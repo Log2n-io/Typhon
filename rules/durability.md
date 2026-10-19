@@ -3185,8 +3185,8 @@ answer to different constraints — RB must always end with a usable database, I
 ## Module: BKP — Online backup capture
 
 A backup point is a frozen image of the data file plus the WAL tail that makes it consistent (ADR-075; design
-`design/Durability/PitBackup/`, implementation plan `impl/1412-capture-plan.md`). This module covers capture. BKP-05, 08, 10
-and 11 (restore, store, WAL archiving) land with #1413 and #1418.
+`design/Durability/PitBackup/`, implementation plans `impl/1412-capture-plan.md` and `impl/1413-store-restore-plan.md`). This
+module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BKP-10 and 11 (WAL archiving) land with #1418.
 
 ### BKP-01: Every data-file write is tracked and gated `[silent]`
   invariant ∀ engine write w to the data file: w is issued by PagedMMF.IssueDataFileWrite or
@@ -3283,6 +3283,44 @@ and 11 (restore, store, WAL archiving) land with #1413 and #1418.
             corruption, ActiveSegment assigned outside the lock
   spec: rules/tla/BackupCapture.tla (S6) — TailCoversImage, NoNeededRecordReclaimed; mutants -mutant-noflush, -mutant-nofloor
 
+### BKP-05: Opening a bundle restored from a point yields exactly that point's committed prefix `[fatal]` `[silent]`
+  invariant ∀ published point X, R = restore(X): state(open(R)) = I_X + every transaction whose TxCommit lies in the valid
+            prefix of T_X's copied bytes, and nothing else — the state a hard crash at F_X leaves when the data file took no
+            write after F_X and the WAL stayed durable to the end of the tail copy (LOG-04, AP-12)
+  invariant R/data = materialise(X): the chain's newest image of each page, zeros for a page no point holds, exactly
+            N_X × 8192 bytes, written ascending and completely (BKP-02 carried through the store)
+  invariant R/wal holds exactly T_X's segments, each {SegmentId:D16}.wal: bytes [0, RawLength) the copied bytes,
+            [RawLength, header.SegmentSize) zero — never shorter than its header declares, since the segment reader scans
+            the declared size and ignores a short read
+  invariant I_X unclean ⇒ T_X holds ≥ 1 segment (the writer refuses to publish otherwise; offline capture always takes
+            the newest segment): CrashRecoveryAtOpen needs a *.wal, and without one the open skips replay, the RB-01
+            rebuild and the RB-04 net over an image that needs them
+  invariant R holds nothing another session wrote beside the data (no chunk-summary, backup-state or db.lock), so every
+            nonce in I_X's meta matches nothing and the open trusts nothing outside the image (CS-05)
+  invariant an open that finds {R}/restore.json reads its WAL from {R}/wal or refuses; it adopts NewTimelineId into
+            BK_TimelineId (one fsynced meta flip, skipped when already adopted) before the WAL manager starts, then deletes
+            the marker, so a crash anywhere repeats both; a marker that is unreadable or names another DatabaseId refuses
+            the open before anything is written; a marker without a data file is never mistaken for a new database
+  invariant a restore never deletes a database: an existing target is renamed {name}.typhon.pre-restore-{utc}; the only
+            directory it deletes is a staging directory carrying its own restore.staging marker; it refuses a target a
+            live process holds (lock file OR an exclusive probe of its data file) whatever it was asked
+  requires: BKP-02, BKP-04, BKP-08, LOG-03, LOG-04, AP-12, CS-05, WR-01, CK-04 — the sealed segments T_X omits hold only
+            records below C_X, exactly those CK-04 may reclaim once C_X is persisted, so R/wal is the WAL of a reachable
+            crash state
+  scope: RestoreStager.Run, RestoreStager.WriteWalSegment, RestoreStager.Swap, ChainMaterializer.Materialize,
+    PackWriter.Complete, OfflineCapture.Create, WalTailInspector.CaptureTailOffline, RestoreMarker.TryRead,
+    DatabaseEngine.CheckRestoreMarkerAtOpen, DatabaseEngine.AdoptRestoredTimeline, DatabaseEngine.AdoptTimeline,
+    PagedMMF.RefuseRestoreMarkerWithoutData
+  on_violation: a restored database that opens without error and holds another state than the point it names —
+    transactions missing or half-applied (an image replayed with no tail, or none), replayed from a foreign WAL directory,
+    or writing its new history under the original's timeline; found when the data is needed
+  verified: BackupCaptureRoundTripTests.EveryPoint_RestoredFromItsPacks_OpensToTheCommittedStateAtItsPointLsn (T1a over
+            real packs: bytes = what capture handed the store, crash path, timeline, committed state at P; mutant
+            Mutant_ARestoreWithoutItsWal_IsReported), OfflineCaptureRestoreTests (T9), TimelineAdoptionTests (T10),
+            RestoredBundleShapeTests, RestoreGuardTests — [VerifiesRule("BKP-05")]; source mutants seen red: no SetLength,
+            delete instead of rename, adopt after the WAL manager, delete the marker before the flip, ignore the marker's
+            DatabaseId, no WalDirectory check, no create guard, newest segment not always taken offline
+
 ### BKP-06: An incremental only on a trusted map and an unbroken chain `[silent]`
   invariant a point is captured incremental iff the request allows it ∧ BackupLineage.Trusted ∧ lineage.StoreId = the
             store's id ∧ the store's head of lineage.ChainId is lineage.LastBackupId ∧ that head is on the database's current
@@ -3326,6 +3364,31 @@ and 11 (restore, store, WAL archiving) land with #1413 and #1418.
             BackupFailurePathTests.DisposeDuringCapture_ClosesCleanly_AndTheMapHoldsThePageSet (each phase),
             CbwStallTests (the incremental after a stall holds the aborted set); source mutant seen red: no merge on failure
   spec: rules/tla/BackupCapture.tla (S6) — ChangeMapComplete over the Abort action
+
+### BKP-08: A published pack is never modified, and its id names one content for the store's life `[fatal]`
+  invariant a pack is visible under {BackupId:D8}-{K}.tpack only complete: written as *.tpack.tmp, fsynced, then moved
+            without overwrite by a durable rename (Windows MoveFileExW WRITE_THROUGH; Linux rename + fsync of packs/); an
+            existing final name fails the publish; a rename whose directory flush fails is undone, so Complete throws with
+            nothing visible
+  invariant no code opens a published pack with write access; readers open it Read | Delete sharing
+  invariant ids are allocated under store.lock (held open FileShare.None) as max(store.hwm, every pack and temp id) + 1,
+            with store.hwm durable before the temp exists: a deleted id is never reused (a lost or damaged store.hwm
+            degrades to the packs present, and says so)
+  invariant a temp is never part of a chain; the holder of store.lock deletes every temp it finds before it writes
+  invariant every byte of a pack is covered by a CRC that verify --level full checks: HeaderCRC, FooterCRC, IndexCRC,
+            TailDirCRC, SuspectCRC, each page's PageCrc after decode, each tail segment's RawCrc after decode, and
+            FileCRC over [0, EOF-4); restore checks every one it reads and never returns a byte it read wrong
+  invariant (#1415) a pack is deleted only under store.lock, only when no kept point's chain resolves through it
+  scope: PackWriter.Complete, PackWriter.Abort, BackupStore.Publish, BackupStore.AllocateBackupId,
+    BackupStore.DeleteAbandonedTemps, StoreFileSystem.MoveDurable, PackReader.Open, BackupVerifier.VerifyStore
+  on_violation: a point whose bytes changed after it was verified, a restore of "#12" that returns another point, or a
+    visible pack missing its tail bytes — an unrestorable backup, discovered at restore
+  verified: StorePublishCrashTests (a crash after every file-system operation of a backup, Windows and Linux directory
+            durability models), PackCorruptionPropertyTests (T7: every byte under a checked CRC, no restore ever
+            wrong), BackupIdAllocationTests — [VerifiesRule("BKP-08")]; mutant
+            BackupIdAllocationTests.Mutant_AStoreThatLostItsHighWater_ReusesAnId; source mutants seen red: rename before
+            flush, no directory flush (Linux model), publish with overwrite, allocation ignoring the high-water, verify
+            skipping FileCRC, restore skipping PageCrc
 
 ### BKP-12: The engine never waits on a backup past its budget
   invariant a data-file writer spends at most CbwStallTimeout in BackupCapture.BeforeWrite per write (the slot wait and

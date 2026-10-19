@@ -137,6 +137,7 @@ internal sealed class OfflineCaptureRestoreTests
 
     [Test]
     [CancelAfter(60_000)]
+    [VerifiesRule("BKP-05")]
     public void ACrashedBundleWithNothingPastItsCheckpoint_StillCarriesASegment_AndTakesTheCrashPath()
     {
         // Staged, not hoped for: a clean close makes C cover every record; a session that writes nothing and crashes leaves the image unclean.

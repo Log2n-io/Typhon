@@ -205,6 +205,7 @@ internal sealed class PackCorruptionPropertyTests
     /// <summary>Gate: every byte outside DATA, every 8th inside; the whole store verified and every point restored on a seeded sample.</summary>
     [Test]
     [CancelAfter(120_000)]
+    [VerifiesRule("BKP-08")]
     public void EveryFlip_IsDetected_AndNoRestoreReturnsWrongBytes() => FlipSweep(dataStride: 8, outsideStride: 1, storeSamples: 24);
 
     [Test]

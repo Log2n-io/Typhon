@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -9,10 +10,11 @@ using NUnit.Framework;
 namespace Typhon.Engine.Tests;
 
 /// <summary>
-/// T1a (AC-C1, BKP-02, BKP-04): points taken while the engine runs, at random instants and staged inside checkpoint cycles, each restored the way a
-/// restore will (<see cref="TestPointMaterializer"/>: chain image + tail), opened through the crash path, and compared with the workload's committed
-/// state at the point's LSN: the highest commit or fence at or below <c>P</c>. Versioned spawns, updates and destroys under Immediate commits, and
-/// SingleVersion values made durable by tick fences.
+/// T1a (AC-C1, AC-R1, AC-R3, BKP-02, BKP-04, BKP-05): points taken while the engine runs, at random instants and staged inside checkpoint cycles, each
+/// restored and opened through the crash path, and compared with the workload's committed state at the point's LSN: the highest commit or fence at or
+/// below <c>P</c>. Versioned spawns, updates and destroys under Immediate commits, and SingleVersion values made durable by tick fences. Two restores
+/// of one workload: the capture's own stand-in (<see cref="TestPointMaterializer"/> over a <see cref="FakeBackupStore"/>), and the real thing — packs
+/// in a store, <see cref="RestoreStager"/>, the restored bundle opened as itself, its timeline adopted.
 /// </summary>
 [Category("Seeded")]
 [Seeded]
@@ -43,6 +45,27 @@ class BackupCaptureRoundTripTests : BackupTestBase<BackupCaptureRoundTripTests>
         RuleMutants.AssertDetects("BKP-04", Marker, () => AssertRoundTrip(outcome));
     }
 
+    /// <summary>
+    /// The same workload into a real store: each point restored from its packs (byte-identical to the image and tail capture handed the store), opened
+    /// as a restored bundle through the crash path to the committed state at its P, closed cleanly and found Sound by a deep scan; the first backup of
+    /// a restored database is full, on a new chain, on the restore's timeline.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("BKP-05")]
+    public void EveryPoint_RestoredFromItsPacks_OpensToTheCommittedStateAtItsPointLsn()
+        => AssertRoundTrip(RunAndRestoreFromPacks(TestSeed.For("bkp-roundtrip-packs"), points: 20, dropRestoredWal: false));
+
+    /// <summary>A restore that left out <c>wal/</c>: the image opens without the records it needs. The round trip must see it.</summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [RuleMutant("BKP-05")]
+    public void Mutant_ARestoreWithoutItsWal_IsReported()
+    {
+        var outcome = RunAndRestoreFromPacks(TestSeed.For("bkp-roundtrip-packs"), points: 8, dropRestoredWal: true);
+        RuleMutants.AssertDetects("BKP-05", Marker, () => AssertRoundTrip(outcome));
+    }
+
     /// <summary>The nightly breadth: 200 points per seed.</summary>
     [Test]
     [CancelAfter(300_000)]
@@ -55,10 +78,182 @@ class BackupCaptureRoundTripTests : BackupTestBase<BackupCaptureRoundTripTests>
 
     private sealed record Outcome(List<string> Failures, int Points, int FrozenInsideACycle);
 
+    private sealed record Workload(List<Snapshot> History, List<BackupPointInfo> Points, int FrozenInsideACycle, string DataPath, string WalDirectory);
+
     private Outcome RunAndRestore(int seed, int points, bool skipFirstTailSegment)
     {
-        var rng = new Random(seed);
         var store = new FakeBackupStore();
+        var run = Run(seed, points, store);
+        var history = run.History;
+
+        // Each point, restored and opened through the crash path.
+        var failures = new List<string>();
+        foreach (var point in store.Points.ToList())
+        {
+            TestPointMaterializer.Materialize(store, point, run.DataPath, run.WalDirectory, skipFirstTailSegment);
+            using var scope = ServiceProvider.CreateScope();
+            var dbe = Open(scope);
+            var where = $"point {point.BackupId} ({point.Plan.Kind}, C={point.CheckpointLsn}, P={point.PointLsn})";
+            CheckState(dbe, history.Last(h => h.Lsn <= point.PointLsn), point.PointLsn, where, failures);
+        }
+
+        return new Outcome(failures, store.Points.Count, run.FrozenInsideACycle);
+    }
+
+    private Outcome RunAndRestoreFromPacks(int seed, int points, bool dropRestoredWal)
+    {
+        var root = Path.Combine(TestStorage.ForFixture(nameof(BackupCaptureRoundTripTests)), Guid.NewGuid().ToString("N"));
+        var storePath = Path.Combine(root, "store");
+        var recording = new RecordingStore(new FileSystemBackupStore(storePath));
+        var run = Run(seed, points, recording);
+        var failures = new List<string>();
+        try
+        {
+            for (var i = 0; i < run.Points.Count; i++)
+            {
+                var point = run.Points[i];
+                var where = $"point {point.BackupId} ({point.Kind}, C={point.CheckpointLsn}, P={point.PointLsn})";
+                var restoreDir = Path.Combine(root, "r" + point.BackupId);
+                var outcome = RestoreStager.Run(storePath, PointSelector.ById(point.BackupId), restoreDir);
+
+                // BKP-02 through the store: the restored data file is the image capture handed the store, the restored wal/ its tail (C3).
+                CheckBytes(recording, point.BackupId, outcome.Target, where, failures);
+                if (dropRestoredWal)
+                {
+                    Directory.Delete(Path.Combine(outcome.Target, "wal"), true);
+                    Directory.CreateDirectory(Path.Combine(outcome.Target, "wal"));
+                }
+
+                using (var provider = ProviderFor(restoreDir))
+                {
+                    using (var scope = provider.CreateScope())
+                    {
+                        var dbe = Open(scope);
+                        if (!dbe.LastOpenRanCrashRecovery)
+                        {
+                            failures.Add($"{where}: the restored image did not open through the crash path");
+                        }
+
+                        if (dbe.TimelineId != outcome.NewTimelineId)
+                        {
+                            failures.Add($"{where}: the restored database is on timeline {dbe.TimelineId}, not the restore's {outcome.NewTimelineId}");
+                        }
+
+                        CheckState(dbe, run.History.Last(h => h.Lsn <= point.PointLsn), point.PointLsn, where, failures);
+
+                        // AC-R3, once: the restored database's first backup is full, on a new chain, on the restore's timeline.
+                        if (i == run.Points.Count - 1 && !dropRestoredWal)
+                        {
+                            var first = dbe.BackupCoordinator.CaptureAsync(new FileSystemBackupStore(storePath), BackupKind.Incremental,
+                                CancellationToken.None);
+                            Assert.That(first.Wait(Budget), Is.True, "the restored database's first backup did not finish");
+                            var view = StoreView.Open(storePath, trustCatalog: false);
+                            var pack = view.Catalog.Packs.Single(p => p.BackupId == first.Result.BackupId);
+                            if (first.Result.Kind != BackupKind.Full || run.Points.Any(p => p.ChainId == first.Result.ChainId)
+                                || pack.TimelineId != outcome.NewTimelineId)
+                            {
+                                failures.Add($"{where}: the restored database's first backup is {first.Result.Kind} on chain {first.Result.ChainId}, "
+                                             + $"timeline {pack.TimelineId}: expected a full point on a new chain, timeline {outcome.NewTimelineId}");
+                            }
+                        }
+                    }
+
+                    // AC-R1(e): closed cleanly, the restored database is Sound to a deep scan.
+                    if (!dropRestoredWal)
+                    {
+                        using var source = new OfflineBundlePageSource(outcome.Target);
+                        var report = IntegrityScanner.Scan(source, IntegrityOptions.Deep);
+                        // The one tolerated divergence is the engine's own crash-recovery defect, reproduced with no backup at all
+                        // (AHardCrashUnderTheSameWorkload_IsSoundAfterRecovery): a destroyed entity's key left in its freed cluster slot.
+                        var unexplained = report.Findings.Where(f => !IsKnownRecoveryDivergence(f)).ToList();
+                        if (report.Verdict != IntegrityVerdict.Sound && unexplained.Count > 0)
+                        {
+                            failures.Add($"{where}: a deep scan after a clean close reports {report.Verdict} (only {KnownRecoveryIssue}'s CHK-CLU-01 is "
+                                         + $"tolerated): {string.Join("; ", unexplained.Take(3))}");
+                        }
+                    }
+                }
+            }
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(root, true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+
+        return new Outcome(failures, run.Points.Count, run.FrozenInsideACycle);
+    }
+
+    /// <summary>The issue tracking the crash-recovery divergence the deep scan tolerates.</summary>
+    private const string KnownRecoveryIssue = "#1450";
+
+    /// <summary>
+    /// CHK-CLU-01, Lossless, on a <c>CompAArch</c> cluster slot: a free slot still holding a key after crash recovery and a clean close
+    /// (<see cref="KnownRecoveryIssue"/>). Anything else a deep scan finds is a failure.
+    /// </summary>
+    private static bool IsKnownRecoveryDivergence(IntegrityFinding f) =>
+        f.Code == "CHK-CLU-01" && f.Severity == IntegritySeverity.Divergence && f.Repair == Repairability.Lossless
+        && f.Summary.Contains("'CompAArch'", StringComparison.Ordinal) && f.Summary.Contains("free cluster slot", StringComparison.Ordinal);
+
+    /// <summary>The restored bundle against what capture handed the store: the chain's newest page images, zeros elsewhere; each segment's prefix.</summary>
+    private static void CheckBytes(RecordingStore recording, uint id, string bundle, string where, List<string> failures)
+    {
+        var point = recording.Points[id];
+        var data = File.ReadAllBytes(Path.Combine(bundle, "data"));
+        if (data.Length != (long)point.ImagePages * PagedMMF.PageSize)
+        {
+            failures.Add($"{where}: the restored data file is {data.Length} bytes, the image {point.ImagePages} pages");
+            return;
+        }
+
+        var zeros = new byte[PagedMMF.PageSize];
+        for (var p = 0; p < point.ImagePages; p++)
+        {
+            byte[] expected = null;
+            for (var c = point; c != null && expected == null; c = c.ParentId == 0 ? null : recording.Points[c.ParentId])
+            {
+                c.Pages.TryGetValue(p, out expected);
+            }
+
+            if (!data.AsSpan(p * PagedMMF.PageSize, PagedMMF.PageSize).SequenceEqual(expected ?? zeros))
+            {
+                failures.Add($"{where}: restored page {p} is not the image's");
+                return;
+            }
+        }
+
+        foreach (var (segmentId, declared, prefix) in point.Tail)
+        {
+            var wal = File.ReadAllBytes(Path.Combine(bundle, "wal", $"{segmentId:D16}.wal"));
+            if (wal.Length != declared || !wal.AsSpan(0, prefix.Length).SequenceEqual(prefix) || wal.AsSpan(prefix.Length).IndexOfAnyExcept((byte)0) >= 0)
+            {
+                failures.Add($"{where}: restored segment {segmentId} is not its copied prefix then zeros to {declared} bytes");
+            }
+        }
+    }
+
+    private void CheckState(DatabaseEngine dbe, Snapshot expected, long pointLsn, string where, List<string> failures)
+    {
+        if (dbe.LastWalV2RecoveryResult.MaxLsn > pointLsn)
+        {
+            failures.Add($"{where}: recovery applied LSN {dbe.LastWalV2RecoveryResult.MaxLsn}, past P");
+        }
+
+        using var t = dbe.CreateQuickTransaction();
+        Compare(where, "versioned", expected.Versioned, Read(t, t.Query<CompAArch>().Execute(), id => t.Open(id).Read(CompAArch.A).A), failures);
+        Compare(where, "single-version", expected.SingleVersion,
+            Read(t, t.Query<SvTestArchetype>().Execute(), id => t.Open(id).Read(SvTestArchetype.SvComp).Value), failures);
+    }
+
+    private Workload Run(int seed, int points, IBackupPointStore store)
+    {
+        var rng = new Random(seed);
+        var captured = new List<BackupPointInfo>();
         var history = new List<Snapshot>();
         var versioned = new Dictionary<EntityId, int>();
         var singleVersion = new Dictionary<EntityId, int>();
@@ -191,7 +386,7 @@ class BackupCaptureRoundTripTests : BackupTestBase<BackupCaptureRoundTripTests>
 
                 var staged = cycle != null && hit.Wait(Budget);
                 coordinator.Options.CheckpointBeforeFreeze = !staged && rng.Next(2) == 0;
-                var capture = StartCapture(dbe, store, point % 7 == 0 ? BackupKind.Full : BackupKind.Incremental);
+                var capture = coordinator.CaptureAsync(store, point % 7 == 0 ? BackupKind.Full : BackupKind.Incremental, CancellationToken.None);
                 try
                 {
                     // Commits during the capture, except while a cycle is held: it may hold a lock a commit needs.
@@ -201,6 +396,7 @@ class BackupCaptureRoundTripTests : BackupTestBase<BackupCaptureRoundTripTests>
                     }
 
                     Assert.That(capture.Wait(Budget), Is.True, "the capture did not finish");
+                    captured.Add(capture.Result);
                 }
                 finally
                 {
@@ -217,27 +413,191 @@ class BackupCaptureRoundTripTests : BackupTestBase<BackupCaptureRoundTripTests>
             }
         }
 
-        // Each point, restored and opened through the crash path.
-        var failures = new List<string>();
-        foreach (var point in store.Points.ToList())
+        return new Workload(history, captured, insideACycle, dataPath, walDir);
+    }
+
+    /// <summary>
+    /// Classification, crash only: the round trip's Versioned workload (spawns, updates, destroys, Immediate) under its 40 ms checkpoints, a hard
+    /// crash at a seeded instant, the crash open, a clean close, a deep scan. No backup code runs. About one seed in five leaves a destroyed
+    /// entity's key in its freed cluster slot (CHK-CLU-01): the engine's recovery defect #1450, which the round trip over packs therefore tolerates.
+    /// </summary>
+    [TestCase(1)]
+    [TestCase(2)]
+    [TestCase(3)]
+    [TestCase(4)]
+    [TestCase(5)]
+    [TestCase(6)]
+    [TestCase(7)]
+    [TestCase(8)]
+    [TestCase(9)]
+    [TestCase(10)]
+    [TestCase(11)]
+    [TestCase(12)]
+    [TestCase(13)]
+    [TestCase(14)]
+    [TestCase(15)]
+    [TestCase(16)]
+    [TestCase(17)]
+    [TestCase(18)]
+    [TestCase(19)]
+    [TestCase(20)]
+    [TestCase(21)]
+    [TestCase(22)]
+    [TestCase(23)]
+    [TestCase(24)]
+    [TestCase(25)]
+    [TestCase(26)]
+    [TestCase(27)]
+    [TestCase(28)]
+    [TestCase(29)]
+    [TestCase(30)]
+    [TestCase(31)]
+    [TestCase(32)]
+    [TestCase(33)]
+    [TestCase(34)]
+    [TestCase(35)]
+    [TestCase(36)]
+    [TestCase(37)]
+    [TestCase(38)]
+    [TestCase(39)]
+    [TestCase(40)]
+    [CancelAfter(60_000)]
+    [Category("Quarantine")]   // #1450: crash recovery leaves a destroyed entity's key in its freed cluster slot (CHK-CLU-01); no backup involved
+    public void AHardCrashUnderTheSameWorkload_IsSoundAfterRecovery(int seed)
+    {
+        var rng = new Random(seed);
+        var versioned = new List<EntityId>();
+        var walDir = "";
+        using (var scope = ServiceProvider.CreateScope())
         {
-            TestPointMaterializer.Materialize(store, point, dataPath, walDir, skipFirstTailSegment);
-            using var scope = ServiceProvider.CreateScope();
             var dbe = Open(scope);
-            var expected = history.Last(h => h.Lsn <= point.PointLsn);
-            var where = $"point {point.BackupId} ({point.Plan.Kind}, C={point.CheckpointLsn}, P={point.PointLsn})";
-            if (dbe.LastWalV2RecoveryResult.MaxLsn > point.PointLsn)
+            walDir = dbe.WalDirectory;
+            var steps = rng.Next(800, 3000);
+            for (var s = 0; s < steps; s++)
             {
-                failures.Add($"{where}: recovery applied LSN {dbe.LastWalV2RecoveryResult.MaxLsn}, past P");
+                using var t = dbe.CreateQuickTransaction(DurabilityMode.Immediate);
+                switch (rng.Next(3))
+                {
+                    case 0:
+                        for (var i = rng.Next(1, 4); i > 0; i--)
+                        {
+                            versioned.Add(t.Spawn<CompAArch>(CompAArch.A.Set(new CompA(s))));
+                        }
+
+                        break;
+                    case 1:
+                        foreach (var id in versioned.OrderBy(_ => rng.Next()).Take(rng.Next(0, 5)).ToList())
+                        {
+                            t.OpenMut(id).Set(CompAArch.A, new CompA(-s));
+                        }
+
+                        break;
+                    default:
+                        if (versioned.Count > 5)
+                        {
+                            var victim = versioned[rng.Next(versioned.Count)];
+                            t.Destroy(victim);
+                            versioned.Remove(victim);
+                        }
+
+                        break;
+                }
+
+                t.Commit();
             }
 
-            using var t = dbe.CreateQuickTransaction();
-            Compare(where, "versioned", expected.Versioned, Read(t, t.Query<CompAArch>().Execute(), id => t.Open(id).Read(CompAArch.A).A), failures);
-            Compare(where, "single-version", expected.SingleVersion,
-                Read(t, t.Query<SvTestArchetype>().Execute(), id => t.Open(id).Read(SvTestArchetype.SvComp).Value), failures);
+            dbe.SimulateHardCrash();
         }
 
-        return new Outcome(failures, store.Points.Count, insideACycle);
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Open(scope);
+            Assert.That(dbe.LastOpenRanCrashRecovery, Is.True);
+            using var t = dbe.CreateQuickTransaction();
+            Assert.That(t.Query<CompAArch>().Execute().Count, Is.EqualTo(versioned.Count));
+        }
+
+        using var source = new OfflineBundlePageSource(Path.Combine(Path.GetDirectoryName(walDir), CurrentDatabaseName + ".typhon"));
+        var report = IntegrityScanner.Scan(source, IntegrityOptions.Deep);
+        Assert.That(report.Verdict, Is.EqualTo(IntegrityVerdict.Sound), string.Join("; ", report.Findings));
+    }
+
+    /// <summary>A store that also keeps what capture handed it: each point's image pages, its tail and its parent.</summary>
+    private sealed class RecordingStore(IBackupPointStore inner) : IBackupPointStore
+    {
+        public Dictionary<uint, RecordedPoint> Points { get; } = [];
+
+        public IBackupStoreSession OpenSession(Guid databaseId, CancellationToken ct) => new Session(this, inner.OpenSession(databaseId, ct));
+
+        private sealed class Session(RecordingStore owner, IBackupStoreSession session) : IBackupStoreSession
+        {
+            public Guid StoreId => session.StoreId;
+
+            public bool TryGetChainHead(Guid chainId, out BackupChainHead head) => session.TryGetChainHead(chainId, out head);
+
+            public IBackupPointSink BeginPoint(in BackupPointPlan plan) => new RecordingSink(owner, session.BeginPoint(plan), plan.ParentId);
+
+            public void Dispose() => session.Dispose();
+        }
+    }
+
+    private sealed class RecordedPoint
+    {
+        public uint ParentId;
+        public int ImagePages;
+        public readonly Dictionary<int, byte[]> Pages = [];
+        public readonly List<(long SegmentId, uint Declared, byte[] Prefix)> Tail = [];
+    }
+
+    private sealed class RecordingSink(RecordingStore owner, IBackupPointSink inner, uint parentId) : IBackupPointSink
+    {
+        private readonly RecordedPoint _point = new() { ParentId = parentId };
+        private MemoryStream _segment;
+        private (long Id, uint Declared) _current;
+
+        public uint BackupId => inner.BackupId;
+
+        public Guid ChainId => inner.ChainId;
+
+        public void SetImage(int imagePages, long checkpointLsn, long freezeUtcTicks)
+        {
+            _point.ImagePages = imagePages;
+            inner.SetImage(imagePages, checkpointLsn, freezeUtcTicks);
+        }
+
+        public void AddPage(int pageId, ReadOnlySpan<byte> image, bool suspect)
+        {
+            _point.Pages[pageId] = image.ToArray();
+            inner.AddPage(pageId, image, suspect);
+        }
+
+        public void BeginTailSegment(long segmentId, long firstLsn, uint declaredSize)
+        {
+            _segment = new MemoryStream();
+            _current = (segmentId, declaredSize);
+            inner.BeginTailSegment(segmentId, firstLsn, declaredSize);
+        }
+
+        public void AppendTail(ReadOnlySpan<byte> bytes)
+        {
+            _segment.Write(bytes);
+            inner.AppendTail(bytes);
+        }
+
+        public void EndTailSegment()
+        {
+            _point.Tail.Add((_current.Id, _current.Declared, _segment.ToArray()));
+            inner.EndTailSegment();
+        }
+
+        public BackupPointInfo Complete(long pointLsn, long tailEndUtcTicks)
+        {
+            var info = inner.Complete(pointLsn, tailEndUtcTicks);
+            owner.Points[info.BackupId] = _point;
+            return info;
+        }
+
+        public void Abort() => inner.Abort();
     }
 
     private static Dictionary<EntityId, int> Read(Transaction t, IEnumerable<EntityId> ids, Func<EntityId, int> value)

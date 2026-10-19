@@ -45,6 +45,7 @@ internal sealed class RestoredBundleShapeTests
 
     [Test]
     [CancelAfter(30_000)]
+    [VerifiesRule("BKP-05")]
     public void TheRestoredBundle_IsTheImagePlusItsTailAtDeclaredSizes_AndNothingElse()
     {
         var image = BackupTestImages.Unclean;

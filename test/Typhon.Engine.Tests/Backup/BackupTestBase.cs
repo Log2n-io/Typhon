@@ -4,6 +4,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 
 namespace Typhon.Engine.Tests;
@@ -19,6 +20,64 @@ abstract class BackupTestBase<T> : TestBase<T> where T : BackupTestBase<T>
     {
         base.ConfigureEngineOptions(o);
         o.Resources.CheckpointIntervalMs = 600_000;   // staged scenarios force their checkpoints; none may run on its own
+
+        // A WAL directory per test, not per fixture: these fixtures write real segments, and a fixture-wide directory hands one test's leftovers to the
+        // next test's fresh database (the round trip broke the moment a test that ran before it left segments behind).
+        o.Wal.WalDirectory = Path.Combine(Path.GetDirectoryName(o.Wal.WalDirectory), CurrentDatabaseName + ".wal");
+    }
+
+    // TestBase removes the bundle only; this directory sits beside it, so a repeated or retried test would otherwise open a fresh file over old segments.
+    private static string PerTestWalDirectory => Path.Combine(TestStorage.Root, typeof(T).Name, CurrentDatabaseName + ".wal");
+
+    public override void Setup()
+    {
+        DeletePerTestWal();
+        base.Setup();
+    }
+
+    public override void TearDown()
+    {
+        base.TearDown();
+        DeletePerTestWal();
+    }
+
+    private static void DeletePerTestWal()
+    {
+        if (Directory.Exists(PerTestWalDirectory))
+        {
+            Directory.Delete(PerTestWalDirectory, true);
+        }
+    }
+
+    /// <summary>
+    /// A provider like the fixture's, over another directory, whose engine reads the WAL from the bundle's own <c>wal/</c>: how a restored bundle is
+    /// opened (DC-4: a restore marker beside any other WAL directory refuses the open).
+    /// </summary>
+    protected ServiceProvider ProviderFor(string databaseDirectory)
+    {
+        var services = new ServiceCollection();
+        services
+            .AddLogging(b => b.SetMinimumLevel(LogLevel.Warning))
+            .AddResourceRegistry()
+            .AddMemoryAllocator()
+            .AddEpochManager()
+            .AddHighResolutionSharedTimer()
+            .AddDeadlineWatchdog()
+            .AddScopedManagedPagedMemoryMappedFile(o =>
+            {
+                o.DatabaseName = CurrentDatabaseName;
+                o.DatabaseDirectory = databaseDirectory;
+                o.DatabaseCacheSize = 8UL * 1024 * 1024;
+                o.TestMode = true;
+                o.PagesDebugPattern = false;
+            })
+            .AddScopedDatabaseEngine(o =>
+            {
+                ConfigureEngineOptions(o);
+                o.Wal.WalDirectory = null;
+            });
+        services.AddScoped<IWalFileIO>(_ => new WalFileIO());
+        return services.BuildServiceProvider();
     }
 
     protected static DatabaseEngine Open(IServiceScope scope)

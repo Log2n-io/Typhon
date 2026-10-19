@@ -61,6 +61,7 @@ The canonical red set is **platform-specific** and must be determined on the CI 
 
 | Test (fully-qualified) | Issue | Reason | Added |
 |------------------------|-------|--------|-------|
+| `Typhon.Engine.Tests.BackupCaptureRoundTripTests.AHardCrashUnderTheSameWorkload_IsSoundAfterRecovery` | [#1450](https://github.com/Log2n-io/Typhon/issues/1450) | Crash recovery + clean close leaves a destroyed Versioned entity's key in its freed cluster slot (CHK-CLU-01 Divergence, Lossless) on ~1 seed in 5; found by the backup round trip, reproduced with no backup. | 2026-10-19 |
 | `Typhon.Engine.Tests.CheckerboardTests.SpatialGridAccessor_AccessibleFromTickContext` | [#406](https://github.com/nockawa/Typhon/issues/406) | Linux-CI-only: `SpatialGrid.IsValid` false in the tick callback; passes on Windows (isolated + full parallel). Needs Linux repro. | 2026-06-26 |
 | `Typhon.Engine.Tests.ViewChangeCaptureTests.UnchangedField_NoEntryForThatFieldView` | [#406](https://github.com/nockawa/Typhon/issues/406) | Linux-CI-only: `IndexOutOfRangeException`; passes on Windows. Needs Linux repro. | 2026-06-26 |
 | `Typhon.Engine.Tests.ExceptionPathLeakTests` (whole fixture — 3 lock-timeout leak tests) | [#410](https://github.com/nockawa/Typhon/issues/410) | c6id-only: `MMF.CheckInternalState` compares the whole page-state array, racing background page-cache/checkpoint timing; fails on the slower gate box even in the serial quiet pass (green locally). Likely an over-broad leak check, not a real leak. Fix = narrow/quiesce the check. | 2026-06-27 |

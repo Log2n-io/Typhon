@@ -67,6 +67,60 @@ class WalTailCaptureTests : TestBase<WalTailCaptureTests>
     }
 
     /// <summary>
+    /// C24: a write the WAL writer has issued but not completed is never in the copy. The active segment's bound is its write offset, which the writer
+    /// advances only once the write returns, so a write in flight lies wholly past it — staged here with the write's first block already on disk.
+    /// </summary>
+    [Test]
+    [CancelAfter(10_000)]
+    public void ACopyTakenWhileAWriteIsInFlight_HoldsNoneOfItsBytes()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var wal = dbe.WalManager;
+        Commit(dbe, 5);
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(Budget), Is.True);
+        var checkpointLsn = dbe.CheckpointManager.CheckpointLsn;
+        var durable = wal.DurableLsn;
+
+        _gatedIo.HoldTorn();
+        try
+        {
+            using (var t = dbe.CreateQuickTransaction(DurabilityMode.Deferred))
+            {
+                for (var i = 0; i < 400; i++)
+                {
+                    t.Spawn<CompAArch>(CompAArch.A.Set(new CompA(10_000 + i)));
+                }
+
+                t.Commit();
+            }
+
+            wal.RequestFlush();
+            Assert.That(_gatedIo.WriterHeld.Wait(Budget), Is.True, "premise: the WAL writer is held inside its write");
+            var (heldAt, heldLength) = _gatedIo.HeldWrite;
+            Assert.That(heldLength, Is.GreaterThan(4096), "premise: the held write spans blocks, so its first one is on disk while it is in flight");
+            var active = wal.SegmentManager.ActiveSegment;
+            var landed = new byte[4096];
+            using (var handle = wal.FileIO.OpenSegmentForRead(active.Path))
+            {
+                wal.FileIO.ReadAligned(handle, heldAt, landed);
+            }
+
+            Assert.That(landed.AsSpan().IndexOfAnyExcept((byte)0), Is.GreaterThanOrEqualTo(0), "premise: the in-flight write is partly on disk");
+
+            var result = WalTailInspector.CaptureTail(wal, dbe.MemoryAllocator, AllocationResource, checkpointLsn, durable, NewSink(dbe), null, Budget,
+                CancellationToken.None);
+            var copy = result.Segments.Single(s => s.SegmentId == active.SegmentId);
+            Assert.That(copy.Prefix.Length, Is.LessThanOrEqualTo(heldAt),
+                $"the copy read {copy.Prefix.Length - heldAt} byte(s) of the write in flight at {heldAt}");
+        }
+        finally
+        {
+            _gatedIo.Release();
+        }
+    }
+
+    /// <summary>
     /// C2: an idle engine that switches segments and then checkpoints leaves a sealed segment whose last LSN equals the checkpoint LSN. Recovery resumes
     /// the TSN counter above every commit stamp it scans, at or below the checkpoint too, so that segment must be in the tail.
     /// </summary>

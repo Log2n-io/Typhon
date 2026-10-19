@@ -177,6 +177,7 @@ internal sealed class RestoreGuardTests
     [TestCase(CrashModelKind.Windows)]
     [TestCase(CrashModelKind.Linux)]
     [CancelAfter(60_000)]
+    [VerifiesRule("BKP-05")]
     public void ACrashAnywhereInARestore_DeletesNothingOutsideItsStaging_AndLeavesARecognisableState(CrashModelKind kind)
     {
         var image = BackupTestImages.WithShortTail(BackupTestImages.Unclean);

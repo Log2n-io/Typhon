@@ -18,6 +18,7 @@ internal sealed class StorePublishCrashTests
     [TestCase(CrashModelKind.Windows)]
     [TestCase(CrashModelKind.Linux)]
     [CancelAfter(60_000)]
+    [VerifiesRule("BKP-08")]
     public void ACrashAfterAnyOperation_LeavesOldPointsIntact_AndTheNewOneCompleteOrAbsent(CrashModelKind kind)
     {
         var image = BackupTestImages.WithShortTail(BackupTestImages.Unclean);
@@ -87,6 +88,7 @@ internal sealed class StorePublishCrashTests
     [TestCase(CrashModelKind.Windows)]
     [TestCase(CrashModelKind.Linux)]
     [CancelAfter(15_000)]
+    [VerifiesRule("BKP-08")]
     public void APublish_NeverReplacesAnExistingPack(CrashModelKind kind)
     {
         var image = BackupTestImages.Clean;

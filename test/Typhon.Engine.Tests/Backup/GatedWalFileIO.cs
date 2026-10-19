@@ -11,17 +11,32 @@ namespace Typhon.Engine.Tests;
 /// </summary>
 internal sealed class GatedWalFileIO : IWalFileIO
 {
+    private const int Block = 4096;
     private readonly WalFileIO _inner = new();
     private readonly ManualResetEventSlim _open = new(true);
+    private volatile bool _torn;
 
     /// <summary>Set once a record write is waiting on the gate.</summary>
     public ManualResetEventSlim WriterHeld { get; } = new(false);
 
+    /// <summary>Where the held write lands and how long it is; set with <see cref="WriterHeld"/>.</summary>
+    public (long Offset, int Length) HeldWrite { get; private set; }
+
     /// <summary>Holds every later record write until <see cref="Release"/>.</summary>
     public void Hold()
     {
+        _torn = false;
         WriterHeld.Reset();
         _open.Reset();
+    }
+
+    /// <summary>
+    /// Like <see cref="Hold"/>, but a held write of more than one 4 KiB block lands its first block before it waits: a write in flight, partly on disk.
+    /// </summary>
+    public void HoldTorn()
+    {
+        Hold();
+        _torn = true;
     }
 
     /// <summary>Lets held and later writes through.</summary>
@@ -33,6 +48,12 @@ internal sealed class GatedWalFileIO : IWalFileIO
     {
         if (offset >= WalSegmentHeader.SizeInBytes && !_open.IsSet)
         {
+            if (_torn && data.Length > Block)
+            {
+                _inner.WriteAligned(handle, offset, data[..Block]);
+            }
+
+            HeldWrite = (offset, data.Length);
             WriterHeld.Set();
             _open.Wait();
         }

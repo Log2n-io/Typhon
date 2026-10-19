@@ -14,9 +14,21 @@ internal sealed class BackupIdAllocationTests
 {
     private const string Root = "/s";
 
+    private const string Marker = "BKP-08: an id was handed out twice";
+
     [Test]
     [CancelAfter(15_000)]
-    public void DeletingTheNewestPack_NeverReusesItsId()
+    [VerifiesRule("BKP-08")]
+    public void DeletingTheNewestPack_NeverReusesItsId() => AssertNewestIdNeverReused(loseHighWater: false);
+
+    /// <summary>A store whose high-water is gone can only count the packs present: deleting the newest one frees its id. The check must see it.</summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [RuleMutant("BKP-08")]
+    public void Mutant_AStoreThatLostItsHighWater_ReusesAnId() =>
+        RuleMutants.AssertDetects("BKP-08", Marker, () => AssertNewestIdNeverReused(loseHighWater: true));
+
+    private static void AssertNewestIdNeverReused(bool loseHighWater)
     {
         var image = BackupTestImages.Clean;
         var fs = new InMemorySparseFileSystem();
@@ -29,11 +41,15 @@ internal sealed class BackupIdAllocationTests
         }
 
         fs.DeleteFile(Root + "/packs/00000003-I.tpack");
+        if (loseHighWater)
+        {
+            fs.DeleteFile(Root + "/store.hwm");
+        }
 
         using (var store = BackupStore.OpenForWrite(Root, image.DatabaseId, true, fs))
         {
             var next = StoreTestKit.WritePoint(store, image);
-            Assert.That(next.BackupId, Is.EqualTo(4u), "#3 was allocated once; its pack is gone but its id is not free");
+            Assert.That(next.BackupId, Is.EqualTo(4u), $"{Marker}: #3 was allocated once; its pack is gone but its id is not free");
         }
     }
 

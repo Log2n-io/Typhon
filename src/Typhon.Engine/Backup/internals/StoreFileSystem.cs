@@ -250,7 +250,7 @@ internal sealed partial class StoreFileSystem : IStoreFileSystem
         if (OperatingSystem.IsWindows())
         {
             var flags = MoveFileWriteThrough | (replace ? MoveFileReplaceExisting : 0u);
-            if (!MoveFileEx(System.IO.Path.GetFullPath(source), System.IO.Path.GetFullPath(destination), flags))
+            if (!MoveFileEx(ExtendedLength(source), ExtendedLength(destination), flags))
             {
                 var error = Marshal.GetLastPInvokeError();
                 throw new IOException($"Cannot move '{source}' to '{destination}': {new Win32Exception(error).Message}", error);
@@ -269,6 +269,21 @@ internal sealed partial class StoreFileSystem : IStoreFileSystem
         {
             File.Move(source, destination, replace);
         }
+    }
+
+    /// <summary>
+    /// The extended-length (<c>\\?\</c>) form of a full path: the raw Win32 call does not get .NET's long-path handling, and a restore's staging path
+    /// under a deep directory passes MAX_PATH easily.
+    /// </summary>
+    private static string ExtendedLength(string path)
+    {
+        var full = System.IO.Path.GetFullPath(path);
+        if (full.StartsWith(@"\\?\", StringComparison.Ordinal))
+        {
+            return full;
+        }
+
+        return full.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + full[2..] : @"\\?\" + full;
     }
 
     /// <inheritdoc />

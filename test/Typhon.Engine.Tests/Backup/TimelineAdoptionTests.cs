@@ -72,6 +72,7 @@ internal sealed class TimelineAdoptionTests
     [TestCase(true)]
     [TestCase(false)]
     [CancelAfter(60_000)]
+    [VerifiesRule("BKP-05")]
     public void TheFirstOpen_AdoptsTheNewTimeline_BeforeTheWalManager_ThenDeletesTheMarker(bool unclean)
     {
         var (image, outcome) = Restored(unclean);

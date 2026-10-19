@@ -87,7 +87,8 @@ internal static class WalTailInspector
         }
 
         // Read only after the durable LSN reached PubF: the writer advances a segment's write offset before the durable LSN, so the active segment's
-        // written length read now covers every record up to PubF.
+        // written length read now covers every record up to PubF. And it advances it only once the write has returned (WalWriter), so a write still in
+        // flight lies wholly at or past the length read here: the copy never reads a byte of it (C24).
         var selected = SelectTail(wal.SegmentManager.SnapshotForTail(), checkpointLsn);
 
         using var block = allocator.AllocatePinned("Backup.TailCopy", owner, CopyChunkBytes, false, PageAlignment);
