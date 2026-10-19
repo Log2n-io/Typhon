@@ -85,7 +85,9 @@ public sealed class BackupCommandTests
         Assert.That(create.GetProperty("point").GetProperty("backupId").GetUInt32(), Is.EqualTo(1));
         Assert.That(create.GetProperty("point").GetProperty("kind").GetString(), Is.EqualTo("full"));
 
-        var list = Json(Run((c, j) => BackupListCommand.Run(new BackupListCommand.Settings { Store = _store, Format = "json", Restorable = true }, c, j)));
+        var listed = Json(Run((c, j) => BackupListCommand.Run(new BackupListCommand.Settings { Store = _store, Format = "json", Restorable = true }, c, j)));
+        Assert.That(listed.GetProperty("exitCode").GetInt32(), Is.EqualTo(0), "every verb's JSON carries its exit code");
+        var list = listed.GetProperty("listing");
         Assert.That(list.GetProperty("points").GetArrayLength(), Is.EqualTo(1));
         Assert.That(list.GetProperty("restorablePoints")[0].GetUInt32(), Is.EqualTo(1));
         Assert.That(list.GetProperty("chains")[0].GetProperty("depth").GetInt32(), Is.EqualTo(1));
@@ -218,6 +220,76 @@ public sealed class BackupCommandTests
         Assert.That(File.Exists(DatabaseLockFile.RequestPathFor(_bundle)), Is.False, "an unanswered request is withdrawn");
     }
 
+    /// <summary>
+    /// M3: the bundle is resolved once, as the capture resolves it. Given as a stem, the handoff still finds the yieldable holder's lock and request
+    /// file in the real bundle; raw, it looked for them beside the stem, found nothing, and the capture then refused a database its holder would
+    /// have yielded.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void AStem_IsResolvedOnce_SoTheHandoffFindsTheHolder()
+    {
+        var provider = Provider(Path.GetDirectoryName(_bundle), yieldable: true);
+        var scope = provider.CreateScope();
+        scope.ServiceProvider.GetRequiredService<DatabaseEngine>().InitializeArchetypes();
+        var yielder = Task.Run(() =>
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (DateTime.UtcNow < deadline && !File.Exists(DatabaseLockFile.RequestPathFor(_bundle)))
+            {
+                Thread.Sleep(5);
+            }
+
+            scope.Dispose();
+            provider.Dispose();
+        });
+
+        var stem = _bundle[..^".typhon".Length];
+        var create = Run((c, j) => BackupCreateCommand.Run(new BackupCreateCommand.Settings { Bundle = stem, Store = _store, Format = "text" }, c, j,
+            CancellationToken.None));
+        Assert.That(yielder.Wait(TimeSpan.FromSeconds(10)), Is.True);
+        Assert.That(create.Code, Is.EqualTo(BackupCli.ExitOk), create.Text);
+        Assert.That(create.Text, Does.Contain(_bundle), "the message names the bundle the capture locked");
+    }
+
+    /// <summary>The handoff wait honours cancellation (Ctrl+C): it withdraws its request and stops, instead of waiting out the timeout.</summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void TheHandoffWait_StopsOnCancellation_AndWithdrawsItsRequest()
+    {
+        using var provider = Provider(Path.GetDirectoryName(_bundle), yieldable: true);
+        using var scope = provider.CreateScope();
+        scope.ServiceProvider.GetRequiredService<DatabaseEngine>().InitializeArchetypes();
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
+        var settings = new BackupCreateCommand.Settings { Bundle = _bundle, Store = _store, Format = "json", HandoffTimeout = TimeSpan.FromSeconds(20) };
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var create = Run((c, j) => BackupCreateCommand.Run(settings, c, j, cts.Token));
+        Assert.That(clock.Elapsed, Is.LessThan(TimeSpan.FromSeconds(10)), "the wait did not stop on cancellation");
+        Assert.That(create.Code, Is.EqualTo(BackupCli.ExitFailed), create.Json);
+        Assert.That(File.Exists(DatabaseLockFile.RequestPathFor(_bundle)), Is.False, "a cancelled request is withdrawn");
+    }
+
+    /// <summary>
+    /// M2: every exception the store throws has an exit code (an unenforced store lock is a refusal, a store out of ids a failure), and in JSON mode
+    /// nothing escapes as markup: an exception no code maps is still a JSON error, exit 2.
+    /// </summary>
+    [Test]
+    public void EveryStoreException_HasAnExitCode_AndJsonModeAlwaysAnswersInJson()
+    {
+        Assert.That(BackupCli.ExitCodeFor(new NotSupportedException("locking is not enforced")), Is.EqualTo(BackupCli.ExitRefused));
+        Assert.That(BackupCli.ExitCodeFor(new InvalidOperationException("no backup id left")), Is.EqualTo(BackupCli.ExitFailed));
+        Assert.That(BackupCli.ExitCodeFor(new ArgumentException("a defect")), Is.EqualTo(-1), "a defect still reaches the shell's handler in text");
+
+        // A target with a NUL is refused by the runtime (Path.GetFullPath) with an ArgumentException: no store code maps it.
+        Assert.That(Create().Code, Is.EqualTo(BackupCli.ExitOk));
+        var bad = Restore("restored\0here", "json");
+        Assert.That(bad.Code, Is.EqualTo(BackupCli.ExitFailed), bad.Text);
+        var error = Json(bad).GetProperty("error");
+        Assert.That(error.GetProperty("exitCode").GetInt32(), Is.EqualTo(BackupCli.ExitFailed));
+        Assert.That(bad.Text, Is.Empty, "nothing as markup in JSON mode");
+    }
+
     [Test]
     public void TheDefaultHandoffWait_IsTheEngines()
         => Assert.That(new BackupCreateCommand.Settings().HandoffTimeout, Is.EqualTo(new PagedMMFOptions().LockHandoffTimeout));
@@ -276,6 +348,8 @@ public sealed class BackupCommandTests
     {
         // An offline create cannot show it end to end: only a database an engine backed up before has a lineage to continue incrementally.
         Assert.That(BackupCreateCommand.OptionsFor(new BackupCreateCommand.Settings { Full = true }, CancellationToken.None).Full, Is.True);
+        Assert.That(BackupCreateCommand.OptionsFor(new BackupCreateCommand.Settings { WalDir = "/wal" }, CancellationToken.None).WalDirectory,
+            Is.EqualTo("/wal"), "--wal-dir reaches the capture");
         Assert.That(BackupCreateCommand.OptionsFor(new BackupCreateCommand.Settings(), CancellationToken.None).Full, Is.False);
     }
 

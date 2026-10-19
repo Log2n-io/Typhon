@@ -29,6 +29,10 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
         [Description("Take a full point even when an incremental would do.")]
         public bool Full { get; set; }
 
+        [CommandOption("--wal-dir")]
+        [Description("The database's WAL directory, when its engine was configured with one other than {bundle}/wal.")]
+        public string WalDir { get; set; }
+
         /// <summary>How long a yieldable holder gets to release the database: the engine's own handoff wait by default. Not on the command line.</summary>
         public TimeSpan HandoffTimeout { get; set; } = new PagedMMFOptions().LockHandoffTimeout;
         // ReSharper restore UnusedAutoPropertyAccessor.Global
@@ -50,21 +54,34 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
             return output.Error(BackupCli.ExitUsage, "--store is required: the store to back the database up into.");
         }
 
-        if (!AskAYieldableHolder(settings.Bundle, settings.HandoffTimeout, out var asked, out var refusal))
+        // The bundle as the capture resolves it (a stem, a .typhon directory, or its data file), once: the handoff, the refusal and the request file
+        // must all name the directory the capture will lock.
+        string bundle;
+        bool asked;
+        string refusal;
+        try
         {
-            return output.Error(BackupCli.ExitRefused, refusal);
+            bundle = OfflineBundlePageSource.ResolveBundleDirectory(settings.Bundle);
+            if (!AskAYieldableHolder(bundle, settings.HandoffTimeout, ct, out asked, out refusal))
+            {
+                return output.Error(BackupCli.ExitRefused, refusal);
+            }
+        }
+        catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0 || output.AsJson)
+        {
+            return output.Error(ex);
         }
 
         BackupPointSummary point;
         try
         {
-            point = BackupOperations.Create(settings.Bundle, settings.Store, OptionsFor(settings, ct));
+            point = BackupOperations.Create(bundle, settings.Store, OptionsFor(settings, ct));
         }
         catch (DatabaseLockedException ex)
         {
-            return output.Error(BackupCli.ExitRefused, OnlineRefusal(settings.Bundle, ex));
+            return output.Error(BackupCli.ExitRefused, OnlineRefusal(bundle, ex));
         }
-        catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0)
+        catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0 || output.AsJson)
         {
             return output.Error(ex);
         }
@@ -73,7 +90,7 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
             // Retired only now, once the capture held the lock: while it exists, the holder that yielded must not take the database back (#621).
             if (asked)
             {
-                DatabaseLockFile.DeleteRequest(settings.Bundle);
+                DatabaseLockFile.DeleteRequest(bundle);
             }
         }
 
@@ -84,7 +101,7 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
             return exit;
         }
 
-        console.MarkupLine($"[green]Backed up[/] {Markup.Escape(settings.Bundle)} as point [bold]#{point.BackupId}[/] ({point.Kind}, C={point.CheckpointLsn}, "
+        console.MarkupLine($"[green]Backed up[/] {Markup.Escape(bundle)} as point [bold]#{point.BackupId}[/] ({point.Kind}, C={point.CheckpointLsn}, "
                            + $"P={point.PointLsn}, {point.PageCount} page(s), {BackupCli.Bytes(point.PackBytes)}).");
         if (point.Suspect)
         {
@@ -95,7 +112,8 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
     }
 
     /// <summary>What the command line asks of the capture. Offline, <c>--full</c> matters only to a database an engine has backed up before.</summary>
-    internal static BackupCreateOptions OptionsFor(Settings settings, CancellationToken ct) => new() { Full = settings.Full, Cancellation = ct };
+    internal static BackupCreateOptions OptionsFor(Settings settings, CancellationToken ct) =>
+        new() { Full = settings.Full, WalDirectory = settings.WalDir, Cancellation = ct };
 
     private static string OnlineRefusal(string bundle, DatabaseLockedException ex) =>
         $"Database '{bundle}' is open in process {ex.OwnerPid} on {ex.OwnerMachine}. Back it up from inside the application with "
@@ -107,7 +125,7 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
     /// the lock to go. <c>false</c> when it did not release in time (the request is withdrawn). Any other holder is left to the capture, which refuses
     /// it. On success the request stays until the capture holds the lock.
     /// </summary>
-    private static bool AskAYieldableHolder(string bundle, TimeSpan timeout, out bool asked, out string refusal)
+    private static bool AskAYieldableHolder(string bundle, TimeSpan timeout, CancellationToken ct, out bool asked, out string refusal)
     {
         asked = false;
         refusal = null;
@@ -132,7 +150,12 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
                 return false;
             }
 
-            Thread.Sleep(20);
+            if (ct.WaitHandle.WaitOne(20))
+            {
+                DatabaseLockFile.DeleteRequest(bundle);
+                asked = false;
+                ct.ThrowIfCancellationRequested();
+            }
         }
 
         return true;
@@ -178,14 +201,14 @@ internal sealed class BackupListCommand : Command<BackupListCommand.Settings>
         {
             listing = BackupOperations.List(settings.Store, settings.Restorable);
         }
-        catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0)
+        catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0 || output.AsJson)
         {
             return output.Error(ex);
         }
 
         if (output.AsJson)
         {
-            output.Json(listing);
+            output.Json(new { exitCode = BackupCli.ExitOk, listing });
             return BackupCli.ExitOk;
         }
 
@@ -296,7 +319,7 @@ internal sealed class BackupVerifyCommand : Command<BackupVerifyCommand.Settings
         {
             report = settings.Point == null ? BackupOperations.Verify(settings.Store, level) : BackupOperations.Verify(settings.Store, point, level);
         }
-        catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0)
+        catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0 || output.AsJson)
         {
             return output.Error(ex);
         }
@@ -426,7 +449,7 @@ internal sealed class BackupRestoreCommand : Command<BackupRestoreCommand.Settin
                 Cancellation = ct,
             });
         }
-        catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0)
+        catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0 || output.AsJson)
         {
             return output.Error(ex);
         }
@@ -500,7 +523,7 @@ internal sealed class BackupStatusCommand : Command<BackupSettings>
             status = BackupOperations.Status(settings.Store);
             listing = BackupOperations.List(settings.Store);
         }
-        catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0)
+        catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0 || output.AsJson)
         {
             return output.Error(ex);
         }

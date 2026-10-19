@@ -92,15 +92,21 @@ internal static class BackupCli
     }
 
     /// <summary>
-    /// The exit code for what an operation threw, or <c>-1</c> for an exception that is not an outcome but a defect. Verbs catch only what maps
-    /// (<c>catch … when (ExitCodeFor(ex) &gt;= 0)</c>), so a defect reaches the shell's handler with its stack and whole chain.
+    /// The exit code for what an operation threw, or <c>-1</c> for an exception that is not an outcome but a defect. Verbs catch what maps
+    /// (<c>catch … when (ExitCodeFor(ex) &gt;= 0 || AsJson)</c>): in text a defect reaches the shell's handler with its stack and whole chain; in JSON
+    /// it is still a JSON error, exit 2, because the reader is a program.
     /// </summary>
+    /// <remarks>
+    /// Every exception the store throws maps: its typed ones; <see cref="NotSupportedException"/> when the file system does not enforce the store's
+    /// lock (a refusal: the store will not run where it cannot exclude another writer); <see cref="InvalidOperationException"/> when it has no
+    /// backup id left (and its misuse checks).
+    /// </remarks>
     internal static int ExitCodeFor(Exception ex) => ex switch
     {
         RestoreRefusedException or DatabaseLockedException or BackupStoreMismatchException or BackupStoreLockedException
-            or BackupFormatUnsupportedException => ExitRefused,
+            or BackupFormatUnsupportedException or NotSupportedException => ExitRefused,
         BackupChainBrokenException or BackupPackCorruptException => ExitStoreDamaged,
-        OperationCanceledException or IOException or UnauthorizedAccessException or TyphonException => ExitFailed,
+        OperationCanceledException or IOException or UnauthorizedAccessException or TyphonException or InvalidOperationException => ExitFailed,
         _ => -1,
     };
 
@@ -175,6 +181,7 @@ internal sealed class BackupOutput(IAnsiConsole console, TextWriter json, bool a
             message += " Caused by: " + inner.Message;
         }
 
-        return Error(BackupCli.ExitCodeFor(ex), message);
+        var code = BackupCli.ExitCodeFor(ex);
+        return Error(code >= 0 ? code : BackupCli.ExitFailed, message);
     }
 }
