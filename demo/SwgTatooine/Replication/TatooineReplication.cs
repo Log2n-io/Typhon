@@ -115,6 +115,49 @@ public struct SetViewRadius
     public ushort RadiusM;
 }
 
+/// <summary>
+/// "Fly me to that city." A player standing at its city's shuttleport asking to be flown to another.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>A city index, not a position, and not a port entity.</b> The destination is one of the planet's cities, which the client already ships in its own map
+/// data, so the whole of the wire payload is "which city" — there is nothing in it a client could inflate. The server decides which port that city is served
+/// by, where that port is, and whether this player is standing at one.
+/// </para>
+/// <para>
+/// <b>Why a command at all, rather than relaxing who the shuttle will carry.</b> The boarding loop admits only players the simulation is deciding for,
+/// and that is right: a body flown away by a system its client cannot see is the worst kind of surprise, and with several planets it would change realm
+/// too. A command inverts it — the flight happens because the client asked for it, on the tick it asked, and the refusals say why not.
+/// </para>
+/// </remarks>
+public struct BoardShuttle
+{
+    /// <summary>The destination city's index, as the client's own map numbers them.</summary>
+    public int DestCity;
+}
+
+/// <summary>The geometry a boarding ask is validated against: where the ports are, and how many cities there are.</summary>
+/// <remarks>
+/// <b>An interface rather than the index itself, because the index lives in the simulation and this file is the protocol.</b> The world's cities and the
+/// ports drawn inside them belong to <c>WorldIndex</c>, which <c>SimBridge</c> owns; the command handler needs one question answered about them and has no
+/// business walking them. <c>TatooineSim</c> hands the bridge over at <c>StartReplication</c>, and a server with shuttles off hands over nothing, which is
+/// itself the refusal.
+/// </remarks>
+public interface IShuttleBoarding
+{
+    /// <summary>How many cities a destination may name.</summary>
+    int CityCount { get; }
+
+    /// <summary>Whether a point is close enough to its own city's shuttleport to board there.</summary>
+    /// <param name="x">Where the player is, east.</param>
+    /// <param name="z">Where the player is, north.</param>
+    /// <param name="planet">The realm it is in, which decides whose ports these are.</param>
+    /// <param name="withinM">How close counts as at the port, in metres.</param>
+    /// <param name="city">The city whose port it is standing at.</param>
+    /// <returns>Whether it is at one.</returns>
+    bool TryPortAt(float x, float z, ushort planet, double withinM, out int city);
+}
+
 /// <summary>The speed classes a client may ask for, and what each is worth.</summary>
 /// <remarks>
 /// <para>
@@ -490,6 +533,26 @@ public static partial class TatooineReplication
     /// application's own refusal timed out, and the same case asserting <c>Forbidden</c> passes.
     /// </remarks>
     public const byte SpectateNoSuchEntity = AckReasons.FirstApplicationReason + 2;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="BoardShuttle"/> from a player that is not standing at a shuttleport.</summary>
+    /// <remarks>
+    /// Refused rather than turned into a walk: a client that asked to fly and got a walk instead would have no way to tell the difference from a shuttle
+    /// that is simply away, and the bot brain comparing routes needs to know which of the two happened.
+    /// </remarks>
+    public const byte ShuttleNotAtPort = AckReasons.FirstApplicationReason + 3;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="BoardShuttle"/> naming a city that does not exist, or the one it is standing in.</summary>
+    public const byte ShuttleBadDestination = AckReasons.FirstApplicationReason + 4;
+
+    /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
+    /// <remarks>
+    /// The port is a building with a 12 m half extent, so this is about a building's width clear of it — close enough that a person aiming at the port has
+    /// arrived, far enough that the last metre of a walk does not decide it. It is also what the client draws its prompt at.
+    /// </remarks>
+    public const double ShuttleBoardM = 20d;
+
+    /// <summary>The simulation's ports and cities, for validating a boarding ask; <see langword="null"/> when the server runs without shuttles.</summary>
+    public static IShuttleBoarding ShuttleBoarding { get; set; }
 
     // There is deliberately no "you are riding" refusal code. Asking for a realm while riding ENDS the ride and goes there — see the ViewRealm loop. The
     // first version refused it instead, which needed the application to know whether the engine considered the session anchored; it got that wrong once, in
@@ -1297,6 +1360,14 @@ public static partial class TatooineReplication
             .Rate(4, 8)
             .Roles(SessionRole.Player)
             .Field(v => v.RadiusM, Codec.VarUInt, "radiusM"));
+
+        // Queued and slow: boarding is a decision, not a state, and a second ask before the first has been answered is a person pressing the key twice.
+        // LatestPerSession would be wrong here — two asks naming two cities are two different intentions and the last one is not obviously the wanted one;
+        // the rate limit refuses the second instead, which the client can show.
+        subs.Command<BoardShuttle>(c => c
+            .Rate(1, 2)
+            .Roles(SessionRole.Player)
+            .Field(v => v.DestCity, Codec.VarInt, "destCity"));
 
         // SWG-09. Queued, because each utterance matters and their order is the conversation; one a second, which is the
         // rate 04-protocol § 4 gives it and roughly what a person types.
@@ -2231,6 +2302,16 @@ public static partial class TatooineReplication
     /// <summary>Players handed back to the simulation.</summary>
     private static long _releases;
 
+    /// <summary>Boarding asks queued for the next shuttle.</summary>
+    private static long _boardingsQueued;
+
+    /// <summary>Boarding asks refused — not at a port, or a destination that does not exist.</summary>
+    private static long _boardingsRefused;
+
+    /// <summary>What the boarding command did, cumulatively: asks queued for a shuttle, and asks refused.</summary>
+    public static (long Queued, long Refused) Boardings
+        => (System.Threading.Interlocked.Read(ref _boardingsQueued), System.Threading.Interlocked.Read(ref _boardingsRefused));
+
     /// <summary>What the intent path did, cumulatively. For the report and for the checks beside the demo.</summary>
     public static (long Owned, long Applied, long Unowned, long RefusedSpeed, long TargetsSet, long TargetsRefused, long Possessions, long Releases) Intents
         => (System.Threading.Interlocked.Read(ref _intentsOwned), System.Threading.Interlocked.Read(ref _intentsApplied),
@@ -2293,6 +2374,61 @@ public static partial class TatooineReplication
             SteerTo(ref move, ref player, subs, 0f, tick.TickNumber);
             player.Set(Player.Move, move);
             System.Threading.Interlocked.Increment(ref _intentsApplied);
+        }
+
+        // Boarding. Everything here is re-validated against the state the ask has to agree with, as every other intent is: the wire carries a city index
+        // and nothing else, and whether this player is standing at a port is a fact about the world rather than about the message.
+        foreach (var command in subs.Commands<BoardShuttle>())
+        {
+            if (!TryOpenControlled(subs, accessor, command.Session, out var player))
+            {
+                continue;
+            }
+
+            var boarding = ShuttleBoarding;
+            var dest = command.Value.DestCity;
+            if (boarding == null || (uint)dest >= (uint)boarding.CityCount)
+            {
+                // No boarding geometry at all means the server is running without shuttles, which is a destination that does not exist rather than a
+                // player in the wrong place.
+                subs.Reject(command, ShuttleBadDestination);
+                System.Threading.Interlocked.Increment(ref _boardingsRefused);
+                continue;
+            }
+
+            var at = player.Read(Player.Bounds);
+            if (!boarding.TryPortAt(at.X, at.Z, player.Read(Player.Realm).Value, ShuttleBoardM, out var from))
+            {
+                subs.Reject(command, ShuttleNotAtPort);
+                System.Threading.Interlocked.Increment(ref _boardingsRefused);
+                continue;
+            }
+
+            if (dest == from)
+            {
+                subs.Reject(command, ShuttleBadDestination);
+                System.Threading.Interlocked.Increment(ref _boardingsRefused);
+                continue;
+            }
+
+            // Queued where the simulation's own passengers queue, so the flight is the same code: ShuttleTick boards whoever is waiting when the shuttle is
+            // down. Stopped moving first — a passenger still walking would drift out of the port between the ask and the landing.
+            var state = player.Read(Player.State);
+            state.Activity = PlayerActivity.AwaitingShuttle;
+            state.ActivityTicks = 0;
+            state.ShuttleFrom = from;
+            state.ShuttleDest = dest;
+            player.Set(Player.State, state);
+
+            var waiting = player.Read(Player.Move);
+            waiting.VelX = 0f;
+            waiting.VelZ = 0f;
+            waiting.SpeedMps = 0f;
+            waiting.DestX = at.X;
+            waiting.DestZ = at.Z;
+            player.Set(Player.Move, waiting);
+            Replicate(in player);
+            System.Threading.Interlocked.Increment(ref _boardingsQueued);
         }
 
         foreach (var command in subs.Commands<MoveDir>())
@@ -2543,6 +2679,8 @@ public static partial class TatooineReplication
         System.Threading.Interlocked.Exchange(ref _targetsSet, 0);
         System.Threading.Interlocked.Exchange(ref _possessions, 0);
         System.Threading.Interlocked.Exchange(ref _releases, 0);
+        System.Threading.Interlocked.Exchange(ref _boardingsQueued, 0);
+        System.Threading.Interlocked.Exchange(ref _boardingsRefused, 0);
         BoundPlayer.Clear();
 
         // The holds go with it (A13), for the same reason BoundPlayer does: a fixture that resets only the intent accounting would otherwise inherit a hold

@@ -65,7 +65,8 @@ import {
 import { Predictor, speedForClass } from './predictor';
 import { DEFAULT_THIRD_PERSON_M } from '../camera/eye-camera';
 import { useStats, type Inspection } from '../state/stats-store';
-import { useUi, type UiState } from '../state/ui-store';
+import { useUi, type ShuttleportPrompt, type UiState } from '../state/ui-store';
+import { nearestShuttleport } from './shuttle';
 
 const STATS_INTERVAL_MS = 250;
 const REGION_INTERVAL_MS = 200;
@@ -218,6 +219,12 @@ const CLOCK_OPTIONS = {
   minDelayMs: FASTEST_TICK_PERIOD_MS,
   initialDelayMs: 2 * TICK_PERIOD_MS,
 };
+
+/** How close to a shuttleport the prompt appears, in metres: the server's own boarding radius. */
+const SHUTTLE_PROMPT_M = 20;
+
+/** Frames between port searches; see ClientApp.updateShuttlePrompt. */
+const SHUTTLE_SEARCH_FRAMES = 8;
 
 export class ClientApp {
   private readonly canvas: HTMLCanvasElement;
@@ -1253,6 +1260,12 @@ export class ClientApp {
       this.source?.spectate(state.spectateRequest.netId);
     }
 
+    // The same contract again: an ask the server grants on its port's next landing, refuses with an ACKS reason, or
+    // rate-limits. Nothing here moves the avatar — the flight arrives as a position the server sent.
+    if (state.boardRequest !== null && state.boardRequest !== previous.boardRequest) {
+      this.source?.boardShuttle(state.boardRequest.city);
+    }
+
     this.applyUi(state);
   }
 
@@ -1316,6 +1329,10 @@ export class ClientApp {
       ui.setPlaying(playing);
       ui = useUi.getState();
     }
+
+    // The shuttleport prompt. Published on change only, like `playing` above, and only for a session that has a body to
+    // fly: a god camera is not standing anywhere.
+    this.updateShuttlePrompt(playing, ui);
 
     // A10: a player arrives in third person, behind their own avatar. Done here rather than in the store's initial state
     // because it depends on the session being a player's, which is only known once the catalog has arrived — and done
@@ -1679,6 +1696,60 @@ export class ClientApp {
    * Fields rather than a returned object, so two subjects per frame cost no allocation. Written and read within one
    * frame step and never held across one.
    */
+  /**
+   * Publishes the shuttleport the avatar is standing at, or null.
+   *
+   * <b>Every eighth frame, not every frame.</b> The search walks the live `WorldObject` slots, which is hundreds inside
+   * a city, and the answer it produces changes only as fast as a person walks — at a run, eight frames is under 15 cm.
+   * Published on change, because the store is one React subscribes to and a prompt that re-rendered sixty times a
+   * second would cost more than the search.
+   *
+   * @param playing Whether this session drives a body at all.
+   * @param ui The UI state, already read this frame.
+   */
+  private updateShuttlePrompt(playing: boolean, ui: UiState): void {
+    if (++this.shuttleFrames < SHUTTLE_SEARCH_FRAMES) {
+      return;
+    }
+
+    this.shuttleFrames = 0;
+    let next: ShuttleportPrompt | null = null;
+    if (playing) {
+      if (this.shuttleArchetype < 0) {
+        this.shuttleArchetype = this.archetypes.infos.findIndex((info) => info.name === 'WorldObject');
+      }
+
+      if (this.shuttleArchetype >= 0) {
+        // The predicted position when there is one, for the reason the camera uses it: the prompt has to agree with
+        // where the body is drawn, or it appears a stride before or after the player sees themselves arrive.
+        const x = this.predictor.active ? this.predictor.x : this.eyeX;
+        const z = this.predictor.active ? this.predictor.z : this.eyeZ;
+        const port = nearestShuttleport(
+          this.world.archetypeStore(this.shuttleArchetype),
+          this.clock.renderTick,
+          this.clock.renderFrac,
+          x,
+          z,
+          SHUTTLE_PROMPT_M,
+        );
+        if (port !== null) {
+          next = { city: port.city, distanceM: Math.round(port.distanceM) };
+        }
+      }
+    }
+
+    const held = ui.shuttleport;
+    if (held === null ? next !== null : next === null || next.city !== held.city || next.distanceM !== held.distanceM) {
+      ui.setShuttleport(next);
+    }
+  }
+
+  /** Frames since the last port search; see {@link updateShuttlePrompt}. */
+  private shuttleFrames = 0;
+
+  /** The `WorldObject` archetype's index in the live catalog, or -1 before it is known. */
+  private shuttleArchetype = -1;
+
   private evaluate(netId: number): boolean {
     const location = this.world.locate(netId);
     if (location === NOT_FOUND) {

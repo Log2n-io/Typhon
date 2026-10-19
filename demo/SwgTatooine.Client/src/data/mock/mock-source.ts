@@ -119,6 +119,8 @@ export class MockSource implements DataSource, LatencyControl {
   /** The mock owns the world it draws and serves all of it, so there is no sphere to widen. */
   setViewRadius(): void {}
 
+  boardShuttle(): void {}
+
   /** The mock controls nothing: it has no sessions and no SELF block. */
   get selfNetId(): number {
     return 0;

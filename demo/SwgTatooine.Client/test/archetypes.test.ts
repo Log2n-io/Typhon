@@ -200,7 +200,10 @@ describe('archetype identity', () => {
   it('formats a field by the name the catalog gives it, and by the archetype name where that matters', () => {
     expect(formatField('CreatureLair', 'missionId', 3)).toBe('mission, difficulty 3');
     expect(formatField('Creature', 'missionId', 3)).toBe('dormant');
-    expect(formatField('WorldObject', 'region', -1)).toBe('wilderness');
+    // region is sent as city + 1, with 0 for a structure in the wild: the field is a group set's key and a sparse index
+    // never files key 0, so 0 is what "no region" has to be. It spelled that -1 until the city set was declared.
+    expect(formatField('WorldObject', 'region', 0)).toBe('wilderness');
+    expect(formatField('WorldObject', 'region', 1)).toBe('region 0');
     expect(formatField('Creature', 'aggro', 32.5)).toBe('33 m');
   });
 

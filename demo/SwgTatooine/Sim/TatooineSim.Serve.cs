@@ -163,6 +163,10 @@ public sealed partial class TatooineSim
         TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic);
         TatooineReplication.PlayerBudgetBytesPerSecond = _config.SessionBudgetBytesPerSecond;
 
+        // What a BoardShuttle ask is validated against. Handed over rather than reached for: the ports live in the world index, which the bridge owns.
+        // A server running without shuttles answers 0 cities, which refuses every ask as a destination that does not exist.
+        TatooineReplication.ShuttleBoarding = _bridge;
+
         var aborts = 0;
         _runtime.OnTickAborted += (_, outcome) =>
         {

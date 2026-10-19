@@ -279,6 +279,16 @@ export interface DataSource {
    * sweeps the shell between the two radii and the client keeps everything it already holds — nothing resets.
    */
   setViewRadius(radiusM: number): void;
+  /**
+   * Asks to be flown to a city (`BoardShuttle`), naming it by its index in the client's own map data.
+   *
+   * <b>An ask the server refuses rather than approximates.</b> It checks that this session's avatar is standing at a
+   * shuttleport and that the destination is a city other than the one it is standing in, and answers an `ACKS` reason
+   * for either — `ShuttleNotAtPort` or `ShuttleBadDestination`. Nothing happens on the asking tick even when it is
+   * accepted: the avatar queues, and the flight happens on the port's next landing, which is where a shuttle's
+   * timetable becomes visible to whoever is waiting for it.
+   */
+  boardShuttle(destCity: number): void;
   readonly stats: SourceStats;
   /** The simulated link's control, or null for a real connection. */
   readonly latency: LatencyControl | null;
@@ -344,6 +354,8 @@ export class TyphonSource implements DataSource {
   private setTargetCommand: MessagePlan | null = null;
 
   private setViewRadiusCommand: MessagePlan | null = null;
+
+  private boardShuttleCommand: MessagePlan | null = null;
 
   /** The sphere radius last asked for, metres; 0 for none asked. See {@link effectiveRadiusM}. */
   private askedViewRadiusM = 0;
@@ -683,6 +695,18 @@ export class TyphonSource implements DataSource {
     this.sendPending();
   }
 
+  boardShuttle(destCity: number): void {
+    // Absent from the catalog on a server that declares no shuttles, exactly as the radius command is on one whose
+    // sessions have a fixed radius. The prompt reads the same catalog and offers nothing, so this is the belt to that
+    // braces.
+    if (this.boardShuttleCommand === null) {
+      return;
+    }
+
+    this.commands?.enqueue(this.boardShuttleCommand, { destCity: Math.max(0, Math.round(destCity)) });
+    this.sendPending();
+  }
+
   /** The netId this client last asked to ride; see {@link DataSource.spectatingNetId}. */
   get spectatingNetId(): number {
     return this.spectating;
@@ -802,6 +826,7 @@ export class TyphonSource implements DataSource {
     this.moveDirCommand = plan.commandByName('MoveDir');
     this.setTargetCommand = plan.commandByName('SetTarget');
     this.setViewRadiusCommand = plan.commandByName('SetViewRadius');
+    this.boardShuttleCommand = plan.commandByName('BoardShuttle');
     this.commands = new CommandQueue({ plan });
     this.region =
       plan.clientRegion === null

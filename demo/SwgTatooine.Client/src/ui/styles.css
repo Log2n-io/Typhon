@@ -339,6 +339,24 @@ button.active {
   width: 270px;
 }
 
+/* The shuttleport prompt, bottom centre: it appears and disappears as the avatar walks, so it sits where the eye is
+   already looking rather than in a corner, and it is the only panel whose presence is itself information. */
+.shuttle {
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 420px;
+  text-align: center;
+}
+
+.shuttle-destinations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+  margin-top: 8px;
+}
+
 .hud-title {
   font-weight: 700;
   color: var(--accent);

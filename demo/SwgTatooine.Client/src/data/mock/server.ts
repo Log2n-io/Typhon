@@ -220,6 +220,7 @@ export class MockServer {
     switch (a) {
       case Archetype.WorldObject:
         out[0] = w.statics.kind[i];
+        out[1] = w.statics.region[i];
         break;
       case Archetype.CreatureLair:
         out[0] = w.lairs.template[i];

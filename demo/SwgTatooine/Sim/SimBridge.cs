@@ -12,7 +12,7 @@ namespace SwgTatooine;
 /// <c>Execute</c> is one line. Keeping the bodies together makes the shared state obvious and stops per-tick scratch
 /// from being duplicated eight times.</para>
 /// </remarks>
-public sealed partial class SimBridge
+public sealed partial class SimBridge : IShuttleBoarding
 {
     private readonly SimConfig _config;
     private readonly TatooineMap _map;

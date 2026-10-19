@@ -31,6 +31,14 @@ export interface EntitySet {
 
 export interface Statics extends EntitySet {
   readonly kind: Uint8Array;
+  /**
+   * The city or point of interest this belongs to, as the server sends it: the index + 1, with 0 for the wild.
+   *
+   * Points of interest continue the cities' numbering, which is what the server does — they are one index space because
+   * they answer one question. The + 1 is the server's encoding and not the mock's convenience: the field is a group
+   * set's key there, and a sparse index never files key 0, so 0 is what "no region" has to be.
+   */
+  readonly region: Int16Array;
 }
 
 export interface Lairs extends EntitySet {
@@ -193,6 +201,7 @@ export function buildWorld(seed: number, population: number): MockWorld {
       statics.z[s] = p[1]!;
       statics.kind[s] =
         i === 0 ? StructureKind.Shuttleport : i % 9 === 0 ? StructureKind.Terminal : StructureKind.Building;
+      statics.region[s] = ci + 1;
       if (i === 0) {
         shuttleports[ci * 2] = p[0]!;
         shuttleports[ci * 2 + 1] = p[1]!;
@@ -219,6 +228,7 @@ export function buildWorld(seed: number, population: number): MockWorld {
       statics.x[s] = p[0]!;
       statics.z[s] = p[1]!;
       statics.kind[s] = StructureKind.PoiProp;
+      statics.region[s] = CITIES.length + POIS.indexOf(poi) + 1;
       s++;
     }
   }
@@ -283,6 +293,7 @@ export function buildWorld(seed: number, population: number): MockWorld {
     statics.z[s] = clampToPlanet(p[1], 14);
     statics.kind[s] =
       roll < 0.55 ? StructureKind.PlayerHouse : roll < 0.78 ? StructureKind.Harvester : StructureKind.Factory;
+    statics.region[s] = 0; // in the wild, which is what 0 means
     s++;
   }
 
@@ -407,6 +418,7 @@ function allocStatics(count: number): Statics {
     x: new Float64Array(count),
     z: new Float64Array(count),
     kind: new Uint8Array(count),
+    region: new Int16Array(count),
   };
 }
 

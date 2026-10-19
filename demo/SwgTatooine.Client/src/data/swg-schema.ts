@@ -54,7 +54,12 @@ export const SWG_SCHEMA: WorldSchema = {
       name: 'WorldObject',
       position: { kind: 'static', dims: 2 },
       groups: GROUPS,
-      fields: [{ name: 'kind', kind: 'u8' }],
+      // `region` is the city or point of interest this structure belongs to, as city + 1 with 0 for the wild — the
+      // encoding a sparse index forces, since it never files key 0. The shuttleport prompt reads both fields.
+      fields: [
+        { name: 'kind', kind: 'u8' },
+        { name: 'region', kind: 'i16' },
+      ],
     },
     {
       index: Archetype.CreatureLair,

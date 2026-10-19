@@ -4,6 +4,7 @@ import { Inspector } from './Inspector';
 import { Kicked } from './Kicked';
 import { Login } from './Login';
 import { Toolbar } from './Toolbar';
+import { ShuttlePrompt } from './ShuttlePrompt';
 import { needsAccount, Viewport } from './Viewport';
 import { useSessionStore } from '../state/session-store';
 
@@ -39,6 +40,7 @@ export function App() {
       <Toolbar />
       <Hud />
       <Chat />
+      <ShuttlePrompt />
       <Inspector />
       <Kicked />
     </div>

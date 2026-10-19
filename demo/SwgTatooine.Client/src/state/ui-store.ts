@@ -30,6 +30,21 @@ export interface SpectateRequest {
   readonly seq: number;
 }
 
+/** A pending ask to be flown to a city. */
+export interface BoardRequest {
+  /** The destination city's index in the client's own map data. */
+  readonly city: number;
+  readonly seq: number;
+}
+
+/** The shuttleport the avatar is standing at, as the prompt shows it. */
+export interface ShuttleportPrompt {
+  /** The city the port serves. */
+  readonly city: number;
+  /** How far the avatar is from it, in metres, rounded — the prompt shows it and a jitter of centimetres is noise. */
+  readonly distanceM: number;
+}
+
 /** A set of archetype names held as a map, so a missing name reads as its default rather than as `false`. */
 export type NameFlags = Readonly<Record<string, boolean>>;
 
@@ -105,6 +120,16 @@ export interface UiState {
   readonly realmRequest: RealmRequest | null;
   /** A pending ask to ride an entity, or `null`. */
   readonly spectateRequest: SpectateRequest | null;
+  /** A pending ask to be flown somewhere, or `null`. */
+  readonly boardRequest: BoardRequest | null;
+  /**
+   * The shuttleport the avatar is standing at, or `null` when it is not at one.
+   *
+   * <b>Found in the replicated view rather than in the client's map data</b>, because the ports are not in it: which
+   * building of a city is its port is a draw the world generator made, so a client knows where one is only by having
+   * been sent it. `app/shuttle.ts` does the looking, and the bot brain answers the same question the same way.
+   */
+  readonly shuttleport: ShuttleportPrompt | null;
   /** The realms this server says it has, or `null` from the mock and from a server that publishes none. */
   readonly realms: RealmDirectory | null;
   /**
@@ -132,6 +157,10 @@ export interface UiState {
   readonly setCameraMode: (mode: 'god' | 'eye') => void;
   /** Tells the store this session has an avatar to ride; see {@link UiState.playing}. */
   readonly setPlaying: (playing: boolean) => void;
+  /** Asks the server to fly the avatar to a city; refused unless it is standing at a port. */
+  readonly boardShuttle: (city: number) => void;
+  /** Publishes the port the avatar is standing at, or `null`. Called by the frame loop on change only. */
+  readonly setShuttleport: (shuttleport: ShuttleportPrompt | null) => void;
   readonly setShowAuthoritative: (showAuthoritative: boolean) => void;
   readonly setShowLabels: (on: boolean) => void;
   readonly setShowAttacks: (on: boolean) => void;
@@ -176,6 +205,8 @@ export const useUi = create<UiState>()((set) => ({
   cameraRequest: null,
   realmRequest: null,
   spectateRequest: null,
+  boardRequest: null,
+  shuttleport: null,
   realms: null,
   transition: IDLE,
 
@@ -311,6 +342,14 @@ export const useUi = create<UiState>()((set) => ({
       spectateRequest: { netId, seq: (s.spectateRequest?.seq ?? 0) + 1 },
       cameraMode: netId === 0 ? 'god' : 'eye',
     }));
+  },
+  boardShuttle: (city) => {
+    // A sequence for the reason every other request carries one: the server may refuse, so asking for the same city
+    // twice has to send twice, and without it the second ask would be indistinguishable from no ask at all.
+    set((s) => ({ boardRequest: { city, seq: (s.boardRequest?.seq ?? 0) + 1 } }));
+  },
+  setShuttleport: (shuttleport) => {
+    set({ shuttleport });
   },
   viewRealm: (realmId) => {
     // The selection is dropped here as well as on arrival: the entity it names belongs to the realm being left, and

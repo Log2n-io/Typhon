@@ -146,6 +146,40 @@ public sealed partial class SimBridge
         return true;
     }
 
+    /// <summary>How many cities a client may name as a destination; 0 when this server runs without shuttles, which refuses every ask.</summary>
+    public int CityCount => ShuttlesActive ? _index.Cities.Count : 0;
+
+    /// <summary>Whether a point stands close enough to a shuttleport to board there, and which city's port it is.</summary>
+    /// <param name="x">Where the player is, east.</param>
+    /// <param name="z">Where the player is, north.</param>
+    /// <param name="planet">The realm it is in, which decides whose ports these are.</param>
+    /// <param name="withinM">How close counts as at the port, in metres.</param>
+    /// <param name="city">The city whose port it is standing at.</param>
+    /// <returns>Whether it is at one.</returns>
+    /// <remarks>
+    /// <b>Every port, not the port of the city it is standing in.</b> A city's disc and its port are not the same test: a port sits inside its city, but a
+    /// player one metre outside the disc standing against the port building is plainly at the port, and the city lookup would refuse it. Walking the ports
+    /// is also the cheaper of the two — there is one per city, the list is tens long, and this runs once per boarding ask rather than per tick.
+    /// </remarks>
+    public bool TryPortAt(float x, float z, ushort planet, double withinM, out int city)
+    {
+        var ports = PortsOf(planet);
+        var limit = withinM * withinM;
+        for (var i = 0; i < ports.Count; i++)
+        {
+            var dx = x - ports[i].X;
+            var dz = z - ports[i].Z;
+            if (((double)dx * dx) + ((double)dz * dz) <= limit)
+            {
+                city = i;
+                return true;
+            }
+        }
+
+        city = -1;
+        return false;
+    }
+
     /// <summary>A planet's shuttleports: the map's cities are every planet's, the ports' coordinates are each planet's own draw.</summary>
     private List<(float X, float Z)> PortsOf(ushort planet) => PlanetIndexes != null && planet < PlanetIndexes.Length
         ? PlanetIndexes[planet].Shuttleports
@@ -210,14 +244,20 @@ public sealed partial class SimBridge
             var queued = 0UL;
             var peek = cluster.GetReadOnlySpan(Player.State);
 
-            // A possessed player is never boarded (SWG-01). It cannot newly become AwaitingShuttle — PlayerThink is what sets that and it skips possessed
-            // players — but one possessed WHILE already queued would otherwise be flown away, and with several planets flown to another realm, by a system
-            // its client cannot see. `PossessPlayers` normalises the activity on claim so the state is not merely ignored; this is the second half of that.
-            var control = cluster.GetReadOnlySpan(Player.Control);
+            // Everyone waiting is boarded, possessed or not, and the controller is no longer consulted. The filter that was here admitted only
+            // ControllerKind.InProcess, against the hazard of a body "possessed WHILE already queued" being flown away by a system its client cannot see —
+            // and it cited PossessPlayers normalising the activity on claim as the other half of the guard. That function no longer exists: possession was
+            // replaced by avatars in A5, so a client is given a FRESHLY SPAWNED body at PlayerActivity.Idle and never takes over a queued one. The hazard
+            // it defended against cannot occur any more.
+            //
+            // What remains is the invariant that makes this safe, and it is worth stating because it is what the refusal path rests on: the only two things
+            // that set AwaitingShuttle are PlayerThink, which skips possessed players outright, and the world generator, which only ever builds in-process
+            // bodies. So a POSSESSED player is waiting for a shuttle if and only if its own client asked to board (TatooineReplication's BoardShuttle), and
+            // carrying it is doing what it asked rather than something behind its back.
             for (var bits = bits0; bits != 0; bits &= bits - 1)
             {
                 var idx = BitOperations.TrailingZeroCount(bits);
-                if (peek[idx].Activity == PlayerActivity.AwaitingShuttle && control[idx].Kind == ControllerKind.InProcess)
+                if (peek[idx].Activity == PlayerActivity.AwaitingShuttle)
                 {
                     queued |= 1UL << idx;
                 }
