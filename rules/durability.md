@@ -3209,6 +3209,7 @@ and 11 (restore, store, WAL archiving) land with #1413 and #1418.
             each session: create, crash, recovery open with a schema migration, clean closes), with
             ChokepointCompletenessTests.Mutant_ARawWrite_IsMissingFromTheMap and
             DataFileWriteChokepointGateTests.Mutant_AThirdWriteSite_IsReported
+  spec: rules/tla/BackupCapture.tla (S6) — ChangeMapComplete; mutants -mutant-mapafterwrite, -mutant-nogate
 
 ### BKP-02: A captured point is the data file at its freeze `[silent]`
   invariant ∀ point X that completes: ∀ p ∈ [0, N_X) held by X: X's image of p = the bytes of the data file at F_X (zeros
@@ -3226,6 +3227,7 @@ and 11 (restore, store, WAL archiving) land with #1413 and #1418.
             file read at the freeze; the incremental holds every page a write probe saw between the freezes),
             FreezeTests.N_IsThePhysicalLength_NotTheTrackedSize (an async batch held between its write and its fsync);
             source mutant seen red: N from the tracked size
+  spec: rules/tla/BackupCapture.tla (S6) — ImageFidelity; mutant -mutant-nogate
 
 ### BKP-03: Copy-before-write `[silent]`
   invariant from F_X until the hook is uninstalled: ∀ write to p with p < N_X ∧ p in X's image set: the write is issued only
@@ -3245,6 +3247,7 @@ and 11 (restore, store, WAL archiving) land with #1413 and #1418.
             checkpoint rewrites the page), CbwRaceTests.WriterClaimedFirst_TheScannerTakesItsPreImage (a checkpoint ahead of
             the scanner), with CbwRaceTests.Mutant_TheWriterSkipsTheClaimWait_IsReported; CbwRaceTests.Abort_ReleasesAWriterWaitingOnAClaimedPage;
             source mutant seen red: no copy-before-write at all
+  spec: rules/tla/BackupCapture.tla (S6) — ImageFidelity; mutant -mutant-noclaimwait
 
 ### BKP-04: The tail holds every record the image can reflect, and stays reachable until copied `[fatal]`
   invariant the tail of point X = every WAL segment with lastLSN ≥ C_X plus the active one, each copied from offset 0, after
@@ -3277,6 +3280,7 @@ and 11 (restore, store, WAL archiving) land with #1413 and #1418.
             P: WalTailCaptureTests.PointLsn_IsTheLastCommitOrFence_AndStopsAtTheFirstCorruption. Source mutants seen red:
             no flush before the copy, `>` instead of `≥`, no floor in step 8, P without fence records, no stop at the first
             corruption, ActiveSegment assigned outside the lock
+  spec: rules/tla/BackupCapture.tla (S6) — TailCoversImage, NoNeededRecordReclaimed; mutants -mutant-noflush, -mutant-nofloor
 
 ### BKP-06: An incremental only on a trusted map and an unbroken chain `[silent]`
   invariant a point is captured incremental iff the request allows it ∧ BackupLineage.Trusted ∧ lineage.StoreId = the
@@ -3320,6 +3324,7 @@ and 11 (restore, store, WAL archiving) land with #1413 and #1418.
   verified: BackupFailurePathTests.SinkThrowsMidScan_TheNextIncrementalCoversEverything (+ Mutant_APageOfTheFailedCaptureIsMissing_IsReported),
             BackupFailurePathTests.DisposeDuringCapture_ClosesCleanly_AndTheMapHoldsThePageSet (each phase),
             CbwStallTests (the incremental after a stall holds the aborted set); source mutant seen red: no merge on failure
+  spec: rules/tla/BackupCapture.tla (S6) — ChangeMapComplete over the Abort action
 
 ### BKP-12: The engine never waits on a backup past its budget
   invariant a data-file writer spends at most CbwStallTimeout in BackupCapture.BeforeWrite per write (the slot wait and
