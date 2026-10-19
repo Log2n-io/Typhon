@@ -18,7 +18,7 @@
 [![@typhondb/client](https://img.shields.io/npm/v/@typhondb/client/alpha?logo=npm&label=%40typhondb%2Fclient)](https://www.npmjs.com/package/@typhondb/client)
 [![Native SDK](https://img.shields.io/github/v/release/Log2n-io/Typhon?include_prereleases&sort=semver&logo=github&label=native%20SDK)](https://github.com/Log2n-io/Typhon/releases)
 
-### 📣 10 slides, 4 minutes to understand what it is about ➡️ [Typhon intro](https://www.typhondb.io/deck/typhon-intro).
+### 📣 10 slides, 5 minutes to understand what it is about ➡️ [Typhon intro](https://www.typhondb.io/deck/typhon-intro).
 
 #### Want to learn more, read the [**pitch**](PITCH.md).
 It makes the case for Typhon — the problem it solves, what's actually built and measured today, and where it's headed — before you dive into the technical docs below.
