@@ -459,6 +459,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal const string BK_CleanShutdown          = "CleanShutdown";
     internal const string BK_SeedRevision           = "SeedRevision";
     internal const string BK_DatabaseId             = "DatabaseId";
+    internal const string BK_TimelineId             = "TimelineId";
     // ReSharper restore InconsistentNaming
 
     /// <summary>
@@ -490,6 +491,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// created before this key existed adopt an id on their first open by a build that knows about it — see <see cref="EnsureDatabaseIdentity"/>.
     /// </remarks>
     public Guid DatabaseId { get; private set; }
+
+    /// <summary>
+    /// Identity of this database's WAL history: LSNs are unique within a timeline. Minted with <see cref="DatabaseId"/> at creation and kept across
+    /// reopens and crashes; a database restored from a backup point starts a new one (<see cref="AdoptTimeline"/>), because its WAL reuses LSNs the
+    /// original already wrote. Persisted as <see cref="BK_TimelineId"/>, in the same packed shape as <see cref="DatabaseId"/>.
+    /// </summary>
+    internal Guid TimelineId { get; private set; }
 
     /// <summary>
     /// The next transaction number this database will hand out — its position in a globally monotonic, restart-durable sequence.
@@ -3014,6 +3022,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Durable database identity (D-2) — minted here, at creation, and never rewritten. This is the only place a *new* id is born on the create path.
         DatabaseId = Guid.NewGuid();
         bootstrap.Set(BK_DatabaseId, PackDatabaseId(DatabaseId));
+        TimelineId = Guid.NewGuid();
+        bootstrap.Set(BK_TimelineId, PackDatabaseId(TimelineId));
 
         MMF.UnlatchPageExclusive(memPageIdx);
 
@@ -3245,43 +3255,77 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     }
 
     /// <summary>
-    /// Reads <see cref="DatabaseId"/> from the bootstrap on reopen, or mints and persists one if the key is somehow absent.
+    /// Reads <see cref="DatabaseId"/> and <see cref="TimelineId"/> from the bootstrap on reopen, or mints and persists whichever is absent.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// In practice the mint branch does not fire: <see cref="BK_DatabaseId"/> is written by <see cref="CreateSystemSchemaR1"/> alongside
-    /// <see cref="BK_SystemSchemaRevision"/>, and any database predating either is refused by the revision gate above. It is kept as a fallback because a live
-    /// engine must never report <see cref="Guid.Empty"/> as its identity — a capture would then claim to belong to "no database".
+    /// In practice the <see cref="DatabaseId"/> mint branch does not fire: <see cref="BK_DatabaseId"/> is written by <see cref="CreateSystemSchemaR1"/>
+    /// alongside <see cref="BK_SystemSchemaRevision"/>, and any database predating either is refused by the revision gate above. It is kept as a fallback
+    /// because a live engine must never report <see cref="Guid.Empty"/> as its identity — a capture would then claim to belong to "no database". The
+    /// <see cref="TimelineId"/> branch fires once for every database created before the key existed.
     /// </para>
     /// <para>
-    /// Adoption is eager (written and flushed here, not deferred to <see cref="PersistEngineState"/>) because the value's only job is to be stable: an id that
-    /// a crash before clean shutdown could lose, and that the next open would regenerate, would silently break the pairing it exists to guarantee.
+    /// Adoption is eager (written and flushed here, in one meta flip for both keys, not deferred to <see cref="PersistEngineState"/>) because the values'
+    /// only job is to be stable: an id that a crash before clean shutdown could lose, and that the next open would regenerate, would silently break the
+    /// pairing it exists to guarantee.
     /// </para>
     /// </remarks>
     private void EnsureDatabaseIdentity()
     {
         var bootstrap = MMF.Bootstrap;
+        var minted = false;
         if (bootstrap.TryGet(BK_DatabaseId, out var existing))
         {
             DatabaseId = UnpackDatabaseId(existing);
+        }
+        else
+        {
+            DatabaseId = Guid.NewGuid();
+            minted = true;
+        }
+
+        if (bootstrap.TryGet(BK_TimelineId, out var timeline))
+        {
+            TimelineId = UnpackDatabaseId(timeline);
+        }
+        else
+        {
+            TimelineId = Guid.NewGuid();
+            minted = true;
+        }
+
+        if (minted)
+        {
+            MMF.MutateBootstrapAndPersist(() =>
+            {
+                bootstrap.Set(BK_DatabaseId, PackDatabaseId(DatabaseId));
+                bootstrap.Set(BK_TimelineId, PackDatabaseId(TimelineId));
+            });
+        }
+    }
+
+    /// <summary>
+    /// Starts a new WAL timeline: persists <paramref name="timelineId"/> as <see cref="BK_TimelineId"/> (one meta flip, durable on return) and adopts it.
+    /// Idempotent: adopting the current timeline writes nothing. The first open of a restored database calls it before accepting transactions, so a crash
+    /// in between replays the adoption rather than losing it.
+    /// </summary>
+    /// <param name="timelineId">The new timeline; never <see cref="Guid.Empty"/>.</param>
+    internal void AdoptTimeline(Guid timelineId)
+    {
+        if (timelineId == Guid.Empty)
+        {
+            throw new ArgumentException("A timeline id cannot be empty.", nameof(timelineId));
+        }
+
+        var bootstrap = MMF.Bootstrap;
+        if (bootstrap.TryGet(BK_TimelineId, out var current) && UnpackDatabaseId(current) == timelineId)
+        {
+            TimelineId = timelineId;
             return;
         }
 
-        DatabaseId = Guid.NewGuid();
-        bootstrap.Set(BK_DatabaseId, PackDatabaseId(DatabaseId));
-
-        using var guard = EpochGuard.Enter(EpochManager);
-        var epoch = guard.Epoch;
-        var cs = MMF.CreateChangeSet();
-        MMF.RequestPageEpoch(0, epoch, out var memPageIdx);
-        var latched = MMF.TryLatchPageExclusive(memPageIdx);
-        Debug.Assert(latched, "TryLatchPageExclusive failed on root page while adopting a database identity");
-        MMF.GetPage(memPageIdx);
-        cs.AddByMemPageIndex(memPageIdx);
-        MMF.SaveBootstrap(cs);
-        MMF.UnlatchPageExclusive(memPageIdx);
-        cs.SaveChanges();
-        MMF.FlushToDisk();
+        MMF.MutateBootstrapAndPersist(() => bootstrap.Set(BK_TimelineId, PackDatabaseId(timelineId)));
+        TimelineId = timelineId;
     }
 
     /// <summary>
