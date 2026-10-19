@@ -134,6 +134,9 @@ internal sealed class PackWriter : IBackupPointSink, IDisposable
     /// <summary>The sealed file's length.</summary>
     public long FileLength { get; private set; }
 
+    /// <summary>Neither completed nor aborted yet.</summary>
+    public bool IsOpen => _state is State.Created or State.Imaging or State.Failed;
+
     /// <summary>Where the pack was published, once <see cref="Complete"/> returned.</summary>
     public string PublishedPath { get; private set; }
 

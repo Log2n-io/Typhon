@@ -73,7 +73,7 @@ internal static class PackTestKit
         }
     }
 
-    public static void AddTail(PackWriter writer, BackupTestImage image, int chunk = 7_000)
+    public static void AddTail(IBackupPointSink writer, BackupTestImage image, int chunk = 7_000)
     {
         foreach (var s in image.WalSegments)
         {
