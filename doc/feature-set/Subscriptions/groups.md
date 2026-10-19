@@ -112,6 +112,9 @@ drops what is still waiting — a new session holds none of it.
   without `MaxGroupsPerSession` (at most 1 024).
 - A region in a realm other than 0 needs a positioned region archetype: one with no spatial field has no realm, and its regions are realm 0's.
 - A profile may name groups and no archetype: its Sphere then holds the towns' members and nothing by geometry.
+- **A member held through a group stays held when the Sphere narrows or moves away from it**: it leaves only once neither a held key nor the
+  geometry holds it. A test that asserts what a Sphere holds sees the town's members too, the day a set is declared — stand the session outside
+  every town to test the sphere alone.
 - Past `MaxGroupsPerSession` towns met at once, the kept ones and then the nearest are held and the rest counted.
 - Explicit and shared sets: a profile names them with `Groups(set)`, no reach; at most `MaxGroupsPerSession` keys per set, a client's and the server's
   together; `SubscribeRequest` is rate-limited to 5 a second past a burst of `MaxGroupsPerSession` (the catalog says so: a login may subscribe every

@@ -13,10 +13,12 @@
     </PropertyGroup>
 
     <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.1'">
-        <!-- In-box from .NET 5 on; Unity has no System.Text.Json of its own. -->
-        <PackageReference Include="System.Text.Json" Version="10.0.9" />
-        <!-- Unsafe.AsRef: the read-only span over Utf8Buffer256 (Codec/Utf8Text.cs). -->
-        <PackageReference Include="System.Runtime.CompilerServices.Unsafe" Version="6.1.2" />
+        <!-- The versions Unity 6.6 itself ships (Editor/Data/BCLExtensions/runtime/netstandard2.1: System.Text.Json 8.0.0.0, Unsafe 6.0.0.0), so a Unity
+             project resolves these to its own copies and needs no DLL beside Typhon.Protocol and Typhon.Client: a newer one would be a second copy of an
+             assembly Unity already loads. System.Text.Json reads the catalog (source-generated, no feature past 8.0); Unsafe.AsRef the read-only span over
+             Utf8Buffer256 (Codec/Utf8Text.cs). In-box on net10.0. -->
+        <PackageReference Include="System.Text.Json" Version="8.0.6" />
+        <PackageReference Include="System.Runtime.CompilerServices.Unsafe" Version="6.0.0" />
     </ItemGroup>
 
     <ItemGroup Condition="'$(TargetFramework)' != 'netstandard2.1'">
