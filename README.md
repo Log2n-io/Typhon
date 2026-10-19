@@ -15,10 +15,12 @@
 #### Want to learn mode, read the [**pitch**](PITCH.md).
 It makes the case for Typhon — the problem it solves, what's actually built and measured today, and where it's headed — before you dive into the technical docs below.
 
-### ⚠️ The engine is in active development — pre-alpha. ⚠️
+### ⚠️ The engine is in active development — alpha. ⚠️
 Stabilizing fast, not yet production-ready, but ready for POC & early adopters.
 
-**[Alpha NuGet package](https://www.nuget.org/packages/Typhon) (and [CLI + Workbench](https://www.nuget.org/packages/Typhon.Cli))**, full **[reference documentation](https://doc.typhondb.io)** are now live. Most of the public API is now stable — and you can **[open an issue](https://github.com/Log2n-io/Typhon/issues)** or go to the **[discussions](https://github.com/Log2n-io/Typhon/discussions)** for help, questions, or feedback.
+**[Alpha NuGet package](https://www.nuget.org/packages/Typhon) (and [CLI + Workbench](https://www.nuget.org/packages/Typhon.Cli))**, the
+**Subscriptions client SDKs** — [.NET](https://www.nuget.org/packages/Typhon.Client), [TypeScript](https://www.npmjs.com/package/@typhondb/client) and
+[C](https://github.com/Log2n-io/Typhon/releases) — full **[reference documentation](https://doc.typhondb.io)** are now live. Most of the public API is now stable — and you can **[open an issue](https://github.com/Log2n-io/Typhon/issues)** or go to the **[discussions](https://github.com/Log2n-io/Typhon/discussions)** for help, questions, or feedback.
 
 
 **A microsecond-latency ACID data engine combining ECS archetype storage with tick-based parallel execution.**

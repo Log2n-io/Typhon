@@ -9,6 +9,7 @@
         <Project Path="src/Typhon.Analyzers/Typhon.Analyzers.csproj" />
         <Project Path="src/Typhon.Generators/Typhon.Generators.csproj" />
         <Project Path="src/Typhon.Generators.Consumer/Typhon.Generators.Consumer.csproj" />
+        <Project Path="src/Typhon.Generators.Protocol/Typhon.Generators.Protocol.csproj" />
         <Project Path="src/Typhon.Client/Typhon.Client.csproj" />
         <Project Path="src/Typhon.Engine/Typhon.Engine.csproj" />
         <Project Path="src/Typhon.Protocol/Typhon.Protocol.csproj" />

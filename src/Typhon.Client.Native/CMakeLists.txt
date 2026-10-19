@@ -2,7 +2,9 @@ cmake_minimum_required(VERSION 3.25)
 
 # The Typhon client SDK for native clients (design/Subscriptions/13 § 7, 05 § 3a): C++20 inside, a C ABI outside, no third-party
 # dependency. Every language with an FFI binds the C header; the C++ is an implementation detail.
-project(TyphonClientNative VERSION 0.1.0 LANGUAGES C CXX)
+# The release passes the version it ships (the core of the one version every package carries, 07-delivery § 5); a local build is 0.0.0.
+set(TYPHON_VERSION "0.0.0" CACHE STRING "The SDK's version: MAJOR.MINOR.PATCH, the core of the release's version")
+project(TyphonClientNative VERSION ${TYPHON_VERSION} LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -12,6 +14,8 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 option(TYPHON_NATIVE_TESTS "Build the native SDK's tests" ON)
 option(TYPHON_NATIVE_SANITIZE "Build with AddressSanitizer (and UndefinedBehaviorSanitizer where the compiler has it)" OFF)
+# A shared library is what an FFI binds (Java, Rust, Python, Go): only the C ABI is exported, the C++ inside is hidden.
+option(TYPHON_NATIVE_SHARED "Also build the shared library typhon_client_shared" OFF)
 
 # W1's arithmetic is binary64, one IEEE operation per step: no contraction into FMA, no fast-math reassociation. A decoder that
 # disagrees with the C# reference in the last bit fails the golden vectors, so these are correctness flags, not tuning.
@@ -66,11 +70,48 @@ set(TYPHON_SOURCES
 )
 
 add_library(typhon_client STATIC ${TYPHON_SOURCES})
-target_include_directories(typhon_client PUBLIC include PRIVATE src)
+target_include_directories(typhon_client PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include> PRIVATE src)
 target_compile_options(typhon_client PRIVATE ${TYPHON_WARNINGS})
 if(WIN32)
-  target_link_libraries(typhon_client PRIVATE ws2_32)
+  target_link_libraries(typhon_client PUBLIC ws2_32)
 endif()
+set(TYPHON_INSTALL_TARGETS typhon_client)
+
+if(TYPHON_NATIVE_SHARED)
+  add_library(typhon_client_shared SHARED ${TYPHON_SOURCES})
+  target_include_directories(typhon_client_shared PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include> PRIVATE src)
+  target_compile_options(typhon_client_shared PRIVATE ${TYPHON_WARNINGS})
+  # TYPHON_API exports under TYPHON_CLIENT_BUILD and imports for every consumer of the shared library (client.h).
+  target_compile_definitions(typhon_client_shared PUBLIC TYPHON_CLIENT_SHARED PRIVATE TYPHON_CLIENT_BUILD)
+  set_target_properties(typhon_client_shared PROPERTIES
+    OUTPUT_NAME typhon_client
+    ARCHIVE_OUTPUT_NAME typhon_client_import
+    CXX_VISIBILITY_PRESET hidden
+    C_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR})
+  if(WIN32)
+    target_link_libraries(typhon_client_shared PRIVATE ws2_32)
+  endif()
+  list(APPEND TYPHON_INSTALL_TARGETS typhon_client_shared)
+endif()
+
+# Installed as a CMake package: find_package(TyphonClient) gives Typhon::typhon_client (static) and, when built, Typhon::typhon_client_shared.
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+install(TARGETS ${TYPHON_INSTALL_TARGETS} EXPORT TyphonClientTargets
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(EXPORT TyphonClientTargets NAMESPACE Typhon:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/TyphonClient)
+configure_package_config_file(cmake/TyphonClientConfig.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/TyphonClientConfig.cmake
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/TyphonClient)
+write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/TyphonClientConfigVersion.cmake COMPATIBILITY SameMinorVersion)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/TyphonClientConfig.cmake ${CMAKE_CURRENT_BINARY_DIR}/TyphonClientConfigVersion.cmake
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/TyphonClient)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../../LICENSE.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/TyphonClient)
 
 if(TYPHON_NATIVE_TESTS)
   enable_testing()

@@ -2,7 +2,25 @@
   "name": "@typhondb/client",
   "version": "0.0.0",
   "description": "TypeScript client SDK for Typhon Subscriptions: wire protocol codec, catalog-driven decoding, world store, motion segments, clock, aggregates.",
-  "license": "Apache-2.0",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "author": "Log2n",
+  "homepage": "https://doc.typhondb.io/latest/guides/feature-catalog/Subscriptions/client-sdks.html",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Log2n-io/Typhon.git",
+    "directory": "src/Typhon.Client.TypeScript"
+  },
+  "bugs": {
+    "url": "https://github.com/Log2n-io/Typhon/issues"
+  },
+  "keywords": [
+    "typhon",
+    "replication",
+    "game",
+    "realtime",
+    "websocket",
+    "client"
+  ],
   "type": "module",
   "sideEffects": false,
   "main": "./dist/index.js",
@@ -17,16 +35,22 @@
     "typhon-codegen": "./bin/typhon-codegen.mjs"
   },
   "files": [
+    "LICENSE.md",
     "bin/typhon-codegen.mjs",
     "dist",
-    "src"
+    "src",
+    "README.md"
   ],
   "engines": {
     "node": ">=22"
   },
+  "publishConfig": {
+    "access": "public",
+    "tag": "alpha"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "prepack": "npm run build",
+    "prepack": "node -e \"require('fs').copyFileSync('../../LICENSE.md', 'LICENSE.md')\" && npm run build",
     "typecheck": "tsc --noEmit && tsc --noEmit -p test && npm run build && tsc --noEmit -p bin && tsc --noEmit -p bench",
     "lint": "eslint .",
     "format": "prettier --write .",

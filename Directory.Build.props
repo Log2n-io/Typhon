@@ -36,10 +36,11 @@
     `Typhon.Cli` dotnet tool) get consistent identity, versioning, symbols and Source Link. Non-packable
     projects (tests, tools, demos) inherit these harmlessly — the metadata only takes effect when packing.
 
-    Versioning: MinVer derives the version from git tags (decision D-2). No version tag exists yet, so builds
-    resolve to `0.0.0-alpha.0.<height>` — already a prerelease on the 0.0.x line, so we can never accidentally
-    ship a `1.0.0`. The first real release is tagged `0.0.1-alpha.1`. Packages publish PRERELEASE-ONLY through
-    pre-alpha (enforced in release CI, #430).
+    Versioning: MinVer derives the version from git tags (decision D-2); one version for every package, NuGet and npm (07-delivery § 5).
+    The pre-alpha line was 0.0.1-alpha.1 … 0.0.1-alpha.5 (engine + CLI only). The first ALPHA is tagged `0.1.0-alpha.1` and is the first
+    release of Typhon.Protocol, Typhon.Client, Typhon.Subscriptions.AspNetCore, @typhondb/client and the native SDK; later alphas bump the
+    prerelease number (`0.1.0-alpha.2`), a breaking line the minor (`0.2.0-alpha.1`). Untagged builds resolve to `<last tag>.<height>`, still a
+    prerelease. Packages publish PRERELEASE-ONLY through alpha (enforced in release CI, #430).
 
     Source Link: in-box in the .NET 8+ SDK (no PackageReference needed). PublishRepositoryUrl + EmbedUntrackedSources
     enable it for this GitHub-hosted repo; DeterministicSourcePaths + PathMap are already set above.

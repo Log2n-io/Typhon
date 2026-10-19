@@ -6,7 +6,7 @@
 **Typhon Workbench** (a full local database GUI) for [Typhon](https://typhondb.io) — a real-time, low-latency ACID
 database engine built on an ECS architecture with MVCC snapshot isolation.
 
-> ⚠️ **Pre-alpha.** This package is published as a prerelease. Commands, output, and on-disk formats will
+> ⚠️ **Alpha.** This package is published as a prerelease. Commands, output, and on-disk formats will
 > change without notice until the first stable release. Not for production use yet.
 
 ---

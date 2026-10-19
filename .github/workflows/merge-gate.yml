@@ -102,6 +102,7 @@ jobs:
             engine:
               - 'src/Typhon.Engine/**'
               - 'src/Typhon.Protocol/**'
+              - 'src/Typhon.Generators.Protocol/**'
               # The engine suite reaches Typhon.Client: MotionSegmentTests feeds the segments the engine produces through
               # the client's evaluator, so the two motion halves are pinned to one another (P1-10). Missed when that
               # reference was added, which is exactly the drift this block exists to catch.
@@ -132,6 +133,7 @@ jobs:
               - 'src/Typhon.Schema.Definition/**'
               - 'src/Typhon.Profiler/**'
               - 'src/Typhon.Protocol/**'
+              - 'src/Typhon.Generators.Protocol/**'
               # The browser's door (P1-08). It runs here rather than with the SDKs because its build closure is the
               # whole engine, and gating it on `sdk` would make the SDK job run on every engine change.
               - 'src/Typhon.Subscriptions.AspNetCore/**'
@@ -159,6 +161,7 @@ jobs:
             # decode — a vector changed by a Protocol PR must re-run the decoders that consume it.
             sdk:
               - 'src/Typhon.Protocol/**'
+              - 'src/Typhon.Generators.Protocol/**'
               - 'src/Typhon.Client/**'
               - 'src/Typhon.Client.TypeScript/**'
               - 'test/Typhon.Client.Tests/**'
@@ -176,6 +179,7 @@ jobs:
               - 'test/Typhon.Client.Tests/**'
               - 'src/Typhon.Client/**'
               - 'src/Typhon.Protocol/**'
+              - 'src/Typhon.Generators.Protocol/**'
               - 'src/Typhon.Engine/**'
               - 'src/Typhon.Schema.Definition/**'
               - 'src/Typhon.Analyzers/**'

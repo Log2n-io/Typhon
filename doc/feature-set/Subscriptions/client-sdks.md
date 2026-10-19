@@ -1,11 +1,11 @@
 ---
 uid: feature-subscriptions-client-sdks
 title: 'Client SDKs'
-description: 'The TypeScript SDK for browsers and the .NET client for bots, tools and tests: catalog-driven decoding into columnar stores, motion extrapolation, commands, reconnection, recording, and ahead-of-time code generation.'
+description: 'The TypeScript SDK for browsers, the .NET client for bots, tools and tests, and the C SDK for native clients and FFI bindings: catalog-driven decoding into columnar stores, motion extrapolation, commands, reconnection, recording, and ahead-of-time code generation. Published on npm, NuGet and GitHub Releases.'
 ---
 
 # Client SDKs
-> Two clients, one catalog: the browser's and .NET's, both decoding against what the server says rather than its C# types.
+> Three clients, one catalog: the browser's, .NET's and native code's, all decoding against what the server says rather than its C# types.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🔵 Core · **Category:** [Subscriptions](./README.md)
 
@@ -39,6 +39,23 @@ and send commands in the server's encoding — without being regenerated every t
 - `FrameApplied` — raised on the receive thread after each `TICK` is applied whole (events and leaves included) and before the next: the window
   to copy the frame's change lists and columns out to a game or render thread, since the next frame clears and rewrites them.
 
+**C** (`src/Typhon.Client.Native`, C++20 inside, a C ABI outside, no third-party dependency):
+
+- `typhon_client_create` / `_start` / `_poll` / `_stop` over TCP — a columnar store read through `typhon_archetype_view_get` and
+  `typhon_field_column`, motion through `typhon_motion_evaluate_live`, commands through `typhon_command_enqueue` / `typhon_commands_flush`,
+  groups through `typhon_group_subscribe` and `typhon_groups_get`, events through `typhon_event_*`. Caller-owned buffers and opaque handles, so
+  any language with an FFI binds the one header (`typhon/client.h`). TLS and WebSocket are not built (#1045).
+
+## 📦 Install
+
+| SDK | Where | |
+|---|---|---|
+| .NET | NuGet | `dotnet add package Typhon.Client --prerelease` — and `Typhon.Protocol` alone for a contracts assembly shared with the server |
+| TypeScript | npm | `npm install @typhondb/client@alpha` (ESM, Node ≥ 22 or a browser) |
+| C | [GitHub Releases](https://github.com/Log2n-io/Typhon/releases) | `typhon-client-native-<version>-<platform>` for linux-x64, windows-x64, macos-arm64: headers, a static and a shared library, and a CMake package — `find_package(TyphonClient)`, then link `Typhon::typhon_client` (static) or `Typhon::typhon_client_shared` |
+
+Every package carries the server's version (one version for the engine and its clients); the alpha line is prerelease-only.
+
 ## 💻 Usage
 
 ```typescript
@@ -70,11 +87,13 @@ await bot.SendCommandAsync("MoveTo", new RecordValues
 
 ## ⚠️ Guarantees & limits
 
-- **Golden vectors** pin the wire: the engine, the .NET client and the TypeScript SDK decode the committed vectors identically, bit for bit.
+- **Golden vectors** pin the wire: the engine, the .NET client, the TypeScript SDK and the C SDK decode the committed vectors identically, bit for bit.
 - **Forward compatible**: a client skips blocks and fixed-size fields it does not know (AC-14).
 - **Steady state**: the TypeScript SDK shows no retained heap growth over a 10-minute replay; with code generation a steady-state frame of
   10 k records decodes in ≈ 0.3 ms on the reference laptop.
-- **Packaging**: neither SDK is published to a package registry yet (NuGet / npm); use them from the repository.
+- **Packaging**: each release's smoke tests install the packages from the release itself — a server on `Typhon` + `Typhon.Subscriptions.AspNetCore`,
+  the .NET client over TCP, the TypeScript tarball over WebSocket, and the C package through `find_package`, static and shared.
+- **Targets**: the .NET packages target `net10.0` only (Unity's `netstandard2.1`: #1034).
 
 ## 🧪 Tests
 

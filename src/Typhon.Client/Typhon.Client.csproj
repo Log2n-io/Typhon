@@ -8,12 +8,24 @@
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
         <!-- Zero-warning policy, matching Typhon.Engine and Typhon.Profiler. -->
         <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-        <!-- Packaged with the release work (07-delivery § 5), not before: release.yml packs every packable project. -->
-        <IsPackable>false</IsPackable>
+    </PropertyGroup>
+
+    <!-- ============ NuGet packaging (07-delivery § 5) ============ -->
+    <PropertyGroup>
+        <PackageId>Typhon.Client</PackageId>
+        <Description>The .NET client SDK for Typhon Subscriptions: connects to a Typhon server over TCP or WebSocket, decodes its catalog-driven stream into a columnar world store, extrapolates motion, sends commands and subscribes to groups. Alpha — expect breaking changes.</Description>
+        <PackageTags>typhon;replication;networking;client;game-client;realtime</PackageTags>
+        <PackageReadmeFile>PACKAGE.md</PackageReadmeFile>
+        <EnablePackageValidation>true</EnablePackageValidation>
     </PropertyGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\Typhon.Protocol\Typhon.Protocol.csproj" />
+        <None Include="PACKAGE.md" Pack="true" PackagePath="" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- PrivateAssets="none": the replication generator flows with it, for a client or bot that declares its own [ReplicatedMessage] types. -->
+        <ProjectReference Include="..\Typhon.Protocol\Typhon.Protocol.csproj" PrivateAssets="none" />
     </ItemGroup>
 
     <ItemGroup>

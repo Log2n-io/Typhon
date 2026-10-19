@@ -31,7 +31,7 @@ FEED="$(cd "$FEED" && { pwd -W 2>/dev/null || pwd; })"
 
 # Discover both packed versions from the .nupkg filenames (ignore the .snupkg symbol packages).
 CLI_NUPKG="$(ls "$FEED"/Typhon.Cli.*.nupkg 2>/dev/null | grep -v '\.snupkg$' | head -1 || true)"
-ENGINE_NUPKG="$(ls "$FEED"/Typhon.*.nupkg 2>/dev/null | grep -v '\.snupkg$' | grep -v '/Typhon\.Cli\.' | head -1 || true)"
+ENGINE_NUPKG="$(ls "$FEED"/Typhon.[0-9]*.nupkg 2>/dev/null | grep -v '\.snupkg$' | head -1 || true)"
 [ -n "$CLI_NUPKG" ]    || { echo "onboarding-smoke: no Typhon.Cli.*.nupkg found in $FEED"; exit 1; }
 [ -n "$ENGINE_NUPKG" ] || { echo "onboarding-smoke: no Typhon.*.nupkg (engine) found in $FEED"; exit 1; }
 CLI_VERSION="$(basename "$CLI_NUPKG" | sed -E 's/^Typhon\.Cli\.(.*)\.nupkg$/\1/')"
@@ -46,7 +46,7 @@ echo "onboarding-smoke: packed CLI $CLI_VERSION, packed engine $ENGINE_VERSION"
 
 # NuGet's global cache keys on ID+version and won't re-extract a same-version re-pack. When iterating locally the
 # version is fixed (MinVer height), so evict to always test fresh content. (No-op in CI — every build is unique.)
-rm -rf "${HOME}/.nuget/packages/typhon" "${HOME}/.nuget/packages/typhon.cli" 2>/dev/null || true
+rm -rf "${HOME}/.nuget/packages/typhon" "${HOME}/.nuget/packages/typhon.cli" "${HOME}/.nuget/packages/typhon.protocol" 2>/dev/null || true
 
 TOOLDIR="$(mktemp -d)"
 WORK="$(mktemp -d)"

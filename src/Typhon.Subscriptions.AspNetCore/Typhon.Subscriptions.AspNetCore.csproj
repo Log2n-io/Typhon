@@ -6,7 +6,8 @@
         <RootNamespace>Typhon.Subscriptions.AspNetCore</RootNamespace>
         <!-- A library, not an application: the Web SDK is used for the ASP.NET Core framework reference only. -->
         <OutputType>Library</OutputType>
-        <IsPackable>false</IsPackable>
+        <!-- The Web SDK defaults to IsPackable=false. -->
+        <IsPackable>true</IsPackable>
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
         <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
         <!-- No launch profile, no wwwroot, no implicit static files: this project only adds endpoints to somebody else's host. -->
@@ -15,13 +16,26 @@
 
     <ItemGroup>
         <ProjectReference Include="..\Typhon.Engine\Typhon.Engine.csproj" />
-        <!-- Direct, because the engine references it with PrivateAssets="all": the close codes and the subprotocol name are this package's own vocabulary. -->
+        <!-- Direct: the close codes and the subprotocol name are this package's own vocabulary (the engine depends on it too). -->
         <ProjectReference Include="..\Typhon.Protocol\Typhon.Protocol.csproj" />
         <PackageReference Include="JetBrains.Annotations" Version="2026.2.0" PrivateAssets="all" />
     </ItemGroup>
 
     <ItemGroup>
         <InternalsVisibleTo Include="Typhon.Subscriptions.AspNetCore.Tests" />
+    </ItemGroup>
+
+    <!-- ============ NuGet packaging (07-delivery § 5) ============ -->
+    <PropertyGroup>
+        <PackageId>Typhon.Subscriptions.AspNetCore</PackageId>
+        <Description>Hosts Typhon Subscriptions in ASP.NET Core: the WebSocket endpoint for browser and .NET clients (MapTyphonSubscriptions) and the catalog endpoint (MapTyphonCatalog). Alpha — expect breaking changes.</Description>
+        <PackageTags>typhon;replication;websocket;aspnetcore;game-server;realtime</PackageTags>
+        <PackageReadmeFile>PACKAGE.md</PackageReadmeFile>
+        <EnablePackageValidation>true</EnablePackageValidation>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <None Include="PACKAGE.md" Pack="true" PackagePath="" />
     </ItemGroup>
 
 </Project>

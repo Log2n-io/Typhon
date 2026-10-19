@@ -7,7 +7,7 @@ Typhon is an embedded database engine built on an **ECS (Entity-Component-System
 transactional correctness *and* tight, predictable latency — real-time simulations, game servers, and
 in-process analytical/transactional (HTAP-shaped) data.
 
-> ⚠️ **Pre-alpha.** This package is published as a prerelease. APIs, on-disk formats, and defaults will
+> ⚠️ **Alpha.** This package is published as a prerelease. APIs, on-disk formats, and defaults will
 > change without notice until the first stable release. Not for production use yet.
 
 ## Fastest way to see it work
@@ -39,15 +39,25 @@ is required.
 
 ## What's in the box
 
-This single package bundles the full public surface:
+This package bundles the engine's public surface:
 
-- **Engine** — transactions, component tables, B+Tree indexes, storage/persistence, MVCC.
+- **Engine** — transactions, component tables, B+Tree indexes, storage/persistence, MVCC, the runtime, Subscriptions (replication).
 - **Profiler** — the in-box CPU/event profiler APIs.
-- **Protocol** — the wire-format types.
 - **Schema.Definition** — the `[Archetype]` / component-definition attributes.
 
-A **source generator** ships alongside it: decorate a partial class with `[Archetype]` and Typhon generates
-the strongly-typed, zero-copy component accessors for it at compile time.
+It depends on [`Typhon.Protocol`](https://www.nuget.org/packages/Typhon.Protocol) — the Subscriptions wire format and the replication
+attributes — which a contracts assembly shared with clients can reference alone.
+
+**Source generators** ship alongside: decorate a partial class with `[Archetype]` and Typhon generates the strongly-typed, zero-copy
+component accessors for it at compile time; `[Replicated]` / `[ReplicatedMessage]` declare what Subscriptions send.
+
+## Serving remote clients
+
+Subscriptions replicate engine state to game clients, browsers and bots. Host the WebSocket endpoint with
+[`Typhon.Subscriptions.AspNetCore`](https://www.nuget.org/packages/Typhon.Subscriptions.AspNetCore); clients use
+[`Typhon.Client`](https://www.nuget.org/packages/Typhon.Client) (.NET), [`@typhondb/client`](https://www.npmjs.com/package/@typhondb/client)
+(TypeScript) or the C SDK from the [GitHub releases](https://github.com/Log2n-io/Typhon/releases). Guide:
+<https://doc.typhondb.io/latest/guides/07-subscriptions.html>
 
 ## Using with an AI coding agent
 

@@ -5,3 +5,5 @@ test/.generated/
 bench/.generated/
 # The codegen CLI, not a .NET build output (the repository root ignores every bin/).
 !bin/
+# Copied from the repository root at `npm pack` (prepack): the package ships the license, the repository keeps one copy.
+LICENSE.md
