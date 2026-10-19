@@ -1404,6 +1404,9 @@ either durability, recoverability, or consistency.
     `lastLSN < checkpointLSN`, so a segment whose LastLSN equals CheckpointLSN is retained for one extra cycle. Safe
     direction (never recycles a needed segment); the divergence is deliberate-by-effect, not a violation. Do not "fix"
     the code to `≤` without a reason — the retained segment costs one segment of disk and removes a boundary case.
+  note the `<` is load-bearing for online backup (BKP-04): a crash with meta = C keeps exactly the segments with
+    `lastLSN ≥ C`, recovery resumes the TSN counter above every commit stamp it scans in them (RB-05), and a backup's
+    tail copies that same set so a restore is that crash state
   scope: WalSegmentManager.cs, CheckpointManager.cs
   on_violation: premature recycling → WAL records needed for crash recovery
     are gone; data loss without detection
@@ -3206,3 +3209,35 @@ and 11 (restore, store, WAL archiving) land with #1413 and #1418.
             each session: create, crash, recovery open with a schema migration, clean closes), with
             ChokepointCompletenessTests.Mutant_ARawWrite_IsMissingFromTheMap and
             DataFileWriteChokepointGateTests.Mutant_AThirdWriteSite_IsReported
+
+### BKP-04: The tail holds every record the image can reflect, and stays reachable until copied `[fatal]`
+  invariant the tail of point X = every WAL segment with lastLSN ≥ C_X plus the active one, each copied from offset 0, after
+            WaitForDurable(PubF) where PubF = LastPublishedLsn sampled under the freeze; hence it holds every durable
+            record with LSN in (C_X, PubF] — every record any image page can reflect, since a checkpoint wave writes a page
+            BEFORE its flush2 (CK-02 orders flush2 before the data fsync, not before the data write)
+  invariant from the freeze until the copy ends, WAL reclaim never deletes a segment with lastLSN ≥ the floor sampled
+            under the freeze (CheckpointManager.CheckpointLsn, ≤ C_X)
+  invariant the segment snapshot sees the segment a rotation is sealing (CK-07: the assignment and the Add share one
+            critical section)
+  invariant a tail segment is restored at its header's declared size, zero-filled past the copied prefix (the reader
+            scans the declared size and ignores short reads)
+  invariant P_X = the highest LSN in (C_X, end of the valid prefix] recovery applies as a unit — a TxCommit marker or a
+            fence record — computed by the scan RecoveryDriver.Run makes (path order, stop for good at the first
+            corruption); C_X when there is none
+  scope: WalTailInspector.CaptureTail, WalTailInspector.SelectTail, WalTailInspector.ComputePointLsn,
+    WalTailInspector.CaptureTailOffline, CheckpointManager.SetReclaimFloor, CheckpointManager.ClearReclaimFloor
+    (read at step 8 beside the tick-fence floor), WalSegmentManager.SnapshotForTail, WalSegmentManager.RotateSegment,
+    WalWriter.RequestSegmentSwitch (W2: shortens the tail, never decides its content)
+  on_violation: a page reflects a transaction whose commit marker is not in the tail → recovery applies nothing of it and
+    the page keeps part of it (a phantom partial transaction, no undo); or the segment ending at C is missing → the
+    restore resumes the TSN counter below a commit stamp → MVCC visibility corruption; or a needed segment reclaimed
+    mid-copy → the capture fails (or, worse, copies a hole)
+  requires: WP-09 (reclaim keeps lastLSN ≥ C), RB-05, LOG-03, BKP-01 (the floor is read after a gate enter that follows
+    the freeze)
+  verified: WalTailCaptureTests.FlushBeforeTail_CopiesARecordPublishedButNotDurableAtTheFreeze (the WAL writer held with a
+            commit published: the copy waits, then holds it), WalTailCaptureTests.SegmentEndingAtTheCheckpoint_IsInTheTail
+            (+ Mutant_ATailStartingOneSegmentLate_IsReported), WalTailCaptureTests.FloorHoldsDuringTheCopy_WhileACheckpointRuns
+            (a checkpoint inside the copy), SegmentSnapshotTests.SnapshotDuringARotation_SeesTheSegmentBeingSealed;
+            P: WalTailCaptureTests.PointLsn_IsTheLastCommitOrFence_AndStopsAtTheFirstCorruption. Source mutants seen red:
+            no flush before the copy, `>` instead of `≥`, no floor in step 8, P without fence records, no stop at the first
+            corruption, ActiveSegment assigned outside the lock

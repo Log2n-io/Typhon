@@ -33,6 +33,7 @@ public class SegmentSnapshotTests : AllocatorTestBase
 
     [Test]
     [CancelAfter(5_000)]
+    [VerifiesRule("BKP-04")]
     public void SnapshotDuringARotation_SeesTheSegmentBeingSealed()
     {
         using var mgr = new WalSegmentManager(_fileIO, _walDir, 64 * 1024, 1, false);

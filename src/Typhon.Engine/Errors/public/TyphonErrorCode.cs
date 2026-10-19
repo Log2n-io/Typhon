@@ -131,6 +131,17 @@ public enum TyphonErrorCode
     /// </summary>
     RecoveryArchetypeNotRegistered  = 7012,
 
+    // 72xx — Online backup capture
+
+    /// <summary>
+    /// An online backup capture was abandoned: it could not keep up with the engine's writes, the store failed, or the engine was stopping. Nothing was
+    /// published, and the next backup still covers every page this one would have.
+    /// </summary>
+    BackupAborted                   = 7201,
+
+    /// <summary>A backup was requested while another one was running on the same engine.</summary>
+    BackupInProgress                = 7202,
+
     // 8xxx — Runtime / Scheduler
 
     /// <summary>DEBUG-only: a system mutated a component it did not declare in its access set (see <see cref="InvalidAccessException"/>).</summary>

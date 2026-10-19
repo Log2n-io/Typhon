@@ -59,6 +59,9 @@ internal sealed class WalManager : ResourceNode
     /// <summary>The commit buffer for producer threads to claim and publish WAL records.</summary>
     public WalCommitBuffer CommitBuffer { get; private set; }
 
+    /// <summary>The file I/O backend the segments live on; an online backup reads its tail through it.</summary>
+    internal IWalFileIO FileIO => _fileIO;
+
     /// <summary>The segment manager for WAL file lifecycle operations. Used by <see cref="CheckpointManager"/> for segment reclamation.</summary>
     internal WalSegmentManager SegmentManager { get; private set; }
 
@@ -155,7 +158,7 @@ internal sealed class WalManager : ResourceNode
     /// </summary>
     public void RequestFlush() => _writer?.RequestFlush();
 
-    /// <summary>Asks the writer to seal the active segment (W2, see <see cref="WalWriter.RequestSegmentSwitch"/>). Returns the ticket, 0 with no writer.</summary>
+    /// <summary>Asks the writer to seal the active segment (W2, <see cref="WalWriter.RequestSegmentSwitch"/>). Returns the ticket, 0 with no writer.</summary>
     internal long RequestSegmentSwitch() => _writer?.RequestSegmentSwitch() ?? 0;
 
     /// <summary>The highest segment-switch ticket the writer has served.</summary>
