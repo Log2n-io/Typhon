@@ -94,7 +94,9 @@ public sealed class BackupPackCorruptException : BackupException
 {
     /// <summary>Creates the failure.</summary>
     /// <param name="packFile">The pack's path.</param>
-    /// <param name="section">The part that failed: <c>Header</c>, <c>Footer</c>, <c>Index</c>, <c>TailDir</c>, <c>Suspect</c>, <c>Page</c>, <c>Tail</c>, <c>File</c>.</param>
+    /// <param name="section">
+    /// The part that failed: <c>Header</c>, <c>Footer</c>, <c>Index</c>, <c>TailDir</c>, <c>Suspect</c>, <c>Page</c>, <c>Tail</c>, <c>File</c>.
+    /// </param>
     /// <param name="pageId">The page concerned, or <c>-1</c>.</param>
     /// <param name="detail">What was wrong.</param>
     public BackupPackCorruptException(string packFile, string section, long pageId, string detail)

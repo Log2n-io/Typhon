@@ -245,6 +245,13 @@ internal static class BackupVerifier
         };
     }
 
+    /// <summary>One pack on its own: BKP-VER-01..05 and 09..14 (no chain, no points). For tools and tests that look at a single file.</summary>
+    public static PackVerification VerifyPackFile(IStoreFileSystem fs, StoreView view, string file, VerifyLevel level, VerifyOptions options = null)
+    {
+        long bytesRead = 0;
+        return VerifyPack(fs, view, file, level, options ?? VerifyOptions.Default, [], ref bytesRead);
+    }
+
     private static IEnumerable<string> ChainFiles(StoreView view, uint id)
     {
         // The packs the walk reaches, even when it breaks further down: they are still worth verifying.

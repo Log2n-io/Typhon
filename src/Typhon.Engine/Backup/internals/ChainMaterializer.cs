@@ -20,13 +20,16 @@ internal sealed class FrameReader : IDisposable
     public FrameReader(PackReader pack, int windowBytes)
     {
         _pack = pack;
-        _window = ArrayPool<byte>.Shared.Rent(Math.Max(windowBytes, PackFormat.FramePrefixSize + PackFormat.PageSize));
+        // Never larger than the pack's data region: a small pack in a shallow chain would otherwise take the whole budget share.
+        var data = pack.Footer.DataRegionEnd - PackFormat.HeaderSize;
+        var size = (int)Math.Min(windowBytes, Math.Max(data, 0));
+        _window = ArrayPool<byte>.Shared.Rent(Math.Max(size, PackFormat.FramePrefixSize + PackFormat.PageSize));
         _windowStart = -1;
     }
 
     public PackReader Pack => _pack;
 
-    /// <summary>Decodes and checks the page <paramref name="entry"/> names into <paramref name="destination"/>; reports the damage instead of throwing.</summary>
+    /// <summary>Decodes and checks the page <paramref name="entry"/> names into <paramref name="destination"/>; reports damage, never throws it.</summary>
     public bool TryRead(in PackPageEntry entry, Span<byte> destination, out string error)
     {
         if (entry.StoredLength == 0)

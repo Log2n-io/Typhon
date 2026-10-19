@@ -31,7 +31,8 @@ internal static partial class BackupLog
     [LoggerMessage(Level = LogLevel.Warning, Message = "Backup store '{Store}': pack '{File}' is unreadable and left out of the catalog ({Reason})")]
     public static partial void PackUnreadable(ILogger logger, string store, string file, string reason);
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Restore of point #{BackupId} staged: {Pages} pages, {TailSegments} WAL segments, {Milliseconds} ms")]
+    [LoggerMessage(Level = LogLevel.Information,
+        Message = "Restore of point #{BackupId} staged: {Pages} pages, {TailSegments} WAL segments, {Milliseconds} ms")]
     public static partial void RestoreStaged(ILogger logger, uint backupId, int pages, int tailSegments, long milliseconds);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Restore published to '{Target}' (previous bundle kept at '{Displaced}')")]

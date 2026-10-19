@@ -220,7 +220,8 @@ internal sealed class BackupStoreTests
         if (OperatingSystem.IsWindows())
         {
             psi = new ProcessStartInfo("powershell", "-NoProfile -NonInteractive -Command \"$f=[IO.File]::Open('" + lockPath
-                + "','OpenOrCreate','ReadWrite','None'); [Console]::Out.WriteLine('locked'); [Console]::Out.Flush(); [void][Console]::In.ReadLine(); $f.Close()\"");
+                + "','OpenOrCreate','ReadWrite','None'); [Console]::Out.WriteLine('locked'); [Console]::Out.Flush(); "
+                + "[void][Console]::In.ReadLine(); $f.Close()\"");
         }
         else
         {

@@ -301,7 +301,7 @@ internal sealed class PackReader : IDisposable
         }
     }
 
-    /// <summary>As <see cref="ReadPage"/>, reporting the damage instead of throwing. <paramref name="destination"/> holds the decoded bytes, or zeros.</summary>
+    /// <summary>As <see cref="ReadPage"/>, reporting damage instead of throwing; <paramref name="destination"/> holds the decoded bytes or zeros.</summary>
     public bool TryReadPage(in PackPageEntry entry, Span<byte> destination, out string error)
     {
         destination = destination[..PackFormat.PageSize];

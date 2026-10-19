@@ -15,8 +15,9 @@ internal sealed class SimulatedCrashException : Exception
 }
 
 /// <summary>
-/// An <see cref="IStoreFileSystem"/> held in memory. File content is a sparse map of 1 MiB chunks, so a test can write at offsets past 4 GiB
-/// without a disk. Paths are plain strings; both separators are accepted and compared ordinally.
+/// An <see cref="IStoreFileSystem"/> held in memory. File content is a sparse map of 64 KiB chunks (below the large-object heap, so a test
+/// that writes thousands of files does not spend its time in gen-2 collections), so a test can write at offsets past 4 GiB without a disk.
+/// Paths are plain strings; both separators are accepted and compared ordinally.
 /// </summary>
 /// <remarks>
 /// Sharing is modelled the way the real one behaves where the code depends on it: a file created or locked exclusively refuses every other open,
@@ -25,7 +26,7 @@ internal sealed class SimulatedCrashException : Exception
 /// </remarks>
 internal class InMemorySparseFileSystem : IStoreFileSystem
 {
-    internal const int ChunkSize = 1 << 20;
+    internal const int ChunkSize = 64 << 10;
 
     protected readonly HashSet<string> Directories = new(StringComparer.Ordinal);
     protected readonly Dictionary<string, Node> Files = new(StringComparer.Ordinal);
@@ -84,6 +85,22 @@ internal class InMemorySparseFileSystem : IStoreFileSystem
         {
             _heldBundles.Remove(Normalize(bundleDirectory));
         }
+    }
+
+    /// <summary>A file's length and CRC32C, read in chunks (no whole-file copy).</summary>
+    public (long Length, uint Crc) Fingerprint(string path)
+    {
+        var node = Files[Normalize(path)];
+        var crc = Crc32CUtil.Start;
+        var buffer = new byte[ChunkSize];
+        for (long pos = 0; pos < node.Length; pos += ChunkSize)
+        {
+            var n = (int)Math.Min(ChunkSize, node.Length - pos);
+            ReadNode(node, buffer.AsSpan(0, n), pos);
+            crc = Crc32CUtil.Append(crc, buffer.AsSpan(0, n));
+        }
+
+        return (node.Length, Crc32CUtil.Finish(crc));
     }
 
     /// <summary>The whole content of a file, for assertions.</summary>
