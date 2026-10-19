@@ -156,7 +156,7 @@ public static class BackupOperations
         return compacted ?? original;
     }
 
-    private static BackupPointSummary Summarize(CatalogPack p) =>
+    internal static BackupPointSummary Summarize(CatalogPack p) =>
         p == null
             ? null
             : new BackupPointSummary(p.BackupId, (BackupPointKind)p.Kind, p.ChainId, p.ParentId, p.BaseId, p.CheckpointLsn, p.PointLsn, p.ImagePages,

@@ -1933,6 +1933,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>Runs this engine's online backups (#1412) and owns the session's backup lineage. Null once disposed.</summary>
     internal BackupCoordinator BackupCoordinator { get; private set; }
 
+    private IBackupService _backup;
+
+    /// <summary>Online backup of this running database: <c>await engine.Backup.CreateAsync(storePath)</c>.</summary>
+    public IBackupService Backup => _backup ??= new BackupService(this);
+
     /// <summary>
     /// Why this engine cannot take a consistent backup point right now, or null when it can: its open has not completed, it is recovering, its commit
     /// pipeline or checkpointer has stopped, or it is closing.
