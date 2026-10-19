@@ -9,6 +9,12 @@
         <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     </PropertyGroup>
 
+    <!-- A netstandard2.1-subject run builds into its own directories, so it never overwrites the default build that a later no-build run tests. -->
+    <PropertyGroup Condition="'$(TyphonSubjectTfm)' != ''">
+        <OutputPath>bin\$(Configuration)\subject-$(TyphonSubjectTfm)$(TyphonProtocolTfm)\</OutputPath>
+        <IntermediateOutputPath>obj\$(Configuration)\subject-$(TyphonSubjectTfm)$(TyphonProtocolTfm)\</IntermediateOutputPath>
+    </PropertyGroup>
+
     <ItemGroup>
         <PackageReference Include="NUnit" Version="4.6.1" />
         <PackageReference Include="NUnit3TestAdapter" Version="6.2.0" />
@@ -16,7 +22,13 @@
     </ItemGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\..\src\Typhon.Client\Typhon.Client.csproj" />
+        <!-- -p:TyphonSubjectTfm=netstandard2.1 runs these same tests against the subject's netstandard2.1 build — the one Unity loads (#1034) — on
+             CoreCLR: its polyfills, its Bcl ports, and the golden vectors through them. CI runs it beside the default (net10.0) run. -->
+        <ProjectReference Include="..\..\src\Typhon.Client\Typhon.Client.csproj" Condition="'$(TyphonSubjectTfm)' == ''" />
+        <ProjectReference Include="..\..\src\Typhon.Client\Typhon.Client.csproj" Condition="'$(TyphonSubjectTfm)' != ''" SetTargetFramework="TargetFramework=$(TyphonSubjectTfm)" />
+        <!-- With -p:TyphonProtocolTfm=netstandard2.1 too, Typhon.Protocol is the netstandard2.1 build as well — the pair Unity loads. Without it, the
+             netstandard2.1 client runs against the net10.0 protocol: a netstandard2.1 library in a .NET app, which the IsExternalInit forward is for. -->
+        <ProjectReference Include="..\..\src\Typhon.Protocol\Typhon.Protocol.csproj" Condition="'$(TyphonProtocolTfm)' != ''" SetTargetFramework="TargetFramework=$(TyphonProtocolTfm)" />
     </ItemGroup>
 
 </Project>

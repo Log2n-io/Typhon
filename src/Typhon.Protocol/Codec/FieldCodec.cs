@@ -156,7 +156,10 @@ public static class FieldCodec
     /// <param name="sink">Receives the values.</param>
     /// <param name="frame">The session's realm frame, which a position field decodes over (SUB-30); <see langword="null"/> when it holds none.</param>
     public static void ReadSection<TSink>(ref WireReader reader, SectionPlan section, uint frameTick, ref TSink sink, RealmFrame frame = null)
-        where TSink : IFieldSink, allows ref struct
+        where TSink : IFieldSink
+#if NET9_0_OR_GREATER
+        , allows ref struct
+#endif
     {
         Span<double> one = stackalloc double[ProtocolConstants.MaxCount];
         // A field is either numbers or 64-bit integers, and each sink call consumes its span before the next field: one buffer serves both, zeroed once.
@@ -602,7 +605,10 @@ public static class FieldCodec
     }
 
     private static void ReadList<TSink>(ref WireReader reader, FieldPlan field, uint frameTick, ref TSink sink, RealmFrame frame)
-        where TSink : IFieldSink, allows ref struct
+        where TSink : IFieldSink
+#if NET9_0_OR_GREATER
+        , allows ref struct
+#endif
     {
         var raw = reader.ReadVaru();
         if (raw > (uint)field.Codec.MaxCount)
@@ -648,7 +654,10 @@ public static class FieldCodec
     }
 
     private static void ReadCollection<TSink>(ref WireReader reader, FieldPlan field, uint frameTick, ref TSink sink, RealmFrame frame)
-        where TSink : IFieldSink, allows ref struct
+        where TSink : IFieldSink
+#if NET9_0_OR_GREATER
+        , allows ref struct
+#endif
     {
         var total = reader.ReadVaru();
         var sent = reader.ReadVaru();

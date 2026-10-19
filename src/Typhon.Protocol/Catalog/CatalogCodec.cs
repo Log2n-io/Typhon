@@ -187,11 +187,22 @@ public sealed class CatalogCodec
     public string Type { get; init; }
 
     /// <summary>The codec kind <see cref="Type"/> names; <see cref="CodecKind.Unknown"/> for a token this library does not know.</summary>
+    /// <remarks>
+    /// Setting <see cref="CodecKind.Unknown"/> leaves a <see cref="Type"/> already set alone: System.Text.Json 8's source generator (the one Unity ships,
+    /// netstandard2.1 build) creates the object with an initializer that assigns this ignored property too, after <see cref="Type"/>, with its default —
+    /// which would otherwise erase the token just read.
+    /// </remarks>
     [JsonIgnore]
     public CodecKind Kind
     {
         get => CodecTokens.FromToken(Type);
-        init => Type = CodecTokens.ToToken(value);
+        init
+        {
+            if (value != CodecKind.Unknown || Type == null)
+            {
+                Type = CodecTokens.ToToken(value);
+            }
+        }
     }
 
     /// <summary>Width in bits for the quantizing kinds: 8, 16, 24 or 32.</summary>

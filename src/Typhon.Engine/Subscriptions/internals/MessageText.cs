@@ -13,11 +13,11 @@ namespace Typhon.Engine.Internals;
 /// <para>
 /// Both binders ask the same question of a field's CLR type — "is this an inline UTF-8 text, and how many bytes does it
 /// hold?" — and both ask it once per declared field at <c>Start</c>. The answer comes from
-/// <see cref="IInlineUtf8Text"/>'s static <c>Capacity</c>, so a capacity added to the protocol is understood here with no
+/// <see cref="IInlineUtf8Text"/>'s <c>Capacity</c>, so a capacity added to the protocol is understood here with no
 /// change: the alternative, a list of known types, would be a second place to edit and a silent refusal when someone
 /// forgot.
 /// </para>
-/// <para>Cached because reflection on a static abstract member is not free and a catalog may declare the same type on
+/// <para>Cached because creating a value by reflection is not free and a catalog may declare the same type on
 /// several messages; the map is tiny and never invalidated, since a type's capacity cannot change.</para>
 /// </remarks>
 internal static class MessageText
@@ -70,22 +70,16 @@ internal static class MessageText
             return null;
         }
 
-        // The interface's own Capacity, reached through the interface map: the type declares it explicitly, so the public
-        // static property a caller sees is the type's `const`, and this is the one the contract guarantees.
-        var map = type.GetInterfaceMap(typeof(IInlineUtf8Text));
-        for (var i = 0; i < map.InterfaceMethods.Length; i++)
+        // The interface's Capacity, read from the type's default value: it is the type's, the same for every value (an instance member rather than a
+        // static abstract one, so the netstandard2.1 build declares the same interface, #1034). Message texts are structs; read once per type, cached.
+        if (!type.IsValueType)
         {
-            // Paired by index, which is the contract GetInterfaceMap guarantees: InterfaceMethods[i] is implemented by
-            // TargetMethods[i]. Matching on a mangled target name instead happens to work and is not promised.
-            if (map.InterfaceMethods[i].Name == "get_Capacity" && map.TargetMethods[i].IsStatic)
-            {
-                var capacity = (int)map.TargetMethods[i].Invoke(null, null);
-                RequireBinderLayout(type, capacity);
-                return capacity;
-            }
+            return null;
         }
 
-        return null;
+        var capacity = ((IInlineUtf8Text)Activator.CreateInstance(type)).Capacity;
+        RequireBinderLayout(type, capacity);
+        return capacity;
     }
 
     /// <summary>

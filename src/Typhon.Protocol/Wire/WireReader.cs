@@ -197,11 +197,11 @@ public ref struct WireReader
 
     /// <summary>Reads a little-endian IEEE double.</summary>
     /// <returns>The value; every NaN pattern decodes as the canonical NaN.</returns>
-    public double ReadF64() => WireMath.CanonicalizeNaN(BinaryPrimitives.ReadDoubleLittleEndian(Take(8)));
+    public double ReadF64() => WireMath.CanonicalizeNaN(Bcl.ReadDoubleLittleEndian(Take(8)));
 
     /// <summary>Reads a little-endian IEEE single.</summary>
     /// <returns>The value, widened exactly to a double; every NaN pattern decodes as the canonical NaN (<see cref="WireMath.CanonicalNaN"/>).</returns>
-    public double ReadF32() => WireMath.CanonicalizeNaN(BinaryPrimitives.ReadSingleLittleEndian(Take(4)));
+    public double ReadF32() => WireMath.CanonicalizeNaN(Bcl.ReadSingleLittleEndian(Take(4)));
 
     /// <summary>Reads a little-endian IEEE half.</summary>
     /// <returns>The value, widened exactly to a double; every NaN pattern decodes as the canonical NaN.</returns>
@@ -223,7 +223,7 @@ public ref struct WireReader
     public ReadOnlySpan<byte> ReadStrUtf8(int maxBytes)
     {
         var bytes = Take(ReadVaruAtMost(maxBytes, "string length"));
-        if (!Utf8.IsValid(bytes))
+        if (!Bcl.IsValidUtf8(bytes))
         {
             throw WireFormatException.Malformed("string is not valid UTF-8");
         }

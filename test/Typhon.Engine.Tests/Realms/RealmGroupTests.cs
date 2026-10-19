@@ -234,6 +234,167 @@ class RealmGroupTests : TestBase<RealmGroupTests>
         });
     }
 
+    /// <summary>
+    /// A POSITIONED member's key is realm-scoped, unlike a positionless one's: two realms each with a town 8 (one map, spawned once per planet) are two
+    /// groups. A session holds, completes and hears of only its own realm's residents — the other realm's are neither held nor waited for, so its town
+    /// completes — though one index lists both realms' residents under the key.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-33")]
+    [VerifiesRule("SUB-28")]
+    public void APositionedMemberIsHeldOnlyInItsRealmUnderAKeyBothRealmsUse()
+    {
+        using var dbe = SetupEngine();
+        Town(dbe, 0, 8, 50f, 50f);
+        Town(dbe, 1, 8, 0f, 0f);
+        var inZero = new EntityId[3];
+        var inOne = new EntityId[2];
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < inZero.Length; i++)
+            {
+                inZero[i] = tx.Spawn<RealmResident>(
+                    RealmResident.Pos.Set(new RealmPos { Bounds = new AABB2F { MinX = 48 + i, MinY = 50, MaxX = 48 + i, MaxY = 50 }, Realm = 0 }),
+                    RealmResident.Key.Set(new GroupKey { Town = 8 }), RealmResident.Tag.Set(new GroupTag()));
+            }
+
+            for (var i = 0; i < inOne.Length; i++)
+            {
+                inOne[i] = tx.Spawn<RealmResident>(
+                    RealmResident.Pos.Set(new RealmPos { Bounds = new AABB2F { MinX = i, MinY = 0, MaxX = i, MaxY = 0 }, Realm = 1 }),
+                    RealmResident.Key.Set(new GroupKey { Town = 8 }), RealmResident.Tag.Set(new GroupTag()));
+            }
+
+            tx.Commit();
+        }
+
+        using var harness = FrameHarness.Create(dbe, subs =>
+        {
+            subs.Archetype<RealmResident>(a => a.Motion(RealmResident.Pos, m => m.Teleport(200)));
+            subs.Groups("town", g => g.Region<RealmTown>(r => r.Key(RealmTown.Zone, z => z.Key).Extent(RealmTown.Zone, z => z.Extent))
+                .Member<RealmResident>(m => m.Key(RealmResident.Key, k => k.Town)));
+            // Groups only: no resident is held by geometry, so whatever a session holds, its town gave it.
+            subs.Profile(Profile, p => p.Sphere(30).Groups("town", 5));
+            subs.Event<ProjDuel>(e => e.RouteToKnown(d => d.A, d => d.B));
+        }, nameof(APositionedMemberIsHeldOnlyInItsRealmUnderAKeyBothRealmsUse), new SubscriptionsOptions
+        {
+            IngressBytesPerSecond = TestIngress.Budget,
+            MaxGroupsPerSession = 4,
+            ReplicationCellM = 10,
+        });
+        harness.RunFence = true;
+
+        // Both realms served first, each session out of its town's reach: every resident gets its block and identity before either town is met, so the
+        // fills below meet the other realm's residents described — with a block and a netId — and must still pass them by.
+        var sessions = harness.OpenSessions(2, Profile);
+        var commands = harness.Subscriptions.Commands;
+        Assert.That(commands.Enter(sessions[0], RealmId.Default), Is.True);
+        Assert.That(commands.Enter(sessions[1], new RealmId(1)), Is.True);
+        harness.Sessions.SetViewpoint(sessions[0], new Vector3D(95d, 5d, 0d));
+        harness.Sessions.SetViewpoint(sessions[1], new Vector3D(-35d, 35d, 0d));
+        for (var t = 0; t < 4; t++)
+        {
+            harness.RunTick(harness.Tick + 1);
+            harness.Deliver(sessions[0]);
+            harness.Deliver(sessions[1]);
+        }
+
+        Assert.That(inZero.Concat(inOne).Select(harness.NetIdOf), Has.All.Not.Zero, "every resident is described before a town is met");
+        harness.Sessions.SetViewpoint(sessions[0], new Vector3D(50d, 50d, 0d));
+        harness.Sessions.SetViewpoint(sessions[1], new Vector3D(0d, 0d, 0d));
+        for (var t = 0; t < 8; t++)
+        {
+            harness.RunTick(harness.Tick + 1);
+            harness.Deliver(sessions[0]);
+            harness.Deliver(sessions[1]);
+        }
+
+        var plan = harness.PlanIndex(nameof(RealmResident));
+        var zero = harness.Replica(sessions[0]);
+        var one = harness.Replica(sessions[1]);
+        Assert.Multiple(() =>
+        {
+            Assert.That(zero.Store.IsGroupComplete(0, 8), Is.True, "realm 0's town 8 completes: realm 1's residents are not waited for");
+            Assert.That(zero.NetIds(plan), Is.EquivalentTo(inZero.Select(harness.NetIdOf)), "realm 0's residents, and only them");
+            Assert.That(one.Store.IsGroupComplete(0, 8), Is.True);
+            Assert.That(one.NetIds(plan), Is.EquivalentTo(inOne.Select(harness.NetIdOf)), "realm 1's residents, and only them");
+            Assert.That(zero.Store.Anomalies + one.Store.Anomalies, Is.Zero);
+        });
+
+        // An event naming a resident reaches its own realm's holders only, though both realms hold "town 8".
+        commands.Emit(new ProjDuel { A = inOne[0], B = inOne[0], Seq = 5 });
+        harness.RunTick(harness.Tick + 1);
+        harness.Deliver(sessions[0]);
+        harness.Deliver(sessions[1]);
+        Assert.Multiple(() =>
+        {
+            Assert.That(one.Events.Received.Select(e => e.Fields["Seq"]), Is.EqualTo(new[] { 5d }), "realm 1 holds it");
+            Assert.That(zero.Events.Received, Is.Empty, "realm 0's town 8 is another group");
+        });
+    }
+
+    /// <summary>
+    /// A realm no session serves never describes its residents, so another realm's fill meets them in the index with no block at all: they are not this
+    /// realm's to wait for, and its town completes without them (a positionless member with no block is pending; a positioned one of another realm is not).
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-33")]
+    [VerifiesRule("SUB-28")]
+    public void AnUnservedRealmsResidentsDoNotHoldAnotherRealmsTownBack()
+    {
+        using var dbe = SetupEngine();
+        Town(dbe, 0, 8, 50f, 50f);
+        Town(dbe, 1, 8, 0f, 0f);
+        var inZero = new EntityId[2];
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < inZero.Length; i++)
+            {
+                inZero[i] = tx.Spawn<RealmResident>(
+                    RealmResident.Pos.Set(new RealmPos { Bounds = new AABB2F { MinX = 48 + i, MinY = 50, MaxX = 48 + i, MaxY = 50 }, Realm = 0 }),
+                    RealmResident.Key.Set(new GroupKey { Town = 8 }), RealmResident.Tag.Set(new GroupTag()));
+            }
+
+            for (var i = 0; i < 2; i++)
+            {
+                tx.Spawn<RealmResident>(RealmResident.Pos.Set(new RealmPos { Bounds = new AABB2F { MinX = i, MinY = 0, MaxX = i, MaxY = 0 }, Realm = 1 }),
+                    RealmResident.Key.Set(new GroupKey { Town = 8 }), RealmResident.Tag.Set(new GroupTag()));
+            }
+
+            tx.Commit();
+        }
+
+        using var harness = FrameHarness.Create(dbe, subs =>
+        {
+            subs.Archetype<RealmResident>(a => a.Motion(RealmResident.Pos, m => m.Teleport(200)));
+            subs.Groups("town", g => g.Region<RealmTown>(r => r.Key(RealmTown.Zone, z => z.Key).Extent(RealmTown.Zone, z => z.Extent))
+                .Member<RealmResident>(m => m.Key(RealmResident.Key, k => k.Town)));
+            subs.Profile(Profile, p => p.Sphere(30).Groups("town", 5));
+        }, nameof(AnUnservedRealmsResidentsDoNotHoldAnotherRealmsTownBack), new SubscriptionsOptions
+        {
+            IngressBytesPerSecond = TestIngress.Budget,
+            MaxGroupsPerSession = 4,
+            ReplicationCellM = 10,
+        });
+        harness.RunFence = true;
+
+        var session = harness.OpenSessions(1, Profile)[0];
+        Assert.That(harness.Subscriptions.Commands.Enter(session, RealmId.Default), Is.True);
+        harness.Sessions.SetViewpoint(session, new Vector3D(50d, 50d, 0d));
+        for (var t = 0; t < 8; t++)
+        {
+            harness.RunTick(harness.Tick + 1);
+            harness.Deliver(session);
+        }
+
+        var replica = harness.Replica(session);
+        Assert.Multiple(() =>
+        {
+            Assert.That(replica.Store.IsGroupComplete(0, 8), Is.True, "realm 1's undescribed residents are not waited for");
+            Assert.That(replica.NetIds(harness.PlanIndex(nameof(RealmResident))), Is.EquivalentTo(inZero.Select(harness.NetIdOf)));
+        });
+    }
+
     [Test]
     [VerifiesRule("SUB-33")]
     [VerifiesRule("SUB-28")]

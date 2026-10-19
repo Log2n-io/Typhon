@@ -954,8 +954,12 @@
     that every served realm's group gather reads, and a session holds it only through a key it holds — which its own realm's regions decided, or it
     asked for. Group keys are engine-wide: one key held in two realms is one group in both (decided, Loïc 2026-10-18 — sharing data across realms is
     a use; isolating instances is the application's, by giving them distinct keys)
+  invariant a POSITIONED group member is its realm's: a key held in two realms is two groups there — each realm's fill takes the members whose block
+    is its realm's, and passes another realm's by, described or not (never waited for: its key completes without them); the regions that select it are
+    its realm's too. Engine-wide keys are the positionless members' alone (one map spawned per realm, the same keys in each, stays isolated)
   never decide isolation by geometry: identical local coordinates in two realms are the expected case
   scope: PushHub.FinishUnplaced, PushHub.UnplacedAt, PushHub.Place, PushHub.For, PushHub.SweepUnplaced, PushReplication.L, ProjectionPass.ProjectBlock, FrameAssembler.Holds,
+    PushReplication.ReadMembers,
     ArchetypeReplicationState.TryAttachBlock, ArchetypeReplicationState.MigrateEntry, EventHub.EncodeTick, RealmTree.Reaches,
     PushHub.SetOverloadStep, PushHub.BuildIndexes, PushHub.PrepareFar, PushHub.EndFarFolds, PushHub.RecountLevels, PushHub.RunQueuedShadowChecks,
     PushHub.BeginParallelIndex, PushHub.PrepareBlocks, PushHub.MarkPushed, PushHub.RealmPassSteps, RuntimeStatsSnapshot.RealmPassSteps,
@@ -966,7 +970,11 @@
     RealmEventTests.ANearEventIsHeardInItsRealmOnly_AtIdenticalLocalCoordinates, RealmEventTests.AToKnownEventIsFiledInItsEntitysRealm,
     RealmSessionTests.ARealmNoSessionIsInStopsBeingServed_AndIsRefilledWhenOneReturns, RealmReplicationTests.AnEntityOfARealmNotServedIsNeverKnownToASession,
     RealmGroupTests.AShardIsHeldBySessionsOfTheRealmItsTownIsIn (shards identified by realm 0's town are filled by realm 1's session from a block of no
-    realm of its own; red when the fill keeps a positionless member to the session's realm)
+    realm of its own; red when the fill keeps a positionless member to the session's realm),
+    RealmGroupTests.APositionedMemberIsHeldOnlyInItsRealmUnderAKeyBothRealmsUse (a town 8 in each realm, every resident described before either is
+    met: each session holds, completes and hears of its own realm's residents only; red without the fill's block-realm test, and without the regions'),
+    RealmGroupTests.AnUnservedRealmsResidentsDoNotHoldAnotherRealmsTownBack (an unserved realm's residents, with no block, are not waited for; red
+    when the fill counts another realm's blockless member as pending)
   note the "stops being served" half is OBSERVABLE from outside since SWG-08: RuntimeStatsSnapshot.Realms carries a row per REGISTERED realm with
     Served plus its cumulative enters/updates/leaves/cells/resets/events, so "this realm cost nothing" and "this realm has no replication state at all"
     are distinguishable without reaching into the hub — which is what lets the claim be checked at workload scale rather than on three realms.

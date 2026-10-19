@@ -253,7 +253,10 @@ public static class TickReader
     /// <param name="blocks">Which blocks reach the sink.</param>
     /// <exception cref="WireFormatException">The message is malformed.</exception>
     public static void Read<TSink>(ReadOnlySpan<byte> message, CatalogPlan plan, ref TSink sink, TickBlocks blocks = TickBlocks.All)
-        where TSink : ITickSink, allows ref struct
+        where TSink : ITickSink
+#if NET9_0_OR_GREATER
+        , allows ref struct
+#endif
     {
         RealmFrame frame = null;
         Read(message, plan, ref frame, ref sink, blocks);
@@ -273,7 +276,10 @@ public static class TickReader
     /// </param>
     /// <exception cref="WireFormatException">The message is malformed.</exception>
     public static void Read<TSink>(ReadOnlySpan<byte> message, CatalogPlan plan, ref RealmFrame frame, ref TSink sink, TickBlocks blocks = TickBlocks.All)
-        where TSink : ITickSink, allows ref struct
+        where TSink : ITickSink
+#if NET9_0_OR_GREATER
+        , allows ref struct
+#endif
     {
         var reader = new WireReader(message);
         if (reader.ReadU8() != MessageTypes.Tick)
@@ -433,7 +439,10 @@ public static class TickReader
 
     private static void ReadEntities<TSink>(ref WireReader r, CatalogPlan plan, uint tick, scoped Span<ulong> seenArchetypes, RealmFrame frame,
         ref TSink sink)
-        where TSink : ITickSink, allows ref struct
+        where TSink : ITickSink
+#if NET9_0_OR_GREATER
+        , allows ref struct
+#endif
     {
         var archetype = plan.Archetype(r.ReadVaruAtMost(int.MaxValue, "archetype index"));
         ref var seen = ref seenArchetypes[archetype.Idx >> 6];
@@ -587,7 +596,10 @@ public static class TickReader
     }
 
     private static void ReadEvents<TSink>(ref WireReader r, CatalogPlan plan, uint tick, RealmFrame frame, ref TSink sink)
-        where TSink : ITickSink, allows ref struct
+        where TSink : ITickSink
+#if NET9_0_OR_GREATER
+        , allows ref struct
+#endif
     {
         for (var n = r.ReadVaru(); n > 0; n--)
         {
@@ -598,7 +610,10 @@ public static class TickReader
     }
 
     private static void ReadSelf<TSink>(ref WireReader r, CatalogPlan plan, uint tick, RealmFrame frame, ref TSink sink)
-        where TSink : ITickSink, allows ref struct
+        where TSink : ITickSink
+#if NET9_0_OR_GREATER
+        , allows ref struct
+#endif
     {
         var archetypeIdx = r.ReadVaruAtMost(int.MaxValue, "archetype index");
         var netId = r.ReadVaru();
@@ -636,7 +651,10 @@ public static class TickReader
     }
 
     private static void ReadAggregate<TSink>(ref WireReader r, CatalogPlan plan, RealmFrame frame, ref TSink sink)
-        where TSink : ITickSink, allows ref struct
+        where TSink : ITickSink
+#if NET9_0_OR_GREATER
+        , allows ref struct
+#endif
     {
         var gridIdx = r.ReadVaruAtMost(int.MaxValue, "grid index");
         if (gridIdx >= plan.Grids.Length)
@@ -685,7 +703,10 @@ public static class TickReader
     }
 
     private static void ReadStats<TSink>(ref WireReader r, CatalogPlan plan, uint tick, ref TSink sink)
-        where TSink : ITickSink, allows ref struct
+        where TSink : ITickSink
+#if NET9_0_OR_GREATER
+        , allows ref struct
+#endif
     {
         Span<double> value = stackalloc double[4];
         ReadMetrics(ref r, plan.ServerMetrics, tick, value, ref sink);
@@ -693,7 +714,10 @@ public static class TickReader
     }
 
     private static void ReadMetrics<TSink>(ref WireReader r, MetricPlan[] metrics, uint tick, scoped Span<double> value, ref TSink sink)
-        where TSink : ITickSink, allows ref struct
+        where TSink : ITickSink
+#if NET9_0_OR_GREATER
+        , allows ref struct
+#endif
     {
         foreach (var m in metrics)
         {

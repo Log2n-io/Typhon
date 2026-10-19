@@ -59,7 +59,10 @@ public static class CommandsMessage
     /// <param name="frame">The realm frame a realm-framed field decodes over, at <see cref="RealmFrame.CommandPositionBits"/>.</param>
     /// <exception cref="WireFormatException">The message is malformed; nothing reached <paramref name="sink"/>.</exception>
     public static void Read<TSink>(ReadOnlySpan<byte> message, CatalogPlan plan, ref TSink sink, RealmFrame frame = null)
-        where TSink : ICommandSink, allows ref struct
+        where TSink : ICommandSink
+#if NET9_0_OR_GREATER
+        , allows ref struct
+#endif
     {
         var check = default(ValidatingSink);
         var commandFrame = frame?.ForCommands;
@@ -68,7 +71,10 @@ public static class CommandsMessage
     }
 
     private static void Decode<TSink>(ReadOnlySpan<byte> message, CatalogPlan plan, ref TSink sink, RealmFrame frame)
-        where TSink : ICommandSink, allows ref struct
+        where TSink : ICommandSink
+#if NET9_0_OR_GREATER
+        , allows ref struct
+#endif
     {
         var r = new WireReader(message);
         if (r.ReadU8() != MessageTypes.Commands)

@@ -50,3 +50,9 @@ AntHill uses a **four-tier simulation architecture** (full sim near the camera, 
 | Integration | Typhon embedded in-process — renderers read straight from ECS memory, no client/server protocol |
 
 > 📷 Screenshots/trailer to follow (demo art is Phase 8-9).
+
+## Asteroid Field — client/server
+
+**[Asteroid Field](asteroid-field.md)** — a Typhon server simulating a belt of 5 000 drifting asteroids, mirrored in Unity 6.6 desktop clients over the
+Subscriptions SDK: interest management, motion segments, commands checked on the server, owner-only state and reliable events. Where AntHill embeds
+the engine, this one is the shape of a game server.
