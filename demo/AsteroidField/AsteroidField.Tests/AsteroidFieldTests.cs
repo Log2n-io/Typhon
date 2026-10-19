@@ -124,6 +124,28 @@ public class AsteroidFieldTests
     }
 
     [Test]
+    public async Task AFullHoldTakesNoTargetAndMinesNothingMore()
+    {
+        const int hold = 20;
+        using var server = StartServer(hold);
+        await using var link = new BeltLink("127.0.0.1", server.Port);
+        await link.ConnectAsync();
+        var brain = new PilotBrain(link) { SellsWhenFull = false };
+        var world = await Until(brain, w => brain.HoldsFull >= 1 && w.Cargo == hold);
+
+        // The brain aims again at the nearest rock — the one it just filled up on, in range: the server must refuse it.
+        var settled = world.Tick + 40;
+        world = await Until(brain, w => w.Tick > settled);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(world.Cargo, Is.EqualTo(hold), "nothing mined past the hold");
+            Assert.That(brain.HoldsFull, Is.EqualTo(1), "told once");
+            Assert.That(world.TryGetShip(world.SelfNetId, out var self) ? self.Target : 1u, Is.Zero, "no target while full");
+        });
+    }
+
+    [Test]
     public async Task AnotherPilotSeesTheShipAndItsBeam()
     {
         using var server = StartServer();

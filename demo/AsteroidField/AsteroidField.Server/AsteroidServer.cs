@@ -338,8 +338,10 @@ public sealed class AsteroidServer : IDisposable
                 continue;
             }
 
+            // A full hold takes no target: the beam stays off until the pilot sells.
             var pilot = e.Read(Ship.Pilot);
-            pilot.Target = command.Value.Target != 0 && subs.TryResolve(command.Session, command.Value.Target, out var target)
+            pilot.Target = command.Value.Target != 0 && pilot.Cargo < _options.HoldCapacity
+                && subs.TryResolve(command.Session, command.Value.Target, out var target)
                 && target.ArchetypeId == Asteroid.CatalogId
                     ? target
                     : EntityId.Null;
@@ -475,7 +477,7 @@ public sealed class AsteroidServer : IDisposable
         }
 
         var rock = asteroid.Read(Asteroid.Rock);
-        var mined = Math.Min(OrePerTick, (int)rock.Ore);
+        var mined = Math.Min(Math.Min(OrePerTick, (int)rock.Ore), Math.Max(0, _options.HoldCapacity - pilot.Cargo));
         rock.Ore -= (ushort)mined;
         pilot.Cargo += mined;
         if (rock.Ore == 0)

@@ -26,6 +26,9 @@ public sealed class PilotBrain
 
     public int Sales { get; private set; }
 
+    /// <summary>Whether a full hold is sold at once (the default). Off, the brain keeps aiming at rocks with a full hold, as an impatient pilot would.</summary>
+    public bool SellsWhenFull { get; set; } = true;
+
     /// <summary>Takes the newest snapshot and decides nothing: a pilot that only watches.</summary>
     public void Observe()
     {
@@ -55,8 +58,12 @@ public sealed class PilotBrain
             if (e.Name == "CargoFull")
             {
                 HoldsFull++;
-                _link.Sell();
-                Sales++;
+                if (SellsWhenFull)
+                {
+                    _link.Sell();
+                    Sales++;
+                }
+
                 _target = 0;
             }
         }
