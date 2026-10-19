@@ -219,10 +219,14 @@ public sealed class SubscriptionsOptions
     /// The most full enter records one session may receive in one frame. Default: 500.
     /// </summary>
     /// <remarks>
-    /// <b>This, not <see cref="FrameBytes"/>, is what keeps frames small.</b> A session that has just connected, switched profile or turned around wants
-    /// thousands of entities at once; sending them all would produce one enormous frame and then nothing. The budget spreads that fill over consecutive
-    /// frames, nearest first, and nothing is lost — deferred records wait and rise in priority. 500 is an engine rail: it is the granularity at which a view
-    /// fills smoothly at any tick rate, and it bounds a frame to a few tens of kilobytes for any plausible record size.
+    /// A session that has just connected, switched profile or turned around wants thousands of entities at once; sending them all would produce one
+    /// enormous frame and then nothing. The budget spreads that fill over consecutive frames, nearest first, and nothing is lost — deferred records wait and
+    /// rise in priority. 500 is an engine rail: it is the granularity at which a view fills smoothly at any tick rate.
+    /// <para>
+    /// <b>A count does not bound bytes</b> — a record with wide sections can reach half a frame — so the fill is paced by bytes too, at half of
+    /// <see cref="FrameBytes"/>, and what one frame cannot carry is owed to the next ones (design/Subscriptions/15, SUB-36). It is also the owed set's
+    /// scale: past four budgets of owed records, a session is refilled by a <c>RESET</c> instead.
+    /// </para>
     /// </remarks>
     public int EnterBudgetPerFrame { get; init; } = 500;
 
@@ -288,9 +292,10 @@ public sealed class SubscriptionsOptions
     /// The largest frame the engine will send, in bytes. Default: 256 KiB.
     /// </summary>
     /// <remarks>
-    /// A ceiling that catches a runaway frame, not a target — <see cref="EnterBudgetPerFrame"/> is what keeps frames small in normal operation. It is
-    /// exported in the catalog so an SDK can size its receive buffer once and never reallocate, which is why it is a rail rather than a suggestion: a client
-    /// that has sized its buffer from it must never be handed more.
+    /// The frame budget's limit (design/Subscriptions/15, SUB-36): a frame carries the records that fit it and owes the rest to the next frames, so a burst
+    /// is spread rather than refused; a <see cref="SessionLimits.FrameBytes"/> below it lowers one session's. It is exported in the catalog so an SDK can
+    /// size its receive buffer once and never reallocate, which is why it is a rail rather than a suggestion: a client that has sized its buffer from it
+    /// must never be handed more. Refused at <c>Start</c>: an archetype whose largest enter record exceeds half of it.
     /// </remarks>
     public int FrameBytes { get; init; } = 256 * 1024;
 
@@ -384,6 +389,18 @@ public sealed class SubscriptionsOptions
     /// smallest <c>R / 48</c> over the Sphere profiles observing it). <see cref="double.NaN"/> applies the rule; 0 is exact.
     /// </summary>
     internal double VisibilitySlackMForTest { get; init; } = double.NaN;
+
+    /// <summary>
+    /// Tests only: every published frame's <c>ENTITIES</c> blocks are compared with the frame budget's meter (15 § 4.1), and a block longer than its
+    /// metered bound is counted in <c>FrameAssembler.MeterViolations</c> — the meter is an upper bound, or frames can exceed their limit.
+    /// </summary>
+    internal bool CheckFrameMeterForTest { get; init; }
+
+    /// <summary>
+    /// Tests only: the frame budget (15) is off — no fill allowance, no fit — so frames are bounded by the enter count alone, as before #1408. What a
+    /// SUB-36 mutant runs, to show the budget's tests fail without it.
+    /// </summary>
+    internal bool FrameBudgetOffForTest { get; init; }
 
     /// <summary>
     /// Whether a profile may declare <see cref="PushDetection.Automatic"/> (ADR-067). Off: replication is explicit — a system that writes a

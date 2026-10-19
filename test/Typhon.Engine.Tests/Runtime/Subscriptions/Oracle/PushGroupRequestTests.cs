@@ -18,8 +18,9 @@ class PushGroupRequestTests : TestBase<PushGroupRequestTests>
     private const string Lists = "lists";
     private const string Profile = "p";
 
-    private static SubscriptionsOptions Options(int enterBudget = 500, int maxGroups = 8) => new()
+    private static SubscriptionsOptions Options(int enterBudget = 500, int maxGroups = 8, int frameBytes = 0) => new()
     {
+        FrameBytes = frameBytes > 0 ? frameBytes : new SubscriptionsOptions().FrameBytes,
         IngressBytesPerSecond = TestIngress.Budget,
         MaxSessions = 16,
         ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(120),
@@ -31,7 +32,8 @@ class PushGroupRequestTests : TestBase<PushGroupRequestTests>
     /// <summary>Allows every key but 9, which it refuses with its own code, 150.</summary>
     private static GroupDecision Admit(in GroupRequest request) => request.Key == 9 ? GroupDecision.Deny(150) : GroupDecision.Allow;
 
-    private FrameHarness Harness(DatabaseEngine dbe, string name, int enterBudget = 500, int maxGroups = 8, Action<SubscriptionsRegistry> more = null)
+    private FrameHarness Harness(DatabaseEngine dbe, string name, int enterBudget = 500, int maxGroups = 8, Action<SubscriptionsRegistry> more = null,
+        int frameBytes = 0)
     {
         var harness = FrameHarness.Create(dbe, s =>
         {
@@ -39,7 +41,7 @@ class PushGroupRequestTests : TestBase<PushGroupRequestTests>
             s.Groups(Lists, g => g.Explicit(Admit).Member<GroupPositionless>(m => m.Key(GroupPositionless.Key, k => k.Town)));
             s.Profile(Profile, p => p.Sphere(20).Groups(Lists));
             more?.Invoke(s);
-        }, name, Options(enterBudget, maxGroups));
+        }, name, Options(enterBudget, maxGroups, frameBytes));
         harness.RunFence = true;
         harness.RunIngress = true;
         harness.DrainNetIds = true;
@@ -136,6 +138,54 @@ class PushGroupRequestTests : TestBase<PushGroupRequestTests>
             Assert.That(applied[0].Tick, Is.EqualTo(completed[0].Tick), "in the frame that completes the key");
             Assert.That(ShardsHeld(harness, session), Is.EqualTo(6));
             Assert.That(harness.Replica(session).Store.IsGroupComplete((uint)harness.CatalogPlan.GroupSetIndex(Lists), 7), Is.True);
+            Assert.That(harness.Replica(session).Store.Anomalies, Is.Zero);
+            Assert.That(harness.Subscriptions.Push.ShadowIllegal, Is.Zero);
+        });
+    }
+
+    /// <summary>
+    /// SUB-36: an answer waiting for a key's completion is not published while the frame owes an enter — even for a key already complete, which a burst
+    /// of late members (owed, over a 2 KiB frame) has left the store without.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-36")]
+    [VerifiesRule("SUB-33")]
+    public void AnAnswerWaitsWhileAnEnterIsOwed()
+    {
+        var dbe = GroupTestSchema.SetupEngine(ServiceProvider);
+        Shards(dbe, 7, 6);
+        using var harness = Harness(dbe, nameof(AnAnswerWaitsWhileAnEnterIsOwed), frameBytes: 2048);
+        var session = harness.OpenSessions(1, Profile)[0];
+        harness.Sessions.SetViewpoint(session, new Vector3D(0d, 0d, 0d));
+        var seen = new Seen();
+        Run(harness, session, 1, seen);
+        Send(harness, session, 11, 7);
+        Run(harness, session, 4, seen);
+        Assert.That(seen.Answers.Count(a => a.RequestId == 11 && a.Status == SourceStatus.Applied), Is.EqualTo(1), "list 7 held and complete");
+
+        // Late members of the complete list, two thousand: their enters are owed over several frames. The same list asked for again meanwhile.
+        Shards(dbe, 7, 2000);
+        Run(harness, session, 1, seen);
+        Send(harness, session, 12, 7);
+        var owedAtAnswer = -1;
+        var owedSeen = false;
+        for (var t = 0; t < 30; t++)
+        {
+            Run(harness, session, 1, seen);
+            var owed = harness.StateOf(session).OwedEnters;
+            owedSeen |= owed > 0;
+            if (owedAtAnswer < 0 && seen.Answers.Exists(a => a.RequestId == 12))
+            {
+                owedAtAnswer = owed;
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(owedSeen, Is.True, "the late members' enters were owed");
+            Assert.That(seen.Answers.Count(a => a.RequestId == 12 && a.Status == SourceStatus.Applied), Is.EqualTo(1), "answered once");
+            Assert.That(owedAtAnswer, Is.Zero, "in a frame that left nothing owed");
+            Assert.That(ShardsHeld(harness, session), Is.EqualTo(2006));
             Assert.That(harness.Replica(session).Store.Anomalies, Is.Zero);
             Assert.That(harness.Subscriptions.Push.ShadowIllegal, Is.Zero);
         });

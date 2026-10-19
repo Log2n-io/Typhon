@@ -639,6 +639,7 @@ internal abstract unsafe partial class PushReplication
         {
             _shadowGen[local] = 0;
             _shadow[local]?.Clear();
+            _shadowOwed[local]?.Clear();
         }
     }
 
@@ -661,6 +662,7 @@ internal abstract unsafe partial class PushReplication
         {
             Array.Resize(ref _shadow, length);
             Array.Resize(ref _shadowGen, length);
+            Array.Resize(ref _shadowOwed, length);
         }
     }
     private protected uint _tick;
@@ -682,6 +684,18 @@ internal abstract unsafe partial class PushReplication
 
     /// <summary>The frame stage's encode plans, whose group tick slots decide what an update carries.</summary>
     public void AttachEncodePlans(ArchetypeEncodePlan[] plans) => _encodePlans = plans;
+
+    /// <summary>The meter's bound of one enter (15 § 4.1); 0 before the plans are attached, when nothing is metered.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private protected int MeterEnter(int archetype, nint block, int slot) =>
+        (uint)archetype < (uint)_encodePlans.Length ? _encodePlans[archetype].EnterBytes(block, slot) : 0;
+
+    /// <summary>
+    /// Whether a cursor-driven step may take more (15 § 4.2): the enter count under its budget, and the enters' bytes under the frame's fill allowance.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private protected static bool Room(int entered, int enterBudget, FrameWorkerScratch scratch) =>
+        entered < enterBudget && scratch.FillSpent < scratch.FillAllowance;
 
 
     // Counters, cumulative.
@@ -708,6 +722,9 @@ internal abstract unsafe partial class PushReplication
     // Either failing is a divergence a client would carry for good. Off by default: it is a HashSet per session.
     public readonly bool Shadow;
     private protected HashSet<uint>[] _shadow = [];
+
+    // Shadow oracle: the enters each session is owed (15 § 4.3) — held by its geometry or keys, not yet in its client's store, so not missing from it.
+    private protected HashSet<uint>[] _shadowOwed = [];
     private protected ushort[] _shadowGen = [];
     public long ShadowIllegal;
     public long ShadowMissing;
@@ -930,6 +947,7 @@ internal abstract unsafe partial class PushReplication
         {
             _shadow = new HashSet<uint>[_sessions.Length];
             _shadowGen = new ushort[_sessions.Length];
+            _shadowOwed = new HashSet<uint>[_sessions.Length];
         }
     }
 
@@ -998,6 +1016,23 @@ internal abstract unsafe partial class PushReplication
             Interlocked.Add(ref ShadowIllegal, illegal);
         }
     }
+
+    /// <summary>Shadow oracle: the enters a published frame left the session owed, which its check does not count missing.</summary>
+    public void ShadowOwe(SessionId session, OwedRecord[] owed, int count)
+    {
+        var slot = L(session);
+        var set = _shadowOwed[slot] ??= new HashSet<uint>();
+        set.Clear();
+        for (var i = 0; i < count; i++)
+        {
+            if (owed[i].Kind == OwedKind.Enter)
+            {
+                set.Add(owed[i].NetId);
+            }
+        }
+    }
+
+    private protected bool ShadowOwes(int slot, uint netId) => _shadowOwed[slot] is { Count: > 0 } owed && owed.Contains(netId);
 
     private readonly List<(SessionId Session, ArchetypeSet Archetypes)> _shadowQueue = [];
 

@@ -171,6 +171,9 @@ sealed unsafe class FrameHarness : IDisposable
     /// <summary>Stopwatch ticks spent in the hub's index and far stages under <see cref="IndexThroughHub"/>: plans and chunks, nothing else.</summary>
     public long HubIndexTicks { get; private set; }
 
+    /// <summary>The longest frame <see cref="Deliver"/> has applied, in bytes: what a frame-limit test bounds.</summary>
+    public int LargestFrame { get; private set; }
+
     /// <summary>
     /// Drains the identity quarantine at each tick's start, as the runtime does. Off by default, where no identity is ever reissued; on, a released netId
     /// comes back a tick later (the harness's quarantine is one tick), so a skipped session can meet its reuse inside the push log (SUB-06).
@@ -330,6 +333,7 @@ sealed unsafe class FrameHarness : IDisposable
 
             replica.Apply(bytes);
             send.CompleteSend(frame.Sequence);
+            LargestFrame = Math.Max(LargestFrame, frame.Length);
             delivered++;
         }
 

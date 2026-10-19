@@ -159,6 +159,40 @@ class PushGroupTests : TestBase<PushGroupTests>
     }
 
     /// <summary>
+    /// The group oracle under a frame a few records wide (15): fills, joins of complete towns and member updates carried across frames — every session
+    /// still holds exactly its towns at each quiet point, no completion arrives before its last member, and no frame is refused for its size.
+    /// </summary>
+    [TestCase(21, 500)]
+    [TestCase(22, 16)]
+    [VerifiesRule("SUB-36")]
+    [VerifiesRule("SUB-33")]
+    public void SessionsHoldExactlyTheTownsTheyMeetUnderAFrameAFewRecordsWide(int seed, int enterBudget)
+    {
+        var dbe = GroupTestSchema.SetupEngine(ServiceProvider);
+        using var oracle = GroupOracle.Create(dbe, seed, [0, 30, 70, 90], nameof(SessionsHoldExactlyTheTownsTheyMeetUnderAFrameAFewRecordsWide) + seed,
+            enterBudget, frameBytes: 512);
+        for (var round = 0; round < 8; round++)
+        {
+            for (var step = 0; step < 30; step++)
+            {
+                oracle.Step();
+            }
+
+            oracle.Quiesce();
+            oracle.AssertConverged($"seed {seed}, budget {enterBudget}, 512-byte frames, round {round}");
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(oracle.Assembler.FramesOwing, Is.GreaterThan(0), "the frame bound: records were carried");
+            Assert.That(oracle.Assembler.OversizeSkips, Is.Zero, "no frame was refused for its size");
+            Assert.That(oracle.Assembler.MeterViolations, Is.Zero, "the meter bounds every record");
+            Assert.That(oracle.CompletionsChecked, Is.GreaterThan(3), "completions arrived and were checked against the world");
+            Assert.That(oracle.Push.ShadowIllegal, Is.Zero);
+        });
+    }
+
+    /// <summary>
     /// The oracle with masks (step 4.4's acceptance, 14 § 6): the same world, its members tagged — most public, the rest under one of two tags — and the
     /// tags changing under the churn, with sessions that see public only, one tag, or both, now and then switching. At every quiet point a session holds
     /// exactly what it is entitled to and sees; every completion the skip-free sessions receive holds every member they see; no record is ever illegal.
