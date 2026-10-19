@@ -134,6 +134,8 @@ jobs:
               - 'src/Typhon.Profiler/**'
               - 'src/Typhon.Protocol/**'
               - 'src/Typhon.Generators.Protocol/**'
+              # The Asteroid Field demo's tests fly pilots through the .NET client.
+              - 'src/Typhon.Client/**'
               # The browser's door (P1-08). It runs here rather than with the SDKs because its build closure is the
               # whole engine, and gating it on `sdk` would make the SDK job run on every engine change.
               - 'src/Typhon.Subscriptions.AspNetCore/**'
@@ -148,6 +150,7 @@ jobs:
               - 'test/Typhon.Shell.Tests.SchemaFixture/**'
               - 'test/Typhon.Samples.Swg.Tests/**'
               - 'demo/AntHill/**'
+              - 'demo/AsteroidField/**'
               # The SWG demo's realm checks (Realms G1d) build the demo itself.
               - 'demo/SwgTatooine/**'
               - 'demo/SwgTatooine.Tests/**'
@@ -831,7 +834,8 @@ jobs:
             test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj \
             test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj \
             test/Typhon.Subscriptions.AspNetCore.Tests/Typhon.Subscriptions.AspNetCore.Tests.csproj \
-            demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj             demo/SwgTatooine.Tests/SwgTatooine.Tests.csproj ; do
+            demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj             demo/SwgTatooine.Tests/SwgTatooine.Tests.csproj \
+            demo/AsteroidField/AsteroidField.Tests/AsteroidField.Tests.csproj ; do
             name=$(basename "$proj" .csproj)
             echo "::group::${name}"
             # Same category exclusion the gate's other suites apply, so "excluded from the gate" has one meaning.

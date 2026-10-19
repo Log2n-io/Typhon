@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The Asteroid Field server (demo/AsteroidField/README.md): a Typhon engine simulating a belt of asteroids, served over TCP to Unity pilots. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>default</LangVersion>
+    <Nullable>disable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\Typhon.Engine\Typhon.Engine.csproj" />
+    <ProjectReference Include="..\..\..\src\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" />
+    <ProjectReference Include="..\..\..\src\Typhon.Protocol\Typhon.Protocol.csproj" />
+    <ProjectReference Include="..\..\..\src\Typhon.Analyzers\Typhon.Analyzers.csproj" ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
+    <ProjectReference Include="..\..\..\src\Typhon.Generators\Typhon.Generators.csproj" ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="AsteroidField.Tests" />
+  </ItemGroup>
+</Project>

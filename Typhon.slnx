@@ -46,6 +46,9 @@
         </Project>
         <Project Path="demo/AntHill/AntHill.Harness/AntHill.Harness.csproj" />
         <Project Path="demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj" />
+        <Project Path="demo/AsteroidField/AsteroidField.Bot/AsteroidField.Bot.csproj" />
+        <Project Path="demo/AsteroidField/AsteroidField.Server/AsteroidField.Server.csproj" />
+        <Project Path="demo/AsteroidField/AsteroidField.Tests/AsteroidField.Tests.csproj" />
         <Project Path="demo/SpaceBattle/SpaceBattle.csproj" />
         <Project Path="demo/SwgTatooine/SwgTatooine.csproj" />
         <Project Path="demo/SwgTatooine.Bots/SwgTatooine.Bots.csproj" />
