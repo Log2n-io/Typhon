@@ -11,8 +11,8 @@ namespace Typhon.Shell.Commands;
 
 /// <summary>
 /// <c>typhon backup create &lt;bundle&gt; --store S</c> — backs up a closed database (an offline capture, 02 §8). A database a live engine holds is
-/// refused (exit 4): the CLI reaches a running engine only through <c>backup.request</c>, which arrives with #1416. A holder that advertises it will
-/// yield (the Workbench, #621) is asked to release the database first.
+/// refused (exit 4), pointing at <c>engine.Backup</c>: the CLI reaches a running engine only through <c>backup.request</c>, which arrives with #1416.
+/// A holder that advertises it will yield (the Workbench, #621) is asked to release the database first.
 /// </summary>
 // ReSharper disable once ClassNeverInstantiated.Global
 internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings>
@@ -29,8 +29,8 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
         [Description("Take a full point even when an incremental would do.")]
         public bool Full { get; set; }
 
-        /// <summary>How long a yieldable holder gets to release the database; the engine's own handoff wait by default. Not on the command line.</summary>
-        public TimeSpan HandoffTimeout { get; set; } = TimeSpan.FromSeconds(5);
+        /// <summary>How long a yieldable holder gets to release the database: the engine's own handoff wait by default. Not on the command line.</summary>
+        public TimeSpan HandoffTimeout { get; set; } = new PagedMMFOptions().LockHandoffTimeout;
         // ReSharper restore UnusedAutoPropertyAccessor.Global
     }
 
@@ -50,7 +50,7 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
             return output.Error(BackupCli.ExitUsage, "--store is required: the store to back the database up into.");
         }
 
-        if (!YieldIfAsked(settings.Bundle, settings.HandoffTimeout, out var refusal))
+        if (!AskAYieldableHolder(settings.Bundle, settings.HandoffTimeout, out var asked, out var refusal))
         {
             return output.Error(BackupCli.ExitRefused, refusal);
         }
@@ -62,11 +62,19 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
         }
         catch (DatabaseLockedException ex)
         {
-            return output.Error(BackupCli.ExitRefused, OnlineRefusal(ex.Message));
+            return output.Error(BackupCli.ExitRefused, OnlineRefusal(settings.Bundle, ex));
         }
         catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0)
         {
             return output.Error(ex);
+        }
+        finally
+        {
+            // Retired only now, once the capture held the lock: while it exists, the holder that yielded must not take the database back (#621).
+            if (asked)
+            {
+                DatabaseLockFile.DeleteRequest(settings.Bundle);
+            }
         }
 
         var exit = point.Suspect ? BackupCli.ExitWarning : BackupCli.ExitOk;
@@ -89,16 +97,19 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
     /// <summary>What the command line asks of the capture. Offline, <c>--full</c> matters only to a database an engine has backed up before.</summary>
     internal static BackupCreateOptions OptionsFor(Settings settings, CancellationToken ct) => new() { Full = settings.Full, Cancellation = ct };
 
-    private static string OnlineRefusal(string holder) =>
-        $"{holder} The CLI backs up a running database once it can ask the engine through backup.request (#1416); until then, stop the process and "
-        + "run this again.";
+    private static string OnlineRefusal(string bundle, DatabaseLockedException ex) =>
+        $"Database '{bundle}' is open in process {ex.OwnerPid} on {ex.OwnerMachine}. Back it up from inside the application with "
+        + "engine.Backup.CreateAsync(store); the CLI will reach a running database through backup.request (#1416). Or stop the process and run this "
+        + "again.";
 
     /// <summary>
     /// A live holder that advertised it will yield (#621) is asked to, the way a second engine's open asks: the request file, then a bounded wait for
-    /// the lock to go. <c>false</c> when it did not release in time. Any other holder is left to the capture, which refuses it.
+    /// the lock to go. <c>false</c> when it did not release in time (the request is withdrawn). Any other holder is left to the capture, which refuses
+    /// it. On success the request stays until the capture holds the lock.
     /// </summary>
-    private static bool YieldIfAsked(string bundle, TimeSpan timeout, out string refusal)
+    private static bool AskAYieldableHolder(string bundle, TimeSpan timeout, out bool asked, out string refusal)
     {
+        asked = false;
         refusal = null;
         if (!DatabaseLockFile.TryReadLock(bundle, out var holder) || !holder.Yieldable
             || !string.Equals(holder.MachineName, Environment.MachineName, StringComparison.OrdinalIgnoreCase)
@@ -108,12 +119,14 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
         }
 
         DatabaseLockFile.WriteRequest(bundle);
+        asked = true;
         var deadline = DateTime.UtcNow + timeout;
         while (DatabaseLockFile.IsHeldByLiveProcess(bundle))
         {
             if (DateTime.UtcNow >= deadline)
             {
                 DatabaseLockFile.DeleteRequest(bundle);
+                asked = false;
                 refusal = $"Database '{bundle}' is held by process {holder.Pid}, which advertised that it would yield it but did not release it within "
                           + $"{(int)timeout.TotalMilliseconds} ms.";
                 return false;
@@ -122,7 +135,6 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
             Thread.Sleep(20);
         }
 
-        DatabaseLockFile.DeleteRequest(bundle);
         return true;
     }
 }

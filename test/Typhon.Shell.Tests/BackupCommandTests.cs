@@ -147,51 +147,80 @@ public sealed class BackupCommandTests
     [CancelAfter(30_000)]
     public void ADatabaseALiveEngineHolds_IsRefusedWith4_AndTheMessageSaysWhatToDo()
     {
-        WriteLock(yieldable: false);
+        using (var provider = Provider(Path.GetDirectoryName(_bundle), yieldable: false))
+        using (var scope = provider.CreateScope())
+        {
+            scope.ServiceProvider.GetRequiredService<DatabaseEngine>().InitializeArchetypes();
 
-        var create = Create();
-        Assert.That(create.Code, Is.EqualTo(BackupCli.ExitRefused), create.Text);
-        Assert.That(create.Text, Does.Contain("backup.request").And.Contain("#1416").And.Contain("stop the process"));
+            var create = Create();
+            Assert.That(create.Code, Is.EqualTo(BackupCli.ExitRefused), create.Text);
+            Assert.That(create.Text, Does.Contain($"is open in process {Environment.ProcessId} on {Environment.MachineName}")
+                .And.Contain("engine.Backup.CreateAsync(store)").And.Contain("backup.request (#1416)").And.Contain("Or stop the process"));
+            Assert.That(File.Exists(DatabaseLockFile.RequestPathFor(_bundle)), Is.False, "a holder that never offered to yield is not asked to");
+        }
+
         Assert.That(Directory.Exists(_store) && Directory.EnumerateFiles(_store, "*.tpack", SearchOption.AllDirectories).Any(), Is.False,
             "a refused create publishes nothing");
     }
 
+    /// <summary>
+    /// A yieldable engine (the Workbench, #621) sees the request and closes; the capture takes the lock and only then retires the request — while it
+    /// exists, the holder must not take the database back.
+    /// </summary>
     [Test]
     [CancelAfter(30_000)]
     public void AYieldableHolder_IsAskedToRelease_AndTheBackupProceedsWhenItDoes()
     {
-        WriteLock(yieldable: true);
-        var holder = Task.Run(() =>
+        var provider = Provider(Path.GetDirectoryName(_bundle), yieldable: true);
+        var scope = provider.CreateScope();
+        scope.ServiceProvider.GetRequiredService<DatabaseEngine>().InitializeArchetypes();
+        var requestPath = DatabaseLockFile.RequestPathFor(_bundle);
+        var lockPath = DatabaseLockFile.PathFor(_bundle);
+        bool? requestStoodWhenTheCaptureLocked = null;
+        var yielder = Task.Run(() =>
         {
-            // The Workbench's side of #621: see the request, let go of the database.
-            while (!DatabaseLockFile.HasLiveRequest(_bundle, DateTimeOffset.UtcNow))
+            // Stands in for the Workbench's coordinator: watch for a claim, then let go — and watch the claimant take the lock.
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (DateTime.UtcNow < deadline && !File.Exists(requestPath))
             {
                 Thread.Sleep(5);
             }
 
-            File.Delete(DatabaseLockFile.PathFor(_bundle));
+            scope.Dispose();
+            provider.Dispose();
+            while (DateTime.UtcNow < deadline && !File.Exists(lockPath))
+            {
+                Thread.SpinWait(20);
+            }
+
+            requestStoodWhenTheCaptureLocked = File.Exists(requestPath);
         });
 
         var create = Create();
-        Assert.That(holder.Wait(TimeSpan.FromSeconds(5)), Is.True);
+        Assert.That(yielder.Wait(TimeSpan.FromSeconds(10)), Is.True);
         Assert.That(create.Code, Is.EqualTo(BackupCli.ExitOk), create.Text);
-        Assert.That(File.Exists(DatabaseLockFile.RequestPathFor(_bundle)), Is.False, "the request is withdrawn once served");
+        Assert.That(requestStoodWhenTheCaptureLocked, Is.True, "the request was retired before the capture held the lock: the holder could take it back");
+        Assert.That(File.Exists(requestPath), Is.False, "the request is retired once the capture is done");
     }
 
     [Test]
     [CancelAfter(30_000)]
     public void AYieldableHolderThatDoesNotRelease_IsRefusedWith4()
     {
-        WriteLock(yieldable: true);
-        var create = Run((c, j) => BackupCreateCommand.Run(new BackupCreateCommand.Settings
-        {
-            Bundle = _bundle, Store = _store, Format = "text", HandoffTimeout = TimeSpan.FromMilliseconds(100),
-        }, c, j, CancellationToken.None));
+        using var provider = Provider(Path.GetDirectoryName(_bundle), yieldable: true);
+        using var scope = provider.CreateScope();
+        scope.ServiceProvider.GetRequiredService<DatabaseEngine>().InitializeArchetypes();
 
+        var settings = new BackupCreateCommand.Settings { Bundle = _bundle, Store = _store, Format = "text", HandoffTimeout = TimeSpan.FromMilliseconds(150) };
+        var create = Run((c, j) => BackupCreateCommand.Run(settings, c, j, CancellationToken.None));
         Assert.That(create.Code, Is.EqualTo(BackupCli.ExitRefused), create.Text);
-        Assert.That(create.Text, Does.Contain("did not release it"));
+        Assert.That(create.Text, Does.Contain("advertised that it would yield it but did not release it within 150 ms"));
         Assert.That(File.Exists(DatabaseLockFile.RequestPathFor(_bundle)), Is.False, "an unanswered request is withdrawn");
     }
+
+    [Test]
+    public void TheDefaultHandoffWait_IsTheEngines()
+        => Assert.That(new BackupCreateCommand.Settings().HandoffTimeout, Is.EqualTo(new PagedMMFOptions().LockHandoffTimeout));
 
     [Test]
     [CancelAfter(30_000)]
@@ -306,11 +335,14 @@ public sealed class BackupCommandTests
         fs.SetLength(fs.Length - 64);
     }
 
-    private void WriteLock(bool yieldable)
-        => File.WriteAllText(DatabaseLockFile.PathFor(_bundle),
-            DatabaseLockFile.SerializeLock(Environment.ProcessId, DateTimeOffset.UtcNow, Environment.MachineName, yieldable));
-
     private static void CreateClosedDatabase(string directory)
+    {
+        using var provider = Provider(directory, yieldable: false);
+        using var scope = provider.CreateScope();
+        scope.ServiceProvider.GetRequiredService<DatabaseEngine>().InitializeArchetypes();
+    }
+
+    private static ServiceProvider Provider(string directory, bool yieldable)
     {
         var services = new ServiceCollection();
         services
@@ -325,10 +357,9 @@ public sealed class BackupCommandTests
                 o.DatabaseName = DatabaseName;
                 o.DatabaseDirectory = directory;
                 o.DatabaseCacheSize = 16UL * 1024 * 1024;
+                o.YieldableLock = yieldable;
             })
             .AddScopedDatabaseEngine(o => o.Wal = new WalWriterOptions { UseFUA = false });
-        using var provider = services.BuildServiceProvider();
-        using var scope = provider.CreateScope();
-        scope.ServiceProvider.GetRequiredService<DatabaseEngine>().InitializeArchetypes();
+        return services.BuildServiceProvider();
     }
 }
