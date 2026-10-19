@@ -257,6 +257,93 @@ public static class DatabaseLockFile
         }
     }
 
+    // ── Acquisition by a tool ────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Takes the advisory lock for a tool that works on a closed database (an offline backup), atomically: the lock file is created with
+    /// <see cref="FileMode.CreateNew"/>, so of two claimants exactly one creates it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// An existing lock whose owner is dead, or that cannot be read, is removed and the creation retried once — the engine's own acceptance rule
+    /// (a corrupt lock is removable). A live owner, including a different machine's, is never displaced.
+    /// </para>
+    /// <para>
+    /// <b>Advisory only.</b> The engine itself takes the lock exists-then-write, which this cannot exclude; a tool that must keep an engine out
+    /// also holds the data file open with <see cref="FileShare.None"/>, the OS-enforced exclusion on Windows and Linux alike.
+    /// </para>
+    /// </remarks>
+    /// <param name="bundleDirectory">The database's <c>{name}.typhon</c> directory.</param>
+    /// <param name="yieldable">Whether this holder will release the database on request (#621).</param>
+    /// <param name="lockInfo">
+    /// On success, what was written: pass it to <see cref="Release"/>. On failure, the live holder, or <c>default</c> when it could not be read.
+    /// </param>
+    /// <returns><c>true</c> when this call created the lock.</returns>
+    public static bool TryAcquire(string bundleDirectory, bool yieldable, out LockInfo lockInfo)
+    {
+        var path = PathFor(bundleDirectory);
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            var mine = new LockInfo(Environment.ProcessId, Environment.MachineName, DateTimeOffset.UtcNow, yieldable, null);
+            try
+            {
+                using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    stream.Write(System.Text.Encoding.UTF8.GetBytes(SerializeLock(mine.Pid, mine.StartedAt, mine.MachineName, yieldable)));
+                }
+
+                lockInfo = mine;
+                return true;
+            }
+            catch (IOException) when (File.Exists(path))
+            {
+                if (TryReadLock(bundleDirectory, out var holder) && IsOwnerLive(holder.Pid, holder.MachineName))
+                {
+                    lockInfo = holder;
+                    return false;
+                }
+
+                try
+                {
+                    File.Delete(path);
+                }
+                catch (Exception ex) when (IsExpectedIoOrFormatFailure(ex))
+                {
+                    // Held open by its writer: the retry finds it again and reports what it can read.
+                }
+            }
+        }
+
+        lockInfo = TryReadLock(bundleDirectory, out var last) ? last : default;
+        return false;
+    }
+
+    /// <summary>
+    /// Releases a lock taken by <see cref="TryAcquire"/>: deletes the lock file only while it still records exactly <paramref name="acquired"/>,
+    /// so a lock another holder wrote since is never removed.
+    /// </summary>
+    /// <param name="bundleDirectory">The database's <c>{name}.typhon</c> directory.</param>
+    /// <param name="acquired">The value <see cref="TryAcquire"/> returned.</param>
+    /// <returns><c>true</c> when the file was deleted.</returns>
+    public static bool Release(string bundleDirectory, in LockInfo acquired)
+    {
+        if (!TryReadLock(bundleDirectory, out var current) || current.Pid != acquired.Pid || current.StartedAt != acquired.StartedAt
+            || !string.Equals(current.MachineName, acquired.MachineName, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        try
+        {
+            File.Delete(PathFor(bundleDirectory));
+            return true;
+        }
+        catch (Exception ex) when (IsExpectedIoOrFormatFailure(ex))
+        {
+            return false;
+        }
+    }
+
     // ── Claim requests ───────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>Publishes a claim on a yieldable database. Best-effort: a failed write costs the wait, not correctness.</summary>

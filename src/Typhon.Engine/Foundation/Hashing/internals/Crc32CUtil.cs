@@ -35,6 +35,102 @@ internal static class Crc32CUtil
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static uint Compute(ReadOnlySpan<byte> data) => ComputePartial(0xFFFFFFFF, data) ^ 0xFFFFFFFF;
 
+    /// <summary>Initial state of an incremental computation: <c>Finish(Append(Append(Start, a), b)) == Compute(a ++ b)</c>.</summary>
+    public const uint Start = 0xFFFFFFFF;
+
+    /// <summary>
+    /// Advances an incremental CRC32C state over <paramref name="data"/>. The state is the raw register, never inverted between calls, so any
+    /// split of a byte stream yields the same final value as one <see cref="Compute"/> over the whole of it.
+    /// </summary>
+    /// <param name="state"><see cref="Start"/>, or the value a previous <see cref="Append"/> returned.</param>
+    /// <param name="data">The next bytes of the stream.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static uint Append(uint state, ReadOnlySpan<byte> data) => ComputePartial(state, data);
+
+    /// <summary>
+    /// Advances an incremental state over <paramref name="count"/> zero bytes in O(log count): a zero byte is a linear map of the register, so
+    /// <c>count</c> of them is that map's power, built by repeated squaring of the one-bit operator (zlib's <c>crc32_combine</c> construction).
+    /// </summary>
+    /// <param name="state"><see cref="Start"/>, or the value a previous <see cref="Append"/> returned.</param>
+    /// <param name="count">How many zero bytes.</param>
+    public static uint AppendZeros(uint state, long count)
+    {
+        if (count <= 0)
+        {
+            return state;
+        }
+
+        Span<uint> even = stackalloc uint[32];
+        Span<uint> odd = stackalloc uint[32];
+
+        // The operator for one zero BIT on the reflected register.
+        odd[0] = 0x82F63B78u;
+        var row = 1u;
+        for (var n = 1; n < 32; n++)
+        {
+            odd[n] = row;
+            row <<= 1;
+        }
+
+        Gf2MatrixSquare(even, odd);     // two zero bits
+        Gf2MatrixSquare(odd, even);     // four zero bits
+
+        // Each pass squares into the next power of two (first: one byte), applied when that bit of count is set.
+        while (true)
+        {
+            Gf2MatrixSquare(even, odd);
+            if ((count & 1) != 0)
+            {
+                state = Gf2MatrixTimes(even, state);
+            }
+
+            count >>= 1;
+            if (count == 0)
+            {
+                return state;
+            }
+
+            Gf2MatrixSquare(odd, even);
+            if ((count & 1) != 0)
+            {
+                state = Gf2MatrixTimes(odd, state);
+            }
+
+            count >>= 1;
+            if (count == 0)
+            {
+                return state;
+            }
+        }
+    }
+
+    private static uint Gf2MatrixTimes(ReadOnlySpan<uint> matrix, uint vector)
+    {
+        var sum = 0u;
+        for (var i = 0; vector != 0; i++, vector >>= 1)
+        {
+            if ((vector & 1) != 0)
+            {
+                sum ^= matrix[i];
+            }
+        }
+
+        return sum;
+    }
+
+    private static void Gf2MatrixSquare(Span<uint> square, ReadOnlySpan<uint> matrix)
+    {
+        for (var n = 0; n < 32; n++)
+        {
+            square[n] = Gf2MatrixTimes(matrix, matrix[n]);
+        }
+    }
+
+    /// <summary>Turns an incremental state into the CRC32C of every byte appended to it.</summary>
+    /// <param name="state">The value the last <see cref="Append"/> returned.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static uint Finish(uint state) => state ^ 0xFFFFFFFF;
+
     /// <summary>
     /// Compute CRC32C over a data span, skipping a region that is treated as zeros for CRC purposes.
     /// Used for self-referencing CRC fields where the CRC field itself must be excluded from the computation.
