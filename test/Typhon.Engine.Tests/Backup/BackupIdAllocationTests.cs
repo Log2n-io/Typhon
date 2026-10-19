@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Typhon.Engine.Tests.Backup;
 
@@ -19,16 +20,28 @@ internal sealed class BackupIdAllocationTests
     [Test]
     [CancelAfter(15_000)]
     [VerifiesRule("BKP-08")]
-    public void DeletingTheNewestPack_NeverReusesItsId() => AssertNewestIdNeverReused(loseHighWater: false);
+    public void DeletingTheNewestPack_NeverReusesItsId() => AssertNewestIdNeverReused(loseHighWater: false, loseCatalog: false);
 
-    /// <summary>A store whose high-water is gone can only count the packs present: deleting the newest one frees its id. The check must see it.</summary>
+    /// <summary>
+    /// M5: a lost store.hwm used to reset the floor to the packs present, and the rebuilt catalog then overwrote the high-water it still recorded.
+    /// The floor is the higher of the two when the catalog is this store's.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("BKP-08")]
+    public void ALostHighWater_IsCoveredByTheCatalog_SoTheDeletedNewestIdStaysUsed() => AssertNewestIdNeverReused(loseHighWater: true, loseCatalog: false);
+
+    /// <summary>
+    /// A store that lost both its high-water and its catalog can only count the packs present: deleting the newest one frees its id. The check must
+    /// see it.
+    /// </summary>
     [Test]
     [CancelAfter(15_000)]
     [RuleMutant("BKP-08")]
-    public void Mutant_AStoreThatLostItsHighWater_ReusesAnId() =>
-        RuleMutants.AssertDetects("BKP-08", Marker, () => AssertNewestIdNeverReused(loseHighWater: true));
+    public void Mutant_AStoreThatLostEveryHighWater_ReusesAnId() =>
+        RuleMutants.AssertDetects("BKP-08", Marker, () => AssertNewestIdNeverReused(loseHighWater: true, loseCatalog: true));
 
-    private static void AssertNewestIdNeverReused(bool loseHighWater)
+    private static void AssertNewestIdNeverReused(bool loseHighWater, bool loseCatalog)
     {
         var image = BackupTestImages.Clean;
         var fs = new InMemorySparseFileSystem();
@@ -46,10 +59,89 @@ internal sealed class BackupIdAllocationTests
             fs.DeleteFile(Root + "/store.hwm");
         }
 
+        if (loseCatalog)
+        {
+            fs.DeleteFile(Root + "/catalog.json");
+        }
+
         using (var store = BackupStore.OpenForWrite(Root, image.DatabaseId, true, fs))
         {
             var next = StoreTestKit.WritePoint(store, image);
             Assert.That(next.BackupId, Is.EqualTo(4u), $"{Marker}: #3 was allocated once; its pack is gone but its id is not free");
+        }
+    }
+
+    /// <summary>A catalog that is not this store's (copied in from another) is no authority on its ids: its high-water is ignored.</summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void AnotherStoresCatalog_DoesNotMoveTheFloor()
+    {
+        var image = BackupTestImages.Clean;
+        var fs = new InMemorySparseFileSystem();
+        fs.CreateDirectory("/");
+        using (var store = BackupStore.OpenForWrite(Root, image.DatabaseId, true, fs))
+        {
+            StoreTestKit.WritePoint(store, image);
+        }
+
+        var foreign = StoreCatalog.Build(new StoreIdentityFile { StoreId = Guid.NewGuid(), DatabaseId = image.DatabaseId }, "", 1000, [], []);
+        fs.DeleteFile(Root + "/catalog.json");
+        using (var f = fs.OpenCreateNew(Root + "/catalog.json"))
+        {
+            f.Write(StoreCatalog.Serialize(foreign), 0);
+        }
+
+        fs.DeleteFile(Root + "/store.hwm");
+        using (var store = BackupStore.OpenForWrite(Root, image.DatabaseId, true, fs))
+        {
+            Assert.That(StoreTestKit.WritePoint(store, image).BackupId, Is.EqualTo(2u), "past this store's packs, not another store's numbers");
+        }
+    }
+
+    /// <summary>M6: an id past 99 999 999 names its pack with more than eight digits, and the store still sees it.</summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void AnIdPastEightDigits_IsStillAPackTheStoreSees()
+    {
+        var image = BackupTestImages.Clean;
+        var fs = new InMemorySparseFileSystem();
+        fs.CreateDirectory("/");
+        using (var store = BackupStore.OpenForWrite(Root, image.DatabaseId, true, fs))
+        {
+            StoreTestKit.WritePoint(store, image);
+        }
+
+        StoreHighWater.Write(fs, Root + "/store.hwm", 99_999_999);
+        uint id;
+        using (var store = BackupStore.OpenForWrite(Root, image.DatabaseId, true, fs))
+        {
+            id = StoreTestKit.WritePoint(store, image).BackupId;
+        }
+
+        Assert.That(id, Is.EqualTo(100_000_000u));
+        Assert.That(fs.FileExists(Root + "/packs/100000000-F.tpack"), Is.True);
+        Assert.That(StoreView.Open(Root, fs).Catalog.Packs.Select(p => p.BackupId), Does.Contain(100_000_000u), "the store sees the pack");
+        using (var store = BackupStore.OpenForWrite(Root, image.DatabaseId, true, fs))
+        {
+            Assert.That(StoreTestKit.WritePoint(store, image).BackupId, Is.EqualTo(100_000_001u), "and allocates past it");
+        }
+    }
+
+    [TestCase("00000001-F.tpack", true, 1u)]
+    [TestCase("100000000-I.tpack", true, 100_000_000u)]
+    [TestCase("4294967295-C.tpack.tmp", true, uint.MaxValue)]
+    [TestCase("000000001-F.tpack", false, 0u)]
+    [TestCase("0000001-F.tpack", false, 0u)]
+    [TestCase("4294967296-F.tpack", false, 0u)]
+    [TestCase("12345678-X.tpack", false, 0u)]
+    [TestCase("12345678-F.tpackx", false, 0u)]
+    public void PackFileNames_ParseOnlyTheirCanonicalForm(string name, bool parses, uint id)
+    {
+        Assert.That(PackFormat.TryParseFileName(name, out var parsed, out _, out _), Is.EqualTo(parses));
+        if (parses)
+        {
+            Assert.That(parsed, Is.EqualTo(id));
+            Assert.That(PackFormat.FileName(id, BackupKind.Full)[..^"-F.tpack".Length], Is.EqualTo(name[..name.IndexOf('-')]), "FileName writes it");
         }
     }
 

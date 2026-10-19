@@ -437,7 +437,9 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
             BackupLog.HighWaterDegraded(_log, _paths.Root, _paths.HighWater, problem);
         }
 
-        _highWater = hwm ?? 0;
+        // The floor never goes down: the catalog this store last wrote recorded the high-water too, and a lost store.hwm must not make a deleted
+        // newest pack's id allocatable again. Read before the rebuild below overwrites it.
+        _highWater = Math.Max(hwm ?? 0, RecordedHighWater());
         var listing = _fs.EnumerateFiles(_paths.Packs);
         _view = new StoreView
         {
@@ -448,6 +450,25 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
             CatalogFromFile = false,
         };
         WriteCatalogIfChanged();
+    }
+
+    /// <summary>The high-water the catalog on disk recorded, when it is this store's; 0 when there is none to trust.</summary>
+    private uint RecordedHighWater()
+    {
+        if (!_fs.FileExists(_paths.Catalog))
+        {
+            return 0;
+        }
+
+        try
+        {
+            var catalog = StoreCatalog.TryDeserialize(StoreFileSystem.ReadAllBytes(_fs, _paths.Catalog));
+            return catalog != null && catalog.StoreId == _identity.StoreId ? catalog.HighWaterBackupId : 0;
+        }
+        catch (IOException)
+        {
+            return 0;
+        }
     }
 
     /// <summary>Deletes every temp in <c>packs/</c> and at the root: only the lock holder writes, so a temp it did not create is abandoned.</summary>
