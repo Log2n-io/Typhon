@@ -615,6 +615,9 @@ internal sealed class CrashModelFileSystem : InMemorySparseFileSystem
 
     public CrashModelFileSystem(CrashModelKind kind) => _kind = kind;
 
+    /// <summary>A directory whose next flush commits its entries and then throws, once: the flush that "failed" after reaching the disk.</summary>
+    public string FailNextFlushAfterCommit { get; set; }
+
     /// <summary>Mutating operations performed so far.</summary>
     public int Operations { get; private set; }
 
@@ -782,6 +785,12 @@ internal sealed class CrashModelFileSystem : InMemorySparseFileSystem
             {
                 _durableFiles[kv.Key] = kv.Value;
             }
+        }
+
+        if (FailNextFlushAfterCommit != null && Normalize(FailNextFlushAfterCommit) == directory)
+        {
+            FailNextFlushAfterCommit = null;
+            throw new IOException($"fsync of '{directory}' failed (after its entries reached the disk)");
         }
     }
 

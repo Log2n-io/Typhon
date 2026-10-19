@@ -616,7 +616,9 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
             {
                 try
                 {
+                    // Durably: a flush that failed may still have committed the rename, and an undo that is not flushed comes back at a crash.
                     _fs.DeleteFile(final);
+                    _fs.FlushDirectory(Path.GetDirectoryName(final));
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {

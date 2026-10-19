@@ -83,7 +83,7 @@ internal interface IStoreFileSystem
     /// </summary>
     void Rename(string source, string destination, bool replace);
 
-    /// <summary>Makes the entries of <paramref name="directory"/> durable. Linux: <c>open</c> + <c>fsync</c> of the directory. Windows: nothing.</summary>
+    /// <summary>Makes the entries of <paramref name="directory"/> durable. Unix: <c>open</c> + <c>fsync</c> of the directory. Windows: nothing.</summary>
     void FlushDirectory(string directory);
 
     /// <summary>Whether a file exists at <paramref name="path"/>.</summary>
@@ -345,12 +345,13 @@ internal sealed partial class StoreFileSystem : IStoreFileSystem
     /// <inheritdoc />
     public void FlushDirectory(string directory)
     {
-        if (!OperatingSystem.IsLinux())
+        if (OperatingSystem.IsWindows())
         {
             // Windows: the write-through rename already put the entry on disk, and NTFS offers no handle on a directory to flush anyway.
             return;
         }
 
+        // Every Unix: Linux, and macOS and the BSDs, which open and fsync a directory the same way (it used to be skipped there, silently).
         FlushDirectoryPosix(directory);
     }
 
@@ -412,9 +413,16 @@ internal sealed partial class StoreFileSystem : IStoreFileSystem
 
     private static void FlushDirectoryPosix(string directory)
     {
-        // .NET cannot open a directory (File.OpenHandle refuses S_IFDIR with EACCES), so the fsync goes through libc. O_RDONLY alone opens a
-        // directory on Linux; O_DIRECTORY would only add the type check and its value differs between x64 and arm64.
-        var fd = PosixOpen(directory, 0);
+        // .NET cannot open a directory (File.OpenHandle refuses S_IFDIR with EACCES), so the fsync goes through libc. O_RDONLY opens a directory;
+        // O_DIRECTORY would only add the type check, and its value differs between platforms and architectures. O_CLOEXEC, so a process this one
+        // starts in the window never inherits the descriptor. A signal (EINTR) retries the call rather than failing the flush.
+        int fd;
+        do
+        {
+            fd = PosixOpen(directory, OCloexec);
+        }
+        while (fd < 0 && Marshal.GetLastPInvokeError() == Eintr);
+
         if (fd < 0)
         {
             var error = Marshal.GetLastPInvokeError();
@@ -423,7 +431,14 @@ internal sealed partial class StoreFileSystem : IStoreFileSystem
 
         try
         {
-            if (PosixFsync(fd) != 0)
+            int result;
+            do
+            {
+                result = PosixFsync(fd);
+            }
+            while (result != 0 && Marshal.GetLastPInvokeError() == Eintr);
+
+            if (result != 0)
             {
                 var error = Marshal.GetLastPInvokeError();
                 throw new IOException($"fsync of directory '{directory}' failed (errno {error}).", error);
@@ -434,6 +449,13 @@ internal sealed partial class StoreFileSystem : IStoreFileSystem
             PosixClose(fd);
         }
     }
+
+    /// <summary><c>EINTR</c>: 4 on every Unix.</summary>
+    private const int Eintr = 4;
+
+    /// <summary><c>O_CLOEXEC</c>, which differs between Unixes: Linux 0x80000 (x64 and arm64), macOS 0x1000000, FreeBSD 0x100000.</summary>
+    internal static int OCloexec =>
+        OperatingSystem.IsLinux() ? 0x80000 : OperatingSystem.IsMacOS() || OperatingSystem.IsIOS() ? 0x1000000 : OperatingSystem.IsFreeBSD() ? 0x100000 : 0;
 
     private const uint MoveFileReplaceExisting = 0x1;
     private const uint MoveFileWriteThrough = 0x8;
