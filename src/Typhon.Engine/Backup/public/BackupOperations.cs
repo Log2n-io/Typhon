@@ -77,7 +77,8 @@ public static class BackupOperations
         var view = StoreView.Open(store, trustCatalog: false);
         return new BackupRestoreResult(Summarize(Standing(view, outcome.PointId)), outcome.Target, outcome.DisplacedBundle, outcome.ChainDepth,
             outcome.PagesWritten, outcome.ZeroPages, outcome.TailSegments, outcome.BytesRead, outcome.BytesWritten, outcome.Duration, outcome.SuspectPages,
-            outcome.DamagedPages.Select(d => new PackPageDamage(d.PageId, d.PackFile, d.Reason)).ToList(), outcome.NewTimelineId);
+            outcome.DamagedPages.Select(d => new PackPageDamage(d.PageId, d.PackFile, d.Reason)).ToList(), outcome.NewTimelineId,
+            outcome.SettleFailure?.Message);
     }
 
     /// <summary>Verifies the whole store. Never throws for damage: it reports it.</summary>

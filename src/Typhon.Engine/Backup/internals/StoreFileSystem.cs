@@ -106,6 +106,25 @@ internal interface IStoreFileSystem
 
     /// <summary>Whether a database bundle's advisory lock names a live process (<see cref="DatabaseLockFile.IsHeldByLiveProcess"/>).</summary>
     bool IsBundleHeldByLiveProcess(string bundleDirectory);
+
+    /// <summary>The absolute form of <paramref name="path"/>, so no caller ever derives an empty parent from a bare relative name.</summary>
+    string GetFullPath(string path) => System.IO.Path.GetFullPath(path);
+
+    /// <summary>
+    /// Like <see cref="TryLockExclusive"/>, for a lock file that exists only while it is held: releasing it removes the file. The removal happens
+    /// while the handle is still held, so no other claimant can open the file between them. A process that dies leaves the file, unheld: the next
+    /// claimant takes it over.
+    /// </summary>
+    IDisposable TryLockTransient(string path) => TryLockExclusive(path);
+
+    /// <summary>
+    /// Takes a bundle's advisory lock as a non-yieldable holder (<see cref="DatabaseLockFile.TryAcquire"/>); <c>false</c> when a live process holds it.
+    /// </summary>
+    bool TryAcquireBundleLock(string bundleDirectory, out DatabaseLockFile.LockInfo acquired) =>
+        DatabaseLockFile.TryAcquire(bundleDirectory, yieldable: false, out acquired);
+
+    /// <summary>Releases a lock <see cref="TryAcquireBundleLock"/> took, now at <paramref name="bundleDirectory"/> (the bundle may have moved).</summary>
+    void ReleaseBundleLock(string bundleDirectory, in DatabaseLockFile.LockInfo acquired) => DatabaseLockFile.Release(bundleDirectory, acquired);
 }
 
 /// <summary>Helpers over <see cref="IStoreFile"/>.</summary>
@@ -214,6 +233,43 @@ internal sealed partial class StoreFileSystem : IStoreFileSystem
         catch (IOException ex) when (IsHeldFailure(ex))
         {
             return null;
+        }
+    }
+
+    /// <inheritdoc />
+    public IDisposable TryLockTransient(string path)
+    {
+        try
+        {
+            // Delete sharing so the holder can remove the file while still holding it (Windows: delete-pending, refusing every new open until the
+            // handle closes; Linux: unlinked under its flock).
+            return new TransientLock(path, File.OpenHandle(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Delete));
+        }
+        catch (IOException ex) when (IsHeldFailure(ex))
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException) when (OperatingSystem.IsWindows())
+        {
+            // The previous holder's file is delete-pending: it is still being released.
+            return null;
+        }
+    }
+
+    private sealed class TransientLock(string path, SafeFileHandle handle) : IDisposable
+    {
+        public void Dispose()
+        {
+            try
+            {
+                File.Delete(path);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Left behind, unheld: the next claimant takes it over.
+            }
+
+            handle.Dispose();
         }
     }
 

@@ -431,7 +431,10 @@ internal sealed class BackupRestoreCommand : Command<BackupRestoreCommand.Settin
             return output.Error(ex);
         }
 
-        var exit = result.SuspectPages.Count > 0 || result.DamagedPages.Count > 0 ? BackupCli.ExitWarning : BackupCli.ExitOk;
+        // Published, but its settle (an open and close of the restored database) failed: the outcome still says where everything is.
+        var exit = result.SettleError != null
+            ? BackupCli.ExitFailed
+            : result.SuspectPages.Count > 0 || result.DamagedPages.Count > 0 ? BackupCli.ExitWarning : BackupCli.ExitOk;
         if (output.AsJson)
         {
             output.Json(new { exitCode = exit, result });
@@ -455,6 +458,11 @@ internal sealed class BackupRestoreCommand : Command<BackupRestoreCommand.Settin
         if (result.DamagedPages.Count > 0)
         {
             console.MarkupLine($"[yellow]{result.DamagedPages.Count} page(s) failed their check and were written anyway (--allow-damaged).[/]");
+        }
+
+        if (result.SettleError != null)
+        {
+            console.MarkupLine($"[red]The restored database did not open: {Markup.Escape(result.SettleError)}[/]");
         }
 
         console.MarkupLine("[grey]Its first open replays the WAL to the point and starts a new timeline.[/]");

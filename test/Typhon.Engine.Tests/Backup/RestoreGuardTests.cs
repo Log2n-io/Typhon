@@ -174,6 +174,166 @@ internal sealed class RestoreGuardTests
         Assert.That(fs.FileExists(Bundle(image) + "/precious"), Is.False);
     }
 
+    /// <summary>
+    /// H3: a bare relative target (<c>--to world.typhon</c>) is made absolute before anything derives a parent from it. Its parent was "" and the
+    /// Linux directory flush between the two renames threw, leaving the target gone and the old bundle displaced.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void ARelativeTarget_IsRestoredAtItsFullPath()
+    {
+        var (fs, image) = StoreWithOnePoint();
+        fs.CreateDirectory("/cwd");
+
+        var outcome = RestoreStager.Run(Store, PointSelector.Latest, image.DatabaseName + ".typhon", fs: fs);
+        Assert.That(outcome.Target, Is.EqualTo("/cwd/" + image.DatabaseName + ".typhon"));
+        Assert.That(fs.FileExists(outcome.Target + "/data"), Is.True);
+    }
+
+    /// <summary>
+    /// M1: a restore that dies after staging, before its publish, leaves a staging that still carries its marker, so the next restore recognises it
+    /// as a dead restore's, removes it and succeeds (04 §2). Deleting the marker before the swap left a staging the next restore refused as foreign.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void ARestoreThatDiedBeforeItsPublish_LeavesAStagingTheNextRestoreRemoves()
+    {
+        var image = BackupTestImages.Clean;
+        var fs = new DiesAtPublishFileSystem();
+        fs.CreateDirectory("/");
+        fs.CreateDirectory(Parent);
+        using (var store = BackupStore.OpenForWrite(Store, image.DatabaseId, true, fs))
+        {
+            StoreTestKit.WritePoint(store, image, withTail: false);
+        }
+
+        var bundle = Bundle(image);
+        Assert.Throws<SimulatedCrashException>(() => RestoreStager.Run(Store, PointSelector.Latest, Parent, fs: fs));
+        Assert.That(fs.DirectoryExists(bundle + ".restoring") && !fs.DirectoryExists(bundle), Is.True, "premise: a complete staging, unpublished");
+
+        fs.Dead = false;
+        var again = RestoreStager.Run(Store, PointSelector.Latest, Parent, fs: fs);
+        Assert.That(InMemorySparseFileSystem.Normalize(again.Target), Is.EqualTo(bundle));
+        Assert.That(fs.DirectoryExists(bundle + ".restoring"), Is.False, "the dead restore's staging is gone");
+        Assert.That(fs.FileExists(bundle + "/restore.staging"), Is.False, "a published bundle carries no staging marker");
+    }
+
+    /// <summary>A process that dies at the publish rename: everything it wrote stays, nothing after it runs (no catch, no cleanup).</summary>
+    private sealed class DiesAtPublishFileSystem : InMemorySparseFileSystem
+    {
+        public bool Dead { get; set; } = true;
+
+        protected override void BeforeMutation(string what)
+        {
+            if (Dead && what.StartsWith("rename ", StringComparison.Ordinal) && what.Contains(".restoring ->", StringComparison.Ordinal))
+            {
+                throw new SimulatedCrashException(-1);
+            }
+
+            base.BeforeMutation(what);
+        }
+    }
+
+    /// <summary>H4: while the restore stages, it holds the target's data file: another process cannot open it.</summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void WhileStaging_TheTargetsDataFileIsHeld()
+    {
+        var (fs, image) = StoreWithOnePoint();
+        var bundle = Bundle(image);
+        PlantOldBundle(fs, bundle);
+        Exception opening = null;
+        var tried = false;
+
+        var outcome = RestoreStager.Run(Store, PointSelector.Latest, bundle, new RestoreOptions
+        {
+            Replace = true,
+            Progress = (_, _) =>
+            {
+                if (!tried)
+                {
+                    tried = true;
+                    opening = Assert.Catch(() => fs.OpenRead(bundle + "/data").Dispose());
+                }
+            },
+        }, fs);
+
+        Assert.That(opening, Is.InstanceOf<IOException>(), "another process opened the data file of the database being replaced");
+        Assert.That(outcome.DisplacedBundle, Is.Not.Null);
+    }
+
+    /// <summary>
+    /// H4: the target is checked again right before the swap, once the hold is let go (a directory with an open file cannot be renamed on Windows).
+    /// A process that opened the data file in that instant is not moved aside under it: the swap is refused, the staging discarded, the old bundle
+    /// left as it was.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void ADataFileOpenedRightBeforeTheSwap_RefusesIt_AndLeavesTheOldBundle()
+    {
+        var fs = new OpensTheDataFileWhenReleased();
+        fs.CreateDirectory("/");
+        fs.CreateDirectory(Parent);
+        var image = BackupTestImages.Clean;
+        using (var store = BackupStore.OpenForWrite(Store, image.DatabaseId, true, fs))
+        {
+            StoreTestKit.WritePoint(store, image, withTail: false);
+        }
+
+        var bundle = Bundle(image);
+        PlantOldBundle(fs, bundle);
+        var before = Snapshot(fs, bundle);
+        fs.Data = bundle + "/data";
+
+        var ex = Assert.Throws<RestoreRefusedException>(() =>
+            RestoreStager.Run(Store, PointSelector.Latest, bundle, new RestoreOptions { Replace = true }, fs));
+        fs.Opener?.Dispose();
+
+        Assert.That(fs.Opener, Is.Not.Null, "premise: the data file was opened right before the swap");
+        Assert.That(ex.Reason, Is.EqualTo(RestoreRefusalReason.TargetLocked));
+        Assert.That(Snapshot(fs, bundle), Is.EqualTo(before));
+        Assert.That(fs.DirectoryExists(bundle + ".restoring"), Is.False, "the staging is discarded");
+        Assert.That(fs.AllDirectories.Any(d => d.Contains(".pre-restore-", StringComparison.Ordinal)), Is.False, "nothing was moved aside");
+    }
+
+    /// <summary>Another process opens the target's data file the moment the restore stops holding it.</summary>
+    private sealed class OpensTheDataFileWhenReleased : InMemorySparseFileSystem, IStoreFileSystem
+    {
+        public string Data { get; set; }
+
+        public IStoreFile Opener { get; private set; }
+
+        public new bool ProbeExclusive(string path)
+        {
+            if (Data != null && Opener == null && Normalize(path) == Data)
+            {
+                Opener = OpenRead(Data);
+            }
+
+            return base.ProbeExclusive(path);
+        }
+    }
+
+    /// <summary>M3: an open that fails after the publish is reported with the outcome; the displaced bundle is still named.</summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void ASettleThatThrows_StillReturnsTheOutcome_WithItsFailure()
+    {
+        var (fs, image) = StoreWithOnePoint();
+        var bundle = Bundle(image);
+        PlantOldBundle(fs, bundle);
+
+        var outcome = RestoreStager.Run(Store, PointSelector.Latest, bundle, new RestoreOptions
+        {
+            Replace = true,
+            OpenAndClose = _ => throw new InvalidOperationException("the open failed"),
+        }, fs);
+        Assert.That(outcome.SettleFailure, Is.InstanceOf<InvalidOperationException>());
+        Assert.That(InMemorySparseFileSystem.Normalize(outcome.DisplacedBundle), Does.StartWith(bundle + ".pre-restore-"));
+        Assert.That(fs.DirectoryExists(outcome.DisplacedBundle), Is.True);
+        Assert.That(fs.FileExists(bundle + "/data"), Is.True, "the restore itself is published");
+    }
+
     [TestCase(CrashModelKind.Windows)]
     [TestCase(CrashModelKind.Linux)]
     [CancelAfter(60_000)]
@@ -211,7 +371,9 @@ internal sealed class RestoreGuardTests
 
             foreach (var op in fs.Log.Where(o => o.StartsWith("delete ", StringComparison.Ordinal) || o.StartsWith("rmdir ", StringComparison.Ordinal)))
             {
-                Assert.That(op, Does.Contain(bundle + ".restoring/").Or.EndsWith(bundle + ".restoring"), $"k={k}: '{op}' outside the staging");
+                // The staging, and its marker once published inside the target: a restore deletes nothing else.
+                Assert.That(op, Does.Contain(bundle + ".restoring/").Or.EndsWith(bundle + ".restoring").Or.EndsWith(bundle + "/restore.staging"),
+                    $"k={k}: '{op}' outside the staging");
             }
 
             if (!crashed)
@@ -242,7 +404,8 @@ internal sealed class RestoreGuardTests
                 // R6: between the two renames. Both halves exist, complete, and are named; nothing was guessed.
                 Assert.That(displaced, Is.Not.Null, $"k={k}: target gone with no displaced bundle");
                 Assert.That(Snapshot(fs, displaced), Is.EqualTo(old));
-                Assert.That(fs.FileExists(staging + "/restore.staging"), Is.False, $"k={k}: an unfinished staging was published");
+                // M1: the staging keeps its marker until the bundle is published, so the next restore recognises it as a restore's own (04 §2).
+                Assert.That(fs.FileExists(staging + "/restore.staging"), Is.True, $"k={k}: a staging the next restore could not recognise");
                 AssertCompleteRestore(fs, staging, image, ref newData, k);
             }
         }
