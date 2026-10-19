@@ -3345,12 +3345,15 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
 
 ### BKP-09: Every offline writer of the data file deletes backup-state first `[silent]`
   invariant ∀ process that writes the data file without an engine: backup-state is deleted before its first write (beside
-            chunk-summary), so the next open finds no file and the next point is full
-  scope: DatabaseRepair.Apply (the single gate in front of OccupancyRepair and PairSlotRepair),
-    FixturesController.Integrity (the Workbench damage fixture, dev only)
+            chunk-summary), so the next open finds no file and the next point is full; a file that cannot be deleted
+            stops the writer before that write (the engine's own deletes may fail silently: its open and close reset the
+            nonce that vouches for the file, an offline writer does not)
+  scope: OfflineWrite.InvalidateDerivedFiles (the one gate), DatabaseRepair.Apply (in front of OccupancyRepair and
+    PairSlotRepair), FixturesController.Integrity (the Workbench damage fixture, dev only)
   on_violation: a stale trusted map vouches for a file it no longer describes → a wrong incremental
-  verified: BackupAdmissionTests.RepairApply_DeletesTheBackupState_AndTheNextPointIsFull; source mutant seen red: Apply
-            without the delete
+  verified: BackupAdmissionTests.RepairApply_DeletesTheBackupState_AndTheNextPointIsFull,
+            BackupAdmissionTests.RepairApply_ThatCannotDeleteTheBackupState_RefusesBeforeWriting; source mutants seen red:
+            Apply without the delete, a delete that swallows its failure
 
 ### BKP-07: A point that does not complete forgets no page `[silent]`
   invariant a capture that does not complete ORs every page of its image set back into the live PageChangeMap (a full

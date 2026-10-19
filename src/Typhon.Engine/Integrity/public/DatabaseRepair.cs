@@ -284,11 +284,20 @@ public static class DatabaseRepair
         // Every step below writes the data file under the nonce of the last clean close, so the chunk summary that close wrote would stop describing
         // it while still being trusted (#1143). Deleting it is lossless: the next open reads the pages, and its clean close writes a new one.
         // The backup-state goes with it, for the same reason (BKP-09): its change map knows nothing of these writes, and vouched for by that nonce it
-        // would let the next backup be an incremental that misses them. Deleting it costs one full backup.
+        // would let the next backup be an incremental that misses them. Deleting it costs one full backup. One that cannot be deleted refuses the
+        // repair before its first write: nothing else would invalidate it (the engine resets those nonces only at its own open and close).
         if (!dryRun && plan.Steps.Count > 0)
         {
-            File.Delete(Path.Combine(resolved, ChunkSummaryFile.FileName));
-            BackupStateFile.Delete(BackupStateFile.PathIn(resolved));
+            try
+            {
+                OfflineWrite.InvalidateDerivedFiles(resolved);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new InvalidOperationException(
+                    "The repair cannot delete the chunk summary or the backup-state beside the data file, which would otherwise go on describing it "
+                    + $"after the repair; nothing was written. Close whatever holds them and retry.\n  {ex.Message}", ex);
+            }
         }
 
         for (var i = 0; i < plan.Steps.Count; i++)

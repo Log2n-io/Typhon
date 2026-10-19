@@ -234,7 +234,10 @@ internal static class BackupStateFile
         };
     }
 
-    /// <summary>Deletes the file (and a leftover temporary). Never throws: a file that cannot be deleted is still invalidated by its nonce.</summary>
+    /// <summary>
+    /// Deletes the file (and a leftover temporary). Never throws, for the engine's use only: a file it cannot delete is still invalidated by the nonce its
+    /// open and close reset. An offline writer, which leaves the nonce alone, goes through <see cref="OfflineWrite.InvalidateDerivedFiles"/>, which throws.
+    /// </summary>
     internal static void Delete(string path)
     {
         try
@@ -244,7 +247,7 @@ internal static class BackupStateFile
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            // The nonce cleared at the next open makes it untrusted anyway.
+            // The nonce this session's open cleared, or its close rewrites, makes it untrusted anyway.
         }
     }
 }

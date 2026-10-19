@@ -148,6 +148,60 @@ class BackupAdmissionTests : BackupTestBase<BackupAdmissionTests>
         }
     }
 
+    /// <summary>
+    /// BKP-09: the backup-state cannot be deleted (held open, no sharing). The repair refuses before its first write, or (where an open file can be
+    /// unlinked) deletes it; it never writes behind a file vouched for by the clean close's nonce.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    [VerifiesRule("BKP-09")]
+    public void RepairApply_ThatCannotDeleteTheBackupState_RefusesBeforeWriting()
+    {
+        string bundle, dataPath;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Open(scope);
+            Capture(dbe, new FakeBackupStore());
+            bundle = dbe.MMF.BundleDirectory;
+            dataPath = dbe.MMF.DataFilePath;
+        }
+
+        var path = BackupStateFile.PathIn(bundle);
+        IntegrityReport Scan()
+        {
+            using var source = new OfflineBundlePageSource(bundle);
+            return IntegrityScanner.Scan(source, new IntegrityOptions { Depth = ScanDepth.Standard });
+        }
+
+        DamageMetaSlot(bundle, 1 - Scan().Identity.MetaSlot);
+        var plan = DatabaseRepair.Plan(Scan());
+        Assert.That(plan.Steps, Is.Not.Empty, "premise: the repair has a step to apply");
+        var before = File.ReadAllBytes(dataPath);
+
+        InvalidOperationException refused = null;
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            try
+            {
+                DatabaseRepair.Apply(bundle, plan, backupFirst: false);
+            }
+            catch (InvalidOperationException e)
+            {
+                refused = e;
+            }
+        }
+
+        if (refused != null)
+        {
+            Assert.That(File.ReadAllBytes(dataPath), Is.EqualTo(before), "a refused repair wrote the data file");
+        }
+        else
+        {
+            Assert.That(OperatingSystem.IsWindows(), Is.False, "Windows cannot delete a file held without sharing: the repair must have refused");
+            AssertNoBackupStateAfterAnOfflineWrite(path);
+        }
+    }
+
     /// <summary>The verifier must see an offline write that left the backup-state in place.</summary>
     [Test]
     [CancelAfter(15_000)]
