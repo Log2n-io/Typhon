@@ -78,6 +78,7 @@ internal sealed unsafe class ArchetypeEncodePlan
             PackedStateOffset = value.PackedStateOffsetInHotEntry;
             SegmentOffset = value.SegmentOffsetInHotEntry;
             SegmentBytes = value.SegmentBytes;
+            _enterBodyOffset = value.EnterBodyOffsetInColdEntry;
         }
     }
 
@@ -88,6 +89,7 @@ internal sealed unsafe class ArchetypeEncodePlan
     private readonly int _coldStride;
     private readonly int _ownerOffset;
     private readonly int _ownerStride;
+    private readonly int _enterBodyOffset;
 
     /// <summary>The packed state's offset in a hot entry: <see cref="ReplicationBlockLayout.PackedStateOffsetInHotEntry"/>.</summary>
     public int PackedStateOffset { get; private init; }
@@ -139,6 +141,66 @@ internal sealed unsafe class ArchetypeEncodePlan
 
     /// <summary>The largest number of bytes one state record can occupy, gap and mask included.</summary>
     public int MaxStateBytes { get; init; }
+
+    /// <summary>
+    /// The meter's constant part of an enter (15 § 4.1): the gap, the position and every inline section at its widest — the whole bound when no section
+    /// is wide.
+    /// </summary>
+    public int EnterFixedBytes { get; init; }
+
+    /// <summary>The meter's constant part of a state record, by mask: the gap, the mask and the inline groups the mask names at their widest.</summary>
+    public int[] StateFixedBytes { get; init; } = [];
+
+    /// <summary>Whether a section is stored out of line, so the meter reads its stored length.</summary>
+    public bool HasWide { get; init; }
+
+    /// <summary>
+    /// An upper bound of the bytes <see cref="EntitiesEncoder.WriteEntities"/> writes for one enter of the slot — a constant for an archetype with no wide
+    /// section, plus one stored length per wide one (15 § 4.1).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int EnterBytes(nint block, int slot)
+    {
+        if (!HasWide)
+        {
+            return EnterFixedBytes;
+        }
+
+        var bytes = EnterFixedBytes + WideLength(OnEnter, Cold(block, slot) + _enterBodyOffset);
+        var state = Hot(block, slot) + PackedStateOffset;
+        for (var g = 0; g < Groups.Length; g++)
+        {
+            bytes += WideLength(Groups[g], state);
+        }
+
+        return bytes;
+    }
+
+    /// <summary>An upper bound of the bytes one state record of the slot carrying <paramref name="mask"/> occupies (15 § 4.1).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int StateBytes(nint block, int slot, byte mask)
+    {
+        var bytes = StateFixedBytes[mask & (StateFixedBytes.Length - 1)];
+        if (!HasWide)
+        {
+            return bytes;
+        }
+
+        var state = Hot(block, slot) + PackedStateOffset;
+        for (var g = 0; g < Groups.Length; g++)
+        {
+            if ((mask & (1 << g)) != 0)
+            {
+                bytes += WideLength(Groups[g], state);
+            }
+        }
+
+        return bytes;
+    }
+
+    // A wide section's stored length, at most its bound; 0 for an inline one, which the fixed part already counts.
+    private static int WideLength(in SectionWalk walk, byte* region) =>
+        walk.Wide && walk.MaxBytes > 0 ? (int)Math.Min(Unsafe.ReadUnaligned<uint>(region + walk.Offset + sizeof(uint)), (uint)walk.MaxBytes) : 0;
 
     /// <summary>
     /// The archetype's wide section bodies (13 § 6); <see langword="null"/> when no section is wide. Bound once the replication state exists.

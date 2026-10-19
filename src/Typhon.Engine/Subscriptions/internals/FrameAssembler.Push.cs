@@ -1000,6 +1000,12 @@ internal sealed unsafe partial class FrameAssembler
         PublishRealmView(session, state, reset);
         send.PublishFrame(sequence, block, length, _tick);
         events?.NoteDelivered(count, lost);
+        if (reset)
+        {
+            // A RESET clears the client's store: nothing is owed into it any more (SUB-36).
+            ClearOwed(state);
+        }
+
         Requests?.Retire(session, scratch.Answered);
         CommitSelf(session, state, in self, -1, ref counters);
         state.EventsCursor = (uint)_tick;
@@ -1298,6 +1304,10 @@ internal sealed unsafe partial class FrameAssembler
             ResolveFollowed(index, session, ref follow, ref lost);
         }
 
+        // The frame budget (15 § 4.2): the session's own limit, and what of it the cursor-driven steps may fill this frame.
+        var limit = FrameLimitOf(session);
+        scratch.FillAllowance = FillAllowanceOf(state, limit, state.PendingReset);
+
         // The session's visibility mask for this frame (14 § 6): a change of it makes this frame a RESET.
         push.NoteVisibility(session, _sessions.VisibilityOf(session));
 
@@ -1367,15 +1377,15 @@ internal sealed unsafe partial class FrameAssembler
                 out eventBytes, out eventsLost);
 
             // Reliable events first (14 § 7): up to half a frame but at least one, the rest carried to the next frames — never shed.
-            events.CollectReliable(scratch.EventPicks, state, (uint)_tick, _sessions.ControlledOf(session), session, ref geometry, _maxFrameBytes / 2,
+            events.CollectReliable(scratch.EventPicks, state, (uint)_tick, _sessions.ControlledOf(session), session, ref geometry, limit / 2,
                 out var reliable, out var reliableBytes, out var lagging);
             CloseIfUnreliable(session, lagging);
 
             // Events take at most half a frame: past it the best-effort ones are counted, not sent, so a burst cannot make every frame oversize and starve
             // the session.
-            if (eventBytes + reliableBytes > _maxFrameBytes / 2)
+            if (eventBytes + reliableBytes > limit / 2)
             {
-                events.ShedTo(scratch.EventPicks, (_maxFrameBytes / 2) - reliableBytes, ref eventCount, ref eventBytes, ref eventsLost);
+                events.ShedTo(scratch.EventPicks, (limit / 2) - reliableBytes, ref eventCount, ref eventBytes, ref eventsLost);
             }
 
             eventCount += reliable;
@@ -1439,8 +1449,40 @@ internal sealed unsafe partial class FrameAssembler
         var first = !reset && Realm != null && state.PendingRealm != state.CommittedRealm;
         PrepareSelf(session, state, reset || first, scratch, ref follow, out var self);
 
+        // The fit (15 § 4.4): the entity records take what every other block's bound leaves of the frame, and what does not fit is owed to the next
+        // frames. Before the answers, which read the cursors a withheld completion moves; their bound is reserved from the answers owed.
+        var others = EntitiesEncoder.MaxHeaderBytes + OtherBlocksBound(scratch, emitStats, eventCount, eventBytes, aggWrite, aggRows, aggCounts, debugWrite,
+            debugGeometry, in self) + 16 + ((Requests?.OwedAnswers(session) ?? 0) * GroupRecordBound);
+        var fit = FitEntities(state, scratch, limit - others, self.Write && !self.None ? self.NetId : NetIdAllocator.NoNetId, reset, out var owedLost,
+            out var metered);
+        if (fit == FitOutcome.Overflow || owedLost)
+        {
+            // More owed than the cap, or an owed entity found nowhere: a RESET is the repair. Nothing of this frame is committed (SUB-03).
+            Interlocked.Increment(ref _owedResets);
+            state.PendingReset = true;
+            send.AbandonFrame(sequence);
+            ReturnIfValid(recycled);
+            NoteSkip(state);
+            push.NoteNotPublished(session);
+            return;
+        }
+
+        // No completion while an enter is owed (15 § 4.6): a GROUP_COMPLETE, VIEW_COMPLETE or SOURCE_APPLIED says every member is in the store.
+        var owesEnter = fit == FitOutcome.Fitted && OwesEnter(scratch);
+        if (fit == FitOutcome.Fitted)
+        {
+            records = CountRecords(scratch);
+            if (owesEnter)
+            {
+                push.WithholdCompletions(session, scratch.GroupRecords);
+                complete = false;
+                newlyComplete = false;
+                flags &= ~TickFlags.ViewComplete;
+            }
+        }
+
         // The SubscribeRequest answers due in this frame (14 § 4), after the gather's own records: an APPLIED follows the GROUP_COMPLETE it reports.
-        Requests?.Emit(session, push, scratch, _sessions.ProfileName(session));
+        Requests?.Emit(session, push, scratch, _sessions.ProfileName(session), holdCompletions: owesEnter);
         var groupRecords = scratch.GroupRecords.Count;
         if (records == 0 && groupRecords == 0 && eventCount == 0 && !aggWrite && !reset && !emitStats && !newlyComplete && !debugWrite && !self.Write
             && self.Acks == 0)
@@ -1451,6 +1493,15 @@ internal sealed unsafe partial class FrameAssembler
             ReturnIfValid(recycled);
             NoteSkip(state, counted: false);
             push.Commit(session);
+            if (fit == FitOutcome.Fitted)
+            {
+                CommitOwed(state, scratch);
+                if (push.Shadow)
+                {
+                    push.ShadowOwe(session, state.Owed, state.OwedCount);
+                }
+            }
+
             state.EventsCursor = (uint)_tick;
             events?.CommitReliable(state, scratch.EventPicks);
             CommitSelf(session, state, in self, _pushProfiles[index], ref counters);
@@ -1472,9 +1523,8 @@ internal sealed unsafe partial class FrameAssembler
             flags |= TickFlags.Reset;
         }
 
-        var bound = UpperBound(scratch) + (emitStats ? stats.MaxBlockBytes : 0) + (eventCount > 0 ? eventBytes + 16 : 0)
-            + (aggWrite ? 24 + (aggRows * 5 * (1 + aggCounts.ArchetypeCount)) : 0) + (debugWrite ? 16 + DebugGrid.MaxBytes + debugGeometry : 0)
-            + SelfBound(in self) + RealmBlockBound + SourcesBound(scratch);
+        var bound = EntityBound(scratch, limit, metered) + OtherBlocksBound(scratch, emitStats, eventCount, eventBytes, aggWrite, aggRows, aggCounts,
+            debugWrite, debugGeometry, in self);
         var buffer = scratch.Bytes(bound);
         var writer = new WireWriter(buffer);
         EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, flags, Realm != null, state.PendingFrame);
@@ -1488,6 +1538,10 @@ internal sealed unsafe partial class FrameAssembler
 
             EntitiesEncoder.WriteEntities(ref writer, _encodePlans[a], scratch.List(a, FrameListKind.Enter), scratch.List(a, FrameListKind.Segment),
                 scratch.List(a, FrameListKind.State), scratch.List(a, FrameListKind.Leave));
+            if (_options.CheckFrameMeterForTest)
+            {
+                CheckMeter(scratch, a);
+            }
         }
 
         // SOURCES (14 § 3.5): applied after ENTITIES, so a GROUP_COMPLETE lands once the enters it completes are in the store.
@@ -1522,7 +1576,7 @@ internal sealed unsafe partial class FrameAssembler
             mark = now;
         }
 
-        if (length > _maxFrameBytes)
+        if (length > limit)
         {
             counters.OversizeSkips++;
             send.AbandonFrame(sequence);
@@ -1554,6 +1608,15 @@ internal sealed unsafe partial class FrameAssembler
 
         // COMMIT — the anchor and the delivered cells move with the frame that describes them, and so do the owner state and the acknowledgements.
         push.Commit(session);
+        if (fit == FitOutcome.Fitted)
+        {
+            CommitOwed(state, scratch);
+        }
+        else if (reset)
+        {
+            ClearOwed(state);
+        }
+
         Requests?.Retire(session, scratch.Answered);
         state.EventsCursor = (uint)_tick;
         events?.CommitReliable(state, scratch.EventPicks);
@@ -1566,6 +1629,7 @@ internal sealed unsafe partial class FrameAssembler
         if (push.Shadow)
         {
             push.ShadowApply(session, scratch, _plans.Length, reset);
+            push.ShadowOwe(session, state.Owed, state.OwedCount);
         }
         if (newlyComplete)
         {

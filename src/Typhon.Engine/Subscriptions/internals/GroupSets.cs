@@ -241,6 +241,12 @@ internal sealed class GroupSessionState
     /// <summary>A side's first capacity: the common session holds a handful of keys.</summary>
     internal const int InitialCapacity = 8;
 
+    /// <summary>
+    /// A key whose every member is held and whose completion was withheld — its frame owed an enter (15 § 4.6). It reads as filling (<c>CursorOf &gt;
+    /// netId</c> holds every member), and the next fill completes it without reading a member.
+    /// </summary>
+    public const uint HeldAll = Complete - 1;
+
     public ushort Generation;
     private readonly HeldKeys[] _committed;
     private readonly HeldKeys[] _pending;

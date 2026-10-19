@@ -35,6 +35,14 @@ internal abstract unsafe partial class PushReplication
     internal virtual GroupKeyState GroupKeyStateOf(SessionId session, int set, long key) => GroupKeyState.NotHeld;
 
     /// <summary>
+    /// The frame owes an enter (15 § 4.6): every <c>GROUP_COMPLETE</c> it decided is taken out of <paramref name="records"/>, and its key's pending cursor
+    /// left one short of complete — <i>filling, every member held</i> — so the first frame that owes no enter completes it.
+    /// </summary>
+    internal virtual void WithholdCompletions(SessionId session, System.Collections.Generic.List<GroupRecord> records)
+    {
+    }
+
+    /// <summary>
     /// Whether <paramref name="session"/>'s COMMITTED frame holds the member at (<paramref name="block"/>, <paramref name="slot"/>) through one of its keys:
     /// a key the frame held, filled past the member's netId (SUB-33). Read from a system, like <see cref="HoldsCommitted"/>: the frame stage commits the
     /// keys and the projection writes the member's, both after systems run.

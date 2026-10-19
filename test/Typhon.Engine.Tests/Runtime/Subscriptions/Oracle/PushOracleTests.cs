@@ -65,6 +65,126 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
         AssertLookedAtSomething(oracle);
     }
 
+    /// <summary>
+    /// The frame budget (15): a frame a few records wide, so the fill, the churn's bursts and its updates are carried across frames. The client converges
+    /// on the server's world all the same, and no frame is refused for its size.
+    /// </summary>
+    /// <param name="world">A World observer rather than a covering disc.</param>
+    /// <param name="skipPercent">The percentage of ticks on which the session's frames are left undrained.</param>
+    [Test]
+    [VerifiesRule("SUB-36")]
+    [VerifiesRule("SUB-03")]
+    public void AClientsWorldIsTheServersUnderAFrameAFewRecordsWide([Values(false, true)] bool world, [Values(0, 30, 90)] int skipPercent)
+    {
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 15150 + skipPercent, [skipPercent, 0],
+            nameof(PushOracleTests), worldObserver: world, bigWorld: true, frameBytes: 512);
+
+        for (var i = 0; i < GateTicks; i++)
+        {
+            oracle.Step();
+            if ((i + 1) % CompareEvery == 0)
+            {
+                oracle.Quiesce();
+                oracle.AssertConverged($"a 512-byte frame, {(world ? "World" : "Sphere")}, after {i + 1} churned ticks at a {skipPercent}% skip rate");
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(oracle.Assembler.FramesOwing, Is.GreaterThan(10), "the frame bound: records were carried");
+            Assert.That(oracle.Assembler.OversizeSkips, Is.Zero, "no frame was refused for its size");
+            Assert.That(oracle.Assembler.MeterViolations, Is.Zero, "the meter bounds every record");
+            Assert.That(oracle.Assembler.OwedResets, Is.Zero, "carried, never repaired by a RESET");
+            Assert.That(oracle.Push.ShadowIllegal, Is.Zero);
+        });
+        AssertLookedAtSomething(oracle);
+    }
+
+    /// <summary>The frame budget for ClientRegion sessions (C9): their cell delivery paced by bytes, their bursts owed — and every client its region.</summary>
+    /// <param name="skipPercent">The percentage of ticks on which each session's frames are left undrained.</param>
+    [Test]
+    [VerifiesRule("SUB-36")]
+    public void ClientRegionsUnderAFrameAFewRecordsWideConverge([Values(0, 60)] int skipPercent)
+    {
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 15170 + skipPercent, [skipPercent, 0, 30],
+            nameof(PushOracleTests), replicationCellM: 250, regionEdgeM: 6000, frameBytes: 512);
+        oracle.Workload.WalkStrideM = 1.5f;
+        for (var i = 0; i < GateTicks; i++)
+        {
+            oracle.Step();
+            if ((i + 1) % CompareEvery == 0)
+            {
+                oracle.Quiesce();
+                oracle.AssertConverged($"ClientRegion, a 512-byte frame, after {i + 1} ticks at a {skipPercent}% skip rate");
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(oracle.Assembler.FramesOwing, Is.GreaterThan(0), "the frame bound: records were carried");
+            Assert.That(oracle.Assembler.OwedResets, Is.Zero);
+            Assert.That(oracle.Assembler.OversizeSkips, Is.Zero);
+            Assert.That(oracle.Assembler.MeterViolations, Is.Zero);
+            Assert.That(oracle.Push.ShadowIllegal, Is.Zero);
+        });
+    }
+
+    /// <summary>
+    /// The frame budget under distance LOD (15, SUB-22): a walking disc whose far bands defer updates while entities cross clusters, under a frame a few
+    /// records wide. An owed record whose entity migrated while its update was deferred is found again by identity — never a RESET — and the client
+    /// converges.
+    /// </summary>
+    /// <param name="skipPercent">The percentage of ticks on which each session's frames are left undrained.</param>
+    [Test]
+    [VerifiesRule("SUB-36")]
+    [VerifiesRule("SUB-22")]
+    public void ABandedViewUnderAFrameAFewRecordsWideIsCarriedWithoutAReset([Values(0, 30)] int skipPercent)
+    {
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 15160 + skipPercent, [skipPercent, 0],
+            nameof(PushOracleTests), walkRadius: 3000, bands: b => b.Every(2, beyond: 0.4).Every(4, beyond: 0.6).Every(8, beyond: 0.8), frameBytes: 512);
+        oracle.Workload.WalkStrideM = 1.5f;
+
+        for (var i = 0; i < GateTicks; i++)
+        {
+            oracle.Step();
+            if ((i + 1) % CompareEvery == 0)
+            {
+                oracle.Quiesce();
+                oracle.AssertConverged($"three bands, a 512-byte frame, after {i + 1} ticks at a {skipPercent}% skip rate");
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(oracle.Assembler.FramesOwing, Is.GreaterThan(10), "the frame bound: records were carried");
+            Assert.That(oracle.Push.UpdatesDeferred, Is.GreaterThan(20), "the bands deferred updates");
+            Assert.That(oracle.Assembler.OwedResets, Is.Zero, "an owed record whose entity moved is found again, not repaired by a RESET");
+            Assert.That(oracle.Assembler.OversizeSkips, Is.Zero);
+            Assert.That(oracle.Assembler.MeterViolations, Is.Zero);
+            Assert.That(oracle.Push.ShadowIllegal, Is.Zero);
+        });
+    }
+
+    /// <summary>A fill spread over many frames by a small enter budget while the session skips most of them: catch-ups land in the middle of the fill.</summary>
+    [Test]
+    public void AFillSpreadOverFramesConvergesUnderSkips([Values(false, true)] bool world, [Values(0, 90)] int skipPercent)
+    {
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 15150 + skipPercent, [skipPercent, 0],
+            nameof(PushOracleTests), worldObserver: world, bigWorld: true, enterBudget: 4);
+
+        for (var i = 0; i < GateTicks; i++)
+        {
+            oracle.Step();
+            if ((i + 1) % CompareEvery == 0)
+            {
+                oracle.Quiesce();
+                oracle.AssertConverged($"enter budget 4, {(world ? "World" : "Sphere")}, after {i + 1} churned ticks at a {skipPercent}% skip rate");
+            }
+        }
+
+        AssertLookedAtSomething(oracle);
+    }
+
     /// <summary>The same gate case through a push <c>World</c> observer: cells delivered in grid order behind one cursor, then every event.</summary>
     /// <param name="detection">Who signals a change.</param>
     /// <param name="skipPercent">The percentage of ticks on which the session's frames are left undrained.</param>

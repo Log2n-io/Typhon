@@ -54,7 +54,7 @@ internal sealed unsafe class ReplicationBlockPool : ResourceNode, IMemoryResourc
     /// The pool considers this block to be on the free list. This lives in its own header field rather than in <c>ChunkId</c>, because the directory owns
     /// <c>ChunkId</c> and resets it on removal — which would silently disarm the double-return check below.
     /// </summary>
-    private const byte PoolStateFree = 1;
+    internal const byte PoolStateFree = 1;
 
     private readonly IMemoryAllocator _allocator;
     private readonly List<PinnedMemoryBlock> _slabs = [];

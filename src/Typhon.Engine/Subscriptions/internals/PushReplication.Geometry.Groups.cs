@@ -453,6 +453,35 @@ internal sealed unsafe partial class PushReplication<TEvent>
         return pending.Cursors[i] == GroupSessionState.Complete ? GroupKeyState.Complete : GroupKeyState.Filling;
     }
 
+    internal override void WithholdCompletions(SessionId session, List<GroupRecord> records)
+    {
+        var gs = GroupStateAtOrNull(L(session));
+        var write = 0;
+        for (var read = 0; read < records.Count; read++)
+        {
+            var record = records[read];
+            if (record.Kind != GroupRecordKind.Complete)
+            {
+                records[write++] = record;
+                continue;
+            }
+
+            // HeldAll holds every member (CursorOf > netId), and the next fill completes the key; the fit withholds it again while an enter is owed. A
+            // completion was decided by this frame's fill, so its pending side is the frame's own, never the committed one.
+            if (gs != null && gs.Generation == session.Generation && (uint)record.Set < (uint)gs.SetCount)
+            {
+                var pending = gs.Pending(record.Set);
+                var i = pending.IndexOf(record.Key);
+                if (i >= 0 && pending.Cursors[i] == GroupSessionState.Complete)
+                {
+                    pending.Cursors[i] = GroupSessionState.HeldAll;
+                }
+            }
+        }
+
+        records.RemoveRange(write, records.Count - write);
+    }
+
     internal override void ReadMemberKeys(int archetype, nint block, int slot, uint netId, ref GroupFold.KeySlots keys)
     {
         var groupKeys = _plans[archetype].GroupKeys;
@@ -723,10 +752,22 @@ internal sealed unsafe partial class PushReplication<TEvent>
             order.Sort(default(GroupFillOrderComparer));
         }
 
+        // Completions withheld last frame first (15 § 4.6): every member is held already, so each spends its unit and none waits for budget — there are
+        // never more of them than one frame's completions, and a key a nearer fill starved would break "the first frame that owes no enter" (SUB-33).
+        foreach (ref readonly var f in order)
+        {
+            var withheld = gs.Pending(groups[f.Group].Set);
+            if (withheld.Cursors[f.Index] == GroupSessionState.HeldAll)
+            {
+                withheld.Cursors[f.Index] = GroupSessionState.Complete;
+                spent++;
+            }
+        }
+
         foreach (ref readonly var f in order)
         {
             // A spent budget moves no cursor: no read. A key whose members are all gone completes on the next frame with budget left.
-            if (spent >= budget)
+            if (spent >= budget || scratch.FillSpent >= scratch.FillAllowance)
             {
                 break;
             }
@@ -734,8 +775,26 @@ internal sealed unsafe partial class PushReplication<TEvent>
             var set = groups[f.Group].Set;
             var pending = gs.Pending(set);
             var from = pending.Cursors[f.Index];
+            if (from == GroupSessionState.Complete)
+            {
+                continue;
+            }
+
             var members = ReadMembers(set, pending.Keys[f.Index], from, uint.MaxValue, scratch, sort: true, out var unresolved);
             var take = Math.Min(members, budget - spent);
+
+            // The byte allowance (15 § 4.2): the longest prefix whose enters it admits, the last one allowed past it as a cell's last entity is.
+            for (var m = 0; m < take; m++)
+            {
+                if (scratch.FillSpent >= scratch.FillAllowance)
+                {
+                    take = m;
+                    break;
+                }
+
+                ref var member = ref scratch.FillMembers[m];
+                scratch.FillSpent += MeterEnter(member.Archetype, member.Block, member.Slot);
+            }
 
             // A member with no replication state yet — a positionless one whose block a held key is about to attach, or one the pool could not give a
             // block — cannot be sent, so the key is not complete while one is pending (14 § 5): the cursor passes what was taken and waits.

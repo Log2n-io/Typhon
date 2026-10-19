@@ -291,6 +291,17 @@ internal static class ProjectionCompiler
         var blockLayout = ReplicationBlockLayout.ForArchetype(layout.ClusterSize, moving ? position.SegmentBytes : 0, storedStateBytes, quantizedPositionBytes,
             runStartBytes, ownerEntrySize, enterPositionBytes, onEnter.StoredBytes, headingBytes: 4 * headings, referenceBytes: 4 * references);
 
+        // An enter carries the onEnter section and every group (W16): its worst case must fit half a frame, the half the events leave (15 § 4.7). Past it
+        // the oldest record a session is owed could meet a frame it never fits, which is the stall the frame budget exists to end.
+        var enterBytes = EntitiesEncoder.MaxGapBytes + (moving ? position.SegmentBytes : enterPositionBytes) + onEnter.MaxBodyBytes + stateBodyBytes;
+        var frameLimit = Math.Min(frameBytes, FramePool.LargestClassBytes);
+        if (enterBytes > frameLimit / 2)
+        {
+            throw new InvalidOperationException(
+                $"Archetype '{projection.Name}' can produce an enter record of {enterBytes} bytes — its onEnter section and every group at their widest — " +
+                $"above the {frameLimit / 2} a record may reach (half the {frameLimit}-byte frame). Lower a Codec.Str or collection cap, or raise FrameBytes.");
+        }
+
         // v̂ (09 § 2) gets bytes of its own only for a mover with a slack; at zero it is the previous position.
         var slack = moving ? visibilitySlackM : 0d;
         if (slack > 0)

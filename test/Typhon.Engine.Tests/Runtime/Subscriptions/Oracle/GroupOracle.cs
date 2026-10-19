@@ -179,6 +179,9 @@ internal sealed unsafe class GroupOracle : IDisposable
     /// <summary>The push path.</summary>
     public PushReplication Push => _harness.Subscriptions.Push;
 
+    /// <summary>The frame stage under test.</summary>
+    public FrameAssembler Assembler => _harness.Assembler;
+
     /// <summary>What every failure of this oracle's own assertions starts with: a mutant test's evidence that the oracle, not its scaffolding, rejected.</summary>
     public const string FailureMarker = "group oracle:";
 
@@ -202,7 +205,7 @@ internal sealed unsafe class GroupOracle : IDisposable
 
     private bool _untoldFlips;
 
-    public static GroupOracle Create(DatabaseEngine engine, int seed, int[] skipPercent, string name, int enterBudget, bool tags = false)
+    public static GroupOracle Create(DatabaseEngine engine, int seed, int[] skipPercent, string name, int enterBudget, bool tags = false, int frameBytes = 0)
     {
         var harness = FrameHarness.Create(engine, s => GroupTestSchema.Declare(s, Radius, Reach, Margin, shards: true, tags: tags), name,
             new SubscriptionsOptions
@@ -212,6 +215,8 @@ internal sealed unsafe class GroupOracle : IDisposable
             ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(Radius),
             MaxGroupsPerSession = 12,
             EnterBudgetPerFrame = enterBudget,
+            FrameBytes = frameBytes > 0 ? frameBytes : new SubscriptionsOptions().FrameBytes,
+            CheckFrameMeterForTest = frameBytes > 0,
             PushShadow = true,
             StatePoolBudgetBytes = 64L * 1024 * 1024,
             FramePoolBudgetBytes = 64L * 1024 * 1024,
@@ -367,9 +372,10 @@ internal sealed unsafe class GroupOracle : IDisposable
     /// <summary>No writes and no walk, every frame delivered, until every skipped session has caught up and no key is still filling.</summary>
     public void Quiesce()
     {
-        for (var q = 0; q < PushReplication.LogDepth + 2 || Push.AnyGroupFillingForTest(); q++)
+        for (var q = 0; q < PushReplication.LogDepth + 2 || Push.AnyGroupFillingForTest() || Owes() || Filling(); q++)
         {
-            Assert.That(q, Is.LessThan(200), $"{FailureMarker} a key is still filling after 200 quiet ticks: a fill that never completes");
+            Assert.That(q, Is.LessThan(200), $"{FailureMarker} after 200 quiet ticks a key is still filling ({Push.AnyGroupFillingForTest()}), a session "
+                + $"still owes records ({Owes()}) or a view is incomplete ({Filling()}): a fill or a drain that never completes");
             _tick++;
             _harness.RunTick(_tick, Workers);
             for (var i = 0; i < _sessions.Length; i++)
@@ -382,6 +388,34 @@ internal sealed unsafe class GroupOracle : IDisposable
         {
             Assert.That(_harness.HasFrame(session), Is.False, $"session {session.Value} still has a frame waiting: raise the quiet window");
         }
+    }
+
+    // A frame a few records wide (15) paces the geometric fill as well: quiet means every view complete.
+    private bool Filling()
+    {
+        foreach (var session in _sessions)
+        {
+            if (_harness.StateOf(session) is { ViewComplete: false })
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // A frame a few records wide (15) drains what it owes over several frames: quiet means nothing owed as well.
+    private bool Owes()
+    {
+        foreach (var session in _sessions)
+        {
+            if (_harness.StateOf(session) is { OwedCount: > 0 })
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void Churn()

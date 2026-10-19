@@ -107,6 +107,12 @@ internal sealed unsafe partial class FrameAssembler
                 return false;
             }
 
+            // Held, but owed its enter (15 § 4.5): the client was never given it, so it cannot name it.
+            if (state.OwedEnters > 0 && state.OwesEnter(carried))
+            {
+                return false;
+            }
+
             // Visibility (14 § 6): a session that does not see the entity was never sent it, whatever its geometry.
             if (!owner.CommittedSees(session, owner.MaskOf(archetype, block, slot)))
             {

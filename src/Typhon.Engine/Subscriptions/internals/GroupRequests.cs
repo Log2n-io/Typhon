@@ -604,6 +604,9 @@ internal sealed class GroupRequests
         return true;
     }
 
+    /// <summary>How many answers a session is owed: the most <see cref="Emit"/> can add to its next frame, which the frame budget reserves (15 § 4.4).</summary>
+    public int OwedAnswers(SessionId session) => Of(session)?.Answers.Count ?? 0;
+
     /// <summary>
     /// The answers due in the frame being assembled for <paramref name="session"/>, after its group gather: each error, each subscription whose key is now
     /// complete (or no longer asked for), each unsubscription whose key is no longer held. Appended to the frame's group records — after the gather's own, so
@@ -618,7 +621,11 @@ internal sealed class GroupRequests
     /// since nothing fills it: it is answered <see cref="SourceErrorCodes.NotInProfile"/> and the client's key dropped, as if asked under the new profile.
     /// A subscription already answered stays: the session keeps its keys across profiles like across realms, and they fill again under one naming the set.
     /// </remarks>
-    public void Emit(SessionId session, PushReplication push, FrameWorkerScratch scratch, string profileName)
+    /// <param name="holdCompletions">
+    /// The frame leaves an enter owed (15 § 4.6): an answer waiting for its key's completion is held, for a key already complete included — its store
+    /// lacks a member.
+    /// </param>
+    public void Emit(SessionId session, PushReplication push, FrameWorkerScratch scratch, string profileName, bool holdCompletions = false)
     {
         scratch.Answered.Clear();
         var state = Of(session);
@@ -648,7 +655,8 @@ internal sealed class GroupRequests
                         break;
                     }
 
-                    due = state.Find(answer.Set, answer.Key) < 0 || push?.GroupKeyStateOf(session, answer.Set, answer.Key) == GroupKeyState.Complete;
+                    due = state.Find(answer.Set, answer.Key) < 0
+                          || (!holdCompletions && push?.GroupKeyStateOf(session, answer.Set, answer.Key) == GroupKeyState.Complete);
                     break;
                 default:
                     due = state.Find(answer.Set, answer.Key) >= 0 || push == null

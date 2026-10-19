@@ -148,6 +148,122 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
     /// <summary>Explicit sets (14 § 4): the answers the current session's frame says, by their numbers, retired once it is published.</summary>
     internal readonly List<ulong> Answered = [];
 
+    /// <summary>
+    /// The frame budget (15 § 4.2): the bytes the current session's cursor-driven steps — cell delivery and the group fill — may enter this frame, and
+    /// what they have metered so far. Unbounded until the assembler sets it, so a gather driven alone meters and is never cut.
+    /// </summary>
+    internal int FillAllowance = int.MaxValue;
+
+    /// <inheritdoc cref="FillAllowance"/>
+    internal int FillSpent;
+
+    /// <summary>
+    /// The current session's owed records as this frame leaves them (15 § 4.3), in <c>[0, <see cref="PendingOwedCount"/>)</c>: swapped with the session's
+    /// committed ones when the frame is published, discarded otherwise.
+    /// </summary>
+    internal OwedRecord[] PendingOwed = new OwedRecord[16];
+
+    /// <inheritdoc cref="PendingOwed"/>
+    internal int PendingOwedCount;
+
+    // Open addressing from a netId to its index in PendingOwed, plus one; 0 is empty. Kept under half full, so a probe ends in a few steps. Only the first
+    // _owedSize entries are in use — the array keeps its largest size, and a small owed set clears and probes a small prefix of it.
+    private int[] _owedTable = new int[32];
+    private int _owedSize = 32;
+    private int _owedFiled;
+
+    /// <summary>Empties the owed table, sized for <paramref name="entries"/> records; it grows past them as records are filed.</summary>
+    public void ClearOwedTable(int entries)
+    {
+        var size = 32;
+        while (size < entries * 2)
+        {
+            size *= 2;
+        }
+
+        if (size > _owedTable.Length)
+        {
+            _owedTable = new int[size];
+        }
+        else
+        {
+            Array.Clear(_owedTable, 0, size);
+        }
+
+        _owedSize = size;
+        _owedFiled = 0;
+    }
+
+    /// <summary>The index in <see cref="PendingOwed"/> of the record for <paramref name="netId"/>, or -1.</summary>
+    public int FindOwed(uint netId)
+    {
+        var mask = _owedSize - 1;
+        for (var at = (int)((netId * 0x9E3779B1u) >> 8) & mask; ; at = (at + 1) & mask)
+        {
+            var entry = _owedTable[at];
+            if (entry == 0)
+            {
+                return -1;
+            }
+
+            if (PendingOwed[entry - 1].NetId == netId)
+            {
+                return entry - 1;
+            }
+        }
+    }
+
+    /// <summary>Files <paramref name="index"/> in the owed table under its record's netId, which it must not hold yet.</summary>
+    public void FileOwed(int index)
+    {
+        if ((_owedFiled + 1) * 2 > _owedSize)
+        {
+            // Past half full: twice the size, and every record below index filed again — the table only ever files a prefix of PendingOwed.
+            _owedSize *= 2;
+            if (_owedSize > _owedTable.Length)
+            {
+                _owedTable = new int[_owedSize];
+            }
+            else
+            {
+                Array.Clear(_owedTable, 0, _owedSize);
+            }
+
+            _owedFiled = 0;
+            for (var i = 0; i < index; i++)
+            {
+                Place(i);
+            }
+        }
+
+        Place(index);
+    }
+
+    private void Place(int index)
+    {
+        var mask = _owedSize - 1;
+        var at = (int)((PendingOwed[index].NetId * 0x9E3779B1u) >> 8) & mask;
+        while (_owedTable[at] != 0)
+        {
+            at = (at + 1) & mask;
+        }
+
+        _owedTable[at] = index + 1;
+        _owedFiled++;
+    }
+
+    /// <summary>Appends an owed record to <see cref="PendingOwed"/>, growing it by doubling.</summary>
+    public int AppendOwed(in OwedRecord record)
+    {
+        if (PendingOwedCount == PendingOwed.Length)
+        {
+            Array.Resize(ref PendingOwed, PendingOwed.Length * 2);
+        }
+
+        PendingOwed[PendingOwedCount] = record;
+        return PendingOwedCount++;
+    }
+
     private struct RecordList
     {
         public FrameRecord* Items;
@@ -199,6 +315,9 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
         GroupFolds.Clear();
         GroupRecords.Clear();
         Answered.Clear();
+        FillAllowance = int.MaxValue;
+        FillSpent = 0;
+        PendingOwedCount = 0;
     }
 
     /// <summary>One archetype's sub-list, writable in place: what the group post-pass compacts (14 § 3.8).</summary>
@@ -452,6 +571,38 @@ internal sealed class SessionFrameState
     /// <inheritdoc cref="ReliableOwed"/>
     public int ReliableOwedCount { get; set; }
 
+    /// <summary>
+    /// The entity records the session's published frames had no room for (15 § 4.3), oldest first, in <c>[0, <see cref="OwedCount"/>)</c>: an enter its
+    /// client lacks, or an update it holds stale. Committed with the frame like the geometry; emptied by a <c>RESET</c>.
+    /// </summary>
+    public OwedRecord[] Owed { get; set; } = [];
+
+    /// <inheritdoc cref="Owed"/>
+    public int OwedCount { get; set; }
+
+    /// <summary>The metered bytes of <see cref="Owed"/>: what the cursor-driven steps' allowance gives up while it drains.</summary>
+    public int OwedBytes { get; set; }
+
+    /// <summary>How many of <see cref="Owed"/> are enters: while any is, no completion is published (15 § 4.6).</summary>
+    public int OwedEnters { get; set; }
+
+    /// <summary>The metered bytes of the enters in <see cref="Owed"/>: what the cursor-driven steps' allowance gives up while they drain (15 § 4.2).</summary>
+    public int OwedEnterBytes { get; set; }
+
+    /// <summary>Whether the session's client lacks <paramref name="netId"/> although its committed geometry or keys hold it (SUB-26, 15 § 4.5).</summary>
+    public bool OwesEnter(uint netId)
+    {
+        for (var i = 0; i < OwedCount && OwedEnters > 0; i++)
+        {
+            if (Owed[i].NetId == netId && Owed[i].Kind == OwedKind.Enter)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>Whether the initial fill under the enter budget has completed — the <c>VIEW_COMPLETE</c> flag.</summary>
     public bool ViewComplete { get; set; }
 
@@ -523,6 +674,10 @@ internal sealed class SessionFrameState
         PendingReliableCursor = 0;
         ReliableOwedHead = 0;
         ReliableOwedCount = 0;
+        OwedCount = 0;
+        OwedBytes = 0;
+        OwedEnters = 0;
+        OwedEnterBytes = 0;
         ViewComplete = false;
         FramesProduced = 0;
         DegradeLevel = 0;
@@ -610,6 +765,9 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     /// <summary>The send pump's byte count at that emission, so the next one reports its window rather than the process's whole life.</summary>
     private long _operatorSentBytesMark;
     private readonly int _maxFrameBytes;
+
+    // Twice the largest enter record any archetype can produce, at most the ceiling: the floor of a session's own frame limit (C10, 15 § 4.7).
+    private readonly int _minFrameLimit;
     private readonly int _lagBoundTicks;
 
     /// <summary>The declared events' hub (09 § 11), or <see langword="null"/>; set by the runtime before the first tick.</summary>
@@ -760,6 +918,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         // The ceiling a frame is measured against: the operator's, but never above what the pool can serve — a frame larger than the largest size class
         // would be refused by the pool anyway, and refusing it here is what turns "the pool said no" into a number that names the reason.
         _maxFrameBytes = Math.Min(options.FrameBytes, FramePool.LargestClassBytes);
+        _minFrameLimit = Math.Min(_maxFrameBytes, 2 * LargestEnter(_encodePlans));
 
         Pool = new FramePool($"{id}.Pool", parent, allocator, options);
         // 63 bytes of slack for the alignment, pinned so the address that decides the offset cannot change afterwards. See the field's remarks.
@@ -1626,6 +1785,27 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
             }
 
             var enterPosBytes = moving ? layout.SegmentBytes : layout.EnterPositionBytes;
+
+            // The meter's constants (15 § 4.1): every inline section at its widest; a wide one is read at its stored length per record instead.
+            var onEnter = Walk(plan.Fields, plan.OnEnter);
+            var hasWide = onEnter.Wide;
+            var enterFixed = EntitiesEncoder.MaxGapBytes + enterPosBytes + (onEnter.Wide ? 0 : onEnter.MaxBytes);
+            var stateFixed = new int[1 << groups.Length];
+            for (var g = 0; g < groups.Length; g++)
+            {
+                hasWide |= groups[g].Wide;
+                enterFixed += groups[g].Wide ? 0 : groups[g].MaxBytes;
+            }
+
+            for (var mask = 0; mask < stateFixed.Length; mask++)
+            {
+                stateFixed[mask] = EntitiesEncoder.MaxGapBytes + 1;
+                for (var g = 0; g < groups.Length; g++)
+                {
+                    stateFixed[mask] += (mask & (1 << g)) != 0 && !groups[g].Wide ? groups[g].MaxBytes : 0;
+                }
+            }
+
             encodePlans[i] = new ArchetypeEncodePlan
             {
                 WireIndex = WireIndexOf(catalog, plan.Name, i),
@@ -1636,8 +1816,11 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
                 GroupCount = plan.Groups.Length,
                 GroupTickSlot = tickSlots,
                 MotionTickSlot = moving ? 0 : -1,
-                OnEnter = Walk(plan.Fields, plan.OnEnter),
+                OnEnter = onEnter,
                 Groups = groups,
+                EnterFixedBytes = enterFixed,
+                StateFixedBytes = stateFixed,
+                HasWide = hasWide,
                 OwnerGroups = ownerGroups,
                 OwnerAllMask = (byte)ownerAll,
                 MaxSelfBytes = 24 + plan.MaxOwnerBodyBytes,

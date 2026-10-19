@@ -2215,10 +2215,13 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         var anchorCx = CellX(nx);
         var anchorCy = CellY(ny);
         var anchorCz = CellZ(nz);
-        for (var ring = 0; ring <= Half && entered < enterBudget; ring++)
+
+        // Stopped by a budget only in front of a cell it would have delivered: a view whose every cell is delivered is complete, budgets spent or not.
+        var stopped = false;
+        for (var ring = 0; ring <= Half && !stopped; ring++)
         {
             var zSpan = TEvent.Deep ? ring : 0;
-            for (var dz = -zSpan; dz <= zSpan && entered < enterBudget; dz++)
+            for (var dz = -zSpan; dz <= zSpan && !stopped; dz++)
             {
                 var cz = anchorCz + dz;
                 if (TEvent.Deep && (uint)cz >= (uint)_gridD)
@@ -2228,11 +2231,11 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
                 // On the ring's top and bottom planes every cell is at distance `ring`; between them only the square's border is.
                 var plane = (TEvent.Deep ? Math.Abs(dz) : 0) == ring;
-                for (var dy = -ring; dy <= ring && entered < enterBudget; dy++)
+                for (var dy = -ring; dy <= ring && !stopped; dy++)
                 {
                     var fullRow = plane || Math.Abs(dy) == ring;
                     var step = fullRow ? 1 : 2 * ring;
-                    for (var dx = -ring; dx <= ring && entered < enterBudget; dx += step)
+                    for (var dx = -ring; dx <= ring && !stopped; dx += step)
                     {
                         var cx = anchorCx + dx;
                         var cy = anchorCy + dy;
@@ -2251,6 +2254,12 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                             continue;
                         }
 
+                        if (!Room(entered, enterBudget, scratch))
+                        {
+                            stopped = true;
+                            break;
+                        }
+
                         Set(d, row, bit);
                         Set(fresh, row, bit);
                         entered += DeliverCell(slotIndex, cx, cy, cz, in nBall, in archetypes, scratch, tick, gap);
@@ -2260,8 +2269,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             }
         }
 
-        // The budget did not bind, so every cell the sphere reaches is delivered: the client holds its whole view.
-        complete = entered < enterBudget;
+        // No budget stopped the delivery, so every cell the sphere reaches is delivered: the client holds its whole view.
+        complete = !stopped;
         enters += entered;
 
         // ── 2. The push events around both anchors ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -2540,7 +2549,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             var k = LowerBound(_worldOrder, 0, _worldOrderCount, cursor);
             var visited = 0;
             var nowhere = new Ball(0d, 0d, 0d, 0d);
-            for (; k < _worldOrderCount && entered < enterBudget && visited < WorldCellsPerFrame; k++, visited++)
+            for (; k < _worldOrderCount && Room(entered, enterBudget, scratch) && visited < WorldCellsPerFrame; k++, visited++)
             {
                 var key = _worldOrder[k];
                 entered += DeliverCell(local, TEvent.KeyX(key), TEvent.KeyY(key), TEvent.KeyZ(key), in nowhere, in archetypes, scratch, tick, gap,
@@ -3795,6 +3804,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                     }
 
                     scratch.Add(a, FrameListKind.Enter, new FrameRecord { NetId = hot->NetId, Block = (nint)block, Slot = (byte)slot, Archetype = (ushort)a });
+                    scratch.FillSpent += MeterEnter(a, (nint)block, slot);
                     entered++;
                 }
             }
@@ -3944,6 +3954,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         var rows = Committed(ref st, slotIndex);
         var expected = 0;
         var missing = 0L;
+        var owedHits = 0L;
         var where = new Dictionary<uint, (float X, float Y, float Z, bool Delivered)>();
         foreach (var a in _pushIndices)
         {
@@ -3994,15 +4005,23 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                     expected++;
                     if (!set.Contains(hot->NetId))
                     {
-                        missing++;
+                        // Owed an enter (15 § 4.3): held, and on its way.
+                        if (ShadowOwes(slotIndex, hot->NetId))
+                        {
+                            owedHits++;
+                        }
+                        else
+                        {
+                            missing++;
+                        }
                     }
                 }
             }
         }
 
         ShadowMissing += missing;
-        ShadowExtra += set.Count - (expected - missing);
-        if (set.Count - (expected - missing) > 0)
+        ShadowExtra += set.Count - (expected - missing - owedHits);
+        if (set.Count - (expected - missing - owedHits) > 0)
         {
             foreach (var id in set)
             {
