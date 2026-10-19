@@ -109,6 +109,8 @@ public sealed partial class FixturesController
     /// </summary>
     private static void DamagePage(string bundlePath, int filePageIndex, Action<byte[]> mutate)
     {
+        // An offline write: the backup-state's change map would not see it (BKP-09), so the file goes first.
+        Typhon.Engine.Internals.BackupStateFile.Delete(Typhon.Engine.Internals.BackupStateFile.PathIn(bundlePath));
         var dataPath = Path.Combine(bundlePath, IntegrityConstants.DataFileName);
         var page = new byte[IntegrityConstants.PageSize];
         using var fs = new FileStream(dataPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);

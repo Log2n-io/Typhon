@@ -3278,6 +3278,37 @@ and 11 (restore, store, WAL archiving) land with #1413 and #1418.
             no flush before the copy, `>` instead of `≥`, no floor in step 8, P without fence records, no stop at the first
             corruption, ActiveSegment assigned outside the lock
 
+### BKP-06: An incremental only on a trusted map and an unbroken chain `[silent]`
+  invariant a point is captured incremental iff the request allows it ∧ BackupLineage.Trusted ∧ lineage.StoreId = the
+            store's id ∧ the store's head of lineage.ChainId is lineage.LastBackupId ∧ that head is on the database's current
+            timeline; otherwise full (a new ChainId, minted by the store)
+  invariant Trusted at open iff the last close was clean ∧ backup-state's nonce = BackupStateNonce ≠ 0 ∧ both CRCs hold ∧
+            DatabaseId ∧ TimelineId ∧ DataFilePages = the file's length at open; then its map is ORed into the live one
+  invariant backup-state is written only by a Trusted session's clean close, its nonce recorded in the flip that sets the
+            clean flag; an untrusted close deletes it and records 0 (C13); every open after a clean close, SetCleanShutdown(false)
+            and MarkSweepOwed zero the nonce, so after a crash, a failed open or a sweep-owed close nothing vouches for the file;
+            adopting a new timeline makes the lineage untrusted
+  scope: BackupAdmission.Decide, BackupStateFile.TryRead, BackupStateFile.Write, DatabaseEngine.AdoptBackupState,
+    DatabaseEngine.WriteBackupState, DurabilityWatermarks.MarkCleanShutdown, DurabilityWatermarks.BeginOpenAfterCleanClose,
+    DurabilityWatermarks.SetCleanShutdown, DatabaseEngine.AdoptTimeline
+  on_violation: an incremental over a map that missed writes → the restore serves stale pages, discovered at restore
+  verified: BackupAdmissionTests (T6: a clean close → incremental holding exactly the pages a write probe saw between the
+            freezes, AC-C2; a crash, an offline repair, a copied bundle behind its chain's head, a wiped store and a new
+            timeline → full; the decision matrix + Mutant_ADecisionIgnoringTrust_IsReported), BackupStateFileTests (round
+            trip and damage; trusted close → trusted open → nonce cleared; a stale file; a matching nonce with another database,
+            timeline or length; an untrusted close deletes the file; a write failure costs a full point; Mutant_AFileTrustedAfterACrash_IsReported).
+            Source mutants seen red: no nonce check, the open not clearing the nonce, Decide ignoring trust, an untrusted close
+            writing the file
+
+### BKP-09: Every offline writer of the data file deletes backup-state first `[silent]`
+  invariant ∀ process that writes the data file without an engine: backup-state is deleted before its first write (beside
+            chunk-summary), so the next open finds no file and the next point is full
+  scope: DatabaseRepair.Apply (the single gate in front of OccupancyRepair and PairSlotRepair),
+    FixturesController.Integrity (the Workbench damage fixture, dev only)
+  on_violation: a stale trusted map vouches for a file it no longer describes → a wrong incremental
+  verified: BackupAdmissionTests.RepairApply_DeletesTheBackupState_AndTheNextPointIsFull; source mutant seen red: Apply
+            without the delete
+
 ### BKP-07: A point that does not complete forgets no page `[silent]`
   invariant a capture that does not complete ORs every page of its image set back into the live PageChangeMap (a full
             capture ORs back the map it replaced) before the next freeze can detach it, so the next incremental covers

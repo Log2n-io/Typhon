@@ -1970,6 +1970,87 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>Set by the first <see cref="InitializeArchetypes"/> that completes: the database's open is done.</summary>
     private bool _openCompleted;
 
+    /// <summary>The backup-state file read at open (null when none was usable), until <see cref="AdoptBackupState"/> decides.</summary>
+    private BackupStateContents _backupStateAtOpen;
+
+    /// <summary>The data file's length in pages when this session opened it, before any write of its own.</summary>
+    private int _dataFilePagesAtOpen;
+
+    /// <summary>Diagnostic + test oracle: how the open's read of the backup-state ended; <c>NotConsulted</c> after an unclean close.</summary>
+    internal BackupStateReadResult LastOpenBackupStateResult = BackupStateReadResult.NotConsulted;
+
+    /// <summary>
+    /// BKP-06 at open: the session starts with a trusted change map only when the last close was clean and its backup-state is intact, carries the nonce
+    /// that close recorded, and describes this database, on this timeline, at this length. The map it holds is merged into the live one, which has been
+    /// recording since the data file opened; anything else leaves the lineage untrusted, and the next backup full.
+    /// </summary>
+    private void AdoptBackupState()
+    {
+        var state = _backupStateAtOpen;
+        _backupStateAtOpen = null;
+        if (state == null || !DataFileWriteTracking.MapEnabled)
+        {
+            return;
+        }
+
+        if (state.DatabaseId != DatabaseId || state.TimelineId != TimelineId || state.DataFilePages != _dataFilePagesAtOpen)
+        {
+            LastOpenBackupStateResult = BackupStateReadResult.Invalid;
+            return;
+        }
+
+        MMF.ChangeMap.OrDense(state.Map);
+        var lineage = BackupCoordinator.Lineage;
+        lineage.StoreId = state.StoreId;
+        lineage.ChainId = state.ChainId;
+        lineage.LastBackupId = state.LastBackupId;
+        lineage.LastPointLsn = state.LastPointLsn;
+        lineage.Trusted = true;
+    }
+
+    /// <summary>
+    /// Writes the backup-state for the next session and returns its nonce (C13: only for a trusted lineage), or deletes any existing file and returns 0.
+    /// Never fails the close: an error costs the next backup a full point.
+    /// </summary>
+    private ulong WriteBackupState()
+    {
+        var path = BackupStateFile.PathIn(MMF.BundleDirectory);
+        var lineage = BackupCoordinator?.Lineage;
+        if (lineage == null || !lineage.Trusted || !DataFileWriteTracking.MapEnabled)
+        {
+            BackupStateFile.Delete(path);
+            return 0;
+        }
+
+        try
+        {
+            var pages = (int)(new FileInfo(MMF.DataFilePath).Length / PagedMMF.PageSize);
+            var nonce = (ulong)Random.Shared.NextInt64(1, long.MaxValue);
+            BackupStateFile.Write(path, new BackupStateContents
+            {
+                Nonce = nonce,
+                DatabaseId = DatabaseId,
+                TimelineId = TimelineId,
+                StoreId = lineage.StoreId,
+                ChainId = lineage.ChainId,
+                LastBackupId = lineage.LastBackupId,
+                DataFilePages = pages,
+                LastPointLsn = lineage.LastPointLsn,
+                Map = MMF.ChangeMap.ToDense(pages),
+            }, flushToDisk: !MMF.IsTestMode);
+            return nonce;
+        }
+        catch (Exception e)
+        {
+            LogBackupStateWriteFailed(e, path);
+            BackupStateFile.Delete(path);
+            return 0;
+        }
+    }
+
+    [LoggerMessage(LogLevel.Warning, "Close: the backup-state could not be written ({path}); the next backup will be full")]
+    private partial void LogBackupStateWriteFailed(Exception exception, string path);
+
     /// <summary>Set at the start of <see cref="DisposeCore"/>.</summary>
     private volatile bool _disposeStarted;
     internal StatisticsWorker StatisticsWorker { get; private set; }
@@ -2098,6 +2179,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         InitializeWalManager();
         InitializeCheckpointManager();
         BackupCoordinator = new BackupCoordinator(this, _durabilityNode, Logger);
+        AdoptBackupState();
         InitializeStatisticsWorker();
 
         _constructed = true;
@@ -2356,13 +2438,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // Skipped by SimulateUncleanShutdownForTest to reproduce a crash (which also never writes the marker).
                 if (!SimulateUncleanShutdownForTest && (freesHeldAtClose || freesLostAtClose))
                 {
+                    BackupStateFile.Delete(BackupStateFile.PathIn(MMF.BundleDirectory));
                     MarkSweepOwed();
                 }
                 else if (!SimulateUncleanShutdownForTest)
                 {
-                    // The chunk summary first, then the flag that vouches for it (CS-01): the summary describes the data file as PersistEngineState just
-                    // flushed it, and the flag and the summary's nonce flip together.
-                    MarkCleanShutdown(WriteChunkSummary());
+                    // The chunk summary and the backup-state first, then the flag that vouches for both (CS-01, BKP-06): they describe the data file as
+                    // PersistEngineState just flushed it, and the flag and their nonces flip together.
+                    MarkCleanShutdown(WriteChunkSummary(), WriteBackupState());
                 }
             }
 
@@ -2778,6 +2861,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             if (_cleanShutdownAtOpen && !_options.ForceCrashRecoveryAtOpen)
             {
                 AdoptChunkSummary();
+            }
+
+            // BKP-06: the backup-state the last clean close wrote, read while its nonce is still in the meta page (the flip below clears it). Trusted or
+            // not is decided once the database's identity is known (AdoptBackupState); the file's length is taken now, before this session writes.
+            _dataFilePagesAtOpen = (int)(new FileInfo(MMF.DataFilePath).Length / PagedMMF.PageSize);
+            if (_cleanShutdownAtOpen)
+            {
+                _backupStateAtOpen = BackupStateFile.TryRead(BackupStateFile.PathIn(MMF.BundleDirectory), DurabilityWatermarks.ReadBackupStateNonce(MMF),
+                    out var backupStateResult);
+                LastOpenBackupStateResult = backupStateResult;
             }
 
             // CS-02: durably clear the on-disk flag HERE, before returning from the ctor — i.e. before ANY mutation this session. Registration runs schema
@@ -3378,6 +3471,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         MMF.MutateBootstrapAndPersist(() => bootstrap.Set(BK_TimelineId, PackDatabaseId(timelineId)));
         TimelineId = timelineId;
+        if (BackupCoordinator != null)
+        {
+            BackupCoordinator.Lineage.Trusted = false;   // a new timeline starts a new lineage: its first point is full (BKP-06)
+        }
     }
 
     /// <summary>
@@ -3766,9 +3863,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// is only durable once every cluster page whose HEADs it vouches for is already durable, so a torn close leaves the
     /// flag unwritten and the next open conservatively rebuilds. See rules/durability.md (CS-01).
     /// </remarks>
-    private void MarkCleanShutdown(ulong chunkSummaryNonce)
+    private void MarkCleanShutdown(ulong chunkSummaryNonce, ulong backupStateNonce)
     {
-        DurabilityWatermarks.MarkCleanShutdown(MMF, chunkSummaryNonce);
+        DurabilityWatermarks.MarkCleanShutdown(MMF, chunkSummaryNonce, backupStateNonce);
         var checkpointLsn = DurabilityWatermarks.ReadCheckpointLsn(MMF);
         LogCleanShutdownMarked(checkpointLsn);
         LogWalWatermarksSnapshot("close", checkpointLsn);

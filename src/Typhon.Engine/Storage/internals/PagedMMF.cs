@@ -408,6 +408,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>The data file's full path, inside <see cref="BundleDirectory"/>.</summary>
     internal string DataFilePath => Options.BuildDatabasePathFileName();
 
+    /// <summary>Whether this instance runs in test mode (no fsync; see <see cref="PagedMMFOptions.TestMode"/>).</summary>
+    internal bool IsTestMode => Options.TestMode;
+
     /// <summary>The database's name — the bundle directory's stem, without the <c>.typhon</c> suffix. Recorded in profiling captures so a trace can say which
     /// database it ran against in terms a human recognises (#614, D-2).</summary>
     internal string DatabaseName => Options.DatabaseName;

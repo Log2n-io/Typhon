@@ -91,6 +91,53 @@ class BackupFailurePathTests : BackupTestBase<BackupFailurePathTests>
         Assert.That(((BackupAbortedException)ex.InnerException).Reason, Is.EqualTo(BackupAbortReason.EngineStopping));
         Assert.That(store.Points, Has.Count.EqualTo(1), "nothing was published");
         Assert.That(imageSet.Where(p => !map.IsSet(p)), Is.Empty, $"{Marker}: the closed engine's map lacks pages of the abandoned capture");
+
+        // AC-C8: the clean close persisted the merged map, so the next session's first point is an incremental that holds the abandoned set.
+        using var reopened = ServiceProvider.CreateScope();
+        var next = Open(reopened);
+        Assert.That(next.LastOpenBackupStateResult, Is.EqualTo(BackupStateReadResult.Loaded));
+        var point = Capture(next, store);
+        Assert.That(point.Kind, Is.EqualTo(BackupKind.Incremental));
+        AssertCovers(store.Points.Last(), imageSet);
+    }
+
+    /// <summary>AC-C8: a hard crash in the middle of a capture leaves the next session untrusted, so its first point is full.</summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void HardCrashDuringCapture_TheNextPointIsFull()
+    {
+        var store = new FakeBackupStore();
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Open(scope);
+            Spawn(dbe, 100);
+            Capture(dbe, store);
+            var coordinator = dbe.BackupCoordinator;
+            using var reached = new ManualResetEventSlim();
+            coordinator.Probe = (p, _) =>
+            {
+                if (p == CapturePhase.TailCopied)
+                {
+                    reached.Set();
+                    var spin = new SpinWait();
+                    while (coordinator.LastCapture.AbortReason == BackupAbortReason.None)
+                    {
+                        spin.SpinOnce(-1);
+                    }
+                }
+            };
+
+            var running = StartCapture(dbe, store);
+            Assert.That(reached.Wait(Budget), Is.True);
+            dbe.SimulateHardCrash();
+            Assert.Throws<AggregateException>(() => running.Wait(Budget));
+        }
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Open(scope);
+            Assert.That(Capture(dbe, store).Kind, Is.EqualTo(BackupKind.Full), "a crash leaves no trusted map");
+        }
     }
 
     private (List<int> FailedSet, CapturingSink Next) SinkFailureScenario()
