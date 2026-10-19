@@ -287,10 +287,12 @@ jobs:
             echo "::notice::@typhondb/client@$VERSION is already published"
             exit 0
           fi
-          # The dist-tag is the prerelease label — `alpha`, `beta`, `rc` — so `npm install @typhondb/client@beta` follows the line, and `latest`
-          # stays unset until 1.0.0.
+          # The dist-tag is the prerelease label — `alpha`, `beta`, `rc` — so `npm install @typhondb/client@beta` follows the line. `latest` is not
+          # ours to keep empty: npm pointed it at the package's first publish (1.0.0-alpha.1), and it stays there until a publish moves it.
           DIST_TAG=$(echo "$VERSION" | sed -E 's/^[^-]+-([A-Za-z]+).*$/\1/')
-          npm publish "artifacts/typhondb-client-$VERSION.tgz" --access public --tag "$DIST_TAG"
+          # `./` is load-bearing: without it npm reads `artifacts/<file>` as a GitHub `user/repo` shorthand and, with git sources disabled by default
+          # (EALLOWGIT), refuses it. The first 1.0.0-alpha.1 run failed exactly there.
+          npm publish "./artifacts/typhondb-client-$VERSION.tgz" --access public --tag "$DIST_TAG"
 
   # ---- A GitHub Release for the tag: the native SDK archives (its only distribution), and every other artifact beside them. ----
   github-release:

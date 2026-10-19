@@ -88,11 +88,13 @@ XML
 echo "onboarding-smoke: 'dotnet run' — compile the emitted template + run against the packed engine..."
 dotnet run
 
-# The headline promise: config-driven profiling wrote a trace with zero code edits.
-TRACE="$(ls captures/*.typhon-trace 2>/dev/null | head -1 || true)"
-[ -n "$TRACE" ] && [ -s "$TRACE" ] || {
-    echo "onboarding-smoke: FAIL — no non-empty *.typhon-trace under captures/ after 'dotnet run'"
-    ls -la captures 2>/dev/null || true
+# The headline promise: config-driven profiling wrote a trace with zero code edits. Searched for anywhere in the app rather than at a named
+# folder: the template writes it beside its database (`<name>.typhon/profilings/` since #810), and the folder this script used to name,
+# `captures/`, went stale at that move without anything noticing until a release ran it.
+TRACE="$(find . -name '*.typhon-trace' -size +0c -print 2>/dev/null | head -1 || true)"
+[ -n "$TRACE" ] || {
+    echo "onboarding-smoke: FAIL — no non-empty *.typhon-trace anywhere in the app after 'dotnet run'"
+    find . -name '*.typhon-trace' -o -name '*.nettrace' 2>/dev/null || true
     exit 1
 }
 echo "onboarding-smoke: trace written → $TRACE ($(wc -c < "$TRACE") bytes)"
