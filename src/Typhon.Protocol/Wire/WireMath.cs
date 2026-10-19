@@ -13,7 +13,7 @@ namespace Typhon.Protocol;
 /// decoding. Ties round half away from zero — never <see cref="Math.Round(double)"/>'s default to-even, never <c>floor(x + 0.5)</c>. Values are clamped in
 /// double before any integer conversion. Only <c>+ − × ÷</c>, <see cref="Math.Sqrt"/>, <see cref="Math.Floor(double)"/>, <see cref="Math.Abs(double)"/> and
 /// comparisons appear; powers of two come from <see cref="Pow2"/>, built by doubling, never from <see cref="Math.Pow"/>. Nothing here may call
-/// <see cref="Math.FusedMultiplyAdd"/> or a <c>MultiplyAddEstimate</c>: a fused result differs in the last bit from the TypeScript one.
+/// <c>Math.FusedMultiplyAdd</c> or a <c>MultiplyAddEstimate</c>: a fused result differs in the last bit from the TypeScript one.
 /// </para>
 /// <para>
 /// Operators evaluate left to right, one IEEE operation each, exactly as the formulas in § 12 are written. Reordering a product "for speed" changes the last
@@ -22,7 +22,7 @@ namespace Typhon.Protocol;
 /// </remarks>
 public static class WireMath
 {
-    /// <summary>2π, as C#'s <see cref="Math.Tau"/> and TypeScript's <c>2 * Math.PI</c> both spell it.</summary>
+    /// <summary>2π, as C#'s <c>Math.Tau</c> and TypeScript's <c>2 * Math.PI</c> both spell it.</summary>
     public const double Tau = 6.283185307179586;
 
     /// <summary>√½, identical to TypeScript's <c>Math.SQRT1_2</c>.</summary>
@@ -137,7 +137,7 @@ public static class WireMath
     /// <returns>The signed code.</returns>
     public static int EncodeVel(double d, int unitExp, int bits)
     {
-        var x = Math.ScaleB(d, -unitExp);
+        var x = Bcl.ScaleB(d, -unitExp);
         if (double.IsNaN(x))
         {
             return 0;
@@ -151,7 +151,7 @@ public static class WireMath
     /// <param name="unitExp">The unit's binary exponent.</param>
     /// <param name="bits">8, 16, 24 or 32.</param>
     /// <returns>Displacement per tick.</returns>
-    public static double DecodeVel(int q, int unitExp, int bits) => Math.ScaleB(ClampLow(q, bits), unitExp);
+    public static double DecodeVel(int q, int unitExp, int bits) => Bcl.ScaleB(ClampLow(q, bits), unitExp);
 
     // ---- unorm, snorm (W6) ------------------------------------------------------------------------------------------------------------------------
 
@@ -343,17 +343,17 @@ public static class WireMath
     /// <summary>Converts a double to IEEE half bits directly (ties to even, overflow to infinity), with NaN canonicalized to <c>0x7E00</c>.</summary>
     /// <param name="value">The value, in its source precision.</param>
     /// <returns>The half's bits.</returns>
-    public static ushort EncodeHalf(double value) => double.IsNaN(value) ? (ushort)0x7E00 : BitConverter.HalfToUInt16Bits((Half)value);
+    public static ushort EncodeHalf(double value) => double.IsNaN(value) ? (ushort)0x7E00 : Bcl.DoubleToHalfBits(value);
 
     /// <summary>Decodes IEEE half bits, widened exactly.</summary>
     /// <param name="bits">The half's bits.</param>
     /// <returns>The value; every NaN pattern decodes as <see cref="CanonicalNaN"/>.</returns>
-    public static double DecodeHalf(ushort bits) => CanonicalizeNaN((double)BitConverter.UInt16BitsToHalf(bits));
+    public static double DecodeHalf(ushort bits) => CanonicalizeNaN(Bcl.HalfBitsToDouble(bits));
 
     /// <summary>The single-precision bits a value encodes to: narrowing ties to even, NaN canonicalized to <c>0x7FC00000</c>.</summary>
     /// <param name="value">The value.</param>
     /// <returns>The single's bits.</returns>
-    public static uint EncodeSingle(double value) => double.IsNaN(value) ? 0x7FC00000u : BitConverter.SingleToUInt32Bits((float)value);
+    public static uint EncodeSingle(double value) => double.IsNaN(value) ? 0x7FC00000u : Bcl.SingleToUInt32Bits((float)value);
 
     // ---- tickLo (W9) ------------------------------------------------------------------------------------------------------------------------------
 

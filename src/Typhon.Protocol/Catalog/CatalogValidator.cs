@@ -870,7 +870,7 @@ public static class CatalogValidator
 
             // Below this step, min absorbs q × step and decoding stops round-tripping (W2).
             var magnitude = Math.Max(Math.Abs(min), Math.Abs(max));
-            var ulp = Math.BitIncrement(magnitude) - magnitude;
+            var ulp = Bcl.BitIncrement(magnitude) - magnitude;
             if (WireMath.QuantStep(min, max, codec.Bits) < WireMath.Pow2(8) * ulp)
             {
                 problems.Add($"{at}: axis {i} step is below 2⁸ ulps of its bounds, so quantization would not round-trip");

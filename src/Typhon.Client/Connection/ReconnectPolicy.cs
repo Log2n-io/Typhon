@@ -50,7 +50,11 @@ public sealed class ReconnectPolicy
         ArgumentNullException.ThrowIfNull(options);
 
         _options = options;
+#if NET6_0_OR_GREATER
         _random = seed.HasValue ? new Random(seed.Value) : Random.Shared;
+#else
+        _random = seed.HasValue ? new Random(seed.Value) : new Random();
+#endif
     }
 
     /// <summary>How many consecutive failures have happened since the last successful handshake.</summary>

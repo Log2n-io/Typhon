@@ -415,13 +415,15 @@ public sealed class ReplicationGenerator : IIncrementalGenerator
             return output;
         }
 
+        // An array creation, not a collection expression: a contracts assembly may target netstandard2.1, whose default language is C# 8 (Unity, #1034).
         var members = new List<string>
         {
             "global::Typhon.Protocol.MessageFieldDeclaration[] global::Typhon.Protocol.IReplicatedMessage.ReplicatedFields() =>",
-            "[",
+            "new global::Typhon.Protocol.MessageFieldDeclaration[]",
+            "{",
         };
         members.AddRange(entries.Select(e => "    " + e + ","));
-        members.Add("];");
+        members.Add("};");
 
         output.HintName = HintName(symbol, "ReplicatedMessage");
         output.Source = EmitPartial(symbol, symbol.IsRecord ? "record struct" : "struct", "global::Typhon.Protocol.IReplicatedMessage", members);

@@ -61,7 +61,22 @@ public sealed class TcpClientTransport : IClientTransport
     public async Task ConnectAsync(CancellationToken ct)
     {
         var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+#if NET5_0_OR_GREATER
         await socket.ConnectAsync(_host, _port, ct).ConfigureAwait(false);
+#else
+        // netstandard2.1 has no cancellable connect: a cancellation disposes the socket, which fails the pending connect.
+        using (ct.Register(static s => ((Socket)s).Dispose(), socket))
+        {
+            try
+            {
+                await socket.ConnectAsync(_host, _port).ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException) when (ct.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(ct);
+            }
+        }
+#endif
         _socket = socket;
         _stream = new NetworkStream(socket, ownsSocket: false);
         CloseCode = 0;

@@ -93,7 +93,10 @@ await bot.SendCommandAsync("MoveTo", new RecordValues
   10 k records decodes in ≈ 0.3 ms on the reference laptop.
 - **Packaging**: each release's smoke tests install the packages from the release itself — a server on `Typhon` + `Typhon.Subscriptions.AspNetCore`,
   the .NET client over TCP, the TypeScript tarball over WebSocket, and the C package through `find_package`, static and shared.
-- **Targets**: the .NET packages target `net10.0` only (Unity's `netstandard2.1`: #1034).
+- **Targets**: `Typhon.Protocol` and `Typhon.Client` target `net10.0` and `netstandard2.1` — Unity 2021.2 and later. The `netstandard2.1` builds
+  run the same tests, every golden vector among them, on CoreCLR; a run on Mono or IL2CPP is not yet proven, and WebGL has no sockets. A
+  contracts assembly for Unity targets `netstandard2.1` and is built with the .NET SDK (its generator's output is C# 8); `ClientOptions` is
+  settable, since Unity's compiler has no `init` setters. The engine and `Typhon.Subscriptions.AspNetCore` are `net10.0` only.
 
 ## 🧪 Tests
 

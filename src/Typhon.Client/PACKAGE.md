@@ -15,6 +15,9 @@ catalog the server sends at connection — not from C# layouts — so a client k
 - **Commands**: typed, rate-paced, acknowledged; `SubscribeAsync` / `UnsubscribeAsync` for the server's explicit group sets.
 - **Groups and events**: `IsGroupComplete(set, key)`, and the frame's events, best effort or reliable.
 
+Targets `net10.0` and `netstandard2.1` (Unity 2021.2+; tested on CoreCLR, a Mono/IL2CPP run not yet proven). `FrameApplied` is raised on the
+receive thread: copy what a frame changed to your game thread there.
+
 ## Learn more
 
 - [Client SDKs](https://doc.typhondb.io/latest/guides/feature-catalog/Subscriptions/client-sdks.html) — this SDK, the TypeScript one and the C one

@@ -392,6 +392,10 @@ public sealed class FrameApplier
     // Decoded a chunk at a time against the held string, so a long text compares without a buffer of its length.
     private static bool Utf8Equals(string held, ReadOnlySpan<byte> utf8)
     {
+#if !NET
+        // netstandard2.1 has no Utf8.ToUtf16: decode whole (one allocation, on that target only), with the same replacement of invalid sequences.
+        return held == System.Text.Encoding.UTF8.GetString(utf8);
+#else
         Span<char> chunk = stackalloc char[128];
         var rest = held.AsSpan();
         while (!utf8.IsEmpty)
@@ -407,6 +411,7 @@ public sealed class FrameApplier
         }
 
         return rest.IsEmpty;
+#endif
     }
 
     private void List(FieldPlan field, int count, scoped ReadOnlySpan<double> components)

@@ -1,14 +1,27 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
-        <TargetFramework>net10.0</TargetFramework>
-        <LangVersion>default</LangVersion>
+        <!-- netstandard2.1 for Unity (#1034): the same sources, the BCL gaps filled by Compat/ (compiled for that target only), so net10.0's code path
+             is unchanged. The language is the latest on both: what the newer BCL lacks is polyfilled, not avoided. -->
+        <TargetFrameworks>net10.0;netstandard2.1</TargetFrameworks>
+        <LangVersion>latest</LangVersion>
         <!-- XML doc file: ships in the package for IntelliSense and feeds the published API reference.
              Doc-comment warnings are promoted to errors so drift cannot land silently. -->
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
         <!-- Zero-warning policy, matching Typhon.Engine and Typhon.Client: a published package is held to the engine's bar (07-delivery § 5). -->
         <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     </PropertyGroup>
+
+    <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.1'">
+        <!-- In-box from .NET 5 on; Unity has no System.Text.Json of its own. -->
+        <PackageReference Include="System.Text.Json" Version="10.0.9" />
+        <!-- Unsafe.AsRef: the read-only span over Utf8Buffer256 (Codec/Utf8Text.cs). -->
+        <PackageReference Include="System.Runtime.CompilerServices.Unsafe" Version="6.1.2" />
+    </ItemGroup>
+
+    <ItemGroup Condition="'$(TargetFramework)' != 'netstandard2.1'">
+        <Compile Remove="Compat/**" />
+    </ItemGroup>
 
     <!-- ============ NuGet packaging (07-delivery § 5) ============ -->
     <PropertyGroup>

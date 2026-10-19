@@ -869,6 +869,18 @@ jobs:
           dotnet test test/Typhon.Client.Tests/Typhon.Client.Tests.csproj -c Release --filter "TestCategory!=Quarantine&TestCategory!=NativeSdk" \
             --logger "trx;LogFileName=Typhon.Client.Tests.trx" --results-directory TestResults
 
+      # The netstandard2.1 builds Unity loads (#1034), on CoreCLR: the protocol's tests — every golden vector among them — through its polyfills and
+      # Bcl ports; the client's, with the protocol's netstandard2.1 build (the pair Unity loads) and with its net10.0 one (a netstandard2.1 library in a
+      # .NET app, which the IsExternalInit forward is for).
+      - name: Test — netstandard2.1 builds
+        run: |
+          dotnet test test/Typhon.Protocol.Tests/Typhon.Protocol.Tests.csproj -c Release -p:TyphonSubjectTfm=netstandard2.1 \
+            --filter "TestCategory!=Quarantine" --logger "trx;LogFileName=Typhon.Protocol.Tests.ns21.trx" --results-directory TestResults
+          dotnet test test/Typhon.Client.Tests/Typhon.Client.Tests.csproj -c Release -p:TyphonSubjectTfm=netstandard2.1 -p:TyphonProtocolTfm=netstandard2.1 \
+            --filter "TestCategory!=Quarantine&TestCategory!=NativeSdk" --logger "trx;LogFileName=Typhon.Client.Tests.ns21.trx" --results-directory TestResults
+          dotnet test test/Typhon.Client.Tests/Typhon.Client.Tests.csproj -c Release -p:TyphonSubjectTfm=netstandard2.1 \
+            --filter "TestCategory!=Quarantine&TestCategory!=NativeSdk" --logger "trx;LogFileName=Typhon.Client.Tests.ns21-net10.trx" --results-directory TestResults
+
       # typecheck + eslint + prettier + vitest, the vitest suites decoding the same golden vectors as the .NET client.
       - name: Check — TypeScript SDK
         working-directory: src/Typhon.Client.TypeScript

@@ -29,6 +29,9 @@ public partial struct Attack
 The bundled generator implements `IReplicatedMessage` for every `[ReplicatedMessage]` type, so the server and the client describe the
 same fields in the same order.
 
+Targets `net10.0` and `netstandard2.1`: a contracts assembly shared with a Unity client targets `netstandard2.1` and is built with the .NET SDK
+(the generated code is C# 8).
+
 ## Learn more
 
 - [Subscriptions guide](https://doc.typhondb.io/latest/guides/07-subscriptions.html)

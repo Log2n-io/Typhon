@@ -10,6 +10,9 @@ optionally, the TypeScript SDK's `npm pack` tarball) it builds three fresh proje
    generator reaches it through `Typhon`'s dependency on `Typhon.Protocol`, once — a second copy would not compile), spawns three entities, and
    serves them over the engine's TCP listener and the ASP.NET Core WebSocket endpoint.
 3. client — references only `Typhon.Client`: connects over TCP and must hold the three entities.
+4. netstandard2.1 — what Unity loads (#1034): a contracts library at that target's default language (C# 8), whose `[ReplicatedMessage]` compiles only
+   if the generator's output does, used by the net10.0 server at run time (a netstandard2.1 library in a .NET app); and a client library built
+   against `Typhon.Client`'s netstandard2.1 asset.
 
 With --ts-tarball, a Node script installs the tarball and must hold the same three entities over WebSocket.
 
@@ -40,6 +43,47 @@ public partial struct Hello
 }
 """
 
+CONTRACTS21_CS = r"""
+using Typhon.Protocol;
+
+namespace Smoke.Contracts21
+{
+    [ReplicatedMessage]
+    public partial struct Wave
+    {
+        [Codec(CodecKind.U8)] public byte Strength;
+    }
+
+    public static class Proof
+    {
+        // Compiles only if the generator implemented the interface, in C# 8.
+        public static IReplicatedMessage Of(Wave w) => w;
+    }
+}
+"""
+
+CLIENT21_CS = r"""
+using System;
+using System.Threading.Tasks;
+using Typhon.Client;
+
+namespace Smoke.Client21
+{
+    public static class Bot
+    {
+        // Compiles against Typhon.Client's netstandard2.1 asset: what a Unity script would call.
+        public static async Task<int> HoldAsync(Uri endpoint)
+        {
+            var client = new TyphonClient(new ClientOptions { Endpoint = endpoint, Kind = "smoke" });
+            await client.ConnectAsync();
+            var held = client.Store.Archetypes.Length;
+            await client.DisposeAsync();
+            return held;
+        }
+    }
+}
+"""
+
 SERVER_CS = r"""
 using System;
 using System.Linq;
@@ -50,6 +94,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Smoke.Contracts;
+using Smoke.Contracts21;
 using Typhon.Engine;
 using Typhon.Protocol;
 using Typhon.Schema.Definition;
@@ -106,6 +151,7 @@ var registry = runtime.Subscriptions;
 registry.Sessions.Kinds("smoke");
 registry.Archetype<Mob>();                      // as its attributes declare it: the generator must have run here
 registry.Command<Hello>(c => { });             // its fields as its attributes declare them
+registry.Command<Wave>(c => { });              // from the netstandard2.1 contracts library
 registry.Profile("world", p => p.World().Of<Mob>());
 runtime.Start();
 
@@ -229,13 +275,14 @@ def probe(cmd, cwd):
     return r.stdout
 
 
-def project(path, sdk, refs, extra=""):
+def project(path, sdk, refs, extra="", tfm="net10.0", library=None):
     items = "\n".join(refs)
+    library = "contracts" in path if library is None else library
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"""<Project Sdk="{sdk}">
   <PropertyGroup>
-    <OutputType>{"Library" if "contracts" in path else "Exe"}</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>{"Library" if library else "Exe"}</OutputType>
+    <TargetFramework>{tfm}</TargetFramework>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -284,17 +331,22 @@ def main():
 </configuration>
 """)
         pkg = lambda name: f'    <PackageReference Include="{name}" Version="{version}" />'
-        for d in ("contracts", "server", "client"):
+        for d in ("contracts", "contracts21", "client21", "server", "client"):
             os.makedirs(os.path.join(work, d))
         project(os.path.join(work, "contracts", "contracts.csproj"), "Microsoft.NET.Sdk", [pkg("Typhon.Protocol")])
+        # No LangVersion: netstandard2.1's default (C# 8), which a Unity contracts library is held to.
+        project(os.path.join(work, "contracts21", "contracts21.csproj"), "Microsoft.NET.Sdk", [pkg("Typhon.Protocol")], tfm="netstandard2.1")
+        project(os.path.join(work, "client21", "client21.csproj"), "Microsoft.NET.Sdk", [pkg("Typhon.Client")], tfm="netstandard2.1", library=True)
         project(os.path.join(work, "server", "server.csproj"), "Microsoft.NET.Sdk.Web",
-                [pkg("Typhon"), pkg("Typhon.Subscriptions.AspNetCore"), '    <ProjectReference Include="../contracts/contracts.csproj" />'])
+                [pkg("Typhon"), pkg("Typhon.Subscriptions.AspNetCore"), '    <ProjectReference Include="../contracts/contracts.csproj" />',
+                 '    <ProjectReference Include="../contracts21/contracts21.csproj" />'])
         project(os.path.join(work, "client", "client.csproj"), "Microsoft.NET.Sdk", [pkg("Typhon.Client")])
-        for d, source in (("contracts", CONTRACTS_CS), ("server", SERVER_CS), ("client", CLIENT_CS)):
+        for d, source in (("contracts", CONTRACTS_CS), ("contracts21", CONTRACTS21_CS), ("client21", CLIENT21_CS), ("server", SERVER_CS),
+                          ("client", CLIENT_CS)):
             with open(os.path.join(work, d, "Program.cs"), "w", encoding="utf-8") as f:
                 f.write(source)
 
-        for d in ("server", "client"):
+        for d in ("client21", "server", "client"):
             run(["dotnet", "build", f"{d}/{d}.csproj", "-c", "Release", "-v", "quiet", "-nologo"], work)
 
         data = os.path.join(work, "data")

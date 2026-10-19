@@ -1,14 +1,20 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
-        <TargetFramework>net10.0</TargetFramework>
-        <LangVersion>default</LangVersion>
+        <!-- netstandard2.1 for Unity (#1034), as Typhon.Protocol: the same sources, the BCL gaps filled for that target only. -->
+        <TargetFrameworks>net10.0;netstandard2.1</TargetFrameworks>
+        <LangVersion>latest</LangVersion>
         <RootNamespace>Typhon.Client</RootNamespace>
         <!-- XML doc file: the SDK is a product, raised to the engine's documentation bar (05-sdks § 3). -->
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
         <!-- Zero-warning policy, matching Typhon.Engine and Typhon.Profiler. -->
         <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     </PropertyGroup>
+
+    <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.1'">
+        <!-- The compiler-support types and argument guards netstandard2.1 lacks: Typhon.Protocol's, linked (internal, so each assembly has its copy). -->
+        <Compile Include="..\Typhon.Protocol\Compat\*.cs" LinkBase="Compat" />
+    </ItemGroup>
 
     <!-- ============ NuGet packaging (07-delivery § 5) ============ -->
     <PropertyGroup>

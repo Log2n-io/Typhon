@@ -169,6 +169,15 @@ if [ "$BUILD" -eq 1 ]; then
 fi
 suite_step "client suite (Release)" "$CLIENT" pre-push-client.trx
 
+# The netstandard2.1 builds Unity loads (gate: subscriptions-sdk, #1034). Each builds — the subject's target is a build property — into its own output
+# directory (the test projects route it there), so the default builds the --no-build steps run are left as they were.
+PROTOCOL_TESTS=test/Typhon.Protocol.Tests/Typhon.Protocol.Tests.csproj
+step "protocol suite on netstandard2.1 (Release)" dotnet test "$PROTOCOL_TESTS" -c Release -p:TyphonSubjectTfm=netstandard2.1 --filter "$FILTER"
+step "client suite on netstandard2.1, the pair Unity loads (Release)" \
+  dotnet test "$CLIENT" -c Release -p:TyphonSubjectTfm=netstandard2.1 -p:TyphonProtocolTfm=netstandard2.1 --filter "$FILTER"
+step "client suite on netstandard2.1 over the net10.0 protocol (Release)" \
+  dotnet test "$CLIENT" -c Release -p:TyphonSubjectTfm=netstandard2.1 --filter "$FILTER"
+
 # The browser's door (gate: aux-tests). It runs locally because a WebSocket endpoint that stopped accepting is invisible
 # to every engine suite, which is the shape of gap #774 was about.
 WSADAPTER=test/Typhon.Subscriptions.AspNetCore.Tests/Typhon.Subscriptions.AspNetCore.Tests.csproj

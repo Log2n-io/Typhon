@@ -291,7 +291,7 @@ public sealed class WorldStore
             a.Clear();
         }
 
-        Array.Clear(_handles);
+        Array.Clear(_handles, 0, _handles.Length);
         foreach (var g in Aggregates)
         {
             g.Clear();
@@ -415,7 +415,7 @@ public sealed class AggregateGrid
         }
         else
         {
-            Array.Clear(Counts);
+            Array.Clear(Counts, 0, Counts.Length);
         }
 
         Changed.Clear();
@@ -449,7 +449,7 @@ public sealed class AggregateGrid
 
     internal void Clear()
     {
-        Array.Clear(Counts);
+        Array.Clear(Counts, 0, Counts.Length);
         Changed.Clear();
     }
 
