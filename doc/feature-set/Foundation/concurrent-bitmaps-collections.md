@@ -65,4 +65,4 @@ if (pool.Pick(index, out var owned))      // atomic claim; false = already taken
 
 <!-- Deep dive: claude/overview/11-utilities.md §D.1-D.2 -->
 <!-- ADR: claude/adr/041-treiber-stack-chunk-allocator.md — chunk-level slot allocation moved off this bitmap family to a free list; these bitmaps remain the page-occupancy and backup-tracking primitive -->
-<!-- Design: claude/design/Durability/PitBackup/02-backup-creation.md — ConcurrentBitmapL3All as the CoW page-tracking bitmap -->
+<!-- Design (archived v1): claude/archive/Durability/PitBackup-v1/02-backup-creation.md — ConcurrentBitmapL3All as the CoW page-tracking bitmap; v2 (claude/design/Durability/PitBackup/02-capture.md) uses its own grow-without-copy change map -->
