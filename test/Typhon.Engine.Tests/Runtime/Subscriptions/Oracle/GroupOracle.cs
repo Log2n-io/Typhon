@@ -879,6 +879,16 @@ internal sealed unsafe class GroupOracle : IDisposable
             for (var i = 0; i < _sessions.Length; i++)
             {
                 Compare(tx, i, towns, truth, divergences);
+
+                // Nothing went over the bound, so no session may have been told it left a town out (#1407).
+                for (var set = 0u; set < (uint)_harness.CatalogPlan.GroupSets.Length; set++)
+                {
+                    var over = _harness.Replica(_sessions[i]).Store.GroupSetOverLimit(set);
+                    if (over != 0)
+                    {
+                        divergences.Add($"session {i} was told it left {over} key(s) of set {set} out, with none over the bound");
+                    }
+                }
             }
         }
 

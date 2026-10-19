@@ -259,6 +259,11 @@ TEST(CApi_ReadsGroupsFrameByFrameAndTheCompleteSet)
     CHECK_EQ(static_cast<int>(typhon_group_set_index(h.client, "nowhere", &set)), static_cast<int>(TYPHON_ERROR_INVALID_ARGUMENT));
     CHECK(typhon_groups_get(h.client, nullptr, &count) != TYPHON_OK);
     CHECK_EQ(typhon_group_is_complete(nullptr, 0, 3), 0);
+
+    // #1407: no GROUP_TRUNCATED in the stream, so every set is whole; a null client reads 0.
+    CHECK_EQ(typhon_group_set_over_limit(h.client, 0), 0u);
+    CHECK_EQ(typhon_group_set_over_limit(h.client, 1), 0u);
+    CHECK_EQ(typhon_group_set_over_limit(nullptr, 0), 0u);
 }
 
 TEST(CApi_DeliversEventsThroughItsCallback)

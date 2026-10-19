@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using Typhon.Schema.Definition;
 
@@ -109,8 +111,13 @@ internal readonly struct GroupFillMemberOrder : IComparer<GroupFillMember>
 /// <summary>The wire's group record kinds in a <c>SOURCES</c> block (14 § 3.5, P12).</summary>
 internal static class GroupRecordKind
 {
-    public const byte Complete = 2;
-    public const byte Released = 3;
+    public const byte Complete = Typhon.Protocol.SourceStatus.GroupComplete;
+    public const byte Released = Typhon.Protocol.SourceStatus.GroupReleased;
+
+    /// <summary>
+    /// A Region set's observer met more keys than the session may hold: the record's key carries how many were left out, 0 once none is (#1407).
+    /// </summary>
+    public const byte Truncated = Typhon.Protocol.SourceStatus.GroupTruncated;
 }
 
 /// <summary>A group lifecycle record a session's next frame carries.</summary>
@@ -158,80 +165,226 @@ internal struct GroupFold
     }
 }
 
+/// <summary>A filling key of this frame's pending keys, for the fill's order: its profile group, its distance, its index among the keys.</summary>
+internal struct GroupFillOrder
+{
+    public int Group;
+    public double Distance;
+    public int Index;
+}
+
+/// <summary>Profile group first, then nearest, then key order: the order the fill spends the enter budget in.</summary>
+internal readonly struct GroupFillOrderComparer : IComparer<GroupFillOrder>
+{
+    public int Compare(GroupFillOrder x, GroupFillOrder y)
+    {
+        var c = x.Group.CompareTo(y.Group);
+        if (c != 0)
+        {
+            return c;
+        }
+
+        c = x.Distance.CompareTo(y.Distance);
+        return c != 0 ? c : x.Index.CompareTo(y.Index);
+    }
+}
+
+/// <summary>
+/// One side — committed or pending — of a session's keys in one group set: sorted by key, each with its fill cursor. Its capacity is fixed for its life: a
+/// side that outgrows it is given a new holder, so a reader that took the holder once never sees a count past its arrays (#1407).
+/// </summary>
+internal sealed class HeldKeys
+{
+    /// <summary>The empty side every set starts with; never written — a shared cache line every worker would otherwise dirty.</summary>
+    public static readonly HeldKeys Empty = new(0);
+
+    public readonly long[] Keys;
+    public readonly uint[] Cursors;
+    public int Count;
+
+    public HeldKeys(int capacity)
+    {
+        Keys = capacity == 0 ? [] : new long[capacity];
+        Cursors = capacity == 0 ? [] : new uint[capacity];
+    }
+
+    public int Capacity => Keys.Length;
+
+    public ReadOnlySpan<long> KeySpan => Keys.AsSpan(0, Count);
+
+    /// <summary>The index of <paramref name="key"/>, or a negative number when it is not held.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int IndexOf(long key) => Count == 0 ? -1 : Keys.AsSpan(0, Count).BinarySearch(key);
+
+    /// <summary>The cursor of <paramref name="key"/>, or 0 when it is not held.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public uint CursorOf(long key)
+    {
+        var i = IndexOf(key);
+        return i >= 0 ? Cursors[i] : 0u;
+    }
+}
+
 /// <summary>
 /// A session's held keys per group set (14 § 3.8): the committed ones — what the client holds — and the pending ones this frame moves to, each sorted by key
 /// with its fill cursor (a netId; <see cref="Complete"/> when every member is held). Committed with the frame, like the geometry.
 /// </summary>
+/// <remarks>
+/// Costs what it holds (#1407): each side of each set is a <see cref="HeldKeys"/> grown with the keys it holds, never sized by
+/// <see cref="SubscriptionsOptions.MaxGroupsPerSession"/>. A frame's pending side is written into the holder the last commit left free, and the commit swaps
+/// the two — no copy. A frame that wrote no pending side (an unplaced frame) leaves the committed one as it is.
+/// </remarks>
 internal sealed class GroupSessionState
 {
     public const uint Complete = uint.MaxValue;
 
+    /// <summary>A side's first capacity: the common session holds a handful of keys.</summary>
+    internal const int InitialCapacity = 8;
+
     public ushort Generation;
-    public readonly int Max;
-    public readonly long[] CKeys;
-    public readonly uint[] CCursor;
-    private readonly int[] _cCount;
-    private readonly int[] _noKeys;
+    private readonly HeldKeys[] _committed;
+    private readonly HeldKeys[] _pending;
+    private readonly int[] _cOver;
+    private readonly int[] _pOver;
+    private bool _pendingWritten;
 
     /// <summary>This frame is a RESET: the committed keys read as none, and are kept as they are until it is published.</summary>
     public bool Reset;
 
-    /// <summary>The committed key counts per set as this frame reads them: none on a RESET.</summary>
-    public int[] CCount => Reset ? _noKeys : _cCount;
+    public GroupSessionState(int sets)
+    {
+        _committed = new HeldKeys[sets];
+        _pending = new HeldKeys[sets];
+        _cOver = new int[sets];
+        _pOver = new int[sets];
+        Array.Fill(_committed, HeldKeys.Empty);
+        Array.Fill(_pending, HeldKeys.Empty);
+    }
 
-    /// <summary>The committed key counts as the last published frame left them, a pending RESET or not: what a command is judged against (SUB-26).</summary>
-    public int[] PublishedCount => _cCount;
+    public int SetCount => _committed.Length;
+
+    /// <summary>The committed keys of <paramref name="set"/> as this frame reads them: none on a RESET.</summary>
+    public HeldKeys Committed(int set) => Reset ? HeldKeys.Empty : _committed[set];
+
+    /// <summary>The committed keys as the last published frame left them, a pending RESET or not: what a command is judged against (SUB-26).</summary>
+    public HeldKeys Published(int set) => _committed[set];
+
+    /// <summary>The keys this frame moves <paramref name="set"/> to: the committed ones when the frame wrote none.</summary>
+    public HeldKeys Pending(int set) => _pendingWritten ? _pending[set] : _committed[set];
+
+    /// <summary>How many keys of a Region set this frame's observer met past the bound and left out (the session is told, GROUP_TRUNCATED).</summary>
+    public int PendingOver(int set) => _pendingWritten ? _pOver[set] : _cOver[set];
+
+    /// <summary>The count the client was last told: 0 on a RESET, which clears what it holds.</summary>
+    public int CommittedOver(int set) => Reset ? 0 : _cOver[set];
 
     /// <summary>Whether this frame leaves <paramref name="set"/>'s keys and their cursors as the committed ones read: a steady state, the usual case.</summary>
     public bool PendingIsCommitted(int set)
     {
-        var count = CCount[set];
-        if (PCount[set] != count)
+        if (!_pendingWritten)
         {
-            return false;
+            return true;
         }
 
-        var at = set * Max;
-        return CKeys.AsSpan(at, count).SequenceEqual(PKeys.AsSpan(at, count)) && CCursor.AsSpan(at, count).SequenceEqual(PCursor.AsSpan(at, count));
+        var c = Committed(set);
+        var p = _pending[set];
+        return p.Count == c.Count && p.KeySpan.SequenceEqual(c.KeySpan) && p.Cursors.AsSpan(0, p.Count).SequenceEqual(c.Cursors.AsSpan(0, c.Count));
     }
-    public readonly long[] PKeys;
-    public readonly uint[] PCursor;
-    public readonly int[] PCount;
 
-    /// <summary>Each pending key's distance from the anchor this frame: the fill spends the enter budget nearest first.</summary>
-    public readonly double[] PDistance;
-
-    public GroupSessionState(int sets, int max)
+    /// <summary>Opens this frame's pending side: every set's keys empty and its over-count 0, until the gather writes them.</summary>
+    public void BeginFrame()
     {
-        Max = max;
-        CKeys = new long[sets * max];
-        CCursor = new uint[sets * max];
-        _cCount = new int[sets];
-        _noKeys = new int[sets];
-        PKeys = new long[sets * max];
-        PCursor = new uint[sets * max];
-        PCount = new int[sets];
-        PDistance = new double[sets * max];
+        for (var s = 0; s < _pending.Length; s++)
+        {
+            if (_pending[s].Count != 0)
+            {
+                _pending[s].Count = 0;
+            }
+
+            _pOver[s] = 0;
+        }
+
+        _pendingWritten = true;
     }
 
+    /// <summary>
+    /// <paramref name="set"/>'s pending side, emptied, with room for <paramref name="needed"/> keys: the free holder when it fits and is not four times too
+    /// large, else a new one.
+    /// </summary>
+    public HeldKeys BeginPending(int set, int needed)
+    {
+        Debug.Assert(_pendingWritten, "BeginFrame opens the pending side");
+        var h = _pending[set];
+        if (h.Capacity < needed || (h.Capacity > 64 && needed < h.Capacity / 4))
+        {
+            h = needed == 0 ? HeldKeys.Empty : new HeldKeys(CapacityFor(needed));
+            _pending[set] = h;
+        }
+        else if (h.Count != 0)
+        {
+            h.Count = 0;
+        }
+
+        return h;
+    }
+
+    /// <summary><paramref name="set"/>'s pending side with room for <paramref name="needed"/> keys, its keys kept.</summary>
+    public HeldKeys GrowPending(int set, int needed)
+    {
+        var h = _pending[set];
+        if (h.Capacity >= needed)
+        {
+            return h;
+        }
+
+        var grown = new HeldKeys(CapacityFor(needed)) { Count = h.Count };
+        h.Keys.AsSpan(0, h.Count).CopyTo(grown.Keys);
+        h.Cursors.AsSpan(0, h.Count).CopyTo(grown.Cursors);
+        _pending[set] = grown;
+        return grown;
+    }
+
+    public void SetPendingOver(int set, int over) => _pOver[set] = over;
+
+    private static int CapacityFor(int needed) => (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(InitialCapacity, needed));
+
+    /// <summary>A new session in the slot: nothing held.</summary>
     public void Clear()
     {
-        Array.Clear(_cCount);
-        Array.Clear(PCount);
+        Array.Fill(_committed, HeldKeys.Empty);
+        Array.Fill(_pending, HeldKeys.Empty);
+        Array.Clear(_cOver);
+        Array.Clear(_pOver);
+        _pendingWritten = false;
         Reset = false;
+    }
+
+    /// <summary>An unplaced frame holds what was held: the committed keys — none when the frame is a RESET, which clears the client's store.</summary>
+    public void Hold(bool reset)
+    {
+        Reset = false;
+        if (reset)
+        {
+            BeginFrame();
+            for (var s = 0; s < _pending.Length; s++)
+            {
+                BeginPending(s, 0);
+            }
+
+            return;
+        }
+
+        _pendingWritten = false;
     }
 
     /// <summary>Whether a committed key is still filling — the state as the client holds it, whatever this frame's RESET view reads.</summary>
     public bool IsFilling()
     {
-        for (var s = 0; s < _cCount.Length; s++)
+        foreach (var c in _committed)
         {
-            for (var i = 0; i < _cCount[s]; i++)
+            if (c.Cursors.AsSpan(0, c.Count).IndexOfAnyExcept(Complete) >= 0)
             {
-                if (CCursor[(s * Max) + i] != Complete)
-                {
-                    return true;
-                }
+                return true;
             }
         }
 
@@ -239,56 +392,43 @@ internal sealed class GroupSessionState
     }
 
     /// <summary>Every committed and pending key, to the hub's held set: the client's keys and the ones this frame moves to, whatever a RESET reads.</summary>
-    public void CollectKeys(PushHub hub)
+    public void CollectKeys(PushHub hub, int set)
     {
-        for (var s = 0; s < _cCount.Length; s++)
+        var c = _committed[set];
+        for (var i = 0; i < c.Count; i++)
         {
-            for (var i = 0; i < _cCount[s]; i++)
-            {
-                hub.AddWanted(s, CKeys[(s * Max) + i]);
-            }
+            hub.AddWanted(set, c.Keys[i]);
+        }
 
-            for (var i = 0; i < PCount[s]; i++)
+        var p = Pending(set);
+        if (p != c && !p.KeySpan.SequenceEqual(c.KeySpan))
+        {
+            for (var i = 0; i < p.Count; i++)
             {
-                hub.AddWanted(s, PKeys[(s * Max) + i]);
+                hub.AddWanted(set, p.Keys[i]);
             }
         }
     }
 
+    /// <summary>The frame is published: its pending sides become the committed ones, by swapping the holders.</summary>
     public void Commit()
     {
-        Array.Copy(PKeys, CKeys, PKeys.Length);
-        Array.Copy(PCursor, CCursor, PCursor.Length);
-        Array.Copy(PCount, _cCount, PCount.Length);
+        if (_pendingWritten)
+        {
+            for (var s = 0; s < _committed.Length; s++)
+            {
+                (_committed[s], _pending[s]) = (_pending[s], _committed[s]);
+                _cOver[s] = _pOver[s];
+            }
+
+            _pendingWritten = false;
+        }
+
         Reset = false;
     }
 
-    /// <summary>The cursor of <paramref name="key"/> among <paramref name="count"/> sorted keys from <paramref name="at"/>, or 0 when it is not held.</summary>
-    public static uint CursorOf(long[] keys, uint[] cursors, int at, int count, long key)
-    {
-        var lo = at;
-        var hi = at + count - 1;
-        while (lo <= hi)
-        {
-            var mid = (lo + hi) >>> 1;
-            var k = keys[mid];
-            if (k == key)
-            {
-                return cursors[mid];
-            }
-
-            if (k < key)
-            {
-                lo = mid + 1;
-            }
-            else
-            {
-                hi = mid - 1;
-            }
-        }
-
-        return 0;
-    }
+    /// <summary>A side's capacity, for the tests that a bound costs only what is held.</summary>
+    internal int CapacityForTest(int set, bool committed) => committed ? _committed[set].Capacity : _pending[set].Capacity;
 }
 
 /// <summary>A profile observer's interest in one group set, resolved: the set's index and the reach its regions are met at.</summary>

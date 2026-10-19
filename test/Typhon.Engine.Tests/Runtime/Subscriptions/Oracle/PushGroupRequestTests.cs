@@ -681,4 +681,80 @@ class PushGroupRequestTests : TestBase<PushGroupRequestTests>
             Assert.That(harness.CatalogPlan.GroupSets.Single(s => s.Name == Lists).Selector, Is.EqualTo(CatalogGroupSet.ExplicitSelector));
         });
     }
+
+    /// <summary>
+    /// The server's keys past the old ceiling (#1407): 2 000 keys chosen by SetSources and one asked by the client, held together under a bound of 2 048,
+    /// each filled and completed over frames; replaced by half of them, the other half released over frames — the client's key untouched.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-33")]
+    public void ServerKeysPastTheOldCeilingAreHeld()
+    {
+        const int serverKeys = 2000;
+        var dbe = GroupTestSchema.SetupEngine(ServiceProvider);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var k = 1; k <= serverKeys + 1; k++)
+            {
+                tx.Spawn<GroupPositionless>(GroupPositionless.Ai.Set(new ProjAi { Template = (byte)k }),
+                    GroupPositionless.Key.Set(new GroupKey { Town = 10 + k }));
+            }
+
+            tx.Commit();
+        }
+
+        using var harness = Harness(dbe, nameof(ServerKeysPastTheOldCeilingAreHeld), maxGroups: 2048);
+        var session = harness.OpenSessions(1, Profile)[0];
+        harness.Sessions.SetViewpoint(session, new Vector3D(0d, 0d, 0d));
+        var set = (uint)harness.CatalogPlan.GroupSetIndex(Lists);
+        var store = harness.Replica(session).Store;
+        var seen = new Seen();
+        Run(harness, session, 1, seen);
+
+        var keys = Enumerable.Range(11, serverKeys).Select(k => (long)k).ToArray();
+        harness.Subscriptions.Commands.Session(session).SetSources(Lists, keys);
+        Send(harness, session, 1, 10 + serverKeys + 1);
+        Run(harness, session, 8, seen);
+        Assert.Multiple(() =>
+        {
+            Assert.That(store.CompleteGroupCount, Is.EqualTo(serverKeys + 1), "every server key and the client's complete");
+            Assert.That(ShardsHeld(harness, session), Is.EqualTo(serverKeys + 1));
+            Assert.That(seen.Answers.Select(a => a.RequestId), Is.EqualTo(new ushort[] { 1 }), "the client's request answered");
+            Assert.That(harness.Subscriptions.GroupRequests.ServerKeysOverLimit, Is.Zero);
+        });
+
+        // Half of them given back: released over frames, at most the budget's a frame, the client's key kept.
+        var deferredBefore = harness.Subscriptions.Push.GroupReleasesDeferred;
+        harness.Subscriptions.Commands.Session(session).SetSources(Lists, keys[(serverKeys / 2)..]);
+        Run(harness, session, 5, seen);
+        Assert.Multiple(() =>
+        {
+            Assert.That(seen.Groups.Where(g => g.Kind == SourceStatus.GroupReleased).GroupBy(g => g.Tick).Max(g => g.Count()), Is.EqualTo(500),
+                "a budget's worth a frame");
+            Assert.That(harness.Subscriptions.Push.GroupReleasesDeferred - deferredBefore, Is.EqualTo(500), "the other 500 kept a frame");
+            Assert.That(store.CompleteGroupCount, Is.EqualTo((serverKeys / 2) + 1));
+            Assert.That(store.IsGroupComplete(set, 10 + serverKeys + 1), Is.True, "the client's key untouched");
+            Assert.That(ShardsHeld(harness, session), Is.EqualTo((serverKeys / 2) + 1));
+            Assert.That(seen.Groups.Count(g => g.Kind == SourceStatus.GroupReleased), Is.EqualTo(serverKeys / 2));
+            Assert.That(store.Anomalies, Is.Zero);
+        });
+    }
+
+    /// <summary>
+    /// A bound past the catalog's burst range (#1407): the SubscribeRequest burst stays 1 024 and the owed answers follow it, not the bound — a large bound
+    /// grows no per-session answer list.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-33")]
+    public void TheOwedAnswersFollowTheBurstNotTheBound()
+    {
+        var dbe = GroupTestSchema.SetupEngine(ServiceProvider);
+        using var harness = Harness(dbe, nameof(TheOwedAnswersFollowTheBurstNotTheBound), maxGroups: 4096);
+        var command = harness.Subscriptions.Catalog.Canonical.Commands.Single(c => c.Name == BuiltInCommands.SubscribeRequest);
+        Assert.Multiple(() =>
+        {
+            Assert.That(command.Rate.Burst, Is.EqualTo(BuiltInCommands.MaxSubscribeBurst));
+            Assert.That(harness.Subscriptions.GroupRequests.MaxOwedAnswers, Is.EqualTo(2 * BuiltInCommands.MaxSubscribeBurst));
+        });
+    }
 }

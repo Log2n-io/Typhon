@@ -192,6 +192,24 @@
       "key": "9007199254740993"
     },
     {
+      "call": "group",
+      "kind": 4,
+      "set": 0,
+      "key": "70000"
+    },
+    {
+      "call": "group",
+      "kind": 4,
+      "set": 1,
+      "key": "0"
+    },
+    {
+      "call": "group",
+      "kind": 4,
+      "set": 0,
+      "key": "4294967295"
+    },
+    {
       "call": "beginAggregate",
       "grid": 0,
       "reset": true

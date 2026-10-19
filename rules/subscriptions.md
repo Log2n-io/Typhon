@@ -514,10 +514,17 @@
 ### SUB-33: A session holds the groups its observer meets, each whole, and is told once per hold `[fatal][silent]`
   invariant ∀ session s whose Sphere observer names set S with reach r, ∀ region g of S in s's realm with key k: s comes to hold k when the distance
     from s's committed anchor to g's extent (its nearest point, 0 inside) is at most r, keeps it while that distance is at most r + S's leave margin,
-    and releases it beyond — at most MaxGroupsPerSession keys per set, the kept ones first, then the nearest (the rest counted, GroupsOverLimit)
+    and releases it beyond — at most MaxGroupsPerSession keys per set admitted, the kept ones first, then the nearest (a key on its way out, kept by
+    the release budget below, can hold it above the bound for a few frames); the rest are counted (GroupsOverLimit)
+    and the session told: GROUP_TRUNCATED{S, over} in every frame whose count of keys met and not held differs from the one the client was last told,
+    0 once none is, and again after a RESET (#1407)
+  invariant a session's group state and its per-frame group work grow with the keys it holds and the frame's member events, never with
+    MaxGroupsPerSession: a bound of 2^20 costs a session holding three keys three keys' room (#1407)
   invariant ∀ held key k, ∀ tick T: s holds { e : key_S(e) = k ∧ netId(e) < cursor(k) } — the members in ascending netId order the fill has reached
     under the enter budget — and every member once cursor(k) is Complete; the cursor is fixed before the frame's member events are decided, so an
-    event and the fill agree on every member
+    event and the fill agree on every member. A completion spends at least one unit of the enter budget, and a frame releases at most the enter
+    budget's keys — a key past it stays held, its cursor as committed, until a later frame releases it — so neither thousands of empty keys met nor
+    thousands given back at once outgrow a frame (#1407)
   invariant GROUP_COMPLETE{S, k} is published in the frame whose enters complete k, after them (SOURCES follows ENTITIES), exactly once per hold: a
     key released and met again is filled and completed again, and a RESET (a realm crossing, a teleport, a log gap) re-fills and re-completes every
     key; GROUP_RELEASED{S, k} is published with the leaves of k's members no other key and no geometry still holds
@@ -535,7 +542,9 @@
   invariant a catch-up frame decides each member's geometric side from the push log's own per-identity fold — the same entry the geometric catch-up
     emitted from — never from the events the held keys' buckets happened to file; a fill reads a member only when its projected key is the key filled
   invariant ∀ explicit set S (14 § 4): s holds the keys its client asked for with SubscribeRequest and the application allowed, and the keys a system
-    chose for it with SetSources — at most MaxGroupsPerSession, both together, kept engine-wide across a realm switch and a RESET; ∀ shared set S, s
+    chose for it with SetSources — at most MaxGroupsPerSession, both together, kept engine-wide across a realm switch and a RESET; a session's keys of
+    a set its profile no longer names are released; a session whose observer is not a Sphere holds no key — switched to one, its keys are given back
+    and its frame resets; and a realm-local slot handed to another session holds none of its last session's; ∀ shared set S, s
     holds S's one key from its first frame. Both are filled, completed and released like a region's keys
   invariant a SubscribeRequest is decided by the drain of the tick after the one that took it, once that tick's start has applied the session
     requests systems made — so a request sent right after WELCOME is decided under the profile the application's Opened handler bound, never
@@ -547,18 +556,22 @@
     handler, a set the profile does not name, key 0 or one no member's field can hold, an unknown op, the limit, Denied for a handler that throws or
     returns default), the application's from 100. A subscription still filling when the session's profile stops naming its set is answered
     NotInProfile and its key dropped. An answer is retired only by the frame that publishes it; a request past the command's rate, or past
-    GroupRequests.MaxOwedAnswers owed (twice MaxGroupsPerSession, at least 64), is an ACK RateLimited (SUB-27), never an answer; the command's rate
-    is 5 a second past a burst of MaxGroupsPerSession (5 to 1 024), so a client subscribing every key it may hold at once is taken whole
+    GroupRequests.MaxOwedAnswers owed (twice the command's burst, at least 64), is an ACK RateLimited (SUB-27), never an answer; the command's rate
+    is 5 a second past a burst of MaxGroupsPerSession clamped to 5–1 024, so a client subscribing every key it may hold at once, up to 1 024, is
+    taken whole
   never accept at Start what is not built: a set with no selector, or with two; groups on a World or ClientRegion observer; a region set named with no
     reach, or an explicit or shared one named with one; a realm-kind variant naming other explicit sets than its profile; a shared key no member's
     field can hold; a key that is not an integer, not
     [Index(AllowMultiple = true, Sparse = true)], on a Transient component (#1162), or of another signedness than its region key; an observer naming
-    an archetype with no position; more than four sets per archetype or 256 per runtime; an extent that is not an AABB2F, AABB3F, BSphere2F or BSphere3F; a declaration without MaxGroupsPerSession, or with one above 1 024
+    an archetype with no position; more than four sets per archetype or 256 per runtime; an extent that is not an AABB2F, AABB3F, BSphere2F or BSphere3F; a declaration without MaxGroupsPerSession, or with one above 1 048 576 (a rail
+    against a mistyped value, not a cost)
   scope: PushReplication.GatherGroups, PushReplication.ReadMembers, PushReplication.BuildMemberLog, PushReplication.RefreshRegions,
     PushReplication.PostPass, PushReplication.CommitGroups, PushReplication.HoldGroups, PushReplication.MergeKeyChanges, GroupSessionState,
     GroupSetCompiler.Compile, ProjectionPass, ArchetypeClusterState.GroupKeySlotMask, ArchetypeClusterState.SetDirty, FrameAssembler.AssemblePush,
     TickWriter.WriteGroupRecord, SubscriptionsRegistry.Groups, ObserverBuilder.Groups, PushReplication.AddMember, PushReplication.AddMoves,
-    PushReplication.FoldUnplacedKeys, GroupKeyMoveLog.Note, PushHub.AddUnplaced, PushHub.OrphanUnplaced, GroupRequests.Request, GroupRequests.Park, GroupRequests.DecideParked,
+    PushReplication.FoldUnplacedEntry, PushReplication.MatchHeld, PushReplication.DeferReleases, PushReplication.ResetSlot, PushReplication.DropGroups,
+    HeldKeys,
+    SessionGroupRequests.MergeServerKeys, GroupKeyMoveLog.Note, PushHub.AddUnplaced, PushHub.OrphanUnplaced, GroupRequests.Request, GroupRequests.Park, GroupRequests.DecideParked,
     GroupRequests.SetServerKeys, GroupRequests.Emit, GroupRequests.Retire, SessionRequest.SetSources, BuiltInCommands.CreateSubscribeRequest,
     PushHub.PruneKeyMoves, GroupKeyMoveLog.Retain, FrameAssembler.AssembleEventsOnly
   on_violation: silent on both sides. A completion sent before the last member arrives makes a client act on a town missing buildings — SWG's bot
@@ -598,7 +611,19 @@
     refusal's code, a login burst taken whole, a release, a request dropped by the close — it first caught the request decided before its profile
     was bound), PushGroupRequestTests.ARequestDrainedBeforeItsSessionsProfileIsBoundIsDecidedUnderIt (that race staged; red when the drain
     decides at once), PushGroupRequestTests.ASharedKeyOutOfItsMembersRangeIsRefused (each red
-    against its clause removed), and a
+    against its clause removed); past the old ceiling (#1407): PushGroupCapacityTests.TwoThousandTownsAreHeldWholeOverSeveralFrames (2 048 towns held,
+    filled under the budget, each completed once after its building entered, a building moving between two held towns an update, the state sized to
+    what is held), PushGroupCapacityTests.ThousandsOfEmptyTownsCompleteUnderTheEnterBudget (red without the completion's unit: 3 000 in one frame, past
+    its 8 KiB), PushGroupCapacityTests.ACatchUpPastTheOldCeilingFoldsTheWindow, PushGroupCapacityTests.AMassReleaseIsSpreadOverFramesUnderTheBudget,
+    PushGroupCapacityTests.AResetInTheMiddleOfAMassReleaseLeavesNothingHeld, PushGroupCapacityTests.ATownWaitingToBeReleasedAndMetAgainIsKept,
+    PushGroupCapacityTests.PastTheBoundTheSessionIsToldHowManyTownsItLeftOut (the level, a RESET's re-send, an unpublished frame's value carried by
+    the next, 0 once whole), PushGroupCapacityTests.AMillionKeyBoundCostsWhatIsHeld,
+    PushGroupCapacityTests.ASessionSwitchedToAWorldProfileHoldsNoneOfItsKeys (red before the fix: the keys stayed held),
+    PushGroupCapacityTests.ASessionWhoseProfileStopsNamingItsSetHoldsNoneOfItsKeys (red before #1407: the keys stayed held, a member still resolved),
+    RealmGroupTests.ASessionTakingTheRealmSlotAnotherLeftHoldsNoneOfItsKeys (red before #1407: the newcomer inherited the slot's completed keys and
+    never received the town), PushGroupRequestTests.ServerKeysPastTheOldCeilingAreHeld, PushGroupRequestTests.TheOwedAnswersFollowTheBurstNotTheBound,
+    GroupSessionStateTests (the sides' growth, swap and RESET view; the server keys' merge against the old two-pass model), PushGroupTests.ABoundAboveTheRailIsRefused;
+    and a
     refusal test for each clause of the never-accept line. Falsifiability: PushGroupTests.AKeyChangeTheProjectionNeverReadsIsDetected removes the tap from the test side and
     requires the oracle to reject the run; PushGroupShardTests.WithoutTheMoveLogAnOffDagMoveIsCaught takes the move log away and requires the leave of
     the shard the fill passed unsent to be caught. The oracle is also red when completion ignores pending members, when the positionless log is not
@@ -809,9 +834,10 @@
     with a published frame, like its geometry: a skipped frame leaves all three as they were, so its next frame carries the union of the owner groups
     changed meanwhile and every rejection the acknowledgement history still holds. They record WHICH groups and WHICH ticks, never values — the values
     are read, current, from the owner entry when SELF is written — so they are not the per-session value memory the next line forbids
-  invariant a session's held group keys and their fill cursors (SUB-33) are geometry: pending until the frame is published, committed with it, left as
-    they were by a skip; a skipped session's next frame folds the member log's entries for every key it held before or holds now, like the cells, and a
-    RESET reads the committed keys as empty so every key is filled and completed again
+  invariant a session's held group keys, their fill cursors and its count of Region keys met and not held (SUB-33) are geometry: pending until the
+    frame is published, committed with it, left as they were by a skip; a skipped session's next frame folds the member log's entries for every key it
+    held before or holds now, like the cells, and a RESET reads the committed keys as empty and the count as 0, so every key is filled and completed
+    again and the count said again
   never commit a session's geometry before the frame describing it is published — the commit is the LAST step of assembling a frame, after the encode and
     after the hand-off's release
   never encode a delta, a run-length against a previous frame, or a "changed since you last acked" set: a session that missed K frames must converge on

@@ -2447,11 +2447,12 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             scratch.Deferred = 0;
         }
 
-        // ── 5. Groups (14 § 3.8): the keys the anchor meets, their fill under what the cells left of the enter budget, the union with geometry ─────────
-        if (groups is { Length: > 0 } && HasGroups)
+        // ── 5. Groups (14 § 3.8): the keys the anchor meets, their fill under what the cells left of the enter budget, the union with geometry. A profile
+        //       that names no set any more still releases the keys the session holds ──────────────────────────────────────────────────────────────────
+        if (HasGroups && (groups is { Length: > 0 } || HoldsAnyGroup(slotIndex, session.Generation)))
         {
-            enters += GatherGroups(slotIndex, session, groups, reset, gap, tick, in aBall, oOriginX, oOriginY, oOriginZ, o, in nBall, nOriginX, nOriginY,
-                nOriginZ, d, in archetypes, scratch, enterBudget - entered, ref leaves, ref updates);
+            enters += GatherGroups(slotIndex, session, groups ?? [], reset, gap, tick, in aBall, oOriginX, oOriginY, oOriginZ, o, in nBall, nOriginX,
+                nOriginY, nOriginZ, d, in archetypes, scratch, enterBudget - entered, enterBudget, ref leaves, ref updates);
         }
 
         FoldEmptyCells(scratch);
@@ -2490,6 +2491,12 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
         var tick = _tick;
         var reset = st.NeedsReset || forceReset || (st.Anchored && CommittedAsRegion(session));
+        // Groups are a Sphere's (14 § 3.8): keys a session held under one are given back here, and the frame resets so the client drops them too.
+        if (HasGroups && DropGroups(local, session.Generation))
+        {
+            reset = true;
+        }
+
         var gap = st.Anchored && !reset ? (int)(tick - st.LastTick - 1) : 0;
         var log = Log ??= new LogTable();
         log.Clear();

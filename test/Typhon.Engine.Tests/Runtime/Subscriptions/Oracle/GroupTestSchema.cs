@@ -236,6 +236,7 @@ static class GroupTestSchema
         dbe.RegisterComponentFromAccessor<ProjAi>();
         dbe.RegisterComponentFromAccessor<ProjVitals>();
         dbe.RegisterComponentFromAccessor<ProjWallet>();
+        dbe.RegisterComponentFromAccessor<ProjVisibility>();   // ProjRock carries it: without it the rock is not cluster-backed here
         dbe.RegisterComponentFromAccessor<GroupKey>();
         dbe.RegisterComponentFromAccessor<GroupZone>();
         dbe.RegisterComponentFromAccessor<GroupDenseKey>();

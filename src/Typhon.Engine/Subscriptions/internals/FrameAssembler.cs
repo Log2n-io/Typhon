@@ -136,6 +136,15 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
     /// <summary>Group sets: one fill's members, gathered and sorted by netId.</summary>
     internal GroupFillMember[] FillMembers = new GroupFillMember[64];
 
+    /// <summary>Group sets: the current session's filling keys, in the order the fill spends the enter budget (#1407).</summary>
+    internal GroupFillOrder[] FillOrder = new GroupFillOrder[16];
+
+    /// <inheritdoc cref="FillOrder"/>
+    internal int FillOrderCount;
+
+    /// <summary>Group sets: the member-log entries of one tick and set filed under a key the current session holds, in log order.</summary>
+    internal int[] HeldMatches = new int[64];
+
     /// <summary>Explicit sets (14 § 4): the answers the current session's frame says, by their numbers, retired once it is published.</summary>
     internal readonly List<ulong> Answered = [];
 

@@ -221,6 +221,8 @@ void FrameApplier::BeginTick(std::uint32_t tick, std::uint8_t flags, std::uint32
     acks_.clear();
     sources_.clear();
     groups_.clear();
+    // A frame that threw before its end leaves its changes unmerged: they describe nothing the store now holds.
+    groupChanges_.clear();
     stats_.received = false;
     self_.BeginFrame();
     const bool reset = (flags & TickFlags::Reset) != 0;
@@ -240,6 +242,7 @@ void FrameApplier::BeginTick(std::uint32_t tick, std::uint8_t flags, std::uint32
 
         self_.Clear();
         completeGroups_.clear();
+        overLimit_.clear();
 
         // After the clear and before any record applies, so a consumer that drops its netIds here is never handed one from the refill.
         if (options_.onReset)
@@ -347,26 +350,112 @@ void FrameApplier::Source(std::uint32_t requestId, std::uint8_t status, std::uin
 void FrameApplier::Group(std::uint8_t kind, std::uint32_t set, std::int64_t key)
 {
     groups_.push_back({kind, set, key});
-    const std::pair<std::uint32_t, std::int64_t> group{set, key};
-    const auto at = std::lower_bound(completeGroups_.begin(), completeGroups_.end(), group);
-    const bool held = at != completeGroups_.end() && *at == group;
-    if (kind == SourceStatus::GroupComplete)
+    if (kind == SourceStatus::GroupTruncated)
     {
-        // Once per hold (SUB-33): a second completion with no release between is the server's inconsistency, absorbed.
-        if (held)
+        for (std::size_t i = 0; i < overLimit_.size(); i++)
         {
-            world_.anomalies++;
+            if (overLimit_[i].first == set)
+            {
+                if (key == 0)
+                {
+                    overLimit_.erase(overLimit_.begin() + static_cast<std::ptrdiff_t>(i));
+                }
+                else
+                {
+                    overLimit_[i].second = static_cast<std::uint32_t>(key);
+                }
+
+                return;
+            }
         }
-        else
+
+        if (key != 0)
         {
-            completeGroups_.insert(at, group);
+            overLimit_.push_back({set, static_cast<std::uint32_t>(key)});
+        }
+
+        return;
+    }
+
+    groupChanges_.push_back({set, key, static_cast<std::uint32_t>(groupChanges_.size()), kind});
+}
+
+// The frame's completions and releases against the groups held complete, both sorted: each key's records replayed in stream order.
+void FrameApplier::MergeGroupChanges()
+{
+    // A handful of records: each applied in stream order with one shift, cheaper than rewriting every group held.
+    if (groupChanges_.size() <= SmallGroupChangeCount)
+    {
+        for (const GroupChange& change : groupChanges_)
+        {
+            const std::pair<std::uint32_t, std::int64_t> group{change.set, change.key};
+            const auto at = std::lower_bound(completeGroups_.begin(), completeGroups_.end(), group);
+            const bool held = at != completeGroups_.end() && *at == group;
+            if (change.kind == SourceStatus::GroupComplete)
+            {
+                if (held)
+                {
+                    world_.anomalies++;
+                }
+                else
+                {
+                    completeGroups_.insert(at, group);
+                }
+            }
+            else if (held)
+            {
+                completeGroups_.erase(at);
+            }
+        }
+
+        groupChanges_.clear();
+        return;
+    }
+
+    std::sort(groupChanges_.begin(), groupChanges_.end(),
+              [](const GroupChange& a, const GroupChange& b)
+              { return a.set != b.set ? a.set < b.set : a.key != b.key ? a.key < b.key : a.order < b.order; });
+    mergedGroups_.clear();
+    std::size_t held = 0;
+    std::size_t c = 0;
+    while (c < groupChanges_.size())
+    {
+        const std::pair<std::uint32_t, std::int64_t> group{groupChanges_[c].set, groupChanges_[c].key};
+        while (held < completeGroups_.size() && completeGroups_[held] < group)
+        {
+            mergedGroups_.push_back(completeGroups_[held++]);
+        }
+
+        bool complete = held < completeGroups_.size() && completeGroups_[held] == group;
+        held += complete ? 1 : 0;
+        for (; c < groupChanges_.size() && groupChanges_[c].set == group.first && groupChanges_[c].key == group.second; c++)
+        {
+            if (groupChanges_[c].kind == SourceStatus::GroupComplete)
+            {
+                // Once per hold (SUB-33): a second completion with no release between is the server's inconsistency, absorbed.
+                world_.anomalies += complete ? 1 : 0;
+                complete = true;
+            }
+            else
+            {
+                // A group released mid-fill was never complete: nothing to remove, and nothing wrong.
+                complete = false;
+            }
+        }
+
+        if (complete)
+        {
+            mergedGroups_.push_back(group);
         }
     }
-    else if (held)
+
+    for (; held < completeGroups_.size(); held++)
     {
-        // A group released mid-fill was never complete: nothing to remove, and nothing wrong.
-        completeGroups_.erase(at);
+        mergedGroups_.push_back(completeGroups_[held]);
     }
+
+    std::swap(completeGroups_, mergedGroups_);
+    groupChanges_.clear();
 }
 
 void FrameApplier::BeginAggregate(const GridPlan& grid, bool reset)
@@ -412,6 +501,10 @@ void FrameApplier::EndTick()
 {
     target_ = Target::None;
     collection_ = nullptr;
+    if (!groupChanges_.empty())
+    {
+        MergeGroupChanges();
+    }
 }
 
 void FrameApplier::Number(const FieldPlan& field, const double* values)

@@ -39,7 +39,7 @@ stalls everybody; one that accepts whatever a client sends can be driven off its
 | `FrameBytes` | 256 KiB | Largest frame a session may be sent |
 | `FramePoolBudgetBytes` / `StatePoolBudgetBytes` | 256 MiB / 256 MiB per archetype | Native pool ceilings |
 | `IngressPoolBudgetBytes` | 64 MiB | Inbound rings, all sessions |
-| `MaxGroupsPerSession` | required with a group set | Keys a session holds per set, explicit requests and server keys together ([Groups](./groups.md)) |
+| `MaxGroupsPerSession` | required with a group set (≤ 1 048 576) | Keys a session holds per set, explicit requests and server keys together; a bound, not a reservation — a session costs the keys it holds ([Groups](./groups.md)) |
 | `ReliableEventBytes` | required with a reliable event | The reliable ring's budget; an emit past it is refused, `Emit` returning `false` ([Events](./events.md)) |
 
 ## ⚠️ Guarantees & limits

@@ -215,7 +215,8 @@ subs.Profile("player", p => p
   arrived, and `GROUP_RELEASED` when it lets go. An entity reached by the sphere and by a group is held once.
 - **Members need no position.** An archetype with no spatial field can be a member — a structure's shards, a listing — and is reached only
   through its groups; its replication state exists only while some session holds one of its keys.
-- `SubscriptionsOptions.MaxGroupsPerSession` is required once a set is declared.
+- `SubscriptionsOptions.MaxGroupsPerSession` is required once a set is declared: the most keys a session holds per set, up to 1 048 576. It
+  reserves nothing — a session costs the keys it holds — and a session meeting more Region groups than that is told how many it left out.
 
 ### Visibility: what a session may not see
 

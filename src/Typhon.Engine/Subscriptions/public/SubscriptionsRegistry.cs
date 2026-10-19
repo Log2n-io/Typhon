@@ -645,8 +645,11 @@ public sealed class SubscriptionsRegistry
     /// <summary>The most group sets a runtime declares: a key change is identified by (netId, set) in 40 bits.</summary>
     internal const int MaxGroupSets = 256;
 
-    /// <summary>The most keys a session holds per set.</summary>
-    internal const int MaxGroupsPerSessionLimit = 1024;
+    /// <summary>
+    /// The largest bound <see cref="SubscriptionsOptions.MaxGroupsPerSession"/> may name (2^20): a rail against a mistyped value, not a cost — a session's
+    /// group state costs the keys it holds (#1407).
+    /// </summary>
+    internal const int MaxGroupsPerSessionLimit = 1 << 20;
 
     /// <summary>
     /// The group refusals that need no schema (14 § 3.8): a set with no selector, an explicit or shared one (step 4.3), a set no member joins, an interest
@@ -692,15 +695,15 @@ public sealed class SubscriptionsRegistry
         if (_groupSets.Count > 0 && Options.MaxGroupsPerSession > MaxGroupsPerSessionLimit)
         {
             throw new InvalidOperationException(
-                $"SubscriptionsOptions.MaxGroupsPerSession = {Options.MaxGroupsPerSession}: at most {MaxGroupsPerSessionLimit}. Each session holds "
-                + "sets × MaxGroupsPerSession keys and cursors, committed and pending, whether it uses them or not.");
+                $"SubscriptionsOptions.MaxGroupsPerSession = {Options.MaxGroupsPerSession}: at most {MaxGroupsPerSessionLimit} — a rail against a "
+                + "mistyped value, not a cost: a session's group state costs the keys it holds.");
         }
 
         if (_groupSets.Count > 0 && Options.MaxGroupsPerSession <= 0)
         {
             throw new InvalidOperationException(
-                $"Group set '{_groupSets[0].Name}' is declared and SubscriptionsOptions.MaxGroupsPerSession is not set. It bounds the one per-session cost a "
-                + "group set has — the keys a session holds and their fill cursors — and there is no default that suits every application.");
+                $"Group set '{_groupSets[0].Name}' is declared and SubscriptionsOptions.MaxGroupsPerSession is not set. It bounds the keys a session may "
+                + "hold of a set — the application's worst case — and there is no default that suits every application.");
         }
 
         if (interests > 0 && _groupSets.Count == 0)

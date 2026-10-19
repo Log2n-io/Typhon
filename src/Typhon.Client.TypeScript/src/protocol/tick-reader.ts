@@ -60,7 +60,10 @@ export interface TickSink extends FieldSink {
   ack(seq: number, reason: number): void;
   /** A source lifecycle entry; `code` is 0 unless `status` is {@link SourceStatus.Error}. */
   source(requestId: number, status: number, code: number): void;
-  /** A group lifecycle record: {@link SourceStatus.GroupComplete} or {@link SourceStatus.GroupReleased}, the set's index, the key. */
+  /**
+   * A group lifecycle record: {@link SourceStatus.GroupComplete}, {@link SourceStatus.GroupReleased} or
+   * {@link SourceStatus.GroupTruncated}, the set's index, the key — for a truncation, the count left out.
+   */
   group(kind: number, set: number, key: bigint): void;
   /** An `AGG` block begins; with `reset`, every cell not listed is now empty. */
   beginAggregate(grid: GridPlan, reset: boolean): void;
@@ -312,14 +315,22 @@ export class TickReader {
             } else if (kind === SourceStatus.Error) {
               const requestId = r.u16();
               sink.source(requestId, kind, r.u16());
-            } else if (kind === SourceStatus.GroupComplete || kind === SourceStatus.GroupReleased) {
+            } else if (
+              kind === SourceStatus.GroupComplete ||
+              kind === SourceStatus.GroupReleased ||
+              kind === SourceStatus.GroupTruncated
+            ) {
               const set = r.varu();
               if (set >= this.plan.groupSets.length) {
                 throw malformed(`SOURCES group set ${set} is not in the catalog`);
               }
 
-              r.vari64Into(this.keyWords, 0);
-              sink.group(kind, set, bigintOf(this.keyWords[LOW_WORD]!, this.keyWords[HIGH_WORD]!, true));
+              if (kind === SourceStatus.GroupTruncated) {
+                sink.group(kind, set, BigInt(r.varu()));
+              } else {
+                r.vari64Into(this.keyWords, 0);
+                sink.group(kind, set, bigintOf(this.keyWords[LOW_WORD]!, this.keyWords[HIGH_WORD]!, true));
+              }
             } else {
               throw malformed(`SOURCES record kind ${kind} is unknown`);
             }
