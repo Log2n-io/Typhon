@@ -36,9 +36,11 @@ town while it is in or near it, with a completion signal a client can act on: on
   keys alone. It is in no realm and in no cell, and it has replication state only while some session holds a key it carries: a cluster of it gets
   a block when a held key needs one, and gives it back once unneeded for 64 ticks. A key completes only once every member has that state and has
   entered. A Versioned key on such a member may be written off the tick; the fill reads the commits' moves beside the index, so none is lost.
-- **Group keys are engine-wide, not per realm.** A positionless member belongs to no realm, so a key is one group wherever it is held: two realms
-  whose regions use key 7 — or whose sessions subscribe to it — see the same members. That is how data is shared across realms (a guild roster seen
-  from every instance); an application that wants instances isolated gives each its own keys, and an explicit set's `admit` decides who may ask.
+- **A positioned member's key is its realm's; a positionless member's is engine-wide.** A positioned member — a building with a place in a realm —
+  is held only by sessions of its own realm: one map spawned in several realms with the same keys stays isolated, each realm's town 7 holding its own
+  buildings. A positionless member belongs to no realm, so its key is one group wherever it is held: two realms whose regions use key 7 — or whose
+  sessions subscribe to it — see the same positionless members. That is how data is shared across realms (a guild roster seen from every instance);
+  an application that wants positionless data isolated gives each instance its own keys, and an explicit set's `admit` decides who may ask.
 
 ## 💻 Usage
 
