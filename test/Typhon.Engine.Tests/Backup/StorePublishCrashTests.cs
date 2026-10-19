@@ -20,7 +20,7 @@ internal sealed class StorePublishCrashTests
     [CancelAfter(60_000)]
     public void ACrashAfterAnyOperation_LeavesOldPointsIntact_AndTheNewOneCompleteOrAbsent(CrashModelKind kind)
     {
-        var image = BackupTestImages.Unclean;
+        var image = BackupTestImages.WithShortTail(BackupTestImages.Unclean);
         var crashes = 0;
         for (var k = 0; ; k++)
         {

@@ -53,18 +53,7 @@ internal sealed class PackCorruptionPropertyTests
     {
         // A small engine database, 1 full + 2 incrementals, each with a WAL tail: packs of 5 to 25 KB. The tail is each segment's first
         // 8 KiB — its real header and first records, declared size kept — so a flip sweep spends its time on coverage, not on 1 MiB decodes.
-        var unclean = BackupTestImages.Unclean;
-        _image = new BackupTestImage
-        {
-            DatabaseName = unclean.DatabaseName,
-            DatabaseId = unclean.DatabaseId,
-            CheckpointLsn = unclean.CheckpointLsn,
-            Clean = unclean.Clean,
-            FormatRevision = unclean.FormatRevision,
-            Pages = unclean.Pages,
-            WalSegments = unclean.WalSegments.Select(w => w with { Bytes = w.Bytes[..Math.Min(w.Bytes.Length, 8192)] }).ToList(),
-            BundlePath = unclean.BundlePath,
-        };
+        _image = BackupTestImages.WithShortTail(BackupTestImages.Unclean);
         _fs = new InMemorySparseFileSystem();
         _fs.CreateDirectory("/");
         _fs.CreateDirectory(Target);

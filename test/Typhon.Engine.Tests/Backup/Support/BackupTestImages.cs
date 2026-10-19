@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -157,6 +158,22 @@ internal static class BackupTestImages
             BundlePath = image.BundlePath,
         };
     }
+
+    /// <summary>
+    /// A copy of <paramref name="image"/> whose WAL segments are cut to their first <paramref name="bytes"/>: the real header and first records,
+    /// the declared size kept. For sweeps that write and decode the tail thousands of times and test its handling, not its content.
+    /// </summary>
+    public static BackupTestImage WithShortTail(BackupTestImage image, int bytes = 8192) => new()
+    {
+        DatabaseName = image.DatabaseName,
+        DatabaseId = image.DatabaseId,
+        CheckpointLsn = image.CheckpointLsn,
+        Clean = image.Clean,
+        FormatRevision = image.FormatRevision,
+        Pages = image.Pages,
+        WalSegments = image.WalSegments.Select(w => w with { Bytes = w.Bytes[..Math.Min(w.Bytes.Length, bytes)] }).ToList(),
+        BundlePath = image.BundlePath,
+    };
 
     /// <summary>The DI graph the integrity fixtures use, with the WAL inside the bundle and a small cache.</summary>
     public static ServiceProvider BuildProvider(string name, string dbDir, string walDir, bool forceCrashRecovery = false)

@@ -179,7 +179,7 @@ internal sealed class RestoreGuardTests
     [CancelAfter(60_000)]
     public void ACrashAnywhereInARestore_DeletesNothingOutsideItsStaging_AndLeavesARecognisableState(CrashModelKind kind)
     {
-        var image = BackupTestImages.Unclean;
+        var image = BackupTestImages.WithShortTail(BackupTestImages.Unclean);
         var crashes = 0;
         byte[] newData = null;
         for (var k = 0; ; k++)
@@ -252,11 +252,11 @@ internal sealed class RestoreGuardTests
         var data = fs.ReadAll(bundle + "/data");
         Assert.That(data.Length, Is.EqualTo(image.PageCount * PackFormat.PageSize), $"k={k}: data length");
         reference ??= image.Pages.SelectMany(p => p).ToArray();
-        Assert.That(data, Is.EqualTo(reference), $"k={k}: data");
+        Assert.That(data.AsSpan().SequenceEqual(reference), Is.True, $"k={k}: data");
         Assert.That(fs.FileExists(bundle + "/restore.json"), Is.True, $"k={k}: restore.json");
         foreach (var s in image.WalSegments)
         {
-            Assert.That(fs.ReadAll($"{bundle}/wal/{s.SegmentId:D16}.wal").Length, Is.EqualTo(s.SegmentSize), $"k={k}: segment {s.SegmentId}");
+            Assert.That(fs.Fingerprint($"{bundle}/wal/{s.SegmentId:D16}.wal").Length, Is.EqualTo(s.SegmentSize), $"k={k}: segment {s.SegmentId}");
         }
     }
 
