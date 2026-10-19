@@ -13,7 +13,8 @@ network — the shape of a game server, with Typhon's Subscriptions doing the re
 ## What it proves
 
 - **Replication by declaration.** The server declares what each pilot sees, sends and hears; no system writes a packet.
-- **Interest management.** A pilot holds what is within 300 m of its ship — about 70 asteroids of 5 000 — and nothing beyond.
+- **Interest management.** A pilot holds what is within 300 m of its ship — about 70 asteroids of 5 000 — and nothing beyond. Zooming out widens it
+  to 1 200 m at run time (`SetRadius`), and distance bands send the far half every 4th tick.
 - **Motion segments.** A rock drifting straight is one segment until it changes course: thousands of moving objects for a few KiB/s per client.
 - **Commands with server-side checks.** Mining names its target by netId; the server refuses one the client was never shown.
 - **Owner-only state and reliable events.** The hold and credits reach their pilot alone; "hold full" is reliable, a mined-out burst best effort.
@@ -29,5 +30,5 @@ The steps — server, the SDK into the Unity project, Play — are in the demo's
 | **Entities** | 5 000 asteroids, 8 drones, one ship per pilot |
 | **Topology** | Typhon server ↔ Unity clients over TCP |
 | **Client** | Unity 6.6, desktop player (no WebGL) |
-| **Per-client view** | 300 m sphere around the controlled ship |
-| **Typhon features** | Sphere interest, motion segments, commands, owner fields, reliable events, entity references |
+| **Per-client view** | 300 m sphere around the controlled ship, widened to 1 200 m by zooming out |
+| **Typhon features** | Sphere interest, run-time radius, distance bands, motion segments, commands, owner fields, reliable events, entity references |

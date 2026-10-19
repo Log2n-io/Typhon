@@ -111,6 +111,9 @@ namespace AsteroidField.Client
 
         public void Sell() => Send("Sell", new RecordValues { ["unused"] = FieldValue.Of(0d) });
 
+        /// <summary>How far this pilot wants to see, in metres. The server clamps it to the view's range, 300–1 200 m.</summary>
+        public void ViewRadius(float radiusM) => Send("ViewRadius", new RecordValues { ["radius"] = FieldValue.Of(radiusM) });
+
         public ValueTask DisposeAsync() => _client.DisposeAsync();
 
         private void Send(string command, RecordValues values)

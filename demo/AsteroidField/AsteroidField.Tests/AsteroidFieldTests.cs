@@ -53,6 +53,28 @@ public class AsteroidFieldTests
     }
 
     [Test]
+    public async Task ZoomingOutWidensTheViewToTheRadiusAsked()
+    {
+        const float wide = 900f;
+        using var server = StartServer();
+        await using var link = new BeltLink("127.0.0.1", server.Port);
+        await link.ConnectAsync();
+        var brain = new PilotBrain(link);
+        var world = await Until(brain, w => w.TryGetShip(w.SelfNetId, out _) && w.Asteroids.Count > 0, steer: false);
+        var near = world.Asteroids.Count;
+
+        link.ViewRadius(wide);
+        world = await Until(brain, w => Farthest(w) > wide * 0.8, steer: false);
+
+        // 2 000 rocks over the belt: nine times the area holds several times the rocks, and none past the new radius.
+        Assert.Multiple(() =>
+        {
+            Assert.That(Farthest(world), Is.LessThan(wide * 1.1), "nothing beyond the radius asked");
+            Assert.That(world.Asteroids.Count, Is.GreaterThan(near * 3), $"{near} rocks at {AsteroidServer.ViewRadiusM} m");
+        });
+    }
+
+    [Test]
     public async Task MiningFillsTheHoldTheServerSaysSoOnceAndSellingPays()
     {
         const int hold = 20;
@@ -112,6 +134,24 @@ public class AsteroidFieldTests
         link.Mine(shown);
         world = await Until(watcher, w => w.TryGetShip(w.SelfNetId, out var s) && s.Target == shown, steer: false);
         Assert.That(world.TryGetShip(world.SelfNetId, out self) && self.Target == shown, Is.True);
+    }
+
+    private static double Farthest(BeltSnapshot world)
+    {
+        if (!world.TryGetShip(world.SelfNetId, out var self))
+        {
+            return 0;
+        }
+
+        self.PositionAt(world.Tick, out var sx, out var sy);
+        var farthest = 0d;
+        foreach (var a in world.Asteroids)
+        {
+            a.PositionAt(world.Tick, out var x, out var y);
+            farthest = Math.Max(farthest, Math.Sqrt(((x - sx) * (x - sx)) + ((y - sy) * (y - sy))));
+        }
+
+        return farthest;
     }
 
     // Steps the brain (and another, so both sessions keep their commands flowing) until the condition holds on its world.

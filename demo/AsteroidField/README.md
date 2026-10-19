@@ -15,7 +15,10 @@ by tick systems, and replication is *declared* — nothing in the server sends a
 
 ## What it shows of Typhon
 
-- **Interest management** — a session holds what is within 300 m of its own ship (`Sphere(300).AroundControlled()`): about 70 asteroids of 5 000.
+- **Interest management** — a session holds what is within 300 m of its own ship (`Sphere(300, max: 1200).AroundControlled()`): about 70 asteroids
+  of 5 000. Zooming out sends a `ViewRadius` command and the server widens that session's sphere with `SetRadius`, up to 1 200 m (~1 100 asteroids);
+  the HUD's KiB/s shows what it costs. The widest radius sizes the replication cell: a session's window is at most 15 cells, so 240 m cells.
+- **Distance bands** — `.Bands(b => b.Every(4, beyond: 0.5))`: past half the radius, an entity's updates go every 4th tick.
 - **Motion segments** — an asteroid drifting straight is one segment until something changes it; the HUD's KiB/s is what keeping thousands in sync costs.
 - **Commands** — steering (latest wins, rate-limited), mining (the target is a netId; the server's `TryResolve` refuses one this client was never shown),
   selling.
@@ -40,7 +43,8 @@ by tick systems, and replication is *declared* — nothing in the server sends a
 3. **Unity**: Unity Hub → *Add project from disk* → `demo/AsteroidField/Unity` (Unity 6.6, `6000.6.6f1`). Open any scene — the default empty one does —
    and press **Play**. The client builds its scene on load (`AsteroidFieldGame.Boot`) and connects to `127.0.0.1:9300` (the `Asteroid Field` object's
    inspector changes it).
-4. **Fly**: **W/S** thrust, **A/D** turn, **left click** an asteroid to mine it (get within 60 m), **right click** to stop, **E** to sell your hold.
+4. **Fly**: **WASD** moves relative to the camera (the ship turns toward the direction you press, then thrusts), **left click** an asteroid to mine it
+   (get within 60 m), **right click** to stop, **right drag** to orbit the camera, **wheel** to zoom (zooming out widens what the server sends), **E** to sell your hold.
 5. **Company**, optional: `dotnet run -c Release --project demo/AsteroidField/AsteroidField.Bot -- --bots 5` adds five headless pilots.
 
 A **player build** (File → Build Profiles → Windows/Mac/Linux) takes `-host <name> -port <n>` on its command line.
@@ -58,7 +62,7 @@ A **player build** (File → Build Profiles → Windows/Mac/Linux) takes `-host 
 
 ## Checks
 
-- `dotnet test demo/AsteroidField/AsteroidField.Tests` — the server and `BeltLink` pilots end to end: the view, the mining loop with its reliable event
+- `dotnet test demo/AsteroidField/AsteroidField.Tests` — the server and `BeltLink` pilots end to end: the view and its widening, the mining loop with its reliable event
   and the sale, another pilot seeing the beam, a target never shown refused.
 - `python3 demo/AsteroidField/check-unity-scripts.py` — compiles the Unity scripts as Unity does (C# 9, `netstandard2.1`, against an installed editor's
   `UnityEngine` assemblies), without opening the editor. Local only: it needs Unity installed.

@@ -43,7 +43,8 @@ public sealed class ServerOptions
 /// <remarks>
 /// <para>
 /// <b>What it shows of Typhon.</b> The world is ECS data in a database, simulated by four tick systems. Replication is declared, not coded: each pilot's
-/// session holds what is within 300 m of its ship (a Sphere around the controlled entity), sees drifting asteroids as motion segments — a straight drift
+/// session holds what is within 300 m of its ship (a Sphere around the controlled entity) — up to 1 200 m when its pilot zooms out, the far half
+/// updated every 4th tick — sees drifting asteroids as motion segments — a straight drift
 /// is one segment until something changes it, so thousands of them cost almost nothing to keep in sync — and its own cargo and credits as owner-only
 /// fields. Commands come back in: steering (latest wins), mining a target the server checks the client was shown, selling. Two events go out: a burst
 /// when an asteroid is mined out (best effort, to whoever is near), and "hold full" (reliable, to the pilot only).
@@ -57,6 +58,7 @@ public sealed class AsteroidServer : IDisposable
     public const string Profile = "pilot";
     public const float WorldHalfM = 2048f;
     public const double ViewRadiusM = 300;
+    public const double MaxViewRadiusM = 1200;
     public const float MineRangeM = 60f;
     public const int DefaultHoldCapacity = 300;
     public const int CreditsPerOre = 5;
@@ -107,8 +109,9 @@ public sealed class AsteroidServer : IDisposable
             BaseTickRate = options.TickRate,
             Subscriptions = new SubscriptionsOptions
             {
-                // A third of the view radius: each session's view is delivered and swept in cells of this size.
-                ReplicationCellM = ViewRadiusM / 3,
+                // Each session's view is delivered and swept in cells of this size. A session's window is 2⌈R / c⌉ + 5 cells wide, at most 15, so
+                // the widest view a pilot can zoom out to sets it: R / 5.
+                ReplicationCellM = MaxViewRadiusM / 5,
                 IngressBytesPerSecond = 16 * 1024,
                 ReliableEventBytes = 64 * 1024,
             },
@@ -184,6 +187,11 @@ public sealed class AsteroidServer : IDisposable
             .Field(s => s.Turn, Codec.F32, "turn"));
         subs.Command<Mine>(c => c.Rate(4, 8).Field(m => m.Target, Codec.EntityRef, "target"));
         subs.Command<Sell>(c => c.Rate(2, 4).Field(s => s.Unused, Codec.U8, "unused"));
+        subs.Command<ViewRadius>(c => c
+            .Coalesce(CommandCoalesce.LatestPerSession)
+            .Rate(4, 8)
+            .Precheck(static (in v) => float.IsFinite(v.RadiusM))
+            .Field(v => v.RadiusM, Codec.F32, "radius"));
 
         subs.Event<Depleted>(e => e
             .RouteNear(d => new Vector3D(d.X, d.Y, 0d), radiusM: 400)
@@ -196,7 +204,13 @@ public sealed class AsteroidServer : IDisposable
             .Entity(c => c.Ship, "ship")
             .Field(c => c.Cargo, Codec.Exact, "cargo"));
 
-        subs.Profile(Profile, p => p.Sphere(ViewRadiusM).AroundControlled().Of<Asteroid>().Of<Ship>());
+        // 300 m to start, up to 1 200 m when the pilot zooms out (SetRadius); past half the radius an entity's updates go every 4th tick.
+        subs.Profile(Profile, p => p
+            .Sphere(ViewRadiusM, max: MaxViewRadiusM)
+            .AroundControlled()
+            .Bands(b => b.Every(4, beyond: 0.5))
+            .Of<Asteroid>()
+            .Of<Ship>());
     }
 
     // ── The world at start ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -282,7 +296,8 @@ public sealed class AsteroidServer : IDisposable
         }
     }
 
-    // Mine and sell. Mine names its target by the netId the client was shown: TryResolve refuses anything the session does not hold.
+    // Mine, sell, and the view's radius. Mine names its target by the netId the client was shown: TryResolve refuses anything the session does not
+    // hold.
     private void Orders(TickContext ctx)
     {
         var subs = ctx.Subscriptions;
@@ -320,6 +335,16 @@ public sealed class AsteroidServer : IDisposable
             pilot.Cargo = 0;
             e.Set(Ship.Pilot, in pilot);
             subs.Replicate(in e);
+        }
+
+        // The profile and the controlled ship are requested together when the pilot joins and applied together by the next tick: a session that
+        // controls its ship has the profile SetRadius checks against. Clamped, because SetRadius refuses a radius outside the profile's range.
+        foreach (ref readonly var command in subs.Commands<ViewRadius>())
+        {
+            if (_shipOf.TryGetValue(command.Session.Value, out var ship) && subs.ControlledOf(command.Session) == ship)
+            {
+                subs.SetRadius(command.Session, Math.Clamp(command.Value.RadiusM, ViewRadiusM, MaxViewRadiusM));
+            }
         }
     }
 

@@ -25,6 +25,9 @@ namespace AsteroidField.Unity
 
         public static Vector3 ToWorld(double x, double y) => new Vector3((float)x, 0f, (float)y);
 
+        // The belt is a plane on the server; a client may give it some thickness. Seeded by the netId, so every client lifts a rock alike.
+        private static float HeightOf(uint netId) => ((netId * 2654435761u) % 4001u / 4000f * 40f) - 20f;
+
         public bool TryGetShip(uint netId, out Transform ship)
         {
             ship = _ships.TryGetValue(netId, out var v) ? v.Transform : null;
@@ -54,14 +57,14 @@ namespace AsteroidField.Unity
                 }
 
                 a.PositionAt(renderTime, out var x, out var y);
-                view.MoveTowards(ToWorld(x, y), dt * Smoothing);
+                view.MoveTowards(ToWorld(x, y) + (Vector3.up * view.Height), dt * Smoothing);
 
                 // Spin is the client's own flourish (the server does not simulate it), seeded by the netId so every client spins a rock alike.
                 view.Transform.Rotate(view.Spin * dt, Space.Self);
 
                 // Brighter while ore remains; dark once nearly mined out.
                 var full = Mathf.Clamp01(a.Ore / (40f * a.Size * a.Size));
-                view.Renderer.material.color = Color.Lerp(new Color(0.25f, 0.22f, 0.2f), new Color(0.95f, 0.6f, 0.25f), full);
+                Materials.Tint(view.Renderer.material, Color.Lerp(new Color(0.25f, 0.22f, 0.2f), new Color(0.95f, 0.6f, 0.25f), full));
             }
 
             Remove(_asteroids, true);
@@ -135,10 +138,11 @@ namespace AsteroidField.Unity
             var view = new View(go.transform, go.GetComponent<Renderer>(), null)
             {
                 Spin = new Vector3(Range(random, -30, 30), Range(random, -30, 30), Range(random, -30, 30)),
+                Height = HeightOf(a.NetId),
             };
             view.Renderer.material = Materials.Make(new Color(0.6f, 0.5f, 0.4f));
             a.PositionAt(a.T0, out var x, out var y);
-            view.Transform.position = ToWorld(x, y);
+            view.Transform.position = ToWorld(x, y) + (Vector3.up * view.Height);
             return view;
         }
 
@@ -149,7 +153,7 @@ namespace AsteroidField.Unity
             go.AddComponent<MeshFilter>().sharedMesh = ShipMesh.Get();
             var renderer = go.AddComponent<MeshRenderer>();
             var color = s.NetId == _selfNetId ? new Color(0.3f, 0.9f, 1f) : s.Drone ? new Color(1f, 0.85f, 0.3f) : new Color(0.4f, 1f, 0.45f);
-            renderer.material = Materials.Make(color);
+            renderer.material = Materials.Make(color, glow: 0.4f);
 
             var beam = new GameObject("beam").AddComponent<LineRenderer>();
             beam.transform.SetParent(go.transform, false);
@@ -157,7 +161,7 @@ namespace AsteroidField.Unity
             beam.positionCount = 2;
             beam.startWidth = 0.6f;
             beam.endWidth = 0.2f;
-            beam.material = Materials.Make(new Color(1f, 0.35f, 0.2f));
+            beam.material = Materials.Make(new Color(1f, 0.35f, 0.2f), glow: 2f);
             beam.enabled = false;
 
             var view = new View(go.transform, renderer, beam);
@@ -184,6 +188,8 @@ namespace AsteroidField.Unity
             public LineRenderer Beam { get; }
 
             public Vector3 Spin { get; set; }
+
+            public float Height { get; set; }
 
             // Eases toward the target; a jump of more than a few metres (a teleport, a wrap at the belt's edge) is taken at once.
             public void MoveTowards(Vector3 target, float t)

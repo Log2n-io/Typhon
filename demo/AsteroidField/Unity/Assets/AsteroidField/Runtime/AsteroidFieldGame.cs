@@ -20,7 +20,7 @@ namespace AsteroidField.Unity
     /// the SDK's <see cref="Typhon.Client.Clock"/> says which server tick is "now" for rendering — slightly behind the newest frame, so the network's jitter
     /// never shows. A drifting asteroid is one segment for as long as it drifts straight: the HUD's bytes/s is what that costs.
     /// </para>
-    /// <para>Built from code on scene load (<see cref="Boot"/>), so any scene — even an empty one — runs the demo. Controls: W/S thrust, A/D turn, left
+    /// <para>Built from code on scene load (<see cref="Boot"/>), so any scene — even an empty one — runs the demo. Controls: WASD flies relative to the camera, left
     /// click an asteroid to mine it, right click to stop, E to sell your hold.</para>
     /// </remarks>
     public sealed class AsteroidFieldGame : MonoBehaviour
@@ -30,6 +30,9 @@ namespace AsteroidField.Unity
 
         private const int HoldCapacity = 300;
         private const float SteerPeriod = 0.05f;
+        private const float MinViewRadiusM = 300f;
+        private const float MaxViewRadiusM = 1200f;
+        private const float RadiusPeriod = 0.25f;
 
         private BeltLink _link;
         private Clock _clock;
@@ -40,6 +43,10 @@ namespace AsteroidField.Unity
         private readonly List<ReceivedEvent> _events = new List<ReceivedEvent>();
         private readonly List<string> _log = new List<string>();
         private float _steerTimer;
+        private float _radiusTimer;
+        private float _viewRadius = MinViewRadiusM;
+        private Vector2 _rightDownAt;
+        private Vector2 _rightLastAt;
         private uint _wantedTarget;
         private string _status = "connecting…";
         private long _lastBytes;
@@ -61,6 +68,7 @@ namespace AsteroidField.Unity
             Application.targetFrameRate = 120;
             _views = new EntityViews(transform);
             _camera = ChaseCamera.Create();
+            Lighting.Ensure();
             _link = new BeltLink(Host, Port);
             Connect();
         }
@@ -105,6 +113,7 @@ namespace AsteroidField.Unity
                 _camera.Follow(ship, Time.deltaTime);
             }
 
+            FollowZoomWithTheView();
             MeasureBandwidth();
         }
 
@@ -151,7 +160,7 @@ namespace AsteroidField.Unity
             if (_steerTimer >= SteerPeriod)
             {
                 _steerTimer = 0;
-                _link.Steer(Input.GetAxisRaw("Vertical"), Input.GetAxisRaw("Horizontal"));
+                SteerTowardsInput();
             }
 
             if (Input.GetMouseButtonDown(0) && _camera.Camera != null)
@@ -165,7 +174,19 @@ namespace AsteroidField.Unity
                 }
             }
 
-            if (Input.GetMouseButtonDown(1) && _wantedTarget != 0)
+            // The right button orbits the camera when dragged, and turns the beam off when clicked: what decides is how far the mouse moved.
+            if (Input.GetMouseButtonDown(1))
+            {
+                _rightDownAt = Input.mousePosition;
+                _rightLastAt = Input.mousePosition;
+            }
+            else if (Input.GetMouseButton(1))
+            {
+                var at = (Vector2)Input.mousePosition;
+                _camera.Orbit(at - _rightLastAt);
+                _rightLastAt = at;
+            }
+            else if (Input.GetMouseButtonUp(1) && ((Vector2)Input.mousePosition - _rightDownAt).sqrMagnitude < 4f * 4f && _wantedTarget != 0)
             {
                 _wantedTarget = 0;
                 _link.Mine(0);
@@ -177,6 +198,42 @@ namespace AsteroidField.Unity
                 _link.Sell();
                 Log($"sold {_world.Cargo} ore");
             }
+        }
+
+        // WASD is relative to the camera: the pressed direction on screen becomes a heading on the belt. The server flies a ship by thrust and turn, so
+        // the ship turns toward that heading and thrusts once it faces it roughly — pressing S turns it around rather than reversing.
+        private void SteerTowardsInput()
+        {
+            var input = new Vector2(Input.GetAxisRaw("Horizontal"), Input.GetAxisRaw("Vertical"));
+            if (input.sqrMagnitude < 0.01f || !_world.TryGetShip(_world.SelfNetId, out var self))
+            {
+                _link.Steer(0f, 0f);
+                return;
+            }
+
+            var wanted = (_camera.PlanarRight * input.x) + (_camera.PlanarForward * input.y);
+            var desired = Mathf.Atan2(wanted.x, wanted.z);
+            var error = Mathf.DeltaAngle((float)self.Heading * Mathf.Rad2Deg, desired * Mathf.Rad2Deg) * Mathf.Deg2Rad;
+            var turn = Mathf.Clamp(error * 2f, -1f, 1f);
+            var facing = Mathf.Cos(error);
+            var thrust = facing > 0.5f ? Mathf.Clamp01(input.magnitude) * facing : 0f;
+            _link.Steer(thrust, turn);
+        }
+
+        // The server sends what is within the view's radius; the camera decides what is on screen. Zooming out asks for a wider radius, so the belt
+        // does not end at the edge of the old one — in steps of 50 m, at most four times a second, which is what the command's rate allows.
+        private void FollowZoomWithTheView()
+        {
+            _radiusTimer -= Time.deltaTime;
+            var wanted = Mathf.Clamp(Mathf.Round(_camera.GroundReachM / 50f) * 50f, MinViewRadiusM, MaxViewRadiusM);
+            if (_radiusTimer > 0f || Mathf.Approximately(wanted, _viewRadius))
+            {
+                return;
+            }
+
+            _radiusTimer = RadiusPeriod;
+            _viewRadius = wanted;
+            _link.ViewRadius(wanted);
         }
 
         private void MeasureBandwidth()
@@ -207,13 +264,14 @@ namespace AsteroidField.Unity
             if (_world != null)
             {
                 GUILayout.Label($"server tick {_world.Tick}   render delay {(_clock != null ? _clock.RenderDelayMs : 0):F0} ms   frames {_world.Frames}");
-                GUILayout.Label($"in view: {_world.Asteroids.Count} asteroids, {_world.Ships.Count} ships   ·   {_bytesPerSecond / 1024:F1} KiB/s received");
+                GUILayout.Label($"in view ({_viewRadius:F0} m): {_world.Asteroids.Count} asteroids, {_world.Ships.Count} ships   ·   " +
+                    $"{_bytesPerSecond / 1024:F1} KiB/s received");
                 GUILayout.Label($"hold {_world.Cargo} / {HoldCapacity}   credits {_world.Credits}" +
                                 (_wantedTarget != 0 ? $"   mining {_wantedTarget}" : ""));
             }
 
             GUILayout.Space(6);
-            GUILayout.Label("W/S thrust · A/D turn · left click an asteroid: mine · right click: stop · E: sell");
+            GUILayout.Label("WASD: fly, relative to the camera · left click an asteroid: mine · right click: stop · right drag: orbit · E: sell · wheel: zoom (and view radius)");
             foreach (var line in _log)
             {
                 GUILayout.Label(line);

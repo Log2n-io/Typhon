@@ -123,6 +123,13 @@ public struct Sell
     public byte Unused;
 }
 
+/// <summary>How far this pilot wants to see, in metres: the client sends it as the camera zooms. The server clamps it to 300–1 200 m.</summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct ViewRadius
+{
+    public float RadiusM;
+}
+
 // ── What the server tells ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /// <summary>An asteroid was mined out: every client near it draws the burst. Best effort — a missed burst is a missed effect, not lost state.</summary>
