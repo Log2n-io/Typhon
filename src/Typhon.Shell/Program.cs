@@ -39,91 +39,7 @@ internal static class Program
     {
         try
         {
-            var app = new CommandApp<TSHCommand>();
-            app.Configure(config =>
-            {
-                config.SetApplicationName("typhon");
-                config.SetApplicationVersion(Version);
-
-                // Spectre's default handler prints `Error: {ex.Message}` and nothing else, so a wrapped exception loses
-                // the only sentence that says what actually happened — a repair failing on an unopenable database
-                // reported "Virtual Disk Manager initialization error, check inner exception" and then discarded the
-                // very exception it told the reader to check. Render the whole chain: the outermost message is the
-                // context, the innermost is almost always the cause and the fix.
-                config.SetExceptionHandler((ex, _) =>
-                {
-                    AnsiConsole.MarkupLine($"[red]Error:[/] {Markup.Escape(ex.Message)}");
-
-                    for (var inner = ex.InnerException; inner != null; inner = inner.InnerException)
-                    {
-                        AnsiConsole.MarkupLine($"[red]  caused by:[/] {Markup.Escape(inner.Message)}");
-                    }
-
-                    // The stack is noise for a user-facing failure and essential for an unexpected one; DEBUG is the
-                    // line the rest of this file already draws between the two.
-#if DEBUG
-                    AnsiConsole.MarkupLine($"[grey]{Markup.Escape(ex.GetType().FullName)}[/]");
-                    Console.WriteLine(ex.StackTrace);
-#endif
-                    return 10;
-                });
-
-                // `typhon ui [database]` launches the Workbench UI (#429). The REPL remains the default command,
-                // so `typhon`, `typhon <db>`, `typhon -c …` are unchanged; only the literal `ui` verb branches here.
-                config.AddCommand<UiCommand>("ui")
-                    .WithDescription("Launch the Typhon Workbench UI in your browser.")
-                    .WithExample(["ui"])
-                    .WithExample(["ui", "mydb.typhon"]);
-
-                // `typhon new <name>` scaffolds a runnable starter project (SWG Light sample + app template + a pinned
-                // Typhon package reference + config-driven profiling), so `dotnet run` writes a trace with zero edits (#532).
-                config.AddCommand<NewCommand>("new")
-                    .WithDescription("Scaffold a new Typhon starter project.")
-                    .WithExample(["new", "MyApp"]);
-
-                // `typhon docs [path]` opens the documentation site (doc.typhondb.io/latest) in the browser.
-                // `doc` is a registered alias so either singular/plural works.
-                config.AddCommand<DocsCommand>("docs")
-                    .WithAlias("doc")
-                    .WithDescription("Open the Typhon documentation in your browser.")
-                    .WithExample(["docs"])
-                    .WithExample(["docs", "guide/getting-started"]);
-
-                // `typhon check <bundle>` reports what is wrong with a database without changing a byte of it, and carries
-                // the verdict in its exit code (0 sound · 1 leaks · 2 divergent · 3 data loss · 4 unopenable · 64 scan
-                // failed) so it drops straight into cron or a CI gate. It reads the bundle as bytes with no engine, which
-                // is what lets it diagnose the database that will not open — the case that most justifies having it.
-                config.AddCommand<CheckCommand>("check")
-                    .WithDescription("Check a database's integrity and report what is wrong. Read-only.")
-                    .WithExample(["check", "game.typhon"])
-                    .WithExample(["check", "game.typhon", "--depth", "deep"])
-                    .WithExample(["check", "game.typhon", "--format", "json", "--out", "report.json"]);
-
-                // `typhon repair <bundle>` is two steps on purpose: --plan writes a reviewable description and mutates
-                // nothing, --apply re-scans and refuses if the database moved since the plan was made.
-                config.AddCommand<RepairCommand>("repair")
-                    .WithDescription("Plan and apply a repair, with an explicit account of anything it would cost.")
-                    .WithExample(["repair", "game.typhon", "--plan"])
-                    .WithExample(["repair", "game.typhon", "--apply"]);
-
-                // `typhon telemetry …` authors typhon.telemetry.json in the working directory (#522). Scriptable
-                // verbs over the source-generated flag catalog; the interactive tree lives under `edit`.
-                config.AddBranch("telemetry", tel =>
-                {
-                    tel.SetDescription("Create/update typhon.telemetry.json (telemetry gate flags).");
-                    tel.AddCommand<TelemetryListCommand>("list").WithDescription("List flags with default / explicit / effective state.");
-                    tel.AddCommand<TelemetryEnableCommand>("enable").WithDescription("Set a flag (or subtree root) explicitly on.");
-                    tel.AddCommand<TelemetryDisableCommand>("disable").WithDescription("Set a flag explicitly off.");
-                    tel.AddCommand<TelemetryTraceCommand>("trace").WithDescription("Set/clear the profiler trace output file (Typhon:Profiler:Trace).");
-                    tel.AddCommand<TelemetryLiveCommand>("live").WithDescription("Set/clear the live attach TCP port (Typhon:Profiler:Live).");
-                    tel.AddCommand<TelemetryResetCommand>("reset").WithDescription("Remove an explicit flag (back to inherit).");
-                    tel.AddCommand<TelemetryEffectiveCommand>("effective").WithDescription("Show what would actually emit.");
-                    tel.AddCommand<TelemetryPresetCommand>("preset").WithDescription("Apply a curated preset bundle.");
-                    tel.AddCommand<TelemetryEditCommand>("edit").WithDescription("Interactive tri-state tree editor (full-screen).");
-                });
-            });
-
-            return app.Run(args);
+            return BuildApp(args).Run(args);
         }
         catch (Exception ex)
         {
@@ -140,6 +56,120 @@ internal static class Program
             return 10;
         }
     }
+
+    /// <summary>The <c>typhon</c> command line, configured; <paramref name="args"/> picks the exit code of a command line Spectre cannot parse.</summary>
+    internal static CommandApp<TSHCommand> BuildApp(string[] args)
+    {
+        var app = new CommandApp<TSHCommand>();
+        app.Configure(config =>
+        {
+            config.SetApplicationName("typhon");
+            config.SetApplicationVersion(Version);
+
+            // Spectre's default handler prints `Error: {ex.Message}` and nothing else, so a wrapped exception loses
+            // the only sentence that says what actually happened — a repair failing on an unopenable database
+            // reported "Virtual Disk Manager initialization error, check inner exception" and then discarded the
+            // very exception it told the reader to check. Render the whole chain: the outermost message is the
+            // context, the innermost is almost always the cause and the fix.
+            config.SetExceptionHandler((ex, _) =>
+            {
+                AnsiConsole.MarkupLine($"[red]Error:[/] {Markup.Escape(ex.Message)}");
+
+                for (var inner = ex.InnerException; inner != null; inner = inner.InnerException)
+                {
+                    AnsiConsole.MarkupLine($"[red]  caused by:[/] {Markup.Escape(inner.Message)}");
+                }
+
+                // The stack is noise for a user-facing failure and essential for an unexpected one; DEBUG is the
+                // line the rest of this file already draws between the two.
+#if DEBUG
+                AnsiConsole.MarkupLine($"[grey]{Markup.Escape(ex.GetType().FullName)}[/]");
+                Console.WriteLine(ex.StackTrace);
+#endif
+                return ExitCodeForUnhandled(ex, args);
+            });
+
+            // `typhon ui [database]` launches the Workbench UI (#429). The REPL remains the default command,
+            // so `typhon`, `typhon <db>`, `typhon -c …` are unchanged; only the literal `ui` verb branches here.
+            config.AddCommand<UiCommand>("ui")
+                .WithDescription("Launch the Typhon Workbench UI in your browser.")
+                .WithExample(["ui"])
+                .WithExample(["ui", "mydb.typhon"]);
+
+            // `typhon new <name>` scaffolds a runnable starter project (SWG Light sample + app template + a pinned
+            // Typhon package reference + config-driven profiling), so `dotnet run` writes a trace with zero edits (#532).
+            config.AddCommand<NewCommand>("new")
+                .WithDescription("Scaffold a new Typhon starter project.")
+                .WithExample(["new", "MyApp"]);
+
+            // `typhon docs [path]` opens the documentation site (doc.typhondb.io/latest) in the browser.
+            // `doc` is a registered alias so either singular/plural works.
+            config.AddCommand<DocsCommand>("docs")
+                .WithAlias("doc")
+                .WithDescription("Open the Typhon documentation in your browser.")
+                .WithExample(["docs"])
+                .WithExample(["docs", "guide/getting-started"]);
+
+            // `typhon check <bundle>` reports what is wrong with a database without changing a byte of it, and carries
+            // the verdict in its exit code (0 sound · 1 leaks · 2 divergent · 3 data loss · 4 unopenable · 64 scan
+            // failed) so it drops straight into cron or a CI gate. It reads the bundle as bytes with no engine, which
+            // is what lets it diagnose the database that will not open — the case that most justifies having it.
+            config.AddCommand<CheckCommand>("check")
+                .WithDescription("Check a database's integrity and report what is wrong. Read-only.")
+                .WithExample(["check", "game.typhon"])
+                .WithExample(["check", "game.typhon", "--depth", "deep"])
+                .WithExample(["check", "game.typhon", "--format", "json", "--out", "report.json"]);
+
+            // `typhon repair <bundle>` is two steps on purpose: --plan writes a reviewable description and mutates
+            // nothing, --apply re-scans and refuses if the database moved since the plan was made.
+            config.AddCommand<RepairCommand>("repair")
+                .WithDescription("Plan and apply a repair, with an explicit account of anything it would cost.")
+                .WithExample(["repair", "game.typhon", "--plan"])
+                .WithExample(["repair", "game.typhon", "--apply"]);
+
+            // `typhon backup …` (#1414, design 07 §4) works on a closed database and on a backup store, with no engine: the exit code carries the
+            // outcome (0 ok · 1 warning · 2 failed · 3 store damaged · 4 refused · 64 usage), cron and CI ready like `check`.
+            config.AddBranch("backup", backup =>
+            {
+                backup.SetDescription("Back up a closed database, and list, verify, restore and watch a backup store.");
+                backup.AddCommand<BackupCreateCommand>("create").WithDescription("Back up a closed database into a store.")
+                    .WithExample(["backup", "create", "game.typhon", "--store", "/backups/game"]);
+                backup.AddCommand<BackupListCommand>("list").WithDescription("List a store's points and chains.")
+                    .WithExample(["backup", "list", "--store", "/backups/game", "--restorable"]);
+                backup.AddCommand<BackupVerifyCommand>("verify").WithDescription("Verify a store's packs and chains; the verdict is the exit code.")
+                    .WithExample(["backup", "verify", "--store", "/backups/game", "--level", "full"]);
+                backup.AddCommand<BackupRestoreCommand>("restore").WithDescription("Restore a point into a new bundle.")
+                    .WithExample(["backup", "restore", "--store", "/backups/game", "--point", "latest", "--to", "/data/restored"]);
+                backup.AddCommand<BackupStatusCommand>("status").WithDescription("A store's health per chain; the health is the exit code.")
+                    .WithExample(["backup", "status", "--store", "/backups/game"]);
+            });
+
+            // `typhon telemetry …` authors typhon.telemetry.json in the working directory (#522). Scriptable
+            // verbs over the source-generated flag catalog; the interactive tree lives under `edit`.
+            config.AddBranch("telemetry", tel =>
+            {
+                tel.SetDescription("Create/update typhon.telemetry.json (telemetry gate flags).");
+                tel.AddCommand<TelemetryListCommand>("list").WithDescription("List flags with default / explicit / effective state.");
+                tel.AddCommand<TelemetryEnableCommand>("enable").WithDescription("Set a flag (or subtree root) explicitly on.");
+                tel.AddCommand<TelemetryDisableCommand>("disable").WithDescription("Set a flag explicitly off.");
+                tel.AddCommand<TelemetryTraceCommand>("trace").WithDescription("Set/clear the profiler trace output file (Typhon:Profiler:Trace).");
+                tel.AddCommand<TelemetryLiveCommand>("live").WithDescription("Set/clear the live attach TCP port (Typhon:Profiler:Live).");
+                tel.AddCommand<TelemetryResetCommand>("reset").WithDescription("Remove an explicit flag (back to inherit).");
+                tel.AddCommand<TelemetryEffectiveCommand>("effective").WithDescription("Show what would actually emit.");
+                tel.AddCommand<TelemetryPresetCommand>("preset").WithDescription("Apply a curated preset bundle.");
+                tel.AddCommand<TelemetryEditCommand>("edit").WithDescription("Interactive tri-state tree editor (full-screen).");
+            });
+        });
+
+        return app;
+    }
+
+    /// <summary>
+    /// What the exception handler returns: a command line <c>typhon backup</c> cannot parse is a usage error (64, 07 §4) for the scripts that read its
+    /// exit codes; everything else keeps the shell's 10.
+    /// </summary>
+    internal static int ExitCodeForUnhandled(Exception ex, string[] args)
+        => ex is CommandParseException or CommandRuntimeException && args.Length > 0 && args[0] == "backup" ? BackupCli.ExitUsage : 10;
 }
 
 /// <summary>
