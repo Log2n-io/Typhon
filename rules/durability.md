@@ -3210,6 +3210,42 @@ and 11 (restore, store, WAL archiving) land with #1413 and #1418.
             ChokepointCompletenessTests.Mutant_ARawWrite_IsMissingFromTheMap and
             DataFileWriteChokepointGateTests.Mutant_AThirdWriteSite_IsReported
 
+### BKP-02: A captured point is the data file at its freeze `[silent]`
+  invariant ∀ point X that completes: ∀ p ∈ [0, N_X) held by X: X's image of p = the bytes of the data file at F_X (zeros
+            for a page never written); a full point holds every p ∈ [0, N_X); an incremental holds B_X ∪ {0, 1}, where
+            B_X ⊇ the pages written in (F_{X-1}, F_X)
+  invariant F_X is an instant with no data-file write in flight (the write gate held exclusive); N_X = the file's PHYSICAL
+            length then (the tracked size lags an async batch until its fsync); C_X is read from the meta pair copied
+            under the freeze, with the slot selection an open makes (BootstrapReader.Read over FrozenMetaPageSource)
+  requires: BKP-01, BKP-03
+  scope: BackupCapture.Freeze, BackupCapture.Scan, BackupCapture.BeforeWrite, PagedMMF.TryEnterWriteGateExclusive,
+    PagedMMF.DataFileLengthUnderGate, PagedMMF.SwapChangeMap, PagedMMF.InstallWriteHook, FrozenMetaPageSource
+  on_violation: a restore yields a data file that no crash could have produced (pages from different instants), and
+    recovery over it is unproven; a short N drops pages an async batch already wrote
+  verified: FreezeTests.FullThenIncremental_EachIsTheFileAtItsFreeze (every page of a full and of an incremental equals the
+            file read at the freeze; the incremental holds every page a write probe saw between the freezes),
+            FreezeTests.N_IsThePhysicalLength_NotTheTrackedSize (an async batch held between its write and its fsync);
+            source mutant seen red: N from the tracked size
+
+### BKP-03: Copy-before-write `[silent]`
+  invariant from F_X until the hook is uninstalled: ∀ write to p with p < N_X ∧ p in X's image set: the write is issued only
+            after Done(p) — p's pre-image read into capture memory — or after the capture aborted
+  invariant whoever sets Claimed(p) first (scanner or writer) reads p, then sets Done(p); a writer finding p claimed and
+            not done waits for Done(p), bounded (BKP-12); Done(p) never waits for the store (C8)
+  invariant the hook is uninstalled under the exclusive write gate, and only once every page is in the sink (no writer can
+            wait on the backup thread any more) or after an abort (which releases every waiter) — C7; the copy-before-write
+            slots are freed only after that uninstall
+  invariant the meta pair is copied under the freeze and pre-marked claimed ∧ done: a later meta flip never waits
+  scope: BackupCapture.BeforeWrite, BackupCapture.Scan, BackupCapture.Uninstall, BackupCapture.Abort, CbwSlotPool,
+    PagedMMF.BeforeDataFileWrite (the hook call inside the shared gate), PagedMMF.SavePages (the hook runs on the caller's
+    thread before any async write is issued)
+  on_violation: a page of the point holds bytes written after F_X while others hold bytes from before → a silently
+    corrupt point, discovered at restore
+  verified: CbwRaceTests.ScannerClaimedFirst_TheWriterWaits (scanner paused between its claim and its read while a
+            checkpoint rewrites the page), CbwRaceTests.WriterClaimedFirst_TheScannerTakesItsPreImage (a checkpoint ahead of
+            the scanner), with CbwRaceTests.Mutant_TheWriterSkipsTheClaimWait_IsReported; CbwRaceTests.Abort_ReleasesAWriterWaitingOnAClaimedPage;
+            source mutant seen red: no copy-before-write at all
+
 ### BKP-04: The tail holds every record the image can reflect, and stays reachable until copied `[fatal]`
   invariant the tail of point X = every WAL segment with lastLSN ≥ C_X plus the active one, each copied from offset 0, after
             WaitForDurable(PubF) where PubF = LastPublishedLsn sampled under the freeze; hence it holds every durable
@@ -3241,3 +3277,27 @@ and 11 (restore, store, WAL archiving) land with #1413 and #1418.
             P: WalTailCaptureTests.PointLsn_IsTheLastCommitOrFence_AndStopsAtTheFirstCorruption. Source mutants seen red:
             no flush before the copy, `>` instead of `≥`, no floor in step 8, P without fence records, no stop at the first
             corruption, ActiveSegment assigned outside the lock
+
+### BKP-07: A point that does not complete forgets no page `[silent]`
+  invariant a capture that does not complete ORs every page of its image set back into the live PageChangeMap (a full
+            capture ORs back the map it replaced) before the next freeze can detach it, so the next incremental covers
+            every page written since the last COMPLETED point's freeze; its lineage is left as it was
+  invariant an engine closed during a capture stops it first (before any drain or the final checkpoint), so the close sees
+            the merged map; a backup thread that cannot be joined makes the session's lineage untrusted
+  scope: BackupCapture.Fail, PageChangeMap.OrWith, BackupCoordinator.StopAndJoin, DatabaseEngine.DisposeCore
+  on_violation: the next incremental omits pages written before the failed freeze → a restore serves stale pages
+  verified: BackupFailurePathTests.SinkThrowsMidScan_TheNextIncrementalCoversEverything (+ Mutant_APageOfTheFailedCaptureIsMissing_IsReported),
+            BackupFailurePathTests.DisposeDuringCapture_ClosesCleanly_AndTheMapHoldsThePageSet (each phase),
+            CbwStallTests (the incremental after a stall holds the aborted set); source mutant seen red: no merge on failure
+
+### BKP-12: The engine never waits on a backup past its budget
+  invariant a data-file writer spends at most CbwStallTimeout in BackupCapture.BeforeWrite per write (the slot wait and
+            the wait for a claimed page share one deadline); past it the capture aborts and the write proceeds
+  invariant the freeze's exclusive acquire is bounded: on timeout the gate reopens and the backup fails; an uninstall that
+            cannot get the gate leaves the (inert) hook and leaks its buffers rather than freeing them under a writer
+  scope: BackupCapture.BeforeWrite, BackupCapture.Abort, DataFileWriteGate.TryEnterExclusive, CbwSlotPool
+  on_violation: a slow store (or a stuck backup thread) stalls the checkpoint → page-cache back-pressure → transactions stall
+  verified: CbwStallTests.SlotPoolExhausted_TheWriterReturnsWithinBudget_AndTheCaptureAborts [Category("Sensitive")] (two
+            slots, an undrained backup thread, more rewrites than slots: the slowest write ≤ budget + 10 ms, abort
+            CbwStall, the checkpoint advances), DataFileWriteGateTests.ExclusiveTimeout_IsBounded_AndReopensTheGate; source
+            mutant seen red: an unbounded slot wait

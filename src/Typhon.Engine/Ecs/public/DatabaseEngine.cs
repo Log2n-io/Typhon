@@ -1929,6 +1929,49 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// data pages and advances CheckpointLSN to enable WAL segment recycling.
     /// </summary>
     internal CheckpointManager CheckpointManager { get; private set; }
+
+    /// <summary>Runs this engine's online backups (#1412) and owns the session's backup lineage. Null once disposed.</summary>
+    internal BackupCoordinator BackupCoordinator { get; private set; }
+
+    /// <summary>
+    /// Why this engine cannot take a consistent backup point right now, or null when it can: its open has not completed, it is recovering, its commit
+    /// pipeline or checkpointer has stopped, or it is closing.
+    /// </summary>
+    internal string BackupRefusal()
+    {
+        if (IsDisposed || _disposeStarted)
+        {
+            return "the engine is closing.";
+        }
+
+        if (!_openCompleted || _archetypeInitIncomplete)
+        {
+            return "the database's open has not completed (InitializeArchetypes).";
+        }
+
+        if (CheckpointManager == null || CheckpointManager.RecoveryInProgress)
+        {
+            return "crash recovery is in progress.";
+        }
+
+        if (CommitPipelineFailure != null)
+        {
+            return "the commit pipeline has stopped; the next open recovers.";
+        }
+
+        if (CheckpointManager.HasFatalError)
+        {
+            return "the checkpointer has stopped on a fatal error.";
+        }
+
+        return null;
+    }
+
+    /// <summary>Set by the first <see cref="InitializeArchetypes"/> that completes: the database's open is done.</summary>
+    private bool _openCompleted;
+
+    /// <summary>Set at the start of <see cref="DisposeCore"/>.</summary>
+    private volatile bool _disposeStarted;
     internal StatisticsWorker StatisticsWorker { get; private set; }
 
     /// <summary>
@@ -2054,6 +2097,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         InitializeWalManager();
         InitializeCheckpointManager();
+        BackupCoordinator = new BackupCoordinator(this, _durabilityNode, Logger);
         InitializeStatisticsWorker();
 
         _constructed = true;
@@ -2218,6 +2262,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             StatisticsWorker?.Dispose();
             StatisticsWorker = null;
 
+            // A running backup is abandoned before anything else: its failure path merges its page set back into the live change map, releases the WAL
+            // reclaim floor and removes its copy-before-write hook, so the final cycle and the close below see an engine with no capture (BKP-07).
+            _disposeStarted = true;
+            BackupCoordinator?.StopAndJoin(TimeSpan.FromSeconds(10));
+
             Logger?.LogInformation("Engine disposing: CheckpointManager");
             // An open that did not complete closes as a crash (CS-04): no final cycle either. It would flush the half-built session's pages and, with the
             // SPI hook armed, persist its half-built archetype table — #1147 again, through the checkpoint.
@@ -2316,6 +2365,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     MarkCleanShutdown(WriteChunkSummary());
                 }
             }
+
+            BackupCoordinator?.Dispose();
+            BackupCoordinator = null;
 
             Logger?.LogInformation("Engine disposing: WalManager");
             WalManager?.Dispose();
@@ -4446,6 +4498,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
 
         _archetypeInitIncomplete = false;
+        _openCompleted = true;
 
         // A crash open that sealed cleared it; one that did not recover (nothing in the window) clears it here (CK-08).
         if (CheckpointManager != null)

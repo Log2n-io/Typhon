@@ -127,6 +127,7 @@ public class DataFileWriteGateTests
     /// <summary>BKP-12, the freezer's half: an acquire that cannot drain gives up within its budget and leaves the gate open for writers.</summary>
     [Test]
     [CancelAfter(5_000)]
+    [VerifiesRule("BKP-12")]
     public void ExclusiveTimeout_IsBounded_AndReopensTheGate()
     {
         var gate = new DataFileWriteGate();

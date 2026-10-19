@@ -466,6 +466,59 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>Test hook: invoked with <c>(firstPage, count)</c> inside the write gate, after the change-map update, before each data-file write is
     /// issued. Null in production.</summary>
     internal Action<int, int> DataFileWriteProbe { get; set; }
+
+    /// <summary>
+    /// Takes the write gate exclusive: waits for the data-file writes in flight, holds new ones back. <c>false</c> after
+    /// <paramref name="acquireTimeout"/>, the gate reopened. The caller must not hold the gate shared, nor any lock a writer may wait on.
+    /// </summary>
+    internal bool TryEnterWriteGateExclusive(TimeSpan acquireTimeout) => _writeGate.TryEnterExclusive(acquireTimeout);
+
+    /// <summary>Releases the write gate taken by <see cref="TryEnterWriteGateExclusive"/>; everything stored before it is visible to later writers.</summary>
+    internal void ExitWriteGateExclusive() => _writeGate.ExitExclusive();
+
+    /// <summary>Replaces the live change map with <paramref name="fresh"/> and returns the one it replaces. Only under the write gate held exclusive.</summary>
+    internal PageChangeMap SwapChangeMap(PageChangeMap fresh)
+    {
+        Debug.Assert(_writeGate.IsExclusiveHeldByCurrentThread, "the change map is swapped only under the exclusive write gate");
+        var old = _changeMap;
+        Volatile.Write(ref _changeMap, fresh);
+        return old;
+    }
+
+    /// <summary>Installs (or, with null, removes) the copy-before-write hook. Only under the write gate held exclusive.</summary>
+    internal void InstallWriteHook(IDataFileWriteHook hook)
+    {
+        Debug.Assert(_writeGate.IsExclusiveHeldByCurrentThread, "the write hook is installed only under the exclusive write gate");
+        Volatile.Write(ref _writeHook, hook);
+    }
+
+    /// <summary>
+    /// The data file's physical length. Read under the exclusive write gate it is stable and exact: no write is in flight, while the tracked
+    /// <see cref="FileSize"/> lags an async batch until its fsync.
+    /// </summary>
+    internal long DataFileLengthUnderGate()
+    {
+        Debug.Assert(_writeGate.IsExclusiveHeldByCurrentThread, "the physical length is read under the exclusive write gate");
+        return RandomAccess.GetLength(_fileHandle);
+    }
+
+    /// <summary>Reads data-file bytes at <paramref name="offset"/>; returns how many were read (fewer past the end of the file).</summary>
+    internal int ReadDataFile(long offset, Span<byte> destination)
+    {
+        var total = 0;
+        while (total < destination.Length)
+        {
+            var n = RandomAccess.Read(_fileHandle, destination[total..], offset + total);
+            if (n == 0)
+            {
+                break;
+            }
+
+            total += n;
+        }
+
+        return total;
+    }
     private string _lockFilePath;
     private readonly IPageCacheBackpressureStrategy _backpressureStrategy;
 
