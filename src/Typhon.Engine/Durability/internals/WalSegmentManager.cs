@@ -21,6 +21,18 @@ internal sealed class WalSegmentContext : IDisposable
     /// <summary>Current write offset within the segment (starts at <see cref="WalSegmentHeader.SizeInBytes"/>).</summary>
     public long WriteOffset { get; internal set; }
 
+    private long _batchEndOffset = WalSegmentHeader.SizeInBytes;
+
+    /// <summary>
+    /// <see cref="WriteOffset"/> as of the last batch written whole, published by <see cref="CompleteBatch"/> before the durable LSN moves over it. A batch
+    /// larger than the staging buffer is written in several slices, cut anywhere in a chunk, and <see cref="WriteOffset"/> advances per slice: a reader
+    /// that must never end inside a batch (a backup's tail, BKP-04) reads this instead.
+    /// </summary>
+    public long BatchEndOffset => Volatile.Read(ref _batchEndOffset);
+
+    /// <summary>Called by the WAL writer once a batch is wholly written, before it advances the durable LSN over it.</summary>
+    internal void CompleteBatch() => Volatile.Write(ref _batchEndOffset, WriteOffset);
+
     /// <summary>Segment identifier.</summary>
     public long SegmentId { get; internal set; }
 
@@ -548,8 +560,9 @@ internal sealed class WalSegmentManager : IDisposable
 
     /// <summary>
     /// The segments an online backup's tail may need, read in one step under the list lock (BKP-04, CK-07): every sealed segment, then the active one,
-    /// in ascending id. The active segment's written length is read here too; the caller reads it only after observing the durable LSN it needs, so it
-    /// covers every record up to that LSN (the writer advances the write offset before it advances the durable LSN).
+    /// in ascending id. The active segment's written length is its <see cref="WalSegmentContext.BatchEndOffset"/>: the caller reads it only after
+    /// observing the durable LSN it needs, so it covers every record up to that LSN (the writer publishes it before it advances the durable LSN), and it
+    /// never ends inside a batch written in slices. A sealed segment's is its final write offset, where a batch ended (rotation is between batches).
     /// </summary>
     internal List<WalTailSegment> SnapshotForTail()
     {
@@ -564,7 +577,7 @@ internal sealed class WalSegmentManager : IDisposable
             var active = ActiveSegment;
             if (active != null)
             {
-                result.Add(new WalTailSegment(active.SegmentId, active.Path, long.MaxValue, active.SegmentSize, active.WriteOffset, true));
+                result.Add(new WalTailSegment(active.SegmentId, active.Path, long.MaxValue, active.SegmentSize, active.BatchEndOffset, true));
             }
 
             result.Sort(static (a, b) => a.SegmentId.CompareTo(b.SegmentId));

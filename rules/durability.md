@@ -3259,13 +3259,20 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
             under the freeze (CheckpointManager.CheckpointLsn, ≤ C_X)
   invariant the segment snapshot sees the segment a rotation is sealing (CK-07: the assignment and the Add share one
             critical section)
+  invariant the active segment is copied up to its batch end (WalSegmentContext.BatchEndOffset), which the writer
+            publishes once a batch is wholly written and before the durable LSN moves over it: the copy never ends inside a
+            batch, though one larger than the staging buffer is written in slices cut anywhere in a chunk, each advancing
+            the write offset
   invariant a tail segment is restored at its header's declared size, zero-filled past the copied prefix (the reader
             scans the declared size and ignores short reads)
   invariant P_X = the highest LSN in (C_X, end of the valid prefix] recovery applies as a unit — a TxCommit marker or a
             fence record — computed by the scan RecoveryDriver.Run makes (path order, stop for good at the first
             corruption); C_X when there is none
+  invariant P is computed over the segments the copy read, read again through WalTailView (the copied length, zeros past
+            it), under the same floor: the tail is streamed to the sink, never held in managed memory
   scope: WalTailInspector.CaptureTail, WalTailInspector.SelectTail, WalTailInspector.ComputePointLsn,
-    WalTailInspector.CaptureTailOffline, CheckpointManager.SetReclaimFloor, CheckpointManager.ClearReclaimFloor
+    WalTailInspector.CaptureTailOffline, WalTailView, WalSegmentContext.CompleteBatch, WalWriter.WriteInChunks,
+    CheckpointManager.SetReclaimFloor, CheckpointManager.ClearReclaimFloor
     (read at step 8 beside the tick-fence floor), WalSegmentManager.SnapshotForTail, WalSegmentManager.RotateSegment,
     WalWriter.RequestSegmentSwitch (W2: shortens the tail, never decides its content)
   on_violation: a page reflects a transaction whose commit marker is not in the tail → recovery applies nothing of it and
@@ -3278,9 +3285,13 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
             commit published: the copy waits, then holds it), WalTailCaptureTests.SegmentEndingAtTheCheckpoint_IsInTheTail
             (+ Mutant_ATailStartingOneSegmentLate_IsReported), WalTailCaptureTests.FloorHoldsDuringTheCopy_WhileACheckpointRuns
             (a checkpoint inside the copy), SegmentSnapshotTests.SnapshotDuringARotation_SeesTheSegmentBeingSealed;
-            P: WalTailCaptureTests.PointLsn_IsTheLastCommitOrFence_AndStopsAtTheFirstCorruption. Source mutants seen red:
-            no flush before the copy, `>` instead of `≥`, no floor in step 8, P without fence records, no stop at the first
-            corruption, ActiveSegment assigned outside the lock
+            WalTailCaptureTests.ATailTakenBetweenTheSlicesOfABatch_EndsWhereTheBatchBegan (the writer held after a batch's
+            first slice), WalTailCaptureTests.TheTailCopy_MakesNoManagedCopyOfTheTail, WalTailViewTests;
+            P: WalTailCaptureTests.PointLsn_IsTheLastCommitOrFence_AndStopsAtTheFirstCorruption (and P over the stored
+            bytes = P over the live segments). Source mutants seen red: no flush before the copy, `>` instead of `≥`, no
+            floor in step 8, P without fence records, no stop at the first corruption, ActiveSegment assigned outside the
+            lock, the snapshot reading WriteOffset, a batch end published per slice, a managed copy per segment, a view
+            that reads past the copied length
   spec: rules/tla/BackupCapture.tla (S6) — TailCoversImage, NoNeededRecordReclaimed; mutants -mutant-noflush, -mutant-nofloor
 
 ### BKP-05: Opening a bundle restored from a point yields exactly that point's committed prefix `[fatal]` `[silent]`

@@ -468,6 +468,7 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
                             RecordFlushLatency(flushStart);
 
                             segment.WriteOffset += bytesToWrite;
+                            segment.CompleteBatch();
                             Interlocked.Add(ref _totalBytesWritten, bytesToWrite);
                         }
                         finally
@@ -610,6 +611,8 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
             Interlocked.Add(ref _totalBytesWritten, writeLen);
             offset += sliceLen;
         }
+
+        segment.CompleteBatch();   // only now: a reader of the batch end must never see a slice of this batch without the rest (BKP-04)
     }
 
     /// <summary>
@@ -670,6 +673,7 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
                     var writeSpan = new ReadOnlySpan<byte>(_stagingBuffer, bytesToWrite);
                     _fileIO.WriteAligned(segment.Handle, segment.WriteOffset, writeSpan);
                     segment.WriteOffset += bytesToWrite;
+                    segment.CompleteBatch();
                     Interlocked.Add(ref _totalBytesWritten, bytesToWrite);
                 }
             }
@@ -736,6 +740,7 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
                 var writeSpan = new ReadOnlySpan<byte>(_stagingBuffer, bytesToWrite);
                 _fileIO.WriteAligned(segment.Handle, segment.WriteOffset, writeSpan);
                 segment.WriteOffset += bytesToWrite;
+                segment.CompleteBatch();
                 Interlocked.Add(ref _totalBytesWritten, bytesToWrite);
             }
 

@@ -15,6 +15,7 @@ internal sealed class GatedWalFileIO : IWalFileIO
     private readonly WalFileIO _inner = new();
     private readonly ManualResetEventSlim _open = new(true);
     private volatile bool _torn;
+    private int _passes;
 
     /// <summary>Set once a record write is waiting on the gate.</summary>
     public ManualResetEventSlim WriterHeld { get; } = new(false);
@@ -22,10 +23,15 @@ internal sealed class GatedWalFileIO : IWalFileIO
     /// <summary>Where the held write lands and how long it is; set with <see cref="WriterHeld"/>.</summary>
     public (long Offset, int Length) HeldWrite { get; private set; }
 
+    /// <summary>The record writes <see cref="HoldAfter"/> let through, in order.</summary>
+    public List<(long Offset, int Length)> PassedWrites { get; } = [];
+
     /// <summary>Holds every later record write until <see cref="Release"/>.</summary>
     public void Hold()
     {
         _torn = false;
+        _passes = 0;
+        PassedWrites.Clear();
         WriterHeld.Reset();
         _open.Reset();
     }
@@ -39,6 +45,15 @@ internal sealed class GatedWalFileIO : IWalFileIO
         _torn = true;
     }
 
+    /// <summary>
+    /// Like <see cref="Hold"/>, but lets the next <paramref name="passes"/> record writes through first (recorded in <see cref="PassedWrites"/>).
+    /// </summary>
+    public void HoldAfter(int passes)
+    {
+        Hold();
+        _passes = passes;
+    }
+
     /// <summary>Lets held and later writes through.</summary>
     public void Release() => _open.Set();
 
@@ -46,7 +61,11 @@ internal sealed class GatedWalFileIO : IWalFileIO
 
     public void WriteAligned(SafeFileHandle handle, long offset, ReadOnlySpan<byte> data)
     {
-        if (offset >= WalSegmentHeader.SizeInBytes && !_open.IsSet)
+        if (offset >= WalSegmentHeader.SizeInBytes && !_open.IsSet && Interlocked.Decrement(ref _passes) >= 0)
+        {
+            PassedWrites.Add((offset, data.Length));
+        }
+        else if (offset >= WalSegmentHeader.SizeInBytes && !_open.IsSet)
         {
             if (_torn && data.Length > Block)
             {

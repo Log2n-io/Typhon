@@ -6,12 +6,17 @@ using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
-/// <summary>One WAL segment of a backup point's tail: what was copied of it, and what restore needs to recreate it.</summary>
+/// <summary>One WAL segment of a backup point's tail: how much of it was copied, and what restore needs to recreate it. The bytes went to the sink.</summary>
 /// <param name="SegmentId">The segment's id (its file is <c>{SegmentId:D16}.wal</c>).</param>
 /// <param name="FirstLsn">Its header's first LSN.</param>
 /// <param name="DeclaredSize">Its header's size. Restore recreates the file at this size, the copied prefix then zeros (C3).</param>
-/// <param name="Prefix">The copied bytes, from offset 0; a whole number of 4 KiB pages, header included.</param>
-internal readonly record struct WalTailSegmentCopy(long SegmentId, long FirstLsn, uint DeclaredSize, byte[] Prefix);
+/// <param name="CopiedBytes">The bytes copied, from offset 0; a whole number of 4 KiB pages, header included.</param>
+internal readonly record struct WalTailSegmentCopy(long SegmentId, long FirstLsn, uint DeclaredSize, long CopiedBytes);
+
+/// <summary>
+/// A tail segment's copied bytes held in memory (a stored point's), for <see cref="WalTailInspector.ComputePointLsn(IReadOnlyList{WalTailPrefix}, long)"/>.
+/// </summary>
+internal readonly record struct WalTailPrefix(long SegmentId, ReadOnlyMemory<byte> Bytes);
 
 /// <summary>What a tail copy produced.</summary>
 /// <param name="PointLsn"><c>P</c>: the highest LSN in <c>(C, end of the valid prefix]</c> recovery applies as a unit, <c>C</c> when there is none.</param>
@@ -63,8 +68,10 @@ internal static class WalTailInspector
 
     /// <summary>
     /// The online tail copy, on the backup thread right after the freeze. Waits for the WAL to be durable through <paramref name="publishedAtFreeze"/>,
-    /// snapshots the segments, copies the selected ones into <paramref name="sink"/> in 1 MiB aligned reads (calling <paramref name="serviceCbw"/>
-    /// between reads, so writers waiting on copy-before-write slots keep moving), then computes <c>P</c>. The caller holds the reclaim floor throughout.
+    /// snapshots the segments, streams the selected ones into <paramref name="sink"/> through one native 1 MiB buffer (calling
+    /// <paramref name="serviceCbw"/> between reads, so writers waiting on copy-before-write slots keep moving), then computes <c>P</c> by reading the
+    /// same segments again through a <see cref="WalTailView"/> clamped at the lengths copied: no managed copy of the tail is ever made. The caller holds
+    /// the reclaim floor throughout, which keeps every one of those segments in place for both reads.
     /// </summary>
     /// <exception cref="BackupAbortedException">The WAL did not become durable in time, or a segment could not be read.</exception>
     internal static unsafe WalTailResult CaptureTail(WalManager wal, IMemoryAllocator allocator, IResource owner, long checkpointLsn, long publishedAtFreeze,
@@ -87,23 +94,25 @@ internal static class WalTailInspector
             throw new BackupAbortedException(BackupAbortReason.WalFlushTimeout, $"the WAL did not become durable through LSN {publishedAtFreeze}.", e);
         }
 
-        // Read only after the durable LSN reached PubF: the writer advances a segment's write offset before the durable LSN, so the active segment's
-        // written length read now covers every record up to PubF. And it advances it only once the write has returned (WalWriter), so a write still in
-        // flight lies wholly at or past the length read here: the copy never reads a byte of it (C24).
+        // Read only after the durable LSN reached PubF. The active segment's length is its batch end, which the writer publishes once a batch is wholly
+        // written and before the durable LSN moves over it: it covers every record up to PubF, a batch still being written lies wholly at or past it
+        // (C24), and a batch written in slices (WalWriter.WriteInChunks) is never cut by it, though each of its slices advances the write offset.
         var selected = SelectTail(wal.SegmentManager.SnapshotForTail(), checkpointLsn);
 
         using var block = allocator.AllocatePinned("Backup.TailCopy", owner, CopyChunkBytes, false, PageAlignment);
         var buffer = new Span<byte>(block.DataAsPointer, CopyChunkBytes);
         var copies = new List<WalTailSegmentCopy>(selected.Count);
+        var copied = new Dictionary<string, long>(selected.Count);
         long total = 0;
         foreach (var segment in selected)
         {
             var copy = CopySegment(io, segment.Path, segment.SegmentId, segment.WrittenBytes, buffer, sink, serviceCbw, ct);
             copies.Add(copy);
-            total += copy.Prefix.Length;
+            copied.Add(segment.Path, copy.CopiedBytes);
+            total += copy.CopiedBytes;
         }
 
-        return new WalTailResult(ComputePointLsn(copies, checkpointLsn), copies, total);
+        return new WalTailResult(ComputePointLsn(WalTailView.OverSource(io, copied), checkpointLsn), copies, total);
     }
 
     /// <summary>
@@ -130,6 +139,7 @@ internal static class WalTailInspector
 
         valid.Sort(static (a, b) => a.Id.CompareTo(b.Id));
         var copies = new List<WalTailSegmentCopy>();
+        var copied = new Dictionary<string, long>();
         long total = 0;
         for (var i = 0; i < valid.Count; i++)
         {
@@ -141,41 +151,36 @@ internal static class WalTailInspector
 
             var copy = CopySegment(io, valid[i].Path, valid[i].Id, valid[i].Size, buffer, sink, null, ct);
             copies.Add(copy);
-            total += copy.Prefix.Length;
+            copied.Add(valid[i].Path, copy.CopiedBytes);
+            total += copy.CopiedBytes;
         }
 
-        return new WalTailResult(ComputePointLsn(copies, checkpointLsn), copies, total);
+        return new WalTailResult(ComputePointLsn(WalTailView.OverSource(io, copied), checkpointLsn), copies, total);
+    }
+
+    /// <summary><c>P</c> over a stored tail's prefixes (see <see cref="ComputePointLsn(WalTailView, long)"/>).</summary>
+    internal static long ComputePointLsn(IReadOnlyList<WalTailPrefix> segments, long checkpointLsn)
+    {
+        var prefixes = new Dictionary<string, ReadOnlyMemory<byte>>(segments.Count);
+        foreach (var segment in segments)
+        {
+            prefixes.Add(Path.Combine("tail", $"{segment.SegmentId:D16}.wal"), segment.Bytes);
+        }
+
+        return ComputePointLsn(WalTailView.OverPrefixes(prefixes), checkpointLsn);
     }
 
     /// <summary>
     /// <c>P</c> over a tail: replays the scan <c>RecoveryDriver.Run</c> makes over the restored segments (each recreated at its declared size, zeros past
-    /// the copied prefix): segments in path order, the same reader, the same record codec, and the same stop for good at the first corruption. <c>P</c> is
-    /// the highest LSN above <paramref name="checkpointLsn"/> that recovery applies as a unit — a commit marker, or a fence record, which applies without
-    /// one (C10) — and <paramref name="checkpointLsn"/> when there is none.
+    /// the copied prefix, which <paramref name="tail"/> reads as such): segments in path order, the same reader, the same record codec, and the same stop
+    /// for good at the first corruption. <c>P</c> is the highest LSN above <paramref name="checkpointLsn"/> that recovery applies as a unit — a commit
+    /// marker, or a fence record, which applies without one (C10) — and <paramref name="checkpointLsn"/> when there is none.
     /// </summary>
-    internal static long ComputePointLsn(IReadOnlyList<WalTailSegmentCopy> segments, long checkpointLsn)
+    internal static long ComputePointLsn(WalTailView tail, long checkpointLsn)
     {
         var pointLsn = checkpointLsn;
-        if (segments.Count == 0)
-        {
-            return pointLsn;
-        }
-
-        // The reader takes its bytes from an IWalFileIO; a private in-memory one holds the prefixes and reads zeros past them (C3).
-        using var io = new InMemoryWalFileIO();
-        var directory = Path.Combine(Path.GetTempPath(), "typhon-tail-inspect");
-        var paths = new List<string>(segments.Count);
-        foreach (var segment in segments)
-        {
-            var path = Path.Combine(directory, $"{segment.SegmentId:D16}.wal");
-            using var handle = io.OpenSegment(path, false);
-            io.WriteAligned(handle, 0, segment.Prefix);
-            paths.Add(path);
-        }
-
-        paths.Sort(StringComparer.Ordinal);
-        using var reader = new WalSegmentReader(io);
-        foreach (var path in paths)
+        using var reader = new WalSegmentReader(tail);
+        foreach (var path in tail.EnumerateSegmentPaths(null))
         {
             if (!reader.OpenSegment(path))
             {
@@ -222,7 +227,8 @@ internal static class WalTailInspector
             throw new BackupAbortedException(BackupAbortReason.TailUnreadable, $"WAL segment {segmentId} has an unaligned written length {length}.");
         }
 
-        var prefix = new byte[length];
+        long firstLsn = 0;
+        uint declaredSize = 0;
         SafeHandleScope handle;
         try
         {
@@ -258,19 +264,19 @@ internal static class WalTailInspector
                         throw new BackupAbortedException(BackupAbortReason.TailUnreadable, $"WAL segment {segmentId} has no valid header.");
                     }
 
-                    sink.BeginTailSegment(segmentId, header.FirstLSN, header.SegmentSize);
+                    firstLsn = header.FirstLSN;
+                    declaredSize = header.SegmentSize;
+                    sink.BeginTailSegment(segmentId, firstLsn, declaredSize);
                 }
 
                 sink.AppendTail(chunk);
-                chunk.CopyTo(prefix.AsSpan((int)offset));
                 offset += n;
                 serviceCbw?.Invoke();
             }
         }
 
         sink.EndTailSegment();
-        var head = MemoryMarshal.Read<WalSegmentHeader>(prefix);
-        return new WalTailSegmentCopy(segmentId, head.FirstLSN, head.SegmentSize, prefix);
+        return new WalTailSegmentCopy(segmentId, firstLsn, declaredSize, length);
     }
 
     private static bool TryReadHeader(IWalFileIO io, string path, Span<byte> alignedBuffer, out WalSegmentHeader header)

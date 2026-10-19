@@ -40,6 +40,7 @@ public class SegmentSnapshotTests : AllocatorTestBase
         mgr.Initialize(0, 1);
         var first = mgr.ActiveSegment.SegmentId;
         mgr.ActiveSegment.WriteOffset = 3 * 4096;   // as if the writer had written two blocks after the header
+        mgr.ActiveSegment.CompleteBatch();
 
         using var paused = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();

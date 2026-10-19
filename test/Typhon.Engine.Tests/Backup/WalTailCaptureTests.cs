@@ -111,8 +111,8 @@ class WalTailCaptureTests : TestBase<WalTailCaptureTests>
             var result = WalTailInspector.CaptureTail(wal, dbe.MemoryAllocator, AllocationResource, checkpointLsn, durable, NewSink(dbe), null, Budget,
                 CancellationToken.None);
             var copy = result.Segments.Single(s => s.SegmentId == active.SegmentId);
-            Assert.That(copy.Prefix.Length, Is.LessThanOrEqualTo(heldAt),
-                $"the copy read {copy.Prefix.Length - heldAt} byte(s) of the write in flight at {heldAt}");
+            Assert.That(copy.CopiedBytes, Is.LessThanOrEqualTo(heldAt),
+                $"the copy read {copy.CopiedBytes - heldAt} byte(s) of the write in flight at {heldAt}");
         }
         finally
         {
@@ -258,18 +258,108 @@ class WalTailCaptureTests : TestBase<WalTailCaptureTests>
         var fenceLsn = wal.DurableLsn;
         Assert.That(fenceLsn, Is.GreaterThan(svCommit), "premise: the fence wrote records after the last commit");
 
-        var result = WalTailInspector.CaptureTail(wal, dbe.MemoryAllocator, AllocationResource, checkpointLsn, wal.LastPublishedLsn, NewSink(dbe),
+        var sink = NewSink(dbe);
+        var result = WalTailInspector.CaptureTail(wal, dbe.MemoryAllocator, AllocationResource, checkpointLsn, wal.LastPublishedLsn, sink,
             null, Budget, CancellationToken.None);
         Assert.That(result.PointLsn, Is.EqualTo(fenceLsn), "a fence record applies without a commit marker: it ends P");
         Assert.That(result.Segments, Has.Count.GreaterThanOrEqualTo(2));
 
+        // P over the bytes the sink received, as a stored point holds them, is the P computed over the live segments.
+        var stored = sink.Tail.Select(s => (Id: s.SegmentId, Bytes: s.Bytes.ToArray())).ToList();
+        Assert.That(WalTailInspector.ComputePointLsn(stored.Select(s => new WalTailPrefix(s.Id, s.Bytes)).ToList(), checkpointLsn),
+            Is.EqualTo(result.PointLsn), "P over the stored tail differs from P over the live segments it was copied from");
+
         // A corruption in the FIRST segment ends recovery there for good: nothing later counts, however valid.
-        var segments = result.Segments.Select(s => s with { Prefix = (byte[])s.Prefix.Clone() }).ToList();
-        var first = segments[0];
-        Corrupt(first.Prefix);
-        var truncated = WalTailInspector.ComputePointLsn(segments, checkpointLsn);
+        Corrupt(stored[0].Bytes);
+        var truncated = WalTailInspector.ComputePointLsn(stored.Select(s => new WalTailPrefix(s.Id, s.Bytes)).ToList(), checkpointLsn);
         Assert.That(truncated, Is.LessThan(secondCommit), "records past the first corruption must not count, even in a later intact segment");
         Assert.That(truncated, Is.GreaterThanOrEqualTo(checkpointLsn));
+    }
+
+    /// <summary>
+    /// A batch larger than the staging buffer is written in slices, each advancing the write offset, cut anywhere in a chunk. A tail taken between two
+    /// slices ends where the batch began, never inside it (C24 per batch, not per write): a stored point never carries a torn chunk.
+    /// </summary>
+    [Test]
+    [CancelAfter(10_000)]
+    [VerifiesRule("BKP-04")]
+    public void ATailTakenBetweenTheSlicesOfABatch_EndsWhereTheBatchBegan()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var wal = dbe.WalManager;
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(Budget), Is.True);
+        var checkpointLsn = dbe.CheckpointManager.CheckpointLsn;
+        var durable = Commit(dbe, 5);
+        var active = wal.SegmentManager.ActiveSegment;
+
+        _gatedIo.HoldAfter(1);
+        try
+        {
+            using (var t = dbe.CreateQuickTransaction(DurabilityMode.Deferred))
+            {
+                for (var i = 0; i < 8000; i++)
+                {
+                    t.Spawn<CompAArch>(CompAArch.A.Set(new CompA(i)));
+                }
+
+                t.Commit();
+            }
+
+            wal.RequestFlush();
+            Assert.That(_gatedIo.WriterHeld.Wait(Budget), Is.True, "premise: the WAL writer is held");
+            var slice = _gatedIo.PassedWrites.Single();
+            Assert.That(slice.Length, Is.EqualTo(new WalWriterOptions().StagingBufferSize), "premise: the write let through is a batch's first slice");
+            Assert.That(wal.SegmentManager.ActiveSegment, Is.SameAs(active), "premise: no rotation");
+            Assert.That(active.WriteOffset, Is.GreaterThan(slice.Offset), "premise: the slice advanced the write offset");
+
+            var sink = NewSink(dbe);
+            var result = WalTailInspector.CaptureTail(wal, dbe.MemoryAllocator, AllocationResource, checkpointLsn, durable, sink, null, Budget,
+                CancellationToken.None);
+            var copy = result.Segments.Single(s => s.SegmentId == active.SegmentId);
+            Assert.That(copy.CopiedBytes, Is.EqualTo(slice.Offset),
+                $"the tail ends {copy.CopiedBytes - slice.Offset} byte(s) inside a batch written in slices");
+            Assert.That(result.PointLsn, Is.EqualTo(durable));
+        }
+        finally
+        {
+            _gatedIo.Release();
+        }
+    }
+
+    /// <summary>
+    /// The copy streams through one native buffer and <c>P</c> reads the source through a clamped view: the managed allocations are the segment reader's
+    /// own (one data area per segment, as recovery's), never a copy of the tail. Measured on this thread with a sink that keeps no bytes.
+    /// </summary>
+    [Test]
+    [CancelAfter(10_000)]
+    public void TheTailCopy_MakesNoManagedCopyOfTheTail()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var wal = dbe.WalManager;
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(Budget), Is.True);
+        var checkpointLsn = dbe.CheckpointManager.CheckpointLsn;
+        for (var i = 0; i < 4; i++)
+        {
+            Commit(dbe, 8000);
+        }
+
+        var selected = WalTailInspector.SelectTail(wal.SegmentManager.SnapshotForTail(), checkpointLsn);
+        var written = selected.Sum(s => s.WrittenBytes);
+        Assert.That(written, Is.GreaterThan(2L << 20), "premise: a tail of megabytes");
+        var readerOwn = selected.Sum(s => (long)s.DeclaredSize) + (256 << 10);   // per segment its header and data area; one read buffer
+
+        var sink = NewSink(dbe);
+        sink.DiscardTailBytes = true;
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        var result = WalTailInspector.CaptureTail(wal, dbe.MemoryAllocator, AllocationResource, checkpointLsn, wal.LastPublishedLsn, sink, null, Budget,
+            CancellationToken.None);
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.That(result.BytesCopied, Is.EqualTo(written), "premise: the whole tail was copied");
+        Assert.That(allocated, Is.LessThan(readerOwn + (512 << 10)),
+            $"the copy allocated {allocated - readerOwn} byte(s) beyond the segment reader's own, for a tail of {written}");
     }
 
     private static void Corrupt(byte[] prefix)

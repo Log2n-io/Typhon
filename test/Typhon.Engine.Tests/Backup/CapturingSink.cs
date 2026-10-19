@@ -176,9 +176,21 @@ internal sealed class CapturingSink : IBackupPointSink
         _openSegment = new TailSegment(segmentId, firstLsn, declaredSize);
     }
 
+    /// <summary>Counts the tail's bytes without keeping them (an allocation measurement must not see the sink's own copy).</summary>
+    public bool DiscardTailBytes { get; set; }
+
+    /// <summary>The tail bytes counted while <see cref="DiscardTailBytes"/> was set.</summary>
+    public long DiscardedTailBytes { get; private set; }
+
     public void AppendTail(ReadOnlySpan<byte> bytes)
     {
         Require(_openSegment != null, "AppendTail inside a segment");
+        if (DiscardTailBytes)
+        {
+            DiscardedTailBytes += bytes.Length;
+            return;
+        }
+
         _openSegment.Bytes.Write(bytes);
     }
 
