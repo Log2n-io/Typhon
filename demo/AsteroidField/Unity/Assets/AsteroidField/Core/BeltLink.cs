@@ -16,7 +16,9 @@ namespace AsteroidField.Client
     /// <para>
     /// <b>Why a copy.</b> <see cref="TyphonClient"/> owns its store on the thread that receives — <see cref="TyphonClient.FrameApplied"/> is the one moment
     /// it holds a whole frame, and the next frame rewrites it in place. A Unity <c>Update</c> runs on another thread at another rate, so it must never read
-    /// the store; it reads the copy. The copy is small — what one ship's 300 m view holds — and taking it is all the receive thread does here.
+    /// the store; it reads the copy. The copy holds what one ship's view holds, with the motion segments and headings render time can still reach — render
+    /// time trails the newest frame, so the newest segment is not the one to draw. Snapshots a game gives back (<see cref="Recycle"/>) are refilled, so a
+    /// steady stream allocates nothing.
     /// </para>
     /// <para>Thread-safe: <see cref="TryTakeLatest"/>, the drains and the commands may be called from any thread.</para>
     /// </remarks>
@@ -33,7 +35,13 @@ namespace AsteroidField.Client
         // so this file implements no IFieldSink — whose `scoped` parameters a C# 9 compiler (Unity's) does not know.
         private readonly EventCollector _collector = new EventCollector();
         private readonly List<ReceivedEvent> _frameEvents = new List<ReceivedEvent>();
+        private readonly Stack<BeltSnapshot> _pool = new Stack<BeltSnapshot>();
         private BeltSnapshot _latest;
+
+        // Receive thread only: each ship's recent headings (a field holds only its newest value), and how far back render time can reach.
+        private readonly Dictionary<uint, HeadingTrack> _headings = new Dictionary<uint, HeadingTrack>();
+        private readonly List<uint> _gone = new List<uint>();
+        private long _cutoff;
 
         // The fields this demo reads, resolved once per catalog (a new WELCOME can carry a new one).
         private CatalogPlan _plan;
@@ -77,6 +85,23 @@ namespace AsteroidField.Client
             }
 
             return snapshot != null;
+        }
+
+        /// <summary>Gives back a snapshot the game is done with, to be refilled for a later frame. Nothing may read it afterwards.</summary>
+        public void Recycle(BeltSnapshot snapshot)
+        {
+            if (snapshot == null)
+            {
+                return;
+            }
+
+            lock (_gate)
+            {
+                if (_pool.Count < 4)
+                {
+                    _pool.Push(snapshot);
+                }
+            }
         }
 
         /// <summary>Moves every event received since the last call into <paramref name="into"/>, in order. Entity fields hold netIds.</summary>
@@ -133,22 +158,41 @@ namespace AsteroidField.Client
         private void OnFrame(WorldStore store)
         {
             Resolve(store.Plan);
-            var snapshot = new BeltSnapshot
+            BeltSnapshot snapshot = null;
+            lock (_gate)
             {
-                Tick = store.Tick,
-                PeriodMs = store.PeriodUs / 1000.0,
-                SelfNetId = store.Self.NetId,
-                BytesReceived = _client.BytesReceived,
-                Frames = store.Frames,
-            };
+                if (_pool.Count > 0)
+                {
+                    snapshot = _pool.Pop();
+                }
+            }
+
+            snapshot ??= new BeltSnapshot();
+            snapshot.Clear();
+            snapshot.Tick = store.Tick;
+            snapshot.PeriodMs = store.PeriodUs / 1000.0;
+            snapshot.SelfNetId = store.Self.NetId;
+            snapshot.BytesReceived = _client.BytesReceived;
+            snapshot.Frames = store.Frames;
+
+            // Render time trails the newest tick by the clock's render delay, at most this many ticks; a segment or a heading superseded before it is
+            // never drawn again.
+            _cutoff = store.Tick - ((long)Math.Ceiling(SegmentRing.DefaultMaxRenderDelayMs * 1000.0 / Math.Max(1, store.PeriodUs)) + 2);
 
             _collector.TakeFrame(_frameEvents);
-            Copy(store, _asteroidPlan, snapshot.Asteroids, ship: false);
-            Copy(store, _shipPlan, snapshot.Ships, ship: true);
+            Copy(store, _asteroidPlan, snapshot, snapshot.Asteroids, ship: false);
+            Copy(store, _shipPlan, snapshot, snapshot.Ships, ship: true);
+            ForgetGoneShips(snapshot);
             ReadOwner(store.Self, snapshot);
 
             lock (_gate)
             {
+                // A frame nobody took is replaced: it was never handed out, so it is free to refill.
+                if (_latest != null && _pool.Count < 4)
+                {
+                    _pool.Push(_latest);
+                }
+
                 _latest = snapshot;
                 _arrivals.Enqueue(new FrameArrival(store.Tick, NowMs()));
                 foreach (var e in _frameEvents)
@@ -177,7 +221,7 @@ namespace AsteroidField.Client
             _drone = Field(_shipPlan, "drone");
         }
 
-        private void Copy(WorldStore store, ArchetypePlan plan, List<EntityView> into, bool ship)
+        private void Copy(WorldStore store, ArchetypePlan plan, BeltSnapshot snapshot, List<EntityView> into, bool ship)
         {
             if (plan == null)
             {
@@ -199,11 +243,13 @@ namespace AsteroidField.Client
                     Vy = velocity.Length > 1 ? velocity[1] : 0,
                     T0 = a.HeadT0(slot),
                 };
+                CopySegments(a, slot, snapshot, ref view);
                 if (ship)
                 {
                     view.Heading = Number(a, _heading, slot);
                     view.Target = (uint)Number(a, _target, slot);
                     view.Drone = Number(a, _drone, slot) != 0;
+                    CopyHeadings(store.Tick, snapshot, ref view);
                 }
                 else
                 {
@@ -212,6 +258,82 @@ namespace AsteroidField.Client
                 }
 
                 into.Add(view);
+            }
+        }
+
+        // The slot's segments, oldest first, from the one in force at the cutoff on: a steady drifter is one segment, a turning ship a handful.
+        private void CopySegments(ArchetypeStore a, int slot, BeltSnapshot snapshot, ref EntityView view)
+        {
+            var ring = a.Segments;
+            var held = ring.Held(slot);
+            view.SegmentFirst = snapshot.Segments.Count;
+            if (ring.Dims < 2 || held == 0)
+            {
+                return;
+            }
+
+            var entry = (ring.Head(slot) - held + 1 + ring.Depth) % ring.Depth;
+            for (var k = 0; k < held; k++, entry = (entry + 1) % ring.Depth)
+            {
+                var next = (entry + 1) % ring.Depth;
+                if (k < held - 1 && ring.T0(slot, next) <= _cutoff)
+                {
+                    continue;
+                }
+
+                var p = ring.Position(slot, entry);
+                var v = ring.Velocity(slot, entry);
+                snapshot.Segments.Add(new MotionSegment
+                {
+                    T0 = ring.T0(slot, entry), Epoch = ring.Epoch(slot, entry), X = p[0], Y = p[1], Vx = v[0], Vy = v[1],
+                });
+            }
+
+            view.SegmentCount = snapshot.Segments.Count - view.SegmentFirst;
+        }
+
+        // A field holds only its newest value, so the link keeps each ship's recent headings itself: drawn at render time, the nose turns with the path.
+        private void CopyHeadings(long tick, BeltSnapshot snapshot, ref EntityView view)
+        {
+            if (!_headings.TryGetValue(view.NetId, out var track))
+            {
+                track = new HeadingTrack();
+                _headings.Add(view.NetId, track);
+            }
+
+            track.SeenAt = tick;
+            var samples = track.Samples;
+            if (samples.Count == 0 || samples[samples.Count - 1].Heading != view.Heading)
+            {
+                samples.Add(new HeadingSample { Tick = tick, Heading = view.Heading });
+            }
+
+            var stale = 0;
+            while (stale < samples.Count - 1 && samples[stale + 1].Tick <= _cutoff)
+            {
+                stale++;
+            }
+
+            samples.RemoveRange(0, stale);
+            view.HeadingFirst = snapshot.Headings.Count;
+            view.HeadingCount = samples.Count;
+            snapshot.Headings.AddRange(samples);
+        }
+
+        private void ForgetGoneShips(BeltSnapshot snapshot)
+        {
+            _gone.Clear();
+            foreach (var pair in _headings)
+            {
+                if (pair.Value.SeenAt != snapshot.Tick)
+                {
+                    _gone.Add(pair.Key);
+                }
+            }
+
+            foreach (var netId in _gone)
+            {
+                _headings.Remove(netId);
             }
         }
 
@@ -247,6 +369,12 @@ namespace AsteroidField.Client
                     into.Credits = (int)value;
                 }
             }
+        }
+
+        private sealed class HeadingTrack
+        {
+            public readonly List<HeadingSample> Samples = new List<HeadingSample>();
+            public long SeenAt;
         }
 
         private static FieldPlan Field(ArchetypePlan plan, string name) => plan == null ? null : Array.Find(plan.Fields, f => f.Name == name);

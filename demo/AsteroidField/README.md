@@ -15,9 +15,10 @@ by tick systems, and replication is *declared* — nothing in the server sends a
 
 ## What it shows of Typhon
 
-- **Interest management** — a session holds what is within 300 m of its own ship (`Sphere(300, max: 1200).AroundControlled()`): about 70 asteroids
-  of 5 000. Zooming out sends a `ViewRadius` command and the server widens that session's sphere with `SetRadius`, up to 1 200 m (~1 100 asteroids);
-  the HUD's KiB/s shows what it costs. The widest radius sizes the replication cell: a session's window is at most 15 cells, so 240 m cells.
+- **Interest management** — a session holds what is within 300 m of its own ship (`Sphere(300, max: 1200).AroundControlled()`): about 80 asteroids
+  of 5 000. Zooming out sends a `ViewRadius` command — sized to the picture's farthest corner on the belt — and the server widens that session's
+  sphere with `SetRadius`, up to 1 200 m (~1 350 asteroids); the HUD shows the radius asked, the farthest asteroid held, and the KiB/s it costs. A
+  test holds a pilot's view against the server's own census, at 300 m and at 1 200 m. The widest radius sizes the replication cell: a session's window is at most 15 cells, so 240 m cells.
 - **Distance bands** — `.Bands(b => b.Every(4, beyond: 0.5))`: past half the radius, an entity's updates go every 4th tick.
 - **Motion segments** — an asteroid drifting straight is one segment until something changes it; the HUD's KiB/s is what keeping thousands in sync costs.
 - **Commands** — steering (latest wins, rate-limited), mining (the target is a netId; the server's `TryResolve` refuses one this client was never shown),
@@ -43,8 +44,9 @@ by tick systems, and replication is *declared* — nothing in the server sends a
 3. **Unity**: Unity Hub → *Add project from disk* → `demo/AsteroidField/Unity` (Unity 6.6, `6000.6.6f1`). Open any scene — the default empty one does —
    and press **Play**. The client builds its scene on load (`AsteroidFieldGame.Boot`) and connects to `127.0.0.1:9300` (the `Asteroid Field` object's
    inspector changes it).
-4. **Fly**: **WASD** moves relative to the camera (the ship turns toward the direction you press, then thrusts), **left click** an asteroid to mine it
-   (get within 60 m), **right click** to stop, **right drag** to orbit the camera, **wheel** to zoom (zooming out widens what the server sends), **E** to sell your hold.
+4. **Fly**: **WASD** moves relative to the camera (the ship turns toward the direction you press, then thrusts), **left click** an asteroid to turn the beam on
+   (it mines within 60 m) and left click again, anywhere, to turn it off, **right drag** to orbit the camera, **wheel** to zoom (zooming out widens what the server
+   sends), **E** to sell your hold. The drones work the middle of the belt, where pilots start.
 5. **Company**, optional: `dotnet run -c Release --project demo/AsteroidField/AsteroidField.Bot -- --bots 5` adds five headless pilots.
 
 A **player build** (File → Build Profiles → Windows/Mac/Linux) takes `-host <name> -port <n>` on its command line.
@@ -55,7 +57,9 @@ A **player build** (File → Build Profiles → Windows/Mac/Linux) takes `-host 
   draws, the pilot's own state, the events — into a `BeltSnapshot` there; `Update` takes the newest. No Unity object is touched off the main thread,
   and nothing on the main thread reads the SDK's store.
 - **Time.** `Typhon.Client.Clock` turns frame arrivals into a render time slightly behind the newest tick, so network jitter never shows; each entity
-  is drawn at its segment extrapolated to that time, and eased toward it when a new segment corrects it.
+  is drawn on the motion segment in force at that time — the link copies the few render time can still reach, not only the newest — and a ship's
+  nose on the heading it had then. Snapshots go back to the link once drawn and are refilled, so a steady stream allocates nothing.
+- **Camera.** An orbit rig: a pivot that follows the ship, and yaw, pitch and distance that change only when the player changes them.
 - **Events** are received through the SDK's `EventCollector`, so no Unity script implements `IFieldSink` (whose `scoped` parameters C# 9 does not have).
 - **No client-side prediction**: your own ship moves when the server says so, a render delay (≈ 150–300 ms) after your input. The honest baseline;
   prediction is a client's choice the SDK leaves to it.

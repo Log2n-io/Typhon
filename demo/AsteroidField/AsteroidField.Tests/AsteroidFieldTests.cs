@@ -1,4 +1,6 @@
 using System;
+using System.Linq;
+using System.Numerics;
 using System.Threading.Tasks;
 using AsteroidField.Bot;
 using AsteroidField.Client;
@@ -71,6 +73,34 @@ public class AsteroidFieldTests
         {
             Assert.That(Farthest(world), Is.LessThan(wide * 1.1), "nothing beyond the radius asked");
             Assert.That(world.Asteroids.Count, Is.GreaterThan(near * 3), $"{near} rocks at {AsteroidServer.ViewRadiusM} m");
+        });
+    }
+
+    // The view against the truth: every asteroid and ship the server has within the radius, less a margin for drift between the census and the frame.
+    [TestCase(300f)]
+    [TestCase(1200f)]
+    public async Task APilotHoldsEverythingWithinItsRadius(float radius)
+    {
+        using var server = AsteroidServer.Start(new ServerOptions { Port = 0, PilotSpawnRadiusM = 20f });
+        await using var link = new BeltLink("127.0.0.1", server.Port);
+        await link.ConnectAsync();
+        var brain = new PilotBrain(link);
+        var world = await Until(brain, w => w.TryGetShip(w.SelfNetId, out _) && w.Asteroids.Count > 0, steer: false);
+        link.ViewRadius(radius);
+        var settled = world.Tick + 60;
+        await Until(brain, w => w.Tick > settled, steer: false);
+
+        var census = await server.TakeCensusAsync();
+        world = brain.World;
+        var self = census.Pilots.Values.Single();
+        int Within(System.Collections.Generic.List<Vector2> all, float r) => all.Count(p => Vector2.Distance(p, self) <= r);
+
+        TestContext.Out.WriteLine($"radius {radius}: held {world.Asteroids.Count} asteroids, {world.Ships.Count} ships; "
+            + $"the server has {Within(census.Asteroids, radius)} asteroids and {Within(census.Ships, radius)} ships within it");
+        Assert.Multiple(() =>
+        {
+            Assert.That(world.Asteroids.Count, Is.InRange(Within(census.Asteroids, radius - 10f), Within(census.Asteroids, radius + 10f)), "asteroids");
+            Assert.That(world.Ships.Count, Is.InRange(Within(census.Ships, radius - 30f), Within(census.Ships, radius + 30f)), "ships");
         });
     }
 

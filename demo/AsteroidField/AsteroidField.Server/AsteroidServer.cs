@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Numerics;
+using System.Threading.Tasks;
 using Typhon.Engine;
 using Typhon.Protocol;
 using Typhon.Schema.Definition;
@@ -80,7 +81,16 @@ public sealed class AsteroidServer : IDisposable
 
     // Serial systems are the only writers of these: the tick runs them one after the other.
     private readonly Dictionary<uint, EntityId> _shipOf = [];
+
+    // A pilot's stick as last received, and the tick it came: a tick that finds no Steer (network jitter) flies on it for a few ticks instead of
+    // dropping the throttle for one.
+    private readonly Dictionary<uint, (Steer Input, long Tick)> _stickOf = [];
+    private const int StickHoldTicks = 3;
     private readonly List<EntityId> _asteroids = [];
+
+    // Tests only: the whole belt as the tick last left it, taken when a test asks, so a pilot's view can be held against the truth.
+    private volatile bool _censusWanted;
+    private volatile Census _census;
 
     private AsteroidServer(ServerOptions options)
     {
@@ -137,6 +147,19 @@ public sealed class AsteroidServer : IDisposable
     public int Depletions { get; private set; }
 
     public static AsteroidServer Start(ServerOptions options) => new(options ?? new ServerOptions());
+
+    /// <summary>Every asteroid and ship where the tick after this call leaves them. Tests only.</summary>
+    internal async Task<Census> TakeCensusAsync()
+    {
+        _census = null;
+        _censusWanted = true;
+        while (_census == null)
+        {
+            await Task.Delay(10);
+        }
+
+        return _census;
+    }
 
     public void Dispose()
     {
@@ -290,6 +313,7 @@ public sealed class AsteroidServer : IDisposable
             }
             else if (e.Kind == SessionEventKind.Closed && _shipOf.Remove(e.Session.Value, out var ship))
             {
+                _stickOf.Remove(e.Session.Value);
                 tx.Destroy(ship);
                 Pilots--;
             }
@@ -374,20 +398,29 @@ public sealed class AsteroidServer : IDisposable
                 ref var pilot = ref pilots[slot];
 
                 float thrust = 0, turn = 0;
+                var retargeted = false;
                 if (pilot.Drone != 0)
                 {
-                    Autopilot(tx, ref pilot, in body, out thrust, out turn);
+                    retargeted = Autopilot(tx, ref pilot, in body, out thrust, out turn);
                 }
-                else if (steer.TryGetLatest(SessionId.FromValue(pilot.Session), out var input))
+                else
                 {
-                    thrust = Math.Clamp(input.Value.Thrust, -1f, 1f);
-                    turn = Math.Clamp(input.Value.Turn, -1f, 1f);
+                    if (steer.TryGetLatest(SessionId.FromValue(pilot.Session), out var input))
+                    {
+                        _stickOf[pilot.Session] = (input.Value, ctx.TickNumber);
+                    }
+
+                    if (_stickOf.TryGetValue(pilot.Session, out var stick) && ctx.TickNumber - stick.Tick <= StickHoldTicks)
+                    {
+                        thrust = Math.Clamp(stick.Input.Thrust, -1f, 1f);
+                        turn = Math.Clamp(stick.Input.Turn, -1f, 1f);
+                    }
                 }
 
                 Fly(ref body, thrust, turn);
                 cluster.WriteSpatial(Ship.Body, slot, body);
 
-                if (MineTarget(tx, subs, ref pilot, in body, cluster.GetEntityId(slot)))
+                if (MineTarget(tx, subs, ref pilot, in body, cluster.GetEntityId(slot)) || retargeted)
                 {
                     subs.Replicate(in cluster, slot);
                 }
@@ -487,14 +520,15 @@ public sealed class AsteroidServer : IDisposable
     }
 
     // A drone flies to a random asteroid, mines it, and picks another; it sells on its own when full.
-    private void Autopilot(Transaction tx, ref Pilot pilot, in Body body, out float thrust, out float turn)
+    // Returns whether the drone picked a new target, which every pilot near it draws as its beam.
+    private bool Autopilot(Transaction tx, ref Pilot pilot, in Body body, out float thrust, out float turn)
     {
         thrust = 0;
         turn = 0;
         if (pilot.Target.IsNull || !tx.TryOpen(pilot.Target, out var target))
         {
-            pilot.Target = _asteroids[_random.Next(_asteroids.Count)];
-            return;
+            pilot.Target = NextDroneTarget(tx);
+            return true;
         }
 
         var to = Center(target.Read(Asteroid.Body).Bounds) - Center(in body.Bounds);
@@ -503,6 +537,30 @@ public sealed class AsteroidServer : IDisposable
         var error = WrapAngle(wanted - body.Angle);
         turn = Math.Clamp(error * 2f, -1f, 1f);
         thrust = distance > MineRangeM * 0.6f && MathF.Abs(error) < 0.6f ? Math.Clamp(distance / 200f, 0.2f, 1f) : -0.2f;
+        return false;
+    }
+
+    // Drones work the middle of the belt, where pilots start: the rock nearest the centre of a few drawn at random. Any rock at all would scatter them
+    // over the whole 4 km belt, and a pilot would hardly ever meet one.
+    private EntityId NextDroneTarget(Transaction tx)
+    {
+        var best = _asteroids[_random.Next(_asteroids.Count)];
+        var bestDistance = float.MaxValue;
+        for (var draw = 0; draw < 8; draw++)
+        {
+            var candidate = _asteroids[_random.Next(_asteroids.Count)];
+            if (tx.TryOpen(candidate, out var rock))
+            {
+                var distance = Center(rock.Read(Asteroid.Body).Bounds).Length();
+                if (distance < bestDistance)
+                {
+                    best = candidate;
+                    bestDistance = distance;
+                }
+            }
+        }
+
+        return best;
     }
 
     // Asteroids drift; one that leaves the belt comes back on the other side.
@@ -530,6 +588,45 @@ public sealed class AsteroidServer : IDisposable
                 cluster.WriteSpatial(Asteroid.Body, slot, body);
             }
         }
+
+        if (_censusWanted)
+        {
+            _censusWanted = false;
+            _census = TakeCensus(tx);
+        }
+    }
+
+    private static Census TakeCensus(Transaction tx)
+    {
+        var asteroids = new List<Vector2>();
+        foreach (var cluster in tx.For<Asteroid>().GetClusterEnumerator())
+        {
+            var bodies = cluster.GetReadOnlySpan(Asteroid.Body);
+            for (var occupancy = cluster.OccupancyBits; occupancy != 0; occupancy &= occupancy - 1)
+            {
+                asteroids.Add(Center(in bodies[BitOperations.TrailingZeroCount(occupancy)].Bounds));
+            }
+        }
+
+        var ships = new List<Vector2>();
+        var pilots = new Dictionary<uint, Vector2>();
+        foreach (var cluster in tx.For<Ship>().GetClusterEnumerator())
+        {
+            var bodies = cluster.GetReadOnlySpan(Ship.Body);
+            var crews = cluster.GetReadOnlySpan(Ship.Pilot);
+            for (var occupancy = cluster.OccupancyBits; occupancy != 0; occupancy &= occupancy - 1)
+            {
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                var at = Center(in bodies[slot].Bounds);
+                ships.Add(at);
+                if (crews[slot].Drone == 0)
+                {
+                    pilots[crews[slot].Session] = at;
+                }
+            }
+        }
+
+        return new Census(asteroids, ships, pilots);
     }
 
     private static Vector2 Wrap(Vector2 at)
@@ -553,3 +650,6 @@ public sealed class AsteroidServer : IDisposable
         return a;
     }
 }
+
+/// <summary>The belt at one tick: every asteroid and ship, and each pilot's ship by its session. Tests only.</summary>
+internal sealed record Census(List<Vector2> Asteroids, List<Vector2> Ships, Dictionary<uint, Vector2> Pilots);

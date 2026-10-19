@@ -29,10 +29,12 @@ namespace AsteroidField.Unity
         public int Port = 9300;
 
         private const int HoldCapacity = 300;
-        private const float SteerPeriod = 0.05f;
+        private const float SteerPeriod = 0.04f;
+        private const float RadiusRefreshSeconds = 2f;
         private const float MinViewRadiusM = 300f;
         private const float MaxViewRadiusM = 1200f;
         private const float RadiusPeriod = 0.25f;
+        private const float AimSettleSeconds = 1f;
 
         private BeltLink _link;
         private Clock _clock;
@@ -44,10 +46,12 @@ namespace AsteroidField.Unity
         private readonly List<string> _log = new List<string>();
         private float _steerTimer;
         private float _radiusTimer;
+        private float _radiusAge;
+        private double _farthestHeld;
         private float _viewRadius = MinViewRadiusM;
-        private Vector2 _rightDownAt;
         private Vector2 _rightLastAt;
         private uint _wantedTarget;
+        private float _aimedAt = float.NegativeInfinity;
         private string _status = "connecting…";
         private long _lastBytes;
         private float _bytesTimer;
@@ -95,6 +99,8 @@ namespace AsteroidField.Unity
 
             if (_link.TryTakeLatest(out var snapshot))
             {
+                // The views copied what they draw out of the previous one: it goes back to the link to be refilled.
+                _link.Recycle(_world);
                 _world = snapshot;
             }
 
@@ -104,8 +110,7 @@ namespace AsteroidField.Unity
             }
 
             AdvanceClock();
-            var renderTime = _clock.RenderTick + _clock.RenderFrac;
-            _views.Sync(_world, renderTime, Time.deltaTime);
+            _views.Sync(_world, _clock.RenderTick, _clock.RenderFrac, Time.deltaTime);
             HandleEvents();
             HandleInput();
             if (_views.TryGetShip(_world.SelfNetId, out var ship))
@@ -155,29 +160,34 @@ namespace AsteroidField.Unity
 
         private void HandleInput()
         {
-            // The server keeps only the newest Steer of a tick, and a tick without one is a released stick: send it at the server's rate.
+            // Steer goes 25 times a second, above the server's 20 Hz tick and under the command's rate of 30: every tick finds one. The timer keeps its
+            // remainder, so a frame rate that does not divide the period still sends at the period.
             _steerTimer += Time.deltaTime;
             if (_steerTimer >= SteerPeriod)
             {
-                _steerTimer = 0;
+                _steerTimer = _steerTimer >= 2f * SteerPeriod ? 0f : _steerTimer - SteerPeriod;
                 SteerTowardsInput();
             }
 
+            // Left click toggles the beam: off wherever you click while it is on; on, at the asteroid clicked, while it is off.
             if (Input.GetMouseButtonDown(0) && _camera.Camera != null)
             {
-                var ray = _camera.Camera.ScreenPointToRay(Input.mousePosition);
-                if (Physics.Raycast(ray, out var hit, 2000f) && _views.TryGetAsteroid(hit.collider.gameObject, out var netId))
+                if (CurrentTarget() != 0)
                 {
-                    _wantedTarget = netId;
-                    _link.Mine(netId);
-                    Log($"mining asteroid {netId} — get within {60} m");
+                    Aim(0);
+                    Log("beam off");
+                }
+                else if (Physics.Raycast(_camera.Camera.ScreenPointToRay(Input.mousePosition), out var hit, _camera.Camera.farClipPlane)
+                         && _views.TryGetAsteroid(hit.collider.gameObject, out var netId))
+                {
+                    Aim(netId);
+                    Log($"beam on asteroid {netId} — it mines within {60} m");
                 }
             }
 
-            // The right button orbits the camera when dragged, and turns the beam off when clicked: what decides is how far the mouse moved.
+            // The right button orbits the camera.
             if (Input.GetMouseButtonDown(1))
             {
-                _rightDownAt = Input.mousePosition;
                 _rightLastAt = Input.mousePosition;
             }
             else if (Input.GetMouseButton(1))
@@ -185,12 +195,6 @@ namespace AsteroidField.Unity
                 var at = (Vector2)Input.mousePosition;
                 _camera.Orbit(at - _rightLastAt);
                 _rightLastAt = at;
-            }
-            else if (Input.GetMouseButtonUp(1) && ((Vector2)Input.mousePosition - _rightDownAt).sqrMagnitude < 4f * 4f && _wantedTarget != 0)
-            {
-                _wantedTarget = 0;
-                _link.Mine(0);
-                Log("beam off");
             }
 
             if (Input.GetKeyDown(KeyCode.E) && _world.Cargo > 0)
@@ -221,19 +225,43 @@ namespace AsteroidField.Unity
         }
 
         // The server sends what is within the view's radius; the camera decides what is on screen. Zooming out asks for a wider radius, so the belt
-        // does not end at the edge of the old one — in steps of 50 m, at most four times a second, which is what the command's rate allows.
+        // does not end at the edge of the old one — in steps of 50 m, at most four times a second, which is what the command's rate allows. Sent again
+        // every two seconds: a session that reconnected starts at the profile's own radius, and a command sent while disconnected is lost.
         private void FollowZoomWithTheView()
         {
             _radiusTimer -= Time.deltaTime;
-            var wanted = Mathf.Clamp(Mathf.Round(_camera.GroundReachM / 50f) * 50f, MinViewRadiusM, MaxViewRadiusM);
-            if (_radiusTimer > 0f || Mathf.Approximately(wanted, _viewRadius))
+            _radiusAge += Time.deltaTime;
+            // Rounded up, so the radius covers the picture; a corner above the horizon asks for the most there is.
+            var reach = _camera.GroundReachM;
+            var wanted = float.IsInfinity(reach) ? MaxViewRadiusM : Mathf.Clamp(Mathf.Ceil(reach / 50f) * 50f, MinViewRadiusM, MaxViewRadiusM);
+            if (_radiusTimer > 0f || (Mathf.Approximately(wanted, _viewRadius) && _radiusAge < RadiusRefreshSeconds))
             {
                 return;
             }
 
             _radiusTimer = RadiusPeriod;
+            _radiusAge = 0f;
             _viewRadius = wanted;
             _link.ViewRadius(wanted);
+        }
+
+        private void Aim(uint asteroid)
+        {
+            _wantedTarget = asteroid;
+            _aimedAt = Time.time;
+            _link.Mine(asteroid);
+        }
+
+        // The asteroid being mined: the one just clicked while the server's answer is on its way, then the server's own word — it clears the target
+        // when the rock is mined out, the hold fills, or the rock leaves the view.
+        private uint CurrentTarget()
+        {
+            if (Time.time - _aimedAt < AimSettleSeconds)
+            {
+                return _wantedTarget;
+            }
+
+            return _world.TryGetShip(_world.SelfNetId, out var self) ? self.Target : 0u;
         }
 
         private void MeasureBandwidth()
@@ -244,7 +272,27 @@ namespace AsteroidField.Unity
                 _bytesPerSecond = (_world.BytesReceived - _lastBytes) / _bytesTimer;
                 _lastBytes = _world.BytesReceived;
                 _bytesTimer = 0;
+                _farthestHeld = FarthestHeld();
             }
+        }
+
+        // What the server actually applied, seen from here: the farthest asteroid this client holds from its own ship.
+        private double FarthestHeld()
+        {
+            if (!_world.TryGetShip(_world.SelfNetId, out var self))
+            {
+                return 0;
+            }
+
+            self.PositionAt(_world.Tick, out var sx, out var sy);
+            var farthest = 0d;
+            foreach (var a in _world.Asteroids)
+            {
+                a.PositionAt(_world.Tick, out var x, out var y);
+                farthest = Math.Max(farthest, ((x - sx) * (x - sx)) + ((y - sy) * (y - sy)));
+            }
+
+            return Math.Sqrt(farthest);
         }
 
         private void Log(string line)
@@ -264,14 +312,14 @@ namespace AsteroidField.Unity
             if (_world != null)
             {
                 GUILayout.Label($"server tick {_world.Tick}   render delay {(_clock != null ? _clock.RenderDelayMs : 0):F0} ms   frames {_world.Frames}");
-                GUILayout.Label($"in view ({_viewRadius:F0} m): {_world.Asteroids.Count} asteroids, {_world.Ships.Count} ships   ·   " +
-                    $"{_bytesPerSecond / 1024:F1} KiB/s received");
+                GUILayout.Label($"view radius {_viewRadius:F0} m asked, farthest held {_farthestHeld:F0} m   ·   {_bytesPerSecond / 1024:F1} KiB/s received");
+                GUILayout.Label($"in view: {_world.Asteroids.Count} asteroids, {_world.Ships.Count} ships");
                 GUILayout.Label($"hold {_world.Cargo} / {HoldCapacity}   credits {_world.Credits}" +
-                                (_wantedTarget != 0 ? $"   mining {_wantedTarget}" : ""));
+                                (CurrentTarget() != 0 ? $"   mining {CurrentTarget()}" : ""));
             }
 
             GUILayout.Space(6);
-            GUILayout.Label("WASD: fly, relative to the camera · left click an asteroid: mine · right click: stop · right drag: orbit · E: sell · wheel: zoom (and view radius)");
+            GUILayout.Label("WASD: fly, relative to the camera · left click: beam on (at an asteroid) / off · right drag: orbit · wheel: zoom (and view radius) · E: sell");
             foreach (var line in _log)
             {
                 GUILayout.Label(line);
@@ -280,7 +328,10 @@ namespace AsteroidField.Unity
             GUILayout.EndArea();
         }
 
-        private static GUIStyle Rich() => new GUIStyle(GUI.skin.label) { richText = true };
+        private static GUIStyle _rich;
+
+        // Built once: OnGUI runs several times a frame. GUI.skin is only readable inside OnGUI, so not in a field initializer.
+        private static GUIStyle Rich() => _rich ??= new GUIStyle(GUI.skin.label) { richText = true };
 
         // A player build reads `-host <name> -port <n>`; the Editor uses the inspector's values.
         private void ReadCommandLine()

@@ -88,28 +88,30 @@ namespace AsteroidField.Unity
     }
 
     /// <summary>
-    /// The camera: above and behind this pilot's ship, looking down at it at a steep angle — the belt is a plane, and a grazing view piles it onto the
-    /// horizon. The mouse wheel zooms from a close three-quarter view to a nearly top-down one over the belt; dragging with the right button
-    /// orbits it around the ship. The orbit is fixed to the world, not to the ship's heading: WASD steers relative to the camera, and a camera that
-    /// turned with the ship would turn "left" with it, for ever.
+    /// The camera: an orbit rig. A pivot follows the ship; yaw, pitch and distance change only when the player changes them — right drag orbits, the
+    /// wheel zooms — and the camera sits exactly where those three put it, looking at the pivot. Nothing tilts on its own and nothing swims: the only
+    /// easing is the pivot catching up with the ship and the distance catching up with the wheel, both frame-rate independent.
     /// </summary>
+    /// <remarks>The orbit is fixed to the world, not to the ship's heading: WASD steers relative to the camera, and a camera that turned with the ship
+    /// would turn "left" with it, for ever.</remarks>
     public sealed class ChaseCamera
     {
-        private const float MinDistance = 60f;
-        private const float MaxDistance = 1500f;
-        private const float NearPitch = 50f;
-        private const float FarPitch = 80f;
-
-        private const float OrbitDegreesPerPixel = 0.08f;
-        private const float MinPitch = 8f;
-        private const float MaxPitch = 85f;
+        private const float MinDistance = 40f;
+        private const float MaxDistance = 1100f;
+        private const float MinPitch = 15f;
+        private const float MaxPitch = 89f;
+        private const float DegreesPerPixel = 0.25f;
+        private const float ZoomPerNotch = 0.15f;
+        private const float ZoomSharpness = 12f;
+        private const float FollowSharpness = 10f;
 
         private readonly Transform _transform;
-        private float _distance = 220f;
         private float _yaw;
+        private float _pitch = 55f;
+        private float _distance = 220f;
+        private float _wantedDistance = 220f;
+        private Vector3 _pivot;
         private bool _placed;
-        private float _pitchOffset;
-        private bool _orbiting;
 
         private ChaseCamera(Camera camera)
         {
@@ -124,8 +126,30 @@ namespace AsteroidField.Unity
 
         public Vector3 PlanarRight => Quaternion.AngleAxis(_yaw, Vector3.up) * Vector3.right;
 
-        /// <summary>How far from the ship the view reaches on the belt, in metres: the half-width of the picture at the ship's distance.</summary>
-        public float GroundReachM => _distance * Mathf.Tan(Camera.fieldOfView * 0.5f * Mathf.Deg2Rad) * Mathf.Max(Camera.aspect, 1f);
+        /// <summary>
+        /// How far from the ship the picture reaches on the belt, in metres: the farthest of its four corners on the belt's plane, or infinity when a
+        /// corner looks above the horizon. What the view's radius must cover for the belt not to end on screen.
+        /// </summary>
+        public float GroundReachM
+        {
+            get
+            {
+                var plane = new Plane(Vector3.up, _pivot);
+                var reach = 0f;
+                for (var corner = 0; corner < 4; corner++)
+                {
+                    var ray = Camera.ViewportPointToRay(new Vector3(corner & 1, corner >> 1, 0f));
+                    if (!plane.Raycast(ray, out var along))
+                    {
+                        return float.PositiveInfinity;
+                    }
+
+                    reach = Mathf.Max(reach, Vector3.Distance(ray.GetPoint(along), _pivot));
+                }
+
+                return reach;
+            }
+        }
 
         public static ChaseCamera Create()
         {
@@ -148,36 +172,32 @@ namespace AsteroidField.Unity
         /// <summary>Turns the orbit by a mouse movement in pixels: right/left around the ship, up/down over it.</summary>
         public void Orbit(Vector2 pixels)
         {
-            _orbiting = true;
-            _yaw += pixels.x * OrbitDegreesPerPixel;
-            _pitchOffset -= pixels.y * OrbitDegreesPerPixel;
+            _yaw += pixels.x * DegreesPerPixel;
+            _pitch = Mathf.Clamp(_pitch - (pixels.y * DegreesPerPixel), MinPitch, MaxPitch);
         }
 
         public void Follow(Transform ship, float dt)
         {
-            _distance = Mathf.Clamp(_distance * (1f - (Input.mouseScrollDelta.y * 0.1f)), MinDistance, MaxDistance);
-            var basePitch = Mathf.Lerp(NearPitch, FarPitch, Mathf.InverseLerp(MinDistance, MaxDistance, _distance));
-            _pitchOffset = Mathf.Clamp(basePitch + _pitchOffset, MinPitch, MaxPitch) - basePitch;
-            var pitch = (basePitch + _pitchOffset) * Mathf.Deg2Rad;
+            var notches = Input.mouseScrollDelta.y;
+            if (notches != 0f)
+            {
+                _wantedDistance = Mathf.Clamp(_wantedDistance * Mathf.Pow(1f - ZoomPerNotch, notches), MinDistance, MaxDistance);
+            }
 
             // The orbit starts behind the ship, then holds its world yaw until dragged.
             if (!_placed)
             {
                 _yaw = ship.eulerAngles.y;
+                _pivot = ship.position;
                 _placed = true;
             }
 
-            var back = Quaternion.AngleAxis(_yaw, Vector3.up) * Vector3.back;
-            var wanted = ship.position + (back * (_distance * Mathf.Cos(pitch))) + (Vector3.up * (_distance * Mathf.Sin(pitch)));
+            _distance = Mathf.Lerp(_distance, _wantedDistance, 1f - Mathf.Exp(-ZoomSharpness * dt));
+            _pivot = Vector3.Lerp(_pivot, ship.position, 1f - Mathf.Exp(-FollowSharpness * dt));
 
-            // A drag answers at once; following the ship eases.
-            var ease = Mathf.Clamp01(dt * (_orbiting ? 20f : 4f));
-            _orbiting = false;
-            _transform.position = Vector3.Lerp(_transform.position, wanted, ease);
-            // The camera's own up, exact at every tilt: world up blended toward the ship's side as the view turns downward. World up alone is nearly
-            // parallel to the view near top-down, and the roll it then picks swings with every pixel of motion.
-            var up = (Vector3.up * Mathf.Cos(pitch)) - (back * Mathf.Sin(pitch));
-            _transform.rotation = Quaternion.Slerp(_transform.rotation, Quaternion.LookRotation(ship.position - _transform.position, up), ease);
+            // Pitch below 90° keeps the view's up well defined: Euler builds the rotation from the two angles, no look-at to pick a roll.
+            var rotation = Quaternion.Euler(_pitch, _yaw, 0f);
+            _transform.SetPositionAndRotation(_pivot - (rotation * Vector3.forward * _distance), rotation);
         }
     }
 
@@ -192,7 +212,7 @@ namespace AsteroidField.Unity
             var go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             Destroy(go.GetComponent<Collider>());
             go.transform.position = at;
-            go.GetComponent<Renderer>().material = Materials.Make(new Color(1f, 0.7f, 0.3f), glow: 1.5f);
+            go.GetComponent<Renderer>().sharedMaterial = Materials.Make(new Color(1f, 0.7f, 0.3f), glow: 1.5f);
             var effect = go.AddComponent<Effects>();
             effect._size = 6f + (size * 6f);
         }
@@ -206,5 +226,7 @@ namespace AsteroidField.Unity
                 Destroy(gameObject);
             }
         }
+
+        private void OnDestroy() => Destroy(GetComponent<Renderer>().sharedMaterial);
     }
 }
