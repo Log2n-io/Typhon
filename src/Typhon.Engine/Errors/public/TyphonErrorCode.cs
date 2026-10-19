@@ -131,6 +131,26 @@ public enum TyphonErrorCode
     /// </summary>
     RecoveryArchetypeNotRegistered  = 7012,
 
+    // 71xx — Backup
+
+    /// <summary>Another writer holds the backup store's lock (see <see cref="BackupStoreLockedException"/>). Transient.</summary>
+    BackupStoreLocked               = 7101,
+
+    /// <summary>The backup store belongs to another database (see <see cref="BackupStoreMismatchException"/>).</summary>
+    BackupStoreMismatch             = 7102,
+
+    /// <summary>A backup pack failed one of its checks: a CRC, a bound, a frame (see <see cref="BackupPackCorruptException"/>).</summary>
+    BackupPackCorrupt               = 7103,
+
+    /// <summary>A backup point's chain misses a pack, or its links disagree (see <see cref="BackupChainBrokenException"/>).</summary>
+    BackupChainBroken               = 7104,
+
+    /// <summary>A backup store or pack was written by a newer format this build cannot read (see <see cref="BackupFormatUnsupportedException"/>).</summary>
+    BackupFormatUnsupported         = 7105,
+
+    /// <summary>A restore refused to write its target (see <see cref="RestoreRefusedException"/>).</summary>
+    RestoreRefused                  = 7106,
+
     // 8xxx — Runtime / Scheduler
 
     /// <summary>DEBUG-only: a system mutated a component it did not declare in its access set (see <see cref="InvalidAccessException"/>).</summary>

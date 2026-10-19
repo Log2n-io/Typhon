@@ -37,6 +37,22 @@ internal sealed class Crc32CAppendTests
 
     [Test]
     [CancelAfter(5_000)]
+    public void AppendZeros_EqualsAppendingThatManyZeroBytes()
+    {
+        var random = TestSeed.Random(nameof(AppendZeros_EqualsAppendingThatManyZeroBytes));
+        var zeros = new byte[70_000];
+        foreach (var count in new[] { 0, 1, 2, 3, 7, 8, 9, 255, 256, 4096, 65_537, 69_999 })
+        {
+            var prefix = new byte[random.Next(0, 40)];
+            random.NextBytes(prefix);
+            var state = Crc32CUtil.Append(Crc32CUtil.Start, prefix);
+
+            Assert.That(Crc32CUtil.AppendZeros(state, count), Is.EqualTo(Crc32CUtil.Append(state, zeros.AsSpan(0, count))), $"{count} zeros");
+        }
+    }
+
+    [Test]
+    [CancelAfter(5_000)]
     public void EmptyAppends_ChangeNothing()
     {
         var data = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9 };
