@@ -99,7 +99,8 @@ internal static class RestoreStager
         var clock = Stopwatch.StartNew();
 
         // 1 RESOLVE — the chain, every header, footer and INDEX, and what the image says about itself.
-        var view = StoreView.Open(storePath, fs, log);
+        // The packs are the authority (D7): a restore resolves from their headers, never from the catalog cache.
+        var view = StoreView.Open(storePath, fs, log, trustCatalog: false);
         var chain = ChainResolver.Resolve(view, ChainResolver.Select(view, point));
         var packs = PackChainPageSource.OpenPacks(fs, view, chain);
         try

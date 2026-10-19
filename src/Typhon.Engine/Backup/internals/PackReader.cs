@@ -154,8 +154,7 @@ internal sealed class PackReader : IDisposable
                  && f.IndexOffset + ((long)PackFormat.PageEntrySize * f.PageCount) == length - PackFormat.FooterSize
                  && f.SuspectOffset + PackFormat.SectionPrefixSize + (4L * f.SuspectCount) == f.IndexOffset
                  && f.SuspectOffset - f.TailDirOffset >= PackFormat.SectionPrefixSize
-                 && (f.SuspectCount > 0) == f.Suspect
-                 && f.PointLsn >= header.CheckpointLsn;
+                 && (f.SuspectCount > 0) == f.Suspect;
         if (!ok)
         {
             PackFormat.ThrowCorrupt(path, "Footer", -1, "section offsets or counts are inconsistent");

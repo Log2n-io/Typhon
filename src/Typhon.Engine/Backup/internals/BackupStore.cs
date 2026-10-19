@@ -58,8 +58,12 @@ internal sealed class StoreView
     /// <summary>Whether <see cref="Catalog"/> came from <c>catalog.json</c> (true) or a rebuild (false).</summary>
     public bool CatalogFromFile { get; init; }
 
-    /// <summary>Opens a store for reading. Throws when the directory is not a store or its identity is unreadable or newer.</summary>
-    public static StoreView Open(string root, IStoreFileSystem fs = null, ILogger log = null)
+    /// <summary>
+    /// Opens a store for reading. Throws when the directory is not a store or its identity is unreadable or newer. With
+    /// <paramref name="trustCatalog"/> false the catalog is always rebuilt from the packs: verify reads what the packs say, never a cache that a
+    /// same-size in-place change would leave matching.
+    /// </summary>
+    public static StoreView Open(string root, IStoreFileSystem fs = null, ILogger log = null, bool trustCatalog = true)
     {
         fs ??= StoreFileSystem.Instance;
         log ??= NullLogger.Instance;
@@ -68,7 +72,7 @@ internal sealed class StoreView
         var listing = fs.EnumerateFiles(paths.Packs);
         var fingerprint = StoreCatalog.Fingerprint(listing);
         StoreCatalogFile catalog = null;
-        if (fs.FileExists(paths.Catalog))
+        if (trustCatalog && fs.FileExists(paths.Catalog))
         {
             try
             {

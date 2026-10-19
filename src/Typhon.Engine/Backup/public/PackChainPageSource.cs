@@ -98,7 +98,7 @@ public sealed class PackChainPageSource : IPageSource
     /// <param name="options">Damage handling and memory.</param>
     public static PackChainPageSource Open(string store, PointSelector point, PackSourceOptions options = null)
     {
-        var view = StoreView.Open(store);
+        var view = StoreView.Open(store, trustCatalog: false);
         var chain = ChainResolver.Resolve(view, ChainResolver.Select(view, point));
         return Open(StoreFileSystem.Instance, view, chain, options);
     }

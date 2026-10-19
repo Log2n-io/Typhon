@@ -76,8 +76,16 @@ internal static class ChainResolver
     }
 
     /// <summary>Resolves <paramref name="pointId"/>; on failure names the point whose pack breaks the chain and why.</summary>
-    public static bool TryResolve(StoreView view, uint pointId, out ResolvedChain chain, out uint brokenAt, out string why)
+    public static bool TryResolve(StoreView view, uint pointId, out ResolvedChain chain, out uint brokenAt, out string why) =>
+        TryResolve(view, pointId, out chain, out brokenAt, out why, out _);
+
+    /// <summary>
+    /// As <see cref="TryResolve(StoreView, uint, out ResolvedChain, out uint, out string)"/>, also giving the verify code of the failure:
+    /// <c>BKP-VER-07</c> for an LSN out of order, <c>BKP-VER-06</c> for anything else.
+    /// </summary>
+    public static bool TryResolve(StoreView view, uint pointId, out ResolvedChain chain, out uint brokenAt, out string why, out string code)
     {
+        code = null;
         chain = null;
         var links = new List<CatalogPack>();
         CatalogPack child = null;
@@ -88,10 +96,11 @@ internal static class ChainResolver
             if (pack == null)
             {
                 brokenAt = id;
+                code = "BKP-VER-06";
                 return false;
             }
 
-            why = CheckLink(view, pack, child, links.Count == 0 ? null : links[0]);
+            (code, why) = CheckLink(view, pack, child, links.Count == 0 ? null : links[0]);
             if (why != null)
             {
                 brokenAt = id;
@@ -103,6 +112,7 @@ internal static class ChainResolver
             {
                 brokenAt = id;
                 why = $"the chain is deeper than {MaxDepth} points";
+                code = "BKP-VER-06";
                 return false;
             }
 
@@ -171,41 +181,48 @@ internal static class ChainResolver
     /// Checks <paramref name="pack"/> as the parent of <paramref name="child"/> (null for the point itself): same store, database and chain,
     /// ids descending, the data file never shrinking, <c>C</c> and <c>P</c> never decreasing, <c>BaseId</c> consistent.
     /// </summary>
-    private static string CheckLink(StoreView view, CatalogPack pack, CatalogPack child, CatalogPack point)
+    private static (string Code, string Why) CheckLink(StoreView view, CatalogPack pack, CatalogPack child, CatalogPack point)
     {
+        const string link = "BKP-VER-06";
+        const string lsn = "BKP-VER-07";
         if (pack.DatabaseId != view.Identity.DatabaseId)
         {
-            return $"its pack belongs to database {pack.DatabaseId}, the store to {view.Identity.DatabaseId}";
+            return (link, $"its pack belongs to database {pack.DatabaseId}, the store to {view.Identity.DatabaseId}");
         }
 
         if (pack.StoreId != view.Identity.StoreId)
         {
-            return $"its pack was written by store {pack.StoreId}, not this one";
+            return (link, $"its pack was written by store {pack.StoreId}, not this one");
+        }
+
+        if (pack.PointLsn < pack.CheckpointLsn)
+        {
+            return (lsn, $"its PointLSN {pack.PointLsn} is below its CheckpointLSN {pack.CheckpointLsn}");
         }
 
         if (child == null)
         {
-            return null;
+            return (null, null);
         }
 
         if (pack.ChainId != child.ChainId)
         {
-            return $"it belongs to chain {pack.ChainId}, its child #{child.BackupId} to chain {child.ChainId}";
+            return (link, $"it belongs to chain {pack.ChainId}, its child #{child.BackupId} to chain {child.ChainId}");
         }
 
         if (pack.BackupId >= child.BackupId || child.ParentId != pack.BackupId)
         {
-            return $"#{child.BackupId} names parent #{child.ParentId}";
+            return (link, $"#{child.BackupId} names parent #{child.ParentId}");
         }
 
         if (pack.ImagePages > child.ImagePages)
         {
-            return $"its image ({pack.ImagePages} pages) is larger than its child's ({child.ImagePages}); the data file never shrinks";
+            return (link, $"its image ({pack.ImagePages} pages) is larger than its child's ({child.ImagePages}); the data file never shrinks");
         }
 
         if (pack.CheckpointLsn > child.CheckpointLsn || pack.PointLsn > child.PointLsn)
         {
-            return $"its LSNs (C {pack.CheckpointLsn}, P {pack.PointLsn}) are past its child's (C {child.CheckpointLsn}, P {child.PointLsn})";
+            return (lsn, $"its LSNs (C {pack.CheckpointLsn}, P {pack.PointLsn}) are past its child's (C {child.CheckpointLsn}, P {child.PointLsn})");
         }
 
         // BaseId runs unchanged along incrementals; a Full base IS that id. A compacted base stands for a prefix of the chain, so the points
@@ -217,6 +234,6 @@ internal static class ChainResolver
             BackupKind.Full => pack.BackupId == expectedBase,
             _ => expectedBase <= pack.BackupId,
         };
-        return ok ? null : $"its base id {pack.BaseId} disagrees with the point's {expectedBase}";
+        return ok ? (null, null) : (link, $"its base id {pack.BaseId} disagrees with the point's {expectedBase}");
     }
 }
