@@ -77,10 +77,13 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
     private int _abortReason;
     private readonly CancellationTokenSource _abortCts = new();
 
+    // Read by a closing engine that gave up joining the backup thread (it removes the hook itself), so both are volatile.
+    private volatile bool _hookInstalled;
+    private volatile bool _detached;
+
     // Backup thread only.
     private IBackupPointSink _sink;
     private PageChangeMap _mapToMergeOnFailure;
-    private bool _hookInstalled;
     private bool _floorSet;
     private bool _completed;
     private long _added;
@@ -182,7 +185,7 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
 
         if (_options.CheckpointBeforeFreeze)
         {
-            _engine.CheckpointManager.ForceCheckpointAndWait(_options.CheckpointTimeout);
+            _engine.CheckpointManager.ForceCheckpointAndWait(_options.CheckpointTimeout, 0, ct);
         }
 
         ct.ThrowIfCancellationRequested();
@@ -191,7 +194,7 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
         _scanBuffer = _engine.MemoryAllocator.AllocatePinned("Backup.ScanBuffer", _owner, _options.ScanRunPages * PagedMMF.PageSize, false, 4096);
         _metaBuffer = _engine.MemoryAllocator.AllocatePinned("Backup.MetaPair", _owner, 2 * PagedMMF.PageSize, false, 4096);
 
-        Freeze();
+        Freeze(ct);
         Probe?.Invoke(CapturePhase.AfterFreeze, 0);
 
         var meta0 = MetaSlot(0);
@@ -230,32 +233,35 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
         return info;
     }
 
-    /// <summary>The freeze (plan §3.6 step 3). Retries when the file grew past the bitmaps sized before it, so nothing is allocated under the gate.</summary>
-    private void Freeze()
+    /// <summary>
+    /// The freeze (plan §3.6 step 3). Nothing is allocated under the gate, so the bitmaps are sized beforehand from the tracked length plus a margin;
+    /// a freeze that finds the file longer (an async batch's growth is tracked only after its fsync) retries sized from the length it saw. Every
+    /// attempt draws on one budget, <see cref="BackupCaptureOptions.FreezeAcquireTimeout"/> in all, with the gate open between attempts (BKP-12).
+    /// </summary>
+    private void Freeze(CancellationToken ct)
     {
-        for (var attempt = 0; ; attempt++)
+        var deadline = Stopwatch.GetTimestamp() + Ticks(_options.FreezeAcquireTimeout);
+        var margin = Math.Max(0, _options.FreezeGrowthMarginPages);
+        long estimate = _mmf.FileSize / PagedMMF.PageSize + margin;
+        while (true)
         {
-            var estimate = (int)Math.Min(int.MaxValue, (_mmf.FileSize + (64L << 20)) / PagedMMF.PageSize);
-            var claimed = new ulong[(estimate + 63) >> 6];
-            var done = new ulong[(estimate + 63) >> 6];
+            var sized = (int)Math.Min(int.MaxValue, estimate);
+            var claimed = new ulong[(sized + 63) >> 6];
+            var done = new ulong[(sized + 63) >> 6];
             var fresh = new PageChangeMap();
 
             var acquireStart = Stopwatch.GetTimestamp();
-            if (!_mmf.TryEnterWriteGateExclusive(_options.FreezeAcquireTimeout))
+            if (!TryEnterGateExclusiveWithin(deadline, ct))
             {
                 throw new BackupAbortedException(BackupAbortReason.GateTimeout, "the data-file writes in flight did not drain in time.");
             }
 
             var held = Stopwatch.GetTimestamp();
-            var grew = false;
+            var pages = 0;
             try
             {
-                var pages = (int)(_mmf.DataFileLengthUnderGate() / PagedMMF.PageSize);
-                if (pages > estimate)
-                {
-                    grew = true;
-                }
-                else
+                pages = (int)(_mmf.DataFileLengthUnderGate() / PagedMMF.PageSize);
+                if (pages <= sized)
                 {
                     if (pages < 2)
                     {
@@ -289,18 +295,54 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
                 FreezeHoldTicks = Stopwatch.GetTimestamp() - held;
             }
 
-            if (!grew)
+            if (pages <= sized)
             {
                 _expected = _full ? _imagePages : 2 + CountImagePagesFrom(2);
                 return;
             }
 
-            if (attempt >= 2)
-            {
-                throw new BackupAbortedException(BackupAbortReason.GateTimeout, "the data file kept growing past the freeze's estimate.");
-            }
+            // Sized from what the file was seen to hold, never again from the tracked length alone (it may lag the same batch still), so the next
+            // attempt fits unless the file grew again since; the budget bounds the retries.
+            FreezeRetries++;
+            estimate = Math.Max(_mmf.FileSize / PagedMMF.PageSize, pages) + margin;
         }
     }
+
+    /// <summary>Freezes that found the file longer than their bitmaps and retried (test seam).</summary>
+    internal int FreezeRetries { get; private set; }
+
+    /// <summary>
+    /// Takes the write gate exclusive within <paramref name="deadline"/> (a <see cref="Stopwatch"/> timestamp), in attempts of at most
+    /// <see cref="GateAttemptSlice"/>, the gate open between them so writers get through: the writers' stall is bounded by the budget in all, not per
+    /// attempt (BKP-12).
+    /// </summary>
+    private bool TryEnterGateExclusiveWithin(long deadline, CancellationToken ct)
+    {
+        while (true)
+        {
+            var remaining = deadline - Stopwatch.GetTimestamp();
+            if (remaining <= 0)
+            {
+                return false;
+            }
+
+            var slice = TimeSpan.FromSeconds(Math.Min(remaining, Ticks(GateAttemptSlice)) / (double)Stopwatch.Frequency);
+            if (_mmf.TryEnterWriteGateExclusive(slice))
+            {
+                return true;
+            }
+
+            ct.ThrowIfCancellationRequested();
+
+            // The back-off: the gate is open until the writers the attempt held back have entered, so none of them waits through the next one too.
+            _mmf.WriteGate.AdmitWaiters(Math.Min(deadline, Stopwatch.GetTimestamp() + Ticks(GateAttemptSlice)));
+        }
+    }
+
+    /// <summary>The longest one exclusive attempt holds new writers back.</summary>
+    internal static readonly TimeSpan GateAttemptSlice = TimeSpan.FromMilliseconds(100);
+
+    private static long Ticks(TimeSpan span) => (long)(span.TotalSeconds * Stopwatch.Frequency);
 
     /// <summary>The freeze instant, UTC ticks.</summary>
     internal long FreezeUtcTicks { get; private set; }
@@ -488,13 +530,12 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
         try
         {
             _abortCts.Cancel();
+            _slots?.Published.Set();
         }
         catch (ObjectDisposedException)
         {
             // Disposed after the capture ended: nothing waits on it any more.
         }
-
-        _slots?.Published.Set();
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -515,29 +556,36 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
         }
 
         Abort(reason);
-        if (!_completed)
+        try
         {
-            Uninstall();
-
-            // BKP-07: nothing this capture would have covered is forgotten. Lock-free beside the writers setting bits in the live map.
-            if (_mapToMergeOnFailure != null)
+            if (!_completed)
             {
-                _mmf.ChangeMap.OrWith(_mapToMergeOnFailure);
-                _mapToMergeOnFailure = null;
-            }
+                Uninstall();
 
-            _sink?.Abort();
+                // BKP-07: nothing this capture would have covered is forgotten. Lock-free beside the writers setting bits in the live map.
+                if (_mapToMergeOnFailure != null)
+                {
+                    _mmf.ChangeMap.OrWith(_mapToMergeOnFailure);
+                    _mapToMergeOnFailure = null;
+                }
+
+                _sink?.Abort();
+            }
+        }
+        finally
+        {
+            ReleaseFloor();
         }
 
-        ReleaseFloor();
         return error as BackupAbortedException is { } same && same.Reason == reason
             ? same
             : new BackupAbortedException(reason, error.Message, error);
     }
 
     /// <summary>
-    /// Removes the hook under the exclusive write gate. Retried, because native memory can only be freed once no writer can be inside the hook; if every
-    /// attempt fails the hook stays (harmless: every page is done or the capture aborted) and its memory is leaked rather than freed under a writer.
+    /// Removes the hook under the exclusive write gate, within <see cref="BackupCaptureOptions.UninstallTimeout"/> in all, in attempts with the gate
+    /// open between them (BKP-12). Native memory can only be freed once no writer can be inside the hook; if the budget runs out the hook stays
+    /// (harmless: every page is done or the capture aborted) and its memory is leaked rather than freed under a writer.
     /// </summary>
     internal bool Uninstall()
     {
@@ -546,27 +594,33 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
             return true;
         }
 
-        for (var attempt = 0; attempt < 10; attempt++)
+        if (TryEnterGateExclusiveWithin(Stopwatch.GetTimestamp() + Ticks(_options.UninstallTimeout), CancellationToken.None))
         {
-            if (_mmf.TryEnterWriteGateExclusive(_options.FreezeAcquireTimeout))
+            try
             {
-                try
-                {
-                    _mmf.InstallWriteHook(null);
-                }
-                finally
-                {
-                    _mmf.ExitWriteGateExclusive();
-                }
-
-                _hookInstalled = false;
-                return true;
+                _mmf.InstallWriteHook(null);
             }
+            finally
+            {
+                _mmf.ExitWriteGateExclusive();
+            }
+
+            _hookInstalled = false;
+            return true;
         }
 
         LogUninstallFailed();
         return false;
     }
+
+    /// <summary>
+    /// Called by a closing engine that gave up joining the backup thread: the capture still runs, so nothing it allocated may be freed under it. Its
+    /// native memory is leaked instead (BKP-12's last resort; a store stuck past the close is already a failure being logged).
+    /// </summary>
+    internal void Detach() => _detached = true;
+
+    /// <summary>Whether the capture's scan buffer is still allocated (test seam).</summary>
+    internal bool ScanBufferAlive => _scanBuffer is { IsDisposed: false };
 
     private void ReleaseFloor()
     {
@@ -675,6 +729,11 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
     /// <inheritdoc />
     public void Dispose()
     {
+        if (_detached)
+        {
+            return;
+        }
+
         // What a writer could still reach stays alive while the hook is installed (see Uninstall).
         if (!_hookInstalled)
         {

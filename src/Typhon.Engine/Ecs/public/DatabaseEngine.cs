@@ -2020,8 +2020,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private ulong WriteBackupState()
     {
         var path = BackupStateFile.PathIn(MMF.BundleDirectory);
-        var lineage = BackupCoordinator?.Lineage;
-        if (lineage == null || !lineage.Trusted || !DataFileWriteTracking.MapEnabled)
+        var coordinator = BackupCoordinator;
+        var lineage = coordinator != null ? coordinator.Lineage.Snapshot() : default;   // one consistent read (M7)
+        if (!lineage.Trusted || !DataFileWriteTracking.MapEnabled)
         {
             BackupStateFile.Delete(path);
             return 0;
@@ -2368,7 +2369,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // A running backup is abandoned before anything else: its failure path merges its page set back into the live change map, releases the WAL
             // reclaim floor and removes its copy-before-write hook, so the final cycle and the close below see an engine with no capture (BKP-07).
             _disposeStarted = true;
-            BackupCoordinator?.StopAndJoin(TimeSpan.FromSeconds(10));
+            BackupCoordinator?.StopAndJoin();
 
             Logger?.LogInformation("Engine disposing: CheckpointManager");
             // An open that did not complete closes as a crash (CS-04): no final cycle either. It would flush the half-built session's pages and, with the

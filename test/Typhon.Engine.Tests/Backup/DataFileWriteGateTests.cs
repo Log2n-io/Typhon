@@ -124,6 +124,55 @@ public class DataFileWriteGateTests
         gate.ExitExclusive();
     }
 
+    /// <summary>
+    /// BKP-12 across retries: a writer held back by a failed exclusive attempt enters before the freezer's next attempt, however late it is scheduled
+    /// (here, held in its back-off until the freezer is known to be waiting for it).
+    /// </summary>
+    [Test]
+    [CancelAfter(5_000)]
+    [VerifiesRule("BKP-12")]
+    public void AWriterHeldBackByAFailedAttempt_EntersBeforeTheNextOne()
+    {
+        var gate = new DataFileWriteGate();
+        var stuck = gate.EnterShared();
+        using var backedOff = new ManualResetEventSlim();
+        using var go = new ManualResetEventSlim();
+        gate.BackedOffProbe = () =>
+        {
+            backedOff.Set();
+            go.Wait();
+        };
+
+        long holdersAtRetry = -1;
+        var freezer = Task.Factory.StartNew(() =>
+        {
+            Assert.That(gate.TryEnterExclusive(TimeSpan.FromMilliseconds(300)), Is.False, "premise: the stuck holder defeats the attempt");
+            gate.AdmitWaiters(Stopwatch.GetTimestamp() + 2 * Stopwatch.Frequency);
+            holdersAtRetry = gate.SharedHolders();
+        }, TaskCreationOptions.LongRunning);
+
+        var spin = new SpinWait();
+        while (!gate.FreezePending)
+        {
+            spin.SpinOnce(-1);
+        }
+
+        DataFileWriteGate.Token writerToken = default;
+        var writer = Task.Factory.StartNew(() => writerToken = gate.EnterShared(), TaskCreationOptions.LongRunning);
+        Assert.That(backedOff.Wait(Long), Is.True, "premise: the writer met the attempt");
+        Assert.That(gate.Waiting, Is.EqualTo(1));
+        Assert.That(freezer.Wait(600), Is.False, "the freezer went on to its next attempt without waiting for the writer it held back");
+        go.Set();
+        Assert.That(freezer.Wait(Long) && writer.Wait(Long), Is.True);
+        Assert.Multiple(() =>
+        {
+            Assert.That(holdersAtRetry, Is.EqualTo(2), "the held-back writer had not entered when the freezer retried");
+            Assert.That(gate.Waiting, Is.Zero);
+        });
+        gate.ExitShared(writerToken);
+        gate.ExitShared(stuck);
+    }
+
     /// <summary>BKP-12, the freezer's half: an acquire that cannot drain gives up within its budget and leaves the gate open for writers.</summary>
     [Test]
     [CancelAfter(5_000)]

@@ -383,11 +383,14 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// <param name="timeout">Maximum wall-clock time to wait. <see cref="Timeout.InfiniteTimeSpan"/> waits indefinitely.</param>
     /// <param name="minCheckpointLsn">Also wait until <see cref="CheckpointLsn"/> has reached this LSN: a covering cycle that CK-13 held below it
     /// counts as not covering the request. 0 for no such requirement.</param>
-    /// <returns><see langword="true"/> once a covering cycle has finished; <see langword="false"/> on timeout, and at once when checkpointing has
-    /// halted (a fatal error, a simulated hard crash, or the loop stopping).</returns>
-    public bool ForceCheckpointAndWait(TimeSpan timeout, long minCheckpointLsn = 0)
+    /// <param name="ct">Stops the wait early (the request stands: the cycle still runs). An online backup's capture passes its own, so a closing
+    /// engine is not held behind it.</param>
+    /// <returns><see langword="true"/> once a covering cycle has finished; <see langword="false"/> on timeout or cancellation, and at once when
+    /// checkpointing has halted (a fatal error, a simulated hard crash, or the loop stopping).</returns>
+    public bool ForceCheckpointAndWait(TimeSpan timeout, long minCheckpointLsn = 0, CancellationToken ct = default)
     {
-        var ctx = WaitContext.FromTimeout(timeout);
+        var ctx = WaitContext.FromTimeout(timeout, ct);
+        using var wake = ct.CanBeCanceled ? ct.Register(PulseCycleFinished) : default;
         while (true)
         {
             var ticket = RequestCycle();
@@ -424,6 +427,15 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                     return true;
                 }
             }
+        }
+    }
+
+    /// <summary>Wakes the forced waiters to re-check their condition: a cancellation (<see cref="ForceCheckpointAndWait"/>).</summary>
+    private void PulseCycleFinished()
+    {
+        lock (_cycleFinished)
+        {
+            Monitor.PulseAll(_cycleFinished);
         }
     }
 

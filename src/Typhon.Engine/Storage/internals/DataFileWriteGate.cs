@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Threading;
 
 namespace Typhon.Engine.Internals;
@@ -26,7 +27,9 @@ namespace Typhon.Engine.Internals;
 /// backs off, or the freezer waits for it. <see cref="ExitExclusive"/> publishes with a release store that the writer's acquire load of
 /// <c>_freeze</c> pairs with, so whatever the freezer stored inside the exclusive section (map swap, hook install) is visible to every writer that
 /// enters after it. <b>Writer preference:</b> once <c>_freeze</c> is raised no new shared enter succeeds, so the freezer waits only for the writes
-/// already in flight. <b>Bounded:</b> <see cref="TryEnterExclusive"/> gives up after its timeout and reopens the gate.
+/// already in flight. <b>Bounded:</b> <see cref="TryEnterExclusive"/> gives up after its timeout and reopens the gate; a freezer that retries calls
+/// <see cref="AdmitWaiters"/> first, so the writers held back by the failed attempt enter before the next one (without it, a writer that does not
+/// get scheduled in the gap waits through the next attempt too, and the writers' stall is no longer bounded by one attempt).
 /// </para>
 /// <para>
 /// A thread must not enter shared while it holds a shared token whose release depends on that same thread: behind a pending freeze the second
@@ -40,6 +43,7 @@ internal sealed class DataFileWriteGate
 
     private readonly CacheLinePaddedLong[] _stripes = new CacheLinePaddedLong[StripeCount];
     private CacheLinePaddedLong _freeze;
+    private CacheLinePaddedLong _waiting;   // writers that met a freeze and have not entered yet; touched on the slow path only
     private readonly Lock _freezer = new();
 
     /// <summary>A shared hold, naming the stripe it was counted on.</summary>
@@ -64,15 +68,18 @@ internal sealed class DataFileWriteGate
     internal Token EnterShared()
     {
         var stripe = Environment.CurrentManagedThreadId & (StripeCount - 1);
+        Interlocked.Increment(ref _stripes[stripe].Value);
+        return Volatile.Read(ref _freeze.Value) == 0 ? new Token(stripe) : EnterSharedBehindFreeze(stripe);
+    }
+
+    /// <summary>The slow path: the enter met a freeze. Counted in <c>_waiting</c> from before it backs off until it has entered.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private Token EnterSharedBehindFreeze(int stripe)
+    {
         ref var counter = ref _stripes[stripe].Value;
+        Interlocked.Increment(ref _waiting.Value);
         while (true)
         {
-            Interlocked.Increment(ref counter);
-            if (Volatile.Read(ref _freeze.Value) == 0)
-            {
-                return new Token(stripe);
-            }
-
             Interlocked.Decrement(ref counter);
             BackedOffProbe?.Invoke();
             var spin = new SpinWait();
@@ -80,6 +87,13 @@ internal sealed class DataFileWriteGate
             {
                 // No Sleep(1): it is 15.6 ms on Windows, and a freeze lasts microseconds once the writes in flight have drained.
                 spin.SpinOnce(-1);
+            }
+
+            Interlocked.Increment(ref counter);
+            if (Volatile.Read(ref _freeze.Value) == 0)
+            {
+                Interlocked.Decrement(ref _waiting.Value);
+                return new Token(stripe);
             }
         }
     }
@@ -112,6 +126,24 @@ internal sealed class DataFileWriteGate
 
         return true;
     }
+
+    /// <summary>
+    /// Called by a freezer between a failed <see cref="TryEnterExclusive"/> and its next attempt: waits, with the gate open, until every writer that
+    /// met the failed attempt has entered, or until <paramref name="deadline"/> (a <see cref="Stopwatch"/> timestamp). A writer arriving now enters
+    /// without waiting, so this lasts as long as the slowest held-back writer takes to be scheduled.
+    /// </summary>
+    internal void AdmitWaiters(long deadline)
+    {
+        Debug.Assert(!_freezer.IsHeldByCurrentThread, "AdmitWaiters with the gate held exclusive");
+        var spin = new SpinWait();
+        while (Volatile.Read(ref _waiting.Value) != 0 && Stopwatch.GetTimestamp() < deadline)
+        {
+            spin.SpinOnce(-1);
+        }
+    }
+
+    /// <summary>Writers that met a freeze and have not entered yet (test seam).</summary>
+    internal long Waiting => Volatile.Read(ref _waiting.Value);
 
     /// <summary>Leaves exclusive. Everything stored before this call is visible to every writer that enters after it.</summary>
     internal void ExitExclusive()

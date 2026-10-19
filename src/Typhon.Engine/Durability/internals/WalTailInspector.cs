@@ -78,11 +78,12 @@ internal static class WalTailInspector
         try
         {
             wal.RequestFlush();
-            var ctx = WaitContext.FromTimeout(flushTimeout);
+            var ctx = WaitContext.FromTimeout(flushTimeout, ct);
             wal.WaitForDurable(publishedAtFreeze, ref ctx);
         }
         catch (TyphonException e)
         {
+            ct.ThrowIfCancellationRequested();   // a cancelled wait reads as a timeout; it is a cancellation (a closing engine, a caller)
             throw new BackupAbortedException(BackupAbortReason.WalFlushTimeout, $"the WAL did not become durable through LSN {publishedAtFreeze}.", e);
         }
 

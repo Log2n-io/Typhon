@@ -3391,13 +3391,28 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
             skipping FileCRC, restore skipping PageCrc
 
 ### BKP-12: The engine never waits on a backup past its budget
-  invariant a data-file writer spends at most CbwStallTimeout in BackupCapture.BeforeWrite per write (the slot wait and
-            the wait for a claimed page share one deadline); past it the capture aborts and the write proceeds
-  invariant the freeze's exclusive acquire is bounded: on timeout the gate reopens and the backup fails; an uninstall that
-            cannot get the gate leaves the (inert) hook and leaks its buffers rather than freeing them under a writer
-  scope: BackupCapture.BeforeWrite, BackupCapture.Abort, DataFileWriteGate.TryEnterExclusive, CbwSlotPool
+  invariant a data-file writer spends at most CbwStallTimeout in BackupCapture.BeforeWrite per write, and per SavePages
+            batch (the slot wait, the wait for a claimed page and every run of one batch share one deadline); past it the
+            capture aborts and the write proceeds
+  invariant the bound is cumulative: the freeze's exclusive attempts draw on one FreezeAcquireTimeout in all, the hook's
+            removal on one UninstallTimeout; each attempt holds writers back at most GateAttemptSlice, and between
+            attempts the gate stays open until the writers the failed attempt held back have entered
+            (DataFileWriteGate.AdmitWaiters); past the budget the freeze fails, and an uninstall leaves the (inert) hook
+            and leaks its buffers rather than freeing them under a writer
+  invariant a closing engine waits for the backup thread at most BackupCaptureOptions.StopTimeout: every capture wait
+            but a store call and the gate attempts observes the close; past it the lineage is revoked and the capture's
+            native memory is left to the still-running thread, never freed under it
+  scope: BackupCapture.BeforeWrite, BackupCapture.Abort, BackupCapture.Uninstall, BackupCoordinator.StopAndJoin,
+         DataFileWriteGate.TryEnterExclusive, DataFileWriteGate.AdmitWaiters, CbwSlotPool
   on_violation: a slow store (or a stuck backup thread) stalls the checkpoint → page-cache back-pressure → transactions stall
   verified: CbwStallTests.SlotPoolExhausted_TheWriterReturnsWithinBudget_AndTheCaptureAborts [Category("Sensitive")] (two
             slots, an undrained backup thread, more rewrites than slots: the slowest write ≤ budget + 10 ms, abort
-            CbwStall, the checkpoint advances), DataFileWriteGateTests.ExclusiveTimeout_IsBounded_AndReopensTheGate; source
-            mutant seen red: an unbounded slot wait
+            CbwStall, the checkpoint advances), DataFileWriteGateTests.ExclusiveTimeout_IsBounded_AndReopensTheGate,
+            DataFileWriteGateTests.AWriterHeldBackByAFailedAttempt_EntersBeforeTheNextOne,
+            BackupStopTests.AnUninstallThatCannotGetTheGate_StallsWritersWithinOneBudget (a writer's stall summed over the
+            attempts ≤ UninstallTimeout + 250 ms, no single stall > slice + 50 ms), SavePagesGateTests
+            .EveryRunOfABatch_SharesOneCopyBeforeWriteBudget, BackupStopTests.ACloseThatCannotJoin_LeavesTheCaptureItsMemory_
+            AndThePublishCannotRetrust, BackupStopTests.ACloseDuringTheForcedCheckpoint_DoesNotWaitForIt,
+            BackupStopTests.ACloseDuringTheTailFlush_DoesNotWaitForIt; source mutants seen red: an unbounded slot wait,
+            ten uninstall budgets, an uncapped attempt, AdmitWaiters returning at once, a per-run deadline, the checkpoint
+            and WAL waits without the close's token, the coordinator disposed (blocks freed) after a failed join

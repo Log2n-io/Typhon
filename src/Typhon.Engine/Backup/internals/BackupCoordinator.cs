@@ -22,6 +22,7 @@ internal sealed partial class BackupCoordinator : ResourceNode
     private Request _pending;
     private BackupCapture _current;
     private bool _stopped;
+    private bool _detached;
 
     private sealed record Request(IBackupPointStore Store, BackupKind Kind, CancellationToken Ct, TaskCompletionSource<BackupPointInfo> Completion);
 
@@ -46,6 +47,12 @@ internal sealed partial class BackupCoordinator : ResourceNode
 
     /// <summary>The capture of the last request, kept for inspection once it ended.</summary>
     internal BackupCapture LastCapture { get; private set; }
+
+    /// <summary>Test hook, null in production: invoked by the backup thread when it wakes, before it takes the pending request.</summary>
+    internal Action BeforeTakingRequest { get; set; }
+
+    /// <summary>Whether the last stop gave up joining the backup thread (its capture and buffers were left to it).</summary>
+    internal bool Detached => Volatile.Read(ref _detached);
 
     /// <summary>
     /// Takes a backup point into <paramref name="store"/>: full or incremental per admission, <paramref name="kind"/> = <see cref="BackupKind.Full"/>
@@ -101,6 +108,7 @@ internal sealed partial class BackupCoordinator : ResourceNode
         while (true)
         {
             _wake.Wait();
+            BeforeTakingRequest?.Invoke();
             Request request;
             BackupCapture capture;
             lock (_lock)
@@ -151,14 +159,17 @@ internal sealed partial class BackupCoordinator : ResourceNode
     }
 
     /// <summary>
-    /// Stops the coordinator: aborts a running capture (which runs its failure path: map merged back, floor released, hook removed, point abandoned) and
-    /// joins the thread. If the thread does not finish in <paramref name="timeout"/> (a store stuck in I/O), the hook is removed from here and the
-    /// lineage stops being trusted: the abandoned page set may not be merged back before the close persists the map.
+    /// Stops the coordinator: fails a request no capture has taken yet, aborts a running capture (which runs its failure path: map merged back, floor
+    /// released, hook removed, point abandoned), and joins the thread. Every wait of a capture observes the cancellation but a store call and the gate's
+    /// bounded acquires, so the join waits <see cref="BackupCaptureOptions.StopTimeout"/>. If the thread does not finish in it (a store stuck in I/O),
+    /// the hook is removed from here, the lineage is revoked (the abandoned page set may never be merged back), and the capture is detached: its
+    /// native memory, and the coordinator's, is left to the still-running thread rather than freed under it.
     /// </summary>
-    internal void StopAndJoin(TimeSpan timeout)
+    internal void StopAndJoin()
     {
         BackupCapture running;
         Thread thread;
+        Request pending;
         lock (_lock)
         {
             if (_stopped)
@@ -169,15 +180,21 @@ internal sealed partial class BackupCoordinator : ResourceNode
             _stopped = true;
             running = _current;
             thread = _thread;
+            pending = _pending;
+            _pending = null;
         }
 
+        pending?.Completion.TrySetException(new BackupAbortedException(BackupAbortReason.EngineStopping, "the engine is closing."));
         running?.Abort(BackupAbortReason.EngineStopping);
         _stopping.Cancel();
         _wake.Set();
+        var timeout = Options.StopTimeout;
         if (thread != null && !thread.Join(timeout))
         {
             LogStopTimedOut(timeout.TotalSeconds);
-            Lineage.Trusted = false;
+            Lineage.Revoke();
+            running?.Detach();
+            Volatile.Write(ref _detached, true);
             running?.Uninstall();
         }
     }
@@ -187,13 +204,22 @@ internal sealed partial class BackupCoordinator : ResourceNode
     {
         if (disposing)
         {
-            StopAndJoin(TimeSpan.FromSeconds(10));
+            StopAndJoin();
             Parent?.RemoveChild(this);
+            if (Detached)
+            {
+                // The backup thread still runs and owns blocks parented here: disposing this node would free them under it.
+                return;
+            }
+
+            _wake.Dispose();
+            _stopping.Dispose();
         }
 
         base.Dispose(disposing);
     }
 
-    [LoggerMessage(LogLevel.Error, "Backup thread did not stop within {Seconds} s; its copy-before-write hook was removed from the closing thread")]
+    [LoggerMessage(LogLevel.Error,
+        "Backup thread did not stop within {Seconds} s; its copy-before-write hook was removed from the closing thread and its buffers left to it")]
     private partial void LogStopTimedOut(double seconds);
 }

@@ -206,7 +206,14 @@ internal sealed class CapturingSink : IBackupPointSink
         return new BackupPointInfo(BackupId, ChainId, Plan.Kind, pointLsn, CheckpointLsn, ImagePages, Pages.Count, Suspects.Count, 0, "memory");
     }
 
-    public void Abort() => Aborted = true;
+    /// <summary>Invoked by <see cref="Abort"/>: a test may throw here to break the seam's never-throws contract.</summary>
+    public Action OnAbort { get; set; }
+
+    public void Abort()
+    {
+        Aborted = true;
+        OnAbort?.Invoke();
+    }
 
     private static uint ParentBaseId(FakeBackupStore store, BackupPointPlan plan)
     {
