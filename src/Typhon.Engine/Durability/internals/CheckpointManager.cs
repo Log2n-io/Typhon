@@ -104,6 +104,10 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// called more than once per call. Null in production.</summary>
     internal Action AfterForceRequested { get; set; }
 
+    /// <summary>Test seam (#1412): invoked on the checkpoint thread once a batch's pages are written and before its flush2 and fsync, the window in
+    /// which the data file holds pages whose records may not be durable yet (C1). Null in production: one null check per batch.</summary>
+    internal Action BeforeSettleProbe { get; set; }
+
     /// <summary>
     /// Wired by <see cref="DatabaseEngine"/> to <c>PersistArchetypeState</c>. Invoked at the START of every checkpoint cycle (before the durability
     /// barrier) so the per-archetype segment pointers (EntityMap / cluster-segment SPIs in the <c>ArchetypeR1</c> table, plus NextEntityKey + EntityMap
@@ -1035,6 +1039,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
 
                     if (batchPages > 0)
                     {
+                        BeforeSettleProbe?.Invoke();
                         SettleBatch(pending, capturedGen, batch, ref ctx);
                         writtenTotal += batchPages;
                     }

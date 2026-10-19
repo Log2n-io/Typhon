@@ -158,6 +158,65 @@ class FreezeTests : BackupTestBase<FreezeTests>
         }
     }
 
+    /// <summary>
+    /// The freeze waits for a write in flight: an async SavePages batch held inside the write gate (after its map update, before its write) keeps the
+    /// freeze out until it is released. (The image is not compared with a file read here: the released allocation goes on writing after the freeze, and
+    /// a read taken after it cannot tell those writes from the image; the quiet tests above compare it.)
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("BKP-02")]
+    public void Freeze_WaitsForTheWritesInFlight()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        dbe.BackupCoordinator.Options.CheckpointBeforeFreeze = false;
+        var mmf = dbe.MMF;
+
+        using var inFlight = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        using var frozen = new ManualResetEventSlim();
+        var armed = 1;
+        var writer = Task.Run(() =>
+        {
+            mmf.DataFileWriteProbe = (_, _) =>
+            {
+                if (Interlocked.Exchange(ref armed, 0) == 1)
+                {
+                    inFlight.Set();
+                    release.Wait();
+                }
+            };
+            var cs = mmf.CreateChangeSet();
+            mmf.AllocateSegment(PageBlockType.None, 16, cs);
+            cs.SaveChanges();
+        });
+
+        try
+        {
+            Assert.That(inFlight.Wait(Budget), Is.True, "premise: a batch is inside the gate");
+            dbe.BackupCoordinator.Probe = (phase, _) =>
+            {
+                if (phase == CapturePhase.AfterFreeze)
+                {
+                    frozen.Set();
+                }
+            };
+            var store = new FakeBackupStore();
+            var capture = StartCapture(dbe, store);
+            Assert.That(frozen.Wait(100), Is.False, $"{Marker}: the freeze did not wait for the write in flight");
+            release.Set();
+            Assert.That(frozen.Wait(Budget), Is.True, "the freeze proceeds once the write has left the gate");
+            Assert.That(capture.Wait(Budget) && store.Points.Count == 1, Is.True);
+        }
+        finally
+        {
+            release.Set();
+            writer.Wait(Budget);
+            mmf.DataFileWriteProbe = null;
+        }
+    }
+
     /// <summary>The image's checkpoint LSN is the one its own frozen meta pair holds, and the reclaim floor is at or below it (C14).</summary>
     [Test]
     [CancelAfter(15_000)]

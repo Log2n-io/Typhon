@@ -45,9 +45,9 @@ abstract class BackupTestBase<T> : TestBase<T> where T : BackupTestBase<T>
     }
 
     /// <summary>Rewrites every entity of <paramref name="ids"/>: their pages go dirty in the cache, unwritten until a checkpoint.</summary>
-    protected static void Update(DatabaseEngine dbe, IEnumerable<EntityId> ids, int value)
+    protected static void Update(DatabaseEngine dbe, IEnumerable<EntityId> ids, int value, DurabilityMode durability = DurabilityMode.Immediate)
     {
-        using var t = dbe.CreateQuickTransaction(DurabilityMode.Immediate);
+        using var t = dbe.CreateQuickTransaction(durability);
         foreach (var id in ids)
         {
             var entity = t.OpenMut(id);
