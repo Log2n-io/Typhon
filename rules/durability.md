@@ -804,8 +804,13 @@ CK-08 (flush-only cycles) are later increments.
 ### CK-07: Sealed-segment list synchronization
   invariant all `_sealedSegments` access (writer-thread rotate-Add, checkpoint-thread reclaim-Remove, introspection readers) is
             serialized under one private lock
-  scope: `WalSegmentManager._sealedLock` — guards `RotateSegment` Add, `MarkReclaimable`, `SealedSegmentCount`,
-         `GetAllSegmentPaths`, reopen-reconcile Add
+  invariant a rotation makes the new segment active AND adds the old one to `_sealedSegments` in one critical section, so a
+            reader holding the lock sees the old segment as active or as sealed, never as neither (online backup's tail
+            snapshot, BKP-04)
+  scope: `WalSegmentManager._sealedLock` — guards `RotateSegment` (ActiveSegment assignment + Add), `MarkReclaimable`,
+         `SealedSegmentCount`, `GetAllSegmentPaths`, `WalSegmentManager.SnapshotForTail`, reopen-reconcile Add
+  verified: SegmentSnapshotTests.SnapshotDuringARotation_SeesTheSegmentBeingSealed (a rotation paused between creating and
+            publishing the new segment; assigning ActiveSegment outside the lock turns it red)
   on_violation: TXW-7 — `List<T>` corruption under concurrent structural mutation → a fatal latch in a background thread
 
 ### CK-08: Flush-only cycles during recovery `[fatal]`

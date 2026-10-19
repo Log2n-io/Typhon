@@ -68,6 +68,10 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     // ═══════════════════════════════════════════════════════════════
 
     private long _checkpointLsn;
+
+    // W1 (BKP-04): while an online backup copies its WAL tail, step 8 never reclaims a segment whose last LSN is at or above this floor. MaxValue
+    // when no backup holds it.
+    private long _reclaimFloor = long.MaxValue;
     private volatile Exception _fatalError;
     private volatile DurabilityHealth _health = DurabilityHealth.Ok;
     // 1 while a force request waits for the loop. Read-and-cleared in one exchange, so a request landing between the loop's wake and its read
@@ -179,6 +183,18 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
 
     /// <summary>The highest LSN that has been fully checkpointed (data pages on stable media).</summary>
     public long CheckpointLsn => Interlocked.Read(ref _checkpointLsn);
+
+    /// <summary>
+    /// Holds WAL reclaim below <paramref name="floorLsn"/>: until <see cref="ClearReclaimFloor"/>, no checkpoint deletes a segment whose last LSN is
+    /// at or above it (BKP-04). Set by an online backup under its freeze, so a cycle whose meta write follows the freeze reads it at step 8.
+    /// </summary>
+    internal void SetReclaimFloor(long floorLsn) => Volatile.Write(ref _reclaimFloor, floorLsn);
+
+    /// <summary>Releases the floor set by <see cref="SetReclaimFloor"/>.</summary>
+    internal void ClearReclaimFloor() => Volatile.Write(ref _reclaimFloor, long.MaxValue);
+
+    /// <summary>The reclaim floor, <see cref="long.MaxValue"/> when none is held.</summary>
+    internal long ReclaimFloor => Volatile.Read(ref _reclaimFloor);
 
     /// <summary>Whether the checkpoint thread is currently running.</summary>
     public bool IsRunning => _thread != null && _thread.IsAlive;
@@ -1414,6 +1430,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                     {
                         var tickFenceLsn = _lastTickFenceLsnProvider?.Invoke() ?? 0;
                         var trimLsn = tickFenceLsn > 0 ? Math.Min(barrierLsn, tickFenceLsn) : barrierLsn;
+                        trimLsn = Math.Min(trimLsn, Volatile.Read(ref _reclaimFloor));   // W1: an online backup copying its tail (BKP-04)
                         var recycled = segmentManager.MarkReclaimable(trimLsn);
                         recycleScope.RecycledCount = recycled;
                         Interlocked.Add(ref _totalSegmentsRecycled, recycled);

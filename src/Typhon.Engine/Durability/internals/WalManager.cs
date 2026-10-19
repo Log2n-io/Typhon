@@ -155,6 +155,12 @@ internal sealed class WalManager : ResourceNode
     /// </summary>
     public void RequestFlush() => _writer?.RequestFlush();
 
+    /// <summary>Asks the writer to seal the active segment (W2, see <see cref="WalWriter.RequestSegmentSwitch"/>). Returns the ticket, 0 with no writer.</summary>
+    internal long RequestSegmentSwitch() => _writer?.RequestSegmentSwitch() ?? 0;
+
+    /// <summary>The highest segment-switch ticket the writer has served.</summary>
+    internal long SwitchesServed => _writer?.SwitchesServed ?? 0;
+
     /// <summary>Seeds the durable watermark to a frontier already durable on disk (crash-recovery seal — see <see cref="WalWriter.SeedDurableLsn"/>).</summary>
     public void SeedDurableLsn(long lsn) => _writer?.SeedDurableLsn(lsn);
 
