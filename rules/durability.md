@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-10-09 |
+| Last Updated | 2026-10-19 |
 | Domain | WAL, Checkpoint, Crash Recovery, Page Safety, Versioned HEAD Reopen |
 
 > Type-location notes (post-#329 layout): WAL/Checkpoint/Recovery internals live in
@@ -3174,3 +3174,30 @@ answer to different constraints — RB must always end with a usable database, I
             under test) proves both halves against ONE fixture: the scan still produces a report and names the mismatch, and
             `Apply` refuses it without writing a byte. `Mutant_ApplyWithoutTheRevisionGate` shows the assertion can fail.
 
+## Module: BKP — Online backup capture
+
+A backup point is a frozen image of the data file plus the WAL tail that makes it consistent (ADR-075; design
+`design/Durability/PitBackup/`, implementation plan `impl/1412-capture-plan.md`). This module covers capture. BKP-05, 08, 10
+and 11 (restore, store, WAL archiving) land with #1413 and #1418.
+
+### BKP-01: Every data-file write is tracked and gated `[silent]`
+  invariant ∀ engine write w to the data file: w is issued by PagedMMF.IssueDataFileWrite or
+            PagedMMF.IssueDataFileWriteAsync, w holds the DataFileWriteGate shared from before its change-map update until
+            w has completed (async: until the SavePages batch's writes have all completed), and the PageChangeMap bit of
+            every page of w is set BEFORE w is issued
+  invariant Storage/ contains exactly two RandomAccess.Write*/WriteAsync call sites, one inside each of those methods
+  invariant the map and the gate exist before the PagedMMF constructor's first write (field initialisers; genesis writes
+            run from CreateFile inside the constructor)
+  scope: PagedMMF.IssueDataFileWrite, PagedMMF.IssueDataFileWriteAsync, PagedMMF.SavePages (batch token, exited in the
+    continuation or in the issue loop's catch), PagedMMF.BeforeDataFileWrite, PageChangeMap.Set, DataFileWriteGate.EnterShared,
+    DataFileWriteGate.ExitShared, DataFileWriteTracking (TYPHON_DATAFILE_TRACKING=0 turns the map off: every point is then
+    full, never wrong)
+  on_violation: a write outside the map → its page is missing from the next incremental → a restore serves a stale page with
+    no error; a write outside the gate → an image torn at the freeze
+  note the gate is a dedicated writer-preferring striped primitive, not AccessControl: AccessControl's shared count is 8 bits
+       (Release overflow is silent) and AccessControlSmall would starve a pending freeze behind a stream of wave writes
+  verified: DataFileWriteChokepointGateTests.Storage_HasExactlyTheTwoChokepointWrites (+ the merge gate's invariants step),
+            ChokepointCompletenessTests.EveryWriteOfALifecycle_IsInTheMap (witness = the data file's bytes before and after
+            each session: create, crash, recovery open with a schema migration, clean closes), with
+            ChokepointCompletenessTests.Mutant_ARawWrite_IsMissingFromTheMap and
+            DataFileWriteChokepointGateTests.Mutant_AThirdWriteSite_IsReported

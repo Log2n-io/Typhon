@@ -405,6 +405,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>The database bundle directory (<c>{name}.typhon</c>). The <c>data</c> file, <c>db.lock</c>, and <c>wal/</c> live inside it.</summary>
     internal string BundleDirectory => Options.BundleDirectory;
 
+    /// <summary>The data file's full path, inside <see cref="BundleDirectory"/>.</summary>
+    internal string DataFilePath => Options.BuildDatabasePathFileName();
+
     /// <summary>The database's name — the bundle directory's stem, without the <c>.typhon</c> suffix. Recorded in profiling captures so a trace can say which
     /// database it ran against in terms a human recognises (#614, D-2).</summary>
     internal string DatabaseName => Options.DatabaseName;
@@ -447,6 +450,22 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     private SafeFileHandle _fileHandle;
     private long _fileSize;
+
+    // BKP-01: created with the instance, so they exist before the constructor's first write (genesis writes from CreateFile). The map reference is
+    // swapped and the hook installed only under the gate held exclusive; writers read both inside the gate held shared.
+    private readonly DataFileWriteGate _writeGate = new();
+    private PageChangeMap _changeMap = new();
+    private IDataFileWriteHook _writeHook;
+
+    /// <summary>The data-file write gate (BKP-01).</summary>
+    internal DataFileWriteGate WriteGate => _writeGate;
+
+    /// <summary>The live change map: every page written since this instance was created or since the last backup's freeze (BKP-01).</summary>
+    internal PageChangeMap ChangeMap => Volatile.Read(ref _changeMap);
+
+    /// <summary>Test hook: invoked with <c>(firstPage, count)</c> inside the write gate, after the change-map update, before each data-file write is
+    /// issued. Null in production.</summary>
+    internal Action<int, int> DataFileWriteProbe { get; set; }
     private string _lockFilePath;
     private readonly IPageCacheBackpressureStrategy _backpressureStrategy;
 
@@ -3056,8 +3075,37 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     {
         PageWriteInterceptor?.Invoke(filePageIndex);   // test-only crash injection; throws to abort mid-write
         var pageOffset = filePageIndex * (long)PageSize;
-        RandomAccess.Write(_fileHandle, source, pageOffset);
+        var gated = DataFileWriteTracking.GateEnabled;
+        var token = gated ? _writeGate.EnterShared() : default;
+        try
+        {
+            BeforeDataFileWrite(filePageIndex, pageCount);
+            RandomAccess.Write(_fileHandle, source, pageOffset);
+        }
+        finally
+        {
+            if (gated)
+            {
+                _writeGate.ExitShared(token);
+            }
+        }
+
         TrackFileGrowth(pageOffset + pageCount * (long)PageSize);
+    }
+
+    /// <summary>
+    /// What every data-file write does inside the write gate, before it is issued (BKP-01): mark its pages in the change map, then let an online
+    /// backup preserve the pages it still needs (copy-before-write). Never throws.
+    /// </summary>
+    private void BeforeDataFileWrite(int filePageIndex, int pageCount)
+    {
+        if (DataFileWriteTracking.MapEnabled)
+        {
+            Volatile.Read(ref _changeMap).Set(filePageIndex, pageCount);
+        }
+
+        Volatile.Read(ref _writeHook)?.BeforeWrite(filePageIndex, pageCount);
+        DataFileWriteProbe?.Invoke(filePageIndex, pageCount);
     }
 
     /// <summary>
@@ -4426,6 +4474,16 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             }
         }
 
+        // BKP-01: the batch holds the write gate from before its change-map update until every one of its writes has completed, so a freeze sees
+        // either none of the batch or all of it. Copy-before-write runs here, on this thread, before any write is issued: on Linux a pool thread
+        // runs the pwrite later. Exited at the top of the continuation, or below if the writes cannot be issued.
+        var gated = DataFileWriteTracking.GateEnabled;
+        var batchToken = gated ? _writeGate.EnterShared() : default;
+        for (int i = 0; i < operations.Count; i++)
+        {
+            BeforeDataFileWrite(Slot(operations[i].memPageIndex).FilePageIndex, operations[i].length);
+        }
+
         var tasks = new Task[operations.Count];
         var issued = 0;
         try
@@ -4441,12 +4499,23 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // method has returned. Abandoned here, an issued write could outlive the page cache and copy whatever then lived at the freed address: a
             // zeroed page landed over a good one (#978). So the writes already issued are waited for, and their captures ended, before the throw.
             WaitForIssuedWrites(tasks, issued);
+            if (gated)
+            {
+                _writeGate.ExitShared(batchToken);
+            }
+
             EndCaptures(normalPages);
             throw;
         }
 
         var saveTask = Task.WhenAll(tasks).ContinueWith(t =>
         {
+            // Every write of the batch has completed, faulted or not: the data file no longer changes under a freeze.
+            if (gated)
+            {
+                _writeGate.ExitShared(batchToken);
+            }
+
             EndCaptures(normalPages);
 
             // A faulted write never landed: neither the watermark nor the debt may move for it, or the page could be evicted over bytes the file never

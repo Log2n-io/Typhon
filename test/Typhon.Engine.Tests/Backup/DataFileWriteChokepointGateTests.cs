@@ -27,6 +27,7 @@ public class DataFileWriteChokepointGateTests
     private static readonly string[] Chokepoints = ["IssueDataFileWrite", "IssueDataFileWriteAsync"];
 
     [Test]
+    [VerifiesRule("BKP-01")]
     public void Storage_HasExactlyTheTwoChokepointWrites()
     {
         var storageDir = StorageDurabilityIdentifierGateTests.LocateStorageDir();
@@ -47,6 +48,7 @@ public class DataFileWriteChokepointGateTests
     }
 
     [Test]
+    [RuleMutant("BKP-01")]
     public void Mutant_AThirdWriteSite_IsReported()
     {
         // The matcher's self-test: a write placed in another method must be reported by name, or the gate above proves nothing.
