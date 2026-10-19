@@ -2048,6 +2048,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
     }
 
+    [LoggerMessage(LogLevel.Warning,
+        "Open: data-file write tracking is switched off (change map {MapEnabled}, write gate {GateEnabled}): every backup point will be full, and with the "
+        + "gate off online backup is refused (TYPHON_DATAFILE_TRACKING / TYPHON_DATAFILE_GATE)")]
+    private partial void LogDataFileTrackingSwitchedOff(bool mapEnabled, bool gateEnabled);
+
     [LoggerMessage(LogLevel.Warning, "Close: the backup-state could not be written ({path}); the next backup will be full")]
     private partial void LogBackupStateWriteFailed(Exception exception, string path);
 
@@ -2180,6 +2185,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         InitializeCheckpointManager();
         BackupCoordinator = new BackupCoordinator(this, _durabilityNode, Logger);
         AdoptBackupState();
+        if (!DataFileWriteTracking.MapEnabled || !DataFileWriteTracking.GateEnabled)
+        {
+            LogDataFileTrackingSwitchedOff(DataFileWriteTracking.MapEnabled, DataFileWriteTracking.GateEnabled);
+        }
         InitializeStatisticsWorker();
 
         _constructed = true;

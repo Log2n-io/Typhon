@@ -131,16 +131,16 @@ public enum TyphonErrorCode
     /// </summary>
     RecoveryArchetypeNotRegistered  = 7012,
 
-    // 72xx — Online backup capture
+    // 71xx — Backup (7101-7106: the store and restore, #1413; 7107-7108: online capture, #1412)
 
     /// <summary>
     /// An online backup capture was abandoned: it could not keep up with the engine's writes, the store failed, or the engine was stopping. Nothing was
     /// published, and the next backup still covers every page this one would have.
     /// </summary>
-    BackupAborted                   = 7201,
+    BackupAborted                   = 7107,
 
     /// <summary>A backup was requested while another one was running on the same engine.</summary>
-    BackupInProgress                = 7202,
+    BackupInProgress                = 7108,
 
     // 8xxx — Runtime / Scheduler
 

@@ -32,7 +32,10 @@ internal enum BackupAbortReason : byte
     /// <summary>A WAL segment the tail needs could not be read or did not hold a valid header.</summary>
     TailUnreadable = 8,
 
-    /// <summary>The data-file write gate is disabled for this process (<c>TYPHON_DATAFILE_GATE=0</c>), so a freeze cannot exclude in-flight writes.</summary>
+    /// <summary>
+    /// The write gate is switched off for this process (<c>TYPHON_DATAFILE_GATE=0</c>): a freeze cannot exclude in-flight writes. Offline capture
+    /// still works.
+    /// </summary>
     TrackingDisabled = 9,
 }
 

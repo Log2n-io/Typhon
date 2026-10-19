@@ -14,9 +14,9 @@ namespace Typhon.Benchmark;
 /// batch (1, 10, 100 pages). Test mode: real <c>pwrite</c>, no fsync, so the gate's cost is measured against the write it sits beside.
 /// </summary>
 /// <remarks>
-/// Same binary, A/B by environment: run it with <c>TYPHON_DATAFILE_TRACKING=0</c> and <c>TYPHON_DATAFILE_GATE=0</c> set (Off) and unset (On), in
-/// interleaved pairs; BenchmarkDotNet's child process inherits them, and both switches are <c>static readonly</c>, folded by the JIT in Tier 1.
-/// Gate: On within 1 % of Off per page.
+/// Same binary, A/B by environment (the two ops escape hatches): run it with <c>TYPHON_DATAFILE_TRACKING=0</c> and <c>TYPHON_DATAFILE_GATE=0</c>
+/// set (Off) and unset (On), in interleaved pairs; BenchmarkDotNet's child process inherits them, and both switches are <c>static readonly</c>,
+/// folded by the JIT in Tier 1. Gate: On within 1 % of Off per page.
 /// </remarks>
 [BenchmarkCategory("Storage", "Backup")]
 public abstract class DataFileWritePathBenchmarks

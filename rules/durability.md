@@ -3198,8 +3198,9 @@ and 11 (restore, store, WAL archiving) land with #1413 and #1418.
             run from CreateFile inside the constructor)
   scope: PagedMMF.IssueDataFileWrite, PagedMMF.IssueDataFileWriteAsync, PagedMMF.SavePages (batch token, exited in the
     continuation or in the issue loop's catch), PagedMMF.BeforeDataFileWrite, PageChangeMap.Set, DataFileWriteGate.EnterShared,
-    DataFileWriteGate.ExitShared, DataFileWriteTracking (TYPHON_DATAFILE_TRACKING=0 turns the map off: every point is then
-    full, never wrong)
+    DataFileWriteGate.ExitShared, DataFileWriteTracking (ops escape hatches, warned at open: TYPHON_DATAFILE_TRACKING=0 turns the
+    map off, every point is then full, never wrong; TYPHON_DATAFILE_GATE=0 also drops the gate and copy-before-write, and online
+    capture is then refused, BackupCoordinator.CaptureAsync)
   on_violation: a write outside the map → its page is missing from the next incremental → a restore serves a stale page with
     no error; a write outside the gate → an image torn at the freeze
   note the gate is a dedicated writer-preferring striped primitive, not AccessControl: AccessControl's shared count is 8 bits

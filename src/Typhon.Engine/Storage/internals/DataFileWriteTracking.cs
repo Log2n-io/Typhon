@@ -3,17 +3,18 @@ using System;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// Process-wide switches for the data-file write chokepoint, read once from the environment. <c>static readonly</c>, so the JIT folds them in
-/// Tier 1 and an A/B of their cost runs on one binary.
+/// Process-wide switches for the data-file write chokepoint, read once from the environment: two ops escape hatches, also the same-binary A/B of their
+/// cost. <c>static readonly</c>, so the JIT folds them in Tier 1. The engine logs a warning at open when either is set.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <c>TYPHON_DATAFILE_TRACKING=0</c> turns the change map off for the process: an ops kill-switch. A backup then never trusts the map, so every point
-/// is full; a wrong setting costs I/O, never correctness.
+/// <c>TYPHON_DATAFILE_TRACKING=0</c> turns the change map off for the process. The gate and copy-before-write stay, so online backup still works, but
+/// the lineage is never trusted and every point is full: a wrong setting costs I/O, never correctness.
 /// </para>
 /// <para>
-/// <c>TYPHON_DATAFILE_GATE=0</c> also skips the write gate and the copy-before-write hook. It exists to measure their cost and nothing else: with it
-/// set, a freeze cannot exclude in-flight writes, so online backup refuses to capture.
+/// <c>TYPHON_DATAFILE_GATE=0</c> also skips the write gate and the copy-before-write hook, for the day the gate itself misbehaves in production. A
+/// freeze can then no longer exclude in-flight writes, so online capture is refused (<c>BackupAbortReason.TrackingDisabled</c>); offline capture of
+/// a closed database still works.
 /// </para>
 /// </remarks>
 internal static class DataFileWriteTracking
