@@ -2156,6 +2156,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         DBD = new DatabaseDefinitions();
         ConstructComponentStore();
+
+        // A bundle a restore wrote: refused here, before InitializeUowRegistry scans the WAL, when its marker cannot be trusted or the WAL directory is not
+        // its own (DC-4). Late enough that a refused open disposes like any other.
+        CheckRestoreMarkerAtOpen();
         InitializeUowRegistry();
 
         if (MMF.IsDatabaseFileCreating)
@@ -2165,6 +2169,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         else
         {
             LoadSystemSchemaR1();
+
+            // The restored bundle's new timeline, before the WAL manager writes a segment (BKP-05). After the gate, so a refused database is not written.
+            AdoptRestoredTimeline();
 
             // Before the first registration can allocate: every page the file's segments name, claimed (#1296) — the components' from their persisted
             // pointers, the archetypes' from their catalog. The catalog is read here, not in InitializeArchetypesCore: a component registered before
@@ -2495,6 +2502,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     private void InitializeWalManager()
     {
+        BeforeWalManagerProbe?.Invoke(this);
         var walOptions = _options.Wal;
         if (walOptions == null)
         {

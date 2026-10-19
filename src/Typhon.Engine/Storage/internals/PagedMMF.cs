@@ -803,6 +803,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             IsDatabaseFileCreating = fi.Exists == false;
             if (IsDatabaseFileCreating)
             {
+                RefuseRestoreMarkerWithoutData();
                 CreateFile();
             }
             else
@@ -830,6 +831,21 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // twice now (the other was a Win32Exception out of the liveness probe, #621), which is once more than a
             // wrapper that adds no information deserves. The inner exception is still attached for the stack trace.
             throw new Exception($"Cannot open the database at '{Options.BundleDirectory}': {e.Message}", e);
+        }
+    }
+
+    /// <summary>
+    /// Create path only: a bundle holding a restore marker but no data file is a restore that lost its image, never a new database. Creating an empty
+    /// one in its place would hand the application an empty database under the restored name (BKP-05).
+    /// </summary>
+    private void RefuseRestoreMarkerWithoutData()
+    {
+        var marker = Path.Combine(Options.BundleDirectory, RestoreMarker.FileName);
+        if (File.Exists(marker))
+        {
+            throw new StorageException(TyphonErrorCode.InvalidDatabaseBundle,
+                $"'{Options.BundleDirectory}' holds a restore marker but no data file: the restore that wrote it is incomplete. Restore the point again "
+                + "instead of creating an empty database here.");
         }
     }
 
