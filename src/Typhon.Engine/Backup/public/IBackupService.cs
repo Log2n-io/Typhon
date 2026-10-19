@@ -20,10 +20,10 @@ public enum BackupRequestKind
 /// time, on the engine's backup thread. Scheduling and retention are the application's until the engine's scheduler arrives (#1416).
 /// </summary>
 /// <remarks>
-/// Failures are <see cref="TyphonException"/>s carrying their <see cref="TyphonException.ErrorCode"/>: <see cref="TyphonErrorCode.BackupInProgress"/>
-/// when a backup is already running, <see cref="TyphonErrorCode.BackupAborted"/> when the capture was abandoned (cancelled, the engine closing, a
-/// writer the backup could not keep up with, the store failing). An abandoned point publishes nothing and forgets no page: the next point covers it.
-/// The store's own refusals are the typed <see cref="BackupStoreLockedException"/> and <see cref="BackupStoreMismatchException"/>.
+/// Failures: a <see cref="BackupAbortedException"/> when the capture was abandoned, its <see cref="BackupAbortedException.Reason"/> saying why
+/// (cancelled, the engine closing, a writer the backup could not keep up with, the store failing). An abandoned point publishes nothing and forgets no
+/// page: the next point covers it. A <see cref="TyphonException"/> with <see cref="TyphonErrorCode.BackupInProgress"/> when a backup is already
+/// running. The store's own refusals are the typed <see cref="BackupStoreLockedException"/> and <see cref="BackupStoreMismatchException"/>.
 /// </remarks>
 [PublicAPI]
 public interface IBackupService

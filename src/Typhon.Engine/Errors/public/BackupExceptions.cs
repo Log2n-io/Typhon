@@ -247,3 +247,71 @@ public sealed class RestoreRefusedException : BackupException
     /// <summary>The target bundle.</summary>
     public string Target { get; }
 }
+
+/// <summary>Why an online backup (<see cref="IBackupService.CreateAsync"/>) was abandoned.</summary>
+[PublicAPI]
+public enum BackupAbortReason : byte
+{
+    /// <summary>No reason recorded: the capture has not aborted.</summary>
+    None = 0,
+
+    /// <summary>
+    /// A write to the data file had to wait for the backup to preserve the page it overwrites, longer than the capture allows: the backup could not
+    /// keep up with the writers. Transient: a later attempt, at a quieter moment, may succeed.
+    /// </summary>
+    CbwStall = 1,
+
+    /// <summary>The freeze could not drain the data-file writes in flight within its budget. Transient.</summary>
+    GateTimeout = 2,
+
+    /// <summary>The caller cancelled the backup.</summary>
+    Cancelled = 3,
+
+    /// <summary>The engine began to close, or is not open.</summary>
+    EngineStopping = 4,
+
+    /// <summary>The backup store failed; the store's exception is the inner one.</summary>
+    SinkFailed = 5,
+
+    /// <summary>The WAL did not become durable up to the point being frozen within the budget, or failed. Transient.</summary>
+    WalFlushTimeout = 6,
+
+    /// <summary>
+    /// The engine cannot take a consistent point right now: its open has not completed, recovery is running, or its commit pipeline or checkpointer has
+    /// stopped. The message says which.
+    /// </summary>
+    EngineFault = 7,
+
+    /// <summary>A WAL segment the backup needs could not be read, or did not hold a valid header.</summary>
+    TailUnreadable = 8,
+
+    /// <summary>
+    /// Data-file write tracking is switched off for this process (<c>TYPHON_DATAFILE_GATE=0</c>), so no consistent image can be frozen. An offline
+    /// backup (<see cref="BackupOperations.Create"/>) still works.
+    /// </summary>
+    TrackingDisabled = 9,
+}
+
+/// <summary>
+/// An online backup was abandoned (<see cref="TyphonErrorCode.BackupAborted"/>). Nothing was published, and no page is forgotten: the next backup
+/// covers everything this one would have.
+/// </summary>
+[PublicAPI]
+public sealed class BackupAbortedException : BackupException
+{
+    /// <summary>Creates the exception.</summary>
+    /// <param name="reason">Why the backup was abandoned.</param>
+    /// <param name="message">What happened.</param>
+    /// <param name="innerException">The underlying failure, if any.</param>
+    public BackupAbortedException(BackupAbortReason reason, string message, Exception innerException = null)
+        : base(TyphonErrorCode.BackupAborted, $"Backup aborted ({reason}): {message}", innerException)
+    {
+        Reason = reason;
+    }
+
+    /// <summary>Why the backup was abandoned.</summary>
+    public BackupAbortReason Reason { get; }
+
+    /// <inheritdoc />
+    public override bool IsTransient => Reason is BackupAbortReason.CbwStall or BackupAbortReason.GateTimeout or BackupAbortReason.WalFlushTimeout;
+}

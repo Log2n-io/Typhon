@@ -143,6 +143,8 @@ class EngineBackupServiceTests : BackupTestBase<EngineBackupServiceTests>
         var cancelled = Assert.ThrowsAsync<BackupAbortedException>(() => dbe.Backup.CreateAsync(_store, ct: cts.Token));
         Assert.That(cancelled.Reason, Is.EqualTo(BackupAbortReason.Cancelled));
         Assert.That(cancelled.ErrorCode, Is.EqualTo(TyphonErrorCode.BackupAborted));
+        Assert.That(cancelled, Is.InstanceOf<BackupException>(), "an application catches every backup failure as a BackupException");
+        Assert.That(cancelled.IsTransient, Is.False, "a cancellation is not worth retrying on its own");
         coordinator.Probe = null;
 
         var listing = BackupOperations.List(_store);
