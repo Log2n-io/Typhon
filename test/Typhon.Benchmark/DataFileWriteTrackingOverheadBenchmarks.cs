@@ -142,7 +142,8 @@ public class DataFileWriteTrackingOverheadBenchmarks
                 Volatile.Read(ref _changeMap).Set(filePageIndex, 1);
             }
 
-            Volatile.Read(ref _writeHook)?.BeforeWrite(filePageIndex, 1);
+            long deadline = 0;
+            Volatile.Read(ref _writeHook)?.BeforeWrite(filePageIndex, 1, ref deadline);
             _probe?.Invoke(filePageIndex, 1);
             Write(filePageIndex);
         }

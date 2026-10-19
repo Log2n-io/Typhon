@@ -8,9 +8,11 @@ internal interface IDataFileWriteHook
 {
     /// <summary>
     /// Called inside the shared write gate, before pages <c>[firstPage, firstPage + count)</c> are written. Returns once every page of the run that must
-    /// be preserved has been, or once the capture has aborted. Never throws: an internal fault aborts the capture instead (BKP-12).
+    /// be preserved has been preserved, or once the capture has aborted. Never throws: an internal fault aborts the capture instead (BKP-12).
     /// </summary>
     /// <param name="firstPage">The first file page about to be written.</param>
     /// <param name="count">How many consecutive pages.</param>
-    void BeforeWrite(int firstPage, int count);
+    /// <param name="deadline">The write's budget, a <see cref="System.Diagnostics.Stopwatch"/> timestamp: 0 until the hook first needs to wait, which
+    /// then sets it. One write, one budget: every run of a <c>SavePages</c> batch passes the same variable.</param>
+    void BeforeWrite(int firstPage, int count, ref long deadline);
 }

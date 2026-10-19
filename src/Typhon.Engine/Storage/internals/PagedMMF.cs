@@ -3151,7 +3151,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         var token = gated ? _writeGate.EnterShared() : default;
         try
         {
-            BeforeDataFileWrite(filePageIndex, pageCount);
+            long deadline = 0;
+            BeforeDataFileWrite(filePageIndex, pageCount, ref deadline);
             RandomAccess.Write(_fileHandle, source, pageOffset);
         }
         finally
@@ -3167,16 +3168,17 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     /// <summary>
     /// What every data-file write does inside the write gate, before it is issued (BKP-01): mark its pages in the change map, then let an online
-    /// backup preserve the pages it still needs (copy-before-write). Never throws.
+    /// backup preserve the pages it still needs (copy-before-write). <paramref name="deadline"/> is the write's copy-before-write budget (0 until the
+    /// hook starts it): one per write, shared by every run of a <see cref="SavePages"/> batch (BKP-12). Never throws, but for a test probe.
     /// </summary>
-    private void BeforeDataFileWrite(int filePageIndex, int pageCount)
+    private void BeforeDataFileWrite(int filePageIndex, int pageCount, ref long deadline)
     {
         if (DataFileWriteTracking.MapEnabled)
         {
             Volatile.Read(ref _changeMap).Set(filePageIndex, pageCount);
         }
 
-        Volatile.Read(ref _writeHook)?.BeforeWrite(filePageIndex, pageCount);
+        Volatile.Read(ref _writeHook)?.BeforeWrite(filePageIndex, pageCount, ref deadline);
         DataFileWriteProbe?.Invoke(filePageIndex, pageCount);
     }
 
@@ -4548,18 +4550,21 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
         // BKP-01: the batch holds the write gate from before its change-map update until every one of its writes has completed, so a freeze sees
         // either none of the batch or all of it. Copy-before-write runs here, on this thread, before any write is issued: on Linux a pool thread
-        // runs the pwrite later. Exited at the top of the continuation, or below if the writes cannot be issued.
+        // runs the pwrite later; the whole batch shares one copy-before-write budget (BKP-12). Exited at the top of the continuation, or in the catch
+        // below: everything between the enter and the continuation's registration sits inside the try, so a throw cannot leak the hold.
         var gated = DataFileWriteTracking.GateEnabled;
         var batchToken = gated ? _writeGate.EnterShared() : default;
-        for (int i = 0; i < operations.Count; i++)
-        {
-            BeforeDataFileWrite(Slot(operations[i].memPageIndex).FilePageIndex, operations[i].length);
-        }
-
-        var tasks = new Task[operations.Count];
+        Task[] tasks = null;
         var issued = 0;
         try
         {
+            long deadline = 0;
+            for (int i = 0; i < operations.Count; i++)
+            {
+                BeforeDataFileWrite(Slot(operations[i].memPageIndex).FilePageIndex, operations[i].length, ref deadline);
+            }
+
+            tasks = new Task[operations.Count];
             for (; issued < operations.Count; issued++)
             {
                 tasks[issued] = SavePageInternal(operations[issued].memPageIndex, operations[issued].length).AsTask();
@@ -4682,7 +4687,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         }
     }
 
-    internal ValueTask SavePageInternal(int firstMemPageIndex, int length)
+    private ValueTask SavePageInternal(int firstMemPageIndex, int length)
     {
         var pi = Slot(firstMemPageIndex);
 

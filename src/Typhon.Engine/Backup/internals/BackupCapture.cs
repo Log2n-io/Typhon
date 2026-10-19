@@ -382,14 +382,13 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
     // ═══════════════════════════════════════════════════════════════
 
     /// <inheritdoc />
-    public void BeforeWrite(int firstPage, int count)
+    public void BeforeWrite(int firstPage, int count, ref long deadline)
     {
         if (Volatile.Read(ref _abortReason) != 0)
         {
             return;
         }
 
-        long deadline = 0;
         for (var p = firstPage; p < firstPage + count; p++)
         {
             if ((uint)p >= (uint)_imagePages || !IsImagePage(p))
