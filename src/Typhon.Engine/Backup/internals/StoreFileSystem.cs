@@ -396,7 +396,19 @@ internal sealed partial class StoreFileSystem : IStoreFileSystem
     /// <inheritdoc />
     public bool IsBundleHeldByLiveProcess(string bundleDirectory) => DatabaseLockFile.IsHeldByLiveProcess(bundleDirectory);
 
-    private static bool IsHeldFailure(IOException ex) => ex is not (FileNotFoundException or DirectoryNotFoundException or PathTooLongException);
+    private static bool IsHeldFailure(IOException ex) => IsSharingViolation(ex);
+
+    /// <summary>
+    /// Whether an open failed because another handle holds the file — and only that. Windows: <c>ERROR_SHARING_VIOLATION</c> or
+    /// <c>ERROR_LOCK_VIOLATION</c>. Unix: <c>EWOULDBLOCK</c> from the <c>flock</c> behind <see cref="FileShare.None"/> (11 on Linux, 35 on macOS
+    /// and the BSDs). Any other I/O failure is an I/O failure, never "locked".
+    /// </summary>
+    internal static bool IsSharingViolation(IOException ex) => ex.HResult == SharingViolationHResult
+        || (OperatingSystem.IsWindows() && ex.HResult == unchecked((int)0x80070021));
+
+    /// <summary>The <see cref="Exception.HResult"/> of a sharing violation on this platform.</summary>
+    internal static int SharingViolationHResult =>
+        OperatingSystem.IsWindows() ? unchecked((int)0x80070020) : OperatingSystem.IsLinux() ? 11 : 35;
 
     private static void FlushDirectoryPosix(string directory)
     {
