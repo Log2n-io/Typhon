@@ -28,7 +28,8 @@ internal interface IBackupPointStore
     /// Takes the store's exclusive lock and checks the store belongs to <paramref name="databaseId"/>. The session lives for the whole
     /// capture, so the chain head cannot move between admission and publish.
     /// </summary>
-    /// <exception cref="InvalidOperationException">The store belongs to another database, or is locked by another writer.</exception>
+    /// <exception cref="BackupStoreMismatchException">The store belongs to another database.</exception>
+    /// <exception cref="BackupStoreLockedException">Another writer holds the store's lock.</exception>
     IBackupStoreSession OpenSession(Guid databaseId, CancellationToken ct);
 }
 
