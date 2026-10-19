@@ -2182,15 +2182,14 @@ internal static class DamageKit
     }
 
     /// <summary>
-    /// Rewrites the first written WAL segment so two consecutive single-frame drains become ONE drain carrying both frames back to back — the shape the
-    /// writer produces when two frames are published before it drains — and shifts every later drain down a block. Not damage: the bytes and the CRC
-    /// chain are unchanged, and recovery reads every record. The fixture's own writes give one frame per drain, so the shape is made here.
+    /// Rewrites the first written WAL segment so its last two single-frame drains become ONE drain carrying both frames back to back — the shape the
+    /// writer produces when two frames are published before it drains. Not damage: the bytes and the CRC chain are unchanged, and recovery reads every
+    /// record. Staged rather than produced because a segment boundary right after a multi-frame drain is not reachable from a unit test.
     /// </summary>
     /// <param name="bundlePath">The bundle whose log to rewrite.</param>
-    /// <param name="lastPair">Merge the segment's last two drains (nothing after them) instead of its first two (drains still follow).</param>
     /// <param name="highestLsn">Receives the highest LSN of any frame in the segment.</param>
     /// <returns>The segment file rewritten.</returns>
-    internal static string MergeTwoWalDrains(string bundlePath, bool lastPair, out long highestLsn)
+    internal static string MergeLastTwoWalDrains(string bundlePath, out long highestLsn)
     {
         const int Block = 4096;
 
@@ -2217,13 +2216,12 @@ internal static class DamageKit
                 drains.Add((at, length, MemoryMarshal.Read<long>(bytes.AsSpan(at + 8))));
             }
 
-            if (drains.Count < 3)
+            if (drains.Count < 2)
             {
                 continue;
             }
 
-            var first = lastPair ? drains.Count - 2 : 0;
-            var (a, b) = (drains[first], drains[first + 1]);
+            var (a, b) = (drains[^2], drains[^1]);
             Assert.That(a.Length + b.Length, Is.LessThanOrEqualTo(Block), "the two frames must fit one drain block");
 
             var merged = new byte[bytes.Length];
@@ -2236,7 +2234,7 @@ internal static class DamageKit
             return Path.GetFileName(path);
         }
 
-        throw new InvalidOperationException("no WAL segment held three drains to merge two of");
+        throw new InvalidOperationException("no WAL segment held two drains to merge");
     }
 
     /// <summary>

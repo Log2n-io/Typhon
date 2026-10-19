@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
 using System.IO;
@@ -18,21 +19,47 @@ namespace Typhon.Engine.Tests.Integrity;
 [TestFixture]
 internal sealed class WalMultiFrameDrainTests : IntegrityFixtureBase
 {
+    /// <summary>
+    /// The writer, held inside one write while two commits publish, drains both in one write; later commits drain on their own. Closed cleanly, the
+    /// database is Sound — the scan reads the drain's second frame instead of skipping it and then failing the chain at the next drain.
+    /// </summary>
     [Test]
     [CancelAfter(30_000)]
-    public void ADrainOfTwoFramesFollowedByMoreDrains_IsASoundChain()
+    public void TwoCommitsPublishedWhileTheWriterIsHeld_DrainAsOneAndTheLogScansSound()
     {
-        BuildMultiFrameWalDatabase();
-        var before = WalkAsRecovery(WalDir);
-        DamageKit.MergeTwoWalDrains(BundlePath, lastPair: false, out _);
+        GatedWalFileIO gate = null;
+        WalFileIOFactory = () => gate = new GatedWalFileIO();
+        using (var provider = ReopenProvider())
+        using (var scope = provider.CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<CompA>();
+            dbe.InitializeArchetypes();
+            Spawn(dbe, 1, DurabilityMode.Immediate);
 
-        // The premise: recovery reads the rewritten segment exactly as it read the original — every chunk, no break.
-        Assert.That(WalkAsRecovery(WalDir), Is.EqualTo(before), "recovery must read the merged drain as the same sound log");
-        Assert.That(before.Truncated, Is.False);
+            gate.Hold();
+            try
+            {
+                Spawn(dbe, 2, DurabilityMode.Deferred);
+                dbe.WalManager.RequestFlush();
+                Assert.That(gate.WriterHeld.Wait(Budget), Is.True, "premise: the writer is held inside a write");
+                Spawn(dbe, 3, DurabilityMode.Deferred);
+                Spawn(dbe, 4, DurabilityMode.Deferred);
+            }
+            finally
+            {
+                gate.Release();
+            }
+
+            // Two drains after it: the frame a skipping walk would mis-chain to is then not the last thing in the log.
+            Spawn(dbe, 5, DurabilityMode.Immediate);
+            Spawn(dbe, 6, DurabilityMode.Immediate);
+        }
+
+        Assert.That(LargestDrain(WalDir), Is.GreaterThanOrEqualTo(2), "premise: one drain carries the two commits published while the writer was held");
 
         var report = DamageKit.Scan(BundlePath, ScanDepth.Deep);
-        Assert.That(report.Findings.Where(f => f.Code == "CHK-WAL-02"), Is.Empty,
-            "a drain carrying two frames is how the writer coalesces, not a break:" + IntegrityReportText.Render(report));
+        Assert.That(report.Verdict, Is.EqualTo(IntegrityVerdict.Sound), IntegrityReportText.Render(report));
     }
 
     [Test]
@@ -40,7 +67,7 @@ internal sealed class WalMultiFrameDrainTests : IntegrityFixtureBase
     public void ASegmentEndingInADrainOfTwoFrames_EndsAtItsLastFramesLsn()
     {
         BuildMultiFrameWalDatabase();
-        DamageKit.MergeTwoWalDrains(BundlePath, lastPair: true, out var highest);
+        DamageKit.MergeLastTwoWalDrains(BundlePath, out var highest);
 
         // The next segment begins right after the merged drain's second frame: contiguous, if that frame is counted.
         var firstLsn = WalSegmentHeaderFirstLsn(BundlePath);
@@ -52,15 +79,41 @@ internal sealed class WalMultiFrameDrainTests : IntegrityFixtureBase
             $"'{added}' begins at LSN {highest + 1}, right after the last frame of the segment before it:" + IntegrityReportText.Render(report));
     }
 
-    private static (int Chunks, long LastChunkLsn, bool Truncated) WalkAsRecovery(string walDir)
+    private static readonly TimeSpan Budget = TimeSpan.FromSeconds(5);
+
+    private static void Spawn(DatabaseEngine dbe, int key, DurabilityMode mode)
     {
-        using var reader = new WalSegmentReader(new WalFileIO());
-        Assert.That(reader.OpenSegment(FirstWrittenSegment(walDir)), Is.True);
-        while (reader.TryReadNext(out _, out _))
+        using var t = dbe.CreateQuickTransaction(mode);
+        t.Spawn<CompAArch>(CompAArch.A.Set(new CompA(key, key, key)));
+        t.Commit();
+    }
+
+    /// <summary>The most frames any drain (a 4 KiB-aligned write) of the first written segment carries back to back.</summary>
+    private static int LargestDrain(string walDir)
+    {
+        const int Block = 4096;
+        var bytes = File.ReadAllBytes(FirstWrittenSegment(walDir));
+        var largest = 0;
+        for (var drain = WalSegmentHeader.SizeInBytes; drain + WalFrameHeader.SizeInBytes <= bytes.Length;)
         {
+            var frames = 0;
+            var at = drain;
+            while (at + WalFrameHeader.SizeInBytes <= bytes.Length && MemoryMarshal.Read<int>(bytes.AsSpan(at)) > 0)
+            {
+                at += MemoryMarshal.Read<int>(bytes.AsSpan(at));
+                frames++;
+            }
+
+            if (frames == 0)
+            {
+                break;
+            }
+
+            largest = Math.Max(largest, frames);
+            drain = (at + Block - 1) / Block * Block;
         }
 
-        return (reader.RecordsRead, reader.LastValidLSN, reader.WasTruncated);
+        return largest;
     }
 
     private static long WalSegmentHeaderFirstLsn(string bundle)

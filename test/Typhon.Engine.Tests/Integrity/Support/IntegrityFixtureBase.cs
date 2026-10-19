@@ -52,6 +52,9 @@ internal abstract class IntegrityFixtureBase
     /// <summary>The bundle's own <c>wal/</c> directory — inside the bundle, as in a real deployment.</summary>
     protected string WalDir => Path.Combine(BundlePath, "wal");
 
+    /// <summary>The WAL backend each scope of a provider built from now on gets; <c>null</c> keeps the engine's default disk backend.</summary>
+    protected Func<IWalFileIO> WalFileIOFactory { get; set; }
+
     /// <summary>The live provider, or <c>null</c> once <see cref="CloseEngine"/> has run.</summary>
     protected ServiceProvider Provider => _serviceProvider;
 
@@ -323,6 +326,12 @@ internal abstract class IntegrityFixtureBase
                     PreAllocateSegments = 1
                 };
             });
+
+        if (WalFileIOFactory != null)
+        {
+            var factory = WalFileIOFactory;
+            services.AddScoped(_ => factory());
+        }
 
         return services.BuildServiceProvider();
     }
