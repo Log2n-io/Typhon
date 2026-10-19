@@ -20,7 +20,7 @@
          tool cannot share the engine's `Typhon` id — it is `Typhon.Cli` and installs a command named `typhon` (D-1). -->
     <PropertyGroup>
         <PackageId>Typhon.Cli</PackageId>
-        <Description>The `typhon` command-line tool for the Typhon database engine — an interactive shell (REPL) and script runner, plus the Typhon Workbench, a local database GUI launched with `typhon ui` (browse data, inspect schema, author queries, profile and trace). Install as a global or local .NET tool. Pre-alpha — expect breaking changes.</Description>
+        <Description>The `typhon` command-line tool for the Typhon database engine — an interactive shell (REPL) and script runner, plus the Typhon Workbench, a local database GUI launched with `typhon ui` (browse data, inspect schema, author queries, profile and trace). Install as a global or local .NET tool. Alpha — expect breaking changes.</Description>
         <PackageTags>typhon;database;cli;dotnet-tool;repl;ecs;acid;shell;workbench;ui;gui</PackageTags>
         <PackageReadmeFile>PACKAGE.md</PackageReadmeFile>
     </PropertyGroup>

@@ -13,8 +13,8 @@ the database file exclusively, the same way `sqlite3` does: there is no server a
 Its durable niche is what a GUI cannot do — **scripting, CI, and mutation**: a REPL and script files, entity
 CRUD inside explicit transactions, machine-readable output, and exit codes.
 
-> ⚠️ **Pre-alpha.** Published as a prerelease. Commands, output, and on-disk formats change without notice
-> until the first stable release.
+> ⚠️ **Alpha.** Published as a prerelease. Commands, output, and on-disk formats can change without notice
+> until beta.
 
 ## Install
 

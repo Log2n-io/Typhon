@@ -8,7 +8,7 @@ description: 'EntityLink<T> is a typed, blittable reference from one entity to a
 
 > **In one line:** a **typed, blittable reference** from one [entity](xref:concept-entity) to another, storable inside a [component](xref:concept-component) field.
 
-`EntityLink<T>` is how one entity points at another *by type*: a component field of type `EntityLink<Unit>` records "this entity's target is a `Unit`". Because it is blittable, it lives directly in the memory-mapped store like any other field — no serialization, no separate reference table. It carries the target archetype type at compile time, which a bare [`EntityId`](xref:concept-entity) does not.
+`EntityLink<T>` is how one entity points at another *by type*: a component field of type `EntityLink<Unit>` records "this entity's target is a `Unit`". Because it is blittable, it lives directly in the paged store like any other field — no serialization, no separate reference table. It carries the target archetype type at compile time, which a bare [`EntityId`](xref:concept-entity) does not.
 
 ## How it relates
 

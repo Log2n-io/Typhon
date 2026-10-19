@@ -24,7 +24,6 @@ description: 'The query and view engine: a single archetype-rooted fluent API (t
 | [Execution Planning & Pipeline Execution](execution-planning-pipeline.md) | Picks the most selective index as the scan driver and streams results into the caller's collection | ✅ Implemented | 🟣 Advanced |
 | [Statistics Infrastructure (HLL / MCV / Histogram)](statistics-infrastructure.md) | Background-maintained per-field statistics feeding the selectivity estimator, refreshed by a tunable polling worker thread | ✅ Implemented | 🟣 Advanced |
 | [ViewFactory — Parameterized Queries & View Pooling](view-factory-pooling.md) | Reusable query templates with a Rent/Return view pool, to remove per-session view setup cost | 📋 Planned | 🟣 Advanced |
-| [Temporal Queries (Point-in-Time Read & Revision History)](temporal-queries.md) | Opt-in per-component history retention enabling reads of past state and full revision timelines | 📋 Planned | 🟣 Advanced |
 
 ## Internal Features
 

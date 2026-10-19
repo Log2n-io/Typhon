@@ -61,7 +61,7 @@ dbe.ForceCheckpoint();
 ## 🔗 Related
 
 - Sub-features: [A/B Protected-Page Slot-Pairing](./protected-page-pairing.md)
-- Sibling: [Memory-Mapped Page Cache & Clock-Sweep Eviction](../../Storage/page-cache.md) — checkpoint copies pages straight out of the page cache it consolidates
+- Sibling: [Page Cache & Clock-Sweep Eviction](../../Storage/page-cache.md) — checkpoint copies pages straight out of the page cache it consolidates
 
 <!-- Deep dive: claude/overview/06-durability.md §6.4, claude/design/Durability/MinimalWal/04-checkpoint.md -->
 <!-- ADR: claude/adr/025-checkpoint-manager-sole-fsync-owner.md -->

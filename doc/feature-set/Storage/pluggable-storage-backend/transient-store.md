@@ -14,7 +14,7 @@ description: 'Pinned heap blocks standing in for the page cache, so Transient co
 
 `StorageMode.Transient` components (see [Transient](../../Ecs/storage-modes/storage-mode-transient.md))
 promise no durability cost at all — no WAL, no checkpoint, no dirty tracking. Routing them through the
-memory-mapped page cache would mean paying for (and then discarding) eviction bookkeeping and dirty-counter
+page cache would mean paying for (and then discarding) eviction bookkeeping and dirty-counter
 updates the data will never need. The transient store gives those components their own backend — plain pinned
 heap memory — so the cost genuinely disappears instead of just being hidden.
 

@@ -52,11 +52,12 @@ and send commands in the server's encoding — without being regenerated every t
 
 | SDK | Where | |
 |---|---|---|
-| .NET | NuGet | `dotnet add package Typhon.Client --prerelease` — and `Typhon.Protocol` alone for a contracts assembly shared with the server |
-| TypeScript | npm | `npm install @typhondb/client@alpha` (ESM, Node ≥ 22 or a browser) |
+| .NET | [NuGet](https://www.nuget.org/packages/Typhon.Client) | `dotnet add package Typhon.Client --prerelease` (net10.0, netstandard2.1 for Unity) — and [`Typhon.Protocol`](https://www.nuget.org/packages/Typhon.Protocol) alone for a contracts assembly shared with the server |
+| TypeScript | [npm](https://www.npmjs.com/package/@typhondb/client) | `npm install @typhondb/client@alpha` (ESM, Node ≥ 22 or a browser) |
 | C | [GitHub Releases](https://github.com/Log2n-io/Typhon/releases) | `typhon-client-native-<version>-<platform>` for linux-x64, windows-x64, macos-arm64: headers, a static and a shared library, and a CMake package — `find_package(TyphonClient)`, then link `Typhon::typhon_client` (static) or `Typhon::typhon_client_shared` |
 
-Every package carries the server's version (one version for the engine and its clients); the alpha line is prerelease-only.
+Every package carries the server's version (one version for the engine and its clients); the alpha line is prerelease-only. The
+[Packages](../../guide/packages.md) page lists the server-side packages too.
 
 ## 💻 Usage
 
