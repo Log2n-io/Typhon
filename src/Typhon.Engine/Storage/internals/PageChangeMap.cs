@@ -50,6 +50,18 @@ internal sealed class PageChangeMap
         }
     }
 
+    /// <summary>
+    /// Unmarks pages <c>[firstPage, firstPage + count)</c>, a whole word at a time (so every page sharing a word with the range too). For benchmarks
+    /// and tests that need a page's first write again; the engine never unmarks a page (a backup detaches the whole map instead).
+    /// </summary>
+    internal void ClearWordsForTests(int firstPage, int count)
+    {
+        for (var p = firstPage & ~63; p < firstPage + count; p += 64)
+        {
+            Volatile.Write(ref Word(p), 0UL);
+        }
+    }
+
     /// <summary>Whether page <paramref name="page"/> is marked.</summary>
     internal bool IsSet(int page)
     {
