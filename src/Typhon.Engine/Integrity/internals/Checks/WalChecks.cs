@@ -44,19 +44,42 @@ internal static class WalChecks
     public const string WindowContiguity = "CHK-WAL-04";
 
     /// <summary>
-    /// Granularity every drain is written at, so the offset of the next frame is not the end of the previous one.
+    /// Granularity every drain is written at: a drain's frames sit back to back, and the drain is zero-padded to the next boundary.
     /// </summary>
     /// <remarks>
     /// <c>IWalFileIO.WriteAligned</c> requires both offset and length to be multiples of 4096 — the O_DIRECT
-    /// constraint — so each drain occupies a whole block and the next frame starts at the next boundary. Measured on a
+    /// constraint — so each drain occupies whole blocks and the next drain starts at the next boundary. Measured on a
     /// real segment: eight 120-byte frames at exactly 4096, 8192, 12288, … A walk that advanced by <c>FrameLength</c>
-    /// instead reads the padding after frame 0 as an unwritten block and stops, which makes every check built on it
-    /// pass by inspecting one frame out of eight.
+    /// and stopped at the first zero read the padding after frame 0 as the end and inspected one frame out of eight. A
+    /// walk that jumped to the next boundary after EVERY frame was the opposite mistake: a drain carrying two frames hid
+    /// the second one, and the frame after it then failed the chain it had skipped (#1443, a CHK-WAL-02 on a sound log).
+    /// See <see cref="NextFrame"/>.
     /// </remarks>
     private const int DrainAlignment = 4096;
 
     /// <summary>Rounds a file offset up to the next drain boundary.</summary>
     private static int NextDrain(int offset) => ((offset + DrainAlignment - 1) / DrainAlignment) * DrainAlignment;
+
+    /// <summary>
+    /// Where the next frame starts, given where the walk stands, as recovery's <see cref="WalSegmentReader"/> walks it; <c>-1</c> at the end of the
+    /// written log. A zero length mid-block is a drain's padding, so the next drain starts at the boundary; a zero length ON a boundary is a block
+    /// no drain ever wrote.
+    /// </summary>
+    private static int NextFrame(byte[] bytes, int at)
+    {
+        while (at + WalFrameHeader.SizeInBytes <= bytes.Length && MemoryMarshal.Read<int>(bytes.AsSpan(at)) == 0)
+        {
+            var next = NextDrain(at);
+            if (next == at)
+            {
+                return -1;
+            }
+
+            at = next;
+        }
+
+        return at + WalFrameHeader.SizeInBytes <= bytes.Length ? at : -1;
+    }
 
     /// <summary>Runs the WAL family.</summary>
     /// <param name="ctx">The scan context.</param>
@@ -155,19 +178,18 @@ internal static class WalChecks
     /// <summary>Walks one segment's frames, reporting the first break that is not a clean tail.</summary>
     private static void WalkFrames(ScanContext ctx, string name, byte[] bytes)
     {
-        var at = WalSegmentHeader.SizeInBytes;
         var frames = 0;
         long previousLsn = 0;
 
-        while (at + WalFrameHeader.SizeInBytes <= bytes.Length)
+        var at = NextFrame(bytes, WalSegmentHeader.SizeInBytes);
+        while (at >= 0)
         {
             var frameLength = MemoryMarshal.Read<int>(bytes.AsSpan(at));
             var recordCount = MemoryMarshal.Read<int>(bytes.AsSpan(at + sizeof(int)));
             var lastLsn = MemoryMarshal.Read<long>(bytes.AsSpan(at + (2 * sizeof(int))));
 
-            // 0 is "not yet published" — the end of what the writer ever wrote. -1 is the end-of-buffer padding
-            // sentinel. Both are the normal end of a segment, not a break.
-            if (frameLength == 0 || frameLength == WalFrameHeader.PaddingSentinel)
+            // -1 is the end-of-buffer padding sentinel: the normal end of a segment, not a break. (0, "not yet published", is NextFrame's.)
+            if (frameLength == WalFrameHeader.PaddingSentinel)
             {
                 return;
             }
@@ -225,7 +247,7 @@ internal static class WalChecks
                 previousLsn = lastLsn;
             }
 
-            at = NextDrain(at + frameLength);
+            at = NextFrame(bytes, at + frameLength);
             frames++;
         }
     }
@@ -654,13 +676,13 @@ internal static class WalChecks
             return 0;
         }
 
-        var at = WalSegmentHeader.SizeInBytes;
         long highest = 0;
 
-        while (at + WalFrameHeader.SizeInBytes <= bytes.Length)
+        var at = NextFrame(bytes, WalSegmentHeader.SizeInBytes);
+        while (at >= 0)
         {
             var frameLength = MemoryMarshal.Read<int>(bytes.AsSpan(at));
-            if (frameLength == 0 || frameLength == WalFrameHeader.PaddingSentinel
+            if (frameLength == WalFrameHeader.PaddingSentinel
                 || frameLength < WalFrameHeader.SizeInBytes || at + frameLength > bytes.Length)
             {
                 break;
@@ -673,7 +695,7 @@ internal static class WalChecks
                 highest = lastLsn;
             }
 
-            at = NextDrain(at + frameLength);
+            at = NextFrame(bytes, at + frameLength);
         }
 
         return highest;
