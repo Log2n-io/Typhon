@@ -117,7 +117,7 @@ using (var tx = dbe.CreateQuickTransaction())
 }
 ```
 
-Install the package first: `dotnet add package Typhon --prerelease` (Typhon is pre-alpha, so the
+Install the package first: `dotnet add package Typhon --prerelease` (Typhon is in alpha, so the
 prerelease flag is required).
 
 ## 5. A primer to paste into your agent

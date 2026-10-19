@@ -1,18 +1,18 @@
 ---
 uid: feature-storage-pluggable-storage-backend-persistent-store
-title: 'Persistent Store (MMF-backed)'
-description: 'The default backend — every durable component''s segments run through the memory-mapped page cache at zero abstraction cost.'
+title: 'Persistent Store (page-cache-backed)'
+description: 'The default backend — every durable component''s segments run through the page cache at zero abstraction cost.'
 ---
 
-# Persistent Store (MMF-backed)
-> The default backend — every durable component's segments run through the memory-mapped page cache at zero abstraction cost.
+# Persistent Store (page-cache-backed)
+> The default backend — every durable component's segments run through the page cache at zero abstraction cost.
 
 **Status:** ✅ Implemented · **Visibility:** Internal · **Category:** [Storage](../README.md)
 
 ## 🎯 What it solves
 
 `StorageMode.Versioned` and `StorageMode.SingleVersion` components need their pages backed by the durable,
-crash-recoverable memory-mapped file — dirty tracking, eviction protection, CRC verification, WAL/checkpoint
+crash-recoverable data file — dirty tracking, eviction protection, CRC verification, WAL/checkpoint
 integration, all of it. The persistent store is the backend that wires segments, B+Trees, and chunk accessors
 to that machinery, and it has to do so without adding a cent of overhead over calling the page cache directly,
 since this is the path nearly every component in a Typhon database takes.
@@ -44,7 +44,7 @@ struct Tag { public int Value; }
 ```
 
 What you actually configure is the page cache the store wraps — see
-[Memory-Mapped Page Cache & Clock-Sweep Eviction](../page-cache.md) for sizing and timeout options.
+[Page Cache & Clock-Sweep Eviction](../page-cache.md) for sizing and timeout options.
 
 ## ⚠️ Guarantees & limits
 
@@ -64,7 +64,7 @@ What you actually configure is the page cache the store wraps — see
 
 ## 🔗 Related
 
-- Related feature: [Memory-Mapped Page Cache & Clock-Sweep Eviction](../page-cache.md), [Epoch-Based Page Protection & Dirty-Page Tracking](../epoch-dirty-tracking.md)
+- Related feature: [Page Cache & Clock-Sweep Eviction](../page-cache.md), [Epoch-Based Page Protection & Dirty-Page Tracking](../epoch-dirty-tracking.md)
 - Parent feature: [Pluggable Storage Backend](./README.md)
 
 <!-- Deep dive: claude/design/Storage/PageCache/08-page-stores.md — PersistentStore -->

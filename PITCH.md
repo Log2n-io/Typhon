@@ -1,12 +1,12 @@
-# Typhon — The Real-Time ACID Database Engine
+# Typhon — The Real-Time World Engine
 
-**A microsecond-latency ACID database with a parallel, tick-based runtime built in — not bolted on next to it, running inside it.**
+**A real-time world engine: an ACID, larger-than-RAM ECS store, a parallel tick runtime, spatial partitioning with realms, and interest-managed replication to .NET/Unity, TypeScript and native C clients — one process, one data model, from disk to screen.**
 
 ---
 
 ## Where Typhon Stands Today
 
-Typhon is in **active development, targeting an alpha release** — not a finished 1.0. There's no NuGet package yet, no stable API, no support contract. What there is: a ~3,500-test NUnit suite, a durability model backed by TLA+ proofs and a crash-simulation sweep (not just tests), and a measured performance story (see [Measured, Not Just Claimed](#measured-not-just-claimed) below) that already beats or matches purpose-built rivals on their own turf.
+Typhon is in **alpha** — `1.0.0-alpha.1` shipped on 2026-10-19, not a finished 1.0. The engine, its CLI and its client SDKs are on NuGet, npm and GitHub Releases; the public API is not frozen yet (that is beta), and there is no support contract. What there is: over 10,000 NUnit tests across the engine, protocol, client SDKs and tools (plus Vitest suites for the TypeScript SDK and the Workbench), a durability model backed by TLA+ proofs and a crash-simulation sweep (not just tests), and a measured performance story (see [Measured, Not Just Claimed](#measured-not-just-claimed) below) that already beats or matches purpose-built rivals on their own turf.
 
 If you're building a game server, simulation, or real-time stateful system and want to shape the engine while it's still soft — this is the moment.
 
@@ -22,35 +22,35 @@ Every game server, every simulation, every real-time system faces the same impos
 
 **Option C: Use an embedded database.** SQLite, LevelDB, RocksDB — fast, local, no network. But none of them were designed for your data model. You'll spend months wrapping ECS components into relational tables, fighting impedance mismatch, and discovering that "embedded" doesn't mean "real-time." And none of them run your simulation loop for you — you still hand-roll a tick scheduler and a way to push state to clients on top.
 
-There is no Option D. Until now.
+**And that is only half of it.** Once the state is right on the server, it still has to reach every client — each seeing only the part of the world around it, at tick rate. That means change detection, interest management, compact encoding, backpressure for slow clients, and a client library to decode it all — usually hand-built on a second data model (rows → DTOs → network messages), and patched every time the server's types change.
+
+There is no Option D — one engine that holds the world, simulates it, and streams it to the clients that can see it. Until now.
 
 ---
 
 ## What Is Typhon?
 
-Typhon is an **embedded ACID database engine with a game-server runtime built in** — it runs inside your process, speaks your data model natively, and delivers **microsecond-level operations** with full transactional guarantees.
+Typhon is a **real-time world engine**. It started as an embedded ACID ECS database and grew upward, one layer at a time — a parallel tick runtime, then spatial partitioning and realms, then replication to clients — each running inside the engine, on the same entities, transactions and snapshots as the layer below. It runs inside your process, speaks your data model natively, delivers **microsecond-level operations** with full transactional guarantees, and streams the result to .NET/Unity, TypeScript and native clients.
 
-It is not a general-purpose SQL database. It is not a key-value store with transactions bolted on. It is a purpose-built engine for systems where **every microsecond matters, data loss is unacceptable, and the simulation loop is a first-class concern, not an afterthought**.
+It is not a general-purpose SQL database. It is not a key-value store with transactions bolted on. It is a purpose-built engine for systems where **every microsecond matters, data loss is unacceptable, and the simulation loop and the bridge to clients are first-class concerns, not afterthoughts**.
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                 Your Application                    │
-│                                                     │
-│    Game Server · Simulation · Trading Engine        │
-│                                                     │
-│  ┌─────────────────────────────────────────────────┐│
-│  │               Typhon Engine                     ││
-│  │                                                 ││
-│  │  ECS Data Model · MVCC Snapshot Isolation       ││
-│  │  DAG-Scheduled Tick Runtime · Spatial Index     ││
-│  │  WAL v2 Durability · Rebuild-Based Recovery     ││
-│  │  Zero-Copy Reads · Cache-Line-Aware Structures  ││
-│  └─────────────────────────────────────────────────┘│
-│               ▼               ▼                     │
-│          Memory-Mapped Storage File                 │
-└─────────────────────────────────────────────────────┘
-             No network. No serialization.
-                No separate process.
+          .NET & Unity · TypeScript · C / FFI clients
+                            ▲
+                            │  TCP / WebSocket, typhon.3 wire
+┌───────────────────────────┴─────────────────────────────────┐
+│ Your application process                                    │
+│                                                             │
+│   ┌──────────────────────────────────────────────────────┐  │
+│   │ Replication   who sees what · commands & events      │  │
+│   │ World         spatial partitioning · realms          │  │
+│   │ Runtime       DAG-scheduled parallel tick loop       │  │
+│   │ Store         ECS · MVCC ACID · indexes · WAL v2     │  │
+│   └──────────────────────────────────────────────────────┘  │
+│                          ▼                                  │
+│         Paged data file + page cache (larger than RAM)      │
+└─────────────────────────────────────────────────────────────┘
+    One process. One data model, from the disk to the wire.
 ```
 
 ### The Core Idea
@@ -86,13 +86,17 @@ No ORM. No mapping layer. No serialization step. Your struct *is* the storage fo
 
 ## Why Typhon Is a Game Changer
 
-### 1. Microsecond Operations, Not Millisecond
+The sections follow Typhon's layers, bottom to top: the store, the runtime that simulates on it, the world that gives it space, and the replication that brings it to clients.
+
+### 🗄️ The Store — an ACID ECS Database
+
+#### 1. Microsecond Operations, Not Millisecond
 
 Typhon doesn't just aim for "fast." It's engineered at the hardware level for predictable, microsecond-latency operations:
 
 | Technique | What it does |
 |-----------|-------------|
-| **Memory-mapped I/O** | Pages live in your address space. Reads are pointer dereferences, not syscalls |
+| **Engine-owned page cache** | Pages live in pinned native memory the engine manages itself: a cache hit is a pointer dereference, not a syscall; a miss is one async read the engine schedules, and the engine — not the OS — decides what is evicted and when it is written back |
 | **Blittable zero-copy components** | Your struct *is* the on-disk format. No serialize/deserialize step |
 | **Entity Clusters (SoA, SIMD)** | Batched columnar storage per archetype with AVX-512/AVX2 predicate evaluation — turns per-entity hashmap lookups into sequential array scans |
 | **Cache-line-aware 256-byte B+Tree nodes** | Tuned through multi-phase profiling for the common case: one cache-line-friendly node per traversal step |
@@ -103,7 +107,7 @@ Typhon doesn't just aim for "fast." It's engineered at the hardware level for pr
 
 This isn't theoretical — it's measured. A durable commit under Group Commit / Deferred durability returns in **~1.7µs mean**. Bulk-iterating 100K entities through the Entity Cluster path drops per-entity cost from 134ns to **~2.7ns** (~50x) and shrinks the working set from 19.2 MB to 2.5 MB — the difference between spilling out of L3 and staying in L2.
 
-### 2. Real ACID, Not "Pretty Close"
+#### 2. Real ACID, Not "Pretty Close"
 
 Typhon provides genuine ACID guarantees, not approximations:
 
@@ -120,7 +124,7 @@ And the isolation model makes **deadlocks impossible by construction** — not d
 
 Deadlock detection is deliberately not implemented — there's nothing for it to detect.
 
-### 3. Durability Is a Per-Component, Per-Transaction Choice
+#### 3. Durability Is a Per-Component, Per-Transaction Choice
 
 Not every write is equally important, and Typhon doesn't force one durability tier on your whole database. It's a **two-axis** choice:
 
@@ -143,7 +147,7 @@ Not every write is equally important, and Typhon doesn't force one durability ti
 
 One entity can mix a `Versioned` wallet, a `SingleVersion` position, and a `Transient` animation cursor — same `Read`/`Write` API across all three, only the cost and guarantees differ. One database can run your player-authentication transaction on Immediate while your physics update runs on Group Commit, side by side.
 
-### 4. Concurrent Indexing That Scales
+#### 4. Concurrent Indexing That Scales
 
 Typhon's B+Tree and R-Tree indexes run **Optimistic Lock Coupling (OLC)** — the same technique research databases use for 256+ core scaling:
 
@@ -151,9 +155,7 @@ Typhon's B+Tree and R-Tree indexes run **Optimistic Lock Coupling (OLC)** — th
 - **Writers latch only the nodes they modify** — typically 1-3 nodes for an insert, not the whole tree
 - **Compound Move operations** fold a field update's remove+insert into one traversal with one lock on the common same-leaf case
 
-Phase 3 of the OLC roadmap — fully latch-free, CAS-based leaf writes (inspired by the FB+-tree paper) — is designed but not yet built; today's writers still take a leaf latch. Everything above it is real.
-
-### 5. An ECS-Native Data Model, With a GPU-Inspired Storage Layer
+#### 5. An ECS-Native Data Model, With a GPU-Inspired Storage Layer
 
 If your application already thinks in entities and components, Typhon speaks your language:
 
@@ -162,38 +164,7 @@ If your application already thinks in entities and components, Typhon speaks you
 - **Secondary indexes with MVCC versioning.** Mark a field `[Index]`, and Typhon maintains a concurrent B+Tree with HEAD/TAIL buffers so index membership stays correct across updates and deletes, at your transaction's snapshot
 - **Schema evolution without downtime.** Add fields, remove fields, widen types — Typhon migrates existing data automatically at startup, preserving chunk allocation so indexes never need a rebuild. Breaking changes get user-defined migration functions with automatic multi-step chain resolution
 
-### 6. Spatial Indexing and Simulation Tiering, Built In
-
-Most embedded databases stop at "here's your data." Typhon ships a full spatial subsystem, because "what's near this entity" and "how often should this region simulate" are first-class real-time-system questions:
-
-- **A page-backed R-Tree** per `[SpatialIndex]` field, answering AABB, Radius, Ray, Frustum, kNN, and Count queries — sub-microsecond, zero heap allocation per query, OLC-concurrent with restart-not-block semantics under contention
-- **An engine-wide spatial grid**, independent of the R-Tree, driving two things: **Spatially-Coherent Entity Clustering** (entities sharing a grid cell also share a storage cluster) and **Tiered Simulation Dispatch** (`SimTier` — process near entities every tick, far entities at reduced/amortized/dormant rates, with zero per-entity distance checks)
-- **Cluster dormancy** — clusters untouched for N ticks sleep and are skipped by every dispatch path, waking within one tick of being written to
-- **Checkerboard (Red/Black) dispatch** for systems that write across cell boundaries, still running as one parallel DAG node
-
-### 7. A Tick-Based Runtime, Not Just a Store
-
-This is the part most embedded databases don't have at all: Typhon includes `TyphonRuntime`, a DAG-scheduled, multi-threaded tick loop that owns your game/simulation loop and drives it directly against the ECS store — the runtime runs *inside* the database, not on top of it.
-
-- **Five system types** — proactive callbacks, reactive per-entity queries (auto-skip when nothing relevant changed), chunk-parallel non-entity work, multi-stage pipelines, and sub-system grouping
-- **Declarative, auto-derived parallelism.** Systems declare what components they read/write and their phase; the scheduler derives a safe execution DAG and rejects unsafe write/write or stale-read conflicts at build time — you never hand-write a dependency graph
-- **Change-filtered dispatch.** A system can subscribe to "only entities that changed since I last ran," piggybacking on the same ring buffer that backs Persistent Views
-- **Graceful overload response.** A single-writer overload state machine escalates through system throttling and tick-rate modulation (up to 6x) before ever calling your critical-overload callback to shed load — the server degrades, it doesn't fall over
-- **Side-transactions.** A system can commit an economy-critical write durably mid-tick, independent of whether the tick's main transaction ever flushes
-- **Validated at real scale, on Linux.** AntHill, Typhon's headless ECS/runtime stress harness, has been run successfully on a 96-core Linux machine — confirming correctness and healthy scaling of the entity-cluster/system/runtime dispatch path well beyond the single-CCD, 16-thread window the benchmark suite is pinned to
-
-### 8. Built-In Client State Sync — No Networking Code Required
-
-Typhon ships a Subscriptions server and a zero-engine-dependency `Typhon.Client` SDK: register a query as a **Published View**, and the runtime diffs it against every connected client's subscriptions each tick, pushing one MemoryPack-encoded delta over TCP per client, per tick.
-
-- **Automatic incremental sync** — added/removed/modified entities, only the changed component bytes, computed from the same delta pipeline that backs Persistent Views
-- **Backpressure handled for you.** A full client send buffer drops one tick's delta and triggers an automatic full-state resync — never an unbounded queue, never a memory leak
-- **Priority throttling.** Critical Views always go out; Normal/Low Views throttle under overload
-- **A real client SDK**, not just a wire format — `Typhon.Client` decodes deltas and maintains a per-View local entity cache your game client reads directly
-
-If you've ever hand-rolled "diff the world state and push it to clients" for a multiplayer game, this is that system, built in and battle-tested against the same commit pipeline as everything else.
-
-### 9. Production-Grade Crash Safety
+#### 6. Production-Grade Crash Safety
 
 ```
 Write Path:
@@ -219,11 +190,52 @@ Crash Recovery (RecoveryDriver):
 
 Typhon used to protect against torn pages with Full-Page Images (the PostgreSQL strategy). That mechanism was **retired in 2026** in favor of something simpler: derived structures (indexes, EntityMap, occupancy bitmaps) are never trusted after a crash — they're thrown away and rebuilt wholesale from the recovered primary data, which is itself protected by CRC32C plus A/B pairing on the handful of structural pages that can't be re-derived. Measured: **357ms to replay 100,000 hard-crash-interrupted commits with zero data loss.** Every protocol claim here is backed by invariant rules and TLA+ models in CI, not tests alone.
 
-### 10. Backup & Restore — Landing Next, Not Yet Shipped
+#### 7. Backup & Restore — Landing Next, Not Yet Shipped
 
 Point-in-Time incremental backup (forward-chained `.pack` files, scoped to changed pages, restoring through the same `RecoveryDriver` that handles crash recovery) is **designed and on the roadmap**, not implemented yet. If external backup/restore is a hard requirement today, Typhon isn't there — flagged here deliberately rather than left for you to discover after integrating.
 
-### 11. Zero-Overhead Observability, and a Real Dev UI
+### ⚙️ The Runtime — the Simulation Loop
+
+#### 8. A Tick-Based Runtime, Not Just a Store
+
+This is the part most embedded databases don't have at all: Typhon includes `TyphonRuntime`, a DAG-scheduled, multi-threaded tick loop that owns your game/simulation loop and drives it directly against the ECS store — the runtime runs *inside* the database, not on top of it.
+
+- **Five system types** — proactive callbacks, reactive per-entity queries (auto-skip when nothing relevant changed), chunk-parallel non-entity work, multi-stage pipelines, and sub-system grouping
+- **Declarative, auto-derived parallelism.** Systems declare what components they read/write and their phase; the scheduler derives a safe execution DAG and rejects unsafe write/write or stale-read conflicts at build time — you never hand-write a dependency graph
+- **Change-filtered dispatch.** A system can subscribe to "only entities that changed since I last ran," piggybacking on the same ring buffer that backs Persistent Views
+- **Graceful overload response.** A single-writer overload state machine escalates through system throttling and tick-rate modulation (up to 6x) before ever calling your critical-overload callback to shed load — the server degrades, it doesn't fall over
+- **Side-transactions.** A system can commit an economy-critical write durably mid-tick, independent of whether the tick's main transaction ever flushes
+- **Validated at real scale, on Linux.** AntHill, Typhon's headless ECS/runtime stress harness, has been run successfully on a 96-core Linux machine — confirming correctness and healthy scaling of the entity-cluster/system/runtime dispatch path well beyond the single-CCD, 16-thread window the benchmark suite is pinned to
+
+### 🌍 The World — Space and Realms
+
+#### 9. Space and Realms, Built In
+
+Most embedded databases stop at "here's your data." Typhon ships a full spatial layer, because "what's near this entity", "how often should this region simulate" and "which world is it in" are first-class real-time questions:
+
+- **One spatial index, declared on the data.** Mark a component field `[SpatialIndex]`: a sparse, three-level cell grid (2D or 3D) locates the cells a query touches, and inside each cell a cluster broadphase answers AABB, Radius, Ray, Frustum and kNN queries — testing entities only in the clusters that overlap, with a SIMD narrowphase. A dense cell promotes to an OLC R-Tree
+- **Storage follows space.** Entities that share a grid cell share a storage cluster (**Spatially-Coherent Entity Clustering**), so spatial bookkeeping is per cluster, not per entity — and **Tiered Simulation Dispatch** (`SimTier`) runs near cells every tick and far ones at reduced, amortized or dormant rates, with zero per-entity distance checks
+- **Realms — several isolated worlds in one engine.** A planet, a building interior, space, an instanced dungeon: each realm owns its grid, cell size and dimensionality, and its simulation policy. A query answers in one realm only; an entity moves between realms with `Teleport` and keeps its `EntityId`; an empty realm can sleep, and a one-room realm costs about a kilobyte
+- **Cluster dormancy** — clusters untouched for N ticks sleep and are skipped by every dispatch path, waking within one tick of being written to
+- **Checkerboard (Red/Black) dispatch** for systems that write across cell boundaries, still running as one parallel DAG node
+
+### 📡 Replication — the Bridge to Clients
+
+#### 10. From Tick to Screen — Replication to Clients, Built In
+
+Typhon replicates world state to remote clients itself. Declare what each archetype exposes (`[Replicated]`, `[Motion]`, `[Owner]`…) and who may see it; after the tick fence the engine detects what changed, encodes each change once on the quantized, catalog-driven `typhon.3` wire, and pushes each session only what lies around it — in parallel on the worker pool, over the engine's own TCP listener (optional TLS) or WebSocket through ASP.NET Core.
+
+- **Per-session visibility** — spheres with leave bands and distance bands, client regions, groups and visibility tags, owner-only state, all per realm
+- **Commands and events** — typed client intents checked on the transport thread, and events that are best effort or reliable (once, in order, or the session is closed)
+- **Sessions that survive a dropped connection** — a reconnecting client resumes its session instead of starting over
+- **Backpressure handled for you.** Skip, never queue: a slow client catches up from a short log or resyncs, under per-session byte budgets — it never holds up the tick
+- **Real client SDKs**, not just a wire format — .NET (also netstandard2.1 for Unity), TypeScript and C, each decoding against the server's catalog into a columnar world store, with motion extrapolation and reconnection
+
+If you've ever hand-rolled "diff the world state and push it to clients" for a multiplayer game, this is that system, built in and fed by the same commit pipeline as everything else. The server and every SDK ship at one version.
+
+### 🧰 Tooling
+
+#### 11. Zero-Overhead Observability, and a Real Dev UI
 
 Telemetry that costs nothing when you don't need it:
 
@@ -249,13 +261,13 @@ And unusually for an embedded engine: Typhon ships **Workbench**, a local browse
 
 You're running a persistent online world. Thousands of entities with positions, health, inventory, quest state. You need to update 100K+ components per tick at 20-60Hz, never lose a player's inventory to a crash, query "all enemies within 50m with health below 50%" in microseconds, and push world-state deltas to every connected client without hand-rolling a sync protocol.
 
-Typhon was built for exactly this. The ECS model *is* your data model. The tick runtime *is* your game loop. Spatial queries and simulation tiers are native, not bolted on. Subscriptions handle client sync. And when the server crashes at 3 AM, recovery replays 100,000 lost commits in well under half a second.
+Typhon was built for exactly this. The ECS model *is* your data model. The tick runtime *is* your game loop. Spatial queries and simulation tiers are native, not bolted on; realms host interiors, dungeons and other planets in the same process. Subscriptions stream each player the part of the world around them, to .NET/Unity, browser and native clients. And when the server crashes at 3 AM, recovery replays 100,000 lost commits in well under half a second.
 
 ### Simulations & Digital Twins
 
 Large-scale simulations with millions of entities, each with multiple state components. You need snapshot isolation so analysis threads see consistent state while simulation advances, incremental views that update reactively as entities change, and schema evolution as your model matures.
 
-Typhon's MVCC gives you free consistent snapshots. Persistent Views with delta tracking make reactive queries practical at scale. (Point-in-time historical queries against the revision chains that already exist — "what was this entity's state 1000 ticks ago" — are designed but not built yet; today's history lives in the chain, it just isn't exposed as a query API.)
+Typhon's MVCC gives you free consistent snapshots. Persistent Views with delta tracking make reactive queries practical at scale.
 
 ### Financial & Trading Systems
 
@@ -267,7 +279,7 @@ Typhon's mixed durability modes run both workloads in the same engine, side by s
 
 Resource-constrained environments processing sensor data. You need an in-process database with a bounded memory footprint and configurable back-pressure instead of OOM crashes.
 
-Typhon's resource system enforces memory budgets with graceful back-pressure today. If your deployment model depends on shipping incremental backups over a limited link, hold off — that path isn't built yet (see [§10](#10-backup--restore--landing-next-not-yet-shipped) above).
+Typhon's resource system enforces memory budgets with graceful back-pressure today. If your deployment model depends on shipping incremental backups over a limited link, hold off — that path isn't built yet (see [§7](#7-backup--restore--landing-next-not-yet-shipped) above).
 
 ---
 
@@ -290,35 +302,42 @@ Across a 10-rival weighted scorecard (capability × niche-proximity — how clos
 ## The Architecture at a Glance
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                        Application                             │
-├────────────────────────────────────────────────────────────────┤
-│  DatabaseEngine                                                │
-│  ├─ TyphonRuntime (DAG-scheduled tick loop, optional)          │
-│  │  └─ Systems (5 types) → auto-derived parallel dispatch      │
-│  ├─ UnitOfWork (durability boundary)                           │
-│  │  └─ Transaction (MVCC snapshot)                             │
-│  │     ├─ Spawn / Open / Read / Write / Destroy                │
-│  │     └─ Query / View (index-driven, incrementally refreshed) │
-│  ├─ ComponentTable (per-type storage + indexes)                │
-│  │  ├─ Entity Clusters (SoA, SIMD-optimized bulk path)         │
-│  │  ├─ B+Tree Secondary Indexes (OLC, versioned HEAD/TAIL)     │
-│  │  └─ R-Tree Spatial Index + engine-wide Spatial Grid         │
-│  ├─ Subscriptions (TCP delta streaming to Typhon.Client)       │
-│  ├─ PagedMMF (memory-mapped, 8KB pages, clock-sweep cache)     │
-│  ├─ WAL v2 (MPSC ring buffer → append-before-publish → replay) │
-│  ├─ Checkpoint v2 (background flush, A/B slot-pairing)         │
-│  ├─ Resource System (budgets, back-pressure, health checks)    │
-│  └─ Observability (OTLP traces + metrics, zero-overhead)       │
-├────────────────────────────────────────────────────────────────┤
-│  Concurrency Primitives                                        │
-│  ├─ AccessControl / AccessControlSmall (atomic RW locks)       │
-│  ├─ Epoch-Based Resource Protection                            │
-│  ├─ OLC latches (optimistic lock coupling, B+Tree & R-Tree)    │
-│  └─ AdaptiveWaiter (spin → yield → sleep)                      │
-├────────────────────────────────────────────────────────────────┤
-│  Storage File (memory-mapped, CRC32C verified)                 │
-└────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│ Clients — .NET & Unity · TypeScript · C / FFI                        │
+└──────────────────────────────────▲───────────────────────────────────┘
+                                   │  typhon.3 wire: TCP (optional TLS) or
+                                   │  WebSocket (ASP.NET Core)
+┌──────────────────────────────────┴───────────────────────────────────┐
+│ Your application — systems, transactions, replication declarations   │
+├──────────────────────────────────────────────────────────────────────┤
+│ DatabaseEngine                                                       │
+│ ├─ Subscriptions (push replication: projections & motion,            │
+│ │  per-session visibility, groups, commands & events, send pumps)    │
+│ ├─ TyphonRuntime (DAG-scheduled tick loop, optional)                 │
+│ │  ├─ Systems (5 types) → auto-derived parallel dispatch             │
+│ │  └─ Tick fence (parallel: migrations, index moves, WAL publish)    │
+│ ├─ Realms → Spatial (per-realm cell grid, cluster broadphase,        │
+│ │  R-Tree for dense cells, SimTier dispatch)                         │
+│ ├─ Querying (EcsQuery, plans, incrementally refreshed Views)         │
+│ ├─ UnitOfWork (durability boundary)                                  │
+│ │  └─ Transaction (MVCC snapshot)                                    │
+│ │     └─ Spawn / Open / OpenMut / Destroy / Query                    │
+│ ├─ ECS (archetypes, entity map, SoA clusters, three storage modes)   │
+│ ├─ Revision (MVCC chains) · Schema (versioning, migration)           │
+│ ├─ Indexing (B+Tree: OLC, L16 / L32 / L64 / String64 variants)       │
+│ ├─ Storage (page cache of 8 KB pages, clock-sweep, segments,         │
+│ │  ChangeSets, back-pressure)                                        │
+│ ├─ Durability (WAL v2 → Checkpoint v2 → recovery: replay + rebuild)  │
+│ └─ Integrity (cross-structure check & repair)                        │
+├──────────────────────────────────────────────────────────────────────┤
+│ Cross-cutting: Observability (typed events, OTLP, profiler) ·        │
+│ Resources (budgets, back-pressure) · Errors                          │
+├──────────────────────────────────────────────────────────────────────┤
+│ Foundation: AccessControl · epochs · OlcLatch · AdaptiveWaiter ·     │
+│ native allocator                                                     │
+├──────────────────────────────────────────────────────────────────────┤
+│ Data file (8 KB pages, CRC32C-verified) + WAL segments               │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -328,16 +347,18 @@ Across a 10-rival weighted scorecard (capability × niche-proximity — how clos
 |  | Traditional DB (PostgreSQL) | Embedded KV (RocksDB) | In-Memory (Redis) | **Typhon** |
 |--|---|---|---|---|
 | **Deployment** | Separate server | Library | Separate server | **Library (in-process)** |
-| **Latency** | Milliseconds (network) | Microseconds (disk) | Microseconds (network) | **Microseconds (memory-mapped)** |
+| **Latency** | Milliseconds (network) | Microseconds (disk) | Microseconds (network) | **Microseconds (in-process page cache)** |
 | **ACID** | Full | Limited | None | **Full** |
 | **Data Model** | Relational | Key-Value | Key-Value | **ECS (Entity-Component)** |
 | **Runtime included** | No | No | No | **Yes — tick-scheduled, parallel** |
 | **Client sync** | Build it yourself | Build it yourself | Build it yourself | **Built in (Subscriptions)** |
+| **Interest management** | Build it yourself | Build it yourself | Build it yourself | **Built in — per-session visibility and byte budgets** |
+| **Client SDKs** | Server drivers only | None | Server drivers only | **.NET/Unity, TypeScript, C** |
 | **Concurrency** | Lock-based + MVCC | Single-writer | Single-threaded | **MVCC + OLC (lock-free reads)** |
 | **Durability** | One mode | Configurable | Optional | **Per-component + per-UoW configurable** |
 | **Crash Recovery** | WAL replay | WAL replay | AOF/RDB | **WAL replay + rebuild-derived-structures** |
 | **Schema Evolution** | ALTER TABLE | N/A | N/A | **Automatic migration** |
-| **Spatial queries** | Extension (PostGIS) | No | No | **Native (R-Tree + grid)** |
+| **Spatial queries** | Extension (PostGIS) | No | No | **Native — per-realm cell grid + cluster broadphase, several worlds per engine** |
 | **Deadlocks** | Detected & retried | N/A | N/A | **Impossible by construction** |
 
 ---
@@ -354,19 +375,21 @@ Every item below is ✅ **Implemented** and cross-linked to source and tests in 
 
 **Indexing** — Four key-width-specialized B+Tree variants, Optimistic Lock Coupling, versioned HEAD/TAIL secondary indexes, compound Move operations
 
-**Spatial** — Page-backed R-Tree (AABB/Radius/Ray/Frustum/kNN/Count), engine-wide spatial grid, spatially-coherent clustering, tiered simulation dispatch, trigger volumes, category filtering
-
 **Query System** — Three-tier constraint evaluation, index-first execution planning, FK navigation joins, OR/DNF predicates, ordering & pagination, incrementally-refreshed Persistent Views (indexed predicates only, today)
-
-**Runtime** — DAG-scheduled tick loop, five system types, declarative access-based auto-parallelism, change-filtered reactive dispatch, spatial-tier adaptive dispatch with cluster dormancy, checkerboard Red/Black dispatch, side-transactions for mid-tick immediate durability
-
-**Subscriptions** — Published Views (shared and per-client), diff-based subscription management, per-tick delta computation, TCP wire transport with MemoryPack, incremental sync, backpressure-driven resync, priority throttling, a standalone `Typhon.Client` SDK
 
 **Durability & Recovery** — Logical WAL v2, append-before-publish commit pipeline, three per-UoW durability modes, Checkpoint v2 with A/B slot-pairing, rebuild-based crash recovery (RecoveryDriver), CRC32C page checksums with seqlock snapshots — every protocol claim backed by invariant rules and TLA+ models
 
-**Storage Engine** — Memory-mapped 8KB pages, clock-sweep eviction, epoch-based resource protection, resource budgets with graceful back-pressure
+**Storage Engine** — A paged data file with an engine-owned native page cache (8KB pages), clock-sweep eviction, epoch-based resource protection, resource budgets with graceful back-pressure
 
-**Observability & Tooling** — OpenTelemetry traces/metrics/health checks, zero-overhead JIT-eliminated telemetry gating, an embedded zero-allocation event profiler with CPU-sampling and off-CPU thread-scheduling capture, the Workbench dev UI, the `tsh` interactive shell
+**Runtime** — DAG-scheduled tick loop, five system types, declarative access-based auto-parallelism, change-filtered reactive dispatch, spatial-tier adaptive dispatch with cluster dormancy, checkerboard Red/Black dispatch, side-transactions for mid-tick immediate durability
+
+**World** — A sparse 2D/3D cell grid per realm with a per-cell cluster broadphase (AABB/Radius/Ray/Frustum/kNN), realms (several isolated worlds in one engine), spatially-coherent clustering, tiered simulation dispatch, trigger volumes, category filtering
+
+**Replication** — Engine-owned push replication: declared projections and motion segments, per-session visibility (spheres, regions, groups, visibility tags), owner state, typed commands, best-effort and reliable events, session resume, skip-never-queue backpressure with byte budgets, TCP and WebSocket (ASP.NET Core) transports, and .NET / Unity, TypeScript and C client SDKs
+
+**Observability & Tooling** — OpenTelemetry traces/metrics/health checks, zero-overhead JIT-eliminated telemetry gating, an embedded zero-allocation event profiler with CPU-sampling and off-CPU thread-scheduling capture, the Workbench dev UI, the `typhon` CLI (REPL, scripts, scaffolding, offline integrity check & repair)
+
+**Packaging** — One version across five NuGet packages (engine, CLI, ASP.NET Core hosting, protocol, .NET client), `@typhondb/client` on npm and the native SDK on GitHub Releases; netstandard2.1 builds of the protocol and the .NET client for Unity
 
 ---
 
@@ -374,22 +397,19 @@ Every item below is ✅ **Implemented** and cross-linked to source and tests in 
 
 In the spirit of not making you find these out the hard way:
 
-- **No stable API, no NuGet package, no support contract.** Pre-alpha. If you need a vendor to call, this isn't there yet
+- **No frozen API, no support contract.** Alpha: the packages are published, but the public API and wire protocol freeze only at beta. If you need a vendor to call, this isn't there yet
 - **No backup/restore.** Point-in-Time backup is designed, not built — if that's a hard requirement today, wait or plan around it
+- **The native client SDK speaks plain TCP for now.** TLS and WebSocket are in the .NET and TypeScript SDKs, not yet in the native one. Engine integrations (Unreal, Godot…) bind through its C ABI
+- **One engine, one process, one machine.** Realms divide worlds inside one engine; spreading one world across several machines isn't built
 - **Not a general-purpose analytics warehouse.** The DuckDB result above is a real, verified win on one aggregate shape over Entity Cluster data — it isn't a claim that Typhon replaces a columnar OLAP engine for arbitrary ad-hoc analytics
-- **High-thread-count zero-loss commits don't group-commit well yet.** At 16 concurrent threads on the `durable@return` path, throughput reaches only ~2.4x the single-thread rate (a well-tuned group-commit design would approach ~16x). This isn't an architectural ceiling — the WAL-writer handoff and flush batching simply haven't been optimized yet, and the fix path is already understood. It also doesn't affect the common case: the deferred/durable-soon path (~1.7µs, unaffected by thread count) is what most workloads, including game ticks, should reach for
 
 ---
 
 ## Beyond Today: The Roadmap
 
-The four items below are the highlights — for the full, current backlog and priorities, see the [GitHub Project](https://github.com/orgs/Log2n-io/projects/1/views/1).
+The two items below are the highlights — for the full, current backlog and priorities, see the [GitHub Project](https://github.com/orgs/Log2n-io/projects/1/views/1).
 
 **Point-in-Time Incremental Backup** — forward-chained `.pack` files scoped to changed pages, restoring through the same crash-recovery driver. Designed, not built. The most concrete near-term gap.
-
-**Temporal Queries** — `ReadEntityAtVersion(entityId, timestamp)` and `GetRevisionHistory(entityId)` as a thin API layer over the revision chains Typhon already maintains for every Versioned component. Design exists; no code yet.
-
-**Latch-Free Leaf Updates** — Phase 3 of the OLC roadmap: CAS-based B+Tree leaf modifications (FB+-tree-inspired), removing the last write latch from the index path. Phases 1-2 (OLC reads, Compound Move) are live; this one is deferred.
 
 **Async-Aware UnitOfWork** — `async/await` at the API boundary while engine internals stay synchronous. Currently an early idea, not yet promoted to a design doc.
 
@@ -401,15 +421,15 @@ Typhon exists because the real-time systems being built today deserve better tha
 
 Game servers shouldn't have to choose between "fast" and "correct." Trading engines shouldn't need a separate PostgreSQL instance for the 5% of writes that need durability. Simulations shouldn't sacrifice transactional consistency to hit their tick rate. And none of them should have to hand-roll a tick scheduler and a client-sync protocol on top of whatever storage engine they picked.
 
-**Typhon is a microsecond-latency ACID database with a parallel tick-based runtime and client-state sync built in — running in your process, speaking your data model, never making you choose between performance and correctness.**
+**Typhon is a real-time world engine: an ACID, larger-than-RAM ECS store, a parallel tick runtime, spatial partitioning with realms, and interest-managed replication to .NET/Unity, TypeScript and native C clients — running in your process, speaking your data model, never making you choose between performance and correctness.**
 
-It's pre-alpha and not finished. But the parts that are built are measured, proven against TLA+ models where it matters most, and already beating purpose-built rivals on their own turf.
+It's alpha and not finished. But the parts that are built are measured, proven against TLA+ models where it matters most, and already beating purpose-built rivals on their own turf.
 
 It's also **source-available**, not open source: every version before 1.0 — which is all of them, right now — is free for any use, any organization size, any purpose. Read it, fork it, ship it. From 1.0 onward it stays free for organizations under $2M annual revenue and 50 people; past that threshold, or if you want to build a competing database product or service on top of it, you need a commercial license. Full terms in [LICENSE.md](LICENSE.md).
 
-*What would a database look like if it were designed for real-time systems, ECS data models, and the runtime that drives them — all from the ground up, together? This is our answer.*
+*What would a database look like if it were designed for real-time systems, ECS data models, the runtime that drives them and the clients that watch them — all from the ground up, together? This is our answer.*
 
 ---
 
-*Typhon is source-available (see [LICENSE.md](LICENSE.md)) — free for any use pre-1.0, and pre-1.0 is everything that exists today. Written in C#/.NET 10. CI-tested on Windows and Linux.*
+*Typhon is source-available (see [LICENSE.md](LICENSE.md)) — free for any use pre-1.0, and pre-1.0 is everything that exists today. Written in C#/.NET 10. CI-tested on Linux, Windows and macOS (arm64).*
 *[GitHub](https://github.com/log2n-io/Typhon) · [User Guide](doc/guide/README.md) · [Feature Catalog](doc/feature-set/README.md) · [In-Depth Overview](doc/in-depth-overview/README.md)*

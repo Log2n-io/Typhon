@@ -330,7 +330,7 @@ MemoryBlockArray AllocateArray(string id, IResource parent, int size, bool zeroe
 PinnedMemoryBlock AllocatePinned(string id, IResource parent, int size, bool zeroed, int alignment, ushort sourceTag);
 ```
 
-`MemoryBlockArray` is a managed `byte[]` exposed as `Memory<byte>`. `PinnedMemoryBlock` is unmanaged (`NativeMemory.Alloc` + optional alignment), survives GC, suitable for memory-mapped files and FFI.
+`MemoryBlockArray` is a managed `byte[]` exposed as `Memory<byte>`. `PinnedMemoryBlock` is unmanaged (`NativeMemory.Alloc` + optional alignment), survives GC, suitable for the page cache and FFI.
 
 Tracks `_totalAllocatedBytes`, `_peakAllocatedBytes`, `_cumulativeAllocations`, `_cumulativeDeallocations` (grand totals) and `_pinnedBytes`, `_peakPinnedBytes`, `_pinnedLiveBlocks` (unmanaged-only). The grand totals feed the resource graph; the pinned-only counters back the `MemoryUnmanagedTotalBytes / PeakBytes / LiveBlocks` gauges.
 

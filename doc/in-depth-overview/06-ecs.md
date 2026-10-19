@@ -344,7 +344,7 @@ The table above describes `SingleVersion` under its default discipline, [`Commit
 2. **No atomicity**: if you write to several SV components and then crash or rollback, the writes that already retired stay. There is no "all or nothing".
 3. **Durability follows the tick, not the commit**: SV writes ride the tick-fence WAL pipeline (`DirtyBitmap` → tick-boundary persistence). Whether your transaction commits or rolls back doesn't change what's persisted.
 
-A transaction around SV writes still gives you *thread affinity* and a *consistent read snapshot for any Versioned components in the same archetype*, but it does **not** give you the right to undo an SV mutation. If that matters, use Versioned — or escalate the SV component to `CommitDiscipline.Commit`, above, if you need atomicity and rollback but not snapshot isolation or temporal queries.
+A transaction around SV writes still gives you *thread affinity* and a *consistent read snapshot for any Versioned components in the same archetype*, but it does **not** give you the right to undo an SV mutation. If that matters, use Versioned — or escalate the SV component to `CommitDiscipline.Commit`, above, if you need atomicity and rollback but not snapshot isolation.
 
 ### Picking a mode
 

@@ -1,8 +1,10 @@
 # Typhon Documentation
 
-**Real-time, low-latency ACID database engine** with an ECS data model and microsecond-level performance — embedded, in-process, no server.
+**A real-time world engine**: an ACID, larger-than-RAM ECS store, a parallel tick runtime, spatial partitioning with realms, and
+interest-managed replication to .NET/Unity, TypeScript and native C clients — one process, one data model, from disk to screen.
 
 > New here? Start with **[Getting Started](guide/getting-started.md)** — a working Typhon app in about five minutes.
+> Looking for an install command? **[Packages](guide/packages.md)** lists every NuGet, npm and native package, with gallery links.
 
 ## Explore the docs
 

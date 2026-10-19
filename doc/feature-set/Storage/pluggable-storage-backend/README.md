@@ -12,7 +12,7 @@ description: 'One set of segment/index code, JIT-specialized per backend, so Tra
 ## 🎯 What it solves
 
 Every Typhon data structure — segments, B+Trees, hash maps, chunk accessors — needs to read and write 8 KiB
-pages. For durable components those pages live in the memory-mapped file and carry dirty tracking, eviction,
+pages. For durable components those pages live in the page cache over the data file and carry dirty tracking, eviction,
 and CRC protection; for `StorageMode.Transient` components (see [Storage Modes](../../Ecs/storage-modes/README.md))
 none of that applies — the data is heap-only and gone on restart by design. Forking the segment/B+Tree/hash-map
 implementations to get a fast heap-only path would double the maintenance surface and risk the two copies
@@ -24,7 +24,7 @@ drifting. The pluggable storage backend lets one implementation serve both cases
 — never as a runtime-polymorphic field. Because the constraint is a struct, not a class, the JIT compiles a
 fully specialized copy of `LogicalSegment<TStore>`, `ChunkBasedSegment<TStore>`, `ChunkAccessor<TStore>`,
 `BTree<TKey, TStore>`, etc. per concrete backend, with zero virtual dispatch. Two backends ship in-tree:
-`PersistentStore`, a one-line forwarding wrapper around the memory-mapped page cache, and `TransientStore`,
+`PersistentStore`, a one-line forwarding wrapper around the page cache, and `TransientStore`,
 a heap-only store backed by pinned memory blocks. `typeof(TStore)` checks in hot paths (e.g. dirty tracking)
 are constant-folded per specialization, so a `TransientStore` build of `ChunkAccessor` literally has no dirty-
 tracking instructions left in it — not a cheap no-op call, an absent one.
@@ -33,7 +33,7 @@ tracking instructions left in it — not a cheap no-op call, an absent one.
 
 | Sub-feature | Backs | Use it for |
 |-------------|-------|-----------|
-| [Persistent Store (MMF-backed)](./persistent-store.md) | `StorageMode.Versioned` / `SingleVersion` | Any durable component — the default path, selected automatically |
+| [Persistent Store (page-cache-backed)](./persistent-store.md) | `StorageMode.Versioned` / `SingleVersion` | Any durable component — the default path, selected automatically |
 | [Transient Store (heap-backed)](./transient-store.md) | `StorageMode.Transient` | Scratch data with `StorageMode.Transient` — tune via `TransientOptions` |
 
 ## ⚠️ Guarantees & limits
@@ -55,6 +55,6 @@ tracking instructions left in it — not a cheap no-op call, an absent one.
 ## 🔗 Related
 
 - Related feature: [Storage Modes](../../Ecs/storage-modes/README.md) — the component-level decision this backend split exists to serve
-- Sub-features: [Persistent Store (MMF-backed)](./persistent-store.md), [Transient Store (heap-backed)](./transient-store.md)
+- Sub-features: [Persistent Store (page-cache-backed)](./persistent-store.md), [Transient Store (heap-backed)](./transient-store.md)
 
 <!-- Deep dive: claude/design/Storage/PageCache/08-page-stores.md, claude/design/Storage/StorageModeGuide.md -->

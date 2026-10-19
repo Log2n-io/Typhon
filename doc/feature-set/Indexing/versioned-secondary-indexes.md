@@ -95,8 +95,8 @@ using var g9 = tx2.EnumerateIndex<GuildMember, long>(guildIndex, 9, 9); // Aria
 - **Current state only.** Typhon does not reconstruct past index membership: there is no "who held this value at
   TSN T" query, and no API exposes one. There is no append-only version-history tail behind the index either — it
   would need pruning of its own and would charge every `AllowMultiple` mutation on a `Versioned` component for a
-  capability no caller can reach. Point-in-time reads work through the revision chain (see the
-  related temporal-query feature), not through the index.
+  capability no caller can reach. A snapshot read of an older revision goes through the revision
+  chain, not through the index.
 
 ## 🧪 Tests
 

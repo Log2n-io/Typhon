@@ -20,7 +20,7 @@ An **in-process, real-time ACID database** with an **ECS** (Entity-Component-Sys
 
 **What it isn't:** not SQL, not a key-value store, not a networked database, no database replication or clustering (serving live world state to game clients *is* built in — that's [ch.7](07-subscriptions.md), not replication between servers). It exists to squeeze maximum throughput out of a single machine for simulation-style and game-server-style workloads.
 
-> 💾 **Not RAM-bound.** Unlike an in-memory ECS (Unity DOTS, Bevy, EnTT…), Typhon's persistent data lives in a memory-mapped, **paged store on disk** — the database can be **far larger than the RAM hosting it**. Only the hot working set (a page cache you size) stays resident, the same way SQL Server or SQLite works. ECS ergonomics, database-grade storage.
+> 💾 **Not RAM-bound.** Unlike an in-memory ECS (Unity DOTS, Bevy, EnTT…), Typhon's persistent data lives in a **paged store on disk** — the database can be **far larger than the RAM hosting it**. Only the hot working set (a page cache you size) stays resident, the same way SQL Server or SQLite works. ECS ergonomics, database-grade storage.
 
 ## 🧠 The mental model
 

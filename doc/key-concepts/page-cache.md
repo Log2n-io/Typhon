@@ -1,12 +1,12 @@
 ---
 uid: concept-page-cache
 title: 'Page cache & paged store'
-description: 'Persistent components live in a memory-mapped, paged store with a bounded cache. The cache size bounds the resident working set, not capacity — the database can far exceed RAM, with cold pages paged in on demand.'
+description: 'Persistent components live in a paged store with a bounded cache. The cache size bounds the resident working set, not capacity — the database can far exceed RAM, with cold pages paged in on demand.'
 ---
 
 # Page cache & paged store
 
-> **In one line:** persistent data lives in a **memory-mapped, paged store** with a **bounded cache** — the working set is resident, everything else lives on disk and pages in on demand.
+> **In one line:** persistent data lives in a **paged store** with a **bounded cache** — the working set is resident, everything else lives on disk and pages in on demand.
 
 You never allocate a page or write a save file — declaring a [component](xref:concept-component) is the whole interaction. The key property: **`DatabaseCacheSize` bounds the resident working set, not how much you can store.** The on-disk database can be many times the cache; cold pages (persistent data, indexes, the entity map) page out and back in on demand — entity count and data size scale with *disk*, not RAM. This is the SQL/SQLite model, and it's what separates Typhon from in-memory ECS frameworks.
 

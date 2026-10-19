@@ -17,7 +17,7 @@ The series is *in-depth* in the sense that it explains mechanism (structures, li
 
 > **What Typhon isn't.** Not SQL. Not a networked database. Not a key-value store. Not a queue. No database replication and no multi-process clustering. The engine focuses on extracting maximum throughput from a single machine. (It *does* serve live world state to remote game clients — [15-subscriptions](15-subscriptions.md) — but that is client replication, not replicating a database.)
 
-> **Disk-backed, not RAM-bound.** Storage is a memory-mapped, paged store: resident memory is bounded by the page-cache size, not by database size, so a Typhon database can exceed RAM by orders of magnitude — only the working set is resident. Persistent component data, indexes, and the per-archetype `EntityMap` all page to disk; data volume scales with disk, not memory. This is conventional for SQL/embedded engines but unusual for an ECS, every mainstream one of which is in-memory only.
+> **Disk-backed, not RAM-bound.** Storage is a paged store with the engine's own page cache: resident memory is bounded by the page-cache size, not by database size, so a Typhon database can exceed RAM by orders of magnitude — only the working set is resident. Persistent component data, indexes, and the per-archetype `EntityMap` all page to disk; data volume scales with disk, not memory. This is conventional for SQL/embedded engines but unusual for an ECS, every mainstream one of which is in-memory only.
 
 ---
 
@@ -28,7 +28,7 @@ The series follows the engine's folder layout — every `src/Typhon.Engine/<Fold
 | # | Chapter | Covers |
 |---|---|---|
 | **01** | [Foundation](01-foundation.md) | Synchronization primitives (AccessControl, Deadline, WaitContext, AdaptiveWaiter), epoch-based reclamation, false-sharing avoidance, concurrent collections, the memory allocator, hosting helpers. The pile of primitives every other subsystem stands on. |
-| **02** | [Storage](02-storage.md) | The paged memory-mapped file (PagedMMF) and its accessors. Page cache, clock-sweep eviction, segments (`LogicalSegment`, `ChunkBasedSegment`), `ChunkAccessor` SOA layout, dirty tracking via ChangeSet, backpressure, page CRC + seqlock writes. |
+| **02** | [Storage](02-storage.md) | The paged data file (`PagedMMF` — the name predates the design; the file is read with explicit I/O, not memory-mapped) and its accessors. Page cache, clock-sweep eviction, segments (`LogicalSegment`, `ChunkBasedSegment`), `ChunkAccessor` SOA layout, dirty tracking via ChangeSet, backpressure, page CRC + seqlock writes. |
 | **03** | [Indexing](03-indexing.md) | B+Tree as the universal index. Node layout, capacity variants (L16/L32/L64/String64), the two-phase `SpinWriteLock`, `OlcLatch` for optimistic reads, structural mutations (split/merge), multi-tree segments. |
 | **04** | [Schema](04-schema.md) | Component and field definitions. The `FieldType` enum (including AABB/BSphere/Unsigned/DoubleFloat flags), persistence via `ComponentR1` / `FieldR1` / `ArchetypeR1` / `SchemaHistoryR1` system entities, schema evolution (eager migration on reopen), the diff model. |
 | **05** | [Revision (MVCC)](05-revision.md) | How snapshot isolation actually works. `CompRevStorageElement` layout (12 B with packed TSN + UowId + IsolationFlag), revision chains, write-time UowId stamping, the snapshot read walk, `EnabledBits` overrides. |
