@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -14,6 +15,21 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 internal static class PackFormat
 {
+    /// <summary>
+    /// The INDEX is read and written as raw <see cref="PackPageEntry"/> structs (MemoryMarshal over their bytes): that is the on-disk format only
+    /// when the struct is exactly <see cref="PageEntrySize"/> bytes and the machine is little-endian. Anything else fails at first use, not as
+    /// a silently garbled index.
+    /// </summary>
+    static PackFormat()
+    {
+        if (Unsafe.SizeOf<PackPageEntry>() != PageEntrySize || !BitConverter.IsLittleEndian)
+        {
+            throw new PlatformNotSupportedException(
+                $"Backup packs need a {PageEntrySize}-byte index entry (this build lays it out in {Unsafe.SizeOf<PackPageEntry>()}) on a little-endian "
+                + $"machine (this one is {(BitConverter.IsLittleEndian ? "little" : "big")}-endian).");
+        }
+    }
+
     public const int HeaderSize = 256;
     public const int FooterSize = 128;
     public const int PageEntrySize = 24;
@@ -101,7 +117,7 @@ internal static class PackFormat
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
     };
 
-    /// <summary><c>{id:D8}-{K}.tpack</c>.</summary>
+    /// <summary><c>{id:D8}-{K}.tpack</c>: eight digits at least, more past 99 999 999.</summary>
     public static string FileName(uint backupId, BackupKind kind) =>
         backupId.ToString("D8", CultureInfo.InvariantCulture) + "-" + KindLetter(kind) + PackExtension;
 
@@ -114,18 +130,24 @@ internal static class PackFormat
         backupId = 0;
         kind = 0;
         temp = false;
-        // {8 digits}-{K}.tpack[.tmp[.idxN]]
-        if (name.Length < 16 || name[8] != '-' || !name.AsSpan(10).StartsWith(PackExtension, StringComparison.Ordinal))
+        // {id:D8, 8 to 10 digits}-{K}.tpack[.tmp[.idxN]]. The digits must be the id's own D8 form, so one id has one name: a fixed 8-digit read
+        // made every id from 100 000 000 on invisible to the store.
+        var digits = 0;
+        while (digits < name.Length && char.IsAsciiDigit(name[digits]))
         {
+            digits++;
+        }
+
+        if (digits < 8 || digits > 10 || name.Length < digits + 2 + PackExtension.Length || name[digits] != '-'
+            || !name.AsSpan(digits + 2).StartsWith(PackExtension, StringComparison.Ordinal)
+            || !uint.TryParse(name.AsSpan(0, digits), NumberStyles.None, CultureInfo.InvariantCulture, out backupId)
+            || !name.AsSpan(0, digits).SequenceEqual(backupId.ToString("D8", CultureInfo.InvariantCulture)))
+        {
+            backupId = 0;
             return false;
         }
 
-        if (!uint.TryParse(name.AsSpan(0, 8), NumberStyles.None, CultureInfo.InvariantCulture, out backupId))
-        {
-            return false;
-        }
-
-        kind = name[9] switch
+        kind = name[digits + 1] switch
         {
             'F' => BackupKind.Full,
             'I' => BackupKind.Incremental,
@@ -137,7 +159,7 @@ internal static class PackFormat
             return false;
         }
 
-        var rest = name.AsSpan(10 + PackExtension.Length);
+        var rest = name.AsSpan(digits + 2 + PackExtension.Length);
         if (rest.Length == 0)
         {
             return true;

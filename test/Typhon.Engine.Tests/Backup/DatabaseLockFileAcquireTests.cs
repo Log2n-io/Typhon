@@ -1,6 +1,8 @@
 using NUnit.Framework;
 using System;
 using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Typhon.Engine.Tests.Backup;
 
@@ -77,8 +79,88 @@ internal sealed class DatabaseLockFileAcquireTests
     public void AnUnreadableLock_IsReplaced_AsTheEngineDoes()
     {
         File.WriteAllText(DatabaseLockFile.PathFor(_bundle), "{ not json");
+        File.SetLastWriteTimeUtc(DatabaseLockFile.PathFor(_bundle), DateTime.UtcNow - DatabaseLockFile.UnreadableLockGrace - TimeSpan.FromMinutes(1));
 
         Assert.That(DatabaseLockFile.TryAcquire(_bundle, false, out _), Is.True);
+    }
+
+    /// <summary>
+    /// M8 (b): a claimant creates the lock, then writes it; in between it reads as empty. Taking that for a corrupt lock deleted a lock its writer
+    /// was about to own. A young unreadable lock is somebody's: refused, left untouched.
+    /// </summary>
+    [Test]
+    [CancelAfter(5_000)]
+    public void AnUnreadableLockStillBeingWritten_IsLeftAlone()
+    {
+        File.WriteAllBytes(DatabaseLockFile.PathFor(_bundle), []);
+
+        Assert.That(DatabaseLockFile.TryAcquire(_bundle, false, out _), Is.False);
+        Assert.That(File.Exists(DatabaseLockFile.PathFor(_bundle)) && new FileInfo(DatabaseLockFile.PathFor(_bundle)).Length == 0, Is.True,
+            "the lock being written is not deleted");
+    }
+
+    /// <summary>
+    /// M8 (a): two claimants that both read a lock as stale used to both take it over: the second deleted the first's fresh lock and both believed they
+    /// held the database. Claimant A is stopped right before its delete, under the takeover; claimant B runs meanwhile and must be refused.
+    /// </summary>
+    [Test]
+    [CancelAfter(10_000)]
+    public void TwoClaimantsOfAStaleLock_OnlyOneTakesItOver()
+    {
+        File.WriteAllText(DatabaseLockFile.PathFor(_bundle),
+            DatabaseLockFile.SerializeLock(DeadPid, DateTimeOffset.UtcNow.AddHours(-1), Environment.MachineName, yieldable: false));
+        using var aAtDelete = new ManualResetEventSlim();
+        using var bDone = new ManualResetEventSlim();
+        var aThread = -1;
+        DatabaseLockFile.BeforeStaleLockDeletedForTest = _ =>
+        {
+            if (Environment.CurrentManagedThreadId == Volatile.Read(ref aThread))
+            {
+                aAtDelete.Set();
+                bDone.Wait(TimeSpan.FromSeconds(5));
+            }
+        };
+
+        try
+        {
+            var a = Task.Factory.StartNew(() =>
+            {
+                Volatile.Write(ref aThread, Environment.CurrentManagedThreadId);
+                return DatabaseLockFile.TryAcquire(_bundle, false, out var info) ? info : (DatabaseLockFile.LockInfo?)null;
+            }, TaskCreationOptions.LongRunning);
+            Assert.That(aAtDelete.Wait(TimeSpan.FromSeconds(5)), Is.True, "premise: A is about to delete the stale lock");
+
+            var bWon = DatabaseLockFile.TryAcquire(_bundle, false, out _);
+            bDone.Set();
+            var aWon = a.Result;
+
+            Assert.That(bWon, Is.False, "B took over a lock A was taking over");
+            Assert.That(aWon, Is.Not.Null);
+            Assert.That(DatabaseLockFile.TryReadLock(_bundle, out var onDisk) && onDisk.StartedAt == aWon.Value.StartedAt, Is.True, "A holds it");
+        }
+        finally
+        {
+            DatabaseLockFile.BeforeStaleLockDeletedForTest = null;
+        }
+    }
+
+    /// <summary>
+    /// M8 (c): on Windows an open of a lock name that is being deleted (classic delete disposition) fails with access denied, and so does one over a
+    /// name that is not a file at all; that is "not acquired", never an exception escaping to the capture or the restore. Modern NTFS deletes with
+    /// POSIX semantics (the name goes at once), so the access-denied case is staged with a directory named db.lock.
+    /// </summary>
+    [Test]
+    [Platform("Win")]
+    [CancelAfter(10_000)]
+    public void ACreateRefusedAccess_IsNotAcquired_AndNeverThrows()
+    {
+        var path = DatabaseLockFile.PathFor(_bundle);
+        Directory.CreateDirectory(path);
+
+        Assert.That(DatabaseLockFile.TryAcquire(_bundle, false, out _), Is.False);
+
+        Directory.Delete(path);
+        Assert.That(DatabaseLockFile.TryAcquire(_bundle, false, out _), Is.True, "and once the name is free, it is acquired");
     }
 
     [Test]

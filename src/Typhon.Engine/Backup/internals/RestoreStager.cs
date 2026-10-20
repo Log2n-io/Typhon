@@ -77,6 +77,12 @@ internal sealed class RestoreOutcome
     public IReadOnlyList<DamagedPage> DamagedPages { get; init; }
 
     public Guid NewTimelineId { get; init; }
+
+    /// <summary>
+    /// What <see cref="RestoreOptions.OpenAndClose"/> threw, or <c>null</c>. The restore itself is published by then: the outcome, the displaced
+    /// bundle included, is still the caller's to act on.
+    /// </summary>
+    public Exception SettleFailure { get; init; }
 }
 
 /// <summary>
@@ -88,6 +94,9 @@ internal static class RestoreStager
 {
     public const string StagingSuffix = ".restoring";
     public const string DisplacedInfix = ".pre-restore-";
+
+    /// <summary>Beside the staging: held by the one restore working on a target, from before its guard to after its settle.</summary>
+    public const string LockSuffix = ".restoring.lock";
 
     /// <summary>Runs a restore. Throws <see cref="RestoreRefusedException"/> (nothing written), <see cref="BackupChainBrokenException"/>,
     /// <see cref="BackupPackCorruptException"/> (staging discarded).</summary>
@@ -107,8 +116,8 @@ internal static class RestoreStager
         {
             var meta = ReadImageMeta(fs, view, chain, packs);
 
-            // 2 TARGET — the bundle the image can be opened as (DC-1), and a format this build opens (DC-12).
-            target = ResolveTarget(target, meta.DatabaseName);
+            // 2 TARGET — the bundle the image can be opened as (DC-1), and a format this build opens (DC-12). Absolute, so no parent is ever "".
+            target = ResolveTarget(fs.GetFullPath(target), meta.DatabaseName);
             if (meta.FormatRevision != PagedMMF.DatabaseFormatRevision && !options.AllowFormatMismatch)
             {
                 Refuse(log, RestoreRefusalReason.FormatRevision, target,
@@ -116,9 +125,22 @@ internal static class RestoreStager
                     + "with a build of that revision, or pass AllowFormatMismatch to restore it for one");
             }
 
-            // 3 GUARD — refusals come before any byte is written.
+            // 3 GUARD — refusals come before any byte is written. One restore per target: the lock beside the staging is held to the end, so a
+            // staging found with no holder is a dead restore's, the only directory a restore ever deletes.
             var staging = target + StagingSuffix;
-            var exists = Guard(fs, log, target, staging, options);
+            var parent = Path.GetDirectoryName(target);
+            if (!string.IsNullOrEmpty(parent) && !fs.DirectoryExists(parent))
+            {
+                fs.CreateDirectory(parent);
+            }
+
+            using var restoreLock = fs.TryLockTransient(target + LockSuffix);
+            if (restoreLock == null)
+            {
+                Refuse(log, RestoreRefusalReason.ForeignStaging, target, "another restore to this target is running");
+            }
+
+            using var hold = Guard(fs, log, target, staging, options);
 
             // 4 STAGE
             var newTimeline = Guid.NewGuid();
@@ -126,6 +148,7 @@ internal static class RestoreStager
             try
             {
                 staged = Stage(fs, view, chain, packs, meta, staging, newTimeline, options);
+                Recheck(fs, log, target, hold);
             }
             catch
             {
@@ -136,12 +159,22 @@ internal static class RestoreStager
 
             BackupLog.RestoreStaged(log, chain.Point.BackupId, staged.Materialized.Pages, staged.TailSegments, clock.ElapsedMilliseconds);
 
-            // 5 SWAP
-            var displaced = Swap(fs, target, staging, meta.DatabaseName, exists, options);
+            // 5 SWAP, then the staging marker goes: until the bundle is published, a crash leaves a staging the next restore recognises (04 §2).
+            var displaced = Swap(fs, target, staging, meta.DatabaseName, hold, options);
+            fs.DeleteFile(Path.Combine(target, RestoreMarker.StagingFileName));
+            fs.FlushDirectory(target);
             BackupLog.RestorePublished(log, target, displaced ?? "none");
 
-            // 6 SETTLE
-            options.OpenAndClose?.Invoke(target);
+            // 6 SETTLE — the restore is published: a failure to open it is reported with the outcome, never instead of it.
+            Exception settleFailure = null;
+            try
+            {
+                options.OpenAndClose?.Invoke(target);
+            }
+            catch (Exception ex)
+            {
+                settleFailure = ex;
+            }
 
             return new RestoreOutcome
             {
@@ -161,6 +194,7 @@ internal static class RestoreStager
                 SuspectPages = staged.Suspects,
                 DamagedPages = staged.Materialized.Damaged,
                 NewTimelineId = newTimeline,
+                SettleFailure = settleFailure,
             };
         }
         finally
@@ -221,44 +255,107 @@ internal static class RestoreStager
         return meta;
     }
 
-    /// <summary>Returns whether the target exists (and may be replaced).</summary>
-    private static bool Guard(IStoreFileSystem fs, ILogger log, string target, string staging, RestoreOptions options)
+    /// <summary>
+    /// What a restore holds of an existing target while it works: the bundle's advisory lock (an engine refuses to open it) and its data file with no
+    /// sharing (anything else is kept out). Nothing for a target that does not exist yet.
+    /// </summary>
+    private sealed class TargetHold(IStoreFileSystem fs, string target) : IDisposable
     {
-        var exists = fs.DirectoryExists(target) || fs.FileExists(target);
-        if (exists)
+        public bool Exists { get; init; }
+
+        public DatabaseLockFile.LockInfo Lock { get; init; }
+
+        public IDisposable DataFile { get; set; }
+
+        /// <summary>Where the bundle, and the lock in it, now is: the displaced path once moved aside.</summary>
+        public string LockedAt { get; set; } = target;
+
+        /// <summary>A directory with a file open under it cannot be renamed on Windows: the data file is let go just before the swap.</summary>
+        public void ReleaseDataFile()
         {
-            // Both: a lock file naming a live process, and the OS refusing an exclusive open of the data file (DC-16). Checked before the
-            // replace question: a live database is refused whatever the caller asked for.
-            if (fs.IsBundleHeldByLiveProcess(target) || !fs.ProbeExclusive(Path.Combine(target, IntegrityConstants.DataFileName)))
+            DataFile?.Dispose();
+            DataFile = null;
+        }
+
+        public void Dispose()
+        {
+            ReleaseDataFile();
+            if (Exists)
+            {
+                fs.ReleaseBundleLock(LockedAt, Lock);
+            }
+        }
+    }
+
+    /// <summary>Refuses a live, unreplaceable or foreign target and removes a dead restore's staging; holds an existing target until the swap.</summary>
+    private static TargetHold Guard(IStoreFileSystem fs, ILogger log, string target, string staging, RestoreOptions options)
+    {
+        var data = Path.Combine(target, IntegrityConstants.DataFileName);
+        TargetHold hold;
+        if (fs.DirectoryExists(target) || fs.FileExists(target))
+        {
+            // Both, for the whole restore: the advisory lock an engine honours, and the OS refusing a second exclusive open of the data file (DC-16).
+            // Checked before the replace question: a live database is refused whatever the caller asked for.
+            if (!fs.TryAcquireBundleLock(target, out var acquired))
             {
                 Refuse(log, RestoreRefusalReason.TargetLocked, target, "a live process holds this database; close it first");
             }
 
+            hold = new TargetHold(fs, target) { Exists = true, Lock = acquired };
+            if (fs.FileExists(data))
+            {
+                hold.DataFile = fs.TryLockExclusive(data);
+                if (hold.DataFile == null)
+                {
+                    hold.Dispose();
+                    Refuse(log, RestoreRefusalReason.TargetLocked, target, "a live process holds this database; close it first");
+                }
+            }
+
             if (!options.Replace)
             {
+                hold.Dispose();
                 Refuse(log, RestoreRefusalReason.TargetExists, target, "it exists; pass Replace to move it aside (it is never deleted)");
             }
+        }
+        else
+        {
+            hold = new TargetHold(fs, target);
         }
 
         if (fs.DirectoryExists(staging) || fs.FileExists(staging))
         {
             if (!fs.FileExists(Path.Combine(staging, RestoreMarker.StagingFileName)))
             {
+                hold.Dispose();
                 Refuse(log, RestoreRefusalReason.ForeignStaging, target,
                     $"'{staging}' exists and was not left by a restore (no {RestoreMarker.StagingFileName}); move or delete it yourself");
             }
 
-            // An interrupted restore's own leftover: the only directory a restore ever deletes.
+            // A dead restore's leftover (a live one would hold the lock): the only directory a restore ever deletes.
             fs.DeleteDirectory(staging);
         }
 
-        var parent = Path.GetDirectoryName(target);
-        if (!string.IsNullOrEmpty(parent) && !fs.DirectoryExists(parent))
+        return hold;
+    }
+
+    /// <summary>
+    /// Right before the swap, with the data file let go: the target is still what the guard decided on. One that appeared during staging is not
+    /// replaced; one whose data file another process has since opened is refused.
+    /// </summary>
+    private static void Recheck(IStoreFileSystem fs, ILogger log, string target, TargetHold hold)
+    {
+        hold.ReleaseDataFile();
+        var exists = fs.DirectoryExists(target) || fs.FileExists(target);
+        if (exists && !hold.Exists)
         {
-            fs.CreateDirectory(parent);
+            Refuse(log, RestoreRefusalReason.TargetExists, target, "it appeared while the restore was staging; nothing was replaced");
         }
 
-        return exists;
+        if (exists && !fs.ProbeExclusive(Path.Combine(target, IntegrityConstants.DataFileName)))
+        {
+            Refuse(log, RestoreRefusalReason.TargetLocked, target, "a process opened this database while the restore was staging; close it first");
+        }
     }
 
     private sealed class Staged
@@ -310,7 +407,7 @@ internal static class RestoreStager
             tailBytes += tail.Segments[i].RawLength;
         }
 
-        // restore.json, then every file and directory flushed before the staging marker goes.
+        // restore.json, then every file and directory flushed. The staging marker stays until the bundle is published.
         var marker = new RestoreMarkerFile
         {
             FormatVersion = RestoreMarkerFile.CurrentFormatVersion,
@@ -331,9 +428,6 @@ internal static class RestoreStager
         };
         WriteFile(fs, Path.Combine(staging, RestoreMarker.FileName), RestoreMarker.Serialize(marker));
         fs.FlushDirectory(walDir);
-        fs.FlushDirectory(staging);
-
-        fs.DeleteFile(stagingMarker);
         fs.FlushDirectory(staging);
 
         var suspects = new SortedSet<uint>();
@@ -363,12 +457,12 @@ internal static class RestoreStager
         file.Flush();
     }
 
-    private static string Swap(IStoreFileSystem fs, string target, string staging, string databaseName, bool exists, RestoreOptions options)
+    private static string Swap(IStoreFileSystem fs, string target, string staging, string databaseName, TargetHold hold, RestoreOptions options)
     {
         string displaced = null;
-        if (exists)
+        if (hold.Exists)
         {
-            var parent = Path.GetDirectoryName(target) ?? "";
+            var parent = Path.GetDirectoryName(target);
             var stamp = options.UtcNow().ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
             displaced = Path.Combine(parent, databaseName + IntegrityConstants.BundleExtension + DisplacedInfix + stamp);
             for (var i = 2; fs.DirectoryExists(displaced) || fs.FileExists(displaced); i++)
@@ -377,6 +471,7 @@ internal static class RestoreStager
             }
 
             StoreFileSystem.MoveDurable(fs, target, displaced, replace: false);
+            hold.LockedAt = displaced;
         }
 
         // A crash between the two moves leaves both directories and no target: the outcome and the runbook name them; nothing guesses (R6).

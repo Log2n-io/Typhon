@@ -83,7 +83,7 @@ internal interface IStoreFileSystem
     /// </summary>
     void Rename(string source, string destination, bool replace);
 
-    /// <summary>Makes the entries of <paramref name="directory"/> durable. Linux: <c>open</c> + <c>fsync</c> of the directory. Windows: nothing.</summary>
+    /// <summary>Makes the entries of <paramref name="directory"/> durable. Unix: <c>open</c> + <c>fsync</c> of the directory. Windows: nothing.</summary>
     void FlushDirectory(string directory);
 
     /// <summary>Whether a file exists at <paramref name="path"/>.</summary>
@@ -106,6 +106,25 @@ internal interface IStoreFileSystem
 
     /// <summary>Whether a database bundle's advisory lock names a live process (<see cref="DatabaseLockFile.IsHeldByLiveProcess"/>).</summary>
     bool IsBundleHeldByLiveProcess(string bundleDirectory);
+
+    /// <summary>The absolute form of <paramref name="path"/>, so no caller ever derives an empty parent from a bare relative name.</summary>
+    string GetFullPath(string path) => System.IO.Path.GetFullPath(path);
+
+    /// <summary>
+    /// Like <see cref="TryLockExclusive"/>, for a lock file that exists only while it is held: releasing it removes the file. The removal happens
+    /// while the handle is still held, so no other claimant can open the file between them. A process that dies leaves the file, unheld: the next
+    /// claimant takes it over.
+    /// </summary>
+    IDisposable TryLockTransient(string path) => TryLockExclusive(path);
+
+    /// <summary>
+    /// Takes a bundle's advisory lock as a non-yieldable holder (<see cref="DatabaseLockFile.TryAcquire"/>); <c>false</c> when a live process holds it.
+    /// </summary>
+    bool TryAcquireBundleLock(string bundleDirectory, out DatabaseLockFile.LockInfo acquired) =>
+        DatabaseLockFile.TryAcquire(bundleDirectory, yieldable: false, out acquired);
+
+    /// <summary>Releases a lock <see cref="TryAcquireBundleLock"/> took, now at <paramref name="bundleDirectory"/> (the bundle may have moved).</summary>
+    void ReleaseBundleLock(string bundleDirectory, in DatabaseLockFile.LockInfo acquired) => DatabaseLockFile.Release(bundleDirectory, acquired);
 }
 
 /// <summary>Helpers over <see cref="IStoreFile"/>.</summary>
@@ -218,6 +237,43 @@ internal sealed partial class StoreFileSystem : IStoreFileSystem
     }
 
     /// <inheritdoc />
+    public IDisposable TryLockTransient(string path)
+    {
+        try
+        {
+            // Delete sharing so the holder can remove the file while still holding it (Windows: delete-pending, refusing every new open until the
+            // handle closes; Linux: unlinked under its flock).
+            return new TransientLock(path, File.OpenHandle(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Delete));
+        }
+        catch (IOException ex) when (IsHeldFailure(ex))
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException) when (OperatingSystem.IsWindows())
+        {
+            // The previous holder's file is delete-pending: it is still being released.
+            return null;
+        }
+    }
+
+    private sealed class TransientLock(string path, SafeFileHandle handle) : IDisposable
+    {
+        public void Dispose()
+        {
+            try
+            {
+                File.Delete(path);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Left behind, unheld: the next claimant takes it over.
+            }
+
+            handle.Dispose();
+        }
+    }
+
+    /// <inheritdoc />
     public bool ProbeExclusive(string path)
     {
         try
@@ -289,12 +345,13 @@ internal sealed partial class StoreFileSystem : IStoreFileSystem
     /// <inheritdoc />
     public void FlushDirectory(string directory)
     {
-        if (!OperatingSystem.IsLinux())
+        if (OperatingSystem.IsWindows())
         {
             // Windows: the write-through rename already put the entry on disk, and NTFS offers no handle on a directory to flush anyway.
             return;
         }
 
+        // Every Unix: Linux, and macOS and the BSDs, which open and fsync a directory the same way (it used to be skipped there, silently).
         FlushDirectoryPosix(directory);
     }
 
@@ -340,13 +397,32 @@ internal sealed partial class StoreFileSystem : IStoreFileSystem
     /// <inheritdoc />
     public bool IsBundleHeldByLiveProcess(string bundleDirectory) => DatabaseLockFile.IsHeldByLiveProcess(bundleDirectory);
 
-    private static bool IsHeldFailure(IOException ex) => ex is not (FileNotFoundException or DirectoryNotFoundException or PathTooLongException);
+    private static bool IsHeldFailure(IOException ex) => IsSharingViolation(ex);
+
+    /// <summary>
+    /// Whether an open failed because another handle holds the file — and only that. Windows: <c>ERROR_SHARING_VIOLATION</c> or
+    /// <c>ERROR_LOCK_VIOLATION</c>. Unix: <c>EWOULDBLOCK</c> from the <c>flock</c> behind <see cref="FileShare.None"/> (11 on Linux, 35 on macOS
+    /// and the BSDs). Any other I/O failure is an I/O failure, never "locked".
+    /// </summary>
+    internal static bool IsSharingViolation(IOException ex) => ex.HResult == SharingViolationHResult
+        || (OperatingSystem.IsWindows() && ex.HResult == unchecked((int)0x80070021));
+
+    /// <summary>The <see cref="Exception.HResult"/> of a sharing violation on this platform.</summary>
+    internal static int SharingViolationHResult =>
+        OperatingSystem.IsWindows() ? unchecked((int)0x80070020) : OperatingSystem.IsLinux() ? 11 : 35;
 
     private static void FlushDirectoryPosix(string directory)
     {
-        // .NET cannot open a directory (File.OpenHandle refuses S_IFDIR with EACCES), so the fsync goes through libc. O_RDONLY alone opens a
-        // directory on Linux; O_DIRECTORY would only add the type check and its value differs between x64 and arm64.
-        var fd = PosixOpen(directory, 0);
+        // .NET cannot open a directory (File.OpenHandle refuses S_IFDIR with EACCES), so the fsync goes through libc. O_RDONLY opens a directory;
+        // O_DIRECTORY would only add the type check, and its value differs between platforms and architectures. O_CLOEXEC, so a process this one
+        // starts in the window never inherits the descriptor. A signal (EINTR) retries the call rather than failing the flush.
+        int fd;
+        do
+        {
+            fd = PosixOpen(directory, OCloexec);
+        }
+        while (fd < 0 && Marshal.GetLastPInvokeError() == Eintr);
+
         if (fd < 0)
         {
             var error = Marshal.GetLastPInvokeError();
@@ -355,7 +431,14 @@ internal sealed partial class StoreFileSystem : IStoreFileSystem
 
         try
         {
-            if (PosixFsync(fd) != 0)
+            int result;
+            do
+            {
+                result = PosixFsync(fd);
+            }
+            while (result != 0 && Marshal.GetLastPInvokeError() == Eintr);
+
+            if (result != 0)
             {
                 var error = Marshal.GetLastPInvokeError();
                 throw new IOException($"fsync of directory '{directory}' failed (errno {error}).", error);
@@ -366,6 +449,13 @@ internal sealed partial class StoreFileSystem : IStoreFileSystem
             PosixClose(fd);
         }
     }
+
+    /// <summary><c>EINTR</c>: 4 on every Unix.</summary>
+    private const int Eintr = 4;
+
+    /// <summary><c>O_CLOEXEC</c>, which differs between Unixes: Linux 0x80000 (x64 and arm64), macOS 0x1000000, FreeBSD 0x100000.</summary>
+    internal static int OCloexec =>
+        OperatingSystem.IsLinux() ? 0x80000 : OperatingSystem.IsMacOS() || OperatingSystem.IsIOS() ? 0x1000000 : OperatingSystem.IsFreeBSD() ? 0x100000 : 0;
 
     private const uint MoveFileReplaceExisting = 0x1;
     private const uint MoveFileWriteThrough = 0x8;

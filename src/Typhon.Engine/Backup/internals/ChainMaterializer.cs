@@ -1,19 +1,26 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// Reads one pack's page frames through a forward read window: frames near the last one read come from memory, any other costs one positional
-/// read of up to the window size starting at the frame. A pack's <c>DataOffset</c> grows with <c>PageId</c> except for copy-before-write
-/// pre-images, so reads in page order stay near-sequential.
+/// Reads one pack's page frames through a forward read window. A pack's <c>DataOffset</c> grows with <c>PageId</c> except for copy-before-write
+/// pre-images, written where they arrived: reading in page order is a sequential stream with a few frames out of place.
 /// </summary>
+/// <remarks>
+/// A frame in the window comes from memory. A miss just ahead of it (within half a window past its end: the stream moving on, perhaps over a few
+/// out-of-place frames) slides the window to it. Any other miss — behind the window, or far ahead (an out-of-place pre-image) — reads that frame
+/// alone and keeps the window. Reloading the window there cost two whole windows per out-of-place frame: one to reach it, one to come back.
+/// </remarks>
 internal sealed class FrameReader : IDisposable
 {
+    /// <summary>The smallest useful window: one whole frame of an incompressible page.</summary>
+    internal const int MinimumWindowBytes = PackFormat.FramePrefixSize + PackFormat.PageSize;
+
     private readonly PackReader _pack;
-    private byte[] _window;
+    private NativeBuffer _window;
+    private NativeBuffer _single;
     private long _windowStart;
     private int _windowLength;
 
@@ -23,7 +30,8 @@ internal sealed class FrameReader : IDisposable
         // Never larger than the pack's data region: a small pack in a shallow chain would otherwise take the whole budget share.
         var data = pack.Footer.DataRegionEnd - PackFormat.HeaderSize;
         var size = (int)Math.Min(windowBytes, Math.Max(data, 0));
-        _window = ArrayPool<byte>.Shared.Rent(Math.Max(size, PackFormat.FramePrefixSize + PackFormat.PageSize));
+        // Engine-free (a restore or a deep verify has no resource tree): NativeBuffer's direct, annotated path.
+        _window = NativeBuffer.Allocate(Math.Max(size, MinimumWindowBytes), null, null);
         _windowStart = -1;
     }
 
@@ -39,32 +47,56 @@ internal sealed class FrameReader : IDisposable
 
         var start = entry.DataOffset - PackFormat.FramePrefixSize;
         var length = PackFormat.FramePrefixSize + (int)entry.StoredLength;
-        if (_windowStart < 0 || start < _windowStart || start + length > _windowStart + _windowLength)
+        if (_windowStart >= 0 && start >= _windowStart && start + length <= _windowStart + _windowLength)
         {
-            var available = _pack.Footer.DataRegionEnd - start;
-            var n = (int)Math.Min(_window.Length, available);
-            if (n < length || !_pack.ReadAt(_window.AsSpan(0, n), start))
+            return PackReader.DecodePage(entry, _window.Span.Slice((int)(start - _windowStart), length), destination, out error);
+        }
+
+        var windowEnd = _windowStart + _windowLength;
+        if (_windowStart < 0 || (start >= _windowStart && start < windowEnd + (_window.Length / 2)))
+        {
+            // The stream moving on: slide the window to this frame.
+            var n = (int)Math.Min(_window.Length, _pack.Footer.DataRegionEnd - start);
+            if (n < length || !_pack.ReadAt(_window.Span[..n], start))
             {
-                destination[..PackFormat.PageSize].Clear();
-                error = "frame runs past the data region";
-                _windowStart = -1;
-                return false;
+                return RunsPast(destination, out error);
             }
 
             _windowStart = start;
             _windowLength = n;
+            return PackReader.DecodePage(entry, _window.Span.Slice(0, length), destination, out error);
         }
 
-        return PackReader.DecodePage(entry, _window.AsSpan((int)(start - _windowStart), length), destination, out error);
+        // Out of place: this frame alone, the window kept for the stream.
+        _single ??= NativeBuffer.Allocate(MinimumWindowBytes, null, null);
+        if (start + length > _pack.Footer.DataRegionEnd || !_pack.ReadAt(_single.Span[..length], start))
+        {
+            return RunsPast(destination, out error);
+        }
+
+        return PackReader.DecodePage(entry, _single.Span[..length], destination, out error);
     }
+
+    private bool RunsPast(Span<byte> destination, out string error)
+    {
+        destination[..PackFormat.PageSize].Clear();
+        error = "frame runs past the data region";
+        _windowStart = -1;
+        return false;
+    }
+
+    /// <summary>
+    /// The window per pack for a read budget shared by <paramref name="packs"/> packs: the budget honoured whatever the chain length (a frame per
+    /// pack at the least), and never more than 64 MiB.
+    /// </summary>
+    internal static int WindowFor(long readBudgetBytes, int packs) => (int)Math.Clamp(readBudgetBytes / Math.Max(packs, 1), MinimumWindowBytes, 64 << 20);
 
     public void Dispose()
     {
-        if (_window != null)
-        {
-            ArrayPool<byte>.Shared.Return(_window);
-            _window = null;
-        }
+        ((IDisposable)_window)?.Dispose();
+        _window = null;
+        ((IDisposable)_single)?.Dispose();
+        _single = null;
     }
 }
 
@@ -73,7 +105,7 @@ internal sealed class MaterializeOptions
 {
     public static readonly MaterializeOptions Default = new();
 
-    /// <summary>Total read-window memory, split across the chain's packs (at least 256 KiB each).</summary>
+    /// <summary>Total read-window memory, split across the chain's packs (one frame each at the least).</summary>
     public long ReadBudgetBytes { get; init; } = 64L << 20;
 
     /// <summary>Forensics only: a page that fails its check is written as stored (or zeros when it does not decode) and listed, instead of failing.</summary>
@@ -122,7 +154,7 @@ internal static class ChainMaterializer
         options ??= MaterializeOptions.Default;
         var k = chain.Count;
         var n = chain[^1].Header.ImagePages;
-        var window = (int)Math.Clamp(options.ReadBudgetBytes / k, 256 << 10, 64 << 20);
+        var window = FrameReader.WindowFor(options.ReadBudgetBytes, k);
         var streams = new PackIndexStream[k];
         var readers = new FrameReader[k];
         var heads = new PackPageEntry[k];

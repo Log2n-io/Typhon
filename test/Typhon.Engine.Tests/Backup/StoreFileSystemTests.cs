@@ -79,9 +79,15 @@ internal sealed class StoreFileSystemTests
     [CancelAfter(5_000)]
     public void FlushDirectory_RunsOnTheRealDisk()
     {
-        // A no-op on Windows; on Linux this is the open + fsync P/Invoke, which must not throw on a real directory.
+        // A no-op on Windows; on every Unix this is the open + fsync P/Invoke (O_CLOEXEC, EINTR retried), which must not throw on a real directory.
         Assert.DoesNotThrow(() => Disk.FlushDirectory(_root));
     }
+
+    /// <summary>The directory flush opens with this platform's O_CLOEXEC, whose value differs between Unixes.</summary>
+    [Test]
+    [Platform("Linux,MacOsX")]
+    public void TheDirectoryFlush_OpensCloseOnExec_WithThisPlatformsFlag() =>
+        Assert.That(StoreFileSystem.OCloexec, Is.EqualTo(OperatingSystem.IsLinux() ? 0x80000 : 0x1000000));
 
     [Test]
     [CancelAfter(5_000)]

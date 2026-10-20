@@ -77,7 +77,8 @@ public static class BackupOperations
         var view = StoreView.Open(store, trustCatalog: false);
         return new BackupRestoreResult(Summarize(Standing(view, outcome.PointId)), outcome.Target, outcome.DisplacedBundle, outcome.ChainDepth,
             outcome.PagesWritten, outcome.ZeroPages, outcome.TailSegments, outcome.BytesRead, outcome.BytesWritten, outcome.Duration, outcome.SuspectPages,
-            outcome.DamagedPages.Select(d => new PackPageDamage(d.PageId, d.PackFile, d.Reason)).ToList(), outcome.NewTimelineId);
+            outcome.DamagedPages.Select(d => new PackPageDamage(d.PageId, d.PackFile, d.Reason)).ToList(), outcome.NewTimelineId,
+            outcome.SettleFailure?.Message);
     }
 
     /// <summary>Verifies the whole store. Never throws for damage: it reports it.</summary>
@@ -114,17 +115,20 @@ public static class BackupOperations
         return new BackupStoreListing(view.Identity.StoreId, view.Identity.DatabaseId, points, chains, unreadable, temps, restorable);
     }
 
-    /// <summary>The store's health from its packs, by a quick verify: <c>typhon backup status --store</c>'s answer and exit code.</summary>
+    /// <summary>
+    /// The store's health from its packs' headers and footers and the chains they form: <c>typhon backup status --store</c>'s answer and exit code.
+    /// Cheap by design (each pack's header and footer, no index, no tail); <see cref="Verify(string, BackupVerifyLevel)"/> reads the rest.
+    /// </summary>
     /// <param name="store">The store directory.</param>
     public static BackupStoreStatus Status(string store)
     {
         var view = StoreView.Open(store, trustCatalog: false);
-        var report = BackupVerifier.VerifyStore(store, VerifyLevel.Quick);
         var latestId = ChainResolver.LatestId(view);
         var latestPack = latestId == 0 ? null : Standing(view, latestId);
-        var restorableId = report.Points.Where(p => p.Restorable).Select(p => p.Id).DefaultIfEmpty(0u).Max();
+        var restorableId = ChainResolver.RestorablePoints(view).DefaultIfEmpty(0u).Max();
         var restorable = restorableId == 0 ? null : Summarize(Standing(view, restorableId));
-        var count = report.Points.Count;
+        var count = view.Catalog.Packs.Select(p => p.BackupId).Concat(view.Catalog.Unreadable
+            .Select(u => PackFormat.TryParseFileName(u.File, out var id, out _, out _) ? id : 0u).Where(id => id != 0)).Distinct().Count();
         if (restorable == null)
         {
             return new BackupStoreStatus(BackupHealth.Failing, count == 0 ? "the store holds no point" : "no point of the store can be restored", count,

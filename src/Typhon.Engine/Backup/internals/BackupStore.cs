@@ -50,7 +50,22 @@ internal sealed class StoreView
 
     public StoreIdentityFile Identity { get; init; }
 
-    public StoreCatalogFile Catalog { get; set; }
+    private StoreCatalogFile _catalog;
+    private Dictionary<uint, (CatalogPack Compacted, CatalogPack Original)> _byId;
+
+    public StoreCatalogFile Catalog
+    {
+        get => _catalog;
+        set
+        {
+            _catalog = value;
+            _byId = null;
+            Resolved.Clear();
+        }
+    }
+
+    /// <summary>Chains resolved against this catalog by <see cref="ChainResolver"/>, memoised per point; cleared when the catalog changes.</summary>
+    internal Dictionary<uint, ChainResolution> Resolved { get; } = [];
 
     /// <summary>Temporary files present in <c>packs/</c> (in-progress or abandoned).</summary>
     public IReadOnlyList<StoreFileEntry> Temps { get; init; }
@@ -173,29 +188,25 @@ internal sealed class StoreView
         return temps;
     }
 
-    /// <summary>The packs of point <paramref name="backupId"/>: the <c>-C</c> one first when present, then the <c>F</c>/<c>I</c> one.</summary>
+    /// <summary>
+    /// The packs of point <paramref name="backupId"/>: the <c>-C</c> one first when present, then the <c>F</c>/<c>I</c> one. Indexed once per catalog:
+    /// a chain walk calls this per link, and a scan of every pack per call made verify and status cubic in the store's points.
+    /// </summary>
     public (CatalogPack Compacted, CatalogPack Original) Find(uint backupId)
     {
-        CatalogPack compacted = null;
-        CatalogPack original = null;
-        foreach (var p in Catalog.Packs)
+        if (_byId == null)
         {
-            if (p.BackupId != backupId)
+            var byId = new Dictionary<uint, (CatalogPack Compacted, CatalogPack Original)>(Catalog.Packs.Count);
+            foreach (var p in Catalog.Packs)
             {
-                continue;
+                byId.TryGetValue(p.BackupId, out var both);
+                byId[p.BackupId] = p.Kind == BackupKind.Compacted ? (p, both.Original) : (both.Compacted, p);
             }
 
-            if (p.Kind == BackupKind.Compacted)
-            {
-                compacted = p;
-            }
-            else
-            {
-                original = p;
-            }
+            _byId = byId;
         }
 
-        return (compacted, original);
+        return _byId.TryGetValue(backupId, out var found) ? found : (null, null);
     }
 }
 
@@ -268,11 +279,16 @@ internal sealed class FileSystemBackupStore : IBackupPointStore
         _writerOptions = writerOptions;
     }
 
+    /// <summary>The last point a session of this store published, as the store recorded it: what the caller reports without reading the store again.</summary>
+    public CatalogPack LastPublished { get; private set; }
+
     /// <inheritdoc />
     public IBackupStoreSession OpenSession(Guid databaseId, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        return BackupStore.OpenForWrite(_root, databaseId, createIfMissing: true, _fs, _log, _writerOptions);
+        var session = BackupStore.OpenForWrite(_root, databaseId, createIfMissing: true, _fs, _log, _writerOptions);
+        session.Published = pack => LastPublished = pack;
+        return session;
     }
 }
 
@@ -292,6 +308,9 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
     private uint _highWater;
     private uint _lastAllocated;
     private PackWriter _open;
+
+    /// <summary>Called with each point once it is durable and visible, before the catalog (a cache) is updated.</summary>
+    internal Action<CatalogPack> Published { get; set; }
 
     private BackupStore(IStoreFileSystem fs, ILogger log, PackWriterOptions writerOptions, StorePaths paths, StoreIdentityFile identity,
         IDisposable storeLock)
@@ -429,7 +448,9 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
             BackupLog.HighWaterDegraded(_log, _paths.Root, _paths.HighWater, problem);
         }
 
-        _highWater = hwm ?? 0;
+        // The floor never goes down: the catalog this store last wrote recorded the high-water too, and a lost store.hwm must not make a deleted
+        // newest pack's id allocatable again. Read before the rebuild below overwrites it.
+        _highWater = Math.Max(hwm ?? 0, RecordedHighWater());
         var listing = _fs.EnumerateFiles(_paths.Packs);
         _view = new StoreView
         {
@@ -440,6 +461,25 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
             CatalogFromFile = false,
         };
         WriteCatalogIfChanged();
+    }
+
+    /// <summary>The high-water the catalog on disk recorded, when it is this store's; 0 when there is none to trust.</summary>
+    private uint RecordedHighWater()
+    {
+        if (!_fs.FileExists(_paths.Catalog))
+        {
+            return 0;
+        }
+
+        try
+        {
+            var catalog = StoreCatalog.TryDeserialize(StoreFileSystem.ReadAllBytes(_fs, _paths.Catalog));
+            return catalog != null && catalog.StoreId == _identity.StoreId ? catalog.HighWaterBackupId : 0;
+        }
+        catch (IOException)
+        {
+            return 0;
+        }
     }
 
     /// <summary>Deletes every temp in <c>packs/</c> and at the root: only the lock holder writes, so a temp it did not create is abandoned.</summary>
@@ -587,7 +627,9 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
             {
                 try
                 {
+                    // Durably: a flush that failed may still have committed the rename, and an undo that is not flushed comes back at a crash.
                     _fs.DeleteFile(final);
+                    _fs.FlushDirectory(Path.GetDirectoryName(final));
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
@@ -599,10 +641,11 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
         }
 
         // The pack is durable and visible: from here nothing fails the publish. The catalog is a cache.
+        var published = CatalogPack.From(Path.GetFileName(final), writer.FileLength, writer.Header, writer.Footer);
+        Published?.Invoke(published);
         try
         {
-            var file = Path.GetFileName(final);
-            var packs = new List<CatalogPack>(_view.Catalog.Packs) { CatalogPack.From(file, writer.FileLength, writer.Header, writer.Footer) };
+            var packs = new List<CatalogPack>(_view.Catalog.Packs) { published };
             _view.Catalog = StoreCatalog.Build(_identity, StoreCatalog.Fingerprint(_fs.EnumerateFiles(_paths.Packs)), _highWater, packs,
                 new List<CatalogUnreadable>(_view.Catalog.Unreadable));
             WriteCatalogIfChanged();

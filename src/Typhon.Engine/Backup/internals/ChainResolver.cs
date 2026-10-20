@@ -3,6 +3,9 @@ using System.Collections.Generic;
 
 namespace Typhon.Engine.Internals;
 
+/// <summary>What resolving one point found: its chain, or where and why it breaks.</summary>
+internal readonly record struct ChainResolution(ResolvedChain Chain, uint BrokenAt, string Why, string Code);
+
 /// <summary>A point's chain, base first and the point last, every link checked.</summary>
 internal sealed class ResolvedChain
 {
@@ -84,6 +87,20 @@ internal static class ChainResolver
     /// <c>BKP-VER-07</c> for an LSN out of order, <c>BKP-VER-06</c> for anything else.
     /// </summary>
     public static bool TryResolve(StoreView view, uint pointId, out ResolvedChain chain, out uint brokenAt, out string why, out string code)
+    {
+        // Memoised per view: verify, status and --restorable resolve every point, often more than once.
+        if (!view.Resolved.TryGetValue(pointId, out var resolution))
+        {
+            Walk(view, pointId, out chain, out brokenAt, out why, out code);
+            resolution = new ChainResolution(chain, brokenAt, why, code);
+            view.Resolved[pointId] = resolution;
+        }
+
+        (chain, brokenAt, why, code) = (resolution.Chain, resolution.BrokenAt, resolution.Why, resolution.Code);
+        return chain != null;
+    }
+
+    private static bool Walk(StoreView view, uint pointId, out ResolvedChain chain, out uint brokenAt, out string why, out string code)
     {
         code = null;
         chain = null;

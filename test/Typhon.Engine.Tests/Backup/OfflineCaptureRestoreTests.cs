@@ -253,6 +253,71 @@ internal sealed class OfflineCaptureRestoreTests
         Assert.That(File.Exists(DatabaseLockFile.PathFor(Bundle("BkT9j"))), Is.False, "the refused capture released its own advisory lock");
     }
 
+    /// <summary>
+    /// Only a sharing violation on the data file means another holder ("locked"). Any other failure to open it surfaces as the I/O failure it is: it
+    /// used to become a DatabaseLockedException naming process 0, sending the operator looking for a process that does not exist.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void OnlyASharingViolationOnTheDataFile_ReadsAsLocked()
+    {
+        Session("BkT9io", 5, checkpoint: true, 0, Close.Clean);
+        try
+        {
+            OfflineCapture.OpenDataFileForTest = _ => throw new IOException("The device is not ready.", unchecked((int)0x80070015));
+            var io = Assert.Throws<IOException>(() => OfflineCapture.Create(Bundle("BkT9io"), Store));
+            Assert.That(io, Is.Not.InstanceOf<DatabaseLockedException>());
+
+            OfflineCapture.OpenDataFileForTest = _ => throw new IOException("in use", StoreFileSystem.SharingViolationHResult);
+            Assert.Throws<DatabaseLockedException>(() => OfflineCapture.Create(Bundle("BkT9io"), Store));
+        }
+        finally
+        {
+            OfflineCapture.OpenDataFileForTest = null;
+        }
+
+        Assert.That(OfflineCapture.Create(Bundle("BkT9io"), Store).Kind, Is.EqualTo(BackupKind.Full), "and nothing was left held");
+    }
+
+    /// <summary>The real thing, measured: a second exclusive open of a file reads as a sharing violation, a missing file does not.</summary>
+    [Test]
+    public void TheSharingViolationPredicate_RecognisesARealOne()
+    {
+        var path = Path.Combine(_root, "held");
+        using (File.Open(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None))
+        {
+            var held = Assert.Catch<IOException>(() => File.Open(path, FileMode.Open, FileAccess.Read, FileShare.None).Dispose());
+            Assert.That(StoreFileSystem.IsSharingViolation(held), Is.True, $"HResult 0x{held.HResult:X8}");
+        }
+
+        var missing = Assert.Catch<IOException>(() => File.Open(path + ".nope", FileMode.Open).Dispose());
+        Assert.That(StoreFileSystem.IsSharingViolation(missing), Is.False);
+    }
+
+    /// <summary>
+    /// A restored bundle not opened yet still carries restore.json: its meta has the OLD timeline until its first open adopts the new one (#1440). A
+    /// point taken from it would record the pre-adoption timeline, so the capture refuses it; once opened, it backs up.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void ARestoreNotOpenedYet_IsRefused_UntilItsFirstOpenAdoptsItsTimeline()
+    {
+        Session("BkT9r", 6, checkpoint: true, 0, Close.Clean);
+        var point = OfflineCapture.Create(Bundle("BkT9r"), Store);
+        var restored = RestoreStager.Run(Store, PointSelector.ById(point.BackupId), Path.Combine(_root, "restored"));
+
+        var refused = Assert.Throws<StorageException>(() => OfflineCapture.Create(restored.Target, Path.Combine(_root, "store2")));
+        Assert.That(refused.Message, Does.Contain("restore.json"));
+
+        using (var provider = BackupTestImages.BuildProvider("BkT9r", Path.GetDirectoryName(restored.Target), Path.Combine(restored.Target, "wal")))
+        using (var scope = provider.CreateScope())
+        {
+            Open(scope);
+        }
+
+        Assert.That(OfflineCapture.Create(restored.Target, Path.Combine(_root, "store2")).Kind, Is.EqualTo(BackupKind.Full));
+    }
+
     [Test]
     [CancelAfter(60_000)]
     public void TheCapture_LeavesNoLockBehind()

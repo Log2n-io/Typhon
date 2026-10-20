@@ -36,6 +36,10 @@ internal static class OfflineCapture
 {
     private const int RunPages = 32;
 
+    /// <summary>Test seam: opens the data file (path → handle) in place of the exclusive open. Null in production.</summary>
+    [ThreadStatic]
+    internal static Func<string, SafeFileHandle> OpenDataFileForTest;
+
     /// <summary>
     /// Captures one point of the bundle at <paramref name="bundle"/> into the store at <paramref name="storePath"/>. Throws
     /// <see cref="DatabaseLockedException"/> when a process holds the database, <see cref="StorageException"/> when the bundle cannot be backed up as
@@ -55,13 +59,23 @@ internal static class OfflineCapture
 
         try
         {
+            // A restored bundle adopts its new timeline at its first open (#1440); captured before, its point would carry the old one.
+            if (File.Exists(Path.Combine(bundle, RestoreMarker.FileName)))
+            {
+                throw new StorageException(TyphonErrorCode.InvalidDatabaseBundle,
+                    $"'{bundle}' is a restore not opened yet ({RestoreMarker.FileName}): open it once with this build so it adopts its new timeline, "
+                    + "then back it up.");
+            }
+
             SafeFileHandle data;
+            var dataPath = Path.Combine(bundle, IntegrityConstants.DataFileName);
             try
             {
-                data = File.OpenHandle(Path.Combine(bundle, IntegrityConstants.DataFileName), FileMode.Open, FileAccess.Read, FileShare.None);
+                data = OpenDataFileForTest?.Invoke(dataPath) ?? File.OpenHandle(dataPath, FileMode.Open, FileAccess.Read, FileShare.None);
             }
-            catch (IOException e) when (e is not (FileNotFoundException or DirectoryNotFoundException))
+            catch (IOException e) when (StoreFileSystem.IsSharingViolation(e))
             {
+                // Only another handle on the data file means "locked" (an engine with no db.lock, A9); any other failure is the I/O failure it is.
                 throw new DatabaseLockedException(bundle, 0, "unknown", DateTimeOffset.MinValue, e);
             }
 
@@ -109,7 +123,7 @@ internal static class OfflineCapture
         {
             throw new StorageException(TyphonErrorCode.InvalidDatabaseBundle,
                 $"'{bundle}' was not closed cleanly and needs its WAL to be restorable, but '{walDir}' holds none. If its engine used another "
-                + "WalDirectory, pass it.");
+                + "WalDirectory, pass it (typhon backup create --wal-dir).");
         }
 
         // 4 STORE + ADMISSION — a trusted lineage only from a backup-state this very image's meta vouches for (its nonce), at this length.

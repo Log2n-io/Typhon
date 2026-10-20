@@ -3391,7 +3391,7 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
   invariant no code opens a published pack with write access; readers open it Read | Delete sharing
   invariant ids are allocated under store.lock (held open FileShare.None) as max(store.hwm, every pack and temp id) + 1,
             with store.hwm durable before the temp exists: a deleted id is never reused (a lost or damaged store.hwm
-            degrades to the packs present, and says so)
+            degrades to the higher of the packs present and the high-water this store's catalog recorded, and says so)
   invariant a temp is never part of a chain; the holder of store.lock deletes every temp it finds before it writes
   invariant every byte of a pack is covered by a CRC that verify --level full checks: HeaderCRC, FooterCRC, IndexCRC,
             TailDirCRC, SuspectCRC, each page's PageCrc after decode, each tail segment's RawCrc after decode, and
@@ -3404,7 +3404,7 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
   verified: StorePublishCrashTests (a crash after every file-system operation of a backup, Windows and Linux directory
             durability models), PackCorruptionPropertyTests (T7: every byte under a checked CRC, no restore ever
             wrong), BackupIdAllocationTests — [VerifiesRule("BKP-08")]; mutant
-            BackupIdAllocationTests.Mutant_AStoreThatLostItsHighWater_ReusesAnId; source mutants seen red: rename before
+            BackupIdAllocationTests.Mutant_AStoreThatLostEveryHighWater_ReusesAnId; source mutants seen red: rename before
             flush, no directory flush (Linux model), publish with overwrite, allocation ignoring the high-water, verify
             skipping FileCRC, restore skipping PageCrc
 

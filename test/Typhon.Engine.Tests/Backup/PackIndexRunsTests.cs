@@ -35,6 +35,64 @@ internal sealed class PackIndexRunsTests
         return fs;
     }
 
+    /// <summary>
+    /// P3: however many runs spill, a merge pass reads at most <see cref="PackIndexRuns.MaxMergeFanIn"/> of them at once (more are merged in passes
+    /// into longer runs), so its open handles and read buffers stay bounded; the output is still every entry once, ascending.
+    /// </summary>
+    [Test]
+    [CancelAfter(10_000)]
+    public void ManyRuns_MergeInPasses_NeverReadingMoreThanTheFanInAtOnce()
+    {
+        var fs = NewFs();
+        const int n = 3_000;
+        using var runs = new PackIndexRuns(fs, "/t/x.tpack.tmp.idx", 4);
+        for (var id = n - 1; id >= 0; id--)
+        {
+            runs.Add(Entry(id));
+        }
+
+        var merged = Drain(runs);
+        Assert.That(runs.SpilledRuns, Is.GreaterThan(PackIndexRuns.MaxMergeFanIn * 4), "premise: far more runs than one pass reads");
+        Assert.That(runs.WidestMerge, Is.LessThanOrEqualTo(PackIndexRuns.MaxMergeFanIn));
+        Assert.That(merged.Select(e => (int)e.PageId), Is.EqualTo(Enumerable.Range(0, n)));
+    }
+
+    /// <summary>
+    /// P3: the sort's memory is native. Indexing 600 000 entries (one run spills, the rest is sorted in the heap's own memory) allocates almost nothing
+    /// on the GC heap; it used to leave ~15 MiB of large-object garbage per point (the heap's array grown to 8 MiB, a 6 MiB copy of its rest, a 1 MiB
+    /// output array, the merge's buffers).
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void SortingAPacksIndex_AllocatesAlmostNothingOnTheGcHeap()
+    {
+        var dir = System.IO.Path.Combine(TestStorage.ForFixture(nameof(PackIndexRunsTests)), Guid.NewGuid().ToString("N"));
+        System.IO.Directory.CreateDirectory(dir);
+        try
+        {
+            const int n = 600_000;
+            long emitted = 0;
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            using (var runs = new PackIndexRuns(StoreFileSystem.Instance, System.IO.Path.Combine(dir, "x.idx")))
+            {
+                for (var id = 0; id < n; id++)
+                {
+                    runs.Add(Entry(id));
+                }
+
+                runs.Merge(batch => emitted += batch.Length);
+            }
+
+            var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            Assert.That(emitted, Is.EqualTo(n));
+            Assert.That(allocated, Is.LessThan(1L << 20), $"{allocated:N0} managed bytes allocated sorting {emitted:N0} entries");
+        }
+        finally
+        {
+            System.IO.Directory.Delete(dir, true);
+        }
+    }
+
     [TestCase(1_000_000, TestName = "Everything in memory")]
     [TestCase(64, TestName = "Small heap, many runs")]
     [TestCase(1, TestName = "Heap of one, a run per descent")]

@@ -179,13 +179,20 @@ internal sealed class PackWriter : IBackupPointSink, IDisposable
             throw new ArgumentOutOfRangeException(nameof(_options.BufferSize), _options.BufferSize, "smaller than one tail block frame");
         }
 
-        _buffers =
-        [
-            NativeBuffer.Allocate(_options.BufferSize, _options.Owner, $"Backup.Pack{_identity.BackupId}.Buffer0"),
-            NativeBuffer.Allocate(_options.BufferSize, _options.Owner, $"Backup.Pack{_identity.BackupId}.Buffer1"),
-        ];
+        // Two buffers, or none: a second allocation that fails must not leave the first one with no owner to free it.
+        var first = NativeBuffer.Allocate(_options.BufferSize, _options.Owner, $"Backup.Pack{_identity.BackupId}.Buffer0");
+        try
+        {
+            _buffers = [first, NativeBuffer.Allocate(_options.BufferSize, _options.Owner, $"Backup.Pack{_identity.BackupId}.Buffer1")];
+        }
+        catch
+        {
+            ((IDisposable)first).Dispose();
+            throw;
+        }
         _seen = new ulong[(imagePages + 63) >> 6];
-        _index = new PackIndexRuns(_fs, TempPath + PackFormat.SidecarInfix, _options.IndexHeapEntries);
+        _index = new PackIndexRuns(_fs, TempPath + PackFormat.SidecarInfix, _options.IndexHeapEntries, _options.Owner,
+            $"Backup.Pack{_identity.BackupId}.Index");
         _header.WriteTo(Reserve(PackFormat.HeaderSize));
         _fill += PackFormat.HeaderSize;
         if (_options.DataGapBytes > 0)
@@ -263,6 +270,12 @@ internal sealed class PackWriter : IBackupPointSink, IDisposable
         if (_segments.Count > 0 && segmentId <= _segments[^1].SegmentId)
         {
             Fail($"tail segment {segmentId} does not follow segment {_segments[^1].SegmentId}");
+        }
+
+        // TailSegmentEntry.RawLength is an int: a declared size past int.MaxValue could never be copied whole, so it is refused here, explicitly.
+        if (declaredSize > int.MaxValue)
+        {
+            Fail($"tail segment {segmentId} declares {declaredSize} bytes, more than a segment can hold ({int.MaxValue})");
         }
 
         if (declaredSize < PackFormat.WalSegmentHeaderSize || declaredSize % PackFormat.WalSegmentHeaderSize != 0)

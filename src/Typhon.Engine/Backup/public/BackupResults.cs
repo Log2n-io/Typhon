@@ -104,10 +104,14 @@ public sealed class BackupRestoreOptions
 /// <param name="SuspectPages">Pages the LIVE database had damaged at capture: a warning, not a defect of the backup.</param>
 /// <param name="DamagedPages">Pages written despite failing their check (only with <see cref="BackupRestoreOptions.AllowDamaged"/>).</param>
 /// <param name="NewTimelineId">The WAL timeline the restored database starts at its first open.</param>
+/// <param name="SettleError">
+/// What <see cref="BackupRestoreOptions.OpenAndClose"/> threw, or <c>null</c>. The restore is published either way: the target and the displaced
+/// bundle are where this result says.
+/// </param>
 [PublicAPI]
 public sealed record BackupRestoreResult(BackupPointSummary Point, string Target, string DisplacedBundle, int ChainDepth, int PagesWritten, int ZeroPages,
     int TailSegments, long BytesRead, long BytesWritten, TimeSpan Duration, IReadOnlyList<uint> SuspectPages, IReadOnlyList<PackPageDamage> DamagedPages,
-    Guid NewTimelineId);
+    Guid NewTimelineId, string SettleError);
 
 /// <summary>How deep a verify reads.</summary>
 [PublicAPI]
@@ -239,6 +243,6 @@ public enum BackupHealth
 /// <param name="Reason">Why, in one sentence.</param>
 /// <param name="Points">Points in the store.</param>
 /// <param name="Latest">The newest point, or <c>null</c>.</param>
-/// <param name="LatestRestorable">The newest restorable point (by a quick verify), or <c>null</c>.</param>
+/// <param name="LatestRestorable">The newest point whose chain resolves (from the packs' headers and footers), or <c>null</c>.</param>
 [PublicAPI]
 public sealed record BackupStoreStatus(BackupHealth Health, string Reason, int Points, BackupPointSummary Latest, BackupPointSummary LatestRestorable);

@@ -1,6 +1,7 @@
 using NUnit.Framework;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 
 namespace Typhon.Engine.Tests.Backup;
@@ -104,6 +105,29 @@ internal sealed class StorePublishCrashTests
 
         Assert.That(ex, Is.Not.InstanceOf<SimulatedCrashException>());
         Assert.That(fs.ReadAll(Root + "/packs/00000003-I.tpack"), Is.EqualTo(stale), "the existing file must be untouched");
+    }
+
+    /// <summary>
+    /// The publish's directory flush fails after the rename reached the disk (fsync reporting an error late). Complete throws "with no point
+    /// visible", so the undo deletes the published name — and flushes that delete. Unflushed, a crash brought the name back: a point the caller
+    /// was told had failed.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("BKP-08")]
+    public void APublishWhoseFlushFailsAfterCommitting_StaysUndoneAcrossACrash()
+    {
+        var image = BackupTestImages.Clean;
+        var fs = Seed(CrashModelKind.Linux, image, out var chain, out _);
+        using (var store = BackupStore.OpenForWrite(Root, image.DatabaseId, true, fs))
+        {
+            fs.FailNextFlushAfterCommit = Root + "/packs";
+            Assert.Throws<IOException>(() => StoreTestKit.WritePoint(store, image, chain, pages: [2]));
+        }
+
+        Assert.That(fs.FileExists(Root + "/packs/00000003-I.tpack"), Is.False, "premise: the publish was undone");
+        fs.Crash();
+        Assert.That(fs.FileExists(Root + "/packs/00000003-I.tpack"), Is.False, "the undone point came back at the crash");
     }
 
     /// <summary>A store with points #1 (full) and #2 (incremental), made fully durable; returns their content hashes.</summary>

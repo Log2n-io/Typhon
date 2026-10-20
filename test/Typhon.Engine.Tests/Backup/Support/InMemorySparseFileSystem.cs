@@ -383,6 +383,26 @@ internal class InMemorySparseFileSystem : IStoreFileSystem
 
     public bool IsBundleHeldByLiveProcess(string bundleDirectory) => _heldBundles.Contains(Normalize(bundleDirectory));
 
+    /// <summary>Rooted paths ("/r/…") are already full; a relative one is rooted under <c>/cwd</c>, as the OS roots it under the current directory.</summary>
+    public string GetFullPath(string path) => Normalize(path.StartsWith('/') || path.StartsWith('\\') ? path : "/cwd/" + path);
+
+    /// <summary>Bundles whose advisory lock this file system's restore took (the lock moves with the directory; only its holding is modelled).</summary>
+    public HashSet<string> AcquiredBundleLocks { get; } = new(StringComparer.Ordinal);
+
+    public bool TryAcquireBundleLock(string bundleDirectory, out DatabaseLockFile.LockInfo acquired)
+    {
+        acquired = new DatabaseLockFile.LockInfo(Environment.ProcessId, Environment.MachineName, DateTimeOffset.UtcNow, false, null);
+        if (_heldBundles.Contains(Normalize(bundleDirectory)))
+        {
+            return false;
+        }
+
+        AcquiredBundleLocks.Add(Normalize(bundleDirectory));
+        return true;
+    }
+
+    public void ReleaseBundleLock(string bundleDirectory, in DatabaseLockFile.LockInfo acquired) => AcquiredBundleLocks.Remove(Normalize(bundleDirectory));
+
     private void RequireParent(string path)
     {
         var parent = ParentOf(path);
@@ -595,6 +615,9 @@ internal sealed class CrashModelFileSystem : InMemorySparseFileSystem
 
     public CrashModelFileSystem(CrashModelKind kind) => _kind = kind;
 
+    /// <summary>A directory whose next flush commits its entries and then throws, once: the flush that "failed" after reaching the disk.</summary>
+    public string FailNextFlushAfterCommit { get; set; }
+
     /// <summary>Mutating operations performed so far.</summary>
     public int Operations { get; private set; }
 
@@ -762,6 +785,12 @@ internal sealed class CrashModelFileSystem : InMemorySparseFileSystem
             {
                 _durableFiles[kv.Key] = kv.Value;
             }
+        }
+
+        if (FailNextFlushAfterCommit != null && Normalize(FailNextFlushAfterCommit) == directory)
+        {
+            FailNextFlushAfterCommit = null;
+            throw new IOException($"fsync of '{directory}' failed (after its entries reached the disk)");
         }
     }
 
