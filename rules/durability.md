@@ -3525,7 +3525,12 @@ lifecycle (#1415: BKP-13, BKP-14). BKP-10 and 11 (WAL archiving) land with #1418
   scope: RetentionPlanner.Plan, RetentionExecutor.Apply, BackupOperations.ApplyRetention, BackupOperations.PlanRetention, BackupStore.DeletePack,
          BackupStore.RefreshView, StoreFileSystem.DeleteFile
   on_violation: a backup the operator was promised by the policy is gone, or a kept point is unrestorable — found on the day it is needed
-  verified: RetentionPlannerTests (each limit alone and combined, MinKeep and KeepLastDrilled pinning and reporting, the cutoff's and the head's
-            compactions, short of space, damaged and unreadable chains, 2 000 points), InterleavedChainsRetentionTests (two chains alternating
-            ids in one store; a broken point after the cutoff; a failed compaction) — [VerifiesRule("BKP-14")]; [RuleMutant("BKP-14")]: "every
-            pack below K" deletion (an interleaved chain loses its base), MinKeep counting unrestorable points
+  verified: RetentionPropertyTests (T11: 64 seeded histories at the gate, 640 nightly — two interleaving chains, compactions, drill records,
+            random valid policies, a power cut at a random operation of a retention under both directory models, checked against a model of
+            every image: kept and promised points intact, every listed point resolving after any prefix, MaxTotalBytes held unless blocked, no id
+            reused), RetentionPlannerTests (each limit alone and combined, MinKeep and KeepLastDrilled pinning and reporting, the cutoff's and
+            the head's compactions, short of space, damaged and unreadable chains, 2 000 points), InterleavedChainsRetentionTests (two chains
+            alternating ids in one store; a broken point after the cutoff; a failed compaction) — [VerifiesRule("BKP-14")];
+            [RuleMutant("BKP-14")]: ascending deletes cut short (a listed point loses its base), the second chain's compaction skipped, "every
+            pack below K" deletion (an interleaved chain loses its base), MinKeep counting unrestorable points; source mutant seen red: the
+            delete order reversed
