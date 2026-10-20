@@ -12,8 +12,6 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Typhon.Workbench")]
 
 // Test / sample friend assemblies
-[assembly: InternalsVisibleTo("AntHill.Core")]
-[assembly: InternalsVisibleTo("AntHill.Demo")]
 [assembly: InternalsVisibleTo("Typhon.Benchmark")]
 // Added 2026-06-29: competitive benchmark harness needs InMemoryWalFileIO for zero-disk D0 CPU measurement
 // (same genuine internal reuse as Typhon.Benchmark — measures the commit path without WAL-writer disk noise).
@@ -24,12 +22,6 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Typhon.Workbench.Tests")]
 [assembly: InternalsVisibleTo("Typhon.IOProfileRunner")]
 [assembly: InternalsVisibleTo("Typhon.MonitoringDemo")]
-// Added 2026-08-14: the SpaceBattle demo is a spatial-partitioning observatory — it renders the per-cell
-// CellState (EntityCount/ClusterCount/Tier), the authoritative cluster->cell map and the per-tick migration
-// counters. None of those has a public surface (SpatialGridAccessor.GetCell is internal because CellState is,
-// ArchetypeClusterState is internal wholesale), and the whole point of the tool is to show the internal state
-// the public API deliberately hides. Genuine internal-implementation reuse; not refactorable to public.
-[assembly: InternalsVisibleTo("SpaceBattle")]
 // Added 2026-09-07 (#906); justification narrowed 2026-09-18 (#205, P1-23). The original two reasons are CLOSED:
 // ClusterSpatialQueryResult carries an EntityId rather than a raw long (#909), and Archetype<T>.CatalogId is public,
 // so the blueprint no longer needs EntityId.FromRaw. What remains is MEASUREMENT, not gameplay and not replication:
@@ -52,3 +44,7 @@ using System.Runtime.CompilerServices;
 //   "Typhon.Shell.Extensibility" — builds clean.
 //   "Typhon.Workbench.Fixtures"  — builds clean.
 //   "Typhon.Workbench.Tests"     — builds clean (it goes through Typhon.Workbench's surface only).
+//
+// Dropped 2026-10-20 (#851: a demo uses no InternalsVisibleTo):
+//   "AntHill.Core"               — builds clean.
+//   "AntHill.Demo"               — read two profiler drop counters off the internal TyphonEvent; TyphonProfiler exposes both.

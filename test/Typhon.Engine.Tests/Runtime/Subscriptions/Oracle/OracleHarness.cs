@@ -416,7 +416,8 @@ internal sealed unsafe class OracleHarness : IDisposable
     public static OracleHarness Create(DatabaseEngine engine, int seed, int[] skipPercent, string name, PushDetection detection = PushDetection.Explicit,
         double walkRadius = 0, bool worldObserver = false, int every = 1, bool bigWorld = false, bool deterministicProjection = false,
         double replicationCellM = 0, bool forceDeep = false, double visibilitySlackM = double.NaN, double leaveRadius = 0, double secondRadius = 0,
-        int farEvery = 0, Action<BandBuilder> bands = null, int aggregateCells = 0, double regionEdgeM = 0, int nearBudget = 0, bool tags = false)
+        int farEvery = 0, Action<BandBuilder> bands = null, int aggregateCells = 0, double regionEdgeM = 0, int nearBudget = 0, bool tags = false,
+        int frameBytes = 0, int enterBudget = 0)
     {
         ArgumentNullException.ThrowIfNull(skipPercent);
 
@@ -426,7 +427,7 @@ internal sealed unsafe class OracleHarness : IDisposable
         var cellM = replicationCellM > 0 ? replicationCellM : ProjectionTestSchema.ReplicationCellFor(worldObserver && !walk ? 0 : radius);
         var harness = FrameHarness.Create(engine, subs => Declare(subs, detection, radius, worldObserver && !walk, every, leaveRadius, secondRadius, farEvery, bands,
                 aggregateCells * cellM, regionEdgeM, nearBudget, tags), name,
-            Options(detection == PushDetection.Automatic, deterministicProjection, cellM, forceDeep, visibilitySlackM));
+            Options(detection == PushDetection.Automatic, deterministicProjection, cellM, forceDeep, visibilitySlackM, frameBytes, enterBudget));
         try
         {
             harness.SerialIndex = deterministicProjection;
@@ -457,6 +458,33 @@ internal sealed unsafe class OracleHarness : IDisposable
             harness.Dispose();
             throw;
         }
+    }
+
+    // A fill spread over many frames — a small enter budget, a narrow frame — may outlast the quiet window for a session that skipped most of the run.
+    private bool Filling()
+    {
+        foreach (var session in _sessions)
+        {
+            if (_harness.StateOf(session) is { ViewComplete: false })
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool Owes()
+    {
+        foreach (var session in _sessions)
+        {
+            if (_harness.StateOf(session) is { OwedCount: > 0 })
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>Runs one tick: churn, the whole track, then each session's delivery according to its skip rate.</summary>
@@ -559,7 +587,10 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// </remarks>
     public void Quiesce()
     {
-        for (var q = 0; q < QuietTicks; q++)
+        // A frame a few records wide (15) drains what it owes over more frames than the quiet window, and a fill spread by a small budget can outlast it
+        // for a session that skipped most of the run: quiet means nothing owed and every view complete as well — bounded, and loud past the bound.
+        var q = 0;
+        for (; q < QuietTicks || ((Owes() || Filling()) && q < QuietTicks + 400); q++)
         {
             _tick++;
             Engine.WriteTickFence(_tick);
@@ -574,10 +605,11 @@ internal sealed unsafe class OracleHarness : IDisposable
         // session that skipped most of the run needs to drain its outstanding frames and receive its union frame; if the guess is ever short, the comparison
         // that follows fails for a reason that has nothing to do with the engine being wrong. Asserting nothing is left owed turns that silent
         // timing-dependence into a loud one.
+        Assert.That(Owes() || Filling(), Is.False, $"a session still owes records or fills its view after {q} quiet ticks: a drain or a fill that never ends");
         foreach (var session in _sessions)
         {
             Assert.That(_harness.HasFrame(session), Is.False,
-                $"session {session.Value} still has a frame waiting after {QuietTicks} quiet ticks, so the comparison below would be against a client the "
+                $"session {session.Value} still has a frame waiting after {q} quiet ticks, so the comparison below would be against a client the "
                 + "engine has not finished talking to — raise QuietTicks rather than trusting the result");
         }
     }
@@ -1050,9 +1082,14 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// induces on purpose — the run would still be correct but it would no longer be measuring what it says it measures. The enter budget is left at the
     /// engine's default: deferring enters across ticks is real behaviour that the quiet window is there to absorb, and raising it would hide it.
     /// </remarks>
+    private static readonly SubscriptionsOptions Defaults = new();
+
     private static SubscriptionsOptions Options(bool automatic, bool deterministicProjection, double replicationCellM, bool forceDeep,
-        double visibilitySlackM) => new()
+        double visibilitySlackM, int frameBytes, int enterBudget) => new()
     {
+        FrameBytes = frameBytes > 0 ? frameBytes : Defaults.FrameBytes,
+        CheckFrameMeterForTest = frameBytes > 0,
+        EnterBudgetPerFrame = enterBudget > 0 ? enterBudget : Defaults.EnterBudgetPerFrame,
         IngressBytesPerSecond = TestIngress.Budget,
         ReplicationCellM = replicationCellM,
         VisibilitySlackMForTest = visibilitySlackM,

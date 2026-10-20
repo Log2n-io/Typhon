@@ -25,6 +25,10 @@ stalls everybody; one that accepts whatever a client sends can be driven off its
   a session too far behind is skipped. A client that stops pinging is closed with **4001**.
 - **Per-session byte budget** (`Session(id).SetBudget(bytesPerSecond)` or `SessionLimits.BytesPerSecond`): the engine raises the session's
   detail level — longer periods for far bands, a smaller enter budget — and, at the last level, shrinks its radius; it never drops state.
+- **Frame budget.** A frame carries what fits `FrameBytes` (or a lower `SessionLimits.FrameBytes`); the records that do not fit are **owed**
+  to the next frames, oldest first, and sent with the entity's state as it is then — a burst of joins or updates is spread, never refused or
+  lost. The view's fill is paced by bytes as well as by the enter count, and no `GROUP_COMPLETE` or `VIEW_COMPLETE` arrives while an enter is
+  owed. A session owing more than four enter budgets is refilled by a `RESET`.
 - **Overload.** When the runtime is overloaded, every Sphere session is served a level lower and every profile half as often.
 - **Inbound.** Each session's inbound byte budget (`IngressBytesPerSecond`, required with commands) refuses over-budget `COMMANDS` whole;
   refused commands past `AbuseRefusalsPerWindow` for `AbuseWindows` adjacent windows close the session with **1008**.
@@ -36,10 +40,10 @@ stalls everybody; one that accepts whatever a client sends can be driven off its
 |---|---|---|
 | `CloseStalledAfter` | 3 s | Skip run after which a session is closed with 1013 (degraded first) |
 | `LagSkipRttAllowanceMs` | 250 | RTT allowance of the acknowledgement-based lag skip |
-| `FrameBytes` | 256 KiB | Largest frame a session may be sent |
+| `FrameBytes` | 256 KiB | Largest frame a session may be sent; what does not fit is owed to the next frames. An archetype whose enter record could exceed half of it is refused at `Start` |
 | `FramePoolBudgetBytes` / `StatePoolBudgetBytes` | 256 MiB / 256 MiB per archetype | Native pool ceilings |
 | `IngressPoolBudgetBytes` | 64 MiB | Inbound rings, all sessions |
-| `MaxGroupsPerSession` | required with a group set | Keys a session holds per set, explicit requests and server keys together ([Groups](./groups.md)) |
+| `MaxGroupsPerSession` | required with a group set (≤ 1 048 576) | Keys a session holds per set, explicit requests and server keys together; a bound, not a reservation — a session costs the keys it holds ([Groups](./groups.md)) |
 | `ReliableEventBytes` | required with a reliable event | The reliable ring's budget; an emit past it is refused, `Emit` returning `false` ([Events](./events.md)) |
 
 ## ⚠️ Guarantees & limits

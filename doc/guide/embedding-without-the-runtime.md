@@ -95,8 +95,8 @@ same consolidation.
 
 ## A worked example
 
-`demo/SpaceBattle` is a full simulation that uses transactions, ECS spawn/destroy, MVCC, WAL and cluster storage —
-and no runtime at all. Its tick closes like this:
+A host that uses transactions, ECS spawn/destroy, MVCC, WAL and cluster storage — and no runtime at all — closes
+each tick like this:
 
 ```csharp
 public void RunTickFence()

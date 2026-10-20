@@ -452,7 +452,8 @@
     sent no region holds nothing, and a session whose committed geometry is another shape's (a profile switch between a region and a Sphere or World)
     resets
   invariant nothing is stored per (session, entity): what s holds is recomputed from the anchor, the delivered cells and each entity's last pushed
-    position, and every event that moves an anchor, moves an entity or delivers a cell emits exactly the enters and leaves that keep it true
+    position, and every event that moves an anchor, moves an entity or delivers a cell emits exactly the enters and leaves that keep it true — with ONE
+    bounded exception, the owed set of SUB-36, empty in the steady state: what s's CLIENT holds is held(s, e) ∧ ¬owedEnter(s, e)
   invariant [s has never been placed] → s holds NOTHING. A default position is a legal world position, so "never placed" and "placed at the origin"
     must be distinguishable, and the unplaced session is the one that sees nothing
   invariant a profile is served through exactly ONE entity observer, World, Sphere or ClientRegion, with at most one Aggregate beside it (09 § 5) —
@@ -514,11 +515,21 @@
 ### SUB-33: A session holds the groups its observer meets, each whole, and is told once per hold `[fatal][silent]`
   invariant ∀ session s whose Sphere observer names set S with reach r, ∀ region g of S in s's realm with key k: s comes to hold k when the distance
     from s's committed anchor to g's extent (its nearest point, 0 inside) is at most r, keeps it while that distance is at most r + S's leave margin,
-    and releases it beyond — at most MaxGroupsPerSession keys per set, the kept ones first, then the nearest (the rest counted, GroupsOverLimit)
+    and releases it beyond — at most MaxGroupsPerSession keys per set admitted, the kept ones first, then the nearest (a key on its way out, kept by
+    the release budget below, can hold it above the bound for a few frames); the rest are counted (GroupsOverLimit)
+    and the session told: GROUP_TRUNCATED{S, over} in every frame whose count of keys met and not held differs from the one the client was last told,
+    0 once none is, and again after a RESET (#1407)
+  invariant a session's group state and its per-frame group work grow with the keys it holds and the frame's member events, never with
+    MaxGroupsPerSession: a bound of 2^20 costs a session holding three keys three keys' room (#1407)
   invariant ∀ held key k, ∀ tick T: s holds { e : key_S(e) = k ∧ netId(e) < cursor(k) } — the members in ascending netId order the fill has reached
     under the enter budget — and every member once cursor(k) is Complete; the cursor is fixed before the frame's member events are decided, so an
-    event and the fill agree on every member
-  invariant GROUP_COMPLETE{S, k} is published in the frame whose enters complete k, after them (SOURCES follows ENTITIES), exactly once per hold: a
+    event and the fill agree on every member. A completion spends at least one unit of the enter budget, and a frame releases at most the enter
+    budget's keys — a key past it stays held, its cursor as committed, until a later frame releases it — so neither thousands of empty keys met nor
+    thousands given back at once outgrow a frame (#1407). A completion withheld behind an owed enter (SUB-36, GroupSessionState.HeldAll) is the
+    exception: such a key goes first in the next fill, spends its unit when one is left and is never deferred for want of one — it enters nothing,
+    and there are never more of them than one frame's completions, so a frame carries at most twice the enter budget's completions
+  invariant GROUP_COMPLETE{S, k} is published in the frame whose enters complete k — or, when that frame left an enter owed (SUB-36), the first frame
+    after it that owes none — after them (SOURCES follows ENTITIES), exactly once per hold: a
     key released and met again is filled and completed again, and a RESET (a realm crossing, a teleport, a log gap) re-fills and re-completes every
     key; GROUP_RELEASED{S, k} is published with the leaves of k's members no other key and no geometry still holds
   invariant a member whose key changes is projected the tick it is written (the tap: a write to a component holding a declared key field marks the
@@ -535,7 +546,9 @@
   invariant a catch-up frame decides each member's geometric side from the push log's own per-identity fold — the same entry the geometric catch-up
     emitted from — never from the events the held keys' buckets happened to file; a fill reads a member only when its projected key is the key filled
   invariant ∀ explicit set S (14 § 4): s holds the keys its client asked for with SubscribeRequest and the application allowed, and the keys a system
-    chose for it with SetSources — at most MaxGroupsPerSession, both together, kept engine-wide across a realm switch and a RESET; ∀ shared set S, s
+    chose for it with SetSources — at most MaxGroupsPerSession, both together, kept engine-wide across a realm switch and a RESET; a session's keys of
+    a set its profile no longer names are released; a session whose observer is not a Sphere holds no key — switched to one, its keys are given back
+    and its frame resets; and a realm-local slot handed to another session holds none of its last session's; ∀ shared set S, s
     holds S's one key from its first frame. Both are filled, completed and released like a region's keys
   invariant a SubscribeRequest is decided by the drain of the tick after the one that took it, once that tick's start has applied the session
     requests systems made — so a request sent right after WELCOME is decided under the profile the application's Opened handler bound, never
@@ -547,18 +560,22 @@
     handler, a set the profile does not name, key 0 or one no member's field can hold, an unknown op, the limit, Denied for a handler that throws or
     returns default), the application's from 100. A subscription still filling when the session's profile stops naming its set is answered
     NotInProfile and its key dropped. An answer is retired only by the frame that publishes it; a request past the command's rate, or past
-    GroupRequests.MaxOwedAnswers owed (twice MaxGroupsPerSession, at least 64), is an ACK RateLimited (SUB-27), never an answer; the command's rate
-    is 5 a second past a burst of MaxGroupsPerSession (5 to 1 024), so a client subscribing every key it may hold at once is taken whole
+    GroupRequests.MaxOwedAnswers owed (twice the command's burst, at least 64), is an ACK RateLimited (SUB-27), never an answer; the command's rate
+    is 5 a second past a burst of MaxGroupsPerSession clamped to 5–1 024, so a client subscribing every key it may hold at once, up to 1 024, is
+    taken whole
   never accept at Start what is not built: a set with no selector, or with two; groups on a World or ClientRegion observer; a region set named with no
     reach, or an explicit or shared one named with one; a realm-kind variant naming other explicit sets than its profile; a shared key no member's
     field can hold; a key that is not an integer, not
     [Index(AllowMultiple = true, Sparse = true)], on a Transient component (#1162), or of another signedness than its region key; an observer naming
-    an archetype with no position; more than four sets per archetype or 256 per runtime; an extent that is not an AABB2F, AABB3F, BSphere2F or BSphere3F; a declaration without MaxGroupsPerSession, or with one above 1 024
+    an archetype with no position; more than four sets per archetype or 256 per runtime; an extent that is not an AABB2F, AABB3F, BSphere2F or BSphere3F; a declaration without MaxGroupsPerSession, or with one above 1 048 576 (a rail
+    against a mistyped value, not a cost)
   scope: PushReplication.GatherGroups, PushReplication.ReadMembers, PushReplication.BuildMemberLog, PushReplication.RefreshRegions,
     PushReplication.PostPass, PushReplication.CommitGroups, PushReplication.HoldGroups, PushReplication.MergeKeyChanges, GroupSessionState,
     GroupSetCompiler.Compile, ProjectionPass, ArchetypeClusterState.GroupKeySlotMask, ArchetypeClusterState.SetDirty, FrameAssembler.AssemblePush,
     TickWriter.WriteGroupRecord, SubscriptionsRegistry.Groups, ObserverBuilder.Groups, PushReplication.AddMember, PushReplication.AddMoves,
-    PushReplication.FoldUnplacedKeys, GroupKeyMoveLog.Note, PushHub.AddUnplaced, PushHub.OrphanUnplaced, GroupRequests.Request, GroupRequests.Park, GroupRequests.DecideParked,
+    PushReplication.FoldUnplacedEntry, PushReplication.MatchHeld, PushReplication.DeferReleases, PushReplication.ResetSlot, PushReplication.DropGroups,
+    HeldKeys,
+    SessionGroupRequests.MergeServerKeys, GroupKeyMoveLog.Note, PushHub.AddUnplaced, PushHub.OrphanUnplaced, GroupRequests.Request, GroupRequests.Park, GroupRequests.DecideParked,
     GroupRequests.SetServerKeys, GroupRequests.Emit, GroupRequests.Retire, SessionRequest.SetSources, BuiltInCommands.CreateSubscribeRequest,
     PushHub.PruneKeyMoves, GroupKeyMoveLog.Retain, FrameAssembler.AssembleEventsOnly
   on_violation: silent on both sides. A completion sent before the last member arrives makes a client act on a town missing buildings — SWG's bot
@@ -598,7 +615,19 @@
     refusal's code, a login burst taken whole, a release, a request dropped by the close — it first caught the request decided before its profile
     was bound), PushGroupRequestTests.ARequestDrainedBeforeItsSessionsProfileIsBoundIsDecidedUnderIt (that race staged; red when the drain
     decides at once), PushGroupRequestTests.ASharedKeyOutOfItsMembersRangeIsRefused (each red
-    against its clause removed), and a
+    against its clause removed); past the old ceiling (#1407): PushGroupCapacityTests.TwoThousandTownsAreHeldWholeOverSeveralFrames (2 048 towns held,
+    filled under the budget, each completed once after its building entered, a building moving between two held towns an update, the state sized to
+    what is held), PushGroupCapacityTests.ThousandsOfEmptyTownsCompleteUnderTheEnterBudget (red without the completion's unit: 3 000 in one frame, past
+    its 8 KiB), PushGroupCapacityTests.ACatchUpPastTheOldCeilingFoldsTheWindow, PushGroupCapacityTests.AMassReleaseIsSpreadOverFramesUnderTheBudget,
+    PushGroupCapacityTests.AResetInTheMiddleOfAMassReleaseLeavesNothingHeld, PushGroupCapacityTests.ATownWaitingToBeReleasedAndMetAgainIsKept,
+    PushGroupCapacityTests.PastTheBoundTheSessionIsToldHowManyTownsItLeftOut (the level, a RESET's re-send, an unpublished frame's value carried by
+    the next, 0 once whole), PushGroupCapacityTests.AMillionKeyBoundCostsWhatIsHeld,
+    PushGroupCapacityTests.ASessionSwitchedToAWorldProfileHoldsNoneOfItsKeys (red before the fix: the keys stayed held),
+    PushGroupCapacityTests.ASessionWhoseProfileStopsNamingItsSetHoldsNoneOfItsKeys (red before #1407: the keys stayed held, a member still resolved),
+    RealmGroupTests.ASessionTakingTheRealmSlotAnotherLeftHoldsNoneOfItsKeys (red before #1407: the newcomer inherited the slot's completed keys and
+    never received the town), PushGroupRequestTests.ServerKeysPastTheOldCeilingAreHeld, PushGroupRequestTests.TheOwedAnswersFollowTheBurstNotTheBound,
+    GroupSessionStateTests (the sides' growth, swap and RESET view; the server keys' merge against the old two-pass model), PushGroupTests.ABoundAboveTheRailIsRefused;
+    and a
     refusal test for each clause of the never-accept line. Falsifiability: PushGroupTests.AKeyChangeTheProjectionNeverReadsIsDetected removes the tap from the test side and
     requires the oracle to reject the run; PushGroupShardTests.WithoutTheMoveLogAnOffDagMoveIsCaught takes the move log away and requires the leave of
     the shard the fill passed unsent to be caught. The oracle is also red when completion ignores pending members, when the positionless log is not
@@ -809,9 +838,12 @@
     with a published frame, like its geometry: a skipped frame leaves all three as they were, so its next frame carries the union of the owner groups
     changed meanwhile and every rejection the acknowledgement history still holds. They record WHICH groups and WHICH ticks, never values — the values
     are read, current, from the owner entry when SELF is written — so they are not the per-session value memory the next line forbids
-  invariant a session's held group keys and their fill cursors (SUB-33) are geometry: pending until the frame is published, committed with it, left as
-    they were by a skip; a skipped session's next frame folds the member log's entries for every key it held before or holds now, like the cells, and a
-    RESET reads the committed keys as empty so every key is filled and completed again
+  invariant a session's owed records (SUB-36) are committed state like the geometry: pending until the frame is published, committed with it, kept as
+    they were by a skip, emptied by a published RESET
+  invariant a session's held group keys, their fill cursors and its count of Region keys met and not held (SUB-33) are geometry: pending until the
+    frame is published, committed with it, left as they were by a skip; a skipped session's next frame folds the member log's entries for every key it
+    held before or holds now, like the cells, and a RESET reads the committed keys as empty and the count as 0, so every key is filled and completed
+    again and the count said again
   never commit a session's geometry before the frame describing it is published — the commit is the LAST step of assembling a frame, after the encode and
     after the hand-off's release
   never encode a delta, a run-length against a previous frame, or a "changed since you last acked" set: a session that missed K frames must converge on
@@ -875,6 +907,7 @@
     controlled entity, s sees e by the mask its last published frame was built against (SUB-34) — a mask change whose RESET is unpublished, and a RESET
     that reads the committed keys as none, judge nothing yet
   invariant an entity a client learned of only from an event (an attacker beyond its view) does not resolve: events inform, they do not grant reach
+  invariant an entity s is owed the enter of (SUB-36) does not resolve: its geometry or keys hold it, its client was never given its identity
   note the committed geometry is the last PUBLISHED frame's, which the client may not have applied yet: an entity that left in a frame still in flight is
     refused while the client may still draw it. Judging each command against the frame the client last applied (COMMANDS.clientTick) would need per-session
     geometry history, which push does not keep; a game treats the refusal as "out of reach". Likewise a session served every few ticks (a rate class,
@@ -954,8 +987,12 @@
     that every served realm's group gather reads, and a session holds it only through a key it holds — which its own realm's regions decided, or it
     asked for. Group keys are engine-wide: one key held in two realms is one group in both (decided, Loïc 2026-10-18 — sharing data across realms is
     a use; isolating instances is the application's, by giving them distinct keys)
+  invariant a POSITIONED group member is its realm's: a key held in two realms is two groups there — each realm's fill takes the members whose block
+    is its realm's, and passes another realm's by, described or not (never waited for: its key completes without them); the regions that select it are
+    its realm's too. Engine-wide keys are the positionless members' alone (one map spawned per realm, the same keys in each, stays isolated)
   never decide isolation by geometry: identical local coordinates in two realms are the expected case
   scope: PushHub.FinishUnplaced, PushHub.UnplacedAt, PushHub.Place, PushHub.For, PushHub.SweepUnplaced, PushReplication.L, ProjectionPass.ProjectBlock, FrameAssembler.Holds,
+    PushReplication.ReadMembers,
     ArchetypeReplicationState.TryAttachBlock, ArchetypeReplicationState.MigrateEntry, EventHub.EncodeTick, RealmTree.Reaches,
     PushHub.SetOverloadStep, PushHub.BuildIndexes, PushHub.PrepareFar, PushHub.EndFarFolds, PushHub.RecountLevels, PushHub.RunQueuedShadowChecks,
     PushHub.BeginParallelIndex, PushHub.PrepareBlocks, PushHub.MarkPushed, PushHub.RealmPassSteps, RuntimeStatsSnapshot.RealmPassSteps,
@@ -966,7 +1003,11 @@
     RealmEventTests.ANearEventIsHeardInItsRealmOnly_AtIdenticalLocalCoordinates, RealmEventTests.AToKnownEventIsFiledInItsEntitysRealm,
     RealmSessionTests.ARealmNoSessionIsInStopsBeingServed_AndIsRefilledWhenOneReturns, RealmReplicationTests.AnEntityOfARealmNotServedIsNeverKnownToASession,
     RealmGroupTests.AShardIsHeldBySessionsOfTheRealmItsTownIsIn (shards identified by realm 0's town are filled by realm 1's session from a block of no
-    realm of its own; red when the fill keeps a positionless member to the session's realm)
+    realm of its own; red when the fill keeps a positionless member to the session's realm),
+    RealmGroupTests.APositionedMemberIsHeldOnlyInItsRealmUnderAKeyBothRealmsUse (a town 8 in each realm, every resident described before either is
+    met: each session holds, completes and hears of its own realm's residents only; red without the fill's block-realm test, and without the regions'),
+    RealmGroupTests.AnUnservedRealmsResidentsDoNotHoldAnotherRealmsTownBack (an unserved realm's residents, with no block, are not waited for; red
+    when the fill counts another realm's blockless member as pending)
   note the "stops being served" half is OBSERVABLE from outside since SWG-08: RuntimeStatsSnapshot.Realms carries a row per REGISTERED realm with
     Served plus its cumulative enters/updates/leaves/cells/resets/events, so "this realm cost nothing" and "this realm has no replication state at all"
     are distinguishable without reaching into the hub — which is what lets the claim be checked at workload scale rather than on three realms.
@@ -1285,6 +1326,58 @@
     the best-effort log), the mid-tick cursor, the backlog close, the budget, the shed's share, the commit at publish and on an idle frame, the events-only
     frame's collection, the Start check, the owed queue's order and head, the trial encoding, the slot release on reuse and over skipped ticks.
 
+### SUB-36: A frame carries what fits its limit; what does not fit is owed, never refused and never lost `[fatal][silent]`
+  invariant ∀ published frame F of session s: F's entity records, metered (an upper bound of each record's encoding: the inline sections at their widest,
+    a wide one at its stored length, a gap at 5 bytes), take at most the frame's limit — s's SessionLimits.FrameBytes, at least twice the largest enter
+    record and at most min(FrameBytes, the pool's largest class) — less every other block's bound, the events' half of that limit included; or F carries
+    s's oldest owed record and only the records that must go with it. The oversize backstop judges F by the same limit
+  invariant ∀ record R the gather produced for s and F does not carry: R's entity is in owed(s) — an Enter when s's client lacks it, an Update (the
+    groups, and the segment, R named, OR-merged with the entity's earlier owed change) when it holds it. An owed record carries no value: it is sent from
+    the slot's state of the frame that sends it, so a newer change replaces an older one and is never queued behind it
+  invariant ∀ e ∈ owed(s): s's committed geometry or keys hold e. A leave of an owed Enter is dropped and cancels it (the client never had e); an update
+    of an owed Enter is dropped (e goes whole); a leave of an owed Update cancels it and goes; an enter of e cancels e's owed record
+  invariant a frame takes, in order: every leave and the controlled entity's records (its owed record first, whatever its age); owed records oldest first,
+    the first always; this frame's updates; its enters — past the first record that does not fit, every later one is owed. A deferral only ages forward,
+    so no owed record starves
+  invariant an owed record names its entity's slot, and its identity: a slot that no longer holds it — a migration while its update was deferred (SUB-22)
+    — is found again through the entity; only an entity gone, or no longer that netId, is lost
+  invariant cell delivery (Sphere, World, ClientRegion) and the group fill take at most half the frame, less the bytes of the ENTERS s owes: a fill is
+    paced by bytes as by the enter count, and a fill that spilled stops until its overshoot drains. Owed updates are not counted — they merge and need not
+    drain while their entities keep changing — so they never hold a fill, or a completion, back. A key whose completion was withheld completes in the
+    first frame that owes no enter, whatever the budgets left (GroupSessionState.HeldAll); a view whose every cell is delivered is complete, budgets spent
+    or not
+  invariant owed(s) is pending until the frame is published, committed with it, kept by a skip, emptied by a published RESET — an events-only one too; a
+    frame that GROWS it past 4 × EnterBudgetPerFrame records, or that meets an owed entity found nowhere, is abandoned and the next is a RESET
+    (FrameAssembler.OwedResets). A RESET frame never overflows — it is the repair, and a cell heavier than the cap, delivered whole, owes more on the
+    RESET and the frames that drain it
+  never publish GROUP_COMPLETE, VIEW_COMPLETE or SOURCE_APPLIED in a frame after which s owes an enter: a completion says every member is in the store —
+    a SOURCE_APPLIED for a key already complete included (GroupRequests.Emit holds it). The gate is global (C3): an already complete view drops
+    VIEW_COMPLETE for the frames a burst's enters are owed, and sets it again once they are not
+  never accept at Start an archetype whose worst-case enter record — onEnter and every group at their widest — exceeds half the frame
+  note the oversize check after the encode stays, as a backstop counted in OversizeSkips: a frame whose events, SELF, AGG and STATS are all at their
+    bounds together with the oldest owed record. It is not fed to the budget loop (SUB-22: a refused frame is not quiet)
+  scope: FrameAssembler.FitEntities, FrameAssembler.CommitOwed, FrameAssembler.FillAllowanceOf, FrameAssembler.FrameLimitOf, FrameAssembler.AssemblePush,
+    SessionFrameState.Owed, SessionFrameState.OwesEnter, FrameWorkerScratch.FillAllowance, FrameWorkerScratch.PendingOwed, ArchetypeEncodePlan.EnterBytes,
+    ArchetypeEncodePlan.StateBytes, PushReplication.Room, PushReplication.MeterEnter, PushReplication.WithholdCompletions, FrameAssembler.TryHeldNetId,
+    FrameAssembler.Located, GroupSessionState.HeldAll, GroupRequests.Emit, ProjectionCompiler, SessionTable.FrameBytesOf
+  on_violation: silent. A frame refused for its size is retried larger, then a RESET refills it under the same budget and is refused again — the session
+    stalls until it is closed with 1013, reconnects and stalls again (#1408). A record owed and then dropped is an entity the client never sees, or a value
+    it keeps for ever.
+  rationale: the enter budget counts records; since wide sections (#1085) a record can be a quarter of a frame, so a count cannot bound bytes. The events
+    already took half a frame and carried the rest (SUB-35); entities do the same, and the owed set is the one per-(session, entity) state it costs —
+    bounded, and empty unless a session is over its frame.
+  verified: PushFrameBudgetTests (the issue's workload, a fill heavier than a frame, group-only updates above a frame a tick with a bounded lag while a
+    town is met and completed, a spawn burst and a cell heavier than a frame — each red on main; an owed enter destroyed, or of a released town, one
+    updated meanwhile, skips, a RESET, the cap once, a cell heavier than the cap, the global completion gate, a withheld completion behind a nearer
+    fill, a session's own limit, SUB-26, an owed entity coming under control, the Start refusal at half the record, the meter over wide sections),
+    PushGroupRequestTests.AnAnswerWaitsWhileAnEnterIsOwed, PushOracleTests.AClientsWorldIsTheServersUnderAFrameAFewRecordsWide,
+    PushOracleTests.ABandedViewUnderAFrameAFewRecordsWideIsCarriedWithoutAReset (red with the slot alone: a migrated entity's deferred update),
+    PushOracleTests.ClientRegionsUnderAFrameAFewRecordsWideConverge, PushGroupTests.SessionsHoldExactlyTheTownsTheyMeetUnderAFrameAFewRecordsWide;
+    mutant committed: PushFrameBudgetTests.Mutant_WithoutTheFrameBudgetABurstStalls. Mutants run red: a leave of an owed enter kept, the owed set not
+    committed, completion not withheld, the allowance ignored, or counting owed updates, the owed set flushed newest first, an owed entity held for a
+    command, the refusal removed, the meter under-counting an enter, an overflow on a frame that does not grow the set, no identity fallback, no HeldAll
+    shortcut, answers not held
+
 ### SUB-22: A session's LOD level defers updates and never loses one `[fatal][silent]`
   invariant a session's LOD level ℓ ∈ 0..3 commits with its frame (SUB-03); the frame is gathered with the committed level's bands before (what every
     held-back change was scheduled by) and the target level's after. At ℓ every declared band's period is min(N · 2^ℓ, 8) at the same boundary, and a
@@ -1304,7 +1397,8 @@
   invariant the budget loop raises the level after the bytes/s EWMA has been over the session's budget for 1 s, lowers it after 3 s under 0.7 of it,
     and returns a session with no budget to level 0. It reads the link: a frame published counts its bytes and a frame with nothing to say counts 0,
     over the live tick period; a frame refused (degraded, lagging, no slot, oversize, no pool) is not fed — congestion is not quiet
-  never drop a record for a budget: a deferred change reaches the session at the entity's next flush for its committed level, or by the inner crescent;
+  never drop a record for a budget: a deferred change reaches the session at the entity's next flush for its committed level, or by the inner crescent,
+    or from the owed set (SUB-36);
     the only eviction is the bounded last-resort radius
   scope: PushReplication.Pace, PushReplication.ResolveFar, PushReplication.CommitLevel, PushReplication.RecountLevels, LodBands.AtLevel,
     FrameAssembler.ExecutePushSessions

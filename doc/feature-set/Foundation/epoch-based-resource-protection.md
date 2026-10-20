@@ -11,7 +11,7 @@ description: 'Lock-free scheme that keeps in-flight cache pages alive with 2 obl
 
 ## 🎯 What it solves
 
-Every transaction reads and writes pages in Typhon's memory-mapped page cache while other threads concurrently evict cold pages to make room. The cache must never reclaim a page a live transaction is still touching, but tracking that safely can't cost a synchronized increment/decrement on every single page access — at microsecond transaction latencies, that overhead (and the leak risk of a missed release) is unacceptable. Epoch-based protection gives every transaction blanket protection for all pages it touches, for the cost of two cheap calls instead of one per page.
+Every transaction reads and writes pages in Typhon's page cache while other threads concurrently evict cold pages to make room. The cache must never reclaim a page a live transaction is still touching, but tracking that safely can't cost a synchronized increment/decrement on every single page access — at microsecond transaction latencies, that overhead (and the leak risk of a missed release) is unacceptable. Epoch-based protection gives every transaction blanket protection for all pages it touches, for the cost of two cheap calls instead of one per page.
 
 ## ⚙️ How it works (in brief)
 

@@ -1,0 +1,24 @@
+# What Unity regenerates on its own.
+/Library/
+/Temp/
+/Logs/
+/UserSettings/
+/obj/
+/Build/
+/Builds/
+/.vs/
+/.idea/
+*.csproj
+*.sln
+*.slnx
+
+# What the repository root ignores and a Unity project must keep: its package manifest and lock (the root ignores every packages/ folder, for
+# NuGet), and the .meta files beside every asset, which hold the GUIDs scenes and prefabs reference.
+!/Packages/
+!/Packages/manifest.json
+!/Packages/packages-lock.json
+!*.meta
+
+# Built from this repository by ../build-unity-plugins.py, never committed: they are always the source tree's. After the re-includes, so it wins.
+/Assets/Plugins/Typhon/
+/Assets/Plugins/Typhon.meta

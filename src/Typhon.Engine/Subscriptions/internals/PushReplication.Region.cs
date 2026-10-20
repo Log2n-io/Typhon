@@ -278,6 +278,11 @@ internal sealed unsafe partial class PushReplication<TEvent>
 
         // A session whose committed geometry is another shape's holds what that shape named: only a RESET says what it holds now.
         var reset = st.NeedsReset || forceReset || (st.Anchored && !r.Anchored);
+        // Groups are a Sphere's (14 § 3.8): keys a session held under one are given back here, and the frame resets so the client drops them too.
+        if (HasGroups && DropGroups(slotIndex, session.Generation))
+        {
+            reset = true;
+        }
         var rows = RegionRows;
         var w = RegionWindow;
 
@@ -579,7 +584,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
                         continue;
                     }
 
-                    if (entered >= enterBudget)
+                    if (!Room(entered, enterBudget, scratch))
                     {
                         enterStop = true;
                         break;
@@ -1027,6 +1032,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
                     }
 
                     scratch.Add(a, FrameListKind.Enter, new FrameRecord { NetId = hot->NetId, Block = (nint)block, Slot = (byte)slot, Archetype = (ushort)a });
+                    scratch.FillSpent += MeterEnter(a, (nint)block, slot);
                     entered++;
                 }
             }
@@ -1496,7 +1502,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
 
                     expected++;
                     known.Add(hot->NetId);
-                    if (!set.Contains(hot->NetId))
+                    if (!set.Contains(hot->NetId) && !ShadowOwes(local, hot->NetId))
                     {
                         missing++;
                     }

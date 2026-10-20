@@ -111,6 +111,47 @@ public class FrameApplierTests
         Assert.That(store.CompleteGroupCount, Is.Zero);
     }
 
+    /// <summary>
+    /// #1407: a Region set's GROUP_TRUNCATED count holds until the next one or a RESET, 0 is whole again, and the record is never a release.
+    /// </summary>
+    [Test]
+    public void ATruncationCountHoldsUntilItChangesOrAResetAndIsNeverARelease()
+    {
+        var store = new WorldStore(Plan);
+        var applier = new FrameApplier(store);
+
+        byte[] Groups(uint tick, TickFlags flags, params (byte Kind, uint Set, long Key)[] records)
+        {
+            var w = new WireWriter(new byte[256]);
+            TickWriter.WriteHeader(ref w, tick, flags);
+            TickWriter.WriteSources(ref w, [], records);
+            return w.Written.ToArray();
+        }
+
+        applier.Apply(Groups(1, TickFlags.None, (SourceStatus.GroupComplete, 0, 3), (SourceStatus.GroupTruncated, 0, 3)));
+        Assert.Multiple(() =>
+        {
+            Assert.That(store.GroupSetOverLimit(0), Is.EqualTo(3u));
+            Assert.That(store.GroupSetOverLimit(1), Is.Zero);
+            Assert.That(store.IsGroupComplete(0, 3), Is.True, "a truncation of the same set releases nothing");
+        });
+
+        applier.Apply(Groups(2, TickFlags.None));
+        Assert.That(store.GroupSetOverLimit(0), Is.EqualTo(3u), "a level: held across frames with no record");
+
+        applier.Apply(Groups(3, TickFlags.None, (SourceStatus.GroupTruncated, 0, 0)));
+        Assert.That(store.GroupSetOverLimit(0), Is.Zero, "whole again");
+
+        applier.Apply(Groups(4, TickFlags.None, (SourceStatus.GroupTruncated, 1, uint.MaxValue)));
+        Assert.That(store.GroupSetOverLimit(1), Is.EqualTo(uint.MaxValue));
+        applier.Apply(Groups(5, TickFlags.Reset));
+        Assert.Multiple(() =>
+        {
+            Assert.That(store.GroupSetOverLimit(1), Is.Zero, "a RESET clears it");
+            Assert.That(store.Anomalies, Is.Zero);
+        });
+    }
+
     /// <summary>A group record naming a set the catalog does not declare is malformed: the set index is what a client maps to its declaration.</summary>
     [Test]
     public void AGroupRecordForAnUndeclaredSetIsMalformed()

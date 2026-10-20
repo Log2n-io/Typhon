@@ -61,8 +61,7 @@ tx2.Commit();                 // new revision becomes HEAD, durable
 - The most expensive mode: ~250 ns/write versus ~40 ns for `SingleVersion`/`Transient` — ~6× (copy-on-write
   allocation, revision-chain append, eventual chain GC).
 - Carries per-entity chain memory overhead even when a component is rarely written.
-- Required for `ReadsSnapshot` / temporal "AS OF" reads and TAIL (committed-value) indexes — these guarantees
-  are `Versioned`-only; `SingleVersion` and `Transient` reject them.
+- Required for `ReadsSnapshot` reads — that guarantee is `Versioned`-only; `SingleVersion` and `Transient` reject it.
 
 ## 🧪 Tests
 

@@ -8,7 +8,7 @@ description: Showcase applications that prove Typhon's beyond-RAM ECS thesis —
 
 > **Typhon is the only ECS engine that isn't all-memory.** It stores and processes databases larger than RAM — with crash recovery, ACID transactions, and microsecond-level access — all in one embedded engine.
 
-Every mainstream ECS framework (Unity DOTS, Flecs, EnTT, Bevy, Unreal Mass) is an in-memory data structure: the whole world lives in RAM, and when the process dies the world dies with it. Persistence, if it exists, is a bolt-on serialize/deserialize step. Typhon inverts that. The world is a **memory-mapped, page-backed, MVCC database** that the ECS runtime reads and writes in place. The hot set lives in the page cache; everything else sits on SSD and pages in on demand — zero-copy, no deserialization. Kill the process and the durable state survives; the correct parts come back, the ephemeral parts are gone.
+Every mainstream ECS framework (Unity DOTS, Flecs, EnTT, Bevy, Unreal Mass) is an in-memory data structure: the whole world lives in RAM, and when the process dies the world dies with it. Persistence, if it exists, is a bolt-on serialize/deserialize step. Typhon inverts that. The world is a **paged, disk-backed MVCC database** that the ECS runtime reads and writes in place. The hot set lives in the page cache; everything else sits on SSD and pages in on demand — zero-copy, no deserialization. Kill the process and the durable state survives; the correct parts come back, the ephemeral parts are gone.
 
 This demo exists to make that concrete. It's a pitch/showcase page — a link-out to source and design, not a hosted interactive build.
 
@@ -50,3 +50,9 @@ AntHill uses a **four-tier simulation architecture** (full sim near the camera, 
 | Integration | Typhon embedded in-process — renderers read straight from ECS memory, no client/server protocol |
 
 > 📷 Screenshots/trailer to follow (demo art is Phase 8-9).
+
+## Asteroid Field — client/server
+
+**[Asteroid Field](asteroid-field.md)** — a Typhon server simulating a belt of 5 000 drifting asteroids, mirrored in Unity 6.6 desktop clients over the
+Subscriptions SDK: interest management, motion segments, commands checked on the server, owner-only state and reliable events. Where AntHill embeds
+the engine, this one is the shape of a game server.

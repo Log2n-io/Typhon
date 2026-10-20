@@ -3,34 +3,35 @@ using System;
 namespace Typhon.Client;
 
 /// <summary>How a <see cref="Clock"/> is tuned. Every value has the default the TypeScript SDK's <c>ClockOptions</c> applies (05-sdks § 1).</summary>
+/// <remarks>Settable rather than <c>init</c>, so a Unity script (C# 9, no init-only setters) can set it (#1034). Read when the clock is constructed.</remarks>
 public sealed class ClockOptions
 {
     /// <summary>The server's tick period in milliseconds, from <c>WELCOME</c>'s catalog. Required, and must be positive.</summary>
-    public double TickPeriodMs { get; init; }
+    public double TickPeriodMs { get; set; }
 
     /// <summary>The render delay applied before enough frames have arrived to measure jitter, clamped into the bounds below.</summary>
-    public double InitialDelayMs { get; init; } = 200;
+    public double InitialDelayMs { get; set; } = 200;
 
     /// <summary>The smallest adaptive render delay.</summary>
-    public double MinDelayMs { get; init; } = 150;
+    public double MinDelayMs { get; set; } = 150;
 
     /// <summary>The largest adaptive render delay; a store's segment ring must span it.</summary>
-    public double MaxDelayMs { get; init; } = 300;
+    public double MaxDelayMs { get; set; } = 300;
 
     /// <summary>The window over which the offset and the jitter are measured, in milliseconds.</summary>
-    public double WindowMs { get; init; } = 2000;
+    public double WindowMs { get; set; } = 2000;
 
     /// <summary>The largest speed-up or slow-down applied to converge on the target time; 0.05 is ±5 %.</summary>
-    public double MaxRateAdjust { get; init; } = 0.05;
+    public double MaxRateAdjust { get; set; } = 0.05;
 
     /// <summary>An error at least this large jumps render time forward, or holds it when it is that far ahead.</summary>
-    public double SnapMs { get; init; } = 1000;
+    public double SnapMs { get; set; } = 1000;
 
     /// <summary>
     /// How far render time may run past the newest frame before it holds. The default is longer than the 500 ms keepalive interval, so a quiet view whose
     /// entities all move on long straight segments never stutters.
     /// </summary>
-    public double MaxExtrapolationMs { get; init; } = 1000;
+    public double MaxExtrapolationMs { get; set; } = 1000;
 }
 
 /// <summary>

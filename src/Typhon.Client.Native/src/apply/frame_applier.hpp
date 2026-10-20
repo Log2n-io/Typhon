@@ -65,13 +65,28 @@ public:
     std::span<const AckEntry> Acks() const { return {acks_.data(), acks_.size()}; }
     std::span<const SourceEntry> Sources() const { return {sources_.data(), sources_.size()}; }
     std::span<const GroupEntry> Groups() const { return {groups_.data(), groups_.size()}; }
-    // Whether a group is held complete: its GROUP_COMPLETE arrived, and neither its GROUP_RELEASED nor a RESET since.
+    // Whether a group is held complete: its GROUP_COMPLETE arrived, and neither its GROUP_RELEASED nor a RESET since. The held set is the last frame's:
+    // a frame's completions and releases are merged at its end (#1407), so it is never read between them.
     bool IsGroupComplete(std::uint32_t set, std::int64_t key) const
     {
         return std::binary_search(completeGroups_.begin(), completeGroups_.end(), std::pair{set, key});
     }
     // The groups held complete, ascending by (set, key).
     std::span<const std::pair<std::uint32_t, std::int64_t>> CompleteGroups() const { return {completeGroups_.data(), completeGroups_.size()}; }
+    // How many groups of a Region set the session meets and does not hold, past the server's MaxGroupsPerSession (#1407): 0 when it holds every group it
+    // meets - the set's selection is whole.
+    std::uint32_t GroupSetOverLimit(std::uint32_t set) const
+    {
+        for (const auto& [s, over] : overLimit_)
+        {
+            if (s == set)
+            {
+                return over;
+            }
+        }
+
+        return 0;
+    }
     const StatsState& Stats() const { return stats_; }
 
     // The current frame's tick; -1 before the first.
@@ -139,6 +154,20 @@ private:
     Vec<GroupEntry> groups_;
     // Sorted, so a steady frame reuses its capacity: a node-based set would allocate on every completion.
     Vec<std::pair<std::uint32_t, std::int64_t>> completeGroups_;
+    // This frame's completions and releases, merged into completeGroups_ once at its end: one pass, not a shift per record (#1407). A frame with only a
+    // few applies them one by one instead, which costs less than copying the whole held set.
+    struct GroupChange {
+        std::uint32_t set;
+        std::int64_t key;
+        std::uint32_t order;
+        std::uint8_t kind;
+    };
+    Vec<GroupChange> groupChanges_;
+    static constexpr std::size_t SmallGroupChangeCount = 8;
+    Vec<std::pair<std::uint32_t, std::int64_t>> mergedGroups_;
+    // Per Region set told it left groups out: (set, count), the count never 0.
+    Vec<std::pair<std::uint32_t, std::uint32_t>> overLimit_;
+    void MergeGroupChanges();
     StatsState stats_;
     TickReader reader_;
     std::unique_ptr<EventPass> eventPass_;

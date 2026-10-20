@@ -159,6 +159,40 @@ class PushGroupTests : TestBase<PushGroupTests>
     }
 
     /// <summary>
+    /// The group oracle under a frame a few records wide (15): fills, joins of complete towns and member updates carried across frames — every session
+    /// still holds exactly its towns at each quiet point, no completion arrives before its last member, and no frame is refused for its size.
+    /// </summary>
+    [TestCase(21, 500)]
+    [TestCase(22, 16)]
+    [VerifiesRule("SUB-36")]
+    [VerifiesRule("SUB-33")]
+    public void SessionsHoldExactlyTheTownsTheyMeetUnderAFrameAFewRecordsWide(int seed, int enterBudget)
+    {
+        var dbe = GroupTestSchema.SetupEngine(ServiceProvider);
+        using var oracle = GroupOracle.Create(dbe, seed, [0, 30, 70, 90], nameof(SessionsHoldExactlyTheTownsTheyMeetUnderAFrameAFewRecordsWide) + seed,
+            enterBudget, frameBytes: 512);
+        for (var round = 0; round < 8; round++)
+        {
+            for (var step = 0; step < 30; step++)
+            {
+                oracle.Step();
+            }
+
+            oracle.Quiesce();
+            oracle.AssertConverged($"seed {seed}, budget {enterBudget}, 512-byte frames, round {round}");
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(oracle.Assembler.FramesOwing, Is.GreaterThan(0), "the frame bound: records were carried");
+            Assert.That(oracle.Assembler.OversizeSkips, Is.Zero, "no frame was refused for its size");
+            Assert.That(oracle.Assembler.MeterViolations, Is.Zero, "the meter bounds every record");
+            Assert.That(oracle.CompletionsChecked, Is.GreaterThan(3), "completions arrived and were checked against the world");
+            Assert.That(oracle.Push.ShadowIllegal, Is.Zero);
+        });
+    }
+
+    /// <summary>
     /// The oracle with masks (step 4.4's acceptance, 14 § 6): the same world, its members tagged — most public, the rest under one of two tags — and the
     /// tags changing under the churn, with sessions that see public only, one tag, or both, now and then switching. At every quiet point a session holds
     /// exactly what it is entitled to and sees; every completion the skip-free sessions receive holds every member they see; no record is ever illegal.
@@ -430,6 +464,7 @@ class PushGroupTests : TestBase<PushGroupTests>
             Assert.That(store.CompleteGroupCount, Is.EqualTo(8), "the bound");
             Assert.That(store.CompleteGroups.Select(g => g.Key), Is.EquivalentTo(nearest), "the nearest eight");
             Assert.That(harness.Subscriptions.Push.GroupsOverLimit, Is.GreaterThan(0), "the rest counted");
+            Assert.That(store.GroupSetOverLimit(0), Is.EqualTo(2), "and the session told how many");
         });
 
         // Walk west by steps under a cell: the held ones are kept while they stay in reach, whatever is nearer.
@@ -1152,10 +1187,10 @@ class PushGroupTests : TestBase<PushGroupTests>
 
     [Test]
     [VerifiesRule("SUB-33")]
-    public void TooManyKeysPerSessionIsRefused() =>
-        RefusedAtFreeze(s => GroupTestSchema.Declare(s, Radius, Reach, Margin), "MaxGroupsPerSession = 5000", new SubscriptionsOptions
+    public void ABoundAboveTheRailIsRefused() =>
+        RefusedAtFreeze(s => GroupTestSchema.Declare(s, Radius, Reach, Margin), "MaxGroupsPerSession = 1048577", new SubscriptionsOptions
         {
-            IngressBytesPerSecond = TestIngress.Budget, ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(Radius), MaxGroupsPerSession = 5000,
+            IngressBytesPerSecond = TestIngress.Budget, ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(Radius), MaxGroupsPerSession = (1 << 20) + 1,
         });
 
     /// <summary>The engine's set index is the catalog's: two sets declared out of name order, each record naming the set it belongs to.</summary>

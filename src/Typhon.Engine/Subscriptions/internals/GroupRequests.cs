@@ -32,18 +32,29 @@ internal sealed class SessionGroupRequests
 
     public ushort Generation;
 
-    // Per set: the keys, ascending, and where each came from; null for a set that is not explicit.
+    // Per set: the keys, ascending, and where each came from; null for a set that is not explicit. Grown with the keys held, to at most the bound (#1407).
     public readonly long[][] Keys;
     public readonly byte[][] Origin;
     public readonly int[] Count;
     public readonly List<GroupAnswer> Answers = [];
     public ulong NextSeq;
 
+    // MergeServerKeys' target, copied back into the set's own arrays — which grow to the set's own size — so no allocation follows once each has grown.
+    private long[] _spareKeys = [];
+    private byte[] _spareOrigin = [];
+
+    private readonly int _max;
+
+    // A set's first capacity, and the size past which a slot handed to a new session gives its arrays back.
+    private const int InitialCapacity = 8;
+    private const int RetainedCapacity = 64;
+
     // Requests the drain took this tick, decided by the next tick's: (requestId, set, key, op).
     public readonly List<(ushort RequestId, uint Set, long Key, byte Op)> Parked = [];
 
     public SessionGroupRequests(CompiledGroupSet[] sets, int max)
     {
+        _max = max;
         Keys = new long[sets.Length][];
         Origin = new byte[sets.Length][];
         Count = new int[sets.Length];
@@ -51,17 +62,32 @@ internal sealed class SessionGroupRequests
         {
             if (sets[s].Selector == GroupSelector.Explicit)
             {
-                Keys[s] = new long[max];
-                Origin[s] = new byte[max];
+                Keys[s] = [];
+                Origin[s] = [];
             }
         }
     }
 
+    /// <summary>A new session in the slot: nothing held, and arrays a large previous session grew given back (#1407).</summary>
     public void Clear()
     {
         Array.Clear(Count);
         Answers.Clear();
         Parked.Clear();
+        for (var s = 0; s < Keys.Length; s++)
+        {
+            if (Keys[s] != null && Keys[s].Length > RetainedCapacity)
+            {
+                Keys[s] = [];
+                Origin[s] = [];
+            }
+        }
+
+        if (_spareKeys.Length > RetainedCapacity)
+        {
+            _spareKeys = [];
+            _spareOrigin = [];
+        }
     }
 
     /// <summary>The key's position among the set's keys, or its insertion point's complement.</summary>
@@ -78,9 +104,16 @@ internal sealed class SessionGroupRequests
         }
 
         var n = Count[set];
-        if (n == Keys[set].Length)
+        if (n == _max)
         {
             return false;
+        }
+
+        if (n == Keys[set].Length)
+        {
+            var capacity = Math.Min(_max, Math.Max(InitialCapacity, n * 2));
+            Array.Resize(ref Keys[set], capacity);
+            Array.Resize(ref Origin[set], capacity);
         }
 
         at = ~at;
@@ -115,6 +148,121 @@ internal sealed class SessionGroupRequests
 
     public void Answer(ushort requestId, byte due, int set, long key, ushort code) =>
         Answers.Add(new GroupAnswer { Seq = ++NextSeq, RequestId = requestId, Due = due, Set = set, Key = key, Code = code });
+
+    /// <summary>
+    /// Replaces the server's keys of <paramref name="set"/> with <paramref name="keys"/> (sorted; 0 and duplicates skipped) in one merge: the client's keys
+    /// kept, the server's it no longer names dropped, new ones added in key order while the set has room.
+    /// </summary>
+    /// <returns>How many new keys did not fit.</returns>
+    public int MergeServerKeys(int set, ReadOnlySpan<long> keys)
+    {
+        var old = Keys[set];
+        var origin = Origin[set];
+        var n = Count[set];
+
+        // What stays of the old keys: the client's, and the server's it names again. The room left is the new ones'.
+        var kept = 0;
+        var newKeys = 0;
+        var walk = 0;
+        for (var j = 0; j < keys.Length; j++)
+        {
+            if (keys[j] == 0 || (j > 0 && keys[j] == keys[j - 1]))
+            {
+                continue;
+            }
+
+            while (walk < n && old[walk] < keys[j])
+            {
+                kept += (origin[walk] & ~FromServer) != 0 ? 1 : 0;
+                walk++;
+            }
+
+            if (walk < n && old[walk] == keys[j])
+            {
+                kept++;
+                walk++;
+            }
+            else
+            {
+                newKeys++;
+            }
+        }
+
+        for (; walk < n; walk++)
+        {
+            kept += (origin[walk] & ~FromServer) != 0 ? 1 : 0;
+        }
+
+        var room = _max - kept;
+        var needed = kept + Math.Min(room, newKeys);
+        if (_spareKeys.Length < needed)
+        {
+            var capacity = Math.Min(_max, Math.Max(InitialCapacity, (int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)needed)));
+            _spareKeys = new long[capacity];
+            _spareOrigin = new byte[capacity];
+        }
+
+        var w = 0;
+        var i = 0;
+        var k = 0;
+        var overLimit = 0;
+        while (i < n || k < keys.Length)
+        {
+            if (k < keys.Length && (keys[k] == 0 || (k > 0 && keys[k] == keys[k - 1])))
+            {
+                k++;
+                continue;
+            }
+
+            if (k >= keys.Length || (i < n && old[i] < keys[k]))
+            {
+                // Not named by the server now: kept for its other origins.
+                var bits = (byte)(origin[i] & ~FromServer);
+                if (bits != 0)
+                {
+                    _spareKeys[w] = old[i];
+                    _spareOrigin[w++] = bits;
+                }
+
+                i++;
+            }
+            else if (i >= n || keys[k] < old[i])
+            {
+                if (room > 0)
+                {
+                    _spareKeys[w] = keys[k];
+                    _spareOrigin[w++] = FromServer;
+                    room--;
+                }
+                else
+                {
+                    overLimit++;
+                }
+
+                k++;
+            }
+            else
+            {
+                _spareKeys[w] = old[i];
+                _spareOrigin[w++] = (byte)(origin[i++] | FromServer);
+                k++;
+            }
+        }
+
+        // Back into the set's own arrays, grown to its own size when they no longer fit: the spare stays the session's scratch.
+        if (old.Length < w)
+        {
+            var capacity = Math.Min(_max, Math.Max(InitialCapacity, (int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)w)));
+            Keys[set] = old = new long[capacity];
+            Origin[set] = origin = new byte[capacity];
+        }
+
+        _spareKeys.AsSpan(0, w).CopyTo(old);
+        _spareOrigin.AsSpan(0, w).CopyTo(origin);
+
+        Count[set] = w;
+        return overLimit;
+    }
 }
 
 /// <summary>
@@ -131,7 +279,8 @@ internal sealed class SessionGroupRequests
 /// <para>
 /// <b>Bounded.</b> A session holds at most <c>MaxGroupsPerSession</c> keys per explicit set, client and server keys together, and is owed at most
 /// <see cref="MaxOwedAnswers"/> answers: a request past that is not taken, and the drain ACKs it <c>RateLimited</c> like one the command's rate refused.
-/// The command's burst is <c>MaxGroupsPerSession</c> (the catalog says so), so a login subscribing every key it may hold is admitted at once.
+/// The command's burst is <see cref="SubscribeBurstOf"/> the bound (the catalog says so), so a login subscribing every key it may hold, up to 1 024, is
+/// admitted at once. A session's keys cost what it holds, never the bound (#1407).
 /// </para>
 /// </remarks>
 internal sealed class GroupRequests
@@ -159,17 +308,21 @@ internal sealed class GroupRequests
     public long AdmitFaults;
 
     /// <summary>
-    /// The most answers a session is owed at once: twice the keys it may hold of a set, and at least 64 — room for a login that subscribes all of them in
-    /// one burst while the first ones fill. A frame not published — the link congested, the session degraded — keeps its answers owed; a client that goes
-    /// on asking meanwhile is refused at the drain rather than grow them.
+    /// The most answers a session is owed at once: twice the <c>SubscribeRequest</c> burst, and at least 64 — room for a login that subscribes a burst's
+    /// keys while the first ones fill. A frame not published — the link congested, the session degraded — keeps its answers owed; a client that goes on
+    /// asking meanwhile is refused at the drain rather than grow them. Follows the burst, not the bound, so a large bound grows no answer list (#1407).
     /// </summary>
     public int MaxOwedAnswers { get; }
+
+    /// <summary>The <c>SubscribeRequest</c> burst a bound gives: the bound, clamped to what the catalog validators accept.</summary>
+    public static int SubscribeBurstOf(int maxGroupsPerSession) =>
+        Math.Clamp(maxGroupsPerSession, BuiltInCommands.MinSubscribeBurst, BuiltInCommands.MaxSubscribeBurst);
 
     public GroupRequests(CompiledGroupSet[] sets, int maxGroupsPerSession, int maxSessions, SubscriptionsRegistry registry)
     {
         _sets = sets;
         _max = Math.Max(1, maxGroupsPerSession);
-        MaxOwedAnswers = Math.Max(64, 2 * _max);
+        MaxOwedAnswers = Math.Max(64, 2 * SubscribeBurstOf(_max));
         _bySlot = new SessionGroupRequests[Math.Max(1, maxSessions) + 1];
         foreach (var profile in registry.Profiles)
         {
@@ -445,27 +598,14 @@ internal sealed class GroupRequests
             return false;
         }
 
-        // Off every key the server no longer names, then on every one it does. The caller's copy is sorted, so each test is a binary search.
+        // Off every key the server no longer names, then on every one it does, in one merge over the sorted copy: O(keys), not a shift per key.
         Array.Sort(keys);
-        for (var i = state.Count[set] - 1; i >= 0; i--)
-        {
-            var key = state.Keys[set][i];
-            if ((state.Origin[set][i] & SessionGroupRequests.FromServer) != 0 && Array.BinarySearch(keys, key) < 0)
-            {
-                state.Remove(set, key, SessionGroupRequests.FromServer);
-            }
-        }
-
-        foreach (var key in keys)
-        {
-            if (key != 0 && !state.Add(set, key, SessionGroupRequests.FromServer))
-            {
-                ServerKeysOverLimit++;
-            }
-        }
-
+        ServerKeysOverLimit += state.MergeServerKeys(set, keys);
         return true;
     }
+
+    /// <summary>How many answers a session is owed: the most <see cref="Emit"/> can add to its next frame, which the frame budget reserves (15 § 4.4).</summary>
+    public int OwedAnswers(SessionId session) => Of(session)?.Answers.Count ?? 0;
 
     /// <summary>
     /// The answers due in the frame being assembled for <paramref name="session"/>, after its group gather: each error, each subscription whose key is now
@@ -481,7 +621,11 @@ internal sealed class GroupRequests
     /// since nothing fills it: it is answered <see cref="SourceErrorCodes.NotInProfile"/> and the client's key dropped, as if asked under the new profile.
     /// A subscription already answered stays: the session keeps its keys across profiles like across realms, and they fill again under one naming the set.
     /// </remarks>
-    public void Emit(SessionId session, PushReplication push, FrameWorkerScratch scratch, string profileName)
+    /// <param name="holdCompletions">
+    /// The frame leaves an enter owed (15 § 4.6): an answer waiting for its key's completion is held, for a key already complete included — its store
+    /// lacks a member.
+    /// </param>
+    public void Emit(SessionId session, PushReplication push, FrameWorkerScratch scratch, string profileName, bool holdCompletions = false)
     {
         scratch.Answered.Clear();
         var state = Of(session);
@@ -511,7 +655,8 @@ internal sealed class GroupRequests
                         break;
                     }
 
-                    due = state.Find(answer.Set, answer.Key) < 0 || push?.GroupKeyStateOf(session, answer.Set, answer.Key) == GroupKeyState.Complete;
+                    due = state.Find(answer.Set, answer.Key) < 0
+                          || (!holdCompletions && push?.GroupKeyStateOf(session, answer.Set, answer.Key) == GroupKeyState.Complete);
                     break;
                 default:
                     due = state.Find(answer.Set, answer.Key) >= 0 || push == null
@@ -545,10 +690,18 @@ internal sealed class GroupRequests
             return;
         }
 
+        // Both in answer order (Emit walks the answers in order): one walk, not a search per answer.
         var kept = 0;
+        var walk = 0;
         for (var i = 0; i < state.Answers.Count; i++)
         {
-            if (answered.Contains(state.Answers[i].Seq))
+            var seq = state.Answers[i].Seq;
+            while (walk < answered.Count && answered[walk] < seq)
+            {
+                walk++;
+            }
+
+            if (walk < answered.Count && answered[walk] == seq)
             {
                 continue;
             }

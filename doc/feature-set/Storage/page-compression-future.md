@@ -46,7 +46,7 @@ Not implemented in the current release — there is no API to enable or configur
 
 ## 🔗 Related
 
-- Related feature: [Memory-Mapped Page Cache & Clock-Sweep Eviction](./page-cache.md) (the layer the adapter would slot beneath)
+- Related feature: [Page Cache & Clock-Sweep Eviction](./page-cache.md) (the layer the adapter would slot beneath)
 - Related feature: [String Table Storage](./string-table.md) (a candidate use case — high expected compression ratio)
 
 <!-- Overview: claude/overview/03-storage.md §3.10 Compression (Future) -->

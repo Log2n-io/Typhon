@@ -46,7 +46,11 @@ public sealed class TyphonClient : IAsyncDisposable
 
     // SubscribeRequest (14 § 4): the requests, their bucket and their callers, under one lock — called from the application, pumped from the receive and
     // ping loops.
+#if NET9_0_OR_GREATER
     private readonly Lock _subscribeLock = new();
+#else
+    private readonly object _subscribeLock = new();
+#endif
     private readonly Dictionary<ushort, TaskCompletionSource<SubscribeResult>> _subscribeWaiters = [];
     private GroupSubscriptions _subscriptions;
     private CommandBucket _subscribeBucket;
@@ -298,7 +302,7 @@ public sealed class TyphonClient : IAsyncDisposable
 
                     _subscriptions.Pump((command, values) =>
                     {
-                        if (!_subscribeBucket.Take(Environment.TickCount64))
+                        if (!_subscribeBucket.Take(NowMs()))
                         {
                             return -1;
                         }
@@ -440,6 +444,14 @@ public sealed class TyphonClient : IAsyncDisposable
         }
     }
 
+    // Monotonic milliseconds, for the subscribe bucket. netstandard2.1 has no Environment.TickCount64; the stopwatch's clock is the same monotonic one.
+    private static long NowMs() =>
+#if NET
+        Environment.TickCount64;
+#else
+        System.Diagnostics.Stopwatch.GetTimestamp() * 1000 / System.Diagnostics.Stopwatch.Frequency;
+#endif
+
     /// <inheritdoc />
     /// <remarks>Idempotent: a second call returns at once.</remarks>
     public async ValueTask DisposeAsync()
@@ -449,7 +461,11 @@ public sealed class TyphonClient : IAsyncDisposable
             return;
         }
 
+#if NET8_0_OR_GREATER
         await _stopping.CancelAsync().ConfigureAwait(false);
+#else
+        _stopping.Cancel();
+#endif
 
         // Awaited rather than abandoned: the loops touch the transport, and disposing it under them turns an orderly shutdown into an ObjectDisposedException
         // on a background task nobody is watching. Except from a handler the receive loop is running: that loop cannot finish until this returns, and a

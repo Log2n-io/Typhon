@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Typhon.Protocol;
@@ -21,23 +22,50 @@ namespace Typhon.Protocol;
 /// <see cref="Utf8Text256"/> is 258 bytes in the arena either way. The WIRE carries only the bytes that are used
 /// (<c>varu length | UTF-8</c>), so this is a memory trade inside the server and never a bandwidth one.
 /// </para>
-/// <para>Adding a capacity is a handful of lines: an <see cref="InlineArrayAttribute"/> buffer and a struct beside the
+/// <para>Adding a capacity is a handful of lines: an <c>[InlineArray]</c> buffer and a struct beside the
 /// ones here. Do it when something needs it rather than in advance.</para>
 /// </remarks>
 public interface IInlineUtf8Text
 {
-    /// <summary>The largest number of UTF-8 bytes this type holds. Must equal the <c>str</c> codec's cap where it is declared.</summary>
-    static abstract int Capacity { get; }
+    /// <summary>The largest number of UTF-8 bytes this type holds — the same for every value of the type. Must equal the <c>str</c> codec's cap where it
+    /// is declared.</summary>
+    /// <remarks>An instance member, not a static abstract one: netstandard2.1's runtime has none (#1034), and the two builds must declare one interface.
+    /// </remarks>
+    int Capacity { get; }
 
     /// <summary>The bytes in use.</summary>
     int Length { get; }
 }
 
 /// <summary>The 256-byte inline buffer of a <see cref="Utf8Text256"/>.</summary>
+/// <remarks>
+/// An inline array on .NET 8 and later; on netstandard2.1, whose runtime has none, a struct of the same size read through
+/// <see cref="MemoryMarshal"/> (a managed reference, GC-tracked — no pointer). The layout, 256 bytes, is the same on both.
+/// </remarks>
+#if NET8_0_OR_GREATER
 [InlineArray(Utf8Text256.Capacity)]
+#else
+[StructLayout(LayoutKind.Sequential, Size = Utf8Text256.Capacity)]
+#endif
 public struct Utf8Buffer256
 {
     private byte _element0;
+
+    [UnscopedRef]
+    internal Span<byte> AsSpan() =>
+#if NET8_0_OR_GREATER
+        this;
+#else
+        MemoryMarshal.CreateSpan(ref _element0, Utf8Text256.Capacity);
+#endif
+
+    [UnscopedRef]
+    internal readonly ReadOnlySpan<byte> AsReadOnlySpan() =>
+#if NET8_0_OR_GREATER
+        this;
+#else
+        MemoryMarshal.CreateReadOnlySpan(ref Unsafe.AsRef(in _element0), Utf8Text256.Capacity);
+#endif
 }
 
 /// <summary>A UTF-8 string of at most 256 bytes, carried inside a message struct. See <see cref="IInlineUtf8Text"/>.</summary>
@@ -56,7 +84,7 @@ public struct Utf8Text256 : IInlineUtf8Text, IEquatable<Utf8Text256>
     private Utf8Buffer256 _bytes;
 
     /// <inheritdoc/>
-    static int IInlineUtf8Text.Capacity => Capacity;
+    readonly int IInlineUtf8Text.Capacity => Capacity;
 
     /// <summary>The number of UTF-8 bytes in use.</summary>
     public readonly int Length => _length;
@@ -66,7 +94,7 @@ public struct Utf8Text256 : IInlineUtf8Text, IEquatable<Utf8Text256>
 
     /// <summary>The bytes in use, which alias this value — never outlive it, and never keep it across a copy.</summary>
     [UnscopedRef]
-    public readonly ReadOnlySpan<byte> Utf8 => ((ReadOnlySpan<byte>)_bytes)[.._length];
+    public readonly ReadOnlySpan<byte> Utf8 => _bytes.AsReadOnlySpan()[.._length];
 
     /// <summary>The text of <paramref name="value"/>, encoded as UTF-8.</summary>
     /// <param name="value">The text; <see langword="null"/> is empty.</param>
@@ -108,7 +136,7 @@ public struct Utf8Text256 : IInlineUtf8Text, IEquatable<Utf8Text256>
         }
 
         var text = default(Utf8Text256);
-        StrictUtf8.GetBytes(value, ((Span<byte>)text._bytes)[..needed]);
+        StrictUtf8.GetBytes(value, text._bytes.AsSpan()[..needed]);
         text._length = (ushort)needed;
         return text;
     }
@@ -125,7 +153,7 @@ public struct Utf8Text256 : IInlineUtf8Text, IEquatable<Utf8Text256>
         }
 
         var text = default(Utf8Text256);
-        utf8.CopyTo((Span<byte>)text._bytes);
+        utf8.CopyTo(text._bytes.AsSpan());
         text._length = (ushort)utf8.Length;
         return text;
     }

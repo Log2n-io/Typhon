@@ -1,0 +1,236 @@
+using System;
+using System.Linq;
+using System.Numerics;
+using System.Threading.Tasks;
+using AsteroidField.Bot;
+using AsteroidField.Client;
+using AsteroidField.Server;
+using NUnit.Framework;
+
+namespace AsteroidField.Tests;
+
+/// <summary>
+/// The Asteroid Field demo end to end, in one process: the server over real TCP, and pilots reading it through <see cref="BeltLink"/> — the client
+/// core the Unity project compiles. What a Unity pilot relies on is asserted here, so a change that breaks the demo breaks a test before it breaks
+/// the Editor.
+/// </summary>
+[TestFixture]
+[NonParallelizable]
+public class AsteroidFieldTests
+{
+    private static readonly TimeSpan Deadline = TimeSpan.FromSeconds(30);
+
+    private static AsteroidServer StartServer(int holdCapacity = AsteroidServer.DefaultHoldCapacity) => AsteroidServer.Start(new ServerOptions
+    {
+        Port = 0,
+        Asteroids = 2000,
+        Drones = 2,
+        HoldCapacity = holdCapacity,
+        PilotSpawnRadiusM = 20f,
+    });
+
+    [Test]
+    public async Task APilotSeesTheAsteroidsAroundItsShipAndNothingBeyondTheView()
+    {
+        using var server = StartServer();
+        await using var link = new BeltLink("127.0.0.1", server.Port);
+        await link.ConnectAsync();
+        var brain = new PilotBrain(link);
+
+        var world = await Until(brain, w => w.SelfNetId != 0 && w.TryGetShip(w.SelfNetId, out _) && w.Asteroids.Count > 0);
+
+        Assert.That(world.TryGetShip(world.SelfNetId, out var self), Is.True);
+        self.PositionAt(world.Tick, out var sx, out var sy);
+        foreach (var a in world.Asteroids)
+        {
+            a.PositionAt(world.Tick, out var x, out var y);
+            var distance = Math.Sqrt(((x - sx) * (x - sx)) + ((y - sy) * (y - sy)));
+            // The view's slack: the anchor moves only past R/48, and a drifting rock may have left since its last segment.
+            Assert.That(distance, Is.LessThan(AsteroidServer.ViewRadiusM * 1.1), $"asteroid {a.NetId} is beyond the view");
+            Assert.That(a.Size, Is.InRange(1, 4), "the onEnter size arrived");
+            Assert.That(a.Ore, Is.GreaterThan(0));
+        }
+
+        Assert.That(world.Cargo, Is.Zero, "a fresh hold");
+    }
+
+    [Test]
+    public async Task ZoomingOutWidensTheViewToTheRadiusAsked()
+    {
+        const float wide = 900f;
+        using var server = StartServer();
+        await using var link = new BeltLink("127.0.0.1", server.Port);
+        await link.ConnectAsync();
+        var brain = new PilotBrain(link);
+        var world = await Until(brain, w => w.TryGetShip(w.SelfNetId, out _) && w.Asteroids.Count > 0, steer: false);
+        var near = world.Asteroids.Count;
+
+        link.ViewRadius(wide);
+        world = await Until(brain, w => Farthest(w) > wide * 0.8, steer: false);
+
+        // 2 000 rocks over the belt: nine times the area holds several times the rocks, and none past the new radius.
+        Assert.Multiple(() =>
+        {
+            Assert.That(Farthest(world), Is.LessThan(wide * 1.1), "nothing beyond the radius asked");
+            Assert.That(world.Asteroids.Count, Is.GreaterThan(near * 3), $"{near} rocks at {AsteroidServer.ViewRadiusM} m");
+        });
+    }
+
+    // The view against the truth: every asteroid and ship the server has within the radius, less a margin for drift between the census and the frame.
+    [TestCase(300f)]
+    [TestCase(1200f)]
+    public async Task APilotHoldsEverythingWithinItsRadius(float radius)
+    {
+        using var server = AsteroidServer.Start(new ServerOptions { Port = 0, PilotSpawnRadiusM = 20f });
+        await using var link = new BeltLink("127.0.0.1", server.Port);
+        await link.ConnectAsync();
+        var brain = new PilotBrain(link);
+        var world = await Until(brain, w => w.TryGetShip(w.SelfNetId, out _) && w.Asteroids.Count > 0, steer: false);
+        link.ViewRadius(radius);
+        var settled = world.Tick + 60;
+        await Until(brain, w => w.Tick > settled, steer: false);
+
+        var census = await server.TakeCensusAsync();
+        world = brain.World;
+        var self = census.Pilots.Values.Single();
+        int Within(System.Collections.Generic.List<Vector2> all, float r) => all.Count(p => Vector2.Distance(p, self) <= r);
+
+        TestContext.Out.WriteLine($"radius {radius}: held {world.Asteroids.Count} asteroids, {world.Ships.Count} ships; "
+            + $"the server has {Within(census.Asteroids, radius)} asteroids and {Within(census.Ships, radius)} ships within it");
+        Assert.Multiple(() =>
+        {
+            Assert.That(world.Asteroids.Count, Is.InRange(Within(census.Asteroids, radius - 10f), Within(census.Asteroids, radius + 10f)), "asteroids");
+            Assert.That(world.Ships.Count, Is.InRange(Within(census.Ships, radius - 30f), Within(census.Ships, radius + 30f)), "ships");
+        });
+    }
+
+    [Test]
+    public async Task MiningFillsTheHoldTheServerSaysSoOnceAndSellingPays()
+    {
+        const int hold = 20;
+        using var server = StartServer(hold);
+        await using var link = new BeltLink("127.0.0.1", server.Port);
+        await link.ConnectAsync();
+        var brain = new PilotBrain(link);
+
+        // The brain flies to the nearest rock, mines it, and sells on the reliable CargoFull: the credits are the proof the whole loop ran.
+        var world = await Until(brain, w => brain.HoldsFull >= 1 && w.Credits > 0);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.HoldsFull, Is.EqualTo(1), "one full hold, told once");
+            Assert.That(world.Credits, Is.EqualTo(hold * AsteroidServer.CreditsPerOre), "the hold, sold");
+        });
+    }
+
+    [Test]
+    public async Task AFullHoldTakesNoTargetAndMinesNothingMore()
+    {
+        const int hold = 20;
+        using var server = StartServer(hold);
+        await using var link = new BeltLink("127.0.0.1", server.Port);
+        await link.ConnectAsync();
+        var brain = new PilotBrain(link) { SellsWhenFull = false };
+        var world = await Until(brain, w => brain.HoldsFull >= 1 && w.Cargo == hold);
+
+        // The brain aims again at the nearest rock — the one it just filled up on, in range: the server must refuse it.
+        var settled = world.Tick + 40;
+        world = await Until(brain, w => w.Tick > settled);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(world.Cargo, Is.EqualTo(hold), "nothing mined past the hold");
+            Assert.That(brain.HoldsFull, Is.EqualTo(1), "told once");
+            Assert.That(world.TryGetShip(world.SelfNetId, out var self) ? self.Target : 1u, Is.Zero, "no target while full");
+        });
+    }
+
+    [Test]
+    public async Task AnotherPilotSeesTheShipAndItsBeam()
+    {
+        using var server = StartServer();
+        await using var first = new BeltLink("127.0.0.1", server.Port);
+        await using var second = new BeltLink("127.0.0.1", server.Port);
+        await first.ConnectAsync();
+        await second.ConnectAsync();
+        var miner = new PilotBrain(first);
+        var watcher = new PilotBrain(second);
+
+        // The miner picks a rock and turns its beam on; the watcher, spawned within 20 m of it, must see the beam's target on the miner's ship.
+        var minerWorld = await Until(miner, w => w.TryGetShip(w.SelfNetId, out var s) && s.Target != 0);
+        minerWorld.TryGetShip(minerWorld.SelfNetId, out var minerShip);
+        var seen = await Until(watcher, w => w.TryGetShip(minerShip.NetId, out var s) && s.Target != 0, stepOther: miner, steer: false);
+
+        Assert.That(seen.TryGetShip(minerShip.NetId, out var fromOutside), Is.True);
+        Assert.That(fromOutside.Target, Is.Not.Zero, "the beam's target travels as the asteroid's netId, to every pilot in range");
+    }
+
+    [Test]
+    public async Task AnAsteroidThisPilotWasNeverShownCannotBeMined()
+    {
+        using var server = StartServer();
+        await using var link = new BeltLink("127.0.0.1", server.Port);
+        await link.ConnectAsync();
+        var watcher = new PilotBrain(link);
+        await Until(watcher, w => w.TryGetShip(w.SelfNetId, out _) && w.Asteroids.Count > 0, steer: false);
+
+        // A netId far past any this session holds: TryResolve refuses it, so the server leaves the beam off.
+        link.Mine(0x00FF_FFFF);
+        var start = watcher.World.Tick;
+        var world = await Until(watcher, w => w.Tick > start + 10, steer: false);
+        world.TryGetShip(world.SelfNetId, out var self);
+        Assert.That(self.Target, Is.Zero, "a target the client was never shown is refused");
+
+        // The positive control: one it holds is accepted.
+        var shown = world.Asteroids[0].NetId;
+        link.Mine(shown);
+        world = await Until(watcher, w => w.TryGetShip(w.SelfNetId, out var s) && s.Target == shown, steer: false);
+        Assert.That(world.TryGetShip(world.SelfNetId, out self) && self.Target == shown, Is.True);
+    }
+
+    private static double Farthest(BeltSnapshot world)
+    {
+        if (!world.TryGetShip(world.SelfNetId, out var self))
+        {
+            return 0;
+        }
+
+        self.PositionAt(world.Tick, out var sx, out var sy);
+        var farthest = 0d;
+        foreach (var a in world.Asteroids)
+        {
+            a.PositionAt(world.Tick, out var x, out var y);
+            farthest = Math.Max(farthest, Math.Sqrt(((x - sx) * (x - sx)) + ((y - sy) * (y - sy))));
+        }
+
+        return farthest;
+    }
+
+    // Steps the brain (and another, so both sessions keep their commands flowing) until the condition holds on its world.
+    private static async Task<BeltSnapshot> Until(PilotBrain brain, Func<BeltSnapshot, bool> condition, PilotBrain stepOther = null, bool steer = true)
+    {
+        var until = DateTime.UtcNow + Deadline;
+        while (DateTime.UtcNow < until)
+        {
+            if (steer)
+            {
+                brain.Step();
+            }
+            else
+            {
+                brain.Observe();
+            }
+
+            stepOther?.Step();
+            if (brain.World != null && condition(brain.World))
+            {
+                return brain.World;
+            }
+
+            await Task.Delay(25);
+        }
+
+        Assert.Fail($"timed out after {Deadline.TotalSeconds} s; last frame {brain.World?.Tick}");
+        return null;
+    }
+}

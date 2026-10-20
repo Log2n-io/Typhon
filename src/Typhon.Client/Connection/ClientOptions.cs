@@ -7,23 +7,25 @@ namespace Typhon.Client;
 /// <remarks>
 /// Everything here has a default that works. The ones without a sensible default — the endpoint — have no default at all, so a
 /// misconfiguration is a construction error rather than a connection that quietly goes nowhere.
+/// <para>Settable rather than <c>init</c>: a Unity script (C# 9, no init-only setters) configures it too (#1034). Read when the client is constructed and
+/// when it connects; set it before, not during a session.</para>
 /// </remarks>
 public sealed class ClientOptions
 {
     /// <summary>Where the server is: a <c>ws://</c> or <c>wss://</c> URL, or a <c>tcp://host:port</c> one.</summary>
-    public Uri Endpoint { get; init; }
+    public Uri Endpoint { get; set; }
 
     /// <summary>The session kind the application declared, or empty for the default.</summary>
-    public string Kind { get; init; } = "";
+    public string Kind { get; set; } = "";
 
     /// <summary>The opaque credential handed to the server's admission hook. Never interpreted here.</summary>
-    public string Token { get; init; } = "";
+    public string Token { get; set; } = "";
 
     /// <summary>Application data for the session's <c>Opened</c> hook, at most 256 bytes.</summary>
-    public byte[] HelloPayload { get; init; } = [];
+    public byte[] HelloPayload { get; set; } = [];
 
     /// <summary>The optional server work to ask for. Granted is a subset; read <see cref="TyphonClient.CapsGranted"/> for what arrived.</summary>
-    public Capabilities Caps { get; init; }
+    public Capabilities Caps { get; set; }
 
     /// <summary>
     /// How often <c>PING</c> carries this client's newest applied tick, in hertz.
@@ -41,38 +43,38 @@ public sealed class ClientOptions
     /// symptom to look for.
     /// </para>
     /// </remarks>
-    public int PingHz { get; init; } = 4;
+    public int PingHz { get; set; } = 4;
 
     /// <summary>
     /// Motion segments kept per entity, or <c>0</c> (the default) to size the history from the render delay the clock may evaluate at
     /// (<see cref="SegmentRing.DepthFor"/>: 17 at 50 Hz). A client that never evaluates motion — a load generator, a recorder — sets <c>1</c>: the history is
     /// the store's largest per-entity cost, about 0.6 KB per moving entity at 50 Hz, and such a client holds tens of thousands of entities.
     /// </summary>
-    public int SegmentHistory { get; init; }
+    public int SegmentHistory { get; set; }
 
     /// <summary>How long to wait for <c>WELCOME</c> before giving up. The server's own <c>HELLO</c> timeout is five seconds.</summary>
-    public TimeSpan HandshakeTimeout { get; init; } = TimeSpan.FromSeconds(10);
+    public TimeSpan HandshakeTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
     /// <summary>Whether to reconnect at all. When false, a close ends the client whatever the code says.</summary>
-    public bool Reconnect { get; init; } = true;
+    public bool Reconnect { get; set; } = true;
 
     /// <summary>The first backoff delay; each attempt doubles it up to <see cref="MaxBackoff"/>, with jitter.</summary>
-    public TimeSpan InitialBackoff { get; init; } = TimeSpan.FromMilliseconds(250);
+    public TimeSpan InitialBackoff { get; set; } = TimeSpan.FromMilliseconds(250);
 
     /// <summary>The ceiling on backoff, however many attempts have failed.</summary>
-    public TimeSpan MaxBackoff { get; init; } = TimeSpan.FromSeconds(30);
+    public TimeSpan MaxBackoff { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>How many consecutive failed attempts to make before giving up. Zero is unlimited.</summary>
-    public int MaxReconnectAttempts { get; init; }
+    public int MaxReconnectAttempts { get; set; }
 
     /// <summary>A recorder to hand every inbound message to, or <see langword="null"/>.</summary>
-    public Recorder Recorder { get; init; }
+    public Recorder Recorder { get; set; }
 
     /// <summary>
     /// Receives every frame's events as they are applied, on the receive loop — after the frame's enters and updates, before its leaves
     /// (<see cref="FrameApplier"/>); <see langword="null"/> drops them. It must not block, and a throw faults the session. Kept across a catalog change.
     /// </summary>
-    public IEventHandler Events { get; init; }
+    public IEventHandler Events { get; set; }
 
     /// <summary>Throws when the options cannot produce a connection.</summary>
     internal void Validate()

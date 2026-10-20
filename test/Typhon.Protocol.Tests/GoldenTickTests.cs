@@ -170,6 +170,7 @@ public class GoldenTickTests
             [
                 (SourceStatus.GroupComplete, 1, -70_000), (SourceStatus.GroupReleased, 0, 65_535), (SourceStatus.GroupComplete, 0, 0),
                 (SourceStatus.GroupComplete, 1, long.MinValue), (SourceStatus.GroupComplete, 1, long.MaxValue), (SourceStatus.GroupReleased, 0, (1L << 53) + 1),
+                (SourceStatus.GroupTruncated, 0, 70_000), (SourceStatus.GroupTruncated, 1, 0), (SourceStatus.GroupTruncated, 0, uint.MaxValue),
             ]);
         TickWriter.WriteAggregate(ref w, Plan.Grids[0], reset: true, [(0u, [1u, 0u]), (17u, [3u, 400u]), (255u, [0u, 9u])]);
         TickWriter.WriteStats(ref w, Plan, new Dictionary<string, double[]>

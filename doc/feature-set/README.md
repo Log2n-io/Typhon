@@ -23,7 +23,7 @@ description: 'Documentation for every feature in src/Typhon.Engine, tagged Publi
 | Category | What it covers | Scope | README |
 |---|---|---|---|
 | Foundation | Lock-free primitives, epoch memory safety, deadlines/timeouts, pinned allocators, and hash maps every other layer is built on. | Mixed | [→](Foundation/README.md) |
-| Storage | The memory-mapped page cache, allocation hierarchy (occupancy → segments → chunks), and pluggable backends underlying every persisted structure. | Mixed | [→](Storage/README.md) |
+| Storage | The engine's native page cache, allocation hierarchy (occupancy → segments → chunks), and pluggable backends underlying every persisted structure. | Mixed | [→](Storage/README.md) |
 | Durability | WAL v2, the append-before-publish commit pipeline, checkpointing, and crash recovery — Typhon's crash-safety guarantees. | Mixed | [→](Durability/README.md) |
 | Schema | Attribute-driven component/field declaration, FieldId stability, validation, and automatic/user-defined schema evolution. | Mixed | [→](Schema/README.md) |
 | Revision | The per-component MVCC revision-chain subsystem — storage, snapshot visibility, conflict baselines, and GC/crash scrub. | Mixed | [→](Revision/README.md) |
@@ -56,7 +56,7 @@ Every Public feature, one line each — the application-facing surface, complete
 |---|---|---|---|---|
 | Transient Store (heap-backed) | Pinned heap blocks standing in for the page cache, so Transient components get raw-memory speed through the same segment code — tune via TransientOptions. | ✅ Implemented | 🔵 Core | [→](Storage/pluggable-storage-backend/transient-store.md) |
 | Database File Locking & Lifecycle | Two-layer protection against concurrent multi-process opens — OS FileShare.Read plus an advisory .lock sidecar with stale/live/cross-machine PID detection — plus create/open/delete lifecycle handling. | ✅ Implemented | 🔵 Core | [→](Storage/file-locking-lifecycle.md) |
-| Memory-Mapped Page Cache & Clock-Sweep Eviction | 8 KiB pages, 4-state lifecycle, clock-sweep eviction with sequential-allocation optimization, async I/O, and backpressure handling. | ✅ Implemented | 🟣 Advanced | [→](Storage/page-cache.md) |
+| Page Cache & Clock-Sweep Eviction | 8 KiB pages, 4-state lifecycle, clock-sweep eviction with sequential-allocation optimization, async I/O, and backpressure handling. | ✅ Implemented | 🟣 Advanced | [→](Storage/page-cache.md) |
 | Page Integrity — CRC32C, Seqlock Snapshots & A/B Page Pairing | Hardware CRC32C page checksums, seqlock-protected checkpoint snapshots, and A/B slot pairing for structural pages that can't be rebuilt. | ✅ Implemented | 🟣 Advanced | [→](Storage/page-integrity.md) |
 | Variable-Sized Buffer Storage (VSBS) | Linked-chunk-chain storage for variable-length, reference-counted buffers — backs multi-value B+Tree index entries and per-element-type ComponentCollection\<T\> pools. | ✅ Implemented | 🟣 Advanced | [→](Storage/vsbs.md) |
 | Storage Introspection & Integrity Diagnostics | Read-only APIs exposing segment/page topology and auditing occupancy-vs-segment consistency, powering the Workbench Database File Map. | ✅ Implemented | 🟣 Advanced | [→](Storage/storage-introspection.md) |
@@ -168,7 +168,6 @@ Every Public feature, one line each — the application-facing surface, complete
 | Execution Planning & Pipeline Execution | Picks the most selective index as the scan driver and streams results into the caller's collection. | ✅ Implemented | 🟣 Advanced | [→](Querying/execution-planning-pipeline.md) |
 | Statistics Infrastructure (HLL / MCV / Histogram) | Background-maintained per-field statistics feeding the selectivity estimator, refreshed by a tunable polling worker thread. | ✅ Implemented | 🟣 Advanced | [→](Querying/statistics-infrastructure.md) |
 | ViewFactory — Parameterized Queries & View Pooling | Reusable query templates with a Rent/Return view pool, to remove per-session view setup cost. | 📋 Planned | 🟣 Advanced | [→](Querying/view-factory-pooling.md) |
-| Temporal Queries (Point-in-Time Read & Revision History) | Opt-in per-component history retention enabling reads of past state and full revision timelines. | 📋 Planned | 🟣 Advanced | [→](Querying/temporal-queries.md) |
 
 ### Transactions
 
@@ -345,7 +344,7 @@ Every Internal feature, one line each — engine machinery with no direct applic
 | Page Allocation & Occupancy Tracking | A 3-level bitmap that allocates and tracks every 8 KiB page in the database file, growing the file automatically as needed. | ✅ Implemented | [→](Storage/page-allocation-occupancy.md) |
 | Segment & Chunk-Based Allocation Engine | Multi-page directories and fixed-size slot allocation — the substrate every component, index, and revision chain is built from. | ✅ Implemented | [→](Storage/segment-chunk-allocation.md) |
 | Pluggable Storage Backend (Persistent vs Transient) | One set of segment/index code, JIT-specialized per backend, so Transient components get heap speed for free. | ✅ Implemented | [→](Storage/pluggable-storage-backend/README.md) |
-| &nbsp;&nbsp;↳ Persistent Store (MMF-backed) | The default backend — every durable component's segments run through the memory-mapped page cache at zero abstraction cost. | ✅ Implemented | [→](Storage/pluggable-storage-backend/persistent-store.md) |
+| &nbsp;&nbsp;↳ Persistent Store (page-cache-backed) | The default backend — every durable component's segments run through the page cache at zero abstraction cost. | ✅ Implemented | [→](Storage/pluggable-storage-backend/persistent-store.md) |
 | String Table Storage | UTF-8 string storage spread across linked fixed-size chunks, for strings too long to hold inline. | ✅ Implemented | [→](Storage/string-table.md) |
 
 > Note: Transient Store (heap-backed), the other child of Pluggable Storage Backend, is Public — see the [Public](#public--what-you-can-use) section above.

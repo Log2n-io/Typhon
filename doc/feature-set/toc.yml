@@ -258,8 +258,6 @@
       href: Querying/spatial-predicates.md
     - name: Statistics Infrastructure (HLL / MCV / Histogram)
       href: Querying/statistics-infrastructure.md
-    - name: 'Temporal Queries (Point-in-Time Read & Revision History)'
-      href: Querying/temporal-queries.md
     - name: 'ViewFactory — Parameterized Queries & View Pooling'
       href: Querying/view-factory-pooling.md
     - name: 'Fluent Query API & Predicate Parsing'
@@ -466,7 +464,7 @@
       href: Storage/file-locking-lifecycle.md
     - name: 'Page Allocation & Occupancy Tracking'
       href: Storage/page-allocation-occupancy.md
-    - name: 'Memory-Mapped Page Cache & Clock-Sweep Eviction'
+    - name: 'Page Cache & Clock-Sweep Eviction'
       href: Storage/page-cache.md
     - name: Page Compression (Future)
       href: Storage/page-compression-future.md
@@ -483,7 +481,7 @@
     - name: Pluggable Storage Backend (Persistent vs Transient)
       href: Storage/pluggable-storage-backend/README.md
       items:
-        - name: Persistent Store (MMF-backed)
+        - name: Persistent Store (page-cache-backed)
           href: Storage/pluggable-storage-backend/persistent-store.md
         - name: Transient Store (heap-backed)
           href: Storage/pluggable-storage-backend/transient-store.md

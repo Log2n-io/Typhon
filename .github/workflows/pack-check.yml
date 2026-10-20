@@ -1,10 +1,14 @@
 name: Pack Check
 
-# Cheap PR gate that catches "packaging silently broke" before merge: packs the `Typhon` engine package and runs
-# the consumer smoke test (a fresh project that adds the package, defines an [Archetype], and must compile + run —
-# which only works if the bundled source generator shipped and fired). Engine-only + no Node, so it stays fast;
-# the full tool+ui pack (which needs Node for the Workbench SPA) is validated on release (release.yml).
-# Design: claude/scratch/distribution-packaging-plan-2026-07-06.md §3 (#430), Feature #435.
+# Cheap PR gate that catches "packaging silently broke" before merge: packs the .NET packages and the TypeScript SDK, then runs
+# - the consumer smoke test (a fresh project that adds the engine package, defines an [Archetype], and must compile + run — which only works if the
+#   bundled source generator shipped and fired);
+# - the subscriptions smoke test (a Protocol-only contracts assembly, a server on Typhon + Typhon.Subscriptions.AspNetCore, the .NET client over TCP and
+#   the TypeScript tarball over WebSocket, all from the local feed);
+# - the CLI tool smoke test and the onboarding loop (`typhon new`, then `dotnet run` the scaffold against the packed engine). Until 1.0.0-alpha.1 only
+#   release.yml ran them, and that release's first attempt failed on an onboarding check that had gone stale two months earlier with no PR to catch it.
+# The native SDK's package is validated by native-package-check.yml.
+# Design: claude/scratch/distribution-packaging-plan-2026-07-06.md §3 (#430), Feature #435; claude/design/Subscriptions/07 § 5 (#1044).
 #
 # To make this block merges, add "pack-check" to the branch-protection required checks (owner action).
 
@@ -32,10 +36,44 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Pack the engine (Typhon)
-        run: dotnet pack src/Typhon.Engine/Typhon.Engine.csproj -c Release -o artifacts
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      # The CLI pack builds the Workbench SPA into wwwroot (its BuildClientApp target shells out to npm), as release.yml does.
+      - name: Restore Workbench client (npm ci)
+        working-directory: tools/Typhon.Workbench/ClientApp
+        run: npm ci
+
+      - name: Pack the .NET packages
+        run: |
+          set -euo pipefail
+          for project in \
+              src/Typhon.Protocol/Typhon.Protocol.csproj \
+              src/Typhon.Engine/Typhon.Engine.csproj \
+              src/Typhon.Client/Typhon.Client.csproj \
+              src/Typhon.Subscriptions.AspNetCore/Typhon.Subscriptions.AspNetCore.csproj \
+              src/Typhon.Shell/Typhon.Shell.csproj; do
+            dotnet pack "$project" -c Release -o artifacts
+          done
+
+      - name: Pack the TypeScript SDK
+        working-directory: src/Typhon.Client.TypeScript
+        run: |
+          set -euo pipefail
+          npm ci
+          npm pack --pack-destination ../../artifacts
 
       # The crux: a clean-feed consumer build must compile `Unit.ReadAll(...)` (proves the ArchetypeAccessorGenerator
       # shipped inside the package AND ran in the consumer's compilation) and then open a DB + spawn/read.
       - name: Consumer smoke test (engine package)
         run: bash scripts/consumer-smoke-test.sh artifacts
+
+      - name: CLI tool smoke test (Typhon.Cli)
+        run: bash scripts/cli-tool-smoke-test.sh artifacts
+
+      - name: Onboarding-loop smoke test (typhon new → dotnet run)
+        run: bash scripts/onboarding-smoke-test.sh artifacts
+
+      - name: Subscriptions smoke test (Protocol, Client, AspNetCore, TypeScript)
+        run: python3 scripts/subscription-smoke-test.py artifacts --ts-tarball "$(ls artifacts/typhondb-client-*.tgz)"

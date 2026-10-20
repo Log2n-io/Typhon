@@ -36,9 +36,11 @@ town while it is in or near it, with a completion signal a client can act on: on
   keys alone. It is in no realm and in no cell, and it has replication state only while some session holds a key it carries: a cluster of it gets
   a block when a held key needs one, and gives it back once unneeded for 64 ticks. A key completes only once every member has that state and has
   entered. A Versioned key on such a member may be written off the tick; the fill reads the commits' moves beside the index, so none is lost.
-- **Group keys are engine-wide, not per realm.** A positionless member belongs to no realm, so a key is one group wherever it is held: two realms
-  whose regions use key 7 — or whose sessions subscribe to it — see the same members. That is how data is shared across realms (a guild roster seen
-  from every instance); an application that wants instances isolated gives each its own keys, and an explicit set's `admit` decides who may ask.
+- **A positioned member's key is its realm's; a positionless member's is engine-wide.** A positioned member — a building with a place in a realm —
+  is held only by sessions of its own realm: one map spawned in several realms with the same keys stays isolated, each realm's town 7 holding its own
+  buildings. A positionless member belongs to no realm, so its key is one group wherever it is held: two realms whose regions use key 7 — or whose
+  sessions subscribe to it — see the same positionless members. That is how data is shared across realms (a guild roster seen from every instance);
+  an application that wants positionless data isolated gives each instance its own keys, and an explicit set's `admit` decides who may ask.
 
 ## 💻 Usage
 
@@ -79,7 +81,8 @@ ctx.Subscriptions.Session(session).SetSources("myLists", accountId);   // the se
 
 On the client: `store.IsGroupComplete(set, key)`, `store.CompleteGroups` and the frame's `store.Groups` (.NET);
 `applier.groups.isComplete(set, key)` (TypeScript); `typhon_group_is_complete` and `typhon_groups_get` (C). The set's index is its position
-in the catalog's `groupSets`, in name order.
+in the catalog's `groupSets`, in name order. Whether a Region set's selection is whole — every group the observer meets held — is
+`store.GroupSetOverLimit(set) == 0` (.NET), `applier.groups.overLimit(set) === 0` (TypeScript), `typhon_group_set_over_limit` (C).
 
 Asking for a key, in each SDK — the answer arrives once the key's members are in the store:
 
@@ -107,14 +110,25 @@ drops what is still waiting — a new session holds none of it.
 - Refused at `Start`: a set with no region, groups on a `World` or `ClientRegion` observer, a key that is not an integer, not sparse and
   multi-value, on a `Transient` component (#1162), or of another signedness than its region key, a member with no projection, an observer
   naming an archetype with no position, more than four sets per archetype or 256 per runtime, an extent of another type, and a declaration
-  without `MaxGroupsPerSession` (at most 1 024).
+  without `MaxGroupsPerSession` (at most 1 048 576 — a rail against a mistyped value, not a cost).
 - A region in a realm other than 0 needs a positioned region archetype: one with no spatial field has no realm, and its regions are realm 0's.
 - A profile may name groups and no archetype: its Sphere then holds the towns' members and nothing by geometry.
-- Past `MaxGroupsPerSession` towns met at once, the kept ones and then the nearest are held and the rest counted.
+- **A member held through a group stays held when the Sphere narrows or moves away from it**: it leaves only once neither a held key nor the
+  geometry holds it. A test that asserts what a Sphere holds sees the town's members too, the day a set is declared — stand the session outside
+  every town to test the sphere alone.
+- `MaxGroupsPerSession` is a bound, not a reservation: a session's group state costs about 12 B a slot, committed and pending each, its slots
+  at most four times the keys it holds; its per-frame group work grows with those keys — never with the bound (#1407). It bounds the keys
+  *admitted*: a key on its way out (below) can keep a session above it for a few frames.
+- Past `MaxGroupsPerSession` towns met at once, the kept ones and then the nearest are held and the rest counted; the session is told how many
+  it left out (`GROUP_TRUNCATED{set, over}`, again after a `RESET`, 0 once it holds every town it meets), so a client can tell a whole selection
+  from a cut one — `GROUP_COMPLETE` only ever says one group is whole.
+- A frame completes at most `EnterBudgetPerFrame` groups and releases at most as many — a completion costs a unit of the budget even with no
+  member, and a group past the release budget stays held until a later frame releases it — so thousands of groups met or given back at once
+  spread over frames.
 - Explicit and shared sets: a profile names them with `Groups(set)`, no reach; at most `MaxGroupsPerSession` keys per set, a client's and the server's
-  together; `SubscribeRequest` is rate-limited to 5 a second past a burst of `MaxGroupsPerSession` (the catalog says so: a login may subscribe every
-  key it may hold at once), and a request past it — or past the answers a session may be owed, twice `MaxGroupsPerSession` and at least 64 — is an
-  `ACK`, not an answer. A handler that throws or returns `default` refuses the request `Denied`; a subscription still filling when the session's profile stops
+  together; `SubscribeRequest` is rate-limited to 5 a second past a burst of `MaxGroupsPerSession` clamped to 5–1 024 (the catalog says so: a
+  login may subscribe every key it may hold at once, up to 1 024), and a request past it — or past the answers a session may be owed, twice the
+  burst and at least 64 — is an `ACK`, not an answer. A handler that throws or returns `default` refuses the request `Denied`; a subscription still filling when the session's profile stops
   naming the set is answered `NotInProfile`. A realm-kind variant names the same explicit sets as its profile.
 - Visibility tags apply to members as to everything else ([Profiles & observers](./profiles-observers.md)): a town is complete when every member
   the session sees has entered, and a hidden member is never sent.

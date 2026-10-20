@@ -110,9 +110,11 @@ typedef struct typhon_realm
 /* SOURCES group record kinds (14 § 3.5). */
 #define TYPHON_GROUP_COMPLETE 2u
 #define TYPHON_GROUP_RELEASED 3u
+#define TYPHON_GROUP_TRUNCATED 4u
 
-/* A group lifecycle record: TYPHON_GROUP_COMPLETE (every current member has entered, with the enters it completes) or
- * TYPHON_GROUP_RELEASED (no longer held; its members' leaves are in the same frame), the set's wire index and the key. */
+/* A group lifecycle record: TYPHON_GROUP_COMPLETE (every current member has entered, with the enters it completes),
+ * TYPHON_GROUP_RELEASED (no longer held; its members' leaves are in the same frame) or TYPHON_GROUP_TRUNCATED (#1407: the session's observer
+ * meets `key` more groups of a Region set than the server lets it hold, 0 once it holds every one), the set's wire index and the key. */
 typedef struct typhon_group_record
 {
     uint32_t kind;
@@ -287,6 +289,9 @@ TYPHON_API typhon_status typhon_groups_get(const typhon_client* client, const ty
 TYPHON_API int32_t typhon_group_is_complete(const typhon_client* client, uint32_t set, int64_t key);
 /* Every group held complete, ascending by set then key; valid until the next frame applies. */
 TYPHON_API typhon_status typhon_complete_groups_get(const typhon_client* client, const typhon_complete_group** groups, size_t* count);
+/* How many groups of a Region set the session meets and does not hold, past the server's MaxGroupsPerSession (#1407): the last
+ * TYPHON_GROUP_TRUNCATED since the last RESET, 0 when none - the set's selection is whole. */
+TYPHON_API uint32_t typhon_group_set_over_limit(const typhon_client* client, uint32_t set);
 
 /* Render time: local monotonic ms, advancing the clock, and the time motion is evaluated at. */
 TYPHON_API double typhon_client_now_ms(const typhon_client* client);

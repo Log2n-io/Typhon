@@ -1425,6 +1425,21 @@ internal sealed unsafe partial class SessionTable : IDisposable
     /// <returns>The budget in bytes per second.</returns>
     public int BudgetOf(SessionId session) => TryGetRow(session, out var row) ? row->BytesPerSecond : 0;
 
+    /// <summary>
+    /// The largest frame a session may be sent (<see cref="SessionLimits.FrameBytes"/>, resolved against the operator's ceiling), 0 when the identity is
+    /// stale. Tick side, without the gate: written before the session is opened, never after.
+    /// </summary>
+    public int FrameBytesOf(SessionId session) => TryGetRow(session, out var row) ? row->FrameBytes : 0;
+
+    /// <summary>Tests only: a session's frame limit, as an admission's <see cref="SessionLimits.FrameBytes"/> would set it, resolved the same way.</summary>
+    internal void SetFrameBytesForTest(SessionId session, int frameBytes)
+    {
+        if (TryGetRow(session, out var row))
+        {
+            row->FrameBytes = Resolve(frameBytes, _options.FrameBytes);
+        }
+    }
+
     /// <summary>A session's visibility tag mask (14 § 6), 0 for public only. Tick side, without the gate, as <see cref="ControlledOf"/>.</summary>
     /// <param name="session">The identity.</param>
     /// <returns>The mask.</returns>

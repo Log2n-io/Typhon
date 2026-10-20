@@ -282,8 +282,11 @@ event under the old and the new key — the **member log**, kept `LogDepth` tick
 A key that becomes held **fills** under what the cells left of the enter budget, in ascending netId behind a cursor — `netId < cursor` is the
 group's analogue of a delivered cell, so "held" stays exact while a fill spans frames — and is announced `GROUP_COMPLETE` once no current member
 is missing; a key let go sends `GROUP_RELEASED` with its members' leaves. A post-pass keeps the union honest: a geometric leave of a member its
-key still holds is dropped, a member moving between two held keys is an update. Per session, the cost is its held keys and their cursors
-(`MaxGroupsPerSession`), never its members.
+key still holds is dropped, a member moving between two held keys is an update. Per session, the cost is the keys it holds and their cursors,
+never its members and never the bound (`MaxGroupsPerSession`, up to 2^20): each side — committed, pending — is a key-sorted array grown with use,
+and the commit swaps the two. The frame's work on them is merges in key order. Past the bound the session is told how many Region keys it left
+out (`GROUP_TRUNCATED`), and a frame completes at most the enter budget's keys and releases at most as many, so a mass arrival or departure
+spans frames. A Sphere is the only observer that holds keys: a session switched to another gives them back with a RESET.
 
 **Positionless members** have no cell, so they are reachable only through groups. Their events go to one engine-wide unplaced log instead of the
 cell index; their blocks and identities are **lazy** — attached when a held key reaches their cluster, released 64 ticks after none does — so a

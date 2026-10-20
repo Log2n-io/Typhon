@@ -206,6 +206,7 @@ void TickReader::ReadMessage(std::span<const std::uint8_t> message, TickSink& si
                         }
                         case SourceStatus::GroupComplete:
                         case SourceStatus::GroupReleased:
+                        case SourceStatus::GroupTruncated:
                         {
                             const std::uint32_t set = r.Varu();
                             if (set >= plan_->GroupSets().size())
@@ -213,7 +214,8 @@ void TickReader::ReadMessage(std::span<const std::uint8_t> message, TickSink& si
                                 throw Malformed("SOURCES group set " + std::to_string(set) + " is not in the catalog");
                             }
 
-                            sink.Group(kind, set, static_cast<std::int64_t>(r.Vari64()));
+                            sink.Group(kind, set, kind == SourceStatus::GroupTruncated ? static_cast<std::int64_t>(r.Varu())
+                                                                                       : static_cast<std::int64_t>(r.Vari64()));
                             break;
                         }
                         default:

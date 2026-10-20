@@ -15,7 +15,7 @@ Inline fixed-width string fields (`String64`, 64 bytes) cover short identifiers 
 
 ## ⚙️ How it works (in brief)
 
-A string is UTF-8 encoded, then sliced into chunk-sized blocks; each chunk holds a small header (bytes remaining, next chunk id) plus its slice of the payload, with chunks linked forward into a chain. `StoreString` allocates the whole chain up front, writes the slices, and returns the id of the root chunk — that id is the string's handle. `LoadString` walks the chain from the root chunk, copying each slice into a buffer and decoding back to UTF-8 once the chain is exhausted. `DeleteString` walks the same chain, freeing each chunk back to the owning `ChunkBasedSegment`. The type is generic over `TStore : IPageStore`, so it works unmodified over both the persistent (MMF-backed) and transient (heap-backed) storage backends — see [Pluggable Storage Backend](pluggable-storage-backend/README.md).
+A string is UTF-8 encoded, then sliced into chunk-sized blocks; each chunk holds a small header (bytes remaining, next chunk id) plus its slice of the payload, with chunks linked forward into a chain. `StoreString` allocates the whole chain up front, writes the slices, and returns the id of the root chunk — that id is the string's handle. `LoadString` walks the chain from the root chunk, copying each slice into a buffer and decoding back to UTF-8 once the chain is exhausted. `DeleteString` walks the same chain, freeing each chunk back to the owning `ChunkBasedSegment`. The type is generic over `TStore : IPageStore`, so it works unmodified over both the persistent (page-cache-backed) and transient (heap-backed) storage backends — see [Pluggable Storage Backend](pluggable-storage-backend/README.md).
 
 ## 💻 Usage
 

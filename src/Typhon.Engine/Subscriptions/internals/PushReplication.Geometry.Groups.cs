@@ -438,20 +438,48 @@ internal sealed unsafe partial class PushReplication<TEvent>
     internal override GroupKeyState GroupKeyStateOf(SessionId session, int set, long key)
     {
         var gs = GroupStateAtOrNull(L(session));
-        if (gs == null || gs.Generation != session.Generation || (uint)set >= (uint)gs.PCount.Length)
+        if (gs == null || gs.Generation != session.Generation || (uint)set >= (uint)gs.SetCount)
         {
             return GroupKeyState.NotHeld;
         }
 
-        var max = gs.Max;
-        if (!IsHeldKey(gs.PKeys, set * max, gs.PCount[set], key))
+        var pending = gs.Pending(set);
+        var i = pending.IndexOf(key);
+        if (i < 0)
         {
             return GroupKeyState.NotHeld;
         }
 
-        return GroupSessionState.CursorOf(gs.PKeys, gs.PCursor, set * max, gs.PCount[set], key) == GroupSessionState.Complete
-            ? GroupKeyState.Complete
-            : GroupKeyState.Filling;
+        return pending.Cursors[i] == GroupSessionState.Complete ? GroupKeyState.Complete : GroupKeyState.Filling;
+    }
+
+    internal override void WithholdCompletions(SessionId session, List<GroupRecord> records)
+    {
+        var gs = GroupStateAtOrNull(L(session));
+        var write = 0;
+        for (var read = 0; read < records.Count; read++)
+        {
+            var record = records[read];
+            if (record.Kind != GroupRecordKind.Complete)
+            {
+                records[write++] = record;
+                continue;
+            }
+
+            // HeldAll holds every member (CursorOf > netId), and the next fill completes the key; the fit withholds it again while an enter is owed. A
+            // completion was decided by this frame's fill, so its pending side is the frame's own, never the committed one.
+            if (gs != null && gs.Generation == session.Generation && (uint)record.Set < (uint)gs.SetCount)
+            {
+                var pending = gs.Pending(record.Set);
+                var i = pending.IndexOf(record.Key);
+                if (i >= 0 && pending.Cursors[i] == GroupSessionState.Complete)
+                {
+                    pending.Cursors[i] = GroupSessionState.HeldAll;
+                }
+            }
+        }
+
+        records.RemoveRange(write, records.Count - write);
     }
 
     internal override void ReadMemberKeys(int archetype, nint block, int slot, uint netId, ref GroupFold.KeySlots keys)
@@ -473,13 +501,10 @@ internal sealed unsafe partial class PushReplication<TEvent>
         }
 
         // The keys the last published frame held, a pending RESET or not: the client still holds them until that RESET is published.
-        var max = gs.Max;
-        var published = gs.PublishedCount;
         for (var g = 0; g < groupKeys.Length; g++)
         {
             var key = CurrentKey((ushort)archetype, block, (byte)slot, netId, groupKeys[g].Slot);
-            var set = groupKeys[g].Set;
-            if (key != 0 && GroupSessionState.CursorOf(gs.CKeys, gs.CCursor, set * max, published[set], key) > netId)
+            if (key != 0 && gs.Published(groupKeys[g].Set).CursorOf(key) > netId)
             {
                 return true;
             }
@@ -488,10 +513,21 @@ internal sealed unsafe partial class PushReplication<TEvent>
         return false;
     }
 
+    // A slot handed to a new session holds no key: a generation number alone cannot tell two sessions apart, since every session slot counts its own.
+    private protected override void ResetSlot(int local)
+    {
+        base.ResetSlot(local);
+        if ((uint)local < (uint)_groupSessions.Length && _groupSessions[local] is { } gs)
+        {
+            gs.Clear();
+            gs.Generation = 0;
+        }
+    }
+
     private GroupSessionState GroupStateOf(int local, ushort generation)
     {
         Debug.Assert((uint)local < (uint)_groupSessions.Length, "the group sessions are sized with the session slots");
-        var gs = _groupSessions[local] ??= new GroupSessionState(GroupSets.Length, MaxGroupsPerSession);
+        var gs = _groupSessions[local] ??= new GroupSessionState(GroupSets.Length);
         if (gs.Generation != generation)
         {
             gs.Clear();
@@ -508,16 +544,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
     {
         if ((uint)local < (uint)_groupSessions.Length && _groupSessions[local] is { } gs && gs.Generation == generation)
         {
-            gs.Reset = false;
-            if (reset)
-            {
-                Array.Clear(gs.PCount);
-                return;
-            }
-
-            Array.Copy(gs.CKeys, gs.PKeys, gs.CKeys.Length);
-            Array.Copy(gs.CCursor, gs.PCursor, gs.CCursor.Length);
-            Array.Copy(gs.CCount, gs.PCount, gs.PCount.Length);
+            gs.Hold(reset);
         }
     }
 
@@ -534,6 +561,40 @@ internal sealed unsafe partial class PushReplication<TEvent>
         return false;
     }
 
+    /// <summary>Whether the slot's session holds a key of any set — committed, or on its way to: what a profile naming no set must still release.</summary>
+    private bool HoldsAnyGroup(int local, ushort generation)
+    {
+        if ((uint)local >= (uint)_groupSessions.Length || _groupSessions[local] is not { } gs || gs.Generation != generation)
+        {
+            return false;
+        }
+
+        for (var set = 0; set < gs.SetCount; set++)
+        {
+            if (gs.Published(set).Count != 0 || gs.Pending(set).Count != 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// A session whose observer is not a Sphere holds no key (groups are a Sphere's): the keys it held under one are dropped from the pending side. True
+    /// when it held any — the caller's frame then resets, so the client drops them too and nothing a key held is left unaccounted for.
+    /// </summary>
+    private bool DropGroups(int local, ushort generation)
+    {
+        if (!HoldsAnyGroup(local, generation))
+        {
+            return false;
+        }
+
+        _groupSessions[local].Hold(reset: true);
+        return true;
+    }
+
     private void CommitGroups(int local, ushort generation)
     {
         if ((uint)local < (uint)_groupSessions.Length && _groupSessions[local] is { } gs && gs.Generation == generation)
@@ -548,13 +609,17 @@ internal sealed unsafe partial class PushReplication<TEvent>
     /// A Sphere session's group frame (14 § 3.8): which keys it holds now, their fill under the remaining enter budget, the members of the keys it released,
     /// the member events of every key it held before or holds now, and the post-pass that keeps the geometric records true to the union.
     /// </summary>
+    /// <remarks>
+    /// Its work grows with the keys the session holds and the frame's member events, never with <see cref="SubscriptionsOptions.MaxGroupsPerSession"/>
+    /// (#1407): the held keys are walked in key order against what they are compared with, and only the filling keys are ordered for the fill.
+    /// </remarks>
     /// <returns>How many enters the fill emitted.</returns>
     private int GatherGroups(int local, SessionId session, ProfileGroup[] groups, bool reset, int gap, uint tick, in Ball a, int oOriginX, int oOriginY,
         int oOriginZ, ReadOnlySpan<ushort> o, in Ball n, int nOriginX, int nOriginY, int nOriginZ, ReadOnlySpan<ushort> d, in ArchetypeSet archetypes,
-        FrameWorkerScratch scratch, int budget, ref long leaves, ref long updates)
+        FrameWorkerScratch scratch, int budget, int releaseBudget, ref long leaves, ref long updates)
     {
         var gs = GroupStateOf(local, session.Generation);
-        var max = gs.Max;
+        var max = MaxGroupsPerSession;
 
         // A RESET clears what the client holds: every key is filled and completed again (P11). Read through an empty view rather than cleared, so a frame
         // that is then not published leaves the committed keys as the client still has them.
@@ -566,123 +631,183 @@ internal sealed unsafe partial class PushReplication<TEvent>
         gs.Reset = reset;
 
         // ── 1. The keys this frame moves to: the regions the anchor meets, the held ones under hysteresis; an explicit set's requested keys, a shared
-        //       set's one ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-        Array.Clear(gs.PCount);
+        //       set's one. A set the profile no longer names moves to none ──────────────────────────────────────────────────────────────────────────
+        gs.BeginFrame();
+        scratch.FillOrderCount = 0;
         Span<long> sharedKey = stackalloc long[1];
-        foreach (var group in groups)
+        for (var g = 0; g < groups.Length; g++)
         {
+            var group = groups[g];
             var set = group.Set;
             var compiled = GroupSets[set];
-            var met = 0;
+            var committed = gs.Committed(set);
             if (compiled.Selector != GroupSelector.Region)
             {
                 // Not met by geometry (14 § 4): every key is at distance 0, so the fill takes them in key order; the bound was the request's.
                 sharedKey[0] = compiled.SharedKey;
                 var keys = compiled.Selector == GroupSelector.Shared ? sharedKey : Requests != null ? Requests.KeysOf(session, set) : default;
-                for (var k = 0; k < keys.Length && met < max; k++)
+                var count = Math.Min(keys.Length, max);
+                var pending = gs.BeginPending(set, count);
+                var walk = 0;
+                for (var k = 0; k < count; k++)
                 {
-                    var cursor = GroupSessionState.CursorOf(gs.CKeys, gs.CCursor, set * max, gs.CCount[set], keys[k]);
-                    var kept = cursor != 0 || IsHeldKey(gs.CKeys, set * max, gs.CCount[set], keys[k]);
-                    gs.PKeys[(set * max) + met] = keys[k];
-                    gs.PCursor[(set * max) + met] = kept ? cursor : 0u;
-                    gs.PDistance[(set * max) + met] = 0d;
-                    met++;
+                    var cursor = CommittedCursor(committed, keys[k], ref walk, out _);
+                    pending.Keys[k] = keys[k];
+                    pending.Cursors[k] = cursor;
+                    if (cursor != GroupSessionState.Complete)
+                    {
+                        AddFillOrder(scratch, g, 0d, k);
+                    }
                 }
 
-                gs.PCount[set] = met;
+                if (count != 0)
+                {
+                    pending.Count = count;
+                }
+
                 continue;
             }
 
-            // A 2D extent lies on the plane z = 0, where it was filed: its sessions look it up there, whatever their altitude.
+            // A 2D extent lies on the plane z = 0, where it was filed: its sessions look it up there, whatever their altitude. A cell's regions and the
+            // oversized list are each in key order, so the committed keys are walked alongside them.
             var cz = Is2D(compiled.Region.ExtentType) ? CellZ(0d) : CellZ(n.Z);
             var cellKey = TEvent.Key(CellX(n.X), CellY(n.Y), cz);
             var cells = _regionCells.Length > set ? _regionCells[set] : [];
-            var count = _regionCellCount.Length > set ? _regionCellCount[set] : 0;
-            var lo = LowerBound(cells, count, cellKey);
-            for (var i = lo; i < count && cells[i] == cellKey; i++)
+            var cellCount = _regionCellCount.Length > set ? _regionCellCount[set] : 0;
+            var met = 0;
+            var inKeyOrder = true;
+            var cellWalk = 0;
+            for (var i = LowerBound(cells, cellCount, cellKey); i < cellCount && cells[i] == cellKey; i++)
             {
-                Meet(gs, set, max, group, compiled, _regionIds[set][i], in n, scratch, ref met);
+                Meet(committed, ref cellWalk, set, group, compiled, _regionIds[set][i], in n, scratch, ref met, ref inKeyOrder);
             }
 
+            var oversizedWalk = 0;
             for (var i = 0; _regionOversizedCount.Length > set && i < _regionOversizedCount[set]; i++)
             {
-                Meet(gs, set, max, group, compiled, _regionOversized[set][i], in n, scratch, ref met);
+                Meet(committed, ref oversizedWalk, set, group, compiled, _regionOversized[set][i], in n, scratch, ref met, ref inKeyOrder);
             }
 
-            // Kept keys first, then the nearest new ones; past the per-session bound a key is not held, and counted.
+            // Kept keys first, then the nearest new ones; past the per-session bound a key is not held, counted, and the session told how many.
             var candidates = scratch.GroupMet.AsSpan(0, met);
-            candidates.Sort(default(GroupMetAdmission));
+            var over = 0;
             if (met > max)
             {
-                Interlocked.Add(ref GroupsOverLimit, met - max);
-                met = max;
-                candidates = candidates[..met];
+                candidates.Sort(default(GroupMetAdmission));
+                over = met - max;
+                Interlocked.Add(ref GroupsOverLimit, over);
+                candidates = candidates[..max];
+                candidates.Sort(default(GroupMetByKey));
             }
-
-            candidates.Sort(default(GroupMetByKey));
-            for (var i = 0; i < met; i++)
+            else if (!inKeyOrder)
             {
-                gs.PKeys[(set * max) + i] = candidates[i].Key;
-                gs.PCursor[(set * max) + i] = candidates[i].Kept ? candidates[i].Cursor : 0u;
-                gs.PDistance[(set * max) + i] = candidates[i].Distance;
+                candidates.Sort(default(GroupMetByKey));
             }
 
-            gs.PCount[set] = met;
+            var held = gs.BeginPending(set, candidates.Length);
+            for (var i = 0; i < candidates.Length; i++)
+            {
+                ref readonly var c = ref candidates[i];
+                held.Keys[i] = c.Key;
+                held.Cursors[i] = c.Cursor;
+                if (c.Cursor != GroupSessionState.Complete)
+                {
+                    AddFillOrder(scratch, g, c.Distance, i);
+                }
+            }
+
+            if (candidates.Length != 0)
+            {
+                held.Count = candidates.Length;
+            }
+
+            gs.SetPendingOver(set, over);
         }
 
-        // ── 2. Fill cursors, fixed before any member is decided: the budget alone moves them, nearest filling key first ──────────────────────────
-        var spent = 0;
-        Span<int> orders = stackalloc int[max];   // MaxGroupsPerSession is at most 1 024: 4 KB
-        foreach (var group in groups)
+        // A set the profile no longer names moves to none: its free side shrinks back, so what it held stops costing (#1407).
+        for (var set = 0; set < gs.SetCount; set++)
         {
-            var set = group.Set;
-            var count = gs.PCount[set];
-            var order = orders[..count];
-            for (var i = 0; i < count; i++)
+            if (!NamedBy(groups, set))
             {
-                order[i] = i;
-            }
-
-            // Insertion sort by distance: at most MaxGroupsPerSession keys, and usually one or two.
-            for (var i = 1; i < count; i++)
-            {
-                var v = order[i];
-                var j = i - 1;
-                while (j >= 0 && gs.PDistance[(set * max) + order[j]] > gs.PDistance[(set * max) + v])
-                {
-                    order[j + 1] = order[j];
-                    j--;
-                }
-
-                order[j + 1] = v;
-            }
-
-            for (var o2 = 0; o2 < count; o2++)
-            {
-                var at = (set * max) + order[o2];
-                if (gs.PCursor[at] == GroupSessionState.Complete)
-                {
-                    continue;
-                }
-
-                // A spent budget moves no cursor: no read. A key whose members are all gone completes on the next frame with budget left.
-                if (spent >= budget)
-                {
-                    continue;
-                }
-
-                var from = gs.PCursor[at];
-                var members = ReadMembers(set, gs.PKeys[at], from, uint.MaxValue, scratch, sort: true, out var pending);
-                var take = Math.Min(members, budget - spent);
-                spent += take;
-
-                // A member with no replication state yet — a positionless one whose block a held key is about to attach, or one the pool could not give a
-                // block — cannot be sent, so the key is not complete while one is pending (14 § 5): the cursor passes what was taken and waits.
-                gs.PCursor[at] = take < members ? scratch.FillMembers[take].NetId
-                    : pending > 0 ? (members > 0 ? scratch.FillMembers[members - 1].NetId + 1 : from)
-                    : GroupSessionState.Complete;
+                gs.BeginPending(set, 0);
             }
         }
+
+        // The truncation, as a level: said whenever it differs from what the client was last told — after a RESET, which cleared that, again (#1407).
+        for (var set = 0; set < gs.SetCount; set++)
+        {
+            var over = gs.PendingOver(set);
+            if (over != gs.CommittedOver(set))
+            {
+                scratch.GroupRecords.Add(new GroupRecord(GroupRecordKind.Truncated, set, over));
+            }
+        }
+
+        // ── 2. Fill cursors, fixed before any member is decided: the budget alone moves them, nearest filling key first. A completion spends at least one
+        //       unit, so a frame carries no more GROUP_COMPLETE than the budget, however many keys are empty ────────────────────────────────────────────
+        var spent = 0;
+        var order = scratch.FillOrder.AsSpan(0, scratch.FillOrderCount);
+        if (order.Length > 1)
+        {
+            order.Sort(default(GroupFillOrderComparer));
+        }
+
+        // Completions withheld last frame first (15 § 4.6): every member is held already, so each spends its unit and none waits for budget — there are
+        // never more of them than one frame's completions, and a key a nearer fill starved would break "the first frame that owes no enter" (SUB-33).
+        foreach (ref readonly var f in order)
+        {
+            var withheld = gs.Pending(groups[f.Group].Set);
+            if (withheld.Cursors[f.Index] == GroupSessionState.HeldAll)
+            {
+                withheld.Cursors[f.Index] = GroupSessionState.Complete;
+                spent++;
+            }
+        }
+
+        foreach (ref readonly var f in order)
+        {
+            // A spent budget moves no cursor: no read. A key whose members are all gone completes on the next frame with budget left.
+            if (spent >= budget || scratch.FillSpent >= scratch.FillAllowance)
+            {
+                break;
+            }
+
+            var set = groups[f.Group].Set;
+            var pending = gs.Pending(set);
+            var from = pending.Cursors[f.Index];
+            if (from == GroupSessionState.Complete)
+            {
+                continue;
+            }
+
+            var members = ReadMembers(set, pending.Keys[f.Index], from, uint.MaxValue, scratch, sort: true, out var unresolved);
+            var take = Math.Min(members, budget - spent);
+
+            // The byte allowance (15 § 4.2): the longest prefix whose enters it admits, the last one allowed past it as a cell's last entity is.
+            for (var m = 0; m < take; m++)
+            {
+                if (scratch.FillSpent >= scratch.FillAllowance)
+                {
+                    take = m;
+                    break;
+                }
+
+                ref var member = ref scratch.FillMembers[m];
+                scratch.FillSpent += MeterEnter(member.Archetype, member.Block, member.Slot);
+            }
+
+            // A member with no replication state yet — a positionless one whose block a held key is about to attach, or one the pool could not give a
+            // block — cannot be sent, so the key is not complete while one is pending (14 § 5): the cursor passes what was taken and waits.
+            var cursor = take < members ? scratch.FillMembers[take].NetId
+                : unresolved > 0 ? (members > 0 ? scratch.FillMembers[members - 1].NetId + 1 : from)
+                : GroupSessionState.Complete;
+            pending.Cursors[f.Index] = cursor;
+            spent += cursor == GroupSessionState.Complete ? Math.Max(take, 1) : take;
+        }
+
+        // ── 2b. Releases, bounded: past the release budget a key the session no longer meets stays held, its cursor as committed, and is released by a
+        //        later frame — so a frame releasing thousands of keys at once cannot outgrow the frame (#1407) ────────────────────────────────────────
+        DeferReleases(gs, scratch, releaseBudget);
 
         // ── 3. The member events of every key held before or now, folded per identity over the frame's window ────────────────────────────────────
         var first = gap > 0 ? tick - (uint)gap : tick;
@@ -694,11 +819,13 @@ internal sealed unsafe partial class PushReplication<TEvent>
                 continue;
             }
 
-            foreach (var group in groups)
+            for (var set = 0; set < gs.SetCount; set++)
             {
-                var set = group.Set;
-                FoldKeys(slot, t, set, gs.CKeys, set * max, gs.CCount[set], scratch);
-                FoldKeys(slot, t, set, gs.PKeys, set * max, gs.PCount[set], scratch);
+                var matches = MatchHeld(slot.Members, slot.MemberCount, set, gs.Committed(set), gs.Pending(set), scratch);
+                for (var m = 0; m < matches; m++)
+                {
+                    FoldEntry(slot, scratch.HeldMatches[m], t, set, scratch);
+                }
             }
         }
 
@@ -711,11 +838,13 @@ internal sealed unsafe partial class PushReplication<TEvent>
                 continue;
             }
 
-            foreach (var group in groups)
+            for (var set = 0; set < gs.SetCount; set++)
             {
-                var set = group.Set;
-                FoldUnplacedKeys(unplaced, t, set, gs.CKeys, set * max, gs.CCount[set], scratch);
-                FoldUnplacedKeys(unplaced, t, set, gs.PKeys, set * max, gs.PCount[set], scratch);
+                var matches = MatchHeld(unplaced.Members, unplaced.MemberCount, set, gs.Committed(set), gs.Pending(set), scratch);
+                for (var m = 0; m < matches; m++)
+                {
+                    FoldUnplacedEntry(unplaced, scratch.HeldMatches[m], t, set, scratch);
+                }
             }
         }
 
@@ -798,16 +927,25 @@ internal sealed unsafe partial class PushReplication<TEvent>
             }
         }
 
-        // ── 4. Fill: the members the cursors now take that have no event in the window (those were the events') ─────────────────────────────────
-        foreach (var group in groups)
+        // ── 4–5. Per set — the profile's in its order, then any other the session still holds — the fill and the releases ─────────────────────────
+        for (var k = 0; k < groups.Length + gs.SetCount; k++)
         {
-            var set = group.Set;
-            for (var i = 0; i < gs.PCount[set]; i++)
+            var set = k < groups.Length ? groups[k].Set : k - groups.Length;
+            if (k >= groups.Length && NamedBy(groups, set))
             {
-                var at = (set * max) + i;
-                var key = gs.PKeys[at];
-                var before = GroupSessionState.CursorOf(gs.CKeys, gs.CCursor, set * max, gs.CCount[set], key);
-                var after = gs.PCursor[at];
+                continue;
+            }
+
+            var committed = gs.Committed(set);
+            var pending = gs.Pending(set);
+
+            // ── 4. Fill: the members the cursors now take that have no event in the window (those were the events') ─────────────────────────────
+            var walk = 0;
+            for (var i = 0; i < pending.Count; i++)
+            {
+                var key = pending.Keys[i];
+                var before = CommittedCursor(committed, key, ref walk, out _);
+                var after = pending.Cursors[i];
                 if (before == GroupSessionState.Complete || after == before)
                 {
                     continue;
@@ -845,17 +983,21 @@ internal sealed unsafe partial class PushReplication<TEvent>
             }
 
             // ── 5. Release: a key held before and not now — its members not held otherwise leave, and the key is released ─────────────────────────
-            for (var i = 0; i < gs.CCount[set]; i++)
+            walk = 0;
+            for (var i = 0; i < committed.Count; i++)
             {
-                var at = (set * max) + i;
-                var key = gs.CKeys[at];
-                if (IsHeldKey(gs.PKeys, set * max, gs.PCount[set], key))
+                var key = committed.Keys[i];
+                while (walk < pending.Count && pending.Keys[walk] < key)
+                {
+                    walk++;
+                }
+
+                if (walk < pending.Count && pending.Keys[walk] == key)
                 {
                     continue;
                 }
 
-                var cursor = gs.CCursor[at];
-                var members = ReadMembers(set, key, 0u, cursor, scratch, sort: false, out _);
+                var members = ReadMembers(set, key, 0u, committed.Cursors[i], scratch, sort: false, out _);
                 for (var m = 0; m < members; m++)
                 {
                     ref var member = ref scratch.FillMembers[m];
@@ -889,14 +1031,132 @@ internal sealed unsafe partial class PushReplication<TEvent>
         return entered;
     }
 
-    /// <summary>Step 1's test for one region of a set: met within the reach, kept within reach plus margin when the committed keys hold it.</summary>
-    private void Meet(GroupSessionState gs, int set, int max, ProfileGroup group, CompiledGroupSet compiled, int region, in Ball n,
-        FrameWorkerScratch scratch, ref int met)
+    private static bool NamedBy(ProfileGroup[] groups, int set)
+    {
+        foreach (var group in groups)
+        {
+            if (group.Set == set)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The committed cursor of <paramref name="key"/>, walking <paramref name="committed"/> from <paramref name="walk"/>: keys asked in ascending order cost
+    /// one pass over the committed ones. 0 when it is not held, and <paramref name="held"/> then false.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint CommittedCursor(HeldKeys committed, long key, ref int walk, out bool held)
+    {
+        while (walk < committed.Count && committed.Keys[walk] < key)
+        {
+            walk++;
+        }
+
+        held = walk < committed.Count && committed.Keys[walk] == key;
+        return held ? committed.Cursors[walk] : 0u;
+    }
+
+    private static void AddFillOrder(FrameWorkerScratch scratch, int group, double distance, int index)
+    {
+        if (scratch.FillOrderCount == scratch.FillOrder.Length)
+        {
+            Array.Resize(ref scratch.FillOrder, scratch.FillOrderCount * 2);
+        }
+
+        scratch.FillOrder[scratch.FillOrderCount++] = new GroupFillOrder { Group = group, Distance = distance, Index = index };
+    }
+
+    /// <summary>
+    /// Keeps held, past <paramref name="releaseBudget"/> releases this frame, the keys the session held and no longer holds: each goes back into the pending
+    /// keys with its committed cursor — still held, still filling where it was — to be released by a later frame (#1407).
+    /// </summary>
+    private void DeferReleases(GroupSessionState gs, FrameWorkerScratch scratch, int releaseBudget)
+    {
+        var released = 0;
+        for (var set = 0; set < gs.SetCount; set++)
+        {
+            var committed = gs.Committed(set);
+            if (committed.Count == 0)
+            {
+                continue;
+            }
+
+            var pending = gs.Pending(set);
+            var deferred = 0;
+            var walk = 0;
+            for (var i = 0; i < committed.Count; i++)
+            {
+                var key = committed.Keys[i];
+                while (walk < pending.Count && pending.Keys[walk] < key)
+                {
+                    walk++;
+                }
+
+                if (walk < pending.Count && pending.Keys[walk] == key)
+                {
+                    continue;
+                }
+
+                if (released < releaseBudget)
+                {
+                    released++;
+                    continue;
+                }
+
+                if (deferred == scratch.GroupMet.Length)
+                {
+                    Array.Resize(ref scratch.GroupMet, deferred * 2);
+                }
+
+                scratch.GroupMet[deferred++] = new GroupMet { Key = key, Cursor = committed.Cursors[i] };
+            }
+
+            if (deferred == 0)
+            {
+                continue;
+            }
+
+            Interlocked.Add(ref GroupReleasesDeferred, deferred);
+
+            // Merged in from the back: both runs are in key order and share no key.
+            var count = pending.Count;
+            pending = gs.GrowPending(set, count + deferred);
+            var p = count - 1;
+            var q = deferred - 1;
+            for (var w = count + deferred - 1; q >= 0; w--)
+            {
+                if (p >= 0 && pending.Keys[p] > scratch.GroupMet[q].Key)
+                {
+                    pending.Keys[w] = pending.Keys[p];
+                    pending.Cursors[w] = pending.Cursors[p];
+                    p--;
+                }
+                else
+                {
+                    pending.Keys[w] = scratch.GroupMet[q].Key;
+                    pending.Cursors[w] = scratch.GroupMet[q].Cursor;
+                    q--;
+                }
+            }
+
+            pending.Count = count + deferred;
+        }
+    }
+
+    /// <summary>
+    /// Step 1's test for one region of a set: met within the reach, kept within reach plus margin when the committed keys hold it. Regions are asked in key
+    /// order within a run, so <paramref name="walk"/> walks the committed keys once.
+    /// </summary>
+    private void Meet(HeldKeys committed, ref int walk, int set, ProfileGroup group, CompiledGroupSet compiled, int region, in Ball n,
+        FrameWorkerScratch scratch, ref int met, ref bool inKeyOrder)
     {
         ref var r = ref _regionTable[set][region];
         var distance = ExtentDistance(in r, n.X, n.Y, n.Z);
-        var cursor = GroupSessionState.CursorOf(gs.CKeys, gs.CCursor, set * max, gs.CCount[set], r.Key);
-        var kept = cursor != 0 || IsHeldKey(gs.CKeys, set * max, gs.CCount[set], r.Key);
+        var cursor = CommittedCursor(committed, r.Key, ref walk, out var kept);
         if (distance > group.ReachM && !(kept && distance <= group.ReachM + compiled.LeaveMarginM))
         {
             return;
@@ -907,6 +1167,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
             Array.Resize(ref scratch.GroupMet, met * 2);
         }
 
+        inKeyOrder &= met == 0 || scratch.GroupMet[met - 1].Key < r.Key;
         scratch.GroupMet[met++] = new GroupMet { Key = r.Key, Distance = distance, Kept = kept, Cursor = cursor };
     }
 
@@ -930,31 +1191,6 @@ internal sealed unsafe partial class PushReplication<TEvent>
         return lo;
     }
 
-    private static bool IsHeldKey(long[] keys, int at, int count, long key)
-    {
-        var lo = at;
-        var hi = at + count - 1;
-        while (lo <= hi)
-        {
-            var mid = (lo + hi) >>> 1;
-            if (keys[mid] == key)
-            {
-                return true;
-            }
-
-            if (keys[mid] < key)
-            {
-                lo = mid + 1;
-            }
-            else
-            {
-                hi = mid - 1;
-            }
-        }
-
-        return false;
-    }
-
     /// <summary>
     /// Whether some set's key held the member, before the frame (<paramref name="committed"/>) or after it: the key in the session's keys of that set, and the
     /// member below the key's fill cursor.
@@ -962,7 +1198,6 @@ internal sealed unsafe partial class PushReplication<TEvent>
     private bool KeysHeld(GroupSessionState gs, bool committed, ushort archetype, uint netId, ref GroupFold.KeySlots keys)
     {
         var groupKeys = _plans[archetype].GroupKeys;
-        var max = gs.Max;
         for (var g = 0; g < groupKeys.Length; g++)
         {
             var key = keys[groupKeys[g].Slot];
@@ -972,9 +1207,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
             }
 
             var set = groupKeys[g].Set;
-            var cursor = committed
-                ? GroupSessionState.CursorOf(gs.CKeys, gs.CCursor, set * max, gs.CCount[set], key)
-                : GroupSessionState.CursorOf(gs.PKeys, gs.PCursor, set * max, gs.PCount[set], key);
+            var cursor = committed ? gs.Committed(set).CursorOf(key) : gs.Pending(set).CursorOf(key);
             if (cursor > netId)
             {
                 return true;
@@ -1190,109 +1423,100 @@ internal sealed unsafe partial class PushReplication<TEvent>
         was = f.TagsSeen ? f.WasTags : isNow;
     }
 
-    /// <summary>Folds one tick's member entries of the held keys into the session's per-identity fold.</summary>
-    private void FoldKeys(TickLog slot, uint t, int set, long[] keys, int at, int count, FrameWorkerScratch scratch)
+    /// <summary>
+    /// The entries of one tick's member log in <paramref name="set"/> filed under a key held before (<paramref name="committed"/>) or after
+    /// (<paramref name="pending"/>) the frame, into <see cref="FrameWorkerScratch.HeldMatches"/> in log order: each filing tested against the held keys when
+    /// the filings are fewer, else each held key looked up among the filings from where the last ended — O(min · log max), never per held key and filing.
+    /// </summary>
+    /// <returns>How many entries matched.</returns>
+    internal static int MatchHeld(MemberEntry[] log, int logCount, int set, HeldKeys committed, HeldKeys pending, FrameWorkerScratch scratch)
     {
-        for (var i = 0; i < count; i++)
+        if (committed.Count == 0 && pending.Count == 0)
         {
-            var key = keys[at + i];
-            var lo = MemberLowerBound(slot, set, key);
-            for (var m = lo; m < slot.MemberCount && slot.Members[m].Set == set && slot.Members[m].Key == key; m++)
-            {
-                ref var entry = ref slot.Members[m];
-                ref var e = ref slot.Events[entry.Event];
-                var keySlot = KeySlotOf(e.Archetype, set);
-                ref var fold = ref CollectionsMarshalHelper.GetOrAdd(scratch.GroupFolds, e.NetId, out var existed);
-                if (!existed)
-                {
-                    fold = default;
-                    fold.FirstFlags = e.Flags;
-                    fold.OldX = e.OldX;
-                    fold.OldY = e.OldY;
-                    fold.OldZ = e.OldZ;
-                    fold.OldCell = e.OldKey;
-                    InitKeys(ref fold, e.Archetype, e.Block, e.Slot, e.NetId);
-                }
-
-                // A set's key before the window is its first entry's old key — whichever set's bucket met the identity first, and in whichever tick — and
-                // its key after is its last entry's new one.
-                if ((fold.SeenSlots & (1 << keySlot)) == 0)
-                {
-                    fold.Before[keySlot] = entry.Old;
-                    fold.SeenSlots |= (byte)(1 << keySlot);
-                }
-
-                fold.After[keySlot] = entry.New;
-                if (existed && fold.LastTick == t)
-                {
-                    continue;   // the same event, met again under its other key or in the other list of keys
-                }
-
-                fold.LastFlags = e.Flags;
-                fold.NewX = e.NewX;
-                fold.NewY = e.NewY;
-                fold.NewZ = e.NewZ;
-                fold.NewCell = e.NewKey;
-                fold.Block = e.Block;
-                fold.Slot = e.Slot;
-                fold.Archetype = e.Archetype;
-                fold.Groups |= e.Groups;
-                fold.Segment |= (e.Flags & PushEvent.Segment) != 0;
-                fold.LastTick = t;
-            }
+            return 0;
         }
+
+        var lo = EntryLowerBound(log, 0, logCount, set, long.MinValue);
+        var hi = lo == logCount || log[lo].Set != set ? lo : EntryLowerBound(log, lo, logCount, set + 1, long.MinValue);
+        if (lo == hi)
+        {
+            return 0;
+        }
+
+        var matches = 0;
+        if (hi - lo <= committed.Count + pending.Count)
+        {
+            var last = 0L;
+            var held = false;
+            for (var m = lo; m < hi; m++)
+            {
+                var key = log[m].Key;
+                if (m == lo || key != last)
+                {
+                    last = key;
+                    held = committed.IndexOf(key) >= 0 || pending.IndexOf(key) >= 0;
+                }
+
+                if (held)
+                {
+                    AddMatch(scratch, ref matches, m);
+                }
+            }
+
+            return matches;
+        }
+
+        // Each distinct key of the two sides, in key order.
+        var i = 0;
+        var j = 0;
+        var from = lo;
+        while ((i < committed.Count || j < pending.Count) && from < hi)
+        {
+            long key;
+            if (j >= pending.Count || (i < committed.Count && committed.Keys[i] < pending.Keys[j]))
+            {
+                key = committed.Keys[i++];
+            }
+            else if (i >= committed.Count || pending.Keys[j] < committed.Keys[i])
+            {
+                key = pending.Keys[j++];
+            }
+            else
+            {
+                key = committed.Keys[i++];
+                j++;
+            }
+
+            var m = EntryLowerBound(log, from, hi, set, key);
+            for (; m < hi && log[m].Key == key; m++)
+            {
+                AddMatch(scratch, ref matches, m);
+            }
+
+            from = m;
+        }
+
+        return matches;
     }
 
-    /// <summary>Folds one tick's positionless member entries of the held keys into the session's per-identity fold: no position, no cell.</summary>
-    private void FoldUnplacedKeys(UnplacedTick slot, uint t, int set, long[] keys, int at, int count, FrameWorkerScratch scratch)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void AddMatch(FrameWorkerScratch scratch, ref int matches, int entry)
     {
-        for (var i = 0; i < count; i++)
+        if (matches == scratch.HeldMatches.Length)
         {
-            var key = keys[at + i];
-            var lo = UnplacedLowerBound(slot, set, key);
-            for (var m = lo; m < slot.MemberCount && slot.Members[m].Set == set && slot.Members[m].Key == key; m++)
-            {
-                ref var entry = ref slot.Members[m];
-                ref var e = ref slot.Events[entry.Event];
-                var keySlot = KeySlotOf(e.Archetype, set);
-                ref var fold = ref CollectionsMarshalHelper.GetOrAdd(scratch.GroupFolds, e.NetId, out var existed);
-                if (!existed)
-                {
-                    fold = default;
-                    fold.FirstFlags = e.Flags;
-                    InitKeys(ref fold, e.Archetype, e.Block, e.Slot, e.NetId);
-                }
-
-                if ((fold.SeenSlots & (1 << keySlot)) == 0)
-                {
-                    fold.Before[keySlot] = entry.Old;
-                    fold.SeenSlots |= (byte)(1 << keySlot);
-                }
-
-                fold.After[keySlot] = entry.New;
-                if (existed && fold.LastTick == t)
-                {
-                    continue;
-                }
-
-                fold.LastFlags = e.Flags;
-                fold.Block = e.Block;
-                fold.Slot = e.Slot;
-                fold.Archetype = e.Archetype;
-                fold.Groups |= e.Groups;
-                fold.LastTick = t;
-            }
+            Array.Resize(ref scratch.HeldMatches, matches * 2);
         }
+
+        scratch.HeldMatches[matches++] = entry;
     }
 
-    private static int UnplacedLowerBound(UnplacedTick slot, int set, long key)
+    /// <summary>The first entry in [<paramref name="lo"/>, <paramref name="hi"/>) at or past (<paramref name="set"/>, <paramref name="key"/>).</summary>
+    private static int EntryLowerBound(MemberEntry[] log, int lo, int hi, int set, long key)
     {
-        var lo = 0;
-        var hi = slot.MemberCount;
         while (lo < hi)
         {
             var mid = (lo + hi) >>> 1;
-            ref var m = ref slot.Members[mid];
+            ref var m = ref log[mid];
             if (m.Set < set || (m.Set == set && m.Key < key))
             {
                 lo = mid + 1;
@@ -1304,6 +1528,85 @@ internal sealed unsafe partial class PushReplication<TEvent>
         }
 
         return lo;
+    }
+
+    /// <summary>Folds one member entry of a held key into the session's per-identity fold.</summary>
+    private void FoldEntry(TickLog slot, int index, uint t, int set, FrameWorkerScratch scratch)
+    {
+        ref var entry = ref slot.Members[index];
+        ref var e = ref slot.Events[entry.Event];
+        var keySlot = KeySlotOf(e.Archetype, set);
+        ref var fold = ref CollectionsMarshalHelper.GetOrAdd(scratch.GroupFolds, e.NetId, out var existed);
+        if (!existed)
+        {
+            fold = default;
+            fold.FirstFlags = e.Flags;
+            fold.OldX = e.OldX;
+            fold.OldY = e.OldY;
+            fold.OldZ = e.OldZ;
+            fold.OldCell = e.OldKey;
+            InitKeys(ref fold, e.Archetype, e.Block, e.Slot, e.NetId);
+        }
+
+        // A set's key before the window is its first entry's old key — whichever set's bucket met the identity first, and in whichever tick — and its key
+        // after is its last entry's new one.
+        if ((fold.SeenSlots & (1 << keySlot)) == 0)
+        {
+            fold.Before[keySlot] = entry.Old;
+            fold.SeenSlots |= (byte)(1 << keySlot);
+        }
+
+        fold.After[keySlot] = entry.New;
+        if (existed && fold.LastTick == t)
+        {
+            return;   // the same event, met again under its other key
+        }
+
+        fold.LastFlags = e.Flags;
+        fold.NewX = e.NewX;
+        fold.NewY = e.NewY;
+        fold.NewZ = e.NewZ;
+        fold.NewCell = e.NewKey;
+        fold.Block = e.Block;
+        fold.Slot = e.Slot;
+        fold.Archetype = e.Archetype;
+        fold.Groups |= e.Groups;
+        fold.Segment |= (e.Flags & PushEvent.Segment) != 0;
+        fold.LastTick = t;
+    }
+
+    /// <summary>Folds one positionless member entry of a held key into the session's per-identity fold: no position, no cell.</summary>
+    private void FoldUnplacedEntry(UnplacedTick slot, int index, uint t, int set, FrameWorkerScratch scratch)
+    {
+        ref var entry = ref slot.Members[index];
+        ref var e = ref slot.Events[entry.Event];
+        var keySlot = KeySlotOf(e.Archetype, set);
+        ref var fold = ref CollectionsMarshalHelper.GetOrAdd(scratch.GroupFolds, e.NetId, out var existed);
+        if (!existed)
+        {
+            fold = default;
+            fold.FirstFlags = e.Flags;
+            InitKeys(ref fold, e.Archetype, e.Block, e.Slot, e.NetId);
+        }
+
+        if ((fold.SeenSlots & (1 << keySlot)) == 0)
+        {
+            fold.Before[keySlot] = entry.Old;
+            fold.SeenSlots |= (byte)(1 << keySlot);
+        }
+
+        fold.After[keySlot] = entry.New;
+        if (existed && fold.LastTick == t)
+        {
+            return;
+        }
+
+        fold.LastFlags = e.Flags;
+        fold.Block = e.Block;
+        fold.Slot = e.Slot;
+        fold.Archetype = e.Archetype;
+        fold.Groups |= e.Groups;
+        fold.LastTick = t;
     }
 
     /// <summary>A fold's other sets' keys, which no held key of theirs filed: unchanged since, so the entry's current keys, on both sides.</summary>
@@ -1333,27 +1636,6 @@ internal sealed unsafe partial class PushReplication<TEvent>
         }
 
         return 0;
-    }
-
-    private static int MemberLowerBound(TickLog slot, int set, long key)
-    {
-        var lo = 0;
-        var hi = slot.MemberCount;
-        while (lo < hi)
-        {
-            var mid = (lo + hi) >>> 1;
-            ref var m = ref slot.Members[mid];
-            if (m.Set < set || (m.Set == set && m.Key < key))
-            {
-                lo = mid + 1;
-            }
-            else
-            {
-                hi = mid;
-            }
-        }
-
-        return lo;
     }
 
     /// <summary>

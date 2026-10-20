@@ -212,6 +212,39 @@ describe('FrameApplier', () => {
     expect(applier.groups.completeGroupCount).toBe(0);
   });
 
+  it('keeps a Region set’s truncation count until it changes or a RESET, never as a release (#1407)', () => {
+    const applier = new FrameApplier(plan, { initialRealm: KITCHEN });
+    const groups = (tick: number, flags: number, records: { kind: number; set: number; key: number }[]): Uint8Array =>
+      frame({
+        tick,
+        flags,
+        write: (w) => {
+          writeSourcesBlock(w, [], records);
+        },
+      });
+    applier.apply(
+      groups(1, 0, [
+        { kind: SourceStatus.GroupComplete, set: 0, key: 3 },
+        { kind: SourceStatus.GroupTruncated, set: 0, key: 3 },
+      ]),
+    );
+    expect(applier.groups.overLimit(0)).toBe(3);
+    expect(applier.groups.isComplete(0, 3)).toBe(true);
+    expect(applier.groups.overLimit(1)).toBe(0);
+
+    applier.apply(groups(2, 0, []));
+    expect(applier.groups.overLimit(0)).toBe(3);
+
+    applier.apply(groups(3, 0, [{ kind: SourceStatus.GroupTruncated, set: 0, key: 0 }]));
+    expect(applier.groups.overLimit(0)).toBe(0);
+    expect(applier.groups.isComplete(0, 3)).toBe(true);
+
+    applier.apply(groups(4, 0, [{ kind: SourceStatus.GroupTruncated, set: 0, key: 70000 }]));
+    applier.apply(groups(5, TickFlags.Reset, []));
+    expect(applier.groups.overLimit(0)).toBe(0);
+    expect(applier.world.anomalies).toBe(0);
+  });
+
   it('refuses a group record naming a set the catalog does not declare', () => {
     const applier = new FrameApplier(plan, { initialRealm: KITCHEN });
     const message = frame({

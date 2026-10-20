@@ -11,8 +11,8 @@ namespace Typhon.Engine.Tests;
 /// The defect: <c>SpawnInternal</c> allocated a <c>ComponentSegment</c> chunk per component with no cluster-eligibility
 /// check, <c>FinalizeSpawns</c> copied the payload into the cluster, and for SV/Transient the chunk then became
 /// <b>structurally unreachable</b> — the persisted <c>ClusterEntityRecord</c> has no field capable of holding its id, so
-/// nothing could ever free it. The file grew with CUMULATIVE spawns rather than live entities. Measured in the
-/// SpaceBattle demo: 491,930 <c>Bullet</c> chunks against ~1,200 live shots, and a 282 MB data file holding ~1.8 MB of
+/// nothing could ever free it. The file grew with CUMULATIVE spawns rather than live entities. Measured in a
+/// demo soak: 491,930 <c>Bullet</c> chunks against ~1,200 live shots, and a 282 MB data file holding ~1.8 MB of
 /// live entity bytes.
 /// </para>
 /// <para>

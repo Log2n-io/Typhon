@@ -1,21 +1,21 @@
 ---
 uid: feature-storage-page-cache
-title: 'Memory-Mapped Page Cache & Clock-Sweep Eviction'
+title: 'Page Cache & Clock-Sweep Eviction'
 description: 'The 8 KiB page cache underneath every Typhon structure — clock-sweep eviction and async I/O instead of trusting the OS, with backpressure instead of…'
 ---
 
-# Memory-Mapped Page Cache & Clock-Sweep Eviction
+# Page Cache & Clock-Sweep Eviction
 > The 8 KiB page cache underneath every Typhon structure — clock-sweep eviction and async I/O instead of trusting the OS, with backpressure instead of crashing when full.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Storage](./README.md)
 
 ## 🎯 What it solves
 
-Every persistent structure in Typhon — components, indexes, revision chains, segments — is built from fixed-size 8 KiB pages backed by a memory-mapped file. Keeping every page resident would blow past available RAM on any real database; relying on the OS to page things in and out naively gives no control over what gets evicted under pressure, no way to guarantee a page a thread is mid-read on stays put, and no async I/O path. The page cache is the layer every other storage feature is built on: it decides which pages are resident, picks what to evict when full, and never lets a page disappear out from under a thread still using it.
+Every persistent structure in Typhon — components, indexes, revision chains, segments — is built from fixed-size 8 KiB pages of the data file. Keeping every page resident would blow past available RAM on any real database; memory-mapping the file and letting the OS page things in and out gives no control over what gets evicted under pressure, no way to guarantee a page a thread is mid-read on stays put, and no async I/O path. The page cache is the layer every other storage feature is built on: it decides which pages are resident, picks what to evict when full, and never lets a page disappear out from under a thread still using it.
 
 ## ⚙️ How it works (in brief)
 
-The cache holds a fixed number of 8192-byte slots in natively-addressed, memory-mapped memory. Each slot moves through a 4-state lifecycle — `Free` → `Allocating` (loading from disk) → `Idle` (resident, readable) → `Exclusive` (single-writer latch) → back to `Idle`. When a slot is needed and none is free, clock-sweep eviction scans slots in circular order: each slot carries a 0–5 "second-chance" counter, bumped on access and decremented as the sweep passes over it, so a slot is only taken once its counter has decayed to 0 *and* it's otherwise unprotected (not dirty, not actively read). Allocating the next file page adjacent to the previous one is tried first, so sequential access lands in contiguous cache memory and several small I/Os batch into one. Reads and writes use async `RandomAccess` I/O instead of blocking the calling thread. If every slot is pinned when a new one is needed, the allocator blocks and waits (triggering a flush) rather than failing outright — up to a configurable timeout.
+The cache holds a fixed number of 8192-byte slots in pinned native memory the engine allocates itself — the file is read and written with explicit I/O, never memory-mapped. Each slot moves through a 4-state lifecycle — `Free` → `Allocating` (loading from disk) → `Idle` (resident, readable) → `Exclusive` (single-writer latch) → back to `Idle`. When a slot is needed and none is free, clock-sweep eviction scans slots in circular order: each slot carries a 0–5 "second-chance" counter, bumped on access and decremented as the sweep passes over it, so a slot is only taken once its counter has decayed to 0 *and* it's otherwise unprotected (not dirty, not actively read). Allocating the next file page adjacent to the previous one is tried first, so sequential access lands in contiguous cache memory and several small I/Os batch into one. Reads and writes use async `RandomAccess` I/O instead of blocking the calling thread. If every slot is pinned when a new one is needed, the allocator blocks and waits (triggering a flush) rather than failing outright — up to a configurable timeout.
 
 ## 💻 Usage
 

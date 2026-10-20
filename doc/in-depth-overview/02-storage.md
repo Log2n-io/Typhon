@@ -1,14 +1,14 @@
 ---
 uid: overview-storage
 title: '02 — Storage'
-description: 'Storage is the physical layer: a memory-mapped file managed by a page cache, segments built on top of pages, and accessors that hold short-lived,…'
+description: 'Storage is the physical layer: a paged data file managed by the engine's own page cache, segments built on top of pages, and accessors that hold short-lived,…'
 ---
 
 # 02 — Storage
 
 **Code:** [`src/Typhon.Engine/Storage/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Storage)
 
-Storage is the physical layer: a memory-mapped file managed by a page cache, segments built on top of pages, and accessors that hold short-lived, JIT-inlined views into chunk memory. Everything above this layer — MVCC revision chains, B+Tree indexes, the ECS component tables, even the page CRC + seqlock snapshots the checkpoint relies on — bottoms out here. The shape of this layer (8 KB pages, two-pass clock-sweep eviction, generic `<TStore>` segments) is what makes the higher layers cheap.
+Storage is the physical layer: a paged data file managed by the engine's own page cache, segments built on top of pages, and accessors that hold short-lived, JIT-inlined views into chunk memory. Everything above this layer — MVCC revision chains, B+Tree indexes, the ECS component tables, even the page CRC + seqlock snapshots the checkpoint relies on — bottoms out here. The shape of this layer (8 KB pages, two-pass clock-sweep eviction, generic `<TStore>` segments) is what makes the higher layers cheap.
 
 Because the cache is a fixed pool with on-demand load + clock-sweep eviction, **the database file can be arbitrarily larger than the cache** — resident memory is bounded by `DatabaseCacheSize`, not by database size. Persistent component data, B+Tree indexes, the per-archetype `EntityMap`, and the free-space bitmap all live in this paged store, so data volume and entity count scale with *disk*, not memory. The lone exception is **Transient** components (`TransientComponentSegment`), which are in-memory only by design. This larger-than-RAM property is routine for SQL and embedded engines (SQLite, LMDB) but sets Typhon apart from in-memory ECS frameworks, where the entire world must fit in process memory.
 

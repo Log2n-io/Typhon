@@ -61,7 +61,7 @@ public class GoldenRefusalTests
         Tick(cases, "block-content-shorter-than-declared", Block(BlockTypes.Acks, 0x00, 0xEE));
         Tick(cases, "block-length-beyond-message", [MessageTypes.Tick, 0, 0, 0, 0, 0, BlockTypes.Acks, 0x0A, 0x00]);
         Tick(cases, "aggregate-cell-outside-grid", Block(BlockTypes.Agg, 0x00, 0x00, 0x01, 0x80, 0x02, 0x00, 0x00));
-        Tick(cases, "sources-unknown-status", Block(BlockTypes.Sources, 0x01, 0x04, 0x01, 0x00));
+        Tick(cases, "sources-unknown-status", Block(BlockTypes.Sources, 0x01, 0x05, 0x01, 0x00));
         Tick(cases, "sources-error-truncated", Block(BlockTypes.Sources, 0x01, SourceStatus.Error, 0x01, 0x00));
         // The kitchen sink declares two group sets: index 2 names none.
         Tick(cases, "sources-group-set-unknown", Block(BlockTypes.Sources, 0x01, SourceStatus.GroupComplete, 0x02, 0x00));

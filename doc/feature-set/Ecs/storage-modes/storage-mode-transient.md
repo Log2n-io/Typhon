@@ -19,7 +19,7 @@ memory, is structurally part of the same ECS entity as your durable components, 
 
 ## ⚙️ How it works (in brief)
 
-A `Transient` component's chunks live in pinned heap memory rather than the memory-mapped file — there is no
+A `Transient` component's chunks live in pinned heap memory rather than the page cache over the data file — there is no
 WAL record, no checkpoint participation, and no dirty tracking; the JIT eliminates the dirty-tracking branches
 entirely for this mode. Reads and writes are direct pointer arithmetic. On crash or restart, `Transient`
 component segments come back empty — the application is responsible for re-initializing any state it needs.

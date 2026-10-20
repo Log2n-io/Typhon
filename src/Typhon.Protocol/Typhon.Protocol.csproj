@@ -1,14 +1,45 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
-        <TargetFramework>net10.0</TargetFramework>
-        <LangVersion>default</LangVersion>
+        <!-- netstandard2.1 for Unity (#1034): the same sources, the BCL gaps filled by Compat/ (compiled for that target only), so net10.0's code path
+             is unchanged. The language is the latest on both: what the newer BCL lacks is polyfilled, not avoided. -->
+        <TargetFrameworks>net10.0;netstandard2.1</TargetFrameworks>
+        <LangVersion>latest</LangVersion>
         <!-- XML doc file: ships in the package for IntelliSense and feeds the published API reference.
              Doc-comment warnings are promoted to errors so drift cannot land silently. -->
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
-        <WarningsAsErrors>$(WarningsAsErrors);CS1570;CS1571;CS1572;CS1573;CS1574;CS1580;CS1581;CS1584;CS1587;CS1589;CS1590;CS1591;CS1592;CS1710;CS1711;CS1712;CS1723;CS1734;CS1735</WarningsAsErrors>
-        <!-- Ships bundled inside the `Typhon` package (#427); never packed standalone. -->
-        <IsPackable>false</IsPackable>
+        <!-- Zero-warning policy, matching Typhon.Engine and Typhon.Client: a published package is held to the engine's bar (07-delivery § 5). -->
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     </PropertyGroup>
+
+    <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.1'">
+        <!-- The versions Unity 6.6 itself ships (Editor/Data/BCLExtensions/runtime/netstandard2.1: System.Text.Json 8.0.0.0, Unsafe 6.0.0.0), so a Unity
+             project resolves these to its own copies and needs no DLL beside Typhon.Protocol and Typhon.Client: a newer one would be a second copy of an
+             assembly Unity already loads. System.Text.Json reads the catalog (source-generated, no feature past 8.0); Unsafe.AsRef the read-only span over
+             Utf8Buffer256 (Codec/Utf8Text.cs). In-box on net10.0. -->
+        <PackageReference Include="System.Text.Json" Version="8.0.6" />
+        <PackageReference Include="System.Runtime.CompilerServices.Unsafe" Version="6.0.0" />
+    </ItemGroup>
+
+    <ItemGroup Condition="'$(TargetFramework)' != 'netstandard2.1'">
+        <Compile Remove="Compat/**" />
+    </ItemGroup>
+
+    <!-- ============ NuGet packaging (07-delivery § 5) ============ -->
+    <PropertyGroup>
+        <PackageId>Typhon.Protocol</PackageId>
+        <Description>The Typhon Subscriptions wire protocol (typhon.3): codecs, framing, the catalog model, and the replication attributes ([Replicated], [ReplicatedMessage], [Codec]…) with their source generator. Reference it alone from a contracts assembly shared by a server and its .NET clients. Alpha — expect breaking changes.</Description>
+        <PackageTags>typhon;replication;networking;protocol;game-server;realtime</PackageTags>
+        <PackageReadmeFile>PACKAGE.md</PackageReadmeFile>
+        <EnablePackageValidation>true</EnablePackageValidation>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <None Include="PACKAGE.md" Pack="true" PackagePath="" />
+        <!-- The replication generator runs in the consumer's compilation, so it ships under analyzers/. The reference is build-order only. -->
+        <ProjectReference Include="..\Typhon.Generators.Protocol\Typhon.Generators.Protocol.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+        <None Include="..\Typhon.Generators.Protocol\bin\$(Configuration)\netstandard2.0\Typhon.Generators.Protocol.dll"
+              Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    </ItemGroup>
 
 </Project>

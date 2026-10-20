@@ -13,7 +13,7 @@ description: 'One using, one fluent chain of Add* calls — wires the engine''s 
 
 A `DatabaseEngine` needs a page cache, a memory allocator, an epoch manager, a deadline watchdog
 and a shared timer all constructed and cross-wired correctly before it can be used — get the
-wiring or the disposal order wrong and you leak native memory-mapped-file handles or resource-tree
+wiring or the disposal order wrong and you leak native file handles, page-cache memory or resource-tree
 nodes. `ServiceCollectionExtensions` packages that wiring as ordinary
 `Microsoft.Extensions.DependencyInjection` extension methods, so a host application stands up the
 engine the same way it stands up any other ASP.NET Core or generic-host service: register it once,

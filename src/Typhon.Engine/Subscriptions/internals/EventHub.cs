@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Typhon.Protocol;
 
@@ -1969,15 +1970,10 @@ internal sealed class EventHub
             // By key (14 § 3): each key the session holds before or after the frame, and of its filings those naming a member its fill has reached.
             if (MemberCount > 0 && geometry.Groups is { } groups)
             {
-                var max = groups.Max;
-                var committed = groups.CCount;
-                for (var set = 0; set < committed.Length; set++)
+                for (var set = 0; set < groups.SetCount; set++)
                 {
-                    MatchKeys(picks, set, groups.CKeys, groups.CCursor, set * max, committed[set], realm, ref geometry);
-                    if (!groups.PendingIsCommitted(set))
-                    {
-                        MatchKeys(picks, set, groups.PKeys, groups.PCursor, set * max, groups.PCount[set], realm, ref geometry);
-                    }
+                    var committed = groups.Committed(set);
+                    MatchKeys(picks, set, committed, groups.Pending(set), realm, ref geometry);
                 }
             }
 
@@ -2000,28 +1996,92 @@ internal sealed class EventHub
             }
         }
 
-        private void MatchKeys<TGeometry>(EventPicks picks, int set, long[] keys, uint[] cursors, int at, int count, ushort realm, ref TGeometry geometry)
+        /// <summary>
+        /// The filings of <paramref name="set"/> under a key held before or after the frame, below that key's fill cursor — the larger of the two sides' when
+        /// both hold it. Each distinct key of the two is looked up from where the last ended, or, when the filings are fewer, each filing is tested against
+        /// the keys: O(min · log max), never per held key and filing (#1407).
+        /// </summary>
+        private void MatchKeys<TGeometry>(EventPicks picks, int set, HeldKeys committed, HeldKeys pending, ushort realm, ref TGeometry geometry)
             where TGeometry : IEventGeometry, allows ref struct
         {
-            for (var i = 0; i < count; i++)
+            if (committed.Count == 0 && pending.Count == 0)
             {
-                var key = keys[at + i];
-                var cursor = cursors[at + i];
-                for (var j = LowerBoundMember(set, key); j < MemberCount && Members[j].Set == set && Members[j].Key == key; j++)
+                return;
+            }
+
+            var lo = LowerBoundMember(set, long.MinValue);
+            var hi = lo == MemberCount || Members[lo].Set != set ? lo : LowerBoundMember(set + 1, long.MinValue);
+            if (lo == hi)
+            {
+                return;
+            }
+
+            if (hi - lo <= committed.Count + pending.Count)
+            {
+                var last = 0L;
+                var cursor = 0u;
+                for (var j = lo; j < hi; j++)
                 {
                     ref var m = ref Members[j];
-                    if (m.NetId < cursor && (m.Unplaced || m.Realm == realm) && (m.Mask == 0 || geometry.SeesTags(m.Mask)))
+                    if (j == lo || m.Key != last)
                     {
-                        picks.AddTemp(m.Event);
+                        last = m.Key;
+                        cursor = Math.Max(committed.CursorOf(m.Key), pending.CursorOf(m.Key));
                     }
+
+                    Pick(picks, ref m, cursor, realm, ref geometry);
                 }
+
+                return;
+            }
+
+            var c = 0;
+            var p = 0;
+            var from = lo;
+            while ((c < committed.Count || p < pending.Count) && from < hi)
+            {
+                long key;
+                uint keyCursor;
+                if (p >= pending.Count || (c < committed.Count && committed.Keys[c] < pending.Keys[p]))
+                {
+                    key = committed.Keys[c];
+                    keyCursor = committed.Cursors[c++];
+                }
+                else if (c >= committed.Count || pending.Keys[p] < committed.Keys[c])
+                {
+                    key = pending.Keys[p];
+                    keyCursor = pending.Cursors[p++];
+                }
+                else
+                {
+                    key = committed.Keys[c];
+                    keyCursor = Math.Max(committed.Cursors[c++], pending.Cursors[p++]);
+                }
+
+                var j = LowerBoundMember(set, key, from, hi);
+                for (; j < hi && Members[j].Key == key; j++)
+                {
+                    Pick(picks, ref Members[j], keyCursor, realm, ref geometry);
+                }
+
+                from = j;
             }
         }
 
-        private int LowerBoundMember(int set, long key)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void Pick<TGeometry>(EventPicks picks, ref Member m, uint cursor, ushort realm, ref TGeometry geometry)
+            where TGeometry : IEventGeometry, allows ref struct
         {
-            var lo = 0;
-            var hi = MemberCount;
+            if (m.NetId < cursor && (m.Unplaced || m.Realm == realm) && (m.Mask == 0 || geometry.SeesTags(m.Mask)))
+            {
+                picks.AddTemp(m.Event);
+            }
+        }
+
+        private int LowerBoundMember(int set, long key) => LowerBoundMember(set, key, 0, MemberCount);
+
+        private int LowerBoundMember(int set, long key, int lo, int hi)
+        {
             while (lo < hi)
             {
                 var mid = (lo + hi) >>> 1;

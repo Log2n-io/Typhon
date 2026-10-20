@@ -85,7 +85,7 @@ using EcsView<Factory> view = tx.Query<Factory>()
 ## 🔗 Related
 
 - Full query/view feature catalog: [Querying category](../Querying/README.md) — ordering & pagination, spatial predicates,
-  statistics infrastructure, persistent views, view pooling, and temporal queries all build on the fluent API
+  statistics infrastructure, persistent views and view pooling all build on the fluent API
   introduced here.
 
 <!-- Deep dive: claude/design/Ecs/05-query-system.md, claude/overview/05-query.md -->

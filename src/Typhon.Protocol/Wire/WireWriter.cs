@@ -146,7 +146,7 @@ public ref struct WireWriter
 
     /// <summary>Writes a little-endian IEEE double; NaN as <c>0x7FF8000000000000</c>.</summary>
     /// <param name="value">The value.</param>
-    public void WriteF64(double value) => BinaryPrimitives.WriteDoubleLittleEndian(Take(8), WireMath.CanonicalizeNaN(value));
+    public void WriteF64(double value) => Bcl.WriteDoubleLittleEndian(Take(8), WireMath.CanonicalizeNaN(value));
 
     /// <summary>Writes a little-endian IEEE single, narrowing <paramref name="value"/> with ties to even; NaN as <c>0x7FC00000</c>.</summary>
     /// <param name="value">The value.</param>
@@ -264,7 +264,7 @@ public ref struct WireWriter
     /// <summary>The number of bytes <see cref="WriteVaru64"/> writes for <paramref name="value"/>.</summary>
     /// <param name="value">The value.</param>
     /// <returns>1 to 10.</returns>
-    public static int Varu64Size(ulong value) => value == 0 ? 1 : (70 - BitOperations.LeadingZeroCount(value)) / 7;
+    public static int Varu64Size(ulong value) => value == 0 ? 1 : (70 - Bcl.LeadingZeroCount(value)) / 7;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private Span<byte> Take(int count)

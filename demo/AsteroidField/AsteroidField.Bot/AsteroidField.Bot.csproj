@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Headless pilots for the Asteroid Field server. The client core is the Unity project's own (Assets/AsteroidField/Core), linked: the bot reads the
+       stream with exactly the code the Unity client does. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <LangVersion>default</LangVersion>
+    <Nullable>disable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\Typhon.Client\Typhon.Client.csproj" />
+    <Compile Include="..\Unity\Assets\AsteroidField\Core\*.cs" LinkBase="Core" />
+  </ItemGroup>
+</Project>

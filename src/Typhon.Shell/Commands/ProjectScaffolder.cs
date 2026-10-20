@@ -25,7 +25,7 @@ internal static class ProjectScaffolder
     internal static readonly string TyphonPackageVersion = ResolveTyphonPackageVersion();
 
     /// <summary>Known-good published fallback used only when the assembly carries no MinVer-stamped prerelease version.</summary>
-    private const string FallbackTyphonPackageVersion = "0.0.1-alpha.4";
+    private const string FallbackTyphonPackageVersion = "1.0.0-alpha.1";
 
     /// <summary>
     /// Reads the CLI's own package version from its MinVer-stamped <see cref="AssemblyInformationalVersionAttribute"/>

@@ -156,6 +156,6 @@ public sealed class WebSocketClientTransport : IClientTransport
     {
         _socket?.Dispose();
         _socket = null;
-        return ValueTask.CompletedTask;
+        return default;
     }
 }

@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <IsPackable>false</IsPackable>
+    <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+    <!-- RS2008 = analyzer release tracking; not applicable to this internal, non-distributed generator. -->
+    <NoWarn>$(NoWarn);RS2008</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.3.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Analyzers" Version="5.3.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!--
+    The replication generator, shipped inside the `Typhon.Protocol` package (07-delivery § 5).
+
+    Its attributes ([Replicated], [ReplicatedMessage], [Codec]…) live in Typhon.Protocol, so a contracts assembly that references only Typhon.Protocol —
+    shared by a server, its .NET clients and its bots — must get it. `Typhon` depends on `Typhon.Protocol` and lets its analyzers flow, so a server gets
+    it from there, once; `Typhon`'s own analyzer (Typhon.Generators.Consumer) no longer carries it. Single source of truth: ReplicationGenerator.cs lives
+    in Typhon.Generators (the engine's own build) and is linked here.
+  -->
+  <ItemGroup>
+    <Compile Include="..\Typhon.Generators\ReplicationGenerator.cs" Link="ReplicationGenerator.cs" />
+  </ItemGroup>
+
+</Project>

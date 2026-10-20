@@ -1,0 +1,51 @@
+name: Native Package Check
+
+# The native C SDK's package, built the way release.yml builds it, on the three platforms a release ships: static + shared library, ctest, install,
+# then a fresh CMake project that finds it with find_package(TyphonClient) and runs against both libraries (scripts/native-package-smoke-test.py).
+# The merge gate's native-sdk job covers the code on Linux and Windows; this covers the package, and macOS, before a tag does.
+# Design: claude/design/Subscriptions/07 § 5 (#1044, #1045).
+
+on:
+  pull_request:
+    paths:
+      - 'src/Typhon.Client.Native/**'
+      - 'scripts/native-package-smoke-test.py'
+      - '.github/workflows/native-package-check.yml'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-package-check-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x64, os: ubuntu-26.04 }
+          - { name: windows-x64, os: windows-latest }
+          - { name: macos-arm64, os: macos-latest }
+    name: native-package (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build, test, install
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S src/Typhon.Client.Native -B build -DCMAKE_BUILD_TYPE=Release -DTYPHON_VERSION=0.0.0 -DTYPHON_NATIVE_SHARED=ON
+          cmake --build build --config Release --parallel
+          ctest --test-dir build -C Release --output-on-failure
+          cmake --install build --config Release --prefix prefix
+
+      # Windows images name it python, the others python3.
+      - name: Native package smoke test
+        shell: bash
+        run: $(command -v python3 || command -v python) scripts/native-package-smoke-test.py prefix

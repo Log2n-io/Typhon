@@ -71,7 +71,10 @@
              transitively through the engine to other in-solution projects, so any project that uses them
              references them DIRECTLY (see those csprojs). External package consumers get the types from lib/. -->
         <ProjectReference Include="..\Typhon.Profiler\Typhon.Profiler.csproj" PrivateAssets="all" />
-        <ProjectReference Include="..\Typhon.Protocol\Typhon.Protocol.csproj" PrivateAssets="all" />
+        <!-- Not bundled: Typhon.Protocol is its own package (07-delivery § 5), so a published Typhon.Client and Typhon resolve to ONE copy of it.
+             PrivateAssets="none" makes it a package dependency whose analyzers flow: the replication generator ships in Typhon.Protocol and
+             reaches a server's compilation through this dependency, once. -->
+        <ProjectReference Include="..\Typhon.Protocol\Typhon.Protocol.csproj" PrivateAssets="none" />
         <ProjectReference Include="..\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" PrivateAssets="all" />
     </ItemGroup>
 
@@ -86,7 +89,7 @@
     <!-- ============ NuGet packaging (#427) ============ -->
     <PropertyGroup>
         <PackageId>Typhon</PackageId>
-        <Description>Typhon is a real-time, low-latency ACID database engine built on an ECS architecture with MVCC snapshot isolation, targeting microsecond-level performance. This package bundles the engine with its profiler, wire protocol, and schema-definition APIs. Pre-alpha — expect breaking changes.</Description>
+        <Description>Typhon is a real-time, low-latency ACID database engine built on an ECS architecture with MVCC snapshot isolation, targeting microsecond-level performance. This package bundles the engine with its profiler and schema-definition APIs; the wire protocol is the Typhon.Protocol dependency. Alpha — expect breaking changes.</Description>
         <PackageTags>database;acid;ecs;mvcc;embedded;realtime;low-latency;in-memory;storage-engine</PackageTags>
         <PackageReadmeFile>PACKAGE.md</PackageReadmeFile>
         <!-- Structural/framework validation of the produced package. API-compat baseline (vs a prior published
@@ -114,7 +117,6 @@
     <Target Name="AddBundledSiblingAssembliesToPackage" DependsOnTargets="ResolveReferences">
         <ItemGroup>
             <BuildOutputInPackage Include="$(TargetDir)Typhon.Profiler.dll" />
-            <BuildOutputInPackage Include="$(TargetDir)Typhon.Protocol.dll" />
             <BuildOutputInPackage Include="$(TargetDir)Typhon.Schema.Definition.dll" />
             <!-- Ship each sibling's XML doc next to its DLL so consumers get inline IntelliSense
                  (Quick Doc) for Profiler/Protocol/Schema.Definition types too — not just Engine.
@@ -122,7 +124,6 @@
                  without the .xml here the DLLs ship doc-less. Guarded by Exists in case doc
                  generation is ever turned off for a sibling. -->
             <BuildOutputInPackage Include="$(TargetDir)Typhon.Profiler.xml" Condition="Exists('$(TargetDir)Typhon.Profiler.xml')" />
-            <BuildOutputInPackage Include="$(TargetDir)Typhon.Protocol.xml" Condition="Exists('$(TargetDir)Typhon.Protocol.xml')" />
             <BuildOutputInPackage Include="$(TargetDir)Typhon.Schema.Definition.xml" Condition="Exists('$(TargetDir)Typhon.Schema.Definition.xml')" />
         </ItemGroup>
     </Target>

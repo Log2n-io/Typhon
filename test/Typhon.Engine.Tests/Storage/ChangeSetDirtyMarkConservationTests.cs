@@ -110,7 +110,7 @@ internal sealed class ChangeSetDirtyMarkConservationTests : TestBase<ChangeSetDi
     /// </summary>
     /// <remarks>
     /// Occupancy/bitmap pages make K large by construction — every transaction that grows a segment marks them — so
-    /// they were the first to become permanently unevictable. Measured in the SpaceBattle demo, one page reached 26
+    /// they were the first to become permanently unevictable. Measured in a demo soak, one page reached 26
     /// outstanding marks and the dirty-page count climbed monotonically to cache exhaustion in about thirty minutes.
     /// Raising the checkpoint frequency reduced the residue 22x, which is the signature of a per-cycle imbalance
     /// rather than an absolute leak.

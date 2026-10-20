@@ -77,7 +77,7 @@ The shell ties it together: a dockable, persisted multi-panel workspace, a `Ctrl
 
 ## 2. 🎚️ Resource budgets
 
-The engine manages its own memory: a paged, memory-mapped store with a cache, the WAL stage, transaction pools. You never allocate a page. What you *do* set is a few **caps**, at engine-build time, and the engine lives within them.
+The engine manages its own memory: a paged store with its own page cache, the WAL stage, transaction pools. You never allocate a page. What you *do* set is a few **caps**, at engine-build time, and the engine lives within them.
 
 ```csharp
 .AddScopedManagedPagedMemoryMappedFile(o =>
@@ -162,7 +162,7 @@ This guide is the *task-oriented* layer. When you need struct layouts, algorithm
 | The telemetry pipeline & profiler internals | [12-observability](../in-depth-overview/12-observability.md) |
 | The resource graph & budgets in detail | [13-resources](../in-depth-overview/13-resources.md) |
 | The full exception hierarchy & error codes | [14-errors](../in-depth-overview/14-errors.md) |
-| Page cache, memory-mapped store, foundation primitives | [02-storage](../in-depth-overview/02-storage.md) · [01-foundation](../in-depth-overview/01-foundation.md) |
+| Page cache, paged store, foundation primitives | [02-storage](../in-depth-overview/02-storage.md) · [01-foundation](../in-depth-overview/01-foundation.md) |
 
 ---
 

@@ -29,7 +29,7 @@ FEED="${1:?usage: consumer-smoke-test.sh <feed-dir>}"
 FEED="$(cd "$FEED" && { pwd -W 2>/dev/null || pwd; })"
 
 # Discover the packed version from the .nupkg filename (ignore the .snupkg symbol package).
-NUPKG="$(ls "$FEED"/Typhon.*.nupkg 2>/dev/null | grep -v '\.snupkg$' | head -1 || true)"
+NUPKG="$(ls "$FEED"/Typhon.[0-9]*.nupkg 2>/dev/null | grep -v '\.snupkg$' | head -1 || true)"
 [ -n "$NUPKG" ] || { echo "smoke: no Typhon.*.nupkg found in $FEED"; exit 1; }
 VERSION="$(basename "$NUPKG" | sed -E 's/^Typhon\.(.*)\.nupkg$/\1/')"
 echo "smoke: testing package 'Typhon' $VERSION from $FEED"
@@ -124,7 +124,7 @@ CS
 # NuGet's global cache keys on ID+version and does NOT re-extract a same-version re-pack. When iterating
 # locally the version is fixed (MinVer height), so evict the Typhon package to always test fresh content.
 # (In CI every build has a unique version, so this is a no-op there.)
-rm -rf "${HOME}/.nuget/packages/typhon" 2>/dev/null || true
+rm -rf "${HOME}/.nuget/packages/typhon" "${HOME}/.nuget/packages/typhon.protocol" 2>/dev/null || true
 
 echo "smoke: building consumer (the generator must fire here)..."
 dotnet build smoke.csproj -c Release -v quiet

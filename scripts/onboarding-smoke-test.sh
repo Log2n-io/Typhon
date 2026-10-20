@@ -31,7 +31,7 @@ FEED="$(cd "$FEED" && { pwd -W 2>/dev/null || pwd; })"
 
 # Discover both packed versions from the .nupkg filenames (ignore the .snupkg symbol packages).
 CLI_NUPKG="$(ls "$FEED"/Typhon.Cli.*.nupkg 2>/dev/null | grep -v '\.snupkg$' | head -1 || true)"
-ENGINE_NUPKG="$(ls "$FEED"/Typhon.*.nupkg 2>/dev/null | grep -v '\.snupkg$' | grep -v '/Typhon\.Cli\.' | head -1 || true)"
+ENGINE_NUPKG="$(ls "$FEED"/Typhon.[0-9]*.nupkg 2>/dev/null | grep -v '\.snupkg$' | head -1 || true)"
 [ -n "$CLI_NUPKG" ]    || { echo "onboarding-smoke: no Typhon.Cli.*.nupkg found in $FEED"; exit 1; }
 [ -n "$ENGINE_NUPKG" ] || { echo "onboarding-smoke: no Typhon.*.nupkg (engine) found in $FEED"; exit 1; }
 CLI_VERSION="$(basename "$CLI_NUPKG" | sed -E 's/^Typhon\.Cli\.(.*)\.nupkg$/\1/')"
@@ -46,7 +46,7 @@ echo "onboarding-smoke: packed CLI $CLI_VERSION, packed engine $ENGINE_VERSION"
 
 # NuGet's global cache keys on ID+version and won't re-extract a same-version re-pack. When iterating locally the
 # version is fixed (MinVer height), so evict to always test fresh content. (No-op in CI — every build is unique.)
-rm -rf "${HOME}/.nuget/packages/typhon" "${HOME}/.nuget/packages/typhon.cli" 2>/dev/null || true
+rm -rf "${HOME}/.nuget/packages/typhon" "${HOME}/.nuget/packages/typhon.cli" "${HOME}/.nuget/packages/typhon.protocol" 2>/dev/null || true
 
 TOOLDIR="$(mktemp -d)"
 WORK="$(mktemp -d)"
@@ -88,11 +88,13 @@ XML
 echo "onboarding-smoke: 'dotnet run' — compile the emitted template + run against the packed engine..."
 dotnet run
 
-# The headline promise: config-driven profiling wrote a trace with zero code edits.
-TRACE="$(ls captures/*.typhon-trace 2>/dev/null | head -1 || true)"
-[ -n "$TRACE" ] && [ -s "$TRACE" ] || {
-    echo "onboarding-smoke: FAIL — no non-empty *.typhon-trace under captures/ after 'dotnet run'"
-    ls -la captures 2>/dev/null || true
+# The headline promise: config-driven profiling wrote a trace with zero code edits. Searched for anywhere in the app rather than at a named
+# folder: the template writes it beside its database (`<name>.typhon/profilings/` since #810), and the folder this script used to name,
+# `captures/`, went stale at that move without anything noticing until a release ran it.
+TRACE="$(find . -name '*.typhon-trace' -size +0c -print 2>/dev/null | head -1 || true)"
+[ -n "$TRACE" ] || {
+    echo "onboarding-smoke: FAIL — no non-empty *.typhon-trace anywhere in the app after 'dotnet run'"
+    find . -name '*.typhon-trace' -o -name '*.nettrace' 2>/dev/null || true
     exit 1
 }
 echo "onboarding-smoke: trace written → $TRACE ($(wc -c < "$TRACE") bytes)"
