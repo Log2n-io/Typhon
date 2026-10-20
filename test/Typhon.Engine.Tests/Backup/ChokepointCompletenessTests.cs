@@ -56,11 +56,9 @@ class ChokepointCompletenessTests : TestBase<ChokepointCompletenessTests>
     [VerifiesRule("BKP-01")]
     public void EveryWriteOfALifecycle_IsInTheMap()
     {
-        string path;
-
         // Session 1: create, workload, checkpoint, more workload, hard crash.
-        var session = OpenSession(null, register: dbe => dbe.RegisterComponentFromAccessor<BkpChokeV1>());
-        path = session.Engine.MMF.DataFilePath;
+        var session = OpenSession(dbe => dbe.RegisterComponentFromAccessor<BkpChokeV1>());
+        var path = session.Engine.MMF.DataFilePath;
         Spawn(session.Engine, 0, 200);
         Assert.That(session.Engine.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "premise: the checkpoint ran");
         Spawn(session.Engine, 200, 50);
@@ -70,7 +68,7 @@ class ChokepointCompletenessTests : TestBase<ChokepointCompletenessTests>
 
         // Session 2: recovery open with a schema migration, workload, checkpoint, clean close.
         var before = ReadFile(path);
-        session = OpenSession(path, register: dbe => dbe.RegisterComponentFromAccessor<BkpChokeV2>());
+        session = OpenSession(dbe => dbe.RegisterComponentFromAccessor<BkpChokeV2>());
         Assert.That(session.Engine.CrashRecoveryAtOpen, Is.True, "premise: the second open recovers");
         using (var t = session.Engine.CreateQuickTransaction(DurabilityMode.Immediate))
         {
@@ -88,7 +86,7 @@ class ChokepointCompletenessTests : TestBase<ChokepointCompletenessTests>
 
         // Session 3: clean reopen, then clean close.
         before = ReadFile(path);
-        session = OpenSession(path, register: dbe => dbe.RegisterComponentFromAccessor<BkpChokeV2>());
+        session = OpenSession(dbe => dbe.RegisterComponentFromAccessor<BkpChokeV2>());
         session.Scope.Dispose();
         AssertMapCoversChanges("clean reopen + clean close", session, before, ReadFile(path));
     }
@@ -99,13 +97,13 @@ class ChokepointCompletenessTests : TestBase<ChokepointCompletenessTests>
     [RuleMutant("BKP-01")]
     public void Mutant_ARawWrite_IsMissingFromTheMap()
     {
-        var session = OpenSession(null, register: dbe => dbe.RegisterComponentFromAccessor<BkpChokeV1>());
+        var session = OpenSession(dbe => dbe.RegisterComponentFromAccessor<BkpChokeV1>());
         var path = session.Engine.MMF.DataFilePath;
         Spawn(session.Engine, 0, 20);
         session.Scope.Dispose();
 
         var before = ReadFile(path);
-        session = OpenSession(path, register: dbe => dbe.RegisterComponentFromAccessor<BkpChokeV1>());
+        session = OpenSession(dbe => dbe.RegisterComponentFromAccessor<BkpChokeV1>());
         session.Scope.Dispose();
 
         // The bypass: one page written straight to the file, as an offline tool or a stray RandomAccess.Write would.
@@ -128,7 +126,7 @@ class ChokepointCompletenessTests : TestBase<ChokepointCompletenessTests>
 
     private sealed record Session(IServiceScope Scope, DatabaseEngine Engine, PageChangeMap Map, List<(int First, int Count)> Probed);
 
-    private Session OpenSession(string path, Action<DatabaseEngine> register)
+    private Session OpenSession(Action<DatabaseEngine> register)
     {
         var scope = ServiceProvider.CreateScope();
         var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();

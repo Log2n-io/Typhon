@@ -176,7 +176,7 @@ internal sealed class PackWriter : IBackupPointSink, IDisposable
         // A frame never straddles two buffers, so one buffer must hold the largest: a tail block LZ4 could not shrink.
         if (_options.BufferSize < PackFormat.FramePrefixSize + LZ4Codec.MaximumOutputSize(PackFormat.TailBlockSize))
         {
-            throw new ArgumentOutOfRangeException(nameof(_options.BufferSize), _options.BufferSize, "smaller than one tail block frame");
+            throw new InvalidOperationException($"PackWriterOptions.BufferSize {_options.BufferSize} is smaller than one tail block frame.");
         }
 
         // Two buffers, or none: a second allocation that fails must not leave the first one with no owner to free it.

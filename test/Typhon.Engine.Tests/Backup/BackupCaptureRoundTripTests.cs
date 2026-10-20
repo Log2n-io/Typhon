@@ -245,9 +245,9 @@ class BackupCaptureRoundTripTests : BackupTestBase<BackupCaptureRoundTripTests>
         }
 
         using var t = dbe.CreateQuickTransaction();
-        Compare(where, "versioned", expected.Versioned, Read(t, t.Query<CompAArch>().Execute(), id => t.Open(id).Read(CompAArch.A).A), failures);
+        Compare(where, "versioned", expected.Versioned, Read(t.Query<CompAArch>().Execute(), id => t.Open(id).Read(CompAArch.A).A), failures);
         Compare(where, "single-version", expected.SingleVersion,
-            Read(t, t.Query<SvTestArchetype>().Execute(), id => t.Open(id).Read(SvTestArchetype.SvComp).Value), failures);
+            Read(t.Query<SvTestArchetype>().Execute(), id => t.Open(id).Read(SvTestArchetype.SvComp).Value), failures);
     }
 
     private Workload Run(int seed, int points, IBackupPointStore store)
@@ -467,7 +467,7 @@ class BackupCaptureRoundTripTests : BackupTestBase<BackupCaptureRoundTripTests>
     {
         var rng = new Random(seed);
         var versioned = new List<EntityId>();
-        var walDir = "";
+        string walDir;
         using (var scope = ServiceProvider.CreateScope())
         {
             var dbe = Open(scope);
@@ -600,7 +600,7 @@ class BackupCaptureRoundTripTests : BackupTestBase<BackupCaptureRoundTripTests>
         public void Abort() => inner.Abort();
     }
 
-    private static Dictionary<EntityId, int> Read(Transaction t, IEnumerable<EntityId> ids, Func<EntityId, int> value)
+    private static Dictionary<EntityId, int> Read(IEnumerable<EntityId> ids, Func<EntityId, int> value)
     {
         var result = new Dictionary<EntityId, int>();
         foreach (var id in ids)

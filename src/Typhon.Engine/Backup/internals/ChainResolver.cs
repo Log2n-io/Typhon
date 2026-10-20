@@ -100,7 +100,7 @@ internal static class ChainResolver
         return chain != null;
     }
 
-    private static bool Walk(StoreView view, uint pointId, out ResolvedChain chain, out uint brokenAt, out string why, out string code)
+    private static void Walk(StoreView view, uint pointId, out ResolvedChain chain, out uint brokenAt, out string why, out string code)
     {
         code = null;
         chain = null;
@@ -114,14 +114,14 @@ internal static class ChainResolver
             {
                 brokenAt = id;
                 code = "BKP-VER-06";
-                return false;
+                return;
             }
 
             (code, why) = CheckLink(view, pack, child, links.Count == 0 ? null : links[0]);
             if (why != null)
             {
                 brokenAt = id;
-                return false;
+                return;
             }
 
             links.Add(pack);
@@ -130,7 +130,7 @@ internal static class ChainResolver
                 brokenAt = id;
                 why = $"the chain is deeper than {MaxDepth} points";
                 code = "BKP-VER-06";
-                return false;
+                return;
             }
 
             if (pack.IsBase)
@@ -146,7 +146,6 @@ internal static class ChainResolver
         chain = new ResolvedChain(links);
         brokenAt = 0;
         why = null;
-        return true;
     }
 
     /// <summary>Every point whose chain resolves, ascending.</summary>

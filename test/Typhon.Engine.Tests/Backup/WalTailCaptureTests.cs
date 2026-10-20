@@ -256,7 +256,7 @@ class WalTailCaptureTests : TestBase<WalTailCaptureTests>
         Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(Budget), Is.True);
         var checkpointLsn = dbe.CheckpointManager.CheckpointLsn;
 
-        var firstCommit = Commit(dbe, 2);
+        Commit(dbe, 2);
         Serve(wal, wal.RequestSegmentSwitch());
         var secondCommit = Commit(dbe, 2);
 

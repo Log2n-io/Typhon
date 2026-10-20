@@ -54,7 +54,7 @@ class BackupStopTests : BackupTestBase<BackupStopTests>
             release.Wait();
         };
         var running = StartCapture(dbe, store);
-        Task closing = null;
+        Task closing;
         try
         {
             Assert.That(stuck.Wait(Budget), Is.True, "premise: the store is stuck in Complete");
@@ -105,7 +105,7 @@ class BackupStopTests : BackupTestBase<BackupStopTests>
             }
         };
         var cycle = Task.Run(() => dbe.CheckpointManager.ForceCheckpointAndWait(Budget));
-        Task closing = null;
+        Task closing;
         try
         {
             Assert.That(held.Wait(Budget), Is.True, "premise: a cycle is held mid-pass");
@@ -144,7 +144,7 @@ class BackupStopTests : BackupTestBase<BackupStopTests>
         Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(Budget), Is.True);
 
         _gatedIo.Hold();
-        Task closing = null;
+        Task closing;
         try
         {
             Update(dbe, ids, 2, DurabilityMode.Deferred);

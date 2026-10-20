@@ -1,6 +1,5 @@
 using System;
 using System.Diagnostics;
-using System.IO;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -91,7 +90,6 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
     private bool _completed;
     private long _added;
     private long _expected;
-    private int _suspects;
     private PinnedMemoryBlock _scanBuffer;
     private PinnedMemoryBlock _metaBuffer;
 
@@ -260,7 +258,7 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
             }
 
             var held = Stopwatch.GetTimestamp();
-            var pages = 0;
+            int pages;
             try
             {
                 pages = (int)(_mmf.DataFileLengthUnderGate() / PagedMMF.PageSize);
@@ -704,7 +702,6 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
     private void AddPageToSink(int page, ReadOnlySpan<byte> image)
     {
         var suspect = image.IndexOfAnyExcept((byte)0) >= 0 && !PagedMMF.VerifyPageImage(image, out _);
-        _suspects += suspect ? 1 : 0;
         try
         {
             _sink.AddPage(page, image, suspect);
