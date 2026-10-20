@@ -7728,7 +7728,8 @@
           "storeError",
           "engine",
           "route",
-          "runningJobId"
+          "runningJobId",
+          "defaultScratch"
         ],
         "type": "object",
         "properties": {
@@ -7765,6 +7766,12 @@
               "string"
             ],
             "format": "uuid"
+          },
+          "defaultScratch": {
+            "type": [
+              "null",
+              "string"
+            ]
           }
         }
       },

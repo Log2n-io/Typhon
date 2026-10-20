@@ -146,9 +146,9 @@ public sealed partial class BackupsController
     [HttpPost("jobs/drill")]
     public ActionResult<BackupJobDto> StartDrill([FromBody] BackupDrillRequestDto request)
     {
-        if (string.IsNullOrWhiteSpace(request?.Store) || string.IsNullOrWhiteSpace(request.Scratch))
+        if (string.IsNullOrWhiteSpace(request?.Store))
         {
-            return Problem400("A store path and a scratch directory are required.");
+            return Problem400("A store path is required.");
         }
 
         if (!TryParsePoint(request.Point, archiveTargets: false, out var point, out var error))
@@ -162,7 +162,7 @@ public sealed partial class BackupsController
         }
 
         var store = BackupPaths.Full(request.Store);
-        var scratch = BackupPaths.Full(request.Scratch);
+        var scratch = BackupPaths.Full(string.IsNullOrWhiteSpace(request.Scratch) ? DefaultScratch() : request.Scratch);
         var schema = SchemaOf(request.Bundle);
         var pointArg = point.IsLatest ? "latest" : point.BackupId.ToString();
         return Start("drill", store, request.Bundle, null, null, ctx =>

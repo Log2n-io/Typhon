@@ -83,7 +83,7 @@ public sealed partial class BackupsController : ControllerBase
 
         var route = BackupRouting.Decide(bundle, store, _sessions, _ops);
         return Ok(new BackupStatusDto(store, bundle, storeStatus, storeError, engine, new BackupRouteDto(route.Kind, route.Reason, route.Session?.Id),
-            _jobs.Running(store)?.Id));
+            _jobs.Running(store)?.Id, DefaultScratch()));
     }
 
     /// <summary>What the store holds (<c>typhon backup list</c>): points, chains, unreadable packs, temps, drills; restorable points when asked.</summary>
@@ -255,6 +255,26 @@ public sealed partial class BackupsController : ControllerBase
         }
 
         return newest;
+    }
+
+    /// <summary>
+    /// The drill scratch directory when the operator names none (WB-21): beside the Workbench's other per-user state (the fixtures root convention),
+    /// never inside a store. A drill needs the space of the whole image there.
+    /// </summary>
+    internal static string DefaultScratch()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Typhon", "Workbench", "DrillScratch");
+        }
+
+        var xdg = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
+        if (string.IsNullOrWhiteSpace(xdg))
+        {
+            xdg = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share");
+        }
+
+        return Path.Combine(xdg, "typhon", "workbench", "drill-scratch");
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

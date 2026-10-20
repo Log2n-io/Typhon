@@ -50,7 +50,7 @@ public sealed record BackupCreateRequestDto(string Store, string Bundle, bool Fu
 /// <summary>Verify the store (<see cref="Point"/> null) or one point, at <c>quick</c>, <c>full</c> or <c>deep</c>.</summary>
 public sealed record BackupVerifyRequestDto(string Store, BackupPointRefDto Point, string Level);
 
-/// <summary>Drill a point into <see cref="Scratch"/>; <see cref="Bundle"/> names the database whose open session's schema the drill loads, if any.</summary>
+/// <summary>Drill a point into <see cref="Scratch"/> (blank: the Workbench's default); <see cref="Bundle"/> names the database whose open session's schema the drill loads, if any.</summary>
 public sealed record BackupDrillRequestDto(string Store, BackupPointRefDto Point, string Scratch, string Bundle);
 
 /// <summary>Compact a point into a base.</summary>
@@ -126,8 +126,9 @@ public sealed record BackupRouteDto(string Kind, string Reason, Guid? SessionId)
 /// <param name="Engine">The engine's status; null when none is known.</param>
 /// <param name="Route">How "Back up now" would run.</param>
 /// <param name="RunningJobId">The store's running job, if any.</param>
+/// <param name="DefaultScratch">The drill scratch directory used when none is given (WB-21).</param>
 public sealed record BackupStatusDto(string Store, string Bundle, BackupStoreStatusDto StoreStatus, string StoreError, BackupEngineStatusDto Engine,
-    BackupRouteDto Route, Guid? RunningJobId);
+    BackupRouteDto Route, Guid? RunningJobId, string DefaultScratch);
 
 /// <summary>One archived WAL segment.</summary>
 public sealed record BackupArchivedSegmentDto(long SegmentId, long FirstLsn, long LastLsn, DateTime? SealedUtc, DateTime? ArchivedUtc, long Bytes,
