@@ -112,7 +112,9 @@ public class DataFileWriteGateTests
 
     /// <summary>
     /// BKP-01 under load: two freezers take the gate exclusive thousands of times while four writers enter and leave shared without pause; no writer is
-    /// ever inside while a freezer holds it, and a freezer never sees a shared holder.
+    /// ever inside while a freezer holds it, and a freezer never sees a shared holder. Each freeze waits for a writer entry since its previous one, so
+    /// the writers run between the freezes by construction: on 2 vCPUs the freezers once finished every cycle while the writers had entered 383 times
+    /// (#1468).
     /// </summary>
     [Test]
     [CancelAfter(20_000)]
@@ -125,6 +127,7 @@ public class DataFileWriteGateTests
         var inside = 0;   // writers between their EnterShared and ExitShared
         var violations = 0;
         var timeouts = 0;
+        var stalls = 0;
         long entries = 0, entriesDuringFreezes = 0;
         using var stop = new CancellationTokenSource();
         var writers = new Task[4];
@@ -157,8 +160,25 @@ public class DataFileWriteGateTests
             {
                 started.Wait();
                 var first = Interlocked.Read(ref entries);
+                var seen = first;
                 for (var c = 0; c < Cycles; c++)
                 {
+                    // Yields, never sleeps (sleep1Threshold -1); bounded so a writer that can no longer enter fails the test instead of hanging it.
+                    var spin = new SpinWait();
+                    var deadline = Environment.TickCount64 + 2_000;
+                    while (Interlocked.Read(ref entries) == seen && Environment.TickCount64 < deadline)
+                    {
+                        spin.SpinOnce(-1);
+                    }
+
+                    var now = Interlocked.Read(ref entries);
+                    if (now == seen)
+                    {
+                        Interlocked.Increment(ref stalls);
+                        break;
+                    }
+
+                    seen = now;
                     if (!gate.TryEnterExclusive(Long))
                     {
                         Interlocked.Increment(ref timeouts);
@@ -186,7 +206,8 @@ public class DataFileWriteGateTests
         Assert.Multiple(() =>
         {
             Assert.That(done, Is.True, "the freezers did not finish");
-            Assert.That(entriesDuringFreezes, Is.GreaterThan(Cycles), "premise: the writers ran while the freezers cycled");
+            Assert.That(stalls, Is.Zero, "no writer entered for 2 s between two freezes");
+            Assert.That(entriesDuringFreezes, Is.GreaterThanOrEqualTo(2 * Cycles), "premise: the writers ran between every two freezes");
             Assert.That(violations, Is.Zero, "BKP-01: a writer was inside an exclusive hold, or two freezers held it at once");
             Assert.That(timeouts, Is.Zero);
             Assert.That(gate.SharedHolders(), Is.Zero);
