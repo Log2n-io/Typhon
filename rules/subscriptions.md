@@ -714,6 +714,8 @@
     closes the link after it; the connection leaves the link bound for it. Only before the session is open (a refused HELLO) does the receive thread,
     then the link's only writer, send the KICK itself. The pending KICK carries the link it was decided for, so a slot recycled before the pump runs
     neither strands it nor redirects it, and a pump that ends on an exception lowers its flag rather than leaving the session unable to send
+  invariant a pump that runs out of work lowers its flag with a full fence (Interlocked) before it looks for work again: a requester stores its KICK,
+    PONG or frame and then CASes the flag, so a release store alone lets each side read the other's old value and leave, the work stranded
   invariant [the client itself started the close] → no KICK: the connection unbinds its link before asking the tick to close, and an absent
     link is what tells the pump there is nobody to inform
   invariant ∀ SDK: the close code it reports is the KICK's when one arrived, and the transport's only otherwise — TCP carries no code, so a
