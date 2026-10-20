@@ -42,6 +42,10 @@ internal static partial class WalArchiveLog
         Message = "WAL archive: the close's final pass ran out of time, archived through LSN {Through} of {Durable}; the next open archives the rest")]
     public static partial void ClosePassIncomplete(ILogger logger, long through, long durable);
 
+    [LoggerMessage(Level = LogLevel.Warning,
+        Message = "Restore: point #{BackupId} skipped as a base, its tail segment {SegmentId} disagrees with the archive of timeline {Timeline} (another history)")]
+    public static partial void BaseSkipped(ILogger logger, uint backupId, long segmentId, Guid timeline);
+
     [LoggerMessage(Level = LogLevel.Warning, Message = "WAL archive: a scheduler step failed ({Reason})")]
     public static partial void StepFailed(ILogger logger, string reason);
 

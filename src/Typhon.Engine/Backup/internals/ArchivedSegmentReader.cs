@@ -129,7 +129,8 @@ internal sealed class ArchivedSegmentReader : IDisposable
 
         // LastRecordLsn may pass LastLsn: a segment adopted after a crash ends, for the segment manager, at the frontier the open's first scan found,
         // which can be its last chunk's first record rather than its last; the next segment's header starts right after that.
-        if (f.LastLsn < header.FirstLsn - 1 || f.LastUnitLsn > f.LastRecordLsn || (f.LastRecordLsn != 0 && f.LastRecordLsn < header.FirstLsn))
+        if (f.LastLsn < header.FirstLsn - 1 || f.LastUnitLsn > f.LastRecordLsn || (f.LastRecordLsn != 0 && f.LastRecordLsn < header.FirstLsn)
+            || (f.FirstRecordLsn != 0 && (f.FirstRecordLsn < header.FirstLsn || f.FirstRecordLsn > f.LastRecordLsn)))
         {
             Corrupt(path, "Footer", $"LSNs out of order (first {header.FirstLsn}, last {f.LastLsn}, record {f.LastRecordLsn}, unit {f.LastUnitLsn})");
         }

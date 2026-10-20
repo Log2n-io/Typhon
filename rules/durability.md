@@ -3498,6 +3498,41 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08) and
   spec: rules/tla/WalArchive.tla (S7) — ArchivedOrReleased, NoSilentHole; mutants -mutant-raisebeforepublish, -mutant-openreclaim,
     -mutant-nofloor, -mutant-continuityunchecked, -mutant-releasenocount
 
+### BKP-11: A restore to an LSN or a time yields exactly the committed prefix at its cut, on one timeline, from one history `[fatal]` `[silent]`
+  invariant restore(L) on timeline t: L' = the highest LSN ≤ L that ends a whole frame of t's WAL; state(open(R)) = every
+            transaction whose TxCommit LSN ≤ L' and nothing else — BKP-05 with the tail extended by t's archived segments and cut
+            at L' (the cut segment's bytes past the frame end zeroed to its declared size); L' ≥ the base's P, and L' is what the
+            restore reports (EffectiveLsn)
+  invariant an instant resolves to the highest LSN sampled durable at or before it on t's ancestry (t's samples, then its
+            parent's at or below t's origin); never a frame durable after the instant; none ⇒ BeforeCoverage
+  invariant the base is the newest restorable point of t with P ≤ L whose tail agrees with t's archive: each tail segment that
+            has an archived copy under its id equals it over the bytes both hold, the tail's rest zeros; a disagreeing base is
+            never mixed with the archive (another history, WA-11), an older one is tried; none ⇒ NoBase
+  invariant the restored WAL is continuous from the base's tail to L': every hop next.FirstRecordLsn ≤ prev.End + 1, re-derived
+            from the files, never the index; a recorded drop (BacklogReleased, CorruptMidSegment, TornAtCrash) or a missing
+            range below L refuses with its range (Gap) and the LSNs still restorable; L past the archive ⇒ BeyondArchive
+  invariant a restore never crosses a fork: L ≤ a child's OriginLsn is restored on the parent (ancestry walk), L > it on the
+            child from a child point only; a fork (SchemaChange at registration, BulkLoad before BulkEnd, Restore at adoption)
+            flips BK_TimelineId/Parent/OriginLsn/Reason in one fsynced meta write before any record of the new timeline
+  invariant a clean base restored with archived WAL opens on the crash path: the marker (v2) carries ForceCrashRecovery, and the
+            open replays the restored WAL whatever the image's clean flag; a v1 marker is still read, a newer one refused
+  invariant a refused or planned restore writes nothing: Preview/PlanRestore report every refusal Run would raise; a Run held to
+            an ApprovedPlan whose fingerprint (point, target, segments and their CRCs, cut) no longer matches refuses
+            (BackupPlanChanged) before the first write
+  requires: BKP-05, BKP-10, BKP-06, BKP-08, LOG-03, LOG-04
+  scope: ArchiveRestorePlanner.Plan, ArchiveRestorePlanner.ResolveTime, ArchiveRestorePlanner.Ancestor, WalArchiveScanner.FindCut,
+    RestoreStager.Run, RestoreStager.Preview, RestoreStager.WriteArchivedWal, RestoreMarker.TryRead,
+    DatabaseEngine.CheckRestoreMarkerAtOpen, DatabaseEngine.ForkTimeline, DatabaseEngine.AdoptTimeline
+  on_violation: a restore that opens without error to a state no run produced — a prefix past the target, a frame cut in half, two
+    histories spliced at a segment, a fork crossed, or a clean base whose archived WAL is silently skipped; found when the data
+    is needed
+  verified: RestoreToLsnOracleTests (T12: every frame end as a target, from either base, oracle state; forced crash recovery),
+            FrameCutTests, ArchiveRestorePlannerTests (every refusal; a disagreeing base never mixed; never across a fork),
+            TimelineForkTests, RestoreMarkerV2Tests, RestoreCleanBaseTests
+            (Mutant_AMarkerWithoutForceCrashRecovery_IsReported), RestorePlanTests (AC-A11) — [VerifiesRule("BKP-11")]. Source
+            mutants seen red: fork flipped after FlushToDisk
+  spec: rules/tla/WalArchive.tla (S7) — RestoreIsPrefix
+
 ### BKP-12: The engine never waits on a backup past its budget
   invariant a data-file writer spends at most CbwStallTimeout in BackupCapture.BeforeWrite per write, and per SavePages
             batch (the slot wait, the wait for a claimed page and every run of one batch share one deadline); past it the

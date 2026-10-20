@@ -24,8 +24,9 @@ namespace Typhon.Engine.Internals;
 /// The highest such LSN; 0 = none. For a segment a crash open sealed, the highest fence LSN its seal recorded (the torn frame's chunks are no longer read).
 /// </param>
 /// <param name="SealedAtCrash">The walk ended at the padding sentinel a crash open writes over a torn frame (<see cref="WalFrameHeader.CrashSealRecordCount"/>).</param>
+/// <param name="FirstRecordLsn">The lowest LSN of the frames read whole; 0 = none.</param>
 internal readonly record struct WalSegmentScan(long SegmentId, long FirstLsn, long PrevSegmentLsn, uint DeclaredSize, int ArchiveLength, long LastRecordLsn,
-    long LastUnitLsn, bool StoppedAtCorruption, int FirstInvalidFrameOffset, long DroppedFromLsn, long DroppedToLsn, bool SealedAtCrash);
+    long LastUnitLsn, bool StoppedAtCorruption, int FirstInvalidFrameOffset, long DroppedFromLsn, long DroppedToLsn, bool SealedAtCrash, long FirstRecordLsn);
 
 /// <summary>Where <see cref="WalArchiveScanner.FindCut"/> cuts a segment for a restore to an LSN.</summary>
 /// <param name="CutOffset">File offset of the end of the last frame kept; the restored segment holds <c>[0, CutOffset)</c> then zeros.</param>
@@ -52,8 +53,8 @@ internal static class WalArchiveScanner
     internal static WalSegmentScan Scan(WalSegmentReader reader)
     {
         ArgumentNullException.ThrowIfNull(reader);
-        long lastRecord = 0, lastUnit = 0;
-        long frameRecord = 0, frameUnit = 0, frameFenceLow = 0, frameFenceHigh = 0;
+        long lastRecord = 0, lastUnit = 0, firstRecord = 0;
+        long frameRecord = 0, frameUnit = 0, frameFenceLow = 0, frameFenceHigh = 0, frameFirst = 0;
         var frameStart = -1;
         var frameEnd = 0;
         while (reader.TryReadNext(out var chunk, out var body))
@@ -63,9 +64,10 @@ internal static class WalArchiveScanner
                 // A new frame: the previous one was read whole.
                 lastRecord = Math.Max(lastRecord, frameRecord);
                 lastUnit = Math.Max(lastUnit, frameUnit);
+                firstRecord = firstRecord == 0 ? frameFirst : firstRecord;
                 frameStart = reader.FrameStart;
                 frameEnd = reader.FrameEnd;
-                frameRecord = frameUnit = frameFenceLow = frameFenceHigh = 0;
+                frameRecord = frameUnit = frameFenceLow = frameFenceHigh = frameFirst = 0;
             }
 
             if (chunk.ChunkType != (ushort)WalChunkType.Transaction)
@@ -73,7 +75,9 @@ internal static class WalArchiveScanner
                 // Every chunk type carries its LSN at body offset 0 (WP-07).
                 if (body.Length >= sizeof(long))
                 {
-                    frameRecord = Math.Max(frameRecord, MemoryMarshal.Read<long>(body));
+                    var lsn = MemoryMarshal.Read<long>(body);
+                    frameRecord = Math.Max(frameRecord, lsn);
+                    frameFirst = frameFirst == 0 ? lsn : Math.Min(frameFirst, lsn);
                 }
 
                 continue;
@@ -89,6 +93,7 @@ internal static class WalArchiveScanner
                 }
 
                 frameRecord = Math.Max(frameRecord, view.Lsn);
+                frameFirst = frameFirst == 0 ? view.Lsn : Math.Min(frameFirst, view.Lsn);
                 if (view.IsTxCommit || view.IsFence)
                 {
                     frameUnit = Math.Max(frameUnit, view.Lsn);
@@ -107,6 +112,7 @@ internal static class WalArchiveScanner
         {
             lastRecord = Math.Max(lastRecord, frameRecord);
             lastUnit = Math.Max(lastUnit, frameUnit);
+            firstRecord = firstRecord == 0 ? frameFirst : firstRecord;
         }
         else if (frameStart >= 0)
         {
@@ -136,7 +142,7 @@ internal static class WalArchiveScanner
         var archiveLength = WalSegmentHeader.SizeInBytes + AlignUp(complete);
         var truncated = reader.WasTruncated;
         return new WalSegmentScan(header.SegmentId, header.FirstLSN, header.PrevSegmentLSN, header.SegmentSize, archiveLength, lastRecord, lastUnit, truncated,
-            truncated ? WalSegmentHeader.SizeInBytes + reader.FrameStart : 0, droppedFrom, droppedTo, sealedAtCrash);
+            truncated ? WalSegmentHeader.SizeInBytes + reader.FrameStart : 0, droppedFrom, droppedTo, sealedAtCrash, firstRecord);
     }
 
     /// <summary>

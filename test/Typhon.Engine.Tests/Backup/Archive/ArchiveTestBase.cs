@@ -11,13 +11,16 @@ namespace Typhon.Engine.Tests;
 /// Shared harness of the WAL archive fixtures: a disk WAL of small segments, archiving configured into a store per test, checkpoints forced by the test
 /// (never by the clock), segments sealed by switch requests whose service the test waits for.
 /// </summary>
-abstract class ArchiveTestBase<T> : BackupTestBase<T> where T : ArchiveTestBase<T>
+abstract partial class ArchiveTestBase<T> : BackupTestBase<T> where T : ArchiveTestBase<T>
 {
     /// <summary>Every segment of these fixtures has this declared size, so the backlog arithmetic is exact.</summary>
     protected const uint SegmentSize = 256 * 1024;
 
     /// <summary>Whether the engine opens with archiving configured.</summary>
     protected virtual bool ArchivingOn => true;
+
+    /// <summary>Set to open restored bundles without archiving (read when an engine is resolved).</summary>
+    protected bool SuppressArchiving { get; set; }
 
     /// <summary>The backlog limit; large by default, so nothing is released unless a test lowers it.</summary>
     protected virtual long BacklogLimit => 64L * SegmentSize;
@@ -33,7 +36,7 @@ abstract class ArchiveTestBase<T> : BackupTestBase<T> where T : ArchiveTestBase<
         o.Wal.SegmentSize = SegmentSize;
         o.Wal.InitialSegmentSize = SegmentSize;
         o.Wal.PreAllocateSegments = 1;
-        o.WalArchive = ArchivingOn
+        o.WalArchive = ArchivingOn && !SuppressArchiving
             ? new WalArchiveConfiguration
             {
                 Options = new ArchiveOptions { MaxSegmentAge = TimeSpan.FromSeconds(5), BacklogLimitBytes = BacklogLimit },

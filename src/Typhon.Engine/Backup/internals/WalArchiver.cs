@@ -96,7 +96,7 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
         public readonly List<ArchivedSegmentInfo> Archived = [];
         public int PublishesSinceIndex;
 
-        public long End => Archived.Count == 0 ? 0 : Archived[^1].LastLsn;
+        public long End => Archived.Count == 0 ? 0 : Archived[^1].End;
     }
 
     /// <summary>Creates an archiver under <paramref name="parent"/>; its worker starts with <see cref="Start"/> (tests drive <see cref="ArchivePending"/>).</summary>
@@ -639,20 +639,12 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
                 if (a.SegmentId == s.Id)
                 {
                     archived = a;
+                    break;
                 }
-                else if (a.FirstLsn <= s.LastLsn && s.FirstLsn <= a.LastLsn)
-                {
-                    Diverge($"local segment {s.Id} holds LSNs {s.FirstLsn}..{s.LastLsn}, archived under segment {a.SegmentId}");
-                    return false;
-                }
-            }
-
-            if (archived == null)
-            {
-                continue;   // inside a recorded gap of the archive
             }
 
             uint crc;
+            WalSegmentScan scan;
             lock (_engineAccess)
             {
                 if (_stopped || !_reader.OpenSegmentForArchive(s.Path, s.WrittenBytes))
@@ -660,20 +652,46 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
                     continue;   // reclaimed meanwhile: nothing to compare
                 }
 
-                var length = (int)archived.Footer.ArchiveLength - WalSegmentHeader.SizeInBytes;
-                if (archived.FirstLsn != s.FirstLsn || length > _reader.LoadedData.Length)
+                if (archived != null)
                 {
-                    Diverge($"local segment {s.Id} is not the segment archived under its id");
+                    var length = (int)archived.Footer.ArchiveLength - WalSegmentHeader.SizeInBytes;
+                    if (archived.FirstLsn != s.FirstLsn || length > _reader.LoadedData.Length)
+                    {
+                        Diverge($"local segment {s.Id} is not the segment archived under its id");
+                        return false;
+                    }
+
+                    crc = Crc32CUtil.Finish(Crc32CUtil.Append(Crc32CUtil.Append(Crc32CUtil.Start, _reader.HeaderBytes), _reader.LoadedData[..length]));
+                    scan = default;
+                }
+                else
+                {
+                    crc = 0;
+                    scan = WalArchiveScanner.Scan(_reader);
+                }
+            }
+
+            if (archived != null)
+            {
+                if (crc != archived.Footer.RawCrc)
+                {
+                    Diverge($"local segment {s.Id} differs from its archived copy");
                     return false;
                 }
 
-                crc = Crc32CUtil.Finish(Crc32CUtil.Append(Crc32CUtil.Append(Crc32CUtil.Start, _reader.HeaderBytes), _reader.LoadedData[..length]));
+                continue;
             }
 
-            if (crc != archived.Footer.RawCrc)
+            // Not archived under its id: inside a recorded gap of the archive — unless the archive holds its records under another id (two histories).
+            // By records, not headers: the first segment after a crash open starts, in its header, below the previous one's end.
+            foreach (var a in archive.Archived)
             {
-                Diverge($"local segment {s.Id} differs from its archived copy");
-                return false;
+                if (scan.FirstRecordLsn != 0 && a.Footer.FirstRecordLsn != 0 && scan.FirstRecordLsn <= a.Footer.LastRecordLsn
+                    && a.Footer.FirstRecordLsn <= scan.LastRecordLsn)
+                {
+                    Diverge($"local segment {s.Id} holds LSNs {scan.FirstRecordLsn}..{scan.LastRecordLsn}, archived under segment {a.SegmentId}");
+                    return false;
+                }
             }
         }
 
@@ -730,10 +748,12 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
             throw new InvalidOperationException($"WA-15: segment {s.Id} ends at LSN {s.LastLsn}, past the durable LSN {durable}.");
         }
 
-        // c  Continuity, by LSN (WA-8): a hole is a gap, recorded with its cause; an overlap is another history (WA-14).
-        if (s.FirstLsn <= archivedThrough && archivedThrough > 0)
+        // c  Continuity, by LSN (WA-8): a hole is a gap, recorded with its cause; a record inside the archive is another history (WA-14). The first segment
+        // after a crash open may start, in its header, below the archive's end: the open's first scan names the last chunk's first record as its frontier,
+        // its records start past the recovered one; what counts is that none of them is already archived.
+        if (archivedThrough > 0 && scan.FirstRecordLsn != 0 && scan.FirstRecordLsn <= archivedThrough)
         {
-            Diverge($"segment {s.Id} starts at LSN {s.FirstLsn}, inside the archive (archived through {archivedThrough})");
+            Diverge($"segment {s.Id} holds LSN {scan.FirstRecordLsn}, inside the archive (archived through {archivedThrough})");
             return false;
         }
 
@@ -750,6 +770,7 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
             LastLsn = s.LastLsn,
             LastRecordLsn = scan.LastRecordLsn,
             LastUnitLsn = scan.LastUnitLsn,
+            FirstRecordLsn = scan.FirstRecordLsn,
             ArchivedUtcTicks = (UtcClock?.Invoke() ?? DateTime.UtcNow).Ticks,
         };
 
@@ -849,11 +870,12 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
             RecordGap(footer.DroppedFromLsn, footer.DroppedToLsn, scan.StoppedAtCorruption ? ArchiveGapReason.Unknown : ArchiveGapReason.TornAtCrash);
         }
 
-        Volatile.Write(ref _archivedThroughLsn, s.LastLsn);
+        var end = Math.Max(s.LastLsn, scan.LastRecordLsn);
+        Volatile.Write(ref _archivedThroughLsn, end);
         Volatile.Write(ref _lastArchivedSealTicks, s.SealedUtcTicks);
         _releasesAtLastArchive = releases;
         _archivedThisSession = true;
-        DropSamples(s.LastLsn);
+        DropSamples(end);
         lock (_engineAccess)
         {
             if (_stopped)
@@ -861,7 +883,7 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
                 return false;
             }
 
-            _engine.CheckpointManager?.RaiseArchiveFloor(s.LastLsn + 1);
+            _engine.CheckpointManager?.RaiseArchiveFloor(end + 1);
         }
 
         WalArchiveLog.SegmentArchived(_log, s.Id, s.FirstLsn, s.LastLsn, scan.ArchiveLength, published.Segment.FileLength);

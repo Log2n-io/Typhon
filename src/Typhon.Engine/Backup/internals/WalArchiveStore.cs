@@ -61,7 +61,7 @@ internal sealed class ArchivedTimeline
     public bool FromIndex { get; init; }
 
     /// <summary>The last LSN archived: the newest segment's; 0 when none.</summary>
-    public long ArchivedThroughLsn => Segments.Count == 0 ? 0 : Segments[^1].LastLsn;
+    public long ArchivedThroughLsn => Segments.Count == 0 ? 0 : Segments[^1].End;
 }
 
 /// <summary>How a publish ended.</summary>

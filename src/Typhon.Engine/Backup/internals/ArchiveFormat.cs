@@ -74,6 +74,7 @@ internal static class ArchiveFormat
     public const int FDroppedFromLsn = 84;
     public const int FDroppedToLsn = 92;
     public const int FArchivedUtcTicks = 100;
+    public const int FFirstRecordLsn = 108;
     public const int FFooterCrc = 116;
     public const int FFooterMagic = 120;
     public const int FFileCrc = 124;
@@ -173,6 +174,10 @@ internal struct ArchivedSegmentFooter
     public long DroppedToLsn;
     public long ArchivedUtcTicks;
 
+    /// <summary>The lowest LSN of the frames archived; 0 = none. Above <see cref="ArchivedSegmentHeader.FirstLsn"/> for the first segment after a crash open,
+    /// whose header names the frontier the open's first scan found (its last chunk's first record) while its records start past the recovered one.</summary>
+    public long FirstRecordLsn;
+
     public readonly bool GapBefore => (Flags & ArchiveFormat.FooterFlagGapBefore) != 0;
 
     /// <summary>Serialises bytes <c>[0, 124)</c>: every field, the <c>FooterCRC</c> and the magic. The <c>FileCRC</c> is the writer's to append.</summary>
@@ -196,6 +201,7 @@ internal struct ArchivedSegmentFooter
         BinaryPrimitives.WriteInt64LittleEndian(dst[ArchiveFormat.FDroppedFromLsn..], DroppedFromLsn);
         BinaryPrimitives.WriteInt64LittleEndian(dst[ArchiveFormat.FDroppedToLsn..], DroppedToLsn);
         BinaryPrimitives.WriteInt64LittleEndian(dst[ArchiveFormat.FArchivedUtcTicks..], ArchivedUtcTicks);
+        BinaryPrimitives.WriteInt64LittleEndian(dst[ArchiveFormat.FFirstRecordLsn..], FirstRecordLsn);
         BinaryPrimitives.WriteUInt32LittleEndian(dst[ArchiveFormat.FFooterCrc..], Crc32CUtil.Compute(dst[..ArchiveFormat.FFooterCrc]));
         ArchiveFormat.FooterMagic.CopyTo(dst[ArchiveFormat.FFooterMagic..]);
     }
@@ -218,6 +224,7 @@ internal struct ArchivedSegmentFooter
         DroppedFromLsn = BinaryPrimitives.ReadInt64LittleEndian(src[ArchiveFormat.FDroppedFromLsn..]),
         DroppedToLsn = BinaryPrimitives.ReadInt64LittleEndian(src[ArchiveFormat.FDroppedToLsn..]),
         ArchivedUtcTicks = BinaryPrimitives.ReadInt64LittleEndian(src[ArchiveFormat.FArchivedUtcTicks..]),
+        FirstRecordLsn = BinaryPrimitives.ReadInt64LittleEndian(src[ArchiveFormat.FFirstRecordLsn..]),
     };
 }
 
@@ -248,6 +255,15 @@ internal sealed record ArchivedSegmentInfo
     public long FirstLsn => Header.FirstLsn;
 
     public long LastLsn => Footer.LastLsn;
+
+    /// <summary>
+    /// The archive's end once this segment is in it: its last LSN, or its last record's when that lies further (a segment adopted after a crash ends, for
+    /// the segment manager, at the frontier the open's first scan found).
+    /// </summary>
+    public long End => Math.Max(Footer.LastLsn, Footer.LastRecordLsn);
+
+    /// <summary>Whether this segment continues the archive ending at <paramref name="end"/>: no hole before it, no record of it at or below the end.</summary>
+    public bool Continues(long end) => Header.FirstLsn <= end + 1 && (Footer.FirstRecordLsn == 0 || Footer.FirstRecordLsn > end);
 
     /// <summary>The first segment of an engine session: no previous segment, and past the database's first LSN.</summary>
     public bool SessionStart => Header.PrevSegmentLsn == 0 && Header.FirstLsn > 1;

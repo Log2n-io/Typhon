@@ -31,6 +31,7 @@ class WalArchiveBacklogTests : ArchiveTestBase<WalArchiveBacklogTests>
         Tick(archiver, 0);
         Tick(archiver, 1);
         Assert.That(archiver.ArchivedThroughLsn, Is.EqualTo(archived.LastLsn), "premise: a first segment archived");
+        CapturePoint(dbe, BackupKind.Full);
 
         // The store stops answering: the archiver stalls, the floor holds, checkpoints keep cycling.
         fs.Failing = true;
@@ -75,5 +76,15 @@ class WalArchiveBacklogTests : ArchiveTestBase<WalArchiveBacklogTests>
         Assert.That((archiver.State.LastGapFromLsn, archiver.State.LastGapToLsn, archiver.State.GapsTotal),
             Is.EqualTo((archived.LastLsn + 1, resumed.FirstLsn - 1, 1L)));
         Assert.That(archiver.ConsumeImmediatePointRequest(), Is.True, "a gap asks for a point");
+
+        // No restore crosses the hole: a target inside it, or past it from the point before it, refuses naming the range.
+        var view = StoreView.Open(StorePath, trustCatalog: false);
+        foreach (var target in new[] { archived.LastLsn + 1, resumed.LastLsn })
+        {
+            var refused = Assert.Throws<RestoreTargetUnreachableException>(() =>
+                ArchiveRestorePlanner.Plan(StoreFileSystem.Instance, view, PointSelector.AtLsn(target)));
+            Assert.That(refused.Reason, Is.EqualTo(RestoreUnreachableReason.Gap), $"{Marker}: a restore across it, target {target}");
+            Assert.That(refused.FromLsn, Is.LessThanOrEqualTo(archived.LastLsn + 1));
+        }
     }
 }
