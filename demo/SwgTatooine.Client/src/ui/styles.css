@@ -363,6 +363,41 @@ button.active {
   }
 }
 
+/*
+ * The travel line: one sentence saying what the server is doing with a flight request.
+ *
+ * Coloured by outcome rather than decorated, because the whole point is that a glance tells a waiting person which of
+ * the five things is happening. The left rule is what makes it read as a status rather than as more body text.
+ */
+.travel {
+  margin: 4px 0 2px;
+  padding: 5px 7px;
+  border-left: 3px solid var(--muted);
+  background: rgba(255, 255, 255, 0.04);
+  line-height: 1.35;
+}
+
+.travel.asking {
+  border-left-color: var(--muted);
+  color: var(--muted);
+}
+
+.travel.queued {
+  border-left-color: var(--accent);
+}
+
+.travel.refused {
+  border-left-color: #d8623c;
+}
+
+.travel.arrived {
+  border-left-color: #6fbf5a;
+}
+
+.travel.stranded {
+  border-left-color: #d8a33c;
+}
+
 .shuttle-destinations {
   display: flex;
   flex-wrap: wrap;

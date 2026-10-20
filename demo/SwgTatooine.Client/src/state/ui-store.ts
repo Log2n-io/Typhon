@@ -16,6 +16,7 @@ export interface CameraRequest {
 
 import type { RealmDirectory } from '../data/server-config';
 import { askedFor, IDLE, type TransitionState } from '../app/realm-transition';
+import { NOT_TRAVELLING, type TravelState } from '../app/travel';
 
 /** A pending ask to look at another realm. The sequence makes a repeat of the same realm a new ask. */
 export interface RealmRequest {
@@ -34,6 +35,19 @@ export interface SpectateRequest {
 export interface BoardRequest {
   /** The destination city's index in the client's own map data. */
   readonly city: number;
+  readonly seq: number;
+}
+
+/**
+ * A boarding refusal the source reported, held for one frame.
+ *
+ * <b>A sequence rather than a flag, so two refusals in a row are two.</b> A person who clicks a destination the server
+ * will not accept tends to click it again; without the counter the second refusal would be indistinguishable from the
+ * first still being on screen, and the panel would look stuck rather than answering.
+ */
+export interface ShuttleRefusal {
+  /** The `ACKS` reason, or `travel.REASON_NOT_SENT` when the ask never left the client. */
+  readonly reason: number;
   readonly seq: number;
 }
 
@@ -130,6 +144,17 @@ export interface UiState {
    * been sent it. `app/shuttle.ts` does the looking, and the bot brain answers the same question the same way.
    */
   readonly shuttleport: ShuttleportPrompt | null;
+
+  /**
+   * How the journey is going, as the panel reports it.
+   *
+   * Written by the app from {@link nextTravel} once a frame rather than by the actions below, because every input it
+   * reads except the ask itself comes from the server.
+   */
+  readonly travel: TravelState;
+
+  /** The last boarding refusal, or null; drained by the app on the frame it feeds the machine. */
+  readonly shuttleRefusal: ShuttleRefusal | null;
   /** The realms this server says it has, or `null` from the mock and from a server that publishes none. */
   readonly realms: RealmDirectory | null;
   /**
@@ -161,6 +186,15 @@ export interface UiState {
   readonly boardShuttle: (city: number) => void;
   /** Publishes the port the avatar is standing at, or `null`. Called by the frame loop on change only. */
   readonly setShuttleport: (shuttleport: ShuttleportPrompt | null) => void;
+
+  /** Publishes this frame's travel state. */
+  readonly setTravel: (travel: TravelState) => void;
+
+  /** Records a refusal the source reported, for the app to drain on its next frame. */
+  readonly shuttleRefused: (reason: number) => void;
+
+  /** Clears a drained refusal, so one reason is fed to the machine exactly once. */
+  readonly clearShuttleRefusal: () => void;
   readonly setShowAuthoritative: (showAuthoritative: boolean) => void;
   readonly setShowLabels: (on: boolean) => void;
   readonly setShowAttacks: (on: boolean) => void;
@@ -180,7 +214,7 @@ export interface UiState {
   readonly setTransition: (transition: TransitionState) => void;
 }
 
-export const useUi = create<UiState>()((set) => ({
+export const useUi = create<UiState>()((set, get) => ({
   population: 1,
   seed: 20260916,
   viewRadius: 1500,
@@ -207,6 +241,8 @@ export const useUi = create<UiState>()((set) => ({
   spectateRequest: null,
   boardRequest: null,
   shuttleport: null,
+  travel: NOT_TRAVELLING,
+  shuttleRefusal: null,
   realms: null,
   transition: IDLE,
 
@@ -350,6 +386,21 @@ export const useUi = create<UiState>()((set) => ({
   },
   setShuttleport: (shuttleport) => {
     set({ shuttleport });
+  },
+  setTravel: (travel) => {
+    // Compared by identity before publishing: the machine returns its own previous state when nothing moved, and a
+    // store write every frame would re-render the panel sixty times a second for an unchanged queue.
+    if (get().travel !== travel) {
+      set({ travel });
+    }
+  },
+  shuttleRefused: (reason) => {
+    set((s) => ({ shuttleRefusal: { reason, seq: (s.shuttleRefusal?.seq ?? 0) + 1 } }));
+  },
+  clearShuttleRefusal: () => {
+    if (get().shuttleRefusal !== null) {
+      set({ shuttleRefusal: null });
+    }
   },
   viewRealm: (realmId) => {
     // The selection is dropped here as well as on arrival: the entity it names belongs to the realm being left, and

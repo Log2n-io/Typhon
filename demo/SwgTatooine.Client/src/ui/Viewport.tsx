@@ -129,6 +129,12 @@ function factoryFor(
         const state = useUi.getState();
         state.setTransition(refused(state.transition, performance.now()));
       },
+      onShuttleRefused: (reason) => {
+        // The only thing that will ever say the flight is not happening. An accepted boarding shows up in the avatar's
+        // activity and the flight in its position, but a refusal produces no frame of any kind, so without this the
+        // panel would show an ask in flight until the session ended.
+        useUi.getState().shuttleRefused(reason);
+      },
       onSpectateRefused: () => {
         // A refused ride leaves nothing behind on its own: no frame arrives, so nothing takes the camera out of the
         // eye mode the ask put it in optimistically, and the viewer is left at head height on an entity the session

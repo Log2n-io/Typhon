@@ -37,6 +37,18 @@ export interface SpawnRegionDef {
   readonly template: number;
 }
 
+/**
+ * The seven cities, by the names this client uses.
+ *
+ * <b>These are NOT the names the server prints, and the difference is deliberate rather than drift.</b> Every
+ * coordinate, radius and count below is the same number as the server's `TatooineData.Cities`, in the same order, so
+ * the index a destination travels under means the same city on both sides. Only the names differ: the browser shows
+ * neutral ones while the server keeps Star Wars Galaxies' own, whose radii carry [CORE3] provenance.
+ *
+ * The correspondence, index by index, because a server log line and this UI will otherwise look like two different
+ * worlds: Port Sable is Mos Eisley, Whitestone is Bestine, Dry Wells is Mos Espa, Red Mesa is Mos Entha, Tern's Rest
+ * is Anchorhead, Tallow is Mos Taike, and Far Reach is Wayfar. The points of interest below rename the same way.
+ */
 export const CITIES: readonly CityDef[] = [
   { name: 'Port Sable', x: 3460, z: -4768, radius: 456, buildings: 190, npcs: 340, playerWeight: 0.34 },
   { name: 'Whitestone', x: -1370, z: -3639, radius: 336, buildings: 140, npcs: 240, playerWeight: 0.18 },

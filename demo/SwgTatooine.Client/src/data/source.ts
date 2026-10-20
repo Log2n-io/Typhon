@@ -26,6 +26,7 @@ import {
 } from '@typhondb/client';
 import { hullInRadiusM } from './replication-stats';
 import { realmViewOf, type RealmView } from './realm-view';
+import { REASON_NOT_SENT } from '../app/travel';
 
 /**
  * Where the client's world comes from. The renderer and the UI only ever see the SDK's store, clock and aggregate grid;
@@ -299,6 +300,17 @@ export interface TyphonSourceOptions {
   readonly onRealmRefused?: () => void;
   /** The server refused a ride, or the local rate limit did. Nothing else will ever say so. */
   readonly onSpectateRefused?: () => void;
+
+  /**
+   * A boarding ask the server refused, or that the client's own bucket never sent.
+   *
+   * <b>The only thing that will ever say so.</b> An accepted boarding is visible in the avatar's `activity`, and the
+   * flight itself in the body's position, so those two need no callback — but a refusal produces no frame of any kind,
+   * and without this the browser would show an ask that stays in flight for the rest of the session.
+   *
+   * @param reason The `ACKS` reason, or `travel.REASON_NOT_SENT` when nothing left the client.
+   */
+  readonly onShuttleRefused?: (reason: number) => void;
   /** The server's WebSocket URL, which must speak `typhon.3`. */
   readonly url: string;
   /** The clock render time comes from; the source feeds it every frame. */
@@ -703,9 +715,22 @@ export class TyphonSource implements DataSource {
       return;
     }
 
-    this.commands?.enqueue(this.boardShuttleCommand, { destCity: Math.max(0, Math.round(destCity)) });
+    const seq = this.commands?.enqueue(this.boardShuttleCommand, { destCity: Math.max(0, Math.round(destCity)) })
+      ?? CommandRefused.RateLimited;
+    if (seq < 0) {
+      // Nothing was sent, so no ack will ever come for it. Reported immediately rather than left to the panel's
+      // timeout: the client knows this one for certain, and two clicks in one tick is enough to cause it.
+      this.pendingBoardSeq = -1;
+      this.options.onShuttleRefused?.(REASON_NOT_SENT);
+      return;
+    }
+
+    this.pendingBoardSeq = seq;
     this.sendPending();
   }
+
+  /** The sequence of the boarding ask awaiting an answer, or -1; see {@link SourceOptions.onShuttleRefused}. */
+  private pendingBoardSeq = -1;
 
   /** The netId this client last asked to ride; see {@link DataSource.spectatingNetId}. */
   get spectatingNetId(): number {
@@ -939,6 +964,13 @@ export class TyphonSource implements DataSource {
         this.pendingSpectateSeq = -1;
         this.spectating = 0;
         this.options.onSpectateRefused?.();
+      }
+
+      // A refused boarding. An ACCEPTED one is never acked, so this branch only ever carries bad news — which is why
+      // the panel reads acceptance from the avatar's activity instead of from here.
+      if (seq === this.pendingBoardSeq) {
+        this.pendingBoardSeq = -1;
+        this.options.onShuttleRefused?.(applier.acks.reason[i]);
       }
     }
 

@@ -67,6 +67,7 @@ import { DEFAULT_THIRD_PERSON_M } from '../camera/eye-camera';
 import { useStats, type Inspection } from '../state/stats-store';
 import { useUi, type ShuttleportPrompt, type UiState } from '../state/ui-store';
 import { nearestShuttleport } from './shuttle';
+import { nextTravel } from './travel';
 
 const STATS_INTERVAL_MS = 250;
 const REGION_INTERVAL_MS = 200;
@@ -1381,6 +1382,7 @@ export class ClientApp {
     // before the SELF entity arrives — and the prompt then measured from wherever the avatar last stood, offering a
     // boarding the server answers with ShuttleNotAtPort. The camera latch below already gated on both.
     this.updateShuttlePrompt(playing && haveEyeSubject, ui);
+    this.updateTravel(ui);
 
     // A10: a player arrives in third person, behind their own avatar. Done here rather than in the store's initial state
     // because it depends on the session being a player's, which is only known once the catalog has arrived — and done
@@ -1798,6 +1800,87 @@ export class ClientApp {
 
   /** Frames since the last port search; see {@link updateShuttlePrompt}. */
   private shuttleFrames = 0;
+
+  /**
+   * Advances the travel machine and publishes what it says.
+   *
+   * <b>Every frame, unlike the port search above, and for two reasons.</b> One is the queue's elapsed figure, which a
+   * person reads as a clock. The other is the unanswered-ask timeout: a command the client dropped or the wire lost
+   * produces no frame at all, so the only thing that can notice is the passage of time.
+   *
+   * @param ui The UI state, already read this frame.
+   */
+  private updateTravel(ui: UiState): void {
+    const source = this.source;
+    const ask = ui.boardRequest;
+    if (source === null || ask === null) {
+      if (ui.travel.phase !== 'idle') {
+        ui.setTravel(nextTravel(ui.travel, this.travelInputs(null, null)));
+      }
+
+      return;
+    }
+
+    // Fed once: a reason is consumed on the frame the machine acts on it, and a refusal that arrives in the same frame
+    // as its own ask waits for the next one, when the machine is in `asking` and able to take it.
+    const pending = ui.shuttleRefusal;
+    const refusal = pending !== null && pending.seq !== this.travelRefusalSeq ? pending.reason : null;
+
+    const next = nextTravel(ui.travel, this.travelInputs(ask, refusal));
+    if (pending !== null && (next.phase === 'refused' || next.phase === 'idle')) {
+      this.travelRefusalSeq = pending.seq;
+      ui.clearShuttleRefusal();
+    }
+
+    ui.setTravel(next);
+  }
+
+  /** This frame's inputs for {@link nextTravel}: the ask, what the server says of the body, and where it stands. */
+  private travelInputs(
+    ask: { readonly city: number; readonly seq: number } | null,
+    refusal: number | null,
+  ): Parameters<typeof nextTravel>[1] {
+    // The predicted position when there is one, for the reason the prompt uses it: the arrival test compares against
+    // the destination's disc, and the drawn body is the one the person is watching.
+    const city = ask === null ? undefined : CITIES[ask.city];
+    return {
+      ask,
+      activity: this.selfActivity(),
+      refusal,
+      x: this.predictor.active ? this.predictor.x : this.eyeX,
+      z: this.predictor.active ? this.predictor.z : this.eyeZ,
+      destination: city === undefined ? null : { x: city.x, z: city.z, radiusM: city.radius },
+      nowMs: performance.now(),
+    };
+  }
+
+  /** The refusal sequence already fed to the travel machine; see {@link updateTravel}. */
+  private travelRefusalSeq = 0;
+
+  /**
+   * The avatar's own `activity`, or `NaN` when it cannot be read.
+   *
+   * <b>From the world store and NOT from `SELF`, which is where this looked first and found nothing.</b> The `SELF`
+   * block carries the owner-only fields a session is told about itself; `activity` is an ordinary replicated field on
+   * the Player archetype, so `selfNumber('activity')` answers null and the travel machine was handed NaN for ever —
+   * it never saw a queue, and every accepted boarding timed out as unanswered. Found by clicking the button in a
+   * browser, which no unit test of the machine could have caught: the machine was right and its input was empty.
+   */
+  private selfActivity(): number {
+    const source = this.source;
+    if (source === null || source.selfNetId === 0) {
+      return Number.NaN;
+    }
+
+    const location = this.world.locate(source.selfNetId);
+    if (location === NOT_FOUND) {
+      return Number.NaN;
+    }
+
+    const store = this.world.archetypeStore(archetypeOf(location));
+    const field = store.fieldIndex('activity');
+    return field < 0 ? Number.NaN : store.fieldAt(field)[slotOf(location)];
+  }
 
   /** The `WorldObject` archetype's index in the live catalog, or -1 before it is known. */
   private shuttleArchetype = -1;

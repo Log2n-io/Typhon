@@ -140,6 +140,18 @@ export const PlayerActivity = {
   Roaming: 3,
   ToShuttle: 4,
   AwaitingShuttle: 5,
+
+  /**
+   * Walking to a building's door, with the portal in `ShuttleDest` (Realms G1b).
+   *
+   * These two were missing while the server had them, which is a quiet way to be wrong: `activity` is a `u8` the
+   * renderer and the inspector both read, so a body in either state was shown under whatever name the lookup fell
+   * through to rather than as unknown.
+   */
+  ToPortal: 6,
+
+  /** Inside a building, a dungeon or any other interior realm. */
+  Inside: 7,
 } as const;
 
 export const CONTROLLER_NAMES: readonly string[] = ['Simulated', 'Bot', 'Human'];
