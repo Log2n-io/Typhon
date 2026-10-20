@@ -147,7 +147,9 @@ class BackupSchedulerTests : SchedulerTestBase<BackupSchedulerTests>
         Assert.That(dbe.Backup.Status.PointsTotal, Is.EqualTo(2));
     }
 
-    /// <summary>DL-20: counted failures back off from a minute, doubling up to a quarter of the interval; three make health Failing; a success resets.</summary>
+    /// <summary>
+    /// DL-20: counted failures back off from a minute, doubling up to a quarter of the interval; three make health Failing; a success resets.
+    /// </summary>
     [Test]
     [CancelAfter(30_000)]
     public void Failures_BackOff_AndThreeAreFailing_AndASuccessResets()

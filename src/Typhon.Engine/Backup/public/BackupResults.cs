@@ -221,9 +221,11 @@ public sealed record BackupChainSummary(Guid ChainId, uint BaseId, uint HeadBack
 /// <param name="UnreadablePacks">Pack files whose header or footer cannot be read, with why.</param>
 /// <param name="TemporaryFiles">In-progress or abandoned temps.</param>
 /// <param name="RestorablePoints">The restorable points by a quick verify, or <c>null</c> when not asked for.</param>
+/// <param name="Drills">Each drilled point's newest drill (a drill that could not run is not one), by point id.</param>
 [PublicAPI]
 public sealed record BackupStoreListing(Guid StoreId, Guid DatabaseId, IReadOnlyList<BackupPointSummary> Points, IReadOnlyList<BackupChainSummary> Chains,
-    IReadOnlyList<KeyValuePair<string, string>> UnreadablePacks, IReadOnlyList<string> TemporaryFiles, IReadOnlyList<uint> RestorablePoints);
+    IReadOnlyList<KeyValuePair<string, string>> UnreadablePacks, IReadOnlyList<string> TemporaryFiles, IReadOnlyList<uint> RestorablePoints,
+    IReadOnlyDictionary<uint, BackupDrillSummary> Drills);
 
 /// <summary>
 /// Backup health, one verdict (07 §6): a store's from its packs (<see cref="BackupOperations.Status"/>), an engine's from its schedule, its store and its
@@ -244,7 +246,9 @@ public enum BackupHealth
     /// </summary>
     Warning,
 
-    /// <summary>Every point is still restorable, with reduced coverage or assurance: the backups are stale, the archive lags or has a gap, a drill failed.</summary>
+    /// <summary>
+    /// Every point is still restorable, with reduced coverage or assurance: the backups are stale, the archive lags or has a gap, a drill failed.
+    /// </summary>
     Degraded,
 
     /// <summary>No point can be restored, or backups keep failing.</summary>

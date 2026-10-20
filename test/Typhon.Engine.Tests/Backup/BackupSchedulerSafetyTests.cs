@@ -93,7 +93,8 @@ class BackupSchedulerSafetyTests : SchedulerTestBase<BackupSchedulerSafetyTests>
 
         var elsewhere = Path.Combine(Path.GetDirectoryName(Store), Guid.NewGuid().ToString("N"));
         var id = Guid.NewGuid();
-        WriteRequest(dbe, $$"""{"formatVersion":1,"requestId":"{{id}}","kind":"full","requestedBy":"test","storePath":"{{elsewhere.Replace("\\", "\\\\")}}"}""");
+        var path = elsewhere.Replace("\\", "\\\\");
+        WriteRequest(dbe, $$"""{"formatVersion":1,"requestId":"{{id}}","kind":"full","requestedBy":"test","storePath":"{{path}}"}""");
         var point = Tick(dbe);
 
         Assert.That(point?.Kind, Is.EqualTo(BackupKind.Full), "the kind is honoured: full although an incremental would do");

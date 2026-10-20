@@ -230,6 +230,9 @@ public enum RestoreRefusalReason
 
     /// <summary>A staging directory the restore did not create is in the way.</summary>
     ForeignStaging,
+
+    /// <summary>A drill's scratch directory lies inside the store (DL-25): a mirror of the store would copy the restored image.</summary>
+    ScratchInsideStore,
 }
 
 /// <summary>A restore refused to write its target. Nothing was written.</summary>
@@ -254,7 +257,9 @@ public sealed class RestoreRefusedException : BackupException
     public string Target { get; }
 }
 
-/// <summary>Why an online backup (<see cref="IBackupService.CreateAsync(string, BackupRequestKind, System.Threading.CancellationToken)"/>) was abandoned.</summary>
+/// <summary>
+/// Why an online backup (<see cref="IBackupService.CreateAsync(string, BackupRequestKind, System.Threading.CancellationToken)"/>) was abandoned.
+/// </summary>
 [PublicAPI]
 public enum BackupAbortReason : byte
 {

@@ -34,14 +34,18 @@ internal sealed class BackupStatusFileContent
     public HealthInputs Inputs { get; set; }
 }
 
-/// <summary>Writes and reads the status file. The engine's writes are best effort (temp + replace, no fsync); a failed one is retried at the next change.</summary>
+/// <summary>
+/// Writes and reads the status file. The engine's writes are best effort (temp + replace, no fsync); a failed one is retried at the next change.
+/// </summary>
 internal static class BackupStatusFile
 {
     public const string FileName = "backup.status.json";
 
     public static string PathIn(string bundleDirectory) => Path.Combine(bundleDirectory, FileName);
 
-    /// <summary>Replaces the file whole. Never throws (BKP-16): <c>false</c> when it could not be written (a reader holding it on a share, a full disk).</summary>
+    /// <summary>
+    /// Replaces the file whole. Never throws (BKP-16): <c>false</c> when it could not be written (a reader holding it on a share, a full disk).
+    /// </summary>
     public static bool TryWrite(string bundleDirectory, BackupStatusFileContent content)
     {
         var path = PathIn(bundleDirectory);
@@ -58,7 +62,10 @@ internal static class BackupStatusFile
         }
     }
 
-    /// <summary>The file's content, or <c>null</c> when there is none or it cannot be read. Opened sharing read, write and delete: the engine's replace never fails on a reader.</summary>
+    /// <summary>
+    /// The file's content, or <c>null</c> when there is none or it cannot be read. Opened sharing read, write and delete: the engine's replace never fails
+    /// on a reader.
+    /// </summary>
     public static BackupStatusFileContent TryRead(string bundleDirectory)
     {
         var path = PathIn(bundleDirectory);

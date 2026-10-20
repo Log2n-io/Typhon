@@ -67,4 +67,14 @@ internal static partial class BackupLog
     [LoggerMessage(Level = LogLevel.Error,
         Message = "Backup store '{Store}': after retention, kept point #{BackupId} does not resolve ({Reason}). This is a defect: report it")]
     public static partial void RetentionBrokeAKeptPoint(ILogger logger, string store, uint backupId, string reason);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Drill of backup point #{BackupId}: {Outcome} (stage {Stage}: {Problem}), {Milliseconds} ms")]
+    public static partial void DrillEnded(ILogger logger, uint backupId, BackupDrillOutcome outcome, BackupDrillStage stage, string problem,
+        long milliseconds);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Backup store '{Store}': the record of the drill of point #{BackupId} was not written: {Reason}")]
+    public static partial void DrillRecordFailed(ILogger logger, string store, uint backupId, string reason);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "The drill's scratch directory '{Directory}' could not be deleted: {Reason}")]
+    public static partial void DrillScratchLeft(ILogger logger, string directory, string reason);
 }

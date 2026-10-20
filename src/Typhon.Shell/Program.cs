@@ -132,7 +132,8 @@ internal static class Program
             config.AddBranch("backup", backup =>
             {
                 backup.SetDescription("Back up a closed database, and list, verify, restore, compact, prune and watch a backup store.");
-                backup.AddCommand<BackupCreateCommand>("create").WithDescription("Back up a database: ask its running engine, or capture it closed into a store.")
+                backup.AddCommand<BackupCreateCommand>("create")
+                    .WithDescription("Back up a database: ask its running engine, or capture it closed into a store.")
                     .WithExample(["backup", "create", "game.typhon", "--store", "/backups/game"])
                     .WithExample(["backup", "create", "game.typhon", "--wait"]);
                 backup.AddCommand<BackupListCommand>("list").WithDescription("List a store's points and chains.")
@@ -146,6 +147,8 @@ internal static class Program
                     .WithExample(["backup", "status", "--store", "/backups/game", "--stale-after", "1d"]);
                 backup.AddCommand<BackupCompactCommand>("compact").WithDescription("Turn a point into a base inside the store; nothing is deleted.")
                     .WithExample(["backup", "compact", "--store", "/backups/game", "--point", "latest"]);
+                backup.AddCommand<BackupDrillCommand>("drill").WithDescription("Prove a point restores: restore into scratch, open, check deep, record.")
+                    .WithExample(["backup", "drill", "--store", "/backups/game", "--scratch", "/scratch"]);
                 backup.AddCommand<BackupPruneCommand>("prune").WithDescription("Apply a retention policy: keep what it promises, delete what nothing needs.")
                     .WithExample(["backup", "prune", "--store", "/backups/game", "--min-keep", "3", "--max-age", "7d", "--dry-run"]);
             });

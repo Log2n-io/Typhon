@@ -40,7 +40,8 @@ internal sealed class BackupOptionsValidationTests
     {
         Assert.That(Error(new BackupOptions { StorePath = "/b", Interval = TimeSpan.Zero, Retention = null, DrillWindow = TimeSpan.FromSeconds(-1) }),
             Does.Contain("DrillWindow"));
-        Assert.That(Error(new BackupOptions { StorePath = "/b", Interval = TimeSpan.Zero, Retention = null, CbwBufferPages = 0 }), Does.Contain("CbwBufferPages"));
+        Assert.That(Error(new BackupOptions { StorePath = "/b", Interval = TimeSpan.Zero, Retention = null, CbwBufferPages = 0 }),
+            Does.Contain("CbwBufferPages"));
         Assert.That(Error(new BackupOptions { StorePath = "/b", Interval = TimeSpan.Zero, Retention = null, CbwStallTimeout = TimeSpan.Zero }),
             Does.Contain("CbwStallTimeout"));
         var noLimit = new BackupRetentionPolicy

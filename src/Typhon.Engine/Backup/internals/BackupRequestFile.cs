@@ -4,7 +4,9 @@ using System.Text.Json;
 
 namespace Typhon.Engine.Internals;
 
-/// <summary><c>{bundle}/backup.request</c>: a process asking the running engine for a point (07 §3, plan 1416 §4.6). It carries no path, ever (BKP-16).</summary>
+/// <summary>
+/// <c>{bundle}/backup.request</c>: a process asking the running engine for a point (07 §3, plan 1416 §4.6). It carries no path, ever (BKP-16).
+/// </summary>
 internal sealed class BackupRequestContent
 {
     public const int CurrentFormatVersion = 1;

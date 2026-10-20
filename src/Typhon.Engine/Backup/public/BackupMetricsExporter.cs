@@ -43,7 +43,8 @@ public sealed class BackupMetricsExporter : IDisposable
 
     private void Register()
     {
-        _meter.CreateObservableGauge("typhon.backup.health", () => (int)Status.Health, "{state}", "Backup health: 0 off, 1 ok, 2 warning, 3 degraded, 4 failing");
+        _meter.CreateObservableGauge("typhon.backup.health", () => (int)Status.Health, "{state}",
+            "Backup health: 0 off, 1 ok, 2 warning, 3 degraded, 4 failing");
         _meter.CreateObservableGauge("typhon.backup.last_success_age_seconds", () => Age(Status.LastSuccessUtc), "s",
             "Seconds since the newest point of this database's timeline (none: no measurement)");
         _meter.CreateObservableGauge("typhon.backup.last_duration_ms", () => Last(m => m.DurationUs / 1000.0), "ms", "The last point's duration");
@@ -55,9 +56,11 @@ public sealed class BackupMetricsExporter : IDisposable
         _meter.CreateObservableGauge("typhon.backup.restorable_points", () => Status.RestorablePoints, "{points}", "The store's restorable points");
         _meter.CreateObservableGauge("typhon.backup.last_drill_age_seconds", () => Age(Status.LastDrill?.Utc ?? DateTime.MinValue), "s",
             "Seconds since the newest drill (none: no measurement)");
-        _meter.CreateObservableGauge("typhon.backup.last_drill_ok", LastDrillOk, "1", "1 when the newest drill passed, 0 when it failed (none: no measurement)");
+        _meter.CreateObservableGauge("typhon.backup.last_drill_ok", LastDrillOk, "1",
+            "1 when the newest drill passed, 0 when it failed (none: no measurement)");
         _meter.CreateObservableGauge("typhon.backup.archive.lag_bytes", () => Archive(a => a.LagBytes), "By", "Durable WAL bytes not archived yet");
-        _meter.CreateObservableGauge("typhon.backup.archive.lag_seconds", () => Archive(a => a.LagSeconds), "s", "The archive's lag: the RPO with archiving on");
+        _meter.CreateObservableGauge("typhon.backup.archive.lag_seconds", () => Archive(a => a.LagSeconds), "s",
+            "The archive's lag: the RPO with archiving on");
         _meter.CreateObservableGauge("typhon.backup.archive.archived_through_lsn", () => Archive(a => a.ArchivedThroughLsn), "{lsn}",
             "Every LSN up to this one is archived");
         _meter.CreateObservableGauge("typhon.backup.rpo_seconds", Rpo, "s",

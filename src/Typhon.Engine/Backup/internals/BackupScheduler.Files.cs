@@ -3,7 +3,9 @@ using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
-/// <summary>The scheduler's bundle file (plan 1416 §4.6, DL-23): <c>backup.status.json</c>, rewritten after each change, every tick while a job runs, and at stop.</summary>
+/// <summary>
+/// The scheduler's bundle file (plan 1416 §4.6, DL-23): <c>backup.status.json</c>, rewritten after each change, every tick while a job runs, and at stop.
+/// </summary>
 internal sealed partial class BackupScheduler
 {
     private string _bundleDirectory;
@@ -14,7 +16,9 @@ internal sealed partial class BackupScheduler
 
     partial void OnStopped() => WriteStatusFile();
 
-    /// <summary>Writes the status file when the published snapshot moved since the last write, or a job runs (its progress). Best effort, never throws.</summary>
+    /// <summary>
+    /// Writes the status file when the published snapshot moved since the last write, or a job runs (its progress). Best effort, never throws.
+    /// </summary>
     private void WriteStatusFileIfDue(bool running)
     {
         if (_bundleDirectory != null && (running || Volatile.Read(ref _publishedVersion) != _fileVersion))

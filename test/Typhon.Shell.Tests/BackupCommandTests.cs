@@ -65,7 +65,8 @@ public sealed class BackupCommandTests
         Assert.That(verify.Code, Is.EqualTo(BackupCli.ExitOk), verify.Text);
         Assert.That(verify.Text, Does.Contain("Ok").And.Contain("Full verify of 1 pack(s)").And.Contain("1 of 1 point(s) restorable"));
 
-        var status = Run((c, j) => BackupStatusCommand.Run(new BackupStatusCommand.Settings { Store = _store, Format = "text" }, c, j, DateTime.UtcNow.AddMinutes(5)));
+        var status = Run((c, j) =>
+            BackupStatusCommand.Run(new BackupStatusCommand.Settings { Store = _store, Format = "text" }, c, j, DateTime.UtcNow.AddMinutes(5)));
         Assert.That(status.Code, Is.EqualTo(BackupCli.ExitOk), status.Text);
         Assert.That(status.Text, Does.Contain("Ok").And.Contain("Newest point #1").And.Contain("min old").And.Contain("Head age"));
 
@@ -367,6 +368,8 @@ public sealed class BackupCommandTests
         Assert.That(App("backup", "prune", "--store", _store, "--min-keep", "1", "--max-age", "30d", "--dry-run", "--format", "json"),
             Is.EqualTo(BackupCli.ExitOk));
         Assert.That(App("backup", "prune", "--store", _store, "--max-count", "2"), Is.EqualTo(BackupCli.ExitUsage), "--min-keep is required");
+        Assert.That(App("backup", "drill", "--store", _store, "--scratch", Path.Combine(_root, "scratch"), "--format", "json"), Is.EqualTo(BackupCli.ExitOk));
+        Assert.That(App("backup", "drill", "--store", _store), Is.EqualTo(BackupCli.ExitUsage), "--scratch is required");
 
         Assert.That(App("backup", "list", "--store", _store, "--no-such-option"), Is.EqualTo(BackupCli.ExitUsage));
         Assert.That(App("backup", "create"), Is.EqualTo(BackupCli.ExitUsage), "a missing <bundle>");
@@ -401,6 +404,41 @@ public sealed class BackupCommandTests
         Assert.That(applied.GetProperty("result").GetProperty("deleted").GetArrayLength(), Is.EqualTo(4));
         Assert.That(Directory.GetFiles(Path.Combine(_store, "packs")).Select(Path.GetFileName), Is.EqualTo(new[] { "00000003-C.tpack" }));
         Assert.That(Prune(new BackupPruneCommand.Settings { MinKeep = 1, MaxCount = 1 }).Text, Does.Contain("Nothing to delete"));
+    }
+
+    /// <summary>#1416: drill passes (0) and is recorded, so list shows it; a scratch inside the store is refused (4); a damaged point fails (3).</summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void Drill_InTextAndJson_ItsRecordInList_AndItsExitCodes()
+    {
+        Assert.That(Create().Code, Is.EqualTo(BackupCli.ExitOk));
+        var scratch = Path.Combine(_root, "scratch");
+
+        var passed = Drill(scratch);
+        Assert.That(passed.Code, Is.EqualTo(BackupCli.ExitOk), passed.Text);
+        Assert.That(passed.Text, Does.Contain("Drill passed").And.Contain("point #1").And.Contain("Sound").And.Contain("Recorded:"));
+        Assert.That(Directory.EnumerateFileSystemEntries(scratch), Is.Empty, "the scratch bundle is deleted");
+
+        var json = Json(Drill(scratch, "json"));
+        Assert.That(json.GetProperty("exitCode").GetInt32(), Is.EqualTo(BackupCli.ExitOk));
+        var report = json.GetProperty("report");
+        Assert.That(report.GetProperty("outcome").GetString(), Is.EqualTo("passed"));
+        Assert.That(report.GetProperty("point").GetProperty("backupId").GetUInt32(), Is.EqualTo(1u));
+        Assert.That(report.GetProperty("recovery").TryGetProperty("recordsReplayed", out _), Is.True, "the recovery's figures, not an empty object");
+
+        var list = Run((c, j) => BackupListCommand.Run(new BackupListCommand.Settings { Store = _store, Format = "text" }, c, j));
+        Assert.That(list.Text, Does.Contain("Drill").And.Contain("passed " + DateTime.UtcNow.ToString("yyyy-MM-dd")));
+
+        var inside = Drill(Path.Combine(_store, "scratch"));
+        Assert.That(inside.Code, Is.EqualTo(BackupCli.ExitRefused), inside.Text);
+        Assert.That(inside.Text, Does.Contain("ScratchInsideStore"));
+
+        // An unreadable pack is no point to drill (nothing to record against): the chain error, exit 3. A damaged page of a readable one is a recorded
+        // Failed(Restore) (engine BackupDrillTests).
+        TruncateNewestPack();
+        var damaged = Drill(scratch);
+        Assert.That(damaged.Code, Is.EqualTo(BackupCli.ExitStoreDamaged), damaged.Text);
+        Assert.That(damaged.Text, Does.Contain("unreadable"));
     }
 
     [Test]
@@ -537,6 +575,10 @@ public sealed class BackupCommandTests
 
     private (int Code, string Text, string Json) Compact(string point, string format = "text")
         => Run((c, j) => BackupCompactCommand.Run(new BackupCompactCommand.Settings { Store = _store, Point = point, Format = format }, c, j,
+            CancellationToken.None));
+
+    private (int Code, string Text, string Json) Drill(string scratch, string format = "text")
+        => Run((c, j) => BackupDrillCommand.Run(new BackupDrillCommand.Settings { Store = _store, Scratch = scratch, Format = format }, c, j,
             CancellationToken.None));
 
     private (int Code, string Text, string Json) Prune(BackupPruneCommand.Settings settings)

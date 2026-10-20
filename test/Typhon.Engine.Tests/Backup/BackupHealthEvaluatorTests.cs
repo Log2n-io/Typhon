@@ -30,28 +30,35 @@ internal sealed class BackupHealthEvaluatorTests
         AnyDrillPassed = true,
     };
 
+    private static object[] Row(string name, Func<HealthInputs, HealthInputs> change, BackupHealth health, BackupHealthReason reason) =>
+        [name, change, health, reason];
+
     private static readonly object[] Rows =
     [
-        new object[] { "not configured", (Func<HealthInputs, HealthInputs>)(i => i with { Configured = false }), BackupHealth.Off, BackupHealthReason.NotConfigured },
-        new object[] { "no restorable point", (Func<HealthInputs, HealthInputs>)(i => i with { RestorablePoints = 0 }), BackupHealth.Failing, BackupHealthReason.NoRestorablePoint },
-        new object[] { "3 failures", (Func<HealthInputs, HealthInputs>)(i => i with { ConsecutiveFailures = 3 }), BackupHealth.Failing, BackupHealthReason.ConsecutiveFailures },
-        new object[] { "store down > interval", (Func<HealthInputs, HealthInputs>)(i => i with { StoreFailingSinceUtc = Now.AddHours(-2) }), BackupHealth.Failing, BackupHealthReason.StoreUnreachable },
-        new object[] { "capture refused", (Func<HealthInputs, HealthInputs>)(i => i with { CaptureRefused = true }), BackupHealth.Failing, BackupHealthReason.CaptureRefused },
-        new object[] { "archive diverged", (Func<HealthInputs, HealthInputs>)(i => i with { ArchiveCondition = WalArchiveCondition.Diverged }), BackupHealth.Failing, BackupHealthReason.ArchiveFailed },
-        new object[] { "stale", (Func<HealthInputs, HealthInputs>)(i => i with { LastSuccessUtc = Now.AddHours(-2.1) }), BackupHealth.Degraded, BackupHealthReason.Stale },
-        new object[] { "archive released", (Func<HealthInputs, HealthInputs>)(i => i with { ArchiveCondition = WalArchiveCondition.Released }), BackupHealth.Degraded, BackupHealthReason.ArchiveGap },
-        new object[] { "uncovered gap", (Func<HealthInputs, HealthInputs>)(i => i with { ArchiveCondition = WalArchiveCondition.Archiving, ArchiveLastGapToLsn = 1000 }), BackupHealth.Degraded, BackupHealthReason.ArchiveGap },
-        new object[] { "archive stalled", (Func<HealthInputs, HealthInputs>)(i => i with { ArchiveCondition = WalArchiveCondition.Stalled }), BackupHealth.Degraded, BackupHealthReason.ArchiveLag },
-        new object[] { "archive lag", (Func<HealthInputs, HealthInputs>)(i => i with { ArchiveCondition = WalArchiveCondition.Archiving, ArchiveMaxSegmentAge = TimeSpan.FromSeconds(30), ArchiveLagSeconds = 61 }), BackupHealth.Degraded, BackupHealthReason.ArchiveLag },
-        new object[] { "drill failed, none passed", (Func<HealthInputs, HealthInputs>)(i => i with { LastDrillFailed = true, AnyDrillPassed = false }), BackupHealth.Degraded, BackupHealthReason.DrillFailed },
-        new object[] { "no point on this timeline", (Func<HealthInputs, HealthInputs>)(i => i with { LastSuccessUtc = DateTime.MinValue, StartedUtc = Now.AddMinutes(-1) }), BackupHealth.Warning, BackupHealthReason.FirstPointPending },
-        new object[] { "suspect allocated", (Func<HealthInputs, HealthInputs>)(i => i with { LastPointSuspectAllocated = true }), BackupHealth.Warning, BackupHealthReason.LastPointSuspect },
-        new object[] { "retention failed", (Func<HealthInputs, HealthInputs>)(i => i with { RetentionFailed = true }), BackupHealth.Warning, BackupHealthReason.RetentionFailed },
-        new object[] { "retention blocked", (Func<HealthInputs, HealthInputs>)(i => i with { RetentionBlocked = BackupRetentionBlock.MinKeep }), BackupHealth.Warning, BackupHealthReason.RetentionBlocked },
-        new object[] { "drill stale", (Func<HealthInputs, HealthInputs>)(i => i with { LastDrillUtc = Now.AddDays(-2) }), BackupHealth.Warning, BackupHealthReason.DrillStale },
-        new object[] { "never drilled", (Func<HealthInputs, HealthInputs>)(i => i with { LastDrillUtc = DateTime.MinValue, AnyDrillPassed = false }), BackupHealth.Warning, BackupHealthReason.DrillStale },
-        new object[] { "drill failed, older passed", (Func<HealthInputs, HealthInputs>)(i => i with { LastDrillFailed = true }), BackupHealth.Warning, BackupHealthReason.DrillFailedOlderOk },
-        new object[] { "healthy", (Func<HealthInputs, HealthInputs>)(i => i), BackupHealth.Ok, BackupHealthReason.None },
+        Row("not configured", i => i with { Configured = false }, BackupHealth.Off, BackupHealthReason.NotConfigured),
+        Row("no restorable point", i => i with { RestorablePoints = 0 }, BackupHealth.Failing, BackupHealthReason.NoRestorablePoint),
+        Row("3 failures", i => i with { ConsecutiveFailures = 3 }, BackupHealth.Failing, BackupHealthReason.ConsecutiveFailures),
+        Row("store down > interval", i => i with { StoreFailingSinceUtc = Now.AddHours(-2) }, BackupHealth.Failing, BackupHealthReason.StoreUnreachable),
+        Row("capture refused", i => i with { CaptureRefused = true }, BackupHealth.Failing, BackupHealthReason.CaptureRefused),
+        Row("archive diverged", i => i with { ArchiveCondition = WalArchiveCondition.Diverged }, BackupHealth.Failing, BackupHealthReason.ArchiveFailed),
+        Row("stale", i => i with { LastSuccessUtc = Now.AddHours(-2.1) }, BackupHealth.Degraded, BackupHealthReason.Stale),
+        Row("archive released", i => i with { ArchiveCondition = WalArchiveCondition.Released }, BackupHealth.Degraded, BackupHealthReason.ArchiveGap),
+        Row("uncovered gap", i => i with { ArchiveCondition = WalArchiveCondition.Archiving, ArchiveLastGapToLsn = 1000 },
+            BackupHealth.Degraded, BackupHealthReason.ArchiveGap),
+        Row("archive stalled", i => i with { ArchiveCondition = WalArchiveCondition.Stalled }, BackupHealth.Degraded, BackupHealthReason.ArchiveLag),
+        Row("archive lag",
+            i => i with { ArchiveCondition = WalArchiveCondition.Archiving, ArchiveMaxSegmentAge = TimeSpan.FromSeconds(30), ArchiveLagSeconds = 61 },
+            BackupHealth.Degraded, BackupHealthReason.ArchiveLag),
+        Row("drill failed, none passed", i => i with { LastDrillFailed = true, AnyDrillPassed = false }, BackupHealth.Degraded, BackupHealthReason.DrillFailed),
+        Row("no point on this timeline", i => i with { LastSuccessUtc = DateTime.MinValue, StartedUtc = Now.AddMinutes(-1) },
+            BackupHealth.Warning, BackupHealthReason.FirstPointPending),
+        Row("suspect allocated", i => i with { LastPointSuspectAllocated = true }, BackupHealth.Warning, BackupHealthReason.LastPointSuspect),
+        Row("retention failed", i => i with { RetentionFailed = true }, BackupHealth.Warning, BackupHealthReason.RetentionFailed),
+        Row("retention blocked", i => i with { RetentionBlocked = BackupRetentionBlock.MinKeep }, BackupHealth.Warning, BackupHealthReason.RetentionBlocked),
+        Row("drill stale", i => i with { LastDrillUtc = Now.AddDays(-2) }, BackupHealth.Warning, BackupHealthReason.DrillStale),
+        Row("never drilled", i => i with { LastDrillUtc = DateTime.MinValue, AnyDrillPassed = false }, BackupHealth.Warning, BackupHealthReason.DrillStale),
+        Row("drill failed, older passed", i => i with { LastDrillFailed = true }, BackupHealth.Warning, BackupHealthReason.DrillFailedOlderOk),
+        Row("healthy", i => i, BackupHealth.Ok, BackupHealthReason.None),
     ];
 
     [TestCaseSource(nameof(Rows))]

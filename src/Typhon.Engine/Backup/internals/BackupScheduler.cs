@@ -31,7 +31,8 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
     private readonly BackupOpsState _state = new();
     private BackupStatus _status = BackupStatus.Off;
 
-    public BackupScheduler(DatabaseEngine engine, BackupOptions options, IResource parent, ILogger logger) : base("BackupScheduler", ResourceType.Backup, parent)
+    public BackupScheduler(DatabaseEngine engine, BackupOptions options, IResource parent, ILogger logger)
+        : base("BackupScheduler", ResourceType.Backup, parent)
     {
         _engine = engine;
         _options = options;
@@ -103,7 +104,8 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
 
     /// <summary>The store the engine's points go into, its write buffers children of the coordinator.</summary>
     internal FileSystemBackupStore CreateStore() =>
-        new(_options.StorePath, StoreFileSystem, writerOptions: new PackWriterOptions { Owner = new BufferOwner(_engine.MemoryAllocator, _engine.BackupCoordinator) });
+        new(_options.StorePath, StoreFileSystem,
+            writerOptions: new PackWriterOptions { Owner = new BufferOwner(_engine.MemoryAllocator, _engine.BackupCoordinator) });
 
     // ── Jobs (on the backup thread) ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -515,7 +517,8 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
             status = new BackupStatus(health, reason, BackupHealthEvaluator.Explain(inputs, reason, now), _state.State, _state.Phase, added, expected,
                 Volatile.Read(ref _progressBytes), facts.LastPoint, facts.LastPoint?.TailEndUtc ?? DateTime.MinValue, _state.NextDueUtc,
                 _state.ConsecutiveFailures, _state.LastFailure, _state.PointsTotal, _state.FailuresTotal, _state.CbwCopiesTotal, _state.CbwAbortsTotal,
-                _state.SuspectPagesTotal, facts.ChainDepth, facts.StoreBytes, facts.RestorablePoints, facts.FreeSuspects, facts.LastDrill, facts.LastPassedDrill,
+                _state.SuspectPagesTotal, facts.ChainDepth, facts.StoreBytes, facts.RestorablePoints, facts.FreeSuspects, facts.LastDrill,
+                facts.LastPassedDrill,
                 _state.RetentionBlocked, ArchiveStatus(_state.Archive), _state.LastRequestId, now);
         }
 
@@ -538,7 +541,9 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
         /// <summary>No failure.</summary>
         None,
 
-        /// <summary>Not a failure: another writer holds the store, a job is already running, the engine is closing, the caller cancelled. Retried soon.</summary>
+        /// <summary>
+        /// Not a failure: another writer holds the store, a job is already running, the engine is closing, the caller cancelled. Retried soon.
+        /// </summary>
         Deferred,
 
         /// <summary>No retry helps until the engine's state changes: write tracking off, an engine fault. Health Failing (CaptureRefused).</summary>

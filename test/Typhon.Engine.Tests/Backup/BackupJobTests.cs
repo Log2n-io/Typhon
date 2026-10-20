@@ -107,7 +107,9 @@ class BackupJobTests : BackupTestBase<BackupJobTests>
         Assert.That(status.State, Is.EqualTo(BackupRunState.Idle));
     }
 
-    /// <summary>A job is one job until its retention has ended: a second request meanwhile is BackupInProgress, though the first caller's task completed.</summary>
+    /// <summary>
+    /// A job is one job until its retention has ended: a second request meanwhile is BackupInProgress, though the first caller's task completed.
+    /// </summary>
     [Test]
     [CancelAfter(20_000)]
     public void ASecondPointWhileRetentionRuns_IsBackupInProgress()

@@ -141,7 +141,9 @@ public enum TraceEventKind : byte
     /// </summary>
     BackupCapture = 44,
 
-    /// <summary>The capture's freeze: the write gate held exclusive while the change map is swapped and the meta pair copied. Optional: <c>imagePages: i32</c>.</summary>
+    /// <summary>
+    /// The capture's freeze: the write gate held exclusive while the change map is swapped and the meta pair copied. Optional: <c>imagePages: i32</c>.
+    /// </summary>
     BackupFreeze = 45,
 
     /// <summary>The capture's WAL tail copy, under the reclaim floor. Optional: <c>pointLsn: i64</c>.</summary>

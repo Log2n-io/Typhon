@@ -16,7 +16,7 @@ namespace Typhon.Engine;
 /// (BKP-05).
 /// </remarks>
 [PublicAPI]
-public static class BackupOperations
+public static partial class BackupOperations
 {
     /// <summary>
     /// Backs up a closed database into a store (created when absent): a full point, or an incremental one when the database's last clean close kept a
@@ -111,7 +111,8 @@ public static class BackupOperations
             restorable = BackupVerifier.VerifyStore(store, VerifyLevel.Quick).Points.Where(p => p.Restorable).Select(p => p.Id).ToList();
         }
 
-        return new BackupStoreListing(view.Identity.StoreId, view.Identity.DatabaseId, points, chains, unreadable, temps, restorable);
+        var drills = DrillRecords.ReadNewestPerPoint(StoreFileSystem.Instance, view.Paths.Root).PerPoint;
+        return new BackupStoreListing(view.Identity.StoreId, view.Identity.DatabaseId, points, chains, unreadable, temps, restorable, drills);
     }
 
     /// <summary>
@@ -186,7 +187,7 @@ public static class BackupOperations
         var fs = StoreFileSystem.Instance;
         var view = StoreView.Open(store, fs, trustCatalog: false);
         long? free = ((IStoreFileSystem)fs).TryGetAvailableFreeSpace(view.Paths.Packs, out var bytes) ? bytes : null;
-        return RetentionPlanner.Plan(view, policy, [], DateTime.UtcNow, free).Plan;
+        return RetentionPlanner.Plan(view, policy, DrillRecords.ReadNewestPerPoint(fs, view.Paths.Root).Passed, DateTime.UtcNow, free).Plan;
     }
 
     /// <summary>
@@ -211,7 +212,8 @@ public static class BackupOperations
         Validate(policy);
         options ??= new BackupLifecycleOptions();
         using var session = BackupStore.OpenForMaintenance(store, "prune", log: options.Logger);
-        return RetentionExecutor.Apply(session, policy, approved, [], DateTime.UtcNow, Guid.Empty, options);
+        var drillPassed = DrillRecords.ReadNewestPerPoint(session.FileSystem, session.Root).Passed;
+        return RetentionExecutor.Apply(session, policy, approved, drillPassed, DateTime.UtcNow, Guid.Empty, options);
     }
 
     private static void Validate(BackupRetentionPolicy policy)

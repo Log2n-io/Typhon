@@ -60,7 +60,10 @@ internal static class DrillRecords
 {
     public const string Directory = "drills";
 
-    /// <summary>What a store's drills say: the newest drill, the newest that passed, and the points whose newest drill passed.</summary>
+    /// <summary>
+    /// What a store's drills say about its points: the newest drill, the newest that passed, and the points whose newest drill passed. A drill that ended
+    /// in <see cref="BackupDrillOutcome.Error"/> is not counted: it could not run, and says nothing about its point.
+    /// </summary>
     internal readonly record struct DrillHistory(BackupDrillSummary Newest, BackupDrillSummary NewestPassed, uint[] Passed,
         IReadOnlyDictionary<uint, BackupDrillSummary> PerPoint);
 
@@ -116,7 +119,8 @@ internal static class DrillRecords
 
             try
             {
-                var record = JsonSerializer.Deserialize(StoreFileSystem.ReadAllBytes(fs, Path.Combine(directory, f.Name)), BackupJsonContext.Default.DrillRecordFile);
+                var bytes = StoreFileSystem.ReadAllBytes(fs, Path.Combine(directory, f.Name));
+                var record = JsonSerializer.Deserialize(bytes, BackupJsonContext.Default.DrillRecordFile);
                 if (record is { FormatVersion: DrillRecordFile.CurrentFormatVersion })
                 {
                     records.Add(record);
@@ -137,6 +141,11 @@ internal static class DrillRecords
         BackupDrillSummary newestPassed = null;
         foreach (var r in ReadAll(fs, storeRoot))
         {
+            if (r.Outcome == BackupDrillOutcome.Error)
+            {
+                continue;
+            }
+
             var summary = new BackupDrillSummary(r.BackupId, r.StartedUtc, r.Outcome, r.Error);
             perPoint[r.BackupId] = summary;
             newest = summary;
@@ -159,7 +168,9 @@ internal static class DrillRecords
         return new DrillHistory(newest, newestPassed, [.. passed], perPoint);
     }
 
-    /// <summary>Deletes the records of points no longer in the store (retention, under <c>store.lock</c>). Best effort: a record left names a gone point.</summary>
+    /// <summary>
+    /// Deletes the records of points no longer in the store (retention, under <c>store.lock</c>). Best effort: a record left names a gone point.
+    /// </summary>
     public static int DeleteForPointsNotIn(IStoreFileSystem fs, string storeRoot, HashSet<uint> listed)
     {
         var deleted = 0;

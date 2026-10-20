@@ -37,7 +37,9 @@ public sealed class BackupOptions
     /// </summary>
     public bool FullVerifyAfterBackup { get; init; }
 
-    /// <summary>Honour <c>{bundle}/backup.request</c>, the file <c>typhon backup create &lt;bundle&gt;</c> writes to ask a running engine for a point.</summary>
+    /// <summary>
+    /// Honour <c>{bundle}/backup.request</c>, the file <c>typhon backup create &lt;bundle&gt;</c> writes to ask a running engine for a point.
+    /// </summary>
     public bool AcceptRequests { get; init; } = true;
 
     /// <summary>

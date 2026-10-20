@@ -5,7 +5,9 @@ using Typhon.Profiler;
 
 namespace Typhon.Engine.Internals;
 
-/// <summary>An online backup capture, freeze to publish (#1416, DL-29). Required: the requested kind. Optional: the point's id, pages, copy-before-write copies.</summary>
+/// <summary>
+/// An online backup capture, freeze to publish (#1416, DL-29). Required: the requested kind. Optional: the point's id, pages, copy-before-write copies.
+/// </summary>
 [TraceEvent(TraceEventKind.BackupCapture, EmitEncoder = true)]
 internal ref partial struct BackupCaptureEvent
 {

@@ -167,7 +167,8 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
         Guid id;
         try
         {
-            id = BackupOperations.RequestBackup(bundle, settings.Full ? BackupRequestKind.Full : BackupRequestKind.Auto, $"typhon backup create (PID {Environment.ProcessId})");
+            id = BackupOperations.RequestBackup(bundle, settings.Full ? BackupRequestKind.Full : BackupRequestKind.Auto,
+                $"typhon backup create (PID {Environment.ProcessId})");
         }
         catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0 || output.AsJson)
         {
@@ -330,7 +331,7 @@ internal sealed class BackupListCommand : Command<BackupListCommand.Settings>
 
         console.MarkupLine($"[grey]Store {listing.StoreId} of database {listing.DatabaseId}: {listing.Points.Count} point(s), "
                            + $"{BackupCli.Bytes(listing.Points.Sum(p => p.PackBytes))}.[/]");
-        var table = new Table().AddColumns("Id", "Kind", "Chain", "Parent", "P", "Frozen (UTC)", "Pages", "Size", "Notes");
+        var table = new Table().AddColumns("Id", "Kind", "Chain", "Parent", "P", "Frozen (UTC)", "Pages", "Size", "Drill", "Notes");
         if (settings.Verbose)
         {
             table.AddColumns("C", "Image pages", "WAL segs", "Timeline", "Pack");
@@ -347,7 +348,7 @@ internal sealed class BackupListCommand : Command<BackupListCommand.Settings>
             var row = new[]
             {
                 p.BackupId.ToString(), p.Kind.ToString(), p.ChainId.ToString()[..8], p.ParentId == 0 ? "-" : p.ParentId.ToString(), p.PointLsn.ToString(),
-                p.FreezeUtc.ToString("yyyy-MM-dd HH:mm:ss"), p.PageCount.ToString(), BackupCli.Bytes(p.PackBytes), notes,
+                p.FreezeUtc.ToString("yyyy-MM-dd HH:mm:ss"), p.PageCount.ToString(), BackupCli.Bytes(p.PackBytes), Drill(listing, p.BackupId), notes,
             }.AsEnumerable();
             if (settings.Verbose)
             {
@@ -381,6 +382,12 @@ internal sealed class BackupListCommand : Command<BackupListCommand.Settings>
 
         return BackupCli.ExitOk;
     }
+
+    /// <summary>The point's newest drill: <c>passed</c> or <c>failed</c> and its date; <c>-</c> when never drilled.</summary>
+    private static string Drill(BackupStoreListing listing, uint id) => listing.Drills.TryGetValue(id, out var d)
+        ? (d.Outcome == BackupDrillOutcome.Failed ? "[red]failed[/] " : d.Outcome == BackupDrillOutcome.PassedWithWarnings ? "passed (warnings) " : "passed ")
+          + d.Utc.ToString("yyyy-MM-dd")
+        : "-";
 }
 
 /// <summary>
