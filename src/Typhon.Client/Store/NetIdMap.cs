@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 
 namespace Typhon.Client;
 
@@ -199,8 +199,8 @@ internal sealed class NetIdMap
             return;
         }
 
-        Array.Clear(_keys);
-        Array.Clear(_values);
+        Array.Clear(_keys, 0, _keys.Length);
+        Array.Clear(_values, 0, _values.Length);
         _count = 0;
     }
 
@@ -210,8 +210,16 @@ internal sealed class NetIdMap
         _values = new int[capacity];
         _mask = capacity - 1;
 
-        // Fold the product's HIGH bits down, which is the half the multiply actually mixes.
-        _shift = 32 - System.Numerics.BitOperations.TrailingZeroCount((uint)capacity);
+        // Fold the product's HIGH bits down, which is the half the multiply actually mixes. The log is counted rather than
+        // taken from System.Numerics.BitOperations, which netstandard2.1 declares but does not make public (#1034's Unity
+        // target): a handful of shifts, once per growth, is not worth a compat shim.
+        var bits = 0;
+        while ((capacity >> bits) > 1)
+        {
+            bits++;
+        }
+
+        _shift = 32 - bits;
     }
 
     private int Bucket(uint netId) => (int)((netId * Fibonacci) >> _shift);

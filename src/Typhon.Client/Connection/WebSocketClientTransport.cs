@@ -1,8 +1,10 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Net.Sockets;
 using System.Net.WebSockets;
+#if NET6_0_OR_GREATER
 using System.Runtime.CompilerServices;
+#endif
 using System.Threading;
 using System.Threading.Tasks;
 using Typhon.Protocol;
@@ -105,7 +107,11 @@ public sealed class WebSocketClientTransport : IClientTransport
     }
 
     /// <inheritdoc />
+#if NET6_0_OR_GREATER
+    // The pooled builder reuses the state-machine box, which is what makes a receive that completes synchronously allocation-free -- the common case at a
+    // fleet's message rate. It arrived in .NET 6, so the netstandard2.1 target (Unity, #1034) compiles with the default builder and allocates per receive.
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
+#endif
     public async ValueTask<byte[]> ReceiveAsync(CancellationToken ct)
     {
         var socket = _socket;
