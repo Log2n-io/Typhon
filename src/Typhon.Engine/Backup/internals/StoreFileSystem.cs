@@ -111,9 +111,10 @@ internal interface IStoreFileSystem
     string GetFullPath(string path) => System.IO.Path.GetFullPath(path);
 
     /// <summary>
-    /// Like <see cref="TryLockExclusive"/>, for a lock file that exists only while it is held: releasing it removes the file. The removal happens
-    /// while the handle is still held, so no other claimant can open the file between them. A process that dies leaves the file, unheld: the next
-    /// claimant takes it over.
+    /// Like <see cref="TryLockExclusive"/>, for a lock file that exists only while it is held, where the platform allows it. Windows: releasing it
+    /// removes the file while the handle is still held (delete-pending refuses every new open until the handle closes). Unix: the file stays, unheld;
+    /// unlinking it would let a claimant that opened the old inode lock it while another creates and locks a new file under the same name. A process
+    /// that dies leaves the file, unheld: the next claimant takes it over.
     /// </summary>
     IDisposable TryLockTransient(string path) => TryLockExclusive(path);
 
@@ -241,9 +242,14 @@ internal sealed partial class StoreFileSystem : IStoreFileSystem
     {
         try
         {
-            // Delete sharing so the holder can remove the file while still holding it (Windows: delete-pending, refusing every new open until the
-            // handle closes; Linux: unlinked under its flock).
-            return new TransientLock(path, File.OpenHandle(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Delete));
+            // Windows: delete sharing, so the holder can remove the file while still holding it. Unix: FileShare.None, the only share mode .NET
+            // backs with an exclusive flock (any other takes a shared one, which excludes nobody); the file is not removed (see the interface).
+            if (OperatingSystem.IsWindows())
+            {
+                return new TransientLock(path, File.OpenHandle(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Delete));
+            }
+
+            return File.OpenHandle(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         }
         catch (IOException ex) when (IsHeldFailure(ex))
         {

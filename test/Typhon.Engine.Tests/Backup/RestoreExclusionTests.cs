@@ -101,7 +101,9 @@ internal sealed class RestoreExclusionTests
         Assert.That(second.Reason, Is.EqualTo(RestoreRefusalReason.ForeignStaging));
         Assert.That(second.Message, Does.Contain("another restore"));
         Assert.That(File.Exists(Path.Combine(outcome.Target, "data")), Is.True, "the first restore was not disturbed");
-        Assert.That(File.Exists(outcome.Target + RestoreStager.LockSuffix), Is.False, "the lock exists only while held");
+        var restoreLock = outcome.Target + RestoreStager.LockSuffix;
+        Assert.That(OperatingSystem.IsWindows() ? !File.Exists(restoreLock) : StoreFileSystem.Instance.ProbeExclusive(restoreLock), Is.True,
+            "the lock is released (Windows: removed with it; Unix: left unheld)");
 
         // Once the first is done, the target is free again.
         Assert.That(RestoreStager.Run(_store, PointSelector.Latest, target, new RestoreOptions { Replace = true }).DisplacedBundle, Is.Not.Null);

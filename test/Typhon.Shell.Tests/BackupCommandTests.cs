@@ -390,6 +390,7 @@ public sealed class BackupCommandTests
             ColorSystem = ColorSystemSupport.NoColors,
             Interactive = InteractionSupport.No,
             Out = new AnsiConsoleOutput(text),
+            Enrichment = new ProfileEnrichment { UseDefaultEnrichers = false },   // under GitHub Actions, its enricher turns ANSI back on
         });
         console.Profile.Width = 4000;
         var code = verb(console, json);
