@@ -216,6 +216,10 @@ Backup*/
 # ...but the engine's backup feature lives in Backup/ folders (#1411)
 !src/**/Backup/
 !test/**/Backup/
+# ...and the Workbench's Backups view in Backups/ folders (#1417)
+!tools/**/Backups/
+!tools/**/backups/
+!test/**/Backups/
 UpgradeLog*.XML
 UpgradeLog*.htm
 

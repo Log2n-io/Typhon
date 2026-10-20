@@ -28,6 +28,19 @@ public sealed class EngineLifecycle : IDisposable
     /// <summary>Provenance of the resolved schema: "user-specified" | "registered" | "bundled" | "legacy-adjacent" | "schemaless".</summary>
     public string SchemaStatus { get; }
 
+    /// <summary>
+    /// The open took the crash path with no schema archetypes registered, so <c>InitializeArchetypes</c> was not called (#1417 WB-5): the session shows the
+    /// image as the last checkpoint left it, before any WAL replay, and the engine refuses an online backup. Open it with its application schema to
+    /// recover it.
+    /// </summary>
+    public bool OpenedOnCrashPathWithoutSchema { get; private init; }
+
+    /// <summary>What <c>InitializeArchetypes</c> threw, or null (also surfaced as an <c>archetype_init_failed</c> diagnostic).</summary>
+    public Exception InitializeArchetypesFailure { get; private init; }
+
+    /// <summary>The open's <c>InitializeArchetypes</c> call; zero when it was not called.</summary>
+    public TimeSpan InitializeArchetypesDuration { get; private init; }
+
     private EngineLifecycle(
         ServiceProvider services,
         WorkbenchAssemblyLoadContext alc,
@@ -192,6 +205,8 @@ public sealed class EngineLifecycle : IDisposable
             SchemaCompatibility.State state = SchemaCompatibility.State.Ready;
             SchemaCompatibility.Diagnostic[] diagnostics = [];
             int loaded = 0;
+            var initializeArchetypes = false;
+            Exception initFailure = null;
 
             if (resolvedSchemaPaths.Length > 0)
             {
@@ -232,22 +247,33 @@ public sealed class EngineLifecycle : IDisposable
                     // registry entries on session dispose, so the next session's RunModuleConstructor barrier repopulates the slot map with THIS ALC's Types —
                     // no manual RefreshSlotTypes pass needed (retired, #529).
                     schemaDllTicks = System.Diagnostics.Stopwatch.GetTimestamp() - schemaStart;
-                    try
+                    initializeArchetypes = true;
+                }
+            }
+
+            // #1417 WB-5: a session without schema archetypes completes its open too, so its engine can take an online backup (the engine refuses one
+            // until InitializeArchetypes has run) — as DerivedStructureRegeneration's schemaless call does. Except on the crash path: there it is where the
+            // WAL replays, and a process that does not register the application's archetypes cannot replay their records (7012, #1309), so the call
+            // would fail the open. Such a session keeps the pre-replay image and cannot back up (OpenedOnCrashPathWithoutSchema says why).
+            var crashPathWithoutSchema = !initializeArchetypes && engine.CrashRecoveryAtOpen;
+            if (!crashPathWithoutSchema)
+            {
+                try
+                {
+                    var initStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                    engine.InitializeArchetypes();
+                    initArchetypesTicks = System.Diagnostics.Stopwatch.GetTimestamp() - initStart;
+                }
+                catch (Exception initEx)
+                {
+                    initFailure = initEx;
+                    diagnostics = [.. diagnostics, new SchemaCompatibility.Diagnostic(
+                        ComponentName: "(InitializeArchetypes)",
+                        Kind: "archetype_init_failed",
+                        Detail: initEx.ToString())];
+                    if (state == SchemaCompatibility.State.Ready)
                     {
-                        var initStart = System.Diagnostics.Stopwatch.GetTimestamp();
-                        engine.InitializeArchetypes();
-                        initArchetypesTicks = System.Diagnostics.Stopwatch.GetTimestamp() - initStart;
-                    }
-                    catch (Exception initEx)
-                    {
-                        diagnostics = [.. diagnostics, new SchemaCompatibility.Diagnostic(
-                            ComponentName: "(InitializeArchetypes)",
-                            Kind: "archetype_init_failed",
-                            Detail: initEx.ToString())];
-                        if (state == SchemaCompatibility.State.Ready)
-                        {
-                            state = SchemaCompatibility.State.MigrationRequired;
-                        }
+                        state = SchemaCompatibility.State.MigrationRequired;
                     }
                 }
             }
@@ -279,7 +305,12 @@ public sealed class EngineLifecycle : IDisposable
                 schemaDllTicks * toMs,
                 initArchetypesTicks * toMs);
 
-            return new EngineLifecycle(sp, alc, engine, registry, fullPath, state, loaded, diagnostics, schemaStatus, resolvedSchemaPaths);
+            return new EngineLifecycle(sp, alc, engine, registry, fullPath, state, loaded, diagnostics, schemaStatus, resolvedSchemaPaths)
+            {
+                OpenedOnCrashPathWithoutSchema = crashPathWithoutSchema,
+                InitializeArchetypesFailure = initFailure,
+                InitializeArchetypesDuration = TimeSpan.FromMilliseconds(initArchetypesTicks * toMs),
+            };
         }
         catch (WorkbenchException)
         {
