@@ -254,7 +254,7 @@ public sealed class RestoreRefusedException : BackupException
     public string Target { get; }
 }
 
-/// <summary>Why an online backup (<see cref="IBackupService.CreateAsync"/>) was abandoned.</summary>
+/// <summary>Why an online backup (<see cref="IBackupService.CreateAsync(string, BackupRequestKind, System.Threading.CancellationToken)"/>) was abandoned.</summary>
 [PublicAPI]
 public enum BackupAbortReason : byte
 {

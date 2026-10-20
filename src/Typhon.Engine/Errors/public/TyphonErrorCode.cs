@@ -169,6 +169,12 @@ public enum TyphonErrorCode
     /// </summary>
     BackupPlanChanged               = 7109,
 
+    /// <summary>
+    /// The engine's backups are not configured the way the call needs: no <see cref="BackupOptions"/> for a point into the configured store, a store other
+    /// than the configured one, or a <c>backup.request</c> to an engine that is not running, has backup off, or refuses requests.
+    /// </summary>
+    BackupNotConfigured             = 7110,
+
     // 8xxx — Runtime / Scheduler
 
     /// <summary>DEBUG-only: a system mutated a component it did not declare in its access set (see <see cref="InvalidAccessException"/>).</summary>

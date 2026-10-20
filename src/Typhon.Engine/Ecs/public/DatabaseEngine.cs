@@ -395,6 +395,12 @@ public class DatabaseEngineOptions
     /// Spatial broadphase tuning — where a cell switches between a linear scan and a per-cell R-Tree.
     /// </summary>
     public SpatialOptions Spatial { get; set; } = new();
+
+    /// <summary>
+    /// The engine's own backups (#1416): store, schedule, retention, requests, archiving. Null: off — no schedule, no status file, and
+    /// <see cref="DatabaseEngine.Backup"/> takes points only into a store the caller names.
+    /// </summary>
+    public BackupOptions Backup { get; set; }
 }
 
 /// <summary>
@@ -2215,6 +2221,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         InitializeWalManager();
         InitializeCheckpointManager();
         BackupCoordinator = new BackupCoordinator(this, _durabilityNode, Logger);
+        ConfigureBackup();
         AdoptBackupState();
         if (!DataFileWriteTracking.MapEnabled || !DataFileWriteTracking.GateEnabled)
         {

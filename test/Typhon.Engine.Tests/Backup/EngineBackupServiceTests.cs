@@ -59,6 +59,19 @@ class EngineBackupServiceTests : BackupTestBase<EngineBackupServiceTests>
             "what CreateAsync returned is what the store holds");
     }
 
+    /// <summary>DL-15: with no BackupOptions there is no configured store to take a point into; naming one still works.</summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void WithoutBackupOptions_ThePointNeedsAStore()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+
+        var ex = Assert.Throws<TyphonException>(() => dbe.Backup.CreateAsync());
+        Assert.That(ex.ErrorCode, Is.EqualTo(TyphonErrorCode.BackupNotConfigured));
+        Assert.That(Create(dbe).Kind, Is.EqualTo(BackupPointKind.Full));
+    }
+
     [Test]
     [CancelAfter(15_000)]
     public void Full_StartsANewChain_WhereAutoWouldContinue()
