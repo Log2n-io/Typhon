@@ -42,6 +42,9 @@ internal sealed partial class BackupCoordinator : ResourceNode
     /// <summary>Test hook, null in production: passed to every capture.</summary>
     internal Action<CapturePhase, int> Probe { get; set; }
 
+    /// <summary>Test seam, null in production: the copy-before-write clock handed to every capture (<see cref="BackupCapture.CbwClock"/>).</summary>
+    internal Func<long> CbwClock { get; set; }
+
     /// <summary>Test hook, null in production: called with each capture before it runs.</summary>
     internal Action<BackupCapture> CaptureCreated { get; set; }
 
@@ -126,7 +129,7 @@ internal sealed partial class BackupCoordinator : ResourceNode
                     continue;
                 }
 
-                capture = new BackupCapture(_engine, Options, this, _logger, Probe);
+                capture = new BackupCapture(_engine, Options, this, _logger, Probe) { CbwClock = CbwClock };
                 _current = capture;
                 LastCapture = capture;
             }

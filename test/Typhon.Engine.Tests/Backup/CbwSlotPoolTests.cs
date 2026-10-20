@@ -108,27 +108,45 @@ public class CbwSlotPoolTests : AllocatorTestBase
     }
 
     /// <summary>
-    /// BKP-12: a writer that finds the pool empty gives up at its deadline, not on the OS timer tick after it (15.6 ms on Windows, where a timed
-    /// semaphore wait returned 9 to 16 ms late). Five waits, none more than 3 ms late.
+    /// BKP-12, on a logical clock: a writer that finds the pool empty blocks in the kernel only until one timer tick before its deadline (a kernel
+    /// wait wakes on the tick, 15.6 ms late at worst on Windows: measured 9 to 16 ms), keeps waiting while the clock is held, and gives up once the
+    /// clock reaches the deadline.
     /// </summary>
     [Test]
-    [Category("Sensitive")]   // a timing bound: run serially, as the gate does
     [CancelAfter(10_000)]
     [VerifiesRule("BKP-12")]
-    public void AWaitOnAnEmptyPool_GivesUpAtItsDeadline()
+    public void ASlotWait_NeverBlocksIntoTheLastTimerTick_AndGivesUpAtItsDeadline()
     {
-        using var pool = new CbwSlotPool(MemoryAllocator, AllocationResource, 1);
+        var clock = Stopwatch.GetTimestamp();
+        using var pool = new CbwSlotPool(MemoryAllocator, AllocationResource, 1, () => Volatile.Read(ref clock));
         Assert.That(pool.TryRent(In(0), CancellationToken.None), Is.EqualTo(0), "premise: the only slot is held");
-        long worst = 0;
-        for (var i = 0; i < 5; i++)
+        var deadline = clock + 50 * Stopwatch.Frequency / 1000;
+        var intoTheLastTick = 0;
+        long firstBlockMs = -1;
+        using var blocked = new ManualResetEventSlim();
+        pool.BlockingWaitProbe = (now, ms, d) =>
         {
-            var deadline = In(50);
-            Assert.That(pool.TryRent(deadline, CancellationToken.None), Is.EqualTo(-1));
-            worst = Math.Max(worst, Stopwatch.GetTimestamp() - deadline);
-        }
+            if (now + ms * Stopwatch.Frequency / 1000 > d - CbwSlotPool.TimerSlackTicks)
+            {
+                Interlocked.Increment(ref intoTheLastTick);
+            }
 
-        Assert.That(TimeSpan.FromSeconds((double)worst / Stopwatch.Frequency), Is.LessThan(TimeSpan.FromMilliseconds(3)),
-            "BKP-12: a slot wait returned past its deadline");
+            Interlocked.CompareExchange(ref firstBlockMs, ms, -1);
+            blocked.Set();
+        };
+
+        var waiter = Task.Factory.StartNew(() => pool.TryRent(deadline, CancellationToken.None), TaskCreationOptions.LongRunning);
+        Assert.That(blocked.Wait(5_000), Is.True, "premise: the writer blocks on the empty pool");
+        Assert.That(waiter.Wait(200), Is.False, "the writer gave up with the clock held, before its deadline");
+        Interlocked.Exchange(ref clock, deadline);
+        Assert.That(waiter.Wait(5_000), Is.True, "BKP-12: the writer kept waiting past its deadline");
+        Assert.Multiple(() =>
+        {
+            Assert.That(waiter.Result, Is.EqualTo(-1));
+            Assert.That(intoTheLastTick, Is.Zero, "BKP-12: a blocking wait reached into the last timer tick before the deadline");
+            var expectedBlockMs = (50 * Stopwatch.Frequency / 1000 - CbwSlotPool.TimerSlackTicks) * 1000 / Stopwatch.Frequency;
+            Assert.That(firstBlockMs, Is.EqualTo(expectedBlockMs), "the wait blocks for everything but the last tick, rather than polling it");
+        });
     }
 
     private static long In(int ms) => Stopwatch.GetTimestamp() + ms * Stopwatch.Frequency / 1000;

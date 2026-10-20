@@ -11,14 +11,21 @@ namespace Typhon.Engine.Tests;
 
 /// <summary>
 /// BKP-12 / AC-C4: a backup that cannot keep up aborts; the engine does not wait on it past <c>CbwStallTimeout</c>. Two copy-before-write slots, a
-/// backup thread that never drains them, and a checkpoint rewriting more image pages than that: the third writer gives up within the budget, the
+/// backup thread that never drains them, and a checkpoint rewriting more image pages than that: the third writer gives up at its budget, the
 /// capture aborts with <see cref="BackupAbortReason.CbwStall"/>, the checkpoint completes, and the next incremental still covers every page.
 /// </summary>
+/// <remarks>
+/// The budget is checked on a logical clock (<see cref="BackupCoordinator.CbwClock"/>), not on wall time. On a loaded box a writer polling the last
+/// timer tick before its deadline was measured off the CPU for 12 ms between two of its checks, then gave up at the first check past the deadline:
+/// the scheduler's time, which no budget can promise away. What BKP-12 does promise is checked exactly: with the clock held the writer keeps waiting;
+/// moved to the deadline, it gives up having spent exactly its budget; and none of its blocking waits reaches into the last timer tick before the
+/// deadline, where a kernel wait would wake a tick late.
+/// </remarks>
 [Category("Sensitive")]
 class CbwStallTests : BackupTestBase<CbwStallTests>
 {
     private static readonly TimeSpan Stall = TimeSpan.FromMilliseconds(50);
-    private static readonly TimeSpan Slack = TimeSpan.FromMilliseconds(10);
+    private static readonly long StallTicks = (long)(Stall.TotalSeconds * Stopwatch.Frequency);
 
     [Test]
     [CancelAfter(15_000)]
@@ -40,6 +47,10 @@ class CbwStallTests : BackupTestBase<CbwStallTests>
         coordinator.Options.CheckpointBeforeFreeze = false;
         coordinator.Options.CbwBufferPages = 2;
         coordinator.Options.CbwStallTimeout = Stall;
+        var clock = Stopwatch.GetTimestamp();
+        coordinator.CbwClock = () => Volatile.Read(ref clock);
+        var intoTheLastTick = 0;
+        using var writerBlocked = new ManualResetEventSlim();
         var imageSet = new HashSet<int>();
         using var frozen = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
@@ -48,6 +59,15 @@ class CbwStallTests : BackupTestBase<CbwStallTests>
             if (phase == CapturePhase.AfterFreeze)
             {
                 var capture = coordinator.LastCapture;
+                capture.Slots.BlockingWaitProbe = (now, ms, deadline) =>
+                {
+                    if (now + ms * Stopwatch.Frequency / 1000 > deadline - CbwSlotPool.TimerSlackTicks)
+                    {
+                        Interlocked.Increment(ref intoTheLastTick);
+                    }
+
+                    writerBlocked.Set();
+                };
                 for (var p = 0; p < capture.ImagePages; p++)
                 {
                     if (capture.IsInImage(p))
@@ -70,7 +90,11 @@ class CbwStallTests : BackupTestBase<CbwStallTests>
             Assert.That(rewrites, Is.GreaterThan(2), "premise: the checkpoint rewrites more image pages than there are slots");
 
             var checkpoint = Task.Run(() => dbe.CheckpointManager.ForceCheckpointAndWait(Budget));
-            Assert.That(checkpoint.Wait(TimeSpan.FromSeconds(2)), Is.True, "BKP-12: a writer waited on the stalled backup past its budget");
+            Assert.That(writerBlocked.Wait(Budget), Is.True, "premise: a writer found the slot pool empty and waits");
+            Assert.That(checkpoint.Wait(200), Is.False, "the writer gave up before its budget ran out (the clock is held)");
+
+            Interlocked.Add(ref clock, StallTicks);   // every budget started at the held instant: this is each one's deadline
+            Assert.That(checkpoint.Wait(Budget), Is.True, "BKP-12: a writer kept waiting on the stalled backup past its deadline");
             Assert.That(checkpoint.Result, Is.True);
         }
         finally
@@ -85,12 +109,14 @@ class CbwStallTests : BackupTestBase<CbwStallTests>
         {
             Assert.That(ex.InnerException, Is.TypeOf<BackupAbortedException>());
             Assert.That(((BackupAbortedException)ex.InnerException).Reason, Is.EqualTo(BackupAbortReason.CbwStall));
-            AssertWithinBudget(TimeSpan.FromSeconds((double)worst / Stopwatch.Frequency));
+            AssertWithinBudget(worst);
+            Assert.That(intoTheLastTick, Is.Zero, "BKP-12: a slot wait blocked into the last timer tick before its deadline");
             Assert.That(dbe.CheckpointManager.CheckpointLsn, Is.GreaterThan(lsnBefore), "the checkpoint advanced past the aborted capture");
         });
 
         // The lineage survived the abort and the page set was merged back: the next point is an incremental that holds it.
         coordinator.Probe = null;
+        coordinator.CbwClock = null;
         coordinator.Options.CbwBufferPages = 256;
         var next = Capture(dbe, store);
         var nextPoint = store.Points.Last();
@@ -102,8 +128,9 @@ class CbwStallTests : BackupTestBase<CbwStallTests>
     [Test]
     [RuleMutant("BKP-12")]
     public void Mutant_AWriteOverItsBudget_IsReported()
-        => RuleMutants.AssertDetects("BKP-12", "BKP-12: the slowest write", () => AssertWithinBudget(Stall + Slack + TimeSpan.FromMilliseconds(1)));
+        => RuleMutants.AssertDetects("BKP-12", "BKP-12: the slowest write", () => AssertWithinBudget(StallTicks + 1));
 
-    private static void AssertWithinBudget(TimeSpan slowestWrite)
-        => Assert.That(slowestWrite, Is.LessThanOrEqualTo(Stall + Slack), "BKP-12: the slowest write spent longer in the backup hook than its budget");
+    /// <summary>On the logical clock: exactly the budget, no slack.</summary>
+    private static void AssertWithinBudget(long slowestWriteTicks)
+        => Assert.That(slowestWriteTicks, Is.LessThanOrEqualTo(StallTicks), "BKP-12: the slowest write spent longer in the backup hook than its budget");
 }

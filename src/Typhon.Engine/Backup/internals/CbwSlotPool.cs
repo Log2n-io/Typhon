@@ -29,10 +29,15 @@ internal sealed unsafe class CbwSlotPool : IDisposable
     private readonly long[] _inUse;
     private readonly long[] _ready;
     private readonly int[] _slotPage;
+    private readonly Func<long> _clock;
 
-    /// <summary>Allocates <paramref name="slotCount"/> slots.</summary>
-    public CbwSlotPool(IMemoryAllocator allocator, IResource owner, int slotCount)
+    /// <summary>
+    /// Allocates <paramref name="slotCount"/> slots. <paramref name="clock"/> stands in for <see cref="Stopwatch.GetTimestamp"/> in the deadline
+    /// arithmetic (a test's logical clock); null in production.
+    /// </summary>
+    public CbwSlotPool(IMemoryAllocator allocator, IResource owner, int slotCount, Func<long> clock = null)
     {
+        _clock = clock;
         _count = Math.Max(1, slotCount);
         _block = allocator.AllocatePinned("Backup.CbwSlots", owner, _count * PagedMMF.PageSize, false, 4096);
         _base = _block.DataAsPointer;
@@ -55,6 +60,11 @@ internal sealed unsafe class CbwSlotPool : IDisposable
     /// </summary>
     internal static readonly long TimerSlackTicks = Stopwatch.Frequency * (OperatingSystem.IsWindows() ? 16 : 1) / 1000;
 
+    /// <summary>Test hook, null in production: invoked before every blocking wait with (now, milliseconds requested, deadline).</summary>
+    internal Action<long, long, long> BlockingWaitProbe { get; set; }
+
+    private long Now() => _clock != null ? _clock() : Stopwatch.GetTimestamp();
+
     /// <summary>
     /// Rents a free slot, waiting until <paramref name="deadline"/> (a <see cref="Stopwatch"/> timestamp) at the latest; <c>-1</c> when none freed in
     /// time or <paramref name="abort"/> fired.
@@ -66,13 +76,19 @@ internal sealed unsafe class CbwSlotPool : IDisposable
             var spin = new SpinWait();
             while (true)
             {
-                var blockMs = (deadline - Stopwatch.GetTimestamp() - TimerSlackTicks) * 1000 / Stopwatch.Frequency;
+                var now = Now();
+                var blockMs = (deadline - now - TimerSlackTicks) * 1000 / Stopwatch.Frequency;
+                if (blockMs > 0)
+                {
+                    BlockingWaitProbe?.Invoke(now, blockMs, deadline);
+                }
+
                 if (blockMs > 0 ? _free.Wait((int)Math.Min(blockMs, int.MaxValue), abort) : _free.Wait(0))
                 {
                     break;
                 }
 
-                if (abort.IsCancellationRequested || Stopwatch.GetTimestamp() >= deadline)
+                if (abort.IsCancellationRequested || Now() >= deadline)
                 {
                     return -1;
                 }

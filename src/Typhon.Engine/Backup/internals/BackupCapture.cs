@@ -190,7 +190,7 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
 
         ct.ThrowIfCancellationRequested();
         ThrowIfEngineCannotCapture();
-        _slots = new CbwSlotPool(_engine.MemoryAllocator, _owner, _options.CbwBufferPages);
+        _slots = new CbwSlotPool(_engine.MemoryAllocator, _owner, _options.CbwBufferPages, CbwClock);
         _scanBuffer = _engine.MemoryAllocator.AllocatePinned("Backup.ScanBuffer", _owner, _options.ScanRunPages * PagedMMF.PageSize, false, 4096);
         _metaBuffer = _engine.MemoryAllocator.AllocatePinned("Backup.MetaPair", _owner, 2 * PagedMMF.PageSize, false, 4096);
 
@@ -447,7 +447,7 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
 
             if (deadline == 0)
             {
-                deadline = Stopwatch.GetTimestamp() + _stallTicks;
+                deadline = CbwNow() + _stallTicks;
             }
 
             if ((Interlocked.Or(ref _claimed[word], bit) & bit) == 0)
@@ -478,9 +478,21 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
     /// </summary>
     internal long MaxHookElapsedTicks;
 
+    /// <summary>
+    /// Test seam, null in production: the clock of the copy-before-write budget (its start, every check against it, <see cref="MaxHookElapsedTicks"/>
+    /// and the slot pool's waits), in <see cref="Stopwatch"/> ticks. A test's logical clock makes BKP-12 checkable without wall time: on a loaded box
+    /// a writer can be off the CPU for a scheduler quantum between two checks, which no budget can promise away.
+    /// </summary>
+    internal Func<long> CbwClock { get; init; }
+
+    /// <summary>The copy-before-write slots, once allocated (test seam).</summary>
+    internal CbwSlotPool Slots => _slots;
+
+    private long CbwNow() => CbwClock != null ? CbwClock() : Stopwatch.GetTimestamp();
+
     private void NoteHookElapsed(long deadline)
     {
-        var elapsed = Stopwatch.GetTimestamp() - (deadline - _stallTicks);
+        var elapsed = CbwNow() - (deadline - _stallTicks);
         long seen;
         while (elapsed > (seen = Volatile.Read(ref MaxHookElapsedTicks)) && Interlocked.CompareExchange(ref MaxHookElapsedTicks, elapsed, seen) != seen)
         {
@@ -527,7 +539,7 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
                 return false;
             }
 
-            if (Stopwatch.GetTimestamp() >= deadline)
+            if (CbwNow() >= deadline)
             {
                 Abort(BackupAbortReason.CbwStall);
                 return false;
