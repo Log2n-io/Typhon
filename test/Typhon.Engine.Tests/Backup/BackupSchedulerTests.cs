@@ -79,6 +79,7 @@ abstract class SchedulerTestBase<T> : BackupTestBase<T> where T : SchedulerTestB
         scheduler.UtcNow = () => Clock.Utc;
         scheduler.MonoNow = () => Clock.Mono;
         scheduler.StoreFileSystem = StoreFs;
+        dbe.BackupCoordinator.WallClock = () => Clock.Utc;
         BeforeStart?.Invoke(scheduler);
         dbe.InitializeArchetypes();
         return dbe;

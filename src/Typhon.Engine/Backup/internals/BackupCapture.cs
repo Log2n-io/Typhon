@@ -236,7 +236,7 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
             tailSpan.Dispose();
         }
 
-        var tailEndUtc = DateTime.UtcNow.Ticks;
+        var tailEndUtc = UtcNow().Ticks;
         Probe?.Invoke(CapturePhase.TailCopied, 0);
 
         // 6. The scan.
@@ -313,7 +313,7 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
                     _engine.CheckpointManager.SetReclaimFloor(ReclaimFloor);
                     _floorSet = true;
                     PublishedAtFreeze = _engine.WalManager.LastPublishedLsn;
-                    FreezeUtcTicks = DateTime.UtcNow.Ticks;
+                    FreezeUtcTicks = UtcNow().Ticks;
                     _mmf.InstallWriteHook(this);
                     _hookInstalled = true;
                 }
@@ -516,12 +516,20 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
     /// </summary>
     internal Func<long> CbwClock { get; init; }
 
+    /// <summary>
+    /// Test seam, null in production: the wall clock of the point's freeze and tail-end stamps, so a scheduler on a logical clock judges a point's age
+    /// on the same clock (plan 1416 §8.4).
+    /// </summary>
+    internal Func<DateTime> WallClock { get; init; }
+
     /// <summary>The copy-before-write slots, once allocated (test seam).</summary>
     internal CbwSlotPool Slots => _slots;
 
     private void BeforePointLsn() => Probe?.Invoke(CapturePhase.TailBeforePoint, 0);
 
     private long CbwNow() => CbwClock != null ? CbwClock() : Stopwatch.GetTimestamp();
+
+    private DateTime UtcNow() => WallClock != null ? WallClock() : DateTime.UtcNow;
 
     private void NoteHookElapsed(long deadline)
     {

@@ -70,8 +70,11 @@ public sealed class BackupMetricsExporter : IDisposable
         _meter.CreateObservableCounter("typhon.backup.archive.gaps_total", () => Status.Archive.GapsTotal, "{gaps}", "Archive gaps recorded this session");
     }
 
-    private static IEnumerable<Measurement<double>> Age(DateTime utc) =>
-        utc == DateTime.MinValue ? [] : [new Measurement<double>((DateTime.UtcNow - utc).TotalSeconds)];
+    /// <summary>Now, on the clock the health is judged on (the scheduler's).</summary>
+    private DateTime UtcNow => _engine.BackupScheduler?.UtcNow() ?? DateTime.UtcNow;
+
+    private IEnumerable<Measurement<double>> Age(DateTime utc) =>
+        utc == DateTime.MinValue ? [] : [new Measurement<double>((UtcNow - utc).TotalSeconds)];
 
     private IEnumerable<Measurement<double>> Last(Func<(long DurationUs, long Bytes, long Pages), double> value)
     {
@@ -99,7 +102,7 @@ public sealed class BackupMetricsExporter : IDisposable
             return [new Measurement<double>(status.Archive.LagSeconds)];
         }
 
-        return status.LastPoint == null ? [] : [new Measurement<double>((DateTime.UtcNow - status.LastPoint.TailEndUtc).TotalSeconds)];
+        return status.LastPoint == null ? [] : [new Measurement<double>((UtcNow - status.LastPoint.TailEndUtc).TotalSeconds)];
     }
 
     /// <inheritdoc />
