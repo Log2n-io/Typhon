@@ -167,6 +167,7 @@ internal sealed partial class BackupScheduler
             }
 
             bool publish;
+            bool running;
             lock (_lock)
             {
                 var next = DueUtc(utc, mono);
@@ -177,24 +178,22 @@ internal sealed partial class BackupScheduler
                 }
 
                 var inputs = Inputs();
-                publish = _state.Version != _publishedVersion || _state.State == BackupRunState.Running
-                          || BackupHealthEvaluator.Evaluate(inputs, utc) != _publishedHealth;
+                running = _state.State == BackupRunState.Running;
+                publish = _state.Version != _publishedVersion || running || BackupHealthEvaluator.Evaluate(inputs, utc) != _publishedHealth;
             }
 
             if (publish)
             {
                 Publish();
-                OnPublished();
             }
+
+            WriteStatusFileIfDue(running);
         }
         catch (Exception e)
         {
             LogUnexpected("tick", e.Message);
         }
     }
-
-    /// <summary>After a republish: the status file (O5) follows the snapshot.</summary>
-    partial void OnPublished();
 
     private DateTime DueUtc(DateTime utc, long mono) => _options.Interval > TimeSpan.Zero ? _schedule.NextDueUtc(utc, mono) : DateTime.MinValue;
 

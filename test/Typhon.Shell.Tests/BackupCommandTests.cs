@@ -65,7 +65,7 @@ public sealed class BackupCommandTests
         Assert.That(verify.Code, Is.EqualTo(BackupCli.ExitOk), verify.Text);
         Assert.That(verify.Text, Does.Contain("Ok").And.Contain("Full verify of 1 pack(s)").And.Contain("1 of 1 point(s) restorable"));
 
-        var status = Run((c, j) => BackupStatusCommand.Run(new BackupSettings { Store = _store, Format = "text" }, c, j, DateTime.UtcNow.AddMinutes(5)));
+        var status = Run((c, j) => BackupStatusCommand.Run(new BackupStatusCommand.Settings { Store = _store, Format = "text" }, c, j, DateTime.UtcNow.AddMinutes(5)));
         Assert.That(status.Code, Is.EqualTo(BackupCli.ExitOk), status.Text);
         Assert.That(status.Text, Does.Contain("Ok").And.Contain("Newest point #1").And.Contain("min old").And.Contain("Head age"));
 
@@ -96,7 +96,7 @@ public sealed class BackupCommandTests
         Assert.That(verify.GetProperty("exitCode").GetInt32(), Is.EqualTo(0));
         Assert.That(verify.GetProperty("report").GetProperty("verdict").GetString(), Is.EqualTo("ok"));
 
-        var status = Json(Run((c, j) => BackupStatusCommand.Run(new BackupSettings { Store = _store, Format = "json" }, c, j, DateTime.UtcNow)));
+        var status = Json(Run((c, j) => BackupStatusCommand.Run(new BackupStatusCommand.Settings { Store = _store, Format = "json" }, c, j, DateTime.UtcNow)));
         Assert.That(status.GetProperty("health").GetString(), Is.EqualTo("ok"));
         Assert.That(status.GetProperty("storeBytes").GetInt64(), Is.GreaterThan(0));
         Assert.That(status.GetProperty("latest").GetProperty("backupId").GetUInt32(), Is.EqualTo(1));
@@ -115,7 +115,7 @@ public sealed class BackupCommandTests
         Assert.That(Create(full: true).Code, Is.EqualTo(0));
         TruncateNewestPack();
 
-        var status = Run((c, j) => BackupStatusCommand.Run(new BackupSettings { Store = _store, Format = "text" }, c, j, DateTime.UtcNow));
+        var status = Run((c, j) => BackupStatusCommand.Run(new BackupStatusCommand.Settings { Store = _store, Format = "text" }, c, j, DateTime.UtcNow));
         Assert.That(status.Code, Is.EqualTo(BackupCli.ExitWarning), status.Text);
         Assert.That(status.Text, Does.Contain("Warning"));
 
@@ -133,7 +133,7 @@ public sealed class BackupCommandTests
         Assert.That(Create().Code, Is.EqualTo(0));
         TruncateNewestPack();
 
-        var status = Run((c, j) => BackupStatusCommand.Run(new BackupSettings { Store = _store, Format = "text" }, c, j, DateTime.UtcNow));
+        var status = Run((c, j) => BackupStatusCommand.Run(new BackupStatusCommand.Settings { Store = _store, Format = "text" }, c, j, DateTime.UtcNow));
         Assert.That(status.Code, Is.EqualTo(BackupCli.ExitStoreDamaged), status.Text);
         Assert.That(status.Text, Does.Contain("Failing"));
 
@@ -157,7 +157,7 @@ public sealed class BackupCommandTests
             var create = Create();
             Assert.That(create.Code, Is.EqualTo(BackupCli.ExitRefused), create.Text);
             Assert.That(create.Text, Does.Contain($"is open in process {Environment.ProcessId} on {Environment.MachineName}")
-                .And.Contain("engine.Backup.CreateAsync(store)").And.Contain("backup.request (#1416)").And.Contain("Or stop the process"));
+                .And.Contain("takes no backup requests").And.Contain("engine.Backup.CreateAsync()").And.Contain("stop the process"));
             Assert.That(File.Exists(DatabaseLockFile.RequestPathFor(_bundle)), Is.False, "a holder that never offered to yield is not asked to");
         }
 
@@ -326,7 +326,7 @@ public sealed class BackupCommandTests
         var none = new BackupCreateCommand.Settings { Bundle = _bundle, Format = "text" };
         Assert.That(Run((c, j) => BackupCreateCommand.Run(none, c, j, CancellationToken.None)).Code, Is.EqualTo(BackupCli.ExitUsage), "create without --store");
         Assert.That(Run((c, j) => BackupListCommand.Run(new BackupListCommand.Settings { Format = "text" }, c, j)).Code, Is.EqualTo(BackupCli.ExitUsage));
-        Assert.That(Run((c, j) => BackupStatusCommand.Run(new BackupSettings { Format = "text" }, c, j, DateTime.UtcNow)).Code,
+        Assert.That(Run((c, j) => BackupStatusCommand.Run(new BackupStatusCommand.Settings { Format = "text" }, c, j, DateTime.UtcNow)).Code,
             Is.EqualTo(BackupCli.ExitUsage));
         var noTarget = new BackupRestoreCommand.Settings { Store = _store, Format = "text" };
         Assert.That(Run((c, j) => BackupRestoreCommand.Run(noTarget, c, j, CancellationToken.None)).Code, Is.EqualTo(BackupCli.ExitUsage),
@@ -466,6 +466,73 @@ public sealed class BackupCommandTests
     [TestCase("1.5h")]
     public void ABadDuration_IsRefused(string value) => Assert.That(BackupCli.TryParseDuration(value, out _, out _), Is.False);
 
+    /// <summary>
+    /// #1416 (DL-24, AC-O2): with a running engine whose backup takes requests, <c>create --wait</c> asks it through <c>backup.request</c> and reports the
+    /// point it took; <c>status &lt;bundle&gt;</c> is its health (Ok 0; Degraded 1 once stale, judged at read time; a stopped engine still answers).
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void CreateWait_AsksTheRunningEngine_AndTheBundlesStatusIsItsHealth()
+    {
+        var backup = new BackupOptions { StorePath = _store, Interval = TimeSpan.FromHours(1), Retention = null };
+        using (var provider = Provider(Path.GetDirectoryName(_bundle), yieldable: false, backup))
+        using (var scope = provider.CreateScope())
+        {
+            scope.ServiceProvider.GetRequiredService<DatabaseEngine>().InitializeArchetypes();
+            WaitForStatusFile();
+
+            var create = new BackupCreateCommand.Settings { Bundle = _bundle, Wait = true, Format = "json", PollInterval = TimeSpan.FromMilliseconds(20) };
+            var created = Json(Run((c, j) => BackupCreateCommand.Run(create, c, j, CancellationToken.None)));
+            Assert.That(created.GetProperty("exitCode").GetInt32(), Is.EqualTo(BackupCli.ExitOk), created.ToString());
+            Assert.That(created.GetProperty("point").GetProperty("backupId").GetUInt32(), Is.EqualTo(1));
+            Assert.That(BackupOperations.List(_store).Points, Has.Count.EqualTo(1), "the engine took it into its own store");
+
+            var status = Run((c, j) => BackupStatusCommand.Run(new BackupStatusCommand.Settings { Bundle = _bundle, Format = "text" }, c, j, DateTime.UtcNow));
+            Assert.That(status.Code, Is.EqualTo(BackupCli.ExitOk), status.Text);
+            Assert.That(status.Text, Does.Contain("Ok").And.Contain("takes requests").And.Contain("Newest point #1"));
+        }
+
+        var stale = Json(Run((c, j) => BackupStatusCommand.Run(new BackupStatusCommand.Settings { Bundle = _bundle, Format = "json" }, c, j,
+            DateTime.UtcNow.AddHours(3))));
+        Assert.That(stale.GetProperty("exitCode").GetInt32(), Is.EqualTo(BackupCli.ExitWarning), "Degraded is a warning-level exit");
+        Assert.That(stale.GetProperty("report").GetProperty("health").GetString(), Is.EqualTo("degraded"));
+        Assert.That(stale.GetProperty("report").GetProperty("engineLive").GetBoolean(), Is.False);
+
+        File.Delete(Path.Combine(_bundle, "backup.status.json"));
+        var off = Run((c, j) => BackupStatusCommand.Run(new BackupStatusCommand.Settings { Bundle = _bundle, Format = "text" }, c, j, DateTime.UtcNow));
+        Assert.That(off.Code, Is.EqualTo(BackupCli.ExitStoreDamaged), "no backup status is Off: a monitored database with no backup is not healthy");
+        var missing = Run((c, j) => BackupStatusCommand.Run(new BackupStatusCommand.Settings { Bundle = Path.Combine(_root, "nope.typhon"), Format = "text" },
+            c, j, DateTime.UtcNow));
+        Assert.That(missing.Code, Is.EqualTo(BackupCli.ExitFailed), "no such bundle: the command failed");
+    }
+
+    [Test]
+    [CancelAfter(30_000)]
+    public void StaleAfter_DegradesAStoresStatus()
+    {
+        Assert.That(Create().Code, Is.EqualTo(BackupCli.ExitOk));
+        var settings = new BackupStatusCommand.Settings { Store = _store, StaleAfter = "1h", Format = "text" };
+        Assert.That(Run((c, j) => BackupStatusCommand.Run(settings, c, j, DateTime.UtcNow)).Code, Is.EqualTo(BackupCli.ExitOk));
+        var stale = Run((c, j) => BackupStatusCommand.Run(settings, c, j, DateTime.UtcNow.AddHours(2)));
+        Assert.That(stale.Code, Is.EqualTo(BackupCli.ExitWarning), stale.Text);
+        Assert.That(stale.Text, Does.Contain("Degraded").And.Contain("older than"));
+        Assert.That(BackupCli.ExitCodeOf(BackupHealth.Off), Is.EqualTo(BackupCli.ExitStoreDamaged));
+        Assert.That(BackupCli.ExitCodeOf(BackupHealth.Failing), Is.EqualTo(BackupCli.ExitStoreDamaged));
+        Assert.That(BackupCli.ExitCodeFor(new TyphonException(TyphonErrorCode.BackupNotConfigured, "x")), Is.EqualTo(BackupCli.ExitRefused));
+    }
+
+    /// <summary>The engine's scheduler writes the status file on its first tick, on its own thread: waited for, bounded.</summary>
+    private void WaitForStatusFile()
+    {
+        var path = Path.Combine(_bundle, "backup.status.json");
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (!File.Exists(path))
+        {
+            Assert.That(DateTime.UtcNow, Is.LessThan(deadline), "the engine never wrote its status file");
+            Task.Delay(10).Wait();
+        }
+    }
+
     private static int App(params string[] args) => Program.BuildApp(args).Run(args);
 
     private (int Code, string Text, string Json) Compact(string point, string format = "text")
@@ -538,7 +605,7 @@ public sealed class BackupCommandTests
         scope.ServiceProvider.GetRequiredService<DatabaseEngine>().InitializeArchetypes();
     }
 
-    private static ServiceProvider Provider(string directory, bool yieldable)
+    private static ServiceProvider Provider(string directory, bool yieldable, BackupOptions backup = null)
     {
         var services = new ServiceCollection();
         services
@@ -555,7 +622,11 @@ public sealed class BackupCommandTests
                 o.DatabaseCacheSize = 16UL * 1024 * 1024;
                 o.YieldableLock = yieldable;
             })
-            .AddScopedDatabaseEngine(o => o.Wal = new WalWriterOptions { UseFUA = false });
+            .AddScopedDatabaseEngine(o =>
+            {
+                o.Wal = new WalWriterOptions { UseFUA = false };
+                o.Backup = backup;
+            });
         return services.BuildServiceProvider();
     }
 }

@@ -9,9 +9,10 @@ using System.Threading;
 namespace Typhon.Shell.Commands;
 
 /// <summary>
-/// <c>typhon backup create &lt;bundle&gt; --store S</c> — backs up a closed database (an offline capture, 02 §8). A database a live engine holds is
-/// refused (exit 4), pointing at <c>engine.Backup</c>: the CLI reaches a running engine only through <c>backup.request</c>, which arrives with #1416.
-/// A holder that advertises it will yield (the Workbench, #621) is asked to release the database first.
+/// <c>typhon backup create &lt;bundle&gt; [--store S] [--full] [--wait [--timeout T]]</c> — a point of a database. A running engine whose backup is
+/// configured and accepts requests is asked through <c>backup.request</c> (07 §3, DL-24): it takes the point into its own store (<c>--store</c> is
+/// ignored), and <c>--wait</c> follows its status until the point is published or failed. Otherwise the database is backed up offline (02 §8) into
+/// <c>--store</c>; a holder that advertises it will yield (the Workbench, #621) is asked to release it first, any other is refused (exit 4).
 /// </summary>
 // ReSharper disable once ClassNeverInstantiated.Global
 internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings>
@@ -32,8 +33,19 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
         [Description("The database's WAL directory, when its engine was configured with one other than {bundle}/wal.")]
         public string WalDir { get; set; }
 
+        [CommandOption("--wait")]
+        [Description("With a running engine: wait until the point is published (or failed); the exit code is its outcome.")]
+        public bool Wait { get; set; }
+
+        [CommandOption("--timeout")]
+        [Description("With --wait: how long to wait (30d, 12h, 90m, 45s). Default 10m.")]
+        public string Timeout { get; set; }
+
         /// <summary>How long a yieldable holder gets to release the database: the engine's own handoff wait by default. Not on the command line.</summary>
         public TimeSpan HandoffTimeout { get; set; } = new PagedMMFOptions().LockHandoffTimeout;
+
+        /// <summary>How often <c>--wait</c> reads the engine's status. Not on the command line.</summary>
+        public TimeSpan PollInterval { get; set; } = TimeSpan.FromMilliseconds(200);
         // ReSharper restore UnusedAutoPropertyAccessor.Global
     }
 
@@ -48,6 +60,33 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
         }
 
         var output = new BackupOutput(console, json, asJson);
+        var timeout = TimeSpan.FromMinutes(10);
+        if (settings.Timeout != null && !BackupCli.TryParseDuration(settings.Timeout, out timeout, out var timeoutError))
+        {
+            return output.Error(BackupCli.ExitUsage, timeoutError);
+        }
+
+        // A running engine that takes requests backs itself up (DL-24).
+        string live;
+        try
+        {
+            live = OfflineBundlePageSource.ResolveBundleDirectory(settings.Bundle);
+        }
+        catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0 || output.AsJson)
+        {
+            return output.Error(ex);
+        }
+
+        if (BackupOperations.ReadStatus(live) is { AcceptsRequests: true } running)
+        {
+            return Request(live, running, settings, timeout, output, ct);
+        }
+
+        if (settings.Wait)
+        {
+            return output.Error(BackupCli.ExitUsage, "--wait follows a running engine's backup; this database has none that accepts requests.");
+        }
+
         if (string.IsNullOrWhiteSpace(settings.Store))
         {
             return output.Error(BackupCli.ExitUsage, "--store is required: the store to back the database up into.");
@@ -115,9 +154,87 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
         new() { Full = settings.Full, WalDirectory = settings.WalDir, Cancellation = ct };
 
     private static string OnlineRefusal(string bundle, DatabaseLockedException ex) =>
-        $"Database '{bundle}' is open in process {ex.OwnerPid} on {ex.OwnerMachine}. Back it up from inside the application with "
-        + "engine.Backup.CreateAsync(store); the CLI will reach a running database through backup.request (#1416). Or stop the process and run this "
-        + "again.";
+        $"Database '{bundle}' is open in process {ex.OwnerPid} on {ex.OwnerMachine}, and its engine takes no backup requests (no BackupOptions, or "
+        + "AcceptRequests off). Configure its backup (DatabaseEngineOptions.Backup) to ask it from here, back it up from inside the application with "
+        + "engine.Backup.CreateAsync(), or stop the process and run this again.";
+
+    /// <summary>
+    /// The request path: <c>backup.request</c> written (the one writer, <see cref="BackupOperations.RequestBackup"/>); with <c>--wait</c>, the engine's
+    /// status followed until its job for this request ended: 0 published (1 when suspect), 2 failed, deferred or timed out.
+    /// </summary>
+    private static int Request(string bundle, BackupStatusReport before, Settings settings, TimeSpan timeout, BackupOutput output, CancellationToken ct)
+    {
+        Guid id;
+        try
+        {
+            id = BackupOperations.RequestBackup(bundle, settings.Full ? BackupRequestKind.Full : BackupRequestKind.Auto, $"typhon backup create (PID {Environment.ProcessId})");
+        }
+        catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0 || output.AsJson)
+        {
+            return output.Error(ex);
+        }
+
+        if (!settings.Wait)
+        {
+            if (output.AsJson)
+            {
+                output.Json(new { exitCode = BackupCli.ExitOk, requestId = id, store = before.StorePath });
+            }
+            else
+            {
+                output.Console.MarkupLine($"[green]Requested[/] a point of {Markup.Escape(bundle)} from its running engine (request {id}); it goes into "
+                                          + $"{Markup.Escape(before.StorePath)}. Follow it with `typhon backup status {Markup.Escape(bundle)}`.");
+            }
+
+            return BackupCli.ExitOk;
+        }
+
+        var points = before.Status.PointsTotal;
+        var failures = before.Status.FailuresTotal;
+        var deadline = DateTime.UtcNow + timeout;
+        while (true)
+        {
+            if (ct.WaitHandle.WaitOne(settings.PollInterval))
+            {
+                return output.Error(BackupCli.ExitFailed, $"Cancelled while waiting for request {id}; the engine may still take the point.");
+            }
+
+            var report = BackupOperations.ReadStatus(bundle);
+            var status = report.Status;
+            if (status != null && status.LastRequestId == id && status.State == BackupRunState.Idle)
+            {
+                if (status.PointsTotal > points && status.LastPoint != null)
+                {
+                    var exit = status.LastPoint.Suspect ? BackupCli.ExitWarning : BackupCli.ExitOk;
+                    if (output.AsJson)
+                    {
+                        output.Json(new { exitCode = exit, requestId = id, point = status.LastPoint });
+                    }
+                    else
+                    {
+                        output.Console.MarkupLine($"[green]Backed up[/] {Markup.Escape(bundle)} as point [bold]#{status.LastPoint.BackupId}[/] "
+                                                  + $"({status.LastPoint.Kind}, P={status.LastPoint.PointLsn}) by its running engine.");
+                    }
+
+                    return exit;
+                }
+
+                var why = status.FailuresTotal > failures ? status.LastFailure?.Message ?? "it failed"
+                    : "the engine could not take it now (its store was held by another writer, or it was closing); ask again";
+                return output.Error(BackupCli.ExitFailed, $"Request {id} did not produce a point: {why}");
+            }
+
+            if (!report.EngineLive)
+            {
+                return output.Error(BackupCli.ExitFailed, $"The engine stopped before request {id} was served.");
+            }
+
+            if (DateTime.UtcNow >= deadline)
+            {
+                return output.Error(BackupCli.ExitFailed, $"Request {id} was not served within {timeout}; the engine may still take the point.");
+            }
+        }
+    }
 
     /// <summary>
     /// A live holder that advertised it will yield (#621) is asked to, the way a second engine's open asks: the request file, then a bounded wait for
@@ -494,17 +611,74 @@ internal sealed class BackupRestoreCommand : Command<BackupRestoreCommand.Settin
 }
 
 /// <summary>
-/// <c>typhon backup status --store S</c> — the store's health from its packs' headers and footers and the chains they form, per chain, with the
-/// newest point's age: cheap enough to poll. The exit code is the health (0 ok, 1 warning, 3 nothing restorable), for monitoring; <c>verify</c>
-/// reads the rest. The engine's status file and its health thresholds arrive with #1416.
+/// <c>typhon backup status &lt;bundle&gt; | --store S [--stale-after T]</c> — backup health, cheap enough to poll; the exit code is the health for
+/// monitoring (DL-22 e): Ok 0, Warning and Degraded 1, Failing, Off and unknown 3. A bundle's comes from its engine's <c>backup.status.json</c> (a
+/// stopped engine's time rules judged again now, DL-23) and its store; a store's from its packs' headers and footers per chain, with
+/// <c>--stale-after</c> for the stores of databases backed up offline (DL-33).
 /// </summary>
 // ReSharper disable once ClassNeverInstantiated.Global
-internal sealed class BackupStatusCommand : Command<BackupSettings>
+internal sealed class BackupStatusCommand : Command<BackupStatusCommand.Settings>
 {
-    protected override int Execute(CommandContext context, BackupSettings settings, CancellationToken cancellationToken)
+    // ReSharper disable once ClassNeverInstantiated.Global
+    public sealed class Settings : BackupSettings
+    {
+        // ReSharper disable UnusedAutoPropertyAccessor.Global
+        [CommandArgument(0, "[bundle]")]
+        [Description("A .typhon bundle: its running (or last) engine's backup status. Or give --store.")]
+        public string Bundle { get; set; }
+
+        [CommandOption("--stale-after")]
+        [Description("With --store: Degraded when the newest restorable point is older than this (30d, 12h, 90m, 45s).")]
+        public string StaleAfter { get; set; }
+        // ReSharper restore UnusedAutoPropertyAccessor.Global
+    }
+
+    protected override int Execute(CommandContext context, Settings settings, CancellationToken cancellationToken)
         => BackupCli.RejectLeftovers(context, settings) is var usage and >= 0 ? usage : Run(settings, AnsiConsole.Console, Console.Out, DateTime.UtcNow);
 
-    internal static int Run(BackupSettings settings, IAnsiConsole console, TextWriter json, DateTime utcNow)
+    /// <summary>A bundle's status: its engine's status file (judged again now) and its store.</summary>
+    private static int BundleStatus(string bundle, BackupOutput output, DateTime utcNow)
+    {
+        BackupStatusReport report;
+        try
+        {
+            report = BackupOperations.ReadStatus(OfflineBundlePageSource.ResolveBundleDirectory(bundle), utcNow);
+        }
+        catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0 || output.AsJson)
+        {
+            return output.Error(ex);
+        }
+
+        var exit = BackupCli.ExitCodeOf(report.Health);
+        if (output.AsJson)
+        {
+            output.Json(new { exitCode = exit, report });
+            return exit;
+        }
+
+        var colour = exit switch { BackupCli.ExitOk => "green", BackupCli.ExitWarning => "yellow", _ => "red" };
+        output.Console.MarkupLine($"[{colour}]{report.Health}[/] — {Markup.Escape(report.Reason)}.");
+        var s = report.Status;
+        if (s != null)
+        {
+            output.Console.MarkupLine(report.EngineLive
+                ? $"Engine PID {report.Pid} on {Markup.Escape(report.Machine)}, {s.State}{(s.State == BackupRunState.Running ? " (" + s.Phase + ")" : "")}, "
+                  + $"store {Markup.Escape(report.StorePath)}{(report.AcceptsRequests ? ", takes requests" : "")}."
+                : $"No engine runs on it (last: PID {report.Pid} on {Markup.Escape(report.Machine)}); store {Markup.Escape(report.StorePath)}.");
+            output.Console.MarkupLine(s.LastPoint == null
+                ? "No point of this database's timeline yet."
+                : $"Newest point #{s.LastPoint.BackupId} ({s.LastPoint.Kind}), {BackupCli.Age(utcNow - s.LastSuccessUtc)} old; "
+                  + $"{s.RestorablePoints} restorable point(s), {BackupCli.Bytes(s.StoreBytes)}; {s.ConsecutiveFailures} failure(s) in a row.");
+            if (s.LastFailure != null)
+            {
+                output.Console.MarkupLine($"[grey]Last failure {s.LastFailure.Utc:u}: {Markup.Escape(s.LastFailure.Message)}[/]");
+            }
+        }
+
+        return exit;
+    }
+
+    internal static int Run(Settings settings, IAnsiConsole console, TextWriter json, DateTime utcNow)
     {
         if (!BackupCli.TryResolveFormat(settings.Format, out var asJson, out var formatError))
         {
@@ -512,9 +686,22 @@ internal sealed class BackupStatusCommand : Command<BackupSettings>
         }
 
         var output = new BackupOutput(console, json, asJson);
+        if (!string.IsNullOrWhiteSpace(settings.Bundle))
+        {
+            return string.IsNullOrWhiteSpace(settings.Store) && settings.StaleAfter == null
+                ? BundleStatus(settings.Bundle, output, utcNow)
+                : output.Error(BackupCli.ExitUsage, "Give a bundle or --store, not both (--stale-after goes with --store).");
+        }
+
         if (string.IsNullOrWhiteSpace(settings.Store))
         {
-            return output.Error(BackupCli.ExitUsage, "--store is required (status of a bundle, from its engine's status file, arrives with #1416).");
+            return output.Error(BackupCli.ExitUsage, "Give a bundle (its engine's backup status) or --store (a store's).");
+        }
+
+        var staleAfter = TimeSpan.Zero;
+        if (settings.StaleAfter != null && !BackupCli.TryParseDuration(settings.StaleAfter, out staleAfter, out var staleError))
+        {
+            return output.Error(BackupCli.ExitUsage, staleError);
         }
 
         BackupStoreStatus status;
@@ -527,6 +714,17 @@ internal sealed class BackupStatusCommand : Command<BackupSettings>
         catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0 || output.AsJson)
         {
             return output.Error(ex);
+        }
+
+        // DL-33: a store of an offline-backed database has no engine to judge staleness; --stale-after does.
+        if (staleAfter > TimeSpan.Zero && status.Health is BackupHealth.Ok or BackupHealth.Warning && status.LatestRestorable != null
+            && utcNow - status.LatestRestorable.TailEndUtc > staleAfter)
+        {
+            status = status with
+            {
+                Health = BackupHealth.Degraded,
+                Reason = $"the newest restorable point #{status.LatestRestorable.BackupId} is older than {BackupCli.Age(staleAfter)}",
+            };
         }
 
         var exit = BackupCli.ExitCodeOf(status.Health);

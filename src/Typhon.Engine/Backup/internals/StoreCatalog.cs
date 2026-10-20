@@ -314,4 +314,5 @@ internal static class StoreCatalog
 [JsonSerializable(typeof(StoreCatalogFile))]
 [JsonSerializable(typeof(DrillRecordFile))]
 [JsonSerializable(typeof(BackupRequestContent))]
+[JsonSerializable(typeof(BackupStatusFileContent))]
 internal sealed partial class BackupJsonContext : JsonSerializerContext;

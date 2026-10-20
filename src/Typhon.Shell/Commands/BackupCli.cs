@@ -105,6 +105,7 @@ internal static class BackupCli
     {
         RestoreRefusedException or DatabaseLockedException or BackupStoreMismatchException or BackupStoreLockedException
             or BackupFormatUnsupportedException or BackupPlanChangedException or NotSupportedException => ExitRefused,
+        TyphonException { ErrorCode: TyphonErrorCode.BackupNotConfigured } => ExitRefused,
         BackupChainBrokenException or BackupPackCorruptException => ExitStoreDamaged,
         OperationCanceledException or IOException or UnauthorizedAccessException or TyphonException or InvalidOperationException => ExitFailed,
         _ => -1,

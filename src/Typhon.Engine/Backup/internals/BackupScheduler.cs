@@ -464,6 +464,7 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
             var inputs = Inputs();
             var (health, reason) = BackupHealthEvaluator.Evaluate(inputs, now);
             _publishedHealth = (health, reason);
+            _publishedInputs = inputs;
             _publishedVersion = _state.Version;
             var facts = _state.Facts;
             status = new BackupStatus(health, reason, BackupHealthEvaluator.Explain(inputs, reason, now), _state.State, _state.Phase, added, expected,

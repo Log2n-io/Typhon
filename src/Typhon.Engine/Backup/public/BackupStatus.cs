@@ -192,6 +192,20 @@ public sealed record BackupArchiveStatus(BackupArchiveState State, Guid Timeline
     public static BackupArchiveStatus Off { get; } = new(BackupArchiveState.Off, Guid.Empty, 0, 0, 0, 0, 0, 0, 0, DateTime.MinValue, 0, null);
 }
 
+/// <summary>What <see cref="BackupOperations.ReadStatus(string)"/> found for a bundle or a store.</summary>
+/// <param name="EngineLive">An engine runs on the bundle now (its status file is current).</param>
+/// <param name="Pid">The process that wrote the status file; 0 for a store.</param>
+/// <param name="Machine">Its machine; <c>null</c> for a store.</param>
+/// <param name="StorePath">The store the bundle's engine backs up into, or the store asked about.</param>
+/// <param name="AcceptsRequests">A <c>backup.request</c> would be honoured now (a live engine that accepts requests).</param>
+/// <param name="Status">The engine's status, its health judged again now (a stopped engine's status degrades by itself); <c>null</c> for a store.</param>
+/// <param name="Store">The store's own status from its packs, or <c>null</c> when it cannot be read.</param>
+/// <param name="Health">The verdict.</param>
+/// <param name="Reason">Why, in one sentence.</param>
+[PublicAPI]
+public sealed record BackupStatusReport(bool EngineLive, int Pid, string Machine, string StorePath, bool AcceptsRequests, BackupStatus Status,
+    BackupStoreStatus Store, BackupHealth Health, string Reason);
+
 /// <summary>
 /// An engine's backups at one instant (<see cref="IBackupService.Status"/>, <c>backup.status.json</c>): a published snapshot, read without a lock.
 /// <see cref="DateTime.MinValue"/> means "none" for every time.

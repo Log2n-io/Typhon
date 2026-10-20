@@ -223,6 +223,103 @@ public static class BackupOperations
         }
     }
 
+    /// <summary>
+    /// The backup status of a bundle (from its engine's <c>backup.status.json</c> and its store) or of a store (from its packs): <c>typhon backup status</c>'s
+    /// answer. A stopped engine's time rules are judged again now (DL-23), so its status degrades by itself; a bundle with no status file is
+    /// <see cref="BackupHealth.Off"/>.
+    /// </summary>
+    /// <param name="bundleOrStore">A <c>{name}.typhon</c> bundle directory, or a store directory.</param>
+    public static BackupStatusReport ReadStatus(string bundleOrStore) => ReadStatus(bundleOrStore, DateTime.UtcNow);
+
+    internal static BackupStatusReport ReadStatus(string bundleOrStore, DateTime utcNow)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(bundleOrStore);
+        if (System.IO.File.Exists(System.IO.Path.Combine(bundleOrStore, "store.json")))
+        {
+            var store = Status(bundleOrStore);
+            return new BackupStatusReport(false, 0, null, bundleOrStore, false, null, store, store.Health, store.Reason);
+        }
+
+        var file = BackupStatusFile.TryRead(bundleOrStore);
+        if (file == null)
+        {
+            return new BackupStatusReport(false, 0, null, null, false, null, null, BackupHealth.Off,
+                "no backup status: backup is off for this database, or its engine never ran with it");
+        }
+
+        var live = BackupStatusFile.IsLive(file);
+        var (health, reason) = BackupHealthEvaluator.Evaluate(file.Inputs, utcNow);
+        var text = BackupHealthEvaluator.Explain(file.Inputs, reason, utcNow);
+        var status = file.Status with
+        {
+            Health = health,
+            Reason = reason,
+            ReasonText = text,
+            State = live ? file.Status.State : BackupRunState.Stopped,
+        };
+        BackupStoreStatus storeStatus = null;
+        try
+        {
+            storeStatus = Status(file.StorePath);
+        }
+        catch (Exception e) when (e is System.IO.IOException or UnauthorizedAccessException or BackupException)
+        {
+            // The status still answers; the store's own view is missing.
+        }
+
+        return new BackupStatusReport(live, file.Pid, file.MachineName, file.StorePath, live && file.AcceptRequests, status, storeStatus, health,
+            live ? text : $"engine not running; last known state: {text}");
+    }
+
+    /// <summary>
+    /// Asks the engine running on <paramref name="bundle"/> for a point (07 §3, DL-24): writes <c>backup.request</c> whole. Only when a live engine's status
+    /// file says it accepts requests; the engine writes to its own configured store, never to a path the request could name.
+    /// </summary>
+    /// <param name="bundle">The bundle directory.</param>
+    /// <param name="kind">Auto or full.</param>
+    /// <param name="requestedBy">Who asks, for the record.</param>
+    /// <returns>The request's id, which the engine's status echoes once its job starts.</returns>
+    /// <exception cref="TyphonException">
+    /// <see cref="TyphonErrorCode.BackupNotConfigured"/>: no live engine, backup off, or requests refused. <see cref="TyphonErrorCode.BackupInProgress"/>:
+    /// another request is still pending after a short wait.
+    /// </exception>
+    public static Guid RequestBackup(string bundle, BackupRequestKind kind, string requestedBy)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(bundle);
+        var file = BackupStatusFile.TryRead(bundle);
+        var refusal = file == null ? "it has no backup status: backup is off, or no engine runs on it with backup configured"
+            : !BackupStatusFile.IsLive(file) ? $"its engine (PID {file.Pid} on {file.MachineName}) is not running"
+            : !file.AcceptRequests ? "its engine refuses backup requests (BackupOptions.AcceptRequests is off)"
+            : null;
+        if (refusal != null)
+        {
+            throw new TyphonException(TyphonErrorCode.BackupNotConfigured, $"Cannot ask '{bundle}' for a backup: {refusal}.");
+        }
+
+        var id = Guid.NewGuid();
+        var content = new BackupRequestContent
+        {
+            FormatVersion = BackupRequestContent.CurrentFormatVersion,
+            RequestId = id,
+            Kind = kind == BackupRequestKind.Full ? "full" : "auto",
+            RequestedBy = requestedBy,
+            RequestedUtc = DateTime.UtcNow,
+        };
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (!BackupRequestFile.Write(bundle, content))
+        {
+            // A second requester waits until the engine has retired the first request (it does within a tick, when its job starts).
+            if (DateTime.UtcNow >= deadline)
+            {
+                throw new TyphonException(TyphonErrorCode.BackupInProgress, $"Another backup request to '{bundle}' is still pending.");
+            }
+
+            System.Threading.Thread.Sleep(50);
+        }
+
+        return id;
+    }
+
     /// <summary>The pack that stands for a point: its compacted one when present.</summary>
     private static CatalogPack Standing(StoreView view, uint id)
     {

@@ -132,16 +132,18 @@ internal static class Program
             config.AddBranch("backup", backup =>
             {
                 backup.SetDescription("Back up a closed database, and list, verify, restore, compact, prune and watch a backup store.");
-                backup.AddCommand<BackupCreateCommand>("create").WithDescription("Back up a closed database into a store.")
-                    .WithExample(["backup", "create", "game.typhon", "--store", "/backups/game"]);
+                backup.AddCommand<BackupCreateCommand>("create").WithDescription("Back up a database: ask its running engine, or capture it closed into a store.")
+                    .WithExample(["backup", "create", "game.typhon", "--store", "/backups/game"])
+                    .WithExample(["backup", "create", "game.typhon", "--wait"]);
                 backup.AddCommand<BackupListCommand>("list").WithDescription("List a store's points and chains.")
                     .WithExample(["backup", "list", "--store", "/backups/game", "--restorable"]);
                 backup.AddCommand<BackupVerifyCommand>("verify").WithDescription("Verify a store's packs and chains; the verdict is the exit code.")
                     .WithExample(["backup", "verify", "--store", "/backups/game", "--level", "full"]);
                 backup.AddCommand<BackupRestoreCommand>("restore").WithDescription("Restore a point into a new bundle.")
                     .WithExample(["backup", "restore", "--store", "/backups/game", "--point", "latest", "--to", "/data/restored"]);
-                backup.AddCommand<BackupStatusCommand>("status").WithDescription("A store's health per chain; the health is the exit code.")
-                    .WithExample(["backup", "status", "--store", "/backups/game"]);
+                backup.AddCommand<BackupStatusCommand>("status").WithDescription("A database's or a store's backup health; the health is the exit code.")
+                    .WithExample(["backup", "status", "game.typhon"])
+                    .WithExample(["backup", "status", "--store", "/backups/game", "--stale-after", "1d"]);
                 backup.AddCommand<BackupCompactCommand>("compact").WithDescription("Turn a point into a base inside the store; nothing is deleted.")
                     .WithExample(["backup", "compact", "--store", "/backups/game", "--point", "latest"]);
                 backup.AddCommand<BackupPruneCommand>("prune").WithDescription("Apply a retention policy: keep what it promises, delete what nothing needs.")
