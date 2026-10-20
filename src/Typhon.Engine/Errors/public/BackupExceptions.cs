@@ -66,40 +66,6 @@ public sealed class BackupStoreLockedException : BackupException
     public override bool IsTransient => true;
 }
 
-/// <summary>
-/// A retention approved from a preview would now delete a pack the preview did not list (a point landed, a drill passed, time moved past an age limit):
-/// nothing was compacted or deleted. Preview again and approve the new plan.
-/// </summary>
-[PublicAPI]
-public sealed class BackupPlanChangedException : BackupException
-{
-    /// <summary>Creates the failure.</summary>
-    /// <param name="storePath">The store directory.</param>
-    /// <param name="approvedFingerprint">The fingerprint of the plan that was approved.</param>
-    /// <param name="currentFingerprint">The fingerprint of the plan the store makes now.</param>
-    public BackupPlanChangedException(string storePath, string approvedFingerprint, string currentFingerprint)
-        : base(TyphonErrorCode.BackupPlanChanged,
-            $"The retention plan of backup store '{storePath}' changed since it was approved (plan {approvedFingerprint}, now {currentFingerprint}): it would "
-            + "delete a pack the approved plan did not list. Nothing was deleted; preview it again.")
-    {
-        StorePath = storePath;
-        ApprovedFingerprint = approvedFingerprint;
-        CurrentFingerprint = currentFingerprint;
-    }
-
-    /// <summary>The store directory.</summary>
-    public string StorePath { get; }
-
-    /// <summary>The fingerprint of the plan that was approved.</summary>
-    public string ApprovedFingerprint { get; }
-
-    /// <summary>The fingerprint of the plan the store makes now.</summary>
-    public string CurrentFingerprint { get; }
-
-    /// <inheritdoc />
-    public override bool IsTransient => true;
-}
-
 /// <summary>The backup store belongs to another database: two databases never interleave in one store.</summary>
 [PublicAPI]
 public sealed class BackupStoreMismatchException : BackupException

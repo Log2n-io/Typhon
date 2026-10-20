@@ -83,8 +83,8 @@ internal sealed class BackupLifecycleOperationsTests
         var ex = Assert.Throws<BackupPlanChangedException>(() => BackupOperations.ApplyRetention(_store, KeepTwo, approved));
 
         Assert.That(ex.ErrorCode, Is.EqualTo(TyphonErrorCode.BackupPlanChanged));
-        Assert.That(ex.ApprovedFingerprint, Is.EqualTo(approved.Fingerprint));
-        Assert.That(ex.CurrentFingerprint, Is.Not.EqualTo(approved.Fingerprint));
+        Assert.That(ex.Approved, Is.EqualTo(approved.Fingerprint));
+        Assert.That(ex.Current, Is.Not.EqualTo(approved.Fingerprint));
         Assert.That(Packs(), Is.EqualTo(before), "nothing compacted, nothing deleted");
         Assert.That(BackupOperations.ApplyRetention(_store, KeepTwo).Deleted, Is.Not.Empty, "without an approval, the current policy applies");
     }

@@ -335,13 +335,14 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
 
     public string Root => _paths.Root;
 
-    /// <summary>The store as this session sees it (always rebuilt from the packs, then kept up to date by its own publishes).</summary>
-    public StoreView View => _view;
-
     /// <summary>The file system the session writes through.</summary>
     internal IStoreFileSystem FileSystem => _fs;
 
-    internal ILogger Logger => _log;
+    /// <summary>Where the session logs.</summary>
+    internal ILogger Log => _log;
+
+    /// <summary>The store as this session sees it (always rebuilt from the packs, then kept up to date by its own publishes).</summary>
+    public StoreView View => _view;
 
     /// <summary>
     /// Opens a store for writing. Throws <see cref="BackupStoreLockedException"/> when another writer holds it,

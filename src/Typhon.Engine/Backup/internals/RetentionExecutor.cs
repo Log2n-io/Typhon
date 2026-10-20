@@ -6,6 +6,13 @@ using System.IO;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
+/// Retention's step 5 (05 §3, DL-13): deletes the archived WAL no kept point can replay from — per timeline the segments wholly below
+/// <c>KeepFromLsn</c> (the CheckpointLSN of its oldest kept point), and every timeline absent from <paramref name="floors"/> except
+/// <paramref name="liveTimeline"/>. Called under <c>store.lock</c>, after the pack deletes. The archive is #1418's (impl/1418 §4.6).
+/// </summary>
+internal delegate void ArchivePruner(BackupStore session, IReadOnlyList<(Guid TimelineId, long KeepFromLsn)> floors, Guid liveTimeline);
+
+/// <summary>
 /// Applies a retention under <c>store.lock</c> (05 §3 as corrected, BKP-14): plan, refuse a plan that changed since the one approved, compact, re-plan on
 /// what the compactions actually published, delete newest first with each delete made durable, prune the WAL archive, then prove every kept point
 /// still resolves.
@@ -24,13 +31,14 @@ internal static class RetentionExecutor
     /// <param name="utcNow">Now, for <c>MaxAge</c>.</param>
     /// <param name="liveTimeline">The timeline a live engine is writing, whose archive is never pruned whole; empty from the CLI.</param>
     /// <param name="options">Read budget, cancellation, progress, logging.</param>
+    /// <param name="pruneArchive">Step 5; <c>null</c> is <see cref="DefaultArchivePruner"/>.</param>
     public static BackupRetentionResult Apply(BackupStore session, BackupRetentionPolicy policy, BackupRetentionPlan approved, IReadOnlyCollection<uint> drillPassed,
-        DateTime utcNow, Guid liveTimeline, BackupLifecycleOptions options)
+        DateTime utcNow, Guid liveTimeline, BackupLifecycleOptions options, ArchivePruner pruneArchive = null)
     {
         options ??= new BackupLifecycleOptions();
         var clock = Stopwatch.StartNew();
         var fs = session.FileSystem;
-        var log = session.Logger;
+        var log = session.Log;
         var root = session.Root;
         long? free = fs.TryGetAvailableFreeSpace(session.View.Paths.Packs, out var bytes) ? bytes : null;
         var first = RetentionPlanner.Plan(session.View, policy, drillPassed, utcNow, free);
@@ -87,7 +95,7 @@ internal static class RetentionExecutor
         }
 
         // DL-13 (05 §3 step 5): the archived WAL no kept point can replay from.
-        PruneArchive(session, decision.ArchiveFloors, liveTimeline);
+        (pruneArchive ?? DefaultArchivePruner)(session, decision.ArchiveFloors, liveTimeline);
 
         // R1 (DL-7): every kept point resolves on the store as it now is. Deletion cannot change a kept pack (BKP-08), only remove a link.
         foreach (var id in decision.Kept)
@@ -120,17 +128,10 @@ internal static class RetentionExecutor
     }
 
     /// <summary>
-    /// Deletes the archived WAL segments no kept point can replay from: per timeline, every segment wholly below the CheckpointLSN of its oldest kept
-    /// point, and every timeline no kept point is on, except <paramref name="liveTimeline"/>.
+    /// The archive prune every retention runs. TODO(#1418): <c>WalArchiveStore.PruneArchive(session, floors, liveTimeline)</c>, which takes each
+    /// <c>wal/&lt;t&gt;/archive.lock</c> per operation; until it is on this branch there is no <c>wal/</c> to prune, so it does nothing.
     /// </summary>
-    private static void PruneArchive(BackupStore session, List<(Guid TimelineId, long KeepFromLsn)> floors, Guid liveTimeline)
-    {
-        // TODO(#1418): WalArchive.PruneArchive(session, floors, liveTimeline) — the archive and its per-timeline archive.lock are #1418's (impl/1418
-        // §4.6). Until it lands there is no wal/ to prune. The floors are computed here, under store.lock, as the seam fixes them.
-        _ = session;
-        _ = floors;
-        _ = liveTimeline;
-    }
+    internal static readonly ArchivePruner DefaultArchivePruner = static (_, _, _) => { };
 
     private static bool IsSubset(IReadOnlyList<string> subset, IReadOnlyList<string> of)
     {

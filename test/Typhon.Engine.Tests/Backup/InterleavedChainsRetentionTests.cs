@@ -114,6 +114,25 @@ internal sealed class InterleavedChainsRetentionTests
         AssertKeptPointsIntact(inner, images, result.Plan.Kept);
     }
 
+    /// <summary>DL-13: after the deletes, under the lock, the archive is pruned to the oldest kept point of each timeline, the live one named.</summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void TheArchiveIsPrunedAfterTheDeletes_ToTheOldestKeptPointOfEachTimeline()
+    {
+        var fs = TwoChains(out _);
+        var live = Guid.NewGuid();
+        (IReadOnlyList<(Guid, long)> Floors, Guid Live, int PacksLeft) seen = default;
+        using (var session = BackupStore.OpenForMaintenance(Root, "prune", fs))
+        {
+            RetentionExecutor.Apply(session, KeepFour, null, [], DateTime.UtcNow, live, null,
+                (s, floors, liveTimeline) => seen = (floors, liveTimeline, s.View.Catalog.Packs.Count));
+        }
+
+        Assert.That(seen.Floors, Is.EqualTo(new[] { (StoreTestKit.Timeline, BackupTestImages.Clean.CheckpointLsn) }));
+        Assert.That(seen.Live, Is.EqualTo(live));
+        Assert.That(seen.PacksLeft, Is.EqualTo(4), "called once the packs are deleted");
+    }
+
     internal static BackupRetentionResult Apply(IStoreFileSystem fs, BackupRetentionPolicy policy, BackupRetentionPlan approved = null)
     {
         using var session = BackupStore.OpenForMaintenance(Root, "prune", fs);

@@ -104,7 +104,7 @@ internal static class BackupCompactor
             var info = writer.Complete(point.Footer.PointLsn, point.Footer.TailEndUtcTicks);
             var bytesRead = BytesRead(packs);
             options.Progress?.Invoke(bytesRead, chainBytes);
-            BackupLog.PointCompacted(session.Logger, pointId, packs.Length, info.ImagePages, holes, bytesRead, info.PackBytes, clock.ElapsedMilliseconds);
+            BackupLog.PointCompacted(session.Log, pointId, packs.Length, info.ImagePages, holes, bytesRead, info.PackBytes, clock.ElapsedMilliseconds);
             return new BackupCompactionResult(BackupOperations.Summarize(session.View.Find(pointId).Compacted), false, packs.Length, info.ImagePages,
                 holes, bytesRead, info.PackBytes, clock.Elapsed);
         }
