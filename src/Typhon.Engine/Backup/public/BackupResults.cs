@@ -243,6 +243,6 @@ public enum BackupHealth
 /// <param name="Reason">Why, in one sentence.</param>
 /// <param name="Points">Points in the store.</param>
 /// <param name="Latest">The newest point, or <c>null</c>.</param>
-/// <param name="LatestRestorable">The newest restorable point (by a quick verify), or <c>null</c>.</param>
+/// <param name="LatestRestorable">The newest point whose chain resolves (from the packs' headers and footers), or <c>null</c>.</param>
 [PublicAPI]
 public sealed record BackupStoreStatus(BackupHealth Health, string Reason, int Points, BackupPointSummary Latest, BackupPointSummary LatestRestorable);

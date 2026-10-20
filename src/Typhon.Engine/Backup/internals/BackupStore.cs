@@ -50,7 +50,22 @@ internal sealed class StoreView
 
     public StoreIdentityFile Identity { get; init; }
 
-    public StoreCatalogFile Catalog { get; set; }
+    private StoreCatalogFile _catalog;
+    private Dictionary<uint, (CatalogPack Compacted, CatalogPack Original)> _byId;
+
+    public StoreCatalogFile Catalog
+    {
+        get => _catalog;
+        set
+        {
+            _catalog = value;
+            _byId = null;
+            Resolved.Clear();
+        }
+    }
+
+    /// <summary>Chains resolved against this catalog by <see cref="ChainResolver"/>, memoised per point; cleared when the catalog changes.</summary>
+    internal Dictionary<uint, ChainResolution> Resolved { get; } = [];
 
     /// <summary>Temporary files present in <c>packs/</c> (in-progress or abandoned).</summary>
     public IReadOnlyList<StoreFileEntry> Temps { get; init; }
@@ -173,29 +188,25 @@ internal sealed class StoreView
         return temps;
     }
 
-    /// <summary>The packs of point <paramref name="backupId"/>: the <c>-C</c> one first when present, then the <c>F</c>/<c>I</c> one.</summary>
+    /// <summary>
+    /// The packs of point <paramref name="backupId"/>: the <c>-C</c> one first when present, then the <c>F</c>/<c>I</c> one. Indexed once per catalog:
+    /// a chain walk calls this per link, and a scan of every pack per call made verify and status cubic in the store's points.
+    /// </summary>
     public (CatalogPack Compacted, CatalogPack Original) Find(uint backupId)
     {
-        CatalogPack compacted = null;
-        CatalogPack original = null;
-        foreach (var p in Catalog.Packs)
+        if (_byId == null)
         {
-            if (p.BackupId != backupId)
+            var byId = new Dictionary<uint, (CatalogPack Compacted, CatalogPack Original)>(Catalog.Packs.Count);
+            foreach (var p in Catalog.Packs)
             {
-                continue;
+                byId.TryGetValue(p.BackupId, out var both);
+                byId[p.BackupId] = p.Kind == BackupKind.Compacted ? (p, both.Original) : (both.Compacted, p);
             }
 
-            if (p.Kind == BackupKind.Compacted)
-            {
-                compacted = p;
-            }
-            else
-            {
-                original = p;
-            }
+            _byId = byId;
         }
 
-        return (compacted, original);
+        return _byId.TryGetValue(backupId, out var found) ? found : (null, null);
     }
 }
 

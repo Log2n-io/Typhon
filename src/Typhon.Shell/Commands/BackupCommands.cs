@@ -494,8 +494,9 @@ internal sealed class BackupRestoreCommand : Command<BackupRestoreCommand.Settin
 }
 
 /// <summary>
-/// <c>typhon backup status --store S</c> — the store's health from its packs, per chain, with the newest point's age. The exit code is the health
-/// (0 ok, 1 warning, 3 nothing restorable), for monitoring. The engine's status file and its health thresholds arrive with #1416.
+/// <c>typhon backup status --store S</c> — the store's health from its packs' headers and footers and the chains they form, per chain, with the
+/// newest point's age: cheap enough to poll. The exit code is the health (0 ok, 1 warning, 3 nothing restorable), for monitoring; <c>verify</c>
+/// reads the rest. The engine's status file and its health thresholds arrive with #1416.
 /// </summary>
 // ReSharper disable once ClassNeverInstantiated.Global
 internal sealed class BackupStatusCommand : Command<BackupSettings>
