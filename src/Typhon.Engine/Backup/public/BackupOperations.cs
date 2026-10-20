@@ -152,6 +152,25 @@ public static class BackupOperations
             latestPack == null ? null : Summarize(latestPack), restorable);
     }
 
+    /// <summary>
+    /// Turns a point into a base without touching the database (05 §2): <c>{id}-C.tpack</c> holds every page of its image and its tail, so the points
+    /// after it rest on it and the packs before it can go. Published only once a full verify of it passed; nothing is deleted.
+    /// </summary>
+    /// <param name="store">The store directory.</param>
+    /// <param name="point">Which point; a full or already compacted one is a no-op.</param>
+    /// <param name="options">Read budget, cancellation, progress, logging.</param>
+    /// <exception cref="BackupStoreLockedException">Another writer holds the store.</exception>
+    /// <exception cref="BackupChainBrokenException">The point does not resolve.</exception>
+    /// <exception cref="BackupPackCorruptException">A page of its chain, or the compacted pack, failed a check: nothing was published.</exception>
+    /// <exception cref="System.IO.IOException">The volume is short of the space a whole image needs, or another I/O failure.</exception>
+    public static BackupCompactionResult Compact(string store, PointSelector point, BackupLifecycleOptions options = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(store);
+        options ??= new BackupLifecycleOptions();
+        using var session = BackupStore.OpenForMaintenance(store, "compact", log: options.Logger);
+        return BackupCompactor.Compact(session, ChainResolver.Select(session.View, point), options);
+    }
+
     /// <summary>The pack that stands for a point: its compacted one when present.</summary>
     private static CatalogPack Standing(StoreView view, uint id)
     {

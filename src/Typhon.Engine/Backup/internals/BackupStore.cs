@@ -312,6 +312,7 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
     private uint _highWater;
     private uint _lastAllocated;
     private PackWriter _open;
+    private CancellationToken _compactionCancellation;
 
     /// <summary>Called with each point once it is durable and visible, before the catalog (a cache) is updated.</summary>
     internal Action<CatalogPack> Published { get; set; }
@@ -336,6 +337,11 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
 
     /// <summary>The store as this session sees it (always rebuilt from the packs, then kept up to date by its own publishes).</summary>
     public StoreView View => _view;
+
+    /// <summary>The file system the session writes through.</summary>
+    internal IStoreFileSystem FileSystem => _fs;
+
+    internal ILogger Logger => _log;
 
     /// <summary>
     /// Opens a store for writing. Throws <see cref="BackupStoreLockedException"/> when another writer holds it,
@@ -612,9 +618,10 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
     /// <summary>
     /// Starts the compacted pack of <paramref name="source"/>, an incremental point of this store (05 §2, DL-10): <c>{X}-C.tpack.tmp</c> under X's
     /// own id (none is allocated, <c>store.hwm</c> is not written), its header X's with <c>Kind = Compacted</c>, <c>ParentId = 0</c> and
-    /// <c>BaseId = X</c>. The caller writes X's image and tail into it, as <c>BackupCompactor</c> does.
+    /// <c>BaseId = X</c>. The caller writes X's image and tail into it, as <see cref="BackupCompactor"/> does. Its publish verifies the sealed temp in
+    /// full first and makes it visible only if that passes (BKP-13): resolution prefers a <c>-C</c>, so a bad one would break every later point.
     /// </summary>
-    public PackWriter BeginCompaction(CatalogPack source)
+    public PackWriter BeginCompaction(CatalogPack source, CancellationToken ct = default)
     {
         ObjectDisposedException.ThrowIf(_lock == null, this);
         ArgumentNullException.ThrowIfNull(source);
@@ -641,6 +648,7 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
         var identity = new PackIdentity(source.DatabaseId, source.StoreId, source.ChainId, source.BackupId, 0, source.BackupId, BackupKind.Compacted,
             source.TimelineId, source.FormatRevision, source.EngineVersion, source.Offline);
         var temp = _paths.PackPath(PackFormat.FileName(source.BackupId, BackupKind.Compacted) + PackFormat.TempSuffix);
+        _compactionCancellation = ct;
         _open = new PackWriter(_fs, _fs.OpenCreateNew(temp), identity, this, _writerOptions, _log);
         return _open;
     }
@@ -676,6 +684,12 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
     public string Publish(PackWriter writer)
     {
         var final = writer.TempPath[..^PackFormat.TempSuffix.Length];
+        if (writer.Header.Kind == BackupKind.Compacted)
+        {
+            // DL-3: verified sealed and fsynced, BEFORE the rename. A failure leaves the temp to the writer's abort: nothing was ever visible.
+            VerifyCompactedTemp(writer);
+        }
+
         try
         {
             StoreFileSystem.MoveDurable(_fs, writer.TempPath, final, replace: false);
@@ -717,6 +731,22 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
         }
 
         return final;
+    }
+
+    private void VerifyCompactedTemp(PackWriter writer)
+    {
+        var file = Path.GetFileName(writer.TempPath);
+        var result = BackupVerifier.VerifyPackFile(_fs, _view, file, VerifyLevel.Full,
+            new VerifyOptions { Cancellation = _compactionCancellation, Logger = _log });
+        if (result.Status == PackVerifyStatus.Ok)
+        {
+            return;
+        }
+
+        var first = result.Findings.Find(f => f.Severity == VerifySeverity.Damage);
+        BackupLog.CompactionRejected(_log, writer.BackupId, first.Code, first.Message);
+        throw new BackupPackCorruptException(writer.TempPath, "Compaction", first.PageId,
+            $"the compacted pack failed its full verify before publish ({first.Code}: {first.Message}); nothing was published");
     }
 
     private void WriteCatalogIfChanged()

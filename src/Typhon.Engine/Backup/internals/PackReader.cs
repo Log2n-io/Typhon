@@ -395,7 +395,19 @@ internal sealed class PackReader : IDisposable
     /// </summary>
     public uint DecodeTailSegment(TailDirectory directory, int index, Span<byte> destination) => ReadTailSegment(directory, index, null, destination);
 
-    private uint ReadTailSegment(TailDirectory directory, int index, IStoreFile target, Span<byte> destination)
+    /// <summary>
+    /// Re-feeds tail segment <paramref name="index"/> into <paramref name="sink"/> as capture did (begin, the copied bytes block by block, end), every
+    /// block, the WAL header and the <c>RawCrc</c> checked as a restore checks them; a check that fails throws before the segment ends. A compaction
+    /// copies its point's tail this way (05 §2), never holding a segment whole.
+    /// </summary>
+    public void CopyTailSegment(TailDirectory directory, int index, IBackupPointSink sink)
+    {
+        ArgumentNullException.ThrowIfNull(sink);
+        ReadTailSegment(directory, index, null, [], sink);
+        sink.EndTailSegment();
+    }
+
+    private uint ReadTailSegment(TailDirectory directory, int index, IStoreFile target, Span<byte> destination, IBackupPointSink sink = null)
     {
         var segment = directory.Segments[index];
         var stored = ArrayPool<byte>.Shared.Rent(PackFormat.FramePrefixSize + PackFormat.TailBlockSize);
@@ -434,10 +446,12 @@ internal sealed class PackReader : IDisposable
                 if (b == segment.FirstBlock)
                 {
                     declared = CheckSegmentHeader(segment, bytes);
+                    sink?.BeginTailSegment(segment.SegmentId, segment.FirstLsn, declared);
                 }
 
                 crc = Crc32CUtil.Append(crc, bytes);
                 target?.Write(bytes, offset);
+                sink?.AppendTail(bytes);
                 if (!destination.IsEmpty)
                 {
                     bytes.CopyTo(destination[(int)offset..]);

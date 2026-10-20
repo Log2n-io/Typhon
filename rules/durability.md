@@ -3211,8 +3211,9 @@ answer to different constraints — RB must always end with a usable database, I
 ## Module: BKP — Online backup capture
 
 A backup point is a frozen image of the data file plus the WAL tail that makes it consistent (ADR-075; design
-`design/Durability/PitBackup/`, implementation plans `impl/1412-capture-plan.md` and `impl/1413-store-restore-plan.md`). This
-module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BKP-10 and 11 (WAL archiving) land with #1418.
+`design/Durability/PitBackup/`, implementation plans `impl/1412-capture-plan.md`, `impl/1413-store-restore-plan.md` and
+`impl/1415-1416-lifecycle-ops-plan.md`). This module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08) and the chain
+lifecycle (#1415: BKP-13). BKP-10 and 11 (WAL archiving) land with #1418.
 
 ### BKP-01: Every data-file write is tracked and gated `[silent]`
   invariant ∀ engine write w to the data file: w is issued by PagedMMF.IssueDataFileWrite or
@@ -3419,7 +3420,7 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
   spec: rules/tla/BackupCapture.tla (S6) — ChangeMapComplete over the abort's four steps (flag, uninstall request, removal under
     the drained gate, merge of the DETACHED map); mutant -mutant-mergeimageset (merging the image set, null for a full capture)
 
-### BKP-08: A published pack is never modified, and its id names one content for the store's life `[fatal]`
+### BKP-08: A published pack is never modified, and its id names one point for the store's life `[fatal]`
   invariant a pack is visible under {BackupId:D8}-{K}.tpack only complete: written as *.tpack.tmp, fsynced, then moved
             without overwrite by a durable rename (Windows MoveFileExW WRITE_THROUGH; Linux rename + fsync of packs/); an
             existing final name fails the publish; a rename whose directory flush fails is undone, so Complete throws with
@@ -3432,8 +3433,9 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
   invariant every byte of a pack is covered by a CRC that verify --level full checks: HeaderCRC, FooterCRC, IndexCRC,
             TailDirCRC, SuspectCRC, each page's PageCrc after decode, each tail segment's RawCrc after decode, and
             FileCRC over [0, EOF-4); restore checks every one it reads and never returns a byte it read wrong
+  invariant an id names one point: its -F or -I pack and its -C pack (a compaction keeps the id) materialise identically (BKP-13)
   invariant (#1415) a pack is deleted only under store.lock, only when no kept point's chain resolves through it
-  scope: PackWriter.Complete, PackWriter.Abort, BackupStore.Publish, BackupStore.AllocateBackupId,
+  scope: PackWriter.Complete, PackWriter.Abort, BackupStore.Publish, BackupStore.AllocateBackupId, BackupStore.BeginCompaction,
     BackupStore.DeleteAbandonedTemps, StoreFileSystem.MoveDurable, PackReader.Open, BackupVerifier.VerifyStore
   on_violation: a point whose bytes changed after it was verified, a restore of "#12" that returns another point, or a
     visible pack missing its tail bytes — an unrestorable backup, discovered at restore
@@ -3485,3 +3487,24 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
   spec: rules/tla/BackupCapture.tla (S6) — HookNotRemovedUnderWriter, and under weak fairness without any timeout
     (BackupCapture-liveness.cfg) WritersProgress and GateReopens; mutants -mutant-uninstallnogate, -mutant-noabortrelease,
     -mutant-timeoutkeepsgate
+
+### BKP-13: Compaction preserves its point exactly, and is visible only verified `[silent]`
+  invariant ∀ X, X-C = Compact(X): materialise(X-C) = materialise(X) byte for byte over [0, N_X); X-C's C, P, N, TimelineId, ChainId,
+            FreezeUtc, TailEndUtc and tail segments are X's, its header X's with Kind = Compacted, ParentId = 0, BaseId = X; its suspect
+            set = { p : p suspect in the pack p's newest version came from }
+  invariant X-C holds an entry for every page of [0, N_X), a hole (a page no pack of the chain holds) as a zero entry; each stored frame is
+            its source frame's bytes, decoded once and checked against its PageCrc before it is written, never re-encoded
+  invariant X-C becomes visible only after VerifyPackFile(temp, Full) passed on the sealed, fsynced temp, then by BKP-08's durable rename;
+            a failure deletes the temp and leaves no X-C (resolution prefers -C, so a bad one would break X and every later point)
+  invariant compaction allocates no id, writes no store.hwm, modifies and deletes no pack, and never touches the database; an X that is
+            already a base (full, or an existing X-C) makes it a no-op
+  requires: BKP-08, BKP-02
+  scope: BackupCompactor.Compact, BackupStore.BeginCompaction, BackupStore.Publish, BackupStore.VerifyCompactedTemp,
+         PackWriter.AddStoredPage, PackWriter.AddZeroPage, PackWriter.Complete, PackReader.CopyTailSegment, ChainPageCursor,
+         FrameReader.TryReadFrame, ChainResolver.Resolve (the -C preference)
+  on_violation: every restore of X and of every later point resolves through a pack that is not X — wrong data, discovered at restore
+  verified: CompactionEquivalenceTests (synthetic chains of depth 1 to 50: growth, holes, overlapping rewrites, tails, suspects in several
+            packs; every other point and every pack unchanged; a damaged temp never published), CompactionOfAnEngineChainTests (a chain the
+            engine captured online, compacted, restored, and continued), CompactionCrashTests (a crash after every file-system operation of a
+            compaction, Windows and Linux directory models; an existing -C never replaced) — [VerifiesRule("BKP-13")]; [RuleMutant("BKP-13")]:
+            the oldest version of each page wins, the suspect set not carried, a damaged pack renamed in before its verify

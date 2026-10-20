@@ -111,6 +111,16 @@ internal interface IStoreFileSystem
     string GetFullPath(string path) => System.IO.Path.GetFullPath(path);
 
     /// <summary>
+    /// The bytes free for this process on <paramref name="directory"/>'s volume; <c>false</c> when the volume does not say (a share, a file system
+    /// without the call). A compaction checks it before writing a full image beside the packs it reads (DL-12).
+    /// </summary>
+    bool TryGetAvailableFreeSpace(string directory, out long bytes)
+    {
+        bytes = 0;
+        return false;
+    }
+
+    /// <summary>
     /// Like <see cref="TryLockExclusive"/>, for a lock file that exists only while it is held, where the platform allows it. Windows: releasing it
     /// removes the file while the handle is still held (delete-pending refuses every new open until the handle closes). Unix: the file stays, unheld;
     /// unlinking it would let a claimant that opened the old inode lock it while another creates and locks a new file under the same name. A process
@@ -359,6 +369,23 @@ internal sealed partial class StoreFileSystem : IStoreFileSystem
 
         // Every Unix: Linux, and macOS and the BSDs, which open and fsync a directory the same way (it used to be skipped there, silently).
         FlushDirectoryPosix(directory);
+    }
+
+    /// <inheritdoc />
+    public bool TryGetAvailableFreeSpace(string directory, out long bytes)
+    {
+        try
+        {
+            // Windows: the drive of the path (a UNC share is refused by DriveInfo, and reported unknown). Unix: statvfs of the path itself.
+            var full = System.IO.Path.GetFullPath(directory);
+            bytes = new DriveInfo(OperatingSystem.IsWindows() ? System.IO.Path.GetPathRoot(full) : full).AvailableFreeSpace;
+            return true;
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            bytes = 0;
+            return false;
+        }
     }
 
     /// <inheritdoc />
