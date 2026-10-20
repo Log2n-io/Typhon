@@ -121,8 +121,11 @@ internal static class BackupVerifier
 
     /// <summary>The packs of one point's chain, and that point.</summary>
     public static VerifyReport VerifyPoint(string storePath, PointSelector point, VerifyLevel level, VerifyOptions options = null,
-        IStoreFileSystem fs = null) =>
-        Run(storePath, point, level, options, fs);
+        IStoreFileSystem fs = null)
+    {
+        point.RequirePoint("Verify");
+        return Run(storePath, point, level, options, fs);
+    }
 
     private static VerifyReport Run(string storePath, PointSelector? point, VerifyLevel level, VerifyOptions options, IStoreFileSystem fs)
     {
