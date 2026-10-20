@@ -55,7 +55,8 @@ typhon backup create  <bundle> [--store S] [--full]     # online via the running
 typhon backup status  <bundle>                           # exit code = health, for monitoring
 typhon backup list    --store S
 typhon backup verify  --store S [--level quick|full|deep]
-typhon backup restore --store S [--point X | --lsn L | --time T] --to <bundle>
+typhon backup restore --store S [--point X | --lsn L | --time T [--timeline t]] --to <bundle> [--dry-run]
+typhon backup log     --store S [--timeline t] [--lsn-from L1 --lsn-to L2 | --from T1 --to T2] [--commits]
 typhon backup drill   --store S                          # restore to scratch, open, check, delete
 typhon backup compact --store S
 typhon backup prune   --store S --max-age 7d --min-keep 3
@@ -76,6 +77,10 @@ typhon backup prune   --store S --max-age 7d --min-keep 3
   same checks `typhon check` uses.
 - **Backup never endangers the engine.** A backup that cannot keep up aborts and retries; an unreachable store degrades
   health (and, with archiving, the recovery point), it does not stop the engine.
+- **Archiving never loses WAL silently.** A segment leaves the database un-archived only when the archive falls behind past
+  its backlog limit; that range is then a recorded gap, which no restore crosses, and a new point is taken. A restore to an
+  LSN or an instant ends at the last whole transaction at or below it, and never crosses a schema change or a bulk load
+  (each starts a new timeline).
 - **One store per database**, a local or mounted filesystem path. Remote object stores, encryption and logical
   (entity-level) export are out of scope for now.
 
