@@ -2454,6 +2454,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 freesHeldAtClose = true;
             }
 
+            // The WAL archive's final pass (WA-23): after the drains, so it archives what they appended; before the final cycle, which then sees the raised
+            // floor. A close treated as a crash makes no pass, as a crash would not.
+            StopWalArchiverAtClose(_simulateHardCrash || SimulateUncleanShutdownForTest || !_constructed || _archetypeInitIncomplete);
+
             // Checkpoint must dispose first: runs final cycle, writes pages + advances LSN before WAL shuts down
             CheckpointManager?.Dispose();
             CheckpointManager = null;

@@ -20,9 +20,12 @@ namespace Typhon.Engine.Internals;
 /// With <paramref name="StoppedAtCorruption"/>: the lowest LSN of a record recovery applies alone (a fence record) in the incomplete frame's valid
 /// chunks — applied by the crash recovery that saw them, absent from the archive; 0 = none.
 /// </param>
-/// <param name="DroppedToLsn">The highest such LSN; 0 = none.</param>
+/// <param name="DroppedToLsn">
+/// The highest such LSN; 0 = none. For a segment a crash open sealed, the highest fence LSN its seal recorded (the torn frame's chunks are no longer read).
+/// </param>
+/// <param name="SealedAtCrash">The walk ended at the padding sentinel a crash open writes over a torn frame (<see cref="WalFrameHeader.CrashSealRecordCount"/>).</param>
 internal readonly record struct WalSegmentScan(long SegmentId, long FirstLsn, long PrevSegmentLsn, uint DeclaredSize, int ArchiveLength, long LastRecordLsn,
-    long LastUnitLsn, bool StoppedAtCorruption, int FirstInvalidFrameOffset, long DroppedFromLsn, long DroppedToLsn);
+    long LastUnitLsn, bool StoppedAtCorruption, int FirstInvalidFrameOffset, long DroppedFromLsn, long DroppedToLsn, bool SealedAtCrash);
 
 /// <summary>Where <see cref="WalArchiveScanner.FindCut"/> cuts a segment for a restore to an LSN.</summary>
 /// <param name="CutOffset">File offset of the end of the last frame kept; the restored segment holds <c>[0, CutOffset)</c> then zeros.</param>
@@ -112,13 +115,28 @@ internal static class WalArchiveScanner
             droppedTo = frameFenceHigh;
         }
 
+        // A crash open's seal: the sentinel over the torn frame names the fence records its recovery applied from that frame (BKP-10, torn-tail clause).
+        var sealedAtCrash = false;
+        var data = reader.LoadedData;
+        var stop = reader.FrameStart;
+        if (!reader.WasTruncated && stop >= 0 && stop + WalFrameHeader.SizeInBytes <= data.Length)
+        {
+            var sentinel = MemoryMarshal.Read<WalFrameHeader>(data[stop..]);
+            if (sentinel.FrameLength == WalFrameHeader.PaddingSentinel && sentinel.RecordCount == WalFrameHeader.CrashSealRecordCount)
+            {
+                sealedAtCrash = true;
+                droppedFrom = sentinel.LastLsn > 0 ? lastRecord + 1 : 0;
+                droppedTo = sentinel.LastLsn;
+            }
+        }
+
         var complete = reader.LastCompleteFrameEnd;
         reader.ZeroFrom(complete);
         ref readonly var header = ref reader.SegmentHeader;
         var archiveLength = WalSegmentHeader.SizeInBytes + AlignUp(complete);
         var truncated = reader.WasTruncated;
         return new WalSegmentScan(header.SegmentId, header.FirstLSN, header.PrevSegmentLSN, header.SegmentSize, archiveLength, lastRecord, lastUnit, truncated,
-            truncated ? WalSegmentHeader.SizeInBytes + reader.FrameStart : 0, droppedFrom, droppedTo);
+            truncated ? WalSegmentHeader.SizeInBytes + reader.FrameStart : 0, droppedFrom, droppedTo, sealedAtCrash);
     }
 
     /// <summary>

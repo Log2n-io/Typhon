@@ -102,4 +102,24 @@ abstract class ArchiveTestBase<T> : BackupTestBase<T> where T : ArchiveTestBase<
     }
 
     protected static void ForceCheckpoint(DatabaseEngine dbe) => Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(Budget), Is.True);
+
+    /// <summary>The engine's archiver, its worker not started unless <paramref name="start"/>: the test drives Step and ArchivePending itself.</summary>
+    protected static WalArchiver NewArchiver(DatabaseEngine dbe, IStoreFileSystem fs = null, bool start = false) =>
+        dbe.CreateWalArchiver(dbe.ArchiveConfiguration.Options, StorePath, fs, start);
+
+    /// <summary><paramref name="seconds"/> on the monotonic clock the archiver ages segments by.</summary>
+    protected static long Mono(double seconds) => (long)(seconds * Stopwatch.Frequency);
+
+    /// <summary>The wall clock matching <see cref="Mono"/> on the test's logical timeline.</summary>
+    protected static DateTime Utc(double seconds) => new DateTime(2026, 10, 20, 12, 0, 0, DateTimeKind.Utc).AddTicks((long)(seconds * TimeSpan.TicksPerSecond));
+
+    /// <summary>One scheduler tick at logical second <paramref name="seconds"/>, then the worker's pass, both on the test's thread.</summary>
+    protected static void Tick(WalArchiver archiver, double seconds)
+    {
+        archiver.Step(Utc(seconds), Mono(seconds), default);
+        archiver.ArchivePending(default);
+    }
+
+    /// <summary>The store's archived segments of the database's timeline, from the files.</summary>
+    protected static ArchivedTimeline Archived(DatabaseEngine dbe) => WalArchiveStore.Load(StoreFileSystem.Instance, StorePath, dbe.TimelineId, trustIndex: false);
 }

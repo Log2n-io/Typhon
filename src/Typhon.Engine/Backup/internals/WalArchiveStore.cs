@@ -308,31 +308,39 @@ internal static class WalArchiveStore
 
 /// <summary>
 /// One timeline's archive under its <c>archive.lock</c>, for one operation (WA-14, WA-24): one publish by the archiver, or one prune. Opening deletes
-/// abandoned temps (only the holder writes, so a temp it did not create is abandoned).
+/// abandoned temps (only the holder writes, so a temp it did not create is abandoned). The archiver keeps one for its life and holds the lock per segment
+/// (<see cref="TryReacquire"/>, <see cref="ReleaseLock"/>): a retention run gets the timeline between two publishes.
 /// </summary>
 internal sealed class WalArchiveTimeline : IDisposable
 {
     private readonly IStoreFileSystem _fs;
     private readonly ILogger _log;
     private readonly WalArchivePaths _paths;
+    private readonly string _lockPath;
     private IDisposable _lock;
 
-    private WalArchiveTimeline(IStoreFileSystem fs, ILogger log, WalArchivePaths paths, Guid timelineId, IDisposable held)
+    private WalArchiveTimeline(IStoreFileSystem fs, ILogger log, WalArchivePaths paths, Guid timelineId, string directory, string lockPath, IDisposable held)
     {
         _fs = fs;
         _log = log;
         _paths = paths;
         TimelineId = timelineId;
+        Directory = directory;
+        _lockPath = lockPath;
         _lock = held;
     }
 
     public Guid TimelineId { get; }
 
-    public string Directory => _paths.Timeline(TimelineId);
+    public string Directory { get; }
+
+    /// <summary>Whether this handle holds the timeline's lock now.</summary>
+    public bool Held => _lock != null;
 
     /// <summary>
     /// Takes <c>wal/&lt;t&gt;/archive.lock</c> (creating the directories when absent); <c>null</c> when another holder has it (a retry, not a refusal).
-    /// Throws <see cref="NotSupportedException"/> when the file system does not enforce the lock (R3): two writers could interleave.
+    /// Checks that the file system enforces the lock, throwing <see cref="NotSupportedException"/> when it does not (R3: two writers could interleave),
+    /// and deletes the temps a dead holder left.
     /// </summary>
     public static WalArchiveTimeline TryOpen(IStoreFileSystem fs, string storeRoot, Guid timelineId, ILogger log = null)
     {
@@ -352,7 +360,8 @@ internal sealed class WalArchiveTimeline : IDisposable
             fs.FlushDirectory(paths.Wal);
         }
 
-        var held = fs.TryLockTransient(paths.Lock(timelineId));
+        var lockPath = paths.Lock(timelineId);
+        var held = fs.TryLockTransient(lockPath);
         if (held == null)
         {
             return null;
@@ -360,17 +369,17 @@ internal sealed class WalArchiveTimeline : IDisposable
 
         try
         {
-            using (var probe = fs.TryLockTransient(paths.Lock(timelineId)))
+            using (var probe = fs.TryLockTransient(lockPath))
             {
                 if (probe != null)
                 {
                     throw new NotSupportedException(
-                        $"File locking is not enforced for '{paths.Lock(timelineId)}' (DOTNET_SYSTEM_IO_DISABLEFILELOCKING set, or a file system without "
+                        $"File locking is not enforced for '{lockPath}' (DOTNET_SYSTEM_IO_DISABLEFILELOCKING set, or a file system without "
                         + "locks): the WAL archive cannot exclude a second writer, so it refuses to write.");
                 }
             }
 
-            var timeline = new WalArchiveTimeline(fs, log, paths, timelineId, held);
+            var timeline = new WalArchiveTimeline(fs, log, paths, timelineId, dir, lockPath, held);
             held = null;
             timeline.DeleteTemps();
             return timeline;
@@ -379,6 +388,20 @@ internal sealed class WalArchiveTimeline : IDisposable
         {
             held?.Dispose();
         }
+    }
+
+    /// <summary>Takes the lock again after <see cref="ReleaseLock"/>; false when another holder has it (a retry).</summary>
+    public bool TryReacquire()
+    {
+        _lock ??= _fs.TryLockTransient(_lockPath);
+        return _lock != null;
+    }
+
+    /// <summary>Lets the lock go, keeping the handle for <see cref="TryReacquire"/>.</summary>
+    public void ReleaseLock()
+    {
+        _lock?.Dispose();
+        _lock = null;
     }
 
     /// <summary>Deletes every temp of the directory: abandoned, since only the lock holder writes.</summary>
@@ -424,51 +447,67 @@ internal sealed class WalArchiveTimeline : IDisposable
     }
 
     /// <summary>
-    /// Publishes one archived segment (BKP-10): a fresh temp written by <paramref name="writer"/>, flushed, then moved under its name without replacing
-    /// anything. A name already taken is compared: the same segment (first LSN, archived length, raw CRC) is <see cref="ArchivePublishOutcome.AlreadyArchived"/>
-    /// — its directory is flushed again, so a rename whose flush failed is durable before the floor rises past it — anything else is
-    /// <see cref="ArchivePublishOutcome.Diverged"/>. Throws on an I/O failure, with nothing published that the caller may count on.
+    /// Publishes one archived segment (BKP-10): a fresh temp written by <paramref name="writer"/>, flushed, then renamed under its name without replacing
+    /// anything, and the directory flushed. A name already taken is compared: the same segment (first LSN, archived length, raw CRC) is
+    /// <see cref="ArchivePublishOutcome.AlreadyArchived"/> — its directory is flushed again, so a rename whose flush failed is durable before the floor
+    /// rises past it — anything else is <see cref="ArchivePublishOutcome.Diverged"/>. Throws on an I/O failure, its temp removed, with nothing published
+    /// that the caller may count on.
     /// </summary>
     public (ArchivePublishOutcome Outcome, ArchivedSegmentInfo Segment) Publish(ArchivedSegmentWriter writer, in ArchivedSegmentHeader header,
         ReadOnlySpan<byte> walHeader, ReadOnlySpan<byte> walData, ArchivedSegmentFooter footer, ReadOnlySpan<ArchiveTimeSample> samples)
     {
-        ObjectDisposedException.ThrowIf(_lock == null, this);
+        if (_lock == null)
+        {
+            throw new InvalidOperationException($"Timeline {TimelineId}'s archive lock is not held.");
+        }
+
         if (header.TimelineId != TimelineId)
         {
             throw new InvalidOperationException($"Segment {header.SegmentId} is of timeline {header.TimelineId}, not {TimelineId}.");
         }
 
-        var final = _paths.Segment(TimelineId, header.SegmentId);
+        var name = ArchiveFormat.FileName(header.SegmentId);
+        var final = Path.Combine(Directory, name);
         var temp = final + ArchiveFormat.TempSuffix;
-        _fs.DeleteFile(temp);
         ArchivedSegmentWritten written;
-        using (var file = _fs.OpenCreateNew(temp))
+        try
         {
-            written = writer.Complete(file, header, walHeader, walData, footer, samples);
-            file.Flush();
-        }
+            using (var file = _fs.OpenCreateNew(temp))
+            {
+                written = writer.Complete(file, header, walHeader, walData, footer, samples);
+                file.Flush();
+            }
 
-        if (_fs.FileExists(final))
+            // Never over an existing name (BKP-08's discipline): the rename refuses one, and the compare below decides what it is.
+            _fs.Rename(temp, final, replace: false);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            _fs.DeleteFile(temp);
+            var collided = _fs.FileExists(final) && _fs.FileExists(temp);
+            TryDelete(temp);
+            if (!collided)
+            {
+                throw;
+            }
+
             using var existing = ArchivedSegmentReader.Open(_fs, final);
             var same = existing.Header.FirstLsn == header.FirstLsn && existing.Header.TimelineId == header.TimelineId
                                                                     && existing.Header.DatabaseId == header.DatabaseId
-                                                                    && existing.Footer.ArchiveLength == written.Footer.ArchiveLength
-                                                                    && existing.Footer.RawCrc == written.RawCrc;
+                                                                    && existing.Footer.ArchiveLength == walHeader.Length + walData.Length
+                                                                    && existing.Footer.RawCrc == RawCrc(walHeader, walData);
             if (!same)
             {
-                return (ArchivePublishOutcome.Diverged, WalArchiveStore.Describe(Path.GetFileName(final), existing));
+                return (ArchivePublishOutcome.Diverged, WalArchiveStore.Describe(name, existing));
             }
 
             _fs.FlushDirectory(Directory);
-            return (ArchivePublishOutcome.AlreadyArchived, WalArchiveStore.Describe(Path.GetFileName(final), existing));
+            return (ArchivePublishOutcome.AlreadyArchived, WalArchiveStore.Describe(name, existing));
         }
 
-        StoreFileSystem.MoveDurable(_fs, temp, final, replace: false);
+        _fs.FlushDirectory(Directory);
         var segment = new ArchivedSegmentInfo
         {
-            File = Path.GetFileName(final),
+            File = name,
             FileLength = written.FileLength,
             Header = header,
             Footer = written.Footer,
@@ -478,6 +517,21 @@ internal sealed class WalArchiveTimeline : IDisposable
             LastSampleUtcTicks = samples.Length > 0 ? samples[^1].UtcTicks : 0,
         };
         return (ArchivePublishOutcome.Published, segment);
+    }
+
+    private static uint RawCrc(ReadOnlySpan<byte> walHeader, ReadOnlySpan<byte> walData) =>
+        Crc32CUtil.Finish(Crc32CUtil.Append(Crc32CUtil.Append(Crc32CUtil.Start, walHeader), walData));
+
+    private void TryDelete(string path)
+    {
+        try
+        {
+            _fs.DeleteFile(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Left for the next first open, which deletes every temp.
+        }
     }
 
     /// <summary>The timeline's segments, as the index cache has them when it matches the listing, else rebuilt from the files (and the index rewritten).</summary>
@@ -514,11 +568,7 @@ internal sealed class WalArchiveTimeline : IDisposable
         }
     }
 
-    public void Dispose()
-    {
-        _lock?.Dispose();
-        _lock = null;
-    }
+    public void Dispose() => ReleaseLock();
 }
 
 /// <summary>

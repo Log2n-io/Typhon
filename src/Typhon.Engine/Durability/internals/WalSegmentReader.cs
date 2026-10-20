@@ -91,6 +91,11 @@ internal sealed unsafe class WalSegmentReader : IDisposable
     /// </summary>
     internal bool OpenSegmentForArchive(string path, long writtenBytes)
     {
+        if (!_fileIO.Exists(path))
+        {
+            return false;
+        }
+
         using var handle = _fileIO.OpenSegmentForArchive(path);
         return Load(handle, writtenBytes);
     }

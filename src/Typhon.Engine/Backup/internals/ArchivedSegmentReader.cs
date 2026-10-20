@@ -127,7 +127,9 @@ internal sealed class ArchivedSegmentReader : IDisposable
             Corrupt(path, "Footer", $"sections out of bounds (blockdir {f.BlockDirOffset}, samples {f.SamplesOffset}, archived {f.ArchiveLength}, file {length})");
         }
 
-        if (f.LastLsn < header.FirstLsn - 1 || f.LastRecordLsn > f.LastLsn || f.LastUnitLsn > f.LastRecordLsn)
+        // LastRecordLsn may pass LastLsn: a segment adopted after a crash ends, for the segment manager, at the frontier the open's first scan found,
+        // which can be its last chunk's first record rather than its last; the next segment's header starts right after that.
+        if (f.LastLsn < header.FirstLsn - 1 || f.LastUnitLsn > f.LastRecordLsn || (f.LastRecordLsn != 0 && f.LastRecordLsn < header.FirstLsn))
         {
             Corrupt(path, "Footer", $"LSNs out of order (first {header.FirstLsn}, last {f.LastLsn}, record {f.LastRecordLsn}, unit {f.LastUnitLsn})");
         }

@@ -3217,7 +3217,7 @@ answer to different constraints — RB must always end with a usable database, I
 
 A backup point is a frozen image of the data file plus the WAL tail that makes it consistent (ADR-075; design
 `design/Durability/PitBackup/`, implementation plans `impl/1412-capture-plan.md` and `impl/1413-store-restore-plan.md`). This
-module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BKP-10 and 11 (WAL archiving) land with #1418.
+module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08) and WAL archiving (#1418: BKP-10, BKP-11).
 
 ### BKP-01: Every data-file write is tracked and gated `[silent]`
   invariant ∀ engine write w to the data file: w is issued by PagedMMF.IssueDataFileWrite or
@@ -3448,6 +3448,51 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
             BackupIdAllocationTests.Mutant_AStoreThatLostEveryHighWater_ReusesAnId; source mutants seen red: rename before
             flush, no directory flush (Linux model), publish with overwrite, allocation ignoring the high-water, verify
             skipping FileCRC, restore skipping PageCrc
+
+### BKP-10: No WAL segment leaves the database un-archived, unless the backlog policy released it, and every loss is a visible gap `[fatal]`
+  invariant with archiving configured, reclaim — CheckpointManager step 8 and the open's reconcile — deletes a sealed segment s only
+            when s.LastLsn < archiveFloor; archiveFloor = ArchivedThroughLsn + 1, raised by the archiver only after s's .twal is
+            durable (flushed, renamed without replace, its directory flushed); it is engaged at 0 before the first cycle (the
+            recovery seal's included), and the open reclaims nothing below it (WA-3)
+  invariant the floor is released only at step 8, by a CAS, only when the bytes it alone holds (floor ≤ LastLsn < trim) exceed
+            BacklogLimitBytes, each release counted; it is re-engaged only by the archiver's raise after a successful publish; a
+            raise racing the CAS wins and the cycle honours the floor it read. The engine never waits on the archive and holds at
+            most the limit plus one segment for it; archiving off costs step 8 one read
+  invariant the archive holds only durable, valid WAL: s is archived only once s.LastLsn ≤ DurableLsn (WA-15), and only up to the
+            end of its last frame read whole, the rest of that page zeroed (no byte of a torn frame is ever archived); a break in
+            a segment is recorded as a dropped range no restore may cross (CorruptMidSegment)
+  invariant a timeline's archive is ordered by LSN; wherever next.FirstLsn ≠ prev.LastLsn + 1 the next segment's footer records
+            the gap with its cause (BacklogReleased, ArchivingOff, Unknown) and every restore re-derives continuity from the
+            files; a segment starting inside the archive, a local segment whose archived copy under its id has other bytes, or a
+            name holding other bytes stops archiving that timeline (Diverged, WA-14) — the existing file is never replaced
+  invariant an archived segment is immutable, self-describing and wholly CRC-covered (.twal: HeaderCRC, BlockDirCrc, SamplesCrc,
+            RawCrc after decode, FooterCRC, FileCRC); archive-index.bin is a cache, used only intact and for the listing it was
+            written for; a timeline's archive.lock is held for one operation, and a file system that does not enforce it is refused
+  invariant the segment the archiver reads is opened with delete sharing (WA-5): a released cycle that reclaims it deletes it
+            instead of failing under the sealed-list lock
+  scope: CheckpointManager.EngageArchiveFloor, CheckpointManager.RaiseArchiveFloor, CheckpointManager.ArchiveFloorReleased
+    (step 8, beside the backup floor W1), WalSegmentManager.Initialize (reclaimFloorAtOpen), WalSegmentManager.BytesHeldBetween,
+    WalSegmentManager.ArchiveSnapshot, IWalFileIO.OpenSegmentForArchive, WalFileIO.OpenSegmentForArchive,
+    WalSegmentReader.OpenSegmentForArchive, WalArchiveScanner.Scan, WalArchiver.Step, WalArchiver.ArchivePending,
+    WalArchiver.ArchiveOne, WalArchiver.CheckCovered, WalArchiveTimeline.Publish, WalArchiveTimeline.TryOpen,
+    ArchivedSegmentWriter.Complete, ArchivedSegmentReader.Decode, ArchiveIndex.TryRead, DatabaseEngine.InitializeWalManager,
+    DatabaseEngine.CreateWalArchiver
+  on_violation: a segment deleted un-archived with no gap → a restore replays across a hole as if continuous → a state no run
+    produced, found when it is needed; a torn frame in the store → every restore across it stops there for good; un-durable
+    bytes archived → the next session reuses their LSNs and the timeline's archive diverges from the database
+  requires: WP-09, CK-07, WP-06, LOG-03
+  verified: WalArchiveFloorTests (held through checkpoints until the raise; released once, counted, re-engaged only by a raise; a
+            raise beating the release CAS; Mutant_AReclaimIgnoringTheArchiveFloor_IsReported), WalArchiveOpenReclaimTests (AC-A5,
+            Mutant_AnOpenReclaimingBelowTheCheckpointOnly_IsReported), ArchiveShareDeleteTests (Windows, real files;
+            Mutant_AReadHandleWithoutDeleteSharing_FailsTheReclaim), WalArchiveScannerTests, WalArchiverStepTests (the floor is
+            still 1 when the copy becomes durable), WalArchiveBacklogTests (AC-A1), ArchivedSegmentCorruptionTests (T7: every byte
+            outside the data and every 8th inside; Mutant_ADecodeWithoutTheRawCrc_IsReported), ArchiveStoreCrashTests (AC-A4, a
+            crash after every operation of a publish, both directory models), ArchiveIndexTests
+            (Mutant_AnIndexTrustedWithoutItsFingerprint_IsReported), ArchiveDivergenceTests — [VerifiesRule("BKP-10")]. Source
+            mutants seen red: the floor raised before the publish, a release not counted, no flush before the rename, no
+            directory flush (Linux model)
+  spec: rules/tla/WalArchive.tla (S7) — ArchivedOrReleased, NoSilentHole; mutants -mutant-raisebeforepublish, -mutant-openreclaim,
+    -mutant-nofloor, -mutant-continuityunchecked, -mutant-releasenocount
 
 ### BKP-12: The engine never waits on a backup past its budget
   invariant a data-file writer spends at most CbwStallTimeout in BackupCapture.BeforeWrite per write, and per SavePages

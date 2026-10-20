@@ -11,6 +11,40 @@ internal static partial class WalArchiveLog
                   + "reclaims up to LSN {Trim} un-archived. The archive will record a gap, and a backup point is requested")]
     public static partial void FloorReleased(ILogger logger, long held, long limit, long floor, long trim);
 
+    [LoggerMessage(Level = LogLevel.Debug,
+        Message = "WAL archive: segment {SegmentId} (LSN {FirstLsn}..{LastLsn}) archived, {RawBytes} bytes in a {FileBytes}-byte file")]
+    public static partial void SegmentArchived(ILogger logger, long segmentId, long firstLsn, long lastLsn, long rawBytes, long fileBytes);
+
+    [LoggerMessage(Level = LogLevel.Warning,
+        Message = "WAL archive: timeline {Timeline} misses LSN {From}..{To} ({Reason}); no restore crosses it. A backup point is requested")]
+    public static partial void GapRecorded(ILogger logger, Guid timeline, long from, long to, ArchiveGapReason reason);
+
+    [LoggerMessage(Level = LogLevel.Error,
+        Message = "WAL archive: segment {SegmentId} breaks at file offset {Offset}; archived up to its last whole frame, LSN {From}..{To} unrecoverable")]
+    public static partial void SegmentDamaged(ILogger logger, long segmentId, int offset, long from, long to);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "WAL archive: timeline {Timeline} diverged ({Why}); archiving stopped")]
+    public static partial void ArchiveDiverged(ILogger logger, Guid timeline, string why);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "WAL archive: the store '{Store}' is failing ({Reason}); retrying, the WAL is held up to the backlog limit")]
+    public static partial void StoreUnavailable(ILogger logger, string store, string reason);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "WAL archive refused for the store '{Store}': {Why}")]
+    public static partial void ArchiverRefused(ILogger logger, string store, string why);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "WAL archive: timeline {Timeline} archived through LSN {Through} in '{Store}'")]
+    public static partial void ArchiverStarted(ILogger logger, Guid timeline, long through, string store);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "WAL archive: the wall clock stepped back from {Previous:O} to {Now:O}; time samples are clamped")]
+    public static partial void ClockSteppedBack(ILogger logger, DateTime previous, DateTime now);
+
+    [LoggerMessage(Level = LogLevel.Warning,
+        Message = "WAL archive: the close's final pass ran out of time, archived through LSN {Through} of {Durable}; the next open archives the rest")]
+    public static partial void ClosePassIncomplete(ILogger logger, long through, long durable);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "WAL archive: a scheduler step failed ({Reason})")]
+    public static partial void StepFailed(ILogger logger, string reason);
+
     [LoggerMessage(Level = LogLevel.Information, Message = "WAL archive retention: timeline {Timeline} skipped this run, its archive.lock is held")]
     public static partial void PruneSkipped(ILogger logger, Guid timeline);
 

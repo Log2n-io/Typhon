@@ -404,6 +404,15 @@ internal sealed class WalSegmentManager : IDisposable
         return held;
     }
 
+    /// <summary>A copy of the sealed segments, ascending (the archiver's start-up check; allocates).</summary>
+    internal List<WalSealedSegment> SealedSegments()
+    {
+        lock (_sealedLock)
+        {
+            return new List<WalSealedSegment>(_sealedSegments);
+        }
+    }
+
     /// <summary>Bumped by every rotation: a change tells the WAL archiver a segment was sealed.</summary>
     internal long SealedGeneration => Volatile.Read(ref _sealedGeneration);
 
