@@ -3209,7 +3209,9 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
             ChokepointCompletenessTests.EveryWriteOfALifecycle_IsInTheMap (witness = the data file's bytes before and after
             each session: create, crash, recovery open with a schema migration, clean closes), with
             ChokepointCompletenessTests.Mutant_ARawWrite_IsMissingFromTheMap and
-            DataFileWriteChokepointGateTests.Mutant_AThirdWriteSite_IsReported
+            DataFileWriteChokepointGateTests.Mutant_AThirdWriteSite_IsReported; the gate itself:
+            DataFileWriteGateTests.Stress_NoWriterIsEverInsideAnExclusiveHold (two freezers × 2 500 exclusive holds against
+            four writers; source mutant seen red: a shared enter that does not re-check the freeze)
   spec: rules/tla/BackupCapture.tla (S6) — ChangeMapComplete; mutants -mutant-mapafterwrite, -mutant-nogate
 
 ### BKP-02: A captured point is the data file at its freeze `[silent]`
@@ -3350,9 +3352,10 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
             freezes, AC-C2; a crash, an offline repair, a copied bundle behind its chain's head, a wiped store and a new
             timeline → full; the decision matrix + Mutant_ADecisionIgnoringTrust_IsReported), BackupStateFileTests (round
             trip and damage; trusted close → trusted open → nonce cleared; a stale file; a matching nonce with another database,
-            timeline or length; an untrusted close deletes the file; a write failure costs a full point; Mutant_AFileTrustedAfterACrash_IsReported).
+            timeline or length; an untrusted close deletes the file; a write failure costs a full point; Mutant_AFileTrustedAfterACrash_IsReported;
+            Adoption_IsReportedLoaded_OnlyWhenTheSessionAdopts: tracking off is TrackingOff, never Loaded).
             Source mutants seen red: no nonce check, the open not clearing the nonce, Decide ignoring trust, an untrusted close
-            writing the file
+            writing the file, the adoption reporting Loaded with tracking off
 
 ### BKP-09: Every offline writer of the data file deletes backup-state first `[silent]`
   invariant ∀ process that writes the data file without an engine: backup-state is deleted before its first write (beside
@@ -3423,10 +3426,13 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
             slots, an undrained backup thread, more rewrites than slots: the slowest write ≤ budget + 10 ms, abort
             CbwStall, the checkpoint advances), DataFileWriteGateTests.ExclusiveTimeout_IsBounded_AndReopensTheGate,
             DataFileWriteGateTests.AWriterHeldBackByAFailedAttempt_EntersBeforeTheNextOne,
+            CbwSlotPoolTests.AnAbort_ReleasesAWriterWaitingOnAnEmptyPool (and CbwSlotPoolTests.ConcurrentRentPublishDrain_
+            DeliversEveryPreImageOnce: no slot or pre-image lost under four writers and one drainer),
             BackupStopTests.AnUninstallThatCannotGetTheGate_StallsWritersWithinOneBudget (a writer's stall summed over the
             attempts ≤ UninstallTimeout + 250 ms, no single stall > slice + 50 ms), SavePagesGateTests
             .EveryRunOfABatch_SharesOneCopyBeforeWriteBudget, BackupStopTests.ACloseThatCannotJoin_LeavesTheCaptureItsMemory_
             AndThePublishCannotRetrust, BackupStopTests.ACloseDuringTheForcedCheckpoint_DoesNotWaitForIt,
             BackupStopTests.ACloseDuringTheTailFlush_DoesNotWaitForIt; source mutants seen red: an unbounded slot wait,
-            ten uninstall budgets, an uncapped attempt, AdmitWaiters returning at once, a per-run deadline, the checkpoint
+            ten uninstall budgets, an uncapped attempt, AdmitWaiters returning at once, a per-run deadline, a slot wait
+            without the abort token, a plain publish or drain of the ready bits, the checkpoint
             and WAL waits without the close's token, the coordinator disposed (blocks freed) after a failed join

@@ -1993,14 +1993,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     {
         var state = _backupStateAtOpen;
         _backupStateAtOpen = null;
-        if (state == null || !DataFileWriteTracking.MapEnabled)
+        LastOpenBackupStateResult = DecideBackupStateAdoption(state, LastOpenBackupStateResult, DataFileWriteTracking.MapEnabled, DatabaseId, TimelineId,
+            _dataFilePagesAtOpen);
+        if (LastOpenBackupStateResult != BackupStateReadResult.Loaded)
         {
-            return;
-        }
-
-        if (state.DatabaseId != DatabaseId || state.TimelineId != TimelineId || state.DataFilePages != _dataFilePagesAtOpen)
-        {
-            LastOpenBackupStateResult = BackupStateReadResult.Invalid;
             return;
         }
 
@@ -2011,6 +2007,28 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         lineage.LastBackupId = state.LastBackupId;
         lineage.LastPointLsn = state.LastPointLsn;
         lineage.Trusted = true;
+    }
+
+    /// <summary>
+    /// BKP-06's verdict on the backup-state the open read (<paramref name="read"/> is how the read ended): <see cref="BackupStateReadResult.Loaded"/>
+    /// only when the session adopts it, which takes write tracking on and the file describing this database, on this timeline, at this length.
+    /// </summary>
+    internal static BackupStateReadResult DecideBackupStateAdoption(BackupStateContents state, BackupStateReadResult read, bool mapEnabled, Guid databaseId,
+        Guid timelineId, int dataFilePagesAtOpen)
+    {
+        if (state == null)
+        {
+            return read;
+        }
+
+        if (!mapEnabled)
+        {
+            return BackupStateReadResult.TrackingOff;
+        }
+
+        return state.DatabaseId == databaseId && state.TimelineId == timelineId && state.DataFilePages == dataFilePagesAtOpen
+            ? BackupStateReadResult.Loaded
+            : BackupStateReadResult.Invalid;
     }
 
     /// <summary>

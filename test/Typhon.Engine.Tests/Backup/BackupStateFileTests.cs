@@ -14,6 +14,29 @@ class BackupStateFileTests : BackupTestBase<BackupStateFileTests>
 {
     private const string Marker = "BKP-06 trusted";
 
+    /// <summary>The open adopts a backup-state, and reports it Loaded, only with tracking on and a file describing this database as it opened.</summary>
+    [Test]
+    [VerifiesRule("BKP-06")]
+    public void Adoption_IsReportedLoaded_OnlyWhenTheSessionAdopts()
+    {
+        var db = Guid.NewGuid();
+        var timeline = Guid.NewGuid();
+        var state = new BackupStateContents { Nonce = 1, DatabaseId = db, TimelineId = timeline, DataFilePages = 64, Map = new ulong[1] };
+        BackupStateReadResult Decide(BackupStateContents s, bool mapEnabled, Guid d, Guid t, int pages)
+            => DatabaseEngine.DecideBackupStateAdoption(s, s == null ? BackupStateReadResult.Missing : BackupStateReadResult.Loaded, mapEnabled, d, t, pages);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Decide(state, true, db, timeline, 64), Is.EqualTo(BackupStateReadResult.Loaded));
+            Assert.That(Decide(state, false, db, timeline, 64), Is.EqualTo(BackupStateReadResult.TrackingOff),
+                "with tracking off the session adopts no map, so it must not report one Loaded");
+            Assert.That(Decide(state, true, Guid.NewGuid(), timeline, 64), Is.EqualTo(BackupStateReadResult.Invalid), "another database");
+            Assert.That(Decide(state, true, db, Guid.NewGuid(), 64), Is.EqualTo(BackupStateReadResult.Invalid), "another timeline");
+            Assert.That(Decide(state, true, db, timeline, 65), Is.EqualTo(BackupStateReadResult.Invalid), "another length");
+            Assert.That(Decide(null, true, db, timeline, 64), Is.EqualTo(BackupStateReadResult.Missing), "nothing read: the read's own result");
+        });
+    }
+
     [Test]
     public void RoundTrip_AndEveryKindOfDamage_IsRejected()
     {

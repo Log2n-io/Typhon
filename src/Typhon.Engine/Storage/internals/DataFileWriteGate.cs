@@ -153,7 +153,10 @@ internal sealed class DataFileWriteGate
         _freezer.Exit();
     }
 
-    /// <summary>The number of shared holds, summed over the stripes. Exact only while the gate is held exclusive.</summary>
+    /// <summary>
+    /// The number of shared holds, summed over the stripes. Under the exclusive hold no writer is inside, but the sum may still read non-zero for an
+    /// instant: a writer that meets the freeze counts on its stripe until it backs off. Zero means no holder; non-zero is exact only with no freeze.
+    /// </summary>
     internal long SharedHolders()
     {
         long total = 0;

@@ -55,6 +55,9 @@ internal enum BackupStateReadResult
 
     /// <summary>The file could not be read.</summary>
     Unreadable,
+
+    /// <summary>Read and intact, but data-file write tracking is switched off: the session cannot keep a map, so it adopts none.</summary>
+    TrackingOff,
 }
 
 /// <summary>

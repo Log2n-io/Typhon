@@ -110,6 +110,90 @@ public class DataFileWriteGateTests
         Assert.That(enteredBeforeFreeze, Is.Zero, "a writer that arrived after the freeze request entered ahead of it");
     }
 
+    /// <summary>
+    /// BKP-01 under load: two freezers take the gate exclusive thousands of times while four writers enter and leave shared without pause; no writer is
+    /// ever inside while a freezer holds it, and a freezer never sees a shared holder.
+    /// </summary>
+    [Test]
+    [CancelAfter(20_000)]
+    [VerifiesRule("BKP-01")]
+    public void Stress_NoWriterIsEverInsideAnExclusiveHold()
+    {
+        const int Cycles = 2_500;
+        var gate = new DataFileWriteGate();
+        var exclusive = 0;
+        var inside = 0;   // writers between their EnterShared and ExitShared
+        var violations = 0;
+        var timeouts = 0;
+        long entries = 0, entriesDuringFreezes = 0;
+        using var stop = new CancellationTokenSource();
+        var writers = new Task[4];
+        using var started = new CountdownEvent(writers.Length);
+        for (var i = 0; i < writers.Length; i++)
+        {
+            writers[i] = Task.Factory.StartNew(() =>
+            {
+                started.Signal();
+                while (!stop.IsCancellationRequested)
+                {
+                    var t = gate.EnterShared();
+                    Interlocked.Increment(ref entries);
+                    Interlocked.Increment(ref inside);
+                    if (Volatile.Read(ref exclusive) != 0)
+                    {
+                        Interlocked.Increment(ref violations);
+                    }
+
+                    Interlocked.Decrement(ref inside);
+                    gate.ExitShared(t);
+                }
+            }, TaskCreationOptions.LongRunning);
+        }
+
+        var freezers = new Task[2];
+        for (var i = 0; i < freezers.Length; i++)
+        {
+            freezers[i] = Task.Factory.StartNew(() =>
+            {
+                started.Wait();
+                var first = Interlocked.Read(ref entries);
+                for (var c = 0; c < Cycles; c++)
+                {
+                    if (!gate.TryEnterExclusive(Long))
+                    {
+                        Interlocked.Increment(ref timeouts);
+                        continue;
+                    }
+
+                    // Not SharedHolders(): a writer meeting the freeze counts on its stripe for an instant before it backs off.
+                    if (Interlocked.Increment(ref exclusive) != 1 || Volatile.Read(ref inside) != 0)
+                    {
+                        Interlocked.Increment(ref violations);
+                    }
+
+                    Thread.SpinWait(20);
+                    Interlocked.Decrement(ref exclusive);
+                    gate.ExitExclusive();
+                }
+
+                Interlocked.Add(ref entriesDuringFreezes, Interlocked.Read(ref entries) - first);
+            }, TaskCreationOptions.LongRunning);
+        }
+
+        var done = Task.WaitAll(freezers, 15_000);
+        stop.Cancel();
+        Assert.That(Task.WaitAll(writers, Long), Is.True);
+        Assert.Multiple(() =>
+        {
+            Assert.That(done, Is.True, "the freezers did not finish");
+            Assert.That(entriesDuringFreezes, Is.GreaterThan(Cycles), "premise: the writers ran while the freezers cycled");
+            Assert.That(violations, Is.Zero, "BKP-01: a writer was inside an exclusive hold, or two freezers held it at once");
+            Assert.That(timeouts, Is.Zero);
+            Assert.That(gate.SharedHolders(), Is.Zero);
+            Assert.That(gate.Waiting, Is.Zero);
+        });
+    }
+
     [Test]
     [CancelAfter(5_000)]
     public void SharedHold_CanBeReleasedByAnotherThread()
