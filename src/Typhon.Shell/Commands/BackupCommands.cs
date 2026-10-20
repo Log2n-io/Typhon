@@ -391,8 +391,9 @@ internal sealed class BackupListCommand : Command<BackupListCommand.Settings>
 }
 
 /// <summary>
-/// <c>typhon backup verify --store S [--point X] [--level quick|full]</c> — checks packs and chains without restoring anything (04 §4). The verdict is the
-/// exit code: 0 ok, 1 advisories, 2 damage with a restorable point left, 3 nothing restorable.
+/// <c>typhon backup verify --store S [--point X] [--level quick|full|deep]</c> — checks packs and chains without restoring anything (04 §4); deep also
+/// scans the image of the point (or of the newest restorable one). The verdict is the exit code: 0 ok, 1 advisories, 2 damage with a restorable point
+/// left, 3 nothing restorable.
 /// </summary>
 // ReSharper disable once ClassNeverInstantiated.Global
 internal sealed class BackupVerifyCommand : Command<BackupVerifyCommand.Settings>
@@ -406,7 +407,7 @@ internal sealed class BackupVerifyCommand : Command<BackupVerifyCommand.Settings
         public string Point { get; set; }
 
         [CommandOption("-l|--level")]
-        [Description("quick | full. Default: quick.")]
+        [Description("quick | full | deep (full, plus the integrity scan of the point's image). Default: quick.")]
         public string Level { get; set; }
         // ReSharper restore UnusedAutoPropertyAccessor.Global
     }
@@ -499,10 +500,10 @@ internal sealed class BackupVerifyCommand : Command<BackupVerifyCommand.Settings
                 level = BackupVerifyLevel.Full;
                 return true;
             case "deep":
-                error = "--level deep (restore into scratch and run the integrity scan) arrives with the drill (#1416). Use quick or full.";
-                return false;
+                level = BackupVerifyLevel.Deep;
+                return true;
             default:
-                error = $"Unknown level '{value}'. Expected quick or full.";
+                error = $"Unknown level '{value}'. Expected quick, full or deep.";
                 return false;
         }
     }

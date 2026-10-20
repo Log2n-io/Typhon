@@ -17,6 +17,11 @@ internal enum VerifyLevel : byte
 
     /// <summary>Quick, plus every byte's FileCRC, every page decoded against its PageCrc, and the point's meta pair against its header.</summary>
     Full,
+
+    /// <summary>
+    /// Full, plus the integrity scan of a point's image read through its chain (DL-27): of the point verified, or of the store's newest restorable point.
+    /// </summary>
+    Deep,
 }
 
 internal enum VerifySeverity : byte
@@ -222,6 +227,11 @@ internal static class BackupVerifier
             }
 
             points.Add(new PointVerification { Id = id, Restorable = broken.Count == 0, BrokenBy = [.. broken] });
+        }
+
+        if (level == VerifyLevel.Deep)
+        {
+            ScanDeep(fs, view, points, storeFindings, options);
         }
 
         var packList = packs.Values.ToList();
@@ -496,7 +506,7 @@ internal static class BackupVerifier
                     $"the live database had {suspects.Length} damaged page(s) at capture, faithfully kept: {List(suspects)}"));
             }
 
-            if (level == VerifyLevel.Full)
+            if (level >= VerifyLevel.Full)
             {
                 VerifyFull(reader, result, indexOk, tailDirOk, tail, imageMeta, options);
             }
@@ -506,6 +516,56 @@ internal static class BackupVerifier
 
         result.Status = result.Findings.Any(f => f.Severity == VerifySeverity.Damage) ? PackVerifyStatus.Damaged : PackVerifyStatus.Ok;
         return result;
+    }
+
+    /// <summary>
+    /// BKP-VER-19/20 (DL-27): the integrity scan of the newest restorable point in scope, its image read through its chain (the page catalogue: no WAL
+    /// check, which BKP-VER-09/12 already make of the tail). An image the scan cannot traverse is not restorable (BKP-VER-19); damage or leaks the image
+    /// holds are the live database's, faithfully kept: advisories (BKP-VER-20). The image is the one at C, before its tail replays.
+    /// </summary>
+    private static void ScanDeep(IStoreFileSystem fs, StoreView view, List<PointVerification> points, List<VerifyFinding> storeFindings,
+        VerifyOptions options)
+    {
+        var at = points.FindLastIndex(p => p.Restorable);
+        if (at < 0)
+        {
+            return;
+        }
+
+        var id = points[at].Id;
+        var chain = ChainResolver.Resolve(view, id);
+        var file = chain.Packs[^1].File;
+        IntegrityReport report;
+        try
+        {
+            using var source = PackChainPageSource.Open(fs, view, chain);
+            report = IntegrityScanner.Scan(source, new IntegrityOptions { Depth = ScanDepth.Deep, Cancellation = options.Cancellation });
+        }
+        catch (Exception e) when (e is BackupException or IOException)
+        {
+            storeFindings.Add(new VerifyFinding("BKP-VER-19", VerifySeverity.Damage, file, -1, $"point #{id}: its image could not be scanned: {e.Message}"));
+            points[at] = new PointVerification { Id = id, Restorable = false, BrokenBy = [id] };
+            return;
+        }
+
+        options.Cancellation.ThrowIfCancellationRequested();
+        var first = report.Findings.Count == 0 ? "" : $"; first: {report.Findings[0].Code} {report.Findings[0].Summary}";
+        switch (report.Verdict)
+        {
+            case IntegrityVerdict.Unopenable:
+                storeFindings.Add(new VerifyFinding("BKP-VER-19", VerifySeverity.Damage, file, -1,
+                    $"point #{id}: its image cannot be traversed ({report.Findings.Count} finding(s){first})"));
+                points[at] = new PointVerification { Id = id, Restorable = false, BrokenBy = [id] };
+                break;
+            case IntegrityVerdict.DataLoss or IntegrityVerdict.Divergent:
+                storeFindings.Add(new VerifyFinding("BKP-VER-20", VerifySeverity.Advisory, file, -1,
+                    $"point #{id}: the image carries damage the live database had: {report.Verdict} ({report.Findings.Count} finding(s){first})"));
+                break;
+            case IntegrityVerdict.SoundWithLeaks:
+                storeFindings.Add(new VerifyFinding("BKP-VER-20", VerifySeverity.Advisory, file, -1,
+                    $"point #{id}: the image holds leaked space ({report.Totals.BytesLeaked} bytes), as the live database did"));
+                break;
+        }
     }
 
     /// <summary>BKP-VER-10..13: every byte, every page, the tail's P, the meta pair against the header.</summary>

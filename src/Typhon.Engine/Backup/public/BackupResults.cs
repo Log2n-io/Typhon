@@ -122,6 +122,12 @@ public enum BackupVerifyLevel
 
     /// <summary>Quick, plus every byte's file CRC, every page decoded and checked, and each point's meta pair against its header.</summary>
     Full,
+
+    /// <summary>
+    /// Full, plus the integrity scan of a point's image (of the point verified, or of the store's newest restorable one): an image the scan cannot
+    /// traverse is not restorable; damage the image holds (the live database's) is a warning. The drill is what proves the point opens.
+    /// </summary>
+    Deep,
 }
 
 /// <summary>A verify's overall answer; <c>typhon backup verify</c> maps it to exit 0, 1, 2, 3.</summary>

@@ -333,7 +333,7 @@ public sealed class BackupCommandTests
         Assert.That(Run((c, j) => BackupRestoreCommand.Run(noTarget, c, j, CancellationToken.None)).Code, Is.EqualTo(BackupCli.ExitUsage),
             "restore without --to");
 
-        foreach (var (level, point) in new (string Level, string Point)[] { ("deep", null), ("fast", null), (null, "yesterday"), (null, "0") })
+        foreach (var (level, point) in new (string Level, string Point)[] { ("fast", null), (null, "yesterday"), (null, "0") })
         {
             var verify = new BackupVerifyCommand.Settings { Store = _store, Format = "text", Level = level, Point = point };
             var r = Run((c, j) => BackupVerifyCommand.Run(verify, c, j));
@@ -362,6 +362,7 @@ public sealed class BackupCommandTests
         Assert.That(App("backup", "create", _bundle, "--store", _store, "--format", "json"), Is.EqualTo(BackupCli.ExitOk));
         Assert.That(App("backup", "list", "--store", _store, "--format", "json"), Is.EqualTo(BackupCli.ExitOk));
         Assert.That(App("backup", "verify", "--store", _store, "--level", "full", "--format", "json"), Is.EqualTo(BackupCli.ExitOk));
+        Assert.That(App("backup", "verify", "--store", _store, "--level", "deep", "--format", "json"), Is.EqualTo(BackupCli.ExitOk));
         Assert.That(App("backup", "status", "--store", _store, "--format", "json"), Is.EqualTo(BackupCli.ExitOk));
         Assert.That(App("backup", "restore", "--store", _store, "--point", "latest", "--to", Path.Combine(_root, "r"), "--format", "json"), Is.EqualTo(0));
         Assert.That(App("backup", "compact", "--store", _store, "--point", "latest", "--format", "json"), Is.EqualTo(BackupCli.ExitOk));
