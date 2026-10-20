@@ -25,7 +25,7 @@ struct PadTail
     public int Weight;
 }
 
-/// <summary>Explicit oversize, the shape #816 was found on (SpaceBattle's <c>Vitals</c>): field extent 4, CLR size 8.</summary>
+/// <summary>Explicit oversize, the shape #816 was found on (a demo's <c>Vitals</c>): field extent 4, CLR size 8.</summary>
 [Component("Typhon.Test.Pad.Explicit", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential, Size = 8)]
 struct PadExplicit

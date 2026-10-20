@@ -32,7 +32,7 @@ class UowRegistryTests : TestBase<UowRegistryTests>
     /// <c>Release</c> ran on every slot free while <c>WaitForSlotFreed</c> is reached only when the registry is
     /// saturated, so a workload that never saturates produced a permit per free and consumed none. The count rose
     /// monotonically for the life of the process and threw <c>SemaphoreFullException</c> at <see cref="int.MaxValue"/>,
-    /// killing it — measured in a SpaceBattle soak at 1 454 985 ticks / 6 h 40 m, roughly 1 476 frees per tick (#844).
+    /// killing it — measured in a demo soak at 1 454 985 ticks / 6 h 40 m, roughly 1 476 frees per tick (#844).
     /// </para>
     /// <para>
     /// This asserts the SLOPE, not a total: a permit count that tracks cumulative frees is the defect, so the test

@@ -935,7 +935,7 @@ public static class SpatialPartitionMatrix
         // spatialBits build.
         //
         // Barrier-only is opt-in by API and universal in first-party practice: AntHill declares it for all four of its
-        // archetypes, SpaceBattle for all five, and the guide sample for its one. So the dirty path this harness
+        // archetypes, and the guide sample for its one. So the dirty path this harness
         // measured by default is the path no shipped workload uses, and comparing the two is the point.
         if (barrier)
         {

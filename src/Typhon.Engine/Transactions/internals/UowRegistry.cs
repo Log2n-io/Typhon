@@ -109,7 +109,7 @@ internal unsafe class UowRegistry : IDisposable
     /// while <see cref="WaitForSlotFreed"/> is reached only when the registry is saturated. A workload that never
     /// saturates therefore never consumes a permit, the count rises monotonically for the life of the process, and at
     /// <see cref="int.MaxValue"/> <c>Release</c> throws <c>SemaphoreFullException</c> and kills it. Measured: a
-    /// SpaceBattle soak died after 1 454 985 ticks / 6 h 40 m — about 1 476 UoW frees per tick (#844).
+    /// demo soak died after 1 454 985 ticks / 6 h 40 m — about 1 476 UoW frees per tick (#844).
     /// </para>
     /// <para>
     /// <b>Bound.</b> Concurrent freers can each observe the same pre-release count and all release, so permits can

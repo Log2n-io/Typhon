@@ -49,7 +49,6 @@
         <Project Path="demo/AsteroidField/AsteroidField.Bot/AsteroidField.Bot.csproj" />
         <Project Path="demo/AsteroidField/AsteroidField.Server/AsteroidField.Server.csproj" />
         <Project Path="demo/AsteroidField/AsteroidField.Tests/AsteroidField.Tests.csproj" />
-        <Project Path="demo/SpaceBattle/SpaceBattle.csproj" />
         <Project Path="demo/SwgTatooine/SwgTatooine.csproj" />
         <Project Path="demo/SwgTatooine.Bots/SwgTatooine.Bots.csproj" />
         <Project Path="demo/SwgTatooine.Tests/SwgTatooine.Tests.csproj" />

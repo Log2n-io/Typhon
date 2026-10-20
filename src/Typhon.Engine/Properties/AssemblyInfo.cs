@@ -24,12 +24,6 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Typhon.Workbench.Tests")]
 [assembly: InternalsVisibleTo("Typhon.IOProfileRunner")]
 [assembly: InternalsVisibleTo("Typhon.MonitoringDemo")]
-// Added 2026-08-14: the SpaceBattle demo is a spatial-partitioning observatory — it renders the per-cell
-// CellState (EntityCount/ClusterCount/Tier), the authoritative cluster->cell map and the per-tick migration
-// counters. None of those has a public surface (SpatialGridAccessor.GetCell is internal because CellState is,
-// ArchetypeClusterState is internal wholesale), and the whole point of the tool is to show the internal state
-// the public API deliberately hides. Genuine internal-implementation reuse; not refactorable to public.
-[assembly: InternalsVisibleTo("SpaceBattle")]
 // Added 2026-09-07 (#906); justification narrowed 2026-09-18 (#205, P1-23). The original two reasons are CLOSED:
 // ClusterSpatialQueryResult carries an EntityId rather than a raw long (#909), and Archetype<T>.CatalogId is public,
 // so the blueprint no longer needs EntityId.FromRaw. What remains is MEASUREMENT, not gameplay and not replication:

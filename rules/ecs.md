@@ -549,7 +549,7 @@ reclaimed.
          EcsQuery.CollectPendingSpawnsFull, SpawnStagingArena, DeferredCleanupManager.ReleaseCollectionBuffers
   on_violation: the chunk becomes unreachable the instant `PlaceSpawns` copies the payload into the cluster, and
                 nothing frees it — every free site is gated on rollback or on Versioned. The file then grows with
-                CUMULATIVE spawns rather than live entities. Measured in the SpaceBattle demo before the fix: 491,930
+                CUMULATIVE spawns rather than live entities. Measured in a demo soak before the fix: 491,930
                 `Bullet` chunks against ~1,200 live shots, 900,096 `Pos` chunks against ~20,200 live entities, and a
                 282 MB data file holding ~1.8 MB of live entity bytes — a 160× gap that only grew (#839). Silent: every
                 read returns correct data, because the authoritative copy is in the cluster the whole time.
@@ -760,8 +760,8 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
          DatabaseEngine.FlushDeferredCleanups, Transaction.ProcessDeferredCleanups,
          DeferredCleanupManager.ProcessDeferredCleanups
   on_violation: the `EntityMap` retains one record per entity ever destroyed, for the life of the engine, and its
-                backing segment grows with CUMULATIVE destroys rather than live entities. Measured in the SpaceBattle
-                demo before the fix: 561,796 `EntityMap` chunks against a live population that never exceeded ~13,900,
+                backing segment grows with CUMULATIVE destroys rather than live entities. Measured in a demo
+                soak before the fix: 561,796 `EntityMap` chunks against a live population that never exceeded ~13,900,
                 holding 8,590 of the file's 9,692 pages — 89% — while every `Component` segment stayed flat at 30. The
                 cost is a smooth per-operation regression, not a crash: engine time per unit of simulation work doubled
                 (971 → 1,969 ns) over 100,000 ticks while the workload itself FELL (#681). Silent: every read returns

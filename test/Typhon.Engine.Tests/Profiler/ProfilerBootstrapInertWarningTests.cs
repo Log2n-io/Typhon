@@ -71,7 +71,7 @@ public sealed class ProfilerBootstrapInertWarningTests
     }
 
     /// <summary>
-    /// The #792 configuration end to end: the master switch on and sub-gates enabled, but no <c>Trace</c> / <c>Live</c> key — which is what SpaceBattle
+    /// The #792 configuration end to end: the master switch on and sub-gates enabled, but no <c>Trace</c> / <c>Live</c> key — which is what a demo
     /// produced once its late environment writes were ignored. <see cref="ProfilerLaunchConfig.FromConfiguration"/> must resolve that to inert, and the
     /// bootstrap must have something to say about it.
     /// </summary>
@@ -101,13 +101,13 @@ public sealed class ProfilerBootstrapInertWarningTests
             .AddInMemoryCollection(new Dictionary<string, string>
             {
                 ["Typhon:Profiler:Enabled"] = "true",
-                ["Typhon:Profiler:Trace"] = "spacebattle.typhon-trace",
+                ["Typhon:Profiler:Trace"] = "app.typhon-trace",
             })
             .Build();
 
         var launch = ProfilerLaunchConfig.FromConfiguration(config);
 
-        Assert.That(launch.TraceFilePath, Is.EqualTo("spacebattle.typhon-trace"));
+        Assert.That(launch.TraceFilePath, Is.EqualTo("app.typhon-trace"));
         Assert.That(ProfilerBootstrap.BuildInertProfilerWarning(launch), Is.Null);
     }
 }

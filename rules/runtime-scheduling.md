@@ -476,8 +476,8 @@ descends from this one property.
     later change silently revokes. Phases cannot supply this property and never could — see PH-01, which makes
     them ordering contracts rather than barriers, and ExclusivePhase, which is Build()-time validation that no
     other system shares a phase and says nothing about adjacent ones.
-  host_mode: WriteTickFence is public and a runtime-less host drives it directly (demo/SpaceBattle
-    TyphonHost.RunTickFence). For such a host this is a DOCUMENTED CALLER OBLIGATION, not an enforced one, and it
+  host_mode: WriteTickFence is public and a runtime-less host drives it directly (the pattern in
+    doc/guide/embedding-without-the-runtime.md). For such a host this is a DOCUMENTED CALLER OBLIGATION, not an enforced one, and it
     is stated on the method's own XML doc. Trivially satisfied single-threaded; unchecked for a host that runs its
     own worker threads. Enforcing it would require the engine to track every application thread, which it does not
     and should not. The fence is also where emptied clusters are reclaimed (CLUSTERWALK-03, #582): a runtime-less host
