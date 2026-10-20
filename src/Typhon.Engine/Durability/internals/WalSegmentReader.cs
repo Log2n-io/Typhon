@@ -40,6 +40,10 @@ internal sealed unsafe class WalSegmentReader : IDisposable
     // Record-level iteration within a frame
     private int _recordOffset;        // Current chunk position within frame
 
+    // End of the last frame read whole (every chunk valid) or skipped as empty: where a torn segment's usable data ends. Bookkeeping only; the walk
+    // itself is unchanged.
+    private int _lastCompleteFrameEnd;
+
     // CRC chain state
     private uint _lastFooterCrc;
     private bool _isFirstChunk;
@@ -78,7 +82,51 @@ internal sealed unsafe class WalSegmentReader : IDisposable
         }
 
         using var handle = _fileIO.OpenSegmentForRead(path);
+        return Load(handle, long.MaxValue);
+    }
 
+    /// <summary>
+    /// Opens a sealed segment for the WAL archiver (<see cref="IWalFileIO.OpenSegmentForArchive"/>: delete sharing, WA-5), reading no further than
+    /// <paramref name="writtenBytes"/> from the start of the file: past it the segment holds zeros, which the reader sees without reading them.
+    /// </summary>
+    internal bool OpenSegmentForArchive(string path, long writtenBytes)
+    {
+        using var handle = _fileIO.OpenSegmentForArchive(path);
+        return Load(handle, writtenBytes);
+    }
+
+    /// <summary>The segment header's bytes as read (a page), valid until the next open.</summary>
+    internal ReadOnlySpan<byte> HeaderBytes => new(_header, WalSegmentHeader.SizeInBytes);
+
+    /// <summary>
+    /// The segment's data area as loaded (zeros past what was read), valid until the next open: the archiver compresses from it, so a segment is read
+    /// once. Writable, for <see cref="ZeroFrom"/> only.
+    /// </summary>
+    internal Span<byte> LoadedData => Data;
+
+    /// <summary>Offset in the data area (after the header) of the frame being read, or of the one where the walk stopped.</summary>
+    internal int FrameStart => _frameOffset;
+
+    /// <summary>Offset in the data area of the end of the frame being read; 0 before the first.</summary>
+    internal int FrameEnd => _frameEnd;
+
+    /// <summary>Offset in the data area of the end of the last frame read whole, every chunk valid; 0 when none.</summary>
+    internal int LastCompleteFrameEnd => _lastCompleteFrameEnd;
+
+    /// <summary>The highest LSN the frame being read declares (<see cref="WalFrameHeader.LastLsn"/>).</summary>
+    internal long FrameLastLsn => _frameEnd > 0 ? Unsafe.As<byte, WalFrameHeader>(ref Data[_frameOffset]).LastLsn : 0;
+
+    /// <summary>Zeros the loaded data from <paramref name="offset"/> (data-relative) on: the archiver keeps no byte of a torn frame.</summary>
+    internal void ZeroFrom(int offset)
+    {
+        if (offset < _segmentDataLength)
+        {
+            Data[offset..].Clear();
+        }
+    }
+
+    private bool Load(Microsoft.Win32.SafeHandles.SafeFileHandle handle, long readLimit)
+    {
         // Read the header (first 4096 bytes)
         var headerBuffer = new Span<byte>(_header, WalSegmentHeader.SizeInBytes);
         headerBuffer.Clear();
@@ -102,7 +150,7 @@ internal sealed unsafe class WalSegmentReader : IDisposable
             _data = (byte*)AlignUp((nint)_block, PageSize);
             _segmentDataLength = dataSize;
 
-            var readable = (int)Math.Clamp(_fileIO.ReadableLength(handle) - WalSegmentHeader.SizeInBytes, 0, capacity);
+            var readable = (int)Math.Clamp(Math.Min(_fileIO.ReadableLength(handle), readLimit) - WalSegmentHeader.SizeInBytes, 0, capacity);
             var toRead = AlignUp(readable, PageSize);
             for (var offset = 0; offset < toRead; offset += ReadChunkBytes)
             {
@@ -114,6 +162,7 @@ internal sealed unsafe class WalSegmentReader : IDisposable
         _opened = true;
         _frameOffset = 0;
         _frameEnd = 0;
+        _lastCompleteFrameEnd = 0;
         _recordOffset = 0;
         _recordsRemainingInFrame = 0;
         _isFirstChunk = true;
@@ -228,10 +277,12 @@ internal sealed unsafe class WalSegmentReader : IDisposable
     /// </summary>
     private bool AdvanceToNextFrame()
     {
-        // If we were mid-frame, jump to end of current frame
+        // If we were mid-frame, jump to end of current frame. Called only once its chunks are exhausted (a broken chunk returns before), so that frame
+        // was read whole.
         if (_frameEnd > 0)
         {
             _frameOffset = _frameEnd;
+            _lastCompleteFrameEnd = _frameEnd;
         }
 
         while (_frameOffset < _segmentDataLength)
@@ -287,6 +338,7 @@ internal sealed unsafe class WalSegmentReader : IDisposable
 
             // Empty frame (abandoned claim) — skip to next
             _frameOffset = _frameEnd;
+            _lastCompleteFrameEnd = _frameEnd;
         }
 
         return false;
