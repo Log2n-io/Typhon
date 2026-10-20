@@ -326,6 +326,8 @@ class SlotReserveTests
     [VerifiesRule("PS-24")]
     public void UnderTheEvictionGuard_AReservedSlotSatOutItsQuarantine()
     {
+        // The guard protects one cache page at a time, so a cache page must be whole system pages: not on Apple Silicon's 16 KiB pages.
+        Assume.That(PagedMMF.PageSize % Environment.SystemPageSize, Is.Zero, "the eviction guard needs cache pages made of whole system pages");
         using var scope = _serviceProvider.CreateScope();
         var pmmf = scope.ServiceProvider.GetService<PagedMMF>();
         var epochManager = scope.ServiceProvider.GetRequiredService<EpochManager>();
