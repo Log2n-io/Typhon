@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using NUnit.Framework;
@@ -22,17 +23,17 @@ public class CbwSlotPoolTests : AllocatorTestBase
     {
         using var pool = new CbwSlotPool(MemoryAllocator, AllocationResource, 1);
         using var abort = new CancellationTokenSource();
-        var held = pool.TryRent(0, CancellationToken.None);
+        var held = pool.TryRent(In(0), CancellationToken.None);
         Assert.That(held, Is.EqualTo(0), "premise: the only slot is held");
 
-        var waiter = Task.Factory.StartNew(() => pool.TryRent(30_000, abort.Token), TaskCreationOptions.LongRunning);
+        var waiter = Task.Factory.StartNew(() => pool.TryRent(In(30_000), abort.Token), TaskCreationOptions.LongRunning);
         Assert.That(waiter.Wait(50), Is.False, "premise: the writer waits on the empty pool");
         abort.Cancel();
         Assert.That(waiter.Wait(2_000), Is.True, "BKP-12: an abort left a writer waiting on the pool");
         Assert.That(waiter.Result, Is.EqualTo(-1));
 
         pool.Release(held);
-        Assert.That(pool.TryRent(0, CancellationToken.None), Is.EqualTo(0), "the cancelled wait took no slot with it");
+        Assert.That(pool.TryRent(In(0), CancellationToken.None), Is.EqualTo(0), "the cancelled wait took no slot with it");
     }
 
     /// <summary>Four writers rent, fill and publish thousands of pre-images through a few slots while one thread drains them.</summary>
@@ -57,7 +58,7 @@ public class CbwSlotPoolTests : AllocatorTestBase
                 for (var i = 0; i < PerWriter; i++)
                 {
                     var page = writer * PerWriter + i;
-                    var slot = pool.TryRent(5_000, CancellationToken.None);
+                    var slot = pool.TryRent(In(5_000), CancellationToken.None);
                     if (slot < 0)
                     {
                         Interlocked.Increment(ref rentTimeouts);
@@ -102,7 +103,33 @@ public class CbwSlotPoolTests : AllocatorTestBase
 
         for (var i = 0; i < slots; i++)
         {
-            Assert.That(pool.TryRent(0, CancellationToken.None), Is.GreaterThanOrEqualTo(0), "every slot is back in the pool");
+            Assert.That(pool.TryRent(In(0), CancellationToken.None), Is.GreaterThanOrEqualTo(0), "every slot is back in the pool");
         }
     }
+
+    /// <summary>
+    /// BKP-12: a writer that finds the pool empty gives up at its deadline, not on the OS timer tick after it (15.6 ms on Windows, where a timed
+    /// semaphore wait returned 9 to 16 ms late). Five waits, none more than 3 ms late.
+    /// </summary>
+    [Test]
+    [Category("Sensitive")]   // a timing bound: run serially, as the gate does
+    [CancelAfter(10_000)]
+    [VerifiesRule("BKP-12")]
+    public void AWaitOnAnEmptyPool_GivesUpAtItsDeadline()
+    {
+        using var pool = new CbwSlotPool(MemoryAllocator, AllocationResource, 1);
+        Assert.That(pool.TryRent(In(0), CancellationToken.None), Is.EqualTo(0), "premise: the only slot is held");
+        long worst = 0;
+        for (var i = 0; i < 5; i++)
+        {
+            var deadline = In(50);
+            Assert.That(pool.TryRent(deadline, CancellationToken.None), Is.EqualTo(-1));
+            worst = Math.Max(worst, Stopwatch.GetTimestamp() - deadline);
+        }
+
+        Assert.That(TimeSpan.FromSeconds((double)worst / Stopwatch.Frequency), Is.LessThan(TimeSpan.FromMilliseconds(3)),
+            "BKP-12: a slot wait returned past its deadline");
+    }
+
+    private static long In(int ms) => Stopwatch.GetTimestamp() + ms * Stopwatch.Frequency / 1000;
 }

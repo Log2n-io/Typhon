@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Numerics;
 using System.Threading;
 
@@ -47,14 +48,39 @@ internal sealed unsafe class CbwSlotPool : IDisposable
     /// <summary>The bytes of slot <paramref name="slot"/>.</summary>
     public Span<byte> Span(int slot) => new(_base + (long)slot * PagedMMF.PageSize, PagedMMF.PageSize);
 
-    /// <summary>Rents a free slot, waiting up to <paramref name="timeoutMs"/>; <c>-1</c> when none freed in time or <paramref name="abort"/> fired.</summary>
-    public int TryRent(int timeoutMs, CancellationToken abort)
+    /// <summary>
+    /// How long before a deadline a slot wait stops blocking and polls. A timed kernel wait wakes on the OS timer tick, 15.6 ms on Windows by default:
+    /// measured, a 50 ms wait returned 9 to 16 ms late, past BKP-12's budget. The last tick is polled instead (on a stall only, which aborts the
+    /// capture), so the writer returns at its deadline.
+    /// </summary>
+    internal static readonly long TimerSlackTicks = Stopwatch.Frequency * (OperatingSystem.IsWindows() ? 16 : 1) / 1000;
+
+    /// <summary>
+    /// Rents a free slot, waiting until <paramref name="deadline"/> (a <see cref="Stopwatch"/> timestamp) at the latest; <c>-1</c> when none freed in
+    /// time or <paramref name="abort"/> fired.
+    /// </summary>
+    public int TryRent(long deadline, CancellationToken abort)
     {
         try
         {
-            if (!_free.Wait(Math.Max(0, timeoutMs), abort))
+            var spin = new SpinWait();
+            while (true)
             {
-                return -1;
+                var blockMs = (deadline - Stopwatch.GetTimestamp() - TimerSlackTicks) * 1000 / Stopwatch.Frequency;
+                if (blockMs > 0 ? _free.Wait((int)Math.Min(blockMs, int.MaxValue), abort) : _free.Wait(0))
+                {
+                    break;
+                }
+
+                if (abort.IsCancellationRequested || Stopwatch.GetTimestamp() >= deadline)
+                {
+                    return -1;
+                }
+
+                if (blockMs <= 0)
+                {
+                    spin.SpinOnce(-1);   // no Sleep(1): it is the very tick this avoids
+                }
             }
         }
         catch (OperationCanceledException)

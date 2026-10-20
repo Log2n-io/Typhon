@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -64,26 +63,11 @@ class CbwStallTests : BackupTestBase<CbwStallTests>
 
         var stalled = StartCapture(dbe, store);
         var lsnBefore = dbe.CheckpointManager.CheckpointLsn;
-        var started = new ConcurrentDictionary<int, long>();
-        var worst = 0L;
         try
         {
             Assert.That(frozen.Wait(Budget), Is.True);
             var rewrites = DirtyFilePages(dbe).Count(imageSet.Contains);
             Assert.That(rewrites, Is.GreaterThan(2), "premise: the checkpoint rewrites more image pages than there are slots");
-
-            dbe.MMF.PageWriteInterceptor = _ => started[Environment.CurrentManagedThreadId] = Stopwatch.GetTimestamp();
-            dbe.MMF.DataFileWriteProbe = (_, _) =>
-            {
-                if (started.TryRemove(Environment.CurrentManagedThreadId, out var t0))
-                {
-                    var spent = Stopwatch.GetTimestamp() - t0;
-                    long seen;
-                    while (spent > (seen = Volatile.Read(ref worst)) && Interlocked.CompareExchange(ref worst, spent, seen) != seen)
-                    {
-                    }
-                }
-            };
 
             var checkpoint = Task.Run(() => dbe.CheckpointManager.ForceCheckpointAndWait(Budget));
             Assert.That(checkpoint.Wait(TimeSpan.FromSeconds(2)), Is.True, "BKP-12: a writer waited on the stalled backup past its budget");
@@ -91,12 +75,12 @@ class CbwStallTests : BackupTestBase<CbwStallTests>
         }
         finally
         {
-            dbe.MMF.PageWriteInterceptor = null;
-            dbe.MMF.DataFileWriteProbe = null;
             release.Set();
         }
 
         var ex = Assert.Throws<AggregateException>(() => stalled.Wait(Budget));
+        // The hook's own measure: from the start of a write's budget (a SavePages batch's, shared by its runs) to its return.
+        var worst = coordinator.LastCapture.MaxHookElapsedTicks;
         Assert.Multiple(() =>
         {
             Assert.That(ex.InnerException, Is.TypeOf<BackupAbortedException>());

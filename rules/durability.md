@@ -3423,9 +3423,12 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
   scope: BackupCapture.BeforeWrite, BackupCapture.Abort, BackupCapture.Uninstall, BackupCoordinator.StopAndJoin,
          DataFileWriteGate.TryEnterExclusive, DataFileWriteGate.AdmitWaiters, CbwSlotPool
   on_violation: a slow store (or a stuck backup thread) stalls the checkpoint → page-cache back-pressure → transactions stall
+  invariant a slot wait returns at its deadline, not on the OS timer tick after it: it blocks until one tick before the
+            deadline (16 ms on Windows, 1 ms elsewhere) and polls the rest (a timed semaphore wait returned 9-16 ms late)
   verified: CbwStallTests.SlotPoolExhausted_TheWriterReturnsWithinBudget_AndTheCaptureAborts [Category("Sensitive")] (two
-            slots, an undrained backup thread, more rewrites than slots: the slowest write ≤ budget + 10 ms, abort
-            CbwStall, the checkpoint advances), DataFileWriteGateTests.ExclusiveTimeout_IsBounded_AndReopensTheGate,
+            slots, an undrained backup thread, more rewrites than slots: the slowest write, measured by the hook from its
+            budget's start, ≤ budget + 10 ms; abort CbwStall, the checkpoint advances),
+            CbwSlotPoolTests.AWaitOnAnEmptyPool_GivesUpAtItsDeadline (≤ 3 ms late; a wait blocking to its deadline seen red), DataFileWriteGateTests.ExclusiveTimeout_IsBounded_AndReopensTheGate,
             DataFileWriteGateTests.AWriterHeldBackByAFailedAttempt_EntersBeforeTheNextOne,
             CbwSlotPoolTests.AnAbort_ReleasesAWriterWaitingOnAnEmptyPool (and CbwSlotPoolTests.ConcurrentRentPublishDrain_
             DeliversEveryPreImageOnce: no slot or pre-image lost under four writers and one drainer),

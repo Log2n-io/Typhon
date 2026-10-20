@@ -454,21 +454,43 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
             {
                 if (!CopyBeforeWrite(p, word, bit, deadline))
                 {
+                    NoteHookElapsed(deadline);
                     return;
                 }
             }
             else if (!SkipClaimWaitForMutant && !WaitCaptured(word, bit, deadline))
             {
+                NoteHookElapsed(deadline);
                 return;
             }
+        }
+
+        if (deadline != 0)
+        {
+            NoteHookElapsed(deadline);
+        }
+    }
+
+    /// <summary>
+    /// The longest any write has spent in this hook since its budget started, in <see cref="Stopwatch"/> ticks: BKP-12's measure, cumulative over a
+    /// <see cref="PagedMMF.SavePages"/> batch, whose runs share one budget. Taken only by writes that touched a page still to capture (a copy costs an
+    /// 8 KiB read; a timestamp beside it is noise).
+    /// </summary>
+    internal long MaxHookElapsedTicks;
+
+    private void NoteHookElapsed(long deadline)
+    {
+        var elapsed = Stopwatch.GetTimestamp() - (deadline - _stallTicks);
+        long seen;
+        while (elapsed > (seen = Volatile.Read(ref MaxHookElapsedTicks)) && Interlocked.CompareExchange(ref MaxHookElapsedTicks, elapsed, seen) != seen)
+        {
         }
     }
 
     /// <summary>This writer claimed <paramref name="page"/> first: copy its pre-image into a slot before the write proceeds.</summary>
     private bool CopyBeforeWrite(int page, int word, ulong bit, long deadline)
     {
-        var remainingMs = (int)Math.Max(0, (deadline - Stopwatch.GetTimestamp()) * 1000 / Stopwatch.Frequency);
-        var slot = _slots.TryRent(remainingMs, _abortCts.Token);
+        var slot = _slots.TryRent(deadline, _abortCts.Token);
         if (slot < 0)
         {
             Abort(BackupAbortReason.CbwStall);
