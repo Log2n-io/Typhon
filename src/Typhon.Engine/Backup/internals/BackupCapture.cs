@@ -1,8 +1,10 @@
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Win32.SafeHandles;
 
 namespace Typhon.Engine.Internals;
 
@@ -92,6 +94,10 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
     private long _expected;
     private PinnedMemoryBlock _scanBuffer;
     private PinnedMemoryBlock _metaBuffer;
+
+    // The capture's own synchronous read handle on the data file. The engine's is overlapped (its batches write asynchronously), and every synchronous
+    // read through an overlapped handle allocates on Windows: ~176 B per copy-before-write and per scanned run.
+    private SafeFileHandle _reader;
 
     /// <summary>Creates a capture for <paramref name="engine"/>; <see cref="Run"/> performs it.</summary>
     public BackupCapture(DatabaseEngine engine, BackupCaptureOptions options, IResource owner, ILogger logger, Action<CapturePhase, int> probe)
@@ -194,6 +200,7 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
         _slots = new CbwSlotPool(_engine.MemoryAllocator, _owner, _options.CbwBufferPages, CbwClock);
         _scanBuffer = _engine.MemoryAllocator.AllocatePinned("Backup.ScanBuffer", _owner, _options.ScanRunPages * PagedMMF.PageSize, false, 4096);
         _metaBuffer = _engine.MemoryAllocator.AllocatePinned("Backup.MetaPair", _owner, 2 * PagedMMF.PageSize, false, 4096);
+        _reader = _mmf.OpenDataFileReader();
 
         Freeze(ct);
         Probe?.Invoke(CapturePhase.AfterFreeze, 0);
@@ -250,6 +257,7 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
             var claimed = new ulong[(sized + 63) >> 6];
             var done = new ulong[(sized + 63) >> 6];
             var fresh = new PageChangeMap();
+            fresh.Reserve(sized);
 
             var acquireStart = Stopwatch.GetTimestamp();
             if (!TryEnterGateExclusiveWithin(deadline, ct))
@@ -269,8 +277,8 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
                         throw new BackupAbortedException(BackupAbortReason.EngineFault, "the data file holds no meta pair.");
                     }
 
-                    _mmf.ReadPageDirect(0, MetaSlot(0));
-                    _mmf.ReadPageDirect(1, MetaSlot(1));
+                    ReadPage(0, MetaSlot(0));
+                    ReadPage(1, MetaSlot(1));
                     var detached = _mmf.SwapChangeMap(fresh);
                     _full = Kind == BackupKind.Full;
                     _imageSet = _full ? null : detached;
@@ -380,7 +388,7 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
 
             Probe?.Invoke(CapturePhase.ScannerClaimed, p);
             var bytes = run * PagedMMF.PageSize;
-            var read = _mmf.ReadDataFile(p * (long)PagedMMF.PageSize, scan[..bytes]);
+            var read = ReadDataFile(p * (long)PagedMMF.PageSize, scan[..bytes]);
             if (read < bytes)
             {
                 scan[read..bytes].Clear();
@@ -515,7 +523,7 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
         try
         {
             // No write to this page can be in flight: every earlier one finished before the freeze or waited for this claim.
-            _mmf.ReadPageDirect(page, _slots.Span(slot));
+            ReadPage(page, _slots.Span(slot));
         }
         catch (Exception)
         {
@@ -760,6 +768,31 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
 
     private unsafe Span<byte> MetaSlot(int slot) => new(_metaBuffer.DataAsPointer + slot * PagedMMF.PageSize, PagedMMF.PageSize);
 
+    /// <summary>Reads data-file bytes at <paramref name="offset"/> through the capture's handle; returns how many (fewer past the end of the file).</summary>
+    private int ReadDataFile(long offset, Span<byte> destination)
+    {
+        var total = 0;
+        while (total < destination.Length)
+        {
+            var n = RandomAccess.Read(_reader, destination[total..], offset + total);
+            if (n == 0)
+            {
+                break;
+            }
+
+            total += n;
+        }
+
+        return total;
+    }
+
+    /// <summary>Reads file page <paramref name="page"/>; zeros past the end of the file.</summary>
+    private void ReadPage(int page, Span<byte> destination)
+    {
+        var read = ReadDataFile(page * (long)PagedMMF.PageSize, destination);
+        destination[read..].Clear();
+    }
+
     private unsafe Span<byte> ScanSpan() => new(_scanBuffer.DataAsPointer, _options.ScanRunPages * PagedMMF.PageSize);
 
     /// <inheritdoc />
@@ -775,6 +808,8 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
         {
             _slots?.Dispose();
             _slots = null;
+            _reader?.Dispose();
+            _reader = null;
             _abortCts.Dispose();
         }
 

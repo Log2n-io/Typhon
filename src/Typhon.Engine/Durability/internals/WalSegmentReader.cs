@@ -8,19 +8,29 @@ namespace Typhon.Engine.Internals;
 /// Sequential reader for WAL segment files during crash recovery. Opens a segment, validates the header,
 /// and iterates chunks with CRC chain validation. Stops at end-of-data or CRC break (truncation).
 /// </summary>
-internal sealed class WalSegmentReader : IDisposable
+/// <remarks>
+/// A segment's data area lives in native memory zero-filled by the OS (<see cref="NativeMemory"/>), not a GC array: a segment is up to its declared size
+/// (64 MiB by default), and a backup computes its point LSN with this reader on every capture, so an array per segment was large-object garbage on
+/// every point. Fresh zeroed pages cost nothing until touched, and only the part <see cref="IWalFileIO.ReadableLength"/> reports is read: past it the
+/// reader sees the zeros a tail view would have returned, so what it parses is unchanged. A body returned by <see cref="TryReadNext"/> points into that
+/// memory and is valid until the next <see cref="OpenSegment"/> or <see cref="Dispose"/>.
+/// </remarks>
+internal sealed unsafe class WalSegmentReader : IDisposable
 {
     private const int PageSize = 4096;
+    private const int ReadChunkBytes = 4 << 20;
 
     private readonly IWalFileIO _fileIO;
 
-    // Staging buffer for aligned reads
-    private byte[] _readBuffer;
-    private readonly int _readBufferSize;
+    // The header's read buffer, page-aligned: segments are opened unbuffered on Windows
+    private byte* _header;
 
-    // Segment data loaded into memory
-    private byte[] _segmentData;
+    // Segment data loaded into memory: _data is _block aligned up to a page
+    private byte* _block;
+    private byte* _data;
     private int _segmentDataLength;
+
+    private Span<byte> Data => new(_data, _segmentDataLength);
 
     // Frame-level iteration
     private int _frameOffset;         // Start of current frame (WalFrameHeader position)
@@ -53,8 +63,8 @@ internal sealed class WalSegmentReader : IDisposable
     {
         ArgumentNullException.ThrowIfNull(fileIO);
         _fileIO = fileIO;
-        _readBufferSize = 256 * 1024; // 256KB read buffer
-        _readBuffer = GC.AllocateArray<byte>(_readBufferSize, true);
+        // native-alloc: one page per reader, freed by Dispose; recovery runs before the engine's allocator and resource tree exist.
+        _header = (byte*)NativeMemory.AlignedAlloc(WalSegmentHeader.SizeInBytes, PageSize);
     }
 
     /// <summary>
@@ -70,7 +80,8 @@ internal sealed class WalSegmentReader : IDisposable
         using var handle = _fileIO.OpenSegmentForRead(path);
 
         // Read the header (first 4096 bytes)
-        var headerBuffer = new byte[WalSegmentHeader.SizeInBytes];
+        var headerBuffer = new Span<byte>(_header, WalSegmentHeader.SizeInBytes);
+        headerBuffer.Clear();
         _fileIO.ReadAligned(handle, 0, headerBuffer);
 
         _segmentHeader = MemoryMarshal.Read<WalSegmentHeader>(headerBuffer);
@@ -80,41 +91,24 @@ internal sealed class WalSegmentReader : IDisposable
             return false;
         }
 
-        // Read the full segment data area (after header) into memory
+        // Read the segment data area (after header) into memory: zeros past what the source can return
         var dataSize = (int)_segmentHeader.SegmentSize - WalSegmentHeader.SizeInBytes;
-        if (dataSize <= 0)
+        FreeData();
+        if (dataSize > 0)
         {
-            _segmentData = [];
-            _segmentDataLength = 0;
-        }
-        else
-        {
-            _segmentData = new byte[dataSize];
-            var remaining = dataSize;
-            var fileOffset = (long)WalSegmentHeader.SizeInBytes;
-            var destOffset = 0;
-
-            while (remaining > 0)
-            {
-                var toRead = Math.Min(remaining, _readBufferSize);
-                var alignedRead = AlignUp(toRead, PageSize);
-                if (alignedRead > _readBufferSize)
-                {
-                    alignedRead = _readBufferSize;
-                    toRead = alignedRead;
-                }
-
-                _fileIO.ReadAligned(handle, fileOffset, _readBuffer.AsSpan(0, alignedRead));
-
-                var toCopy = Math.Min(toRead, remaining);
-                _readBuffer.AsSpan(0, toCopy).CopyTo(_segmentData.AsSpan(destOffset));
-
-                fileOffset += alignedRead;
-                destOffset += toCopy;
-                remaining -= toCopy;
-            }
-
+            var capacity = AlignUp(dataSize, PageSize);
+            // native-alloc: lazily zeroed pages (the declared size, mostly untouched past the written part), freed at the next open or Dispose.
+            _block = (byte*)NativeMemory.AllocZeroed((nuint)(capacity + PageSize));
+            _data = (byte*)AlignUp((nint)_block, PageSize);
             _segmentDataLength = dataSize;
+
+            var readable = (int)Math.Clamp(_fileIO.ReadableLength(handle) - WalSegmentHeader.SizeInBytes, 0, capacity);
+            var toRead = AlignUp(readable, PageSize);
+            for (var offset = 0; offset < toRead; offset += ReadChunkBytes)
+            {
+                var chunk = new Span<byte>(_data + offset, Math.Min(ReadChunkBytes, toRead - offset));
+                _fileIO.ReadAligned(handle, WalSegmentHeader.SizeInBytes + (long)offset, chunk);
+            }
         }
 
         _opened = true;
@@ -142,7 +136,7 @@ internal sealed class WalSegmentReader : IDisposable
         chunkHeader = default;
         body = default;
 
-        if (!_opened || _segmentData == null)
+        if (!_opened || _data == null)
         {
             return false;
         }
@@ -165,7 +159,7 @@ internal sealed class WalSegmentReader : IDisposable
             return false;
         }
 
-        chunkHeader = Unsafe.As<byte, WalChunkHeader>(ref _segmentData[_recordOffset]);
+        chunkHeader = Unsafe.As<byte, WalChunkHeader>(ref Data[_recordOffset]);
 
         // Validate minimum chunk size: header (8) + footer (4) = 12
         if (chunkHeader.ChunkSize < WalChunkHeader.SizeInBytes + WalChunkFooter.SizeInBytes)
@@ -183,10 +177,10 @@ internal sealed class WalSegmentReader : IDisposable
 
         // Read footer CRC
         var footerOffset = _recordOffset + chunkHeader.ChunkSize - WalChunkFooter.SizeInBytes;
-        var footerCrc = Unsafe.As<byte, uint>(ref _segmentData[footerOffset]);
+        var footerCrc = Unsafe.As<byte, uint>(ref Data[footerOffset]);
 
         // Compute CRC over [0, ChunkSize - 4) — header + body
-        var crcSpan = _segmentData.AsSpan(_recordOffset, chunkHeader.ChunkSize - WalChunkFooter.SizeInBytes);
+        var crcSpan = Data.Slice(_recordOffset, chunkHeader.ChunkSize - WalChunkFooter.SizeInBytes);
         var computedCrc = Crc32CUtil.Compute(crcSpan);
 
         if (computedCrc != footerCrc)
@@ -212,12 +206,12 @@ internal sealed class WalSegmentReader : IDisposable
         // Extract body: bytes between chunk header and footer
         var bodyStart = _recordOffset + WalChunkHeader.SizeInBytes;
         var bodyLen = chunkHeader.ChunkSize - WalChunkHeader.SizeInBytes - WalChunkFooter.SizeInBytes;
-        body = _segmentData.AsSpan(bodyStart, bodyLen);
+        body = Data.Slice(bodyStart, bodyLen);
 
         // Read LSN from body[0..8] (convention: LSN is always at body offset 0)
         if (bodyLen >= sizeof(long))
         {
-            LastValidLSN = Unsafe.As<byte, long>(ref _segmentData[bodyStart]);
+            LastValidLSN = Unsafe.As<byte, long>(ref Data[bodyStart]);
         }
 
         RecordsRead++;
@@ -247,7 +241,7 @@ internal sealed class WalSegmentReader : IDisposable
                 return false;
             }
 
-            ref var frameHeader = ref Unsafe.As<byte, WalFrameHeader>(ref _segmentData[_frameOffset]);
+            ref var frameHeader = ref Unsafe.As<byte, WalFrameHeader>(ref Data[_frameOffset]);
 
             // Zero frame length = either intra-block tail padding or genuine end-of-data. The WAL writer issues each drain as its
             // own O_DIRECT block, padded up to a 4096-byte boundary (WalWriter: bytesToWrite = AlignUp(data.Length, PageSize)). A
@@ -300,11 +294,31 @@ internal sealed class WalSegmentReader : IDisposable
 
     public void Dispose()
     {
-        _segmentData = null;
-        _readBuffer = null;
+        FreeData();
+        if (_header != null)
+        {
+            NativeMemory.AlignedFree(_header);
+            _header = null;
+        }
+
         _opened = false;
+    }
+
+    private void FreeData()
+    {
+        if (_block != null)
+        {
+            NativeMemory.Free(_block);
+            _block = null;
+        }
+
+        _data = null;
+        _segmentDataLength = 0;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int AlignUp(int value, int alignment) => (value + alignment - 1) & ~(alignment - 1);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static nint AlignUp(nint value, int alignment) => (value + alignment - 1) & ~(nint)(alignment - 1);
 }

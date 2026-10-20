@@ -73,8 +73,9 @@ internal sealed unsafe class CbwSlotPool : IDisposable
     {
         try
         {
+            // A free slot is the common case; Wait(0) takes it without registering on the abort token, which allocates.
             var spin = new SpinWait();
-            while (true)
+            while (!_free.Wait(0))
             {
                 var now = Now();
                 var blockMs = (deadline - now - TimerSlackTicks) * 1000 / Stopwatch.Frequency;

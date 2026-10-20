@@ -505,23 +505,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         return RandomAccess.GetLength(_fileHandle);
     }
 
-    /// <summary>Reads data-file bytes at <paramref name="offset"/>; returns how many were read (fewer past the end of the file).</summary>
-    internal int ReadDataFile(long offset, Span<byte> destination)
-    {
-        var total = 0;
-        while (total < destination.Length)
-        {
-            var n = RandomAccess.Read(_fileHandle, destination[total..], offset + total);
-            if (n == 0)
-            {
-                break;
-            }
+    /// <summary>
+    /// A second, synchronous, read-only handle on the data file, for a reader of its own (an online backup). This instance's handle is overlapped, and
+    /// a synchronous read through it allocates on Windows. Reads through both see the same file: neither bypasses the system cache.
+    /// </summary>
+    internal SafeFileHandle OpenDataFileReader()
+        => File.OpenHandle(DataFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, FileOptions.RandomAccess);
 
-            total += n;
-        }
-
-        return total;
-    }
     private string _lockFilePath;
     private readonly IPageCacheBackpressureStrategy _backpressureStrategy;
 

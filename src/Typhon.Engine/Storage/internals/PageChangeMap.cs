@@ -36,6 +36,18 @@ internal sealed class PageChangeMap
 
     private readonly ulong[][] _chunks = new ulong[DirectorySize][];
 
+    /// <summary>
+    /// Allocates the chunks covering pages <c>[0, pageCount)</c> now, so the first writes into a fresh map allocate nothing: a backup swaps one in at
+    /// every freeze, and its 64 KiB chunks would otherwise be allocated by the data-file writers.
+    /// </summary>
+    internal void Reserve(int pageCount)
+    {
+        for (var chunk = 0; chunk < DirectorySize && (long)chunk * PagesPerChunk < pageCount; chunk++)
+        {
+            Chunk(chunk);
+        }
+    }
+
     /// <summary>Marks pages <c>[firstPage, firstPage + count)</c> written.</summary>
     internal void Set(int firstPage, int count)
     {

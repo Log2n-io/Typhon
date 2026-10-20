@@ -66,6 +66,14 @@ internal interface IWalFileIO : IDisposable
     void ReadAligned(SafeFileHandle handle, long offset, Span<byte> buffer);
 
     /// <summary>
+    /// How many bytes from the start of the segment a read can return before it reads only zeros. <see cref="WalSegmentReader"/> reads no further, so a
+    /// source that knows its data ends early (a backup's tail view) spares it reading, and holding, the zeros of the rest of the declared size.
+    /// </summary>
+    /// <param name="handle">File handle from <see cref="OpenSegmentForRead"/>.</param>
+    /// <returns>The whole segment, <see cref="long.MaxValue"/>, unless the source knows better.</returns>
+    long ReadableLength(SafeFileHandle handle) => long.MaxValue;
+
+    /// <summary>
     /// Opens a WAL segment file for read-only access with sharing that allows concurrent writers.
     /// Used by <see cref="WalSegmentReader"/> (recovery scan) where the active segment may be held open by the <see cref="WalWriter"/>.
     /// </summary>

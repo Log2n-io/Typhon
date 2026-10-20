@@ -92,6 +92,9 @@ internal sealed class WalTailView : IWalFileIO
         buffer[n..].Clear();
     }
 
+    /// <summary>The segment's copied length: past it the view reads zeros, as a restored segment holds them.</summary>
+    public long ReadableLength(SafeFileHandle handle) => _lengths[_open[handle]];
+
     private void RequireFloor()
     {
         if (_floorHeld != null && !_floorHeld())
