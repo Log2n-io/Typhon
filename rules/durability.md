@@ -3504,8 +3504,8 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08) and
             (ASealedTornTail_EndsCleanlyAtItsSentinel_NamingTheFenceRecordsRecoveryApplied) — [VerifiesRule("BKP-10")]. Source
             mutants seen red: the floor raised before the publish, a release not counted, no flush before the rename, no
             directory flush (Linux model), a seal over a mid-log break
-  spec: rules/tla/WalArchive.tla (S7) — ArchivedOrReleased, NoSilentHole; mutants -mutant-raisebeforepublish, -mutant-openreclaim,
-    -mutant-nofloor, -mutant-continuityunchecked, -mutant-releasenocount
+  spec: rules/tla/WalArchive.tla (S7) — ArchivedOrReleased, FloorHoldsUnarchived, FloorAtArchiveEnd, NoSilentHole (2 792 states; -full
+    28 776); mutants -mutant-raisebeforepublish, -mutant-openreclaim, -mutant-nofloor, -mutant-continuityunchecked, -mutant-releasenocount
 
 ### BKP-11: A restore to an LSN or a time yields exactly the committed prefix at its cut, on one timeline, from one history `[fatal]` `[silent]`
   invariant restore(L) on timeline t: L' = the highest LSN ≤ L that ends a whole frame of t's WAL; state(open(R)) = every
@@ -3540,7 +3540,8 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08) and
             TimelineForkTests, RestoreMarkerV2Tests, RestoreCleanBaseTests
             (Mutant_AMarkerWithoutForceCrashRecovery_IsReported), RestorePlanTests (AC-A11) — [VerifiesRule("BKP-11")]. Source
             mutants seen red: fork flipped after FlushToDisk
-  spec: rules/tla/WalArchive.tla (S7) — RestoreIsPrefix
+  spec: rules/tla/WalArchive.tla (S7) — NoSilentHole (a restore never accepts a target past a hole); the cut is a prefix of the log, whose
+    recovery to exactly the committed prefix is S2's (CommitRecovery.tla)
 
 ### BKP-12: The engine never waits on a backup past its budget
   invariant a data-file writer spends at most CbwStallTimeout in BackupCapture.BeforeWrite per write, and per SavePages
