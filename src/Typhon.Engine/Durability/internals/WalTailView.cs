@@ -13,23 +13,29 @@ namespace Typhon.Engine.Internals;
 internal sealed class WalTailView : IWalFileIO
 {
     private readonly IWalFileIO _source;   // null over prefixes
+    private readonly Func<bool> _floorHeld;   // over a live engine's segments: whether the reclaim floor still keeps them
     private readonly Dictionary<string, long> _lengths;
     private readonly Dictionary<string, ReadOnlyMemory<byte>> _prefixes;
     private readonly Dictionary<SafeFileHandle, string> _open = new(ReferenceEqualityComparer.Instance);
     private int _nextHandle;
 
-    private WalTailView(IWalFileIO source, Dictionary<string, long> lengths, Dictionary<string, ReadOnlyMemory<byte>> prefixes)
+    private WalTailView(IWalFileIO source, Dictionary<string, long> lengths, Dictionary<string, ReadOnlyMemory<byte>> prefixes, Func<bool> floorHeld)
     {
         _source = source;
+        _floorHeld = floorHeld;
         _lengths = lengths;
         _prefixes = prefixes;
     }
 
-    /// <summary>The segments of <paramref name="source"/> named in <paramref name="lengths"/>, each read up to its length (a 4 KiB multiple).</summary>
-    internal static WalTailView OverSource(IWalFileIO source, Dictionary<string, long> lengths)
+    /// <summary>
+    /// The segments of <paramref name="source"/> named in <paramref name="lengths"/>, each read up to its length (a 4 KiB multiple). Over a running
+    /// engine's WAL, <paramref name="floorHeld"/> says whether the reclaim floor still keeps them, and every open and read checks it (BKP-04): nothing
+    /// else stops a checkpoint deleting a segment under the read. Null where no engine runs (the offline copy holds the database lock).
+    /// </summary>
+    internal static WalTailView OverSource(IWalFileIO source, Dictionary<string, long> lengths, Func<bool> floorHeld)
     {
         ArgumentNullException.ThrowIfNull(source);
-        return new WalTailView(source, lengths, null);
+        return new WalTailView(source, lengths, null, floorHeld);
     }
 
     /// <summary>Segments held in memory, keyed by path.</summary>
@@ -41,7 +47,7 @@ internal sealed class WalTailView : IWalFileIO
             lengths.Add(path, bytes.Length);
         }
 
-        return new WalTailView(null, lengths, prefixes);
+        return new WalTailView(null, lengths, prefixes, null);
     }
 
     public bool Exists(string path) => _lengths.ContainsKey(path);
@@ -55,6 +61,7 @@ internal sealed class WalTailView : IWalFileIO
 
     public SafeFileHandle OpenSegmentForRead(string path)
     {
+        RequireFloor();
         if (!_lengths.ContainsKey(path))
         {
             throw new FileNotFoundException("Not a segment of this tail.", path);
@@ -67,6 +74,7 @@ internal sealed class WalTailView : IWalFileIO
 
     public void ReadAligned(SafeFileHandle handle, long offset, Span<byte> buffer)
     {
+        RequireFloor();
         var path = _open[handle];
         var n = (int)Math.Clamp(_lengths[path] - offset, 0, buffer.Length);
         if (n > 0)
@@ -82,6 +90,14 @@ internal sealed class WalTailView : IWalFileIO
         }
 
         buffer[n..].Clear();
+    }
+
+    private void RequireFloor()
+    {
+        if (_floorHeld != null && !_floorHeld())
+        {
+            throw new InvalidOperationException("BKP-04: the live WAL segments are read without the reclaim floor that keeps them.");
+        }
     }
 
     public SafeFileHandle OpenSegment(string path, bool withFUA) => throw new NotSupportedException("A tail view is read-only.");

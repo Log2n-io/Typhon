@@ -20,6 +20,30 @@ class WalTailCaptureTests : TestBase<WalTailCaptureTests>
 
     protected override IWalFileIO CreateWalFileIO() => _gatedIo = new GatedWalFileIO();
 
+    // Staged scenarios force their checkpoints; a periodic one landing between a test's commit and its checkpoint would move what it stages.
+    protected override void ConfigureEngineOptions(DatabaseEngineOptions o)
+    {
+        base.ConfigureEngineOptions(o);
+        o.Resources.CheckpointIntervalMs = 600_000;
+    }
+
+    /// <summary>The tail copy as a capture runs it: holding the reclaim floor at C until it returns (its contract, BKP-04).</summary>
+    private WalTailResult CaptureHoldingFloor(DatabaseEngine dbe, long checkpointLsn, long publishedAtFreeze, IBackupPointSink sink, Action serviceCbw,
+        TimeSpan flushTimeout, CancellationToken ct, Action beforePointLsn = null)
+    {
+        var cm = dbe.CheckpointManager;
+        cm.SetReclaimFloor(checkpointLsn);
+        try
+        {
+            return WalTailInspector.CaptureTail(dbe.WalManager, () => cm.ReclaimFloor, dbe.MemoryAllocator, AllocationResource, checkpointLsn,
+                publishedAtFreeze, sink, serviceCbw, flushTimeout, ct, beforePointLsn);
+        }
+        finally
+        {
+            cm.ClearReclaimFloor();
+        }
+    }
+
     /// <summary>
     /// C1: a record published but not durable at the freeze (the WAL writer is held) can already be reflected by an image page, because a checkpoint
     /// wave writes before its flush2. The tail copy must wait until it is durable and then hold it.
@@ -52,7 +76,7 @@ class WalTailCaptureTests : TestBase<WalTailCaptureTests>
             publishedAtFreeze = dbe.WalManager.LastPublishedLsn;
             Assert.That(dbe.WalManager.DurableLsn, Is.LessThan(publishedAtFreeze), "premise: the commit is published, not durable");
 
-            capture = Task.Run(() => WalTailInspector.CaptureTail(dbe.WalManager, dbe.MemoryAllocator, AllocationResource, checkpointLsn,
+            capture = Task.Run(() => CaptureHoldingFloor(dbe, checkpointLsn,
                 publishedAtFreeze, sink, null, Budget, CancellationToken.None));
             Assert.That(capture.Wait(50), Is.False, $"{MissMarker}: the copy started before the WAL was durable through the freeze's published LSN");
         }
@@ -108,7 +132,7 @@ class WalTailCaptureTests : TestBase<WalTailCaptureTests>
 
             Assert.That(landed.AsSpan().IndexOfAnyExcept((byte)0), Is.GreaterThanOrEqualTo(0), "premise: the in-flight write is partly on disk");
 
-            var result = WalTailInspector.CaptureTail(wal, dbe.MemoryAllocator, AllocationResource, checkpointLsn, durable, NewSink(dbe), null, Budget,
+            var result = CaptureHoldingFloor(dbe, checkpointLsn, durable, NewSink(dbe), null, Budget,
                 CancellationToken.None);
             var copy = result.Segments.Single(s => s.SegmentId == active.SegmentId);
             Assert.That(copy.CopiedBytes, Is.LessThanOrEqualTo(heldAt),
@@ -158,7 +182,7 @@ class WalTailCaptureTests : TestBase<WalTailCaptureTests>
         var boundary = wal.SegmentManager.SnapshotForTail().Single(s => s.SegmentId == sealedId);
         Assert.That(boundary.LastLsn, Is.EqualTo(checkpointLsn).And.EqualTo(lastLsn), "premise: the sealed segment ends exactly at the checkpoint");
 
-        var result = WalTailInspector.CaptureTail(wal, dbe.MemoryAllocator, AllocationResource, checkpointLsn, wal.LastPublishedLsn, NewSink(dbe),
+        var result = CaptureHoldingFloor(dbe, checkpointLsn, wal.LastPublishedLsn, NewSink(dbe),
             null, Budget, CancellationToken.None);
         return (result, sealedId, checkpointLsn);
     }
@@ -192,7 +216,7 @@ class WalTailCaptureTests : TestBase<WalTailCaptureTests>
         WalTailResult result;
         try
         {
-            result = WalTailInspector.CaptureTail(wal, dbe.MemoryAllocator, AllocationResource, checkpointLsn, wal.LastPublishedLsn, NewSink(dbe),
+            result = CaptureHoldingFloor(dbe, checkpointLsn, wal.LastPublishedLsn, NewSink(dbe),
                 () =>
                 {
                     if (checkpointsDuringCopy++ == 0)
@@ -259,7 +283,7 @@ class WalTailCaptureTests : TestBase<WalTailCaptureTests>
         Assert.That(fenceLsn, Is.GreaterThan(svCommit), "premise: the fence wrote records after the last commit");
 
         var sink = NewSink(dbe);
-        var result = WalTailInspector.CaptureTail(wal, dbe.MemoryAllocator, AllocationResource, checkpointLsn, wal.LastPublishedLsn, sink,
+        var result = CaptureHoldingFloor(dbe, checkpointLsn, wal.LastPublishedLsn, sink,
             null, Budget, CancellationToken.None);
         Assert.That(result.PointLsn, Is.EqualTo(fenceLsn), "a fence record applies without a commit marker: it ends P");
         Assert.That(result.Segments, Has.Count.GreaterThanOrEqualTo(2));
@@ -314,7 +338,7 @@ class WalTailCaptureTests : TestBase<WalTailCaptureTests>
             Assert.That(active.WriteOffset, Is.GreaterThan(slice.Offset), "premise: the slice advanced the write offset");
 
             var sink = NewSink(dbe);
-            var result = WalTailInspector.CaptureTail(wal, dbe.MemoryAllocator, AllocationResource, checkpointLsn, durable, sink, null, Budget,
+            var result = CaptureHoldingFloor(dbe, checkpointLsn, durable, sink, null, Budget,
                 CancellationToken.None);
             var copy = result.Segments.Single(s => s.SegmentId == active.SegmentId);
             Assert.That(copy.CopiedBytes, Is.EqualTo(slice.Offset),
@@ -353,13 +377,46 @@ class WalTailCaptureTests : TestBase<WalTailCaptureTests>
         var sink = NewSink(dbe);
         sink.DiscardTailBytes = true;
         var before = GC.GetAllocatedBytesForCurrentThread();
-        var result = WalTailInspector.CaptureTail(wal, dbe.MemoryAllocator, AllocationResource, checkpointLsn, wal.LastPublishedLsn, sink, null, Budget,
+        var result = CaptureHoldingFloor(dbe, checkpointLsn, wal.LastPublishedLsn, sink, null, Budget,
             CancellationToken.None);
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
         Assert.That(result.BytesCopied, Is.EqualTo(written), "premise: the whole tail was copied");
         Assert.That(allocated, Is.LessThan(readerOwn + (512 << 10)),
             $"the copy allocated {allocated - readerOwn} byte(s) beyond the segment reader's own, for a tail of {written}");
+    }
+
+    /// <summary>The floor is the copy's contract, enforced: without it the tail copy refuses to start.</summary>
+    [Test]
+    [CancelAfter(10_000)]
+    [VerifiesRule("BKP-04")]
+    public void ATailCopyWithoutTheFloor_Refuses()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        Commit(dbe, 3);
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(Budget), Is.True);
+        var c = dbe.CheckpointManager.CheckpointLsn;
+        var sink = NewSink(dbe);
+        Assert.That(() => WalTailInspector.CaptureTail(dbe.WalManager, () => dbe.CheckpointManager.ReclaimFloor, dbe.MemoryAllocator, AllocationResource,
+            c, dbe.WalManager.LastPublishedLsn, sink, null, Budget, CancellationToken.None), Throws.InvalidOperationException);
+        Assert.That(sink.Tail, Is.Empty, "the copy started without the floor");
+    }
+
+    /// <summary>And the read of <c>P</c> checks it too: a floor released between the copy and that read is caught, not read through.</summary>
+    [Test]
+    [CancelAfter(10_000)]
+    [VerifiesRule("BKP-04")]
+    public void AFloorReleasedBeforeTheReadOfP_IsCaught()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        Commit(dbe, 3);
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(Budget), Is.True);
+        var c = dbe.CheckpointManager.CheckpointLsn;
+        Commit(dbe, 3);
+        Assert.That(() => CaptureHoldingFloor(dbe, c, dbe.WalManager.LastPublishedLsn, NewSink(dbe), null, Budget, CancellationToken.None,
+            () => dbe.CheckpointManager.ClearReclaimFloor()), Throws.InvalidOperationException);
     }
 
     private static void Corrupt(byte[] prefix)

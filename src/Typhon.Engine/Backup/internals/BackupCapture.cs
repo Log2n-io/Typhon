@@ -16,6 +16,9 @@ internal enum CapturePhase : byte
     /// <summary>The image is frozen and the write gate released; the hook is installed.</summary>
     AfterFreeze,
 
+    /// <summary>The WAL tail is copied, and its point LSN not computed yet: the floor still holds (test seam for the read of <c>P</c>).</summary>
+    TailBeforePoint,
+
     /// <summary>The WAL tail is copied and the reclaim floor released.</summary>
     TailCopied,
 
@@ -208,8 +211,8 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
         WalTailResult tail;
         try
         {
-            tail = WalTailInspector.CaptureTail(wal, _engine.MemoryAllocator, _owner, CheckpointLsn, PublishedAtFreeze, new SinkGuard(this),
-                () => ServiceCbw(), _options.WalFlushTimeout, ct);
+            tail = WalTailInspector.CaptureTail(wal, () => _engine.CheckpointManager.ReclaimFloor, _engine.MemoryAllocator, _owner, CheckpointLsn,
+                PublishedAtFreeze, new SinkGuard(this), () => ServiceCbw(), _options.WalFlushTimeout, ct, BeforePointLsn);
         }
         finally
         {
@@ -487,6 +490,8 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
 
     /// <summary>The copy-before-write slots, once allocated (test seam).</summary>
     internal CbwSlotPool Slots => _slots;
+
+    private void BeforePointLsn() => Probe?.Invoke(CapturePhase.TailBeforePoint, 0);
 
     private long CbwNow() => CbwClock != null ? CbwClock() : Stopwatch.GetTimestamp();
 

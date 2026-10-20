@@ -71,15 +71,25 @@ internal static class WalTailInspector
     /// snapshots the segments, streams the selected ones into <paramref name="sink"/> through one native 1 MiB buffer (calling
     /// <paramref name="serviceCbw"/> between reads, so writers waiting on copy-before-write slots keep moving), then computes <c>P</c> by reading the
     /// same segments again through a <see cref="WalTailView"/> clamped at the lengths copied: no managed copy of the tail is ever made. The caller holds
-    /// the reclaim floor throughout, which keeps every one of those segments in place for both reads.
+    /// the reclaim floor at or below <paramref name="checkpointLsn"/> until this returns, which keeps every one of those segments in place for both
+    /// reads; <paramref name="reclaimFloor"/> reads it, and the copy and every read of <c>P</c> check it (BKP-04). <paramref name="beforePointLsn"/>
+    /// (a test probe, null in production) runs between the copy and the computation of <c>P</c>.
     /// </summary>
     /// <exception cref="BackupAbortedException">The WAL did not become durable in time, or a segment could not be read.</exception>
-    internal static unsafe WalTailResult CaptureTail(WalManager wal, IMemoryAllocator allocator, IResource owner, long checkpointLsn, long publishedAtFreeze,
-        IBackupPointSink sink, Action serviceCbw, TimeSpan flushTimeout, CancellationToken ct)
+    /// <exception cref="InvalidOperationException">The reclaim floor is not held (a caller's bug).</exception>
+    internal static unsafe WalTailResult CaptureTail(WalManager wal, Func<long> reclaimFloor, IMemoryAllocator allocator, IResource owner,
+        long checkpointLsn, long publishedAtFreeze, IBackupPointSink sink, Action serviceCbw, TimeSpan flushTimeout, CancellationToken ct,
+        Action beforePointLsn = null)
     {
         ArgumentNullException.ThrowIfNull(wal);
+        ArgumentNullException.ThrowIfNull(reclaimFloor);
         ArgumentNullException.ThrowIfNull(sink);
         var io = wal.FileIO;
+        bool FloorHeld() => reclaimFloor() <= checkpointLsn;
+        if (!FloorHeld())
+        {
+            throw new InvalidOperationException("BKP-04: the WAL tail is copied without the reclaim floor that keeps its segments.");
+        }
 
         // C1: everything the image can reflect is published at or below PubF; make it durable before reading a byte.
         try
@@ -112,7 +122,8 @@ internal static class WalTailInspector
             total += copy.CopiedBytes;
         }
 
-        return new WalTailResult(ComputePointLsn(WalTailView.OverSource(io, copied), checkpointLsn), copies, total);
+        beforePointLsn?.Invoke();
+        return new WalTailResult(ComputePointLsn(WalTailView.OverSource(io, copied, FloorHeld), checkpointLsn), copies, total);
     }
 
     /// <summary>
@@ -155,7 +166,7 @@ internal static class WalTailInspector
             total += copy.CopiedBytes;
         }
 
-        return new WalTailResult(ComputePointLsn(WalTailView.OverSource(io, copied), checkpointLsn), copies, total);
+        return new WalTailResult(ComputePointLsn(WalTailView.OverSource(io, copied, null), checkpointLsn), copies, total);   // the lock excludes every writer
     }
 
     /// <summary><c>P</c> over a stored tail's prefixes (see <see cref="ComputePointLsn(WalTailView, long)"/>).</summary>

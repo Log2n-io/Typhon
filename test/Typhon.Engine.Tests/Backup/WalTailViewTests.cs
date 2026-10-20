@@ -27,8 +27,28 @@ public class WalTailViewTests
             source.WriteAligned(handle, 0, written);
         }
 
-        var view = WalTailView.OverSource(source, new Dictionary<string, long> { [path] = 2 * Page });
+        var view = WalTailView.OverSource(source, new Dictionary<string, long> { [path] = 2 * Page }, null);
         AssertReadsTwoPagesThenZeros(view, path);
+    }
+
+    /// <summary>BKP-04: over a live engine's segments, a read without the reclaim floor is refused, not served.</summary>
+    [Test]
+    public void OverASource_RefusesEveryReadOnceTheFloorIsGone()
+    {
+        using var source = new InMemoryWalFileIO();
+        var path = Path.Combine("wal", "0000000000000001.wal");
+        using (var handle = source.OpenSegment(path, false))
+        {
+            source.WriteAligned(handle, 0, new byte[Page]);
+        }
+
+        var held = true;
+        var view = WalTailView.OverSource(source, new Dictionary<string, long> { [path] = Page }, () => held);
+        using var open = view.OpenSegmentForRead(path);
+        view.ReadAligned(open, 0, new byte[Page]);
+        held = false;
+        Assert.Throws<InvalidOperationException>(() => view.ReadAligned(open, 0, new byte[Page]));
+        Assert.Throws<InvalidOperationException>(() => view.OpenSegmentForRead(path));
     }
 
     [Test]

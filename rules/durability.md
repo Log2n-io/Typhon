@@ -3271,7 +3271,12 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
             fence record — computed by the scan RecoveryDriver.Run makes (path order, stop for good at the first
             corruption); C_X when there is none
   invariant P is computed over the segments the copy read, read again through WalTailView (the copied length, zeros past
-            it), under the same floor: the tail is streamed to the sink, never held in managed memory
+            it), under the same floor: the tail is streamed to the sink, never held in managed memory. The floor is enforced,
+            not assumed: CaptureTail refuses to start without it, and every open and read of the live segments by the view
+            checks it (a floor released before P throws rather than reading a reclaimed file). Nothing but reclaim removes or
+            rewrites a tail segment: ids are monotonic, preallocation creates only ids past the active one, headers are
+            written only into new files, the writer appends only past the batch end. The offline copy holds the database
+            lock and the data file unshared: no writer, no reclaim
   scope: WalTailInspector.CaptureTail, WalTailInspector.SelectTail, WalTailInspector.ComputePointLsn,
     WalTailInspector.CaptureTailOffline, WalTailView, WalSegmentContext.CompleteBatch, WalWriter.WriteInChunks,
     CheckpointManager.SetReclaimFloor, CheckpointManager.ClearReclaimFloor
@@ -3287,13 +3292,18 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
             commit published: the copy waits, then holds it), WalTailCaptureTests.SegmentEndingAtTheCheckpoint_IsInTheTail
             (+ Mutant_ATailStartingOneSegmentLate_IsReported), WalTailCaptureTests.FloorHoldsDuringTheCopy_WhileACheckpointRuns
             (a checkpoint inside the copy), SegmentSnapshotTests.SnapshotDuringARotation_SeesTheSegmentBeingSealed;
+            TailFloorTests.AReclaimStagedBeforeTheReadOfP_LeavesTheTailSegments (a checkpoint past a sealed tail segment, run
+            between the copy and the read of P), WalTailCaptureTests.ATailCopyWithoutTheFloor_Refuses,
+            WalTailCaptureTests.AFloorReleasedBeforeTheReadOfP_IsCaught, WalTailViewTests.OverASource_RefusesEveryReadOnceTheFloorIsGone,
             WalTailCaptureTests.ATailTakenBetweenTheSlicesOfABatch_EndsWhereTheBatchBegan (the writer held after a batch's
             first slice), WalTailCaptureTests.TheTailCopy_MakesNoManagedCopyOfTheTail, WalTailViewTests;
             P: WalTailCaptureTests.PointLsn_IsTheLastCommitOrFence_AndStopsAtTheFirstCorruption (and P over the stored
             bytes = P over the live segments). Source mutants seen red: no flush before the copy, `>` instead of `≥`, no
             floor in step 8, P without fence records, no stop at the first corruption, ActiveSegment assigned outside the
             lock, the snapshot reading WriteOffset, a batch end published per slice, a managed copy per segment, a view
-            that reads past the copied length
+            that reads past the copied length, the floor released before P (caught by the view; with the view's check
+            removed too, the staged checkpoint deletes the segment under the read), the view's check removed, the copy's
+            precondition removed
   spec: rules/tla/BackupCapture.tla (S6) — TailCoversImage, NoNeededRecordReclaimed; mutants -mutant-noflush, -mutant-nofloor
 
 ### BKP-05: Opening a bundle restored from a point yields exactly that point's committed prefix `[fatal]` `[silent]`
