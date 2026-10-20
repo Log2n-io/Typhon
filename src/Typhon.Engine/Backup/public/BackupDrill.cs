@@ -22,9 +22,11 @@ public sealed class BackupDrillOptions
     public ulong PageCacheBytes { get; init; }
 
     /// <summary>
-    /// Opens the restored bundle (recovery runs) and closes it cleanly; <c>null</c> = <see cref="BackupOperations.OpenAndCloseRestored"/>. A host whose
-    /// database cannot be opened without its own component assemblies passes its own. Whatever it does, the drill checks the result itself: a bundle not
-    /// left clean, or an unclean image no recovery ran on, fails the open (the check never runs on an unrecovered image).
+    /// Opens the restored bundle (recovery runs) and closes it cleanly; <c>null</c> = <see cref="BackupOperations.OpenAndCloseRestored(string, ILogger)"/>,
+    /// which replays no record of the application's archetypes. An application drills a point whose tail holds them with
+    /// <c>b =&gt; BackupOperations.OpenAndCloseRestored(b, o =&gt; /* its registrations */)</c>. Whatever the opener does,
+    /// the drill checks the result itself: a bundle not left clean, or an unclean image no recovery ran on, fails the open (the check never runs on an
+    /// unrecovered image).
     /// </summary>
     public Func<string, BackupSettleResult> OpenAndClose { get; init; }
 
@@ -60,7 +62,7 @@ public sealed record BackupDrillReport(BackupPointSummary Point, BackupDrillOutc
     TimeSpan RestoreTime, TimeSpan OpenTime, TimeSpan CheckTime, WalRecoveryResult Recovery, IntegrityVerdict Verdict, int Findings, int SuspectPages,
     string RecordFile, string ScratchBundle);
 
-/// <summary>What an open and close of a restored bundle did (<see cref="BackupOperations.OpenAndCloseRestored"/>).</summary>
+/// <summary>What an open and close of a restored bundle did (<see cref="BackupOperations.OpenAndCloseRestored(string, ILogger)"/>).</summary>
 /// <param name="CrashRecoveryRan">The open took the crash path: the WAL was replayed, derived structures rebuilt, the image sealed.</param>
 /// <param name="Recovery">The WAL recovery's figures; default when none ran.</param>
 /// <param name="Duration">Open to close.</param>

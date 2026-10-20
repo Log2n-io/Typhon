@@ -107,6 +107,23 @@ class BackupDrillTests : BackupTestBase<BackupDrillTests>
         Assert.That(DrillRecords.ReadNewestPerPoint(StoreFileSystem.Instance, _store).Newest, Is.Null);
     }
 
+    /// <summary>
+    /// The application's way past #1309: the public opener with its registrations replays the tail the default opener refuses, and reports the recovery
+    /// honestly, so the drill's guard holds and the point passes.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void ThePublicOpener_WithTheApplicationsRegistrations_DrillsAPointWithATail()
+    {
+        Backup(out _);
+
+        var report = BackupOperations.Drill(_store, PointSelector.Latest, Options(opener: b =>
+            BackupOperations.OpenAndCloseRestored(b, o => o.PageCacheSize(DrillCache).Register<CompA>().Register<CompSmSingleVersion>())));
+
+        Assert.That((report.Outcome, report.FailedStage), Is.EqualTo((BackupDrillOutcome.Passed, BackupDrillStage.None)), report.Error);
+        Assert.That(report.Recovery.RecordsReplayed, Is.GreaterThan(0), "the tail's records were replayed");
+    }
+
     [Test]
     [CancelAfter(30_000)]
     public void KeepScratch_LeavesTheBundleOpenable()

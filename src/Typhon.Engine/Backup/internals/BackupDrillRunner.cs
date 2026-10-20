@@ -86,7 +86,7 @@ internal static class BackupDrillRunner
     private static string Restore(IStoreFileSystem fs, string store, uint id, string work, DrillState run)
     {
         var options = run.Options;
-        var opener = options.OpenAndClose ?? (b => OpenAndCloseRestored(b, options.Logger, options.PageCacheBytes));
+        var opener = options.OpenAndClose ?? (b => OpenAndCloseRestored(b, null, options.Logger, options.PageCacheBytes));
         var clock = Stopwatch.StartNew();
         var imageClean = false;
         BackupSettleResult settle = null;
@@ -257,10 +257,11 @@ internal static class BackupDrillRunner
     }
 
     /// <summary>
-    /// Opens a restored bundle with no application schema through <see cref="DatabaseEngine.Open"/>, which runs <c>InitializeArchetypes</c> (where the WAL
-    /// replays, the derived structures rebuild and the image is sealed), then disposes it: a clean close.
+    /// Opens a restored bundle through <see cref="DatabaseEngine.Open"/> with <paramref name="configure"/>'s registrations (none: the persisted schema
+    /// alone), which runs <c>InitializeArchetypes</c>: the WAL tail replays there, the derived structures rebuild and the image is sealed. Then a
+    /// dispose: a clean close. A tail holding records of an archetype <paramref name="configure"/> does not register fails the open (7012, #1309).
     /// </summary>
-    public static BackupSettleResult OpenAndCloseRestored(string bundle, ILogger logger, ulong pageCacheBytes)
+    public static BackupSettleResult OpenAndCloseRestored(string bundle, Action<TyphonOptions> configure, ILogger logger, ulong pageCacheBytes)
     {
         ArgumentException.ThrowIfNullOrEmpty(bundle);
         var clock = Stopwatch.StartNew();
@@ -272,6 +273,8 @@ internal static class BackupDrillRunner
                    {
                        o.PageCacheSize(pageCacheBytes);
                    }
+
+                   configure?.Invoke(o);
                }, factory))
         {
             settled = SettleResultOf(engine, clock.Elapsed);

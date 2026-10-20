@@ -183,7 +183,6 @@ internal static class BackupCli
     internal static int ExitCodeFor(Exception ex) => ex switch
     {
         RestoreTargetUnreachableException => ExitStoreDamaged,
-        BackupPlanChangedException => ExitRefused,
         RestoreRefusedException or DatabaseLockedException or BackupStoreMismatchException or BackupStoreLockedException
             or BackupFormatUnsupportedException or BackupPlanChangedException or NotSupportedException => ExitRefused,
         TyphonException { ErrorCode: TyphonErrorCode.BackupNotConfigured } => ExitRefused,

@@ -91,8 +91,8 @@ typhon backup prune   --store S --min-keep 3 --max-age 7d [--dry-run]
   drill each lower it; a stopped engine's last status degrades by itself as time passes.
 - **A drill proves a point restores.** It restores into a scratch directory, opens the database (recovery runs), checks it
   deep and records the result in the store. The `typhon` tool drills a point whose WAL tail it can replay without the
-  application's assemblies; a point whose tail holds the application's records is drilled in-process, by a host that
-  passes its own opener (`BackupDrillOptions.OpenAndClose`).
+  application's assemblies; a point whose tail holds the application's records is drilled in-process, by the application:
+  `OpenAndClose = b => BackupOperations.OpenAndCloseRestored(b, o => /* its registrations */)`.
 - **Archiving never loses WAL silently.** A segment leaves the database un-archived only when the archive falls behind past
   its backlog limit; that range is then a recorded gap, which no restore crosses, and a new point is taken. A restore to an
   LSN or an instant ends at the last whole transaction at or below it, and never crosses a schema change or a bulk load
