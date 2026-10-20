@@ -123,13 +123,21 @@ internal sealed class PackReader : IDisposable
 
         var isBase = header.Kind != BackupKind.Incremental;
         if (header.ImagePages < 2 || header.BackupId == 0 || (isBase ? header.ParentId != 0 || header.BaseId != header.BackupId
-                : header.ParentId == 0 || header.ParentId >= header.BackupId || header.BaseId > header.ParentId))
+                : header.ParentId == 0 || header.ParentId >= header.BackupId || header.BaseId == 0 || header.BaseId > header.ParentId))
         {
             PackFormat.ThrowCorrupt(path, "Header", -1, "inconsistent identity (BackupId/ParentId/BaseId/ImagePages)");
         }
 
         return header;
     }
+
+    /// <summary>
+    /// Whether a frame of <paramref name="storedLength"/> bytes whose data starts at <paramref name="dataOffset"/> (its prefix 4 bytes before) lies in
+    /// <c>[HeaderSize, dataRegionEnd)</c>. Written so no forged offset can wrap: an offset near <c>long.MinValue</c> passed the old
+    /// <c>offset - 4 &gt;= HeaderSize</c> and <c>offset + length &lt;= end</c> by overflowing both.
+    /// </summary>
+    internal static bool InDataRegion(long dataOffset, long storedLength, long dataRegionEnd) =>
+        dataOffset >= PackFormat.HeaderSize + PackFormat.FramePrefixSize && dataOffset <= dataRegionEnd && storedLength <= dataRegionEnd - dataOffset;
 
     private static PackFooter CheckFooter(string path, ReadOnlySpan<byte> bytes, long length, in PackHeader header)
     {
@@ -236,8 +244,7 @@ internal sealed class PackReader : IDisposable
                 var last = b == s.FirstBlock + s.BlockCount - 1;
                 var blockOk = blk.RawLength > 0 && blk.RawLength <= PackFormat.TailBlockSize && (last || blk.RawLength == PackFormat.TailBlockSize)
                               && blk.StoredLength > 0 && blk.StoredLength <= blk.RawLength
-                              && blk.DataOffset - PackFormat.FramePrefixSize >= PackFormat.HeaderSize
-                              && blk.DataOffset + blk.StoredLength <= Footer.DataRegionEnd;
+                              && InDataRegion(blk.DataOffset, blk.StoredLength, Footer.DataRegionEnd);
                 if (!blockOk)
                 {
                     PackFormat.ThrowCorrupt(Path, "TailDir", -1, $"block entry {b} is inconsistent");
@@ -512,6 +519,7 @@ internal sealed class PackIndexStream : IDisposable
     private int _filled;
     private long _last = -1;
     private uint _crc = Crc32CUtil.Start;
+    private bool _corrupt;
 
     public PackIndexStream(PackReader pack, int bufferBytes)
     {
@@ -524,6 +532,12 @@ internal sealed class PackIndexStream : IDisposable
 
     public bool TryNext(out PackPageEntry entry)
     {
+        // A stream that failed its IndexCRC stays failed: a caller that retries must never read on from its buffer as if nothing happened.
+        if (_corrupt)
+        {
+            PackFormat.ThrowCorrupt(_pack.Path, "Index", -1, "IndexCRC mismatch");
+        }
+
         if (_pos == _filled)
         {
             var remaining = _pack.Footer.PageCount - _read;
@@ -531,7 +545,7 @@ internal sealed class PackIndexStream : IDisposable
             {
                 if (_filled >= 0 && Crc32CUtil.Finish(_crc) != _pack.Footer.IndexCrc)
                 {
-                    _filled = -1;
+                    _corrupt = true;
                     PackFormat.ThrowCorrupt(_pack.Path, "Index", -1, "IndexCRC mismatch");
                 }
 
@@ -577,8 +591,7 @@ internal sealed class PackIndexStream : IDisposable
                 problem = "zero-page entry carries a frame or a non-zero CRC";
             }
         }
-        else if (e.StoredLength > PackFormat.PageSize || e.DataOffset - PackFormat.FramePrefixSize < PackFormat.HeaderSize
-                 || e.DataOffset + e.StoredLength > _pack.Footer.DataRegionEnd)
+        else if (e.StoredLength > PackFormat.PageSize || !PackReader.InDataRegion(e.DataOffset, e.StoredLength, _pack.Footer.DataRegionEnd))
         {
             problem = "frame outside the data region";
         }

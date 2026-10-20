@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -14,6 +15,21 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 internal static class PackFormat
 {
+    /// <summary>
+    /// The INDEX is read and written as raw <see cref="PackPageEntry"/> structs (MemoryMarshal over their bytes): that is the on-disk format only
+    /// when the struct is exactly <see cref="PageEntrySize"/> bytes and the machine is little-endian. Anything else fails at first use, not as
+    /// a silently garbled index.
+    /// </summary>
+    static PackFormat()
+    {
+        if (Unsafe.SizeOf<PackPageEntry>() != PageEntrySize || !BitConverter.IsLittleEndian)
+        {
+            throw new PlatformNotSupportedException(
+                $"Backup packs need a {PageEntrySize}-byte index entry (this build lays it out in {Unsafe.SizeOf<PackPageEntry>()}) on a little-endian "
+                + $"machine (this one is {(BitConverter.IsLittleEndian ? "little" : "big")}-endian).");
+        }
+    }
+
     public const int HeaderSize = 256;
     public const int FooterSize = 128;
     public const int PageEntrySize = 24;
