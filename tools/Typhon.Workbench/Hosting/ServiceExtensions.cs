@@ -40,6 +40,10 @@ public static class ServiceExtensions
         // #621: owns the paused-session lifecycle — releasing a database to another process and watching for its return. Singleton because it holds one
         // shared poll timer and the per-session watchers; a scoped instance would leave a paused session with nobody watching for it.
         services.AddSingleton<DatabasePauseCoordinator>();
+        // #1417: the Backups view's server-side jobs, the engine calls they make (one seam, substituted by tests), and the retention plans it served.
+        services.AddSingleton<Typhon.Workbench.Backups.BackupJobRegistry>();
+        services.AddSingleton<Typhon.Workbench.Backups.IBackupOperations, Typhon.Workbench.Backups.BackupOperationsAdapter>();
+        services.AddSingleton<Typhon.Workbench.Backups.BackupPlanCache>();
         return services;
     }
 
@@ -57,6 +61,8 @@ public static class ServiceExtensions
            .WithTags("Data");
         app.MapGet("/api/options/stream", OptionsChangedStream.HandleAsync)
            .WithTags("Options");
+        app.MapGet("/api/backups/jobs/{jobId:guid}/stream", BackupJobStream.HandleAsync)
+           .WithTags("Backups");
         return app;
     }
 
@@ -79,6 +85,11 @@ public static class ServiceExtensions
         // before any session is disposed, rather than racing the teardown.
         lifetime.ApplicationStopping.Register(manager.DisposeAll);
         lifetime.ApplicationStopping.Register(pause.Dispose);
+
+        // #1417: registered last so it runs first — running backup jobs are cancelled (a capture publishes nothing, a restore before its publish leaves
+        // only its staging) before any session's engine is disposed under an in-process capture.
+        var backupJobs = services.GetRequiredService<Typhon.Workbench.Backups.BackupJobRegistry>();
+        lifetime.ApplicationStopping.Register(() => backupJobs.CancelAll(TimeSpan.FromSeconds(10)));
 #if DEBUG
         lifetime.ApplicationStopping.Register(() =>
         {

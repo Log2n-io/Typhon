@@ -37,6 +37,12 @@ internal static class Program
 
     private static int Main(string[] args)
     {
+        // `typhon ui` hosts the Workbench in this process, so its Backups view starts its drill child from this executable (#1417 WB-13).
+        if (Typhon.Workbench.Backups.BackupDrillChild.TryRun(args) is { } drill)
+        {
+            return drill;
+        }
+
         try
         {
             return BuildApp(args).Run(args);
