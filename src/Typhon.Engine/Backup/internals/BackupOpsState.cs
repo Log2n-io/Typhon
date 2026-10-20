@@ -70,6 +70,7 @@ internal sealed class BackupOpsState
 
     /// <summary>The last point's duration and size, for the metrics.</summary>
     public long LastDurationUs;
+    public long EmaDurationUs;
     public long MaxDurationUs;
     public long LastBytes;
     public long LastPages;

@@ -46,6 +46,8 @@ internal static class BackupCompactor
         var packs = PackChainPageSource.OpenPacks(fs, view, chain);
         ChainPageCursor cursor = null;
         PackWriter writer = null;
+        var span = TyphonEvent.BeginBackupLifecycle(1);
+        span.Packs = packs.Length;
         try
         {
             var suspects = new uint[packs.Length][];
@@ -104,6 +106,7 @@ internal static class BackupCompactor
             var info = writer.Complete(point.Footer.PointLsn, point.Footer.TailEndUtcTicks);
             var bytesRead = BytesRead(packs);
             options.Progress?.Invoke(bytesRead, chainBytes);
+            span.Bytes = info.PackBytes;
             BackupLog.PointCompacted(session.Log, pointId, packs.Length, info.ImagePages, holes, bytesRead, info.PackBytes, clock.ElapsedMilliseconds);
             return new BackupCompactionResult(BackupOperations.Summarize(session.View.Find(pointId).Compacted), false, packs.Length, info.ImagePages,
                 holes, bytesRead, info.PackBytes, clock.Elapsed);
@@ -115,6 +118,7 @@ internal static class BackupCompactor
         }
         finally
         {
+            span.Dispose();
             cursor?.Dispose();
             foreach (var p in packs)
             {

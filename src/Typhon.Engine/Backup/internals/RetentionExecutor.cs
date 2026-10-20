@@ -79,6 +79,7 @@ internal static class RetentionExecutor
 
         var deleted = new List<string>();
         long bytesFreed = 0;
+        var span = TyphonEvent.BeginBackupLifecycle(2);
         try
         {
             foreach (var d in decision.Deletions)
@@ -91,6 +92,9 @@ internal static class RetentionExecutor
         }
         finally
         {
+            span.Packs = deleted.Count;
+            span.Bytes = bytesFreed;
+            span.Dispose();
             session.RefreshView();
         }
 

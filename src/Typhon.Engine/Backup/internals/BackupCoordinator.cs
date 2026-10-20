@@ -228,7 +228,19 @@ internal sealed partial class BackupCoordinator : ResourceNode
                     capture.Abort(BackupAbortReason.EngineStopping);
                 }
 
-                point = capture.Run(request.Store, request.Kind, Lineage, linked.Token);
+                var span = TyphonEvent.BeginBackupCapture((byte)(request.Kind == BackupKind.Full ? 1 : 2));
+                try
+                {
+                    point = capture.Run(request.Store, request.Kind, Lineage, linked.Token);
+                    span.BackupId = point.BackupId;
+                    span.Pages = point.PageCount;
+                    span.CbwCopies = Volatile.Read(ref capture.CbwCopies);
+                }
+                finally
+                {
+                    span.Dispose();
+                }
+
                 observer?.PhaseChanged(BackupRunPhase.Verify);
                 BeforePostVerify?.Invoke(point);
                 VerifyPublished(request.Store as FileSystemBackupStore, point);
@@ -309,6 +321,7 @@ internal sealed partial class BackupCoordinator : ResourceNode
         }
 
         string problem;
+        var span = TyphonEvent.BeginBackupVerify(point.BackupId, (byte)(FullVerifyAfterBackup ? 1 : 0));
         try
         {
             var pack = BackupVerifier.VerifyPackFile(store.FileSystem, view, System.IO.Path.GetFileName(point.PackPath),
@@ -321,6 +334,10 @@ internal sealed partial class BackupCoordinator : ResourceNode
         catch (Exception e) when (e is BackupException or System.IO.IOException or UnauthorizedAccessException)
         {
             problem = e.Message;
+        }
+        finally
+        {
+            span.Dispose();
         }
 
         if (problem == null)

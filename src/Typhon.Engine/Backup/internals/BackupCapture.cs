@@ -202,7 +202,17 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
         _metaBuffer = _engine.MemoryAllocator.AllocatePinned("Backup.MetaPair", _owner, 2 * PagedMMF.PageSize, false, 4096);
         _reader = _mmf.OpenDataFileReader();
 
-        Freeze(ct);
+        var freezeSpan = TyphonEvent.BeginBackupFreeze();
+        try
+        {
+            Freeze(ct);
+            freezeSpan.ImagePages = _imagePages;
+        }
+        finally
+        {
+            freezeSpan.Dispose();
+        }
+
         Probe?.Invoke(CapturePhase.AfterFreeze, 0);
 
         var meta0 = MetaSlot(0);
@@ -214,6 +224,7 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
 
         // 5. The tail, holding the floor; writers' pre-images are drained between reads (C7).
         WalTailResult tail;
+        var tailSpan = TyphonEvent.BeginBackupTail();
         try
         {
             tail = WalTailInspector.CaptureTail(wal, () => _engine.CheckpointManager.ReclaimFloor, _engine.MemoryAllocator, _owner, CheckpointLsn,
@@ -222,13 +233,23 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
         finally
         {
             ReleaseFloor();
+            tailSpan.Dispose();
         }
 
         var tailEndUtc = DateTime.UtcNow.Ticks;
         Probe?.Invoke(CapturePhase.TailCopied, 0);
 
         // 6. The scan.
-        Scan(ct);
+        var scanSpan = TyphonEvent.BeginBackupScan();
+        try
+        {
+            Scan(ct);
+            scanSpan.Pages = (int)Volatile.Read(ref _added);
+        }
+        finally
+        {
+            scanSpan.Dispose();
+        }
 
         Probe?.Invoke(CapturePhase.BeforeComplete, 0);
         ThrowIfAborted();

@@ -22,7 +22,7 @@ namespace Typhon.Engine.Internals;
 /// capture's own gate protocol is the coordinator's.
 /// </para>
 /// </remarks>
-internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
+internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver, IMetricSource
 {
     private readonly DatabaseEngine _engine;
     private readonly BackupOptions _options;
@@ -155,6 +155,7 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
                 _state.SuspectPagesTotal += point.SuspectCount;
                 _state.LastDurationUs = (long)((mono - _jobStartedMono) * 1_000_000.0 / Stopwatch.Frequency);
                 _state.MaxDurationUs = Math.Max(_state.MaxDurationUs, _state.LastDurationUs);
+                _state.EmaDurationUs = _state.EmaDurationUs == 0 ? _state.LastDurationUs : ((_state.EmaDurationUs * 7) + _state.LastDurationUs) / 8;
                 _state.LastBytes = point.PackBytes;
                 _state.LastPages = point.PageCount;
                 if (summary != null && summary.TimelineId == _timeline)
@@ -416,6 +417,50 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
         LastPassedDrill = facts.LastPassedDrill,
         DrillPassed = facts.DrillPassed,
     };
+
+    // ── Metrics (plan 1416 §4.4) ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>The last point's duration (µs), pack bytes and pages, for the gauges of <see cref="BackupMetricsExporter"/>.</summary>
+    internal (long DurationUs, long Bytes, long Pages) LastPointMetrics
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return (_state.LastDurationUs, _state.LastBytes, _state.LastPages);
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public void ReadMetrics(IMetricWriter writer)
+    {
+        var s = Status;
+        long compactions, deleted, last, ema, max;
+        lock (_lock)
+        {
+            (compactions, deleted, last, ema, max) =
+                (_state.CompactionsTotal, _state.PacksDeletedTotal, _state.LastDurationUs, _state.EmaDurationUs, _state.MaxDurationUs);
+        }
+
+        writer.WriteThroughput("Points", s.PointsTotal);
+        writer.WriteThroughput("Failures", s.FailuresTotal);
+        writer.WriteThroughput("CbwCopies", s.CbwCopiesTotal);
+        writer.WriteThroughput("CbwAborts", s.CbwAbortsTotal);
+        writer.WriteThroughput("SuspectPages", s.SuspectPagesTotal);
+        writer.WriteThroughput("Compactions", compactions);
+        writer.WriteThroughput("PacksDeleted", deleted);
+        writer.WriteDuration("BackupPoint", last, ema, max);
+    }
+
+    /// <inheritdoc />
+    public void ResetPeaks()
+    {
+        lock (_lock)
+        {
+            _state.MaxDurationUs = 0;
+        }
+    }
 
     // ── The snapshot ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
