@@ -267,6 +267,9 @@ internal enum TimelineReason
 
     /// <summary>A completed bulk load forked it: replay cannot recreate the bulk's pages (Q4).</summary>
     BulkLoad,
+
+    /// <summary>Not known: the parent of the oldest timeline an engine knew, whose own origin its meta does not record.</summary>
+    Unknown,
 }
 
 /// <summary>Where a restored timeline came from.</summary>

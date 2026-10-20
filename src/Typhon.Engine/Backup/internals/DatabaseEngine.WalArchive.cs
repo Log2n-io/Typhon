@@ -89,17 +89,4 @@ public partial class DatabaseEngine
         archiver.Dispose();
         WalArchiver = null;
     }
-
-    /// <summary>What <c>wal/&lt;t&gt;/timeline.json</c> says about this database's current timeline (impl/1418 §3.6).</summary>
-    internal TimelineFile DescribeTimeline(Guid storeId) => new()
-    {
-        FormatVersion = TimelineFile.CurrentFormatVersion,
-        TimelineId = TimelineId,
-        DatabaseId = DatabaseId,
-        StoreId = storeId,
-        ParentTimelineId = null,
-        OriginLsn = 0,
-        Reason = TimelineReason.Genesis,
-        CreatedUtc = DateTime.UtcNow,
-    };
 }

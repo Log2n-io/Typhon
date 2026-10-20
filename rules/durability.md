@@ -3378,7 +3378,8 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08) and
 ### BKP-06: An incremental only on a trusted map and an unbroken chain `[silent]`
   invariant a point is captured incremental iff the request allows it ∧ BackupLineage.Trusted ∧ lineage.StoreId = the
             store's id ∧ the store's head of lineage.ChainId is lineage.LastBackupId ∧ that head is on the database's current
-            timeline; otherwise full (a new ChainId, minted by the store)
+            timeline or on the timeline it forked from (#1418: a fork for a write the WAL cannot replay keeps the lineage, the map
+            having tracked every write; a restore's new timeline does not); otherwise full (a new ChainId, minted by the store)
   invariant Trusted at open iff the last close was clean ∧ backup-state's nonce = BackupStateNonce ≠ 0 ∧ both CRCs hold ∧
             DatabaseId ∧ TimelineId ∧ DataFilePages = the file's length at open; then its map is ORed into the live one
   invariant backup-state is written only by a Trusted session's clean close, its nonce recorded in the flip that sets the
@@ -3387,14 +3388,17 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08) and
             adopting a new timeline makes the lineage untrusted
   scope: BackupAdmission.Decide, BackupStateFile.TryRead, BackupStateFile.Write, DatabaseEngine.AdoptBackupState,
     DatabaseEngine.WriteBackupState, DurabilityWatermarks.MarkCleanShutdown, DurabilityWatermarks.BeginOpenAfterCleanClose,
-    DurabilityWatermarks.SetCleanShutdown, DatabaseEngine.AdoptTimeline
+    DurabilityWatermarks.SetCleanShutdown, DatabaseEngine.AdoptTimeline, DatabaseEngine.ForkTimeline (keepLineage), OfflineCapture.Create
+    (the image's BK_TimelineParent)
   on_violation: an incremental over a map that missed writes → the restore serves stale pages, discovered at restore
   verified: BackupAdmissionTests (T6: a clean close → incremental holding exactly the pages a write probe saw between the
             freezes, AC-C2; a crash, an offline repair, a copied bundle behind its chain's head, a wiped store and a new
             timeline → full; the decision matrix + Mutant_ADecisionIgnoringTrust_IsReported), BackupStateFileTests (round
             trip and damage; trusted close → trusted open → nonce cleared; a stale file; a matching nonce with another database,
             timeline or length; an untrusted close deletes the file; a write failure costs a full point; Mutant_AFileTrustedAfterACrash_IsReported;
-            Adoption_IsReportedLoaded_OnlyWhenTheSessionAdopts: tracking off is TrackingOff, never Loaded).
+            Adoption_IsReportedLoaded_OnlyWhenTheSessionAdopts: tracking off is TrackingOff, never Loaded),
+            TimelineForkTests.AFork_KeepsTheLineage_TheNextPointIsIncremental (the parent clause; the decision matrix holds a
+            head on the parent and on another timeline's fork).
             Source mutants seen red: no nonce check, the open not clearing the nonce, Decide ignoring trust, an untrusted close
             writing the file, the adoption reporting Loaded with tracking off
 

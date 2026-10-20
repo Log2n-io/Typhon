@@ -51,10 +51,8 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
     private WalSegmentReader _reader;
     private ArchivedSegmentWriter _writer;
     private bool _started;
-    private Guid _timeline;
-    private WalArchiveTimeline _timelineHandle;
-    private readonly List<ArchivedSegmentInfo> _archived = [];
-    private int _publishesSinceIndex;
+    private Guid _storeId;
+    private readonly Dictionary<Guid, TimelineArchive> _timelines = new();
     private long _releasesAtLastArchive;
     private bool _archivedThisSession;
     private ArchiveTimeSample[] _segmentSamples = new ArchiveTimeSample[64];
@@ -82,12 +80,23 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
     private long _activeSegmentSeen;
     private long _activeFirstDurableMono;
     private long _releasesSeen;
+    private Guid _timelineSeen;
     private int _pointRequested;
     private StateBox _state;
 
     private sealed class StateBox(WalArchiveState value)
     {
         public readonly WalArchiveState Value = value;
+    }
+
+    /// <summary>One timeline's archive as the worker keeps it: its handle (paths, the per-segment lock), its segments, the publishes since its index.</summary>
+    private sealed class TimelineArchive(WalArchiveTimeline handle)
+    {
+        public readonly WalArchiveTimeline Handle = handle;
+        public readonly List<ArchivedSegmentInfo> Archived = [];
+        public int PublishesSinceIndex;
+
+        public long End => Archived.Count == 0 ? 0 : Archived[^1].LastLsn;
     }
 
     /// <summary>Creates an archiver under <paramref name="parent"/>; its worker starts with <see cref="Start"/> (tests drive <see cref="ArchivePending"/>).</summary>
@@ -107,10 +116,10 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
         _sampleIntervalTicks = (long)(options.TimeSampleInterval.TotalSeconds * Stopwatch.Frequency);
         var capacity = (int)Math.Clamp(2 * options.MaxSegmentAge.Ticks / Math.Max(1, options.TimeSampleInterval.Ticks), 16, 1 << 16);
         _ring = new (long, long, long)[capacity];
-        _timeline = engine.TimelineId;
+        _timelineSeen = engine.TimelineId;
         _releasesSeen = engine.CheckpointManager?.ArchiveReleases ?? 0;
         _releasesAtLastArchive = _releasesSeen;
-        _state = new StateBox(new WalArchiveState(WalArchiveCondition.Starting, _timeline, 0, 0, 0, 0, 0, 0, 0, ArchiveGapReason.None, DateTime.MinValue, null));
+        _state = new StateBox(new WalArchiveState(WalArchiveCondition.Starting, _timelineSeen, 0, 0, 0, 0, 0, 0, 0, ArchiveGapReason.None, DateTime.MinValue, null));
     }
 
     /// <summary>The close's final-pass budget (<see cref="ArchiveOptions.CloseTimeout"/>).</summary>
@@ -217,6 +226,14 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
             _wake.Set();
         }
 
+        // A fork (a schema change, a bulk load): the new timeline has no point to restore from yet.
+        var timeline = _engine.TimelineId;
+        if (timeline != _timelineSeen)
+        {
+            _timelineSeen = timeline;
+            Volatile.Write(ref _pointRequested, 1);
+        }
+
         // 4 RELEASE: the checkpoint released the floor since the last step.
         var releases = checkpoint.ArchiveReleases;
         var released = releases != _releasesSeen;
@@ -238,7 +255,7 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
         var gapTo = Volatile.Read(ref _lastGapTo);
         var gapFrom = Volatile.Read(ref _lastGapFrom);
         var sealTicks = Volatile.Read(ref _lastArchivedSealTicks);
-        var next = new WalArchiveState(condition, _timeline, archivedThrough, lagBytes, snap.HeldBytes, lagSeconds, Volatile.Read(ref _gapsTotal), gapFrom,
+        var next = new WalArchiveState(condition, timeline, archivedThrough, lagBytes, snap.HeldBytes, lagSeconds, Volatile.Read(ref _gapsTotal), gapFrom,
             gapTo, (ArchiveGapReason)Volatile.Read(ref _lastGapReason), sealTicks == 0 ? DateTime.MinValue : new DateTime(sealTicks, DateTimeKind.Utc),
             Volatile.Read(ref _lastError));
         if (next != _state.Value)
@@ -476,10 +493,34 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
             return false;
         }
 
-        WalArchiveTimeline timeline;
+        _storeId = identity.StoreId;
+        _reader ??= new WalSegmentReader(_wal.FileIO);
+        _writer ??= new ArchivedSegmentWriter(new BufferOwner(_engine.MemoryAllocator, this));
+
+        // The archive's end: the current timeline's; for a fork, its parent's when that is further (segments of the parent may still wait here, held by
+        // the floor); for a restored database, at least its origin — the segments below it are the parent's history, restored, never re-archived.
+        var current = _engine.TimelineFor(long.MaxValue);
+        var through = 0L;
+        TimelineArchive archive;
         try
         {
-            timeline = WalArchiveTimeline.TryOpen(_fs, _storePath, _timeline, _log);
+            archive = OpenTimeline(current);
+            if (archive == null)
+            {
+                return false;
+            }
+
+            through = archive.End;
+            if (current.ParentId != Guid.Empty && current.Reason is TimelineReason.SchemaChange or TimelineReason.BulkLoad)
+            {
+                var parent = OpenTimeline(_engine.TimelineFor(current.OriginLsn));
+                if (parent == null)
+                {
+                    return false;
+                }
+
+                through = Math.Max(through, parent.End);
+            }
         }
         catch (NotSupportedException e)
         {
@@ -487,43 +528,11 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
             return false;
         }
 
-        if (timeline == null)
+        through = Math.Max(through, _engine.RestoreOriginLsn);
+        if (archive.Archived.Count > 0)
         {
-            Fail(new IOException($"the archive lock of timeline {_timeline} is held (a retention run); retrying"));
-            return false;
+            Volatile.Write(ref _lastArchivedSealTicks, archive.Archived[^1].Header.SealedUtcTicks);
         }
-
-        long through;
-        try
-        {
-            var file = timeline.EnsureTimelineFile(_engine.DescribeTimeline(identity.StoreId));
-            if (file.DatabaseId != _engine.DatabaseId)
-            {
-                timeline.Dispose();
-                Diverge($"timeline {_timeline} of the store was written by database {file.DatabaseId}");
-                return false;
-            }
-
-            var loaded = timeline.LoadAndRefreshIndex();
-            _archived.Clear();
-            _archived.AddRange(loaded.Segments);
-            through = loaded.ArchivedThroughLsn;
-            if (_archived.Count > 0)
-            {
-                Volatile.Write(ref _lastArchivedSealTicks, _archived[^1].Header.SealedUtcTicks);
-            }
-        }
-        finally
-        {
-            // Kept for the archiver's life, its paths computed once; the lock is taken again per segment (WA-24).
-            timeline.ReleaseLock();
-        }
-
-        _timelineHandle?.Dispose();
-        _timelineHandle = timeline;
-
-        _reader ??= new WalSegmentReader(_wal.FileIO);
-        _writer ??= new ArchivedSegmentWriter(new BufferOwner(_engine.MemoryAllocator, this));
 
         // Local segments the archive already covers (a crash before the floor rose): theirs must be the archived bytes, or two histories share this
         // timeline (WA-14).
@@ -544,15 +553,51 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
             _engine.CheckpointManager?.RaiseArchiveFloor(through + 1);
         }
 
-        if (!StoreHasPointOnTimeline())
+        if (!StoreHasPointOnTimeline(current.TimelineId))
         {
             Volatile.Write(ref _pointRequested, 1);   // a timeline with no point cannot be restored from at all
         }
 
         _started = true;
         SetCondition(WalArchiveCondition.Archiving, null);
-        WalArchiveLog.ArchiverStarted(_log, _timeline, through, _storePath);
+        WalArchiveLog.ArchiverStarted(_log, current.TimelineId, through, _storePath);
         return true;
+    }
+
+    /// <summary>
+    /// A timeline's archive, opened once per archiver (its lock taken, <c>timeline.json</c> written when absent, its segments loaded, the lock let go: it is
+    /// taken again per segment). Null when the timeline was written by another database (Diverged). Throws an <see cref="IOException"/> when the lock is
+    /// busy (a retry).
+    /// </summary>
+    private TimelineArchive OpenTimeline(in TimelineEntry entry)
+    {
+        if (_timelines.TryGetValue(entry.TimelineId, out var cached))
+        {
+            return cached;
+        }
+
+        var handle = WalArchiveTimeline.TryOpen(_fs, _storePath, entry.TimelineId, _log)
+                     ?? throw new IOException($"the archive lock of timeline {entry.TimelineId} is held (a retention run); retrying");
+        var archive = new TimelineArchive(handle);
+        try
+        {
+            var file = handle.EnsureTimelineFile(_engine.DescribeTimeline(entry, _storeId));
+            if (file.DatabaseId != _engine.DatabaseId)
+            {
+                handle.Dispose();
+                Diverge($"timeline {entry.TimelineId} of the store was written by database {file.DatabaseId}");
+                return null;
+            }
+
+            archive.Archived.AddRange(handle.LoadAndRefreshIndex().Segments);
+        }
+        finally
+        {
+            handle.ReleaseLock();
+        }
+
+        _timelines[entry.TimelineId] = archive;
+        return archive;
     }
 
     /// <summary>Whether every local sealed segment at or below <paramref name="through"/> is the one archived under its id (WA-14).</summary>
@@ -574,15 +619,22 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
             local = _wal.SegmentManager.SealedSegments();
         }
 
+        var restoreOrigin = _engine.RestoreOriginLsn;
         foreach (var s in local)
         {
-            if (s.LastLsn > through || s.LastLsn < s.FirstLsn)
+            if (s.LastLsn > through || s.LastLsn < s.FirstLsn || s.LastLsn <= restoreOrigin)
             {
-                continue;
+                continue;   // not archived yet, empty, or the restored history of the parent (never re-archived)
+            }
+
+            var archive = OpenTimeline(_engine.TimelineFor(s.LastLsn));
+            if (archive == null)
+            {
+                return false;
             }
 
             ArchivedSegmentInfo archived = null;
-            foreach (var a in _archived)
+            foreach (var a in archive.Archived)
             {
                 if (a.SegmentId == s.Id)
                 {
@@ -628,13 +680,13 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
         return true;
     }
 
-    private bool StoreHasPointOnTimeline()
+    private bool StoreHasPointOnTimeline(Guid timeline)
     {
         try
         {
             foreach (var p in StoreView.Open(_storePath, _fs, _log).Catalog.Packs)
             {
-                if (p.TimelineId == _timeline)
+                if (p.TimelineId == timeline)
                 {
                     return true;
                 }
@@ -682,6 +734,14 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
         if (s.FirstLsn <= archivedThrough && archivedThrough > 0)
         {
             Diverge($"segment {s.Id} starts at LSN {s.FirstLsn}, inside the archive (archived through {archivedThrough})");
+            return false;
+        }
+
+        // b  Its timeline (WA-22): the newest whose origin is below its last LSN — a fork's parent keeps what was written before the fork.
+        var entry = _engine.TimelineFor(s.LastLsn);
+        var target = OpenTimeline(entry);
+        if (target == null)
+        {
             return false;
         }
 
@@ -733,8 +793,8 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
             Flags = s.Adopted ? ArchiveFormat.HeaderFlagAdopted : (byte)0,
             BlockSize = PackFormat.TailBlockSize,
             DatabaseId = _engine.DatabaseId,
-            StoreId = StoreIdOrEmpty(),
-            TimelineId = _timeline,
+            StoreId = _storeId,
+            TimelineId = entry.TimelineId,
             SegmentId = s.Id,
             FirstLsn = scan.FirstLsn,
             DeclaredSize = scan.DeclaredSize,
@@ -744,10 +804,10 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
 
         // d  Write and publish under the timeline's lock, for this one segment (WA-14, WA-24).
         var sampleCount = TakeSamples(s.FirstLsn, s.LastLsn);
-        var timeline = _timelineHandle;
+        var timeline = target.Handle;
         if (!timeline.TryReacquire())
         {
-            throw new IOException($"the archive lock of timeline {_timeline} is held (a retention run)");
+            throw new IOException($"the archive lock of timeline {entry.TimelineId} is held (a retention run)");
         }
 
         (ArchivePublishOutcome Outcome, ArchivedSegmentInfo Segment) published;
@@ -761,11 +821,14 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
                 return false;
             }
 
-            _archived.Add(published.Segment);
-            if (++_publishesSinceIndex >= IndexWriteEvery)
+            if (published.Outcome == ArchivePublishOutcome.Published)
             {
-                timeline.WriteIndex(_archived);
-                _publishesSinceIndex = 0;
+                target.Archived.Add(published.Segment);
+                if (++target.PublishesSinceIndex >= IndexWriteEvery)
+                {
+                    timeline.WriteIndex(target.Archived);
+                    target.PublishesSinceIndex = 0;
+                }
             }
         }
         finally
@@ -805,18 +868,6 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
         return true;
     }
 
-    private Guid _storeId;
-
-    private Guid StoreIdOrEmpty()
-    {
-        if (_storeId == Guid.Empty)
-        {
-            _storeId = StoreView.ReadIdentity(_fs, new StorePaths(_storePath))?.StoreId ?? Guid.Empty;
-        }
-
-        return _storeId;
-    }
-
     private void RecordGap(long from, long to, ArchiveGapReason reason)
     {
         Volatile.Write(ref _lastGapFrom, from);
@@ -824,7 +875,7 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
         Volatile.Write(ref _lastGapTo, to);
         Interlocked.Increment(ref _gapsTotal);
         Volatile.Write(ref _pointRequested, 1);
-        WalArchiveLog.GapRecorded(_log, _timeline, from, to, reason);
+        WalArchiveLog.GapRecorded(_log, _engine.TimelineId, from, to, reason);
     }
 
     private void SetCondition(WalArchiveCondition condition, string error)
@@ -853,7 +904,7 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
     private void Diverge(string why)
     {
         SetCondition(WalArchiveCondition.Diverged, why);
-        WalArchiveLog.ArchiveDiverged(_log, _timeline, why);
+        WalArchiveLog.ArchiveDiverged(_log, _engine.TimelineId, why);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -910,7 +961,7 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
             // A store call that does not return: the worker keeps its buffers (leaked, never freed under it).
             _detached = true;
         }
-        else if (_started && _publishesSinceIndex > 0)
+        else if (_started)
         {
             WriteIndexAtClose();
         }
@@ -930,21 +981,28 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
 
     private void WriteIndexAtClose()
     {
-        var timeline = _timelineHandle;
-        try
+        foreach (var archive in _timelines.Values)
         {
-            if (timeline != null && timeline.TryReacquire())
+            if (archive.PublishesSinceIndex == 0)
             {
-                timeline.WriteIndex(_archived);
+                continue;
             }
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
-        {
-            WalArchiveLog.StoreUnavailable(_log, _storePath, e.Message);
-        }
-        finally
-        {
-            timeline?.ReleaseLock();
+
+            try
+            {
+                if (archive.Handle.TryReacquire())
+                {
+                    archive.Handle.WriteIndex(archive.Archived);
+                }
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                WalArchiveLog.StoreUnavailable(_log, _storePath, e.Message);
+            }
+            finally
+            {
+                archive.Handle.ReleaseLock();
+            }
         }
     }
 
@@ -963,7 +1021,11 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
 
             _reader?.Dispose();
             _writer?.Dispose();
-            _timelineHandle?.Dispose();
+            foreach (var archive in _timelines.Values)
+            {
+                archive.Handle.Dispose();
+            }
+
             _wake.Dispose();
             _stopping.Dispose();
         }

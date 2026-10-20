@@ -277,6 +277,11 @@ public sealed class BulkLoadSession : IDisposable
                 $"checkpoint completed but CheckpointLSN ({_engine.CheckpointManager.CheckpointLsn}) did not advance past bulk anchor ({BulkBeginLsn})");
         }
 
+        // Q4 (impl/1418 §3.6): the bulk's pages reach the data file through the checkpoint above, never the WAL (BL-01), so a restore that replays
+        // its BulkEnd onto an image from before the bulk would claim a bulk it does not hold. The timeline forks first, at a segment boundary: BulkEnd and
+        // everything after it is on the child, whose every base was frozen after the bulk's pages were written.
+        _engine.ForkTimeline(TimelineReason.BulkLoad, switchSegment: true);
+
         // Step 5: Emit BulkEnd chunk carrying the final manifest (entity counters; PageRangeCount=0 in v1).
         var bulkEndLsn = EmitBulkManifestChunk(false, true);
 

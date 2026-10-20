@@ -157,14 +157,17 @@ internal static class BackupAdmission
 {
     /// <summary>
     /// An incremental only when the caller allows one, the live map is trusted, and the store's head of the lineage's chain is the lineage's last point,
-    /// on this database's timeline; a full point otherwise. Any doubt costs I/O, never correctness.
+    /// on this database's timeline or on the timeline it forked from (a fork keeps the lineage: the map tracked every write, impl/1418 §3.6); a full point
+    /// otherwise. Any doubt costs I/O, never correctness.
     /// </summary>
     /// <param name="requested"><see cref="BackupKind.Full"/> forces a full point; <see cref="BackupKind.Incremental"/> allows an incremental.</param>
     /// <param name="lineage">The session's lineage.</param>
     /// <param name="session">The open store session.</param>
     /// <param name="timelineId">The database's current timeline.</param>
+    /// <param name="timelineParentId">The timeline it continues; <see cref="Guid.Empty"/> for none.</param>
     /// <param name="parent">Receives the head an incremental builds on.</param>
-    public static BackupKind Decide(BackupKind requested, BackupLineage lineage, IBackupStoreSession session, Guid timelineId, out BackupChainHead parent)
+    public static BackupKind Decide(BackupKind requested, BackupLineage lineage, IBackupStoreSession session, Guid timelineId, Guid timelineParentId,
+        out BackupChainHead parent)
     {
         parent = default;
         if (requested == BackupKind.Full || !lineage.Trusted || lineage.StoreId != session.StoreId || lineage.LastBackupId == 0)
@@ -172,7 +175,8 @@ internal static class BackupAdmission
             return BackupKind.Full;
         }
 
-        if (!session.TryGetChainHead(lineage.ChainId, out var head) || head.BackupId != lineage.LastBackupId || head.TimelineId != timelineId)
+        if (!session.TryGetChainHead(lineage.ChainId, out var head) || head.BackupId != lineage.LastBackupId
+            || (head.TimelineId != timelineId && (timelineParentId == Guid.Empty || head.TimelineId != timelineParentId)))
         {
             return BackupKind.Full;
         }

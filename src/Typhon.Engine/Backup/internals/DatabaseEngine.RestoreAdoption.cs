@@ -26,6 +26,12 @@ public partial class DatabaseEngine
 {
     private RestoreMarkerFile _restoreMarker;
 
+    /// <summary>
+    /// The open takes the crash path whatever the last close was: a repair's regeneration (<see cref="DatabaseEngineOptions.ForceCrashRecoveryAtOpen"/>), or
+    /// a restored bundle whose marker asks for it (WA-12: a clean image restored past its own WAL).
+    /// </summary>
+    private bool ForcedCrashRecoveryAtOpen => _options.ForceCrashRecoveryAtOpen || _restoreMarker is { ForceCrashRecovery: true };
+
     /// <summary>What this open did with a restore marker.</summary>
     internal RestoreAdoption LastOpenRestoreAdoption { get; private set; }
 
@@ -98,7 +104,8 @@ public partial class DatabaseEngine
 
         var previous = MMF.Bootstrap.TryGet(BK_TimelineId, out var current) ? UnpackDatabaseId(current) : Guid.Empty;
         var flips = previous != _restoreMarker.NewTimelineId;
-        AdoptTimeline(_restoreMarker.NewTimelineId);
+        AdoptTimeline(_restoreMarker.NewTimelineId, _restoreMarker.RestoredFrom.TimelineId, _restoreMarker.OriginLsn, TimelineReason.Restore,
+            keepLineage: false);
         RestoreAdoptionProbe?.Invoke();
 
         var path = Path.Combine(MMF.BundleDirectory, RestoreMarker.FileName);

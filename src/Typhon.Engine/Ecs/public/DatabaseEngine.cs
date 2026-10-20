@@ -2920,7 +2920,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
             // #1143: before the first chunk-segment load (LoadSystemSchemaR1, next in the ctor), so every segment the open loads can rebuild its allocator
             // from what the last clean close recorded instead of reading all of its pages. After an unclean close the summary is never consulted.
-            if (_cleanShutdownAtOpen && !_options.ForceCrashRecoveryAtOpen)
+            if (_cleanShutdownAtOpen && !ForcedCrashRecoveryAtOpen)
             {
                 AdoptChunkSummary();
             }
@@ -2969,7 +2969,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // clear in BuildIndexedFieldInfo sees it. RunWalV2Recovery reads the same flag for the matching Phase-5 rebuild, so clear and rebuild always
                 // agree. The scan below still runs on a clean open: it reads the log, not the data file, and gives InitializeWalManager the LSN frontier
                 // (LOG-08).
-                CrashRecoveryAtOpen = !_cleanShutdownAtOpen || _options.ForceCrashRecoveryAtOpen;
+                CrashRecoveryAtOpen = !_cleanShutdownAtOpen || ForcedCrashRecoveryAtOpen;
 
                 // A crash open completes a segment grow torn by the crash rather than refusing the segment (#1296) — where the WAL can refill what a page
                 // the grow had not written held, as for the segments it replaces (TolerateTornSegmentsAtOpen); a clean open stays strict.
@@ -3508,34 +3508,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 bootstrap.Set(BK_DatabaseId, PackDatabaseId(DatabaseId));
                 bootstrap.Set(BK_TimelineId, PackDatabaseId(TimelineId));
             });
-        }
-    }
-
-    /// <summary>
-    /// Starts a new WAL timeline: persists <paramref name="timelineId"/> as <see cref="BK_TimelineId"/> (one meta flip, durable on return) and adopts it.
-    /// Idempotent: adopting the current timeline writes nothing. The first open of a restored database calls it before accepting transactions, so a crash
-    /// in between replays the adoption rather than losing it.
-    /// </summary>
-    /// <param name="timelineId">The new timeline; never <see cref="Guid.Empty"/>.</param>
-    internal void AdoptTimeline(Guid timelineId)
-    {
-        if (timelineId == Guid.Empty)
-        {
-            throw new ArgumentException("A timeline id cannot be empty.", nameof(timelineId));
-        }
-
-        var bootstrap = MMF.Bootstrap;
-        if (bootstrap.TryGet(BK_TimelineId, out var current) && UnpackDatabaseId(current) == timelineId)
-        {
-            TimelineId = timelineId;
-            return;
-        }
-
-        MMF.MutateBootstrapAndPersist(() => bootstrap.Set(BK_TimelineId, PackDatabaseId(timelineId)));
-        TimelineId = timelineId;
-        if (BackupCoordinator != null)
-        {
-            BackupCoordinator.Lineage.Trusted = false;   // a new timeline starts a new lineage: its first point is full (BKP-06)
         }
     }
 
@@ -4341,6 +4313,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 diff = SchemaValidator.ComputeDiff(schemaName, persistedFields, persisted.Comp, definition,
                     resolver.Renames ?? (IReadOnlyList<(string, string, int)>)[]);
 
+                // Q4 (impl/1418 §3.6): a layout change makes the records written from here on unreplayable onto an image from before it. The timeline
+                // forks before the first byte of the change is written, so no restore replays across it.
+                if (!diff.IsIdentical)
+                {
+                    ForkTimeline(TimelineReason.SchemaChange, switchSegment: false);
+                }
+
                 if (diff.HasBreakingChanges && schemaValidation != SchemaValidationMode.Skip)
                 {
 
@@ -4544,7 +4523,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
         else
         {
-            // Create path: use the provided ChangeSet, or create a new one for standalone registration
+            // Create path: use the provided ChangeSet, or create a new one for standalone registration. A component new to an existing database is a
+            // schema change (Q4): the timeline forks before its table is written.
+            if (_componentsTable != null && !MMF.IsDatabaseFileCreating)
+            {
+                ForkTimeline(TimelineReason.SchemaChange, switchSegment: false);
+            }
+
             var cs = changeSet ?? MMF.CreateChangeSet();
             componentTable = new ComponentTable(this, definition, this, storageMode, changeSet: cs);
 
@@ -4995,6 +4980,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // Reopen re-match by name (claude/design/Ecs/SourceGeneratedRegistry/04-solution-design.md §7.1):
             // restore this archetype's persisted routing id, or assign a fresh one for a newly-added archetype.
             var hasPersisted = TryGetPersistedArchetype(meta, out var persisted);
+
+            // A new archetype on an existing database (Q4): records name (routingId, slot), and an image predating it may hand the id to another
+            // archetype at its open. The timeline forks before the id is used.
+            if (!hasPersisted && !MMF.IsDatabaseFileCreating)
+            {
+                ForkTimeline(TimelineReason.SchemaChange, switchSegment: false);
+            }
+
             var routingId = hasPersisted ? persisted.Arch.RoutingId : _nextRoutingId++;
 
             // A migration invalidates the cluster (new component sizes => new geometry), so the fresh one is allocated below and the old bytes would be
