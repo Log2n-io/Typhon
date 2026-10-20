@@ -654,6 +654,58 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
     }
 
     /// <summary>
+    /// Deletes a published pack, durably: the delete, then a flush of <c>packs/</c>, before the caller's next delete (BKP-14: a crash keeps a prefix of a
+    /// descending sequence). Retention's only way to remove a pack, under this session's lock. The view is stale until <see cref="RefreshView"/>.
+    /// </summary>
+    public void DeletePack(string file)
+    {
+        ObjectDisposedException.ThrowIf(_lock == null, this);
+        if (!StoreCatalog.IsPublishedPack(file))
+        {
+            throw new ArgumentException($"'{file}' is not a published pack name.", nameof(file));
+        }
+
+        _fs.DeleteFile(_paths.PackPath(file));
+        _fs.FlushDirectory(_paths.Packs);
+    }
+
+    /// <summary>
+    /// The view after deletes: the catalog keeps the packs still listed (a pack never changes under the lock, BKP-08, so no header is read again), and
+    /// is written back.
+    /// </summary>
+    public void RefreshView()
+    {
+        ObjectDisposedException.ThrowIf(_lock == null, this);
+        var listing = _fs.EnumerateFiles(_paths.Packs);
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var f in listing)
+        {
+            names.Add(f.Name);
+        }
+
+        var packs = new List<CatalogPack>();
+        foreach (var p in _view.Catalog.Packs)
+        {
+            if (names.Contains(p.File))
+            {
+                packs.Add(p);
+            }
+        }
+
+        var unreadable = new List<CatalogUnreadable>();
+        foreach (var u in _view.Catalog.Unreadable)
+        {
+            if (names.Contains(u.File))
+            {
+                unreadable.Add(u);
+            }
+        }
+
+        _view.Catalog = StoreCatalog.Build(_identity, StoreCatalog.Fingerprint(listing), _highWater, packs, unreadable);
+        WriteCatalogIfChanged();
+    }
+
+    /// <summary>
     /// <c>max(store.hwm, every pack id, every temp id, every id this session allocated) + 1</c>, made durable in <c>store.hwm</c> before the
     /// caller creates its temp: an id is never reused, even after its pack is deleted (BKP-08, DC-6).
     /// </summary>

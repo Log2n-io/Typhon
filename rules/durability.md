@@ -3213,7 +3213,7 @@ answer to different constraints — RB must always end with a usable database, I
 A backup point is a frozen image of the data file plus the WAL tail that makes it consistent (ADR-075; design
 `design/Durability/PitBackup/`, implementation plans `impl/1412-capture-plan.md`, `impl/1413-store-restore-plan.md` and
 `impl/1415-1416-lifecycle-ops-plan.md`). This module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08) and the chain
-lifecycle (#1415: BKP-13). BKP-10 and 11 (WAL archiving) land with #1418.
+lifecycle (#1415: BKP-13, BKP-14). BKP-10 and 11 (WAL archiving) land with #1418.
 
 ### BKP-01: Every data-file write is tracked and gated `[silent]`
   invariant ∀ engine write w to the data file: w is issued by PagedMMF.IssueDataFileWrite or
@@ -3434,9 +3434,9 @@ lifecycle (#1415: BKP-13). BKP-10 and 11 (WAL archiving) land with #1418.
             TailDirCRC, SuspectCRC, each page's PageCrc after decode, each tail segment's RawCrc after decode, and
             FileCRC over [0, EOF-4); restore checks every one it reads and never returns a byte it read wrong
   invariant an id names one point: its -F or -I pack and its -C pack (a compaction keeps the id) materialise identically (BKP-13)
-  invariant (#1415) a pack is deleted only under store.lock, only when no kept point's chain resolves through it
+  invariant a pack is deleted only by retention, per BKP-14
   scope: PackWriter.Complete, PackWriter.Abort, BackupStore.Publish, BackupStore.AllocateBackupId, BackupStore.BeginCompaction,
-    BackupStore.DeleteAbandonedTemps, StoreFileSystem.MoveDurable, PackReader.Open, BackupVerifier.VerifyStore
+    BackupStore.DeleteAbandonedTemps, StoreFileSystem.MoveDurable, PackReader.Open, BackupVerifier.VerifyStore, RetentionExecutor.Apply
   on_violation: a point whose bytes changed after it was verified, a restore of "#12" that returns another point, or a
     visible pack missing its tail bytes — an unrestorable backup, discovered at restore
   verified: StorePublishCrashTests (a crash after every file-system operation of a backup, Windows and Linux directory
@@ -3508,3 +3508,24 @@ lifecycle (#1415: BKP-13). BKP-10 and 11 (WAL archiving) land with #1418.
             engine captured online, compacted, restored, and continued), CompactionCrashTests (a crash after every file-system operation of a
             compaction, Windows and Linux directory models; an existing -C never replaced) — [VerifiesRule("BKP-13")]; [RuleMutant("BKP-13")]:
             the oldest version of each page wins, the suspect set not carried, a damaged pack renamed in before its verify
+
+### BKP-14: Retention deletes only what no kept point needs `[fatal]`
+  invariant the kept set S = the restorable points ≥ K, K the last point of the walk newest → oldest that keeps p while rank(p) < MinKeep, or
+            while p is within MaxAge (from its freeze) ∧ rank(p) < MaxCount ∧ the packs ∪ resolve(S ∪ {p}) ≤ MaxTotalBytes (0 = no limit);
+            KeepLastDrilled ⇒ K ≤ the newest restorable drill-passed point. MinKeep counts restorable points only; MinKeep and KeepLastDrilled
+            beat every limit (R2), and a limit they prevent is reported as RetentionBlocked, never met by deleting (R3)
+  invariant before any delete, every chain with a point in S whose oldest kept point resolves below K has that point compacted (BKP-13);
+            a compaction that fails is not substituted: its chain keeps its packs that run
+  invariant a pack q is deleted only under store.lock, only if no s ∈ S resolves through it (the published compactions substituted), and
+            only if q.Id < K or q is an -I whose -C a kept resolution uses; a chain holding a point ≥ K that does not resolve loses nothing,
+            and an unreadable pack ≥ K (of no known chain) keeps every pack below K
+  invariant deletes run in descending BackupId, each made durable (a flush of packs/) before the next: after any crash prefix every point
+            still listed resolves as it did; after the last, every s ∈ S resolves (checked, a failure is a defect)
+  requires: BKP-08, BKP-13
+  scope: RetentionPlanner.Plan, RetentionExecutor.Apply, BackupOperations.ApplyRetention, BackupOperations.PlanRetention, BackupStore.DeletePack,
+         BackupStore.RefreshView, StoreFileSystem.DeleteFile
+  on_violation: a backup the operator was promised by the policy is gone, or a kept point is unrestorable — found on the day it is needed
+  verified: RetentionPlannerTests (each limit alone and combined, MinKeep and KeepLastDrilled pinning and reporting, the cutoff's and the head's
+            compactions, short of space, damaged and unreadable chains, 2 000 points), InterleavedChainsRetentionTests (two chains alternating
+            ids in one store; a broken point after the cutoff; a failed compaction) — [VerifiesRule("BKP-14")]; [RuleMutant("BKP-14")]: "every
+            pack below K" deletion (an interleaved chain loses its base), MinKeep counting unrestorable points

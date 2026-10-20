@@ -133,7 +133,8 @@ public enum TyphonErrorCode
     /// </summary>
     RecoveryArchetypeNotRegistered  = 7012,
 
-    // 71xx — Backup (7101-7106: the store and restore, #1413; 7107-7108: online capture, #1412)
+    // 71xx — Backup (7101-7106: the store and restore, #1413; 7107-7108: online capture, #1412; 7109: lifecycle, #1415; 7110: ops, #1416;
+    // 7111-7112: WAL archiving, #1418)
 
     /// <summary>Another writer holds the backup store's lock (see <see cref="BackupStoreLockedException"/>). Transient.</summary>
     BackupStoreLocked               = 7101,
@@ -161,6 +162,12 @@ public enum TyphonErrorCode
 
     /// <summary>A backup was requested while another one was running on the same engine.</summary>
     BackupInProgress                = 7108,
+
+    /// <summary>
+    /// A retention was applied with an approved plan, and the store now plans to delete a pack that plan did not list (see
+    /// <see cref="BackupPlanChangedException"/>). Nothing was deleted.
+    /// </summary>
+    BackupPlanChanged               = 7109,
 
     // 8xxx — Runtime / Scheduler
 

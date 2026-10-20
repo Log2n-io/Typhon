@@ -6,7 +6,7 @@ using System.Threading;
 
 namespace Typhon.Engine;
 
-/// <summary>Options of <see cref="BackupOperations.Compact"/> and <c>BackupOperations.ApplyRetention</c>.</summary>
+/// <summary>Options of <see cref="BackupOperations.Compact"/> and <see cref="BackupOperations.ApplyRetention"/>.</summary>
 [PublicAPI]
 public sealed class BackupLifecycleOptions
 {
@@ -73,7 +73,7 @@ public enum BackupRetentionBlock
 /// <param name="Blocked">The limit it could not meet, or <see cref="BackupRetentionBlock.None"/>.</param>
 /// <param name="BlockedReason">Why, in one sentence; <c>null</c> when not blocked.</param>
 /// <param name="Fingerprint">
-/// A CRC of the deletions and compactions: <c>BackupOperations.ApplyRetention</c> refuses a plan that would now delete a pack the approved
+/// A CRC of the deletions and compactions: <see cref="BackupOperations.ApplyRetention"/> refuses a plan that would now delete a pack the approved
 /// one did not list.
 /// </param>
 [PublicAPI]
@@ -82,7 +82,7 @@ public sealed record BackupRetentionPlan(IReadOnlyList<uint> Kept, IReadOnlyList
     string Fingerprint);
 
 /// <summary>What a retention did.</summary>
-/// <param name="Plan">The plan it applied (re-planned after its compactions).</param>
+/// <param name="Plan">The plan it applied: the compactions it attempted, then the deletions re-planned on what they published.</param>
 /// <param name="Compactions">The compactions it ran, failed ones excluded (their chains keep every pack this run).</param>
 /// <param name="Deleted">The pack files deleted, in order.</param>
 /// <param name="BytesFreed">Their bytes, minus the compacted packs written.</param>

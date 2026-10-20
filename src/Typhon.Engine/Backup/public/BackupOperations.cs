@@ -171,6 +171,58 @@ public static class BackupOperations
         return BackupCompactor.Compact(session, ChainResolver.Select(session.View, point), options);
     }
 
+    /// <summary>
+    /// What a retention would do now, without doing it (05 §3, the mandatory preview): the points it keeps, compacts and removes, and the packs it
+    /// deletes. Reads the packs' headers only; takes no lock, so a writer may change the store before the plan is applied (see
+    /// <see cref="ApplyRetention"/>'s <c>approved</c>).
+    /// </summary>
+    /// <param name="store">The store directory.</param>
+    /// <param name="policy">The policy (validated).</param>
+    /// <exception cref="ArgumentException">The policy is invalid.</exception>
+    public static BackupRetentionPlan PlanRetention(string store, BackupRetentionPolicy policy)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(store);
+        Validate(policy);
+        var fs = StoreFileSystem.Instance;
+        var view = StoreView.Open(store, fs, trustCatalog: false);
+        long? free = ((IStoreFileSystem)fs).TryGetAvailableFreeSpace(view.Paths.Packs, out var bytes) ? bytes : null;
+        return RetentionPlanner.Plan(view, policy, [], DateTime.UtcNow, free).Plan;
+    }
+
+    /// <summary>
+    /// Applies a retention under the store's lock (05 §3, BKP-14): compacts the oldest kept point of each chain that needs it, then deletes, newest first,
+    /// every pack no kept point resolves through; a kept point is never lost, and a limit <see cref="BackupRetentionPolicy.MinKeep"/> or
+    /// <see cref="BackupRetentionPolicy.KeepLastDrilled"/> prevents is reported, not met.
+    /// </summary>
+    /// <param name="store">The store directory.</param>
+    /// <param name="policy">The policy (validated).</param>
+    /// <param name="approved">
+    /// A plan from <see cref="PlanRetention"/> the operator approved: refused with <see cref="BackupPlanChangedException"/> when the store would now
+    /// delete a pack it did not list. <c>null</c> applies the policy as it stands.
+    /// </param>
+    /// <param name="options">Read budget, cancellation, progress, logging.</param>
+    /// <exception cref="ArgumentException">The policy is invalid.</exception>
+    /// <exception cref="BackupStoreLockedException">Another writer holds the store.</exception>
+    /// <exception cref="BackupPlanChangedException">The plan changed since <paramref name="approved"/>.</exception>
+    public static BackupRetentionResult ApplyRetention(string store, BackupRetentionPolicy policy, BackupRetentionPlan approved = null,
+        BackupLifecycleOptions options = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(store);
+        Validate(policy);
+        options ??= new BackupLifecycleOptions();
+        using var session = BackupStore.OpenForMaintenance(store, "prune", log: options.Logger);
+        return RetentionExecutor.Apply(session, policy, approved, [], DateTime.UtcNow, Guid.Empty, options);
+    }
+
+    private static void Validate(BackupRetentionPolicy policy)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        if (!policy.Validate(out var error))
+        {
+            throw new ArgumentException(error, nameof(policy));
+        }
+    }
+
     /// <summary>The pack that stands for a point: its compacted one when present.</summary>
     private static CatalogPack Standing(StoreView view, uint id)
     {
