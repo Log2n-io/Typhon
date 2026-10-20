@@ -3213,7 +3213,7 @@ answer to different constraints — RB must always end with a usable database, I
 A backup point is a frozen image of the data file plus the WAL tail that makes it consistent (ADR-075; design
 `design/Durability/PitBackup/`, implementation plans `impl/1412-capture-plan.md`, `impl/1413-store-restore-plan.md` and
 `impl/1415-1416-lifecycle-ops-plan.md`). This module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08) and the chain
-lifecycle (#1415: BKP-13, BKP-14). BKP-10 and 11 (WAL archiving) land with #1418.
+lifecycle (#1415: BKP-13, BKP-14) and the ops loop (#1416: BKP-15, BKP-16). BKP-10 and 11 (WAL archiving) land with #1418.
 
 ### BKP-01: Every data-file write is tracked and gated `[silent]`
   invariant ∀ engine write w to the data file: w is issued by PagedMMF.IssueDataFileWrite or
@@ -3534,3 +3534,15 @@ lifecycle (#1415: BKP-13, BKP-14). BKP-10 and 11 (WAL archiving) land with #1418
             [RuleMutant("BKP-14")]: ascending deletes cut short (a listed point loses its base), the second chain's compaction skipped, "every
             pack below K" deletion (an interleaved chain loses its base), MinKeep counting unrestorable points; source mutant seen red: the
             delete order reversed
+
+### BKP-15: Backup health never reports better than the store and the schedule are `[silent]`
+  invariant health ≠ Ok while the engine's timeline has no point, when ConsecutiveFailures ≥ 3, or when Interval > 0 and the newest point of
+            the engine's timeline (or, with none, the scheduler's start) is older than 2 × Interval; health = Failing when the store holds no
+            restorable point once an attempt of the session has ended
+  invariant the worst condition that holds wins: Failing (no restorable point, 3 failures, store failing > Interval, capture refused, archive
+            diverged or failed) over Degraded (stale, an archive gap no later point covers, archive lag, a failed drill with none passed) over
+            Warning (no point yet, an allocated suspect page, retention failed or blocked, drill overdue, the newest drill failed)
+  scope: BackupHealthEvaluator.Evaluate, HealthInputs
+  on_violation: monitoring says Ok while nothing restorable is being produced — the failure mode a backup exists to prevent
+  verified: BackupHealthEvaluatorTests (every row of the table alone, the worst winning, a seeded property over random inputs) —
+            [VerifiesRule("BKP-15")]; [RuleMutant("BKP-15")]: an evaluator that forgets a timeline with no point

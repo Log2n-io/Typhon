@@ -225,17 +225,29 @@ public sealed record BackupChainSummary(Guid ChainId, uint BaseId, uint HeadBack
 public sealed record BackupStoreListing(Guid StoreId, Guid DatabaseId, IReadOnlyList<BackupPointSummary> Points, IReadOnlyList<BackupChainSummary> Chains,
     IReadOnlyList<KeyValuePair<string, string>> UnreadablePacks, IReadOnlyList<string> TemporaryFiles, IReadOnlyList<uint> RestorablePoints);
 
-/// <summary>A store's health, from its packs alone (the engine's status file and scheduler health come with #1416).</summary>
+/// <summary>
+/// Backup health, one verdict (07 §6): a store's from its packs (<see cref="BackupOperations.Status"/>), an engine's from its schedule, its store and its
+/// drills (<see cref="BackupStatus.Health"/>). <c>typhon backup status</c> maps it to its exit code: Ok 0, Warning 1, Degraded 1, Failing 3, Off 3.
+/// </summary>
 [PublicAPI]
 public enum BackupHealth
 {
+    /// <summary>Backup is not configured.</summary>
+    Off = 0,
+
     /// <summary>The newest point is restorable and nothing needs attention.</summary>
     Ok,
 
-    /// <summary>Restorable, but something needs attention: the newest point is suspect or not restorable while an older one is, or temps are left.</summary>
+    /// <summary>
+    /// Restorable, but something needs attention: a suspect newest point, a newest point that is not restorable while an older one is, temps left, retention
+    /// blocked, a drill overdue.
+    /// </summary>
     Warning,
 
-    /// <summary>No point can be restored.</summary>
+    /// <summary>Every point is still restorable, with reduced coverage or assurance: the backups are stale, the archive lags or has a gap, a drill failed.</summary>
+    Degraded,
+
+    /// <summary>No point can be restored, or backups keep failing.</summary>
     Failing,
 }
 

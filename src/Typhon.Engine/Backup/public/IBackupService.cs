@@ -46,4 +46,7 @@ public interface IBackupService
     /// <param name="ct">Abandons the capture: nothing is published.</param>
     /// <returns>The published point, once it is published and verified.</returns>
     Task<BackupPointSummary> CreateAsync(string storePath, BackupRequestKind kind = BackupRequestKind.Auto, CancellationToken ct = default);
+
+    /// <summary>The engine's backups now: health and why, the running job, the last point, the counters. A published snapshot: 0 B per read.</summary>
+    BackupStatus Status { get; }
 }

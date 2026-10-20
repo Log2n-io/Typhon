@@ -529,12 +529,7 @@ internal sealed class BackupStatusCommand : Command<BackupSettings>
             return output.Error(ex);
         }
 
-        var exit = status.Health switch
-        {
-            BackupHealth.Ok => BackupCli.ExitOk,
-            BackupHealth.Warning => BackupCli.ExitWarning,
-            _ => BackupCli.ExitStoreDamaged,
-        };
+        var exit = BackupCli.ExitCodeOf(status.Health);
         var storeBytes = listing.Points.Sum(p => p.PackBytes);
         var chains = listing.Chains.Select(c =>
         {

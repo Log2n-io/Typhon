@@ -34,6 +34,8 @@ internal sealed class BackupService(DatabaseEngine engine) : IBackupService
         return CreateCoreAsync(storePath, kind, ct);
     }
 
+    public BackupStatus Status => BackupStatus.Off;
+
     private async Task<BackupPointSummary> CreateCoreAsync(string storePath, BackupRequestKind kind, CancellationToken ct)
     {
         var requested = kind switch

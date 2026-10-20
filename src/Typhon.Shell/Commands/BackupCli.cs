@@ -193,6 +193,17 @@ internal static class BackupCli
         return false;
     }
 
+    /// <summary>
+    /// <c>status</c>'s exit code (DL-22 e): Ok 0; Warning and Degraded 1 (every point is still restorable, the reason says what is reduced); Failing,
+    /// Off and anything unknown 3 (a monitored database with no backup is not healthy). 2 stays the code of a command that itself failed.
+    /// </summary>
+    internal static int ExitCodeOf(BackupHealth health) => health switch
+    {
+        BackupHealth.Ok => ExitOk,
+        BackupHealth.Warning or BackupHealth.Degraded => ExitWarning,
+        _ => ExitStoreDamaged,
+    };
+
     /// <summary>A byte count for a person.</summary>
     internal static string Bytes(long bytes) => bytes switch
     {
