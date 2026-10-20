@@ -194,7 +194,7 @@ internal static class RestoreStager
                 var current = Fingerprint(chain, archivePlan, target);
                 if (!string.Equals(current, options.ApprovedPlan, StringComparison.Ordinal))
                 {
-                    throw new BackupPlanChangedException(options.ApprovedPlan, current, "the point, the archived WAL or the target resolve differently now");
+                    throw new BackupPlanChangedException(storePath, options.ApprovedPlan, current);
                 }
             }
 

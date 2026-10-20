@@ -890,6 +890,9 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
             _engine.CheckpointManager?.RaiseArchiveFloor(end + 1);
         }
 
+        // TODO(#1416 merge): emit BackupArchiveSegment span (trace kind 74) around ArchiveOne: segment id (s.Id), raw bytes (scan.ArchiveLength), stored
+        // bytes (published.Segment.FileLength), duration (read + scan + compress + publish + raise), outcome (Published | AlreadyArchived | Diverged |
+        // Failed). #1416 defines kind 74 with its own 44–49 in the profiler/Workbench pipeline.
         WalArchiveLog.SegmentArchived(_log, s.Id, s.FirstLsn, s.LastLsn, scan.ArchiveLength, published.Segment.FileLength);
         return true;
     }

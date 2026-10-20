@@ -10,11 +10,12 @@ namespace Typhon.Engine;
 public sealed class BackupPlanChangedException : BackupException
 {
     /// <summary>Creates the failure.</summary>
+    /// <param name="storePath">The store the plan was made against.</param>
     /// <param name="approved">The fingerprint of the plan that was approved.</param>
     /// <param name="current">The fingerprint of the plan as it stands now.</param>
-    /// <param name="what">What changed, in a few words.</param>
-    public BackupPlanChangedException(string approved, string current, string what)
-        : base(TyphonErrorCode.BackupPlanChanged, $"The approved plan {approved} no longer holds ({what}); the plan is now {current}. Nothing was written.")
+    public BackupPlanChangedException(string storePath, string approved, string current)
+        : base(TyphonErrorCode.BackupPlanChanged,
+            $"The plan approved for the store '{storePath}' ({approved}) no longer holds: it is now {current}. Nothing was written; plan again.")
     {
         Approved = approved;
         Current = current;
