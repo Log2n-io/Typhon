@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 namespace Typhon.Engine.Internals;
@@ -27,6 +28,31 @@ namespace Typhon.Engine.Internals;
 /// <param name="FirstRecordLsn">The lowest LSN of the frames read whole; 0 = none.</param>
 internal readonly record struct WalSegmentScan(long SegmentId, long FirstLsn, long PrevSegmentLsn, uint DeclaredSize, int ArchiveLength, long LastRecordLsn,
     long LastUnitLsn, bool StoppedAtCorruption, int FirstInvalidFrameOffset, long DroppedFromLsn, long DroppedToLsn, bool SealedAtCrash, long FirstRecordLsn);
+
+/// <summary>What a WAL frame holds, for <c>typhon backup log --commits</c>.</summary>
+internal enum WalFrameKind : byte
+{
+    /// <summary>A transaction: its last record is its TxCommit.</summary>
+    Transaction,
+
+    /// <summary>One fence emission: fence records, or a tick-fence chunk.</summary>
+    Fence,
+
+    /// <summary>A bulk load's begin or end manifest.</summary>
+    Bulk,
+
+    /// <summary>Anything else: records of no known kind.</summary>
+    Other,
+}
+
+/// <summary>One frame read whole by <see cref="WalArchiveScanner.Frames"/>.</summary>
+/// <param name="FirstLsn">Its lowest LSN.</param>
+/// <param name="LastLsn">Its highest LSN.</param>
+/// <param name="Tsn">The transaction's TSN (its first record's); 0 when it holds no transaction record.</param>
+/// <param name="Kind">What it holds.</param>
+/// <param name="Records">Its records (chunks, for a chunk type holding no v2 records).</param>
+/// <param name="CommitStamp">The TxCommit's stamp; 0 when none.</param>
+internal readonly record struct WalFrameSummary(long FirstLsn, long LastLsn, long Tsn, WalFrameKind Kind, int Records, long CommitStamp);
 
 /// <summary>Where <see cref="WalArchiveScanner.FindCut"/> cuts a segment for a restore to an LSN.</summary>
 /// <param name="CutOffset">File offset of the end of the last frame kept; the restored segment holds <c>[0, CutOffset)</c> then zeros.</param>
@@ -183,6 +209,75 @@ internal static class WalArchiveScanner
         }
 
         return new WalCut(WalSegmentHeader.SizeInBytes + cut, effective, past);
+    }
+
+    /// <summary>
+    /// Appends every frame of the segment <paramref name="reader"/> has open that recovery would read whole to <paramref name="into"/>, ascending; a
+    /// frame broken by a corruption is not listed (WA-25). Record bytes stay here (LOG-02): the caller sees LSNs, TSNs and kinds.
+    /// </summary>
+    internal static void Frames(WalSegmentReader reader, List<WalFrameSummary> into)
+    {
+        ArgumentNullException.ThrowIfNull(reader);
+        ArgumentNullException.ThrowIfNull(into);
+        var frameStart = -1;
+        var frameEnd = 0;
+        var current = default(FrameAccumulator);
+        while (reader.TryReadNext(out var chunk, out var body))
+        {
+            if (reader.FrameStart != frameStart)
+            {
+                if (frameStart >= 0)
+                {
+                    into.Add(current.Summary());
+                }
+
+                frameStart = reader.FrameStart;
+                frameEnd = reader.FrameEnd;
+                current = default;
+            }
+
+            if (chunk.ChunkType != (ushort)WalChunkType.Transaction)
+            {
+                var lsn = body.Length >= sizeof(long) ? MemoryMarshal.Read<long>(body) : 0;
+                current.Add(lsn, 0, chunk.ChunkType is (ushort)WalChunkType.BulkBegin or (ushort)WalChunkType.BulkEnd ? WalFrameKind.Bulk : WalFrameKind.Fence,
+                    0);
+                continue;
+            }
+
+            var offset = 0;
+            while (RecordCodec.TryReadRecord(body, offset, out var consumed, out var view))
+            {
+                offset += consumed;
+                current.Add(view.Lsn, view.IsFence ? 0 : view.Tsn,
+                    view.IsUnknownKind ? WalFrameKind.Other : view.IsFence ? WalFrameKind.Fence : WalFrameKind.Transaction, view.IsTxCommit ? view.CommitStamp : 0);
+            }
+        }
+
+        if (frameStart >= 0 && frameEnd <= reader.LastCompleteFrameEnd)
+        {
+            into.Add(current.Summary());
+        }
+    }
+
+    private struct FrameAccumulator
+    {
+        private long _first, _last, _tsn, _stamp;
+        private int _records;
+        private WalFrameKind _kind;
+        private bool _any;
+
+        public void Add(long lsn, long tsn, WalFrameKind kind, long stamp)
+        {
+            _first = _records == 0 || lsn < _first ? lsn : _first;
+            _last = Math.Max(_last, lsn);
+            _tsn = _tsn == 0 ? tsn : _tsn;
+            _stamp = stamp != 0 ? stamp : _stamp;
+            _kind = !_any || kind < _kind ? kind : _kind;
+            _any = true;
+            _records++;
+        }
+
+        public readonly WalFrameSummary Summary() => new(_first, _last, _tsn, _any ? _kind : WalFrameKind.Other, _records, _stamp);
     }
 
     private static bool Keep(long frameLast, int frameEnd, long targetLsn, ref int cut, ref long effective)

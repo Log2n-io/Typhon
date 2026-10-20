@@ -320,7 +320,7 @@ internal static class ArchiveRestorePlanner
     /// Whether the tail's copy and the archived copy are one history (WA-11): equal over the bytes both hold, and nothing in the tail past the archived
     /// bytes but zeros (an offline point copies a segment whole, at its declared size; the archive keeps it to its last frame).
     /// </summary>
-    private static bool TailAgrees(IStoreFileSystem fs, StoreView view, PackReader reader, TailDirectory tail, int index, ArchivedSegmentInfo copy)
+    internal static bool TailAgrees(IStoreFileSystem fs, StoreView view, PackReader reader, TailDirectory tail, int index, ArchivedSegmentInfo copy)
     {
         var raw = tail.Segments[index].RawLength;
         var archivedLength = (int)copy.Footer.ArchiveLength;
@@ -365,7 +365,7 @@ internal static class ArchiveRestorePlanner
     internal static string SegmentPath(StoreView view, ArchivedSegmentInfo segment) =>
         Path.Combine(new WalArchivePaths(view.Paths.Root).Timeline(segment.Header.TimelineId), segment.File);
 
-    private static ArchivedSegmentInfo Find(ArchivedTimeline archive, long segmentId)
+    internal static ArchivedSegmentInfo Find(ArchivedTimeline archive, long segmentId)
     {
         if (archive == null)
         {

@@ -185,7 +185,10 @@ internal sealed class ArchivedSegmentReader : IDisposable
         return blocks;
     }
 
-    /// <summary>The time samples, checked: CRC, count, LSNs inside the segment, both columns ascending.</summary>
+    /// <summary>
+    /// The time samples, checked: CRC, count, LSNs inside the segment (or the previous segment's end, sampled after it was archived), both columns
+    /// ascending.
+    /// </summary>
     public ArchiveTimeSample[] ReadSamples()
     {
         var prefix = new byte[ArchiveFormat.SectionPrefixSize];
@@ -209,7 +212,7 @@ internal sealed class ArchivedSegmentReader : IDisposable
         for (var i = 0; i < count; i++)
         {
             var s = samples[i];
-            if (s.Lsn < Header.FirstLsn || s.Lsn > Footer.LastLsn || (i > 0 && (s.Lsn <= samples[i - 1].Lsn || s.UtcTicks < samples[i - 1].UtcTicks)))
+            if (s.Lsn < Header.FirstLsn - 1 || s.Lsn > Footer.LastLsn || (i > 0 && (s.Lsn <= samples[i - 1].Lsn || s.UtcTicks < samples[i - 1].UtcTicks)))
             {
                 Corrupt(Path, "Samples", $"sample {i} (LSN {s.Lsn}) is out of the segment or out of order");
             }

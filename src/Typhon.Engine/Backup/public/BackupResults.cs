@@ -253,5 +253,7 @@ public enum BackupHealth
 /// <param name="Points">Points in the store.</param>
 /// <param name="Latest">The newest point, or <c>null</c>.</param>
 /// <param name="LatestRestorable">The newest point whose chain resolves (from the packs' headers and footers), or <c>null</c>.</param>
+/// <param name="Archive">What each timeline's WAL archive makes restorable; empty when the store holds no archive.</param>
 [PublicAPI]
-public sealed record BackupStoreStatus(BackupHealth Health, string Reason, int Points, BackupPointSummary Latest, BackupPointSummary LatestRestorable);
+public sealed record BackupStoreStatus(BackupHealth Health, string Reason, int Points, BackupPointSummary Latest, BackupPointSummary LatestRestorable,
+    IReadOnlyList<BackupArchiveCoverage> Archive);

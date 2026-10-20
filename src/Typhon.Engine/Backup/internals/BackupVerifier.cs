@@ -222,6 +222,12 @@ internal static class BackupVerifier
             points.Add(new PointVerification { Id = id, Restorable = broken.Count == 0, BrokenBy = [.. broken] });
         }
 
+        // BKP-VER-15…18: the WAL archive, with the store (a point's verify reads its chain only).
+        if (point == null)
+        {
+            WalArchiveReport.Verify(fs, view, level, storeFindings, ref bytesRead);
+        }
+
         var packList = packs.Values.ToList();
         var anyDamage = packList.Any(p => p.Status != PackVerifyStatus.Ok) || storeFindings.Any(f => f.Severity == VerifySeverity.Damage)
                         || points.Any(p => !p.Restorable);

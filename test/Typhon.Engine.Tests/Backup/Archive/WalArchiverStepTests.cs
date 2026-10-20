@@ -55,6 +55,37 @@ class WalArchiverStepTests : ArchiveTestBase<WalArchiverStepTests>
         Assert.That(File.Exists(Path.Combine(StorePath, "wal", dbe.TimelineId.ToString("D"), "timeline.json")), Is.True);
     }
 
+    /// <summary>
+    /// A step right after a switch samples the sealed segment's end, which an archived segment can no longer take: the sample is filed with the next one
+    /// rather than lost, so the instant still resolves to that LSN.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void ASampleOfAnArchivedSegmentsEnd_IsFiledWithTheNextSegment()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var archiver = NewArchiver(dbe);
+        Tick(archiver, 0);
+        Tick(archiver, 0.5);
+        var first = SpawnAndSeal(dbe, 20, 0);
+        Tick(archiver, 1);
+        Assert.That(archiver.ArchivedThroughLsn, Is.EqualTo(first.LastLsn), "premise: the segment is archived before its end is sampled");
+        Tick(archiver, 2);
+        Assert.That(archiver.PendingSamples().Select(s => s.Lsn), Does.Contain(first.LastLsn), "premise: the next step sampled the archived end");
+
+        var second = SpawnAndSeal(dbe, 20, 100);
+        Tick(archiver, 3);
+        var segment = Archived(dbe).Segments.Single(s => s.SegmentId == second.Id);
+        using (var reader = ArchivedSegmentReader.Open(StoreFileSystem.Instance, Path.Combine(StorePath, "wal", dbe.TimelineId.ToString("D"), segment.File)))
+        {
+            Assert.That(reader.ReadSamples()[0], Is.EqualTo(new ArchiveTimeSample(first.LastLsn, Utc(2).Ticks)));
+        }
+
+        var timelines = ArchiveRestorePlanner.LoadTimelines(StoreFileSystem.Instance, StorePath);
+        Assert.That(ArchiveRestorePlanner.ResolveTime(StoreFileSystem.Instance, StorePath, timelines, dbe.TimelineId, Utc(2.5)).Lsn, Is.EqualTo(first.LastLsn));
+    }
+
     [Test]
     [CancelAfter(15_000)]
     public void ASample_PairsTheDurableLsnOfThePreviousStepWithThisStepsClock_KeptOnlyWhenItMoved_AndClampedWhenTheClockStepsBack()

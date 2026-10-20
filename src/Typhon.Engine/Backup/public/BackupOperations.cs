@@ -134,10 +134,11 @@ public static partial class BackupOperations
         var restorable = restorableId == 0 ? null : Summarize(Standing(view, restorableId));
         var count = view.Catalog.Packs.Select(p => p.BackupId).Concat(view.Catalog.Unreadable
             .Select(u => PackFormat.TryParseFileName(u.File, out var id, out _, out _) ? id : 0u).Where(id => id != 0)).Distinct().Count();
+        var archive = WalArchiveReport.Coverage(StoreFileSystem.Instance, view);
         if (restorable == null)
         {
             return new BackupStoreStatus(BackupHealth.Failing, count == 0 ? "the store holds no point" : "no point of the store can be restored", count,
-                latestPack == null ? null : Summarize(latestPack), null);
+                latestPack == null ? null : Summarize(latestPack), null, archive);
         }
 
         string warning = null;
@@ -153,9 +154,15 @@ public static partial class BackupOperations
         {
             warning = $"{view.Temps.Count} temporary file(s) of an interrupted backup are left; the next backup deletes them";
         }
+        else if (archive.Find(static c => c.UncoveredGaps.Count > 0) is { } gapped)
+        {
+            var g = gapped.UncoveredGaps[0];
+            warning = $"the WAL archive of timeline {gapped.TimelineId} misses LSN {g.FromLsn}..{g.ToLsn} ({g.Reason}) and no point lies past it: "
+                      + "nothing after it can be restored to an LSN until the next point";
+        }
 
         return new BackupStoreStatus(warning == null ? BackupHealth.Ok : BackupHealth.Warning, warning ?? "the newest point is restorable", count,
-            latestPack == null ? null : Summarize(latestPack), restorable);
+            latestPack == null ? null : Summarize(latestPack), restorable, archive);
     }
 
     /// <summary>The pack that stands for a point: its compacted one when present.</summary>

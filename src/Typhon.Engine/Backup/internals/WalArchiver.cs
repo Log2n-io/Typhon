@@ -335,7 +335,11 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
         return 0;
     }
 
-    /// <summary>Copies the ring's samples with an LSN in <c>[first, last]</c> into <see cref="_segmentSamples"/>; returns how many.</summary>
+    /// <summary>
+    /// Copies the ring's samples with an LSN in <c>[first − 1, last]</c> into <see cref="_segmentSamples"/>; returns how many. A sample at
+    /// <c>first − 1</c> was taken after the previous segment was archived (a step right after a switch samples the durable LSN of the step before, the
+    /// previous segment's end): still true, it is filed with this segment rather than lost.
+    /// </summary>
     private int TakeSamples(long first, long last)
     {
         lock (_ringLock)
@@ -344,7 +348,7 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
             for (var i = 0; i < _ringCount; i++)
             {
                 var s = _ring[(_ringStart + i) % _ring.Length];
-                if (s.Lsn < first || s.Lsn > last)
+                if (s.Lsn < first - 1 || s.Lsn > last)
                 {
                     continue;
                 }

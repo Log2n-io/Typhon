@@ -2,6 +2,7 @@ using Spectre.Console;
 using Spectre.Console.Cli;
 using System;
 using System.ComponentModel;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -91,6 +92,85 @@ internal static class BackupCli
     }
 
     /// <summary>
+    /// Parses a restore's target: <c>--point</c>, <c>--lsn</c> or <c>--time</c> (one at most; none is the latest point), and <c>--timeline</c>, which
+    /// only an LSN or a time takes.
+    /// </summary>
+    internal static bool TryParseTarget(string point, string lsn, string time, string timeline, out PointSelector target, out string error)
+    {
+        target = PointSelector.Latest;
+        var given = (string.IsNullOrWhiteSpace(point) ? 0 : 1) + (string.IsNullOrWhiteSpace(lsn) ? 0 : 1) + (string.IsNullOrWhiteSpace(time) ? 0 : 1);
+        if (given > 1)
+        {
+            error = "--point, --lsn and --time are mutually exclusive.";
+            return false;
+        }
+
+        Guid? timelineId = null;
+        if (!string.IsNullOrWhiteSpace(timeline))
+        {
+            if (!Guid.TryParse(timeline.Trim(), out var parsed))
+            {
+                error = $"Unknown timeline '{timeline}'. Expected a timeline id.";
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(lsn) && string.IsNullOrWhiteSpace(time))
+            {
+                error = "--timeline goes with --lsn or --time.";
+                return false;
+            }
+
+            timelineId = parsed;
+        }
+
+        if (!string.IsNullOrWhiteSpace(lsn))
+        {
+            if (!long.TryParse(lsn.Trim(), out var l) || l <= 0)
+            {
+                error = $"Unknown LSN '{lsn}'. Expected a positive integer.";
+                return false;
+            }
+
+            target = PointSelector.AtLsn(l, timelineId);
+            error = null;
+            return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(time))
+        {
+            if (!TryParseUtc(time, "--time", out var utc, out error))
+            {
+                return false;
+            }
+
+            target = PointSelector.AtTime(utc, timelineId);
+            return true;
+        }
+
+        return TryParsePoint(point, out target, out error);
+    }
+
+    /// <summary>
+    /// Parses an instant written with its offset (<c>Z</c> or <c>±hh:mm</c>), to UTC. An instant without one is refused: the machine's time zone would
+    /// silently decide which commits a restore keeps.
+    /// </summary>
+    internal static bool TryParseUtc(string value, string option, out DateTime utc, out string error)
+    {
+        utc = default;
+        var text = value.Trim();
+        var hasOffset = text.EndsWith('Z') || text.EndsWith('z') || (text.Length > 6 && text[^6] is '+' or '-' && text[^3] == ':');
+        if (!hasOffset || !DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed))
+        {
+            error = $"{option} '{value}' needs an ISO 8601 instant with its offset, e.g. 2026-10-21T14:03:00Z or 2026-10-21T16:03:00+02:00.";
+            return false;
+        }
+
+        utc = parsed.UtcDateTime;
+        error = null;
+        return true;
+    }
+
+    /// <summary>
     /// The exit code for what an operation threw, or <c>-1</c> for an exception that is not an outcome but a defect. Verbs catch what maps
     /// (<c>catch … when (ExitCodeFor(ex) &gt;= 0 || AsJson)</c>): in text a defect reaches the shell's handler with its stack and whole chain; in JSON
     /// it is still a JSON error, exit 2, because the reader is a program.
@@ -102,6 +182,8 @@ internal static class BackupCli
     /// </remarks>
     internal static int ExitCodeFor(Exception ex) => ex switch
     {
+        RestoreTargetUnreachableException => ExitStoreDamaged,
+        BackupPlanChangedException => ExitRefused,
         RestoreRefusedException or DatabaseLockedException or BackupStoreMismatchException or BackupStoreLockedException
             or BackupFormatUnsupportedException or NotSupportedException => ExitRefused,
         BackupChainBrokenException or BackupPackCorruptException => ExitStoreDamaged,
