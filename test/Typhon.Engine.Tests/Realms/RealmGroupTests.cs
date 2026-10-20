@@ -470,6 +470,59 @@ class RealmGroupTests : TestBase<RealmGroupTests>
     }
 
     /// <summary>
+    /// A realm whose last session left stops being served, and the keys its sessions held stop being wanted with it (#1410): a dormant realm must not keep
+    /// a lazy town's shards attached for ever. The departing session's own sync releases the key before the sweep; the hub's withdrawal at deactivation
+    /// is the backstop for what no sync reached, which this path does not exercise.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-33")]
+    public void ADeactivatedRealmsHeldKeysAreNoLongerWanted()
+    {
+        using var dbe = SetupEngine();
+        Town(dbe, 1, 7, 0f, 0f);
+        Shards(dbe);
+
+        using var harness = FrameHarness.Create(dbe, subs =>
+        {
+            subs.Archetype<GroupPositionless>(a => a.Field(GroupPositionless.Ai, x => x.Template, Codec.U8, name: "kind"));
+            subs.Groups("town", g => g.Region<RealmTown>(r => r.Key(RealmTown.Zone, z => z.Key).Extent(RealmTown.Zone, z => z.Extent))
+                .Member<GroupPositionless>(m => m.Key(GroupPositionless.Key, k => k.Town)));
+            subs.Profile(Profile, p => p.Sphere(30).Groups("town", 5));
+        }, nameof(ADeactivatedRealmsHeldKeysAreNoLongerWanted),
+            new SubscriptionsOptions { IngressBytesPerSecond = TestIngress.Budget, MaxGroupsPerSession = 4, ReplicationCellM = 10 });
+        harness.RunFence = true;
+        var hub = harness.Subscriptions.Hub;
+        var set = harness.CatalogPlan.GroupSetIndex("town");
+
+        var session = harness.OpenSessions(1, Profile)[0];
+        var commands = harness.Subscriptions.Commands;
+        Assert.That(commands.Enter(session, new RealmId(1)), Is.True);
+        harness.Sessions.SetViewpoint(session, new Vector3D(0d, 0d, 0d));
+        for (var t = 0; t < 6; t++)
+        {
+            harness.RunTick(harness.Tick + 1);
+            harness.Deliver(session);
+        }
+
+        Assert.That(hub.IsWanted(set, 7), Is.True, "the realm 1 session holds town 7");
+
+        // Back to the default realm, far from anything: realm 1 is left with no session, and the next sweep (every 64 ticks) deactivates it.
+        Assert.That(commands.Enter(session, RealmId.Default), Is.True);
+        harness.Sessions.SetViewpoint(session, new Vector3D(95d, 95d, 0d));
+        for (var t = 0; t < 70; t++)
+        {
+            harness.RunTick(harness.Tick + 1);
+            harness.Deliver(session);
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(hub.RealmsDeactivated, Is.EqualTo(1), "realm 1 stopped being served");
+            Assert.That(hub.IsWanted(set, 7), Is.False, "a deactivated realm's town is still wanted");
+        });
+    }
+
+    /// <summary>
     /// A realm-local slot a session gave back by leaving the realm, taken by another session of the same generation number: the newcomer starts from no
     /// key — it fills and completes the town it meets — never from the keys the slot's last session held (#1407).
     /// </summary>

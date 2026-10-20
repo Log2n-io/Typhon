@@ -1519,8 +1519,8 @@ internal abstract unsafe partial class PushReplication
     public abstract void PlaceWorker(int chunk);
 
     /// <summary>
-    /// Builds this tick's index serially: what the frame prologue runs when no stage merged it (the collapsed shape, a deterministic projection, the
-    /// parallel index switched off), and the finish when one did.
+    /// Builds this tick's index serially: what the frame prologue runs when no stage merged it (a deterministic projection, the parallel index switched
+    /// off), and the finish when one did.
     /// </summary>
     public abstract void BuildIndex();
 

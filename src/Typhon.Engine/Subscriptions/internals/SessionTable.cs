@@ -95,6 +95,8 @@ internal sealed unsafe partial class SessionTable : IDisposable
     private readonly int[] _profileIndices;
     private Func<string, int> _profileResolver;
     private readonly string[] _closeReasons;
+    // Closes per SessionCloseReason since start, indexed by its value. Written by the tick alone (CloseCore).
+    private readonly long[] _closesByReason = new long[16];
     private readonly object[] _appData;
     private readonly SessionViewpoint[] _viewpoints;
 
@@ -476,6 +478,10 @@ internal sealed unsafe partial class SessionTable : IDisposable
 
             _events.Append(new SessionEvent(SessionEventKind.Opened, session, admission.Role, limits, appData, sessionKind, payload, null,
                 resumedFrom, default, 0, false));
+            if (TelemetryConfig.SubscriptionsSessionChangesActive)
+            {
+                TyphonEvent.EmitSubscriptionsSessionChanged(session.Value, (byte)SessionChange.Opened, 0, 0, 0);
+            }
         }
         finally
         {
@@ -676,6 +682,11 @@ internal sealed unsafe partial class SessionTable : IDisposable
     /// <param name="session">The identity.</param>
     /// <returns>The reason.</returns>
     public string CloseDetail(SessionId session) => (string)SlotReference(session, _closeReasons);
+
+    /// <summary>Sessions closed for one reason since start.</summary>
+    /// <param name="reason">The reason.</param>
+    /// <returns>The count.</returns>
+    public long ClosesBy(SessionCloseReason reason) => Volatile.Read(ref _closesByReason[(int)reason & 15]);
 
     /// <summary>
     /// Reads one of the slot-keyed managed arrays for a session, with the identity checked on both sides of the read.
@@ -914,8 +925,18 @@ internal sealed unsafe partial class SessionTable : IDisposable
 
         Volatile.Write(ref row->State, (int)SessionSlotState.Closing);
 
+        // Tick side only, so a plain add; readers on other threads take it through Volatile.Read.
+        Volatile.Write(ref _closesByReason[(int)reason & 15], _closesByReason[(int)reason & 15] + 1);
+
         _events.Append(new SessionEvent(SessionEventKind.Closed, session, (SessionRole)row->Role, _declaredLimits[session.Slot],
             _appData[session.Slot], _sessionKinds[session.Slot], null, null, SessionId.None, reason, code, resumable));
+        if (TelemetryConfig.SubscriptionsSessionChangesActive)
+        {
+            // The table does not hold the degrade level (the frame state does); 0 here is "not reported", and the last kind-73 Degraded/Recovered or
+            // kind-72 record of this session carries the level it closed at.
+            TyphonEvent.EmitSubscriptionsSessionChanged(session.Value, (byte)SessionChange.Closed, 0, (byte)((byte)reason + 1), code);
+        }
+
         return true;
     }
 
@@ -1401,6 +1422,42 @@ internal sealed unsafe partial class SessionTable : IDisposable
             _viewpoints[session.Slot] = default;
             _events.Append(new SessionEvent(SessionEventKind.RealmClosed, session, (SessionRole)row->Role, _declaredLimits[session.Slot],
                 _appData[session.Slot], _sessionKinds[session.Slot], null, null, SessionId.None, default, 0, false, new RealmId(realm)));
+            return true;
+        }
+        finally
+        {
+            _affinity.Exit();
+            Exit();
+        }
+    }
+
+    /// <summary>
+    /// Queues a <see cref="SessionEventKind.Degraded"/> for a session that moved on the degrade ladder. Tick side, from the frame prologue's skip sweep.
+    /// </summary>
+    /// <param name="session">The identity.</param>
+    /// <param name="level">The level it moved to; 0 is back to full rate.</param>
+    /// <returns><see langword="false"/> when the session is gone or closing, in which case nothing was queued.</returns>
+    /// <remarks>
+    /// Open, not merely present, for <see cref="NoteRealmClosed"/>'s reason: a session already Closing stays in the open list until its Closed event is
+    /// delivered, and an application that has released the session on Closed must not be told about it afterwards.
+    /// </remarks>
+    public bool NoteDegradeLevel(SessionId session, int level)
+    {
+        if (!TryEnter())
+        {
+            return false;
+        }
+
+        _affinity.Enter(nameof(SessionTable), nameof(NoteDegradeLevel));
+        try
+        {
+            if (!TryGetOpenRow(session, out var row))
+            {
+                return false;
+            }
+
+            _events.Append(new SessionEvent(SessionEventKind.Degraded, session, (SessionRole)row->Role, _declaredLimits[session.Slot],
+                _appData[session.Slot], _sessionKinds[session.Slot], null, null, SessionId.None, default, 0, false, default, level));
             return true;
         }
         finally

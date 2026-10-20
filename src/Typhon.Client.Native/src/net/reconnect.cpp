@@ -81,6 +81,11 @@ void PingScheduler::Start(double nowMs)
 {
     running_ = true;
     dueMs_ = nowMs;
+
+    // A new session: its round trip starts over, as the .NET and TypeScript clients' do on WELCOME. The ping counters stay cumulative.
+    smoothedRtt_ = 0;
+    latestRtt_ = 0;
+    sessionPongs_ = 0;
 }
 
 bool PingScheduler::Due(double nowMs, std::uint32_t lastAppliedTick, PingMessage& ping)
@@ -106,11 +111,13 @@ bool PingScheduler::Due(double nowMs, std::uint32_t lastAppliedTick, PingMessage
 void PingScheduler::OnPong(const PongMessage& pong, double recvMs)
 {
     received_++;
+    sessionPongs_++;
     lastPongTick_ = pong.tick;
     const std::uint32_t now = static_cast<std::uint32_t>(static_cast<std::uint64_t>(recvMs));
     const auto rtt = static_cast<double>(static_cast<std::uint32_t>(now - pong.clientMs));
     latestRtt_ = rtt;
-    smoothedRtt_ = smoothedRtt_ == 0 ? rtt : smoothedRtt_ + weight_ * (rtt - smoothedRtt_);
+    // Seeded by the session's first sample: a 0 ms loopback round trip is a measurement, not "no sample yet".
+    smoothedRtt_ = sessionPongs_ == 1 ? rtt : smoothedRtt_ + weight_ * (rtt - smoothedRtt_);
 }
 
 }  // namespace typhon::client

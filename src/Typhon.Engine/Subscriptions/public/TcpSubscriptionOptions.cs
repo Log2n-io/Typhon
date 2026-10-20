@@ -78,6 +78,18 @@ public sealed class TcpSubscriptionOptions
     public int HandshakeTimeoutMs { get; init; } = ProtocolConstants.HelloTimeoutMs;
 
     /// <summary>
+    /// How many connections may be accepted and not yet admitted at once — in TLS, in the preamble, or waiting for <c>HELLO</c>. One more is refused the
+    /// moment it is accepted, before a byte is read or written, and counted in <see cref="TcpSubscriptionTransport.PendingRefused"/>.
+    /// </summary>
+    /// <remarks>
+    /// <c>MaxSessions</c> bounds sessions only, and a session exists from <c>HELLO</c> on: a peer that connects and stays silent holds a socket, a link and a
+    /// timer for <see cref="HandshakeTimeoutMs"/> plus the <c>HELLO</c> deadline, so without this bound a connect flood holds as many as it can open. The
+    /// default is two <see cref="Backlog"/>s, room for a reconnect storm of a few hundred clients inside one <c>HELLO</c> window
+    /// (<c>design/Subscriptions/16-phase5-design.md § 2</c>).
+    /// </remarks>
+    public int MaxPendingConnections { get; init; } = 256;
+
+    /// <summary>
     /// How long a close waits for an in-flight send to reach the kernel before it stops waiting, in milliseconds. A <c>KICK</c> is written and then the link is
     /// closed, so this is what makes the reason arrive rather than race the <c>FIN</c>.
     /// </summary>
@@ -136,6 +148,11 @@ public sealed class TcpSubscriptionOptions
         if (HandshakeTimeoutMs <= 0)
         {
             throw new ArgumentException("A handshake deadline of zero drops every connection before it can speak.", nameof(HandshakeTimeoutMs));
+        }
+
+        if (MaxPendingConnections <= 0)
+        {
+            throw new ArgumentException($"A pending-connection cap of {MaxPendingConnections} refuses every connection.", nameof(MaxPendingConnections));
         }
 
         if (CloseDrainTimeoutMs < 0)

@@ -1,4 +1,5 @@
 using System;
+using System.Numerics;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 
@@ -106,29 +107,98 @@ internal abstract unsafe partial class PushReplication
     /// <summary>RESET frames gathered while the session held a key still filling: each refills it from its first member. Diagnostic.</summary>
     internal long GroupResetsMidFill;
 
+    /// <summary>Regions filed, re-filed or removed from their set's index — a region born, gone, or whose padded box moved (#1409), summed.
+    /// Diagnostic.</summary>
+    internal long RegionRefiles;
+
+    /// <summary>
+    /// After every refresh, build the index from scratch beside the real one and count each difference in <see cref="RegionIndexMismatches"/> (#1409's
+    /// differential check). Off outside tests: the from-scratch build is what the incremental index exists to avoid.
+    /// </summary>
+    internal bool VerifyRegionIndexForTest;
+
+    /// <summary>The differential check's findings, and any region the index failed to find where it was filed; zero is the only correct value.</summary>
+    internal long RegionIndexMismatches;
+
+    /// <summary>The mutant for the check above: a region whose extent moved stays filed where it was.</summary>
+    internal bool RefileSkippedForTest;
+
+    /// <summary>The region refresh's time — the read, the compare, any rebuild — in <c>Stopwatch</c> ticks, summed (#1409). Diagnostic.</summary>
+    internal long RegionRefreshTicks;
+
     /// <summary>Whether any session's committed keys include one still filling; a test's quiet point waits for none.</summary>
     internal virtual bool AnyGroupFillingForTest() => false;
 
+    // Per session slot, per set: the keys the slot last counted in the hub's wanted set (#1410) — the union of its committed and pending sides, sorted —
+    // and the session generation it counted them for. A slot that changed nothing since costs a comparison; one that changed costs its difference.
+    private long[][][] _contributed = [];
+    private int[][] _contributedCount = [];
+    private ushort[] _contributedGeneration = [];
+    private int _contributedHigh;
+    private long[] _unionScratch = new long[16];
+
     /// <summary>
-    /// Every key a session here holds or is moving to in a set with a positionless member, to <paramref name="hub"/> (14 § 5): what decides which
-    /// positionless members need replication state. Serial, at the blocks step.
+    /// Brings the hub's wanted set up to date with this realm's sessions (14 § 5, #1410): each slot's keys in a set with a positionless member, committed or
+    /// pending, against what the slot counted last time — a key it took is wanted, one it let go of is withdrawn, a slot whose session left withdraws them
+    /// all. Serial, at the blocks step.
     /// </summary>
-    internal void CollectHeldKeys(PushHub hub)
+    internal void SyncHeldKeys(PushHub hub)
     {
         if (!HasGroups)
         {
             return;
         }
 
+        var high = Math.Max(_slotHigh, _contributedHigh);
+        GrowContributions(high);
+        var keep = hub.KeepWithdrawnKeysForTest;
+        for (var local = 1; local < high; local++)
+        {
+            var owner = local < _slotHigh ? _slotOwners[local] : default;
+            var gs = owner.IsValid ? GroupStateAtOrNull(local) : null;
+            var live = gs != null && gs.Generation == owner.Generation;
+            if (!live || _contributedGeneration[local] != owner.Generation)
+            {
+                // Another session in the slot, or none: what the last one counted goes, whoever it was.
+                Withdraw(hub, local, keep);
+                _contributedGeneration[local] = live ? owner.Generation : (ushort)0;
+                if (!live)
+                {
+                    continue;
+                }
+            }
+
+            for (var set = 0; set < gs.SetCount; set++)
+            {
+                if (hub.IsLazySet(set))
+                {
+                    Sync(hub, local, set, gs, keep);
+                }
+            }
+        }
+
+        _contributedHigh = _slotHigh;
+    }
+
+    /// <summary>Withdraws everything this realm's slots counted: the realm stops being served, and its sessions are gone.</summary>
+    internal void WithdrawHeldKeys(PushHub hub)
+    {
+        for (var local = 1; local < _contributedHigh && local < _contributed.Length; local++)
+        {
+            Withdraw(hub, local, keep: false);
+            _contributedGeneration[local] = 0;
+        }
+
+        _contributedHigh = 0;
+    }
+
+    /// <summary>For the hub's differential check: every live slot's keys, counted from its two sides as the collection did before #1410.</summary>
+    internal void RecountHeldKeysForTest(Dictionary<long, int>[] into)
+    {
         for (var local = 1; local < _slotHigh; local++)
         {
             var owner = _slotOwners[local];
-            if (!owner.IsValid)
-            {
-                continue;
-            }
-
-            var gs = GroupStateAtOrNull(local);
+            var gs = owner.IsValid ? GroupStateAtOrNull(local) : null;
             if (gs == null || gs.Generation != owner.Generation)
             {
                 continue;
@@ -136,12 +206,169 @@ internal abstract unsafe partial class PushReplication
 
             for (var set = 0; set < gs.SetCount; set++)
             {
-                if (hub.IsLazySet(set))
+                if (into[set] == null)
                 {
-                    gs.CollectKeys(hub, set);
+                    continue;
+                }
+
+                gs.Sides(set, out var committed, out var pending);
+                var keys = new SortedSet<long>();
+                foreach (var key in committed.KeySpan)
+                {
+                    keys.Add(key);
+                }
+
+                foreach (var key in pending.KeySpan)
+                {
+                    keys.Add(key);
+                }
+
+                foreach (var key in keys)
+                {
+                    into[set][key] = into[set].GetValueOrDefault(key) + 1;
                 }
             }
         }
+    }
+
+    private void GrowContributions(int high)
+    {
+        if (_contributed.Length >= high)
+        {
+            return;
+        }
+
+        var size = Math.Max(high, _contributed.Length * 2);
+        Array.Resize(ref _contributed, size);
+        Array.Resize(ref _contributedCount, size);
+        Array.Resize(ref _contributedGeneration, size);
+    }
+
+    private static bool IsSortedUnique(ReadOnlySpan<long> keys)
+    {
+        for (var i = 1; i < keys.Length; i++)
+        {
+            if (keys[i - 1] >= keys[i])
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>One slot's keys in one set against what it counted: unchanged — the steady state — costs one or two vectorized comparisons.</summary>
+    private void Sync(PushHub hub, int local, int set, GroupSessionState gs, bool keep)
+    {
+        gs.Sides(set, out var committed, out var pending);
+        ReadOnlySpan<long> now;
+        if (ReferenceEquals(pending, committed) || pending.KeySpan.SequenceEqual(committed.KeySpan))
+        {
+            now = committed.KeySpan;
+        }
+        else
+        {
+            now = Union(committed.KeySpan, pending.KeySpan);
+        }
+
+        var sets = _contributed[local] ??= new long[GroupSets.Length][];
+        var counts = _contributedCount[local] ??= new int[GroupSets.Length];
+        var mine = sets[set] ?? [];
+        var count = counts[set];
+        if (now.SequenceEqual(mine.AsSpan(0, count)))
+        {
+            return;
+        }
+
+        // Both sorted and unique: one walk finds what was taken and what was let go of. A side out of order would skew the counts silently, so a debug build
+        // checks the one this does not build itself (the explicit sets' server-set keys are sorted by GroupRequests.SetServerKeys).
+        System.Diagnostics.Debug.Assert(IsSortedUnique(now), "a session's held keys must be sorted and unique for the merge walk");
+        var a = 0;
+        var b = 0;
+        while (a < now.Length || b < count)
+        {
+            if (b == count || (a < now.Length && now[a] < mine[b]))
+            {
+                hub.WantKey(set, now[a++]);
+            }
+            else if (a == now.Length || mine[b] < now[a])
+            {
+                if (!keep)
+                {
+                    hub.UnwantKey(set, mine[b]);
+                }
+
+                b++;
+            }
+            else
+            {
+                a++;
+                b++;
+            }
+        }
+
+        if (mine.Length < now.Length)
+        {
+            mine = new long[(int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(8, now.Length))];
+            sets[set] = mine;
+        }
+
+        now.CopyTo(mine);
+        counts[set] = now.Length;
+    }
+
+    /// <summary>Withdraws every key slot <paramref name="local"/> counted, in every set.</summary>
+    private void Withdraw(PushHub hub, int local, bool keep)
+    {
+        if (local >= _contributed.Length || _contributed[local] is not { } sets)
+        {
+            return;
+        }
+
+        var counts = _contributedCount[local];
+        for (var set = 0; set < sets.Length; set++)
+        {
+            if (!keep)
+            {
+                for (var i = 0; i < counts[set]; i++)
+                {
+                    hub.UnwantKey(set, sets[set][i]);
+                }
+            }
+
+            counts[set] = 0;
+        }
+    }
+
+    /// <summary>The sorted union of two sorted, unique key lists, in a scratch reused across slots.</summary>
+    private ReadOnlySpan<long> Union(ReadOnlySpan<long> x, ReadOnlySpan<long> y)
+    {
+        if (_unionScratch.Length < x.Length + y.Length)
+        {
+            _unionScratch = new long[(int)BitOperations.RoundUpToPowerOf2((uint)(x.Length + y.Length))];
+        }
+
+        var n = 0;
+        var i = 0;
+        var j = 0;
+        while (i < x.Length || j < y.Length)
+        {
+            if (j == y.Length || (i < x.Length && x[i] < y[j]))
+            {
+                _unionScratch[n++] = x[i++];
+            }
+            else if (i == x.Length || y[j] < x[i])
+            {
+                _unionScratch[n++] = y[j++];
+            }
+            else
+            {
+                _unionScratch[n++] = x[i++];
+                j++;
+            }
+        }
+
+        return _unionScratch.AsSpan(0, n);
     }
 
     // A slot's group state, or null when it has none; the geometry owns the array.

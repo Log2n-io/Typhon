@@ -22,4 +22,11 @@
         <ProjectReference Include="..\..\src\Typhon.Protocol\Typhon.Protocol.csproj" />
     </ItemGroup>
 
+    <ItemGroup>
+        <!-- The engine tests' in-process link and fake host (AC-15): the WebSocket parity test compares against the same oracle as the TCP one. -->
+        <Compile Include="..\Typhon.Engine.Tests\Runtime\Subscriptions\InProcessLink.cs" Link="Shared\InProcessLink.cs" />
+        <!-- What the engine tests' GlobalUsings.cs gives that file. -->
+        <Using Include="Typhon.Engine.Internals" />
+    </ItemGroup>
+
 </Project>

@@ -97,11 +97,10 @@ public sealed partial class TatooineSim
             // 08-hosting's systemd unit already answers it with Restart=on-failure, which restarts from a checkpoint rather than limping on.
             SystemExceptionPolicy = SystemExceptionPolicy.AbortTickAndStop,
 
-            // --subs-pipeline and --subs-mode. Every other field of the options is left at its default: these are the ones an A/B moves, and moving another
+            // --subs-mode. Every other field of the options is left at its default: these are the ones an A/B moves, and moving another
             // would make the two arms differ in more than the thing being measured.
             Subscriptions = new SubscriptionsOptions
             {
-                CollapseBelowWorkUnits = _config.SubscriptionsCollapseWorkUnits,
                 AllowAutomaticPushDetection = _config.SubscriptionsPushAutomatic,
 
                 // The planet's own spatial cell, 1:1 (set in Initialize): a 9 x 9 window for a 192 m session, 15 x 15 for the slider's ceiling.

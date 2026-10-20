@@ -73,6 +73,7 @@ export function isInstantKind(v: number): boolean {
   if (v === 65 || v === 66 || v === 67) return true;                       // 67 joined them for the per-realm record (#WB-05)
   if (v === 68 || v === 69) return true;                                   // push replication's server record and its session rows (#WB-02)
   if (v === 70) return true;                                               // per-realm maintenance RATE rows, the rate twin of 67
+  if (v >= 71 && v <= 73) return true;                                     // push replication's per-session frame and lifecycle records (#1038 D-2)
   if (v >= 90 && v <= 116) return true;                                    // Concurrency tracing (Phase 2, #280)
   // Spatial tracing (Phase 3, #281) — mixed; instants are 127-135, 137, 140-142, 144, 145.
   if ((v >= 127 && v <= 135) || v === 137 || (v >= 140 && v <= 142) || v === 144 || v === 145) return true;

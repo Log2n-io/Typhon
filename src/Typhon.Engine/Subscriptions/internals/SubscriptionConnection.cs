@@ -524,6 +524,9 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
 
         _session = session;
 
+        // A session from here on, so the transport's pending-connection slot is no longer this connection's to hold (#1397).
+        (_link as IAdmissionObserver)?.OnAdmitted();
+
         // Before WELCOME, so no frame can be produced for a session whose link the pump cannot find. The row is already published at this point, which is what
         // makes the binding safe to read from a pump thread.
         _host.BindSessionLink(session, _link);

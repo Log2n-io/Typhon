@@ -157,8 +157,8 @@ sealed unsafe class FrameHarness : IDisposable
     public int ProjectionWorkers { get; set; } = 1;
 
     /// <summary>
-    /// Whether the index is built serially in the frame prologue instead of sorted by the projection and merged by the index stage: the path the
-    /// collapsed shape and <c>TYPHON_PUSH_PARALLEL_INDEX=0</c> take.
+    /// Whether the index is built serially in the frame prologue instead of sorted by the projection and merged by the index stage: the path
+    /// <c>TYPHON_PUSH_PARALLEL_INDEX=0</c> takes.
     /// </summary>
     public bool SerialIndex { get; set; }
 
@@ -211,9 +211,22 @@ sealed unsafe class FrameHarness : IDisposable
     /// <param name="workers">Worker-pool width for the frame stage; the projection runs as one chunk.</param>
     /// <remarks>Ticks must be consecutive: a gap is a missed tick to the push log, and a session that seems to have missed one is caught up or reset.</remarks>
     // The tick driver's publication: what a connection stamps a PING with, so a live client is heard from on this tick (SUB-15's silence sweep). The
-    // multiplier is the frame stage's current one, so a test that set an overload keeps it.
-    private void PublishTick(long tick) =>
-        Subscriptions.PublishTickState(tick, System.Diagnostics.Stopwatch.GetTimestamp(), Assembler.TickMultiplier);
+    // multiplier is the frame stage's current one, so a test that set an overload keeps it. The origin is SIMULATED, one period after the last, because
+    // the policy clock advances by the time that really passed: harness ticks run back to back, and a real origin would make every test's clock crawl.
+    private void PublishTick(long tick)
+    {
+        var periodUs = TickSpacingUs > 0 ? TickSpacingUs : (long)Subscriptions.NominalTickPeriodUs * Assembler.TickMultiplier;
+        _simulatedOrigin += Math.Max(1, (long)(periodUs * (System.Diagnostics.Stopwatch.Frequency / 1_000_000d)));
+        Subscriptions.PublishTickState(tick, _simulatedOrigin, Assembler.TickMultiplier);
+    }
+
+    private long _simulatedOrigin = System.Diagnostics.Stopwatch.GetTimestamp();
+
+    /// <summary>
+    /// The simulated time between two ticks' starts, in microseconds; 0 (the default) is one period. A test sets it below the period to stage the ticks a
+    /// stalled metronome runs back to back to catch up its schedule.
+    /// </summary>
+    public long TickSpacingUs { get; set; }
 
     // The message is built only when the check fails: an interpolated message passed to Assert.That is built on every call, and the allocation tests
     // measure these calls.
@@ -258,6 +271,10 @@ sealed unsafe class FrameHarness : IDisposable
 
         // The publication gate, which the tick driver moves once the unit of work has flushed (SUB-02). Nothing a test reads is sendable before it.
         Assembler.Gate.Publish(tick);
+
+        // What the runtime's send pump does once it has woken the sessions the frames were for: without it every worker's ready list grows by a session a
+        // frame for the life of the harness, and an allocation measurement reads the growth as the track's (#1040).
+        Assembler.ClearReady();
     }
 
     /// <summary>Advances to <paramref name="tick"/> without running the track: a tick its gate skipped (no session connected, an aborted tick).</summary>

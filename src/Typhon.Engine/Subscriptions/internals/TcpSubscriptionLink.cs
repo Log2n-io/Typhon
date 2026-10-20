@@ -30,7 +30,7 @@ namespace Typhon.Engine.Internals;
 /// deliver exactly one <see cref="ISubscriptionConnection.OnClosed"/>.
 /// </para>
 /// </remarks>
-internal sealed class TcpSubscriptionLink : ISubscriptionLink
+internal sealed class TcpSubscriptionLink : ISubscriptionLink, IAdmissionObserver
 {
     /// <summary>The length prefix's own width, which it excludes.</summary>
     internal const int FrameHeaderBytes = 4;
@@ -53,6 +53,7 @@ internal sealed class TcpSubscriptionLink : ISubscriptionLink
     private readonly Socket _socket;
     private readonly Stream _stream;
     private readonly TcpSubscriptionOptions _options;
+    private readonly Action _onAdmitted;
     private readonly SemaphoreSlim _sendGate = new(1, 1);
     private readonly CancellationTokenSource _receiveStopping = new();
     private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -71,7 +72,11 @@ internal sealed class TcpSubscriptionLink : ISubscriptionLink
     /// <param name="socket">The accepted socket. Owned from here: this link disposes it.</param>
     /// <param name="stream">The TLS stream over it, or <see langword="null"/> for a plaintext link.</param>
     /// <param name="options">The listener's options, for the caps and the close drain.</param>
-    public TcpSubscriptionLink(Socket socket, Stream stream, TcpSubscriptionOptions options)
+    /// <param name="onAdmitted">
+    /// Called when the connection's <c>HELLO</c> is admitted, or <see langword="null"/>. The transport releases the connection's pending slot with it; it must
+    /// not block, since the engine calls it from inside the connection's lock.
+    /// </param>
+    public TcpSubscriptionLink(Socket socket, Stream stream, TcpSubscriptionOptions options, Action onAdmitted = null)
     {
         ArgumentNullException.ThrowIfNull(socket);
         ArgumentNullException.ThrowIfNull(options);
@@ -79,7 +84,11 @@ internal sealed class TcpSubscriptionLink : ISubscriptionLink
         _socket = socket;
         _stream = stream;
         _options = options;
+        _onAdmitted = onAdmitted;
     }
+
+    /// <inheritdoc />
+    public void OnAdmitted() => _onAdmitted?.Invoke();
 
     /// <inheritdoc />
     public bool SupportsUnreliable => false;

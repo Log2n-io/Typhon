@@ -397,6 +397,56 @@ sealed class ReliableEventTests : TestBase<ReliableEventTests>
     }
 
     /// <summary>
+    /// The same unkeepable session while the metronome catches up after a stall — ticks 1 µs apart: its backlog does not age in ticks (SUB-15), so the
+    /// close bound does not fire; the ring's own depth still does, the tick before it would reuse the slot the oldest owed event sits in (SUB-35).
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-15")]
+    [VerifiesRule("SUB-35")]
+    public void ACatchUpDoesNotAgeAReliableBacklogButTheRingStillForcesTheClose()
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        Spawn(dbe, 1, 0f);
+        using var harness = Harness(dbe, nameof(ACatchUpDoesNotAgeAReliableBacklogButTheRingStillForcesTheClose),
+            Options(closeAfter: TimeSpan.FromMilliseconds(1)));
+        var session = harness.OpenSessions(1, "near")[0];
+        Assert.That(harness.Sessions.SetViewpoint(session, new Vector3D(0d, 0d, 0d)), Is.True);
+        var tick = 0L;
+        for (; tick < FillTicks;)
+        {
+            harness.RunTick(++tick);
+            harness.Deliver(session);
+        }
+
+        harness.TickSpacingUs = 1;
+        var commands = harness.Subscriptions.Commands;
+        var bound = harness.Assembler.CloseBoundTicks;
+        var depth = harness.Subscriptions.Events.ReliableDepth;
+        var state = harness.StateOf(session);
+        var age = 0L;
+        // The backlog ages about half a tick per tick here (a frame carries half of what each tick emits), so four ring depths reach the backstop.
+        for (var t = 0; t < (depth * 4) && harness.Assembler.SessionsClosedReliable == 0; t++)
+        {
+            var oldest = EventHub.OldestOwed(state);
+            age = oldest == 0 ? 0 : tick + 1 - oldest;
+            for (var i = 0; i < 30; i++)
+            {
+                commands.Emit(new RelLetter { Text = Long, Seq = i });
+            }
+
+            harness.RunTick(++tick);
+            harness.Deliver(session);
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(harness.Assembler.SessionsClosedReliable, Is.EqualTo(1), "closed once");
+            Assert.That(age, Is.GreaterThan(bound + 1), "not by the close bound: the catch-up's ticks took microseconds between them");
+            Assert.That(age, Is.EqualTo(depth - 1), "by the ring's backstop, the tick before the oldest owed event's slot would be reused");
+        });
+    }
+
+    /// <summary>
     /// The burst's check against a client that loses one of the frames carrying it — the violation SUB-35 forbids, made on the test side: the check must
     /// reject the run.
     /// </summary>

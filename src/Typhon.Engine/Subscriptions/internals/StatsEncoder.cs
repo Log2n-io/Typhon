@@ -54,6 +54,8 @@ internal sealed class StatsEncoder
         NetOutBytesPerSec,
         TrackP99,
         DurabilityWaitP99,
+        SessionsClosed,
+        FramesSkipped,
         Application,
     }
 
@@ -252,6 +254,9 @@ internal sealed class StatsEncoder
     /// <summary>Sessions open right now, for a caller that reports population alongside its own figures.</summary>
     internal int OpenSessions => _sessions.OpenCount;
 
+    /// <summary>The frame stage this encoder is attached to, for <c>typhon.frames.skipped</c>; set by <see cref="FrameAssembler.AttachStats"/>.</summary>
+    internal FrameAssembler Frames { get; set; }
+
     /// <summary>The send pump's lifetime byte count, or 0 with no pump. The caller differences it against its own mark.</summary>
     internal long SentBytes => _sendPump?.BytesSent ?? 0;
 
@@ -316,6 +321,22 @@ internal sealed class StatsEncoder
                     break;
                 case ServerSource.Sessions:
                     _serverValues[at] = _sessions.OpenCount;
+                    break;
+                case ServerSource.SessionsClosed:
+                    // Label k is close reason k (BuiltInMetrics.SessionsClosedLabels).
+                    for (var k = 0; k < binding.ValueCount; k++)
+                    {
+                        _serverValues[at + k] = Counter(_sessions.ClosesBy((SessionCloseReason)k));
+                    }
+
+                    break;
+                case ServerSource.FramesSkipped:
+                    // Label k is skip cause k + 1: cause 0 is "not a skip" and has no label (BuiltInMetrics.FramesSkippedLabels).
+                    for (var k = 0; k < binding.ValueCount; k++)
+                    {
+                        _serverValues[at + k] = Counter(Frames?.SkipsBy((FrameSkipCause)(k + 1)) ?? 0);
+                    }
+
                     break;
                 case ServerSource.NetOutBytesPerSec:
                     _serverValues[at] = outBytesPerSec;
@@ -661,6 +682,8 @@ internal sealed class StatsEncoder
         // — so with no always-on number this emitted a hard zero. TickTelemetry.UowFlushMs is now stamped every tick, and the percentile comes out of the
         // same window pass as typhon.tick.p99. It is the per-TICK wait, not the per-commit one; see DurabilityWaitPercentile.
         "typhon.durability.wait.p99" => ServerSource.DurabilityWaitP99,
+        BuiltInMetrics.SessionsClosed => ServerSource.SessionsClosed,
+        BuiltInMetrics.FramesSkipped => ServerSource.FramesSkipped,
 
         // A built-in this engine cannot source yet emits zero rather than a number nobody measured. None is left today; the arm stays because the next
         // reserved index is added to the table before its source exists, and a silent fall-through to Application would call a reader that is not there.

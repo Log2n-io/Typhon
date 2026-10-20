@@ -226,6 +226,10 @@ internal sealed unsafe class GroupOracle : IDisposable
             harness.RunFence = true;
             harness.DrainNetIds = true;
             harness.RunIngress = true;
+            // #1409: the region index is incremental; every refresh that changes it is checked against a from-scratch build.
+            harness.Subscriptions.Push.VerifyRegionIndexForTest = true;
+            // #1410: the wanted keys are counted, not rebuilt; every blocks step is checked against a recount.
+            harness.Subscriptions.Hub.VerifyWantedForTest = true;
             var oracle = new GroupOracle(harness, seed, skipPercent, tags);
             oracle.Seed();
             for (var i = 0; i < oracle._sessions.Length; i++)
@@ -893,6 +897,16 @@ internal sealed unsafe class GroupOracle : IDisposable
         if (Push.ShadowIllegal != 0)
         {
             divergences.Add($"the push path published {Push.ShadowIllegal} record(s) a client could not legally apply");
+        }
+
+        if (_harness.Subscriptions.Hub.WantedMismatches != 0)
+        {
+            divergences.Add($"the wanted-key counts differed from a recount {_harness.Subscriptions.Hub.WantedMismatches} time(s)");
+        }
+
+        if (Push.RegionIndexMismatches != 0)
+        {
+            divergences.Add($"the incremental region index differed from a from-scratch build {Push.RegionIndexMismatches} time(s)");
         }
 
         if (Push.GroupsOverLimit != 0)

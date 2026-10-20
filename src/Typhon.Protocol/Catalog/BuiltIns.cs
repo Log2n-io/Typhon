@@ -235,20 +235,41 @@ public static class BuiltInCommands
 /// </summary>
 public static class BuiltInMetrics
 {
-    private static readonly (string Name, string Unit, CodecKind Codec, string Kind, string Scope)[] Table =
+    // Labelled is a column, as in the TypeScript and native validators' tables, rather than a list of names beside it that could drift from them.
+    private static readonly (string Name, string Unit, CodecKind Codec, string Kind, string Scope, bool Labelled)[] Table =
     [
-        ("typhon.tick.p50", "ms", CodecKind.F16, null, null),
-        ("typhon.tick.p99", "ms", CodecKind.F16, null, null),
-        ("typhon.system.mean", "ms", CodecKind.F16, null, null),
-        ("typhon.archetype.entities", "count", CodecKind.Varu, null, null),
-        ("typhon.sessions", "count", CodecKind.Varu, null, null),
-        ("typhon.net.outBytesPerSec", "B/s", CodecKind.Varu, null, null),
-        ("typhon.subscriptions.track.p99", "ms", CodecKind.F16, null, null),
-        ("typhon.durability.wait.p99", "ms", CodecKind.F16, null, null),
-        ("typhon.session.outBytesPerSec", "B/s", CodecKind.Varu, null, CatalogMetric.SessionScope),
-        ("typhon.session.skippedFrames", "count", CodecKind.Varu, CatalogMetric.CounterKind, CatalogMetric.SessionScope),
-        ("typhon.session.droppedCommands", "count", CodecKind.Varu, CatalogMetric.CounterKind, CatalogMetric.SessionScope),
+        ("typhon.tick.p50", "ms", CodecKind.F16, null, null, false),
+        ("typhon.tick.p99", "ms", CodecKind.F16, null, null, false),
+        ("typhon.system.mean", "ms", CodecKind.F16, null, null, true),
+        ("typhon.archetype.entities", "count", CodecKind.Varu, null, null, true),
+        ("typhon.sessions", "count", CodecKind.Varu, null, null, false),
+        ("typhon.net.outBytesPerSec", "B/s", CodecKind.Varu, null, null, false),
+        ("typhon.subscriptions.track.p99", "ms", CodecKind.F16, null, null, false),
+        ("typhon.durability.wait.p99", "ms", CodecKind.F16, null, null, false),
+        ("typhon.session.outBytesPerSec", "B/s", CodecKind.Varu, null, CatalogMetric.SessionScope, false),
+        ("typhon.session.skippedFrames", "count", CodecKind.Varu, CatalogMetric.CounterKind, CatalogMetric.SessionScope, false),
+        ("typhon.session.droppedCommands", "count", CodecKind.Varu, CatalogMetric.CounterKind, CatalogMetric.SessionScope, false),
+        (SessionsClosed, "count", CodecKind.Varu, CatalogMetric.CounterKind, null, true),
+        (FramesSkipped, "count", CodecKind.Varu, CatalogMetric.CounterKind, null, true),
     ];
+
+    /// <summary>Sessions closed since the server started, one value per reason in <see cref="SessionsClosedLabels"/> order. Cumulative.</summary>
+    public const string SessionsClosed = "typhon.sessions.closed";
+
+    /// <summary>
+    /// The labels of <see cref="SessionsClosed"/>: the engine's close reasons by their numeric value, so label <c>k</c> is reason <c>k</c>. Fixed, append only.
+    /// </summary>
+    public static readonly string[] SessionsClosedLabels =
+        ["clientLeft", "kicked", "linkLost", "lagging", "unacknowledged", "protocolError", "serverShutdown", "internalError", "abusive"];
+
+    /// <summary>Frames skipped since the server started, one value per cause in <see cref="FramesSkippedLabels"/> order. Cumulative.</summary>
+    public const string FramesSkipped = "typhon.frames.skipped";
+
+    /// <summary>
+    /// The labels of <see cref="FramesSkipped"/>: why the engine denied a session a frame — the degrade gate, an acknowledgement past the lag bound, both
+    /// frame slots in flight, a frame over the wire cap, a frame pool that would not lend, a backlog repaired by a <c>RESET</c>. Fixed, append only.
+    /// </summary>
+    public static readonly string[] FramesSkippedLabels = ["gated", "lagging", "inFlightFull", "oversize", "poolRefused", "owedReset"];
 
     /// <summary>Per-system mean duration; its labels are the system names, in schedule order.</summary>
     public const string SystemMean = "typhon.system.mean";
@@ -281,8 +302,7 @@ public static class BuiltInMetrics
     /// <returns><see langword="true"/> when unit, codec, kind, scope and the presence of labels all match.</returns>
     public static bool HasShape(int idx, CatalogMetric metric)
     {
-        var (_, unit, codec, kind, scope) = Table[idx];
-        var labelled = Table[idx].Name is SystemMean or ArchetypeEntities;
+        var (_, unit, codec, kind, scope, labelled) = Table[idx];
         return metric.Unit == unit
             && metric.Codec?.Kind == codec
             && (metric.Kind ?? CatalogMetric.GaugeKind) == (kind ?? CatalogMetric.GaugeKind)
@@ -292,11 +312,14 @@ public static class BuiltInMetrics
 
     /// <summary>Builds the definition of the built-in metric at <paramref name="idx"/>.</summary>
     /// <param name="idx">The reserved index, in [0, <see cref="Count"/>).</param>
-    /// <param name="labels">The labels, for <see cref="SystemMean"/> and <see cref="ArchetypeEntities"/>; otherwise <see langword="null"/>.</param>
+    /// <param name="labels">
+    /// The labels, for a labelled built-in — <see cref="SystemMean"/>, <see cref="ArchetypeEntities"/>, <see cref="SessionsClosed"/> and
+    /// <see cref="FramesSkipped"/>; otherwise <see langword="null"/>.
+    /// </param>
     /// <returns>The metric definition.</returns>
     public static CatalogMetric Create(int idx, string[] labels = null)
     {
-        var (name, unit, codec, kind, scope) = Table[idx];
+        var (name, unit, codec, kind, scope, _) = Table[idx];
         return new CatalogMetric
         {
             Idx = idx, Name = name, Unit = unit, Codec = new CatalogCodec { Kind = codec }, Kind = kind, Scope = scope, Labels = labels,

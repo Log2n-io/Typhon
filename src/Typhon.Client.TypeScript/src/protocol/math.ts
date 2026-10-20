@@ -249,6 +249,72 @@ export function decodeQuat3Halves(low: number, high: number, out: Float64Array, 
   out[offset + largest] = Math.sqrt(rest > 0 ? rest : 0);
 }
 
+// ---- interpolation (03 § 6) -----------------------------------------------------------------------------------------
+
+/**
+ * Interpolates two decoded `angle` values the short way round, in code space (03 § 6, W7): Δ = wrap_b(q1 − q0), then
+ * q0 + t × Δ, re-wrapped into [−2^(b−1), 2^(b−1)) and decoded. Radians in [−π, π); `t` outside [0, 1] extrapolates
+ * along the same short way. In code space so every SDK takes the same way at exactly half a turn.
+ */
+export function interpolateAngle(from: number, to: number, t: number, bits: number): number {
+  if (bits !== 8 && bits !== 16 && bits !== 24 && bits !== 32) {
+    throw new RangeError(`an angle is 8, 16, 24 or 32 bits wide, not ${bits}`);
+  }
+
+  const p = pow2(bits);
+  const h = pow2(bits - 1);
+  const q0 = encodeAngle(from, bits);
+  const q1 = encodeAngle(to, bits);
+  const d = q1 - q0;
+  const delta = d - p * Math.floor((d + h) / p);
+  let x = q0 + t * delta;
+  x -= p * Math.floor((x + h) / p);
+  return (x * TAU) / p;
+}
+
+/**
+ * Interpolates two decoded `quat3` rotations (03 § 6, W8), each x, y, z, w at its offset: the shorter hemisphere — `to`
+ * negated when the dot product is negative — then a linear interpolation, normalized. A zero result is the identity, as
+ * the encoder makes it. `out` may alias either input.
+ */
+export function interpolateQuat3(
+  from: ArrayLike<number>,
+  fromOffset: number,
+  to: ArrayLike<number>,
+  toOffset: number,
+  t: number,
+  out: Float64Array,
+  outOffset: number,
+): void {
+  const a0 = from[fromOffset]!;
+  const a1 = from[fromOffset + 1]!;
+  const a2 = from[fromOffset + 2]!;
+  const a3 = from[fromOffset + 3]!;
+  const b0 = to[toOffset]!;
+  const b1 = to[toOffset + 1]!;
+  const b2 = to[toOffset + 2]!;
+  const b3 = to[toOffset + 3]!;
+  const dot = a0 * b0 + a1 * b1 + a2 * b2 + a3 * b3;
+  const sign = dot < 0 ? -1 : 1;
+  const x = a0 + t * (sign * b0 - a0);
+  const y = a1 + t * (sign * b1 - a1);
+  const z = a2 + t * (sign * b2 - a2);
+  const w = a3 + t * (sign * b3 - a3);
+  const n = Math.sqrt(x * x + y * y + z * z + w * w);
+  if (!(n > 0) || n === Infinity) {
+    out[outOffset] = 0;
+    out[outOffset + 1] = 0;
+    out[outOffset + 2] = 0;
+    out[outOffset + 3] = 1;
+    return;
+  }
+
+  out[outOffset] = x / n;
+  out[outOffset + 1] = y / n;
+  out[outOffset + 2] = z / n;
+  out[outOffset + 3] = w / n;
+}
+
 // ---- f16 (W10) ------------------------------------------------------------------------------------------------------
 
 const f16Bits = new DataView(new ArrayBuffer(8));
