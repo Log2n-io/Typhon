@@ -52,12 +52,18 @@ public:
     // Advances render time to local time `nowMs`. Call once per rendered frame.
     void Update(double nowMs);
 
+    // How far into the server's tick the local instant `atMs` fell, as a fraction in [0, 1), or NaN before the first frame has anchored
+    // the grid. `oneWayDelayMs` is the downlink delay to take off the anchor: half the PingScheduler's RTT is the usual estimate, 0 leaves
+    // the bias in (loopback). The grid a client quantises an intent against (the .NET and TypeScript SDKs' SubTickPhase).
+    double SubTickPhase(double atMs, double oneWayDelayMs = 0) const;
+
 private:
     static constexpr int SampleCapacity = 128;
     static constexpr int MinSamplesForJitter = 4;
     static constexpr int PeriodHistory = 8;
 
     double ServerMsOf(std::int64_t tick) const;
+    int PieceAt(double ms) const;
     void ToTick(double ms);
     void PushSample(double recvMs, double offset);
 

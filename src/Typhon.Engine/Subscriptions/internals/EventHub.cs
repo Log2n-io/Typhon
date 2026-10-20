@@ -509,8 +509,8 @@ internal sealed class EventHub
     public long ReliableRetained => System.Threading.Volatile.Read(ref _reliableRetained);
 
     /// <summary>
-    /// Sizes the reliable ring from the session close bound: a power of two above it, so a session's oldest owed tick is always still held while the session
-    /// lives. Called once by the runtime, before the first tick.
+    /// Sizes the reliable ring from the session close bound: a power of two above twice it, so a session's oldest owed tick is always still held while the
+    /// session lives — the close sweep forces the close the tick before the ring would reuse that slot. Called once by the runtime, before the first tick.
     /// </summary>
     public void BindReliable(int closeBoundTicks, long budgetBytes)
     {
@@ -519,8 +519,10 @@ internal sealed class EventHub
             return;
         }
 
-        // A slot is made the first time a reliable event lands on its tick: the ring is as deep as the close bound, not as large as it.
-        var depth = (int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)Math.Clamp(closeBoundTicks + 2, 2, 1 << 24));
+        // A slot is made the first time a reliable event lands on its tick: the ring is as deep as the close bound, not as large as it. Twice as deep:
+        // the close is measured on the policy clock (SUB-15), and the ticks a stalled metronome runs back to back can outrun it — the second half is
+        // their headroom before the ring itself forces the close.
+        var depth = (int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)Math.Clamp((2 * closeBoundTicks) + 2, 2, 1 << 24));
         _reliable = new Tick[depth];
         _reliableMask = depth - 1;
         _reliableBudget = budgetBytes;

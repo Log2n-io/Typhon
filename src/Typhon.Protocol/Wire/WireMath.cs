@@ -326,6 +326,71 @@ public static class WireMath
         xyzw[largest] = Math.Sqrt(rest > 0 ? rest : 0);
     }
 
+    // ---- interpolation (03 § 6) -------------------------------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Interpolates two decoded <c>angle</c> values the short way round, in code space (03 § 6, W7): Δ = wrap_b(q1 − q0), then q0 + t × Δ, re-wrapped
+    /// into [−2ᵇ⁻¹, 2ᵇ⁻¹) and decoded.
+    /// </summary>
+    /// <param name="from">The value at <paramref name="t"/> = 0, as the field decoded it.</param>
+    /// <param name="to">The value at <paramref name="t"/> = 1, as the field decoded it.</param>
+    /// <param name="t">The fraction; outside [0, 1] it extrapolates along the same short way.</param>
+    /// <param name="bits">The field's code width: 8, 16, 24 or 32.</param>
+    /// <returns>Radians in [−π, π).</returns>
+    /// <remarks>
+    /// In code space rather than in radians so every SDK takes the same short way at exactly half a turn: Δ = −2ᵇ⁻¹ there, as the encoder's own wrap
+    /// decides, where a radian wrap would have to pick a side of π itself.
+    /// </remarks>
+    public static double InterpolateAngle(double from, double to, double t, int bits)
+    {
+        if (bits is not (8 or 16 or 24 or 32))
+        {
+            throw new ArgumentOutOfRangeException(nameof(bits), bits, "an angle is 8, 16, 24 or 32 bits wide");
+        }
+
+        var p = Pow2(bits);
+        var h = Pow2(bits - 1);
+        double q0 = EncodeAngle(from, bits);
+        double q1 = EncodeAngle(to, bits);
+        var d = q1 - q0;
+        var delta = d - (p * Math.Floor((d + h) / p));
+        var x = q0 + (t * delta);
+        x -= p * Math.Floor((x + h) / p);
+        return x * Tau / p;
+    }
+
+    /// <summary>
+    /// Interpolates two decoded <c>quat3</c> rotations (03 § 6, W8): the shorter hemisphere — <paramref name="to"/> negated when the dot product is negative —
+    /// then a linear interpolation, normalized. A zero result is the identity, as the encoder makes it.
+    /// </summary>
+    /// <param name="from">x, y, z, w at <paramref name="t"/> = 0.</param>
+    /// <param name="to">x, y, z, w at <paramref name="t"/> = 1.</param>
+    /// <param name="t">The fraction.</param>
+    /// <param name="xyzw">Receives x, y, z, w; may be <paramref name="from"/> or <paramref name="to"/>.</param>
+    public static void InterpolateQuat3(ReadOnlySpan<double> from, ReadOnlySpan<double> to, double t, Span<double> xyzw)
+    {
+        var dot = (((from[0] * to[0]) + (from[1] * to[1])) + (from[2] * to[2])) + (from[3] * to[3]);
+        var sign = dot < 0 ? -1.0 : 1.0;
+        var x = from[0] + (t * ((sign * to[0]) - from[0]));
+        var y = from[1] + (t * ((sign * to[1]) - from[1]));
+        var z = from[2] + (t * ((sign * to[2]) - from[2]));
+        var w = from[3] + (t * ((sign * to[3]) - from[3]));
+        var n = Math.Sqrt((((x * x) + (y * y)) + (z * z)) + (w * w));
+        if (!(n > 0) || double.IsPositiveInfinity(n))
+        {
+            xyzw[0] = 0;
+            xyzw[1] = 0;
+            xyzw[2] = 0;
+            xyzw[3] = 1;
+            return;
+        }
+
+        xyzw[0] = x / n;
+        xyzw[1] = y / n;
+        xyzw[2] = z / n;
+        xyzw[3] = w / n;
+    }
+
     // ---- f16 (W10) --------------------------------------------------------------------------------------------------------------------------------
 
     /// <summary>

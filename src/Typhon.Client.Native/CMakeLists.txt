@@ -136,6 +136,7 @@ if(TYPHON_NATIVE_TESTS)
     tests/corruption_test.cpp
     tests/json_test.cpp
     tests/golden_subscribe_requests_test.cpp
+    tests/golden_clock_test.cpp
   )
   target_include_directories(typhon_client_tests PRIVATE src tests)
   target_compile_options(typhon_client_tests PRIVATE ${TYPHON_WARNINGS})

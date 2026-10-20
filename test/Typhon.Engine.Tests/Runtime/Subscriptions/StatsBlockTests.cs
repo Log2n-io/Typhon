@@ -1,8 +1,10 @@
 using NUnit.Framework;
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Typhon.Client;
+using Microsoft.Extensions.Logging;
 using Typhon.Engine.Internals;
 using Typhon.Protocol;
 using Typhon.Schema.Definition;
@@ -206,6 +208,92 @@ class StatsBlockTests : TestBase<StatsBlockTests>
             // #CLI-04 through the other door: the same stamp the wire metric now reports.
             Assert.That(stats.DurabilityWaitP99Ms, Is.GreaterThan(0), "a ticking WAL engine waits for durability every tick");
         });
+    }
+
+    /// <summary>
+    /// Why sessions closed, through every door an operator has: the <c>STATS</c> block's <c>typhon.sessions.closed</c> and <c>typhon.frames.skipped</c>,
+    /// <c>ReadStats</c>, and one warning line from the frame stage — all agreeing on the same close.
+    /// </summary>
+    /// <remarks>
+    /// The 2026-10-20 one-box AC-4 run lost 3 000 of 5 000 sessions and needed a reflection probe to learn they were closed for silence. The counters already
+    /// existed inside the engine; this asserts that they leave it.
+    /// </remarks>
+    [Test]
+    public void ACloseIsCountedByReasonOnTheWireInReadStatsAndInTheLog()
+    {
+        using var world = new StatsWorld(SetupEngine());
+        var warnings = new List<string>();
+        world.Subscriptions.Frames.Logger = new CapturingLogger(warnings);
+
+        // A tenth of a second rather than the shipped second: what is under test is the report, not its period.
+        world.Subscriptions.Frames.CloseReportWindowUs = 100_000;
+
+        var observer = world.Connect(Capabilities.Stats);
+        var victim = world.Connect(Capabilities.Stats);
+        Assert.That(observer.AwaitBlock() && victim.AwaitBlock(), Is.True, "no STATS block reached a client");
+
+        // An engine-decided close, as the silence sweep makes it.
+        Assert.That(world.Subscriptions.Sessions.RequestClose(victim.Session, SessionCloseReason.Unacknowledged, CloseCodes.NoAcknowledgement), Is.True);
+
+        // Until the wire carries the close AND the once-a-second report has run, pinging all along so the observer is not the next silent close.
+        var silentLabel = Array.IndexOf(BuiltInMetrics.SessionsClosedLabels, "unacknowledged");
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline)
+        {
+            observer.Ping();
+            observer.AwaitBlock(DateTime.UtcNow.AddMilliseconds(200));
+            int logged;
+            lock (warnings)
+            {
+                logged = warnings.Count;
+            }
+
+            if (Row(observer, BuiltInMetrics.SessionsClosed)[silentLabel] >= 1 && logged > 0)
+            {
+                break;
+            }
+        }
+
+        var stats = world.Runtime.ReadStats();
+        var closed = Row(observer, BuiltInMetrics.SessionsClosed);
+        Assert.Multiple(() =>
+        {
+            Assert.That(Metric(observer, BuiltInMetrics.SessionsClosed).Metric.Labels, Is.EqualTo(BuiltInMetrics.SessionsClosedLabels),
+                "the close counter is labelled with the reasons, in their numeric order");
+            Assert.That(Metric(observer, BuiltInMetrics.FramesSkipped).Metric.Labels, Is.EqualTo(BuiltInMetrics.FramesSkippedLabels));
+            Assert.That(Row(observer, BuiltInMetrics.FramesSkipped), Has.Length.EqualTo(BuiltInMetrics.FramesSkippedLabels.Length));
+            Assert.That(closed[silentLabel], Is.EqualTo(1), "one session was closed for silence, and the wire says so under its reason");
+            Assert.That(closed[Array.IndexOf(BuiltInMetrics.SessionsClosedLabels, "lagging")], Is.Zero, "and under no other");
+            Assert.That(stats.SessionsClosed.Unacknowledged, Is.EqualTo(1), "ReadStats counts the same close under the same reason");
+            Assert.That(stats.SessionsClosed.Lagging + stats.SessionsClosed.LinkLost + stats.SessionsClosed.ClientLeft, Is.Zero);
+            lock (warnings)
+            {
+                Assert.That(warnings, Has.Count.EqualTo(1), "one window, one close by the engine: one warning, however many ticks the window had");
+                Assert.That(warnings.Count > 0 ? warnings[0] : "", Does.Contain("closed 1 sessions").And.Contain("1 silent (4001"),
+                    "the warning names how many the engine closed and why");
+            }
+        });
+    }
+
+    /// <summary>A logger that keeps the formatted warnings.</summary>
+    private sealed class CapturingLogger(List<string> warnings) : ILogger
+    {
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Warning;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception exception, Func<TState, Exception, string> formatter)
+        {
+            if (logLevel < LogLevel.Warning)
+            {
+                return;
+            }
+
+            lock (warnings)
+            {
+                warnings.Add(formatter(state, exception));
+            }
+        }
     }
 
     /// <summary>
@@ -459,7 +547,7 @@ class StatsBlockTests : TestBase<StatsBlockTests>
             var catalog = CatalogPlan.Compile(Subscriptions.Catalog.Canonical);
             Assert.That(welcome.CapsGranted, Is.EqualTo(caps & Capabilities.Stats), "the grant is what the producer keys the block off");
 
-            return new StatsClient(link, connection.Session, catalog);
+            return new StatsClient(link, connection.Session, catalog) { Connection = connection };
         }
 
         public void Dispose()
@@ -514,6 +602,12 @@ class StatsBlockTests : TestBase<StatsBlockTests>
         public SessionId Session { get; }
 
         public WorldStore Store { get; }
+
+        /// <summary>The server side of the link, so a test that outlives the silence bound can keep the session talking.</summary>
+        public SubscriptionConnection Connection { get; init; }
+
+        /// <summary>Sends one <c>PING</c> carrying the newest applied tick, as an SDK's ping loop would.</summary>
+        public void Ping() => Connection.OnMessage(ClientMessages.Ping(0, (uint)Store.Tick));
 
         /// <summary>Frames carrying a <c>STATS</c> block that this client has applied.</summary>
         public int StatsBlocks { get; private set; }

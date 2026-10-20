@@ -47,6 +47,7 @@ app.MapTyphonCatalog("/typhon/catalog.json");
 |---|---|---|
 | `TcpSubscriptionOptions.Address` / `Port` | loopback / required | Where TCP listens (`Port = 0`: ephemeral, read `BoundEndPoint`) |
 | `TcpSubscriptionOptions.ServerCertificate` | none | TLS on TCP |
+| `TcpSubscriptionOptions.MaxPendingConnections` | 256 | Accepted connections not yet admitted (in the TLS handshake or waiting for `HELLO`); past it a new connection is reset at once and counted (`PendingRefused`) |
 | `TyphonSubscriptionsOptions.AllowedOrigins` | empty (refuses) | Browser origins allowed |
 | `TyphonSubscriptionsOptions.KeepAliveInterval` / `KeepAliveTimeout` | 15 s / 15 s | WebSocket ping frames (the framework's defaults are 2 min / infinite) |
 
@@ -54,6 +55,8 @@ app.MapTyphonCatalog("/typhon/catalog.json");
 
 - `Typhon.Engine` references no ASP.NET Core assembly (AC-19).
 - **Neither transport authenticates**: the `HELLO` token reaches the admission hook unexamined.
+- **TCP bounds connections that never finish their handshake** (SUB-37): each holds a slot from accept until admission, its close, or
+  `StopAsync`, so a flood of half-open connections costs at most `MaxPendingConnections` sockets, never the admitted sessions'.
 - The WebSocket adapter does not cap kernel send buffering (`TCP_NOTSENT_LOWAT` on the upgraded socket), so the acknowledgement-based lag
   skip is what bounds a slow browser. **WebTransport is not built.**
 - A transport can be written against `ISubscriptionTransport` / `ISubscriptionLink` and started with `StartSubscriptionTransport`.
@@ -61,6 +64,8 @@ app.MapTyphonCatalog("/typhon/catalog.json");
 ## 🧪 Tests
 
 - [TcpTransportTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/TcpTransportTests.cs) — framing, preamble, random framing never stops the listener
+- [TcpTransportTests.Hardening](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/TcpTransportTests.Hardening.cs) — the pending-connection cap, TLS, a stop mid-handshake, hostile length prefixes
+- [WebSocketParityTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Subscriptions.AspNetCore.Tests/WebSocketParityTests.cs) — WebSocket and in-process links yield byte-identical messages (AC-15)
 - [LiveClientTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/LiveClientTests.cs) — a real client over TCP end to end
 
 ## 🔗 Related

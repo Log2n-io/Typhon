@@ -2,6 +2,7 @@
 // motion and the commands are read and written through the C surface only.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -12,6 +13,7 @@
 #include "test_framework.hpp"
 #include "typhon/client.h"
 #include "wire/commands.hpp"
+#include "wire/math.hpp"
 
 using namespace typhon::test;
 
@@ -313,6 +315,36 @@ TEST(CApi_EvaluatesMotionAtTheClocksRenderTime)
     // A buffer too small for every live entity is refused, not overrun.
     CHECK_EQ(static_cast<int>(typhon_motion_evaluate_live(h.client, drone, all.data(), all.size() - 1)),
              static_cast<int>(TYPHON_ERROR_OUT_OF_RANGE));
+}
+
+TEST(CApi_GivesThePhaseTheRoundTripAndTheInterpolations)
+{
+    CapiHarness h;
+    double phase = 0;
+    CHECK_EQ(static_cast<int>(typhon_clock_sub_tick_phase(h.client, 1000, 0, &phase)), static_cast<int>(TYPHON_ERROR_STATE));
+    h.OpenAndStream();
+    CHECK_EQ(static_cast<int>(typhon_clock_sub_tick_phase(h.client, 1000, 0, &phase)), static_cast<int>(TYPHON_OK));
+    CHECK(phase >= 0 && phase < 1);
+    CHECK_EQ(static_cast<int>(typhon_clock_sub_tick_phase(h.client, 1000, 0, nullptr)), static_cast<int>(TYPHON_ERROR_INVALID_ARGUMENT));
+
+    double rtt = -1;
+    double last = -1;
+    CHECK_EQ(static_cast<int>(typhon_client_round_trip(h.client, &rtt, &last)), static_cast<int>(TYPHON_OK));
+    CHECK(rtt >= 0 && last >= 0);
+
+    // The same arithmetic as math::InterpolateAngle, through the ABI: across +pi at 8 bits, the short way.
+    double angle = 0;
+    const double from = math::DecodeAngle(126, 8);
+    const double to = math::DecodeAngle(-125, 8);
+    CHECK_EQ(static_cast<int>(typhon_interpolate_angle(from, to, 0.5, 8, &angle)), static_cast<int>(TYPHON_OK));
+    CHECK(angle == math::InterpolateAngle(from, to, 0.5, 8));
+    CHECK_EQ(static_cast<int>(typhon_interpolate_angle(from, to, 0.5, 7, &angle)), static_cast<int>(TYPHON_ERROR_INVALID_ARGUMENT));
+
+    const double s = 0.7071067811865476;
+    double q[4] = {0, 0, s, s};
+    const double neg[4] = {0, 0, -s, -s};
+    CHECK_EQ(static_cast<int>(typhon_interpolate_quat3(q, neg, 0.5, q)), static_cast<int>(TYPHON_OK));
+    CHECK(std::abs(q[2] - s) < 1e-12 && std::abs(q[3] - s) < 1e-12);
 }
 
 TEST(CApi_QueuesAndFlushesCommands)

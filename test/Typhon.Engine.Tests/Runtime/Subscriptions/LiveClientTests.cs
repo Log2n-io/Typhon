@@ -60,6 +60,9 @@ sealed class LiveClientTests : TestBase<LiveClientTests>
                 // client that connected and then received nothing at all.
                 var arrived = SpinWait.SpinUntil(() => LiveCount(client, creatures) >= CreatureCount, TimeSpan.FromSeconds(15));
 
+                // The client's own PING loop runs at the catalog's rate: a PONG answers it, and the round trip is measured from it (#1398).
+                var measured = SpinWait.SpinUntil(() => client.RoundTrip.PongsReceived >= 4, TimeSpan.FromSeconds(5));
+
                 Assert.Multiple(() =>
                 {
                     Assert.That(client.Plan, Is.Not.Null, "the handshake produced no catalog");
@@ -67,6 +70,10 @@ sealed class LiveClientTests : TestBase<LiveClientTests>
                     Assert.That(arrived, Is.True, $"the client decoded {LiveCount(client, creatures)} creatures of {CreatureCount} within fifteen seconds");
                     Assert.That(client.Store.Anomalies, Is.Zero, "the decoder could not apply something the engine sent it");
                     Assert.That(client.MessagesReceived, Is.GreaterThan(0));
+                    Assert.That(measured, Is.True, "no PONG was measured: the .NET client dropped them before #1398");
+                    // Tight on purpose: the default ping loop once stamped with Environment.TickCount while the PONG side subtracted the Stopwatch
+                    // clock, and the round trip carried the two clocks' offset (+23 ms on the dev box) on a loopback that measures ~1.3 ms.
+                    Assert.That(client.RoundTrip.RttMs, Is.InRange(0d, 20d), "a loopback round trip, in milliseconds, on ONE clock");
                 });
 
                 // The recording has to be usable, which means the WELCOME that carries the catalog is in it.

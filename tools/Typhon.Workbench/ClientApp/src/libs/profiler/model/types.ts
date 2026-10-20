@@ -59,6 +59,10 @@ export const enum TraceEventKind {
   SpatialRealmRates = 70,
   SubscriptionsServerTelemetry = 68,
   SubscriptionsSessionTelemetry = 69,
+  /** Instants — push replication's per-session records (#1038 D-2): frame produced, frame skipped, session changed (mirrored in `isInstantKind`). */
+  SubscriptionsFrameProduced = 71,
+  SubscriptionsFrameSkipped = 72,
+  SubscriptionsSessionChanged = 73,
 
   WalFlush = 80,
   WalSegmentRotate = 81,

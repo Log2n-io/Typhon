@@ -118,7 +118,15 @@ public enum SessionEventKind : byte
     /// <summary>A resumable session's grace period elapsed without the client coming back. Built with resume, in a later phase.</summary>
     ResumeExpired = 3,
 
-    /// <summary>A session was served less — a rate class dropped, a near radius shrunk — rather than closed. Built with the send pump.</summary>
+    /// <summary>
+    /// A session moved on the degrade ladder: it could not keep up and is now served every 2nd or 4th tick, or it recovered. <see
+    /// cref="SessionEvent.DegradeLevel"/>
+    /// carries the level it moved to — 1 or 2 when it fell, 0 when it is back to every tick.
+    /// </summary>
+    /// <remarks>
+    /// The engine's own response is mechanical — fewer frames. The application is the party that can do better: shrink the player's interest so each frame is
+    /// smaller, drop optional streams, tell the player the connection is struggling. One event per step, in either direction, never one per tick spent there.
+    /// </remarks>
     Degraded = 4,
 
     /// <summary>
@@ -186,9 +194,10 @@ public readonly struct SessionEvent
 {
     internal SessionEvent(SessionEventKind kind, SessionId session, SessionRole role, SessionLimits limits, object appData, string sessionKind,
         byte[] helloPayload, ClaimsPrincipal principal, SessionId resumedFrom, SessionCloseReason reason, ushort closeCode, bool resumable,
-        RealmId realm = default)
+        RealmId realm = default, int degradeLevel = 0)
     {
         Realm = kind == SessionEventKind.RealmClosed ? realm : RealmId.None;
+        DegradeLevel = kind == SessionEventKind.Degraded ? degradeLevel : 0;
         Kind = kind;
         Session = session;
         Role = role;
@@ -250,11 +259,18 @@ public readonly struct SessionEvent
     /// </remarks>
     public RealmId Realm { get; }
 
+    /// <summary>
+    /// The degrade level the session moved to. Meaningful on <see cref="SessionEventKind.Degraded"/>: 1 is served every 2nd tick, 2 every 4th, and 0 is back
+    /// to every tick. 0 on every other kind.
+    /// </summary>
+    public int DegradeLevel { get; }
+
     /// <inheritdoc />
     public override string ToString() => Kind switch
     {
         SessionEventKind.Closed => $"{Kind} {Session} ({Reason}, {CloseCode})",
         SessionEventKind.RealmClosed => $"{Kind} {Session} (realm {Realm.Value})",
+        SessionEventKind.Degraded => $"{Kind} {Session} (level {DegradeLevel})",
         _ => $"{Kind} {Session}",
     };
 }

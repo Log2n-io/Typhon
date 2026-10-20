@@ -397,23 +397,14 @@ internal sealed class GroupSessionState
         return false;
     }
 
-    /// <summary>Every committed and pending key, to the hub's held set: the client's keys and the ones this frame moves to, whatever a RESET reads.</summary>
-    public void CollectKeys(PushHub hub, int set)
+    /// <summary>
+    /// The two sides as the hub's wanted set counts them (#1410): the committed keys whatever a RESET reads — the client still holds them — and the pending
+    /// ones, the same holder when this frame wrote none.
+    /// </summary>
+    public void Sides(int set, out HeldKeys committed, out HeldKeys pending)
     {
-        var c = _committed[set];
-        for (var i = 0; i < c.Count; i++)
-        {
-            hub.AddWanted(set, c.Keys[i]);
-        }
-
-        var p = Pending(set);
-        if (p != c && !p.KeySpan.SequenceEqual(c.KeySpan))
-        {
-            for (var i = 0; i < p.Count; i++)
-            {
-                hub.AddWanted(set, p.Keys[i]);
-            }
-        }
+        committed = _committed[set];
+        pending = Pending(set);
     }
 
     /// <summary>The frame is published: its pending sides become the committed ones, by swapping the holders.</summary>

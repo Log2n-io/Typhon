@@ -1413,6 +1413,24 @@
               "kind": "subtreeResolved",
               "field": "SubscriptionsSessionTelemetryActive",
               "desc": "Combined gate for the Subscriptions:SessionTelemetry instant (kind 69: one row per connected session, carrying its bytes/s, skipped frames and degrade level). Separate from ServerTelemetry because its volume scales with the session count, not with the engine: a server at its 8192-session limit can afford the one server record and not the rows, so the emission is capped and the server record states how many sessions it is not showing."
+            },
+            {
+              "name": "FrameProduced",
+              "kind": "subtreeResolved",
+              "field": "SubscriptionsFrameProducedActive",
+              "desc": "Combined gate for the Subscriptions:FrameProduced instant (kind 71: one record per frame published for a session — its sequence, bytes, RESET flag and degrade level). The firehose of the push-replication records — one per served session per tick, 50 000 a second for 1 000 sessions at 50 Hz — and gated alone for that reason."
+            },
+            {
+              "name": "FrameSkipped",
+              "kind": "subtreeResolved",
+              "field": "SubscriptionsFrameSkippedActive",
+              "desc": "Combined gate for the Subscriptions:FrameSkipped instant (kind 72: a session due a frame that did not get one — gated, lagging, in flight full, oversize, pool refused or owed reset — with its skip run). Back-pressure only: a tick with nothing to say is not a skip."
+            },
+            {
+              "name": "SessionChanges",
+              "kind": "subtreeResolved",
+              "field": "SubscriptionsSessionChangesActive",
+              "desc": "Combined gate for the Subscriptions:SessionChanges instant (kind 73: a session opened, closed — with its reason and close code — or moved a step down or back up the degrade ladder)."
             }
           ]
         },

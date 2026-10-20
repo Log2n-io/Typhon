@@ -38,6 +38,8 @@ and send commands in the server's encoding — without being regenerated every t
   (`SubscribeResult`); paced by the command's rate, sent again when the server still refuses it for the rate, dropped when the session ends.
 - `EventCollector` — an `IEventHandler` that keeps each frame's events as `ReceivedEvent` values (fields by wire name); take them in `FrameApplied`.
   The way to receive events from code that cannot implement `IFieldSink` (its parameters are `scoped`), a Unity script among it.
+- `RoundTrip` — the round trip measured from `PING`/`PONG` (`RttMs`, a smoothed estimate; `LastRttMs`, the latest sample); the TypeScript
+  SDK's `PingScheduler.rttMs` and the C SDK's `typhon_client_round_trip` give the same figure.
 - `FrameApplied` — raised on the receive thread after each `TICK` is applied whole (events and leaves included) and before the next: the window
   to copy the frame's change lists and columns out to a game or render thread, since the next frame clears and rewrites them.
 
@@ -92,6 +94,10 @@ await bot.SendCommandAsync("MoveTo", new RecordValues
 
 - **Golden vectors** pin the wire: the engine, the .NET client, the TypeScript SDK and the C SDK decode the committed vectors identically, bit for bit.
 - **Forward compatible**: a client skips blocks and fixed-size fields it does not know (AC-14).
+- **Interpolation helpers**, identical in the three SDKs: an angle field interpolated through its wrap (`InterpolateAngle` /
+  `interpolateAngle` / `typhon_interpolate_angle`) and a `quat3` rotation by the shorter arc (`InterpolateQuat3` / `interpolateQuat3` /
+  `typhon_interpolate_quat3`). Two golden vectors — a recorded clock trace and the interpolation cases — replay bit for bit in .NET,
+  TypeScript and C.
 - **Steady state**: the TypeScript SDK shows no retained heap growth over a 10-minute replay; with code generation a steady-state frame of
   10 k records decodes in ≈ 0.3 ms on the reference laptop.
 - **Packaging**: each release's smoke tests install the packages from the release itself — a server on `Typhon` + `Typhon.Subscriptions.AspNetCore`,
@@ -104,6 +110,7 @@ await bot.SendCommandAsync("MoveTo", new RecordValues
 ## 🧪 Tests
 
 - `src/Typhon.Client.TypeScript/test` — vitest suites: framing, apply, motion, reconnect, codegen, golden streams
+- [ClockTraceGoldenTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Client.Tests/ClockTraceGoldenTests.cs) · [InterpolationGoldenTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Client.Tests/InterpolationGoldenTests.cs) — the clock and interpolation goldens shared by the three SDKs
 - [EngineStreamGoldenTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Client.Tests/EngineStreamGoldenTests.cs) — the .NET client against the engine's golden stream
 
 ## 🔗 Related

@@ -506,6 +506,15 @@ internal sealed unsafe partial class PushHub
     {
         var replication = _active[index];
         var realm = replication.ServedRealm;
+
+        // Its sessions are gone; what they counted in the wanted set goes with them, or a dormant realm would keep its keys wanted for ever (#1410). A
+        // backstop: a session that LEFT the realm was already withdrawn by the realm's own sync on the ticks before this sweep
+        // (RealmGroupTests.ADeactivatedRealmsHeldKeysAreNoLongerWanted), so this catches only what no sync reached.
+        if (_anyLazy)
+        {
+            replication.WithdrawHeldKeys(this);
+        }
+
         _byRealm[realm] = null;
         _active[index] = _active[--_activeCount];
         _active[_activeCount] = null;

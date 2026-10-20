@@ -301,4 +301,41 @@ double DecodeF16(std::uint16_t bits)
 
 std::uint32_t DecodeTickLo(std::uint32_t low, std::uint32_t frameTick) { return frameTick - ((frameTick - low) & 0xFFFFu); }
 
+double InterpolateAngle(double from, double to, double t, int bits)
+{
+    const double p = Pow2(bits);
+    const double h = Pow2(bits - 1);
+    const double q0 = EncodeAngle(from, bits);
+    const double q1 = EncodeAngle(to, bits);
+    const double d = q1 - q0;
+    const double delta = d - p * std::floor((d + h) / p);
+    double x = q0 + t * delta;
+    x -= p * std::floor((x + h) / p);
+    return (x * Tau) / p;
+}
+
+void InterpolateQuat3(const double* from, const double* to, double t, double* out)
+{
+    const double dot = from[0] * to[0] + from[1] * to[1] + from[2] * to[2] + from[3] * to[3];
+    const double sign = dot < 0 ? -1.0 : 1.0;
+    const double x = from[0] + t * (sign * to[0] - from[0]);
+    const double y = from[1] + t * (sign * to[1] - from[1]);
+    const double z = from[2] + t * (sign * to[2] - from[2]);
+    const double w = from[3] + t * (sign * to[3] - from[3]);
+    const double n = std::sqrt(x * x + y * y + z * z + w * w);
+    if (!(n > 0) || std::isinf(n))
+    {
+        out[0] = 0;
+        out[1] = 0;
+        out[2] = 0;
+        out[3] = 1;
+        return;
+    }
+
+    out[0] = x / n;
+    out[1] = y / n;
+    out[2] = z / n;
+    out[3] = w / n;
+}
+
 }  // namespace typhon::client::math

@@ -112,6 +112,20 @@ public sealed class RuntimeStatsSnapshot
     public double ReplicationTrackP99Ms { get; init; }
 
     /// <summary>
+    /// Sessions closed since the process started, by reason. <b>Cumulative</b>: difference two reads for a rate.
+    /// </summary>
+    /// <remarks>
+    /// The reasons split who decided: the client (<c>ClientLeft</c>, <c>LinkLost</c>), the application (<c>Kicked</c>), or the engine (<c>Unacknowledged</c>
+    /// — the client stopped pinging; <c>Lagging</c> — it could not take frames for <c>CloseStalledAfter</c>; <c>ProtocolError</c>, <c>Abusive</c>,
+    /// <c>InternalError</c>). Read beside <see cref="FramesSkipped"/> and <see cref="TickP99Ms"/>, a burst of engine closes says whether the clients
+    /// stopped talking, the server fell behind, or the clients could not keep up.
+    /// </remarks>
+    public SessionCloseCounts SessionsClosed { get; init; }
+
+    /// <summary>Frames the engine denied a session, by cause. <b>Cumulative</b>: difference two reads for a rate.</summary>
+    public FrameSkipCounts FramesSkipped { get; init; }
+
+    /// <summary>
     /// One row per <b>registered</b> realm, in registration order: what it is, what it is doing, and what its sessions have cost.
     /// </summary>
     /// <remarks>
@@ -259,3 +273,27 @@ public readonly record struct SystemStat(string Name, double MeanUs, int TickDiv
 /// <param name="Entities">Live entities at the moment of the read.</param>
 [PublicAPI]
 public readonly record struct ArchetypeStat(string Name, long Entities);
+
+/// <summary>Sessions closed since the process started, one count per close reason. Cumulative.</summary>
+/// <param name="ClientLeft">The client left with <c>BYE</c>.</param>
+/// <param name="Kicked">The application kicked it.</param>
+/// <param name="LinkLost">The link went away without a goodbye.</param>
+/// <param name="Lagging">Closed 1013: denied frames for <c>CloseStalledAfter</c>, or owed a reliable event past it.</param>
+/// <param name="Unacknowledged">Closed 4001: no <c>PING</c> within the silence bound.</param>
+/// <param name="ProtocolError">Closed for a protocol violation.</param>
+/// <param name="ServerShutdown">Closed because the server stopped.</param>
+/// <param name="InternalError">Closed because the engine faulted serving it.</param>
+/// <param name="Abusive">Closed 1008 for sustained refused messages.</param>
+[PublicAPI]
+public readonly record struct SessionCloseCounts(
+    long ClientLeft, long Kicked, long LinkLost, long Lagging, long Unacknowledged, long ProtocolError, long ServerShutdown, long InternalError, long Abusive);
+
+/// <summary>Frames the engine denied a session since the process started, one count per cause. Cumulative.</summary>
+/// <param name="Gated">The session is degraded and this was not one of its ticks.</param>
+/// <param name="Lagging">The client's acknowledgement was further behind than the lag bound.</param>
+/// <param name="InFlightFull">Both frame slots were still in flight: the link had not taken the previous frames.</param>
+/// <param name="Oversize">The frame came out over the wire cap.</param>
+/// <param name="PoolRefused">The frame pool would not lend a block: <c>FramePoolBudgetBytes</c> is short for the load.</param>
+/// <param name="OwedReset">More was owed than a frame holds; a <c>RESET</c> repairs the view.</param>
+[PublicAPI]
+public readonly record struct FrameSkipCounts(long Gated, long Lagging, long InFlightFull, long Oversize, long PoolRefused, long OwedReset);

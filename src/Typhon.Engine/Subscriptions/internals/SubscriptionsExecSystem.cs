@@ -33,17 +33,10 @@ internal abstract class SubscriptionsExecSystemBase : ChunkedCallbackSystem<Subs
 {
     protected readonly DatabaseEngine Engine;
 
-    /// <summary>
-    /// The per-tick choice between the staged shape and the collapsed one, shared by every member of the track — see <see cref="RunsInThisShape"/>.
-    /// </summary>
-    protected readonly SubscriptionsPipelineShape Shape;
-
-    protected SubscriptionsExecSystemBase(DatabaseEngine engine, SubscriptionsPipelineShape shape)
+    protected SubscriptionsExecSystemBase(DatabaseEngine engine)
     {
         ArgumentNullException.ThrowIfNull(engine);
-        ArgumentNullException.ThrowIfNull(shape);
         Engine = engine;
-        Shape = shape;
     }
 
     /// <summary>
@@ -65,13 +58,6 @@ internal abstract class SubscriptionsExecSystemBase : ChunkedCallbackSystem<Subs
                 throw new InvalidOperationException("Injected replication-stage fault (test only).");
             }
 
-            // The shape gate comes AFTER the fault gate on purpose: the injected fault must reach whichever shape is running, or the collapsed path would
-            // have no failure case to be tested against at all.
-            if (!RunsInThisShape(Shape.CollapsedFor(ctx)))
-            {
-                return false;
-            }
-
             // Stamped here rather than in Execute, so "compute happened" stays observable for a stage that clears its gate and then prepares zero chunks —
             // a stage with nothing to do this tick. Gating off leaves the stamp at zero, which is exactly what SUB-02's aborted-tick case asserts.
             ctx.NoteCompute();
@@ -83,17 +69,6 @@ internal abstract class SubscriptionsExecSystemBase : ChunkedCallbackSystem<Subs
             throw;
         }
     }
-
-    /// <summary>
-    /// Whether this system belongs to the shape chosen for this tick. Staged by default; <see cref="SubscriptionsCollapsedExecSystem"/> inverts it.
-    /// </summary>
-    /// <remarks>
-    /// This is how "exactly one shape prepares chunks per tick" is enforced, and it is enforced at the <c>ShouldRun</c> gate rather than by returning zero
-    /// chunks from <c>Prepare</c>. The difference is not cosmetic: a stage's <c>Prepare</c> is where its serial half lives — the prologue, the blocks step,
-    /// the session rebind — so letting the losing shape prepare and then dispatch nothing would run every one of those twice per tick, once on each shape,
-    /// and the second run would see state the first had already advanced.
-    /// </remarks>
-    protected virtual bool RunsInThisShape(bool collapsed) => !collapsed;
 
     /// <summary>Timestamp ticks every subscriptions chunk spent entering an epoch, and how many did. A diagnostic; zero unless phase timing is on.</summary>
     internal static long EpochEnterTicks;
@@ -186,7 +161,7 @@ internal abstract class SubscriptionsExecSystemBase : ChunkedCallbackSystem<Subs
 /// </remarks>
 internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecSystemBase
 {
-    public SubscriptionsProjectExecSystem(DatabaseEngine engine, SubscriptionsPipelineShape shape) : base(engine, shape) { }
+    public SubscriptionsProjectExecSystem(DatabaseEngine engine) : base(engine) { }
 
     protected override void Configure(SystemBuilder<SubscriptionsContext> b) => b
         .Name("SubscriptionsProject")
@@ -200,11 +175,6 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
     protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount) => Project(ctx, chunkIndex, chunkCount);
 
     /// <summary>The stage's serial half — the blocks step — and the chunk count it partitions the watched blocks into.</summary>
-    /// <remarks>
-    /// Static, and called by <see cref="SubscriptionsCollapsedExecSystem"/> as well as by the dispatch below. The body reaches nothing but
-    /// <see cref="SubscriptionsContext"/>, so there is no instance state for the two shapes to disagree about — which is why the collapsed path can be a second
-    /// caller rather than a second implementation.
-    /// </remarks>
     internal static int BlocksStep(SubscriptionsContext ctx)
     {
         var subs = ctx.Subscriptions;
@@ -255,8 +225,7 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
         var t2 = timed ? Stopwatch.GetTimestamp() : 0L;
 
         // The marks come BEFORE the leases, which are sized from the marked blocks. Each projection chunk sorts its own events for the index; the merge's
-        // order is a function of the runs, so a deterministic projection gives a deterministic index in this shape too. The collapsed shape sorts but never
-        // merges in a stage — its frame prologue merges the sorted runs serially.
+        // order is a function of the runs, so a deterministic projection gives a deterministic index too.
         for (var i = 0; i < states.Length; i++)
         {
             states[i].BeginWatchedBlocks(tick);
@@ -459,9 +428,9 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
 /// </remarks>
 internal sealed class SubscriptionsEventsExecSystem : SubscriptionsExecSystemBase
 {
-    public SubscriptionsEventsExecSystem(DatabaseEngine engine, SubscriptionsPipelineShape shape) : base(engine, shape) { }
+    public SubscriptionsEventsExecSystem(DatabaseEngine engine) : base(engine) { }
 
-    /// <summary>The stage's serial half. Zero until replicated queues exist; shared with <see cref="SubscriptionsCollapsedExecSystem"/>.</summary>
+    /// <summary>The stage's serial half. Zero until replicated queues exist.</summary>
     internal static int PrepareDrain(SubscriptionsContext ctx) => 0;
 
     /// <summary>The stage's parallel half, for one chunk of <paramref name="chunkCount"/>.</summary>
@@ -485,7 +454,7 @@ internal sealed class SubscriptionsEventsExecSystem : SubscriptionsExecSystemBas
 /// </summary>
 internal sealed class SubscriptionsPushIndexExecSystem : SubscriptionsExecSystemBase
 {
-    public SubscriptionsPushIndexExecSystem(DatabaseEngine engine, SubscriptionsPipelineShape shape) : base(engine, shape) { }
+    public SubscriptionsPushIndexExecSystem(DatabaseEngine engine) : base(engine) { }
 
     protected override void Configure(SystemBuilder<SubscriptionsContext> b) => b
         .Name("SubscriptionsPushIndex")
@@ -506,7 +475,7 @@ internal sealed class SubscriptionsPushIndexExecSystem : SubscriptionsExecSystem
 /// </summary>
 internal sealed class SubscriptionsPushFarExecSystem : SubscriptionsExecSystemBase
 {
-    public SubscriptionsPushFarExecSystem(DatabaseEngine engine, SubscriptionsPipelineShape shape) : base(engine, shape) { }
+    public SubscriptionsPushFarExecSystem(DatabaseEngine engine) : base(engine) { }
 
     protected override void Configure(SystemBuilder<SubscriptionsContext> b) => b
         .Name("SubscriptionsPushFar")
@@ -541,11 +510,9 @@ internal sealed class SubscriptionsPushFarExecSystem : SubscriptionsExecSystemBa
 /// </remarks>
 internal sealed class SubscriptionsFramesExecSystem : SubscriptionsExecSystemBase
 {
-    public SubscriptionsFramesExecSystem(DatabaseEngine engine, SubscriptionsPipelineShape shape) : base(engine, shape) { }
+    public SubscriptionsFramesExecSystem(DatabaseEngine engine) : base(engine) { }
 
     /// <summary>The stage's serial half — the session prologue — and the chunk count it partitions the tick's sessions into.</summary>
-    /// <remarks>Static and shared with <see cref="SubscriptionsCollapsedExecSystem"/>; see the note on
-    /// <see cref="SubscriptionsProjectExecSystem.BlocksStep"/>.</remarks>
     internal static int Prologue(SubscriptionsContext ctx)
     {
         var frames = ctx.Subscriptions?.Frames;

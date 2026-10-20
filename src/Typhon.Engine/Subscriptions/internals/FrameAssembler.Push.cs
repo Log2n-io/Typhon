@@ -968,10 +968,10 @@ internal sealed unsafe partial class FrameAssembler
         reset |= first;
 
         ref var send = ref SendStateOf(slot);
-        if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, _tick) || SkipPolicy.AcknowledgementLag(send.ProducedTick, send.AckedTick) > _lagBoundTicks
-            || !send.TryBeginFrame(out var sequence, out var recycled))
+        var refused = Refused(state, _tick, ref send);
+        if (refused != FrameSkipCause.None || !send.TryBeginFrame(out var sequence, out var recycled, _skipsCount))
         {
-            NoteSkip(state);
+            NoteSkip(session, state, refused != FrameSkipCause.None ? refused : FrameSkipCause.InFlightFull);
             return;
         }
 
@@ -987,11 +987,12 @@ internal sealed unsafe partial class FrameAssembler
 
         var length = writer.Position;
         var block = recycled;
-        if (length > _maxFrameBytes || !Pool.TryRentOrKeep(length, ref block, out var previous))
+        var oversize = length > _maxFrameBytes;
+        if (oversize || !Pool.TryRentOrKeep(length, ref block, out var previous))
         {
             ReturnIfValid(block);
-            send.AbandonFrame(sequence);
-            NoteSkip(state);
+            send.AbandonFrame(sequence, _skipsCount);
+            NoteSkip(session, state, oversize ? FrameSkipCause.Oversize : FrameSkipCause.PoolRefused);
             return;
         }
 
@@ -1019,6 +1020,7 @@ internal sealed unsafe partial class FrameAssembler
         state.BytesPublished += length;
         state.FramesProduced++;
         state.FramesSinceDegrade++;
+        NoteProduced(session, state, sequence, length, reset);
         scratch.AddReady(session);
         counters.FramesProduced++;
         counters.BytesEncoded += length;
@@ -1273,24 +1275,17 @@ internal sealed unsafe partial class FrameAssembler
         // degrade level 1 would pass one gate only on the ticks the other refuses, and never produce a frame — never closed either, since neither gate is a
         // skip of its run. An undivided session keeps the bare tick, so every session at one level lands on the same ticks.
         ref var send = ref SendStateOf(session.Slot);
-        if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, divisor > 1 ? _tick + session.Slot : _tick))
+        var refused = Refused(state, divisor > 1 ? _tick + session.Slot : _tick, ref send);
+        if (refused != FrameSkipCause.None)
         {
-            NoteSkip(state);
+            NoteSkip(session, state, refused);
             push.NoteNotPublished(session);
             return;
         }
 
-        if (SkipPolicy.AcknowledgementLag(send.ProducedTick, send.AckedTick) > _lagBoundTicks)
+        if (!send.TryBeginFrame(out var sequence, out var recycled, _skipsCount))
         {
-            send.NoteSkipped();
-            NoteSkip(state);
-            push.NoteNotPublished(session);
-            return;
-        }
-
-        if (!send.TryBeginFrame(out var sequence, out var recycled))
-        {
-            NoteSkip(state);
+            NoteSkip(session, state, FrameSkipCause.InFlightFull);
             push.NoteNotPublished(session);
             return;
         }
@@ -1460,9 +1455,9 @@ internal sealed unsafe partial class FrameAssembler
             // More owed than the cap, or an owed entity found nowhere: a RESET is the repair. Nothing of this frame is committed (SUB-03).
             Interlocked.Increment(ref _owedResets);
             state.PendingReset = true;
-            send.AbandonFrame(sequence);
+            send.AbandonFrame(sequence, _skipsCount);
             ReturnIfValid(recycled);
-            NoteSkip(state);
+            NoteSkip(session, state, FrameSkipCause.OwedReset);
             push.NoteNotPublished(session);
             return;
         }
@@ -1491,7 +1486,7 @@ internal sealed unsafe partial class FrameAssembler
             // so the pending state is committed even though no frame is.
             send.AbandonIdleFrame(sequence);
             ReturnIfValid(recycled);
-            NoteSkip(state, counted: false);
+            NoteSkip(session, state, FrameSkipCause.None, counted: false);
             push.Commit(session);
             if (fit == FitOutcome.Fitted)
             {
@@ -1579,9 +1574,9 @@ internal sealed unsafe partial class FrameAssembler
         if (length > limit)
         {
             counters.OversizeSkips++;
-            send.AbandonFrame(sequence);
+            send.AbandonFrame(sequence, _skipsCount);
             ReturnIfValid(recycled);
-            NoteSkip(state);
+            NoteSkip(session, state, FrameSkipCause.Oversize);
             push.NoteNotPublished(session);
             return;
         }
@@ -1590,8 +1585,8 @@ internal sealed unsafe partial class FrameAssembler
         if (!Pool.TryRentOrKeep(length, ref block, out var previous))
         {
             ReturnIfValid(block);
-            send.AbandonFrame(sequence);
-            NoteSkip(state);
+            send.AbandonFrame(sequence, _skipsCount);
+            NoteSkip(session, state, FrameSkipCause.PoolRefused);
             push.NoteNotPublished(session);
             return;
         }
@@ -1668,6 +1663,7 @@ internal sealed unsafe partial class FrameAssembler
 
         state.FramesProduced++;
         state.FramesSinceDegrade++;
+        NoteProduced(session, state, sequence, length, reset);
         scratch.AddReady(session);
 
         counters.FramesProduced++;

@@ -62,8 +62,8 @@ Publish                                     Volatile.Write(CommittedTick, T): se
   the durability flush, so a client never sees state a crash could take back. An aborted or fence-failed tick dispatches no stage, and no
   session's geometry moves. A flush that fails after frames were produced closes every session.
 - **Stages, not a chain of dispatches.** Serial work runs in the next stage's single-threaded `Prepare` hook, so each dispatch barrier is
-  paid once per stage. Below `SubscriptionsOptions.CollapseBelowWorkUnits` one collapsed system runs the same bodies inline and produces
-  the same bytes.
+  paid once per stage. There is one shape: a collapsed alternative that ran every stage inline in one system was measured slower at every
+  load (it serialises the push index too) and removed.
 - **Epochs, no fence enrolment.** Each chunk enters its own `EpochGuard`; replication writes only its own native memory, never a
   fence-owned structure.
 
