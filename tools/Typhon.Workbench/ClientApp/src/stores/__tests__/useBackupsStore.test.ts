@@ -38,7 +38,12 @@ describe('useBackupsStore', () => {
 
     const after = useBackupsStore.getState();
     expect(after.storePath).toBe('C:/stores/b');
-    expect([after.selectedPointId, after.activeJobId, after.restorePlan, after.retentionPlan]).toEqual([null, null, null, null]);
+    expect([after.selectedPointId, after.activeJobId, after.restorePlan, after.retentionPlan]).toEqual([
+      null,
+      null,
+      null,
+      null,
+    ]);
     expect([after.wizardOpen, after.retentionOpen]).toEqual([false, false]);
   });
 
@@ -60,7 +65,9 @@ describe('useBackupsStore', () => {
     expect(useBackupsStore.getState().storePath).toBe('D:/backups/world');
 
     useBackupsStore.getState().setBundle('C:/db/never-seen.typhon');
-    expect(useBackupsStore.getState().storePath, 'no memory: the store field keeps what it had').toBe('D:/backups/world');
+    expect(useBackupsStore.getState().storePath, 'no memory: the store field keeps what it had').toBe(
+      'D:/backups/world',
+    );
   });
 
   it('any restore input change drops the plan and steps back from the preview', () => {
@@ -88,7 +95,10 @@ describe('useBackupsStore', () => {
 
     useBackupsStore.getState().setRetentionConsent(true);
     useBackupsStore.getState().updateRetention({ maxCount: '5' });
-    expect([useBackupsStore.getState().retentionConsent, useBackupsStore.getState().retentionPlan]).toEqual([false, null]);
+    expect([useBackupsStore.getState().retentionConsent, useBackupsStore.getState().retentionPlan]).toEqual([
+      false,
+      null,
+    ]);
   });
 
   it('remembers a drill scratch per store, else the server’s default', () => {

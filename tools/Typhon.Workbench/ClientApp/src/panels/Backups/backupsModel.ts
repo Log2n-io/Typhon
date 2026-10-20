@@ -124,7 +124,12 @@ export interface Listing {
 export function normalizeListing(l: BackupListingDto): Listing {
   const drills = new Map<number, Drill>();
   for (const d of l.drills ?? []) {
-    drills.set(n(d.backupId), { backupId: n(d.backupId), utc: d.utc ?? null, outcome: s(d.outcome), error: d.error ?? null });
+    drills.set(n(d.backupId), {
+      backupId: n(d.backupId),
+      utc: d.utc ?? null,
+      outcome: s(d.outcome),
+      error: d.error ?? null,
+    });
   }
   return {
     storeId: s(l.storeId),
@@ -173,7 +178,12 @@ export function buildRibbons(listing: Listing): Ribbon[] {
     byChain.set(p.chainId, chain);
     const existing = chain.get(p.backupId);
     const restorable = listing.restorable == null ? null : listing.restorable.includes(p.backupId);
-    const entry: RibbonPoint = { point: p, compacted: p.kind === 'Compacted', drill: drillPassed(listing.drills.get(p.backupId)), restorable };
+    const entry: RibbonPoint = {
+      point: p,
+      compacted: p.kind === 'Compacted',
+      drill: drillPassed(listing.drills.get(p.backupId)),
+      restorable,
+    };
     if (!existing) {
       chain.set(p.backupId, entry);
     } else if (p.kind === 'Compacted') {
@@ -215,7 +225,14 @@ export interface ArchiveTimeline {
   originLsn: number;
   reason: string;
   archivedThroughLsn: number;
-  segments: { segmentId: number; firstLsn: number; lastLsn: number; sealedUtc: string | null; bytes: number; flags: string }[];
+  segments: {
+    segmentId: number;
+    firstLsn: number;
+    lastLsn: number;
+    sealedUtc: string | null;
+    bytes: number;
+    flags: string;
+  }[];
   gaps: Gap[];
   samples: { lsn: number; utc: string }[];
 }
@@ -287,7 +304,14 @@ export function coverageOf(timeline: ArchiveTimeline, points: Point[]): Coverage
     }
   }
   for (const g of timeline.gaps) {
-    runs.push({ kind: 'gap', fromLsn: g.fromLsn, toLsn: g.toLsn, from: at(g.fromLsn), to: at(g.toLsn), covered: g.covered });
+    runs.push({
+      kind: 'gap',
+      fromLsn: g.fromLsn,
+      toLsn: g.toLsn,
+      from: at(g.fromLsn),
+      to: at(g.toLsn),
+      covered: g.covered,
+    });
   }
   if (width <= 0) {
     runs.length = 0;
@@ -308,7 +332,13 @@ export type RouteKind = 'inProcess' | 'request' | 'offline' | 'unavailable';
 export interface Status {
   store: string;
   bundle: string | null;
-  storeStatus: { health: string; reason: string; points: number; latest: Point | null; latestRestorable: Point | null } | null;
+  storeStatus: {
+    health: string;
+    reason: string;
+    points: number;
+    latest: Point | null;
+    latestRestorable: Point | null;
+  } | null;
   storeError: string | null;
   engine: {
     live: boolean;
@@ -327,7 +357,14 @@ export interface Status {
     consecutiveFailures: number;
     lastFailure: string | null;
     lastDrill: Drill | null;
-    archive: { state: string; lagBytes: number; lagSeconds: number; lastGapFromLsn: number; lastGapToLsn: number; lastError: string | null };
+    archive: {
+      state: string;
+      lagBytes: number;
+      lagSeconds: number;
+      lastGapFromLsn: number;
+      lastGapToLsn: number;
+      lastError: string | null;
+    };
   } | null;
   route: { kind: RouteKind | string; reason: string; sessionId: string | null };
   runningJobId: string | null;
@@ -367,7 +404,9 @@ export function normalizeStatus(d: BackupStatusDto): Status {
           nextDueUtc: e.nextDueUtc ?? null,
           consecutiveFailures: n(e.consecutiveFailures),
           lastFailure: e.lastFailure?.message ?? null,
-          lastDrill: ld ? { backupId: n(ld.backupId), utc: ld.utc ?? null, outcome: s(ld.outcome), error: ld.error ?? null } : null,
+          lastDrill: ld
+            ? { backupId: n(ld.backupId), utc: ld.utc ?? null, outcome: s(ld.outcome), error: ld.error ?? null }
+            : null,
           archive: {
             state: s(e.archive?.state),
             lagBytes: n(e.archive?.lagBytes),
@@ -378,7 +417,11 @@ export function normalizeStatus(d: BackupStatusDto): Status {
           },
         }
       : null,
-    route: { kind: s(d.route?.kind) || 'unavailable', reason: s(d.route?.reason), sessionId: d.route?.sessionId ?? null },
+    route: {
+      kind: s(d.route?.kind) || 'unavailable',
+      reason: s(d.route?.reason),
+      sessionId: d.route?.sessionId ?? null,
+    },
     runningJobId: d.runningJobId ?? null,
     defaultScratch: d.defaultScratch ?? null,
   };
@@ -390,7 +433,9 @@ export function normalizeStatus(d: BackupStatusDto): Status {
  */
 export function cardHealth(status: Status): { health: string; reason: string; source: 'engine' | 'store' } | null {
   if (status.engine && status.engine.health && status.engine.health !== 'Off') {
-    const reason = status.engine.live ? status.engine.reason : `engine not running; last known state: ${status.engine.reason}`;
+    const reason = status.engine.live
+      ? status.engine.reason
+      : `engine not running; last known state: ${status.engine.reason}`;
     return { health: status.engine.health, reason, source: 'engine' };
   }
   if (status.storeStatus) {
@@ -456,7 +501,11 @@ export function jobProgress(job: Pick<Job, 'phase' | 'completed' | 'total' | 'un
   if (job.total > 0) {
     const fraction = Math.min(1, Math.max(0, job.completed / job.total));
     const unit = job.unit ? ` ${job.unit}` : '';
-    return { determinate: true, fraction, text: `${phase}: ${job.completed.toLocaleString()} / ${job.total.toLocaleString()}${unit} (${Math.floor(fraction * 100)} %)` };
+    return {
+      determinate: true,
+      fraction,
+      text: `${phase}: ${job.completed.toLocaleString()} / ${job.total.toLocaleString()}${unit} (${Math.floor(fraction * 100)} %)`,
+    };
   }
   return { determinate: false, fraction: 0, text: `${phase}…` };
 }
@@ -510,7 +559,9 @@ export function normalizeRestorePlan(p: BackupRestorePlanDto): RestorePlan {
 }
 
 /** "What is lost after" the restored LSN, in words (07 §5): the commits the store knows past it, or that nothing it knows is lost. */
-export function lostAfterText(plan: Pick<RestorePlan, 'canRestore' | 'pointLsn' | 'newestKnownLsn' | 'lostLsns'>): string {
+export function lostAfterText(
+  plan: Pick<RestorePlan, 'canRestore' | 'pointLsn' | 'newestKnownLsn' | 'lostLsns'>,
+): string {
   if (!plan.canRestore) {
     return '';
   }
@@ -566,7 +617,13 @@ export function verifyFindings(r: BackupVerifyReportDto): VerifyFinding[] {
   const all: VerifyFinding[] = [];
   for (const p of r.packs ?? []) {
     for (const f of p.findings ?? []) {
-      all.push({ code: s(f.code), severity: s(f.severity), file: s(f.file), pageId: n(f.pageId), message: s(f.message) });
+      all.push({
+        code: s(f.code),
+        severity: s(f.severity),
+        file: s(f.file),
+        pageId: n(f.pageId),
+        message: s(f.message),
+      });
     }
   }
   for (const f of r.storeFindings ?? []) {

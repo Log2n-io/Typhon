@@ -181,10 +181,12 @@ export const useBackupsStore = create<BackupsState>()(
         })),
       setRestorePlan: (restorePlan) => set({ restorePlan }),
 
-      openRetention: () => set({ retentionOpen: true, retentionPlan: null, retentionConsent: false, wizardOpen: false }),
+      openRetention: () =>
+        set({ retentionOpen: true, retentionPlan: null, retentionConsent: false, wizardOpen: false }),
       closeRetention: () => set({ retentionOpen: false, retentionPlan: null, retentionConsent: false }),
       // A changed policy is another plan: the one on screen is dropped, consent with it.
-      updateRetention: (patch) => set((s) => ({ retention: { ...s.retention, ...patch }, retentionPlan: null, retentionConsent: false })),
+      updateRetention: (patch) =>
+        set((s) => ({ retention: { ...s.retention, ...patch }, retentionPlan: null, retentionConsent: false })),
       setRetentionPlan: (retentionPlan) => set({ retentionPlan, retentionConsent: false }),
       setRetentionConsent: (retentionConsent) => set({ retentionConsent }),
 
@@ -200,7 +202,11 @@ export const useBackupsStore = create<BackupsState>()(
       name: 'pref:backups',
       storage: safeStorage,
       // Only the preferences persist (PC-1): the paths' memory and the verify level. Plans, consent and jobs never outlive the tab.
-      partialize: (s) => ({ storeByBundle: s.storeByBundle, scratchByStore: s.scratchByStore, verifyLevel: s.verifyLevel }),
+      partialize: (s) => ({
+        storeByBundle: s.storeByBundle,
+        scratchByStore: s.scratchByStore,
+        verifyLevel: s.verifyLevel,
+      }),
     },
   ),
 );

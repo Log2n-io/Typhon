@@ -18,7 +18,9 @@ export function pointRefOf(draft: RestoreDraft): { ref: BackupPointRefDto } | { 
         : { ref: { kind: 'id', id: draft.pointId, lsn: null, timeUtc: null, timelineId: null } };
     case 'time': {
       const timeUtc = localInputToUtc(draft.timeLocal);
-      return timeUtc ? { ref: { kind: 'time', id: null, lsn: null, timeUtc, timelineId } } : { error: 'Enter the instant to restore to.' };
+      return timeUtc
+        ? { ref: { kind: 'time', id: null, lsn: null, timeUtc, timelineId } }
+        : { error: 'Enter the instant to restore to.' };
     }
     case 'lsn': {
       const lsn = Number(draft.lsn.trim());
@@ -30,7 +32,12 @@ export function pointRefOf(draft: RestoreDraft): { ref: BackupPointRefDto } | { 
 }
 
 /** The request a draft makes; <paramref name="fingerprint"/> null for a preview. */
-export function restoreRequestOf(store: string, bundle: string, draft: RestoreDraft, fingerprint: string | null): BackupRestoreRequestDto | null {
+export function restoreRequestOf(
+  store: string,
+  bundle: string,
+  draft: RestoreDraft,
+  fingerprint: string | null,
+): BackupRestoreRequestDto | null {
   const point = pointRefOf(draft);
   if (!('ref' in point) || !draft.target.trim()) {
     return null;

@@ -73,7 +73,9 @@ export function useBackupActions() {
   const drill = useJobStart((v: { store: string; point: BackupPointRefDto; scratch: string; bundle: string }) =>
     postApiBackupsJobsDrill({ store: v.store, point: v.point, scratch: v.scratch || null, bundle: v.bundle || null }),
   );
-  const compact = useJobStart((v: { store: string; point: BackupPointRefDto }) => postApiBackupsJobsCompact({ store: v.store, point: v.point }));
+  const compact = useJobStart((v: { store: string; point: BackupPointRefDto }) =>
+    postApiBackupsJobsCompact({ store: v.store, point: v.point }),
+  );
   const applyRetention = useJobStart((v: { store: string; fingerprint: string }) =>
     postApiBackupsJobsRetention({ store: v.store, approvedFingerprint: v.fingerprint }),
   );
@@ -94,13 +96,34 @@ export function useBackupActions() {
 
   const resolveTime = useMutation({
     mutationFn: async (v: { store: string; timeUtc: string; timelineId: string }) =>
-      (await postApiBackupsArchiveResolveTime({ store: v.store, timeUtc: v.timeUtc, timelineId: v.timelineId || null })).data,
+      (await postApiBackupsArchiveResolveTime({ store: v.store, timeUtc: v.timeUtc, timelineId: v.timelineId || null }))
+        .data,
   });
 
   const readLog = useMutation({
     mutationFn: async (v: { store: string; timelineId: string; fromUtc: string; toUtc: string }) =>
-      (await postApiBackupsArchiveLog({ store: v.store, timelineId: v.timelineId || null, fromUtc: v.fromUtc, toUtc: v.toUtc, max: 200 })).data,
+      (
+        await postApiBackupsArchiveLog({
+          store: v.store,
+          timelineId: v.timelineId || null,
+          fromUtc: v.fromUtc,
+          toUtc: v.toUtc,
+          max: 200,
+        })
+      ).data,
   });
 
-  return { create, verify, drill, compact, applyRetention, restore, cancel, planRestore, planRetention, resolveTime, readLog };
+  return {
+    create,
+    verify,
+    drill,
+    compact,
+    applyRetention,
+    restore,
+    cancel,
+    planRestore,
+    planRetention,
+    resolveTime,
+    readLog,
+  };
 }

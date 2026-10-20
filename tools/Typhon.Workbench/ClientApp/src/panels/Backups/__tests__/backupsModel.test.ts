@@ -50,7 +50,9 @@ const listing = (points: BackupPointDto[], extra: Partial<BackupListingDto> = {}
 
 describe('chain ribbons', () => {
   it('shows an id once, as its compacted pack when it has one (05 §2)', () => {
-    const ribbons = buildRibbons(normalizeListing(listing([point(1, 'Full'), point(2, 'Incremental'), point(2, 'Compacted')])));
+    const ribbons = buildRibbons(
+      normalizeListing(listing([point(1, 'Full'), point(2, 'Incremental'), point(2, 'Compacted')])),
+    );
     expect(ribbons).toHaveLength(1);
     expect(ribbons[0].points.map((p) => [p.point.backupId, p.point.kind, p.compacted])).toEqual([
       [1, 'Full', false],
@@ -60,7 +62,15 @@ describe('chain ribbons', () => {
 
   it('orders points base → head and chains by their first point', () => {
     const ribbons = buildRibbons(
-      normalizeListing(listing([point(5, 'Full', 'c2'), point(3, 'Incremental'), point(1, 'Full'), point(6, 'Incremental', 'c2'), point(2, 'Incremental')])),
+      normalizeListing(
+        listing([
+          point(5, 'Full', 'c2'),
+          point(3, 'Incremental'),
+          point(1, 'Full'),
+          point(6, 'Incremental', 'c2'),
+          point(2, 'Incremental'),
+        ]),
+      ),
     );
     expect(ribbons.map((r) => r.chainId)).toEqual(['c1', 'c2']);
     expect(ribbons[0].points.map((p) => p.point.backupId)).toEqual([1, 2, 3]);
@@ -68,7 +78,9 @@ describe('chain ribbons', () => {
   });
 
   it('marks a point the restorable set leaves out, and says nothing when the set is unknown', () => {
-    const known = buildRibbons(normalizeListing(listing([point(1, 'Full'), point(2, 'Incremental')], { restorablePoints: [1] })));
+    const known = buildRibbons(
+      normalizeListing(listing([point(1, 'Full'), point(2, 'Incremental')], { restorablePoints: [1] })),
+    );
     expect(known[0].points.map((p) => p.restorable)).toEqual([true, false]);
     const unknown = buildRibbons(normalizeListing(listing([point(1, 'Full')])));
     expect(unknown[0].points[0].restorable).toBeNull();
@@ -106,7 +118,12 @@ describe('archive coverage', () => {
   };
 
   it('merges contiguous segments, draws the gap, and ticks each point at its P', () => {
-    const c = coverageOf(timeline, normalizeListing(listing([point(1, 'Full', 'c1', { pointLsn: 150 }), point(9, 'Full', 'c9', { timelineId: 'other' })])).points);
+    const c = coverageOf(
+      timeline,
+      normalizeListing(
+        listing([point(1, 'Full', 'c1', { pointLsn: 150 }), point(9, 'Full', 'c9', { timelineId: 'other' })]),
+      ).points,
+    );
     expect([c.minLsn, c.maxLsn]).toEqual([100, 400]);
     expect(c.runs.map((r) => [r.kind, r.fromLsn, r.toLsn])).toEqual([
       ['archived', 100, 249],
@@ -138,7 +155,13 @@ describe('health', () => {
     const base = {
       store: 'S',
       bundle: 'B',
-      storeStatus: { health: 'Ok', reason: 'the newest point is restorable', points: 2, latest: null, latestRestorable: null },
+      storeStatus: {
+        health: 'Ok',
+        reason: 'the newest point is restorable',
+        points: 2,
+        latest: null,
+        latestRestorable: null,
+      },
       storeError: null,
       engine: null,
       route: { kind: 'offline', reason: '', sessionId: null },
@@ -147,20 +170,61 @@ describe('health', () => {
     };
     // The server omits null members (WhenWritingNull) and Orval types nested DTOs as present: the wire shape is cast, the normalizer copes.
     const wire = (x: object) => x as unknown as BackupStatusDto;
-    expect(cardHealth(normalizeStatus(wire(base)))).toEqual({ health: 'Ok', reason: 'the newest point is restorable', source: 'store' });
+    expect(cardHealth(normalizeStatus(wire(base)))).toEqual({
+      health: 'Ok',
+      reason: 'the newest point is restorable',
+      source: 'store',
+    });
 
     const engine = {
-      source: 'statusFile', engineLive: false, pid: 4, machine: 'm', storePath: 'S', acceptsRequests: false, health: 'Degraded', healthReason: 'Stale',
-      reasonText: 'the newest point is 3 h old', state: 'Stopped', phase: 'None', progressPages: 0, progressOfPages: 0, progressBytes: 0, lastPoint: null,
-      lastSuccessUtc: null, nextDueUtc: null, consecutiveFailures: 0, lastFailure: null, chainDepth: 1, storeBytes: 0, restorablePoints: 1,
-      lastDrill: null, lastPassedDrill: null, retentionBlocked: 'None', lastRequestId: null, updatedUtc: null,
+      source: 'statusFile',
+      engineLive: false,
+      pid: 4,
+      machine: 'm',
+      storePath: 'S',
+      acceptsRequests: false,
+      health: 'Degraded',
+      healthReason: 'Stale',
+      reasonText: 'the newest point is 3 h old',
+      state: 'Stopped',
+      phase: 'None',
+      progressPages: 0,
+      progressOfPages: 0,
+      progressBytes: 0,
+      lastPoint: null,
+      lastSuccessUtc: null,
+      nextDueUtc: null,
+      consecutiveFailures: 0,
+      lastFailure: null,
+      chainDepth: 1,
+      storeBytes: 0,
+      restorablePoints: 1,
+      lastDrill: null,
+      lastPassedDrill: null,
+      retentionBlocked: 'None',
+      lastRequestId: null,
+      updatedUtc: null,
       archive: {
-        state: 'Off', timelineId: null, archivedThroughLsn: 0, lagBytes: 0, backlogBytes: 0, lagSeconds: 0, gapsTotal: 0, lastGapFromLsn: 0,
-        lastGapToLsn: 0, lastArchivedSealUtc: null, consecutiveFailures: 0, lastError: null,
+        state: 'Off',
+        timelineId: null,
+        archivedThroughLsn: 0,
+        lagBytes: 0,
+        backlogBytes: 0,
+        lagSeconds: 0,
+        gapsTotal: 0,
+        lastGapFromLsn: 0,
+        lastGapToLsn: 0,
+        lastArchivedSealUtc: null,
+        consecutiveFailures: 0,
+        lastError: null,
       },
     };
     const stopped = cardHealth(normalizeStatus(wire({ ...base, engine })));
-    expect(stopped).toEqual({ health: 'Degraded', reason: 'engine not running; last known state: the newest point is 3 h old', source: 'engine' });
+    expect(stopped).toEqual({
+      health: 'Degraded',
+      reason: 'engine not running; last known state: the newest point is 3 h old',
+      source: 'engine',
+    });
   });
 });
 
@@ -181,8 +245,12 @@ describe('job progress', () => {
 
 describe('what is lost after the restored LSN', () => {
   it('names the LSNs past the point, or says nothing is lost', () => {
-    expect(lostAfterText({ canRestore: true, pointLsn: 150, newestKnownLsn: 450, lostLsns: 300 })).toContain('300 LSNs');
-    expect(lostAfterText({ canRestore: true, pointLsn: 450, newestKnownLsn: 450, lostLsns: 0 })).toContain('no committed change it holds is lost');
+    expect(lostAfterText({ canRestore: true, pointLsn: 150, newestKnownLsn: 450, lostLsns: 300 })).toContain(
+      '300 LSNs',
+    );
+    expect(lostAfterText({ canRestore: true, pointLsn: 450, newestKnownLsn: 450, lostLsns: 0 })).toContain(
+      'no committed change it holds is lost',
+    );
     expect(lostAfterText({ canRestore: false, pointLsn: 0, newestKnownLsn: 0, lostLsns: 0 })).toBe('');
   });
 });
@@ -192,7 +260,14 @@ describe('verify findings', () => {
     const findings = verifyFindings({
       level: 'Full',
       verdict: 'Damaged',
-      packs: [{ file: 'p1', backupId: 1, status: 'Damaged', findings: [{ code: 'BKP-VER-08', severity: 'Advisory', file: 't', pageId: -1, message: 'temp' }] }],
+      packs: [
+        {
+          file: 'p1',
+          backupId: 1,
+          status: 'Damaged',
+          findings: [{ code: 'BKP-VER-08', severity: 'Advisory', file: 't', pageId: -1, message: 'temp' }],
+        },
+      ],
       points: [],
       storeFindings: [{ code: 'BKP-VER-10', severity: 'Damage', file: 'p1', pageId: -1, message: 'FileCRC mismatch' }],
       durationMs: 1,
