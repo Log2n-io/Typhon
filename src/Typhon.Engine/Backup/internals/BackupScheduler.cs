@@ -157,7 +157,7 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
                 _state.MaxDurationUs = Math.Max(_state.MaxDurationUs, _state.LastDurationUs);
                 _state.LastBytes = point.PackBytes;
                 _state.LastPages = point.PageCount;
-                if (summary != null && summary.TimelineId == _engine.TimelineId)
+                if (summary != null && summary.TimelineId == _timeline)
                 {
                     // The store will say so too at the refresh; until then the point just published is this timeline's newest.
                     _state.Facts = WithLastPoint(_state.Facts, summary);
@@ -238,6 +238,9 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
 
     private long _jobStartedMono;
 
+    /// <summary>The engine's timeline, read once at <c>Start</c> (a restored bundle adopts its new one at construction, before the open completes).</summary>
+    private Guid _timeline;
+
     /// <summary>The O4 schedule's view of an outcome (deferred failures retry soon, counted ones back off, permanent ones wait).</summary>
     partial void OnJobOutcome(FailureClass failureClass, long monoNow);
 
@@ -261,7 +264,7 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
             BeforeRetentionProbe?.Invoke();
             var drillPassed = ReadDrillPassed(store.FileSystem);
             using var session = BackupStore.OpenForMaintenance(store.Root, "retention", store.FileSystem, _logger);
-            var result = RetentionExecutor.Apply(session, policy, null, drillPassed, UtcNow(), _engine.TimelineId,
+            var result = RetentionExecutor.Apply(session, policy, null, drillPassed, UtcNow(), _timeline,
                 new BackupLifecycleOptions { Cancellation = ct, Logger = _logger, Progress = (done, _) => Volatile.Write(ref _progressBytes, done) });
             lock (_lock)
             {
@@ -345,15 +348,7 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
 
         var view = StoreView.Open(root, fs, _logger);
         var restorable = ChainResolver.RestorablePoints(view);
-        ResolvedChain newest = null;
-        for (var i = restorable.Count - 1; i >= 0 && newest == null; i--)
-        {
-            var chain = ChainResolver.Resolve(view, restorable[i]);
-            if (chain.Point.TimelineId == _engine.TimelineId)
-            {
-                newest = chain;
-            }
-        }
+        var newest = NewestOnTimeline(view, restorable, _timeline);
 
         long bytes = 0;
         foreach (var p in view.Catalog.Packs)
@@ -376,6 +371,24 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
             LastPassedDrill = drills.NewestPassed,
             DrillPassed = drills.Passed,
         };
+    }
+
+    /// <summary>
+    /// The newest restorable point of <paramref name="timeline"/> (DL-19): the last success the schedule and the health count from. Never another
+    /// timeline's: after a restore, the old timeline's newest point would make the new one wait a whole interval for its first point.
+    /// </summary>
+    internal static ResolvedChain NewestOnTimeline(StoreView view, System.Collections.Generic.List<uint> restorable, Guid timeline)
+    {
+        for (var i = restorable.Count - 1; i >= 0; i--)
+        {
+            var chain = ChainResolver.Resolve(view, restorable[i]);
+            if (chain.Point.TimelineId == timeline)
+            {
+                return chain;
+            }
+        }
+
+        return null;
     }
 
     private uint[] ReadDrillPassed(IStoreFileSystem fs)
@@ -442,7 +455,8 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
     internal void Publish()
     {
         var now = UtcNow();
-        var running = _engine.BackupCoordinator?.Running;
+        // A tick left behind by a close (BKP-16) touches nothing of the engine: no progress to read.
+        var running = Stopped ? null : _engine.BackupCoordinator?.Running;
         var (added, expected) = running?.Progress ?? (0, 0);
         BackupStatus status;
         lock (_lock)

@@ -21,10 +21,30 @@ internal sealed class HookedFileSystem(IStoreFileSystem inner) : IStoreFileSyste
     /// <summary>Runs before every <see cref="DeleteFile"/>, with its path.</summary>
     public Action<string> BeforeDelete { get; init; }
 
-    public IStoreFile OpenCreateNew(string path, long preallocationSize = 0) => Inner.OpenCreateNew(path, preallocationSize);
+    /// <summary>When set and returning an exception for an operation and its path, that operation throws it instead of running. Settable mid-test.</summary>
+    public Func<string, string, Exception> Fault { get; set; }
+
+    /// <summary>Runs before every operation, with its name and path: a test parks a call here.</summary>
+    public Action<string, string> BeforeAny { get; set; }
+
+    private void Check(string op, string path)
+    {
+        BeforeAny?.Invoke(op, path);
+        if (Fault?.Invoke(op, path) is { } e)
+        {
+            throw e;
+        }
+    }
+
+    public IStoreFile OpenCreateNew(string path, long preallocationSize = 0)
+    {
+        Check(nameof(OpenCreateNew), path);
+        return Inner.OpenCreateNew(path, preallocationSize);
+    }
 
     public IStoreFile OpenRead(string path)
     {
+        Check(nameof(OpenRead), path);
         BeforeOpenRead?.Invoke(path);
         if (OpenReadFails?.Invoke(path) == true)
         {
@@ -34,7 +54,11 @@ internal sealed class HookedFileSystem(IStoreFileSystem inner) : IStoreFileSyste
         return Inner.OpenRead(path);
     }
 
-    public IDisposable TryLockExclusive(string path) => Inner.TryLockExclusive(path);
+    public IDisposable TryLockExclusive(string path)
+    {
+        Check(nameof(TryLockExclusive), path);
+        return Inner.TryLockExclusive(path);
+    }
 
     public bool ProbeExclusive(string path) => Inner.ProbeExclusive(path);
 
@@ -42,11 +66,19 @@ internal sealed class HookedFileSystem(IStoreFileSystem inner) : IStoreFileSyste
 
     public void FlushDirectory(string directory) => Inner.FlushDirectory(directory);
 
-    public bool FileExists(string path) => Inner.FileExists(path);
+    public bool FileExists(string path)
+    {
+        Check(nameof(FileExists), path);
+        return Inner.FileExists(path);
+    }
 
     public bool DirectoryExists(string path) => Inner.DirectoryExists(path);
 
-    public void CreateDirectory(string path) => Inner.CreateDirectory(path);
+    public void CreateDirectory(string path)
+    {
+        Check(nameof(CreateDirectory), path);
+        Inner.CreateDirectory(path);
+    }
 
     public void DeleteFile(string path)
     {
@@ -56,7 +88,11 @@ internal sealed class HookedFileSystem(IStoreFileSystem inner) : IStoreFileSyste
 
     public void DeleteDirectory(string path) => Inner.DeleteDirectory(path);
 
-    public IReadOnlyList<StoreFileEntry> EnumerateFiles(string directory) => Inner.EnumerateFiles(directory);
+    public IReadOnlyList<StoreFileEntry> EnumerateFiles(string directory)
+    {
+        Check(nameof(EnumerateFiles), directory);
+        return Inner.EnumerateFiles(directory);
+    }
 
     public bool IsBundleHeldByLiveProcess(string bundleDirectory) => Inner.IsBundleHeldByLiveProcess(bundleDirectory);
 

@@ -4646,6 +4646,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         _archetypeInitIncomplete = false;
         _openCompleted = true;
+        StartBackupScheduler();
 
         // A crash open that sealed cleared it; one that did not recover (nothing in the window) clears it here (CK-08).
         if (CheckpointManager != null)

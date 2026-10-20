@@ -3461,8 +3461,9 @@ lifecycle (#1415: BKP-13, BKP-14) and the ops loop (#1416: BKP-15, BKP-16). BKP-
   invariant a closing engine waits for the backup thread at most BackupCaptureOptions.StopTimeout: every capture wait
             but a store call and the gate attempts observes the close; past it the lineage is revoked and the capture's
             native memory is left to the still-running thread, never freed under it
+  invariant (#1416) the scheduler is stopped before the coordinator, within one tick (BKP-16)
   scope: BackupCapture.BeforeWrite, BackupCapture.Abort, BackupCapture.Uninstall, BackupCoordinator.StopAndJoin,
-         DataFileWriteGate.TryEnterExclusive, DataFileWriteGate.AdmitWaiters, CbwSlotPool
+         DataFileWriteGate.TryEnterExclusive, DataFileWriteGate.AdmitWaiters, CbwSlotPool, BackupScheduler.StopAndJoin
   on_violation: a slow store (or a stuck backup thread) stalls the checkpoint → page-cache back-pressure → transactions stall
   invariant a slot wait returns at its deadline, not on the OS timer tick after it: it blocks until one tick before the
             deadline (16 ms on Windows, 1 ms elsewhere) and polls the rest (a timed semaphore wait returned 9-16 ms late)
@@ -3549,7 +3550,28 @@ lifecycle (#1415: BKP-13, BKP-14) and the ops loop (#1416: BKP-15, BKP-16). BKP-
   invariant the worst condition that holds wins: Failing (no restorable point, 3 failures, store failing > Interval, capture refused, archive
             diverged or failed) over Degraded (stale, an archive gap no later point covers, archive lag, a failed drill with none passed) over
             Warning (no point yet, an allocated suspect page, retention failed or blocked, drill overdue, the newest drill failed)
-  scope: BackupHealthEvaluator.Evaluate, HealthInputs
+  invariant the last success comes from the store, filtered by the engine's timeline (a restart neither doubles nor skips a due point; a restored
+            database's first point is due after the grace); due is decided on a monotonic anchor, so a wall clock set back delays a point by at
+            most one Interval
+  scope: BackupHealthEvaluator.Evaluate, HealthInputs, ScheduleState.IsDue, ScheduleState.Initialize, BackupScheduler.RefreshStoreFacts,
+         BackupScheduler.NewestOnTimeline
   on_violation: monitoring says Ok while nothing restorable is being produced — the failure mode a backup exists to prevent
-  verified: BackupHealthEvaluatorTests (every row of the table alone, the worst winning, a seeded property over random inputs) —
-            [VerifiesRule("BKP-15")]; [RuleMutant("BKP-15")]: an evaluator that forgets a timeline with no point
+  verified: BackupHealthEvaluatorTests (every row of the table alone, the worst winning, a seeded property over random inputs),
+            BackupSchedulerTests (logical clocks: grace then interval, a restart reading the store, a new timeline, a wall clock set back a day),
+            ScheduleStateTests — [VerifiesRule("BKP-15")]; [RuleMutant("BKP-15")]: an evaluator that forgets a timeline with no point, a
+            wall-clock schedule (the clock set back a day stops it), a last success taken from another timeline (a restored database waits an
+            Interval)
+
+### BKP-16: The ops loop never endangers the engine and writes only to its store
+  invariant no exception leaves the scheduler's tick or a backup job: every failure becomes state and health (BackupOpsState, BackupStatus)
+  invariant neither thread takes an engine lock outside the capture's gate protocol; no job starts before InitializeArchetypes completed (the
+            scheduler starts there; a capture refuses earlier)
+  invariant a closing engine stops the scheduler first, before the coordinator, waiting for its tick at most one tick; a tick left behind (a store
+            call parked on a dead share) touches nothing of the engine after the stop returned
+  invariant a backup.request selects auto or full and nothing else: the engine writes to BackupOptions.StorePath alone
+  scope: BackupScheduler.Tick, BackupScheduler.StopAndJoin, BackupScheduler.Start, BackupCoordinator.RunJob, BackupRequestFile.TryPoll,
+         DatabaseEngine.DisposeCore
+  on_violation: a full disk or a dead share crashes or stalls the database; a bundle-directory writer redirects backups anywhere
+  verified: BackupSchedulerSafetyTests (a store throwing IOException, UnauthorizedAccessException or a non-I/O exception at every operation; a
+            request naming a path; an unreadable request; requests refused; a close with a store call parked) — [VerifiesRule("BKP-16")];
+            [RuleMutant("BKP-16")]: a tick that rethrows

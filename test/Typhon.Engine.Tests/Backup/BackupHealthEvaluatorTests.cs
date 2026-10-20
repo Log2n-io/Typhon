@@ -75,6 +75,16 @@ internal sealed class BackupHealthEvaluatorTests
             "a timeline with no point for twice the interval since start is stale, not merely pending");
     }
 
+    [Test]
+    public void TheHealthCheck_MapsOffAndOkHealthy_WarningAndDegradedDegraded_FailingUnhealthy()
+    {
+        Assert.That(BackupHealthCheck.Map(BackupHealth.Off), Is.EqualTo(HealthStatus.Healthy));
+        Assert.That(BackupHealthCheck.Map(BackupHealth.Ok), Is.EqualTo(HealthStatus.Healthy));
+        Assert.That(BackupHealthCheck.Map(BackupHealth.Warning), Is.EqualTo(HealthStatus.Degraded));
+        Assert.That(BackupHealthCheck.Map(BackupHealth.Degraded), Is.EqualTo(HealthStatus.Degraded));
+        Assert.That(BackupHealthCheck.Map(BackupHealth.Failing), Is.EqualTo(HealthStatus.Unhealthy));
+    }
+
     /// <summary>The worst condition wins, and a covered gap is no gap.</summary>
     [Test]
     public void TheWorstConditionWins()

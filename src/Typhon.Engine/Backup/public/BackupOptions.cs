@@ -55,6 +55,9 @@ public sealed class BackupOptions
     /// <summary>Continuous WAL archiving into the same store (Layer 2, #1418); <c>null</c>: off.</summary>
     public ArchiveOptions Archive { get; init; }
 
+    /// <summary>Test seam: the scheduler starts no thread; the test drives its ticks on logical clocks.</summary>
+    internal bool ManualTickForTest { get; init; }
+
     /// <summary>Checks the values, and the retention policy; the archive options against nothing (the engine checks them against its WAL).</summary>
     /// <param name="error">What is wrong, or <c>null</c>.</param>
     public bool Validate(out string error)

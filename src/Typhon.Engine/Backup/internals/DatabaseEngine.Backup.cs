@@ -36,6 +36,9 @@ public partial class DatabaseEngine
         BackupCoordinator.Observer = BackupScheduler;
     }
 
+    /// <summary>Starts the schedule once the open completed (DL-30): the first completed <see cref="InitializeArchetypes"/>; a repeat starts nothing.</summary>
+    private void StartBackupScheduler() => BackupScheduler?.Start();
+
     /// <summary>Stops the scheduler first in the close, before the coordinator (BKP-16): no new job, no tick touching the engine.</summary>
     private void StopBackupScheduler()
     {
