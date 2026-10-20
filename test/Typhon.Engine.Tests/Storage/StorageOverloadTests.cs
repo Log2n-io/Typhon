@@ -99,9 +99,16 @@ class StorageOverloadTests : TestBase<StorageOverloadTests>
             var extensions = dbe.MMF.OverloadWaitExtensions;
             dbe.MMF.ForceBackpressureForTest = () =>
             {
-                if (Environment.CurrentManagedThreadId != me || held.ElapsedMilliseconds >= 350)
+                if (held.ElapsedMilliseconds >= 350)
                 {
                     return false;
+                }
+
+                // Unserved, every thread is held, not this one alone: any allocation counts as a page served (PS-22), the engine's own threads' too,
+                // and on the macOS runner one of theirs inside the window extended the wait it was meant to end.
+                if (Environment.CurrentManagedThreadId != me)
+                {
+                    return !served;
                 }
 
                 if (served)
@@ -170,9 +177,16 @@ class StorageOverloadTests : TestBase<StorageOverloadTests>
             dbe.MMF.SetSlotReserveTargetForTests(0);
             dbe.MMF.ForceBackpressureForTest = () =>
             {
-                if (Environment.CurrentManagedThreadId != me || held.ElapsedMilliseconds >= 350)
+                if (held.ElapsedMilliseconds >= 350)
                 {
                     return false;
+                }
+
+                // Unserved, every thread is held, not this one alone: any allocation counts as a page served (PS-22), the engine's own threads' too,
+                // and on the macOS runner one of theirs inside the window extended the wait it was meant to end.
+                if (Environment.CurrentManagedThreadId != me)
+                {
+                    return !served;
                 }
 
                 if (served)
