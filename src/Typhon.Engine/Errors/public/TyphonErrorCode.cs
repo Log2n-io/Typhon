@@ -131,6 +131,35 @@ public enum TyphonErrorCode
     /// </summary>
     RecoveryArchetypeNotRegistered  = 7012,
 
+    // 71xx — Backup (7101-7106: the store and restore, #1413; 7107-7108: online capture, #1412)
+
+    /// <summary>Another writer holds the backup store's lock (see <see cref="BackupStoreLockedException"/>). Transient.</summary>
+    BackupStoreLocked               = 7101,
+
+    /// <summary>The backup store belongs to another database (see <see cref="BackupStoreMismatchException"/>).</summary>
+    BackupStoreMismatch             = 7102,
+
+    /// <summary>A backup pack failed one of its checks: a CRC, a bound, a frame (see <see cref="BackupPackCorruptException"/>).</summary>
+    BackupPackCorrupt               = 7103,
+
+    /// <summary>A backup point's chain misses a pack, or its links disagree (see <see cref="BackupChainBrokenException"/>).</summary>
+    BackupChainBroken               = 7104,
+
+    /// <summary>A backup store or pack was written by a newer format this build cannot read (see <see cref="BackupFormatUnsupportedException"/>).</summary>
+    BackupFormatUnsupported         = 7105,
+
+    /// <summary>A restore refused to write its target (see <see cref="RestoreRefusedException"/>).</summary>
+    RestoreRefused                  = 7106,
+
+    /// <summary>
+    /// An online backup capture was abandoned: it could not keep up with the engine's writes, the store failed, or the engine was stopping. Nothing was
+    /// published, and the next backup still covers every page this one would have.
+    /// </summary>
+    BackupAborted                   = 7107,
+
+    /// <summary>A backup was requested while another one was running on the same engine.</summary>
+    BackupInProgress                = 7108,
+
     // 8xxx — Runtime / Scheduler
 
     /// <summary>DEBUG-only: a system mutated a component it did not declare in its access set (see <see cref="InvalidAccessException"/>).</summary>

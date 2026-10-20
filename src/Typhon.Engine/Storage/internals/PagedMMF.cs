@@ -405,6 +405,12 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>The database bundle directory (<c>{name}.typhon</c>). The <c>data</c> file, <c>db.lock</c>, and <c>wal/</c> live inside it.</summary>
     internal string BundleDirectory => Options.BundleDirectory;
 
+    /// <summary>The data file's full path, inside <see cref="BundleDirectory"/>.</summary>
+    internal string DataFilePath => Options.BuildDatabasePathFileName();
+
+    /// <summary>Whether this instance runs in test mode (no fsync; see <see cref="PagedMMFOptions.TestMode"/>).</summary>
+    internal bool IsTestMode => Options.TestMode;
+
     /// <summary>The database's name — the bundle directory's stem, without the <c>.typhon</c> suffix. Recorded in profiling captures so a trace can say which
     /// database it ran against in terms a human recognises (#614, D-2).</summary>
     internal string DatabaseName => Options.DatabaseName;
@@ -447,6 +453,65 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     private SafeFileHandle _fileHandle;
     private long _fileSize;
+
+    // BKP-01: created with the instance, so they exist before the constructor's first write (genesis writes from CreateFile). The map reference is
+    // swapped and the hook installed only under the gate held exclusive; writers read both inside the gate held shared.
+    private readonly DataFileWriteGate _writeGate = new();
+    private PageChangeMap _changeMap = new();
+    private IDataFileWriteHook _writeHook;
+
+    /// <summary>The data-file write gate (BKP-01).</summary>
+    internal DataFileWriteGate WriteGate => _writeGate;
+
+    /// <summary>The live change map: every page written since this instance was created or since the last backup's freeze (BKP-01).</summary>
+    internal PageChangeMap ChangeMap => Volatile.Read(ref _changeMap);
+
+    /// <summary>Test hook: invoked with <c>(firstPage, count)</c> inside the write gate, after the change-map update, before each data-file write is
+    /// issued. Null in production.</summary>
+    internal Action<int, int> DataFileWriteProbe { get; set; }
+
+    /// <summary>
+    /// Takes the write gate exclusive: waits for the data-file writes in flight, holds new ones back. <c>false</c> after
+    /// <paramref name="acquireTimeout"/>, the gate reopened. The caller must not hold the gate shared, nor any lock a writer may wait on.
+    /// </summary>
+    internal bool TryEnterWriteGateExclusive(TimeSpan acquireTimeout) => _writeGate.TryEnterExclusive(acquireTimeout);
+
+    /// <summary>Releases the write gate taken by <see cref="TryEnterWriteGateExclusive"/>; everything stored before it is visible to later writers.</summary>
+    internal void ExitWriteGateExclusive() => _writeGate.ExitExclusive();
+
+    /// <summary>Replaces the live change map with <paramref name="fresh"/> and returns the one it replaces. Only under the write gate held exclusive.</summary>
+    internal PageChangeMap SwapChangeMap(PageChangeMap fresh)
+    {
+        Debug.Assert(_writeGate.IsExclusiveHeldByCurrentThread, "the change map is swapped only under the exclusive write gate");
+        var old = _changeMap;
+        Volatile.Write(ref _changeMap, fresh);
+        return old;
+    }
+
+    /// <summary>Installs (or, with null, removes) the copy-before-write hook. Only under the write gate held exclusive.</summary>
+    internal void InstallWriteHook(IDataFileWriteHook hook)
+    {
+        Debug.Assert(_writeGate.IsExclusiveHeldByCurrentThread, "the write hook is installed only under the exclusive write gate");
+        Volatile.Write(ref _writeHook, hook);
+    }
+
+    /// <summary>
+    /// The data file's physical length. Read under the exclusive write gate it is stable and exact: no write is in flight, while the tracked
+    /// <see cref="FileSize"/> lags an async batch until its fsync.
+    /// </summary>
+    internal long DataFileLengthUnderGate()
+    {
+        Debug.Assert(_writeGate.IsExclusiveHeldByCurrentThread, "the physical length is read under the exclusive write gate");
+        return RandomAccess.GetLength(_fileHandle);
+    }
+
+    /// <summary>
+    /// A second, synchronous, read-only handle on the data file, for a reader of its own (an online backup). This instance's handle is overlapped, and
+    /// a synchronous read through it allocates on Windows. Reads through both see the same file: neither bypasses the system cache.
+    /// </summary>
+    internal SafeFileHandle OpenDataFileReader()
+        => File.OpenHandle(DataFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, FileOptions.RandomAccess);
+
     private string _lockFilePath;
     private readonly IPageCacheBackpressureStrategy _backpressureStrategy;
 
@@ -728,6 +793,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             IsDatabaseFileCreating = fi.Exists == false;
             if (IsDatabaseFileCreating)
             {
+                RefuseRestoreMarkerWithoutData();
                 CreateFile();
             }
             else
@@ -755,6 +821,21 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // twice now (the other was a Win32Exception out of the liveness probe, #621), which is once more than a
             // wrapper that adds no information deserves. The inner exception is still attached for the stack trace.
             throw new Exception($"Cannot open the database at '{Options.BundleDirectory}': {e.Message}", e);
+        }
+    }
+
+    /// <summary>
+    /// Create path only: a bundle holding a restore marker but no data file is a restore that lost its image, never a new database. Creating an empty
+    /// one in its place would hand the application an empty database under the restored name (BKP-05).
+    /// </summary>
+    private void RefuseRestoreMarkerWithoutData()
+    {
+        var marker = Path.Combine(Options.BundleDirectory, RestoreMarker.FileName);
+        if (File.Exists(marker))
+        {
+            throw new StorageException(TyphonErrorCode.InvalidDatabaseBundle,
+                $"'{Options.BundleDirectory}' holds a restore marker but no data file: the restore that wrote it is incomplete. Restore the point again "
+                + "instead of creating an empty database here.");
         }
     }
 
@@ -3042,13 +3123,63 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// Writes a full page directly to the data file from the source buffer (used by the structural / direct-write paths).
     /// Also updates the tracked file size if the write extends beyond the current end of file.
     /// </summary>
-    internal void WritePageDirect(int filePageIndex, ReadOnlySpan<byte> source)
+    internal void WritePageDirect(int filePageIndex, ReadOnlySpan<byte> source) => IssueDataFileWrite(filePageIndex, 1, source);
+
+    /// <summary>
+    /// The synchronous half of the data-file write chokepoint (BKP-01): with <see cref="IssueDataFileWriteAsync"/>, the only code that calls
+    /// <c>RandomAccess.Write*</c> on the data file. Every page the engine writes passes through one of the two, so whatever must see every write
+    /// (the change map and write gate of online backup) lives here and nowhere else.
+    /// </summary>
+    /// <param name="filePageIndex">The first file page written.</param>
+    /// <param name="pageCount">How many consecutive pages <paramref name="source"/> holds.</param>
+    /// <param name="source">The bytes, <paramref name="pageCount"/> pages long.</param>
+    private void IssueDataFileWrite(int filePageIndex, int pageCount, ReadOnlySpan<byte> source)
     {
         PageWriteInterceptor?.Invoke(filePageIndex);   // test-only crash injection; throws to abort mid-write
         var pageOffset = filePageIndex * (long)PageSize;
-        RandomAccess.Write(_fileHandle, source, pageOffset);
-        TrackFileGrowth(pageOffset + PageSize);
+        var gated = DataFileWriteTracking.GateEnabled;
+        var token = gated ? _writeGate.EnterShared() : default;
+        try
+        {
+            long deadline = 0;
+            BeforeDataFileWrite(filePageIndex, pageCount, ref deadline);
+            RandomAccess.Write(_fileHandle, source, pageOffset);
+        }
+        finally
+        {
+            if (gated)
+            {
+                _writeGate.ExitShared(token);
+            }
+        }
+
+        TrackFileGrowth(pageOffset + pageCount * (long)PageSize);
     }
+
+    /// <summary>
+    /// What every data-file write does inside the write gate, before it is issued (BKP-01): mark its pages in the change map, then let an online
+    /// backup preserve the pages it still needs (copy-before-write). <paramref name="deadline"/> is the write's copy-before-write budget (0 until the
+    /// hook starts it): one per write, shared by every run of a <see cref="SavePages"/> batch (BKP-12). Never throws, but for a test probe.
+    /// </summary>
+    private void BeforeDataFileWrite(int filePageIndex, int pageCount, ref long deadline)
+    {
+        if (DataFileWriteTracking.MapEnabled)
+        {
+            Volatile.Read(ref _changeMap).Set(filePageIndex, pageCount);
+        }
+
+        Volatile.Read(ref _writeHook)?.BeforeWrite(filePageIndex, pageCount, ref deadline);
+        DataFileWriteProbe?.Invoke(filePageIndex, pageCount);
+    }
+
+    /// <summary>
+    /// The asynchronous half of the data-file write chokepoint (BKP-01), used by <see cref="SavePageInternal"/>. It does not advance the
+    /// tracked file size (PS-08: <see cref="SavePages"/> does, once the batch is durable).
+    /// </summary>
+    /// <param name="filePageIndex">The first file page written.</param>
+    /// <param name="source">The bytes, a whole number of pages, read by the OS until the returned task completes.</param>
+    private ValueTask IssueDataFileWriteAsync(int filePageIndex, ReadOnlyMemory<byte> source)
+        => RandomAccess.WriteAsync(_fileHandle, source, filePageIndex * (long)PageSize);
 
     /// <summary>
     /// Maps a logical file-page index to the on-disk byte offset to read it from. The identity mapping by default; a
@@ -4194,11 +4325,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // page was already written (and fsynced) to its alternate slot by the protected-page redirect above.
             if (!redirected)
             {
-                PageWriteInterceptor?.Invoke(filePageIndex);   // test-only crash injection; throws to abort the checkpoint mid-cycle
                 plainWrittenThisPass = true;
-                var pageOffset = filePageIndex * (long)PageSize;
-                RandomAccess.Write(_fileHandle, staging.Span, pageOffset);
-                TrackFileGrowth(pageOffset + PageSize);
+                IssueDataFileWrite(filePageIndex, 1, staging.Span);   // its interceptor may throw to abort the checkpoint mid-cycle
             }
 
             // Partition in place: written pages to the front [0, writtenCount), skipped pages to the back [writtenCount, length). Swap (never overwrite) so the
@@ -4410,10 +4538,23 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             }
         }
 
-        var tasks = new Task[operations.Count];
+        // BKP-01: the batch holds the write gate from before its change-map update until every one of its writes has completed, so a freeze sees
+        // either none of the batch or all of it. Copy-before-write runs here, on this thread, before any write is issued: on Linux a pool thread
+        // runs the pwrite later; the whole batch shares one copy-before-write budget (BKP-12). Exited at the top of the continuation, or in the catch
+        // below: everything between the enter and the continuation's registration sits inside the try, so a throw cannot leak the hold.
+        var gated = DataFileWriteTracking.GateEnabled;
+        var batchToken = gated ? _writeGate.EnterShared() : default;
+        Task[] tasks = null;
         var issued = 0;
         try
         {
+            long deadline = 0;
+            for (int i = 0; i < operations.Count; i++)
+            {
+                BeforeDataFileWrite(Slot(operations[i].memPageIndex).FilePageIndex, operations[i].length, ref deadline);
+            }
+
+            tasks = new Task[operations.Count];
             for (; issued < operations.Count; issued++)
             {
                 tasks[issued] = SavePageInternal(operations[issued].memPageIndex, operations[issued].length).AsTask();
@@ -4425,12 +4566,23 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // method has returned. Abandoned here, an issued write could outlive the page cache and copy whatever then lived at the freed address: a
             // zeroed page landed over a good one (#978). So the writes already issued are waited for, and their captures ended, before the throw.
             WaitForIssuedWrites(tasks, issued);
+            if (gated)
+            {
+                _writeGate.ExitShared(batchToken);
+            }
+
             EndCaptures(normalPages);
             throw;
         }
 
         var saveTask = Task.WhenAll(tasks).ContinueWith(t =>
         {
+            // Every write of the batch has completed, faulted or not: the data file no longer changes under a freeze.
+            if (gated)
+            {
+                _writeGate.ExitShared(batchToken);
+            }
+
             EndCaptures(normalPages);
 
             // A faulted write never landed: neither the watermark nor the debt may move for it, or the page could be evicted over bytes the file never
@@ -4525,13 +4677,12 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         }
     }
 
-    internal ValueTask SavePageInternal(int firstMemPageIndex, int length)
+    private ValueTask SavePageInternal(int firstMemPageIndex, int length)
     {
         var pi = Slot(firstMemPageIndex);
 
         // Save the page to disk
         var filePageIndex = pi.FilePageIndex;
-        var pageOffset = filePageIndex * (long)PageSize;
         // A run never leaves its window (SavePages' run builder ends one on a window's last page), so its length fits an int.
         Debug.Assert((long)PageSize * length <= int.MaxValue, "A write run must fit one page-cache window.");
         var pageData = PageCacheWindow.PageRunMemory(_windows, firstMemPageIndex, length);
@@ -4553,7 +4704,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         var writeBeginTs = writeScope.Header.StartTimestamp;
         writeScope.Dispose();
 
-        var writeTask = RandomAccess.WriteAsync(_fileHandle, pageData, pageOffset);
+        var writeTask = IssueDataFileWriteAsync(filePageIndex, pageData);
 
         // Async-completion tracking: opt-in via UnsuppressKind(PageCacheDiskWriteCompleted). Same gating logic as the read path — skip the
         // wrap when either the kickoff span is suppressed (nothing to correlate with) or the completion kind is suppressed (zero-alloc path).

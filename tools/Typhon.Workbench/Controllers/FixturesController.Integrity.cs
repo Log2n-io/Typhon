@@ -109,6 +109,8 @@ public sealed partial class FixturesController
     /// </summary>
     private static void DamagePage(string bundlePath, int filePageIndex, Action<byte[]> mutate)
     {
+        // An offline write: the chunk summary and the backup-state would go on describing the file (BKP-09), so they go first.
+        Typhon.Engine.Internals.OfflineWrite.InvalidateDerivedFiles(bundlePath);
         var dataPath = Path.Combine(bundlePath, IntegrityConstants.DataFileName);
         var page = new byte[IntegrityConstants.PageSize];
         using var fs = new FileStream(dataPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);

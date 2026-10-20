@@ -95,11 +95,14 @@ internal sealed class InMemoryWalFileIO : IWalFileIO
             return;
         }
 
-        var available = seg.Data.Length - (int)offset;
-        var toCopy = Math.Min(available, buffer.Length);
+        // One read of the array reference: a writer growing the segment swaps it, and both halves of this read must see the same array. Clamped at
+        // zero: a read starting past the data (a segment whose header declares more than was ever written) reads zeros, as past a file's written part.
+        var data = seg.Data;
+        var available = data.Length - offset;
+        var toCopy = (int)Math.Max(0, Math.Min(available, buffer.Length));
         if (toCopy > 0)
         {
-            seg.Data.AsSpan((int)offset, toCopy).CopyTo(buffer);
+            data.AsSpan((int)offset, toCopy).CopyTo(buffer);
         }
 
         // Zero any remaining buffer space beyond available data
@@ -199,8 +202,9 @@ internal sealed class InMemoryWalFileIO : IWalFileIO
     [PublicAPI]
     public sealed class MemorySegment
     {
-        /// <summary>The raw data buffer (simulates file contents).</summary>
-        public byte[] Data;
+        /// <summary>The raw data buffer (simulates file contents). Volatile: a write that grows the segment publishes a new array while an online backup
+        /// may be reading the old one from another thread.</summary>
+        public volatile byte[] Data;
 
         /// <summary>Whether FUA was requested when opening.</summary>
         public bool WithFUA { get; }

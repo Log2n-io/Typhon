@@ -2182,6 +2182,62 @@ internal static class DamageKit
     }
 
     /// <summary>
+    /// Rewrites the first written WAL segment so its last two single-frame drains become ONE drain carrying both frames back to back — the shape the
+    /// writer produces when two frames are published before it drains. Not damage: the bytes and the CRC chain are unchanged, and recovery reads every
+    /// record. Staged rather than produced because a segment boundary right after a multi-frame drain is not reachable from a unit test.
+    /// </summary>
+    /// <param name="bundlePath">The bundle whose log to rewrite.</param>
+    /// <param name="highestLsn">Receives the highest LSN of any frame in the segment.</param>
+    /// <returns>The segment file rewritten.</returns>
+    internal static string MergeLastTwoWalDrains(string bundlePath, out long highestLsn)
+    {
+        const int Block = 4096;
+
+        var walDir = Path.Combine(bundlePath, "wal");
+        foreach (var path in Directory.GetFiles(walDir).OrderBy(p => p, StringComparer.Ordinal))
+        {
+            var bytes = File.ReadAllBytes(path);
+            if (bytes.Length <= WalSegmentHeaderSize)
+            {
+                continue;
+            }
+
+            // The fixture writes one frame per drain, each drain one block.
+            var drains = new List<(int At, int Length, long LastLsn)>();
+            for (var at = WalSegmentHeaderSize; at + WalFrameHeaderSize <= bytes.Length; at += Block)
+            {
+                var length = MemoryMarshal.Read<int>(bytes.AsSpan(at));
+                if (length <= 0)
+                {
+                    break;
+                }
+
+                Assert.That(length, Is.LessThanOrEqualTo(Block), "the fixture's drains are expected to fit one block");
+                drains.Add((at, length, MemoryMarshal.Read<long>(bytes.AsSpan(at + 8))));
+            }
+
+            if (drains.Count < 2)
+            {
+                continue;
+            }
+
+            var (a, b) = (drains[^2], drains[^1]);
+            Assert.That(a.Length + b.Length, Is.LessThanOrEqualTo(Block), "the two frames must fit one drain block");
+
+            var merged = new byte[bytes.Length];
+            bytes.AsSpan(0, a.At + a.Length).CopyTo(merged);
+            bytes.AsSpan(b.At, b.Length).CopyTo(merged.AsSpan(a.At + a.Length));
+            bytes.AsSpan(b.At + Block).CopyTo(merged.AsSpan(a.At + Block));
+            File.WriteAllBytes(path, merged);
+
+            highestLsn = drains.Max(d => d.LastLsn);
+            return Path.GetFileName(path);
+        }
+
+        throw new InvalidOperationException("no WAL segment held two drains to merge");
+    }
+
+    /// <summary>
     /// <b>D9</b> — appends a WAL segment whose first LSN skips ahead, leaving a hole in the log's coverage.
     /// </summary>
     /// <remarks>

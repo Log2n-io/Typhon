@@ -68,6 +68,10 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     // ═══════════════════════════════════════════════════════════════
 
     private long _checkpointLsn;
+
+    // W1 (BKP-04): while an online backup copies its WAL tail, step 8 never reclaims a segment whose last LSN is at or above this floor. MaxValue
+    // when no backup holds it.
+    private long _reclaimFloor = long.MaxValue;
     private volatile Exception _fatalError;
     private volatile DurabilityHealth _health = DurabilityHealth.Ok;
     // 1 while a force request waits for the loop. Read-and-cleared in one exchange, so a request landing between the loop's wake and its read
@@ -99,6 +103,10 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// so a fixture can let the forced cycle finish first — the ordering the old force-then-wait pairing lost its own cycle to. Must tolerate being
     /// called more than once per call. Null in production.</summary>
     internal Action AfterForceRequested { get; set; }
+
+    /// <summary>Test seam (#1412): invoked on the checkpoint thread once a batch's pages are written and before its flush2 and fsync, the window in
+    /// which the data file holds pages whose records may not be durable yet (C1). Null in production: one null check per batch.</summary>
+    internal Action BeforeSettleProbe { get; set; }
 
     /// <summary>
     /// Wired by <see cref="DatabaseEngine"/> to <c>PersistArchetypeState</c>. Invoked at the START of every checkpoint cycle (before the durability
@@ -179,6 +187,18 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
 
     /// <summary>The highest LSN that has been fully checkpointed (data pages on stable media).</summary>
     public long CheckpointLsn => Interlocked.Read(ref _checkpointLsn);
+
+    /// <summary>
+    /// Holds WAL reclaim below <paramref name="floorLsn"/>: until <see cref="ClearReclaimFloor"/>, no checkpoint deletes a segment whose last LSN is
+    /// at or above it (BKP-04). Set by an online backup under its freeze, so a cycle whose meta write follows the freeze reads it at step 8.
+    /// </summary>
+    internal void SetReclaimFloor(long floorLsn) => Volatile.Write(ref _reclaimFloor, floorLsn);
+
+    /// <summary>Releases the floor set by <see cref="SetReclaimFloor"/>.</summary>
+    internal void ClearReclaimFloor() => Volatile.Write(ref _reclaimFloor, long.MaxValue);
+
+    /// <summary>The reclaim floor, <see cref="long.MaxValue"/> when none is held.</summary>
+    internal long ReclaimFloor => Volatile.Read(ref _reclaimFloor);
 
     /// <summary>Whether the checkpoint thread is currently running.</summary>
     public bool IsRunning => _thread != null && _thread.IsAlive;
@@ -363,11 +383,14 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// <param name="timeout">Maximum wall-clock time to wait. <see cref="Timeout.InfiniteTimeSpan"/> waits indefinitely.</param>
     /// <param name="minCheckpointLsn">Also wait until <see cref="CheckpointLsn"/> has reached this LSN: a covering cycle that CK-13 held below it
     /// counts as not covering the request. 0 for no such requirement.</param>
-    /// <returns><see langword="true"/> once a covering cycle has finished; <see langword="false"/> on timeout, and at once when checkpointing has
-    /// halted (a fatal error, a simulated hard crash, or the loop stopping).</returns>
-    public bool ForceCheckpointAndWait(TimeSpan timeout, long minCheckpointLsn = 0)
+    /// <param name="ct">Stops the wait early (the request stands: the cycle still runs). An online backup's capture passes its own, so a closing
+    /// engine is not held behind it.</param>
+    /// <returns><see langword="true"/> once a covering cycle has finished; <see langword="false"/> on timeout or cancellation, and at once when
+    /// checkpointing has halted (a fatal error, a simulated hard crash, or the loop stopping).</returns>
+    public bool ForceCheckpointAndWait(TimeSpan timeout, long minCheckpointLsn = 0, CancellationToken ct = default)
     {
-        var ctx = WaitContext.FromTimeout(timeout);
+        var ctx = WaitContext.FromTimeout(timeout, ct);
+        using var wake = ct.CanBeCanceled ? ct.Register(PulseCycleFinished) : default;
         while (true)
         {
             var ticket = RequestCycle();
@@ -404,6 +427,15 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                     return true;
                 }
             }
+        }
+    }
+
+    /// <summary>Wakes the forced waiters to re-check their condition: a cancellation (<see cref="ForceCheckpointAndWait"/>).</summary>
+    private void PulseCycleFinished()
+    {
+        lock (_cycleFinished)
+        {
+            Monitor.PulseAll(_cycleFinished);
         }
     }
 
@@ -1019,6 +1051,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
 
                     if (batchPages > 0)
                     {
+                        BeforeSettleProbe?.Invoke();
                         SettleBatch(pending, capturedGen, batch, ref ctx);
                         writtenTotal += batchPages;
                     }
@@ -1414,6 +1447,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                     {
                         var tickFenceLsn = _lastTickFenceLsnProvider?.Invoke() ?? 0;
                         var trimLsn = tickFenceLsn > 0 ? Math.Min(barrierLsn, tickFenceLsn) : barrierLsn;
+                        trimLsn = Math.Min(trimLsn, Volatile.Read(ref _reclaimFloor));   // W1: an online backup copying its tail (BKP-04)
                         var recycled = segmentManager.MarkReclaimable(trimLsn);
                         recycleScope.RecycledCount = recycled;
                         Interlocked.Add(ref _totalSegmentsRecycled, recycled);

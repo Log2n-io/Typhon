@@ -257,6 +257,192 @@ public static class DatabaseLockFile
         }
     }
 
+    // ── Acquisition by a tool ────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Takes the advisory lock for a tool that works on a closed database (an offline backup), atomically: the lock file is created with
+    /// <see cref="FileMode.CreateNew"/>, so of two claimants exactly one creates it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// An existing lock whose owner is dead, or that cannot be read, is removed and the creation retried once — the engine's own acceptance rule
+    /// (a corrupt lock is removable). A live owner, including a different machine's, is never displaced.
+    /// </para>
+    /// <para>
+    /// <b>Advisory only.</b> The engine itself takes the lock exists-then-write, which this cannot exclude; a tool that must keep an engine out
+    /// also holds the data file open with <see cref="FileShare.None"/>, the OS-enforced exclusion on Windows and Linux alike.
+    /// </para>
+    /// </remarks>
+    /// <param name="bundleDirectory">The database's <c>{name}.typhon</c> directory.</param>
+    /// <param name="yieldable">Whether this holder will release the database on request (#621).</param>
+    /// <param name="lockInfo">
+    /// On success, what was written: pass it to <see cref="Release"/>. On failure, the live holder, or <c>default</c> when it could not be read.
+    /// </param>
+    /// <returns><c>true</c> when this call created the lock.</returns>
+    public static bool TryAcquire(string bundleDirectory, bool yieldable, out LockInfo lockInfo)
+    {
+        var path = PathFor(bundleDirectory);
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var mine = new LockInfo(Environment.ProcessId, Environment.MachineName, DateTimeOffset.UtcNow, yieldable, null);
+            switch (TryCreate(path, mine))
+            {
+                case Created.Yes:
+                    lockInfo = mine;
+                    return true;
+                case Created.Pending:
+                    // Windows: the previous lock is being deleted (delete-pending refuses every open); it is gone in an instant.
+                    System.Threading.Thread.Sleep(10);
+                    continue;
+            }
+
+            if (TryReadLock(bundleDirectory, out var holder) && IsOwnerLive(holder.Pid, holder.MachineName))
+            {
+                lockInfo = holder;
+                return false;
+            }
+
+            // A lock that cannot be read yet may be one a claimant is writing right now (Linux: CreateNew, then the write): only an old one is corrupt.
+            if (!File.Exists(path) || (!TryReadLock(bundleDirectory, out _) && IsYoung(path)))
+            {
+                if (File.Exists(path))
+                {
+                    lockInfo = default;
+                    return false;
+                }
+
+                continue;
+            }
+
+            // A dead owner's lock, or an old unreadable one: taken over by one claimant at a time. Without the takeover lock, two claimants that both
+            // read it as stale could each delete it, the second deleting the first's fresh lock, and both believe they hold the database.
+            using (var takeover = TryTakeover(path))
+            {
+                if (takeover == null)
+                {
+                    lockInfo = default;
+                    return false;
+                }
+
+                if (TryReadLock(bundleDirectory, out var again) && IsOwnerLive(again.Pid, again.MachineName))
+                {
+                    lockInfo = again;
+                    return false;
+                }
+
+                BeforeStaleLockDeletedForTest?.Invoke(path);
+                try
+                {
+                    File.Delete(path);
+                }
+                catch (Exception ex) when (IsExpectedIoOrFormatFailure(ex))
+                {
+                    // Held open by its writer: the next attempt finds it again and reports what it can read.
+                    continue;
+                }
+
+                if (TryCreate(path, mine) == Created.Yes)
+                {
+                    lockInfo = mine;
+                    return true;
+                }
+            }
+        }
+
+        lockInfo = TryReadLock(bundleDirectory, out var last) ? last : default;
+        return false;
+    }
+
+    /// <summary>Test seam: called under the takeover lock, right before a stale lock is deleted. Null in production.</summary>
+    internal static Action<string> BeforeStaleLockDeletedForTest;
+
+    /// <summary>How long an unreadable lock is taken for one being written rather than a corrupt one.</summary>
+    internal static readonly TimeSpan UnreadableLockGrace = TimeSpan.FromSeconds(5);
+
+    private enum Created
+    {
+        Yes,
+        Exists,
+        Pending,
+    }
+
+    private static Created TryCreate(string path, in LockInfo mine)
+    {
+        try
+        {
+            using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            stream.Write(System.Text.Encoding.UTF8.GetBytes(SerializeLock(mine.Pid, mine.StartedAt, mine.MachineName, mine.Yieldable)));
+            return Created.Yes;
+        }
+        catch (IOException) when (File.Exists(path))
+        {
+            return Created.Exists;
+        }
+        catch (UnauthorizedAccessException) when (OperatingSystem.IsWindows())
+        {
+            return Created.Pending;
+        }
+    }
+
+    private static bool IsYoung(string path)
+    {
+        try
+        {
+            return DateTime.UtcNow - File.GetLastWriteTimeUtc(path) < UnreadableLockGrace;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// The exclusive right to take over a stale lock: <c>db.lock.takeover</c> held with no sharing and deleted on close; <c>null</c> while another
+    /// claimant holds it.
+    /// </summary>
+    private static IDisposable TryTakeover(string path)
+    {
+        try
+        {
+            return File.OpenHandle(path + ".takeover", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, FileOptions.DeleteOnClose);
+        }
+        catch (IOException) when (File.Exists(path + ".takeover"))
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException) when (OperatingSystem.IsWindows())
+        {
+            // The previous holder's takeover file is being deleted.
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Releases a lock taken by <see cref="TryAcquire"/>: deletes the lock file only while it still records exactly <paramref name="acquired"/>,
+    /// so a lock another holder wrote since is never removed.
+    /// </summary>
+    /// <param name="bundleDirectory">The database's <c>{name}.typhon</c> directory.</param>
+    /// <param name="acquired">The value <see cref="TryAcquire"/> returned.</param>
+    /// <returns><c>true</c> when the file was deleted.</returns>
+    public static bool Release(string bundleDirectory, in LockInfo acquired)
+    {
+        if (!TryReadLock(bundleDirectory, out var current) || current.Pid != acquired.Pid || current.StartedAt != acquired.StartedAt
+            || !string.Equals(current.MachineName, acquired.MachineName, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        try
+        {
+            File.Delete(PathFor(bundleDirectory));
+            return true;
+        }
+        catch (Exception ex) when (IsExpectedIoOrFormatFailure(ex))
+        {
+            return false;
+        }
+    }
+
     // ── Claim requests ───────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>Publishes a claim on a yieldable database. Best-effort: a failed write costs the wait, not correctness.</summary>

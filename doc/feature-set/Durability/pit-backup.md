@@ -1,86 +1,90 @@
 ---
 uid: feature-durability-pit-backup
 title: 'Point-in-Time Incremental Backup'
-description: 'Forward-incremental .pack backups scoped to changed pages; restore reassembles a base and heals it through crash recovery''s RecoveryDriver.'
+description: 'Online, forward-incremental page backups; each point is a frozen data-file image plus a short WAL tail, restored through crash recovery.'
 ---
 
 # Point-in-Time Incremental Backup
-> Forward-incremental `.pack` backups scoped to changed pages; restore reassembles a base and heals it through crash recovery's RecoveryDriver.
+> Online, forward-incremental page backups; each point is a frozen data-file image plus a short WAL tail, restored through crash recovery.
 
 **Status:** 📋 Planned · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Durability](./README.md)
 **Assumes:** [Crash Recovery (RecoveryDriver)](crash-recovery/README.md)
 
 ## 🎯 What it solves
 
-A database that only ever recovers to "last checkpoint plus WAL replay" has no answer for disk failure, accidental
-mass-delete, or wanting a snapshot from four hours ago — the WAL itself is recycled after each checkpoint
-(ADR-014), so nothing but the live data file survives past
-that point. A naive backup that copies the whole database every time doesn't scale: I/O cost is proportional to
-database size, not to how much actually changed. PIT Backup gives Typhon an external, self-contained recovery
-point whose cost tracks the change rate, without taxing the live transaction path to get it.
+Without a backup, a lost disk, an accidental mass delete or a bad deploy is unrecoverable: the WAL is reclaimed after each
+checkpoint, so the live data file is the only copy. A naive file copy is not enough either. A checkpointed data file is
+only crash-consistent, so a copy taken while the engine runs holds half-applied transactions. PIT Backup gives Typhon
+restorable points, taken while the engine runs, at a cost that follows the change rate. Restore reuses the engine's proven
+crash recovery instead of inventing a second one.
 
 ## ⚙️ How it works (in brief)
 
-The checkpoint pipeline already iterates dirty pages every cycle; it OR's each flushed page's index into a
-**persistent dirty bitmap** at near-zero cost. A backup point forces a checkpoint, reads that bitmap as the
-changed-page set since the last backup, copies just those pages from the data file, and writes them — LZ4-compressed,
-checksummed, page-indexed — into a self-contained `.pack` file. Successive `.pack` files chain forward; restoring a
-point walks the chain **backward**, taking the newest copy of each page (first-hit-wins) to assemble a single backup
-base. That base is then handed to the **same `RecoveryDriver` used for crash recovery** — it validates pages and
-rebuilds every derived structure (indexes, EntityMap, occupancy bitmap, spatial/statistics) from scratch, exactly as
-it does after a crash. Backups therefore never capture derived-structure pages at all, and restore carries no
-backup-specific replay code. Periodic **compaction** collapses the chain into a fresh base to bound restore time; a
-**retention policy** prunes old points.
+Every page the engine writes to the data file sets a bit in a **change map**. A backup point **freezes** the data file at an
+instant (a short write gate, never touching transactions). It then copies the pages written since the previous point. If a
+checkpoint wants to overwrite one of those pages before it has been copied, the old page is copied first
+(**copy-before-write**, on the checkpoint's cold path). The point also stores the **WAL tail**: the few milliseconds of log
+the frozen image needs to be consistent. Everything goes, LZ4-compressed and CRC-covered, into one immutable `.tpack` file
+in a backup **store**.
 
-> Design note: the original draft (6-part series) protected
-> the live capture window with a scoped Copy-on-Write shadow buffer. That mechanism was dropped in the 2026-06-11
-> redesign (MinimalWal README §P3, decision D11) in favor
-> of plain post-checkpoint reads — consistency is restored at restore time by RecoveryDriver instead of guaranteed at
-> capture time, which is simpler and reuses an already-proven healing path.
+**Restoring** a point assembles the newest copy of every page along its chain, puts the tail in `wal/`, and opens the
+database. The engine sees an unclean shutdown and runs ordinary crash recovery, so a restore is equivalent to a hard crash
+at the freeze instant. **Compaction** folds a chain into a new base inside the store. **Retention** keeps a bounded,
+always-restorable history. An optional **archiving** layer copies every sealed WAL segment to the store. That brings the
+recovery point objective down to seconds and allows restoring to any LSN or time.
 
 ## 💻 Usage
 
-Not implemented — there is no API or CLI to create, restore, or manage backups today. The sketch below shows the
-*intended* shape (a CLI tool plus an in-process retention policy) for planning purposes only; none of this exists yet:
+Not implemented. The sketch below is the *intended* shape:
 
 ```csharp
 // Illustrative only — not a real/current Typhon API.
-
-// Planned: configure automatic compaction/pruning alongside the engine.
-// var policy = new BackupRetentionPolicy
+// services.AddTyphon(o => o.DatabaseFile("world.typhon").Backup(b =>
 // {
-//     MaxAge           = TimeSpan.FromDays(7),
-//     MaxTotalSize     = 20L * 1024 * 1024 * 1024,
-//     CompactThreshold = 42,   // compact after 42 incrementals (~1 week at 4h intervals)
-//     MinKeep          = 5,
-// };
+//     b.StorePath = "/backups/world";
+//     b.Interval  = TimeSpan.FromHours(1);                         // required: no implicit default
+//     b.Retention = new BackupRetentionPolicy { MaxAge = TimeSpan.FromDays(7), MinKeep = 3 };
+//     b.Archive   = new ArchiveOptions { MaxSegmentAge = TimeSpan.FromSeconds(30), BacklogLimitBytes = 8L << 30 };
+// }));
+// var point = await engine.Backup.CreateAsync();                    // on demand
 ```
 
 ```
-# Planned CLI surface (separate process / offline — not engine-embedded)
-typhon-backup create   --db <path> --dest <backup-dir>
-typhon-backup restore  --source <backup-dir> --target <db-path> [--point <id|datetime>]
-typhon-backup compact  --source <backup-dir>
-typhon-backup prune    --source <backup-dir> --before <id|datetime>
-typhon-backup verify   --source <backup-dir> [--point <id|datetime>]
+# Planned CLI (the `typhon` tool, beside check / repair)
+typhon backup create  <bundle> [--store S] [--full]     # online via the running engine, or offline
+typhon backup status  <bundle>                           # exit code = health, for monitoring
+typhon backup list    --store S
+typhon backup verify  --store S [--level quick|full|deep]
+typhon backup restore --store S [--point X | --lsn L | --time T] --to <bundle>
+typhon backup drill   --store S                          # restore to scratch, open, check, delete
+typhon backup compact --store S
+typhon backup prune   --store S --max-age 7d --min-keep 3
 ```
 
 ## ⚠️ Guarantees & limits
 
-- **Not implemented.** No code exists under `src/Typhon.Engine/Backup` today; everything above is a design sketch, subject to change.
-- **I/O proportional to change, not size** — a backup point costs O(changed pages); only periodic compaction costs O(database size), amortized over the chain (design target: ~15 GB per incremental vs. ~205 GB for a naive full-copy scheme, at 100 GB DB / 10% churn).
-- **Self-contained per chain** — each `.pack` file is independently checksummed (header, footer, and per-page CRC32C); the base point needs no live WAL to restore.
-- **Zero transaction-path overhead when idle** — the only steady-state cost is the checkpoint pipeline's one bit-OR per flushed page.
-- **Restore heals, it doesn't trust** — the assembled base is run through `RecoveryDriver`, the identical mechanism crash recovery uses; derived structures are always rebuilt, never restored byte-for-byte.
-- **One backup at a time** — compaction and pruning run offline against `.pack` files only and never touch the live engine.
-- **Fine-grained point-in-time restore is a separate, optional layer** — retaining WAL segments past checkpoint (revising ADR-014) is planned but not part of the base design; without it, restore granularity is "whichever backup point you took."
+- **Not implemented.** Everything above is design.
+- **Zero transaction-path cost.** The only steady-state cost is one atomic bit-set per data-file page write; a backup's
+  copy-before-write runs on the checkpoint's write path, never on a commit.
+- **I/O proportional to change.** An incremental copies only the pages written since the previous point; a full or
+  compacted base costs O(database size).
+- **Restore ≡ crash recovery.** A restored point yields exactly the transactions committed up to its point LSN, via the
+  unchanged recovery path.
+- **Any doubt costs a full backup, never a wrong one.** After a crash, an offline repair or a copied bundle, the next point
+  is full.
+- **Every byte in the store is checksummed**; `verify` checks packs, chains and (deep) the database structure through the
+  same checks `typhon check` uses.
+- **Backup never endangers the engine.** A backup that cannot keep up aborts and retries; an unreachable store degrades
+  health (and, with archiving, the recovery point), it does not stop the engine.
+- **One store per database**, a local or mounted filesystem path. Remote object stores, encryption and logical
+  (entity-level) export are out of scope for now.
 
 ## 🔗 Related
 
-- Sibling: [Checkpoint v2 (SnapshotStore pipeline)](checkpoint-v2/README.md) — a backup point forces a checkpoint cycle and reads its dirty-page bitmap
-- Sibling: [Pluggable WAL I/O Backend (IWalFileIO seam)](../Hosting/wal-io-injection-seam.md) — the kind of file-system access seam backup tooling would need for its own I/O
+- Sibling: [Checkpoint v2 (SnapshotStore pipeline)](checkpoint-v2/README.md): a backup forces a checkpoint and shares its data-file write path
+- Sibling: [Pluggable WAL I/O Backend (IWalFileIO seam)](../Hosting/wal-io-injection-seam.md): the seam the tail copy and the archiver read through
 
 <!-- Overview: claude/overview/07-backup.md -->
-<!-- Design (original 6-part spec — file format, dirty bitmap, chain-walk reconstruction, compaction/pruning still current): claude/design/Durability/PitBackup/README.md -->
-<!-- Design (current resolution — supersedes the CoW capture mechanism, adds RecoveryDriver-based restore): claude/design/Durability/MinimalWal/README.md §P3 / Decision D11 -->
-<!-- ADRs: 014 — No PITR (claude/adr/014-no-point-in-time-recovery.md, revision planned), 028 — CoW snapshot backup (claude/adr/028-cow-snapshot-backup.md, capture mechanism superseded), 029 — Reverse-delta snapshots (claude/adr/029-reverse-delta-incremental-snapshots.md, superseded by forward incrementals), 030 — Dual-limit retention policy (claude/adr/030-dual-limit-retention-policy.md) -->
+<!-- Design (v2, current): claude/design/Durability/PitBackup/README.md (01 model · 02 capture · 03 format · 04 restore/verify · 05 lifecycle · 06 archiving · 07 ops loop · 08 rules/proofs) -->
+<!-- Design (v1, archived — CoW shadow buffer, superseded): claude/archive/Durability/PitBackup-v1/README.md -->
+<!-- ADRs: 075 — frozen image + WAL tail (claude/adr/075-backup-is-a-frozen-image-plus-wal-tail.md); 014 — revised by 075; 028 — superseded by 075; 029 — superseded; 030 — retention policy (kept) -->

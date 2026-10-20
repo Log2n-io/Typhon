@@ -22,6 +22,10 @@ internal static class DurabilityWatermarks
     // flag that vouches for it, so the two are durable together or not at all.
     internal const string ChunkSummaryNonceKey = "ChunkSummaryNonce";
 
+    // The nonce of the backup-state file (#1412, BKP-06) a clean close of a trusted session wrote, 0 when it wrote none. Same discipline as the chunk
+    // summary's: set with the clean flag, cleared with it.
+    internal const string BackupStateNonceKey = "BackupStateNonce";
+
     /// <summary>Reads the persisted watermark pair; a fresh database (key absent) reads as <c>(0, false)</c>.</summary>
     internal static (long CheckpointLsn, bool CleanShutdown) Read(ManagedPagedMMF mmf)
     {
@@ -63,6 +67,7 @@ internal static class DurabilityWatermarks
             if (!cleanShutdown)
             {
                 mmf.Bootstrap.SetLong(ChunkSummaryNonceKey, 0);
+                mmf.Bootstrap.SetLong(BackupStateNonceKey, 0);
             }
         });
 
@@ -77,6 +82,7 @@ internal static class DurabilityWatermarks
         {
             Write(mmf, Read(mmf).CheckpointLsn, false);
             mmf.Bootstrap.SetLong(ChunkSummaryNonceKey, 0);
+            mmf.Bootstrap.SetLong(BackupStateNonceKey, 0);
             mmf.Bootstrap.SetInt(FailedOpenKey, 1);
         });
 
@@ -94,17 +100,22 @@ internal static class DurabilityWatermarks
     internal static bool ReadFailedOpen(ManagedPagedMMF mmf) => mmf.Bootstrap.GetInt(FailedOpenKey) != 0;
 
     /// <summary>
-    /// Marks a clean close: sets the clean-shutdown flag and records the nonce of the chunk summary written just before, in ONE meta flip (CK-05). The
-    /// next open trusts the summary only when this flag is set and the file carries this nonce (CS-05).
+    /// Marks a clean close: sets the clean-shutdown flag and records the nonces of the chunk summary and the backup-state written just before, in ONE meta
+    /// flip (CK-05). The next open trusts either file only when this flag is set and the file carries this nonce (CS-05, BKP-06).
     /// </summary>
     /// <param name="mmf">The data file.</param>
     /// <param name="chunkSummaryNonce">The summary file's nonce, or 0 when the close wrote none.</param>
-    internal static void MarkCleanShutdown(ManagedPagedMMF mmf, ulong chunkSummaryNonce)
+    /// <param name="backupStateNonce">The backup-state file's nonce, or 0 when the close wrote none.</param>
+    internal static void MarkCleanShutdown(ManagedPagedMMF mmf, ulong chunkSummaryNonce, ulong backupStateNonce = 0)
         => mmf.MutateBootstrapAndPersist(() =>
         {
             Write(mmf, Read(mmf).CheckpointLsn, true);
             mmf.Bootstrap.SetLong(ChunkSummaryNonceKey, (long)chunkSummaryNonce);
+            mmf.Bootstrap.SetLong(BackupStateNonceKey, (long)backupStateNonce);
         });
+
+    /// <summary>The nonce of the backup-state the last clean close wrote (0 when none). Meaningful only while the clean flag is set.</summary>
+    internal static ulong ReadBackupStateNonce(ManagedPagedMMF mmf) => (ulong)mmf.Bootstrap.GetLong(BackupStateNonceKey);
 
     /// <summary>The nonce of the chunk summary the last clean close wrote (0 when none). Meaningful only while the clean flag is set.</summary>
     internal static ulong ReadChunkSummaryNonce(ManagedPagedMMF mmf) => (ulong)mmf.Bootstrap.GetLong(ChunkSummaryNonceKey);

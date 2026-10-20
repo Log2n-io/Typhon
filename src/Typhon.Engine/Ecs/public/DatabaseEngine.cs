@@ -459,6 +459,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal const string BK_CleanShutdown          = "CleanShutdown";
     internal const string BK_SeedRevision           = "SeedRevision";
     internal const string BK_DatabaseId             = "DatabaseId";
+    internal const string BK_TimelineId             = "TimelineId";
     // ReSharper restore InconsistentNaming
 
     /// <summary>
@@ -490,6 +491,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// created before this key existed adopt an id on their first open by a build that knows about it — see <see cref="EnsureDatabaseIdentity"/>.
     /// </remarks>
     public Guid DatabaseId { get; private set; }
+
+    /// <summary>
+    /// Identity of this database's WAL history: LSNs are unique within a timeline. Minted with <see cref="DatabaseId"/> at creation and kept across
+    /// reopens and crashes; a database restored from a backup point starts a new one (<see cref="AdoptTimeline"/>), because its WAL reuses LSNs the
+    /// original already wrote. Persisted as <see cref="BK_TimelineId"/>, in the same packed shape as <see cref="DatabaseId"/>.
+    /// </summary>
+    internal Guid TimelineId { get; private set; }
 
     /// <summary>
     /// The next transaction number this database will hand out — its position in a globally monotonic, restart-durable sequence.
@@ -1921,6 +1929,159 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// data pages and advances CheckpointLSN to enable WAL segment recycling.
     /// </summary>
     internal CheckpointManager CheckpointManager { get; private set; }
+
+    /// <summary>Runs this engine's online backups (#1412) and owns the session's backup lineage. Null once disposed.</summary>
+    internal BackupCoordinator BackupCoordinator { get; private set; }
+
+    private IBackupService _backup;
+
+    /// <summary>Online backup of this running database: <c>await engine.Backup.CreateAsync(storePath)</c>.</summary>
+    public IBackupService Backup => _backup ??= new BackupService(this);
+
+    /// <summary>
+    /// Why this engine cannot take a consistent backup point right now, or null when it can: its open has not completed, it is recovering, its commit
+    /// pipeline or checkpointer has stopped, or it is closing.
+    /// </summary>
+    internal string BackupRefusal()
+    {
+        if (IsDisposed || _disposeStarted)
+        {
+            return "the engine is closing.";
+        }
+
+        if (!_openCompleted || _archetypeInitIncomplete)
+        {
+            return "the database's open has not completed (InitializeArchetypes).";
+        }
+
+        if (CheckpointManager == null || CheckpointManager.RecoveryInProgress)
+        {
+            return "crash recovery is in progress.";
+        }
+
+        if (CommitPipelineFailure != null)
+        {
+            return "the commit pipeline has stopped; the next open recovers.";
+        }
+
+        if (CheckpointManager.HasFatalError)
+        {
+            return "the checkpointer has stopped on a fatal error.";
+        }
+
+        return null;
+    }
+
+    /// <summary>Set by the first <see cref="InitializeArchetypes"/> that completes: the database's open is done.</summary>
+    private bool _openCompleted;
+
+    /// <summary>The backup-state file read at open (null when none was usable), until <see cref="AdoptBackupState"/> decides.</summary>
+    private BackupStateContents _backupStateAtOpen;
+
+    /// <summary>The data file's length in pages when this session opened it, before any write of its own.</summary>
+    private int _dataFilePagesAtOpen;
+
+    /// <summary>Diagnostic + test oracle: how the open's read of the backup-state ended; <c>NotConsulted</c> after an unclean close.</summary>
+    internal BackupStateReadResult LastOpenBackupStateResult = BackupStateReadResult.NotConsulted;
+
+    /// <summary>
+    /// BKP-06 at open: the session starts with a trusted change map only when the last close was clean and its backup-state is intact, carries the nonce
+    /// that close recorded, and describes this database, on this timeline, at this length. The map it holds is merged into the live one, which has been
+    /// recording since the data file opened; anything else leaves the lineage untrusted, and the next backup full.
+    /// </summary>
+    private void AdoptBackupState()
+    {
+        var state = _backupStateAtOpen;
+        _backupStateAtOpen = null;
+        LastOpenBackupStateResult = DecideBackupStateAdoption(state, LastOpenBackupStateResult, DataFileWriteTracking.MapEnabled, DatabaseId, TimelineId,
+            _dataFilePagesAtOpen);
+        if (LastOpenBackupStateResult != BackupStateReadResult.Loaded)
+        {
+            return;
+        }
+
+        MMF.ChangeMap.OrDense(state.Map);
+        var lineage = BackupCoordinator.Lineage;
+        lineage.StoreId = state.StoreId;
+        lineage.ChainId = state.ChainId;
+        lineage.LastBackupId = state.LastBackupId;
+        lineage.LastPointLsn = state.LastPointLsn;
+        lineage.Trusted = true;
+    }
+
+    /// <summary>
+    /// BKP-06's verdict on the backup-state the open read (<paramref name="read"/> is how the read ended): <see cref="BackupStateReadResult.Loaded"/>
+    /// only when the session adopts it, which takes write tracking on and the file describing this database, on this timeline, at this length.
+    /// </summary>
+    internal static BackupStateReadResult DecideBackupStateAdoption(BackupStateContents state, BackupStateReadResult read, bool mapEnabled, Guid databaseId,
+        Guid timelineId, int dataFilePagesAtOpen)
+    {
+        if (state == null)
+        {
+            return read;
+        }
+
+        if (!mapEnabled)
+        {
+            return BackupStateReadResult.TrackingOff;
+        }
+
+        return state.DatabaseId == databaseId && state.TimelineId == timelineId && state.DataFilePages == dataFilePagesAtOpen
+            ? BackupStateReadResult.Loaded
+            : BackupStateReadResult.Invalid;
+    }
+
+    /// <summary>
+    /// Writes the backup-state for the next session and returns its nonce (C13: only for a trusted lineage), or deletes any existing file and returns 0.
+    /// Never fails the close: an error costs the next backup a full point.
+    /// </summary>
+    private ulong WriteBackupState()
+    {
+        var path = BackupStateFile.PathIn(MMF.BundleDirectory);
+        var coordinator = BackupCoordinator;
+        var lineage = coordinator != null ? coordinator.Lineage.Snapshot() : default;   // one consistent read (M7)
+        if (!lineage.Trusted || !DataFileWriteTracking.MapEnabled)
+        {
+            BackupStateFile.Delete(path);
+            return 0;
+        }
+
+        try
+        {
+            var pages = (int)(new FileInfo(MMF.DataFilePath).Length / PagedMMF.PageSize);
+            var nonce = (ulong)Random.Shared.NextInt64(1, long.MaxValue);
+            BackupStateFile.Write(path, new BackupStateContents
+            {
+                Nonce = nonce,
+                DatabaseId = DatabaseId,
+                TimelineId = TimelineId,
+                StoreId = lineage.StoreId,
+                ChainId = lineage.ChainId,
+                LastBackupId = lineage.LastBackupId,
+                DataFilePages = pages,
+                LastPointLsn = lineage.LastPointLsn,
+                Map = MMF.ChangeMap.ToDense(pages),
+            }, flushToDisk: !MMF.IsTestMode);
+            return nonce;
+        }
+        catch (Exception e)
+        {
+            LogBackupStateWriteFailed(e, path);
+            BackupStateFile.Delete(path);
+            return 0;
+        }
+    }
+
+    [LoggerMessage(LogLevel.Warning,
+        "Open: data-file write tracking is switched off (change map {MapEnabled}, write gate {GateEnabled}): every backup point will be full, and with the "
+        + "gate off online backup is refused (TYPHON_DATAFILE_TRACKING / TYPHON_DATAFILE_GATE)")]
+    private partial void LogDataFileTrackingSwitchedOff(bool mapEnabled, bool gateEnabled);
+
+    [LoggerMessage(LogLevel.Warning, "Close: the backup-state could not be written ({path}); the next backup will be full")]
+    private partial void LogBackupStateWriteFailed(Exception exception, string path);
+
+    /// <summary>Set at the start of <see cref="DisposeCore"/>.</summary>
+    private volatile bool _disposeStarted;
     internal StatisticsWorker StatisticsWorker { get; private set; }
 
     /// <summary>
@@ -2019,6 +2180,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         DBD = new DatabaseDefinitions();
         ConstructComponentStore();
+
+        // A bundle a restore wrote: refused here, before InitializeUowRegistry scans the WAL, when its marker cannot be trusted or the WAL directory is not
+        // its own (DC-4). Late enough that a refused open disposes like any other.
+        CheckRestoreMarkerAtOpen();
         InitializeUowRegistry();
 
         if (MMF.IsDatabaseFileCreating)
@@ -2028,6 +2193,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         else
         {
             LoadSystemSchemaR1();
+
+            // The restored bundle's new timeline, before the WAL manager writes a segment (BKP-05). After the gate, so a refused database is not written.
+            AdoptRestoredTimeline();
 
             // Before the first registration can allocate: every page the file's segments name, claimed (#1296) — the components' from their persisted
             // pointers, the archetypes' from their catalog. The catalog is read here, not in InitializeArchetypesCore: a component registered before
@@ -2046,6 +2214,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         InitializeWalManager();
         InitializeCheckpointManager();
+        BackupCoordinator = new BackupCoordinator(this, _durabilityNode, Logger);
+        AdoptBackupState();
+        if (!DataFileWriteTracking.MapEnabled || !DataFileWriteTracking.GateEnabled)
+        {
+            LogDataFileTrackingSwitchedOff(DataFileWriteTracking.MapEnabled, DataFileWriteTracking.GateEnabled);
+        }
         InitializeStatisticsWorker();
 
         _constructed = true;
@@ -2210,6 +2384,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             StatisticsWorker?.Dispose();
             StatisticsWorker = null;
 
+            // A running backup is abandoned before anything else: its failure path merges its page set back into the live change map, releases the WAL
+            // reclaim floor and removes its copy-before-write hook, so the final cycle and the close below see an engine with no capture (BKP-07).
+            _disposeStarted = true;
+            BackupCoordinator?.StopAndJoin();
+
             Logger?.LogInformation("Engine disposing: CheckpointManager");
             // An open that did not complete closes as a crash (CS-04): no final cycle either. It would flush the half-built session's pages and, with the
             // SPI hook armed, persist its half-built archetype table — #1147 again, through the checkpoint.
@@ -2299,15 +2478,19 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // Skipped by SimulateUncleanShutdownForTest to reproduce a crash (which also never writes the marker).
                 if (!SimulateUncleanShutdownForTest && (freesHeldAtClose || freesLostAtClose))
                 {
+                    BackupStateFile.Delete(BackupStateFile.PathIn(MMF.BundleDirectory));
                     MarkSweepOwed();
                 }
                 else if (!SimulateUncleanShutdownForTest)
                 {
-                    // The chunk summary first, then the flag that vouches for it (CS-01): the summary describes the data file as PersistEngineState just
-                    // flushed it, and the flag and the summary's nonce flip together.
-                    MarkCleanShutdown(WriteChunkSummary());
+                    // The chunk summary and the backup-state first, then the flag that vouches for both (CS-01, BKP-06): they describe the data file as
+                    // PersistEngineState just flushed it, and the flag and their nonces flip together.
+                    MarkCleanShutdown(WriteChunkSummary(), WriteBackupState());
                 }
             }
+
+            BackupCoordinator?.Dispose();
+            BackupCoordinator = null;
 
             Logger?.LogInformation("Engine disposing: WalManager");
             WalManager?.Dispose();
@@ -2343,6 +2526,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     private void InitializeWalManager()
     {
+        BeforeWalManagerProbe?.Invoke(this);
         var walOptions = _options.Wal;
         if (walOptions == null)
         {
@@ -2720,6 +2904,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 AdoptChunkSummary();
             }
 
+            // BKP-06: the backup-state the last clean close wrote, read while its nonce is still in the meta page (the flip below clears it). Trusted or
+            // not is decided once the database's identity is known (AdoptBackupState); the file's length is taken now, before this session writes.
+            _dataFilePagesAtOpen = (int)(new FileInfo(MMF.DataFilePath).Length / PagedMMF.PageSize);
+            if (_cleanShutdownAtOpen)
+            {
+                _backupStateAtOpen = BackupStateFile.TryRead(BackupStateFile.PathIn(MMF.BundleDirectory), DurabilityWatermarks.ReadBackupStateNonce(MMF),
+                    out var backupStateResult);
+                LastOpenBackupStateResult = backupStateResult;
+            }
+
             // CS-02: durably clear the on-disk flag HERE, before returning from the ctor — i.e. before ANY mutation this session. Registration runs schema
             // migration and PersistSchemaChanges (see InitializeArchetypes), so clearing it later (as this used to, inside InitializeArchetypes) left a window
             // where a crash mid-registration kept the flag set: the next open then saw cleanShutdown=1 with no migration of its own, trusted the half-migrated
@@ -3014,6 +3208,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Durable database identity (D-2) — minted here, at creation, and never rewritten. This is the only place a *new* id is born on the create path.
         DatabaseId = Guid.NewGuid();
         bootstrap.Set(BK_DatabaseId, PackDatabaseId(DatabaseId));
+        TimelineId = Guid.NewGuid();
+        bootstrap.Set(BK_TimelineId, PackDatabaseId(TimelineId));
 
         MMF.UnlatchPageExclusive(memPageIdx);
 
@@ -3245,43 +3441,81 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     }
 
     /// <summary>
-    /// Reads <see cref="DatabaseId"/> from the bootstrap on reopen, or mints and persists one if the key is somehow absent.
+    /// Reads <see cref="DatabaseId"/> and <see cref="TimelineId"/> from the bootstrap on reopen, or mints and persists whichever is absent.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// In practice the mint branch does not fire: <see cref="BK_DatabaseId"/> is written by <see cref="CreateSystemSchemaR1"/> alongside
-    /// <see cref="BK_SystemSchemaRevision"/>, and any database predating either is refused by the revision gate above. It is kept as a fallback because a live
-    /// engine must never report <see cref="Guid.Empty"/> as its identity — a capture would then claim to belong to "no database".
+    /// In practice the <see cref="DatabaseId"/> mint branch does not fire: <see cref="BK_DatabaseId"/> is written by <see cref="CreateSystemSchemaR1"/>
+    /// alongside <see cref="BK_SystemSchemaRevision"/>, and any database predating either is refused by the revision gate above. It is kept as a fallback
+    /// because a live engine must never report <see cref="Guid.Empty"/> as its identity — a capture would then claim to belong to "no database". The
+    /// <see cref="TimelineId"/> branch fires once for every database created before the key existed.
     /// </para>
     /// <para>
-    /// Adoption is eager (written and flushed here, not deferred to <see cref="PersistEngineState"/>) because the value's only job is to be stable: an id that
-    /// a crash before clean shutdown could lose, and that the next open would regenerate, would silently break the pairing it exists to guarantee.
+    /// Adoption is eager (written and flushed here, in one meta flip for both keys, not deferred to <see cref="PersistEngineState"/>) because the values'
+    /// only job is to be stable: an id that a crash before clean shutdown could lose, and that the next open would regenerate, would silently break the
+    /// pairing it exists to guarantee.
     /// </para>
     /// </remarks>
     private void EnsureDatabaseIdentity()
     {
         var bootstrap = MMF.Bootstrap;
+        var minted = false;
         if (bootstrap.TryGet(BK_DatabaseId, out var existing))
         {
             DatabaseId = UnpackDatabaseId(existing);
+        }
+        else
+        {
+            DatabaseId = Guid.NewGuid();
+            minted = true;
+        }
+
+        if (bootstrap.TryGet(BK_TimelineId, out var timeline))
+        {
+            TimelineId = UnpackDatabaseId(timeline);
+        }
+        else
+        {
+            TimelineId = Guid.NewGuid();
+            minted = true;
+        }
+
+        if (minted)
+        {
+            MMF.MutateBootstrapAndPersist(() =>
+            {
+                bootstrap.Set(BK_DatabaseId, PackDatabaseId(DatabaseId));
+                bootstrap.Set(BK_TimelineId, PackDatabaseId(TimelineId));
+            });
+        }
+    }
+
+    /// <summary>
+    /// Starts a new WAL timeline: persists <paramref name="timelineId"/> as <see cref="BK_TimelineId"/> (one meta flip, durable on return) and adopts it.
+    /// Idempotent: adopting the current timeline writes nothing. The first open of a restored database calls it before accepting transactions, so a crash
+    /// in between replays the adoption rather than losing it.
+    /// </summary>
+    /// <param name="timelineId">The new timeline; never <see cref="Guid.Empty"/>.</param>
+    internal void AdoptTimeline(Guid timelineId)
+    {
+        if (timelineId == Guid.Empty)
+        {
+            throw new ArgumentException("A timeline id cannot be empty.", nameof(timelineId));
+        }
+
+        var bootstrap = MMF.Bootstrap;
+        if (bootstrap.TryGet(BK_TimelineId, out var current) && UnpackDatabaseId(current) == timelineId)
+        {
+            TimelineId = timelineId;
             return;
         }
 
-        DatabaseId = Guid.NewGuid();
-        bootstrap.Set(BK_DatabaseId, PackDatabaseId(DatabaseId));
-
-        using var guard = EpochGuard.Enter(EpochManager);
-        var epoch = guard.Epoch;
-        var cs = MMF.CreateChangeSet();
-        MMF.RequestPageEpoch(0, epoch, out var memPageIdx);
-        var latched = MMF.TryLatchPageExclusive(memPageIdx);
-        Debug.Assert(latched, "TryLatchPageExclusive failed on root page while adopting a database identity");
-        MMF.GetPage(memPageIdx);
-        cs.AddByMemPageIndex(memPageIdx);
-        MMF.SaveBootstrap(cs);
-        MMF.UnlatchPageExclusive(memPageIdx);
-        cs.SaveChanges();
-        MMF.FlushToDisk();
+        MMF.MutateBootstrapAndPersist(() => bootstrap.Set(BK_TimelineId, PackDatabaseId(timelineId)));
+        TimelineId = timelineId;
+        if (BackupCoordinator != null)
+        {
+            BackupCoordinator.Lineage.Trusted = false;   // a new timeline starts a new lineage: its first point is full (BKP-06)
+        }
     }
 
     /// <summary>
@@ -3670,9 +3904,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// is only durable once every cluster page whose HEADs it vouches for is already durable, so a torn close leaves the
     /// flag unwritten and the next open conservatively rebuilds. See rules/durability.md (CS-01).
     /// </remarks>
-    private void MarkCleanShutdown(ulong chunkSummaryNonce)
+    private void MarkCleanShutdown(ulong chunkSummaryNonce, ulong backupStateNonce)
     {
-        DurabilityWatermarks.MarkCleanShutdown(MMF, chunkSummaryNonce);
+        DurabilityWatermarks.MarkCleanShutdown(MMF, chunkSummaryNonce, backupStateNonce);
         var checkpointLsn = DurabilityWatermarks.ReadCheckpointLsn(MMF);
         LogCleanShutdownMarked(checkpointLsn);
         LogWalWatermarksSnapshot("close", checkpointLsn);
@@ -4402,6 +4636,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
 
         _archetypeInitIncomplete = false;
+        _openCompleted = true;
 
         // A crash open that sealed cleared it; one that did not recover (nothing in the window) clears it here (CK-08).
         if (CheckpointManager != null)

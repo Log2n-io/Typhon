@@ -107,6 +107,15 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
     private volatile bool _flushRequested;
 
     // ═══════════════════════════════════════════════════════════════
+    // Segment-switch request (online backup, W2)
+    // ═══════════════════════════════════════════════════════════════
+
+    // Tickets: a requester increments _switchRequested; the writer thread rotates (if the active segment holds a record) and then publishes the
+    // ticket it served in _switchServed. Only the writer thread writes _switchServed.
+    private long _switchRequested;
+    private long _switchServed;
+
+    // ═══════════════════════════════════════════════════════════════
     // Metrics
     // ═══════════════════════════════════════════════════════════════
 
@@ -187,6 +196,45 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
     {
         _flushRequested = true;
         _commitBuffer.Signal(); // Wake the writer thread so it doesn't wait for the full GroupCommit interval
+    }
+
+    /// <summary>
+    /// Asks the writer to seal the active segment at its next batch boundary, or at once when it is idle, so the records written so far sit in a sealed
+    /// segment and later ones in a new one (online backup, W2: it keeps a backup's WAL tail short). A segment holding no record is not rotated.
+    /// </summary>
+    /// <returns>The request's ticket: the request is served once <see cref="SwitchesServed"/> reaches it.</returns>
+    internal long RequestSegmentSwitch()
+    {
+        var ticket = Interlocked.Increment(ref _switchRequested);
+        _commitBuffer.Signal();
+        return ticket;
+    }
+
+    /// <summary>The highest switch ticket the writer has served (rotated, or skipped because the active segment was empty).</summary>
+    internal long SwitchesServed => Volatile.Read(ref _switchServed);
+
+    /// <summary>
+    /// Serves a pending switch request, on the writer thread (or a stopped writer's synchronous drain). <paramref name="lastWrittenLsn"/> is the high
+    /// LSN of the last batch written into the active segment. Resets the CRC chain when it rotates, as every rotation does.
+    /// </summary>
+    private void ServeSwitchRequest(long lastWrittenLsn)
+    {
+        var requested = Volatile.Read(ref _switchRequested);
+        if (requested == _switchServed)
+        {
+            return;
+        }
+
+        var active = _segmentManager.ActiveSegment;
+        if (active != null && active.WriteOffset > WalSegmentHeader.SizeInBytes)
+        {
+            var sealAt = Math.Max(lastWrittenLsn, active.FirstLSN - 1);
+            using var rotateScope = TyphonEvent.BeginWalSegmentRotate((int)active.SegmentId);
+            _segmentManager.RotateSegment(sealAt + 1, sealAt);
+            _lastFooterCrc = 0;
+        }
+
+        Volatile.Write(ref _switchServed, requested);
     }
 
     /// <summary>
@@ -335,6 +383,8 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
                             PerformFlush();
                         }
 
+                        // An idle writer never reaches the post-write rotation below, so a switch request is served here too (W2).
+                        ServeSwitchRequest(_lastWrittenLsn);
                         continue;
                     }
                 }
@@ -418,6 +468,7 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
                             RecordFlushLatency(flushStart);
 
                             segment.WriteOffset += bytesToWrite;
+                            segment.CompleteBatch();
                             Interlocked.Add(ref _totalBytesWritten, bytesToWrite);
                         }
                         finally
@@ -462,7 +513,12 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
                     // (step 4a) can seal the segment at the right LSN if it has to rotate before writing.
                     _lastWrittenLsn = batchHighLsn;
 
-                    // 8. Check segment rotation threshold
+                    // 8. Check segment rotation threshold, then any switch request (W2): one volatile read per drained batch
+                    if (Volatile.Read(ref _switchRequested) != _switchServed)
+                    {
+                        ServeSwitchRequest(batchHighLsn);
+                    }
+
                     if (_segmentManager.ActiveSegmentUtilization >= RotationThreshold)
                     {
                         Logger?.LogInformation("WAL segment rotation at {Utilization:P0}, rotating after LSN {LastLsn}",
@@ -555,6 +611,8 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
             Interlocked.Add(ref _totalBytesWritten, writeLen);
             offset += sliceLen;
         }
+
+        segment.CompleteBatch();   // only now: a reader of the batch end must never see a slice of this batch without the rest (BKP-04)
     }
 
     /// <summary>
@@ -615,6 +673,7 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
                     var writeSpan = new ReadOnlySpan<byte>(_stagingBuffer, bytesToWrite);
                     _fileIO.WriteAligned(segment.Handle, segment.WriteOffset, writeSpan);
                     segment.WriteOffset += bytesToWrite;
+                    segment.CompleteBatch();
                     Interlocked.Add(ref _totalBytesWritten, bytesToWrite);
                 }
             }
@@ -681,6 +740,7 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
                 var writeSpan = new ReadOnlySpan<byte>(_stagingBuffer, bytesToWrite);
                 _fileIO.WriteAligned(segment.Handle, segment.WriteOffset, writeSpan);
                 segment.WriteOffset += bytesToWrite;
+                segment.CompleteBatch();
                 Interlocked.Add(ref _totalBytesWritten, bytesToWrite);
             }
 
@@ -690,7 +750,10 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
 
             Interlocked.Increment(ref _totalFlushes);
 
+            _lastWrittenLsn = batchHighLsn;
+
             // Segment rotation parity with WriterLoop so multi-segment sync workloads behave like production.
+            ServeSwitchRequest(batchHighLsn);
             if (_segmentManager.ActiveSegmentUtilization >= RotationThreshold)
             {
                 _segmentManager.RotateSegment(batchHighLsn + 1, batchHighLsn);
@@ -698,6 +761,7 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
             }
         }
 
+        ServeSwitchRequest(_lastWrittenLsn);
         PerformFlush();
     }
 

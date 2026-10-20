@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-10-09 |
+| Last Updated | 2026-10-19 |
 | Domain | WAL, Checkpoint, Crash Recovery, Page Safety, Versioned HEAD Reopen |
 
 > Type-location notes (post-#329 layout): WAL/Checkpoint/Recovery internals live in
@@ -804,8 +804,13 @@ CK-08 (flush-only cycles) are later increments.
 ### CK-07: Sealed-segment list synchronization
   invariant all `_sealedSegments` access (writer-thread rotate-Add, checkpoint-thread reclaim-Remove, introspection readers) is
             serialized under one private lock
-  scope: `WalSegmentManager._sealedLock` — guards `RotateSegment` Add, `MarkReclaimable`, `SealedSegmentCount`,
-         `GetAllSegmentPaths`, reopen-reconcile Add
+  invariant a rotation makes the new segment active AND adds the old one to `_sealedSegments` in one critical section, so a
+            reader holding the lock sees the old segment as active or as sealed, never as neither (online backup's tail
+            snapshot, BKP-04)
+  scope: `WalSegmentManager._sealedLock` — guards `RotateSegment` (ActiveSegment assignment + Add), `MarkReclaimable`,
+         `SealedSegmentCount`, `GetAllSegmentPaths`, `WalSegmentManager.SnapshotForTail`, reopen-reconcile Add
+  verified: SegmentSnapshotTests.SnapshotDuringARotation_SeesTheSegmentBeingSealed (a rotation paused between creating and
+            publishing the new segment; assigning ActiveSegment outside the lock turns it red)
   on_violation: TXW-7 — `List<T>` corruption under concurrent structural mutation → a fatal latch in a background thread
 
 ### CK-08: Flush-only cycles during recovery `[fatal]`
@@ -1399,6 +1404,9 @@ either durability, recoverability, or consistency.
     `lastLSN < checkpointLSN`, so a segment whose LastLSN equals CheckpointLSN is retained for one extra cycle. Safe
     direction (never recycles a needed segment); the divergence is deliberate-by-effect, not a violation. Do not "fix"
     the code to `≤` without a reason — the retained segment costs one segment of disk and removes a boundary case.
+  note the `<` is load-bearing for online backup (BKP-04): a crash with meta = C keeps exactly the segments with
+    `lastLSN ≥ C`, recovery resumes the TSN counter above every commit stamp it scans in them (RB-05), and a backup's
+    tail copies that same set so a restore is that crash state
   scope: WalSegmentManager.cs, CheckpointManager.cs
   on_violation: premature recycling → WAL records needed for crash recovery
     are gone; data loss without detection
@@ -3174,3 +3182,280 @@ answer to different constraints — RB must always end with a usable database, I
             under test) proves both halves against ONE fixture: the scan still produces a report and names the mismatch, and
             `Apply` refuses it without writing a byte. `Mutant_ApplyWithoutTheRevisionGate` shows the assertion can fail.
 
+## Module: BKP — Online backup capture
+
+A backup point is a frozen image of the data file plus the WAL tail that makes it consistent (ADR-075; design
+`design/Durability/PitBackup/`, implementation plans `impl/1412-capture-plan.md` and `impl/1413-store-restore-plan.md`). This
+module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BKP-10 and 11 (WAL archiving) land with #1418.
+
+### BKP-01: Every data-file write is tracked and gated `[silent]`
+  invariant ∀ engine write w to the data file: w is issued by PagedMMF.IssueDataFileWrite or
+            PagedMMF.IssueDataFileWriteAsync, w holds the DataFileWriteGate shared from before its change-map update until
+            w has completed (async: until the SavePages batch's writes have all completed), and the PageChangeMap bit of
+            every page of w is set BEFORE w is issued
+  invariant Storage/ contains exactly two RandomAccess.Write*/WriteAsync call sites, one inside each of those methods
+  invariant the map and the gate exist before the PagedMMF constructor's first write (field initialisers; genesis writes
+            run from CreateFile inside the constructor)
+  scope: PagedMMF.IssueDataFileWrite, PagedMMF.IssueDataFileWriteAsync, PagedMMF.SavePages (batch token, exited in the
+    continuation or in the issue loop's catch), PagedMMF.BeforeDataFileWrite, PageChangeMap.Set, DataFileWriteGate.EnterShared,
+    DataFileWriteGate.ExitShared, DataFileWriteTracking (ops escape hatches, warned at open: TYPHON_DATAFILE_TRACKING=0 turns the
+    map off, every point is then full, never wrong; TYPHON_DATAFILE_GATE=0 also drops the gate and copy-before-write, and online
+    capture is then refused, BackupCoordinator.CaptureAsync)
+  on_violation: a write outside the map → its page is missing from the next incremental → a restore serves a stale page with
+    no error; a write outside the gate → an image torn at the freeze
+  note the gate is a dedicated writer-preferring striped primitive, not AccessControl: AccessControl's shared count is 8 bits
+       (Release overflow is silent) and AccessControlSmall would starve a pending freeze behind a stream of wave writes
+  verified: DataFileWriteChokepointGateTests.Storage_HasExactlyTheTwoChokepointWrites (+ the merge gate's invariants step),
+            ChokepointCompletenessTests.EveryWriteOfALifecycle_IsInTheMap (witness = the data file's bytes before and after
+            each session: create, crash, recovery open with a schema migration, clean closes), with
+            ChokepointCompletenessTests.Mutant_ARawWrite_IsMissingFromTheMap and
+            DataFileWriteChokepointGateTests.Mutant_AThirdWriteSite_IsReported; the gate itself:
+            DataFileWriteGateTests.Stress_NoWriterIsEverInsideAnExclusiveHold (two freezers × 2 500 exclusive holds against
+            four writers; source mutant seen red: a shared enter that does not re-check the freeze)
+  spec: rules/tla/BackupCapture.tla (S6) — ChangeMapComplete; mutants -mutant-mapafterwrite, -mutant-nogate
+
+### BKP-02: A captured point is the data file at its freeze `[silent]`
+  invariant ∀ point X that completes: ∀ p ∈ [0, N_X) held by X: X's image of p = the bytes of the data file at F_X (zeros
+            for a page never written); a full point holds every p ∈ [0, N_X); an incremental holds B_X ∪ {0, 1}, where
+            B_X ⊇ the pages written in (F_{X-1}, F_X)
+  invariant F_X is an instant with no data-file write in flight (the write gate held exclusive); N_X = the file's PHYSICAL
+            length then (the tracked size lags an async batch until its fsync); C_X is read from the meta pair copied
+            under the freeze, with the slot selection an open makes (BootstrapReader.Read over FrozenMetaPageSource)
+  requires: BKP-01, BKP-03
+  scope: BackupCapture.Freeze, BackupCapture.Scan, BackupCapture.BeforeWrite, PagedMMF.TryEnterWriteGateExclusive,
+    PagedMMF.DataFileLengthUnderGate, PagedMMF.SwapChangeMap, PagedMMF.InstallWriteHook, FrozenMetaPageSource
+  on_violation: a restore yields a data file that no crash could have produced (pages from different instants), and
+    recovery over it is unproven; a short N drops pages an async batch already wrote
+  verified: FreezeTests.FullThenIncremental_EachIsTheFileAtItsFreeze (every page of a full and of an incremental equals the
+            file read at the freeze; the incremental holds every page a write probe saw between the freezes),
+            FreezeTests.N_IsThePhysicalLength_NotTheTrackedSize (an async batch held between its write and its fsync);
+            source mutant seen red: N from the tracked size
+  spec: rules/tla/BackupCapture.tla (S6) — ImageFidelity; mutant -mutant-nogate
+
+### BKP-03: Copy-before-write `[silent]`
+  invariant from F_X until the hook is uninstalled: ∀ write to p with p < N_X ∧ p in X's image set: the write is issued only
+            after Done(p) — p's pre-image read into capture memory — or after the capture aborted
+  invariant whoever sets Claimed(p) first (scanner or writer) reads p, then sets Done(p); a writer finding p claimed and
+            not done waits for Done(p), bounded (BKP-12); Done(p) never waits for the store (C8)
+  invariant the hook is uninstalled under the exclusive write gate, and only once every page is in the sink (no writer can
+            wait on the backup thread any more) or after an abort (which releases every waiter) — C7; the copy-before-write
+            slots are freed only after that uninstall
+  invariant the meta pair is copied under the freeze and pre-marked claimed ∧ done: a later meta flip never waits
+  scope: BackupCapture.BeforeWrite, BackupCapture.Scan, BackupCapture.Uninstall, BackupCapture.Abort, CbwSlotPool,
+    PagedMMF.BeforeDataFileWrite (the hook call inside the shared gate), PagedMMF.SavePages (the hook runs on the caller's
+    thread before any async write is issued)
+  on_violation: a page of the point holds bytes written after F_X while others hold bytes from before → a silently
+    corrupt point, discovered at restore
+  verified: CbwRaceTests.ScannerClaimedFirst_TheWriterWaits (scanner paused between its claim and its read while a
+            checkpoint rewrites the page), CbwRaceTests.WriterClaimedFirst_TheScannerTakesItsPreImage (a checkpoint ahead of
+            the scanner), with CbwRaceTests.Mutant_TheWriterSkipsTheClaimWait_IsReported; CbwRaceTests.Abort_ReleasesAWriterWaitingOnAClaimedPage;
+            source mutant seen red: no copy-before-write at all
+  spec: rules/tla/BackupCapture.tla (S6) — ImageFidelity; mutant -mutant-noclaimwait
+
+### BKP-04: The tail holds every record the image can reflect, and stays reachable until copied `[fatal]`
+  invariant the tail of point X = every WAL segment with lastLSN ≥ C_X plus the active one, each copied from offset 0, after
+            WaitForDurable(PubF) where PubF = LastPublishedLsn sampled under the freeze; hence it holds every durable
+            record with LSN in (C_X, PubF] — every record any image page can reflect, since a checkpoint wave writes a page
+            BEFORE its flush2 (CK-02 orders flush2 before the data fsync, not before the data write)
+  invariant from the freeze until the copy ends, WAL reclaim never deletes a segment with lastLSN ≥ the floor sampled
+            under the freeze (CheckpointManager.CheckpointLsn, ≤ C_X)
+  invariant the segment snapshot sees the segment a rotation is sealing (CK-07: the assignment and the Add share one
+            critical section)
+  invariant the active segment is copied up to its batch end (WalSegmentContext.BatchEndOffset), which the writer
+            publishes once a batch is wholly written and before the durable LSN moves over it: the copy never ends inside a
+            batch, though one larger than the staging buffer is written in slices cut anywhere in a chunk, each advancing
+            the write offset
+  invariant a tail segment is restored at its header's declared size, zero-filled past the copied prefix (the reader
+            scans the declared size and ignores short reads)
+  invariant P_X = the highest LSN in (C_X, end of the valid prefix] recovery applies as a unit — a TxCommit marker or a
+            fence record — computed by the scan RecoveryDriver.Run makes (path order, stop for good at the first
+            corruption); C_X when there is none
+  invariant P is computed over the segments the copy read, read again through WalTailView (the copied length, zeros past
+            it), under the same floor: the tail is streamed to the sink, never held in managed memory. The floor is enforced,
+            not assumed: CaptureTail refuses to start without it, and every open and read of the live segments by the view
+            checks it (a floor released before P throws rather than reading a reclaimed file). Nothing but reclaim removes or
+            rewrites a tail segment: ids are monotonic, preallocation creates only ids past the active one, headers are
+            written only into new files, the writer appends only past the batch end. The offline copy holds the database
+            lock and the data file unshared: no writer, no reclaim
+  scope: WalTailInspector.CaptureTail, WalTailInspector.SelectTail, WalTailInspector.ComputePointLsn,
+    WalTailInspector.CaptureTailOffline, WalTailView, WalSegmentContext.CompleteBatch, WalWriter.WriteInChunks,
+    CheckpointManager.SetReclaimFloor, CheckpointManager.ClearReclaimFloor
+    (read at step 8 beside the tick-fence floor), WalSegmentManager.SnapshotForTail, WalSegmentManager.RotateSegment,
+    WalWriter.RequestSegmentSwitch (W2: shortens the tail, never decides its content)
+  on_violation: a page reflects a transaction whose commit marker is not in the tail → recovery applies nothing of it and
+    the page keeps part of it (a phantom partial transaction, no undo); or the segment ending at C is missing → the
+    restore resumes the TSN counter below a commit stamp → MVCC visibility corruption; or a needed segment reclaimed
+    mid-copy → the capture fails (or, worse, copies a hole)
+  requires: WP-09 (reclaim keeps lastLSN ≥ C), RB-05, LOG-03, BKP-01 (the floor is read after a gate enter that follows
+    the freeze)
+  verified: WalTailCaptureTests.FlushBeforeTail_CopiesARecordPublishedButNotDurableAtTheFreeze (the WAL writer held with a
+            commit published: the copy waits, then holds it), WalTailCaptureTests.SegmentEndingAtTheCheckpoint_IsInTheTail
+            (+ Mutant_ATailStartingOneSegmentLate_IsReported), WalTailCaptureTests.FloorHoldsDuringTheCopy_WhileACheckpointRuns
+            (a checkpoint inside the copy), SegmentSnapshotTests.SnapshotDuringARotation_SeesTheSegmentBeingSealed;
+            TailFloorTests.AReclaimStagedBeforeTheReadOfP_LeavesTheTailSegments (a checkpoint past a sealed tail segment, run
+            between the copy and the read of P), WalTailCaptureTests.ATailCopyWithoutTheFloor_Refuses,
+            WalTailCaptureTests.AFloorReleasedBeforeTheReadOfP_IsCaught, WalTailViewTests.OverASource_RefusesEveryReadOnceTheFloorIsGone,
+            WalTailCaptureTests.ATailTakenBetweenTheSlicesOfABatch_EndsWhereTheBatchBegan (the writer held after a batch's
+            first slice), WalTailCaptureTests.TheTailCopy_MakesNoManagedCopyOfTheTail, WalTailViewTests;
+            P: WalTailCaptureTests.PointLsn_IsTheLastCommitOrFence_AndStopsAtTheFirstCorruption (and P over the stored
+            bytes = P over the live segments). Source mutants seen red: no flush before the copy, `>` instead of `≥`, no
+            floor in step 8, P without fence records, no stop at the first corruption, ActiveSegment assigned outside the
+            lock, the snapshot reading WriteOffset, a batch end published per slice, a managed copy per segment, a view
+            that reads past the copied length, the floor released before P (caught by the view; with the view's check
+            removed too, the staged checkpoint deletes the segment under the read), the view's check removed, the copy's
+            precondition removed
+  spec: rules/tla/BackupCapture.tla (S6) — TailCoversImage, NoNeededRecordReclaimed; mutants -mutant-noflush, -mutant-nofloor
+
+### BKP-05: Opening a bundle restored from a point yields exactly that point's committed prefix `[fatal]` `[silent]`
+  invariant ∀ published point X, R = restore(X): state(open(R)) = I_X + every transaction whose TxCommit lies in the valid
+            prefix of T_X's copied bytes, and nothing else — the state a hard crash at F_X leaves when the data file took no
+            write after F_X and the WAL stayed durable to the end of the tail copy (LOG-04, AP-12)
+  invariant R/data = materialise(X): the chain's newest image of each page, zeros for a page no point holds, exactly
+            N_X × 8192 bytes, written ascending and completely (BKP-02 carried through the store)
+  invariant R/wal holds exactly T_X's segments, each {SegmentId:D16}.wal: bytes [0, RawLength) the copied bytes,
+            [RawLength, header.SegmentSize) zero — never shorter than its header declares, since the segment reader scans
+            the declared size and ignores a short read
+  invariant I_X unclean ⇒ T_X holds ≥ 1 segment (the writer refuses to publish otherwise; offline capture always takes
+            the newest segment): CrashRecoveryAtOpen needs a *.wal, and without one the open skips replay, the RB-01
+            rebuild and the RB-04 net over an image that needs them
+  invariant R holds nothing another session wrote beside the data (no chunk-summary, backup-state or db.lock), so every
+            nonce in I_X's meta matches nothing and the open trusts nothing outside the image (CS-05)
+  invariant an open that finds {R}/restore.json reads its WAL from {R}/wal or refuses; it adopts NewTimelineId into
+            BK_TimelineId (one fsynced meta flip, skipped when already adopted) before the WAL manager starts, then deletes
+            the marker, so a crash anywhere repeats both; a marker that is unreadable or names another DatabaseId refuses
+            the open before anything is written; a marker without a data file is never mistaken for a new database
+  invariant a restore never deletes a database: an existing target is renamed {name}.typhon.pre-restore-{utc}; the only
+            directory it deletes is a staging directory carrying its own restore.staging marker; it refuses a target a
+            live process holds (lock file OR an exclusive probe of its data file) whatever it was asked
+  requires: BKP-02, BKP-04, BKP-08, LOG-03, LOG-04, AP-12, CS-05, WR-01, CK-04 — the sealed segments T_X omits hold only
+            records below C_X, exactly those CK-04 may reclaim once C_X is persisted, so R/wal is the WAL of a reachable
+            crash state
+  scope: RestoreStager.Run, RestoreStager.WriteWalSegment, RestoreStager.Swap, ChainMaterializer.Materialize,
+    PackWriter.Complete, OfflineCapture.Create, WalTailInspector.CaptureTailOffline, RestoreMarker.TryRead,
+    DatabaseEngine.CheckRestoreMarkerAtOpen, DatabaseEngine.AdoptRestoredTimeline, DatabaseEngine.AdoptTimeline,
+    PagedMMF.RefuseRestoreMarkerWithoutData
+  on_violation: a restored database that opens without error and holds another state than the point it names —
+    transactions missing or half-applied (an image replayed with no tail, or none), replayed from a foreign WAL directory,
+    or writing its new history under the original's timeline; found when the data is needed
+  verified: BackupCaptureRoundTripTests.EveryPoint_RestoredFromItsPacks_OpensToTheCommittedStateAtItsPointLsn (T1a over
+            real packs: bytes = what capture handed the store, crash path, timeline, committed state at P; mutant
+            Mutant_ARestoreWithoutItsWal_IsReported), OfflineCaptureRestoreTests (T9), TimelineAdoptionTests (T10),
+            RestoredBundleShapeTests, RestoreGuardTests — [VerifiesRule("BKP-05")]; source mutants seen red: no SetLength,
+            delete instead of rename, adopt after the WAL manager, delete the marker before the flip, ignore the marker's
+            DatabaseId, no WalDirectory check, no create guard, newest segment not always taken offline
+
+### BKP-06: An incremental only on a trusted map and an unbroken chain `[silent]`
+  invariant a point is captured incremental iff the request allows it ∧ BackupLineage.Trusted ∧ lineage.StoreId = the
+            store's id ∧ the store's head of lineage.ChainId is lineage.LastBackupId ∧ that head is on the database's current
+            timeline; otherwise full (a new ChainId, minted by the store)
+  invariant Trusted at open iff the last close was clean ∧ backup-state's nonce = BackupStateNonce ≠ 0 ∧ both CRCs hold ∧
+            DatabaseId ∧ TimelineId ∧ DataFilePages = the file's length at open; then its map is ORed into the live one
+  invariant backup-state is written only by a Trusted session's clean close, its nonce recorded in the flip that sets the
+            clean flag; an untrusted close deletes it and records 0 (C13); every open after a clean close, SetCleanShutdown(false)
+            and MarkSweepOwed zero the nonce, so after a crash, a failed open or a sweep-owed close nothing vouches for the file;
+            adopting a new timeline makes the lineage untrusted
+  scope: BackupAdmission.Decide, BackupStateFile.TryRead, BackupStateFile.Write, DatabaseEngine.AdoptBackupState,
+    DatabaseEngine.WriteBackupState, DurabilityWatermarks.MarkCleanShutdown, DurabilityWatermarks.BeginOpenAfterCleanClose,
+    DurabilityWatermarks.SetCleanShutdown, DatabaseEngine.AdoptTimeline
+  on_violation: an incremental over a map that missed writes → the restore serves stale pages, discovered at restore
+  verified: BackupAdmissionTests (T6: a clean close → incremental holding exactly the pages a write probe saw between the
+            freezes, AC-C2; a crash, an offline repair, a copied bundle behind its chain's head, a wiped store and a new
+            timeline → full; the decision matrix + Mutant_ADecisionIgnoringTrust_IsReported), BackupStateFileTests (round
+            trip and damage; trusted close → trusted open → nonce cleared; a stale file; a matching nonce with another database,
+            timeline or length; an untrusted close deletes the file; a write failure costs a full point; Mutant_AFileTrustedAfterACrash_IsReported;
+            Adoption_IsReportedLoaded_OnlyWhenTheSessionAdopts: tracking off is TrackingOff, never Loaded).
+            Source mutants seen red: no nonce check, the open not clearing the nonce, Decide ignoring trust, an untrusted close
+            writing the file, the adoption reporting Loaded with tracking off
+
+### BKP-09: Every offline writer of the data file deletes backup-state first `[silent]`
+  invariant ∀ process that writes the data file without an engine: backup-state is deleted before its first write (beside
+            chunk-summary), so the next open finds no file and the next point is full; a file that cannot be deleted
+            stops the writer before that write (the engine's own deletes may fail silently: its open and close reset the
+            nonce that vouches for the file, an offline writer does not)
+  scope: OfflineWrite.InvalidateDerivedFiles (the one gate), DatabaseRepair.Apply (in front of OccupancyRepair and
+    PairSlotRepair), FixturesController.Integrity (the Workbench damage fixture, dev only)
+  on_violation: a stale trusted map vouches for a file it no longer describes → a wrong incremental
+  verified: BackupAdmissionTests.RepairApply_DeletesTheBackupState_AndTheNextPointIsFull,
+            BackupAdmissionTests.RepairApply_ThatCannotDeleteTheBackupState_RefusesBeforeWriting; source mutants seen red:
+            Apply without the delete, a delete that swallows its failure
+
+### BKP-07: A point that does not complete forgets no page `[silent]`
+  invariant a capture that does not complete ORs every page of its image set back into the live PageChangeMap (a full
+            capture ORs back the map it replaced) before the next freeze can detach it, so the next incremental covers
+            every page written since the last COMPLETED point's freeze; its lineage is left as it was
+  invariant an engine closed during a capture stops it first (before any drain or the final checkpoint), so the close sees
+            the merged map; a backup thread that cannot be joined makes the session's lineage untrusted
+  scope: BackupCapture.Fail, PageChangeMap.OrWith, BackupCoordinator.StopAndJoin, DatabaseEngine.DisposeCore
+  on_violation: the next incremental omits pages written before the failed freeze → a restore serves stale pages
+  verified: BackupFailurePathTests.SinkThrowsMidScan_TheNextIncrementalCoversEverything (+ Mutant_APageOfTheFailedCaptureIsMissing_IsReported),
+            BackupFailurePathTests.DisposeDuringCapture_ClosesCleanly_AndTheMapHoldsThePageSet (each phase),
+            CbwStallTests (the incremental after a stall holds the aborted set); source mutant seen red: no merge on failure
+  spec: rules/tla/BackupCapture.tla (S6) — ChangeMapComplete over the abort's four steps (flag, uninstall request, removal under
+    the drained gate, merge of the DETACHED map); mutant -mutant-mergeimageset (merging the image set, null for a full capture)
+
+### BKP-08: A published pack is never modified, and its id names one content for the store's life `[fatal]`
+  invariant a pack is visible under {BackupId:D8}-{K}.tpack only complete: written as *.tpack.tmp, fsynced, then moved
+            without overwrite by a durable rename (Windows MoveFileExW WRITE_THROUGH; Linux rename + fsync of packs/); an
+            existing final name fails the publish; a rename whose directory flush fails is undone, so Complete throws with
+            nothing visible
+  invariant no code opens a published pack with write access; readers open it Read | Delete sharing
+  invariant ids are allocated under store.lock (held open FileShare.None) as max(store.hwm, every pack and temp id) + 1,
+            with store.hwm durable before the temp exists: a deleted id is never reused (a lost or damaged store.hwm
+            degrades to the higher of the packs present and the high-water this store's catalog recorded, and says so)
+  invariant a temp is never part of a chain; the holder of store.lock deletes every temp it finds before it writes
+  invariant every byte of a pack is covered by a CRC that verify --level full checks: HeaderCRC, FooterCRC, IndexCRC,
+            TailDirCRC, SuspectCRC, each page's PageCrc after decode, each tail segment's RawCrc after decode, and
+            FileCRC over [0, EOF-4); restore checks every one it reads and never returns a byte it read wrong
+  invariant (#1415) a pack is deleted only under store.lock, only when no kept point's chain resolves through it
+  scope: PackWriter.Complete, PackWriter.Abort, BackupStore.Publish, BackupStore.AllocateBackupId,
+    BackupStore.DeleteAbandonedTemps, StoreFileSystem.MoveDurable, PackReader.Open, BackupVerifier.VerifyStore
+  on_violation: a point whose bytes changed after it was verified, a restore of "#12" that returns another point, or a
+    visible pack missing its tail bytes — an unrestorable backup, discovered at restore
+  verified: StorePublishCrashTests (a crash after every file-system operation of a backup, Windows and Linux directory
+            durability models), PackCorruptionPropertyTests (T7: every byte under a checked CRC, no restore ever
+            wrong), BackupIdAllocationTests — [VerifiesRule("BKP-08")]; mutant
+            BackupIdAllocationTests.Mutant_AStoreThatLostEveryHighWater_ReusesAnId; source mutants seen red: rename before
+            flush, no directory flush (Linux model), publish with overwrite, allocation ignoring the high-water, verify
+            skipping FileCRC, restore skipping PageCrc
+
+### BKP-12: The engine never waits on a backup past its budget
+  invariant a data-file writer spends at most CbwStallTimeout in BackupCapture.BeforeWrite per write, and per SavePages
+            batch (the slot wait, the wait for a claimed page and every run of one batch share one deadline); past it the
+            capture aborts and the write proceeds
+  invariant the bound is cumulative: the freeze's exclusive attempts draw on one FreezeAcquireTimeout in all, the hook's
+            removal on one UninstallTimeout; each attempt holds writers back at most GateAttemptSlice, and between
+            attempts the gate stays open until the writers the failed attempt held back have entered
+            (DataFileWriteGate.AdmitWaiters); past the budget the freeze fails, and an uninstall leaves the (inert) hook
+            and leaks its buffers rather than freeing them under a writer
+  invariant a closing engine waits for the backup thread at most BackupCaptureOptions.StopTimeout: every capture wait
+            but a store call and the gate attempts observes the close; past it the lineage is revoked and the capture's
+            native memory is left to the still-running thread, never freed under it
+  scope: BackupCapture.BeforeWrite, BackupCapture.Abort, BackupCapture.Uninstall, BackupCoordinator.StopAndJoin,
+         DataFileWriteGate.TryEnterExclusive, DataFileWriteGate.AdmitWaiters, CbwSlotPool
+  on_violation: a slow store (or a stuck backup thread) stalls the checkpoint → page-cache back-pressure → transactions stall
+  invariant a slot wait returns at its deadline, not on the OS timer tick after it: it blocks until one tick before the
+            deadline (16 ms on Windows, 1 ms elsewhere) and polls the rest (a timed semaphore wait returned 9-16 ms late)
+  note: the budget bounds the writer's waiting, not the scheduler: on a saturated box a writer polling its last tick was
+            measured off the CPU for 12 ms between two of its checks. The copy-before-write budget is therefore verified on a
+            logical clock (BackupCoordinator.CbwClock): the writer waits while the clock is held, gives up once it reaches
+            the deadline having spent exactly the budget, and no blocking wait reaches into the last tick
+  verified: CbwStallTests.SlotPoolExhausted_TheWriterReturnsWithinBudget_AndTheCaptureAborts [Category("Sensitive")] (two
+            slots, an undrained backup thread, more rewrites than slots; on the logical clock: no give-up while held, the
+            slowest write = the budget exactly once moved; abort CbwStall, the checkpoint advances),
+            CbwSlotPoolTests.ASlotWait_NeverBlocksIntoTheLastTimerTick_AndGivesUpAtItsDeadline (source mutants seen red: a
+            wait blocking to its deadline, a give-up one tick late, a give-up before the deadline),
+            DataFileWriteGateTests.ExclusiveTimeout_IsBounded_AndReopensTheGate,
+            DataFileWriteGateTests.AWriterHeldBackByAFailedAttempt_EntersBeforeTheNextOne,
+            CbwSlotPoolTests.AnAbort_ReleasesAWriterWaitingOnAnEmptyPool (and CbwSlotPoolTests.ConcurrentRentPublishDrain_
+            DeliversEveryPreImageOnce: no slot or pre-image lost under four writers and one drainer),
+            BackupStopTests.AnUninstallThatCannotGetTheGate_StallsWritersWithinOneBudget (a writer's stall summed over the
+            attempts ≤ UninstallTimeout + 250 ms, no single stall > slice + 50 ms), SavePagesGateTests
+            .EveryRunOfABatch_SharesOneCopyBeforeWriteBudget, BackupStopTests.ACloseThatCannotJoin_LeavesTheCaptureItsMemory_
+            AndThePublishCannotRetrust, BackupStopTests.ACloseDuringTheForcedCheckpoint_DoesNotWaitForIt,
+            BackupStopTests.ACloseDuringTheTailFlush_DoesNotWaitForIt; source mutants seen red: an unbounded slot wait,
+            ten uninstall budgets, an uncapped attempt, AdmitWaiters returning at once, a per-run deadline, a slot wait
+            without the abort token, a plain publish or drain of the ready bits, the checkpoint
+            and WAL waits without the close's token, the coordinator disposed (blocks freed) after a failed join
+  spec: rules/tla/BackupCapture.tla (S6) — HookNotRemovedUnderWriter, and under weak fairness without any timeout
+    (BackupCapture-liveness.cfg) WritersProgress and GateReopens; mutants -mutant-uninstallnogate, -mutant-noabortrelease,
+    -mutant-timeoutkeepsgate
