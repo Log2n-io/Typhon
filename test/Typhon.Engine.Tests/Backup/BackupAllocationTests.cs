@@ -1,8 +1,10 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
+using Typhon.Engine.Tests.Backup;
 
 namespace Typhon.Engine.Tests;
 
@@ -58,6 +60,54 @@ class BackupAllocationTests : BackupTestBase<BackupAllocationTests>
         Assert.That(m.PointLsn, Is.LessThanOrEqualTo(16 << 10), "the point LSN's read of the tail allocated a copy of it");
         Assert.That(m.Scan, Is.LessThanOrEqualTo(4 << 10), $"the scan of {m.ImagePages} pages allocated per page");
         Assert.That(m.Capture, Is.LessThanOrEqualTo(128 << 10), "the backup thread's allocations, freeze to completion");
+    }
+
+    /// <summary>
+    /// Plan 1415 §3.2/§9: a compaction allocates nothing per page — its read windows, write buffers and the pages it decodes are native or on the stack,
+    /// and the INDEX streams are pooled. Compacting a chain four times as large costs the same managed bytes, but for the writer's one bit per page.
+    /// On disk, so the file system itself allocates nothing per byte.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void Compaction_ZeroManagedBytesPerPage()
+    {
+        const int Small = 1024;
+        const int Large = 4 * Small;
+        var warm = ChainOnDisk("warm", Large);
+        var small = ChainOnDisk("small", Small);
+        var large = ChainOnDisk("large", Large);
+        BackupOperations.Compact(warm, PointSelector.ById(3));   // JIT, and the pools' largest buckets
+
+        var a = AllocatedBy(() => BackupOperations.Compact(small, PointSelector.ById(3)));
+        var b = AllocatedBy(() => BackupOperations.Compact(large, PointSelector.ById(3)));
+
+        Assert.That(BackupOperations.List(large).Points.Any(p => p.Kind == BackupPointKind.Compacted), Is.True, "premise: it compacted");
+        var perPage = (double)(b - a) / (Large - Small);
+        Assert.That(b - a, Is.LessThanOrEqualTo(((Large - Small) / 8) + (8 << 10)),
+            $"{Small} pages: {a} B, {Large} pages: {b} B — {perPage:0.00} B per page beyond the writer's one bit");
+    }
+
+    private static long AllocatedBy(Action action)
+    {
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        action();
+        return GC.GetAllocatedBytesForCurrentThread() - before;
+    }
+
+    /// <summary>A full point of <paramref name="pages"/> pages and two incrementals rewriting a quarter of them, in a store on disk.</summary>
+    private string ChainOnDisk(string name, int pages)
+    {
+        var image = BackupTestImages.Clean;
+        var root = Path.Combine(_store, name);
+        using var store = BackupStore.OpenForWrite(root, image.DatabaseId, true);
+        var full = StoreTestKit.WritePoint(store, image, imagePages: pages);
+        for (var i = 2; i <= 3; i++)
+        {
+            StoreTestKit.WritePoint(store, image, full.ChainId, pages: Enumerable.Range(2, pages - 2).Where(p => p % 4 == i), imagePages: pages,
+                @override: StoreTestKit.Salted(image, i));
+        }
+
+        return root;
     }
 
     private record struct Measures(int ImagePages, long CbwCopies, long FirstHookedWrite, long FirstPlainWrite, long HookedWrites, long PlainWrites,

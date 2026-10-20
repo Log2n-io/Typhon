@@ -552,7 +552,8 @@ internal sealed class PackReader : IDisposable
 internal sealed class PackIndexStream : IDisposable
 {
     private readonly PackReader _pack;
-    private readonly PackPageEntry[] _buffer;
+    private readonly int _capacity;
+    private PackPageEntry[] _buffer;
     private long _read;
     private int _pos;
     private int _filled;
@@ -563,7 +564,9 @@ internal sealed class PackIndexStream : IDisposable
     public PackIndexStream(PackReader pack, int bufferBytes)
     {
         _pack = pack;
-        _buffer = new PackPageEntry[Math.Max(1, Math.Min(bufferBytes / PackFormat.PageEntrySize, pack.Footer.PageCount))];
+        // Pooled: up to 1 MiB per stream, opened per pack of every restore, verify and compaction, would be garbage proportional to the pack's pages.
+        _capacity = Math.Max(1, Math.Min(bufferBytes / PackFormat.PageEntrySize, pack.Footer.PageCount));
+        _buffer = ArrayPool<PackPageEntry>.Shared.Rent(_capacity);
     }
 
     /// <summary>Entries returned so far.</summary>
@@ -594,7 +597,7 @@ internal sealed class PackIndexStream : IDisposable
                 return false;
             }
 
-            var n = (int)Math.Min(_buffer.Length, remaining);
+            var n = (int)Math.Min(_capacity, remaining);
             var bytes = MemoryMarshal.AsBytes(_buffer.AsSpan(0, n));
             if (!_pack.ReadAt(bytes, _pack.Footer.IndexOffset + (_read * PackFormat.PageEntrySize)))
             {
@@ -650,5 +653,10 @@ internal sealed class PackIndexStream : IDisposable
 
     public void Dispose()
     {
+        if (_buffer != null)
+        {
+            ArrayPool<PackPageEntry>.Shared.Return(_buffer);
+            _buffer = null;
+        }
     }
 }

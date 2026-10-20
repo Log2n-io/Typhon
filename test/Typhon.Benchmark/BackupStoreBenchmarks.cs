@@ -220,6 +220,62 @@ public class RestoreMarkerOpenBenchmarks
     public void WithProbe() => OpenClose(null);
 }
 
+/// <summary>
+/// Compaction (#1415 plan §9), in memory: a <see cref="ImageMiB"/> image as a full point and seven incrementals each rewriting an eighth of it, compacted
+/// into one base — every page's newest frame copied, never re-encoded, then the full verify the pack must pass before it is published. Gates (CPU-bound):
+/// ≥ 1.2 GB/s of raw image bytes (estimate 2.3 GB/s without the verify), 0 B managed per page. Prepared, not yet run: timings belong on a quiet machine.
+/// </summary>
+[BenchmarkCategory("Storage", "Backup")]
+[MemoryDiagnoser]
+public class CompactionBenchmarks
+{
+    private const string Root = "/s";
+    private const uint Head = 8;
+    private BackupBenchmarkFileSystem _fs;
+
+    [Params(64)]
+    public int ImageMiB { get; set; }
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        var pages = ImageMiB * 1024 * 1024 / PagedMMF.PageSize;
+        var image = BackupBenchmarkCorpus.Mixed(pages);
+        (image[0], image[1]) = BackupBenchmarkCorpus.MetaPair(out _);
+        _fs = new BackupBenchmarkFileSystem(keepBytes: true);
+        var databaseId = BackupBenchmarkCorpus.DatabaseId;
+        using var store = BackupStore.OpenForWrite(Root, databaseId, true, _fs);
+        var chain = Guid.Empty;
+        for (uint id = 1; id <= Head; id++)
+        {
+            var plan = id == 1
+                ? new BackupPointPlan(databaseId, Guid.Empty, BackupKind.Full, Guid.Empty, 0, PagedMMF.DatabaseFormatRevision, "bench", false)
+                : new BackupPointPlan(databaseId, Guid.Empty, BackupKind.Incremental, chain, id - 1, PagedMMF.DatabaseFormatRevision, "bench", false);
+            var sink = store.BeginPoint(plan);
+            sink.SetImage(pages, BackupBenchmarkCorpus.CheckpointLsn, id);
+            for (var p = 0; p < pages; p++)
+            {
+                if (id == 1 || p < 2 || p % 8 == (int)id - 1)
+                {
+                    sink.AddPage(p, image[p], false);
+                }
+            }
+
+            chain = sink.Complete(BackupBenchmarkCorpus.CheckpointLsn, id).ChainId;
+        }
+    }
+
+    [IterationSetup]
+    public void RemoveTheBase() => _fs.DeleteFile(Root + "/packs/" + PackFormat.FileName(Head, BackupKind.Compacted));
+
+    [Benchmark]
+    public long Compact()
+    {
+        using var session = BackupStore.OpenForMaintenance(Root, "bench", _fs);
+        return BackupCompactor.Compact(session, Head, null).BytesWritten;
+    }
+}
+
 /// <summary>Deterministic page images for the backup benchmarks.</summary>
 internal static class BackupBenchmarkCorpus
 {
