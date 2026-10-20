@@ -549,7 +549,9 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
         Assert.Multiple(() =>
         {
             Assert.That(closes.Where(kv => MalformedCloseCodes.Contains(kv.Key)).Sum(kv => kv.Value), Is.GreaterThan(0), "the refusal paths were reached");
-            Assert.That(OpenCount(harness), Is.EqualTo(clients.Count), "every live client still has its session, and no slot leaked");
+            Assert.That(OpenCount(harness), Is.EqualTo(clients.Count),
+                $"every live client still has its session, and no slot leaked (closed by the tick: {harness.Assembler.SessionsClosedLagging} lagging, "
+                + $"{harness.Assembler.SessionsClosedSilent} silent; longest skip run {harness.Assembler.LongestSkipRun} of {harness.Assembler.CloseBoundTicks})");
         });
     }
 
@@ -571,6 +573,18 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
         // well would make two claimers of one hand-off, which the send state rightly refuses (frames completed out of order).
         var pump = harness.Subscriptions.SendPump;
         pump.PublishAndWake(_tick);
+
+        // The ticks here run back to back, a few hundred microseconds apart, while the skip policy's bounds are in ticks of the nominal period: 3 s of
+        // CloseStalledAfter is ~180 of them, which this loop spends in tens of milliseconds. A pump the runner is slow to schedule then falls that many
+        // ticks behind, and the tick closes its session 1013 as lagging — seed 7 on every Linux CI run, never locally. Waiting for the pumps to finish
+        // each tick gives every session the time a real tick would; what the fuzz exercises is the input path, not a runner's scheduling.
+        var deadline = Environment.TickCount64 + 5000;
+        while (pump.ActivePumps != 0 && Environment.TickCount64 < deadline)
+        {
+            Thread.Yield();
+        }
+
+        Assert.That(pump.ActivePumps, Is.Zero, $"seed {seed}, after message {m}: the send pumps never finished the tick");
         Assert.That(pump.PumpFaults, Is.Zero, $"seed {seed}, after message {m}: a send pump faulted: {pump.LastPumpFault}");
     }
 
