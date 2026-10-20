@@ -117,6 +117,7 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
         });
         harness.RunFence = true;
         harness.RunIngress = true;
+        harness.PublishThroughPump = true;
         _tick = 0;
         return harness;
     }
@@ -547,6 +548,7 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
             + $"{string.Join(", ", closes.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}×{kv.Value}"))}, tick {_tick}, acks {harness.Assembler.AcksWritten}, "
             + $"lagging {harness.Assembler.SessionsClosedLagging}, degraded {harness.Assembler.SessionsDegraded}, longest skip run {harness.Assembler.LongestSkipRun} of {harness.Assembler.CloseBoundTicks}, "
             + $"frames {harness.Assembler.FramesProduced} produced / {harness.Assembler.FramesSkipped} skipped, oversize {harness.Assembler.OversizeSkips}, "
+            + $"skipped as gated/lagging/in-flight-full {harness.Assembler.SkipsBy(FrameSkipCause.Gated)}/{harness.Assembler.SkipsBy(FrameSkipCause.Lagging)}/{harness.Assembler.SkipsBy(FrameSkipCause.InFlightFull)}, "
             + $"owed resets {harness.Assembler.OwedResets}, meter {harness.Assembler.MeterViolations}/{harness.Assembler.MeterChecks}");
 
         Assert.Multiple(() =>
@@ -574,13 +576,15 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
 
         // The frames go out the way they do in production: the tick publishes and wakes each session's pump, the link's only writer. Claiming them here as
         // well would make two claimers of one hand-off, which the send state rightly refuses (frames completed out of order).
+        // The harness leaves the publish to this call (PublishThroughPump). It used to publish and empty the ready lists itself, so this woke nobody: frames
+        // went out only when a PING woke a pump for its PONG, and the PING cap, refilled by wall-clock time, refused more of them the faster a run went. On
+        // Linux, where a seed runs in under a second, frames filled the in-flight bound, sessions skipped until the tick closed them 1013, and seed 7 ended
+        // a session short on every CI run.
         var pump = harness.Subscriptions.SendPump;
         pump.PublishAndWake(_tick);
 
-        // The ticks here run back to back, a few hundred microseconds apart, while the skip policy's bounds are in ticks of the nominal period: 3 s of
-        // CloseStalledAfter is ~180 of them, which this loop spends in tens of milliseconds. A pump the runner is slow to schedule then falls that many
-        // ticks behind, and the tick closes its session 1013 as lagging — seed 7 on every Linux CI run, never locally. Waiting for the pumps to finish
-        // each tick gives every session the time a real tick would; what the fuzz exercises is the input path, not a runner's scheduling.
+        // Waited out, so every session has had its frames sent before the next tick produces: the ticks here run back to back, while the skip policy's
+        // bounds count ticks of the nominal period.
         var deadline = Environment.TickCount64 + 5000;
         while (pump.ActivePumps != 0 && Environment.TickCount64 < deadline)
         {

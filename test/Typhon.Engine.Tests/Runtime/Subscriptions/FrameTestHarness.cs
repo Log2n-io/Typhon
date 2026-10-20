@@ -183,6 +183,13 @@ sealed unsafe class FrameHarness : IDisposable
     /// <summary>Whether <see cref="RunTick"/> drains the ingress first, as Engine-Pre does: commands framed before it become this tick's.</summary>
     public bool RunIngress { get; set; }
 
+    /// <summary>
+    /// Whether the caller publishes each tick through the runtime's <c>SendPump.PublishAndWake</c>, as the tick driver does: <see cref="RunTick"/> then
+    /// leaves the gate and the ready lists to it. Off, the harness publishes and empties the lists itself, and a pump woken after it would find nobody to
+    /// wake.
+    /// </summary>
+    public bool PublishThroughPump { get; set; }
+
     /// <summary>Called after the ingress drain of each tick, where an application system would apply (or reject) the tick's commands.</summary>
     public Action<long> AfterIngress { get; set; }
 
@@ -268,6 +275,10 @@ sealed unsafe class FrameHarness : IDisposable
         Sessions.BeginTick();
         RunProject(tick);
         RunFrames(tick, workers);
+        if (PublishThroughPump)
+        {
+            return;
+        }
 
         // The publication gate, which the tick driver moves once the unit of work has flushed (SUB-02). Nothing a test reads is sendable before it.
         Assembler.Gate.Publish(tick);
