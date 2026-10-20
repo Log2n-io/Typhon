@@ -40,10 +40,23 @@ public static class WorldBuilder
         index ??= new WorldIndex();
         _realm = realm;
 
-        SpawnCities(dbe, map, config, census, ref rng, index);
-        SpawnPointsOfInterest(dbe, map, config, census, ref rng, index);
+        if (map.ClampedSites > 0 && realm == 0)
+        {
+            // Once per run, not once per planet or once per city: the cause is the world size, which is one decision, and a line per city would bury it.
+            Console.WriteLine(
+                $"  !! --world {config.WorldEdgeKm:G} compresses the map past what its sites can hold: {map.ClampedSites} sites had their structure count "
+                + $"cut, {map.ClampedStructures} structures dropped. Structure counts are not comparable with the real planet size.");
+        }
+
+        // ONE planner for the whole planet, not one per site. Every structure on the ground is tested against every other one near it, whichever site
+        // planted it — see SitePlanner's own remarks for the 74 overlapping pairs that per-site planners left in a finished world. Cities go in first, so
+        // the authored content wins every contest against a player's house.
+        var plan = new SitePlanner(StructureFootprint.HalfExtentM(StructureKind.Shuttleport));
+
+        SpawnCities(dbe, map, config, census, ref rng, index, plan);
+        SpawnPointsOfInterest(dbe, map, config, census, ref rng, index, plan);
         SpawnWilderness(dbe, map, config, census, ref rng, index);
-        SpawnPlayerStructures(dbe, map, config, census, ref rng);
+        SpawnPlayerStructures(dbe, map, config, census, ref rng, plan);
         SpawnPlayers(dbe, map, config, census, ref rng, index);
         SpawnMissionLairPool(dbe, map, config, census, ref rng, index);
 
@@ -65,7 +78,8 @@ public static class WorldBuilder
     /// a 12 m box — so their cluster bounds are not degenerate points, which matters: an index over zero-extent boxes
     /// behaves differently from one over real ones, and buildings are the largest population in the world.
     /// </remarks>
-    private static void SpawnCities(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldCensus census, ref Rng rng, WorldIndex index)
+    private static void SpawnCities(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldCensus census, ref Rng rng, WorldIndex index,
+        SitePlanner plan)
     {
         // The planet's ground, baked once per process (see TerrainField). Taken here rather than per entity: the
         // cache lookup is cheap but not free, and this loop runs seventeen thousand times.
@@ -76,13 +90,14 @@ public static class WorldBuilder
             var buildings = city.Buildings;
             var npcs = Scale(city.Npcs, config.PopulationScale);
             var firstPortal = index.Portals.Count;
-
+            var crowdedBefore = plan.Crowded;
             using (var tx = dbe.CreateQuickTransaction())
             {
                 for (var i = 0; i < buildings; i++)
                 {
-                    var (x, z) = rng.PointInDisc(city.X, city.Z, city.Radius);
                     var kind = i == 0 ? StructureKind.Shuttleport : (i % 9 == 0 ? StructureKind.Terminal : StructureKind.Building);
+                    var half = StructureFootprint.HalfExtentM(kind);
+                    var (x, z, _) = plan.Place(ref rng, city.X, city.Z, city.Radius, half);
                     var portalIndex = -1;
                     if (i == 0)
                     {
@@ -97,11 +112,23 @@ public static class WorldBuilder
                         index.Portals.Add((x, z));
                     }
 
-                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), 12f, kind, ownerRegion: cityIndex + 1, tickPeriod: 0, ref rng, portalIndex);
+                    // The entity's bounds are its FOOTPRINT, not a uniform 12 m for every kind. They used to be the latter, which
+                    // made the dome and a terminal the same size to every spatial query and to anything asking what stands at a
+                    // point -- and collision has to ask exactly that.
+                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), half, kind, ownerRegion: cityIndex + 1, tickPeriod: 0, ref rng, portalIndex);
                     census.StaticObjects++;
                 }
 
                 tx.Commit();
+            }
+
+            if (plan.Crowded > crowdedBefore)
+            {
+                // Said rather than swallowed. The map has already capped this count to what the disc holds
+                // (StructureFootprint.CapacityOf), so reaching here means the cap is wrong rather than the map — the packing ceiling it is derived from has
+                // been measured too high, or something else was planted across this city first.
+                Console.WriteLine(
+                    $"  !! {city.Name}: {plan.Crowded - crowdedBefore} of {buildings} structures had no room in a {city.Radius:F0} m disc and overlap");
             }
 
             var made = 0;
@@ -288,7 +315,8 @@ public static class WorldBuilder
 
     // ── Points of interest ──────────────────────────────────────────────────────────────────────────────────────────
 
-    private static void SpawnPointsOfInterest(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldCensus census, ref Rng rng, WorldIndex index)
+    private static void SpawnPointsOfInterest(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldCensus census, ref Rng rng, WorldIndex index,
+        SitePlanner plan)
     {
         // The planet's ground, baked once per process (see TerrainField). Taken here rather than per entity: the
         // cache lookup is cheap but not free, and this loop runs seventeen thousand times.
@@ -299,10 +327,11 @@ public static class WorldBuilder
         {
             using (var tx = dbe.CreateQuickTransaction())
             {
+                var propHalf = StructureFootprint.HalfExtentM(StructureKind.PoiProp);
                 for (var i = 0; i < poi.Props; i++)
                 {
-                    var (x, z) = rng.PointInDisc(poi.X, poi.Z, poi.Radius);
-                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), 6f, StructureKind.PoiProp, ownerRegion: poiIndex + 1, tickPeriod: 0, ref rng);
+                    var (x, z, _) = plan.Place(ref rng, poi.X, poi.Z, poi.Radius, propHalf);
+                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), propHalf, StructureKind.PoiProp, ownerRegion: poiIndex + 1, tickPeriod: 0, ref rng);
                     census.StaticObjects++;
                 }
 
@@ -462,7 +491,7 @@ public static class WorldBuilder
     /// next to friends' houses — so the structure population is a set of knots in otherwise empty desert, and that is a
     /// different spatial signature from the uniform scatter a naive model would produce.</para>
     /// </remarks>
-    private static void SpawnPlayerStructures(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldCensus census, ref Rng rng)
+    private static void SpawnPlayerStructures(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldCensus census, ref Rng rng, SitePlanner plan)
     {
         // The planet's ground, baked once per process (see TerrainField). Taken here rather than per entity: the
         // cache lookup is cheap but not free, and this loop runs seventeen thousand times.
@@ -476,7 +505,21 @@ public static class WorldBuilder
         // Two thirds of structures sit in player-city knots; the rest are lone harvesters out in the resource fields.
         var sites = BuildPlayerCitySites(map, config, ref rng);
         var inCities = (int)(total * 0.66f);
-        var loose = total - inCities;
+
+        // PLANNED, where these used to be raw draws — the defect SitePlanner exists for and the one place it had not reached. A rank-0 knot is 150 m
+        // across and takes about 143 of the 2 600 structures, so player houses stood inside each other at the REAL planet size, not merely at a compressed
+        // one: 74 overlapping pairs in a finished 16.384 km world, every one of them a player structure.
+        //
+        // A knot that is full sends its next structure out to the desert instead, which keeps the total the map asked for and is a shape the model already
+        // has — a third of them are lone harvesters anyway. Fullness is discovered rather than computed: the planner is asked and says no, which is exact,
+        // where a capacity would have to guess the mix of houses, factories and harvesters a knot happens to draw. It is the CALLER's state because the
+        // planner is the planet's, so one full knot must not stop another from being searched.
+        //
+        // Held per knot as a SIZE rather than a flag: a knot with no room for a 22 m factory usually still has room for a 6 m harvester, and a flag would
+        // send both out to the desert. What the knot has proved is that nothing this big fits, so that is what is remembered.
+        var fullAt = new float[sites.Count];
+        Array.Fill(fullAt, float.MaxValue);
+        var homeless = 0;
 
         var made = 0;
         while (made < total)
@@ -485,23 +528,9 @@ public static class WorldBuilder
             using var tx = dbe.CreateQuickTransaction();
             for (var i = 0; i < n; i++)
             {
-                float x, z;
-                if (made + i < inCities && sites.Count > 0)
-                {
-                    var site = sites[rng.NextInt(0, sites.Count)];
-                    // A site centre is drawn at 0.97 of the half-extent and then given a radius of up to 450 m, so a site
-                    // reaches 8 396 m against a half-extent of 8 192. Unbounded, the engine clamped the write in silence
-                    // and `GroundAt` sampled the point it asked for rather than the one it got (#1073).
-                    (x, z) = Inside(rng.PointInDisc(site.X, site.Z, site.Radius), config);
-                }
-                else
-                {
-                    (x, z) = RandomWildernessPoint(map, config, ref rng);
-                }
-
-                // A house never ticks. A factory runs a batch; a harvester extracts. SWG's own numbers: manufacturing is
-                // complexity x 8 seconds per unit, and a harvester's rate is units per minute — so both are periods of
-                // tens of seconds to minutes, which at this tick rate is hundreds to thousands of ticks.
+                // The KIND first, because it decides the footprint a spot has to be planned for. A house never ticks. A factory runs a batch; a harvester
+                // extracts. SWG's own numbers: manufacturing is complexity x 8 seconds per unit, and a harvester's rate is units per minute — so both are
+                // periods of tens of seconds to minutes, which at this tick rate is hundreds to thousands of ticks.
                 var roll = rng.NextFloat();
                 var (kind, period) = roll < 0.55f
                     ? (StructureKind.PlayerHouse, 0)
@@ -509,9 +538,45 @@ public static class WorldBuilder
                         ? (StructureKind.Harvester, 600)
                         : (StructureKind.Factory, 1800);
 
+                // The footprint the client draws for this kind, which used to be a flat 10 or 14 here while the city loop had already moved to the table.
+                var half = StructureFootprint.HalfExtentM(kind);
+
+                var site = made + i < inCities && sites.Count > 0 ? rng.NextInt(0, sites.Count) : -1;
+                if (site >= 0 && half >= fullAt[site])
+                {
+                    site = -1;
+                }
+
+                float x, z;
+                if (site >= 0 && plan.TryPlace(ref rng, sites[site].X, sites[site].Z, sites[site].Radius, half, out x, out z))
+                {
+                    // In the knot it drew.
+                }
+                else
+                {
+                    if (site >= 0)
+                    {
+                        // The knot had no room for this one, so it has none for the next of this size or larger.
+                        fullAt[site] = MathF.Min(fullAt[site], half);
+                    }
+
+                    // Out in the desert, where the candidates come from a keep-out rejection rather than from a disc, so the planner only gets to veto them.
+                    (x, z) = RandomWildernessPoint(map, config, ref rng);
+                    var fitted = plan.TryPlaceAt(x, z, half);
+                    for (var attempt = 1; !fitted && attempt < SitePlanner.Attempts; attempt++)
+                    {
+                        (x, z) = RandomWildernessPoint(map, config, ref rng);
+                        fitted = plan.TryPlaceAt(x, z, half);
+                    }
+
+                    if (!fitted)
+                    {
+                        homeless++;
+                    }
+                }
+
                 // ownerRegion 0: these stand in the wild, and 0 is how Structure.OwnerRegion spells "no region" now that it is a sparse index's key.
-                SpawnStructure(tx, x, z, terrain.GroundAt(x, z), kind == StructureKind.PlayerHouse ? 10f : 14f, kind, ownerRegion: 0,
-                    tickPeriod: period, ref rng);
+                SpawnStructure(tx, x, z, terrain.GroundAt(x, z), half, kind, ownerRegion: 0, tickPeriod: period, ref rng);
                 census.PlayerStructures++;
             }
 
@@ -519,7 +584,12 @@ public static class WorldBuilder
             made += n;
         }
 
-        _ = loose;
+        if (homeless > 0)
+        {
+            // Not the knots being full — that is handled by sending the structure out here — but the DESERT being full, which means the planet itself has
+            // no clear ground left. Only reachable by compressing the world far enough that 2 600 structures do not fit on it.
+            Console.WriteLine($"  !! {homeless} of {total} player structures found no clear ground on the whole planet and overlap");
+        }
     }
 
     /// <summary>
@@ -553,7 +623,16 @@ public static class WorldBuilder
             {
                 // Rank drawn from the tier table; most player cities never grew past Township.
                 var rank = rng.NextFloat() < 0.55f ? 0 : rng.NextFloat() < 0.7f ? 2 : 4;
-                sites.Add((x, z, TatooineData.PlayerCityRadiusM[rank] * config.ContentScale));
+
+                // The disc is TRIMMED to what lies inside the planet. A site centre is drawn at 0.97 of the half-extent and a rank-4 radius is 450 m, so an
+                // untrimmed site reaches past the edge; a structure drawn out there is clamped back in (#1073) to a spot nothing tested, and two structures
+                // clamped against the same edge stand inside each other. Trimming is what makes a planned spot the spot actually used.
+                var reach = (config.WorldEdgeM * 0.5f * InsideEdge) - MathF.Max(MathF.Abs(x), MathF.Abs(z));
+                var radius = MathF.Min(TatooineData.PlayerCityRadiusM[rank] * config.ContentScale, reach);
+                if (radius > 0f)
+                {
+                    sites.Add((x, z, radius));
+                }
             }
         }
 

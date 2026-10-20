@@ -23,6 +23,18 @@ public sealed class SimConfig
     /// <c>coordinateMin</c>/<c>coordinateMax</c>). 64 and 128 are inflations that keep the same content and spread it
     /// further apart, which is how the study reaches a sparsity SWG itself never had.
     /// </summary>
+    /// <remarks>
+    /// <b>Inflation is the direction this axis supports for STRUCTURES, and compressing it costs buildings.</b> A city's
+    /// building count is a fact about the game while its radius is a coordinate, so <see cref="TatooineMap.Build"/>
+    /// scales the radius and leaves the count alone — which is what keeps the agent population per cell comparable
+    /// across the axis, and what makes the same city impossible to build once the disc shrinks. Anchorhead is already at
+    /// 44.8 % of its ground at 16.384 km, and packing goes as 1/scale², so <em>any</em> value below the real planet size
+    /// puts a site over the limit measured in <see cref="StructureFootprint.MaxPacking"/>: at 8 km all seven cities are
+    /// over, at 2 km thirteen sites are and 786 structures cannot be planted. The counts are capped to what fits and the
+    /// build says so once (<see cref="TatooineMap.ClampedSites"/>), so a compressed world is still a valid world — but
+    /// its structure population is not comparable with the real planet's, and a measurement that spans the two is
+    /// measuring the clamp as well as the engine.
+    /// </remarks>
     public float WorldEdgeKm = TatooineData.PlanetEdgeM / 1000f;
 
     /// <summary>

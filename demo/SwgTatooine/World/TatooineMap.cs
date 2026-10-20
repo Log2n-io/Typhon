@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 namespace SwgTatooine;
@@ -118,6 +118,33 @@ public sealed class TatooineMap
 
     public List<SpawnRegionDef> SpawnRegions { get; private set; }
 
+    /// <summary>Sites whose structure count the world size forced down, and how many structures that cost.</summary>
+    /// <remarks>
+    /// Zero at the real planet size and at every inflation of it, which is the only direction this axis was built for. Compressing the world shrinks a
+    /// site's disc and leaves its structure count alone, so below <c>--world 16.384</c> the ask outgrows the ground — see
+    /// <see cref="StructureFootprint.CapacityOf"/>. Read by <c>WorldBuilder.Populate</c>, which reports it once per run.
+    /// </remarks>
+    public int ClampedSites { get; private set; }
+
+    /// <inheritdoc cref="ClampedSites"/>
+    public int ClampedStructures { get; private set; }
+
+    /// <summary>The structure count a site may actually be asked for, counting what it could not have.</summary>
+    /// <param name="asked">What the authentic map wants.</param>
+    /// <param name="capacity">What the scaled disc holds.</param>
+    /// <returns>The smaller of the two.</returns>
+    private int Fit(int asked, int capacity)
+    {
+        if (asked <= capacity)
+        {
+            return asked;
+        }
+
+        ClampedSites++;
+        ClampedStructures += asked - capacity;
+        return capacity;
+    }
+
     /// <summary>
     /// Build the map for a configuration, scaling every authentic coordinate by <see cref="SimConfig.ContentScale"/>.
     /// </summary>
@@ -131,14 +158,21 @@ public sealed class TatooineMap
         // make the inflated worlds a study of empty space rather than of a bigger planet, and the swarm scenario in the
         // benchmark already covers empty space. Scaling everything keeps entities-per-cell comparable across the axis so
         // that a cell-size sweep means the same thing at every world size.
+        // A structure count is a fact about the game and a radius is a coordinate, so the radius scales and the count does not -- which is fine while the
+        // world is being inflated and impossible once it is compressed. Capped here, in the one place the scaling is applied, rather than left for the
+        // planner to discover 256 futile draws at a time: at --world 2 a 456 m city becomes 55.7 m and would still be asked for 190 buildings.
         foreach (var c in TatooineData.Cities)
         {
-            map.Cities.Add(new CityDef(c.Name, c.X * s, c.Z * s, c.Radius * s, c.Buildings, c.Npcs, c.PlayerWeight));
+            var radius = c.Radius * s;
+            var buildings = map.Fit(c.Buildings, StructureFootprint.CapacityOf(radius, StructureKind.Building));
+            map.Cities.Add(new CityDef(c.Name, c.X * s, c.Z * s, radius, buildings, c.Npcs, c.PlayerWeight));
         }
 
         foreach (var p in TatooineData.Pois)
         {
-            map.Pois.Add(new PoiDef(p.Name, p.X * s, p.Z * s, p.Radius * s, p.Props, p.Lairs));
+            var radius = p.Radius * s;
+            var props = map.Fit(p.Props, StructureFootprint.CapacityOf(radius, StructureKind.PoiProp));
+            map.Pois.Add(new PoiDef(p.Name, p.X * s, p.Z * s, radius, props, p.Lairs));
         }
 
         foreach (var r in TatooineData.SpawnRegions)
