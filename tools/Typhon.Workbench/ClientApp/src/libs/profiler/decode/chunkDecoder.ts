@@ -862,6 +862,15 @@ function decodeSpan(
     case TraceEventKind.StatisticsRebuild:
       return decodeStatisticsRebuild(reader, kind, threadSlot, tickNumber, timestampUs, header);
 
+    case TraceEventKind.BackupCapture:
+    case TraceEventKind.BackupFreeze:
+    case TraceEventKind.BackupTail:
+    case TraceEventKind.BackupScan:
+    case TraceEventKind.BackupVerify:
+    case TraceEventKind.BackupLifecycle:
+    case TraceEventKind.BackupArchiveSegment:
+      return decodeBackup(reader, kind, threadSlot, tickNumber, timestampUs, header);
+
     case TraceEventKind.NamedSpan:
       // Fall back to generic span — the name payload isn't surfaced on the server's DTO either.
       return baseSpanEvent(kind, threadSlot, tickNumber, timestampUs, header);
@@ -1571,6 +1580,71 @@ function decodeCheckpoint(
     }
     // Collect + Fsync have no payload; header-only event is correct.
   }
+  return evt;
+}
+
+/**
+ * Backup spans (#1416: 44-49; #1418: 74). Layout: the required fields, then (when the kind has optionals) one optMask byte and the optionals present,
+ * in mask order. Mirrors `src/Typhon.Engine/Profiler/internals/BackupEvents.cs`; TraceEventEncodeEquivalenceTests pins the bytes.
+ */
+function decodeBackup(
+  reader: BinaryReader, kind: TraceEventKind,
+  threadSlot: number, tickNumber: number, timestampUs: number, header: SpanHeader,
+): TraceEvent {
+  const evt = baseSpanEvent(kind, threadSlot, tickNumber, timestampUs, header);
+  let o = header.payloadOffset;
+  switch (kind) {
+    case TraceEventKind.BackupCapture: {
+      // [u8 requestedKind][u8 optMask][u32 backupId?][i32 pages?][i32 cbwCopies?]
+      evt.requestedKind = reader.readU8(o);
+      const mask = reader.readU8(o + 1);
+      o += 2;
+      if ((mask & 0x01) !== 0) { evt.backupId = reader.readU32(o); o += 4; }
+      if ((mask & 0x02) !== 0) { evt.pages = reader.readI32(o); o += 4; }
+      if ((mask & 0x04) !== 0) { evt.cbwCopies = reader.readI32(o); }
+      break;
+    }
+    case TraceEventKind.BackupFreeze: {
+      // [u8 optMask][i32 imagePages?]
+      if ((reader.readU8(o) & 0x01) !== 0) { evt.imagePages = reader.readI32(o + 1); }
+      break;
+    }
+    case TraceEventKind.BackupTail: {
+      // [u8 optMask][i64 pointLsn?]
+      if ((reader.readU8(o) & 0x01) !== 0) { evt.pointLsn = reader.readI64Decimal(o + 1); }
+      break;
+    }
+    case TraceEventKind.BackupScan: {
+      // [u8 optMask][i32 pages?]
+      if ((reader.readU8(o) & 0x01) !== 0) { evt.pages = reader.readI32(o + 1); }
+      break;
+    }
+    case TraceEventKind.BackupVerify: {
+      // [u32 backupId][u8 level]
+      evt.backupId = reader.readU32(o);
+      evt.level = reader.readU8(o + 4);
+      break;
+    }
+    case TraceEventKind.BackupLifecycle: {
+      // [u8 op][u8 optMask][i32 packs?][i64 bytes?]
+      evt.op = reader.readU8(o);
+      const mask = reader.readU8(o + 1);
+      o += 2;
+      if ((mask & 0x01) !== 0) { evt.packs = reader.readI32(o); o += 4; }
+      if ((mask & 0x02) !== 0) { evt.bytes = reader.readI64AsNumber(o); }
+      break;
+    }
+    case TraceEventKind.BackupArchiveSegment: {
+      // [i64 segmentId][u8 optMask][i64 bytes?][u8 outcome?]
+      evt.segmentId = reader.readI64AsNumber(o);
+      const mask = reader.readU8(o + 8);
+      o += 9;
+      if ((mask & 0x01) !== 0) { evt.bytes = reader.readI64AsNumber(o); o += 8; }
+      if ((mask & 0x02) !== 0) { evt.outcome = reader.readU8(o); }
+      break;
+    }
+  }
+
   return evt;
 }
 

@@ -185,6 +185,8 @@ public class TyphonEventKindSuppressionTests
             TraceEventKind.CheckpointFsync, TraceEventKind.CheckpointTransition, TraceEventKind.CheckpointRecycle,
             TraceEventKind.StatisticsRebuild,
             TraceEventKind.NamedSpan,
+            TraceEventKind.BackupCapture, TraceEventKind.BackupFreeze, TraceEventKind.BackupTail, TraceEventKind.BackupScan,
+            TraceEventKind.BackupVerify, TraceEventKind.BackupLifecycle, TraceEventKind.BackupArchiveSegment,
         ];
 
         foreach (var kind in allKinds)

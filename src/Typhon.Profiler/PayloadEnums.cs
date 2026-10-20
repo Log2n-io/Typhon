@@ -70,6 +70,22 @@ public enum TickPhase : byte
 }
 
 /// <summary>
+/// How the archiving of one WAL segment ended. Carried as the optional <c>outcome</c> byte on <see cref="TraceEventKind.BackupArchiveSegment"/> spans;
+/// absent when the span ended before the archiver knew (0 is not a value).
+/// </summary>
+public enum BackupArchiveSegmentOutcome : byte
+{
+    /// <summary>The segment is in the archive, durable.</summary>
+    Archived = 1,
+
+    /// <summary>The copy failed (the store, the segment); the archiver retries it.</summary>
+    Failed = 2,
+
+    /// <summary>The copy was abandoned: the archiver stopped, or the segment was released to a gap.</summary>
+    Abandoned = 3,
+}
+
+/// <summary>
 /// What triggered a checkpoint cycle. Carried as the <c>reason</c> byte on <see cref="TraceEventKind.CheckpointCycle"/> spans.
 /// </summary>
 public enum CheckpointReason : byte

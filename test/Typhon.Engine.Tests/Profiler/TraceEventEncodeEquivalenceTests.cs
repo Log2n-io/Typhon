@@ -2302,6 +2302,186 @@ public class TraceEventEncodeEquivalenceTests
     }
     // ── GENERATED-END ──
 
+    // ── Hand-written, outside the generated section: the backup spans (#1416, kinds 44-49) and the archive span (#1418, kind 74) have no legacy codec. Their
+    // goldens are the documented wire layout written out by hand — header, required fields, optMask, the optionals in mask order — so a generator change
+    // that moves a field shows here.
+
+    [Test]
+    public void BackupCaptureEvent_StructEncode_MatchesLayout()
+    {
+        var ev = new BackupCaptureEvent
+        {
+            Header = new TraceSpanHeader
+            {
+                ThreadSlot = ThreadSlot,
+                StartTimestamp = StartTs,
+                SpanId = SpanId,
+                ParentSpanId = ParentSpanId,
+                TraceIdHi = TraceIdHi,
+                TraceIdLo = TraceIdLo,
+            },
+            RequestedKind = 1,
+            BackupId = 0x01020304,
+            Pages = 500,
+            CbwCopies = 7,
+        };
+
+        Span<byte> bufStruct = stackalloc byte[256];
+        ev.EncodeTo(bufStruct, EndTs, out var lenStruct);
+
+        var golden = Convert.FromHexString("43002C0744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F0010704030201F401000007000000");
+        AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
+    }
+
+    [Test]
+    public void BackupFreezeEvent_StructEncode_MatchesLayout()
+    {
+        var ev = new BackupFreezeEvent
+        {
+            Header = new TraceSpanHeader
+            {
+                ThreadSlot = ThreadSlot,
+                StartTimestamp = StartTs,
+                SpanId = SpanId,
+                ParentSpanId = ParentSpanId,
+                TraceIdHi = TraceIdHi,
+                TraceIdLo = TraceIdLo,
+            },
+            ImagePages = 135,
+        };
+
+        Span<byte> bufStruct = stackalloc byte[256];
+        ev.EncodeTo(bufStruct, EndTs, out var lenStruct);
+
+        var golden = Convert.FromHexString("3A002D0744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F00187000000");
+        AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
+    }
+
+    [Test]
+    public void BackupTailEvent_StructEncode_MatchesLayout()
+    {
+        var ev = new BackupTailEvent
+        {
+            Header = new TraceSpanHeader
+            {
+                ThreadSlot = ThreadSlot,
+                StartTimestamp = StartTs,
+                SpanId = SpanId,
+                ParentSpanId = ParentSpanId,
+                TraceIdHi = TraceIdHi,
+                TraceIdLo = TraceIdLo,
+            },
+            PointLsn = 0x0102030405060708L,
+        };
+
+        Span<byte> bufStruct = stackalloc byte[256];
+        ev.EncodeTo(bufStruct, EndTs, out var lenStruct);
+
+        var golden = Convert.FromHexString("3E002E0744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F0010807060504030201");
+        AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
+    }
+
+    [Test]
+    public void BackupScanEvent_StructEncode_MatchesLayout()
+    {
+        var ev = new BackupScanEvent
+        {
+            Header = new TraceSpanHeader
+            {
+                ThreadSlot = ThreadSlot,
+                StartTimestamp = StartTs,
+                SpanId = SpanId,
+                ParentSpanId = ParentSpanId,
+                TraceIdHi = TraceIdHi,
+                TraceIdLo = TraceIdLo,
+            },
+            Pages = 42,
+        };
+
+        Span<byte> bufStruct = stackalloc byte[256];
+        ev.EncodeTo(bufStruct, EndTs, out var lenStruct);
+
+        var golden = Convert.FromHexString("3A002F0744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F0012A000000");
+        AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
+    }
+
+    [Test]
+    public void BackupVerifyEvent_StructEncode_MatchesLayout()
+    {
+        var ev = new BackupVerifyEvent
+        {
+            Header = new TraceSpanHeader
+            {
+                ThreadSlot = ThreadSlot,
+                StartTimestamp = StartTs,
+                SpanId = SpanId,
+                ParentSpanId = ParentSpanId,
+                TraceIdHi = TraceIdHi,
+                TraceIdLo = TraceIdLo,
+            },
+            BackupId = 9,
+            Level = 1,
+        };
+
+        Span<byte> bufStruct = stackalloc byte[256];
+        ev.EncodeTo(bufStruct, EndTs, out var lenStruct);
+
+        var golden = Convert.FromHexString("3A00300744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F00900000001");
+        AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
+    }
+
+    [Test]
+    public void BackupLifecycleEvent_StructEncode_MatchesLayout()
+    {
+        var ev = new BackupLifecycleEvent
+        {
+            Header = new TraceSpanHeader
+            {
+                ThreadSlot = ThreadSlot,
+                StartTimestamp = StartTs,
+                SpanId = SpanId,
+                ParentSpanId = ParentSpanId,
+                TraceIdHi = TraceIdHi,
+                TraceIdLo = TraceIdLo,
+            },
+            Op = 2,
+            Packs = 3,
+            Bytes = 0x10000,
+        };
+
+        Span<byte> bufStruct = stackalloc byte[256];
+        ev.EncodeTo(bufStruct, EndTs, out var lenStruct);
+
+        var golden = Convert.FromHexString("4300310744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F00203030000000000010000000000");
+        AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
+    }
+
+    [Test]
+    public void BackupArchiveSegmentEvent_StructEncode_MatchesLayout()
+    {
+        var ev = new BackupArchiveSegmentEvent
+        {
+            Header = new TraceSpanHeader
+            {
+                ThreadSlot = ThreadSlot,
+                StartTimestamp = StartTs,
+                SpanId = SpanId,
+                ParentSpanId = ParentSpanId,
+                TraceIdHi = TraceIdHi,
+                TraceIdLo = TraceIdLo,
+            },
+            SegmentId = 0x0000_0001_0000_0002L,
+            Bytes = 0x20000,
+            Outcome = (byte)BackupArchiveSegmentOutcome.Archived,
+        };
+
+        Span<byte> bufStruct = stackalloc byte[256];
+        ev.EncodeTo(bufStruct, EndTs, out var lenStruct);
+
+        var golden = Convert.FromHexString("47004A0744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F0020000000100000003000002000000000001");
+        AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
+    }
+
     private static void AssertSpanEqualsGolden(ReadOnlySpan<byte> actual, int actualLen, ReadOnlySpan<byte> golden)
     {
         Assert.That(actualLen, Is.EqualTo(golden.Length),

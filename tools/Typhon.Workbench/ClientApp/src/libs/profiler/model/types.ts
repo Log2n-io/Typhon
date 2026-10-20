@@ -37,6 +37,14 @@ export const enum TraceEventKind {
   BTreeNodeSplit = 42,
   BTreeNodeMerge = 43,
 
+  // Backup spans (#1416): the online capture and its phases, the verify of a new pack, compaction and retention.
+  BackupCapture = 44,
+  BackupFreeze = 45,
+  BackupTail = 46,
+  BackupScan = 47,
+  BackupVerify = 48,
+  BackupLifecycle = 49,
+
   PageCacheFetch = 50,
   PageCacheDiskRead = 51,
   PageCacheDiskWrite = 52,
@@ -63,6 +71,8 @@ export const enum TraceEventKind {
   SubscriptionsFrameProduced = 71,
   SubscriptionsFrameSkipped = 72,
   SubscriptionsSessionChanged = 73,
+  /** Span — one WAL segment archived into the backup store (#1418). Sits right after the 65-73 instant run. */
+  BackupArchiveSegment = 74,
 
   WalFlush = 80,
   WalSegmentRotate = 81,
@@ -404,6 +414,13 @@ export const SpanKindNames: Record<number, string> = {
   [TraceEventKind.BTreeDelete]: 'BTree.Delete',
   [TraceEventKind.BTreeNodeSplit]: 'BTree.NodeSplit',
   [TraceEventKind.BTreeNodeMerge]: 'BTree.NodeMerge',
+  [TraceEventKind.BackupCapture]: 'Backup.Capture',
+  [TraceEventKind.BackupFreeze]: 'Backup.Freeze',
+  [TraceEventKind.BackupTail]: 'Backup.Tail',
+  [TraceEventKind.BackupScan]: 'Backup.Scan',
+  [TraceEventKind.BackupVerify]: 'Backup.Verify',
+  [TraceEventKind.BackupLifecycle]: 'Backup.Lifecycle',
+  [TraceEventKind.BackupArchiveSegment]: 'Backup.ArchiveSegment',
   [TraceEventKind.PageCacheFetch]: 'PageCache.Fetch',
   [TraceEventKind.PageCacheDiskRead]: 'PageCache.DiskRead',
   [TraceEventKind.PageCacheDiskWrite]: 'PageCache.DiskWrite',
@@ -903,6 +920,20 @@ export interface TraceEvent {
   retryCount?: number;
   dirtyCount?: number;
   epochCount?: number;
+
+  // Backup spans (44-49, 74)
+  requestedKind?: number;        // BackupCapture: 1 full, 2 auto
+  backupId?: number;             // BackupCapture (optional), BackupVerify
+  pages?: number;                // BackupCapture: pages the point holds; BackupScan: pages handed to the store
+  cbwCopies?: number;
+  imagePages?: number;           // BackupFreeze
+  pointLsn?: string;             // BackupTail
+  level?: number;                // BackupVerify: 0 quick, 1 full
+  op?: number;                   // BackupLifecycle: 1 compaction, 2 retention
+  packs?: number;                // BackupLifecycle: packs read or deleted
+  bytes?: number;                // BackupLifecycle: written or freed; BackupArchiveSegment: stored
+  segmentId?: number;            // BackupArchiveSegment
+  outcome?: number;              // BackupArchiveSegment: 1 archived, 2 failed, 3 abandoned
 
   // WAL spans
   batchByteCount?: number;

@@ -42,10 +42,12 @@ const INSTANT_KINDS: readonly number[] = [
 // where an off-by-one in a range check would land.
 const SPAN_KINDS: readonly number[] = [
   10, 20, 23, 30, 31, 32, 33, 34, 35, 40, 41,
+  // The backup spans (#1416).
+  44, 45, 46, 47, 48, 49,
   // 60-64 are spans; 64 (#911 SpatialRepairUnit) sits directly below the 65/66 instants above, which is where an
   // off-by-one in the new carve-out would land.
   60, 61, 62, 63, 64,
-  // 74 sits directly above the 65-73 run (unassigned, so the ladder's default: a span) and 75 is GcSuspension.
+  // 74 (BackupArchiveSegment, #1418) sits directly above the 65-73 run and 75 is GcSuspension.
   74, 75,
   117, 126, 136, 138, 139, 143,
   149, 150, 152, 155, 159, 160, 163, 164, 165,

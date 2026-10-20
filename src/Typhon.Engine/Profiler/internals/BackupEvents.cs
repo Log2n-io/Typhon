@@ -59,6 +59,23 @@ internal ref partial struct BackupVerifyEvent
     public byte Level;
 }
 
+/// <summary>
+/// One WAL segment archived into the store (#1418's archiver emits it). Required: the segment's id. Optional: the bytes stored, the outcome
+/// (<see cref="BackupArchiveSegmentOutcome"/>).
+/// </summary>
+[TraceEvent(TraceEventKind.BackupArchiveSegment, EmitEncoder = true)]
+internal ref partial struct BackupArchiveSegmentEvent
+{
+    [BeginParam]
+    public long SegmentId;
+
+    [Optional(MaskValue = 0x01)]
+    private long _bytes;
+
+    [Optional(MaskValue = 0x02)]
+    private byte _outcome;
+}
+
 /// <summary>A chain lifecycle operation (1 compaction, 2 retention). Optional: packs read or deleted, bytes written or freed.</summary>
 [TraceEvent(TraceEventKind.BackupLifecycle, EmitEncoder = true)]
 internal ref partial struct BackupLifecycleEvent

@@ -61,14 +61,16 @@ internal sealed class TraceEventShapeConsistencyTests
             + "as a phantom nested span.\n  " + string.Join("\n  ", mismatches));
     }
 
-    /// <summary>The backup spans (#1416, kinds 44-49) are spans to every reader: they sit in the span range, with no carve-out.</summary>
+    /// <summary>
+    /// The backup spans (#1416, kinds 44-49) and the archive span (#1418, kind 74, right after the 65-73 instant carve-out) are spans to every reader.
+    /// </summary>
     [Test]
     public void TheBackupKinds_AreSpans()
     {
         foreach (var kind in new[]
                  {
                      TraceEventKind.BackupCapture, TraceEventKind.BackupFreeze, TraceEventKind.BackupTail, TraceEventKind.BackupScan,
-                     TraceEventKind.BackupVerify, TraceEventKind.BackupLifecycle,
+                     TraceEventKind.BackupVerify, TraceEventKind.BackupLifecycle, TraceEventKind.BackupArchiveSegment,
                  })
         {
             Assert.That(kind.IsSpan(), Is.True, kind.ToString());
@@ -76,6 +78,7 @@ internal sealed class TraceEventShapeConsistencyTests
 
         Assert.That((byte)TraceEventKind.BackupCapture, Is.EqualTo(44));
         Assert.That((byte)TraceEventKind.BackupLifecycle, Is.EqualTo(49));
+        Assert.That((byte)TraceEventKind.BackupArchiveSegment, Is.EqualTo(74));
     }
 
     /// <summary>

@@ -483,6 +483,14 @@ public enum TraceEventKind : byte
     /// </remarks>
     SubscriptionsSessionChanged = 73,
 
+    // ── Backup WAL archiving (span, #1418) ──
+
+    /// <summary>
+    /// One WAL segment copied into the backup store's archive, open to its durable publish. Required: <c>segmentId: i64</c>. Optional:
+    /// <c>bytes: i64</c> (stored), <c>outcome: u8</c> (<see cref="BackupArchiveSegmentOutcome"/>). The duration is the span's.
+    /// </summary>
+    BackupArchiveSegment = 74,
+
     // ── .NET runtime GC suspension (span) ──
 
     /// <summary>

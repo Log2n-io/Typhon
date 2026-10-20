@@ -229,6 +229,7 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
         {
             tail = WalTailInspector.CaptureTail(wal, () => _engine.CheckpointManager.ReclaimFloor, _engine.MemoryAllocator, _owner, CheckpointLsn,
                 PublishedAtFreeze, new SinkGuard(this), () => ServiceCbw(), _options.WalFlushTimeout, ct, BeforePointLsn);
+            tailSpan.PointLsn = tail.PointLsn;
         }
         finally
         {
