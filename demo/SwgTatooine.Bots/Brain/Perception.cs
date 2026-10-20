@@ -1,5 +1,5 @@
-using System;
 using Typhon.Client;
+using Typhon.Protocol;
 
 namespace SwgTatooine.Bots.Brain;
 
@@ -21,17 +21,13 @@ namespace SwgTatooine.Bots.Brain;
 public sealed class Perception
 {
     private const string WorldObject = "WorldObject";
-    private const string CreatureLair = "CreatureLair";
     private const string Creature = "Creature";
-    private const string Player = "Player";
 
     private WorldStore _bound;
     private int _structures = -1;
     private int _creatures = -1;
-    private int _players = -1;
     private int _kindField = -1;
     private int _regionField = -1;
-    private int _hpField = -1;
 
     /// <summary>Reads what this bot can see, and teaches its map any facility in view.</summary>
     /// <param name="store">The bot's store, or null before a catalog has arrived.</param>
@@ -65,13 +61,11 @@ public sealed class Perception
             X = x,
             Z = z,
             Realm = store.Realm?.RealmId ?? 0,
-            HealthFraction = Health(own, ownSlot),
-            PortCity = -1,
+            BoardRefused = BoardRefusedIn(store),
         };
 
         world = NearestCreature(store, _creatures, x, z, world);
-        world = Facilities(store, x, z, world, facilities);
-        return world with { PlayersInView = Count(store, _players) };
+        return Facilities(store, x, z, world, facilities);
     }
 
     /// <summary>The nearest creature, with its position and distance.</summary>
@@ -121,7 +115,7 @@ public sealed class Perception
         return world with { NearestCreature = bestNetId, NearestCreatureX = bestX, NearestCreatureZ = bestZ, NearestCreatureM = (float)best };
     }
 
-    /// <summary>Teaches the map every structure in view, and notices a port close enough to board at.</summary>
+    /// <summary>Teaches the map every shuttleport in view, and notices one close enough to board at.</summary>
     /// <param name="store">The store.</param>
     /// <param name="x">The bot, east.</param>
     /// <param name="z">The bot, north.</param>
@@ -149,7 +143,7 @@ public sealed class Perception
             return world;
         }
 
-        var port = -1;
+        var port = 0;
         for (var i = 0; i < set.LiveCount; i++)
         {
             var slot = set.Live[i];
@@ -159,20 +153,64 @@ public sealed class Perception
                 continue;   // in the wild: it belongs to no city, so there is nothing to remember it under
             }
 
+            // Ports only, and it is a cost decision. A city holds about 190 structures and every one of them was being
+            // filed every tick by every bot standing there — some 380 k hashed writes a second at 500 bots — for a
+            // table whose only reader asks for shuttleports. A POI's props carry a region too, and theirs are numbered
+            // above the cities' (WorldBuilder starts poiIndex at Cities.Count), so they were never confused with a
+            // city's facilities; they were simply filed for nobody.
             var kind = (int)kinds[slot];
+            if (kind != Routing.ShuttleportKind)
+            {
+                continue;
+            }
+
             var at = set.HeadPosition(slot);
             var px = (float)at[0];
             var pz = set.Dims > 1 ? (float)at[1] : 0f;
 
-            // region is city + 1, because the server's key field is a sparse index and a sparse index never files key 0.
-            facilities.Observe(region - 1, kind, px, pz);
-            if (kind == Routing.ShuttleportKind && Routing.Distance(x, z, px, pz) <= BoardingM)
+            // The region is kept as the wire carries it — a city plus one — so that 0 means "none" the whole way through.
+            facilities.Observe(region, kind, px, pz);
+            if (Routing.Distance(x, z, px, pz) <= BoardingM)
             {
-                port = region - 1;
+                port = region;
             }
         }
 
-        return world with { PortCity = port };
+        return world with { PortRegion = port };
+    }
+
+    /// <summary><c>ACKS</c> reason: the body was not at a shuttleport — <c>TatooineReplication.ShuttleNotAtPort</c>.</summary>
+    /// <remarks>
+    /// The bot's copy of two server constants, for the reason <see cref="BoardingM"/> is: this project references
+    /// <c>Typhon.Client</c> and nothing of the server, deliberately, so a shared constant would mean a shared
+    /// assembly. <c>AckReasons.FirstApplicationReason</c> is the protocol's, so only the offsets are duplicated.
+    /// </remarks>
+    public const byte ShuttleNotAtPort = AckReasons.FirstApplicationReason + 3;
+
+    /// <summary><c>ACKS</c> reason: the destination city does not exist, or is the one it stands in.</summary>
+    public const byte ShuttleBadDestination = AckReasons.FirstApplicationReason + 4;
+
+    /// <summary>Whether the frame just applied refused a boarding.</summary>
+    /// <param name="store">The store, whose ACK list holds this frame's answers only.</param>
+    /// <returns>Whether one of the two shuttle refusals arrived.</returns>
+    /// <remarks>
+    /// <b>By reason and not by sequence number.</b> Matching the ACK to the command that earned it would need the
+    /// swarm's sequence numbers in the brain; a bot has exactly one boarding in flight at a time, so "a boarding was
+    /// refused" is the whole question. The list is cleared every frame by the applier, so this is never stale.
+    /// </remarks>
+    private static bool BoardRefusedIn(WorldStore store)
+    {
+        var acks = store.Acks;
+        for (var i = 0; i < acks.Count; i++)
+        {
+            var reason = acks[i].Reason;
+            if (reason == ShuttleNotAtPort || reason == ShuttleBadDestination)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>How close the server lets a body board, in metres — <c>TatooineReplication.ShuttleBoardM</c>.</summary>
@@ -182,27 +220,6 @@ public sealed class Perception
     /// person does when a prompt does not appear.
     /// </remarks>
     public const double BoardingM = 20d;
-
-    /// <summary>How many of an archetype are in view.</summary>
-    /// <param name="store">The store.</param>
-    /// <param name="archetype">Which, or -1.</param>
-    /// <returns>The count.</returns>
-    private static int Count(WorldStore store, int archetype) => archetype < 0 ? 0 : store.Archetypes[archetype].LiveCount;
-
-    /// <summary>A body's health as a fraction, or 1 when the server does not replicate it.</summary>
-    /// <param name="own">The archetype holding it.</param>
-    /// <param name="slot">Its slot.</param>
-    /// <returns>0..1.</returns>
-    private float Health(ArchetypeStore own, int slot)
-    {
-        if (_hpField < 0 || _hpField >= own.Numbers.Length)
-        {
-            return 1f;
-        }
-
-        var hp = own.Numbers[_hpField];
-        return hp == null ? 1f : (float)Math.Clamp(hp[slot], 0d, 1d);
-    }
 
     /// <summary>Resolves the archetype and field indices once per catalog.</summary>
     /// <param name="store">The store to resolve against.</param>
@@ -216,10 +233,12 @@ public sealed class Perception
         _bound = store;
         _structures = IndexOf(store, WorldObject);
         _creatures = IndexOf(store, Creature);
-        _players = IndexOf(store, Player);
+
+        // Both fields are resolved against the archetype they are read from, which is the bug this line replaced: the
+        // first version resolved a field index against `Player` and then indexed it into whatever archetype held the
+        // body, bounds-checked only. A field index is meaningful in one archetype and nowhere else.
         _kindField = FieldOf(store, _structures, "kind");
         _regionField = FieldOf(store, _structures, "region");
-        _hpField = FieldOf(store, IndexOf(store, Player), "hp");
     }
 
     private static int IndexOf(WorldStore store, string name)

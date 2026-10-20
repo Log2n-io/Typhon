@@ -105,7 +105,9 @@ public sealed partial class TatooineSim
             {
                 AllowAutomaticPushDetection = _config.SubscriptionsPushAutomatic,
 
-                // The planet's own spatial cell, 1:1 (set in Initialize): a 9 x 9 window for a 192 m session, 15 x 15 for the slider's ceiling.
+                // The replication cell, set in Initialize. It TRACKS the planet's spatial cell and is not equal to it: a floor of PlayerRadiusM / 3 applies,
+                // so --world 2 (spatial cell 31.25 m) replicates on 64 m cells, not 31.25 m ones. At the default 64 m that is an 11 x 11 window for a 192 m
+                // session and 15 x 15 at the slider's ceiling; whenever the floor bites the two numbers differ and only the spatial one is printed.
                 ReplicationCellM = TatooineReplication.ReplicationCellM,
 
                 // Each session's inbound budget (--ingress-budget): required once clients can send commands, and the god camera's ClientRegion is one.

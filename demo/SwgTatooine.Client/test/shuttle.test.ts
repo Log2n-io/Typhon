@@ -26,37 +26,72 @@ function setup() {
 }
 
 describe('nearestShuttleport', () => {
+  // THE AVATAR IS NEVER AT THE ORIGIN IN THESE CASES, and that is deliberate. Every case used to search from (0, 0)
+  // with ports offset along one axis, so a distance that ignored z entirely passed all five — and an x/z swap was
+  // invisible for the same reason. A viewpoint off both axes, with ports offset on both, is what makes the two
+  // coordinates distinguishable from each other and from a constant.
+  const EYE_X = 120;
+  const EYE_Z = -40;
+
   it('finds the port in range and decodes the city from the wire’s city + 1', () => {
     const { store, place } = setup();
-    place(1, 10, 0, SHUTTLEPORT_KIND, 4); // city 3's port, 10 m east
-    const found = nearestShuttleport(store, 1, 0, 0, 0, 20);
+    place(1, EYE_X + 6, EYE_Z + 8, SHUTTLEPORT_KIND, 4); // city 3's port, a 6-8-10 triangle away
+    const found = nearestShuttleport(store, 1, 0, EYE_X, EYE_Z, 20);
 
     expect(found).not.toBeNull();
     expect(found?.city).toBe(3);
     expect(found?.distanceM).toBeCloseTo(10, 6);
+    expect(found?.x).toBeCloseTo(EYE_X + 6, 6);
+    expect(found?.z).toBeCloseTo(EYE_Z + 8, 6);
+  });
+
+  it('measures both axes, so a port far on z alone is out of range', () => {
+    const { store, place } = setup();
+
+    // 4 m east and 30 m north: inside the limit on x alone, outside it in the plane. A search that dropped the z term
+    // would offer this one, which is the shape of the bug this case exists for.
+    place(1, EYE_X + 4, EYE_Z + 30, SHUTTLEPORT_KIND, 4);
+    expect(nearestShuttleport(store, 1, 0, EYE_X, EYE_Z, 20)).toBeNull();
+  });
+
+  it('does not confuse the two axes', () => {
+    const { store, place } = setup();
+
+    // Reachable only if x is read as x and z as z: swapping them puts this port 100 m away instead of 10.
+    place(1, EYE_X + 6, EYE_Z + 8, SHUTTLEPORT_KIND, 2);
+    place(2, EYE_Z + 6, EYE_X + 8, SHUTTLEPORT_KIND, 5);
+    expect(nearestShuttleport(store, 1, 0, EYE_X, EYE_Z, 20)?.city).toBe(1);
   });
 
   it('ignores a building that is not a port, and a port out of range', () => {
     const { store, place } = setup();
-    place(1, 2, 0, 0, 4); // a building, right next to the avatar
-    place(2, 100, 0, SHUTTLEPORT_KIND, 4); // a port, far away
-    expect(nearestShuttleport(store, 1, 0, 0, 0, 20)).toBeNull();
+    place(1, EYE_X + 2, EYE_Z + 1, 0, 4); // a building, right next to the avatar
+    place(2, EYE_X + 100, EYE_Z + 20, SHUTTLEPORT_KIND, 4); // a port, far away
+    expect(nearestShuttleport(store, 1, 0, EYE_X, EYE_Z, 20)).toBeNull();
   });
 
   it('ignores a port in no region, because there is no city to fly to', () => {
     const { store, place } = setup();
-    place(1, 5, 0, SHUTTLEPORT_KIND, 0);
-    expect(nearestShuttleport(store, 1, 0, 0, 0, 20)).toBeNull();
+    place(1, EYE_X + 3, EYE_Z + 4, SHUTTLEPORT_KIND, 0);
+    expect(nearestShuttleport(store, 1, 0, EYE_X, EYE_Z, 20)).toBeNull();
   });
 
   it('takes the nearest when two are in range', () => {
     const { store, place } = setup();
-    place(1, 15, 0, SHUTTLEPORT_KIND, 1);
-    place(2, 0, 4, SHUTTLEPORT_KIND, 7);
-    expect(nearestShuttleport(store, 1, 0, 0, 0, 20)?.city).toBe(6);
+    place(1, EYE_X + 9, EYE_Z + 12, SHUTTLEPORT_KIND, 1); // 15 m
+    place(2, EYE_X - 3, EYE_Z + 4, SHUTTLEPORT_KIND, 7); //  5 m
+    expect(nearestShuttleport(store, 1, 0, EYE_X, EYE_Z, 20)?.city).toBe(6);
   });
 
   it('is null without a store, which is every frame before the first one arrives', () => {
-    expect(nearestShuttleport(null, 1, 0, 0, 0, 20)).toBeNull();
+    expect(nearestShuttleport(null, 1, 0, EYE_X, EYE_Z, 20)).toBeNull();
+  });
+
+  it('reuses its scratch, so two searches in one frame agree', () => {
+    const { store, place } = setup();
+    place(1, EYE_X + 6, EYE_Z + 8, SHUTTLEPORT_KIND, 4);
+    const first = nearestShuttleport(store, 1, 0, EYE_X, EYE_Z, 20);
+    const second = nearestShuttleport(store, 1, 0, EYE_X, EYE_Z, 20);
+    expect(second).toEqual(first);
   });
 });

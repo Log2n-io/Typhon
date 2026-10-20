@@ -16,9 +16,14 @@ namespace SwgTatooine.Tests;
 internal struct AckSink : ITickSink
 {
     /// <summary>Every reason, in arrival order.</summary>
+    /// <remarks>
+    /// Created on first use rather than by the caller: a <c>default(AckSink)</c> is a legal thing for a fixture to
+    /// write, and it used to throw a <see cref="NullReferenceException"/> inside the first frame it read — a failure
+    /// several layers away from the line that left the list null.
+    /// </remarks>
     public List<byte> Reasons;
 
-    public void Ack(ushort seq, byte reason) => Reasons.Add(reason);
+    public void Ack(ushort seq, byte reason) => (Reasons ??= []).Add(reason);
 
     public void Number(FieldPlan field, scoped ReadOnlySpan<double> components)
     {

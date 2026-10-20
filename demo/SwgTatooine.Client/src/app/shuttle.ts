@@ -17,6 +17,17 @@ import { Placement } from '../data/placement';
 /** `StructureKind.Shuttleport`, as the server's `kind` field spells it. */
 export const SHUTTLEPORT_KIND = 2;
 
+/**
+ * The interpolation scratch and placement, held at module scope rather than allocated per search.
+ *
+ * `Placement`'s own contract is that it is reused — "a frame that walks ten thousand entities allocates nothing" — and
+ * every other caller in this client holds both as instance fields. This was the one site that allocated a typed array
+ * and a `Placement` on every call. The search is single-threaded and finishes before it returns, so one pair for the
+ * module is enough; nothing holds a reference to either afterwards.
+ */
+const SCRATCH = new Float64Array(MAX_MOTION_STRIDE);
+const PLACEMENT = new Placement();
+
 /** A shuttleport the avatar is near. */
 export interface NearbyShuttleport {
   /** The city it serves, already decoded from the wire's `region = city + 1`. */
@@ -63,11 +74,15 @@ export function nearestShuttleport(
   const live = store.live;
   const count = store.liveCount;
   const dims = store.dims;
-  const motion = new Float64Array(MAX_MOTION_STRIDE);
-  const at = new Placement();
+  const motion = SCRATCH;
+  const at = PLACEMENT;
   const limit = withinM * withinM;
 
-  let best: NearbyShuttleport | null = null;
+  // The winner is tracked as primitives and built once at the end: the previous shape allocated a result object for
+  // every candidate that improved on the last, and took a square root with it, for a value most of them never became.
+  let bestRegion = 0;
+  let bestX = 0;
+  let bestZ = 0;
   let bestSquared = limit;
   for (let i = 0; i < count; i++) {
     const slot = live[i];
@@ -89,9 +104,15 @@ export function nearestShuttleport(
     const squared = dx * dx + dz * dz;
     if (squared <= bestSquared) {
       bestSquared = squared;
-      best = { city: region - 1, x: at.x, z: at.z, distanceM: Math.sqrt(squared) };
+      bestRegion = region;
+      bestX = at.x;
+      bestZ = at.z;
     }
   }
 
-  return best;
+  if (bestRegion === 0) {
+    return null;
+  }
+
+  return { city: bestRegion - 1, x: bestX, z: bestZ, distanceM: Math.sqrt(bestSquared) };
 }

@@ -541,11 +541,10 @@ internal sealed class SessionHarness
             return;
         }
 
-        var (tick, reason, systemName, fault) = abort.Value;
         throw new InvalidOperationException(
-            $"the engine aborted tick {tick} in system '{systemName}' ({reason}), so it has stopped committing and this wait can never finish. "
-            + "The abort is the failure; what this case was waiting for is a consequence of it.",
-            fault);
+            $"the engine aborted tick {abort.Tick} in system '{abort.SystemName}' ({abort.Reason}), so it has stopped committing and this wait can never "
+            + "finish. The abort is the failure; what this case was waiting for is a consequence of it.",
+            abort.Fault);
     }
 
     /// <summary>How long one link waits between PINGs: the engine's default ping period, <c>1000 / SubscriptionsOptions.PingHz</c>.</summary>

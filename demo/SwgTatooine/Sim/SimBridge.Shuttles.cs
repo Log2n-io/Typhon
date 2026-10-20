@@ -163,6 +163,18 @@ public sealed partial class SimBridge
     /// </remarks>
     public bool TryPortAt(float x, float z, ushort planet, double withinM, out int city)
     {
+        // A REALM is passed in and only some realms are planets: interiors, dungeons and space are realms too, and
+        // PortsOf answers for planet 0 when handed one of them. That made an avatar indoors eligible to board whenever
+        // its interior coordinates happened to fall within ShuttleBoardM of a planet-0 port — and ShuttleTick would
+        // then write planet coordinates into a 64 m interior. Every other consumer of a realm refuses instead of
+        // falling back (EnterPortal, and the inter-planet roll's own `planet < Planets`), so this one does too.
+        var planets = PlanetIndexes != null ? PlanetIndexes.Length : 1;
+        if (planet >= planets)
+        {
+            city = -1;
+            return false;
+        }
+
         var ports = PortsOf(planet);
         var limit = withinM * withinM;
         for (var i = 0; i < ports.Count; i++)
@@ -250,10 +262,12 @@ public sealed partial class SimBridge
             // replaced by avatars in A5, so a client is given a FRESHLY SPAWNED body at PlayerActivity.Idle and never takes over a queued one. The hazard
             // it defended against cannot occur any more.
             //
-            // What remains is the invariant that makes this safe, and it is worth stating because it is what the refusal path rests on: the only two things
-            // that set AwaitingShuttle are PlayerThink, which skips possessed players outright, and the world generator, which only ever builds in-process
-            // bodies. So a POSSESSED player is waiting for a shuttle if and only if its own client asked to board (TatooineReplication's BoardShuttle), and
-            // carrying it is doing what it asked rather than something behind its back.
+            // What remains is the invariant the refusal path rests on: the only two things that set AwaitingShuttle are PlayerThink, which skips possessed
+            // players outright, and the world generator, which only ever builds in-process bodies. So a POSSESSED player is waiting for a shuttle if and
+            // only if its own client asked to board (TatooineReplication's BoardShuttle).
+            //
+            // That makes carrying it correct and it does NOT make the DESTINATION correct, which is the half this comment used to assert its way past: the
+            // inter-planet roll below is gated on ControllerKind.InProcess for exactly that reason. A client asked for a city.
             for (var bits = bits0; bits != 0; bits &= bits - 1)
             {
                 var idx = BitOperations.TrailingZeroCount(bits);
@@ -271,6 +285,7 @@ public sealed partial class SimBridge
             var states = cluster.GetSpan(Player.State);
             var motions = cluster.GetSpan(Player.Move);
             var places = cluster.GetReadOnlySpan(Player.Bounds);
+            var controls = cluster.GetReadOnlySpan(Player.Control);
             var planet = cluster.Realm.Value;
             var planetPorts = PortsOf(planet);
             var k = ctx.Realms.TicksPerVisit(cluster.Realm);   // Realms G2: a divided planet's cluster is seen once in k ticks
@@ -309,8 +324,17 @@ public sealed partial class SimBridge
                     continue;
                 }
 
+                // The inter-planet roll is the SCRIPTED crowd's, and only theirs. A client's BoardShuttle names a city
+                // and nothing else, so flying it to another planet's city of the same index is not what it asked for —
+                // it is a realm change behind the client's back, one time in five at the default share. This is the
+                // hazard the removed ControllerKind filter was really standing in front of; the comment that replaced
+                // it reasoned about possession, which possession's removal had already settled, and missed this.
                 var h = places[idx].HalfExtent;
-                var interPlanet = _config.Planets > 1 && planet < _config.Planets && Hash01(Salt(tick, key, 0x0B4E1A37u)) < _config.InterPlanetShare;
+                var scripted = controls[idx].Kind == ControllerKind.InProcess;
+                var interPlanet = scripted
+                    && _config.Planets > 1
+                    && planet < _config.Planets
+                    && Hash01(Salt(tick, key, 0x0B4E1A37u)) < _config.InterPlanetShare;
                 if (interPlanet)
                 {
                     // Bound for another planet: a realm change, applied by TeleportSystem after this system.

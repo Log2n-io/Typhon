@@ -14,6 +14,12 @@ namespace SwgTatooine.Bots.Brain;
 /// facts about them, so the scan happens once per tick in <c>Perception</c> and the brain reads a struct. It also means
 /// the brain can be tested by writing one of these down, which a store cannot.
 /// </para>
+/// <para>
+/// <b>Only what a goal reads lives here.</b> A field computed every tick for every bot and read by nothing is a cost
+/// with no behaviour attached: health and the number of players in view were both written here and never consulted, and
+/// reading health meant resolving a field index against one archetype and applying it to another. When a goal needs
+/// either, it comes back with the goal that reads it — and with a test that fails without it.
+/// </para>
 /// </remarks>
 public readonly struct Perceived
 {
@@ -28,9 +34,6 @@ public readonly struct Perceived
 
     /// <summary>The realm it is in: 0 is the planet, anything else an interior, a dungeon or space.</summary>
     public int Realm { get; init; }
-
-    /// <summary>Its health as a fraction of its maximum, or 1 when the server does not replicate it.</summary>
-    public float HealthFraction { get; init; }
 
     /// <summary>The nearest creature it could attack, or 0.</summary>
     /// <remarks>
@@ -52,9 +55,24 @@ public readonly struct Perceived
     /// <summary>How far that creature is, metres.</summary>
     public float NearestCreatureM { get; init; }
 
-    /// <summary>The city whose shuttleport is within boarding range, or -1.</summary>
-    public int PortCity { get; init; }
+    /// <summary>Whether a <c>BoardShuttle</c> this bot sent was refused in the frame just applied.</summary>
+    /// <remarks>
+    /// <b>The server's answer, read rather than guessed at.</b> A boarding is the one decision here the server can
+    /// refuse, and the first version of this brain had no path for the answer: it asked once, moved to waiting, and
+    /// stood still for the full patience — four minutes — whenever the ask did not take. The refusal is on the wire
+    /// already, as an <c>ACKS</c> reason, and <c>TatooineReplication</c> says in as many words that it is refused rather
+    /// than silently turned into a walk <i>because</i> a brain comparing routes needs to know which happened. Reading it
+    /// turns four minutes of inertness into one tick.
+    /// </remarks>
+    public bool BoardRefused { get; init; }
 
-    /// <summary>How many other players are in view, which is what makes a place busy.</summary>
-    public int PlayersInView { get; init; }
+    /// <summary>The REGION whose shuttleport is within boarding range — a city plus one — or 0 for none.</summary>
+    /// <remarks>
+    /// <b>A region and not a city index, so that absence is 0 rather than -1.</b> This is the value the server puts on
+    /// the wire: a structure's <c>region</c> field is its city plus one, because the key is a sparse index's and a
+    /// sparse index never files key 0. Carrying it unchanged means the brain has no sentinel to get wrong, and a
+    /// <c>default</c> of this struct says "no port in range" instead of "standing at city 0's port". The subtraction
+    /// happens once, where a destination reaches the wire.
+    /// </remarks>
+    public int PortRegion { get; init; }
 }

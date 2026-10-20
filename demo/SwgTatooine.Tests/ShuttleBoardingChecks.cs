@@ -31,6 +31,9 @@ namespace SwgTatooine.Tests;
 [NonParallelizable]
 public sealed class ShuttleBoardingChecks
 {
+    /// <summary>The server's boarding radius, as a float so that a <c>[TestCase]</c> can sit either side of it.</summary>
+    private const float ShuttleBoardM = (float)TatooineReplication.ShuttleBoardM;
+
     private string _dir;
     private SessionHarness _harness;
 
@@ -135,6 +138,7 @@ public sealed class ShuttleBoardingChecks
     /// <param name="dest">The destination asked for.</param>
     [TestCase(0, TestName = "AskingForTheCityItIsStandingInIsRefused")]
     [TestCase(9999, TestName = "AskingForACityThatDoesNotExistIsRefused")]
+    [TestCase(-1, TestName = "AskingForANegativeCityIsRefused")]
     [CancelAfter(90_000)]
     public void ABadDestinationIsRefused(int dest)
     {
@@ -158,6 +162,117 @@ public sealed class ShuttleBoardingChecks
             Assert.That(TatooineReplication.Boardings.Queued, Is.Zero, "a bad destination was queued for a shuttle");
             Assert.That(Refusals(link), Contains.Item(TatooineReplication.ShuttleBadDestination), "the client was not told the destination is bad");
         });
+    }
+
+    /// <summary>The boarding radius is the radius the server says it is, at both sides of it.</summary>
+    /// <param name="offsetM">How far from the port to stand.</param>
+    /// <param name="accepted">Whether the ask must be accepted.</param>
+    /// <remarks>
+    /// <b>The only negative case before this one stood 1 414 m from the port</b>, so every assertion here held just as
+    /// well with a boarding radius ten times too large — and the client's own prompt threshold is a copy of this number,
+    /// which makes it the kind of constant that drifts quietly. One metre inside and one metre outside pin it.
+    /// </remarks>
+    [TestCase(ShuttleBoardM - 1f, true, TestName = "JustInsideTheBoardingRadiusIsAccepted")]
+    [TestCase(ShuttleBoardM + 1f, false, TestName = "JustOutsideTheBoardingRadiusIsRefused")]
+    [CancelAfter(90_000)]
+    public void TheBoardingRadiusIsWhereTheServerSaysItIs(float offsetM, bool accepted)
+    {
+        using var sim = new TatooineSim(Config());
+        sim.Initialize();
+        _harness = new SessionHarness(sim);
+        var link = Connect();
+
+        var port = sim.Index.Shuttleports[0];
+        Worlds.Park(sim, link.Session, port.X + offsetM, port.Z);
+
+        link.SendCommand(nameof(BoardShuttle), new RecordValues { ["destCity"] = FieldValue.Of(1) });
+        SessionHarness.Until(
+            () => TatooineReplication.Boardings.Queued + TatooineReplication.Boardings.Refused >= 1,
+            "the boarding ask to be answered by a tick");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(TatooineReplication.Boardings.Queued, Is.EqualTo(accepted ? 1 : 0), $"standing {offsetM} m from the port");
+            Assert.That(TatooineReplication.Boardings.Refused, Is.EqualTo(accepted ? 0 : 1), $"standing {offsetM} m from the port");
+        });
+    }
+
+    /// <summary>Walking away gives up the place in the queue instead of being carried off anyway.</summary>
+    /// <remarks>
+    /// The boarding handler zeroes the body's motion and its comment says "stopped moving first", but <c>MoveDir</c> is
+    /// drained AFTER the boarding loop in the same <c>ApplyIntents</c>: a client holding a direction key re-set its
+    /// destination on the same tick, walked away from the port for a whole interval, and was still teleported when the
+    /// shuttle came. The queue is what has to go — refusing the walk would freeze an avatar for up to two minutes.
+    /// </remarks>
+    [Test]
+    [CancelAfter(90_000)]
+    public void WalkingAwayCancelsTheBoarding()
+    {
+        using var sim = new TatooineSim(Config());
+        sim.Initialize();
+        _harness = new SessionHarness(sim);
+        var link = Connect();
+
+        const int Dest = 1;
+        var port = sim.Index.Shuttleports[0];
+        var destPort = sim.Index.Shuttleports[Dest];
+        var player = Worlds.Park(sim, link.Session, port.X, port.Z);
+
+        link.SendCommand(nameof(BoardShuttle), new RecordValues { ["destCity"] = FieldValue.Of(Dest) });
+        SessionHarness.Until(() => TatooineReplication.Boardings.Queued >= 1, "the boarding ask to be queued by a tick");
+
+        // Due east at a run, which is what a held key sends.
+        link.SendCommand(
+            nameof(MoveDir),
+            new RecordValues { ["heading"] = FieldValue.Of(0.0), ["speedClass"] = FieldValue.Of(2.0), ["changePhase"] = FieldValue.Of(0.0) });
+        SessionHarness.Until(() => TatooineReplication.Boardings.Cancelled >= 1, "the queued boarding to be cancelled by the movement");
+
+        // Two full intervals at 10 Hz: if the queue had survived, the next landing would have flown it.
+        _harness.Ticks(45);
+
+        Assert.That(
+            Near(sim, player, destPort.X, destPort.Z, 128f), Is.False,
+            "a player who walked away from the port was still flown to the city it had asked for");
+    }
+
+    /// <summary>A client's boarding stays on its own planet, however the scripted crowd's inter-planet traffic is set.</summary>
+    /// <remarks>
+    /// <b>The share is forced to 1, so this is a certainty rather than a coin.</b> At the default 0.2 a broken build
+    /// carries a client to another planet one ask in five, which is exactly the kind of defect a single-boarding test
+    /// reports as passing four times out of five. <c>BoardShuttle</c> names a city and nothing else; another planet's
+    /// city of the same index is not what was asked for, and arriving there is a realm change behind the client's back.
+    /// </remarks>
+    [Test]
+    [CancelAfter(120_000)]
+    public void AClientIsNeverFlownToAnotherPlanet()
+    {
+        var config = Config();
+        config.Planets = 2;
+        config.InterPlanetShare = 1f;
+
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+        _harness = new SessionHarness(sim);
+        var link = Connect();
+
+        const int Dest = 1;
+        var port = sim.Index.Shuttleports[0];
+        var player = Worlds.Park(sim, link.Session, port.X, port.Z);
+        var realm = Worlds.RealmOf(sim, player);
+
+        link.SendCommand(nameof(BoardShuttle), new RecordValues { ["destCity"] = FieldValue.Of(Dest) });
+        SessionHarness.Until(() => TatooineReplication.Boardings.Queued >= 1, "the boarding ask to be queued by a tick");
+
+        var destPort = sim.Index.Shuttleports[Dest];
+        SessionHarness.Until(
+            () =>
+            {
+                _harness.Ticks(1);
+                return Near(sim, player, destPort.X, destPort.Z, 128f);
+            },
+            $"the player to arrive at city {Dest}'s port on its own planet");
+
+        Assert.That(Worlds.RealmOf(sim, player), Is.EqualTo(realm), "a client that asked for a city was flown to another planet");
     }
 
     private FakeLink Connect()

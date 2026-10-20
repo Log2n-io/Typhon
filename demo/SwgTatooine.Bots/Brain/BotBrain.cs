@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 
 namespace SwgTatooine.Bots.Brain;
 
@@ -11,7 +11,7 @@ public enum Goal
     /// <summary>Going to a city.</summary>
     Travelling,
 
-    /// <summary>Killing what is around a lair.</summary>
+    /// <summary>Killing a creature it has noticed.</summary>
     Hunting,
 
     /// <summary>Standing somewhere plausible for a while.</summary>
@@ -46,9 +46,19 @@ public sealed class BotBrain
 {
     /// <summary>How close counts as arrived, in metres.</summary>
     /// <remarks>
+    /// <para>
     /// A city's radius would be too coarse — a bot would stop at the wall and call it arrival — and a metre would be too
     /// fine for a server that integrates positions per tick: a bot would orbit its destination forever. 24 m is about
     /// five seconds of running, and it is inside every city.
+    /// </para>
+    /// <para>
+    /// <b>This constant was written, argued for, and then not used, and the cost was the whole feature.</b> Arrival
+    /// compared against the city's radius instead, so a bot bound for Port Sable stopped 456 m from its centre — more
+    /// than twice a player's 192 m sphere. The city's structures therefore never entered its store, no shuttleport was
+    /// ever learned, and <see cref="Routing.Plan"/> could not return <see cref="TravelMode.Shuttle"/>, which needs both
+    /// ports. A fleet that never boarded anything was read as a run too short to board in. The test that should have
+    /// caught it placed the body on the city's exact centre, where both thresholds agree.
+    /// </para>
     /// </remarks>
     public const float ArrivedM = 24f;
 
@@ -93,6 +103,13 @@ public sealed class BotBrain
     public BotBrain(City[] cities, uint seed, double ticksPerSecond = 4d)
     {
         ArgumentNullException.ThrowIfNull(cities);
+        if (cities.Length == 0)
+        {
+            // Refused at construction rather than at the first roll, where it was a DivideByZeroException from
+            // `Next() % _cities.Length` several frames into a run.
+            throw new ArgumentException("a brain needs at least one city to travel to", nameof(cities));
+        }
+
         _cities = cities;
         _rng = seed == 0 ? 0x9E3779B9u : seed;   // xorshift is dead at zero, and a caller numbering bots from 0 would hand it one
         var rate = ticksPerSecond > 0d ? ticksPerSecond : 1d;
@@ -107,8 +124,12 @@ public sealed class BotBrain
     /// <summary>What it is doing.</summary>
     public Goal Goal { get; private set; } = Goal.Choosing;
 
-    /// <summary>The city it is going to, or -1.</summary>
-    public int TargetCity { get; private set; } = -1;
+    /// <summary>The REGION it is going to — a city plus one — or 0 when it is not travelling.</summary>
+    /// <remarks>
+    /// A region rather than a city index, so that "no destination" is 0; see <see cref="Perceived.PortRegion"/> for why
+    /// the brain carries the wire's own encoding rather than a sentinel of its own.
+    /// </remarks>
+    public int TargetRegion { get; private set; }
 
     /// <summary>How it decided to get there.</summary>
     public TravelMode Mode { get; private set; } = TravelMode.Run;
@@ -122,6 +143,10 @@ public sealed class BotBrain
     private long _until;
 
     /// <summary>Whether it has already asked to board on this trip, so it asks once rather than every tick.</summary>
+    /// <remarks>
+    /// Once is enough now that a refusal comes back — see <see cref="Perceived.BoardRefused"/>. Asking repeatedly would
+    /// also inflate the server's queued-boarding counter, which is one of the numbers this fleet exists to produce.
+    /// </remarks>
     private bool _asked;
 
     /// <summary>Decides what to do this tick.</summary>
@@ -188,16 +213,26 @@ public sealed class BotBrain
             return Intent.Move(0f, 0);   // stop where it is: speed class 0 is the server's own "stand still"
         }
 
-        var here = CityAt(world.X, world.Z);
-        var destination = (int)(Next() % (uint)_cities.Length);
-        if (destination == here)
+        var here = RegionAt(world.X, world.Z);
+
+        // The city it is standing in is excluded by rolling over the OTHERS, not by nudging a self-selection to the
+        // next index: that nudge made one neighbour twice as likely as every other city, and a fleet that visits one
+        // place twice as often is a load distribution reported as uniform.
+        int destination;
+        if (here != 0 && _cities.Length > 1)
         {
-            destination = (destination + 1) % _cities.Length;
+            var excluded = here - 1;
+            var pick = (int)(Next() % (uint)(_cities.Length - 1));
+            destination = pick < excluded ? pick : pick + 1;
+        }
+        else
+        {
+            destination = (int)(Next() % (uint)_cities.Length);
         }
 
-        TargetCity = destination;
+        TargetRegion = destination + 1;
         var city = _cities[destination];
-        var route = Routing.Plan(new Journey(world.X, world.Z, city.X, city.Z, here, destination, Facilities));
+        var route = Routing.Plan(new Journey(world.X, world.Z, city.X, city.Z, here, TargetRegion, Facilities));
         Mode = route.Mode;
         _portX = route.PortX;
         _portZ = route.PortZ;
@@ -206,7 +241,7 @@ public sealed class BotBrain
         return Travel(in world, tick);
     }
 
-    /// <summary>Attacks what is near the lair, and leaves when there is nothing left to attack.</summary>
+    /// <summary>Closes on the creature it noticed and attacks it, and gives up when it is gone or too far.</summary>
     /// <param name="world">What the bot was sent.</param>
     /// <param name="tick">The fleet's tick.</param>
     /// <returns>The command.</returns>
@@ -215,6 +250,15 @@ public sealed class BotBrain
         if (world.NearestCreature == 0)
         {
             // Killed, or it wandered out of view. Nothing to hunt, so decide again.
+            Goal = Goal.Choosing;
+            return Choose(in world, tick);
+        }
+
+        // Out of the range it bothers at: give up and decide again. Without this the only exit was an empty sphere, so
+        // a bot in a creature-dense place re-targeted whatever was nearest every tick, for the whole run, and never
+        // travelled anywhere — the goal had no end, which is not the same as a goal that takes a long time.
+        if (world.NearestCreatureM > NoticeM)
+        {
             Goal = Goal.Choosing;
             return Choose(in world, tick);
         }
@@ -237,20 +281,20 @@ public sealed class BotBrain
     /// <returns>The command.</returns>
     private Intent Travel(in Perceived world, long tick)
     {
-        if (TargetCity < 0 || TargetCity >= _cities.Length)
+        if (TargetRegion <= 0 || TargetRegion > _cities.Length)
         {
             Goal = Goal.Choosing;
             return Choose(in world, tick);
         }
 
-        var city = _cities[TargetCity];
-        if (Routing.Distance(world.X, world.Z, city.X, city.Z) <= city.Radius)
+        var city = _cities[TargetRegion - 1];
+        if (Routing.Distance(world.X, world.Z, city.X, city.Z) <= ArrivedM)
         {
             // Arrived. Idle a while rather than choosing again at once: a fleet that re-decided on arrival would travel
             // without pause, and a city nobody stands in is a city whose group set is never held.
             Goal = Goal.Idling;
             _until = tick + _idleTicks;
-            TargetCity = -1;
+            TargetRegion = 0;
             return Intent.Move(0f, 0);
         }
 
@@ -261,12 +305,12 @@ public sealed class BotBrain
 
         // Flying: walk to this city's port, then ask. The ask is refused unless the body is at the port, so the walk is
         // not optional and the refusal is the feedback if the port has been misremembered.
-        if (world.PortCity >= 0 && !_asked)
+        if (world.PortRegion != 0 && !_asked)
         {
             _asked = true;
             Goal = Goal.Waiting;
             _until = tick + _patienceTicks;
-            return Intent.Board(TargetCity);
+            return Intent.Board(TargetRegion);
         }
 
         return Intent.Move(Routing.HeadingTo(world.X, world.Z, _portX, _portZ), Routing.SpeedClassOf(TravelMode.Run));
@@ -283,16 +327,24 @@ public sealed class BotBrain
     /// </remarks>
     private Intent Wait(in Perceived world, long tick)
     {
-        if (TargetCity >= 0 && TargetCity < _cities.Length)
+        // Arrival after a flight is being INSIDE the city asked for, not within ArrivedM of its centre: the server puts
+        // the body down at the destination's port, which can be most of a radius from the middle. Walking there is then
+        // an ordinary arrival, and the two questions are deliberately different ones.
+        if (TargetRegion > 0 && RegionAt(world.X, world.Z) == TargetRegion)
         {
-            var city = _cities[TargetCity];
-            if (Routing.Distance(world.X, world.Z, city.X, city.Z) <= city.Radius)
-            {
-                Goal = Goal.Idling;
-                _until = tick + _idleTicks;
-                TargetCity = -1;
-                return Intent.Move(0f, 0);
-            }
+            Goal = Goal.Idling;
+            _until = tick + _idleTicks;
+            TargetRegion = 0;
+            return Intent.Move(0f, 0);
+        }
+
+        // The ask was refused, so there is nothing to wait for. Without this the bot stood at the port for the full
+        // patience — four minutes — because the only thing it watched for was a position change that was never coming.
+        if (world.BoardRefused)
+        {
+            Mode = TravelMode.Speeder;
+            Goal = Goal.Travelling;
+            return Travel(in world, tick);
         }
 
         if (tick < _until)
@@ -306,21 +358,25 @@ public sealed class BotBrain
         return Travel(in world, tick);
     }
 
-    /// <summary>The city whose disc contains a point, or -1.</summary>
+    /// <summary>The REGION whose city disc contains a point — a city plus one — or 0 out in the desert.</summary>
     /// <param name="x">East.</param>
     /// <param name="z">North.</param>
-    /// <returns>The city, or -1.</returns>
-    public int CityAt(float x, float z)
+    /// <returns>The region, or 0.</returns>
+    /// <remarks>
+    /// The disc and not <see cref="ArrivedM"/>, because this answers "which city am I in", which is what a route's
+    /// first leg and a flight's arrival both need. Arrival on foot is a different question and uses the tighter one.
+    /// </remarks>
+    public int RegionAt(float x, float z)
     {
         for (var i = 0; i < _cities.Length; i++)
         {
             if (Routing.Distance(x, z, _cities[i].X, _cities[i].Z) <= _cities[i].Radius)
             {
-                return i;
+                return i + 1;
             }
         }
 
-        return -1;
+        return 0;
     }
 
     /// <summary>xorshift32: deterministic, allocation-free, and owned by this bot alone.</summary>

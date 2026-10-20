@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net.Http;
@@ -875,10 +875,13 @@ public sealed class BotSwarm : IAsyncDisposable
     /// or never reached a port looks exactly like a healthy fleet of walkers, and the first version of this sent two intents per
     /// session in 45 seconds while every number in the report said the run was fine.
     /// </remarks>
-    public (long Boardings, long Hunts) Decisions()
+    public (long Boardings, long Hunts, int PortsKnownMax, int BotsThatCanFly, int Creatures) Decisions()
     {
         long boardings = 0;
         long hunts = 0;
+        var portsMax = 0;
+        var canFly = 0;
+        var creatures = 0;
         foreach (var bot in Bots)
         {
             if (bot == null)
@@ -888,9 +891,21 @@ public sealed class BotSwarm : IAsyncDisposable
 
             boardings += Volatile.Read(ref bot.BoardingsAsked);
             hunts += Volatile.Read(ref bot.HuntsStarted);
+
+            // What the brain has LEARNED, which is the precondition of the two counters above and the thing their
+            // absence does not distinguish from a brain that is working. A fleet with no boardings because no bot knows
+            // two ports is a different report from one that knows them and never chooses to fly, and both read as 0.
+            var ports = bot.PortsKnown();
+            portsMax = Math.Max(portsMax, ports);
+            if (ports >= 2)
+            {
+                canFly++;
+            }
+
+            creatures = Math.Max(creatures, Volatile.Read(ref bot.CreaturesSeenMax));
         }
 
-        return (boardings, hunts);
+        return (boardings, hunts, portsMax, canFly, creatures);
     }
 
     private readonly Dictionary<ushort, int> _disconnects = [];
@@ -2130,10 +2145,17 @@ public sealed class BotSwarm : IAsyncDisposable
         public long RealmSwitches;
         public long IntentsSent;
 
-        /// <summary>Shuttle boardings this bot has asked for, and lairs it has decided to hunt: what the brain actually did.</summary>
+        /// <summary>Shuttle boardings this bot has asked for, and hunts it has begun: what the brain actually did.</summary>
         public long BoardingsAsked;
 
         public long HuntsStarted;
+
+        /// <summary>The most creatures this bot has ever had in view at once, so an empty sky can be told from a blind scan.</summary>
+        public int CreaturesSeenMax;
+
+        /// <summary>How many shuttleports this brain has learned: 2 is the fewest that lets it fly anywhere.</summary>
+        /// <returns>The count.</returns>
+        public int PortsKnown() => _brain?.Facilities.Count ?? 0;
 
         /// <summary>This bot's own decision loop and the eye that feeds it; null unless the run is thinking.</summary>
         private readonly BotBrain _brain;
@@ -2312,7 +2334,23 @@ public sealed class BotSwarm : IAsyncDisposable
             }
 
             var world = _eyes.Read(Client.Store, _brain.Facilities);
+            if (world.NearestCreature != 0)
+            {
+                CreaturesSeenMax = Math.Max(CreaturesSeenMax, 1);
+            }
+
+            var before = _brain.Goal;
             var intent = _brain.Decide(in world, tick);
+
+            // Counted on the TRANSITION into hunting, not on each SetTarget. A hunt re-names its target every tick it
+            // is in strike range, so counting sends made a dozen bots look like five hundred hunts — and this counter
+            // exists because an earlier version's silence was invisible, so a counter that overstates is worse than
+            // none at all.
+            if (_brain.Goal == Goal.Hunting && before != Goal.Hunting)
+            {
+                HuntsStarted++;
+            }
+
             switch (intent.Kind)
             {
                 case IntentKind.Move when Client.Plan.CommandByName(MoveDirCommand) != null:
@@ -2334,13 +2372,14 @@ public sealed class BotSwarm : IAsyncDisposable
                         new RecordValues { ["netId"] = FieldValue.Of((double)intent.NetId) },
                         ct).ConfigureAwait(false);
                     IntentsSent++;
-                    HuntsStarted++;
                     break;
 
                 case IntentKind.Board when Client.Plan.CommandByName(BoardShuttleCommand) != null:
+                    // The one place the brain's regions meet the wire's city index, and the only -1 in the bot: the
+                    // brain carries a city plus one so that absence is 0, and `BoardShuttle` names a bare city.
                     await Client.SendCommandAsync(
                         BoardShuttleCommand,
-                        new RecordValues { ["destCity"] = FieldValue.Of((double)intent.City) },
+                        new RecordValues { ["destCity"] = FieldValue.Of((double)(intent.Region - 1)) },
                         ct).ConfigureAwait(false);
                     IntentsSent++;
                     BoardingsAsked++;

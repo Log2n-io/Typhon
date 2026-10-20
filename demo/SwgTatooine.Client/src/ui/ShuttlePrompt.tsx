@@ -41,7 +41,9 @@ export function ShuttlePrompt() {
             <button
               key={city.name}
               type="button"
-              onClick={() => boardShuttle(index)}
+              onClick={() => {
+                boardShuttle(index);
+              }}
               title={`Queue for the next shuttle to ${city.name}`}
             >
               {city.name}

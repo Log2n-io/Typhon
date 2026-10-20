@@ -28,10 +28,14 @@ public enum TravelMode
 /// <param name="FromZ">Where the bot is, north.</param>
 /// <param name="ToX">Where it wants to be, east.</param>
 /// <param name="ToZ">Where it wants to be, north.</param>
-/// <param name="FromCity">The city it is standing in, or -1 out in the desert.</param>
-/// <param name="ToCity">The city it is going to.</param>
+/// <param name="FromRegion">The region it is standing in, as a city plus one; 0 out in the desert.</param>
+/// <param name="ToRegion">The region it is going to, as a city plus one.</param>
 /// <param name="Map">What it has learned about the cities' facilities.</param>
-public readonly record struct Journey(float FromX, float FromZ, float ToX, float ToZ, int FromCity, int ToCity, FacilityMap Map);
+/// <remarks>
+/// <b>Regions rather than city indices, so that "nowhere" is 0.</b> The map is keyed by the region the wire carries and
+/// a region is a city plus one; standing in the desert is the absence of one, which is 0 here and never -1.
+/// </remarks>
+public readonly record struct Journey(float FromX, float FromZ, float ToX, float ToZ, int FromRegion, int ToRegion, FacilityMap Map);
 
 /// <summary>A chosen route.</summary>
 /// <param name="Mode">How to travel.</param>
@@ -89,19 +93,23 @@ public static class Routing
         var direct = Distance(journey.FromX, journey.FromZ, journey.ToX, journey.ToZ);
         var best = new Route(TravelMode.Run, direct / RunMps, 0f, 0f);
 
+        // Riding wins every direct comparison while MountSeconds is 0, because 24 m/s beats 5 m/s over any distance.
+        // The comparison is written out rather than collapsed because MountSeconds is the constant that makes it a real
+        // comparison, and a server that grows a vehicle to call is the server where running becomes the right answer
+        // over a street's width.
         var riding = (direct / SpeederMps) + MountSeconds;
         if (riding < best.Seconds)
         {
             best = new Route(TravelMode.Speeder, riding, 0f, 0f);
         }
 
-        if (journey.FromCity < 0 || journey.Map == null)
+        if (journey.FromRegion <= 0 || journey.Map == null)
         {
             return best;   // out in the desert there is no port to walk to, which is the ordinary travel case
         }
 
-        if (!journey.Map.TryFind(journey.FromCity, ShuttleportKind, out var from)
-            || !journey.Map.TryFind(journey.ToCity, ShuttleportKind, out var to))
+        if (!journey.Map.TryFind(journey.FromRegion, ShuttleportKind, out var from)
+            || !journey.Map.TryFind(journey.ToRegion, ShuttleportKind, out var to))
         {
             return best;
         }

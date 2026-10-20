@@ -464,7 +464,10 @@ Console.WriteLine(intentsSent == 0
 if (brain)
 {
     var decisions = swarm.Decisions();
-    Console.WriteLine($"brain: {decisions.Boardings} shuttle boarding(s) asked for, {decisions.Hunts} hunt(s) begun");
+    Console.WriteLine(
+        $"brain: {decisions.Boardings} shuttle boarding(s) asked for, {decisions.Hunts} hunt(s) begun; "
+        + $"{decisions.PortsKnownMax} port(s) known by the best-travelled bot, {decisions.BotsThatCanFly} bot(s) know two or more, "
+        + $"{(decisions.Creatures > 0 ? "a creature was in view at least once" : "no creature was EVER in view")}");
 }
 
 if (swarm.Disconnects.Count == 0)

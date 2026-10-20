@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using NUnit.Framework;
 using SwgTatooine.Bots.Brain;
 
@@ -25,8 +26,6 @@ public sealed class BotBrainChecks
         X = x,
         Z = z,
         Realm = 0,
-        HealthFraction = 1f,
-        PortCity = -1,
     };
 
     /// <summary>A camera has no body, so it has nothing to decide and must send nothing.</summary>
@@ -59,16 +58,21 @@ public sealed class BotBrainChecks
     public void ACreatureInViewIsWalkedToAndThenAttacked()
     {
         var brain = Brain();
-        var far = Empty(0f, 0f) with { NearestCreature = 42u, NearestCreatureX = 0f, NearestCreatureZ = 100f, NearestCreatureM = 100f };
+        // ASYMMETRIC on purpose: 30 m east and 40 m north. Both coordinates on one axis — the creature due north of the
+        // bot — makes dx zero, and a zero term cannot show a sign error: atan2(100, -0) is the same quarter turn as
+        // atan2(100, +0), so negating the X term passed. A 3-4-5 triangle pins the angle to one value no mirroring or
+        // sign flip reproduces.
+        var far = Empty(0f, 0f) with { NearestCreature = 42u, NearestCreatureX = 30f, NearestCreatureZ = 40f, NearestCreatureM = 50f };
         var approach = brain.Decide(in far, 1);
 
         Assert.Multiple(() =>
         {
             Assert.That(brain.Goal, Is.EqualTo(Goal.Hunting), "a creature in view did not become a hunt");
-            Assert.That(approach.Kind, Is.EqualTo(IntentKind.Move), "a creature 100 m away was attacked rather than approached");
+            Assert.That(approach.Kind, Is.EqualTo(IntentKind.Move), "a creature 50 m away was attacked rather than approached");
 
-            // The server's convention: 0 along +X, measured toward +Z. Due north is therefore a quarter turn.
-            Assert.That(approach.Heading, Is.EqualTo(MathF.PI / 2f).Within(0.01f), "the heading does not point at the creature");
+            // The server's convention: 0 along +X, measured toward +Z, so the arguments to Atan2 are (dz, dx).
+            Assert.That(approach.Heading, Is.EqualTo(MathF.Atan2(40f, 30f)).Within(0.001f), "the heading does not point at the creature");
+            Assert.That(approach.Heading, Is.EqualTo(0.9273f).Within(0.001f), "the heading is not the angle a 3-4-5 triangle makes");
         });
 
         var close = Empty(0f, 90f) with { NearestCreature = 99u, NearestCreatureX = 0f, NearestCreatureZ = 100f, NearestCreatureM = 10f };
@@ -108,23 +112,86 @@ public sealed class BotBrainChecks
         // journey is kilometres and the shuttle wins — so this asserts the decision rather than a particular roll.
         for (var i = 0; i < BotMap.Cities.Length; i++)
         {
-            brain.Facilities.Observe(i, Routing.ShuttleportKind, BotMap.Cities[i].X, BotMap.Cities[i].Z);
+            brain.Facilities.Observe(i + 1, Routing.ShuttleportKind, BotMap.Cities[i].X, BotMap.Cities[i].Z);
         }
 
         var here = BotMap.Cities[0];
         var asked = Intent.None;
         for (var tick = 1; tick < 400 && asked.Kind != IntentKind.Board; tick++)
         {
-            var world = Empty(here.X, here.Z) with { PortCity = 0 };
+            var world = Empty(here.X, here.Z) with { PortRegion = 1 };
             asked = brain.Decide(in world, tick);
         }
 
         Assert.Multiple(() =>
         {
             Assert.That(asked.Kind, Is.EqualTo(IntentKind.Board), "a bot standing at a port, knowing every port, never asked to fly");
-            Assert.That(asked.City, Is.Not.Zero, "it asked to fly to the city it is standing in");
+
+            // Against the region it is STANDING in, not against 0: `Is.Not.Zero` was unfalsifiable here, because the
+            // only way to reach a Board is through the arrival test, and arriving at the city it is in ends the journey
+            // before any ask. The claim is "it did not ask to fly to where it already is", so that is the assertion.
+            Assert.That(asked.Region, Is.Not.EqualTo(1), "it asked to fly to the city it is standing in");
+            Assert.That(asked.Region, Is.InRange(2, BotMap.Cities.Length), "the destination is not a region on the map");
             Assert.That(brain.Goal, Is.EqualTo(Goal.Waiting), "asking to board did not put the bot into waiting");
         });
+    }
+
+    /// <summary>A refused boarding is noticed at once and travelled around, instead of standing at the port.</summary>
+    /// <remarks>
+    /// The server answers a boarding it will not accept with an <c>ACKS</c> reason, and the brain's patience is two
+    /// shuttle intervals — four minutes. Without reading the refusal a bot stood there for all of it, because the only
+    /// thing it watched for was a position change that was never coming. This is the test that fails if the refusal
+    /// path is removed.
+    /// </remarks>
+    [Test]
+    public void ARefusedBoardingTravelsInsteadOfWaiting()
+    {
+        var brain = Brain();
+        for (var i = 0; i < BotMap.Cities.Length; i++)
+        {
+            brain.Facilities.Observe(i + 1, Routing.ShuttleportKind, BotMap.Cities[i].X, BotMap.Cities[i].Z);
+        }
+
+        var here = BotMap.Cities[0];
+        var tick = 1L;
+        var asked = Intent.None;
+        for (; tick < 400 && asked.Kind != IntentKind.Board; tick++)
+        {
+            asked = brain.Decide(Empty(here.X, here.Z) with { PortRegion = 1 }, tick);
+        }
+
+        Assert.That(brain.Goal, Is.EqualTo(Goal.Waiting), "the premise failed: the bot never got as far as waiting for a shuttle");
+
+        var refused = Empty(here.X, here.Z) with { PortRegion = 1, BoardRefused = true };
+        var next = brain.Decide(in refused, tick);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Travelling), "a refused boarding left the bot waiting for a shuttle it will never be given");
+            Assert.That(next.Kind, Is.EqualTo(IntentKind.Move), "a refused boarding sent no movement");
+            Assert.That(next.SpeedClass, Is.Not.Zero, "it stood still after being refused");
+        });
+    }
+
+    /// <summary>A quarry that retreats out of notice range is given up on, even while it is still in view.</summary>
+    /// <remarks>
+    /// The sphere is 192 m and <see cref="BotBrain.NoticeM"/> is 120: between the two, a creature is visible and not
+    /// worth chasing. The first version's only exit from a hunt was an EMPTY sphere, so a bot in a creature-dense place
+    /// re-targeted whatever was nearest every tick and never travelled again — a goal with no end rather than a long
+    /// one. A test that only moved the creature out of view entirely could not see the difference.
+    /// </remarks>
+    [Test]
+    public void AQuarryBeyondNoticeRangeIsGivenUpOn()
+    {
+        var brain = Brain();
+        var near = Empty(0f, 0f) with { NearestCreature = 42u, NearestCreatureZ = 100f, NearestCreatureM = 100f };
+        brain.Decide(in near, 1);
+        Assert.That(brain.Goal, Is.EqualTo(Goal.Hunting), "the premise failed: a creature at 100 m did not become a hunt");
+
+        var retreated = Empty(0f, 0f) with { NearestCreature = 42u, NearestCreatureZ = 170f, NearestCreatureM = 170f };
+        brain.Decide(in retreated, 2);
+
+        Assert.That(brain.Goal, Is.Not.EqualTo(Goal.Hunting), "the bot chased a creature past the range it had decided to bother at");
     }
 
     /// <summary>A hunt whose quarry leaves view decides again rather than standing there.</summary>
@@ -156,16 +223,113 @@ public sealed class BotBrainChecks
         Assert.That(brain.Goal, Is.EqualTo(Goal.Travelling), "the brain never chose to travel; the goal roll must have changed");
         Assert.That(last.Kind, Is.EqualTo(IntentKind.Move), "a travelling bot sent no movement");
 
-        var city = BotMap.Cities[brain.TargetCity];
-        var arrived = Empty(city.X, city.Z);
-        var stop = brain.Decide(in arrived, 100);
+        var city = BotMap.Cities[brain.TargetRegion - 1];
+
+        // THE CITY'S EDGE IS NOT ARRIVAL, and this is the assertion the first version of this test was missing. It put
+        // the body on the city's exact centre, where every candidate threshold agrees, so it passed just as well
+        // against the radius — which is what the code actually compared, leaving a bot bound for a 456 m city standing
+        // 456 m short of it, outside its own 192 m sphere, never seeing the shuttleport it had come for.
+        var atTheWall = Empty(city.X + city.Radius - 1f, city.Z);
+        var keepGoing = brain.Decide(in atTheWall, 100);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Travelling), "the bot stopped at the city wall and called it arrival");
+            Assert.That(keepGoing.Kind, Is.EqualTo(IntentKind.Move), "a bot short of its destination sent no movement");
+            Assert.That(keepGoing.SpeedClass, Is.Not.Zero, "a bot short of its destination stopped moving");
+        });
+
+        var arrived = Empty(city.X + BotBrain.ArrivedM - 1f, city.Z);
+        var stop = brain.Decide(in arrived, 101);
 
         Assert.Multiple(() =>
         {
             Assert.That(brain.Goal, Is.EqualTo(Goal.Idling), "arriving did not end the journey");
             Assert.That(stop.Kind, Is.EqualTo(IntentKind.Move), "arrival sent no command");
             Assert.That(stop.SpeedClass, Is.Zero, "arriving must stop the body, which is speed class 0");
+            Assert.That(brain.TargetRegion, Is.Zero, "arriving left the destination set, so 0 no longer means 'not travelling'");
         });
+    }
+
+    /// <summary>A flight's arrival is being inside the city asked for, not within walking tolerance of its centre.</summary>
+    /// <remarks>
+    /// The server puts a passenger down at the DESTINATION's port, which can be most of a radius from the middle, so a
+    /// shuttle that worked would otherwise look to the brain like a flight that never happened — and the bot would
+    /// stand at its new port until its patience ran out.
+    /// </remarks>
+    [Test]
+    public void LandingAnywhereInTheTargetCityEndsTheFlight()
+    {
+        var brain = Brain();
+        for (var i = 0; i < BotMap.Cities.Length; i++)
+        {
+            brain.Facilities.Observe(i + 1, Routing.ShuttleportKind, BotMap.Cities[i].X, BotMap.Cities[i].Z);
+        }
+
+        var here = BotMap.Cities[0];
+        var tick = 1L;
+        var asked = Intent.None;
+        for (; tick < 400 && asked.Kind != IntentKind.Board; tick++)
+        {
+            asked = brain.Decide(Empty(here.X, here.Z) with { PortRegion = 1 }, tick);
+        }
+
+        Assert.That(brain.Goal, Is.EqualTo(Goal.Waiting), "the premise failed: the bot never asked to board");
+
+        // Put it down near the edge of the city it asked for — a port's distance from the centre, not an arrival's.
+        var destination = BotMap.Cities[asked.Region - 1];
+        var landed = Empty(destination.X + destination.Radius - 2f, destination.Z);
+        var stop = brain.Decide(in landed, tick + 1);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Idling), "landing inside the city it flew to was not recognised as arrival");
+            Assert.That(stop.SpeedClass, Is.Zero, "a bot that has arrived kept moving");
+        });
+    }
+
+    /// <summary>The city a bot stands in is excluded by rolling over the others, so no neighbour is twice as likely.</summary>
+    /// <remarks>
+    /// <b>A distribution, because the defect was a distribution.</b> Excluding the current city by nudging a
+    /// self-selection to the next index gave that one neighbour two of the seven rolls: a fleet that visited one place
+    /// twice as often as the rest, reported as uniform. The seeds are fixed, so this is a property of a known sequence
+    /// and not a sample — it either holds or it does not, on every run.
+    /// </remarks>
+    [Test]
+    public void TheCityItStandsInIsExcludedWithoutFavouringItsNeighbour()
+    {
+        const int Brains = 700;
+        var chosen = new int[BotMap.Cities.Length + 1];
+        var here = BotMap.Cities[0];
+        var travels = 0;
+        for (var seed = 1u; seed <= Brains; seed++)
+        {
+            var brain = new BotBrain(BotMap.Cities, seed);
+            for (var tick = 1L; tick <= 20 && brain.Goal != Goal.Travelling; tick++)
+            {
+                brain.Decide(Empty(here.X, here.Z), tick * 100);   // × 100 so an idle has always expired by the next look
+            }
+
+            if (brain.Goal != Goal.Travelling)
+            {
+                continue;
+            }
+
+            chosen[brain.TargetRegion]++;
+            travels++;
+        }
+
+        Assert.That(travels, Is.GreaterThan(Brains / 2), "the premise failed: most brains never chose to travel");
+        Assert.That(chosen[1], Is.Zero, "a bot chose to travel to the city it was already standing in");
+
+        var share = travels / (double)(BotMap.Cities.Length - 1);
+        for (var region = 2; region <= BotMap.Cities.Length; region++)
+        {
+            Assert.That(
+                chosen[region],
+                Is.InRange(share * 0.6, share * 1.5),
+                $"region {region} took {chosen[region]} of {travels} travels against an even share of {share:F0}");
+        }
     }
 
     /// <summary>Two brains with the same seed make the same decisions, which is what makes a fleet reproducible.</summary>
@@ -174,25 +338,72 @@ public sealed class BotBrainChecks
     {
         var a = Brain(12345u);
         var b = Brain(12345u);
+        // THE TICKS ARE SPACED, and that is what makes the comparison mean anything. An idle lasts 80 driver ticks, so
+        // sixty consecutive ticks are one roll followed by fifty-nine refusals to act: two brains that both happened to
+        // idle first produced identical sequences whatever their seeds, and the negative control below failed on
+        // exactly that before the spacing was added. Spaced ticks let every goal run to its end and the next begin.
+        var travelled = 0;
         for (var tick = 1; tick <= 60; tick++)
         {
-            Assert.That(a.Decide(Empty(10f, 20f), tick), Is.EqualTo(b.Decide(Empty(10f, 20f), tick)), $"two bots with one seed diverged at tick {tick}");
+            var left = a.Decide(Empty(10f, 20f), tick * 100);
+            Assert.That(left, Is.EqualTo(b.Decide(Empty(10f, 20f), tick * 100)), $"two bots with one seed diverged at tick {tick}");
+            if (left.SpeedClass != 0)
+            {
+                travelled++;
+            }
         }
+
+        // Without these two, a brain that ignored its seed entirely — or one that only ever stood still — would pass:
+        // equality of two sequences says nothing unless the sequences contain decisions and differ for different seeds.
+        Assert.That(travelled, Is.GreaterThan(0), "the compared sequences never moved, so equality proved nothing");
+
+        // The negative control is on the DESTINATIONS and not on the intent stream, because a bot in a world that never
+        // changes never arrives: it chooses once and re-sends the same heading for every tick after, so the whole
+        // sequence is one decision and two seeds that pick the same of seven cities produce identical streams. Seeds
+        // 999 and 12345 do exactly that, which is how this control failed while the generator was working perfectly.
+        var destinations = new HashSet<int>();
+        for (var seed = 1u; seed <= 8u; seed++)
+        {
+            var brain = new BotBrain(BotMap.Cities, seed);
+            for (var tick = 1L; tick <= 20 && brain.Goal != Goal.Travelling; tick++)
+            {
+                brain.Decide(Empty(10f, 20f), tick * 100);
+            }
+
+            if (brain.Goal == Goal.Travelling)
+            {
+                destinations.Add(brain.TargetRegion);
+            }
+        }
+
+        Assert.That(destinations, Has.Count.GreaterThan(1), "eight differently seeded bots all chose the same city, so the seed is not being read");
     }
 
     /// <summary>A bot numbered 0 still decides: xorshift is dead at zero and the constructor must not hand it one.</summary>
+    /// <remarks>
+    /// <b>The assertion is that the bot TRAVELS, not that it does something.</b> A dead xorshift returns 0 for every
+    /// roll, and a roll of 0 is under the idle threshold — so the brain idles, and an idle's first command is
+    /// <c>Move(0, 0)</c>, whose <c>Kind</c> is not <c>None</c>. The old assertion therefore passed with the exact
+    /// generator it was named after: remove the constructor's guard and it stayed green. A speed class that is not zero
+    /// cannot come out of an endless idle.
+    /// </remarks>
     [Test]
     public void ASeedOfZeroStillDecides()
     {
         var brain = Brain(0u);
-        var moved = false;
-        for (var tick = 1; tick <= 40 && !moved; tick++)
+        var travelled = false;
+        for (var tick = 1; tick <= 40 && !travelled; tick++)
         {
-            moved = brain.Decide(Empty(0f, 0f), tick).Kind != IntentKind.None;
+            travelled = brain.Decide(Empty(0f, 0f), tick * 100).SpeedClass != 0;
         }
 
-        Assert.That(moved, Is.True, "a bot seeded 0 never did anything, which is what a dead xorshift looks like");
+        Assert.That(travelled, Is.True, "a bot seeded 0 only ever stood still, which is what a dead xorshift looks like");
     }
+
+    /// <summary>A brain with no cities is refused at construction rather than dividing by zero mid-run.</summary>
+    [Test]
+    public void ABrainWithNoCitiesIsRefused()
+        => Assert.That(() => new BotBrain([], 7u), Throws.TypeOf<ArgumentException>(), "an empty map was accepted and would divide by zero on the first roll");
 }
 
 /// <summary>
@@ -213,26 +424,32 @@ public sealed class RoutingChecks
     public void AShortHopIsNeverWorthAShuttle()
     {
         var map = new FacilityMap();
-        map.Observe(0, Port, 0f, 0f);
-        map.Observe(1, Port, 100f, 0f);
+        map.Observe(1, Port, 0f, 0f);
+        map.Observe(2, Port, 100f, 0f);
 
-        var route = Routing.Plan(new Journey(0f, 0f, 80f, 0f, 0, 1, map));
+        var route = Routing.Plan(new Journey(0f, 0f, 80f, 0f, 1, 2, map));
         Assert.That(route.Mode, Is.Not.EqualTo(TravelMode.Shuttle), "an 80 m hop was flown, which costs a minute of waiting to save three seconds");
     }
 
-    /// <summary>Crossing the planet is flown, once both ports are known.</summary>
+    /// <summary>Crossing the planet is flown, once both ports are known, and the route names the near port.</summary>
+    /// <remarks>
+    /// <b>The near port is deliberately NOT where the bot is standing.</b> It used to be, and that made the assertion on
+    /// <c>PortX</c> a tautology: returning the journey's own origin instead of the port's position passed, and
+    /// <c>PortZ</c> was never asserted at all. 300 m of offset on both axes is what makes the two distinguishable.
+    /// </remarks>
     [Test]
     public void CrossingThePlanetIsFlown()
     {
         var map = new FacilityMap();
-        map.Observe(0, Port, 3460f, -4768f);
-        map.Observe(2, Port, -2890f, 2198f);
+        map.Observe(1, Port, 3760f, -4468f);
+        map.Observe(3, Port, -2890f, 2198f);
 
-        var route = Routing.Plan(new Journey(3460f, -4768f, -2890f, 2198f, 0, 2, map));
+        var route = Routing.Plan(new Journey(3460f, -4768f, -2890f, 2198f, 1, 3, map));
         Assert.Multiple(() =>
         {
             Assert.That(route.Mode, Is.EqualTo(TravelMode.Shuttle), "a 10 km crossing was walked or ridden");
-            Assert.That(route.PortX, Is.EqualTo(3460f), "the route must name the port to walk to first");
+            Assert.That(route.PortX, Is.EqualTo(3760f), "the route must name the port to walk to first, not where the bot is standing");
+            Assert.That(route.PortZ, Is.EqualTo(-4468f), "the route's port is on the wrong axis");
         });
     }
 
@@ -248,13 +465,13 @@ public sealed class RoutingChecks
     public void AnUnknownFarPortIsNotFlownTo()
     {
         var map = new FacilityMap();
-        map.Observe(0, Port, 3460f, -4768f);
+        map.Observe(1, Port, 3460f, -4768f);
 
-        var route = Routing.Plan(new Journey(3460f, -4768f, -2890f, 2198f, 0, 2, map));
+        var route = Routing.Plan(new Journey(3460f, -4768f, -2890f, 2198f, 1, 3, map));
         Assert.That(route.Mode, Is.Not.EqualTo(TravelMode.Shuttle), "the bot flew to a port it has never seen");
 
-        map.Observe(2, Port, -2890f, 2198f);
-        var informed = Routing.Plan(new Journey(3460f, -4768f, -2890f, 2198f, 0, 2, map));
+        map.Observe(3, Port, -2890f, 2198f);
+        var informed = Routing.Plan(new Journey(3460f, -4768f, -2890f, 2198f, 1, 3, map));
         Assert.That(informed.Mode, Is.EqualTo(TravelMode.Shuttle), "having learned the far port changed nothing, so the map is not being read");
     }
 
@@ -263,31 +480,72 @@ public sealed class RoutingChecks
     public void FromTheDesertThereIsNoShuttle()
     {
         var map = new FacilityMap();
-        map.Observe(0, Port, 3460f, -4768f);
-        map.Observe(2, Port, -2890f, 2198f);
+        map.Observe(1, Port, 3460f, -4768f);
+        map.Observe(3, Port, -2890f, 2198f);
 
-        var route = Routing.Plan(new Journey(0f, 0f, -2890f, 2198f, -1, 2, map));
+        var route = Routing.Plan(new Journey(0f, 0f, -2890f, 2198f, 0, 3, map));
         Assert.That(route.Mode, Is.Not.EqualTo(TravelMode.Shuttle), "a bot in the open desert boarded a shuttle from nowhere");
     }
 
-    /// <summary>The learned map answers by city and kind, and forgets nothing it has seen.</summary>
+    /// <summary>A journey too short to fly is RIDDEN rather than run, and the speed classes are the server's.</summary>
+    /// <remarks>
+    /// <b>Nothing asserted that a speeder was ever chosen.</b> Every other case here is "(not) the shuttle", so deleting
+    /// the speeder branch outright left them all green — and the speed class a mode asks for, which is the only part of
+    /// a route that reaches the wire, had no test of its own at all.
+    /// </remarks>
+    [Test]
+    public void AJourneyTooShortToFlyIsRidden()
+    {
+        var map = new FacilityMap();
+        map.Observe(1, Port, 0f, 0f);
+        map.Observe(2, Port, 900f, 0f);
+
+        var route = Routing.Plan(new Journey(0f, 0f, 900f, 0f, 1, 2, map));
+        Assert.Multiple(() =>
+        {
+            Assert.That(route.Mode, Is.EqualTo(TravelMode.Speeder), "a 900 m ride was run on foot or flown");
+            Assert.That(route.Seconds, Is.EqualTo(900d / Routing.SpeederMps).Within(0.001), "the ride was not costed at the speeder's speed");
+            Assert.That(Routing.SpeedClassOf(TravelMode.Speeder), Is.EqualTo(4), "a speeder must ask for the class the server grants a speeder");
+            Assert.That(Routing.SpeedClassOf(TravelMode.Run), Is.EqualTo(2), "running must ask for the run class");
+            Assert.That(Routing.SpeedClassOf(TravelMode.Shuttle), Is.EqualTo(2), "walking to a port is done at a run");
+        });
+    }
+
+    /// <summary>The learned map answers by region and kind, and forgets nothing it has seen.</summary>
     [Test]
     public void TheMapRemembersWhatItWasShown()
     {
         var map = new FacilityMap();
-        Assert.That(map.TryFind(3, Port, out _), Is.False, "an unseen city answered");
+        Assert.That(map.TryFind(4, Port, out _), Is.False, "an unseen region answered");
 
-        map.Observe(3, Port, 10f, 20f);
-        map.Observe(3, 1, 30f, 40f);
-        map.Observe(-1, Port, 50f, 60f);
+        map.Observe(4, Port, 10f, 20f);
+        map.Observe(4, 1, 30f, 40f);
+        map.Observe(0, Port, 50f, 60f);
 
         Assert.Multiple(() =>
         {
-            Assert.That(map.TryFind(3, Port, out var port), Is.True);
+            Assert.That(map.TryFind(4, Port, out var port), Is.True);
             Assert.That(port, Is.EqualTo((10f, 20f)));
-            Assert.That(map.TryFind(3, 1, out var terminal), Is.True, "two kinds in one city must not overwrite each other");
+            Assert.That(map.TryFind(4, 1, out var terminal), Is.True, "two kinds in one city must not overwrite each other");
             Assert.That(terminal, Is.EqualTo((30f, 40f)));
-            Assert.That(map.Count, Is.EqualTo(2), "a facility in no city was remembered under something");
+            Assert.That(map.Count, Is.EqualTo(2), "a facility in no region was remembered under something");
+            Assert.That(map.TryFind(0, Port, out _), Is.False, "region 0 means 'no region', so nothing can be filed under it");
         });
+    }
+
+    /// <summary>A second sighting does not move a facility, and the first one stands.</summary>
+    /// <remarks>
+    /// These structures never move, so this is about the table rather than the world: the scan files what it sees every
+    /// tick, and the first-sighting rule is what makes that a no-op instead of a hashed write per structure per tick.
+    /// </remarks>
+    [Test]
+    public void ASecondSightingKeepsTheFirst()
+    {
+        var map = new FacilityMap();
+        map.Observe(2, Port, 10f, 20f);
+        map.Observe(2, Port, 999f, 999f);
+
+        Assert.That(map.TryFind(2, Port, out var port), Is.True);
+        Assert.That(port, Is.EqualTo((10f, 20f)), "a second sighting of the same facility replaced the first");
     }
 }

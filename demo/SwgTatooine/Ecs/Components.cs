@@ -52,7 +52,9 @@ public struct StructureRealm
     public StructureRealm(ushort value) => Value = value;
 }
 
-/// <summary>Which region a structure belongs to — the city or point of interest it is part of — <b>encoded region + 1</b>, and 0 for one in the wild.</summary>
+/// <summary>
+/// Which region a structure belongs to — the city or point of interest it is part of — <b>encoded region + 1</b>, and 0 for one in the wild.
+/// </summary>
 /// <remarks>
 /// <para>
 /// <b>A component of its own, and not a field on <see cref="Structure"/>, because of the index.</b> The engine refuses a writable span over any component

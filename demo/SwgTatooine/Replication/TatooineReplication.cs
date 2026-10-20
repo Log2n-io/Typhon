@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Numerics;
 using SwgTatooine.Accounts;
@@ -2308,9 +2308,13 @@ public static partial class TatooineReplication
     /// <summary>Boarding asks refused — not at a port, or a destination that does not exist.</summary>
     private static long _boardingsRefused;
 
-    /// <summary>What the boarding command did, cumulatively: asks queued for a shuttle, and asks refused.</summary>
-    public static (long Queued, long Refused) Boardings
-        => (System.Threading.Interlocked.Read(ref _boardingsQueued), System.Threading.Interlocked.Read(ref _boardingsRefused));
+    /// <summary>Queued boardings a client walked out of before the shuttle came.</summary>
+    private static long _boardingsCancelled;
+
+    /// <summary>What the boarding command did, cumulatively: asks queued, asks refused, and queues abandoned by walking away.</summary>
+    public static (long Queued, long Refused, long Cancelled) Boardings
+        => (System.Threading.Interlocked.Read(ref _boardingsQueued), System.Threading.Interlocked.Read(ref _boardingsRefused),
+            System.Threading.Interlocked.Read(ref _boardingsCancelled));
 
     /// <summary>What the intent path did, cumulatively. For the report and for the checks beside the demo.</summary>
     public static (long Owned, long Applied, long Unowned, long RefusedSpeed, long TargetsSet, long TargetsRefused, long Possessions, long Releases) Intents
@@ -2368,6 +2372,7 @@ public static partial class TatooineReplication
             move.DestX = Math.Clamp(command.Value.X, -half, half);
             move.DestZ = Math.Clamp(command.Value.Z, -half, half);
             move.SpeedMps = TatooineData.PlayerRunSpeedMps;
+            CancelBoardingIfWaiting(ref player);
 
             // No phase: a click names a destination, and nothing about WHEN the pointer went down changes where the server is asked to walk to. The split
             // exists for a held key, whose duration is the whole of what it means.
@@ -2444,6 +2449,8 @@ public static partial class TatooineReplication
                 continue;
             }
 
+            CancelBoardingIfWaiting(ref player);
+
             // A heading is turned into a destination one second of travel away rather than into a velocity, so that this and MoveTo leave the player in the
             // same state and PlayerMove needs to know nothing about which one sent it. A held key re-sends every frame, and each one renews the second.
             var move = player.Read(Player.Move);
@@ -2513,6 +2520,39 @@ public static partial class TatooineReplication
             var place = player.Read(Player.Bounds);
             Speak(tick, BoundPlayer[command.Session.Value], command.Value.Text, place.X, place.Z, player.Realm.Value);
         }
+    }
+
+    /// <summary>Takes a player out of the shuttle queue when its client asks to move instead.</summary>
+    /// <param name="player">The body, already opened for writing; by ref because <c>Set</c> updates the handle.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>Boarding and walking are the same client's two answers, and the later one wins.</b> The boarding handler zeroes the body's motion and the comment
+    /// there says "stopped moving first", but the MoveDir loop is drained AFTER it in the same <c>ApplyIntents</c> and used to touch nothing but the motion:
+    /// a client holding a direction key re-set its destination on the same tick, walked away from the port for a whole shuttle interval, and was still
+    /// teleported to the destination when the shuttle came. The queue is the thing that has to go, not the movement — refusing the walk instead would freeze
+    /// an avatar for up to two minutes with no way to say "never mind", which is the worse answer to give a person holding a key.
+    /// </para>
+    /// <para>
+    /// <c>MoveTo</c> is drained before the boarding loop and <c>MoveDir</c> after it, so a click in the same tick as a board loses to the board and a held
+    /// key beats it. That asymmetry is the engine's command order rather than a decision here, and it lands the right way round: an explicit boarding is the
+    /// later intent in the first case and the abandoned one in the second.
+    /// </para>
+    /// </remarks>
+    private static void CancelBoardingIfWaiting(ref EntityRefMut player)
+    {
+        var state = player.Read(Player.State);
+        if (state.Activity != PlayerActivity.AwaitingShuttle)
+        {
+            return;
+        }
+
+        state.Activity = PlayerActivity.Idle;
+        state.ActivityTicks = 0;
+        state.ShuttleFrom = 0;
+        state.ShuttleDest = 0;
+        player.Set(Player.State, state);
+        Replicate(in player);
+        System.Threading.Interlocked.Increment(ref _boardingsCancelled);
     }
 
     /// <summary>The player a session controls, opened for writing.</summary>
@@ -2681,6 +2721,7 @@ public static partial class TatooineReplication
         System.Threading.Interlocked.Exchange(ref _releases, 0);
         System.Threading.Interlocked.Exchange(ref _boardingsQueued, 0);
         System.Threading.Interlocked.Exchange(ref _boardingsRefused, 0);
+        System.Threading.Interlocked.Exchange(ref _boardingsCancelled, 0);
         BoundPlayer.Clear();
 
         // The holds go with it (A13), for the same reason BoundPlayer does: a fixture that resets only the intent accounting would otherwise inherit a hold
@@ -2693,6 +2734,11 @@ public static partial class TatooineReplication
         // first one's configuration.
         _pushCommands = null;
         Scheduler = null;
+
+        // The boarding geometry goes with them, and for the same reason: it is the LAST runtime's SimBridge, whose port
+        // and planet indexes describe a world that has been disposed. A BoardShuttle in the next run would be validated
+        // against it, and a fixture that happened to run second would accept or refuse on the first run's map.
+        ShuttleBoarding = null;
         _declared = false;
         System.Threading.Interlocked.Exchange(ref _announced, 0);
         System.Threading.Interlocked.Exchange(ref _strikes, 0);

@@ -112,9 +112,29 @@ public sealed class CityGroupChecks
             $"the '{TatooineReplication.CitySet}' set to complete for city {widest} (key {widest + 1}), "
             + $"a {city.Radius:F0} m city around a {TatooineReplication.PlayerRadiusM:F0} m sphere");
 
+        // The geometry, and not only the completion. GROUP_COMPLETE is the stronger statement and it is what this case
+        // waits for, but it rests on the engine's own definition of complete: one structure measurably outside the
+        // sphere says the same thing in the case's own terms, and fails loudly rather than by timeout if the set ever
+        // starts completing without delivering.
+        var beyond = 0;
+        var positions = sink.Positions;
+        Assert.That(positions, Is.Not.Null, "no structure carried a position, so the geometry cannot be checked");
+        foreach (var at in positions.Values)
+        {
+            var dx = at.X - city.X;
+            var dz = at.Z - city.Z;
+            if (Math.Sqrt((dx * dx) + (dz * dz)) > TatooineReplication.PlayerRadiusM)
+            {
+                beyond++;
+            }
+        }
+
         Assert.Multiple(() =>
         {
             Assert.That(sink.Held, Is.Not.Empty, "a complete city delivered no structures at all");
+            Assert.That(
+                beyond, Is.GreaterThan(0),
+                $"every structure delivered was inside the {TatooineReplication.PlayerRadiusM:F0} m sphere, so the group set proved nothing");
             Assert.That(sink.Released, Does.Not.Contain((set, widest + 1)), "the city was released again while the player stood in it");
         });
     }
@@ -175,11 +195,21 @@ public sealed class CityGroupChecks
 
         public void Enter(uint netId, scoped ReadOnlySpan<double> position, scoped ReadOnlySpan<double> velocity, uint t0, byte epoch)
         {
-            if (_structures)
+            if (!_structures)
             {
-                Held.Add(netId);
+                return;
+            }
+
+            Held.Add(netId);
+            if (position.Length >= 2)
+            {
+                (Positions ??= [])[netId] = (position[0], position[1]);
             }
         }
+
+        /// <summary>Where each held structure is, so a case can assert on the geometry rather than only on the count.</summary>
+        /// <remarks>Created on first entry: this is a struct, so a field initialiser here would need a constructor it has no other use for.</remarks>
+        public Dictionary<uint, (double X, double Z)> Positions;
 
         public void Leave(uint netId) => Held.Remove(netId);
 

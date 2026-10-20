@@ -189,15 +189,34 @@ public sealed partial class TatooineSim
     /// session test downstream of it fails ten seconds later saying it timed out waiting for something the world can no longer do — four layers from the
     /// cause. The exception itself only reaches a console. <c>SessionHarness</c> reads this and throws it, so the first failure names the defect.
     /// </remarks>
-    public (long Tick, string Reason, string SystemName, Exception Fault)? TickAbort { get; private set; }
+    /// <remarks>
+    /// <b>One reference, published and read atomically.</b> It is written from a tick thread and read from whichever thread a test waits on, and the shape
+    /// it had — a nullable four-field tuple assigned with <c>??=</c> — is neither atomic to write nor to read: a reader could see <c>HasValue</c> before the
+    /// fields it describes, which in a diagnostic means a null message explaining a null fault. A class reference is one word, so a reader sees either the
+    /// whole record or none of it.
+    /// </remarks>
+    public TickAbortRecord TickAbort => Volatile.Read(ref _tickAbort);
+
+    private TickAbortRecord _tickAbort;
 
     /// <summary>Records the first abort and nothing after it: a tick that aborts usually aborts again, and the first one holds the cause.</summary>
     /// <param name="tick">The tick it happened on.</param>
     /// <param name="reason">The outcome's reason.</param>
     /// <param name="systemName">The system that failed.</param>
     /// <param name="fault">Its exception, which may be null.</param>
+    /// <remarks>
+    /// <c>CompareExchange</c> and not a test followed by a store: two systems in one tick can abort concurrently, and the loser must not overwrite the
+    /// record the waiting test is about to read.
+    /// </remarks>
     private void NoteTickAbort(long tick, string reason, string systemName, Exception fault)
-        => TickAbort ??= (tick, reason, systemName, fault);
+        => Interlocked.CompareExchange(ref _tickAbort, new TickAbortRecord(tick, reason, systemName, fault), null);
+
+    /// <summary>What an aborted tick leaves behind, for a waiting test to fail with instead of a timeout.</summary>
+    /// <param name="Tick">The tick it happened on.</param>
+    /// <param name="Reason">The outcome's reason.</param>
+    /// <param name="SystemName">The system that failed.</param>
+    /// <param name="Fault">Its exception, which may be null.</param>
+    public sealed record TickAbortRecord(long Tick, string Reason, string SystemName, Exception Fault);
 
     /// <summary>
     /// Writes a crash artefact for this run: the fault, the ticks leading to it, the world and the configuration.

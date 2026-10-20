@@ -341,12 +341,26 @@ button.active {
 
 /* The shuttleport prompt, bottom centre: it appears and disappears as the avatar walks, so it sits where the eye is
    already looking rather than in a corner, and it is the only panel whose presence is itself information. */
+/* Above the chat and the inspector, and clear of both. At 420 px centred it overlaps a 300 px chat and a 270 px
+   inspector on any viewport under about 1010 px, and DOM order alone put it over the chat's clickable speaker links
+   while the inspector covered its own destination buttons. The margins keep it out of their columns when there is room
+   and the z-index decides it when there is not: the prompt is the transient panel, so it wins. */
 .shuttle {
   bottom: 16px;
   left: 50%;
   transform: translateX(-50%);
   max-width: 420px;
   text-align: center;
+  z-index: 3;
+}
+
+/* Under about 1010 px a 420 px centred panel reaches into the 300 px chat and the 270 px inspector, so it moves up
+   above the chat instead of across it. The z-index above decides the rest: the prompt is the transient panel and the
+   one whose buttons have to be clickable, so it is on top where they do overlap. */
+@media (max-width: 1010px) {
+  .shuttle {
+    bottom: calc(34% + 26px);
+  }
 }
 
 .shuttle-destinations {
