@@ -45,11 +45,29 @@ internal sealed class FrameReader : IDisposable
             return _pack.TryReadPage(entry, destination, out error);
         }
 
+        if (!TryReadFrame(entry, out var frame, out error))
+        {
+            destination[..PackFormat.PageSize].Clear();
+            return false;
+        }
+
+        return PackReader.DecodePage(entry, frame, destination, out error);
+    }
+
+    /// <summary>
+    /// The stored frame of a page with a frame (<c>StoredLength &gt; 0</c>), length prefix included, as the pack holds it: a slice of this reader's
+    /// window, valid until its next read. Nothing is decoded or checked here (the caller does, <see cref="PackReader.DecodePage"/>); <c>false</c> when
+    /// the frame runs past the data region. The compactor copies frames through this (DL-2).
+    /// </summary>
+    public bool TryReadFrame(in PackPageEntry entry, out ReadOnlySpan<byte> frame, out string error)
+    {
         var start = entry.DataOffset - PackFormat.FramePrefixSize;
         var length = PackFormat.FramePrefixSize + (int)entry.StoredLength;
+        error = null;
         if (_windowStart >= 0 && start >= _windowStart && start + length <= _windowStart + _windowLength)
         {
-            return PackReader.DecodePage(entry, _window.Span.Slice((int)(start - _windowStart), length), destination, out error);
+            frame = _window.Span.Slice((int)(start - _windowStart), length);
+            return true;
         }
 
         var windowEnd = _windowStart + _windowLength;
@@ -59,27 +77,29 @@ internal sealed class FrameReader : IDisposable
             var n = (int)Math.Min(_window.Length, _pack.Footer.DataRegionEnd - start);
             if (n < length || !_pack.ReadAt(_window.Span[..n], start))
             {
-                return RunsPast(destination, out error);
+                return RunsPast(out frame, out error);
             }
 
             _windowStart = start;
             _windowLength = n;
-            return PackReader.DecodePage(entry, _window.Span.Slice(0, length), destination, out error);
+            frame = _window.Span[..length];
+            return true;
         }
 
         // Out of place: this frame alone, the window kept for the stream.
         _single ??= NativeBuffer.Allocate(MinimumWindowBytes, null, null);
         if (start + length > _pack.Footer.DataRegionEnd || !_pack.ReadAt(_single.Span[..length], start))
         {
-            return RunsPast(destination, out error);
+            return RunsPast(out frame, out error);
         }
 
-        return PackReader.DecodePage(entry, _single.Span[..length], destination, out error);
+        frame = _single.Span[..length];
+        return true;
     }
 
-    private bool RunsPast(Span<byte> destination, out string error)
+    private bool RunsPast(out ReadOnlySpan<byte> frame, out string error)
     {
-        destination[..PackFormat.PageSize].Clear();
+        frame = default;
         error = "frame runs past the data region";
         _windowStart = -1;
         return false;
@@ -136,8 +156,8 @@ internal sealed class MaterializeResult
 }
 
 /// <summary>
-/// Writes a point's image into a target file (plan 1413 §2.7, 04 §1): a k-way merge of the chain's sorted INDEX streams yields, for each page in
-/// ascending order, the entry of the NEWEST pack that holds it; a page no pack holds is zeros. The target is written strictly ascending and
+/// Writes a point's image into a target file (plan 1413 §2.7, 04 §1): <see cref="ChainPageCursor"/> yields, for each page in ascending order, the entry
+/// of the NEWEST pack that holds it; a page no pack holds is zeros. The target is written strictly ascending and
 /// completely, so its length is exactly <c>N × 8 KiB</c> and NTFS never zero-fills a gap (DC-11).
 /// </summary>
 internal static class ChainMaterializer
@@ -152,51 +172,19 @@ internal static class ChainMaterializer
     public static MaterializeResult Materialize(IReadOnlyList<PackReader> chain, IStoreFile target, MaterializeOptions options = null)
     {
         options ??= MaterializeOptions.Default;
-        var k = chain.Count;
         var n = chain[^1].Header.ImagePages;
-        var window = FrameReader.WindowFor(options.ReadBudgetBytes, k);
-        var streams = new PackIndexStream[k];
-        var readers = new FrameReader[k];
-        var heads = new PackPageEntry[k];
-        var heap = new PriorityQueue<int, uint>(k);
         var damaged = new List<DamagedPage>();
         var buffer = NativeBuffer.Allocate(WriteBufferBytes, null, null);   // restore runs with no engine
         long bytesWritten = 0;
         var zeroPages = 0;
+        ChainPageCursor cursor = null;
         try
         {
-            for (var i = 0; i < k; i++)
-            {
-                streams[i] = chain[i].OpenIndexStream();
-                readers[i] = new FrameReader(chain[i], window);
-                if (streams[i].TryNext(out heads[i]))
-                {
-                    heap.Enqueue(i, heads[i].PageId);
-                }
-            }
-
+            cursor = new ChainPageCursor(chain, options.ReadBudgetBytes);
             var fill = 0;
             long flushedPages = 0;
-            for (var p = 0; p < n; p++)
+            while (cursor.MoveNext(out var p, out var newest, out var entry))
             {
-                // Every pack holding p sits at the top of the heap now: take them all, keep the newest (the highest chain index).
-                var newest = -1;
-                PackPageEntry entry = default;
-                while (heap.TryPeek(out var i, out var id) && id == (uint)p)
-                {
-                    heap.Dequeue();
-                    if (i > newest)
-                    {
-                        newest = i;
-                        entry = heads[i];
-                    }
-
-                    if (streams[i].TryNext(out heads[i]))
-                    {
-                        heap.Enqueue(i, heads[i].PageId);
-                    }
-                }
-
                 var page = buffer.Span.Slice(fill, PackFormat.PageSize);
                 if (newest < 0)
                 {
@@ -210,7 +198,7 @@ internal static class ChainMaterializer
                         zeroPages++;
                     }
 
-                    if (!readers[newest].TryRead(entry, page, out var error))
+                    if (!cursor.Frames(newest).TryRead(entry, page, out var error))
                     {
                         if (!options.AllowDamaged)
                         {
@@ -242,14 +230,7 @@ internal static class ChainMaterializer
             }
 
             // Entries are proven only once their stream ends on a matching IndexCRC; an entry past N would be one no page consumed.
-            for (var i = 0; i < k; i++)
-            {
-                if (heap.Count > 0 || streams[i].TryNext(out _))
-                {
-                    PackFormat.ThrowCorrupt(chain[i].Path, "Index", -1, "entries beyond the point's image");
-                }
-            }
-
+            cursor.Complete();
             target.Flush();
             long bytesRead = 0;
             foreach (var pack in chain)
@@ -262,15 +243,7 @@ internal static class ChainMaterializer
         finally
         {
             ((IDisposable)buffer).Dispose();
-            foreach (var r in readers)
-            {
-                r?.Dispose();
-            }
-
-            foreach (var s in streams)
-            {
-                s?.Dispose();
-            }
+            cursor?.Dispose();
         }
     }
 }
