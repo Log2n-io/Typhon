@@ -96,7 +96,7 @@ class EcsCleanupDrainTests : TestBase<EcsCleanupDrainTests>
     /// The defect's actual signature: churn at a flat population must not grow the map.
     /// </summary>
     /// <remarks>
-    /// This is the unit-scale version of what the SpaceBattle demo showed at 100 000 ticks — 561 796 EntityMap chunks
+    /// This is the unit-scale version of what a demo soak showed at 100 000 ticks — 561 796 EntityMap chunks
     /// against a live population that never exceeded ~13 900, holding 89 % of the data file. Rounds, not a single pass:
     /// a leak is a slope, and one round can only ever measure an intercept.
     /// </remarks>

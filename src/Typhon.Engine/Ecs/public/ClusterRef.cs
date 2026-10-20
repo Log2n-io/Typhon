@@ -653,7 +653,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     /// <remarks>
     /// <para><b>Returns a value, not a <c>ref readonly</c>, since #872 step 9.</b> The engine stores these bounds <c>C15</c> cell-relative, and this property
     /// is the boundary where they become world coordinates again. A reference cannot convert, and leaving it as one would have silently changed what every
-    /// existing caller receives: the AntHill rock gather (<c>TyphonBridge</c>) and the SpaceBattle renderer and camera cull all compare this box against
+    /// existing caller receives: the AntHill rock gather (<c>TyphonBridge</c>) and a demo renderer's camera cull both compared this box against
     /// world positions, so they would have kept compiling and started answering wrongly by exactly the distance to the cell's origin.</para>
     /// <para><b>And it returns a DIFFERENT type since #914</b> — <see cref="ClusterWorldAabb"/>, six f64 components. Two reasons, and the second is the
     /// stronger one. It is f64 because a world coordinate is f64 now, and an f32 box would quantise to ~64-unit steps at 10⁹. It is a separate type because

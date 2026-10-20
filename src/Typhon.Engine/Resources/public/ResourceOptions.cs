@@ -97,7 +97,7 @@ public class ResourceOptions
     /// rate and the peak writeback debt is "everything dirtied inside one interval". On a workload that dirties more
     /// than the cache holds in <see cref="CheckpointIntervalMs"/>, the cache saturates and the next page allocation has
     /// nothing to evict — the engine dies on <c>PageCacheBackpressureTimeout</c> with a cache that is ~100 % dirty.
-    /// Measured on the SpaceBattle demo (256 MiB cache, ~25 000 entities at 60 Hz): the 30 s default died at ~58 000
+    /// Measured on a demo soak (256 MiB cache, ~25 000 entities at 60 Hz): the 30 s default died at ~58 000
     /// ticks with 32 758 of 32 768 pages owed, while a 1 s cadence ran to 104 506 ticks with debt never above 15 %.
     /// </para>
     /// <para>

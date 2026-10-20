@@ -569,7 +569,7 @@ happened. The two have opposite correctness conditions, and the type does not di
         `Release` produces a permit per operation and consumes none — the count then rises for the life of the process
   scope: UowRegistry.Release / WaitForSlotFreed / AllocateUowId / HasFreeSlot / SignalPermitCount / WaiterCount
   on_violation: the count reaches `int.MaxValue` and `SemaphoreSlim.Release` throws `SemaphoreFullException` from
-                whatever ordinary call happened to be next, killing the process. Measured: a SpaceBattle soak died at
+                whatever ordinary call happened to be next, killing the process. Measured: a demo soak died at
                 tick 1 454 985 after 6 h 40 m — 2 147 483 647 / 1 454 985 ≈ 1 476 UoW frees per tick, which is the
                 demo's actual transaction rate. The engine was HEALTHY at death (883 of 32 768 pages resident, zero
                 gated cycles, `health Ok`), so every gauge read normal until the instant it died (#844)

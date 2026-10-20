@@ -502,7 +502,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// and the ECS entity cleanup queue fill on different events: the former when a Versioned component is superseded, the latter on every destroy regardless
     /// of storage mode. Gating the whole method on the revision queue alone meant an all-SingleVersion workload — where no revision chain is ever superseded,
     /// so that queue is permanently empty — never reached the ECS drain at all, and its EntityMap tombstones accumulated for the life of the engine (#681).
-    /// Measured in the SpaceBattle demo: 561 796 EntityMap chunks against a live population that never exceeded ~13 900, holding 89 % of the data file.
+    /// Measured in a demo soak: 561 796 EntityMap chunks against a live population that never exceeded ~13 900, holding 89 % of the data file.
     /// </para>
     /// <para>
     /// Both drains require <c>isTail</c>: <c>ComputeNextMinTSN</c> is only meaningful for the oldest live transaction, and it is what guarantees no surviving
