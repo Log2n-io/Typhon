@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using NUnit.Framework;
 using Typhon.Engine;
+using Typhon.Schema.Definition;
 
 namespace SwgTatooine.Tests;
 
@@ -206,10 +207,17 @@ public sealed class CausalityLoopTests
         Assert.That(_sim.CombatQueuePeak, Is.LessThan(256), $"the combat queue peaked at {_sim.CombatQueuePeak} against a 1 024 budget");
     }
 
+    /// <summary>AC-3's end state: nothing is left in a combat mode with nobody to fight.</summary>
+    /// <remarks>
+    /// <b>The leash's own half of AC-3 is <see cref="CreatureLeashTests"/>, and it used to be asserted here.</b> The claim was
+    /// <c>ChaseGivenUp &gt; 0</c> over this run -- which needs some creature, somewhere, to be dragged past 75 m by some player in
+    /// 4 000 ticks. It held until the day the world's structures moved, because what it really sampled was whether this seed happened
+    /// to produce a kiting. A criterion that waits for an emergent event instead of staging it reports the dice, so the leash is now
+    /// driven directly and this fixture keeps only what a snapshot can honestly say.
+    /// </remarks>
     [Test]
     public void AC3_NoCreatureIsLeftFightingNothing()
     {
-        var s = _sim.LastStats;
         var rows = Causality.Creatures(_sim);
         var orphans = 0;
         var engaged = 0;
@@ -227,14 +235,151 @@ public sealed class CausalityLoopTests
             }
         }
 
+        // The defect this guards is gap G6's end state: Pursue was sticky and targetless, so pursuers accumulated for the life of the process. Every
+        // creature in a combat mode must now name somebody.
+        Assert.That(orphans, Is.Zero, $"{orphans} of {engaged} engaged creatures are pursuing nobody");
+    }
+}
+
+/// <summary>
+/// AC-3's other half: a chase past <see cref="TatooineData.MaxChaseRangeM"/> is abandoned, and the creature that abandons it goes back to wandering.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Staged, because a long run cannot be relied on to produce one.</b> A give-up needs a player to outpace a creature by 75 m while that creature is
+/// pursuing it -- a conjunction of a mount, a direction and a head start that a 4 000-tick window either throws up or does not, depending on the seed. The
+/// fight is therefore assembled: one creature in <see cref="AiMode.Pursue"/> naming one player, and that player standing 300 m away.
+/// </para>
+/// <para>
+/// <b>Asserted on this creature's own end state, not only on the counter.</b> <c>ChaseGivenUp</c> is the world's, so another creature's give-up would satisfy
+/// it; what makes the case falsifiable is that the staged creature is back in <see cref="AiMode.Wander"/> naming nobody, which is what the leash branch does
+/// and nothing else does from <see cref="AiMode.Pursue"/> while the target is alive and open.
+/// </para>
+/// </remarks>
+[TestFixture]
+[NonParallelizable]
+public sealed class CreatureLeashTests
+{
+    private string _dir;
+    private TatooineSim _sim;
+    private EntityId _creature;
+    private EntityId _quarry;
+
+    [OneTimeSetUp]
+    public void RunWorld()
+    {
+        _dir = Worlds.NewDirectory();
+
+        // SIXTY ticks, because ten buy exactly one decision. A creature decides once every four to ten ticks (WorldBuilder.AiTicksMin/Max, at this
+        // world's 10 Hz), and the margin was measured rather than assumed: at the end of a ten-tick run the staged creature's ThinkCooldown read 4 to 6,
+        // meaning it had decided once and was still waiting for its second. One decision is no margin at all -- it has to fall after the staging is
+        // published and before the run stops, and an unpaced run's length is not even fixed (TatooineSim.Run overshoots its request by an unknown number
+        // of ticks). Six seconds give it six or more decisions.
+        var config = Causality.LongEnough(_dir, 60);
+        config.WorkerCount = 1;
+        _sim = new TatooineSim(config);
+        _sim.Initialize();
+
+        var chosen = default((EntityId Id, float X, float Z, int Mode, EntityId Target, int Health));
+        foreach (var row in Causality.Creatures(_sim))
+        {
+            // Inside the world by a margin, for PlayerCloneTests' reason: a spawn region may place a creature past the planet's f32 extent, and a teleport
+            // onto or away from such a creature is clamped back inside -- which would decide the very distance this case is about.
+            var margin = (_sim.Config.WorldEdgeM * 0.5f) - 500f;
+            if (row.Mode != AiMode.Dead && row.Health > 0 && MathF.Abs(row.X) < margin && MathF.Abs(row.Z) < margin)
+            {
+                chosen = row;
+                break;
+            }
+        }
+
+        Assert.That(chosen.Id.IsNull, Is.False, "precondition: the world has a living creature inside its own bounds");
+        _creature = chosen.Id;
+        _quarry = _sim.Index.Players[0];
+        var player = _quarry;
+
+        // Four times the leash, towards the origin so the planet's edge cannot clamp the player back into range.
+        var farX = chosen.X + (chosen.X > 0f ? -300f : 300f);
+
+        // Commit discipline, like PortalTests' crossings: the staging is published before the world is ticked rather than at whichever fence came next.
+        using (var tx = _sim.Dbe.CreateQuickTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit))
+        {
+            var creature = tx.OpenMut(_creature);
+            var ai = creature.Read(Creature.Ai);
+            ai.Mode = AiMode.Pursue;
+            ai.Target = player;
+
+            // Home is where it stands, so the LAIR leash cannot pre-empt the quarry leash: that branch is tested first and would send the creature home
+            // without ever reading the target, which looks identical in the end state and is a different mechanism.
+            ai.HomeX = chosen.X;
+            ai.HomeZ = chosen.Z;
+            creature.Set(Creature.Ai, ai);
+
+            // Decides on the first tick rather than in four to ten, so the window holds as many decisions as possible.
+            var timers = creature.Read(Creature.Timers);
+            timers.ThinkCooldown = 0;
+            creature.Set(Creature.Timers, timers);
+
+            var quarry = tx.OpenMut(player);
+
+            // Parked, and parked where it is going to stand: a player that resumed deciding would walk, and at 300 m the direction it walked would decide
+            // whether the leash was reached at all.
+            var state = quarry.Read(Player.State);
+            state.Activity = PlayerActivity.Roaming;
+            state.ActivityTicks = int.MaxValue / 2;
+            quarry.Set(Player.State, state);
+            var move = quarry.Read(Player.Move);
+            move.VelX = 0f;
+            move.VelZ = 0f;
+            move.DestX = farX;
+            move.DestZ = chosen.Z;
+            quarry.Set(Player.Move, move);
+
+            var at = default(PlayerPlacement);
+            at.SetAt(farX, chosen.Z, 0f, quarry.Read(Player.Bounds).HalfExtent);
+            tx.Teleport(player, Player.Bounds, RealmId.Default, in at);
+            Assert.That(tx.Commit(), Is.True, "the staging did not commit, so nothing below is about the world that ran");
+        }
+
+        _sim.Run();
+    }
+
+    [OneTimeTearDown]
+    public void Dispose()
+    {
+        _sim?.Dispose();
+        Worlds.Delete(_dir);
+    }
+
+    [Test]
+    public void ACreatureWhoseQuarryIsPastTheLeash_GivesUpAndGoesBackToWandering()
+    {
+        int mode;
+        EntityId target;
+        float separation;
+        using (var tx = _sim.Dbe.CreateQuickTransaction())
+        {
+            var creature = tx.Open(_creature);
+            var ai = creature.Read(Creature.Ai);
+            mode = ai.Mode;
+            target = ai.Target;
+            var here = creature.Read(Creature.Bounds);
+            var there = tx.Open(_quarry).Read(Player.Bounds);
+            var dx = there.X - here.X;
+            var dz = there.Z - here.Z;
+            separation = MathF.Sqrt((dx * dx) + (dz * dz));
+        }
+
         Assert.Multiple(() =>
         {
-            // The defect this guards is gap G6's end state: Pursue was sticky and targetless, so pursuers accumulated for the life of the process. Every
-            // creature in a combat mode must now name somebody.
-            Assert.That(orphans, Is.Zero, $"{orphans} of {engaged} engaged creatures are pursuing nobody");
+            // Stated rather than assumed: everything below is about a quarry out of reach, and a staging that left it in reach would make the rest of the
+            // case pass or fail for a reason that has nothing to do with the leash.
+            Assert.That(separation, Is.GreaterThan(TatooineData.MaxChaseRangeM),
+                $"the staged quarry ended up {separation:F0} m away, inside the {TatooineData.MaxChaseRangeM:F0} m leash: this case is not testing the leash");
 
-            // And the leash fires, which is the half of AC-3 that a snapshot of the end state cannot show.
-            Assert.That(s.ChaseGivenUp, Is.GreaterThan(0), "no chase was ever abandoned past MaxChaseRangeM: the leash is not being reached");
+            Assert.That(_sim.LastStats.ChaseGivenUp, Is.GreaterThan(0), "no chase was abandoned past MaxChaseRangeM: the leash is not being reached");
+            Assert.That(mode, Is.EqualTo(AiMode.Wander), "a creature whose quarry is 300 m away is still in a combat mode: the leash did not fire for it");
+            Assert.That(target, Is.EqualTo(EntityId.Null), "it gave the chase up and kept the target, which is gap G6 coming back");
         });
     }
 }

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using NUnit.Framework;
@@ -19,6 +19,17 @@ internal static class Worlds
         TickRateHz = 10,
         Unpaced = true,
     };
+
+    /// <summary>Which realm an entity is in — 0 is the planet, and on a multi-planet server each planet is one.</summary>
+    /// <param name="sim">The simulation.</param>
+    /// <param name="entity">The entity.</param>
+    /// <returns>Its realm.</returns>
+    public static ushort RealmOf(TatooineSim sim, EntityId entity)
+    {
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        Assert.That(tx.TryOpen(entity, out var player), Is.True, "the entity whose realm was asked for does not exist");
+        return player.Read(Player.Realm).Value;
+    }
 
     /// <summary>Puts the player a session controls at a place in a realm, parked, and returns it.</summary>
     /// <param name="sim">The simulation.</param>
@@ -60,6 +71,10 @@ internal static class Worlds
     /// <returns>Its index and its circle.</returns>
     public static (int Index, float X, float Z, float Radius) WidestCity(TatooineSim sim)
     {
+        // A named premise rather than an IndexOutOfRangeException from the line below: a world with no cities is a
+        // world the caller's case cannot mean anything in, and saying so here is three layers closer to the cause.
+        Assert.That(sim.Index.Cities, Is.Not.Empty, "the world has no cities, so there is no widest one to stand in");
+
         var widest = 0;
         for (var i = 0; i < sim.Index.Cities.Count; i++)
         {
@@ -198,6 +213,126 @@ public sealed class PortalTests
         {
             Worlds.Delete(dir);
         }
+    }
+}
+
+/// <summary>
+/// Realms G2's positive half: while a player is inside a building, that building's realm is pinned and runs — and its neighbour, which nobody entered, sleeps.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Through the door, not through a teleport.</b> The pin follows a COMMITTED crossing (<c>SimBridge.TeleportTick</c>), so a player simply placed in an
+/// interior realm would be indoors with nothing pinning it -- which is the state the demo never produces and this case would then be asserting about. The
+/// player is therefore put at a door in <see cref="PlayerActivity.ToPortal"/> and the world ticked: <c>PlayerThink</c> sees it arrive, queues the crossing,
+/// <c>TeleportTick</c> commits it and takes the pin, exactly as a wandering player's would be.
+/// </para>
+/// <para>
+/// <b>Nobody else may cross, which is what makes the sleeping neighbour a claim.</b> <see cref="SimConfig.InteriorShare"/> is zero, so no other player can
+/// decide to walk into a building: every interior but the staged one is untouched for the whole run, and finding one of them awake would mean the sleep
+/// condition is not the absence of an occupant.
+/// </para>
+/// </remarks>
+[TestFixture]
+[NonParallelizable]
+public sealed class OccupiedInteriorTests
+{
+    private string _dir;
+    private TatooineSim _sim;
+    private ushort _occupied;
+    private ushort _empty;
+    private EntityId _player;
+
+    [OneTimeSetUp]
+    public void RunWorld()
+    {
+        _dir = Worlds.NewDirectory();
+        var config = Worlds.Small(_dir);
+        config.Interiors = true;
+        config.Shuttles = false;
+        config.Dungeons = 0;
+
+        // Nobody wanders indoors on their own: the only crossing in this run is the staged one.
+        config.InteriorShare = 0f;
+
+        // Longer than the window, so the staged player is still inside when the run stops, and short enough that the sleep has time to take the others:
+        // 10 Hz x 120 ticks is 12 s of play against a 2 s sleep.
+        config.InteriorStayS = 120f;
+        config.InteriorSleepS = 2f;
+        config.TickRateHz = 10;
+        config.WarmTicks = 0;
+        config.MeasuredTicks = 120;
+        config.Unpaced = true;
+        config.WorkerCount = 1;
+        _sim = new TatooineSim(config);
+        _sim.Initialize();
+        Assert.That(_sim.InteriorsPerPlanet, Is.GreaterThan(1), "precondition: the map has at least two enterable buildings");
+
+        // Portal 0 of planet 0, and portal 1 as the one nobody enters.
+        _occupied = (ushort)config.Planets;
+        _empty = (ushort)(config.Planets + 1);
+        _player = _sim.Index.Players[0];
+        var (doorX, doorZ) = _sim.Index.Portals[0];
+
+        using (var tx = _sim.Dbe.CreateQuickTransaction())
+        {
+            var player = tx.OpenMut(_player);
+
+            // At the door and walking to it, which is the state TryWalkToPortal leaves a player in on the tick before it arrives. ShuttleDest carries the
+            // portal while the activity is ToPortal (PlayerState.ShuttleDest), and the timer only has to outlast the arrival.
+            var state = player.Read(Player.State);
+            state.Activity = PlayerActivity.ToPortal;
+            state.ActivityTicks = 200 * config.TickRateHz;
+            state.ShuttleDest = 0;
+            player.Set(Player.State, state);
+            var move = player.Read(Player.Move);
+            move.SpeedMps = TatooineData.PlayerRunSpeedMps;
+            move.VelX = 0f;
+            move.VelZ = 0f;
+            move.DestX = doorX;
+            move.DestZ = doorZ;
+            player.Set(Player.Move, move);
+
+            var at = default(PlayerPlacement);
+            at.SetAt(doorX, doorZ, 0f, player.Read(Player.Bounds).HalfExtent);
+            tx.Teleport(_player, Player.Bounds, RealmId.Default, in at);
+            tx.Commit();
+        }
+
+        _sim.Run();
+    }
+
+    [OneTimeTearDown]
+    public void Dispose()
+    {
+        _sim?.Dispose();
+        Worlds.Delete(_dir);
+    }
+
+    [Test]
+    public void APlayerInsideABuilding_PinsItsRealmActive_AndTheBuildingNobodyEnteredSleeps()
+    {
+        // Read out under one transaction: a spatial query needs the epoch scope a transaction opens, and EntityRef is a ref struct that cannot cross into
+        // Assert.Multiple's lambda (CS8175).
+        ushort realm;
+        HashSet<EntityId> inside;
+        using (var tx = _sim.Dbe.CreateQuickTransaction())
+        {
+            realm = tx.Open(_player).Read(Player.Realm).Value;
+            inside = Worlds.PlayersIn(_sim.Dbe, _occupied, Worlds.Everywhere);
+        }
+
+        var occupiedState = _sim.Dbe.Realms.StateOf(new RealmId(_occupied));
+        var emptyState = _sim.Dbe.Realms.StateOf(new RealmId(_empty));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(_sim.CrossingTotals.Entries, Is.EqualTo(1), "exactly the staged crossing happened, so the rest of this is about it");
+            Assert.That(realm, Is.EqualTo(_occupied), "the player did not end up inside the building it walked into");
+            Assert.That(inside, Is.EquivalentTo(new[] { _player }), "the interior's index holds the crosser");
+            Assert.That(_sim.IsInteriorPinned(_occupied), Is.True, "an interior holds a player and nothing pins it: Realms G2's pin is gone");
+            Assert.That(occupiedState, Is.EqualTo(RealmRunState.Active), "the interior a player is standing in is not being run");
+            Assert.That(emptyState, Is.EqualTo(RealmRunState.Dormant), "a building nobody ever entered is awake: interiors are not sleeping on absence");
+        });
     }
 }
 
@@ -355,8 +490,17 @@ public sealed class GalaxyTests
         Assert.That(queries, Is.GreaterThan(128));
     }
 
+    /// <summary>Realms G2 at scale: a galaxy of 1 200 interiors sleeps, and any one that happens to hold a player is pinned.</summary>
+    /// <remarks>
+    /// <b>The positive half of this claim is <see cref="OccupiedInteriorTests"/>, and it used to be a precondition here.</b> The line was
+    /// <c>occupied &gt; 0</c> -- "some interior is occupied at the end" -- which samples one instant, the last tick of a 400-tick run, and
+    /// asks a population on 15-to-60-second stays to have somebody indoors at exactly that moment. It is the same emergent-event
+    /// fragility as AC-3's leash was, and it failed the same way. What a snapshot of a galaxy can honestly state is the negative half --
+    /// most interiors hold nobody and sleep -- so that is what stayed, and a player is now walked through a door deliberately to state
+    /// the other.
+    /// </remarks>
     [Test]
-    public void UnobservedInteriors_GoDormant_OccupiedOnesStayActive()
+    public void InteriorsGoDormantAtScale_AndAnyOccupiedOneIsPinned()
     {
         // Counted, not timed. That a dormant realm's clusters reach no system is the engine's RLM-04 (RealmPolicyTests); here, that the demo's
         // interiors actually go dormant at scale while the occupied ones stay active.
@@ -376,7 +520,9 @@ public sealed class GalaxyTests
             }
         }
 
-        Assert.That(occupied, Is.GreaterThan(0), "precondition: some interior is occupied at the end");
+        // No assertion that `occupied` is non-zero: see the remark. Whether anybody is indoors on the last tick of this run is the activity
+        // mix's business, and a case that demanded it would be asserting on the seed.
+        Assert.That(occupied, Is.LessThanOrEqualTo(_sim.Census.Players), "more interiors hold a player than there are players");
     }
 
     [Test]
