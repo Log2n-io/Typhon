@@ -81,7 +81,6 @@ internal sealed class BackupVerifyTests
         Assert.That(report.Verdict, Is.EqualTo(VerifyVerdict.Ok));
         Assert.That(report.Points.Select(p => (p.Id, p.Restorable)), Is.EqualTo(new[] { (1u, true), (2u, true), (3u, true) }));
         Assert.That(report.BytesRead, Is.GreaterThan(0));
-        Assert.That(report.SkippedChecks, Is.Empty, "every check runs, BKP-VER-12 at Full included");
     }
 
     [Test]
@@ -252,7 +251,6 @@ internal sealed class BackupVerifyTests
 
         var report = Verify(fs, VerifyLevel.Full, options);
         AssertOnly(report, "BKP-VER-12", 2, 2);
-        Assert.That(report.SkippedChecks, Is.Empty);
     }
 
     [Test]

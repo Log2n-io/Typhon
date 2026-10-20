@@ -337,9 +337,74 @@ internal sealed class OfflineCaptureRestoreTests
         }
 
         var report = BackupVerifier.VerifyStore(Store, VerifyLevel.Full);
-        Assert.That(report.SkippedChecks, Is.Empty, "BKP-VER-12 ran");
         Assert.That(report.AllFindings, Is.Empty, string.Join("\n", report.AllFindings));
         Assert.That(report.Verdict, Is.EqualTo(VerifyVerdict.Ok));
+    }
+
+    /// <summary>
+    /// BKP-VER-12 against a tail cut short: a point whose commits past <c>C</c> run into the second half of its last copied segment (enough of them to
+    /// fill many tail blocks), so any truncation of the stored tail changes the <c>P</c> it yields. Replayed whole, it yields the footer's <c>P</c>.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void ATailWhoseLastCommitsReachTheEndOfItsCopy_YieldsItsP_OnlyWhole()
+    {
+        const string name = "BkT9w";
+        using (var provider = BackupTestImages.BuildProvider(name, DbDir, Path.Combine(Bundle(name), "wal")))
+        using (var scope = provider.CreateScope())
+        {
+            var dbe = Open(scope);
+            Spawn(dbe, 10);
+            dbe.ForceCheckpoint();
+            // Staged, not guessed: small flushed batches until the active segment is written past 55 % of its size (the writer rotates at 75 %),
+            // so the last commits sit in the second half of the last segment the capture copies.
+            var segments = dbe.WalManager.SegmentManager;
+            for (var batch = 0; segments.ActiveSegment.WriteOffset <= segments.ActiveSegment.SegmentSize * 55L / 100; batch++)
+            {
+                Assert.That(batch, Is.LessThan(10_000), "the active segment never filled");
+                using var uow = dbe.CreateUnitOfWork(DurabilityMode.Deferred);
+                for (var i = 0; i < 5; i++)
+                {
+                    using var tx = uow.CreateTransaction();
+                    tx.Spawn<CompAArch>(CompAArch.A.Set(new CompA(i, batch, i)));
+                    tx.Commit();
+                }
+
+                uow.Flush();
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        var point = OfflineCapture.Create(Bundle(name), Store);
+        using (var pack = PackReader.Open(StoreFileSystem.Instance, point.PackPath))
+        {
+            var tail = pack.LoadTailDirectory();
+            var c = pack.Header.CheckpointLsn;
+            var layout = string.Join(", ", tail.Segments.Select(t => $"#{t.SegmentId} {t.RawLength} B"));
+
+            // The premise the check stands on: the tail's last commits lie in the second half of its last copied segment.
+            Assert.That(HalvedTailPointLsn(pack, tail, c), Is.LessThan(point.PointLsn),
+                $"premise: halving the stored tail must cut commits (C {c}, P {point.PointLsn}, segments {layout})");
+            Assert.That(BackupVerifier.TailPointLsn(pack, tail, c), Is.EqualTo(point.PointLsn), $"the whole tail yields P (segments {layout})");
+        }
+
+        var report = BackupVerifier.VerifyStore(Store, VerifyLevel.Full);
+        Assert.That(report.AllFindings, Is.Empty, string.Join("\n", report.AllFindings));
+    }
+
+    /// <summary><c>P</c> over the stored tail with each segment cut to its first half (whole pages): what a short copy would yield.</summary>
+    private static long HalvedTailPointLsn(PackReader pack, TailDirectory tail, long checkpointLsn)
+    {
+        var prefixes = new WalTailPrefix[tail.Segments.Length];
+        for (var i = 0; i < tail.Segments.Length; i++)
+        {
+            var bytes = new byte[tail.Segments[i].RawLength];
+            pack.DecodeTailSegment(tail, i, bytes);
+            prefixes[i] = new WalTailPrefix(tail.Segments[i].SegmentId, bytes.AsMemory(0, bytes.Length / 2 / 4096 * 4096));
+        }
+
+        return WalTailInspector.ComputePointLsn(prefixes, checkpointLsn);
     }
 
     [Test]

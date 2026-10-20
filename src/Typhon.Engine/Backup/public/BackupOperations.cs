@@ -172,6 +172,6 @@ public static class BackupOperations
         return new BackupVerifyReport((BackupVerifyLevel)r.Level, (BackupVerifyVerdict)r.Verdict,
             r.Packs.Select(p => new BackupPackVerification(p.File, p.BackupId, (BackupPackStatus)p.Status, p.Findings.Select(F).ToList())).ToList(),
             r.Points.Select(p => new BackupPointVerification(p.Id, p.Restorable, p.BrokenBy)).ToList(),
-            r.StoreFindings.Select(F).ToList(), r.SkippedChecks, r.Duration, r.BytesRead);
+            r.StoreFindings.Select(F).ToList(), r.Duration, r.BytesRead);
     }
 }

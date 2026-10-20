@@ -347,11 +347,6 @@ internal sealed class BackupVerifyCommand : Command<BackupVerifyCommand.Settings
             console.MarkupLine($"  [red]Point #{p.BackupId} is not restorable[/] (broken by #{string.Join(", #", p.BrokenBy)}).");
         }
 
-        foreach (var s in report.SkippedChecks)
-        {
-            console.MarkupLine($"  [grey]Skipped: {Markup.Escape(s)}[/]");
-        }
-
         return exit;
     }
 

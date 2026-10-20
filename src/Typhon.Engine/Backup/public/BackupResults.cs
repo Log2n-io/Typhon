@@ -196,13 +196,11 @@ public sealed record BackupPointVerification(uint BackupId, bool Restorable, IRe
 /// <param name="Packs">Every pack verified.</param>
 /// <param name="Points">Every point in scope.</param>
 /// <param name="StoreFindings">Findings about the store or about chain links.</param>
-/// <param name="SkippedChecks">Checks this build could not run, and why.</param>
 /// <param name="Duration">Wall time.</param>
 /// <param name="BytesRead">Bytes read from the store.</param>
 [PublicAPI]
 public sealed record BackupVerifyReport(BackupVerifyLevel Level, BackupVerifyVerdict Verdict, IReadOnlyList<BackupPackVerification> Packs,
-    IReadOnlyList<BackupPointVerification> Points, IReadOnlyList<BackupVerifyFinding> StoreFindings, IReadOnlyList<string> SkippedChecks,
-    TimeSpan Duration, long BytesRead);
+    IReadOnlyList<BackupPointVerification> Points, IReadOnlyList<BackupVerifyFinding> StoreFindings, TimeSpan Duration, long BytesRead);
 
 /// <summary>A chain's head in a store.</summary>
 /// <param name="ChainId">The chain.</param>

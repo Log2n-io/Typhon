@@ -82,9 +82,6 @@ internal sealed class VerifyReport
     /// <summary>Findings about the store rather than one pack (orphan temps) and about chains (links).</summary>
     public IReadOnlyList<VerifyFinding> StoreFindings { get; init; }
 
-    /// <summary>Checks that could not run in this build, with why.</summary>
-    public IReadOnlyList<string> SkippedChecks { get; init; }
-
     public TimeSpan Duration { get; init; }
 
     public long BytesRead { get; init; }
@@ -238,7 +235,6 @@ internal static class BackupVerifier
             Packs = packList,
             Points = points,
             StoreFindings = storeFindings,
-            SkippedChecks = [],
             Duration = clock.Elapsed,
             BytesRead = bytesRead,
         };
