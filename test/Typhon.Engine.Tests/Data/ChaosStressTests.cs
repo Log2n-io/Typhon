@@ -2440,8 +2440,15 @@ class ChaosStressTests : TestBase<ChaosStressTests>
     /// Roles: CompD creators, CompD deleters, CompA updaters, long-running MVCC readers,
     /// indexed field updaters, and rapid create-rollback cycles. All running for 2 seconds.
     /// </summary>
+    /// <remarks>
+    /// 16 MiB, not <see cref="StressCacheSize"/>. At 4 MiB the slot reserve that serves a waiter holding the cache's floor is off by design (PS-24, under
+    /// 1,024 pages): 4 runs of 5 starved on four Linux cores. At the 8 MiB floor, with a grow drawing for the pinned threads blocked on its lock, 3 runs of 39
+    /// still did: a grow initialises up to 1,024 new pages, more than a 32-slot reserve serves on a cache every one of whose pages is epoch-held.
+    /// Ten writers' working set is larger than the floor's cache, which is what the timeout's own advice says; 16 MiB passed 20 of 20. The tiny-cache
+    /// starvation itself is <c>SlotReserveTests</c>' and <c>SlotReserveGrowTests</c>'. A failure names the reserve and the threads that held the cache.
+    /// </remarks>
     [Test]
-    [Property("CacheSize", StressCacheSize)]
+    [Property("CacheSize", 16L * 1024 * 1024)]
     public void UltimateStress_AllSubsystems()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
@@ -2449,6 +2456,15 @@ class ChaosStressTests : TestBase<ChaosStressTests>
         dbe.InitializeArchetypes();
 
         var errors = new ConcurrentBag<string>();
+
+        // Which role runs on which thread, and the pins at the first back-pressure timeout: the epoch-held cache's floor named, not just its lag.
+        var roles = new ConcurrentDictionary<int, string>();
+        string pinsAtTimeout = null;
+        PagedMMF.BackpressureTimeoutObserverForTests = mmf =>
+        {
+            var pins = mmf.EpochManager?.DescribePinnedThreads();
+            Interlocked.CompareExchange(ref pinsAtTimeout, $"reserve {mmf.ReservedSlotCount} of {mmf.SlotReserveTarget}, {mmf.ReserveDraws} draws; {pins}; roles {string.Join(", ", roles.Select(kv => $"#{kv.Key}={kv.Value}"))}", null);
+        };
 
         // Pre-create CompA entities for updaters and readers
         const int preCreatedCompA = 50;
@@ -2489,6 +2505,7 @@ class ChaosStressTests : TestBase<ChaosStressTests>
             allTasks.Add(Task.Run(() =>
             {
                 var rand = new Random(creatorId * 1111);
+                roles[Environment.CurrentManagedThreadId] = "Creator";
                 startSignal.Wait();
 
                 while (!token.IsCancellationRequested)
@@ -2519,6 +2536,7 @@ class ChaosStressTests : TestBase<ChaosStressTests>
             var deleterId = i;
             allTasks.Add(Task.Run(() =>
             {
+                roles[Environment.CurrentManagedThreadId] = "Deleter";
                 startSignal.Wait();
 
                 while (!token.IsCancellationRequested)
@@ -2556,6 +2574,7 @@ class ChaosStressTests : TestBase<ChaosStressTests>
             allTasks.Add(Task.Run(() =>
             {
                 var rand = new Random(updaterId * 3333);
+                roles[Environment.CurrentManagedThreadId] = "Updater";
                 startSignal.Wait();
 
                 while (!token.IsCancellationRequested)
@@ -2610,6 +2629,7 @@ class ChaosStressTests : TestBase<ChaosStressTests>
             var readerId = i;
             allTasks.Add(Task.Run(() =>
             {
+                roles[Environment.CurrentManagedThreadId] = "MVCC reader";
                 startSignal.Wait();
 
                 while (!token.IsCancellationRequested)
@@ -2643,6 +2663,7 @@ class ChaosStressTests : TestBase<ChaosStressTests>
         allTasks.Add(Task.Run(() =>
         {
             var rand = new Random(77777);
+            roles[Environment.CurrentManagedThreadId] = "Index updater";
             startSignal.Wait();
 
             while (!token.IsCancellationRequested)
@@ -2682,6 +2703,7 @@ class ChaosStressTests : TestBase<ChaosStressTests>
         allTasks.Add(Task.Run(() =>
         {
             var rand = new Random(88888);
+            roles[Environment.CurrentManagedThreadId] = "Rollback";
             startSignal.Wait();
 
             while (!token.IsCancellationRequested)
@@ -2713,6 +2735,10 @@ class ChaosStressTests : TestBase<ChaosStressTests>
         {
             // Tasks cancelled — expected
         }
+        finally
+        {
+            PagedMMF.BackpressureTimeoutObserverForTests = null;
+        }
 
         // Report stats
         Logger.LogInformation("=== Ultimate Stress Stats ===");
@@ -2739,7 +2765,7 @@ class ChaosStressTests : TestBase<ChaosStressTests>
 
         // Filter out excessive duplicate errors
         var uniqueErrors = errors.Distinct().Take(30).ToList();
-        Assert.That(uniqueErrors, Is.Empty, $"Errors:\n{string.Join("\n", uniqueErrors)}");
+        Assert.That(uniqueErrors, Is.Empty, $"Errors:\n{string.Join("\n", uniqueErrors)}\nPins at the first back-pressure timeout: {pinsAtTimeout ?? "none"}");
     }
 
     #endregion

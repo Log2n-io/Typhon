@@ -2465,19 +2465,27 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             are the publish's B+Tree writes past their first latch (EP-02), the checkpoint's meta persist, a transaction's own reads, a compaction
             under its chain lock; served first, they cannot hold every other wait behind them for a timeout. The reserve emptied, they wait as
             before
+  invariant a thread holding a lock that pinned threads wait on draws as the floor-holder does (PagedMMF.FloorInheritDepth), its share included and
+            whatever its own pin or a refresh of it: a segment's grow (ChunkBasedSegment.GrowChunkCapacity) holds its grow lock while it reads and
+            creates pages, and every allocation of that segment that found no room waits on the lock, publishes among them with pins at the floor.
+            They wait on the lock, not on a page, so they never draw; the grow, a younger pin, would wait for its pages behind their pins
   scope: PagedMMF.TryDrawReserve, PagedMMF.TryStockReserve, PagedMMF.SlotReserveTarget, PagedMMF.ReservedSlotCount, PagedMMF.ReserveDraws,
-         PagedMMF.AllocateMemoryPageCore
+         PagedMMF.AllocateMemoryPageCore, PagedMMF.FloorInheritDepth, ChunkBasedSegment.GrowChunkCapacity
   verified: SlotReserveTests [VerifiesRule] — a cache under 1,024 pages reserves nothing; the first allocation fills the reserve and 4,096 more
             never take a reserved slot, every slot counted free or serving; with every round finding nothing, a pinned request is served at once
             from the reserve, which the next allocation refills, and with no reserve the same request times out; a wait that moves its epoch draws
             nothing; a younger pin draws down to the floor's share and then waits, and the floor-holder draws from it; a slot that ends a wait
-            serves its waiter, not the reserve; under the eviction guard every reserved slot that held a page was quarantined first. Mutants
+            serves its waiter, not the reserve; under the eviction guard every reserved slot that held a page was quarantined first; a lock holder
+            under FloorInheritDepth draws the floor's share on its first round, and SlotReserveGrowTests' segment grow, a younger pin behind the
+            floor with the reserve down to that share and every page forced to wait, completes from it. Mutants
             killed: no draw (the pinned request times out), a draw for a wait that moved its epoch, no floor share, a waiter's slot stocked, a slot
-            stocked unquarantined, a stock or a draw left out of the free count; [RuleMutant] Mutant_WithNoReserve_APinnedWaiterTimesOut
+            stocked unquarantined, a stock or a draw left out of the free count, a grow that does not inherit the floor, a draw that ignores
+            the inheritance; [RuleMutant] Mutant_WithNoReserve_APinnedWaiterTimesOut
   on_violation: the 32 MiB market (16 threads) failed every run of nine: after the storm, the checkpoint's CheckpointLSN flip (PersistMetaNow)
                 waited for the meta page with its pin, 4,399 epochs behind, and every reader timed out behind it; during the storm, publishes waiting
                 past their first latch, their pins up to 4,000 epochs behind, held the whole cache. With the reserve, 15 of 15 runs pass and the
-                longest back-pressure wait is 68-352 ms
+                longest back-pressure wait is 68-352 ms. Without the inheritance, ChaosStressTests.UltimateStress_AllSubsystems at the 8 MiB floor
+                timed out about one run in six on four Linux cores: a grow waiting for a page, the publishes blocked on its lock 170,000 epochs behind
 
 ## Module: WAL Recovery
 

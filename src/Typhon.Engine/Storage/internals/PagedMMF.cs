@@ -2556,8 +2556,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
                         // PS-24 (#1382): a thread that would wait here with its epoch pinned may hold the cache's floor, and nothing tagged since its
                         // pin can be evicted for it: it takes a reserved slot instead, finishes, and moves its epoch. A wait that moved its epoch
-                        // does not hold the floor, and waits.
-                        if (!refreshed && TryDrawReserve(minActiveEpoch, out var reservedSlot))
+                        // does not hold the floor, and waits — unless it holds a lock pinned threads wait on (FloorInheritDepth): their pins hold the cache
+                        // whatever its own epoch does, and only its finishing releases them.
+                        if ((!refreshed || t_floorInheritDepth > 0) && TryDrawReserve(minActiveEpoch, out var reservedSlot))
                         {
                             memPageIndex = reservedSlot;
                             pi = Slot(reservedSlot);
@@ -3591,12 +3592,19 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     }
 
     /// <summary>
+    /// Test seam: called on the throwing thread just before a back-pressure timeout throws, while the pins that held the cache are still in place — a stress
+    /// test reads <see cref="EpochManager.DescribePinnedThreads"/> there to name the thread holding the floor. Null outside such a test.
+    /// </summary>
+    internal static Action<PagedMMF> BackpressureTimeoutObserverForTests;
+
+    /// <summary>
     /// The back-pressure timeout, with the cache's breakdown taken in one pass at the throw (#1382): what held the slots, not only the lap census's
     /// debt and epoch counts, which leave marks out and count every epoch-tagged page as epoch-held. One pass over the cache, against a wait of seconds.
     /// </summary>
     [DoesNotReturn]
     internal void ThrowBackpressureTimeout(TimeSpan waited)
     {
+        BackpressureTimeoutObserverForTests?.Invoke(this);
         var census = CountUnevictablePages();
         ThrowHelper.ThrowPageCacheBackpressureTimeout(census.Debt, census.EpochHeld, waited, EpochManager?.ActiveSlotCount ?? 0,
             EpochManager != null ? EpochManager.GlobalEpoch - EpochManager.MinActiveEpoch : 0, census.Marked, census.EpochOnly);
