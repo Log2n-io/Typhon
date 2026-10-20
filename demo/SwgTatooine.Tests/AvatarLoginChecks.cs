@@ -121,7 +121,7 @@ internal sealed class AvatarLoginChecks
             {
                 var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
                 total++;
-                if (control[slot].Kind != ControllerKind.InProcess)
+                if (control[slot].Kind != ControllerKind.Scripted)
                 {
                     human++;
                 }
@@ -421,7 +421,7 @@ internal sealed class AvatarLoginChecks
     /// AC A-8: the pooled crowd is untouched by a human walking around.
     /// </summary>
     /// <remarks>
-    /// <b>An avatar is additional, not borrowed.</b> The 320 x <c>--pop</c> pooled players stay <c>InProcess</c> and keep being driven
+    /// <b>An avatar is additional, not borrowed.</b> The 320 x <c>--pop</c> pooled players stay <c>Scripted</c> and keep being driven
     /// by <c>PlayerThink</c>; nothing in A5 claims one. A regression to possession would show up as a pooled player going
     /// <c>Human</c> and the total staying flat.
     /// </remarks>

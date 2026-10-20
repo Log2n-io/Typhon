@@ -127,6 +127,19 @@ public sealed class SimConfig
     /// planet's population.</summary>
     public int InteriorNpcs = 3;
 
+    /// <summary>
+    /// Re-check every colliding body's written position against a fresh spatial query, and count the ones that ended up
+    /// inside a structure (the static neighbourhood's independent oracle).
+    /// </summary>
+    /// <remarks>
+    /// <b>Off by default and only ever on in a test, because its whole point is to not trust the disc.</b> The audit asks the
+    /// spatial layer from scratch, every tick, for every body that collided — which is exactly the work the disc exists to
+    /// avoid, so it is not a thing to leave on. What it buys is an oracle that cannot be graded by the mechanism it is
+    /// grading: a disc that wrongly decided nothing was near, or a push that left a body half inside a wall, is caught here
+    /// whether or not the neighbourhood agrees.
+    /// </remarks>
+    public bool CollisionAudit;
+
     /// <summary>Share of in-city idle decisions that walk into a building instead. [EST]</summary>
     public float InteriorShare = 0.25f;
 

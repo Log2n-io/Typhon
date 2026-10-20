@@ -320,7 +320,7 @@ public static class WorldRebuild
     /// <remarks>
     /// <b>Possession does not survive a restart and must not appear to.</b> <c>PlayerControl.Kind</c> and <c>PlayerSession.Controller</c> are ordinary
     /// persisted components, so a world saved while a client was connected reopens with a player marked as that client's — and the client is gone. Nothing would
-    /// ever clear it: <c>PlayerThink</c> skips anything not <c>InProcess</c>, so the player would stand still for the life of the process while the simulation
+    /// ever clear it: <c>PlayerThink</c> skips anything not <c>Scripted</c>, so the player would stand still for the life of the process while the simulation
     /// politely waited for intents from a session that does not exist. Handing them back is the only correct answer, and doing it here is what makes the count
     /// this method returns the count of players the simulation will actually drive.
     /// </remarks>
@@ -348,7 +348,7 @@ public static class WorldRebuild
                 var id = cluster.GetEntityId(slot);
                 index.Players.Add(id);
                 census.Players++;
-                if (controls[slot].Kind != ControllerKind.InProcess)
+                if (controls[slot].Kind != ControllerKind.Scripted)
                 {
                     possessed.Add(id);
                 }
@@ -363,7 +363,7 @@ public static class WorldRebuild
             }
 
             var control = player.Read(Player.Control);
-            control.Kind = ControllerKind.InProcess;
+            control.Kind = ControllerKind.Scripted;
             player.Set(Player.Control, control);
             var session = player.Read(Player.Session);
             session.Controller = 0u;

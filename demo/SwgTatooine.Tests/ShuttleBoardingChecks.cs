@@ -10,7 +10,7 @@ namespace SwgTatooine.Tests;
 /// <remarks>
 /// <para>
 /// <b>What this closes.</b> <c>TryTakeShuttle</c> is server-side AI and the boarding loop admitted only
-/// <c>ControllerKind.InProcess</c>, so no client could use a shuttle at all: a bot's routing had three answers — walk,
+/// <c>ControllerKind.Scripted</c>, so no client could use a shuttle at all: a bot's routing had three answers — walk,
 /// speeder, fly — of which one was unreachable for every client, and a human watching a crowd fly away could not follow.
 /// </para>
 /// <para>

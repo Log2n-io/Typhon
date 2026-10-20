@@ -697,7 +697,7 @@ public sealed class ClientIntentChecks
     /// <remarks>
     /// <para>
     /// <b>This case was inverted by A5, and the old assertion is worth recording.</b> It used to require that the player went back
-    /// to the simulation as <c>ControllerKind.InProcess</c>, because a session was handed a body out of the pooled crowd and had to
+    /// to the simulation as <c>ControllerKind.Scripted</c>, because a session was handed a body out of the pooled crowd and had to
     /// give it back. An avatar is not borrowed — it is spawned for the session and belongs to nothing else — so going back to the
     /// simulation would leave an ownerless body standing where its client left it, which is the leak the old assertion was guarding
     /// against in the only form it could then take.

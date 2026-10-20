@@ -257,7 +257,7 @@ public sealed partial class SimBridge
             var peek = cluster.GetReadOnlySpan(Player.State);
 
             // Everyone waiting is boarded, possessed or not, and the controller is no longer consulted. The filter that was here admitted only
-            // ControllerKind.InProcess, against the hazard of a body "possessed WHILE already queued" being flown away by a system its client cannot see —
+            // ControllerKind.Scripted, against the hazard of a body "possessed WHILE already queued" being flown away by a system its client cannot see —
             // and it cited PossessPlayers normalising the activity on claim as the other half of the guard. That function no longer exists: possession was
             // replaced by avatars in A5, so a client is given a FRESHLY SPAWNED body at PlayerActivity.Idle and never takes over a queued one. The hazard
             // it defended against cannot occur any more.
@@ -267,7 +267,7 @@ public sealed partial class SimBridge
             // only if its own client asked to board (TatooineReplication's BoardShuttle).
             //
             // That makes carrying it correct and it does NOT make the DESTINATION correct, which is the half this comment used to assert its way past: the
-            // inter-planet roll below is gated on ControllerKind.InProcess for exactly that reason. A client asked for a city.
+            // inter-planet roll below is gated on ControllerKind.Scripted for exactly that reason. A client asked for a city.
             for (var bits = bits0; bits != 0; bits &= bits - 1)
             {
                 var idx = BitOperations.TrailingZeroCount(bits);
@@ -330,7 +330,7 @@ public sealed partial class SimBridge
                 // hazard the removed ControllerKind filter was really standing in front of; the comment that replaced
                 // it reasoned about possession, which possession's removal had already settled, and missed this.
                 var h = places[idx].HalfExtent;
-                var scripted = controls[idx].Kind == ControllerKind.InProcess;
+                var scripted = controls[idx].Kind == ControllerKind.Scripted;
                 var interPlanet = scripted
                     && _config.Planets > 1
                     && planet < _config.Planets

@@ -128,7 +128,15 @@ public partial class Starship : Archetype<Starship>
 /// checkpoint-durable cluster half and a WAL-logged versioned half. That mixture is the interesting case and it is why
 /// the inventory lives on the player rather than in a table of its own.
 /// </remarks>
-[Archetype(1, "Players", ClusterDurability = ClusterDurability.Checkpoint)]
+/// <remarks>
+/// <b>Revision 2 because <see cref="PlayerProximity"/> was added to the component set.</b> An archetype's component set changes
+/// its cluster geometry and the engine has no migration for it (EN-8), so a world written at revision 1 is refused on reopen,
+/// which is right. The bump is the engine's declared contract for that change rather than a cosmetic marker — but it does not
+/// improve the message an operator sees: <c>ValidateArchetypeSchema</c> compares the component COUNT first and throws there, so
+/// the revision branch is unreachable for an added component and the refusal names the count. Pre-alpha, so the answer is to
+/// recreate the world; <c>--persist</c> is opt-in and the benchmark's default deletes the file.
+/// </remarks>
+[Archetype(2, "Players", ClusterDurability = ClusterDurability.Checkpoint)]
 [Replicated]
 public partial class Player : Archetype<Player>
 {
@@ -141,6 +149,12 @@ public partial class Player : Archetype<Player>
     public static readonly Comp<PlayerSession> Session = Register<PlayerSession>();
     public static readonly Comp<Inventory> Inventory = Register<Inventory>();
     public static readonly Comp<PlayerRealm> Realm = Register<PlayerRealm>();
+
+    /// <summary>
+    /// The static neighbourhood's disc (see <see cref="PlayerProximity"/>): written by <c>PlayerMove</c>, read by nothing
+    /// else, never replicated. Appended last so that every existing slot index keeps its number.
+    /// </summary>
+    public static readonly Comp<PlayerProximity> Proximity = Register<PlayerProximity>();
 }
 
 /// <summary>

@@ -270,6 +270,9 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.RegisterComponentFromAccessor<NpcRealm>();
         Dbe.RegisterComponentFromAccessor<CreatureRealm>();
         Dbe.RegisterComponentFromAccessor<PlayerRealm>();
+
+        // The static neighbourhood's disc: where a body last asked what was near it, and how far it may walk from there.
+        Dbe.RegisterComponentFromAccessor<PlayerProximity>();
         Dbe.RegisterComponentFromAccessor<ShipPlacement>();
         Dbe.RegisterComponentFromAccessor<ShipMotion>();
         Dbe.RegisterComponentFromAccessor<ShipRealm>();

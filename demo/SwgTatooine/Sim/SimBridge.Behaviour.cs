@@ -581,7 +581,7 @@ public sealed partial class SimBridge
                 // A possessed player is its client's to drive, and two deciders on one entity is the bug this guards (SWG-01). Nothing below runs for it: not
                 // the arrival test, not the re-decide, not the timer — a possessed player has no server-side activity timer at all, so ActivityTicks is zero
                 // and the re-decide below would fire on every tick and overwrite the destination the client just sent.
-                if (controls[idx].Kind != ControllerKind.InProcess)
+                if (controls[idx].Kind != ControllerKind.Scripted)
                 {
                     skipped++;
                     continue;
@@ -922,6 +922,22 @@ public sealed partial class SimBridge
         var tick = ctx.TickNumber;
         Span<PlayerPlacement> next = stackalloc PlayerPlacement[64];
 
+        // The static neighbourhood's scratch, per worker and allocated once; see SimBridge.Proximity.cs. Taken outside the
+        // cluster loop because one cluster is one batch and every cluster reuses these buffers.
+        var prox = CollisionDisabled ? null : (_proximity ??= new ProximityScratch());
+
+        // Read once per worker pass, not per body: a disc taken before the last static placement is retired, and the value
+        // only ever moves when something fixed is created, destroyed or moved.
+        var generation = Volatile.Read(ref _structureGeneration);
+        var audit = prox != null && _config.CollisionAudit;
+        long held = 0;
+        long refreshed = 0;
+        long batches = 0;
+        long neighbours = 0;
+        long contacts = 0;
+        long overflows = 0;
+        long unresolved = 0;
+
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<Player>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
             : ctx.Accessor.GetClusterEnumerator<Player>(ctx.StartClusterIndex, ctx.EndClusterIndex);
@@ -936,7 +952,13 @@ public sealed partial class SimBridge
 
             var places = cluster.GetReadOnlySpan(Player.Bounds);
             var motions = cluster.GetReadOnlySpan(Player.Move);
+            var controls = prox == null ? default : cluster.GetReadOnlySpan(Player.Control);
             var k = ctx.Realms.TicksPerVisit(cluster.Realm);   // Realms G2, as for creatures
+
+            // The discs, handed out on the first body of this cluster that has actually moved and not before: a cluster of
+            // parked players must not pay for a writable span it never writes.
+            var discs = Span<PlayerProximity>.Empty;
+            var pending = 0;
 
             var moved = 0UL;
             var bits = bits0;
@@ -966,9 +988,52 @@ public sealed partial class SimBridge
                 // the split happened once.
                 var x = Math.Clamp(p.X + (move.VelX * k) + biasX, -half + h, half - h);
                 var z = Math.Clamp(p.Z + (move.VelZ * k) + biasZ, -half + h, half - h);
-                var nb = default(PlayerPlacement);
                 var gy = GroundAt(cluster.Realm, x, z);
                 Slow(cluster.Realm, in p, ref x, ref z, ref gy, h, half);
+
+                // The step is settled now: integrated, held inside the world and shortened by the grade. Everything a fixed
+                // thing has to say about it is said here, on this value, which is why collision lives in the move rather
+                // than in a system of its own.
+                // A non-finite step cannot be collided and must not be handed to the batch: the query refuses a member that is
+                // not finite by throwing, and an exception out of a system body aborts the tick. A client intent carrying NaN
+                // is the only way to get one here, and dropping it back to the uncollided path is the same answer the
+                // simulation gave before collision existed.
+                if (prox != null && controls[idx].Kind != ControllerKind.Scripted && float.IsFinite(x) && float.IsFinite(z))
+                {
+                    if (discs.IsEmpty)
+                    {
+                        discs = cluster.GetSpan(Player.Proximity);
+                    }
+
+                    if (!DiscHolds(in discs[idx], cluster.Realm, generation, x, z, h))
+                    {
+                        // Out of its disc: this body joins the cluster's batch and is written once the query comes back.
+                        prox.Slot[pending] = idx;
+                        prox.Half[pending] = h;
+                        prox.CandX[pending] = x;
+                        prox.CandZ[pending] = z;
+                        prox.Count[pending] = 0;
+                        prox.Overflow[pending] = false;
+                        prox.Probe[pending] = new BSphere2F
+                        {
+                            CenterX = x,
+                            CenterY = z,
+                            Radius = h + ProbeReachM,
+                        };
+                        pending++;
+                        continue;
+                    }
+
+                    held++;
+                    if (audit)
+                    {
+                        // The held path matters MORE to the oracle than the refreshed one: a disc that wrongly decided
+                        // nothing was near is the failure the disc's own bookkeeping cannot see.
+                        Audit(cluster.Realm, x, z, h);
+                    }
+                }
+
+                var nb = default(PlayerPlacement);
                 nb.SetAt(x, z, gy, h);
                 if (batched)
                 {
@@ -981,12 +1046,118 @@ public sealed partial class SimBridge
                 }
             }
 
+            // One query for the whole cluster. A cluster's occupancy word is 64 bits and the batched query takes 64
+            // members, so the batch boundary IS the cluster boundary -- and because clusters are spatial, these bodies are
+            // co-located, which is the case the batch exists for: the cells and clusters they share are opened once.
+            if (pending > 0)
+            {
+                // One member is the common case -- a single client body in a cluster of scripted ones -- and the batch zeroes
+                // several kilobytes of inline member buffers per call. The single enumerator costs none of that.
+                var sink = new ProximitySink(prox);
+                if (pending == 1)
+                {
+                    var probe0 = prox.Probe[0];
+                    var e = Dbe.ClusterSpatialQuery<WorldObject>(cluster.Realm).Radius(in probe0);
+                    try
+                    {
+                        while (e.MoveNext())
+                        {
+                            // Copied out because the enumerator's Current is a property returning by value, and the sink
+                            // takes its hit by reference.
+                            var hit = e.Current;
+                            sink.Hit(0, in hit);
+                        }
+                    }
+                    finally
+                    {
+                        e.Dispose();
+                    }
+                }
+                else
+                {
+                    Dbe.ClusterSpatialQuery<WorldObject>(cluster.Realm).ForEachInRadius(prox.Probe.AsSpan(0, pending), ref sink);
+                }
+
+                batches++;
+                refreshed += pending;
+
+                for (var m = 0; m < pending; m++)
+                {
+                    var slot = prox.Slot[m];
+                    var mh = prox.Half[m];
+                    var mx = prox.CandX[m];
+                    var mz = prox.CandZ[m];
+                    neighbours += prox.Count[m];
+                    if (prox.Overflow[m])
+                    {
+                        overflows++;
+                    }
+
+                    var boxes = prox.Neighbours(m);
+                    if (PushOut(boxes, mh, half, ref mx, ref mz, out var stuck))
+                    {
+                        contacts++;
+                        if (stuck)
+                        {
+                            unresolved++;
+                        }
+                    }
+
+                    // Re-sampled because the push moved the body, for the reason the grade step re-samples: the altitude
+                    // written has to be the ground under the position actually written.
+                    var mgy = GroundAt(cluster.Realm, mx, mz);
+                    var probe = prox.Probe[m];
+                    discs[slot] = new PlayerProximity
+                    {
+                        AnchorX = mx,
+                        AnchorZ = mz,
+
+                        // A full set is still correct, because the sink keeps the NEAREST sixteen: every box it dropped is
+                        // farther than every box it held, hence farther than the disc this takes the minimum of.
+                        ClearM = DiscFor(boxes, probe.CenterX, probe.CenterY, probe.Radius, mx, mz),
+                        Realm = cluster.Realm.Value,
+                        Generation = (ushort)generation,
+                    };
+
+                    if (audit)
+                    {
+                        Audit(cluster.Realm, mx, mz, mh);
+                    }
+
+                    var mb = default(PlayerPlacement);
+                    mb.SetAt(mx, mz, mgy, mh);
+                    if (batched)
+                    {
+                        next[slot] = mb;
+                        moved |= 1UL << slot;
+                    }
+                    else
+                    {
+                        cluster.WriteSpatial(Player.Bounds, slot, mb);
+                    }
+                }
+
+                pending = 0;
+            }
+
             // The moved slots in one call, and only when something moved: 40 % of players are parked idle in a city, so
             // without the mask test most clusters pay the barrier's bookkeeping for an empty write.
             if (batched && moved != 0)
             {
                 cluster.WriteSpatial(Player.Bounds, moved, next);
             }
+        }
+
+        if (prox != null)
+        {
+            // Once per worker rather than once per body: six atomics on a parallel system body, not six per step.
+            Interlocked.Add(ref _discsHeld, held);
+            Interlocked.Add(ref _discsRefreshed, refreshed);
+            Interlocked.Add(ref _proximityBatches, batches);
+            Interlocked.Add(ref _neighboursSeen, neighbours);
+            Interlocked.Add(ref _contacts, contacts);
+            Interlocked.Add(ref _discOverflows, overflows);
+            Interlocked.Add(ref _unresolvedContacts, unresolved);
         }
     }
 

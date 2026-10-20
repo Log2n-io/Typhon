@@ -269,6 +269,19 @@ public sealed partial class TatooineSim
     /// <summary>What the portals did (Realms G1b).</summary>
     public void PrintPortalReport() => _bridge?.PrintPortalReport();
 
+    /// <summary>What the static neighbourhood and the collision did: discs held against discs refreshed is the claim.</summary>
+    public void PrintProximityReport() => _bridge?.PrintProximityReport();
+
+    /// <summary>
+    /// Colliding steps that held their disc, steps that refreshed it, queries issued, contacts resolved, neighbours seen,
+    /// sets that filled and contacts the pass budget could not resolve.
+    /// </summary>
+    public (long Held, long Refreshed, long Batches, long Contacts, long Neighbours, long Overflows, long Unresolved) ProximityTotals
+        => _bridge?.ProximityTotals ?? (0L, 0L, 0L, 0L, 0L, 0L, 0L);
+
+    /// <summary>With <c>--collision-audit</c>, what the independent oracle checked and what it caught.</summary>
+    public (long Checked, long Violations) CollisionAuditTotals => _bridge?.CollisionAuditTotals ?? (0L, 0L);
+
     /// <summary>True when a player inside pins interior <paramref name="realm"/> (Realms G2).</summary>
     public bool IsInteriorPinned(ushort realm) => _bridge?.IsInteriorPinned(realm) ?? false;
 

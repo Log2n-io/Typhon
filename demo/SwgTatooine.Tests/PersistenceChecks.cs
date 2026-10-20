@@ -363,7 +363,7 @@ public sealed class WorldIndexRebuildTests
     public void PossessionDoesNotSurviveARestart()
     {
         // A world saved while a client was connected reopens with a player marked as that client's, and the client is gone. Nothing would ever clear it —
-        // PlayerThink skips anything not InProcess — so the player would stand still for the life of the process while the simulation waited for intents from a
+        // PlayerThink drives only Scripted bodies — so the player would stand still for the life of the process while the simulation waited for intents
         // session that does not exist.
         EntityId possessed;
         using (var sim = Persisted.Run(Persisted.Config(_dir, persist: true, ticks: 5)))
@@ -394,7 +394,7 @@ public sealed class WorldIndexRebuildTests
 
             Assert.Multiple(() =>
             {
-                Assert.That(kind, Is.EqualTo(ControllerKind.InProcess),
+                Assert.That(kind, Is.EqualTo(ControllerKind.Scripted),
                     "a player possessed when the world was saved is still marked as somebody's, and that session is gone");
                 Assert.That(controller, Is.Zero, "the dead session's id is still on the player");
             });

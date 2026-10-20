@@ -15,7 +15,7 @@ namespace SwgTatooine;
 /// character's saved position and realm, and destroyed when the session goes.
 /// </para>
 /// <para>
-/// <b>The pooled crowd is untouched.</b> Those 320 x <c>--pop</c> players stay <c>ControllerKind.InProcess</c> and keep being
+/// <b>The pooled crowd is untouched.</b> Those 320 x <c>--pop</c> players stay <c>ControllerKind.Scripted</c> and keep being
 /// driven by <c>PlayerThink</c>; nothing here claims one, ever. An avatar is <i>additional</i>, one per real session, which is
 /// what acceptance criterion A-8 measures.
 /// </para>
@@ -1071,7 +1071,7 @@ public static partial class TatooineReplication
     /// <b>Possessed at birth, not possessed afterwards.</b> <c>Player.Control.Kind</c> and <c>Player.Session.Controller</c> are set
     /// in the spawn itself rather than written through <c>OpenMut</c> a moment later, so there is no tick — not even part of one — in
     /// which this body exists as something <c>PlayerThink</c> would drive. The pooled crowd's players are spawned without these and
-    /// stay <c>InProcess</c> for ever.
+    /// stay <c>Scripted</c> for ever.
     /// </para>
     /// <para>
     /// <b>Idle and stationary, with the destination on the spawn point.</b> A body that arrived already travelling would take its

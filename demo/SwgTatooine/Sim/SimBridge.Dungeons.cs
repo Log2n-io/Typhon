@@ -189,7 +189,7 @@ public sealed partial class SimBridge
                 // dungeon took it, teleported it into another realm and pinned ActivityTicks at int.MaxValue / 2 — a pin PlayerThink respects and which
                 // therefore survived the client disconnecting, leaving a player parked in a dungeon for the life of the process.
                 if (_interiorPins.ContainsKey(id) || _closedThisTick.Contains(id) || !tx.TryOpen(id, out var candidate)
-                    || candidate.Read(Player.Control).Kind != ControllerKind.InProcess
+                    || candidate.Read(Player.Control).Kind != ControllerKind.Scripted
                     || candidate.Read(Player.Realm).Value != 0 || candidate.Read(Player.State).Activity != PlayerActivity.Idle)
                 {
                     continue;   // read-only first: a rejected candidate's page is not dirtied

@@ -815,6 +815,80 @@ public struct PlayerState
     [Field] public int ShuttleDest;
 }
 
+/// <summary>
+/// Where a player last asked what fixed thing was near it, and how far it may walk from there before the answer can have
+/// changed (the static neighbourhood).
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>A disc, not a cached list.</b> <see cref="ClearM"/> is the distance from <see cref="AnchorX"/>/<see cref="AnchorZ"/>
+/// to the nearest blocking surface the last query found, so while the body stays inside it <i>nothing fixed can be
+/// touching it</i> — there is no test to run and no query to make. Only a body that leaves the disc pays, and the query it
+/// pays for hands it the next disc. Structures are sparse even in the densest city, so a disc is wide and a body crosses
+/// one rarely; a body pressed against a wall gets a disc of zero and refreshes every tick, which is correct and is a
+/// handful of bodies.
+/// </para>
+/// <para>
+/// <b>Three floats rather than the neighbours themselves.</b> A list would have to be sized for the worst case and kept
+/// per body, in a column every walk of the archetype then drags through cache, to answer a question whose answer is
+/// almost always "nothing". The neighbours are transient: the query hands them over, the step resolves against them in
+/// the same call, and they are discarded.
+/// </para>
+/// <para>
+/// <b>It is self-correcting for teleports.</b> A shuttle, a clone and a portal crossing move a body without walking, which
+/// is the case a leash counted in ticks gets wrong; a disc cannot, because the test is whether the new position is inside
+/// the old one. <see cref="Realm"/> is carried for the one case geometry alone would miss: an interior's coordinates are
+/// local and small, so a room position could land inside a planet anchor's disc by arithmetic coincidence rather than by
+/// proximity.
+/// </para>
+/// <para>
+/// A component of its own rather than fields on <see cref="PlayerState"/>, which would change the layout of a column every
+/// system walks; this one is read and written by <c>PlayerMove</c> and by nothing else, and is never replicated.
+/// </para>
+/// <para>
+/// <b><see cref="StorageMode.SingleVersion"/> rather than <see cref="StorageMode.Transient"/>, and the choice costs nothing
+/// either way.</b> <c>Player</c> is a <c>ClusterDurability.Checkpoint</c> archetype, so no per-tick fence record reaches the
+/// WAL for it; Transient would move this column into a store of its own and buy an indirection in the move loop for a
+/// durability saving that is already zero.
+/// </para>
+/// <para>
+/// <b>It therefore IS captured by the checkpoint, and a reopened world restores a disc up to a checkpoint interval stale.</b>
+/// That is safe, and only for a stated reason: the placement is restored from the same coherent checkpoint instant as the
+/// disc, so the anchor still describes where the body actually is — and the structures the disc was measured against do not
+/// move. <see cref="Generation"/> is what covers the case where one day they do.
+/// </para>
+/// </remarks>
+[Component("Swg.PlayerProximity", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct PlayerProximity
+{
+    /// <summary>Where the last query was taken from, east.</summary>
+    [Field] public float AnchorX;
+
+    /// <summary>Where the last query was taken from, north.</summary>
+    [Field] public float AnchorZ;
+
+    /// <summary>
+    /// Distance from the anchor within which no fixed thing can touch this body. Zero — the default, and what a body in
+    /// contact with a wall holds — forces a query on the next step.
+    /// </summary>
+    [Field] public float ClearM;
+
+    /// <summary>The realm the anchor was taken in. A disc from another realm says nothing about this one.</summary>
+    [Field] public ushort Realm;
+
+    /// <summary>
+    /// The world's static generation when the anchor was taken; a disc from an older one is retired unread.
+    /// </summary>
+    /// <remarks>
+    /// Nothing bumps it yet — no code path creates a <c>WorldObject</c> after world build — but player houses, harvesters and
+    /// camp objects are already in the footprint table, and the first runtime placement would otherwise leave a body standing
+    /// inside a new building with nothing anywhere to notice. Two bytes, which this component had spare to its alignment, and
+    /// one comparison. See <c>SimBridge.InvalidateStaticNeighbourhoods</c>.
+    /// </remarks>
+    [Field] public ushort Generation;
+}
+
 /// <summary>Who decides what a player does.</summary>
 /// <remarks>
 /// <b>The field exists so that two deciders cannot fight over one entity (SWG-01).</b> Before it, <c>PlayerThink</c> drove every player in the world; a
@@ -823,8 +897,18 @@ public struct PlayerState
 /// </remarks>
 public static class ControllerKind
 {
-    /// <summary>Driven by <c>PlayerThink</c>: the activity mix the benchmark measures. Every player starts here.</summary>
-    public const byte InProcess = 0;
+    /// <summary>
+    /// Driven by <c>PlayerThink</c>: the simulated crowd, which is the workload this demo exists to generate.
+    /// </summary>
+    /// <remarks>
+    /// <b>Named for what the entity is, not for where its decision is taken.</b> It was <c>InProcess</c>, which described the
+    /// decider's location and read as a third category of thing beside players and NPCs -- and for a while it was one: a session
+    /// used to be handed a free body out of this crowd, so the value meant both "the crowd" and "not yet claimed". Avatars ended
+    /// that (A5): a login spawns its own body and a logout destroys it, nothing claims a scripted one, and the value now means
+    /// exactly one thing. A scripted body is an NPC that happens to carry a player's components, because measuring what a player
+    /// population costs is the point.
+    /// </remarks>
+    public const byte Scripted = 0;
 
     /// <summary>Possessed by a human client's session. <c>PlayerThink</c> leaves it alone entirely.</summary>
     public const byte Human = 1;
@@ -854,7 +938,7 @@ public static class ControllerKind
 /// span is handed out, never observing what the caller does with it. A possession mark written beside replicated state would read as a change to that state
 /// on every input tick. Keeping it out also leaves <c>PlayerState</c>'s layout byte-for-byte what every earlier measurement ran against.
 /// </para>
-/// <para>Zero is the resting state: <c>InProcess</c>, so a spawned player needs no initialisation.</para>
+/// <para>Zero is the resting state: <c>Scripted</c>, so a spawned player needs no initialisation.</para>
 /// </remarks>
 [Component("Swg.PlayerControl", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
@@ -891,7 +975,7 @@ public struct PlayerSession
     [Field] public EntityId Target;
 
     /// <summary>
-    /// The session driving this player — <c>SessionId.Value</c> — or 0 when <see cref="PlayerControl.Kind"/> is <see cref="ControllerKind.InProcess"/>.
+    /// The session driving this player — <c>SessionId.Value</c> — or 0 when <see cref="PlayerControl.Kind"/> is <see cref="ControllerKind.Scripted"/>.
     /// </summary>
     /// <remarks>
     /// It is what <c>TatooineReplication.ControlledBy</c> scans for, so the world rather than a dictionary answers which player a session holds.

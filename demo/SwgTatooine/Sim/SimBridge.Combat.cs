@@ -125,7 +125,7 @@ public sealed partial class SimBridge
                 var z = places[idx].Z;
                 var target = sessions[idx].Target;
                 var targetKind = sessions[idx].TargetKind;
-                var possessed = controls[idx].Kind != ControllerKind.InProcess;
+                var possessed = controls[idx].Kind != ControllerKind.Scripted;
 
                 if (!target.IsNull)
                 {
@@ -894,7 +894,7 @@ public sealed partial class SimBridge
     /// </remarks>
     private bool SendOnMission(Transaction tx, in CombatEvent ev)
     {
-        if (!tx.TryOpenMut(ev.Target, out var player) || player.Read(Player.Control).Kind != ControllerKind.InProcess)
+        if (!tx.TryOpenMut(ev.Target, out var player) || player.Read(Player.Control).Kind != ControllerKind.Scripted)
         {
             return false;
         }

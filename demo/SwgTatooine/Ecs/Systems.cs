@@ -109,6 +109,19 @@ internal sealed class PlayerMoveSystem : QuerySystem
         .ChunksPerWorker(2f)
         .Reads<PlayerMotion>()
         .Writes<PlayerPlacement>()
+
+        // Collision reads the structures around the step this system just produced (the static neighbourhood; see
+        // SimBridge.Proximity.cs). Declared because rule ED-05 is about saying so rather than about whether anything
+        // happens to write it: nothing writes a structure's placement during a tick, so the declaration orders the graph
+        // without constraining it -- and if a later feature does place one, this edge is already right.
+        .Reads<StructurePlacement>()
+
+        // Which bodies collide at all: a client's, never the scripted crowd's. PlayerThink already reads it for the
+        // mirror-image reason -- it decides for the bodies this does not.
+        .Reads<PlayerControl>()
+
+        // The disc each body carries: where its last query was taken from, and how far it may walk from there.
+        .Writes<PlayerProximity>()
         .Input(() => _bridge.PlayerView);
 
     protected override void Execute(TickContext ctx) => _bridge.PlayerMoveTick(ctx);

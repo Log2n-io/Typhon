@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
 using SwgTatooine.Accounts;
@@ -2781,7 +2781,7 @@ public static partial class TatooineReplication
             for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
             {
                 var slot = BitOperations.TrailingZeroCount(bits);
-                if (owners[slot].Controller == session.Value && control[slot].Kind != ControllerKind.InProcess)
+                if (owners[slot].Controller == session.Value && control[slot].Kind != ControllerKind.Scripted)
                 {
                     return cluster.GetEntityId(slot);
                 }

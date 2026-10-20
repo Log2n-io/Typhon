@@ -188,6 +188,7 @@ internal static class Program
 
         sim.PrintShuttleReport();
         sim.PrintPortalReport();
+        sim.PrintProximityReport();
         sim.PrintSpaceReport();
         sim.PrintDungeonReport();
         var counts = sim.Dbe.Realms.Counts;
