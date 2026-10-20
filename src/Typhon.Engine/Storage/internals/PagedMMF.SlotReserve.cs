@@ -20,6 +20,19 @@ public partial class PagedMMF
     /// <summary>The share of the reserve (1 / this) that only the thread holding the cache's floor may draw: younger pins cannot empty it before it.</summary>
     internal const int SlotReserveFloorShareDivisor = 4;
 
+    /// <summary>
+    /// Non-zero while this thread holds a lock other pinned threads may be blocked on (a segment's grow lock): it draws from the reserve as the floor-holder
+    /// does, its share included, whatever its own pin. Those threads hold the cache's floor waiting on the lock, not on a page, so they never draw; their
+    /// pins keep every page epoch-held, and the lock's owner, a younger pin, would wait for a page behind them until the timeout (#1382, PS-24).
+    /// </summary>
+    internal static int FloorInheritDepth
+    {
+        get => t_floorInheritDepth;
+        set => t_floorInheritDepth = value;
+    }
+
+    [ThreadStatic] private static int t_floorInheritDepth;
+
     private readonly object _reserveLock = new();
     private int[] _reserve;
     private int _reserveTarget;
@@ -107,19 +120,21 @@ public partial class PagedMMF
     /// PS-24 (#1382): a slot from the reserve, Allocating and out of the directory, for an allocation that would otherwise wait with this thread's epoch
     /// pinned. False when the thread holds no pin, or when the reserve is down to the share kept for the thread whose pin is the cache's floor
     /// (<paramref name="minActiveEpoch"/>), unless this thread is that one: a floor-holder that finds the reserve emptied by younger pins waits for a
-    /// timeout, since nothing tagged after its pin can be evicted to refill it.
+    /// timeout, since nothing tagged after its pin can be evicted to refill it. A thread under <see cref="FloorInheritDepth"/> draws as the floor-holder does,
+    /// pinned or not.
     /// </summary>
     private bool TryDrawReserve(long minActiveEpoch, out int memPageIndex)
     {
         memPageIndex = -1;
         var epochs = EpochManager;
-        if (Volatile.Read(ref _reservedCount) == 0 || epochs is not { IsCurrentThreadInScope: true })
+        var inherits = t_floorInheritDepth > 0;
+        if (Volatile.Read(ref _reservedCount) == 0 || (!inherits && epochs is not { IsCurrentThreadInScope: true }))
         {
             return false;
         }
 
-        var pinned = epochs.CurrentThreadPinnedEpoch;
-        var kept = pinned != 0 && pinned <= minActiveEpoch ? 0 : _reserveTarget / SlotReserveFloorShareDivisor;
+        var pinned = inherits ? 0 : epochs.CurrentThreadPinnedEpoch;
+        var kept = inherits || (pinned != 0 && pinned <= minActiveEpoch) ? 0 : _reserveTarget / SlotReserveFloorShareDivisor;
         lock (_reserveLock)
         {
             if (_reservedCount <= kept)

@@ -181,6 +181,16 @@ internal readonly ref struct OlcLatch
     }
 
     /// <summary>
+    /// Test seam: the held write lock passes to the next holder with no gap between them. The version moves on as <see cref="WriteUnlock"/> then
+    /// <see cref="TryWriteLock"/> would move it, but no reader can descend between the two, as one can in a real unlock and relock.
+    /// </summary>
+    internal void HandOffWriteLockForTests()
+    {
+        var v = _version;
+        Volatile.Write(ref _version, (((v >> 2) + 1) << 2) | (v & 0b11));
+    }
+
+    /// <summary>
     /// Mark node as obsolete. Must hold write lock.
     /// </summary>
     /// <remarks>

@@ -7,12 +7,15 @@
 # wipe is free and keeps the box drift-free). Idempotent — safe to re-run.
 #
 # Usage:  ./provision.sh [DOTNET_CHANNEL] [NODE_MAJOR]
-#   DOTNET_CHANNEL  default 10.0   (e.g. 11.0 for the .NET 11 move; keep in sync with the repo's global.json)
+#   DOTNET_CHANNEL  default: the SDK band the repo's global.json pins, via ../install-dotnet.sh when this script runs
+#                   from a checkout; a copy outside one (~/typhon-runner/) falls back to the 10.0 channel. Either way
+#                   run-gate.sh installs the pinned band from the checkout before every gate run, so global.json wins.
 #   NODE_MAJOR      default 22     (only the Workbench client needs Node)
 set -euo pipefail
 
-DOTNET_CHANNEL="${1:-10.0}"
+DOTNET_CHANNEL="${1:-}"
 NODE_MAJOR="${2:-22}"
+INSTALL_DOTNET="$(dirname "${BASH_SOURCE[0]}")/../install-dotnet.sh"
 
 echo "== apt prereqs =="
 sudo apt-get update -qq
@@ -25,8 +28,12 @@ if ! command -v aws >/dev/null 2>&1; then
   ( cd /tmp && unzip -q -o awscliv2.zip && sudo ./aws/install )
 fi
 
-echo "== .NET SDK (channel $DOTNET_CHANNEL) =="
-curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel "$DOTNET_CHANNEL" --install-dir "$HOME/.dotnet"
+echo "== .NET SDK (channel ${DOTNET_CHANNEL:-from global.json}) =="
+if [ -f "$INSTALL_DOTNET" ]; then
+  bash "$INSTALL_DOTNET" ${DOTNET_CHANNEL:+"$DOTNET_CHANNEL"}
+else
+  curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel "${DOTNET_CHANNEL:-10.0}" --install-dir "$HOME/.dotnet"
+fi
 # Make the SDK available to every login shell + the runner's job environment.
 if ! grep -q 'DOTNET_ROOT' "$HOME/.bashrc" 2>/dev/null; then
   cat >> "$HOME/.bashrc" <<'EOF'

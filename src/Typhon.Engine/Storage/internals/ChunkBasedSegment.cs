@@ -444,6 +444,25 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
     {
         lock (_growLock)
         {
+            // PS-24 (#1382): every allocation of this segment that finds no room waits on this lock, often a publish holding its pin, and those pins can be
+            // the whole cache's floor. They wait on the lock, not on a page, so they never draw from the reserve, and the pages this grow reads would wait
+            // behind them until the timeout: the grow draws for them.
+            PagedMMF.FloorInheritDepth++;
+            try
+            {
+                return GrowChunkCapacityLocked(minNewPageCount, changeSet);
+            }
+            finally
+            {
+                PagedMMF.FloorInheritDepth--;
+            }
+        }
+    }
+
+    /// <summary>The grow itself, under <c>_growLock</c> (see <see cref="GrowChunkCapacity"/>).</summary>
+    private bool GrowChunkCapacityLocked(int minNewPageCount, ChangeSet changeSet)
+    {
+        {
             var currentLength = Length;
 
             // Calculate new size with capped-doubling growth. Up to GrowDoublingCap pages we double (cheap geometric growth when the segment is small); beyond

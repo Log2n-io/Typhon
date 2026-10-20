@@ -426,7 +426,10 @@ internal sealed class SendPump : IDisposable
 
                 // Clear, then look again. A frame published between the failed claim above and this store would otherwise wait for the next tick that
                 // produced for this session — which, for a session that is now idle, may never come.
-                Volatile.Write(ref _pumping[slot], 0);
+                // A full fence, not a release store: this is a store-then-load handshake with Wake, whose requester stores its KICK, PONG or frame and then
+                // CASes this flag. A release store may sit behind the load below — on x64 too — so the pump read no work while the requester read the flag
+                // still up, and both left: the work stranded, which the nightly fuzz showed as a KICK unsent for 5 s and as sessions closed 1013 as lagging.
+                Interlocked.Exchange(ref _pumping[slot], 0);
 
                 if (!Claimable(slot) || Interlocked.CompareExchange(ref _pumping[slot], 1, 0) != 0)
                 {

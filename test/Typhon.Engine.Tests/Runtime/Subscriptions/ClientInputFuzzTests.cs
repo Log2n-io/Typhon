@@ -117,6 +117,7 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
         });
         harness.RunFence = true;
         harness.RunIngress = true;
+        harness.PublishThroughPump = true;
         _tick = 0;
         return harness;
     }
@@ -544,12 +545,18 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
         Tick(harness, seed, messages);
         Tick(harness, seed, messages);
         TestContext.Out.WriteLine($"seed {seed}: {messages} messages, {hellosMutated} mutated HELLOs, closes "
-            + $"{string.Join(", ", closes.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}×{kv.Value}"))}, tick {_tick}, acks {harness.Assembler.AcksWritten}");
+            + $"{string.Join(", ", closes.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}×{kv.Value}"))}, tick {_tick}, acks {harness.Assembler.AcksWritten}, "
+            + $"lagging {harness.Assembler.SessionsClosedLagging}, degraded {harness.Assembler.SessionsDegraded}, longest skip run {harness.Assembler.LongestSkipRun} of {harness.Assembler.CloseBoundTicks}, "
+            + $"frames {harness.Assembler.FramesProduced} produced / {harness.Assembler.FramesSkipped} skipped, oversize {harness.Assembler.OversizeSkips}, "
+            + $"skipped as gated/lagging/in-flight-full {harness.Assembler.SkipsBy(FrameSkipCause.Gated)}/{harness.Assembler.SkipsBy(FrameSkipCause.Lagging)}/{harness.Assembler.SkipsBy(FrameSkipCause.InFlightFull)}, "
+            + $"owed resets {harness.Assembler.OwedResets}, meter {harness.Assembler.MeterViolations}/{harness.Assembler.MeterChecks}");
 
         Assert.Multiple(() =>
         {
             Assert.That(closes.Where(kv => MalformedCloseCodes.Contains(kv.Key)).Sum(kv => kv.Value), Is.GreaterThan(0), "the refusal paths were reached");
-            Assert.That(OpenCount(harness), Is.EqualTo(clients.Count), "every live client still has its session, and no slot leaked");
+            Assert.That(OpenCount(harness), Is.EqualTo(clients.Count),
+                $"every live client still has its session, and no slot leaked (closed by the tick: {harness.Assembler.SessionsClosedLagging} lagging, "
+                + $"{harness.Assembler.SessionsClosedSilent} silent; longest skip run {harness.Assembler.LongestSkipRun} of {harness.Assembler.CloseBoundTicks})");
         });
     }
 
@@ -569,8 +576,22 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
 
         // The frames go out the way they do in production: the tick publishes and wakes each session's pump, the link's only writer. Claiming them here as
         // well would make two claimers of one hand-off, which the send state rightly refuses (frames completed out of order).
+        // The harness leaves the publish to this call (PublishThroughPump). It used to publish and empty the ready lists itself, so this woke nobody: frames
+        // went out only when a PING woke a pump for its PONG, and the PING cap, refilled by wall-clock time, refused more of them the faster a run went. On
+        // Linux, where a seed runs in under a second, frames filled the in-flight bound, sessions skipped until the tick closed them 1013, and seed 7 ended
+        // a session short on every CI run.
         var pump = harness.Subscriptions.SendPump;
         pump.PublishAndWake(_tick);
+
+        // Waited out, so every session has had its frames sent before the next tick produces: the ticks here run back to back, while the skip policy's
+        // bounds count ticks of the nominal period.
+        var deadline = Environment.TickCount64 + 5000;
+        while (pump.ActivePumps != 0 && Environment.TickCount64 < deadline)
+        {
+            Thread.Yield();
+        }
+
+        Assert.That(pump.ActivePumps, Is.Zero, $"seed {seed}, after message {m}: the send pumps never finished the tick");
         Assert.That(pump.PumpFaults, Is.Zero, $"seed {seed}, after message {m}: a send pump faulted: {pump.LastPumpFault}");
     }
 

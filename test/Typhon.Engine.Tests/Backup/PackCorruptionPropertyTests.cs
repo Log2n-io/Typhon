@@ -202,6 +202,74 @@ internal sealed class PackCorruptionPropertyTests
             .ToDictionary(f => f[bundle.Length..], _fs.Fingerprint);
     }
 
+    /// <summary>
+    /// A damaged frame decodes to the same bytes and verdict whatever the destination held: every bit of every compressed page and tail frame,
+    /// decoded into a zeroed buffer and into one holding other bytes. Without the clear before the decode (PackReader.DecodeLz4), 1 854 flips of this
+    /// store decode differently, and a page could pass its PageCrc in one buffer and fail it in the other (BKP-VER-10 reported instead of 11 on
+    /// the Linux nightly).
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void EveryFrameFlip_DecodesTheSame_WhateverTheDestinationHeld()
+    {
+        var differing = new List<string>();
+        var zeroed = new byte[PackFormat.TailBlockSize];
+        var stale = new byte[PackFormat.TailBlockSize];
+        foreach (var point in _points)
+        {
+            var path = Path(point);
+            var pristine = _pristine[path];
+            var layout = _layouts[path];
+            foreach (var e in layout.Entries.Where(e => e.StoredLength > 0 && e.StoredLength < PackFormat.PageSize))
+            {
+                var frame = pristine.AsSpan((int)e.DataOffset - PackFormat.FramePrefixSize, PackFormat.FramePrefixSize + (int)e.StoredLength).ToArray();
+                EveryFlip(frame, PackFormat.FramePrefixSize, () =>
+                {
+                    Array.Fill(stale, (byte)0xA5);
+                    var a = PackReader.DecodePage(e, frame, zeroed.AsSpan(0, PackFormat.PageSize), out _);
+                    var b = PackReader.DecodePage(e, frame, stale.AsSpan(0, PackFormat.PageSize), out _);
+                    return a == b && zeroed.AsSpan(0, PackFormat.PageSize).SequenceEqual(stale.AsSpan(0, PackFormat.PageSize));
+                }, $"{System.IO.Path.GetFileName(path)} page {e.PageId}", differing);
+            }
+
+            foreach (var block in layout.Blocks.Where(b => b.StoredLength != b.RawLength))
+            {
+                var payload = pristine.AsSpan((int)block.DataOffset, block.StoredLength).ToArray();
+                EveryFlip(payload, 0, () =>
+                {
+                    Array.Fill(stale, (byte)0xA5);
+                    var a = PackReader.DecodeLz4(payload, zeroed.AsSpan(0, block.RawLength));
+                    var b = PackReader.DecodeLz4(payload, stale.AsSpan(0, block.RawLength));
+                    return a == b && zeroed.AsSpan(0, block.RawLength).SequenceEqual(stale.AsSpan(0, block.RawLength));
+                }, $"{System.IO.Path.GetFileName(path)} tail block at {block.DataOffset}", differing);
+            }
+        }
+
+        Assert.That(differing, Is.Empty, $"{differing.Count} flip(s) decode differently into a buffer that held other bytes: "
+                                        + string.Join("; ", differing.Take(5)));
+    }
+
+    /// <summary>
+    /// Flips every bit of <paramref name="bytes"/> from <paramref name="from"/> on, one at a time; records each flip where <paramref name="same"/>
+    /// fails.
+    /// </summary>
+    private static void EveryFlip(byte[] bytes, int from, Func<bool> same, string what, List<string> differing)
+    {
+        for (var i = from; i < bytes.Length; i++)
+        {
+            for (var bit = 0; bit < 8; bit++)
+            {
+                bytes[i] ^= (byte)(1 << bit);
+                if (!same())
+                {
+                    differing.Add($"{what} byte {i} bit {bit}");
+                }
+
+                bytes[i] ^= (byte)(1 << bit);
+            }
+        }
+    }
+
     /// <summary>Gate: every byte outside DATA, every 8th inside; the whole store verified and every point restored on a seeded sample.</summary>
     [Test]
     [CancelAfter(120_000)]

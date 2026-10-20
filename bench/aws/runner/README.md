@@ -22,7 +22,8 @@ Per Q1, do this by hand first to validate, **then** codify in Terraform.
 1. **Launch the box** — see the P0 runbook in the design doc (30 GB gp3 root, `eu-west-1`, key + SG). Do **not**
    pin an EIP (idle cost); auto-assign a public IP or reach it via SSM.
 2. **Copy these files** to `~/typhon-runner/` on the box and `chmod +x *.sh`.
-3. **Toolchain:** `./provision.sh 10.0 22` (keep the SDK channel in sync with the repo `global.json`).
+3. **Toolchain:** `./provision.sh "" 22` — the SDK is the band the repo `global.json` pins (`run-gate.sh` re-applies it from
+   the checkout before every gate run, so a `global.json` bump needs no re-provision).
 4. **NVMe on boot:** `sudo cp typhon-nvme.service /etc/systemd/system/ && sudo systemctl enable --now typhon-nvme.service`.
 5. **Register the runner (long-lived, Q2):**
    ```bash

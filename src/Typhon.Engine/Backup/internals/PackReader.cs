@@ -348,7 +348,7 @@ internal sealed class PackReader : IDisposable
         {
             payload.CopyTo(destination);
         }
-        else if (LZ4Codec.Decode(payload, destination) != PackFormat.PageSize)
+        else if (DecodeLz4(payload, destination) != PackFormat.PageSize)
         {
             destination.Clear();
             error = "LZ4 frame does not decode to one page";
@@ -356,6 +356,18 @@ internal sealed class PackReader : IDisposable
         }
 
         return CheckCrc(entry, destination, out error);
+    }
+
+    /// <summary>
+    /// LZ4-decodes <paramref name="payload"/> into a cleared <paramref name="destination"/>. A damaged frame can still decode to the full length
+    /// with an output that depends on what the destination held before (1 854 single-bit flips of PackCorruptionPropertyTests' reference store),
+    /// so a reused buffer made the same damaged pack verify Damaged or Ok depending on the page decoded just before it. Cleared first, a frame
+    /// decodes to the same bytes, and the same verdict, wherever it is decoded.
+    /// </summary>
+    internal static int DecodeLz4(ReadOnlySpan<byte> payload, Span<byte> destination)
+    {
+        destination.Clear();
+        return LZ4Codec.Decode(payload, destination);
     }
 
     private static bool CheckCrc(in PackPageEntry entry, ReadOnlySpan<byte> page, out string error)
@@ -414,7 +426,7 @@ internal sealed class PackReader : IDisposable
                 {
                     payload.CopyTo(bytes);
                 }
-                else if (LZ4Codec.Decode(payload, bytes) != block.RawLength)
+                else if (DecodeLz4(payload, bytes) != block.RawLength)
                 {
                     PackFormat.ThrowCorrupt(Path, "Tail", -1, $"segment {segment.SegmentId}: block {b} does not decode");
                 }

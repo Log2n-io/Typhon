@@ -264,6 +264,79 @@ class SlotReserveTests
     }
 
     /// <summary>
+    /// A thread holding a lock pinned threads wait on (<see cref="PagedMMF.FloorInheritDepth"/>, a segment's grow) draws the floor-holder's share, younger
+    /// pin or not: the threads blocked on its lock hold the floor and never draw, so it would wait for a page behind their pins until the timeout.
+    /// </summary>
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("PS-24")]
+    public void ALockHolderTheFloorWaitsOn_DrawsTheFloorHoldersShare()
+    {
+        using var scope = _serviceProvider.CreateScope();
+        var pmmf = scope.ServiceProvider.GetService<PagedMMF>();
+        var epochManager = scope.ServiceProvider.GetRequiredService<EpochManager>();
+        using (EpochGuard.Enter(epochManager))
+        {
+            Assert.That(pmmf.RequestPageEpoch(10, epochManager.GlobalEpoch, out _), Is.True);
+        }
+
+        var target = pmmf.ReservedSlotCount;
+        var kept = target / PagedMMF.SlotReserveFloorShareDivisor;
+        using var floorPinned = new ManualResetEventSlim();
+        using var floorRelease = new ManualResetEventSlim();
+        var floor = Task.Run(() =>
+        {
+            using (EpochGuard.Enter(epochManager))
+            {
+                floorPinned.Set();
+                floorRelease.Wait();
+            }
+        });
+        floorPinned.Wait();
+        using (EpochGuard.Enter(epochManager))
+        {
+        }
+
+        var young = Environment.CurrentManagedThreadId;
+        var rounds = 0;
+        pmmf.ForceBackpressureForTest = () => Environment.CurrentManagedThreadId == young && ++rounds <= 2;
+        try
+        {
+            using (EpochGuard.Enter(epochManager))
+            {
+                Assert.That(epochManager.MinActiveEpoch, Is.LessThan(epochManager.CurrentThreadPinnedEpoch), "premise: the other thread's pin is the floor");
+                for (var i = 0; i < target - kept; i++)
+                {
+                    rounds = 0;
+                    Assert.That(pmmf.RequestPageEpoch(200 + i, epochManager.GlobalEpoch, out _), Is.True);
+                }
+
+                Assert.That(pmmf.ReservedSlotCount, Is.EqualTo(kept), "premise: the reserve is down to the floor's share");
+                PagedMMF.FloorInheritDepth++;
+                try
+                {
+                    rounds = 0;
+                    Assert.That(pmmf.RequestPageEpoch(300, epochManager.GlobalEpoch, out _), Is.True);
+                }
+                finally
+                {
+                    PagedMMF.FloorInheritDepth--;
+                }
+
+                Assert.That(rounds, Is.EqualTo(1), "served on its first round, from the floor's share");
+                Assert.That(pmmf.ReserveDraws, Is.EqualTo(target - kept + 1));
+                Assert.That(pmmf.ReservedSlotCount, Is.EqualTo(kept - 1));
+            }
+        }
+        finally
+        {
+            floorRelease.Set();
+            pmmf.ForceBackpressureForTest = null;
+            floor.Wait();
+        }
+    }
+
+    /// <summary>
     /// A slot that ends a wait serves its waiter. Given to the short reserve instead, the waiter would wait again for the next one, and a pinned
     /// waiter would draw back the very slot it had found.
     /// </summary>
@@ -326,6 +399,8 @@ class SlotReserveTests
     [VerifiesRule("PS-24")]
     public void UnderTheEvictionGuard_AReservedSlotSatOutItsQuarantine()
     {
+        // The guard protects one cache page at a time, so a cache page must be whole system pages: not on Apple Silicon's 16 KiB pages.
+        Assume.That(PagedMMF.PageSize % Environment.SystemPageSize, Is.Zero, "the eviction guard needs cache pages made of whole system pages");
         using var scope = _serviceProvider.CreateScope();
         var pmmf = scope.ServiceProvider.GetService<PagedMMF>();
         var epochManager = scope.ServiceProvider.GetRequiredService<EpochManager>();

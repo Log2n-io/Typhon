@@ -16,6 +16,9 @@ set -uo pipefail
 : "${OUT:?OUT (results dir) required}" "${REPO:?REPO (repo root) required}"
 export DOTNET_ROOT="$HOME/.dotnet"; export PATH="$DOTNET_ROOT:$DOTNET_ROOT/tools:$PATH"
 mkdir -p "$OUT"; cd "$REPO"
+# The box keeps its SDK across runs, so a global.json bump would otherwise fail every build until someone re-provisions.
+# A no-op when the pinned band's latest patch is already installed.
+bash bench/aws/install-dotnet.sh
 RC=0; S="$OUT/summary.md"
 { echo "# Typhon CI Gate — run ${RUN_ID}"; echo ""; } > "$S"
 

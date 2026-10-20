@@ -1,6 +1,8 @@
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 
 namespace Typhon.Engine.Tests;
@@ -231,7 +233,7 @@ public class BTreeDescentHopAtomicityTests
 
     /// <summary>
     /// The bound is on one hold, not on the sum of a hot node's holders (#1237): writer after writer taking the root, each for less than
-    /// <see cref="BTreeHeldNode.MaxWait"/> and together for four times it, is contention, and the descent waits it out. Summed, the storm's waiters named
+    /// <see cref="BTreeHeldNode.MaxWait"/> and together for over one and a half times it, is contention, and the descent waits it out. Summed, the storm's waiters named
     /// the market key's leaf a liveness defect past a commit's WAL append, and the engine stopped.
     /// </summary>
     [Test]
@@ -253,8 +255,10 @@ public class BTreeDescentHopAtomicityTests
                 tree.Add(i * 10, i, ref accessor);
             }
 
-            BTreeHeldNode.MaxWait = TimeSpan.FromMilliseconds(100);
+            BTreeHeldNode.MaxWait = TimeSpan.FromMilliseconds(200);
             Assert.That(tree.DiagnosticRoot.GetLatch(ref accessor).TryWriteLock(), Is.True, "premise: the root is held");
+            var heldAt = Stopwatch.GetTimestamp();
+            var holds = new List<long>();
             Exception failure = null;
             var found = -1;
             var reader = new Thread(() =>
@@ -280,13 +284,16 @@ public class BTreeDescentHopAtomicityTests
             var stillWaiting = true;
             try
             {
-                // Seven holds of 60 ms: each under the bound, 420 ms in all. An unlock bumps the version, so each relock is another holder's.
-                for (var hold = 0; hold < 7 && stillWaiting; hold++)
+                // Eight holds of 40 ms: each a fifth of the bound, 320 ms in all. Each hand-off bumps the version, so each hold is another holder's.
+                // Handed off, not unlocked and relocked: the descent got through that gap and found the key, ending the test before its last hold.
+                // A hold ends when Join times out, and that timeout is a floor, not a deadline: on the macOS arm64 runner a 60 ms hold under a 100 ms
+                // bound failed every run. The slack is now 160 ms, and each hold is measured so a premise failure says how long the holds really were.
+                for (var hold = 0; hold < 8 && stillWaiting; hold++)
                 {
-                    stillWaiting = !reader.Join(60);
-                    var latch = tree.DiagnosticRoot.GetLatch(ref accessor);
-                    latch.WriteUnlock();
-                    Assert.That(tree.DiagnosticRoot.GetLatch(ref accessor).TryWriteLock(), Is.True, "premise: the next holder takes the root");
+                    stillWaiting = !reader.Join(40);
+                    tree.DiagnosticRoot.GetLatch(ref accessor).HandOffWriteLockForTests();
+                    holds.Add((long)Stopwatch.GetElapsedTime(heldAt).TotalMilliseconds);
+                    heldAt = Stopwatch.GetTimestamp();
                 }
             }
             finally
@@ -295,7 +302,8 @@ public class BTreeDescentHopAtomicityTests
             }
 
             reader.Join();
-            Assert.That(stillWaiting, Is.True, $"premise: the descent was still waiting after the last hold ({failure?.Message})");
+            Assert.That(stillWaiting, Is.True,
+                $"premise: the descent was still waiting after the last hold (holds of {string.Join(", ", holds)} ms; {failure?.Message})");
             Assert.That(failure, Is.Null, $"the descent summed the holders' holds into one: {failure?.Message}");
             Assert.That(found, Is.EqualTo(1234), "the key, once the last holder let go");
             accessor.Dispose();

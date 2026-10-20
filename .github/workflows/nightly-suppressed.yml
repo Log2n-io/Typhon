@@ -52,7 +52,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
 
       # OlcBTreeRaceStressTests self-attaches with `dotnet-stack report` the instant it detects a stall, and that
       # capture IS the diagnosis: without it the failure report degrades to five counters all reading +0, which says
@@ -248,7 +248,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
 
       - name: Build (Release)
         run: dotnet build test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj -c Release
@@ -357,7 +357,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
 
       # The probe refuses to run on a dirty src/ — it restores files from an in-memory copy and must never do that over
       # someone's work. A fresh checkout is clean, so this is belt-and-braces; it fails loudly rather than silently
@@ -424,7 +424,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
 
       - name: Assert a clean src/ tree
         run: |
