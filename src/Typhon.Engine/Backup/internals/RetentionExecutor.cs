@@ -94,6 +94,18 @@ internal static class RetentionExecutor
             session.RefreshView();
         }
 
+        // DL-14: a deleted point's drill records go with it (they would pin nothing, and name a point the store no longer has).
+        if (deleted.Count > 0)
+        {
+            var listed = new HashSet<uint>();
+            foreach (var p in session.View.Catalog.Packs)
+            {
+                listed.Add(p.BackupId);
+            }
+
+            DrillRecords.DeleteForPointsNotIn(fs, root, listed);
+        }
+
         // DL-13 (05 §3 step 5): the archived WAL no kept point can replay from.
         (pruneArchive ?? DefaultArchivePruner)(session, decision.ArchiveFloors, liveTimeline);
 

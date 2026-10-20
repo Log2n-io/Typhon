@@ -2394,6 +2394,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // A running backup is abandoned before anything else: its failure path merges its page set back into the live change map, releases the WAL
             // reclaim floor and removes its copy-before-write hook, so the final cycle and the close below see an engine with no capture (BKP-07).
             _disposeStarted = true;
+            StopBackupScheduler();
             BackupCoordinator?.StopAndJoin();
 
             Logger?.LogInformation("Engine disposing: CheckpointManager");
@@ -2496,6 +2497,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 }
             }
 
+            DisposeBackupScheduler();
             BackupCoordinator?.Dispose();
             BackupCoordinator = null;
 

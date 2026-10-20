@@ -286,6 +286,15 @@ internal sealed class FileSystemBackupStore : IBackupPointStore
     /// <summary>The last point a session of this store published, as the store recorded it: what the caller reports without reading the store again.</summary>
     public CatalogPack LastPublished { get; private set; }
 
+    /// <summary>The store's directory.</summary>
+    public string Root => _root;
+
+    /// <summary>The file system the store is written through (the process's own unless a test gave one).</summary>
+    public IStoreFileSystem FileSystem => _fs ?? StoreFileSystem.Instance;
+
+    /// <summary>Where the store logs.</summary>
+    public ILogger Log => _log;
+
     /// <inheritdoc />
     public IBackupStoreSession OpenSession(Guid databaseId, CancellationToken ct)
     {

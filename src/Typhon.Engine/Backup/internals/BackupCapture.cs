@@ -306,7 +306,8 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
 
             if (pages <= sized)
             {
-                _expected = _full ? _imagePages : 2 + CountImagePagesFrom(2);
+                // Published for the scheduler's heartbeat (DL-31): another thread reads the progress.
+                Volatile.Write(ref _expected, _full ? _imagePages : 2 + CountImagePagesFrom(2));
                 return;
             }
 
@@ -719,8 +720,11 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
             throw new BackupAbortedException(BackupAbortReason.SinkFailed, $"the store failed at page {page}.", e);
         }
 
-        _added++;
+        Volatile.Write(ref _added, _added + 1);
     }
+
+    /// <summary>Pages handed to the store so far, and the pages the point will hold (0 until the freeze): read by the scheduler's heartbeat.</summary>
+    internal (long Added, long Expected) Progress => (Volatile.Read(ref _added), Volatile.Read(ref _expected));
 
     private void ThrowIfAborted()
     {

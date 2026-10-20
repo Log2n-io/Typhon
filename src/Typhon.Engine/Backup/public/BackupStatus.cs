@@ -110,6 +110,26 @@ public enum BackupDrillOutcome
     Error,
 }
 
+/// <summary>Where a drill stopped (04 §6).</summary>
+[PublicAPI]
+public enum BackupDrillStage
+{
+    /// <summary>It did not stop: it ran to its end.</summary>
+    None = 0,
+
+    /// <summary>Preparing the scratch directory.</summary>
+    Scratch,
+
+    /// <summary>Restoring the point into the scratch bundle.</summary>
+    Restore,
+
+    /// <summary>Opening the restored bundle (recovery runs) and closing it.</summary>
+    Open,
+
+    /// <summary>The integrity check of the result.</summary>
+    Check,
+}
+
 /// <summary>A backup failure, as the status reports it.</summary>
 /// <param name="Utc">When it ended.</param>
 /// <param name="Kind">The exception's type name, or the capture's abort reason.</param>

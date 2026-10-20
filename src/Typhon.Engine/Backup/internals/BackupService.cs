@@ -34,7 +34,7 @@ internal sealed class BackupService(DatabaseEngine engine) : IBackupService
         return CreateCoreAsync(storePath, kind, ct);
     }
 
-    public BackupStatus Status => BackupStatus.Off;
+    public BackupStatus Status => engine.BackupScheduler?.Status ?? BackupStatus.Off;
 
     private async Task<BackupPointSummary> CreateCoreAsync(string storePath, BackupRequestKind kind, CancellationToken ct)
     {
@@ -50,7 +50,7 @@ internal sealed class BackupService(DatabaseEngine engine) : IBackupService
                           ?? throw new BackupAbortedException(BackupAbortReason.EngineStopping, "the engine is not open.");
         // The pack's write buffers are the engine's: children of the coordinator, in the resource tree and the unmanaged-memory gauges.
         var writer = new PackWriterOptions { Owner = new BufferOwner(engine.MemoryAllocator, coordinator) };
-        var store = new FileSystemBackupStore(storePath, StoreFileSystem, writerOptions: writer);
+        var store = new FileSystemBackupStore(storePath, StoreFileSystem ?? engine.BackupScheduler?.StoreFileSystem, writerOptions: writer);
         var point = await coordinator.CaptureAsync(store, requested, ct).ConfigureAwait(false);
 
         // From what the store published, not a second read of the store: the point is durable, and nothing after it may report a failure.

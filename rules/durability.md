@@ -3381,16 +3381,19 @@ lifecycle (#1415: BKP-13, BKP-14) and the ops loop (#1416: BKP-15, BKP-16). BKP-
             clean flag; an untrusted close deletes it and records 0 (C13); every open after a clean close, SetCleanShutdown(false)
             and MarkSweepOwed zero the nonce, so after a crash, a failed open or a sweep-owed close nothing vouches for the file;
             adopting a new timeline makes the lineage untrusted
+  invariant (#1416) a point whose verify after publish finds damage leaves the lineage untrusted: the next point is full, never an incremental over
+            the damaged one (a store that cannot be read back leaves the point unverified, not failed)
   scope: BackupAdmission.Decide, BackupStateFile.TryRead, BackupStateFile.Write, DatabaseEngine.AdoptBackupState,
     DatabaseEngine.WriteBackupState, DurabilityWatermarks.MarkCleanShutdown, DurabilityWatermarks.BeginOpenAfterCleanClose,
-    DurabilityWatermarks.SetCleanShutdown, DatabaseEngine.AdoptTimeline
+    DurabilityWatermarks.SetCleanShutdown, DatabaseEngine.AdoptTimeline, BackupCoordinator.VerifyPublished
   on_violation: an incremental over a map that missed writes → the restore serves stale pages, discovered at restore
   verified: BackupAdmissionTests (T6: a clean close → incremental holding exactly the pages a write probe saw between the
             freezes, AC-C2; a crash, an offline repair, a copied bundle behind its chain's head, a wiped store and a new
             timeline → full; the decision matrix + Mutant_ADecisionIgnoringTrust_IsReported), BackupStateFileTests (round
             trip and damage; trusted close → trusted open → nonce cleared; a stale file; a matching nonce with another database,
             timeline or length; an untrusted close deletes the file; a write failure costs a full point; Mutant_AFileTrustedAfterACrash_IsReported;
-            Adoption_IsReportedLoaded_OnlyWhenTheSessionAdopts: tracking off is TrackingOff, never Loaded).
+            Adoption_IsReportedLoaded_OnlyWhenTheSessionAdopts: tracking off is TrackingOff, never Loaded),
+            BackupJobTests.APointFailingItsVerify_MakesTheNextOneFull (+ Mutant_NoRevokeAfterAFailedVerify_IsReported).
             Source mutants seen red: no nonce check, the open not clearing the nonce, Decide ignoring trust, an untrusted close
             writing the file, the adoption reporting Loaded with tracking off
 
@@ -3520,10 +3523,14 @@ lifecycle (#1415: BKP-13, BKP-14) and the ops loop (#1416: BKP-15, BKP-16). BKP-
             only if q.Id < K or q is an -I whose -C a kept resolution uses; a chain holding a point ≥ K that does not resolve loses nothing,
             and an unreadable pack ≥ K (of no known chain) keeps every pack below K
   invariant deletes run in descending BackupId, each made durable (a flush of packs/) before the next: after any crash prefix every point
-            still listed resolves as it did; after the last, every s ∈ S resolves (checked, a failure is a defect)
+            still listed resolves as it did; after the last, every s ∈ S resolves (checked, a failure is a defect); the drill records of the
+            points deleted go with them
+  invariant (#1416) the engine applies its configured policy after every point it takes, on the backup thread, inside the job (BackupInProgress
+            until it ends), with the drill-passed points the store records as KeepLastDrilled's input
   requires: BKP-08, BKP-13
   scope: RetentionPlanner.Plan, RetentionExecutor.Apply, BackupOperations.ApplyRetention, BackupOperations.PlanRetention, BackupStore.DeletePack,
-         BackupStore.RefreshView, StoreFileSystem.DeleteFile
+         BackupStore.RefreshView, StoreFileSystem.DeleteFile, DrillRecords.DeleteForPointsNotIn, BackupCoordinator.RunJob (the job's retention
+         step), BackupScheduler.ApplyRetention
   on_violation: a backup the operator was promised by the policy is gone, or a kept point is unrestorable — found on the day it is needed
   verified: RetentionPropertyTests (T11: 64 seeded histories at the gate, 640 nightly — two interleaving chains, compactions, drill records,
             random valid policies, a power cut at a random operation of a retention under both directory models, checked against a model of
