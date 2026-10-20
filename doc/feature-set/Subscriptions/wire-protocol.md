@@ -28,7 +28,7 @@ self-describing, versioned independently of the server's code, and exact across 
 | `KICK` / `BYE` | server → client / client → server | a close code and reason / a clean leave |
 
 **Blocks** inside a `TICK`, each length-prefixed so an unknown one is skipped: `ENTITIES` (one archetype's enters, updates, leaves),
-`EVENTS`, `SELF`, `AGG`, `STATS`, `DEBUG`, `ACKS`, `SOURCES` (group lifecycle — `GROUP_COMPLETE`, `GROUP_RELEASED` — and the answers to
+`EVENTS`, `SELF`, `AGG`, `STATS`, `DEBUG`, `ACKS`, `SOURCES` (group lifecycle — `GROUP_COMPLETE`, `GROUP_RELEASED`, `GROUP_TRUNCATED` — and the answers to
 `SubscribeRequest`, built-in command 1), `EXT`.
 
 **The catalog** is canonical JSON — archetypes with their position and fields (codec, group, section), commands with their rate and
