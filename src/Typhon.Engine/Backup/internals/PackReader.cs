@@ -375,7 +375,15 @@ internal sealed class PackReader : IDisposable
     /// TAILDIR, and writes the raw bytes to <paramref name="target"/> at offset 0 when given. Returns the segment's declared size (its header's
     /// <c>SegmentSize</c>). Throws <see cref="BackupPackCorruptException"/>.
     /// </summary>
-    public uint ReadTailSegment(TailDirectory directory, int index, IStoreFile target)
+    public uint ReadTailSegment(TailDirectory directory, int index, IStoreFile target) => ReadTailSegment(directory, index, target, []);
+
+    /// <summary>
+    /// Decodes tail segment <paramref name="index"/>'s copied bytes into <paramref name="destination"/> (at least its <c>RawLength</c>), checking each
+    /// block, the WAL header and the <c>RawCrc</c> as a restore does. Returns the size the segment's header declares.
+    /// </summary>
+    public uint DecodeTailSegment(TailDirectory directory, int index, Span<byte> destination) => ReadTailSegment(directory, index, null, destination);
+
+    private uint ReadTailSegment(TailDirectory directory, int index, IStoreFile target, Span<byte> destination)
     {
         var segment = directory.Segments[index];
         var stored = ArrayPool<byte>.Shared.Rent(PackFormat.FramePrefixSize + PackFormat.TailBlockSize);
@@ -418,6 +426,11 @@ internal sealed class PackReader : IDisposable
 
                 crc = Crc32CUtil.Append(crc, bytes);
                 target?.Write(bytes, offset);
+                if (!destination.IsEmpty)
+                {
+                    bytes.CopyTo(destination[(int)offset..]);
+                }
+
                 offset += bytes.Length;
             }
 

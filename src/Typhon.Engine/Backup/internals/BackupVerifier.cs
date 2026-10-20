@@ -102,7 +102,7 @@ internal sealed class VerifyOptions
 {
     public static readonly VerifyOptions Default = new();
 
-    // TODO(#1412): wire WalTailInspector.ComputePointLsn here once capture lands; until then BKP-VER-12 is reported as skipped, never as passed.
+    /// <summary>BKP-VER-12's computation of a point's <c>P</c> from its tail; <c>null</c> is <see cref="BackupVerifier.TailPointLsn"/>. A test seam.</summary>
     public TailPointLsnInspector TailInspector { get; init; }
 
     public CancellationToken Cancellation { get; init; }
@@ -137,7 +137,6 @@ internal static class BackupVerifier
         // BKP-VER-01 (store side): store.json readable and of a known version, or this throws.
         var view = StoreView.Open(storePath, fs, log, trustCatalog: false);
         var storeFindings = new List<VerifyFinding>();
-        var skipped = new List<string>();
 
         // BKP-VER-08: orphan temps never join a chain; the next writer deletes them.
         foreach (var t in view.Temps)
@@ -192,7 +191,7 @@ internal static class BackupVerifier
         foreach (var file in files)
         {
             options.Cancellation.ThrowIfCancellationRequested();
-            packs[file] = VerifyPack(fs, view, file, level, options, skipped, ref bytesRead);
+            packs[file] = VerifyPack(fs, view, file, level, options, ref bytesRead);
         }
 
         // Points: restorable iff the chain resolves and every pack of it verified without damage (BKP-VER-06/07 for the links).
@@ -239,17 +238,47 @@ internal static class BackupVerifier
             Packs = packList,
             Points = points,
             StoreFindings = storeFindings,
-            SkippedChecks = skipped.Distinct().ToList(),
+            SkippedChecks = [],
             Duration = clock.Elapsed,
             BytesRead = bytesRead,
         };
+    }
+
+    /// <summary>
+    /// <c>P</c> as the point's copied tail yields it (BKP-VER-12): every TAILDIR segment decoded and checked, then
+    /// <see cref="WalTailInspector.ComputePointLsn(IReadOnlyList{WalTailPrefix}, long)"/>, the scan restore's recovery makes. Each segment's bytes live
+    /// in a native buffer of its copied length, freed before this returns: no large-object garbage per pack.
+    /// </summary>
+    internal static long TailPointLsn(PackReader pack, TailDirectory tail, long checkpointLsn)
+    {
+        var buffers = new NativeBuffer[tail.Segments.Length];
+        try
+        {
+            var prefixes = new WalTailPrefix[tail.Segments.Length];
+            for (var i = 0; i < tail.Segments.Length; i++)
+            {
+                var length = tail.Segments[i].RawLength;
+                buffers[i] = NativeBuffer.Allocate(Math.Max(length, 1), null, null);   // verify runs with no engine
+                pack.DecodeTailSegment(tail, i, buffers[i].Span[..length]);
+                prefixes[i] = new WalTailPrefix(tail.Segments[i].SegmentId, buffers[i].Memory[..length]);
+            }
+
+            return WalTailInspector.ComputePointLsn(prefixes, checkpointLsn);
+        }
+        finally
+        {
+            foreach (var b in buffers)
+            {
+                ((IDisposable)b)?.Dispose();
+            }
+        }
     }
 
     /// <summary>One pack on its own: BKP-VER-01..05 and 09..14 (no chain, no points). For tools and tests that look at a single file.</summary>
     public static PackVerification VerifyPackFile(IStoreFileSystem fs, StoreView view, string file, VerifyLevel level, VerifyOptions options = null)
     {
         long bytesRead = 0;
-        return VerifyPack(fs, view, file, level, options ?? VerifyOptions.Default, [], ref bytesRead);
+        return VerifyPack(fs, view, file, level, options ?? VerifyOptions.Default, ref bytesRead);
     }
 
     private static IEnumerable<string> ChainFiles(StoreView view, uint id)
@@ -290,7 +319,7 @@ internal static class BackupVerifier
 
     /// <summary>BKP-VER-01..05 and 09..14 for one pack.</summary>
     private static PackVerification VerifyPack(IStoreFileSystem fs, StoreView view, string file, VerifyLevel level, VerifyOptions options,
-        List<string> skipped, ref long bytesRead)
+        ref long bytesRead)
     {
         PackFormat.TryParseFileName(file, out var id, out _, out _);
         var result = new PackVerification { File = file, BackupId = id };
@@ -399,7 +428,7 @@ internal static class BackupVerifier
 
             if (level == VerifyLevel.Full)
             {
-                VerifyFull(reader, result, indexOk, tailDirOk, tail, imageMeta, options, skipped);
+                VerifyFull(reader, result, indexOk, tailDirOk, tail, imageMeta, options);
             }
 
             bytesRead += reader.BytesRead;
@@ -411,7 +440,7 @@ internal static class BackupVerifier
 
     /// <summary>BKP-VER-10..13: every byte, every page, the tail's P, the meta pair against the header.</summary>
     private static void VerifyFull(PackReader reader, PackVerification result, bool indexOk, bool tailDirOk, TailDirectory tail,
-        BackupImageMeta? imageMeta, VerifyOptions options, List<string> skipped)
+        BackupImageMeta? imageMeta, VerifyOptions options)
     {
         // BKP-VER-10: one pass over the file. The page pass below reads the frames again through a forward window: two reads of the data
         // region, in exchange for memory independent of the pack's size (no offset map of every frame).
@@ -450,16 +479,13 @@ internal static class BackupVerifier
             }
         }
 
-        // BKP-VER-12: the copied tail still yields the point's P.
-        if (options.TailInspector == null)
+        // BKP-VER-12: the copied tail still yields the point's P, computed as recovery will replay it.
+        if (tailDirOk)
         {
-            skipped.Add("BKP-VER-12: needs WalTailInspector (#1412)");
-        }
-        else if (tailDirOk)
-        {
+            var inspector = options.TailInspector ?? TailPointLsn;
             Guard(result, "BKP-VER-12", () =>
             {
-                var p = options.TailInspector(reader, tail, reader.Header.CheckpointLsn);
+                var p = inspector(reader, tail, reader.Header.CheckpointLsn);
                 if (p != reader.Footer.PointLsn)
                 {
                     Add(result, "BKP-VER-12", -1, $"the tail yields P = {p}, the footer records {reader.Footer.PointLsn}");

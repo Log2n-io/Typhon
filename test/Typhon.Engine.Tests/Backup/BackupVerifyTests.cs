@@ -81,8 +81,7 @@ internal sealed class BackupVerifyTests
         Assert.That(report.Verdict, Is.EqualTo(VerifyVerdict.Ok));
         Assert.That(report.Points.Select(p => (p.Id, p.Restorable)), Is.EqualTo(new[] { (1u, true), (2u, true), (3u, true) }));
         Assert.That(report.BytesRead, Is.GreaterThan(0));
-        Assert.That(report.SkippedChecks, level == VerifyLevel.Full ? Has.Some.Contains("BKP-VER-12") : Is.Empty,
-            "BKP-VER-12 is reported as not run, never as passed, until #1412's WalTailInspector is wired");
+        Assert.That(report.SkippedChecks, Is.Empty, "every check runs, BKP-VER-12 at Full included");
     }
 
     [Test]

@@ -318,6 +318,30 @@ internal sealed class OfflineCaptureRestoreTests
         Assert.That(OfflineCapture.Create(restored.Target, Path.Combine(_root, "store2")).Kind, Is.EqualTo(BackupKind.Full));
     }
 
+    /// <summary>
+    /// BKP-VER-12 on a real point: a hard-crashed bundle with commits past its checkpoint, so its tail carries a <c>P</c> above <c>C</c>. A full
+    /// verify decodes the stored tail and replays it as recovery will: it yields the footer's <c>P</c>, and the check runs instead of being skipped.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void AFullVerify_RecomputesARealPointsP_FromItsStoredTail()
+    {
+        Session("BkT9v", 10, checkpoint: true, 6, Close.HardCrash);
+        var point = OfflineCapture.Create(Bundle("BkT9v"), Store);
+        Assert.That(point.PointLsn, Is.GreaterThan(point.CheckpointLsn), "premise: the tail carries commits past C");
+
+        using (var pack = PackReader.Open(StoreFileSystem.Instance, point.PackPath))
+        {
+            var tail = pack.LoadTailDirectory();
+            Assert.That(BackupVerifier.TailPointLsn(pack, tail, pack.Header.CheckpointLsn), Is.EqualTo(point.PointLsn));
+        }
+
+        var report = BackupVerifier.VerifyStore(Store, VerifyLevel.Full);
+        Assert.That(report.SkippedChecks, Is.Empty, "BKP-VER-12 ran");
+        Assert.That(report.AllFindings, Is.Empty, string.Join("\n", report.AllFindings));
+        Assert.That(report.Verdict, Is.EqualTo(VerifyVerdict.Ok));
+    }
+
     [Test]
     [CancelAfter(60_000)]
     public void TheCapture_LeavesNoLockBehind()
