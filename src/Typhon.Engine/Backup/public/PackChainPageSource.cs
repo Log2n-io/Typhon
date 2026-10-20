@@ -77,7 +77,7 @@ public sealed class PackChainPageSource : IPageSource
         }
 
         ChainFiles = files;
-        var window = (int)Math.Clamp(_options.ReadBudgetBytes / packs.Length, 256 << 10, 64 << 20);
+        var window = FrameReader.WindowFor(_options.ReadBudgetBytes, packs.Length);
         _frames = new FrameReader[packs.Length];
         _fences = new uint[packs.Length][];
         for (var i = 0; i < packs.Length; i++)
