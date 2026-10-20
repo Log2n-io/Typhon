@@ -363,6 +363,10 @@ public sealed class BackupCommandTests
         Assert.That(App("backup", "verify", "--store", _store, "--level", "full", "--format", "json"), Is.EqualTo(BackupCli.ExitOk));
         Assert.That(App("backup", "status", "--store", _store, "--format", "json"), Is.EqualTo(BackupCli.ExitOk));
         Assert.That(App("backup", "restore", "--store", _store, "--point", "latest", "--to", Path.Combine(_root, "r"), "--format", "json"), Is.EqualTo(0));
+        Assert.That(App("backup", "compact", "--store", _store, "--point", "latest", "--format", "json"), Is.EqualTo(BackupCli.ExitOk));
+        Assert.That(App("backup", "prune", "--store", _store, "--min-keep", "1", "--max-age", "30d", "--dry-run", "--format", "json"),
+            Is.EqualTo(BackupCli.ExitOk));
+        Assert.That(App("backup", "prune", "--store", _store, "--max-count", "2"), Is.EqualTo(BackupCli.ExitUsage), "--min-keep is required");
 
         Assert.That(App("backup", "list", "--store", _store, "--no-such-option"), Is.EqualTo(BackupCli.ExitUsage));
         Assert.That(App("backup", "create"), Is.EqualTo(BackupCli.ExitUsage), "a missing <bundle>");
@@ -370,7 +374,124 @@ public sealed class BackupCommandTests
         Assert.That(App("check"), Is.EqualTo(10), "the other verbs keep their codes");
     }
 
+    /// <summary>#1415: compact turns an online incremental into a base; prune previews, then deletes what no kept point needs.</summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void CompactAndPrune_InTextAndJson()
+    {
+        OnlineChain(points: 3);
+
+        var compact = Compact("2");
+        Assert.That(compact.Code, Is.EqualTo(BackupCli.ExitOk), compact.Text);
+        Assert.That(compact.Text, Does.Contain("Compacted point #2").And.Contain("chain of 2 pack(s)").And.Contain("Nothing was deleted"));
+        var again = Json(Compact("2", "json"));
+        Assert.That(again.GetProperty("exitCode").GetInt32(), Is.EqualTo(BackupCli.ExitOk));
+        Assert.That(again.GetProperty("result").GetProperty("alreadyBase").GetBoolean(), Is.True);
+        Assert.That(Compact("99").Code, Is.EqualTo(BackupCli.ExitStoreDamaged), "a point that does not resolve");
+
+        var packs = Directory.GetFiles(Path.Combine(_store, "packs")).Select(Path.GetFileName).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+        var dry = Prune(new BackupPruneCommand.Settings { MinKeep = 1, MaxCount = 1, DryRun = true });
+        Assert.That(dry.Code, Is.EqualTo(BackupCli.ExitOk), dry.Text);
+        Assert.That(dry.Text, Does.Contain("Would keep 1 point(s) from #3").And.Contain("Would compact #3").And.Contain("Would delete 4 pack(s)"));
+        Assert.That(Directory.GetFiles(Path.Combine(_store, "packs")).Select(Path.GetFileName).OrderBy(n => n, StringComparer.Ordinal), Is.EqualTo(packs),
+            "a dry run changes nothing");
+
+        var applied = Json(Prune(new BackupPruneCommand.Settings { MinKeep = 1, MaxCount = 1, Format = "json" }));
+        Assert.That(applied.GetProperty("exitCode").GetInt32(), Is.EqualTo(BackupCli.ExitOk));
+        Assert.That(applied.GetProperty("result").GetProperty("deleted").GetArrayLength(), Is.EqualTo(4));
+        Assert.That(Directory.GetFiles(Path.Combine(_store, "packs")).Select(Path.GetFileName), Is.EqualTo(new[] { "00000003-C.tpack" }));
+        Assert.That(Prune(new BackupPruneCommand.Settings { MinKeep = 1, MaxCount = 1 }).Text, Does.Contain("Nothing to delete"));
+    }
+
+    [Test]
+    [CancelAfter(30_000)]
+    public void APruneThatCannotMeetALimitWithoutBreakingMinKeep_Exits1_AndSaysWhy()
+    {
+        Assert.That(Create().Code, Is.EqualTo(BackupCli.ExitOk));
+        Assert.That(Create(full: true).Code, Is.EqualTo(BackupCli.ExitOk));
+
+        var blocked = Prune(new BackupPruneCommand.Settings { MinKeep = 2, MaxBytes = "1" });
+        Assert.That(blocked.Code, Is.EqualTo(BackupCli.ExitWarning), blocked.Text);
+        Assert.That(blocked.Text, Does.Contain("MinKeep").And.Contain("Nothing to delete"));
+    }
+
+    [Test]
+    public void PruneUsageErrors_Exit64_AndAChangedPlanIsARefusal()
+    {
+        foreach (var (settings, what) in new (BackupPruneCommand.Settings, string)[]
+                 {
+                     (new BackupPruneCommand.Settings { MaxCount = 3 }, "--min-keep"),
+                     (new BackupPruneCommand.Settings { MinKeep = 1 }, "No limit"),
+                     (new BackupPruneCommand.Settings { MinKeep = 1, MaxAge = "7x" }, "Unknown duration"),
+                     (new BackupPruneCommand.Settings { MinKeep = 1, MaxBytes = "12XB" }, "Unknown size"),
+                     (new BackupPruneCommand.Settings { MinKeep = 1, MaxCount = 3, CompactAt = 1 }, "--compact-at"),
+                     (new BackupPruneCommand.Settings { MinKeep = 3, MaxCount = 1 }, "below --min-keep"),
+                 })
+        {
+            var r = Prune(settings);
+            Assert.That(r.Code, Is.EqualTo(BackupCli.ExitUsage), what);
+            Assert.That(r.Text, Does.Contain(what));
+        }
+
+        Assert.That(BackupCli.ExitCodeFor(new BackupPlanChangedException("/s", "aa", "bb")), Is.EqualTo(BackupCli.ExitRefused));
+        Assert.That(BackupPruneCommand.ExitCodeOf(BackupRetentionBlock.DamagedChain), Is.EqualTo(BackupCli.ExitStoreDamaged));
+        Assert.That(BackupPruneCommand.ExitCodeOf(BackupRetentionBlock.InsufficientSpace), Is.EqualTo(BackupCli.ExitWarning));
+    }
+
+    [TestCase("30d", 30 * 86_400)]
+    [TestCase("12h", 12 * 3_600)]
+    [TestCase("90m", 90 * 60)]
+    [TestCase("45s", 45)]
+    [TestCase("0s", 0)]
+    public void Durations_Parse(string value, int seconds)
+    {
+        Assert.That(BackupCli.TryParseDuration(value, out var d, out var error), Is.True, error);
+        Assert.That(d, Is.EqualTo(TimeSpan.FromSeconds(seconds)));
+    }
+
+    [TestCase("500GiB", 500L << 30)]
+    [TestCase("2TB", 2_000_000_000_000L)]
+    [TestCase("1048576", 1_048_576L)]
+    [TestCase("1.5KiB", 1_536L)]
+    [TestCase("10mb", 10_000_000L)]
+    public void Sizes_Parse(string value, long bytes)
+    {
+        Assert.That(BackupCli.TryParseBytes(value, out var b, out var error), Is.True, error);
+        Assert.That(b, Is.EqualTo(bytes));
+    }
+
+    [TestCase("7")]
+    [TestCase("d")]
+    [TestCase("-3h")]
+    [TestCase("1.5h")]
+    public void ABadDuration_IsRefused(string value) => Assert.That(BackupCli.TryParseDuration(value, out _, out _), Is.False);
+
     private static int App(params string[] args) => Program.BuildApp(args).Run(args);
+
+    private (int Code, string Text, string Json) Compact(string point, string format = "text")
+        => Run((c, j) => BackupCompactCommand.Run(new BackupCompactCommand.Settings { Store = _store, Point = point, Format = format }, c, j,
+            CancellationToken.None));
+
+    private (int Code, string Text, string Json) Prune(BackupPruneCommand.Settings settings)
+    {
+        settings.Store ??= _store;
+        settings.Format ??= "text";
+        return Run((c, j) => BackupPruneCommand.Run(settings, c, j, CancellationToken.None));
+    }
+
+    /// <summary>A chain the engine captures online (its lineage continues in-session): a full point, then incrementals.</summary>
+    private void OnlineChain(int points)
+    {
+        using var provider = Provider(Path.GetDirectoryName(_bundle), yieldable: false);
+        using var scope = provider.CreateScope();
+        var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.InitializeArchetypes();
+        for (var i = 0; i < points; i++)
+        {
+            var point = dbe.Backup.CreateAsync(_store).GetAwaiter().GetResult();
+            Assert.That(point.Kind, Is.EqualTo(i == 0 ? BackupPointKind.Full : BackupPointKind.Incremental), "premise: one online chain");
+        }
+    }
 
     private (int Code, string Text, string Json) Create(string format = "text", bool full = false)
         => Run((c, j) => BackupCreateCommand.Run(new BackupCreateCommand.Settings { Bundle = _bundle, Store = _store, Format = format, Full = full }, c, j,

@@ -127,11 +127,11 @@ internal static class Program
                 .WithExample(["repair", "game.typhon", "--plan"])
                 .WithExample(["repair", "game.typhon", "--apply"]);
 
-            // `typhon backup …` (#1414, design 07 §4) works on a closed database and on a backup store, with no engine: the exit code carries the
+            // `typhon backup …` (#1414, #1415, design 07 §4) works on a closed database and on a backup store, with no engine: the exit code carries the
             // outcome (0 ok · 1 warning · 2 failed · 3 store damaged · 4 refused · 64 usage), cron and CI ready like `check`.
             config.AddBranch("backup", backup =>
             {
-                backup.SetDescription("Back up a closed database, and list, verify, restore and watch a backup store.");
+                backup.SetDescription("Back up a closed database, and list, verify, restore, compact, prune and watch a backup store.");
                 backup.AddCommand<BackupCreateCommand>("create").WithDescription("Back up a closed database into a store.")
                     .WithExample(["backup", "create", "game.typhon", "--store", "/backups/game"]);
                 backup.AddCommand<BackupListCommand>("list").WithDescription("List a store's points and chains.")
@@ -142,6 +142,10 @@ internal static class Program
                     .WithExample(["backup", "restore", "--store", "/backups/game", "--point", "latest", "--to", "/data/restored"]);
                 backup.AddCommand<BackupStatusCommand>("status").WithDescription("A store's health per chain; the health is the exit code.")
                     .WithExample(["backup", "status", "--store", "/backups/game"]);
+                backup.AddCommand<BackupCompactCommand>("compact").WithDescription("Turn a point into a base inside the store; nothing is deleted.")
+                    .WithExample(["backup", "compact", "--store", "/backups/game", "--point", "latest"]);
+                backup.AddCommand<BackupPruneCommand>("prune").WithDescription("Apply a retention policy: keep what it promises, delete what nothing needs.")
+                    .WithExample(["backup", "prune", "--store", "/backups/game", "--min-keep", "3", "--max-age", "7d", "--dry-run"]);
             });
 
             // `typhon telemetry …` authors typhon.telemetry.json in the working directory (#522). Scriptable

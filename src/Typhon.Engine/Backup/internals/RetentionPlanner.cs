@@ -304,6 +304,23 @@ internal static class RetentionPlanner
         return list;
     }
 
+    /// <summary>The CRC of a plan's compactions and deletions, in order: what an approval names.</summary>
+    internal static string Fingerprint(IReadOnlyList<uint> compactions, IReadOnlyList<string> deletions)
+    {
+        var crc = Crc32CUtil.Start;
+        foreach (var c in compactions)
+        {
+            crc = Crc32CUtil.Append(crc, Encoding.UTF8.GetBytes("C" + c.ToString(CultureInfo.InvariantCulture) + ";"));
+        }
+
+        foreach (var d in deletions)
+        {
+            crc = Crc32CUtil.Append(crc, Encoding.UTF8.GetBytes("D" + d + ";"));
+        }
+
+        return Crc32CUtil.Finish(crc).ToString("x8", CultureInfo.InvariantCulture);
+    }
+
     private static string Limit(bool withinAge, bool withinCount) => !withinAge ? "MaxAge" : !withinCount ? "MaxCount" : "MaxTotalBytes";
 
     private static RetentionDecision Decision(StoreView view, List<uint> kept, uint cutoff, List<uint> compactions, List<StoreFileEntry> deletions,
@@ -375,20 +392,12 @@ internal static class RetentionPlanner
         }
 
         var files = new List<string>(deletions.Count);
-        var crc = Crc32CUtil.Start;
-        foreach (var c in compactions)
-        {
-            crc = Crc32CUtil.Append(crc, Encoding.UTF8.GetBytes("C" + c.ToString(CultureInfo.InvariantCulture) + ";"));
-        }
-
         foreach (var d in deletions)
         {
             files.Add(d.Name);
-            crc = Crc32CUtil.Append(crc, Encoding.UTF8.GetBytes("D" + d.Name + ";"));
         }
 
-        var plan = new BackupRetentionPlan(kept, removed, compactions, files, cutoff, before, after, block, reason,
-            Crc32CUtil.Finish(crc).ToString("x8", CultureInfo.InvariantCulture));
+        var plan = new BackupRetentionPlan(kept, removed, compactions, files, cutoff, before, after, block, reason, Fingerprint(compactions, files));
         return new RetentionDecision
         {
             Plan = plan,

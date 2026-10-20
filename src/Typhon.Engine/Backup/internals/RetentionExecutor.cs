@@ -105,7 +105,11 @@ internal static class RetentionExecutor
         }
 
         // The plan applied: the first one's compactions (the result lists those that published), the deletions re-planned after them.
-        var plan = decision.Plan with { Compactions = first.Plan.Compactions };
+        var plan = decision.Plan with
+        {
+            Compactions = first.Plan.Compactions,
+            Fingerprint = RetentionPlanner.Fingerprint(first.Plan.Compactions, decision.Plan.PackDeletions),
+        };
         if (plan.Blocked != BackupRetentionBlock.None)
         {
             BackupLog.RetentionBlocked(log, root, plan.Blocked, plan.BlockedReason);

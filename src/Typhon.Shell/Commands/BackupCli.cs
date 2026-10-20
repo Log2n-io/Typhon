@@ -2,6 +2,7 @@ using Spectre.Console;
 using Spectre.Console.Cli;
 using System;
 using System.ComponentModel;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -103,7 +104,7 @@ internal static class BackupCli
     internal static int ExitCodeFor(Exception ex) => ex switch
     {
         RestoreRefusedException or DatabaseLockedException or BackupStoreMismatchException or BackupStoreLockedException
-            or BackupFormatUnsupportedException or NotSupportedException => ExitRefused,
+            or BackupFormatUnsupportedException or BackupPlanChangedException or NotSupportedException => ExitRefused,
         BackupChainBrokenException or BackupPackCorruptException => ExitStoreDamaged,
         OperationCanceledException or IOException or UnauthorizedAccessException or TyphonException or InvalidOperationException => ExitFailed,
         _ => -1,
@@ -124,6 +125,72 @@ internal static class BackupCli
 
         return new BackupOutput(AnsiConsole.Console, System.Console.Out, CheckCommand.ResolveFormat(settings.Format, null))
             .Error(ExitUsage, $"Unknown option or argument: {string.Join(", ", leftovers)}.");
+    }
+
+    /// <summary>A duration: a whole number with a unit, <c>30d</c>, <c>12h</c>, <c>90m</c>, <c>45s</c>.</summary>
+    internal static bool TryParseDuration(string value, out TimeSpan duration, out string error)
+    {
+        duration = TimeSpan.Zero;
+        error = null;
+        var v = value?.Trim() ?? "";
+        if (v.Length >= 2 && long.TryParse(v.AsSpan(0, v.Length - 1), NumberStyles.None, CultureInfo.InvariantCulture, out var n))
+        {
+            switch (char.ToLowerInvariant(v[^1]))
+            {
+                case 'd':
+                    duration = TimeSpan.FromDays(n);
+                    return true;
+                case 'h':
+                    duration = TimeSpan.FromHours(n);
+                    return true;
+                case 'm':
+                    duration = TimeSpan.FromMinutes(n);
+                    return true;
+                case 's':
+                    duration = TimeSpan.FromSeconds(n);
+                    return true;
+            }
+        }
+
+        error = $"Unknown duration '{value}'. Expected a whole number and a unit: 30d, 12h, 90m, 45s.";
+        return false;
+    }
+
+    /// <summary>A size: bytes, or a number with KB/MB/GB/TB (powers of 1000) or KiB/MiB/GiB/TiB (powers of 1024).</summary>
+    internal static bool TryParseBytes(string value, out long bytes, out string error)
+    {
+        bytes = 0;
+        error = null;
+        var v = value?.Trim() ?? "";
+        var split = v.Length;
+        while (split > 0 && char.IsAsciiLetter(v[split - 1]))
+        {
+            split--;
+        }
+
+        var unit = v[split..].ToUpperInvariant();
+        long scale = unit switch
+        {
+            "" or "B" => 1,
+            "KB" => 1000L,
+            "MB" => 1000L * 1000,
+            "GB" => 1000L * 1000 * 1000,
+            "TB" => 1000L * 1000 * 1000 * 1000,
+            "KIB" => 1L << 10,
+            "MIB" => 1L << 20,
+            "GIB" => 1L << 30,
+            "TIB" => 1L << 40,
+            _ => 0,
+        };
+        if (scale > 0 && decimal.TryParse(v.AsSpan(0, split), NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var n) && n >= 0
+            && n * scale <= long.MaxValue)
+        {
+            bytes = (long)(n * scale);
+            return true;
+        }
+
+        error = $"Unknown size '{value}'. Expected bytes, or a number with KB, MB, GB, TB, KiB, MiB, GiB or TiB: 500GiB, 2TB.";
+        return false;
     }
 
     /// <summary>A byte count for a person.</summary>
