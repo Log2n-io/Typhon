@@ -123,6 +123,15 @@ public sealed partial class BackupJobRegistry : IDisposable
         }
     }
 
+    /// <summary>A running job of <paramref name="kind"/> on any store, or null.</summary>
+    public BackupJob AnyRunning(string kind)
+    {
+        lock (_lock)
+        {
+            return _jobs.Find(j => j.Kind == kind && !j.IsTerminal);
+        }
+    }
+
     /// <summary>A running restore whose target is <paramref name="bundle"/> (WB-12), or null.</summary>
     public BackupJob ActiveRestoreInto(string bundle)
     {

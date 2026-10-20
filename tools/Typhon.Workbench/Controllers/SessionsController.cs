@@ -18,6 +18,7 @@ public sealed partial class SessionsController : ControllerBase
     private readonly DemoDataProvider _demoData;
     private readonly OptionsStore _options;
     private readonly DatabasePauseCoordinator _pause;
+    private readonly Typhon.Workbench.Backups.BackupJobRegistry _backupJobs;
     private readonly ILogger<SessionsController> _logger;
 
     public SessionsController(
@@ -25,18 +26,28 @@ public sealed partial class SessionsController : ControllerBase
         DemoDataProvider demoData,
         OptionsStore options,
         DatabasePauseCoordinator pause,
+        Typhon.Workbench.Backups.BackupJobRegistry backupJobs,
         ILogger<SessionsController> logger)
     {
         _sessions = sessions;
         _demoData = demoData;
         _options = options;
         _pause = pause;
+        _backupJobs = backupJobs;
         _logger = logger;
     }
 
     [HttpPost("file")]
     public async Task<ActionResult<SessionDto>> CreateFileSession([FromBody] CreateFileSessionRequest request, CancellationToken ct)
     {
+        // #1417 WB-12: a bundle a running restore is writing is nobody's to open until the restore (and its settle) has ended. Ahead of the path's
+        // resolution, which refuses a missing bundle: a restore's target does not exist until its publish, and must not be created by an open either.
+        if (!string.IsNullOrWhiteSpace(request.FilePath) && _backupJobs.ActiveRestoreInto(Path.GetFullPath(request.FilePath)) is { } restoring)
+        {
+            throw new WorkbenchException(409, "restore_in_progress",
+                $"'{Path.GetFullPath(request.FilePath)}' is the target of a running restore (backup job {restoring.Id}); open it once the restore has ended.");
+        }
+
         // Resolve the file path. The bundled "demo" stem still goes through DemoDataProvider for
         // Phase 3 compat; any other path is used verbatim (Phase 4's real file picker).
         var resolvedFile = ResolveFilePath(request.FilePath);
