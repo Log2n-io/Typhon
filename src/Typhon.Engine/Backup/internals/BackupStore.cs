@@ -330,6 +330,12 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
 
     public string Root => _paths.Root;
 
+    /// <summary>The file system the session writes through.</summary>
+    internal IStoreFileSystem FileSystem => _fs;
+
+    /// <summary>Where the session logs.</summary>
+    internal ILogger Log => _log;
+
     /// <summary>The store as this session sees it (always rebuilt from the packs, then kept up to date by its own publishes).</summary>
     public StoreView View => _view;
 

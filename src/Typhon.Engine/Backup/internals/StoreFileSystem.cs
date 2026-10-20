@@ -104,6 +104,24 @@ internal interface IStoreFileSystem
     /// <summary>The files directly inside <paramref name="directory"/>, ordered by name (ordinal). A missing directory has none.</summary>
     IReadOnlyList<StoreFileEntry> EnumerateFiles(string directory);
 
+    /// <summary>The names of the directories directly inside <paramref name="directory"/>, ordered (ordinal). A missing directory has none.</summary>
+    IReadOnlyList<string> EnumerateDirectories(string directory)
+    {
+        if (!Directory.Exists(directory))
+        {
+            return [];
+        }
+
+        var names = new List<string>();
+        foreach (var d in Directory.EnumerateDirectories(directory))
+        {
+            names.Add(System.IO.Path.GetFileName(d));
+        }
+
+        names.Sort(StringComparer.Ordinal);
+        return names;
+    }
+
     /// <summary>Whether a database bundle's advisory lock names a live process (<see cref="DatabaseLockFile.IsHeldByLiveProcess"/>).</summary>
     bool IsBundleHeldByLiveProcess(string bundleDirectory);
 

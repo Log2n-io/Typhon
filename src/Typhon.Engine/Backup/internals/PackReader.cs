@@ -420,13 +420,8 @@ internal sealed class PackReader : IDisposable
                     PackFormat.ThrowCorrupt(Path, "Tail", -1, $"segment {segment.SegmentId}: block {b} length prefix disagrees with the TAILDIR");
                 }
 
-                var payload = frame[PackFormat.FramePrefixSize..];
                 var bytes = raw.AsSpan(0, block.RawLength);
-                if (block.StoredLength == block.RawLength)
-                {
-                    payload.CopyTo(bytes);
-                }
-                else if (DecodeLz4(payload, bytes) != block.RawLength)
+                if (!TailBlockCodec.Decode(frame[PackFormat.FramePrefixSize..], bytes))
                 {
                     PackFormat.ThrowCorrupt(Path, "Tail", -1, $"segment {segment.SegmentId}: block {b} does not decode");
                 }
