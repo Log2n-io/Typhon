@@ -214,7 +214,7 @@ unsafe class FrameHandoffTests
         {
             case ProducerAction.Begin:
             {
-                if (!state->TryBeginFrame(out var sequence, out var recycled))
+                if (!state->TryBeginFrame(out var sequence, out var recycled, countsTowardRun: true))
                 {
                     coverage.InFlightSkips++;
                     return;
@@ -581,7 +581,7 @@ unsafe class FrameHandoffTests
             SessionSendState.Initialize(ref *state);
 
             // A producer-only operation must dirty only the first line.
-            Assert.That(state->TryBeginFrame(out var sequence, out _), Is.True);
+            Assert.That(state->TryBeginFrame(out var sequence, out _, countsTowardRun: true), Is.True);
             var block = stackalloc byte[64];
             state->PublishFrame(sequence, new FrameBlock(block, 64), 8, 1);
 
@@ -654,7 +654,7 @@ unsafe class FrameHandoffTests
 
             for (var i = 0; i < SessionSendState.K; i++)
             {
-                Assert.That(state->TryBeginFrame(out var sequence, out _), Is.True);
+                Assert.That(state->TryBeginFrame(out var sequence, out _, countsTowardRun: true), Is.True);
                 state->PublishFrame(sequence, new FrameBlock(block, 64), 8, sequence + 1);
             }
 
@@ -662,7 +662,8 @@ unsafe class FrameHandoffTests
 
             for (var i = 0; i < 20; i++)
             {
-                Assert.That(state->TryBeginFrame(out var skipped, out var recycled), Is.False, "a third frame would queue, and this protocol does not queue");
+                Assert.That(state->TryBeginFrame(out var skipped, out var recycled, countsTowardRun: true), Is.False,
+                    "a third frame would queue, and this protocol does not queue");
                 Assert.Multiple(() =>
                 {
                     Assert.That(skipped, Is.EqualTo(-1));
@@ -676,9 +677,9 @@ unsafe class FrameHandoffTests
             Assert.That(state->TryClaimFrame(long.MaxValue, out var frame), Is.True);
             state->CompleteSend(frame.Sequence);
 
-            Assert.That(state->TryBeginFrame(out var next, out _), Is.True);
+            Assert.That(state->TryBeginFrame(out var next, out _, countsTowardRun: true), Is.True);
             state->PublishFrame(next, new FrameBlock(block, 64), 8, next + 1);
-            Assert.That(state->TryBeginFrame(out _, out _), Is.False, "the second slot is still in flight");
+            Assert.That(state->TryBeginFrame(out _, out _, countsTowardRun: true), Is.False, "the second slot is still in flight");
             Assert.That(state->SkipRun, Is.EqualTo(1), "a published frame resets the run");
         }
         finally
@@ -697,7 +698,7 @@ unsafe class FrameHandoffTests
         {
             SessionSendState.Initialize(ref *state);
 
-            Assert.That(state->TryBeginFrame(out var sequence, out _), Is.True);
+            Assert.That(state->TryBeginFrame(out var sequence, out _, countsTowardRun: true), Is.True);
             state->PublishFrame(sequence, new FrameBlock(block, 64), 8, tick: 12);
 
             Assert.Multiple(() =>
@@ -733,10 +734,10 @@ unsafe class FrameHandoffTests
             SessionSendState.Initialize(ref *state);
 
             // Ticks 10 and 12 produce; tick 11 is silent. Under tick parity both would land in slot 0, one on top of the other.
-            Assert.That(state->TryBeginFrame(out var first, out _), Is.True);
+            Assert.That(state->TryBeginFrame(out var first, out _, countsTowardRun: true), Is.True);
             state->PublishFrame(first, new FrameBlock(block, 64), 8, tick: 10);
 
-            Assert.That(state->TryBeginFrame(out var second, out _), Is.True);
+            Assert.That(state->TryBeginFrame(out var second, out _, countsTowardRun: true), Is.True);
             state->PublishFrame(second, new FrameBlock(block + 64, 64), 8, tick: 12);
 
             Assert.Multiple(() =>
@@ -762,8 +763,8 @@ unsafe class FrameHandoffTests
         {
             SessionSendState.Initialize(ref *state);
 
-            Assert.That(state->TryBeginFrame(out var sequence, out _), Is.True);
-            state->AbandonFrame(sequence);
+            Assert.That(state->TryBeginFrame(out var sequence, out _, countsTowardRun: true), Is.True);
+            state->AbandonFrame(sequence, countsTowardRun: true);
 
             Assert.Multiple(() =>
             {
@@ -773,7 +774,7 @@ unsafe class FrameHandoffTests
                 Assert.That(state->SkipRun, Is.EqualTo(1), "it is a skip like any other, and the policy counts it as one");
             });
 
-            Assert.That(state->TryBeginFrame(out var again, out _), Is.True);
+            Assert.That(state->TryBeginFrame(out var again, out _, countsTowardRun: true), Is.True);
             Assert.That(again, Is.EqualTo(sequence), "the same sequence is claimed next time");
             state->PublishFrame(again, new FrameBlock(block, 64), 8, 1);
         }
@@ -803,7 +804,8 @@ unsafe class FrameHandoffTests
 
             for (var i = 0; i < 60; i++)
             {
-                Assert.That(state->TryBeginFrame(out var sequence, out _), Is.True, "an idle tick is not back-pressure, so the slot is always claimable");
+                Assert.That(state->TryBeginFrame(out var sequence, out _, countsTowardRun: true), Is.True,
+                    "an idle tick is not back-pressure, so the slot is always claimable");
                 state->AbandonIdleFrame(sequence);
             }
 
@@ -814,12 +816,12 @@ unsafe class FrameHandoffTests
             });
 
             // And a real skip still counts, from wherever the run stood: the two paths are separate, not one path silenced.
-            Assert.That(state->TryBeginFrame(out var claimed, out _), Is.True);
-            state->AbandonFrame(claimed);
+            Assert.That(state->TryBeginFrame(out var claimed, out _, countsTowardRun: true), Is.True);
+            state->AbandonFrame(claimed, countsTowardRun: true);
             Assert.That(state->SkipRun, Is.EqualTo(1), "back-pressure still advances the run");
 
             // And a published frame is what clears it — asserted rather than left as two statements of unexamined setup.
-            Assert.That(state->TryBeginFrame(out var last, out _), Is.True);
+            Assert.That(state->TryBeginFrame(out var last, out _, countsTowardRun: true), Is.True);
             state->PublishFrame(last, new FrameBlock(block, 64), 8, 1);
             Assert.That(state->SkipRun, Is.Zero, "a published frame is the only thing that resets the run, and it must");
         }
@@ -934,7 +936,7 @@ unsafe class FrameHandoffTests
     {
         for (var i = 0; i < count; i++)
         {
-            if (!state->TryBeginFrame(out var sequence, out var block))
+            if (!state->TryBeginFrame(out var sequence, out var block, countsTowardRun: true))
             {
                 continue;
             }
@@ -947,7 +949,7 @@ unsafe class FrameHandoffTests
                     pool.Return(block);
                 }
 
-                state->AbandonFrame(sequence);
+                state->AbandonFrame(sequence, countsTowardRun: true);
                 continue;
             }
 
@@ -1027,7 +1029,7 @@ unsafe class FrameHandoffTests
                     {
                         FrameBlock block;
                         long sequence;
-                        while (!st->TryBeginFrame(out sequence, out block))
+                        while (!st->TryBeginFrame(out sequence, out block, countsTowardRun: true))
                         {
                             if (Stalled(watchdog, ref abort))
                             {

@@ -140,6 +140,8 @@ jobs:
               # whole engine, and gating it on `sdk` would make the SDK job run on every engine change.
               - 'src/Typhon.Subscriptions.AspNetCore/**'
               - 'test/Typhon.Subscriptions.AspNetCore.Tests/**'
+              # Compiled into that suite by link: its WebSocket parity test (AC-15) compares against the engine tests' in-process oracle.
+              - 'test/Typhon.Engine.Tests/Runtime/Subscriptions/InProcessLink.cs'
               - 'src/Typhon.Shell/**'
               - 'src/Typhon.Shell.Extensibility/**'
               - 'samples/Typhon.Samples.Swg/**'

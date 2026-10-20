@@ -1,8 +1,10 @@
 using NUnit.Framework;
 using System;
 using System.Buffers.Binary;
+using Typhon.Engine.Internals;
 using Typhon.Profiler;
 using Typhon.Profiler.Events;
+using Typhon.Protocol;
 
 namespace Typhon.Engine.Tests.Profiler;
 
@@ -557,6 +559,66 @@ public sealed class TypedDtoRoundTripTests
             Assert.That(clippedRow.RealmId, Is.EqualTo(ushort.MaxValue));
             Assert.That(clippedRow.BytesPerSec, Is.Zero);
             Assert.That(clippedRow.DegradeLevel, Is.Zero);
+        });
+    }
+
+    /// <summary>
+    /// Kinds 71-73 — push replication's per-session frame and lifecycle records (#1038 D-2) — decode in the order <see cref="TraceEventKind"/> documents for
+    /// them. All three open with a u64 session id, so every field after it sits at an offset a natural-alignment decoder would get wrong once a byte precedes
+    /// it: kind 71's i32 at 16 and its bytes at 20-21, kind 72's i32 at 10, kind 73's u16 at 11.
+    /// </summary>
+    [Test]
+    public void SubscriptionsSessionRecords_DecodeTheDocumentedLayouts()
+    {
+        const ulong session = 0x0007_0000_0002UL;
+
+        var produced = new byte[TraceRecordHeader.CommonHeaderSize + 22];
+        WriteInstantHeader(produced, (ushort)produced.Length, TraceEventKind.SubscriptionsFrameProduced);
+        var pp = produced.AsSpan(TraceRecordHeader.CommonHeaderSize);
+        BinaryPrimitives.WriteUInt64LittleEndian(pp, session);
+        BinaryPrimitives.WriteInt64LittleEndian(pp[8..], 123_456_789_012L);   // sequence
+        BinaryPrimitives.WriteInt32LittleEndian(pp[16..], 76_543);           // bytes
+        pp[20] = 1;                                                            // reset
+        pp[21] = 2;                                                            // degradeLevel
+
+        var skipped = new byte[TraceRecordHeader.CommonHeaderSize + 14];
+        WriteInstantHeader(skipped, (ushort)skipped.Length, TraceEventKind.SubscriptionsFrameSkipped);
+        var kp = skipped.AsSpan(TraceRecordHeader.CommonHeaderSize);
+        BinaryPrimitives.WriteUInt64LittleEndian(kp, session);
+        kp[8] = (byte)FrameSkipCause.InFlightFull;                             // cause
+        kp[9] = 1;                                                             // degradeLevel
+        BinaryPrimitives.WriteInt32LittleEndian(kp[10..], 29);               // skipRun
+
+        var changed = new byte[TraceRecordHeader.CommonHeaderSize + 13];
+        WriteInstantHeader(changed, (ushort)changed.Length, TraceEventKind.SubscriptionsSessionChanged);
+        var cp = changed.AsSpan(TraceRecordHeader.CommonHeaderSize);
+        BinaryPrimitives.WriteUInt64LittleEndian(cp, session);
+        cp[8] = (byte)SessionChange.Closed;                                    // change
+        cp[9] = 0;                                                             // degradeLevel + 1 — 0: not reported on a close
+        cp[10] = (byte)SessionCloseReason.ClientLeft + 1;                      // closeReason — offset, so ClientLeft is not "no close"
+        BinaryPrimitives.WriteUInt16LittleEndian(cp[11..], CloseCodes.TryAgainLater);
+
+        var p = SubscriptionsFrameProducedEventDto.Decode(produced, CurrentTick, TicksPerUs);
+        var k = SubscriptionsFrameSkippedEventDto.Decode(skipped, CurrentTick, TicksPerUs);
+        var c = SubscriptionsSessionChangedEventDto.Decode(changed, CurrentTick, TicksPerUs);
+        Assert.Multiple(() =>
+        {
+            Assert.That(p.SessionId, Is.EqualTo(session));
+            Assert.That(p.Sequence, Is.EqualTo(123_456_789_012L));
+            Assert.That(p.Bytes, Is.EqualTo(76_543));
+            Assert.That(p.Reset, Is.EqualTo(1));
+            Assert.That(p.DegradeLevel, Is.EqualTo(2));
+
+            Assert.That(k.SessionId, Is.EqualTo(session));
+            Assert.That(k.Cause, Is.EqualTo((byte)FrameSkipCause.InFlightFull));
+            Assert.That(k.DegradeLevel, Is.EqualTo(1));
+            Assert.That(k.SkipRun, Is.EqualTo(29));
+
+            Assert.That(c.SessionId, Is.EqualTo(session));
+            Assert.That(c.Change, Is.EqualTo((byte)SessionChange.Closed));
+            Assert.That(c.DegradeLevel, Is.Zero, "a close does not report the level, and 0 says so");
+            Assert.That(c.CloseReason, Is.EqualTo(1), "ClientLeft, offset by one");
+            Assert.That(c.CloseCode, Is.EqualTo(CloseCodes.TryAgainLater));
         });
     }
 

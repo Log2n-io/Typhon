@@ -557,6 +557,8 @@ public sealed partial class TyphonRuntime : IDisposable
                 ReplicationPrologueMsTotal = _subscriptionsRuntime?.Frames?.PrologueTotal.Ms ?? 0.0,
                 ReplicationPrologueTicks = _subscriptionsRuntime?.Frames?.PrologueTotal.Ticks ?? 0L,
                 ReplicatedArchetypes = _subscriptionsRuntime?.Registry?.Archetypes?.Count ?? 0,
+                SessionsClosed = ReadCloseCounts(_subscriptionsRuntime),
+                FramesSkipped = ReadSkipCounts(_subscriptionsRuntime),
             };
         }
 
@@ -639,7 +641,30 @@ public sealed partial class TyphonRuntime : IDisposable
             Sessions = subscriptions?.Sessions?.OpenCount ?? 0,
             NetOutBytesTotal = subscriptions?.SendPump?.BytesSent ?? 0L,
             ReplicationTrackP99Ms = (_subscriptionsContext.Telemetry?.Percentile(newest, window, 0.99, new double[ticks]) ?? 0.0) / 1000.0,
+            SessionsClosed = ReadCloseCounts(subscriptions),
+            FramesSkipped = ReadSkipCounts(subscriptions),
         };
+    }
+
+    /// <summary>The session table's cumulative closes per reason; zeros with no replication.</summary>
+    private static SessionCloseCounts ReadCloseCounts(SubscriptionsRuntime subscriptions)
+    {
+        var t = subscriptions?.Sessions;
+        return t == null
+            ? default
+            : new SessionCloseCounts(t.ClosesBy(SessionCloseReason.ClientLeft), t.ClosesBy(SessionCloseReason.Kicked), t.ClosesBy(SessionCloseReason.LinkLost),
+                t.ClosesBy(SessionCloseReason.Lagging), t.ClosesBy(SessionCloseReason.Unacknowledged), t.ClosesBy(SessionCloseReason.ProtocolError),
+                t.ClosesBy(SessionCloseReason.ServerShutdown), t.ClosesBy(SessionCloseReason.InternalError), t.ClosesBy(SessionCloseReason.Abusive));
+    }
+
+    /// <summary>The frame stage's cumulative skips per cause; zeros with no replication.</summary>
+    private static FrameSkipCounts ReadSkipCounts(SubscriptionsRuntime subscriptions)
+    {
+        var f = subscriptions?.Frames;
+        return f == null
+            ? default
+            : new FrameSkipCounts(f.SkipsBy(FrameSkipCause.Gated), f.SkipsBy(FrameSkipCause.Lagging), f.SkipsBy(FrameSkipCause.InFlightFull),
+                f.SkipsBy(FrameSkipCause.Oversize), f.SkipsBy(FrameSkipCause.PoolRefused), f.SkipsBy(FrameSkipCause.OwedReset));
     }
 
     /// <summary>

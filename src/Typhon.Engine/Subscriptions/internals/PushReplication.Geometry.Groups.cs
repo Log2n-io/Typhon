@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 using Typhon.Schema.Definition;
 
@@ -51,7 +52,9 @@ internal sealed unsafe partial class PushReplication<TEvent>
     private void BuildMemberLog(TickLog slot)
     {
         slot.MemberCount = 0;
+        var regionsFrom = Stopwatch.GetTimestamp();
         RefreshRegions();
+        RegionRefreshTicks += Stopwatch.GetTimestamp() - regionsFrom;
         for (var k = 0; k < slot.CellCount; k++)
         {
             for (var i = slot.Starts[k]; i < slot.PrimaryEnds[k]; i++)
@@ -142,11 +145,6 @@ internal sealed unsafe partial class PushReplication<TEvent>
 
     // ══ Regions and their index (P6, P7) ══════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-    private readonly struct RegionByKey : IComparer<RegionEntry>
-    {
-        public int Compare(RegionEntry x, RegionEntry y) => x.Key.CompareTo(y.Key);
-    }
-
     private struct RegionEntry
     {
         public long Key;
@@ -158,85 +156,406 @@ internal sealed unsafe partial class PushReplication<TEvent>
             && A5 == other.A5;
     }
 
-    // Per set: the regions of this realm, and the index — every (cell, region) pair within the set's widest reach plus its margin, by cell.
-    private RegionEntry[][] _regionTable = [];
-    private int[] _regionCount = [];
-    private ulong[][] _regionCells = [];
-    private int[][] _regionIds = [];
-    private int[] _regionCellCount = [];
-    private RegionEntry[] _regionScratch = new RegionEntry[16];
+    /// <summary>
+    /// The cells a region is filed under — its extent's bounding box padded by the set's reach and margin — or <see cref="Oversized"/>, filed under none.
+    /// <see cref="None"/> is a region not filed at all: one not yet seen, or gone.
+    /// </summary>
+    private struct RegionBox : IEquatable<RegionBox>
+    {
+        public int X0, X1, Y0, Y1, Z0, Z1;
+        public bool Oversized;
 
-    // Per set: the regions too wide to file cell by cell (P7's oversized list), which every session of the set tests. And the index build's pairs, reused.
-    private int[][] _regionOversized = [];
-    private int[] _regionOversizedCount = [];
-    private (ulong Cell, int Region)[] _regionPairs = new (ulong, int)[64];
+        public static RegionBox None => new() { X0 = 1, X1 = 0, Y0 = 1, Y1 = 0, Z0 = 1, Z1 = 0 };
+
+        /// <summary>Whether the region is filed under cell (x, y, z): inside the box, and the box is filed cell by cell.</summary>
+        public readonly bool Files(int x, int y, int z) => !Oversized && x >= X0 && x <= X1 && y >= Y0 && y <= Y1 && z >= Z0 && z <= Z1;
+
+        public readonly bool Equals(RegionBox other) =>
+            X0 == other.X0 && X1 == other.X1 && Y0 == other.Y0 && Y1 == other.Y1 && Z0 == other.Z0 && Z1 == other.Z1 && Oversized == other.Oversized;
+    }
+
+    /// <summary>
+    /// One region set's regions and their index (#1409). A region keeps a <b>slot</b> for as long as its key is seen, so a region that spawns or dies
+    /// touches its own cells and nobody else's. A cell's <b>bucket</b> lists the slots filed under it in key order — the order a session's walk of a cell
+    /// relies on — and a region whose padded box moves is removed from the cells it left and inserted in the cells it reached, nothing else. Built and edited
+    /// serially at the index's finish; read by the gather's workers afterwards, with no write in between.
+    /// </summary>
+    private sealed class RegionIndex
+    {
+        public RegionEntry[] Entries = new RegionEntry[16];
+        public RegionBox[] Boxes = new RegionBox[16];
+        public uint[] Seen = new uint[16];
+        public bool[] Live = new bool[16];
+        public int Slots;
+        public int LiveCount;
+        public int[] FreeSlots = new int[16];
+        public int FreeSlotCount;
+        public readonly Dictionary<long, int> SlotOfKey = [];
+
+        public readonly Dictionary<ulong, int> BucketOfCell = [];
+        public int[][] Buckets = new int[16][];
+        public int[] BucketCounts = new int[16];
+        public int BucketTotal;
+        public int[] FreeBuckets = new int[16];
+        public int FreeBucketCount;
+
+        /// <summary>The regions too wide to file cell by cell (P7), in key order: every session of the set tests them.</summary>
+        public int[] Oversized = new int[4];
+        public int OversizedCount;
+
+        // The last cluster walk's keys in walk order and the slot each was given (-1 for a key read twice). A walk that meets the same keys in the same
+        // order — every tick a region neither spawns, dies nor migrates — reaches each slot without a lookup (P9).
+        public long[] WalkKeys = [];
+        public int[] WalkSlots = [];
+        public int WalkCount;
+        public uint Walks;
+    }
+
+    // Per set: its index, or null when the set has no region selector.
+    private RegionIndex[] _regionIndexes = [];
+
+    // The refresh's walk, serial and reused.
+    private RegionEntry[] _regionScratch = new RegionEntry[16];
 
     /// <summary>A region filed under more cells than this goes on its set's oversized list instead (P7).</summary>
     internal const int MaxGroupRegionCells = 4096;
 
-    /// <summary>Regions read, region tables rebuilt, summed. Diagnostic.</summary>
-    internal long RegionRebuilds;
-
     /// <summary>
-    /// Reads every set's region archetype and rebuilds the set's index when its table changed (P7): built at the first tick and edited only when an extent,
-    /// a key or the set of regions changes. Serial, at the index's finish.
+    /// Reads every set's region archetype and keeps the set's index current (P7, #1409): a region seen for the first time is filed, one no longer seen is
+    /// removed, and one whose padded box moved is re-filed in the cells it left and reached. Nothing else is touched. Serial, at the index's finish.
     /// </summary>
     private void RefreshRegions()
     {
-        if (_regionTable.Length != GroupSets.Length)
+        if (_regionIndexes.Length != GroupSets.Length)
         {
-            _regionTable = new RegionEntry[GroupSets.Length][];
-            _regionCount = new int[GroupSets.Length];
-            _regionCells = new ulong[GroupSets.Length][];
-            _regionIds = new int[GroupSets.Length][];
-            _regionCellCount = new int[GroupSets.Length];
-            _regionOversized = new int[GroupSets.Length][];
-            _regionOversizedCount = new int[GroupSets.Length];
+            _regionIndexes = new RegionIndex[GroupSets.Length];
             for (var s = 0; s < GroupSets.Length; s++)
             {
-                _regionTable[s] = [];
-                _regionCells[s] = [];
-                _regionIds[s] = [];
-                _regionOversized[s] = [];
-                _regionCount[s] = -1;   // never built
+                _regionIndexes[s] = GroupSets[s].Region == null ? null : new RegionIndex();
             }
         }
 
         for (var s = 0; s < GroupSets.Length; s++)
         {
-            if (GroupSets[s].Region == null)
-            {
-                _regionCount[s] = 0;
-                continue;
-            }
-
-            var count = ReadRegions(GroupSets[s].Region, ref _regionScratch);
-            var table = _regionTable[s];
-            var same = count == _regionCount[s];
-            for (var i = 0; same && i < count; i++)
-            {
-                same = _regionScratch[i].SameAs(in table[i]);
-            }
-
-            if (same)
+            var index = _regionIndexes[s];
+            if (index == null)
             {
                 continue;
             }
 
-            if (table.Length < count)
+            var pad = GroupSets[s].MaxReachM + GroupSets[s].LeaveMarginM;
+            var walked = WalkRegions(GroupSets[s].Region);
+            index.Walks++;
+            var sameWalk = walked == index.WalkCount;
+            for (var i = 0; sameWalk && i < walked; i++)
             {
-                _regionTable[s] = table = new RegionEntry[Math.Max(count, 16)];
+                sameWalk = _regionScratch[i].Key == index.WalkKeys[i];
             }
 
-            Array.Copy(_regionScratch, table, count);
-            _regionCount[s] = count;
-            BuildRegionIndex(s, GroupSets[s].MaxReachM + GroupSets[s].LeaveMarginM);
-            RegionRebuilds++;
+            if (sameWalk)
+            {
+                // The same keys in the same order: the same slots, no region born or gone. Only an extent can have moved.
+                for (var i = 0; i < walked; i++)
+                {
+                    var slot = index.WalkSlots[i];
+                    if (slot >= 0)
+                    {
+                        Update(index, slot, in _regionScratch[i], pad);
+                    }
+                }
+            }
+            else
+            {
+                Rewalk(index, walked, pad);
+            }
+
+            VerifyRegionIndex(index, pad);
         }
     }
 
-    /// <summary>The regions of this realm in the region archetype's clusters, ordered by key; a key held by two regions keeps the first one read.</summary>
-    private int ReadRegions(CompiledRegion region, ref RegionEntry[] into)
+    /// <summary>
+    /// A walk that differs from the last one: each key finds or is given its slot, a key read twice keeps its first reading, and a slot not seen is a
+    /// region gone.
+    /// </summary>
+    private void Rewalk(RegionIndex index, int walked, double pad)
+    {
+        if (index.WalkKeys.Length < walked)
+        {
+            index.WalkKeys = new long[_regionScratch.Length];
+            index.WalkSlots = new int[_regionScratch.Length];
+        }
+
+        var stamp = index.Walks;
+        var claimed = 0;
+        for (var i = 0; i < walked; i++)
+        {
+            ref readonly var entry = ref _regionScratch[i];
+            index.WalkKeys[i] = entry.Key;
+            ref var slot = ref CollectionsMarshal.GetValueRefOrAddDefault(index.SlotOfKey, entry.Key, out var exists);
+            if (!exists)
+            {
+                slot = TakeSlot(index);
+                index.Entries[slot] = entry;
+                index.Boxes[slot] = RegionBox.None;
+                index.Seen[slot] = stamp;
+                index.WalkSlots[i] = slot;
+                claimed++;
+                Refile(index, slot, RegionBox.None, BoxOf(in entry, pad));
+                continue;
+            }
+
+            if (index.Seen[slot] == stamp)
+            {
+                index.WalkSlots[i] = -1;
+                continue;
+            }
+
+            index.Seen[slot] = stamp;
+            index.WalkSlots[i] = slot;
+            claimed++;
+            Update(index, slot, in entry, pad);
+        }
+
+        index.WalkCount = walked;
+        if (claimed == index.LiveCount)
+        {
+            // Every live region was seen: none is gone.
+            return;
+        }
+
+        for (var slot = 0; slot < index.Slots; slot++)
+        {
+            if (!index.Live[slot] || index.Seen[slot] == stamp)
+            {
+                continue;
+            }
+
+            Refile(index, slot, index.Boxes[slot], RegionBox.None);
+            index.SlotOfKey.Remove(index.Entries[slot].Key);
+            index.Live[slot] = false;
+            index.LiveCount--;
+            if (index.FreeSlotCount == index.FreeSlots.Length)
+            {
+                Array.Resize(ref index.FreeSlots, index.FreeSlotCount * 2);
+            }
+
+            index.FreeSlots[index.FreeSlotCount++] = slot;
+        }
+    }
+
+    private static int TakeSlot(RegionIndex index)
+    {
+        int slot;
+        if (index.FreeSlotCount > 0)
+        {
+            slot = index.FreeSlots[--index.FreeSlotCount];
+        }
+        else
+        {
+            slot = index.Slots++;
+            if (slot == index.Entries.Length)
+            {
+                var size = slot * 2;
+                Array.Resize(ref index.Entries, size);
+                Array.Resize(ref index.Boxes, size);
+                Array.Resize(ref index.Seen, size);
+                Array.Resize(ref index.Live, size);
+            }
+        }
+
+        index.Live[slot] = true;
+        index.LiveCount++;
+        return slot;
+    }
+
+    /// <summary>A region seen again: a new extent is kept, and re-filed only when the cells it is filed under changed (P7).</summary>
+    private void Update(RegionIndex index, int slot, in RegionEntry now, double pad)
+    {
+        ref var entry = ref index.Entries[slot];
+        if (entry.SameAs(in now))
+        {
+            return;
+        }
+
+        entry = now;
+        if (RefileSkippedForTest)
+        {
+            return;
+        }
+
+        var box = BoxOf(in now, pad);
+        if (!box.Equals(index.Boxes[slot]))
+        {
+            Refile(index, slot, index.Boxes[slot], box);
+        }
+    }
+
+    /// <summary>
+    /// Moves <paramref name="slot"/> from the cells of <paramref name="was"/> to those of <paramref name="now"/>: removed from each cell it left, inserted in
+    /// each it reached, and on or off the oversized list. Either box may be <see cref="RegionBox.None"/> — a region born or gone.
+    /// </summary>
+    private void Refile(RegionIndex index, int slot, RegionBox was, RegionBox now)
+    {
+        var key = index.Entries[slot].Key;
+        if (was.Oversized && !now.Oversized)
+        {
+            RemoveSorted(index, ref index.Oversized, ref index.OversizedCount, slot, key);
+        }
+        else if (!was.Oversized)
+        {
+            for (var cz = was.Z0; cz <= was.Z1; cz++)
+            {
+                for (var cy = was.Y0; cy <= was.Y1; cy++)
+                {
+                    for (var cx = was.X0; cx <= was.X1; cx++)
+                    {
+                        if (!now.Files(cx, cy, cz))
+                        {
+                            BucketRemove(index, TEvent.Key(cx, cy, cz), slot, key);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (now.Oversized && !was.Oversized)
+        {
+            if (index.OversizedCount == index.Oversized.Length)
+            {
+                Array.Resize(ref index.Oversized, index.OversizedCount * 2);
+            }
+
+            InsertSorted(index, index.Oversized, ref index.OversizedCount, slot, key);
+        }
+        else if (!now.Oversized)
+        {
+            for (var cz = now.Z0; cz <= now.Z1; cz++)
+            {
+                for (var cy = now.Y0; cy <= now.Y1; cy++)
+                {
+                    for (var cx = now.X0; cx <= now.X1; cx++)
+                    {
+                        if (!was.Files(cx, cy, cz))
+                        {
+                            BucketInsert(index, TEvent.Key(cx, cy, cz), slot, key);
+                        }
+                    }
+                }
+            }
+        }
+
+        index.Boxes[slot] = now;
+        RegionRefiles++;
+    }
+
+    private void BucketInsert(RegionIndex index, ulong cell, int slot, long key)
+    {
+        ref var bucket = ref CollectionsMarshal.GetValueRefOrAddDefault(index.BucketOfCell, cell, out var exists);
+        if (!exists)
+        {
+            bucket = TakeBucket(index);
+        }
+
+        ref var slots = ref index.Buckets[bucket];
+        ref var count = ref index.BucketCounts[bucket];
+        if (count == slots.Length)
+        {
+            Array.Resize(ref slots, Math.Max(4, count * 2));
+        }
+
+        InsertSorted(index, slots, ref count, slot, key);
+    }
+
+    private void BucketRemove(RegionIndex index, ulong cell, int slot, long key)
+    {
+        if (!index.BucketOfCell.TryGetValue(cell, out var bucket))
+        {
+            RegionIndexMismatches++;
+            return;
+        }
+
+        ref var count = ref index.BucketCounts[bucket];
+        RemoveSorted(index, ref index.Buckets[bucket], ref count, slot, key);
+        if (count == 0)
+        {
+            index.BucketOfCell.Remove(cell);
+            if (index.FreeBucketCount == index.FreeBuckets.Length)
+            {
+                Array.Resize(ref index.FreeBuckets, index.FreeBucketCount * 2);
+            }
+
+            index.FreeBuckets[index.FreeBucketCount++] = bucket;
+        }
+    }
+
+    private static int TakeBucket(RegionIndex index)
+    {
+        if (index.FreeBucketCount > 0)
+        {
+            return index.FreeBuckets[--index.FreeBucketCount];
+        }
+
+        var bucket = index.BucketTotal++;
+        if (bucket == index.Buckets.Length)
+        {
+            Array.Resize(ref index.Buckets, bucket * 2);
+            Array.Resize(ref index.BucketCounts, bucket * 2);
+        }
+
+        index.Buckets[bucket] ??= new int[4];
+        return bucket;
+    }
+
+    /// <summary>Where <paramref name="key"/> goes in <paramref name="slots"/>, kept in key order: the first position whose region's key is not below
+    /// it.</summary>
+    private static int KeyLowerBound(RegionIndex index, int[] slots, int count, long key)
+    {
+        var lo = 0;
+        var hi = count;
+        while (lo < hi)
+        {
+            var mid = (lo + hi) >>> 1;
+            if (index.Entries[slots[mid]].Key < key)
+            {
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid;
+            }
+        }
+
+        return lo;
+    }
+
+    private static void InsertSorted(RegionIndex index, int[] slots, ref int count, int slot, long key)
+    {
+        var at = KeyLowerBound(index, slots, count, key);
+        Array.Copy(slots, at, slots, at + 1, count - at);
+        slots[at] = slot;
+        count++;
+    }
+
+    private void RemoveSorted(RegionIndex index, ref int[] slots, ref int count, int slot, long key)
+    {
+        // Keys are unique among live regions, so the lower bound is the region itself.
+        var at = KeyLowerBound(index, slots, count, key);
+        if (at == count || slots[at] != slot)
+        {
+            // Never on a correct index: counted rather than thrown, since this runs on the tick.
+            RegionIndexMismatches++;
+            return;
+        }
+
+        Array.Copy(slots, at + 1, slots, at, count - at - 1);
+        count--;
+    }
+
+    /// <summary>
+    /// Reads the regions of this realm from the region archetype's clusters into <see cref="_regionScratch"/>, in walk order; a key of 0 is no region.
+    /// Returns how many.
+    /// </summary>
+    private int WalkRegions(CompiledRegion region)
     {
         var cs = region.ClusterState;
         if (cs?.ClusterSegment == null)
@@ -244,7 +563,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
             return 0;
         }
 
-        var count = 0;
+        var walked = 0;
         using var epoch = EpochGuard.Enter(cs.ClusterSegment.Store.EpochManager);
         var accessor = cs.ClusterSegment.CreateChunkAccessor();
         try
@@ -270,13 +589,13 @@ internal sealed unsafe partial class PushReplication<TEvent>
                         continue;
                     }
 
-                    if (count == into.Length)
+                    if (walked == _regionScratch.Length)
                     {
-                        Array.Resize(ref into, count * 2);
+                        Array.Resize(ref _regionScratch, walked * 2);
                     }
 
                     var p = (float*)region.Extent.At(clusterBase, slot);
-                    ref var r = ref into[count++];
+                    ref var r = ref _regionScratch[walked++];
                     r.Key = key;
                     r.Type = region.ExtentType;
                     switch (region.ExtentType)
@@ -302,90 +621,98 @@ internal sealed unsafe partial class PushReplication<TEvent>
             accessor.Dispose();
         }
 
-        if (count > 1)
+        return walked;
+    }
+
+    /// <summary>The cells <paramref name="r"/> is filed under: its bounding box padded by <paramref name="pad"/>, on the plane z = 0 when it is flat.</summary>
+    private RegionBox BoxOf(in RegionEntry r, double pad)
+    {
+        Bounds(in r, out var x0, out var y0, out var z0, out var x1, out var y1, out var z1);
+        var flat = !TEvent.Deep || Is2D(r.Type);
+        var box = new RegionBox
         {
-            // Stable on a key held twice, so "the first read" is the cluster walk's first: a sort that reordered equal keys would flip between ticks and
-            // rebuild the index for nothing.
-            var span = into.AsSpan(0, count);
-            span.Sort(default(RegionByKey));
-            var kept = 1;
-            for (var i = 1; i < count; i++)
-            {
-                if (span[i].Key != span[kept - 1].Key)
-                {
-                    span[kept++] = span[i];
-                }
-            }
+            X0 = CellX(x0 - pad),
+            X1 = CellX(x1 + pad),
+            Y0 = CellY(y0 - pad),
+            Y1 = CellY(y1 + pad),
+            Z0 = flat ? CellZ(0d) : CellZ(z0 - pad),
+            Z1 = flat ? CellZ(0d) : CellZ(z1 + pad),
+        };
 
-            count = kept;
-        }
-
-        return count;
+        box.Oversized = (long)(box.X1 - box.X0 + 1) * (box.Y1 - box.Y0 + 1) * (box.Z1 - box.Z0 + 1) > MaxGroupRegionCells;
+        return box;
     }
 
     /// <summary>
-    /// Files every region under each grid cell within <paramref name="pad"/> of its extent's bounding box, sorted by cell; a region wider than
-    /// <see cref="MaxGroupRegionCells"/> cells goes on the set's oversized list. A 2D extent is filed on the plane z = 0, where its sessions look it up.
+    /// #1409's differential check, when a test asked for it: the index equals one built from scratch over the same live regions — every cell's slots in key
+    /// order, the oversized list, each region's box.
     /// </summary>
-    private void BuildRegionIndex(int set, double pad)
+    private void VerifyRegionIndex(RegionIndex index, double pad)
     {
-        var table = _regionTable[set];
-        var pairs = 0;
-        var oversized = 0;
-        for (var i = 0; i < _regionCount[set]; i++)
+        // The check lives in its own method because it sorts with a lambda that captures index: C# allocates a captured parameter's closure at the ENTRY of
+        // the method that owns it, before any early return — so with the check inline, every tick paid 24 B for a test that was off (AC-6, 2026-10-20).
+        if (VerifyRegionIndexForTest)
         {
-            Bounds(in table[i], out var x0, out var y0, out var z0, out var x1, out var y1, out var z1);
-            var cx0 = CellX(x0 - pad);
-            var cx1 = CellX(x1 + pad);
-            var cy0 = CellY(y0 - pad);
-            var cy1 = CellY(y1 + pad);
-            var flat = !TEvent.Deep || Is2D(table[i].Type);
-            var cz0 = flat ? CellZ(0d) : CellZ(z0 - pad);
-            var cz1 = flat ? CellZ(0d) : CellZ(z1 + pad);
-            var cells = (long)(cx1 - cx0 + 1) * (cy1 - cy0 + 1) * (cz1 - cz0 + 1);
-            if (cells > MaxGroupRegionCells)
-            {
-                if (oversized == _regionOversized[set].Length)
-                {
-                    Array.Resize(ref _regionOversized[set], Math.Max(4, oversized * 2));
-                }
+            VerifyRegionIndexCore(index, pad);
+        }
+    }
 
-                _regionOversized[set][oversized++] = i;
+    private void VerifyRegionIndexCore(RegionIndex index, double pad)
+    {
+        var live = new List<int>();
+        for (var slot = 0; slot < index.Slots; slot++)
+        {
+            if (index.Live[slot])
+            {
+                live.Add(slot);
+            }
+        }
+
+        live.Sort((a, b) => index.Entries[a].Key.CompareTo(index.Entries[b].Key));
+        var expected = new Dictionary<ulong, List<int>>();
+        var oversized = new List<int>();
+        var same = index.LiveCount == live.Count && index.SlotOfKey.Count == live.Count;
+        foreach (var slot in live)
+        {
+            same &= index.SlotOfKey.TryGetValue(index.Entries[slot].Key, out var mapped) && mapped == slot;
+            var box = BoxOf(in index.Entries[slot], pad);
+            same &= box.Equals(index.Boxes[slot]);
+            if (box.Oversized)
+            {
+                oversized.Add(slot);
                 continue;
             }
 
-            for (var cz = cz0; cz <= cz1; cz++)
+            for (var cz = box.Z0; cz <= box.Z1; cz++)
             {
-                for (var cy = cy0; cy <= cy1; cy++)
+                for (var cy = box.Y0; cy <= box.Y1; cy++)
                 {
-                    for (var cx = cx0; cx <= cx1; cx++)
+                    for (var cx = box.X0; cx <= box.X1; cx++)
                     {
-                        if (pairs == _regionPairs.Length)
+                        var cell = TEvent.Key(cx, cy, cz);
+                        if (!expected.TryGetValue(cell, out var list))
                         {
-                            Array.Resize(ref _regionPairs, pairs * 2);
+                            expected[cell] = list = [];
                         }
 
-                        _regionPairs[pairs++] = (TEvent.Key(cx, cy, cz), i);
+                        list.Add(slot);
                     }
                 }
             }
         }
 
-        _regionPairs.AsSpan(0, pairs).Sort();
-        if (_regionCells[set].Length < pairs)
+        same &= expected.Count == index.BucketOfCell.Count;
+        foreach (var (cell, slots) in expected)
         {
-            _regionCells[set] = new ulong[pairs];
-            _regionIds[set] = new int[pairs];
+            same &= index.BucketOfCell.TryGetValue(cell, out var bucket)
+                && index.Buckets[bucket].AsSpan(0, index.BucketCounts[bucket]).SequenceEqual(CollectionsMarshal.AsSpan(slots));
         }
 
-        for (var i = 0; i < pairs; i++)
+        same &= index.Oversized.AsSpan(0, index.OversizedCount).SequenceEqual(CollectionsMarshal.AsSpan(oversized));
+        if (!same)
         {
-            _regionCells[set][i] = _regionPairs[i].Cell;
-            _regionIds[set][i] = _regionPairs[i].Region;
+            RegionIndexMismatches++;
         }
-
-        _regionCellCount[set] = pairs;
-        _regionOversizedCount[set] = oversized;
     }
 
     private static bool Is2D(SpatialFieldType type) => type is SpatialFieldType.AABB2F or SpatialFieldType.BSphere2F;
@@ -672,20 +999,26 @@ internal sealed unsafe partial class PushReplication<TEvent>
             // oversized list are each in key order, so the committed keys are walked alongside them.
             var cz = Is2D(compiled.Region.ExtentType) ? CellZ(0d) : CellZ(n.Z);
             var cellKey = TEvent.Key(CellX(n.X), CellY(n.Y), cz);
-            var cells = _regionCells.Length > set ? _regionCells[set] : [];
-            var cellCount = _regionCellCount.Length > set ? _regionCellCount[set] : 0;
+            var index = _regionIndexes.Length > set ? _regionIndexes[set] : null;
             var met = 0;
             var inKeyOrder = true;
-            var cellWalk = 0;
-            for (var i = LowerBound(cells, cellCount, cellKey); i < cellCount && cells[i] == cellKey; i++)
+            if (index != null)
             {
-                Meet(committed, ref cellWalk, set, group, compiled, _regionIds[set][i], in n, scratch, ref met, ref inKeyOrder);
-            }
+                var cellWalk = 0;
+                if (index.BucketOfCell.TryGetValue(cellKey, out var bucket))
+                {
+                    var slots = index.Buckets[bucket];
+                    for (var i = 0; i < index.BucketCounts[bucket]; i++)
+                    {
+                        Meet(committed, ref cellWalk, index, group, compiled, slots[i], in n, scratch, ref met, ref inKeyOrder);
+                    }
+                }
 
-            var oversizedWalk = 0;
-            for (var i = 0; _regionOversizedCount.Length > set && i < _regionOversizedCount[set]; i++)
-            {
-                Meet(committed, ref oversizedWalk, set, group, compiled, _regionOversized[set][i], in n, scratch, ref met, ref inKeyOrder);
+                var oversizedWalk = 0;
+                for (var i = 0; i < index.OversizedCount; i++)
+                {
+                    Meet(committed, ref oversizedWalk, index, group, compiled, index.Oversized[i], in n, scratch, ref met, ref inKeyOrder);
+                }
             }
 
             // Kept keys first, then the nearest new ones; past the per-session bound a key is not held, counted, and the session told how many.
@@ -693,15 +1026,15 @@ internal sealed unsafe partial class PushReplication<TEvent>
             var over = 0;
             if (met > max)
             {
-                candidates.Sort(default(GroupMetAdmission));
+                SpanSort.Sort(candidates, default(GroupMetAdmission));
                 over = met - max;
                 Interlocked.Add(ref GroupsOverLimit, over);
                 candidates = candidates[..max];
-                candidates.Sort(default(GroupMetByKey));
+                SpanSort.Sort(candidates, default(GroupMetByKey));
             }
             else if (!inKeyOrder)
             {
-                candidates.Sort(default(GroupMetByKey));
+                SpanSort.Sort(candidates, default(GroupMetByKey));
             }
 
             var held = gs.BeginPending(set, candidates.Length);
@@ -1151,10 +1484,10 @@ internal sealed unsafe partial class PushReplication<TEvent>
     /// Step 1's test for one region of a set: met within the reach, kept within reach plus margin when the committed keys hold it. Regions are asked in key
     /// order within a run, so <paramref name="walk"/> walks the committed keys once.
     /// </summary>
-    private void Meet(HeldKeys committed, ref int walk, int set, ProfileGroup group, CompiledGroupSet compiled, int region, in Ball n,
+    private void Meet(HeldKeys committed, ref int walk, RegionIndex index, ProfileGroup group, CompiledGroupSet compiled, int region, in Ball n,
         FrameWorkerScratch scratch, ref int met, ref bool inKeyOrder)
     {
-        ref var r = ref _regionTable[set][region];
+        ref var r = ref index.Entries[region];
         var distance = ExtentDistance(in r, n.X, n.Y, n.Z);
         var cursor = CommittedCursor(committed, r.Key, ref walk, out var kept);
         if (distance > group.ReachM && !(kept && distance <= group.ReachM + compiled.LeaveMarginM))
@@ -1169,26 +1502,6 @@ internal sealed unsafe partial class PushReplication<TEvent>
 
         inKeyOrder &= met == 0 || scratch.GroupMet[met - 1].Key < r.Key;
         scratch.GroupMet[met++] = new GroupMet { Key = r.Key, Distance = distance, Kept = kept, Cursor = cursor };
-    }
-
-    private static int LowerBound(ulong[] keys, int count, ulong key)
-    {
-        var lo = 0;
-        var hi = count;
-        while (lo < hi)
-        {
-            var mid = (lo + hi) >>> 1;
-            if (keys[mid] < key)
-            {
-                lo = mid + 1;
-            }
-            else
-            {
-                hi = mid;
-            }
-        }
-
-        return lo;
     }
 
     /// <summary>
@@ -1317,7 +1630,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
 
         if (sort && count > 1)
         {
-            scratch.FillMembers.AsSpan(0, count).Sort(default(GroupFillMemberOrder));
+            SpanSort.Sort(scratch.FillMembers.AsSpan(0, count), default(GroupFillMemberOrder));
         }
 
         return count;

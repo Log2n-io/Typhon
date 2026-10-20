@@ -395,7 +395,7 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// <param name="every">The profile's tick divisor.</param>
     /// <param name="bigWorld">Seed the walking oracle's population even when the sessions do not walk.</param>
     /// <param name="deterministicProjection">
-    /// Build the push index serially, in the frame prologue — the collapsed shape's path — instead of sorted by the projection and merged by its stage.
+    /// Build the push index serially, in the frame prologue, instead of sorted by the projection and merged by its stage.
     /// </param>
     /// <param name="replicationCellM">The replication cell side; zero for <c>ProjectionTestSchema.ReplicationCellFor</c> of the profile's radius.</param>
     /// <param name="forceDeep">Serve the flat world with the deep implementation, which must agree with the flat one on it (10 § 3.5).</param>
@@ -637,7 +637,16 @@ internal sealed unsafe class OracleHarness : IDisposable
 
     /// <summary>Asserts that every session's replica is the engine's world, field for field.</summary>
     /// <param name="because">What the caller is proving, printed with any divergence.</param>
-    public void AssertConverged(string because)
+    public void AssertConverged(string because) => AssertConverged(because, accountIdentities: true);
+
+    /// <summary>
+    /// <see cref="AssertConverged(string)"/> between quiet points (AC-11's every-tick comparison): the world compared, the identity count not — an identity
+    /// released this tick sits in its worker's queue until the next tick begins, so the count balances only at a quiet point.
+    /// </summary>
+    /// <param name="because">What the caller is proving, printed with any divergence.</param>
+    public void AssertWorldConverged(string because) => AssertConverged(because, accountIdentities: false);
+
+    private void AssertConverged(string because, bool accountIdentities)
     {
         var divergences = new List<string>();
 
@@ -647,7 +656,11 @@ internal sealed unsafe class OracleHarness : IDisposable
         }
 
         var truth = ServerTruth(divergences);
-        IdentitiesAccountedFor(truth, divergences);
+        if (accountIdentities)
+        {
+            IdentitiesAccountedFor(truth, divergences);
+        }
+
         var before = Compared;
         RequiredAtLastPoint = 0;
         HiddenAtLastPoint = 0;

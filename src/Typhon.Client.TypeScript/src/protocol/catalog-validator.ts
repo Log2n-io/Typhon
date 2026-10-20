@@ -51,6 +51,8 @@ const BUILT_IN_METRICS: readonly (readonly [string, string, CodecKind, string, s
   ['typhon.session.outBytesPerSec', 'B/s', CodecKind.Varu, 'gauge', 'session', false],
   ['typhon.session.skippedFrames', 'count', CodecKind.Varu, 'counter', 'session', false],
   ['typhon.session.droppedCommands', 'count', CodecKind.Varu, 'counter', 'session', false],
+  ['typhon.sessions.closed', 'count', CodecKind.Varu, 'counter', 'server', true],
+  ['typhon.frames.skipped', 'count', CodecKind.Varu, 'counter', 'server', true],
 ];
 
 /** The reserved index of a built-in command, or −1. */

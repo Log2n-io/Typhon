@@ -206,6 +206,12 @@ internal unsafe struct SessionSendState
     /// <summary>The tick of the last frame published for this session.</summary>
     public long ProducedTick => Volatile.Read(ref _producedTick);
 
+    /// <summary>
+    /// Whether <see cref="TryBeginFrame"/> would refuse for the in-flight bound — <see cref="K"/> frames claimed and not yet sent — without counting a skip.
+    /// Producer side only, like <see cref="TryBeginFrame"/>.
+    /// </summary>
+    public bool InFlightFull => _nextSeq - Volatile.Read(ref _sentSeq) >= K;
+
     /// <summary>Consecutive ticks this session has been skipped. Reset by a published frame; the skip policy reads it.</summary>
     public int SkipRun => Volatile.Read(ref _skipRun);
 
@@ -262,6 +268,8 @@ internal unsafe struct SessionSendState
     /// <param name="recycled">
     /// The block that was in the claimed slot, to be returned to <see cref="FramePool"/> or reused in place. Invalid when the slot was empty.
     /// </param>
+    /// <param name="countsTowardRun">Whether a refusal advances <see cref="SkipRun"/>: false on a tick the metronome ran to catch up its schedule
+    /// (SUB-15).</param>
     /// <returns><see langword="false"/> when <c>NextSequence − SentSequence ≥ K</c> — skip, do not queue.</returns>
     /// <remarks>
     /// <para>
@@ -275,7 +283,7 @@ internal unsafe struct SessionSendState
     /// twice: the block is the caller's from this moment on, whatever happens next.
     /// </para>
     /// </remarks>
-    public bool TryBeginFrame(out long sequence, out FrameBlock recycled)
+    public bool TryBeginFrame(out long sequence, out FrameBlock recycled, bool countsTowardRun)
     {
         var next = _nextSeq;
 
@@ -284,7 +292,7 @@ internal unsafe struct SessionSendState
 
         if (next - sent >= K)
         {
-            _skipRun++;
+            _skipRun += countsTowardRun ? 1 : 0;
             sequence = -1;
             recycled = default;
             return false;
@@ -310,10 +318,11 @@ internal unsafe struct SessionSendState
     /// For an encode the engine could not complete — a frame over the wire limit, a block the pool would not lend. The block handed back by
     /// <see cref="TryBeginFrame"/> is still the caller's to return; this only rolls the producer-private counter back so the slot is claimed again next tick.
     /// </remarks>
-    public void AbandonFrame(long sequence)
+    /// <param name="countsTowardRun">Whether the skip advances <see cref="SkipRun"/>: false on a catch-up tick (SUB-15).</param>
+    public void AbandonFrame(long sequence, bool countsTowardRun)
     {
         Rollback(sequence);
-        _skipRun++;
+        _skipRun += countsTowardRun ? 1 : 0;
     }
 
     /// <summary>
@@ -383,7 +392,8 @@ internal unsafe struct SessionSendState
     /// <remarks>
     /// The in-flight skip is counted by <see cref="TryBeginFrame"/> itself; this is for the others, so <see cref="SkipRun"/> means one thing.
     /// </remarks>
-    public void NoteSkipped() => _skipRun++;
+    /// <param name="countsTowardRun">Whether the skip advances <see cref="SkipRun"/>: false on a catch-up tick (SUB-15).</param>
+    public void NoteSkipped(bool countsTowardRun) => _skipRun += countsTowardRun ? 1 : 0;
 
     /// <summary>
     /// Takes the next frame to send, if there is one and its tick is committed.
@@ -462,9 +472,9 @@ internal unsafe struct SessionSendState
     }
 
     /// <summary>
-    /// Records that the session was heard from on this tick. Called by the link thread from <c>PING</c>, and once by the tick when the slot is bound.
+    /// Records that the session was heard from. Called by the link thread from <c>PING</c>, and once when the slot is bound.
     /// </summary>
-    /// <param name="tick">The server tick at the moment the message arrived.</param>
+    /// <param name="tick">The runtime's policy clock, in microseconds, at the moment the message arrived — time that passed, not ticks (SUB-15).</param>
     /// <remarks>
     /// Monotonic, one word, written atomically by one thread at a time — the same shape as <see cref="ReportAppliedTick"/> and on SUB-05's allow-list for the
     /// same reason. The tick reads it to close a session that has stopped talking (4001), which needs a last-heard-from mark that survives a session producing

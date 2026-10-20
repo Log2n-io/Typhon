@@ -54,6 +54,8 @@ public sealed class TcpSubscriptionTransport : ISubscriptionTransport
     private Task _acceptLoop;
     private int _started;
     private int _stopped;
+    private int _pending;
+    private long _pendingRefused;
 
     /// <summary>Creates the listener. Nothing is bound until <see cref="Start"/>.</summary>
     /// <param name="options">Where to listen and how, or <see langword="null"/> for the loopback defaults.</param>
@@ -70,6 +72,20 @@ public sealed class TcpSubscriptionTransport : ISubscriptionTransport
 
     /// <summary>How many connections are being served right now, the ones still exchanging their preamble included.</summary>
     public int ConnectionCount => _links.Count;
+
+    /// <summary>
+    /// How many connections are accepted and not yet admitted right now — in TLS, in the preamble, or waiting for <c>HELLO</c>. Bounded by
+    /// <see cref="TcpSubscriptionOptions.MaxPendingConnections"/>.
+    /// </summary>
+    public int PendingConnectionCount => Volatile.Read(ref _pending);
+
+    /// <summary>Connections refused the moment they were accepted because <see cref="PendingConnectionCount"/> was at its cap. Cumulative.</summary>
+    public long PendingRefused => Interlocked.Read(ref _pendingRefused);
+
+    /// <summary>
+    /// SUB-37's mutant: an admitted connection keeps its pending slot until it closes, so a server full of live sessions refuses every new connection.
+    /// </summary>
+    internal bool KeepPendingOnAdmissionForTest { get; set; }
 
     /// <inheritdoc />
     public void Start(ISubscriptionAcceptor acceptor)
@@ -160,11 +176,93 @@ public sealed class TcpSubscriptionTransport : ISubscriptionTransport
                 continue;
             }
 
-            _ = ServeAsync(socket);
+            if (!TryTakePendingSlot())
+            {
+                // Refused before TLS and before a byte either way: spending a handshake on a connection that will be dropped is what the cap exists to
+                // avoid (#1397).
+                Interlocked.Increment(ref _pendingRefused);
+                Refuse(socket);
+                continue;
+            }
+
+            _ = ServeAsync(socket, new PendingSlot(this));
         }
     }
 
-    private async Task ServeAsync(Socket socket)
+    /// <summary>Takes a pending slot if one is free. A compare-exchange rather than increment-then-undo, so the count never reads past the cap.</summary>
+    private bool TryTakePendingSlot()
+    {
+        var pending = Volatile.Read(ref _pending);
+        while (pending < _options.MaxPendingConnections)
+        {
+            var seen = Interlocked.CompareExchange(ref _pending, pending + 1, pending);
+            if (seen == pending)
+            {
+                return true;
+            }
+
+            pending = seen;
+        }
+
+        return false;
+    }
+
+    // One instance for every refusal: the setter copies the two values into setsockopt, so a flood need not allocate one per connect.
+    private static readonly LingerOption ResetOnClose = new(true, 0);
+
+    /// <summary>
+    /// Drops a socket with a reset rather than a <c>FIN</c>: the side that closes first keeps the <c>TIME_WAIT</c>, and under a connect flood that would be the
+    /// server, accumulating the very state a flood is made of (#1024's wall).
+    /// </summary>
+    private static void Refuse(Socket socket)
+    {
+        try
+        {
+            socket.LingerState = ResetOnClose;
+        }
+        catch (SocketException)
+        {
+            // The peer is already gone; a plain dispose is all that is left to do.
+        }
+
+        socket.Dispose();
+    }
+
+    /// <summary>
+    /// One connection's hold on <see cref="_pending"/>, released exactly once: at <c>HELLO</c>'s admission through the link, or when the connection ends,
+    /// whichever comes first.
+    /// </summary>
+    private sealed class PendingSlot(TcpSubscriptionTransport owner)
+    {
+        private readonly TcpSubscriptionTransport _transport = owner;
+        private TcpSubscriptionTransport _owner = owner;
+
+        /// <summary>The link's admission callback: the slot goes back now rather than when the session ends.</summary>
+        public void Admitted()
+        {
+            if (!_transport.KeepPendingOnAdmissionForTest)
+            {
+                Release();
+            }
+        }
+
+        public void Release()
+        {
+            var o = Interlocked.Exchange(ref _owner, null);
+            if (o != null)
+            {
+                Interlocked.Decrement(ref o._pending);
+            }
+        }
+    }
+
+    // Connections whose serve loop has run to its end, slot released included: what a test waits on, where ConnectionCount drops before the release.
+    private long _servesEnded;
+
+    /// <summary>Connections whose serve loop has finished, its pending slot given back. Cumulative; for tests.</summary>
+    internal long ServesEndedForTest => Interlocked.Read(ref _servesEnded);
+
+    private async Task ServeAsync(Socket socket, PendingSlot slot)
     {
         TcpSubscriptionLink link = null;
         try
@@ -181,7 +279,7 @@ public sealed class TcpSubscriptionTransport : ISubscriptionTransport
                 handshake.CancelAfter(_options.HandshakeTimeoutMs);
 
                 var stream = await AuthenticateAsync(socket, handshake.Token).ConfigureAwait(false);
-                link = new TcpSubscriptionLink(socket, stream, _options);
+                link = new TcpSubscriptionLink(socket, stream, _options, slot.Admitted);
                 _links[link] = 0;
                 speaksThisMajor = await link.ExchangePreambleAsync(handshake.Token).ConfigureAwait(false);
             }
@@ -230,6 +328,9 @@ public sealed class TcpSubscriptionTransport : ISubscriptionTransport
             {
                 _links.TryRemove(link, out _);
             }
+
+            slot.Release();
+            Interlocked.Increment(ref _servesEnded);
         }
     }
 

@@ -15,9 +15,6 @@ internal enum SubscriptionsStage
 
     /// <summary>S2b: frame assembly.</summary>
     Frames = 2,
-
-    /// <summary>The collapsed shape, which is every stage inline in one dispatch.</summary>
-    Collapsed = 3,
 }
 
 /// <summary>
@@ -51,7 +48,7 @@ internal enum SubscriptionsStage
 internal sealed class SubscriptionsTelemetry
 {
     /// <summary>How many stages a per-tick record holds.</summary>
-    public const int StageCount = 4;
+    public const int StageCount = 3;
 
     /// <summary>How many ticks of history the ring keeps. A power of two so the index is a mask, and more than a second at any sane rate.</summary>
     public const int Depth = 256;

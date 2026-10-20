@@ -20,7 +20,9 @@ stalls everybody; one that accepts whatever a client sends can be driven off its
   for it and nothing about it moves. Its next frame carries the union of everything it missed, replayed from an **8-tick push log**; past
   it, a `RESET` re-delivers its view.
 - **Rate classes.** A session that keeps being skipped is served every 2nd, then every 4th tick, then closed with **1013** at
-  `CloseStalledAfter`. A profile can also be served every 2 or 4 ticks by declaration (`Every`).
+  `CloseStalledAfter`. A profile can also be served every 2 or 4 ticks by declaration (`Every`). Each step, down or back up, reaches the
+  application as a `SessionEventKind.Degraded` carrying the level (`SessionEvent.DegradeLevel`: 1, 2, or 0 for full rate again) — the place to
+  shrink that player's interest or show a connection warning.
 - **Acknowledgement-based lag.** A send completing is not proof of delivery; clients report their last applied tick in `PING` (4 Hz), and
   a session too far behind is skipped. A client that stops pinging is closed with **4001**.
 - **Per-session byte budget** (`Session(id).SetBudget(bytesPerSecond)` or `SessionLimits.BytesPerSecond`): the engine raises the session's
@@ -49,7 +51,10 @@ stalls everybody; one that accepts whatever a client sends can be driven off its
 ## ⚠️ Guarantees & limits
 
 - **A slower session loses rate, never state**; records are absolute and skips are unions (SUB-03).
-- **An idle tick is not a skip** (SUB-15).
+- **An idle tick is not a skip** (SUB-15). A client that cannot finish one frame within `CloseStalledAfter` is closed with 1013 within that
+  bound, degraded or not; a client that finishes frames, however slowly, is served at the rate it drains and is not closed.
+- **A server stall is not the client's** (SUB-15). Silence and the skip run are measured in time that passed, not in ticks, so a GC pause or a
+  slow disk — and the ticks the runtime then runs back to back to catch up — neither closes nor degrades a session that kept talking.
 - **An exhausted state pool defers, never drops** (SUB-32): a pushed cluster with no block is offered again every tick and replicated the
   first tick a block frees. Its entities are invisible meanwhile, so the budget is still a sizing decision. Refusals are counted
   (`RentRefusals` in the resource metrics) and the start and end of an exhaustion are logged.
@@ -62,6 +67,8 @@ stalls everybody; one that accepts whatever a client sends can be driven off its
 
 - [SendPumpTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/SendPumpTests.cs) — skip, degrade, close
 - [PushLodLevelTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushLodLevelTests.cs) — detail levels under a budget
+- [SlowClientTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/SlowClientTests.cs) — a stalled client closed within the bound, a slow one served at its rate, a 200 ms one never degraded, every degrade step told to the application
+- [SilenceUnderStallTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/SilenceUnderStallTests.cs) — 1.5 s and 4 s server stalls close and degrade no one
 - [IngressHardeningTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/IngressHardeningTests.cs) — inbound budget and abuse
 
 ## 🔗 Related

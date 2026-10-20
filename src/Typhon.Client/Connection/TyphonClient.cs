@@ -167,6 +167,12 @@ public sealed class TyphonClient : IAsyncDisposable
     /// <summary>The newest tick this client has applied, which is what its <c>PING</c> carries.</summary>
     public uint LastAppliedTick => Store == null || Store.Tick < 0 ? 0 : (uint)Store.Tick;
 
+    /// <summary>
+    /// The round trip measured from this session's <c>PONG</c>s (05-sdks § 1) — the same estimator the TypeScript and native SDKs keep. Reset by every
+    /// <c>WELCOME</c>; half its <see cref="RoundTripEstimator.RttMs"/> is the usual one-way delay for <see cref="Clock.SubTickPhase"/>.
+    /// </summary>
+    public RoundTripEstimator RoundTrip { get; } = new();
+
     /// <summary>Whether a session is open right now.</summary>
     public bool IsConnected => _transport is { IsConnected: true } && Plan != null;
 
@@ -231,7 +237,7 @@ public sealed class TyphonClient : IAsyncDisposable
         var transport = _transport;
         if (transport is { IsConnected: true })
         {
-            await transport.SendAsync(Encode(new PingMessage((uint)Environment.TickCount, LastAppliedTick).Write), ct).ConfigureAwait(false);
+            await transport.SendAsync(Encode(new PingMessage(RoundTripEstimator.Stamp(PreciseNowMs()), LastAppliedTick).Write), ct).ConfigureAwait(false);
             await PumpSubscriptionsAsync().ConfigureAwait(false);
         }
     }
@@ -444,6 +450,10 @@ public sealed class TyphonClient : IAsyncDisposable
         }
     }
 
+    // Monotonic milliseconds at the stopwatch's resolution, for the round trip: Environment.TickCount64 moves in 15.6 ms steps on Windows, which is
+    // the size of a LAN round trip.
+    private static double PreciseNowMs() => System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+
     // Monotonic milliseconds, for the subscribe bucket. netstandard2.1 has no Environment.TickCount64; the stopwatch's clock is the same monotonic one.
     private static long NowMs() =>
 #if NET
@@ -573,6 +583,7 @@ public sealed class TyphonClient : IAsyncDisposable
 
     private void ApplyWelcome(WelcomeMessage welcome)
     {
+        RoundTrip.Reset();
         CapsGranted = welcome.CapsGranted;
         SessionId = welcome.SessionId;
         ResumeToken = welcome.ResumeToken;
@@ -791,8 +802,8 @@ public sealed class TyphonClient : IAsyncDisposable
                 Kicked?.Invoke(kick);
                 break;
             case MessageTypes.Pong:
-                // Parsed though unused, so a malformed one is refused as the native and TypeScript clients refuse it.
-                PongMessage.Parse(message);
+                var pong = PongMessage.Parse(message);
+                RoundTrip.OnPong(pong.ClientMs, PreciseNowMs());
                 break;
             default:
                 // 1002, as 03 § 3 has it. A newer server cannot send this client a type it does not know: the lower minor wins the handshake and the server
@@ -922,7 +933,9 @@ public sealed class TyphonClient : IAsyncDisposable
                 var transport = _transport;
                 if (transport is { IsConnected: true })
                 {
-                    var ping = new PingMessage((uint)Environment.TickCount, LastAppliedTick);
+                    // The round trip's clock, the one OnPong subtracts: a TickCount stamp against a Stopwatch receive time measured two clocks'
+                    // offset (~23 ms on one box) plus TickCount's 15.6 ms steps, and a wrap of four billion ms whenever the offset went negative.
+                    var ping = new PingMessage(RoundTripEstimator.Stamp(PreciseNowMs()), LastAppliedTick);
                     await transport.SendAsync(Encode(ping.Write), ct).ConfigureAwait(false);
 
                     // A request the bucket held back, with no frame arriving to pump it: the ping's cadence sends it once a token is back.

@@ -495,6 +495,10 @@ internal static class CatalogBuilder
                 }
             }
 
+            // The close and skip counters carry fixed labels — the reasons and causes themselves — so they are always published.
+            labels ??= idx == BuiltInMetrics.ReservedIdx(BuiltInMetrics.SessionsClosed) ? BuiltInMetrics.SessionsClosedLabels
+                : idx == BuiltInMetrics.ReservedIdx(BuiltInMetrics.FramesSkipped) ? BuiltInMetrics.FramesSkippedLabels
+                : null;
             metrics.Add(BuiltInMetrics.Create(idx, labels));
         }
 

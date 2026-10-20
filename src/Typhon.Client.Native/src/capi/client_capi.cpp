@@ -12,6 +12,7 @@
 #include "client/client.hpp"
 #include "motion/motion.hpp"
 #include "wire/errors.hpp"
+#include "wire/math.hpp"
 #include "wire/realm_frame.hpp"
 
 struct typhon_client {
@@ -701,6 +702,54 @@ typhon_status typhon_clock_render_time(const typhon_client* client, int64_t* tic
                      *frac = clock.RenderFrac();
                      return TYPHON_OK;
                  });
+}
+
+typhon_status typhon_clock_sub_tick_phase(const typhon_client* client, double at_ms, double one_way_delay_ms, double* out)
+{
+    return Guard(const_cast<typhon_client*>(client),
+                 [&]
+                 {
+                     capi::RequireOut(out);
+                     capi::ApplierOf(client);
+                     *out = const_cast<typhon_client*>(client)->client->RenderClock()->SubTickPhase(at_ms, one_way_delay_ms);
+                     return TYPHON_OK;
+                 });
+}
+
+typhon_status typhon_client_round_trip(const typhon_client* client, double* rtt_ms, double* last_rtt_ms)
+{
+    return Guard(const_cast<typhon_client*>(client),
+                 [&]
+                 {
+                     capi::RequireOut(rtt_ms);
+                     capi::RequireOut(last_rtt_ms);
+                     const PingScheduler* ping = client->client->Ping();
+                     *rtt_ms = ping != nullptr ? ping->RttMs() : 0;
+                     *last_rtt_ms = ping != nullptr ? ping->LastRttMs() : 0;
+                     return TYPHON_OK;
+                 });
+}
+
+typhon_status typhon_interpolate_angle(double from, double to, double t, int32_t bits, double* out)
+{
+    if (out == nullptr || (bits != 8 && bits != 16 && bits != 24 && bits != 32))
+    {
+        return TYPHON_ERROR_INVALID_ARGUMENT;
+    }
+
+    *out = math::InterpolateAngle(from, to, t, bits);
+    return TYPHON_OK;
+}
+
+typhon_status typhon_interpolate_quat3(const double* from, const double* to, double t, double* out)
+{
+    if (from == nullptr || to == nullptr || out == nullptr)
+    {
+        return TYPHON_ERROR_INVALID_ARGUMENT;
+    }
+
+    math::InterpolateQuat3(from, to, t, out);
+    return TYPHON_OK;
 }
 
 typhon_status typhon_motion_evaluate_slot(const typhon_client* client, uint32_t archetype, uint32_t slot, double* out, size_t out_len)

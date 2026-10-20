@@ -407,6 +407,54 @@ public enum TraceEventKind : byte
     /// </remarks>
     SubscriptionsSessionTelemetry = 69,
 
+    // ── Push replication: what happened to one session, for reading a trace by eye (instants, #1038 D-2) ──
+
+    /// <summary>
+    /// A frame was published for one session.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Payload, tightly packed: <c>sessionId: u64</c>, <c>sequence: i64</c>, <c>bytes: i32</c>, <c>reset: u8</c> (1 for a <c>RESET</c> frame),
+    /// <c>degradeLevel: u8</c>. 22 bytes. Append-only, as kinds 68-69.
+    /// </para>
+    /// <para>
+    /// <b>The firehose of the three, and gated alone for that reason:</b> one record per served session per tick — 50 000 a second for 1 000 sessions at
+    /// 50 Hz. Kinds 72 and 73 are what a trace is usually opened for; this one is for following a single session's frames against its client's log.
+    /// </para>
+    /// <para>Gated on <c>SubscriptionsFrameProducedActive</c>.</para>
+    /// </remarks>
+    SubscriptionsFrameProduced = 71,
+
+    /// <summary>
+    /// A session was due a frame and did not get one — back-pressure, never an idle tick (a tick with nothing to say is not a skip).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Payload, tightly packed: <c>sessionId: u64</c>, <c>cause: u8</c>, <c>degradeLevel: u8</c>, <c>skipRun: i32</c>. 14 bytes. Append-only.
+    /// <c>cause</c>: 1 gated (the degrade ladder's rate gate), 2 lagging (acknowledgement past the lag bound), 3 in flight full (K frames unacknowledged),
+    /// 4 oversize (past the session's frame budget), 5 pool refused (frame memory), 6 owed reset (more owed than a frame holds; a <c>RESET</c> follows).
+    /// <c>skipRun</c> is the session's consecutive-skip run after this tick, the number the close bound is read against.
+    /// </para>
+    /// <para>Gated on <c>SubscriptionsFrameSkippedActive</c>.</para>
+    /// </remarks>
+    SubscriptionsFrameSkipped = 72,
+
+    /// <summary>
+    /// A session opened, closed, or moved on the degrade ladder.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Payload, tightly packed: <c>sessionId: u64</c>, <c>change: u8</c>, <c>degradeLevel: u8</c>, <c>closeReason: u8</c>, <c>closeCode: u16</c>. 13 bytes.
+    /// Append-only. <c>change</c>: 1 opened, 2 closed, 3 degraded (level rose), 4 recovered (level fell). <c>degradeLevel</c> is the level after a degrade
+    /// or a recovery PLUS ONE — a recovery to full rate is level 0, a real level — and 0 on an open or a close, where it is not reported: the session table
+    /// that opens and closes sessions does not hold the level; the session's last kind-72 or kind-73 record does.
+    /// <c>closeReason</c> is <c>SessionCloseReason + 1</c> and <c>closeCode</c> the code the client was given, both zero on every change but a close — the
+    /// reason is offset because its first value, <c>ClientLeft</c>, is zero, and zero here means "not a close".
+    /// </para>
+    /// <para>Gated on <c>SubscriptionsSessionChangesActive</c>.</para>
+    /// </remarks>
+    SubscriptionsSessionChanged = 73,
+
     // ── .NET runtime GC suspension (span) ──
 
     /// <summary>
@@ -1285,9 +1333,10 @@ public static class TraceEventKindExtensions
             return false;
         }
         // #911: 64 is a span, 65 and 66 are instants; 67 joined them for the per-realm record, 68-69 for push replication's server record and
-        // its per-session rows, and 70 for the per-realm RATE rows. Their numeric neighbours (60-63) are all spans, so the instants need an explicit
-        // carve-out — the EcsSpawnBatch lesson one group along. TraceEventShapeConsistencyTests holds this against the producers' declared Shape.
-        if (v is 65 or 66 or 67 or 68 or 69 or 70)
+        // its per-session rows, and 70 for the per-realm RATE rows; 71-73 are push replication's per-session frame and lifecycle records. Their numeric
+        // neighbours (60-63) are all spans, so the instants need an explicit carve-out — the EcsSpawnBatch lesson one group along.
+        // TraceEventShapeConsistencyTests holds this against the producers' declared Shape.
+        if (v is >= 65 and <= 73)
         {
             return false;
         }

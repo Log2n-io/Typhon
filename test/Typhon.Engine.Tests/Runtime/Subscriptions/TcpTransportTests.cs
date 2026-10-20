@@ -28,7 +28,7 @@ namespace Typhon.Engine.Tests.Runtime.Subscriptions;
 /// </remarks>
 [TestFixture]
 [NonParallelizable]
-class TcpTransportTests : TestBase<TcpTransportTests>
+partial class TcpTransportTests : TestBase<TcpTransportTests>
 {
     /// <summary>
     /// Every socket wait in this fixture. Long enough that a loaded machine does not fail it, short enough that a hang is a failure and not a hang.
@@ -984,6 +984,9 @@ class TcpTransportTests : TestBase<TcpTransportTests>
         /// <returns>The message, framing removed.</returns>
         public byte[] ReadMessage() => ReadExactly((int)BinaryPrimitives.ReadUInt32LittleEndian(ReadExactly(4)));
 
+        /// <summary>How the last <see cref="ReadWhatever"/> ended: <see cref="SocketError.Success"/> for a FIN, the socket error for a reset.</summary>
+        public SocketError EndedWith { get; private set; } = SocketError.SocketError;
+
         /// <summary>
         /// Reads everything the server still has to say, until it closes. Empty means it closed with nothing more.
         /// </summary>
@@ -1003,15 +1006,17 @@ class TcpTransportTests : TestBase<TcpTransportTests>
                     var read = _socket.Receive(buffer);
                     if (read <= 0)
                     {
+                        EndedWith = SocketError.Success;
                         break;
                     }
 
                     all.AddRange(buffer[..read]);
                 }
             }
-            catch (SocketException)
+            catch (SocketException e)
             {
                 // A reset rather than a FIN: whatever arrived before it is what the peer said.
+                EndedWith = e.SocketErrorCode;
             }
 
             return all.ToArray();

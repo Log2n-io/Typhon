@@ -230,16 +230,21 @@
 ### SUB-07: No managed allocation in the replication steady state `[perf]`
   invariant once the pushed set has stopped growing, a replication tick allocates no managed memory
   never `new`, LINQ, lambda capture or boxing on the per-hit or per-entity replication path
-  scope: ReplicationDirectory, ReplicationBlockPool, NetIdAllocator, ArchetypeReplicationState
+  never span.Sort(structComparer) on the tick path: MemoryExtensions boxes the comparer and builds a Comparison delegate on every call — SpanSort.Sort
+    takes the comparer as a struct type argument and allocates nothing (the group admission and fill sorts, 53 B/tick, 2026-10-20)
+  never a lambda that captures a parameter inside a method that returns early on a test flag: C# allocates the captured parameter's closure at the
+    method's ENTRY, before the return — keep the capturing body in a method of its own (PushReplication.VerifyRegionIndex, 24 B/tick, 2026-10-20)
+  scope: ReplicationDirectory, ReplicationBlockPool, NetIdAllocator, ArchetypeReplicationState, SpanSort
   on_violation: replication adds GC pressure proportional to the push set every tick, which shows up as
     tick-time jitter rather than as a failure — the hardest class of regression to attribute after the fact
   note structural growth is exempt and deliberate: the block pool commits a slab, the directory rehashes, and the
     identity allocator grows its side arrays. These happen at the track prologue AND at the single-threaded blocks
     step — the blocks step runs INSIDE the tick, so the exemption covers allocation within a tick, not merely
     between ticks. None of them happens on the per-hit path, which is the part that must stay allocation-free.
-  note NOT VERIFIED. No test in the suite asserts allocation behaviour for these types, so this rule carries no
-    `verified:` field rather than a verifier that cannot fail. A verifier needs an allocation probe around a
-    steady-state tick, which is only meaningful once the track actually dispatches one.
+  verified: SteadyStateAllocationTests.TheTrackAllocatesNothingInTheSteadyState (eight world sessions over 128 moving creatures: 0 B over 1 000
+    ticks of the track, per-thread counter, after a 128-tick warm-up) and SteadyStateAllocationTests.TheGroupPathsAllocateNothingInTheSteadyState (six
+    sessions moving between twelve shifting towns, lazy shards held and released: 0 B over 1 000 ticks; 77 B/tick before the two traps above were
+    removed).
 
 ### SUB-32: A pushed cluster the state pool cannot give a block is deferred and counted, never dropped `[fatal][silent]`
   invariant ∀ pushed cluster C of an observed archetype A, tick T: [A's pool refuses C a block at T] → every slot pushed into C at T is pushed again at
@@ -738,8 +743,19 @@
     acknowledgement further behind than the lag bound, a frame over the wire cap, a block the pool would not lend
   invariant [s had nothing to say on T] → s's skip run is unchanged: neither advanced nor reset — a session genuinely behind, whose world then
     goes quiet, is still behind
+  invariant a tick the degrade gate refuses advances s's skip run exactly when s is back-pressured as well — K slots full, or an acknowledgement
+    past the lag bound — and so does a lag refusal on either path (the push path's group sessions and the legacy one alike), so a STALLED session is closed after CloseStalledAfter at every degrade level, and a degraded session that drains is
+    never counted on its gated ticks (#1040: before, the run advanced on rate ticks only, and level 2 stretched the stall bound fourfold)
   invariant the last-heard-from mark distinguishes "never bound" from "bound on tick zero": tick zero is a real tick, and a mark that cannot
     say so exempts from the silence policy every session admitted in a server's first tick
+  invariant a server stall is not the client's: the silence bound is measured on the policy clock, which each tick advances by the time that
+    passed since the previous tick capped at two periods, and a skip advances the run at most once per period of that clock — so neither the
+    stall nor the ticks the metronome then runs back to back to catch up its schedule count against a session as silence or as back-pressure.
+    On schedule, every tick is one period of the clock and every skip counts, exactly as a tick count would. The reliable-event close reads the
+    same clock (an owed event older than CloseStalledAfter in time), and the reliable ring's own depth — twice the close bound — forces the close
+    the tick before it would reuse the oldest owed slot, so a catch-up that outruns the clock still loses nothing (SUB-35). Two bounds stay in
+    ticks on purpose because neither can close a session: the lag bound (an acknowledgement further behind than it skips a frame, which the clock
+    then counts at time's rate) and the degrade recovery's RecoveryFrames (a catch-up only recovers a session sooner)
   invariant ∀ bound that names a DURATION — the stall close, the degrade, the lag allowance, the silence bound — the option carries the duration
     and the engine converts it ONCE, at its own tick rate: no policy reads an operator's number as a tick count
   invariant the converted stall bound exceeds the skip run a fully degraded session reaches on its own, (1 << MaxDegradeLevel) - 1, so that
@@ -752,12 +768,16 @@
   never express a time bound as a tick count in an option: 50 ticks is five seconds at 10 Hz and half a second at 100 Hz, and nothing at the
     reading end can tell which was meant
   scope: SessionSendState.AbandonFrame, SessionSendState.AbandonIdleFrame, SessionSendState.NotePing, SessionSendState.PingStamp,
+    SessionSendState.InFlightFull, FrameAssembler.Refused,
     SkipPolicy.Evaluate, SkipPolicy.CloseBoundTicks, SkipPolicy.DegradeBoundTicks, SkipPolicy.MinimumCloseTicks,
-    SubscriptionsOptions.CloseStalledAfter, SubscriptionsRuntime.NominalTickPeriodUsFor, FrameAssembler.SweepSkipPolicy
+    SubscriptionsOptions.CloseStalledAfter, SubscriptionsRuntime.NominalTickPeriodUsFor, FrameAssembler.SweepSkipPolicy,
+    SubscriptionsRuntime.AdvancePolicyClock, FrameAssembler.AccrueSkipCredit, SessionSendState.TryBeginFrame, SessionSendState.NoteSkipped
   on_violation: every session in a world that goes quiet for fifty ticks — half a second at 100 Hz — is closed, and the reason it is given is
     1013, which tells its SDK to back off as though the server were overloaded. Measured on 2026-09-18: fifty healthy sessions, 1 637 quiet
     ticks, zero real skips, all fifty closed. Its twin is quieter still: a session whose mark reads zero is never closed for silence at all,
-    so a client that stops talking is served forever.
+    so a client that stops talking is served forever. Counted in ticks, a server stall closes everyone: one 1.5 s tick, then its catch-up,
+    closed 8 of 8 sessions pinging four times a second with 4001 (2026-10-20); a 4 s stall degraded each of them twice and left them 22 ticks
+    from 1013 — a GC pause or a disk stall disconnecting every player at once.
   rationale: the two states are indistinguishable from the producer's side — a claimed sequence and no frame — which is how they came to share
     one counter. They are opposite conditions: one is a client that cannot take what it is offered, the other a client that was offered
     everything there was.
@@ -766,7 +786,16 @@
     for the conversion and its floor; SendPumpTests.DegradationAlwaysPrecedesTheClose across five durations and five tick rates. The end-to-end
     readings are BotSwarmSmokeTests.FiftyBotsSurviveTwoHundredTicks — which passed before the fix only because the sessions it lost were never
     told, which is SUB-14 — and BotSwarmSmokeTests.TheNaturalSkipRunOfHealthySessionsStaysFarBelowTheCloseBound, which measures the headroom
-    rather than asserting it from a number, and carries its own guard against measuring an idle server.
+    rather than asserting it from a number, and carries its own guard against measuring an idle server. AC-16 (#1040):
+    SlowClientTests.AClientThatCannotDrainAFrameWithinTheCloseBoundIsClosedWith1013WithinFiveSeconds (degraded, then closed within five seconds of
+    its last finished frame, at the bound) and its mutant AStallClockStoppedByTheDegradeGateIsDetected;
+    SlowClientTests.AClientDrainingTenKilobytesASecondIsServedAtTheRateItDrains (a client that finishes frames is served at its rate, never closed);
+    SlowClientTests.AClientTwoHundredMillisecondsAwayAtGodRatesIsNeverDegraded. Server stalls:
+    SilenceUnderStallTests.ClientsThatKeepPingingSurviveAServerStallAndItsCatchUp (1.5 s and 4 s stalls of a moving world over real sockets: no
+    close, no degrade; red before the policy clock for both halves — 8 of 8 closed 4001, 16 degrades); SlowClientTests
+    .ACatchUpAdvancesTheSkipRunNoFasterThanTime (sixty ticks 1 ms apart add at most one to a stalled run) and its mutant
+    ASkipRunThatCountsCatchUpTicksIsDetected; ReliableEventTests.ACatchUpDoesNotAgeAReliableBacklogButTheRingStillForcesTheClose (no close by
+    the bound through a catch-up, the ring’s backstop closes at depth − 1).
 
 ---
 
@@ -819,6 +848,32 @@
     both of them read, asserting resumed + expired = 1. The surrounding invariants are ResumeTests.OnlyALinkThatDiedOnItsOwnLeavesAResume (seven
     reasons), ATokenIsSpentByTheFirstReconnectThatPresentsIt, AnAlteredTokenNamesNothing, AZeroTokenAndAShortOneAreBothNoToken,
     PastTheCapTheOldestPendingResumeExpiresEarly and ASecondSessionOnOneSlotTakesTheRecordAndTheOlderPendingExpires.
+
+### SUB-37: The connections a transport holds before admission are bounded, and every refusal is counted `[fatal][silent]`
+  invariant a TCP connection is PENDING from the moment it is accepted until its HELLO is admitted — through TLS, the preamble and the HELLO wait —
+    and at most TcpSubscriptionOptions.MaxPendingConnections are pending at once (#1397)
+  invariant a connection accepted past the cap is refused at once, before TLS and before a byte is read or written, takes no slot, reaches no
+    acceptor, and increments PendingRefused; it is dropped with a reset, so the TIME_WAIT a flood leaves is the client's, not the server's
+  invariant a pending slot is released exactly once: at admission (the connection tells its link through IAdmissionObserver before WELCOME is
+    written) or when the connection ends — the handshake deadline, the HELLO deadline, a refused HELLO, a close, StopAsync — whichever comes
+    first; an admitted session holds no slot, so a full server of live sessions still accepts
+  never let MaxSessions stand for this bound: a session exists from HELLO on, and a peer that connects and stays silent holds a socket, a link and a
+    timer for the handshake deadline plus the HELLO deadline without ever being one
+  scope: TcpSubscriptionTransport.AcceptLoopAsync, TcpSubscriptionTransport.ServeAsync, TcpSubscriptionTransport.PendingConnectionCount,
+    TcpSubscriptionTransport.PendingRefused, TcpSubscriptionOptions.MaxPendingConnections, TcpSubscriptionLink.OnAdmitted, IAdmissionObserver,
+    SubscriptionConnection.HandleHello
+  on_violation: unbounded, without the cap — #1024's churn measured ~1 300–2 000 connects a second from one host, and each silent one is held for
+    up to ten seconds, so a single client holds tens of thousands of sockets and timers. With a slot that is never released, the opposite and just as
+    silent: the transport refuses every new client once the cap's worth of sessions has passed through, and the only symptom is a refusal counter
+    the operator was not watching.
+  rationale: the cap is a transport option beside Backlog and HandshakeTimeoutMs, the same kind of knob, because only the transport sees a
+    connection before the engine does; the release is the engine's, because only the connection knows when HELLO was admitted. The seam between the
+    two is an internal interface a link may implement, so the public ISubscriptionLink is unchanged and a WebSocket link (bounded by Kestrel) is
+    untouched.
+  verified: TcpTransportTests.AConnectionPastThePendingCapIsRefusedAtAcceptAndCounted (refused before a preamble, no slot, counted; an admission
+    frees a slot), TcpTransportTests.EveryWayOutReleasesThePendingSlotExactlyOnce (the handshake deadline, a close before admission, an admission
+    then a close that must not release twice), TcpTransportTests.AnAdmittedSessionNoLongerHoldsAPendingSlot (the live engine releases at HELLO: a
+    cap of one serves a second client while the first session lives), and its mutant ASlotKeptPastAdmissionIsDetected.
 
 ---
 

@@ -115,3 +115,94 @@ internal ref partial struct SubscriptionsSessionTelemetryEvent
     /// </remarks>
     [BeginParam] public int DegradeLevel;
 }
+
+/// <summary>
+/// A frame published for one session. Instant-shaped. See <see cref="TraceEventKind.SubscriptionsFrameProduced"/>.
+/// </summary>
+/// <remarks>
+/// <b>Records, not figures</b> — unlike kinds 68-69, these three are for reading one session's story in a trace by eye (#1038 D-2): which frame, when, how
+/// big, and when it stopped getting them and why. Emitted at the point the thing happens, on whichever worker produced the frame.
+/// </remarks>
+[TraceEvent(TraceEventKind.SubscriptionsFrameProduced, Shape = TraceEventShape.Instant, Gate = "SubscriptionsFrameProducedActive")]
+internal ref partial struct SubscriptionsFrameProducedEvent
+{
+    /// <summary>The session's id.</summary>
+    [BeginParam] public ulong SessionId;
+    /// <summary>The frame's sequence number — the one the client acknowledges, so a trace lines up with a client log.</summary>
+    [BeginParam] public long Sequence;
+    /// <summary>The frame's encoded length in bytes.</summary>
+    [BeginParam] public int Bytes;
+    /// <summary>1 when the frame is a <c>RESET</c>, which clears the client's store; 0 for a delta.</summary>
+    [BeginParam] public byte Reset;
+    /// <summary>The session's degrade level when the frame was produced.</summary>
+    [BeginParam] public byte DegradeLevel;
+}
+
+/// <summary>
+/// A session due a frame that did not get one. Instant-shaped. See <see cref="TraceEventKind.SubscriptionsFrameSkipped"/>.
+/// </summary>
+[TraceEvent(TraceEventKind.SubscriptionsFrameSkipped, Shape = TraceEventShape.Instant, Gate = "SubscriptionsFrameSkippedActive")]
+internal ref partial struct SubscriptionsFrameSkippedEvent
+{
+    /// <summary>The session's id.</summary>
+    [BeginParam] public ulong SessionId;
+    /// <summary>Why — a <see cref="FrameSkipCause"/>.</summary>
+    [BeginParam] public byte Cause;
+    /// <summary>The session's degrade level at the skip.</summary>
+    [BeginParam] public byte DegradeLevel;
+    /// <summary>The session's consecutive-skip run after this tick — what the degrade and close bounds are read against.</summary>
+    [BeginParam] public int SkipRun;
+}
+
+/// <summary>
+/// A session opened, closed, or moved on the degrade ladder. Instant-shaped. See <see cref="TraceEventKind.SubscriptionsSessionChanged"/>.
+/// </summary>
+[TraceEvent(TraceEventKind.SubscriptionsSessionChanged, Shape = TraceEventShape.Instant, Gate = "SubscriptionsSessionChangesActive")]
+internal ref partial struct SubscriptionsSessionChangedEvent
+{
+    /// <summary>The session's id.</summary>
+    [BeginParam] public ulong SessionId;
+    /// <summary>What happened — a <see cref="SessionChange"/>.</summary>
+    [BeginParam] public byte Change;
+    /// <summary>
+    /// The degrade level after a degrade or a recovery, PLUS ONE; 0 on an open or a close, where the level is not reported. Offset because level 0 — full
+    /// rate, where a recovery ends — is a real level, and zero here means "no data".
+    /// </summary>
+    [BeginParam] public byte DegradeLevel;
+    /// <summary><c>SessionCloseReason + 1</c> on a close, 0 otherwise: <c>ClientLeft</c> is zero, and zero here means "not a close".</summary>
+    [BeginParam] public byte CloseReason;
+    /// <summary>The close code the client was given on a close, 0 otherwise.</summary>
+    [BeginParam] public ushort CloseCode;
+}
+
+/// <summary>Why a session due a frame did not get one — the <c>cause</c> of trace kind 72. Wire values; append only.</summary>
+internal enum FrameSkipCause : byte
+{
+    /// <summary>Not a skip.</summary>
+    None = 0,
+    /// <summary>The degrade ladder's rate gate: the session is degraded and this is not one of its ticks.</summary>
+    Gated = 1,
+    /// <summary>The session's acknowledgement is past the lag bound.</summary>
+    Lagging = 2,
+    /// <summary>K frames are unacknowledged; there is no slot to publish into.</summary>
+    InFlightFull = 3,
+    /// <summary>The frame came out larger than the session's frame budget.</summary>
+    Oversize = 4,
+    /// <summary>The frame pool would not lend the bytes.</summary>
+    PoolRefused = 5,
+    /// <summary>More was owed than a frame holds, or an owed entity was lost: the frame is dropped and a <c>RESET</c> repairs it.</summary>
+    OwedReset = 6,
+}
+
+/// <summary>What happened to a session — the <c>change</c> of trace kind 73. Wire values; append only.</summary>
+internal enum SessionChange : byte
+{
+    /// <summary>Admitted.</summary>
+    Opened = 1,
+    /// <summary>Closed, for the reason and code the record carries.</summary>
+    Closed = 2,
+    /// <summary>Moved one step down the degrade ladder: served less often.</summary>
+    Degraded = 3,
+    /// <summary>Moved one step back up after <c>SkipPolicy.RecoveryFrames</c> clean frames.</summary>
+    Recovered = 4,
+}

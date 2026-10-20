@@ -297,6 +297,19 @@ TYPHON_API uint32_t typhon_group_set_over_limit(const typhon_client* client, uin
 TYPHON_API double typhon_client_now_ms(const typhon_client* client);
 TYPHON_API typhon_status typhon_clock_update(typhon_client* client, double now_ms);
 TYPHON_API typhon_status typhon_clock_render_time(const typhon_client* client, int64_t* tick, double* frac);
+/* How far into the server's tick the local instant at_ms fell, in [0, 1): the grid a client quantises an intent against (05 § 1).
+ * one_way_delay_ms is the downlink delay taken off the anchor - half of typhon_client_round_trip's rtt_ms is the usual estimate, 0 leaves
+ * the bias in. *out is NaN before the first frame. */
+TYPHON_API typhon_status typhon_clock_sub_tick_phase(const typhon_client* client, double at_ms, double one_way_delay_ms, double* out);
+/* The round trip measured from this session's PONGs, in ms: smoothed (TCP's estimator, a new sample weighted 1/8) and latest; both 0
+ * before the first PONG. */
+TYPHON_API typhon_status typhon_client_round_trip(const typhon_client* client, double* rtt_ms, double* last_rtt_ms);
+
+/* 03 § 6's interpolation of decoded values, as every SDK computes it. An angle field of `bits` (8, 16, 24 or 32) in code space, the short
+ * way round; a quat3 as x, y, z, w by the shorter hemisphere and a normalized lerp, `out` possibly aliasing an input. An out-of-range
+ * width or a null pointer is TYPHON_ERROR_INVALID_ARGUMENT. */
+TYPHON_API typhon_status typhon_interpolate_angle(double from, double to, double t, int32_t bits, double* out);
+TYPHON_API typhon_status typhon_interpolate_quat3(const double* from, const double* to, double t, double* out);
 
 /* Motion at the clock's render time (03 § 6): p[dims] v[dims] per slot; for every live slot, in live order, `out` holding
  * live_count x motion_stride doubles. */

@@ -91,6 +91,7 @@ private:
     double latestRtt_ = 0;
     std::uint64_t sent_ = 0;
     std::uint64_t received_ = 0;
+    std::uint64_t sessionPongs_ = 0;
     std::int64_t lastPongTick_ = -1;
 };
 

@@ -17,6 +17,9 @@ using System.Runtime.CompilerServices;
 // (same genuine internal reuse as Typhon.Benchmark — measures the commit path without WAL-writer disk noise).
 [assembly: InternalsVisibleTo("Typhon.CompetitiveBenchmark")]
 [assembly: InternalsVisibleTo("Typhon.Engine.Tests")]
+// Added 2026-10-19 (#1040, AC-15): the WebSocket parity test puts the engine's own SubscriptionAcceptor and the engine tests' fake host behind the real
+// ASP.NET Core endpoint, so the bytes it compares are the engine's; the TCP parity test does the same from Typhon.Engine.Tests.
+[assembly: InternalsVisibleTo("Typhon.Subscriptions.AspNetCore.Tests")]
 // Added 2026-07-19 (#514 D1): archetype catalog ids are now engine-assigned (no author-set [Archetype(Id=N)]), so the Workbench controller tests resolve an
 // archetype's runtime id via Archetype<T>.Metadata instead of a hardcoded literal.
 [assembly: InternalsVisibleTo("Typhon.Workbench.Tests")]

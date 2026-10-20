@@ -148,7 +148,7 @@ double Clock::ServerMsOf(std::int64_t tick) const
     return pieceMs_[p] + (static_cast<double>(tick) - pieceTick_[p]) * piecePeriod_[p];
 }
 
-void Clock::ToTick(double ms)
+int Clock::PieceAt(double ms) const
 {
     int p = pieceCount_ - 1;
     while (p > 0 && ms < pieceMs_[p])
@@ -156,6 +156,28 @@ void Clock::ToTick(double ms)
         p--;
     }
 
+    return p;
+}
+
+double Clock::SubTickPhase(double atMs, double oneWayDelayMs) const
+{
+    if (pieceCount_ == 0 || sampleCount_ == 0)
+    {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const double ms = atMs - minOffsetMs_ + oneWayDelayMs;
+    const int p = PieceAt(ms);
+    const double rel = (ms - pieceMs_[p]) / piecePeriod_[p];
+
+    // `rel - floor(rel)` can land on exactly 1 for a `rel` a hair below an integer: the range is half-open.
+    const double fraction = rel - std::floor(rel);
+    return fraction < 1 ? fraction : 0;
+}
+
+void Clock::ToTick(double ms)
+{
+    const int p = PieceAt(ms);
     const double rel = (ms - pieceMs_[p]) / piecePeriod_[p];
     const double whole = std::floor(rel);
     renderTick_ = static_cast<std::int64_t>(pieceTick_[p] + whole);

@@ -140,8 +140,6 @@ public static class CommandLine
         c.GodNearBudget = r.Int("--god-near", c.GodNearBudget, "god camera's near budget, entities", min: 0);
         c.SubscriptionsPushAutomatic = r.Choice("--subs-mode", "push", ["push", "push-auto"], "who detects a change: the simulation, or the engine")
             == "push-auto";
-        c.SubscriptionsCollapseWorkUnits = r.Choice("--subs-pipeline", "staged", ["staged", "collapsed"], "run the frame pipeline staged or collapsed")
-            == "collapsed" ? int.MaxValue : 0;
         c.SubscriptionsPhaseTiming = r.Switch("--subs-phases", "report per-phase replication timing");
         c.DormancyTicks = r.Int("--dormancy", c.DormancyTicks, "ticks of stillness before a cluster sleeps; 0 is never", min: 0);
 

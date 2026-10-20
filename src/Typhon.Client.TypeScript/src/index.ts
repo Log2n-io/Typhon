@@ -78,6 +78,8 @@ export {
   encodeUnorm,
   encodeVec,
   encodeVel,
+  interpolateAngle,
+  interpolateQuat3,
   pow2,
   quantStep,
   roundHalfAway,

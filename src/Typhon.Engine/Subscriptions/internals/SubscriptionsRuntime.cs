@@ -64,6 +64,13 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     // would read the same value for the whole tick and place every round trip at the tick boundary.
     private long _tickOriginTimestamp;
     private uint _currentTick;
+
+    // The policy clock, in microseconds: what the silence bound is measured on (SUB-15). Each tick advances it by the time that really passed since the
+    // previous tick, capped at two periods — so a stall counts as at most two periods against a client, and the ticks a stalled metronome then runs back to
+    // back count as the milliseconds they take rather than as a period each. A tick count did neither: a 1.5 s stall followed by its catch-up put 38 ticks
+    // behind every PING in a few milliseconds and closed every session 4001, clients pinging four times a second included.
+    private long _policyClockUs;
+    private long _policyClockOrigin;
     private IngressPolicy _ingressPolicy;
     private uint _tickPeriodUs;
 
@@ -197,6 +204,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 NominalTickPeriodUs);
             _frames.Profiles = Profiles;
             _frames.Engine = engine;
+            _frames.Logger = logger;
             _frames.Realm = Realm0Frame;
 
             // A wide section's body is copied from its archetype's arena (13 § 6), which the replication state owns.
@@ -1063,7 +1071,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
             // Silence is measured from the handshake, not from the first PING: a client that completes HELLO and then says nothing must be closed on the same
             // schedule as one that stops mid-session, and a zero here would exempt it forever.
-            send.NotePing(Volatile.Read(ref _currentTick));
+            send.NotePing(Volatile.Read(ref _policyClockUs));
         }
 
         _sendPump?.AttachLink(session, link);
@@ -1111,7 +1119,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         }
 
         ref var send = ref frames.SendStateOf(session.Slot);
-        send.NotePing(Volatile.Read(ref _currentTick));
+        send.NotePing(Volatile.Read(ref _policyClockUs));
         send.ReportAppliedTick(appliedTick);
     }
 
@@ -1155,11 +1163,38 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
         Volatile.Write(ref _tickOriginTimestamp, tickOriginTimestamp);
         Volatile.Write(ref _tickPeriodUs, NominalTickPeriodUs * (uint)Math.Max(1, tickMultiplier));
+        AdvancePolicyClock(tickOriginTimestamp, NominalTickPeriodUs * (long)Math.Max(1, tickMultiplier));
         _frames?.SetTickState(NominalTickPeriodUs * (uint)Math.Max(1, tickMultiplier), tickMultiplier);
         Volatile.Write(ref _currentTick, (uint)tickNumber);
 
         // Before any system of this tick emits: what a tick no frame stage encoded left behind is discarded, not delivered later.
         Events?.OnTickStart((uint)tickNumber);
+    }
+
+    /// <summary>SUB-15's mutant: the policy clock advances one period per tick whatever passed, which is the tick count the engine used before.</summary>
+    internal bool PolicyClockCountsTicksForTest { get; set; }
+
+    /// <summary>The policy clock now, in microseconds; see <see cref="_policyClockUs"/>.</summary>
+    internal long PolicyClockUs => Volatile.Read(ref _policyClockUs);
+
+    /// <summary>Advances the policy clock by the time since the previous tick began, capped at two periods; the first tick counts one period.</summary>
+    /// <param name="tickOriginTimestamp">This tick's start, a <see cref="Stopwatch"/> timestamp.</param>
+    /// <param name="periodUs">The period the tick runs at.</param>
+    /// <remarks>Tick driver only, so the read-modify-write is a plain one; transport threads read the result through <see cref="PolicyClockUs"/>.</remarks>
+    private void AdvancePolicyClock(long tickOriginTimestamp, long periodUs)
+    {
+        var advanceUs = periodUs;
+        var intervalUs = periodUs;
+        if (_policyClockOrigin != 0)
+        {
+            intervalUs = (long)((tickOriginTimestamp - _policyClockOrigin) * (1_000_000d / Stopwatch.Frequency));
+            advanceUs = PolicyClockCountsTicksForTest ? periodUs : Math.Clamp(intervalUs, 0, 2 * periodUs);
+        }
+
+        _policyClockOrigin = tickOriginTimestamp;
+        var clock = _policyClockUs + advanceUs;
+        Volatile.Write(ref _policyClockUs, clock);
+        _frames?.SetPolicyClock(clock, intervalUs);
     }
 
     /// <summary>The replication state of a replicated archetype, or <see langword="null"/> when it is not replicated.</summary>

@@ -63,11 +63,13 @@ describe('catalog-engine', () => {
     expect(plan.event(0).name).toBe('EventsLost');
     expect(plan.event(0).body.fields.map((f) => f.name)).toEqual(['count']);
 
-    // The eleven built-in metrics at 0-10, then the application's from 32. The two vector built-ins carry one value
+    // The thirteen built-in metrics at 0-12, then the application's from 32. The four vector built-ins carry one value
     // per label; every other metric is a scalar.
-    expect(plan.metrics.map((m) => m.idx)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 32]);
+    expect(plan.metrics.map((m) => m.idx)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 32]);
     expect(plan.metrics.find((m) => m.name === 'typhon.system.mean')!.valueCount).toBe(3);
     expect(plan.metrics.find((m) => m.name === 'typhon.archetype.entities')!.valueCount).toBe(3);
+    expect(plan.metrics.find((m) => m.name === 'typhon.sessions.closed')!.valueCount).toBe(9);
+    expect(plan.metrics.find((m) => m.name === 'typhon.frames.skipped')!.valueCount).toBe(6);
     expect(plan.sessionMetrics.map((m) => m.name)).toEqual([
       'typhon.session.outBytesPerSec',
       'typhon.session.skippedFrames',

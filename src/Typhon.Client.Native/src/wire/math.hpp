@@ -53,6 +53,12 @@ double DecodeAngle(double q, int bits);
 std::uint32_t EncodeQuat3(double x, double y, double z, double w);
 void DecodeQuat3(std::uint32_t bits, double* out);
 
+// 03 § 6's interpolation of a decoded angle (code space, the short way round: delta = wrap_b(q1 - q0), q0 + t * delta re-wrapped and
+// decoded) and of a decoded quat3 (the shorter hemisphere, then a normalized lerp; a zero result is the identity). `out` may alias `from`
+// or `to`.
+double InterpolateAngle(double from, double to, double t, int bits);
+void InterpolateQuat3(const double* from, const double* to, double t, double* out);
+
 // f16 (W10)
 std::uint16_t EncodeF16(double x);
 double DecodeF16(std::uint16_t bits);

@@ -59,6 +59,11 @@ int main(void)
     EXPECT(typhon_archetype_index(client, "Drone", &index) == TYPHON_ERROR_STATE);
     EXPECT(strlen(typhon_client_last_error(client)) > 0);
     EXPECT(typhon_clock_render_time(client, &tick, &frac) == TYPHON_ERROR_STATE);
+    EXPECT(typhon_clock_sub_tick_phase(client, 0, 0, &frac) == TYPHON_ERROR_STATE);
+    EXPECT(typhon_client_round_trip(client, &frac, &frac) == TYPHON_OK && frac == 0);
+    EXPECT(typhon_interpolate_angle(0, 0, 0.5, 12, &frac) == TYPHON_ERROR_INVALID_ARGUMENT);
+    EXPECT(typhon_interpolate_angle(0, 0, 0.5, 16, &frac) == TYPHON_OK && frac == 0);
+    EXPECT(typhon_interpolate_quat3(NULL, NULL, 0.5, NULL) == TYPHON_ERROR_INVALID_ARGUMENT);
     EXPECT(typhon_archetype_index(client, "Drone", NULL) == TYPHON_ERROR_INVALID_ARGUMENT);
     EXPECT(typhon_client_stop(client, 1007) == TYPHON_ERROR_INVALID_ARGUMENT);
     EXPECT(typhon_client_now_ms(client) > 0);

@@ -117,7 +117,8 @@ export class PingScheduler {
     this.lastPongTick = pong.tick;
     const rtt = ((recvMs >>> 0) - pong.clientMs) >>> 0;
     this.latestRtt = rtt;
-    this.smoothedRtt = this.smoothedRtt === 0 ? rtt : this.smoothedRtt + this.weight * (rtt - this.smoothedRtt);
+    // Seeded by the first sample: a 0 ms loopback round trip is a measurement, not "no sample yet".
+    this.smoothedRtt = this.received === 1 ? rtt : this.smoothedRtt + this.weight * (rtt - this.smoothedRtt);
   }
 
   private schedule(): void {

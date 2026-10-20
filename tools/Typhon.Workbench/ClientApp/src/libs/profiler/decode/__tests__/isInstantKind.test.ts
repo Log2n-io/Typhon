@@ -13,7 +13,7 @@ import { TraceEventKind } from '@/libs/profiler/model/types';
 // so a divergence fails here rather than in someone's timeline.
 //
 // Source of truth, in ladder order (C# returns false ⇒ instant):
-//   <10 · 76, 77 · 36 · 65, 66, 67, 68, 69 · 90-116 · 127-135, 137, 140-142, 144, 145 · 146-148, 151, 153, 154, 156-158, 161, 162 ·
+//   <10 · 76, 77 · 36 · 65-73 · 90-116 · 127-135, 137, 140-142, 144, 145 · 146-148, 151, 153, 154, 156-158, 161, 162 ·
 //   166-172 · 176, 178, 180, 182, 183, 185, 186 · 191, 197, 200, 202, 203, 206-208, 211-213 ·
 //   217, 218, 220, 225, 228, 233, 234 · 242, 244 · 247, 248 · 254
 const INSTANT_KINDS: readonly number[] = [
@@ -22,8 +22,10 @@ const INSTANT_KINDS: readonly number[] = [
   // #911 — 65/66 are instants wedged among spans (60-64), so they need a point carve-out exactly like 36 does. 67
   // joined them in #WB-05 (the per-realm shape record), which is why it moved out of the span list below, and 68/69
   // in #WB-02 (push replication's server record and its per-session rows). Neither was in EITHER list before that
-  // change, so this test would not have caught them — the same gap that let kind 67 decode as a span once.
-  65, 66, 67, 68, 69,
+  // change, so this test would not have caught them — the same gap that let kind 67 decode as a span once. 70 (per-realm
+  // rates) was carved out in the decoder without joining this list, which is that gap a third time; 71-73 are #1038 D-2's
+  // per-session records.
+  65, 66, 67, 68, 69, 70, 71, 72, 73,
   90, 100, 116,
   127, 131, 135, 137, 140, 142, 144, 145,
   146, 147, 148, 151, 153, 154, 156, 157, 158, 161, 162,
@@ -43,6 +45,8 @@ const SPAN_KINDS: readonly number[] = [
   // 60-64 are spans; 64 (#911 SpatialRepairUnit) sits directly below the 65/66 instants above, which is where an
   // off-by-one in the new carve-out would land.
   60, 61, 62, 63, 64,
+  // 74 sits directly above the 65-73 run (unassigned, so the ladder's default: a span) and 75 is GcSuspension.
+  74, 75,
   117, 126, 136, 138, 139, 143,
   149, 150, 152, 155, 159, 160, 163, 164, 165,
   173, 174, 175, 177, 179, 181, 184,

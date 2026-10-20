@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace Typhon.Engine.Internals;
@@ -79,14 +81,13 @@ internal sealed unsafe partial class PushHub
             }
         }
 
-        _wanted = new long[sets.Length][];
-        _wantedCount = new int[sets.Length];
-        _wantedBefore = new long[sets.Length][];
-        _wantedBeforeCount = new int[sets.Length];
+        _wantedRefs = new Dictionary<long, int>[sets.Length];
+        _newlyWanted = new long[sets.Length][];
+        _newlyWantedCount = new int[sets.Length];
         for (var s = 0; s < sets.Length; s++)
         {
-            _wanted[s] = new long[16];
-            _wantedBefore[s] = new long[16];
+            _wantedRefs[s] = _lazySet[s] ? [] : null;
+            _newlyWanted[s] = new long[16];
         }
 
         _lazySeen = new Dictionary<int, uint>[plans.Length];
@@ -121,64 +122,141 @@ internal sealed unsafe partial class PushHub
 
     // ══ The keys some session holds ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-    // Per set: the keys held, sorted and unique — every served realm's sessions, committed and pending — this blocks step and the last one.
-    private long[][] _wanted = [];
-    private int[] _wantedCount = [];
-    private long[][] _wantedBefore = [];
-    private int[] _wantedBeforeCount = [];
+    // Per lazy set: how many sessions hold each key, committed or pending, over every served realm — a key is present only while some session holds it
+    // (#1410). Each realm's sessions contribute their keys and withdraw the ones they let go of (PushReplication.SyncHeldKeys), so a blocks step costs what
+    // changed, not what is held. And per set, the keys that went from no holder to one since the last blocks step: what PushNewlyWanted attaches.
+    private Dictionary<long, int>[] _wantedRefs = [];
+    private long[][] _newlyWanted = [];
+    private int[] _newlyWantedCount = [];
 
-    /// <summary>Called back by each realm's <see cref="PushReplication.CollectHeldKeys"/>: a key one of its sessions holds or is moving to.</summary>
-    internal void AddWanted(int set, long key)
+    /// <summary>A session began to hold <paramref name="key"/> of lazy set <paramref name="set"/>. Serial, at the blocks step.</summary>
+    internal void WantKey(int set, long key)
     {
-        ref var keys = ref _wanted[set];
-        var n = _wantedCount[set];
+        ref var refs = ref CollectionsMarshal.GetValueRefOrAddDefault(_wantedRefs[set], key, out var held);
+        refs++;
+        if (held)
+        {
+            return;
+        }
+
+        ref var keys = ref _newlyWanted[set];
+        var n = _newlyWantedCount[set];
         if (n == keys.Length)
         {
             Array.Resize(ref keys, n * 2);
         }
 
         keys[n] = key;
-        _wantedCount[set] = n + 1;
+        _newlyWantedCount[set] = n + 1;
     }
+
+    /// <summary>A session let go of <paramref name="key"/>; the last one removes it. Serial, at the blocks step.</summary>
+    internal void UnwantKey(int set, long key)
+    {
+        ref var refs = ref CollectionsMarshal.GetValueRefOrNullRef(_wantedRefs[set], key);
+        if (Unsafe.IsNullRef(ref refs))
+        {
+            // Never on a correct count: a withdrawal of a key nobody contributed. Counted rather than thrown, since this runs on the tick.
+            WantedMismatches++;
+            return;
+        }
+
+        if (--refs == 0)
+        {
+            _wantedRefs[set].Remove(key);
+        }
+    }
+
+    /// <summary><see cref="CollectWanted"/>'s time, in <see cref="Stopwatch"/> ticks, summed (#1410). Diagnostic.</summary>
+    internal long WantedTicks;
+
+    /// <summary>
+    /// After every blocks step, recount the wanted keys from every session's two sides, as the collection did before #1410, and count each difference in
+    /// <see cref="WantedMismatches"/>. Off outside tests: the full recount is what the contributions exist to avoid.
+    /// </summary>
+    internal bool VerifyWantedForTest;
+
+    /// <summary>The differential check's findings, and any withdrawal of a key nobody held; zero is the only correct value.</summary>
+    internal long WantedMismatches;
+
+    /// <summary>The mutant for the check above: a session that lets go of a key keeps counting it.</summary>
+    internal bool KeepWithdrawnKeysForTest;
 
     private void CollectWanted()
     {
-        (_wanted, _wantedBefore) = (_wantedBefore, _wanted);
-        (_wantedCount, _wantedBeforeCount) = (_wantedBeforeCount, _wantedCount);
-        Array.Clear(_wantedCount);
+        var from = Stopwatch.GetTimestamp();
+        Array.Clear(_newlyWantedCount);
         for (var r = 0; r < _activeCount; r++)
         {
-            _active[r].CollectHeldKeys(this);
+            _active[r].SyncHeldKeys(this);
         }
 
-        for (var s = 0; s < _wanted.Length; s++)
+        // Each set's new keys in key order, so the blocks they attach are attached in the order the old sorted walk gave them.
+        for (var s = 0; s < _newlyWantedCount.Length; s++)
         {
-            var n = _wantedCount[s];
-            if (n < 2)
+            if (_newlyWantedCount[s] > 1)
             {
-                continue;
+                _newlyWanted[s].AsSpan(0, _newlyWantedCount[s]).Sort();
             }
+        }
 
-            var keys = _wanted[s].AsSpan(0, n);
-            keys.Sort();
-            var kept = 1;
-            for (var i = 1; i < n; i++)
-            {
-                if (keys[i] != keys[kept - 1])
-                {
-                    keys[kept++] = keys[i];
-                }
-            }
-
-            _wantedCount[s] = kept;
+        WantedTicks += Stopwatch.GetTimestamp() - from;
+        if (VerifyWantedForTest)
+        {
+            VerifyWanted();
         }
     }
 
     /// <summary>Whether some session holds, or is moving to, key <paramref name="key"/> of set <paramref name="set"/>.</summary>
-    internal bool IsWanted(int set, long key) => key != 0 && _wanted[set].AsSpan(0, _wantedCount[set]).BinarySearch(key) >= 0;
+    internal bool IsWanted(int set, long key) => key != 0 && _wantedRefs[set] is { } refs && refs.ContainsKey(key);
 
-    /// <summary>The keys of <paramref name="set"/> some session holds now, for tests.</summary>
-    internal ReadOnlySpan<long> WantedForTest(int set) => _wanted[set].AsSpan(0, _wantedCount[set]);
+    /// <summary>The keys of <paramref name="set"/> some session holds now, sorted, for tests.</summary>
+    internal long[] WantedForTest(int set)
+    {
+        if (_wantedRefs[set] is not { } refs)
+        {
+            return [];
+        }
+
+        var keys = new long[refs.Count];
+        refs.Keys.CopyTo(keys, 0);
+        Array.Sort(keys);
+        return keys;
+    }
+
+    /// <summary>The differential check: every count equals a recount over every active realm's sessions.</summary>
+    private void VerifyWanted()
+    {
+        var expected = new Dictionary<long, int>[_wantedRefs.Length];
+        for (var s = 0; s < expected.Length; s++)
+        {
+            expected[s] = _wantedRefs[s] == null ? null : [];
+        }
+
+        for (var r = 0; r < _activeCount; r++)
+        {
+            _active[r].RecountHeldKeysForTest(expected);
+        }
+
+        for (var s = 0; s < expected.Length; s++)
+        {
+            if (expected[s] == null)
+            {
+                continue;
+            }
+
+            var same = expected[s].Count == _wantedRefs[s].Count;
+            foreach (var (key, count) in expected[s])
+            {
+                same &= _wantedRefs[s].TryGetValue(key, out var mine) && mine == count;
+            }
+
+            if (!same)
+            {
+                WantedMismatches++;
+            }
+        }
+    }
 
     // ══ Lazy blocks (P5′) ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -219,23 +297,10 @@ internal sealed unsafe partial class PushHub
                 continue;
             }
 
-            // Both lists are sorted: the keys wanted before are walked once alongside.
-            var keys = _wanted[set.Index];
-            var before = _wantedBefore[set.Index];
-            var walk = 0;
-            for (var i = 0; i < _wantedCount[set.Index]; i++)
+            var keys = _newlyWanted[set.Index];
+            for (var i = 0; i < _newlyWantedCount[set.Index]; i++)
             {
                 var key = keys[i];
-                while (walk < _wantedBeforeCount[set.Index] && before[walk] < key)
-                {
-                    walk++;
-                }
-
-                if (walk < _wantedBeforeCount[set.Index] && before[walk] == key)
-                {
-                    continue;
-                }
-
                 using var epoch = EpochGuard.Enter(tree.Segment.Store.EpochManager);
                 var accessor = tree.Segment.CreateChunkAccessor();
                 try

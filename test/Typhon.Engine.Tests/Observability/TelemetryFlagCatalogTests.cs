@@ -20,8 +20,10 @@ public class TelemetryFlagCatalogTests
         // The subtree count went 215 -> 218 with #911's three spatial-maintenance gates (Repair, Relocation, ArchetypeTelemetry), then 218 -> 219 with
         // #WB-05's RealmTelemetry (kind 67, the per-realm shape record — its own gate because its volume scales with the realm count, not the archetype
         // count), then 219 -> 222 with #WB-02's push-replication operator telemetry: the `Subscriptions` subtree root plus ServerTelemetry (kind 68) and
-        // SessionTelemetry (kind 69), split for the same volume-scaling reason as the realm record.
-        Assert.That(TelemetryFlagCatalog.All.Count, Is.EqualTo(240));
+        // SessionTelemetry (kind 69), split for the same volume-scaling reason as the realm record, then 222 -> 223 with SpatialRealmRates (kind 70) — and
+        // the subtree grew by 17 more gates elsewhere meanwhile, to 240 — then 240 -> 243 with #1038 D-2's per-session records: FrameProduced (kind 71),
+        // FrameSkipped (72) and SessionChanges (73), each gated alone because the first is a per-session-per-tick firehose the other two must not be paid for.
+        Assert.That(TelemetryFlagCatalog.All.Count, Is.EqualTo(243));
 
         var root = TelemetryFlagCatalog.All[0];
         Assert.That(root.Kind, Is.EqualTo(TelemetryFlagKind.Master));

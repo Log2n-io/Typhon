@@ -15,4 +15,15 @@ internal static partial class SubscriptionsLog
         Message = "Replication state pool for {Archetype} recovered: every pushed cluster has a block again, after {Ticks} ticks and {Deferrals} deferred "
                   + "cluster-ticks")]
     public static partial void StatePoolRecovered(ILogger logger, string archetype, long ticks, long deferrals);
+
+    // At most once a second, and only in a second the engine itself closed someone (FrameAssembler.ReportClosures).
+    [LoggerMessage(Level = LogLevel.Warning,
+        Message = "Replication closed {EngineClosed} sessions in the last {WindowMs} ms: {Silent} silent (4001, no PING for {SilenceMs} ms), {Lagging} "
+                  + "lagging (1013), {Protocol} protocol errors, {Abusive} abusive, {Internal} internal errors; beside {LinkLost} links lost and {Left} "
+                  + "clients leaving. Frames skipped in the window: {InFlightFull} in flight full, {LagSkips} lagging, {PoolRefused} pool refused, "
+                  + "{Oversize} oversize, {Gated} gated, {OwedReset} owed reset. Longest tick interval {LongestTickMs:F1} ms against a "
+                  + "{PeriodMs:F1} ms period; {Open} sessions open")]
+    public static partial void SessionsClosedByEngine(ILogger logger, long engineClosed, long windowMs, long silent, long silenceMs, long lagging,
+        long protocol, long abusive, long @internal, long linkLost, long left, long inFlightFull, long lagSkips, long poolRefused, long oversize, long gated,
+        long owedReset, double longestTickMs, double periodMs, int open);
 }

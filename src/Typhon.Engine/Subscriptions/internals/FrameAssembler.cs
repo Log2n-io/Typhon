@@ -793,8 +793,172 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         Volatile.Write(ref _tickSeconds, periodUs / 1_000_000d);
         Volatile.Write(ref _tickMultiplier, Math.Max(1, multiplier));
     }
-    private readonly int _silenceBoundTicks;
+
+    /// <summary>The runtime's policy clock at this tick's start, in microseconds (SubscriptionsRuntime.AdvancePolicyClock).</summary>
+    /// <param name="clockUs">The clock.</param>
+    /// <param name="intervalUs">The real time since the previous tick began, uncapped: what the close report calls the longest tick interval.</param>
+    /// <remarks>
+    /// Also where the close report runs: on the tick driver, at every tick's start. Not in the frame prologue, which only runs while sessions are open, so a
+    /// tick that closed the last of them — a full wipe, the case the report exists for — would never have been reported.
+    /// </remarks>
+    internal void SetPolicyClock(long clockUs, long intervalUs = 0)
+    {
+        Volatile.Write(ref _policyClockUs, clockUs);
+        _closeWindowLongestIntervalUs = Math.Max(_closeWindowLongestIntervalUs, intervalUs);
+        ReportClosures();
+    }
+
+    /// <summary>Where the close report goes; <see langword="null"/> logs nothing.</summary>
+    internal Microsoft.Extensions.Logging.ILogger Logger { get; set; }
+
+    // The close report's window: the policy clock it opened at, the counters as they stood then, and the longest tick interval seen since. Tick thread only.
+    /// <summary>The close report's window, in policy-clock microseconds: one second; a test shortens it.</summary>
+    internal long CloseReportWindowUs { get; set; } = 1_000_000;
+    private long _closeWindowStartUs;
+    private long _closeWindowLongestIntervalUs;
+    private readonly long[] _closesAtWindowStart = new long[16];
+    private readonly long[] _skipsAtWindowStart = new long[8];
+
+    /// <summary>
+    /// Once a second of policy-clock time, logs one warning when the ENGINE closed sessions in the window (for silence, lag, a protocol error, abuse or an
+    /// internal error) with every close reason and skip cause of the window and the longest tick interval. Nothing when none did.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why one line, and these numbers.</b> A mass disconnect has three common causes that look alike from a client: the clients stopped talking (silent
+    /// closes, ticks normal), the server stalled or fell behind (a long tick interval, lag closes), or the clients could not take what they were sent
+    /// (lag closes with in-flight-full skips). The 2026-10-20 diagnosis of 3 000 silent closes in a 5 000-bot run needed a reflection probe to tell them
+    /// apart; this is that probe, always on.
+    /// </para>
+    /// <para>
+    /// <b>Cost.</b> One compare per tick. Once a second, fifteen counter reads; the log call itself happens only in a second the engine closed someone,
+    /// and at most once a second however many it closed. Closes the client or the application decided (left, link lost, kicked, shutdown) are counted
+    /// in <c>ReadStats</c> and <c>STATS</c> but never logged: a busy server has some every second and they are nobody's fault.
+    /// </para>
+    /// </remarks>
+    private void ReportClosures()
+    {
+        var clock = Volatile.Read(ref _policyClockUs);
+        if (clock - _closeWindowStartUs < CloseReportWindowUs)
+        {
+            return;
+        }
+
+        var windowUs = clock - _closeWindowStartUs;
+        var longestUs = _closeWindowLongestIntervalUs;
+        _closeWindowStartUs = clock;
+        _closeWindowLongestIntervalUs = 0;
+
+        Span<long> closes = stackalloc long[9];
+        for (var r = 0; r < closes.Length; r++)
+        {
+            var now = _sessions.ClosesBy((SessionCloseReason)r);
+            closes[r] = now - _closesAtWindowStart[r];
+            _closesAtWindowStart[r] = now;
+        }
+
+        Span<long> skips = stackalloc long[7];
+        for (var c = 1; c < skips.Length; c++)
+        {
+            var now = SkipsBy((FrameSkipCause)c);
+            skips[c] = now - _skipsAtWindowStart[c];
+            _skipsAtWindowStart[c] = now;
+        }
+
+        var engineClosed = closes[(int)SessionCloseReason.Unacknowledged] + closes[(int)SessionCloseReason.Lagging]
+            + closes[(int)SessionCloseReason.ProtocolError] + closes[(int)SessionCloseReason.Abusive] + closes[(int)SessionCloseReason.InternalError];
+        var logger = Logger;
+        if (engineClosed == 0 || logger == null || !logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Warning))
+        {
+            return;
+        }
+
+        SubscriptionsLog.SessionsClosedByEngine(logger, engineClosed, windowUs / 1000, closes[(int)SessionCloseReason.Unacknowledged],
+            _silenceBoundUs / 1000, closes[(int)SessionCloseReason.Lagging], closes[(int)SessionCloseReason.ProtocolError],
+            closes[(int)SessionCloseReason.Abusive], closes[(int)SessionCloseReason.InternalError], closes[(int)SessionCloseReason.LinkLost],
+            closes[(int)SessionCloseReason.ClientLeft], skips[(int)FrameSkipCause.InFlightFull], skips[(int)FrameSkipCause.Lagging],
+            skips[(int)FrameSkipCause.PoolRefused], skips[(int)FrameSkipCause.Oversize], skips[(int)FrameSkipCause.Gated],
+            skips[(int)FrameSkipCause.OwedReset], longestUs / 1000.0, Volatile.Read(ref _tickSeconds) * 1000.0, _sessions.OpenCount);
+    }
+
+    /// <summary>The policy clock the silence sweep reads, in microseconds: what a test stamps a staged PING with.</summary>
+    internal long PolicyClockUs => Volatile.Read(ref _policyClockUs);
+
+    private long _policyClockUs;
+    private long _lastPolicyClockUs;
+    private long _skipCreditUs;
+
+    // Whether a skip on this tick advances a session's run. Written by the prologue, read by the chunks the dispatch then runs, which orders the two.
+    // False on a tick the metronome ran back to back to catch up its schedule beyond the rate time passes: the run is a DURATION the stall bound reads
+    // (SUB-15), and the 200 ticks a 4 s stall leaves behind, run in a few hundred milliseconds, had degraded every session twice and stood 22 ticks from
+    // closing them all 1013 — for a stall that was the server's.
+    private bool _skipsCount = true;
+
+    /// <summary>SUB-15's mutant for the skip run: every tick counts, as a tick count did before the policy clock.</summary>
+    internal bool SkipCreditIgnoredForTest { get; set; }
+
+    /// <summary>Whether this tick's skips advance a session's run (<see cref="AccrueSkipCredit"/>), for a test of the arithmetic.</summary>
+    internal bool SkipsCountThisTick => _skipsCount;
+
+    /// <summary>
+    /// Decides whether this tick's skips count toward the run: at most one tick's worth per period of policy-clock time, so a run advances no faster than
+    /// time does. A tick on schedule always counts; so does every tick when no policy clock is published.
+    /// </summary>
+    private void AccrueSkipCredit()
+    {
+        var clock = Volatile.Read(ref _policyClockUs);
+        var last = _lastPolicyClockUs;
+        _lastPolicyClockUs = clock;
+        if (clock == 0 || last == 0)
+        {
+            _skipsCount = true;
+            return;
+        }
+
+        // Half a period is the threshold, and the debt carries: jitter around the period counts every tick, and a run of 1 ms catch-up ticks counts one in
+        // twenty at 50 Hz — one per period on average and never more than one per tick. The clamp keeps at most one period in hand, so a tick that took two
+        // periods is counted and so is the one after it (two periods did pass); a longer one earns nothing more.
+        if (SkipCreditIgnoredForTest)
+        {
+            _skipsCount = true;
+            return;
+        }
+
+        var periodUs = Math.Max(1L, (long)(Volatile.Read(ref _tickSeconds) * 1_000_000d));
+        var credit = _skipCreditUs + (clock - last);
+        _skipsCount = credit >= periodUs / 2;
+        if (_skipsCount)
+        {
+            credit -= periodUs;
+        }
+
+        _skipCreditUs = Math.Clamp(credit, -periodUs, periodUs);
+    }
+
+    // The silence bound on the policy clock, not in ticks: converted once at the nominal period (SUB-15), then compared with time that passed, so neither a
+    // stall nor the catch-up after it can make a talking client look silent.
+    private readonly long _silenceBoundUs;
+    private readonly long _closeBoundUs;
     private readonly int _closeBoundTicks;
+
+    // The policy clock at each tick's start, by tick, as deep as the reliable ring: what an owed event's age is read from. Allocated once, on the first tick
+    // a reliable event can be owed.
+    private long[] _tickClockUs;
+
+    /// <summary>Whether a session's oldest owed reliable event is past the close bound in time, or about to be overwritten in the ring.</summary>
+    /// <param name="oldest">The owed event's tick.</param>
+    private bool ReliableOwedTooLong(uint oldest)
+    {
+        var ticks = _tick - oldest;
+        var depth = Events.ReliableDepth;
+        if (ticks >= depth - 1)
+        {
+            return true;
+        }
+
+        var clock = Volatile.Read(ref _policyClockUs);
+        return clock == 0 || _tickClockUs == null ? ticks > _closeBoundTicks : clock - _tickClockUs[oldest & (uint)(depth - 1)] > _closeBoundUs;
+    }
     private readonly int _degradeBoundTicks;
 
     /// <summary>
@@ -855,7 +1019,9 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
 
 
     private long _framesProduced;
-    private long _framesSkipped;
+    // Per FrameSkipCause, indexed by its wire value; FramesSkipped is their sum, so the breakdown costs no more than the single counter it replaced — a path
+    // that already pays one — and nothing on a frame that publishes.
+    private readonly long[] _skipsByCause = new long[8];
     private long _bytesEncoded;
     private long _recordsEncoded;
     private long _entersEmitted;
@@ -907,12 +1073,13 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         _encodePlans = BuildEncodePlans(plans, catalog);
         _lagBoundTicks = SkipPolicy.LagBoundTicks(options, tickPeriodUs);
         _tickSeconds = tickPeriodUs / 1_000_000d;
-        _silenceBoundTicks = SkipPolicy.SilenceBoundTicks(options, tickPeriodUs);
+        _silenceBoundUs = (long)SkipPolicy.SilenceBoundTicks(options, tickPeriodUs) * tickPeriodUs;
 
 
         // Converted once, here, beside the other two. The policy takes tick counts and never the options, so a duration cannot be read as a tick count by
         // a caller that does not know the tick rate - which is what the old bound was.
         _closeBoundTicks = SkipPolicy.CloseBoundTicks(options, tickPeriodUs);
+        _closeBoundUs = (long)_closeBoundTicks * tickPeriodUs;
         _degradeBoundTicks = SkipPolicy.DegradeBoundTicks(_closeBoundTicks);
 
         // The ceiling a frame is measured against: the operator's, but never above what the pool can serve — a frame larger than the largest size class
@@ -940,7 +1107,15 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
 
     /// <summary>Binds the <c>STATS</c> producer. Called once, from <c>SubscriptionsRuntime</c>'s constructor, before any worker exists.</summary>
     /// <param name="stats">The producer.</param>
-    public void AttachStats(StatsEncoder stats) => Volatile.Write(ref _stats, stats);
+    public void AttachStats(StatsEncoder stats)
+    {
+        if (stats != null)
+        {
+            stats.Frames = this;
+        }
+
+        Volatile.Write(ref _stats, stats);
+    }
 
     /// <summary>The durability gate a send pump reads before it sends anything (P1-14b writes it).</summary>
     public FramePublicationGate Gate { get; } = new();
@@ -949,7 +1124,24 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     public long FramesProduced => Volatile.Read(ref _framesProduced);
 
     /// <summary>Sessions skipped: no free frame slot, no block from the pool, or a frame above the ceiling.</summary>
-    public long FramesSkipped => Volatile.Read(ref _framesSkipped);
+    public long FramesSkipped
+    {
+        get
+        {
+            var sum = 0L;
+            for (var c = 0; c < _skipsByCause.Length; c++)
+            {
+                sum += Volatile.Read(ref _skipsByCause[c]);
+            }
+
+            return sum;
+        }
+    }
+
+    /// <summary>Skips with one cause since the runtime started: which of the session's own pace, the server's capacity or the degrade gate denied it.</summary>
+    /// <param name="cause">The cause.</param>
+    /// <returns>The count.</returns>
+    public long SkipsBy(FrameSkipCause cause) => (uint)cause < (uint)_skipsByCause.Length ? Volatile.Read(ref _skipsByCause[(int)cause]) : 0;
 
     /// <summary>Bytes of frame published.</summary>
     public long BytesEncoded => Volatile.Read(ref _bytesEncoded);
@@ -1042,6 +1234,12 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
 
         var prologueFrom = PhaseTimingEnabled ? Stopwatch.GetTimestamp() : 0L;
         _tick = tickNumber;
+        AccrueSkipCredit();
+        if (Events is { HasReliable: true, ReliableDepth: > 0 } events)
+        {
+            _tickClockUs ??= new long[events.ReliableDepth];
+            _tickClockUs[(uint)tickNumber & (uint)(events.ReliableDepth - 1)] = Volatile.Read(ref _policyClockUs);
+        }
 
         // The PREVIOUS tick's chunk stamps, folded before this tick overwrites them. Doing it here rather than at the end of the stage is what keeps it
         // off every worker: the prologue is single-threaded by construction.
@@ -1554,9 +1752,11 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
 
             // Silence first: a client that has stopped talking is gone whatever its skip run says, and 4001 tells its SDK to reconnect rather than to back off
             // as 1013 would.
-            // The stamp is the tick plus one, so zero is "this slot was never bound" and every real tick — tick zero included — is a mark the sweep can use.
+            // The stamp is the policy clock plus one, so zero is "this slot was never bound" and every real reading — zero included — is a mark the sweep can
+            // use. The policy clock, not the tick number: after a stall the metronome runs its missed ticks back to back, and counted in ticks that catch-up
+            // was silence nobody had kept.
             var heardFrom = send.PingStamp;
-            if (heardFrom > 0 && _tick - (heardFrom - 1) > _silenceBoundTicks)
+            if (heardFrom > 0 && Volatile.Read(ref _policyClockUs) - (heardFrom - 1) > _silenceBoundUs)
             {
                 _sessions.RequestClose(session, SessionCloseReason.Unacknowledged, CloseCodes.NoAcknowledgement);
                 Interlocked.Increment(ref _sessionsClosedSilent);
@@ -1579,9 +1779,10 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
                 continue;
             }
 
-            // Reliable events (14 § 7, SUB-35): frames that publish but cannot carry the backlog — an owed event older than the close bound. The ring holds
-            // no more than that, so the session is closed before anything it is owed can leave it.
-            if (Events is { HasReliable: true } && EventHub.OldestOwed(state) is var oldest and not 0 && _tick - oldest > _closeBoundTicks)
+            // Reliable events (14 § 7, SUB-35): frames that publish but cannot carry the backlog — an owed event older than the close bound, measured on the
+            // policy clock (SUB-15) so a catch-up after a stall does not age it; and, whatever the clock says, before the reliable ring reuses the slot it
+            // sits in, so nothing it is owed can leave it.
+            if (Events is { HasReliable: true } && EventHub.OldestOwed(state) is var oldest and not 0 && ReliableOwedTooLong(oldest))
             {
                 if (_sessions.RequestClose(session, SessionCloseReason.Lagging, CloseCodes.TryAgainLater))
                 {
@@ -1596,11 +1797,21 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
                 state.DegradeLevel++;
                 state.FramesSinceDegrade = 0;
                 Interlocked.Increment(ref _sessionsDegraded);
+                _sessions.NoteDegradeLevel(session, state.DegradeLevel);
+                if (TelemetryConfig.SubscriptionsSessionChangesActive)
+                {
+                    TyphonEvent.EmitSubscriptionsSessionChanged(session.Value, (byte)SessionChange.Degraded, (byte)(state.DegradeLevel + 1), 0, 0);
+                }
             }
             else if (state.DegradeLevel > 0 && state.FramesSinceDegrade >= SkipPolicy.RecoveryFrames)
             {
                 state.DegradeLevel--;
                 state.FramesSinceDegrade = 0;
+                _sessions.NoteDegradeLevel(session, state.DegradeLevel);
+                if (TelemetryConfig.SubscriptionsSessionChangesActive)
+                {
+                    TyphonEvent.EmitSubscriptionsSessionChanged(session.Value, (byte)SessionChange.Recovered, (byte)(state.DegradeLevel + 1), 0, 0);
+                }
             }
         }
     }
@@ -1709,8 +1920,52 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         return bound;
     }
 
-    /// <summary>Records that no frame was produced for a session this tick.</summary>
+    /// <summary>
+    /// Whether the degrade gate or the lag bound refuses a session a frame on this tick, advancing its skip run when the refusal is back-pressure. The
+    /// in-flight bound is <see cref="SessionSendState.TryBeginFrame"/>'s own, and counts itself.
+    /// </summary>
     /// <param name="state">The session's state.</param>
+    /// <param name="gateTick">The tick the degrade gate reads: the bare tick, or a rate-classed session's staggered one.</param>
+    /// <param name="send">The session's send state.</param>
+    /// <returns><see langword="true"/> when no frame is produced.</returns>
+    /// <remarks>
+    /// <b>A tick the degrade gate refuses is not back-pressure by itself (SUB-15), but it does not stop the stall clock either.</b> When the session could
+    /// not have taken a frame anyway — <see cref="SessionSendState.K"/> frames in flight, or its acknowledgement past the lag bound — the client is still
+    /// stalled, and the tick counts. Without that, the run advanced only on the session's own rate ticks, so a stalled session degraded to level 2 was closed
+    /// after four times <see cref="SubscriptionsOptions.CloseStalledAfter"/>: a duration the operator set, stretched by the very ladder meant to precede it
+    /// (measured, #1040: a 10 KB/s client of 76 KB frames closed after 61 ticks against a 30-tick bound). A degraded session that drains is not counted on
+    /// its gated ticks, so degrading a healthy session still never brings its close nearer.
+    /// </remarks>
+    /// <returns>Why the tick is refused, or <see cref="FrameSkipCause.None"/> when the session may take a frame.</returns>
+    private FrameSkipCause Refused(SessionFrameState state, long gateTick, ref SessionSendState send)
+    {
+        var lagging = SkipPolicy.AcknowledgementLag(send.ProducedTick, send.AckedTick) > _lagBoundTicks;
+        if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, gateTick))
+        {
+            if (!StallClockStopsWhenGatedForTest && (lagging || send.InFlightFull))
+            {
+                send.NoteSkipped(_skipsCount);
+            }
+
+            return FrameSkipCause.Gated;
+        }
+
+        if (lagging)
+        {
+            send.NoteSkipped(_skipsCount);
+            return FrameSkipCause.Lagging;
+        }
+
+        return FrameSkipCause.None;
+    }
+
+    /// <summary>SUB-15's mutant: a tick the degrade gate refuses never advances the skip run, as before #1040.</summary>
+    internal bool StallClockStopsWhenGatedForTest { get; set; }
+
+    /// <summary>Records that no frame was produced for a session this tick.</summary>
+    /// <param name="session">The session.</param>
+    /// <param name="state">The session's state.</param>
+    /// <param name="cause">Why, for trace kind 72. Ignored when <paramref name="counted"/> is false.</param>
     /// <param name="counted">
     /// Whether this counts against <c>typhon.session.skippedFrames</c>. False for a tick that produced nothing because there was nothing to say.
     /// </param>
@@ -1720,7 +1975,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     /// nothing to send is none of that, and counting it made every quiet session look like a struggling one. What the session holds is left alone either
     /// way, which is what SUB-03 requires.
     /// </remarks>
-    private void NoteSkip(SessionFrameState state, bool counted = true)
+    private void NoteSkip(SessionId session, SessionFrameState state, FrameSkipCause cause, bool counted = true)
     {
         if (!counted)
         {
@@ -1728,7 +1983,20 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         }
 
         state.FramesSkipped++;
-        Interlocked.Increment(ref _framesSkipped);
+        Interlocked.Increment(ref _skipsByCause[(int)cause & 7]);
+        if (TelemetryConfig.SubscriptionsFrameSkippedActive)
+        {
+            TyphonEvent.EmitSubscriptionsFrameSkipped(session.Value, (byte)cause, (byte)state.DegradeLevel, SendStateOf(session.Slot).SkipRun);
+        }
+    }
+
+    /// <summary>Trace kind 71 for a published frame. One flag read when the gate is off, which the JIT folds away.</summary>
+    private static void NoteProduced(SessionId session, SessionFrameState state, long sequence, int length, bool reset)
+    {
+        if (TelemetryConfig.SubscriptionsFrameProducedActive)
+        {
+            TyphonEvent.EmitSubscriptionsFrameProduced(session.Value, sequence, length, reset ? (byte)1 : (byte)0, (byte)state.DegradeLevel);
+        }
     }
 
     private void ReturnIfValid(in FrameBlock block)
