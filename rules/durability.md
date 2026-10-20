@@ -3474,16 +3474,23 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08) and
             written for; a timeline's archive.lock is held for one operation, and a file system that does not enforce it is refused
   invariant the segment the archiver reads is opened with delete sharing (WA-5): a released cycle that reclaims it deletes it
             instead of failing under the sealed-list lock
+  invariant a segment the archive floor may keep past a crash open never holds bytes recovery would stop at (WA-9): when the crash
+            open's recovery stopped at a break in the LAST segment holding data, the open writes a PaddingSentinel frame header
+            (RecordCount = CrashSealRecordCount, LastLsn = the highest fence LSN recovery applied from the torn frame) at the
+            first invalid frame and flushes it, after recovery read the WAL and before the session's first append; the segment
+            then ends cleanly for recovery, captures and the archiver (archived TornTrimmed, the applied fences a dropped range).
+            A break followed by a segment holding data is mid-log corruption (#587): left as it is
   scope: CheckpointManager.EngageArchiveFloor, CheckpointManager.RaiseArchiveFloor, CheckpointManager.ArchiveFloorReleased
     (step 8, beside the backup floor W1), WalSegmentManager.Initialize (reclaimFloorAtOpen), WalSegmentManager.BytesHeldBetween,
     WalSegmentManager.ArchiveSnapshot, IWalFileIO.OpenSegmentForArchive, WalFileIO.OpenSegmentForArchive,
     WalSegmentReader.OpenSegmentForArchive, WalArchiveScanner.Scan, WalArchiver.Step, WalArchiver.ArchivePending,
     WalArchiver.ArchiveOne, WalArchiver.CheckCovered, WalArchiveTimeline.Publish, WalArchiveTimeline.TryOpen,
     ArchivedSegmentWriter.Complete, ArchivedSegmentReader.Decode, ArchiveIndex.TryRead, DatabaseEngine.InitializeWalManager,
-    DatabaseEngine.CreateWalArchiver
+    DatabaseEngine.CreateWalArchiver, WalTornTailSeal.Seal, DatabaseEngine.SealTornTailForArchive
   on_violation: a segment deleted un-archived with no gap → a restore replays across a hole as if continuous → a state no run
     produced, found when it is needed; a torn frame in the store → every restore across it stops there for good; un-durable
-    bytes archived → the next session reuses their LSNs and the timeline's archive diverges from the database
+    bytes archived → the next session reuses their LSNs and the timeline's archive diverges from the database; a torn segment kept
+    unsealed → the next crash's recovery stops at it and loses every commit of the session after it
   requires: WP-09, CK-07, WP-06, LOG-03
   verified: WalArchiveFloorTests (held through checkpoints until the raise; released once, counted, re-engaged only by a raise; a
             raise beating the release CAS; Mutant_AReclaimIgnoringTheArchiveFloor_IsReported), WalArchiveOpenReclaimTests (AC-A5,
@@ -3492,9 +3499,11 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08) and
             still 1 when the copy becomes durable), WalArchiveBacklogTests (AC-A1), ArchivedSegmentCorruptionTests (T7: every byte
             outside the data and every 8th inside; Mutant_ADecodeWithoutTheRawCrc_IsReported), ArchiveStoreCrashTests (AC-A4, a
             crash after every operation of a publish, both directory models), ArchiveIndexTests
-            (Mutant_AnIndexTrustedWithoutItsFingerprint_IsReported), ArchiveDivergenceTests — [VerifiesRule("BKP-10")]. Source
+            (Mutant_AnIndexTrustedWithoutItsFingerprint_IsReported), ArchiveDivergenceTests, ArchiveTornTailTests (AC-A10:
+            Mutant_ACrashOpenThatDoesNotSealTheTornTail_IsReported; a mid-log break left unsealed), WalArchiveScannerTests
+            (ASealedTornTail_EndsCleanlyAtItsSentinel_NamingTheFenceRecordsRecoveryApplied) — [VerifiesRule("BKP-10")]. Source
             mutants seen red: the floor raised before the publish, a release not counted, no flush before the rename, no
-            directory flush (Linux model)
+            directory flush (Linux model), a seal over a mid-log break
   spec: rules/tla/WalArchive.tla (S7) — ArchivedOrReleased, NoSilentHole; mutants -mutant-raisebeforepublish, -mutant-openreclaim,
     -mutant-nofloor, -mutant-continuityunchecked, -mutant-releasenocount
 

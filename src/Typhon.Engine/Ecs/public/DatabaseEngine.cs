@@ -5608,6 +5608,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         if (result.StoppedAtCorruption)
         {
             LogWalRecoveryStoppedAtCorruption(result.SegmentsScanned, result.MaxLsn);
+            SealTornTailForArchive(walDir);
         }
 
         // LOG-08 across a RECOVERY, not only across a clean reopen (#712). InitializeWalManager has to choose the LSN floor in the constructor, where the

@@ -3,6 +3,7 @@ using NUnit.Framework;
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 
 namespace Typhon.Engine.Tests;
@@ -108,6 +109,54 @@ class WalArchiveScannerTests : ArchiveTestBase<WalArchiveScannerTests>
         Assert.That(scan.StoppedAtCorruption, Is.True);
         Assert.That(scan.DroppedFromLsn, Is.EqualTo(applied.Min(r => r.Lsn)));
         Assert.That(scan.DroppedToLsn, Is.EqualTo(applied.Max(r => r.Lsn)));
+    }
+
+    /// <summary>
+    /// The crash open's seal over a fence run torn inside its frame: the sentinel lands at the frame's start, records the fence LSN recovery applied from
+    /// it, and the segment then ends cleanly there for every reader; the archive keeps the same bytes and records the applied range as dropped.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("BKP-10")]
+    public void ASealedTornTail_EndsCleanlyAtItsSentinel_NamingTheFenceRecordsRecoveryApplied()
+    {
+        var (bytes, frame) = FirstFrameWhere(f => f.Chunks >= 2 && f.Records.All(r => r.IsFence));
+        var damaged = BreakSecondChunk(bytes, frame);
+        var torn = Scan(damaged, out var tornKept);
+        var dir = Path.Combine(TestStorage.Root, nameof(WalArchiveScannerTests), CurrentDatabaseName + ".seal");
+        if (Directory.Exists(dir))
+        {
+            Directory.Delete(dir, true);
+        }
+
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var path = Path.Combine(dir, "0000000000000001.wal");
+            File.WriteAllBytes(path, damaged);
+            using (var io = new WalFileIO())
+            {
+                var seal = WalTornTailSeal.Seal(io, dir);
+                Assert.That(seal, Is.EqualTo(new WalTornTailSealResult(torn.SegmentId, frame.Start, torn.DroppedToLsn, true)));
+                Assert.That(WalTornTailSeal.Seal(io, dir).SegmentId, Is.Zero, "sealed, the segment no longer breaks: a second open seals nothing");
+            }
+
+            var sealedBytes = File.ReadAllBytes(path);
+            Assert.That(sealedBytes.AsSpan(0, frame.Start).SequenceEqual(damaged.AsSpan(0, frame.Start)), Is.True, "nothing before the frame changes");
+            Assert.That(sealedBytes.AsSpan(frame.Start + 16).SequenceEqual(damaged.AsSpan(frame.Start + 16)), Is.True, "only the frame header is written");
+            Assert.That(WalFrames.Read(sealedBytes, out var truncated).Count, Is.EqualTo(WalFrames.Read(damaged, out _).Count));
+            Assert.That(truncated, Is.False, "recovery reads to the sentinel and stops cleanly");
+
+            var scan = Scan(sealedBytes, out var kept);
+            Assert.That((scan.StoppedAtCorruption, scan.SealedAtCrash), Is.EqualTo((false, true)));
+            Assert.That((scan.DroppedFromLsn, scan.DroppedToLsn), Is.EqualTo((torn.LastRecordLsn + 1, torn.DroppedToLsn)));
+            Assert.That((scan.LastRecordLsn, scan.ArchiveLength), Is.EqualTo((torn.LastRecordLsn, torn.ArchiveLength)));
+            Assert.That(kept, Is.EqualTo(tornKept), "the archive keeps what it kept of the torn segment");
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
     }
 
     [Test]

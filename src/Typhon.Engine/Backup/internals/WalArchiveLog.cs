@@ -23,6 +23,14 @@ internal static partial class WalArchiveLog
         Message = "WAL archive: segment {SegmentId} breaks at file offset {Offset}; archived up to its last whole frame, LSN {From}..{To} unrecoverable")]
     public static partial void SegmentDamaged(ILogger logger, long segmentId, int offset, long from, long to);
 
+    [LoggerMessage(Level = LogLevel.Warning,
+        Message = "WAL archive: the crash open sealed segment {SegmentId}'s torn tail at file offset {Offset} (fence LSN {FenceLsn} applied from it)")]
+    public static partial void TornTailSealed(ILogger logger, long segmentId, int offset, long fenceLsn);
+
+    [LoggerMessage(Level = LogLevel.Error,
+        Message = "WAL archive: segment {SegmentId} breaks with data-bearing segments after it (mid-log corruption); left unsealed, recovery stops there")]
+    public static partial void MidLogBreakNotSealed(ILogger logger, long segmentId);
+
     [LoggerMessage(Level = LogLevel.Error, Message = "WAL archive: timeline {Timeline} diverged ({Why}); archiving stopped")]
     public static partial void ArchiveDiverged(ILogger logger, Guid timeline, string why);
 

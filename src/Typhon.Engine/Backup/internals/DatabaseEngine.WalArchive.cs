@@ -1,4 +1,5 @@
 using System;
+using Typhon.Engine.Internals;
 
 namespace Typhon.Engine;
 
@@ -88,5 +89,46 @@ public partial class DatabaseEngine
         archiver.Stop(asCrash ? TimeSpan.Zero : archiver.CloseTimeout);
         archiver.Dispose();
         WalArchiver = null;
+    }
+
+    /// <summary>What the crash open's torn-tail seal did; default when it did not run.</summary>
+    internal WalTornTailSealResult LastTornTailSeal { get; private set; }
+
+    /// <summary>Test seam: the crash open skips the torn-tail seal (BKP-10's mutant). False in production.</summary>
+    internal bool TornTailSealDisabledForTest { get; set; }
+
+    /// <summary>
+    /// BKP-10's torn-tail seal (WA-9), on a crash open whose recovery stopped at a break, right after the recovery read the WAL and before anything of the
+    /// session is appended: with archiving configured the archive floor keeps the torn segment past this open, so its tear must not stop the next recovery
+    /// before the segments this session writes. Archiving off, the seal's checkpoint reclaims the torn segment as it always did.
+    /// </summary>
+    private void SealTornTailForArchive(string walDir)
+    {
+        if (ArchiveConfiguration == null || TornTailSealDisabledForTest)
+        {
+            return;
+        }
+
+        var walIO = _injectedWalIo ?? new WalFileIO();
+        try
+        {
+            var seal = WalTornTailSeal.Seal(walIO, walDir);
+            LastTornTailSeal = seal;
+            if (seal.Sealed)
+            {
+                WalArchiveLog.TornTailSealed(Logger, seal.SegmentId, seal.Offset, seal.FenceLsn);
+            }
+            else if (seal.SegmentId != 0)
+            {
+                WalArchiveLog.MidLogBreakNotSealed(Logger, seal.SegmentId);
+            }
+        }
+        finally
+        {
+            if (_injectedWalIo == null)
+            {
+                walIO.Dispose();
+            }
+        }
     }
 }
