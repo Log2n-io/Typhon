@@ -674,7 +674,7 @@ void fragment() {
 
         _bridge = null;
 
-        var dropTotal = TyphonEvent.TotalDroppedEvents;
+        var dropTotal = TyphonProfiler.TotalDroppedEvents;
         var exporterDrops = TyphonProfiler.TotalDroppedExporterBatches;
         var spillAcquired = TyphonProfiler.SpilloverPoolAcquiredCount;
         var spillExhausted = TyphonProfiler.SpilloverPoolExhaustedCount;
@@ -685,7 +685,7 @@ void fragment() {
             $"AntHill: spillover pool — acquired={spillAcquired:N0} (chain extensions absorbed bursts), " +
             $"exhausted={spillExhausted:N0} (overflows that drop because pool was empty — bump SpilloverBufferCount if non-zero)");
 
-        var byKind = TyphonEvent.DroppedEventsByKind;
+        var byKind = TyphonProfiler.DroppedEventsByKind;
         if (byKind.Count == 0)
         {
             GD.Print("AntHill: per-kind drop breakdown — none (all dropped records are instants, see total above).");

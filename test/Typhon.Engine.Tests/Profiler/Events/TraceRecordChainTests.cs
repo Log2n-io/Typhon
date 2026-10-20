@@ -667,4 +667,36 @@ public sealed class TraceRecordChainTests
         ThreadSlotRegistry.ReleaseCurrentThreadForTests();
         ThreadSlotRegistry.ResetForTests();
     }
+
+    /// <summary>
+    /// The public breakdown (<see cref="TyphonProfiler.DroppedEventsByKind"/>) reads a claimed slot's drops by kind, and leaves out the drops that carry no
+    /// kind (instants), which only <see cref="TyphonProfiler.TotalDroppedEvents"/> counts.
+    /// </summary>
+    [Test]
+    public void PublicDropBreakdown_CountsSpansByKind_AndLeavesInstantsToTheTotal()
+    {
+        ThreadSlotRegistry.ResetForTests();
+        try
+        {
+            var slot = ThreadSlotRegistry.GetSlot(ThreadSlotRegistry.GetOrAssignSlot());
+            Assert.That(TyphonProfiler.TotalDroppedEvents, Is.Zero, "premise: a reset registry has dropped nothing");
+
+            const byte span = (byte)TraceEventKind.SchedulerChunk;
+            while (WriteRecord(slot.Buffer, 32, span, 0x11)) { }
+            slot.Buffer.TryReserve(32, span, out _);
+            slot.Buffer.TryReserve(32, out _);   // no kind: an instant
+            var spanDrops = slot.Buffer.DroppedEventsForKind(span);
+            Assert.That(spanDrops, Is.EqualTo(2), "premise: the failing fill call and the one after it");
+
+            var byKind = TyphonProfiler.DroppedEventsByKind;
+            Assert.That(byKind.Count, Is.EqualTo(1));
+            Assert.That(byKind[TraceEventKind.SchedulerChunk], Is.EqualTo(spanDrops));
+            Assert.That(TyphonProfiler.TotalDroppedEvents, Is.EqualTo(spanDrops + 1), "the instant is in the total only");
+        }
+        finally
+        {
+            ThreadSlotRegistry.ReleaseCurrentThreadForTests();
+            ThreadSlotRegistry.ResetForTests();
+        }
+    }
 }
