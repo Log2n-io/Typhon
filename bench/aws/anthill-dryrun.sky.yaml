@@ -24,7 +24,7 @@ setup: |
   sudo mkfs.ext4 -F "/dev/$DEV"
   sudo mkdir -p /nvme && sudo mount "/dev/$DEV" /nvme
   sudo chown "$(whoami)" /nvme
-  curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0
+  bash bench/aws/install-dotnet.sh   # the SDK band global.json pins
   export PATH="$HOME/.dotnet:$PATH"
   dotnet build demo/AntHill/AntHill.Harness/AntHill.Harness.csproj -c Release
 

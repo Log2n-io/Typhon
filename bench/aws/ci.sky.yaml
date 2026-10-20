@@ -39,7 +39,7 @@ setup: |
   sudo mkdir -p /nvme && sudo mount "/dev/$DEV" /nvme
   sudo chown "$(whoami)" /nvme
   # .NET 10 SDK
-  curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0
+  bash bench/aws/install-dotnet.sh   # the SDK band global.json pins
   # DOTNET_ROOT lets apphost-based child processes (the test host) locate the runtime; PATH alone isn't enough.
   export DOTNET_ROOT="$HOME/.dotnet"
   export PATH="$DOTNET_ROOT:$DOTNET_ROOT/tools:$PATH"

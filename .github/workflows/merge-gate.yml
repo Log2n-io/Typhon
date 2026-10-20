@@ -836,7 +836,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
 
       # One step, all five: a per-project step would stop at the first failure and hide the rest, and the whole
       # point is to learn the state of suites nobody has run. `rc` accumulates so every project reports.
@@ -880,7 +880,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
       - uses: actions/setup-node@v5
         with:
           node-version: '22'
@@ -956,7 +956,7 @@ jobs:
       - uses: actions/setup-dotnet@v5
         if: matrix.live
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
 
       # The native client against a live engine over TCP, then the .NET client replaying the same bytes: one replica, frame for frame.
       - name: Live differential test
