@@ -318,6 +318,95 @@ internal sealed class OfflineCaptureRestoreTests
         Assert.That(OfflineCapture.Create(restored.Target, Path.Combine(_root, "store2")).Kind, Is.EqualTo(BackupKind.Full));
     }
 
+    /// <summary>
+    /// BKP-VER-12 on a real point: a hard-crashed bundle with commits past its checkpoint, so its tail carries a <c>P</c> above <c>C</c>. A full
+    /// verify decodes the stored tail and replays it as recovery will: it yields the footer's <c>P</c>, and the check runs instead of being skipped.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void AFullVerify_RecomputesARealPointsP_FromItsStoredTail()
+    {
+        Session("BkT9v", 10, checkpoint: true, 6, Close.HardCrash);
+        var point = OfflineCapture.Create(Bundle("BkT9v"), Store);
+        Assert.That(point.PointLsn, Is.GreaterThan(point.CheckpointLsn), "premise: the tail carries commits past C");
+
+        using (var pack = PackReader.Open(StoreFileSystem.Instance, point.PackPath))
+        {
+            var tail = pack.LoadTailDirectory();
+            Assert.That(BackupVerifier.TailPointLsn(pack, tail, pack.Header.CheckpointLsn), Is.EqualTo(point.PointLsn));
+        }
+
+        var report = BackupVerifier.VerifyStore(Store, VerifyLevel.Full);
+        Assert.That(report.AllFindings, Is.Empty, string.Join("\n", report.AllFindings));
+        Assert.That(report.Verdict, Is.EqualTo(VerifyVerdict.Ok));
+    }
+
+    /// <summary>
+    /// BKP-VER-12 against a tail cut short: a point whose commits past <c>C</c> run into the second half of its last copied segment (enough of them to
+    /// fill many tail blocks), so any truncation of the stored tail changes the <c>P</c> it yields. Replayed whole, it yields the footer's <c>P</c>.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void ATailWhoseLastCommitsReachTheEndOfItsCopy_YieldsItsP_OnlyWhole()
+    {
+        const string name = "BkT9w";
+        using (var provider = BackupTestImages.BuildProvider(name, DbDir, Path.Combine(Bundle(name), "wal")))
+        using (var scope = provider.CreateScope())
+        {
+            var dbe = Open(scope);
+            Spawn(dbe, 10);
+            dbe.ForceCheckpoint();
+            // Staged, not guessed: small flushed batches until the active segment is written past 55 % of its size (the writer rotates at 75 %),
+            // so the last commits sit in the second half of the last segment the capture copies.
+            var segments = dbe.WalManager.SegmentManager;
+            for (var batch = 0; segments.ActiveSegment.WriteOffset <= segments.ActiveSegment.SegmentSize * 55L / 100; batch++)
+            {
+                Assert.That(batch, Is.LessThan(10_000), "the active segment never filled");
+                using var uow = dbe.CreateUnitOfWork(DurabilityMode.Deferred);
+                for (var i = 0; i < 5; i++)
+                {
+                    using var tx = uow.CreateTransaction();
+                    tx.Spawn<CompAArch>(CompAArch.A.Set(new CompA(i, batch, i)));
+                    tx.Commit();
+                }
+
+                uow.Flush();
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        var point = OfflineCapture.Create(Bundle(name), Store);
+        using (var pack = PackReader.Open(StoreFileSystem.Instance, point.PackPath))
+        {
+            var tail = pack.LoadTailDirectory();
+            var c = pack.Header.CheckpointLsn;
+            var layout = string.Join(", ", tail.Segments.Select(t => $"#{t.SegmentId} {t.RawLength} B"));
+
+            // The premise the check stands on: the tail's last commits lie in the second half of its last copied segment.
+            Assert.That(HalvedTailPointLsn(pack, tail, c), Is.LessThan(point.PointLsn),
+                $"premise: halving the stored tail must cut commits (C {c}, P {point.PointLsn}, segments {layout})");
+            Assert.That(BackupVerifier.TailPointLsn(pack, tail, c), Is.EqualTo(point.PointLsn), $"the whole tail yields P (segments {layout})");
+        }
+
+        var report = BackupVerifier.VerifyStore(Store, VerifyLevel.Full);
+        Assert.That(report.AllFindings, Is.Empty, string.Join("\n", report.AllFindings));
+    }
+
+    /// <summary><c>P</c> over the stored tail with each segment cut to its first half (whole pages): what a short copy would yield.</summary>
+    private static long HalvedTailPointLsn(PackReader pack, TailDirectory tail, long checkpointLsn)
+    {
+        var prefixes = new WalTailPrefix[tail.Segments.Length];
+        for (var i = 0; i < tail.Segments.Length; i++)
+        {
+            var bytes = new byte[tail.Segments[i].RawLength];
+            pack.DecodeTailSegment(tail, i, bytes);
+            prefixes[i] = new WalTailPrefix(tail.Segments[i].SegmentId, bytes.AsMemory(0, bytes.Length / 2 / 4096 * 4096));
+        }
+
+        return WalTailInspector.ComputePointLsn(prefixes, checkpointLsn);
+    }
+
     [Test]
     [CancelAfter(60_000)]
     public void TheCapture_LeavesNoLockBehind()
