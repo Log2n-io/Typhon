@@ -47,6 +47,13 @@ internal struct WalFrameHeader
     /// <summary>Sentinel value indicating end-of-buffer padding.</summary>
     public const int PaddingSentinel = -1;
 
+    /// <summary>
+    /// <see cref="RecordCount"/> of the padding sentinel a crash open writes over a torn segment's first invalid frame (BKP-10's torn-tail seal): the segment
+    /// ends there for every reader, and the archiver knows it was sealed. The sentinel's <see cref="LastLsn"/> then carries the highest fence LSN the
+    /// recovery applied from the torn frame's valid chunks (0 = none): records the archive cannot hold.
+    /// </summary>
+    public const int CrashSealRecordCount = 0x5EA1;
+
     /// <summary>Expected size of this struct in bytes.</summary>
     public const int SizeInBytes = 16;
 }

@@ -1,39 +1,134 @@
 using System;
+using Typhon.Engine.Internals;
 
 namespace Typhon.Engine;
 
 /// <summary>
-/// Continuous WAL archiving (#1418): the engine's side, as the backup scheduler (#1416) consumes it. A stand-in on the #1416 branch: #1418 owns this
-/// file, and its version (the archiver, its floor, its close-time stop) replaces this one at the merge.
+/// Continuous WAL archiving (#1418): the engine's side. Whether archiving is configured is read once, by the constructor, because the archive floor and
+/// the open's reclaim must hold every segment from the first instant (BKP-10); the archiver itself is built later, by the backup scheduler (#1416), and
+/// stopped by the close before its final checkpoint (WA-23).
 /// </summary>
 public partial class DatabaseEngine
 {
-    /// <summary>
-    /// Builds the WAL archiver (impl/1418 §4.5): <c>null</c> when <paramref name="options"/> is null. The backup scheduler (#1416) calls it once the open
-    /// completed; the archiver lives until the close stops it. Null on this branch: the archiver is #1418's.
-    /// </summary>
-    /// <param name="options">The archive options; null when archiving is off.</param>
-    /// <param name="storePath">The backup store the archive is written to.</param>
-    internal IWalArchiver CreateWalArchiver(ArchiveOptions options, string storePath)
+    /// <summary>The archiving configuration this engine opened with; null when archiving is off.</summary>
+    internal WalArchiveConfiguration ArchiveConfiguration => _options.WalArchive;
+
+    /// <summary>The archiver <see cref="CreateWalArchiver(ArchiveOptions, string)"/> built; null until then. The close stops it before its final checkpoint.</summary>
+    internal WalArchiver WalArchiver { get; private set; }
+
+    /// <summary>Refuses the open, before anything is written for the WAL, when archiving is configured with options that cannot be used.</summary>
+    private void ValidateArchiveConfiguration()
     {
-        if (options == null)
+        var archive = _options.WalArchive;
+        if (archive == null)
         {
-            return null;
+            return;
         }
 
-        ArgumentException.ThrowIfNullOrEmpty(storePath);
-        return null;
+        if (archive.Options == null)
+        {
+            throw new ArgumentException("WAL archiving is configured without its ArchiveOptions.");
+        }
+
+        if (!archive.Options.Validate(_options.Wal, archive.StorePath, out var error))
+        {
+            throw new ArgumentException(error);
+        }
     }
 
     /// <summary>
-    /// Refuses the open when <see cref="BackupOptions.Archive"/> is set: until #1418's archiver is in this build, configured archiving would silently do
-    /// nothing (impl/1418 §4.5: "<c>Archive != null</c> fails validation" until the archiver lands).
+    /// Builds and starts the WAL archiver (impl/1418 §4.5): <c>null</c> when <paramref name="options"/> is null. The backup scheduler (#1416) calls it once
+    /// the open completed; the archiver lives until the close stops it. Archiving must have been configured when this engine opened: its floor holds every
+    /// segment from the open on, and an archiver started later would find segments the open already reclaimed.
     /// </summary>
-    private void ValidateArchiveConfiguration()
+    /// <param name="options">The archive options; null when archiving is off.</param>
+    /// <param name="storePath">The backup store the archive is written to.</param>
+    internal IWalArchiver CreateWalArchiver(ArchiveOptions options, string storePath) =>
+        options == null ? null : CreateWalArchiver(options, storePath, null, startWorker: true);
+
+    /// <summary>
+    /// <see cref="CreateWalArchiver(ArchiveOptions, string)"/> with the test seams: the store's file system, and a worker left unstarted (the test then drives
+    /// <see cref="Internals.WalArchiver.Step"/> and <see cref="Internals.WalArchiver.ArchivePending"/> on its own thread).
+    /// </summary>
+    internal WalArchiver CreateWalArchiver(ArchiveOptions options, string storePath, IStoreFileSystem fs, bool startWorker)
     {
-        if (_options.Backup?.Archive != null)
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentException.ThrowIfNullOrEmpty(storePath);
+        if (ArchiveConfiguration == null)
         {
-            throw new ArgumentException("BackupOptions.Archive is set, but continuous WAL archiving (#1418) is not part of this build.");
+            throw new InvalidOperationException("WAL archiving was not configured when this database opened: its archive floor did not hold the WAL.");
+        }
+
+        if (WalArchiver != null)
+        {
+            throw new InvalidOperationException("This engine's WAL archiver already exists.");
+        }
+
+        var archiver = new WalArchiver(this, options, storePath, _durabilityNode, Logger, fs);
+        WalArchiver = archiver;
+        if (startWorker)
+        {
+            archiver.Start();
+        }
+
+        return archiver;
+    }
+
+    /// <summary>
+    /// The close's archive step (WA-23), after the drains and the free quarantine's end, before the final checkpoint: the final pass archives what the
+    /// session wrote and the final cycle sees the raised floor. A close the engine treats as a crash makes no pass.
+    /// </summary>
+    private void StopWalArchiverAtClose(bool asCrash)
+    {
+        var archiver = WalArchiver;
+        if (archiver == null)
+        {
+            return;
+        }
+
+        archiver.Stop(asCrash ? TimeSpan.Zero : archiver.CloseTimeout);
+        archiver.Dispose();
+        WalArchiver = null;
+    }
+
+    /// <summary>What the crash open's torn-tail seal did; default when it did not run.</summary>
+    internal WalTornTailSealResult LastTornTailSeal { get; private set; }
+
+    /// <summary>Test seam: the crash open skips the torn-tail seal (BKP-10's mutant). False in production.</summary>
+    internal bool TornTailSealDisabledForTest { get; set; }
+
+    /// <summary>
+    /// BKP-10's torn-tail seal (WA-9), on a crash open whose recovery stopped at a break, right after the recovery read the WAL and before anything of the
+    /// session is appended: with archiving configured the archive floor keeps the torn segment past this open, so its tear must not stop the next recovery
+    /// before the segments this session writes. Archiving off, the seal's checkpoint reclaims the torn segment as it always did.
+    /// </summary>
+    private void SealTornTailForArchive(string walDir)
+    {
+        if (ArchiveConfiguration == null || TornTailSealDisabledForTest)
+        {
+            return;
+        }
+
+        var walIO = _injectedWalIo ?? new WalFileIO();
+        try
+        {
+            var seal = WalTornTailSeal.Seal(walIO, walDir);
+            LastTornTailSeal = seal;
+            if (seal.Sealed)
+            {
+                WalArchiveLog.TornTailSealed(Logger, seal.SegmentId, seal.Offset, seal.FenceLsn);
+            }
+            else if (seal.SegmentId != 0)
+            {
+                WalArchiveLog.MidLogBreakNotSealed(Logger, seal.SegmentId);
+            }
+        }
+        finally
+        {
+            if (_injectedWalIo == null)
+            {
+                walIO.Dispose();
+            }
         }
     }
 }

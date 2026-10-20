@@ -651,15 +651,8 @@ internal sealed class PackWriter : IBackupPointSink, IDisposable
     private void EmitTailBlock()
     {
         var raw = _tailBlock.Span[.._tailFill];
-        var frame = Reserve(PackFormat.FramePrefixSize + LZ4Codec.MaximumOutputSize(raw.Length));
-        var payload = frame[PackFormat.FramePrefixSize..];
-        var stored = LZ4Codec.Encode(raw, payload);
-        if (stored <= 0 || stored >= raw.Length)
-        {
-            raw.CopyTo(payload);
-            stored = raw.Length;
-        }
-
+        var frame = Reserve(PackFormat.FramePrefixSize + TailBlockCodec.MaxStoredLength(raw.Length));
+        var stored = TailBlockCodec.Encode(raw, frame[PackFormat.FramePrefixSize..]);
         BinaryPrimitives.WriteUInt32LittleEndian(frame, (uint)stored);
         _blocks.Add(new TailBlockEntry { DataOffset = Position + PackFormat.FramePrefixSize, RawLength = raw.Length, StoredLength = stored });
         _fill += PackFormat.FramePrefixSize + stored;

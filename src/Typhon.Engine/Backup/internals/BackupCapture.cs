@@ -155,7 +155,7 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
     public BackupPointInfo Run(IBackupPointStore store, BackupKind requested, BackupLineage lineage, CancellationToken ct)
     {
         using var session = store.OpenSession(_engine.DatabaseId, ct);
-        Kind = BackupAdmission.Decide(requested, lineage, session, _engine.TimelineId, out var parent);
+        Kind = BackupAdmission.Decide(requested, lineage, session, _engine.TimelineId, _engine.TimelineParentId, out var parent);
         var plan = new BackupPointPlan(_engine.DatabaseId, _engine.TimelineId, Kind, Kind == BackupKind.Incremental ? lineage.ChainId : Guid.Empty,
             Kind == BackupKind.Incremental ? parent.BackupId : 0, PagedMMF.DatabaseFormatRevision,
             typeof(DatabaseEngine).Assembly.GetName().Version?.ToString() ?? "", false);

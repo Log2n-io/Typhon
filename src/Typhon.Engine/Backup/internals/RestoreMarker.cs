@@ -24,11 +24,15 @@ internal sealed class RestoredFrom
 
 /// <summary>
 /// <c>restore.json</c>: written by a restore inside its private staging directory, read by the first open of the restored bundle, which adopts
-/// <see cref="NewTimelineId"/> and deletes it (plan 1413 §2.8–2.9).
+/// <see cref="NewTimelineId"/> and deletes it (plan 1413 §2.8–2.9). Version 2 (#1418) adds the restore-to-LSN fields and
+/// <see cref="ForceCrashRecovery"/>: a build that reads version 1 only refuses it rather than misread it.
 /// </summary>
 internal sealed class RestoreMarkerFile
 {
-    public const int CurrentFormatVersion = 1;
+    public const int CurrentFormatVersion = 2;
+
+    /// <summary>The oldest version this build reads: a version-1 marker is a point restore, its new fields at their defaults.</summary>
+    public const int MinFormatVersion = 1;
 
     public int FormatVersion { get; set; }
 
@@ -41,6 +45,24 @@ internal sealed class RestoreMarkerFile
     public string Tool { get; set; }
 
     public RestoredFrom RestoredFrom { get; set; }
+
+    /// <summary>The LSN the restore was asked for; 0 for a point restore.</summary>
+    public long TargetLsn { get; set; }
+
+    /// <summary>
+    /// The last LSN the restored WAL holds: <c>L'</c>, the highest frame end at or below <see cref="TargetLsn"/>; the point's <c>P</c> for a point restore
+    /// (0 in a version-1 marker: read <see cref="RestoredFrom.PointLsn"/>). The restored timeline's origin.
+    /// </summary>
+    public long EffectiveLsn { get; set; }
+
+    /// <summary>
+    /// Open on the crash path even though the image was closed cleanly (WA-12): a restore to an LSN past a clean offline point's own WAL needs its archived
+    /// WAL replayed, which the clean path never reads.
+    /// </summary>
+    public bool ForceCrashRecovery { get; set; }
+
+    /// <summary>The restored timeline's origin: <see cref="EffectiveLsn"/>, or the point's <c>P</c> for a version-1 marker.</summary>
+    public long OriginLsn => EffectiveLsn != 0 ? EffectiveLsn : RestoredFrom?.PointLsn ?? 0;
 }
 
 /// <summary><c>restore.staging</c>: marks a <c>{target}.restoring</c> directory as a restore's own, so a leftover is recognisably safe to delete.</summary>
@@ -93,7 +115,8 @@ internal static class RestoreMarker
             return RestoreMarkerState.Invalid;
         }
 
-        if (marker == null || marker.FormatVersion != RestoreMarkerFile.CurrentFormatVersion || marker.DatabaseId == Guid.Empty
+        if (marker == null || marker.FormatVersion < RestoreMarkerFile.MinFormatVersion || marker.FormatVersion > RestoreMarkerFile.CurrentFormatVersion
+            || marker.DatabaseId == Guid.Empty
             || marker.NewTimelineId == Guid.Empty || marker.RestoredFrom == null)
         {
             problem = marker == null ? "empty" : $"format {marker.FormatVersion}, or a field is missing";

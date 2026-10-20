@@ -61,7 +61,8 @@ typhon backup create  <bundle> [--store S] [--full] [--wait]   # asks the runnin
 typhon backup status  <bundle> | --store S [--stale-after 1d]  # exit code = health: 0 ok, 1 warning/degraded, 3 failing/off
 typhon backup list    --store S [--restorable]                 # points, chains, sizes, drill results
 typhon backup verify  --store S [--level quick|full|deep]
-typhon backup restore --store S [--point X] --to <bundle>
+typhon backup restore --store S [--point X | --lsn L | --time T [--timeline t]] --to <bundle> [--dry-run]
+typhon backup log     --store S [--timeline t] [--lsn-from L1 --lsn-to L2 | --from T1 --to T2] [--commits]
 typhon backup drill   --store S --scratch D                    # restore to scratch, open, check deep, record, delete
 typhon backup compact --store S [--point X]
 typhon backup prune   --store S --min-keep 3 --max-age 7d [--dry-run]
@@ -88,6 +89,10 @@ typhon backup prune   --store S --min-keep 3 --max-age 7d [--dry-run]
   deep and records the result in the store. The `typhon` tool drills a point whose WAL tail it can replay without the
   application's assemblies; a point whose tail holds the application's records is drilled in-process, by a host that
   passes its own opener (`BackupDrillOptions.OpenAndClose`).
+- **Archiving never loses WAL silently.** A segment leaves the database un-archived only when the archive falls behind past
+  its backlog limit; that range is then a recorded gap, which no restore crosses, and a new point is taken. A restore to an
+  LSN or an instant ends at the last whole transaction at or below it, and never crosses a schema change or a bulk load
+  (each starts a new timeline).
 - **One store per database**, a local or mounted filesystem path. Remote object stores, encryption and logical
   (entity-level) export are out of scope for now.
 

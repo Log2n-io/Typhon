@@ -88,6 +88,12 @@ public sealed class BackupRestoreOptions
 
     /// <summary>Where the restore logs.</summary>
     public ILogger Logger { get; init; }
+
+    /// <summary>
+    /// The <see cref="BackupRestorePlan.Fingerprint"/> of a reviewed plan (<see cref="BackupOperations.PlanRestore"/>): the restore re-plans under its lock
+    /// and throws <see cref="BackupPlanChangedException"/>, writing nothing, when what it would restore now differs. Null: no plan to hold to.
+    /// </summary>
+    public string ApprovedPlan { get; init; }
 }
 
 /// <summary>What a restore did.</summary>
@@ -108,10 +114,15 @@ public sealed class BackupRestoreOptions
 /// What <see cref="BackupRestoreOptions.OpenAndClose"/> threw, or <c>null</c>. The restore is published either way: the target and the displaced
 /// bundle are where this result says.
 /// </param>
+/// <param name="TargetLsn">The LSN a restore to an LSN or a time aimed at; 0 for a point.</param>
+/// <param name="EffectiveLsn">The restored database's last LSN: the last transaction ending at or below the target, or the point's <c>P</c>.</param>
+/// <param name="TimelineId">The timeline restored from.</param>
+/// <param name="ArchivedSegments">Archived WAL segments restored.</param>
+/// <param name="ForcedCrashRecovery">The restored bundle opens on the crash path although its image is clean (its archived WAL is replayed).</param>
 [PublicAPI]
 public sealed record BackupRestoreResult(BackupPointSummary Point, string Target, string DisplacedBundle, int ChainDepth, int PagesWritten, int ZeroPages,
     int TailSegments, long BytesRead, long BytesWritten, TimeSpan Duration, IReadOnlyList<uint> SuspectPages, IReadOnlyList<PackPageDamage> DamagedPages,
-    Guid NewTimelineId, string SettleError);
+    Guid NewTimelineId, string SettleError, long TargetLsn, long EffectiveLsn, Guid TimelineId, int ArchivedSegments, bool ForcedCrashRecovery);
 
 /// <summary>How deep a verify reads.</summary>
 [PublicAPI]
@@ -267,5 +278,7 @@ public enum BackupHealth
 /// <param name="Points">Points in the store.</param>
 /// <param name="Latest">The newest point, or <c>null</c>.</param>
 /// <param name="LatestRestorable">The newest point whose chain resolves (from the packs' headers and footers), or <c>null</c>.</param>
+/// <param name="Archive">What each timeline's WAL archive makes restorable; empty when the store holds no archive.</param>
 [PublicAPI]
-public sealed record BackupStoreStatus(BackupHealth Health, string Reason, int Points, BackupPointSummary Latest, BackupPointSummary LatestRestorable);
+public sealed record BackupStoreStatus(BackupHealth Health, string Reason, int Points, BackupPointSummary Latest, BackupPointSummary LatestRestorable,
+    IReadOnlyList<BackupArchiveCoverage> Archive);

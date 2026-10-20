@@ -129,8 +129,11 @@ internal static class BackupVerifier
 
     /// <summary>The packs of one point's chain, and that point.</summary>
     public static VerifyReport VerifyPoint(string storePath, PointSelector point, VerifyLevel level, VerifyOptions options = null,
-        IStoreFileSystem fs = null) =>
-        Run(storePath, point, level, options, fs);
+        IStoreFileSystem fs = null)
+    {
+        point.RequirePoint("Verify");
+        return Run(storePath, point, level, options, fs);
+    }
 
     private static VerifyReport Run(string storePath, PointSelector? point, VerifyLevel level, VerifyOptions options, IStoreFileSystem fs)
     {
@@ -227,6 +230,12 @@ internal static class BackupVerifier
             }
 
             points.Add(new PointVerification { Id = id, Restorable = broken.Count == 0, BrokenBy = [.. broken] });
+        }
+
+        // BKP-VER-15…18: the WAL archive, with the store (a point's verify reads its chain only).
+        if (point == null)
+        {
+            WalArchiveReport.Verify(fs, view, level, storeFindings, ref bytesRead);
         }
 
         if (level == VerifyLevel.Deep)

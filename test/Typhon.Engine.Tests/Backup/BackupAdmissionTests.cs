@@ -283,7 +283,7 @@ class BackupAdmissionTests : BackupTestBase<BackupAdmissionTests>
         AssertKind(Capture(dbe, store), BackupKind.Full, "into a wiped store");
         AssertKind(Capture(dbe, store), BackupKind.Incremental, "premise: the new chain");
 
-        dbe.AdoptTimeline(Guid.NewGuid());
+        dbe.AdoptTimeline(Guid.NewGuid(), Guid.Empty, 0, TimelineReason.Restore, keepLineage: false);
         AssertKind(Capture(dbe, store), BackupKind.Full, "on a new timeline");
     }
 
@@ -301,13 +301,13 @@ class BackupAdmissionTests : BackupTestBase<BackupAdmissionTests>
     public void Mutant_ADecisionIgnoringTrust_IsReported()
     {
         RuleMutants.AssertDetects("BKP-06", Marker, () => AssertDecisions((BackupKind requested, BackupLineage lineage, IBackupStoreSession session,
-            Guid timeline, out BackupChainHead parent) =>
+            Guid timeline, Guid timelineParent, out BackupChainHead parent) =>
         {
             var trusted = lineage.Trusted;
             lineage.Trusted = true;
             try
             {
-                return BackupAdmission.Decide(requested, lineage, session, timeline, out parent);
+                return BackupAdmission.Decide(requested, lineage, session, timeline, timelineParent, out parent);
             }
             finally
             {
@@ -316,7 +316,8 @@ class BackupAdmissionTests : BackupTestBase<BackupAdmissionTests>
         }));
     }
 
-    private delegate BackupKind DecideFn(BackupKind requested, BackupLineage lineage, IBackupStoreSession session, Guid timeline, out BackupChainHead parent);
+    private delegate BackupKind DecideFn(BackupKind requested, BackupLineage lineage, IBackupStoreSession session, Guid timeline, Guid timelineParent,
+        out BackupChainHead parent);
 
     private static void AssertDecisions(DecideFn decide)
     {
@@ -340,17 +341,22 @@ class BackupAdmissionTests : BackupTestBase<BackupAdmissionTests>
 
         Assert.Multiple(() =>
         {
-            Assert.That(decide(BackupKind.Incremental, Lineage(), session, timeline, out var parent), Is.EqualTo(BackupKind.Incremental));
+            Assert.That(decide(BackupKind.Incremental, Lineage(), session, timeline, Guid.Empty, out var parent), Is.EqualTo(BackupKind.Incremental));
             Assert.That(parent.BackupId, Is.EqualTo(head.BackupId));
-            Assert.That(decide(BackupKind.Full, Lineage(), session, timeline, out _), Is.EqualTo(BackupKind.Full), $"{Marker}: a full point was asked for");
-            Assert.That(decide(BackupKind.Incremental, Lineage(trusted: false), session, timeline, out _), Is.EqualTo(BackupKind.Full),
+            Assert.That(decide(BackupKind.Full, Lineage(), session, timeline, Guid.Empty, out _), Is.EqualTo(BackupKind.Full),
+                $"{Marker}: a full point was asked for");
+            Assert.That(decide(BackupKind.Incremental, Lineage(trusted: false), session, timeline, Guid.Empty, out _), Is.EqualTo(BackupKind.Full),
                 $"{Marker}: an untrusted map");
-            Assert.That(decide(BackupKind.Incremental, Lineage(storeId: Guid.NewGuid()), session, timeline, out _), Is.EqualTo(BackupKind.Full),
+            Assert.That(decide(BackupKind.Incremental, Lineage(storeId: Guid.NewGuid()), session, timeline, Guid.Empty, out _), Is.EqualTo(BackupKind.Full),
                 $"{Marker}: another store");
-            Assert.That(decide(BackupKind.Incremental, Lineage(last: head.BackupId + 5), session, timeline, out _), Is.EqualTo(BackupKind.Full),
+            Assert.That(decide(BackupKind.Incremental, Lineage(last: head.BackupId + 5), session, timeline, Guid.Empty, out _), Is.EqualTo(BackupKind.Full),
                 $"{Marker}: the chain's head is another point");
-            Assert.That(decide(BackupKind.Incremental, Lineage(), session, Guid.NewGuid(), out _), Is.EqualTo(BackupKind.Full),
+            Assert.That(decide(BackupKind.Incremental, Lineage(), session, Guid.NewGuid(), Guid.Empty, out _), Is.EqualTo(BackupKind.Full),
                 $"{Marker}: another timeline");
+            Assert.That(decide(BackupKind.Incremental, Lineage(), session, Guid.NewGuid(), timeline, out _), Is.EqualTo(BackupKind.Incremental),
+                $"{Marker}: a fork of the head's timeline keeps the lineage (impl/1418 §3.6)");
+            Assert.That(decide(BackupKind.Incremental, Lineage(), session, Guid.NewGuid(), Guid.NewGuid(), out _), Is.EqualTo(BackupKind.Full),
+                $"{Marker}: a fork of another timeline");
         });
     }
 

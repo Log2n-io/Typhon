@@ -110,6 +110,7 @@ internal static class OfflineCapture
         var (c, clean) = view.ReadWatermarks();
         var databaseId = view.TryGet(DatabaseEngine.BK_DatabaseId, out var id) ? BackupImageMeta.UnpackGuid(id) : Guid.Empty;
         var timelineId = view.TryGet(DatabaseEngine.BK_TimelineId, out var tl) ? BackupImageMeta.UnpackGuid(tl) : Guid.Empty;
+        var timelineParent = view.TryGet(DatabaseEngine.BK_TimelineParent, out var tp) ? BackupImageMeta.UnpackGuid(tp) : Guid.Empty;
         var nonce = view.TryGet(DurabilityWatermarks.BackupStateNonceKey, out var nv) ? (ulong)nv.AsLong : 0UL;
         if (databaseId == Guid.Empty)
         {
@@ -149,7 +150,8 @@ internal static class OfflineCapture
         }
 
         using var session = BackupStore.OpenForWrite(storePath, databaseId, createIfMissing: true, options.StoreFileSystem, log);
-        var kind = BackupAdmission.Decide(options.Full ? BackupKind.Full : BackupKind.Incremental, lineage, session, timelineId, out var parent);
+        var kind = BackupAdmission.Decide(options.Full ? BackupKind.Full : BackupKind.Incremental, lineage, session, timelineId, timelineParent,
+            out var parent);
         var plan = new BackupPointPlan(databaseId, timelineId, kind, kind == BackupKind.Incremental ? lineage.ChainId : Guid.Empty,
             kind == BackupKind.Incremental ? parent.BackupId : 0, view.FormatRevision, $"Typhon {typeof(OfflineCapture).Assembly.GetName().Version}",
             Offline: true);

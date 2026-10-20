@@ -244,7 +244,7 @@ class BackupSchedulerTests : SchedulerTestBase<BackupSchedulerTests>
             Spawn(dbe, 50);
             Clock.Advance(TimeSpan.FromSeconds(31));
             Assert.That(Tick(dbe), Is.Not.Null);
-            dbe.AdoptTimeline(Guid.NewGuid());   // what the first open of a restored bundle does
+            dbe.AdoptTimeline(Guid.NewGuid(), dbe.TimelineId, 0, TimelineReason.Restore, keepLineage: false);   // a restored bundle's first open
         }
 
         using (var scope = ServiceProvider.CreateScope())

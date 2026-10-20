@@ -140,8 +140,12 @@ internal static class Program
                     .WithExample(["backup", "list", "--store", "/backups/game", "--restorable"]);
                 backup.AddCommand<BackupVerifyCommand>("verify").WithDescription("Verify a store's packs and chains; the verdict is the exit code.")
                     .WithExample(["backup", "verify", "--store", "/backups/game", "--level", "full"]);
-                backup.AddCommand<BackupRestoreCommand>("restore").WithDescription("Restore a point into a new bundle.")
-                    .WithExample(["backup", "restore", "--store", "/backups/game", "--point", "latest", "--to", "/data/restored"]);
+                backup.AddCommand<BackupRestoreCommand>("restore").WithDescription("Restore a point, an LSN or an instant into a new bundle.")
+                    .WithExample(["backup", "restore", "--store", "/backups/game", "--point", "latest", "--to", "/data/restored"])
+                    .WithExample(["backup", "restore", "--store", "/backups/game", "--time", "2026-10-21T14:03:00Z", "--to", "/data/restored", "--dry-run"]);
+                backup.AddCommand<BackupLogCommand>("log").WithDescription("The WAL archive: timelines, segments, gaps; a range's frames with --commits.")
+                    .WithExample(["backup", "log", "--store", "/backups/game"])
+                    .WithExample(["backup", "log", "--store", "/backups/game", "--lsn-from", "1000", "--lsn-to", "2000", "--commits"]);
                 backup.AddCommand<BackupStatusCommand>("status").WithDescription("A database's or a store's backup health; the health is the exit code.")
                     .WithExample(["backup", "status", "game.typhon"])
                     .WithExample(["backup", "status", "--store", "/backups/game", "--stale-after", "1d"]);

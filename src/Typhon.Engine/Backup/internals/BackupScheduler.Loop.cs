@@ -38,7 +38,7 @@ internal sealed partial class BackupScheduler
     /// </summary>
     internal TimeSpan Grace { get; set; } = TimeSpan.FromSeconds(30);
 
-    /// <summary>Test seam: builds the archiver instead of <see cref="DatabaseEngine.CreateWalArchiver"/>.</summary>
+    /// <summary>Test seam: builds the archiver instead of <see cref="DatabaseEngine.CreateWalArchiver(ArchiveOptions, string)"/>.</summary>
     internal Func<IWalArchiver> ArchiverFactory { get; set; }
 
     /// <summary>Test seam: start no thread; the test calls <see cref="TickForTest"/>.</summary>

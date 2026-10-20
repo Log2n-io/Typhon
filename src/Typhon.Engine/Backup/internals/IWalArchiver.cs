@@ -5,7 +5,7 @@ namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// The continuous WAL archiver of one engine (#1418, impl/1418 §4.5): the seam the backup scheduler (#1416) drives. Built by
-/// <see cref="DatabaseEngine.CreateWalArchiver"/>; <c>null</c> when archiving is not configured.
+/// <see cref="DatabaseEngine.CreateWalArchiver(ArchiveOptions, string)"/>; <c>null</c> when archiving is not configured.
 /// </summary>
 /// <remarks>
 /// Two parts. <see cref="Step"/> runs on the scheduler's tick and does only bounded work: a time sample, the switch decision, the release and gap

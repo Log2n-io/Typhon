@@ -53,6 +53,7 @@ internal static class ChainResolver
     /// <summary>The id a selector names in this store.</summary>
     public static uint Select(StoreView view, PointSelector selector)
     {
+        selector.RequirePoint("Resolving a backup point");
         if (!selector.IsLatest)
         {
             return selector.BackupId;

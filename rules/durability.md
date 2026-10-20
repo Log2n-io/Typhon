@@ -808,7 +808,9 @@ CK-08 (flush-only cycles) are later increments.
             reader holding the lock sees the old segment as active or as sealed, never as neither (online backup's tail
             snapshot, BKP-04)
   scope: `WalSegmentManager._sealedLock` — guards `RotateSegment` (ActiveSegment assignment + Add), `MarkReclaimable`,
-         `SealedSegmentCount`, `GetAllSegmentPaths`, `WalSegmentManager.SnapshotForTail`, reopen-reconcile Add
+         `SealedSegmentCount`, `GetAllSegmentPaths`, `WalSegmentManager.SnapshotForTail`, reopen-reconcile Add, and the WAL
+         archive's reads: `WalSegmentManager.ArchiveSnapshot` (the archiver's step, a few field copies, no I/O under the lock) and
+         `WalSegmentManager.BytesHeldBetween` (step 8's backlog sum, BKP-10)
   verified: SegmentSnapshotTests.SnapshotDuringARotation_SeesTheSegmentBeingSealed (a rotation paused between creating and
             publishing the new segment; assigning ActiveSegment outside the lock turns it red)
   on_violation: TXW-7 — `List<T>` corruption under concurrent structural mutation → a fatal latch in a background thread
@@ -1409,6 +1411,9 @@ either durability, recoverability, or consistency.
   note the `<` is load-bearing for online backup (BKP-04): a crash with meta = C keeps exactly the segments with
     `lastLSN ≥ C`, recovery resumes the TSN counter above every commit stamp it scans in them (RB-05), and a backup's
     tail copies that same set so a restore is that crash state
+  note the WAL archive's floor (BKP-10, W1′) joins the trim with the same `<`: with archiving configured step 8 and the open's
+    reconcile also keep every segment with `lastLSN ≥ archiveFloor` (= the archive's end + 1), unless the backlog policy released
+    it. A third floor, never a weaker one: the checkpoint frontier is unchanged, the floors combine by `min`
   scope: WalSegmentManager.cs, CheckpointManager.cs
   on_violation: premature recycling → WAL records needed for crash recovery
     are gone; data loss without detection
@@ -3211,9 +3216,9 @@ answer to different constraints — RB must always end with a usable database, I
 ## Module: BKP — Online backup capture
 
 A backup point is a frozen image of the data file plus the WAL tail that makes it consistent (ADR-075; design
-`design/Durability/PitBackup/`, implementation plans `impl/1412-capture-plan.md`, `impl/1413-store-restore-plan.md` and
-`impl/1415-1416-lifecycle-ops-plan.md`). This module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08) and the chain
-lifecycle (#1415: BKP-13, BKP-14) and the ops loop (#1416: BKP-15, BKP-16). BKP-10 and 11 (WAL archiving) land with #1418.
+`design/Durability/PitBackup/`, implementation plans `impl/1412-capture-plan.md`, `impl/1413-store-restore-plan.md`,
+`impl/1415-1416-lifecycle-ops-plan.md` and `impl/1418-wal-archive-plan.md`). This module covers capture (#1412), the store and restore (#1413:
+BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#1416: BKP-15, BKP-16) and WAL archiving (#1418: BKP-10, BKP-11).
 
 ### BKP-01: Every data-file write is tracked and gated `[silent]`
   invariant ∀ engine write w to the data file: w is issued by PagedMMF.IssueDataFileWrite or
@@ -3374,7 +3379,8 @@ lifecycle (#1415: BKP-13, BKP-14) and the ops loop (#1416: BKP-15, BKP-16). BKP-
 ### BKP-06: An incremental only on a trusted map and an unbroken chain `[silent]`
   invariant a point is captured incremental iff the request allows it ∧ BackupLineage.Trusted ∧ lineage.StoreId = the
             store's id ∧ the store's head of lineage.ChainId is lineage.LastBackupId ∧ that head is on the database's current
-            timeline; otherwise full (a new ChainId, minted by the store)
+            timeline or on the timeline it forked from (#1418: a fork for a write the WAL cannot replay keeps the lineage, the map
+            having tracked every write; a restore's new timeline does not); otherwise full (a new ChainId, minted by the store)
   invariant Trusted at open iff the last close was clean ∧ backup-state's nonce = BackupStateNonce ≠ 0 ∧ both CRCs hold ∧
             DatabaseId ∧ TimelineId ∧ DataFilePages = the file's length at open; then its map is ORed into the live one
   invariant backup-state is written only by a Trusted session's clean close, its nonce recorded in the flip that sets the
@@ -3385,7 +3391,8 @@ lifecycle (#1415: BKP-13, BKP-14) and the ops loop (#1416: BKP-15, BKP-16). BKP-
             the damaged one (a store that cannot be read back leaves the point unverified, not failed)
   scope: BackupAdmission.Decide, BackupStateFile.TryRead, BackupStateFile.Write, DatabaseEngine.AdoptBackupState,
     DatabaseEngine.WriteBackupState, DurabilityWatermarks.MarkCleanShutdown, DurabilityWatermarks.BeginOpenAfterCleanClose,
-    DurabilityWatermarks.SetCleanShutdown, DatabaseEngine.AdoptTimeline, BackupCoordinator.VerifyPublished
+    DurabilityWatermarks.SetCleanShutdown, DatabaseEngine.AdoptTimeline, DatabaseEngine.ForkTimeline (keepLineage), OfflineCapture.Create
+    (the image's BK_TimelineParent), BackupCoordinator.VerifyPublished
   on_violation: an incremental over a map that missed writes → the restore serves stale pages, discovered at restore
   verified: BackupAdmissionTests (T6: a clean close → incremental holding exactly the pages a write probe saw between the
             freezes, AC-C2; a crash, an offline repair, a copied bundle behind its chain's head, a wiped store and a new
@@ -3393,7 +3400,9 @@ lifecycle (#1415: BKP-13, BKP-14) and the ops loop (#1416: BKP-15, BKP-16). BKP-
             trip and damage; trusted close → trusted open → nonce cleared; a stale file; a matching nonce with another database,
             timeline or length; an untrusted close deletes the file; a write failure costs a full point; Mutant_AFileTrustedAfterACrash_IsReported;
             Adoption_IsReportedLoaded_OnlyWhenTheSessionAdopts: tracking off is TrackingOff, never Loaded),
-            BackupJobTests.APointFailingItsVerify_MakesTheNextOneFull (+ Mutant_NoRevokeAfterAFailedVerify_IsReported).
+            BackupJobTests.APointFailingItsVerify_MakesTheNextOneFull (+ Mutant_NoRevokeAfterAFailedVerify_IsReported),
+            TimelineForkTests.AFork_KeepsTheLineage_TheNextPointIsIncremental (the parent clause; the decision matrix holds a
+            head on the parent and on another timeline's fork).
             Source mutants seen red: no nonce check, the open not clearing the nonce, Decide ignoring trust, an untrusted close
             writing the file, the adoption reporting Loaded with tracking off
 
@@ -3448,6 +3457,96 @@ lifecycle (#1415: BKP-13, BKP-14) and the ops loop (#1416: BKP-15, BKP-16). BKP-
             BackupIdAllocationTests.Mutant_AStoreThatLostEveryHighWater_ReusesAnId; source mutants seen red: rename before
             flush, no directory flush (Linux model), publish with overwrite, allocation ignoring the high-water, verify
             skipping FileCRC, restore skipping PageCrc
+
+### BKP-10: No WAL segment leaves the database un-archived, unless the backlog policy released it, and every loss is a visible gap `[fatal]`
+  invariant with archiving configured, reclaim — CheckpointManager step 8 and the open's reconcile — deletes a sealed segment s only
+            when s.LastLsn < archiveFloor; archiveFloor = ArchivedThroughLsn + 1, raised by the archiver only after s's .twal is
+            durable (flushed, renamed without replace, its directory flushed); it is engaged at 0 before the first cycle (the
+            recovery seal's included), and the open reclaims nothing below it (WA-3)
+  invariant the floor is released only at step 8, by a CAS, only when the bytes it alone holds (floor ≤ LastLsn < trim) exceed
+            BacklogLimitBytes, each release counted; it is re-engaged only by the archiver's raise after a successful publish; a
+            raise racing the CAS wins and the cycle honours the floor it read. The engine never waits on the archive and holds at
+            most the limit plus one segment for it; archiving off costs step 8 one read
+  invariant the archive holds only durable, valid WAL: s is archived only once s.LastLsn ≤ DurableLsn (WA-15), and only up to the
+            end of its last frame read whole, the rest of that page zeroed (no byte of a torn frame is ever archived); a break in
+            a segment is recorded as a dropped range no restore may cross (CorruptMidSegment)
+  invariant a timeline's archive is ordered by LSN; wherever next.FirstLsn ≠ prev.LastLsn + 1 the next segment's footer records
+            the gap with its cause (BacklogReleased, ArchivingOff, Unknown) and every restore re-derives continuity from the
+            files; a segment starting inside the archive, a local segment whose archived copy under its id has other bytes, or a
+            name holding other bytes stops archiving that timeline (Diverged, WA-14) — the existing file is never replaced
+  invariant an archived segment is immutable, self-describing and wholly CRC-covered (.twal: HeaderCRC, BlockDirCrc, SamplesCrc,
+            RawCrc after decode, FooterCRC, FileCRC); archive-index.bin is a cache, used only intact and for the listing it was
+            written for; a timeline's archive.lock is held for one operation, and a file system that does not enforce it is refused
+  invariant the segment the archiver reads is opened with delete sharing (WA-5): a released cycle that reclaims it deletes it
+            instead of failing under the sealed-list lock
+  invariant a segment the archive floor may keep past a crash open never holds bytes recovery would stop at (WA-9): when the crash
+            open's recovery stopped at a break in the LAST segment holding data, the open writes a PaddingSentinel frame header
+            (RecordCount = CrashSealRecordCount, LastLsn = the highest fence LSN recovery applied from the torn frame) at the
+            first invalid frame and flushes it, after recovery read the WAL and before the session's first append; the segment
+            then ends cleanly for recovery, captures and the archiver (archived TornTrimmed, the applied fences a dropped range).
+            A break followed by a segment holding data is mid-log corruption (#587): left as it is
+  scope: CheckpointManager.EngageArchiveFloor, CheckpointManager.RaiseArchiveFloor, CheckpointManager.ArchiveFloorReleased
+    (step 8, beside the backup floor W1), WalSegmentManager.Initialize (reclaimFloorAtOpen), WalSegmentManager.BytesHeldBetween,
+    WalSegmentManager.ArchiveSnapshot, IWalFileIO.OpenSegmentForArchive, WalFileIO.OpenSegmentForArchive,
+    WalSegmentReader.OpenSegmentForArchive, WalArchiveScanner.Scan, WalArchiver.Step, WalArchiver.ArchivePending,
+    WalArchiver.ArchiveOne, WalArchiver.CheckCovered, WalArchiveTimeline.Publish, WalArchiveTimeline.TryOpen,
+    ArchivedSegmentWriter.Complete, ArchivedSegmentReader.Decode, ArchiveIndex.TryRead, DatabaseEngine.InitializeWalManager,
+    DatabaseEngine.CreateWalArchiver, WalTornTailSeal.Seal, DatabaseEngine.SealTornTailForArchive
+  on_violation: a segment deleted un-archived with no gap → a restore replays across a hole as if continuous → a state no run
+    produced, found when it is needed; a torn frame in the store → every restore across it stops there for good; un-durable
+    bytes archived → the next session reuses their LSNs and the timeline's archive diverges from the database; a torn segment kept
+    unsealed → the next crash's recovery stops at it and loses every commit of the session after it
+  requires: WP-09, CK-07, WP-06, LOG-03
+  verified: WalArchiveFloorTests (held through checkpoints until the raise; released once, counted, re-engaged only by a raise; a
+            raise beating the release CAS; Mutant_AReclaimIgnoringTheArchiveFloor_IsReported), WalArchiveOpenReclaimTests (AC-A5,
+            Mutant_AnOpenReclaimingBelowTheCheckpointOnly_IsReported), ArchiveShareDeleteTests (Windows, real files;
+            Mutant_AReadHandleWithoutDeleteSharing_FailsTheReclaim), WalArchiveScannerTests, WalArchiverStepTests (the floor is
+            still 1 when the copy becomes durable), WalArchiveBacklogTests (AC-A1), ArchivedSegmentCorruptionTests (T7: every byte
+            outside the data and every 8th inside; Mutant_ADecodeWithoutTheRawCrc_IsReported), ArchiveStoreCrashTests (AC-A4, a
+            crash after every operation of a publish, both directory models), ArchiveIndexTests
+            (Mutant_AnIndexTrustedWithoutItsFingerprint_IsReported), ArchiveDivergenceTests, ArchiveTornTailTests (AC-A10:
+            Mutant_ACrashOpenThatDoesNotSealTheTornTail_IsReported; a mid-log break left unsealed), WalArchiveScannerTests
+            (ASealedTornTail_EndsCleanlyAtItsSentinel_NamingTheFenceRecordsRecoveryApplied) — [VerifiesRule("BKP-10")]. Source
+            mutants seen red: the floor raised before the publish, a release not counted, no flush before the rename, no
+            directory flush (Linux model), a seal over a mid-log break
+  spec: rules/tla/WalArchive.tla (S7) — ArchivedOrReleased, FloorHoldsUnarchived, FloorAtArchiveEnd, NoSilentHole (2 792 states; -full
+    28 776); mutants -mutant-raisebeforepublish, -mutant-openreclaim, -mutant-nofloor, -mutant-continuityunchecked, -mutant-releasenocount
+
+### BKP-11: A restore to an LSN or a time yields exactly the committed prefix at its cut, on one timeline, from one history `[fatal]` `[silent]`
+  invariant restore(L) on timeline t: L' = the highest LSN ≤ L that ends a whole frame of t's WAL; state(open(R)) = every
+            transaction whose TxCommit LSN ≤ L' and nothing else — BKP-05 with the tail extended by t's archived segments and cut
+            at L' (the cut segment's bytes past the frame end zeroed to its declared size); L' ≥ the base's P, and L' is what the
+            restore reports (EffectiveLsn)
+  invariant an instant resolves to the highest LSN sampled durable at or before it on t's ancestry (t's samples, then its
+            parent's at or below t's origin); never a frame durable after the instant; none ⇒ BeforeCoverage
+  invariant the base is the newest restorable point of t with P ≤ L whose tail agrees with t's archive: each tail segment that
+            has an archived copy under its id equals it over the bytes both hold, the tail's rest zeros; a disagreeing base is
+            never mixed with the archive (another history, WA-11), an older one is tried; none ⇒ NoBase
+  invariant the restored WAL is continuous from the base's tail to L': every hop next.FirstRecordLsn ≤ prev.End + 1, re-derived
+            from the files, never the index; a recorded drop (BacklogReleased, CorruptMidSegment, TornAtCrash) or a missing
+            range below L refuses with its range (Gap) and the LSNs still restorable; L past the archive ⇒ BeyondArchive
+  invariant a restore never crosses a fork: L ≤ a child's OriginLsn is restored on the parent (ancestry walk), L > it on the
+            child from a child point only; a fork (SchemaChange at registration, BulkLoad before BulkEnd, Restore at adoption)
+            flips BK_TimelineId/Parent/OriginLsn/Reason in one fsynced meta write before any record of the new timeline
+  invariant a clean base restored with archived WAL opens on the crash path: the marker (v2) carries ForceCrashRecovery, and the
+            open replays the restored WAL whatever the image's clean flag; a v1 marker is still read, a newer one refused
+  invariant a refused or planned restore writes nothing: Preview/PlanRestore report every refusal Run would raise; a Run held to
+            an ApprovedPlan whose fingerprint (point, target, segments and their CRCs, cut) no longer matches refuses
+            (BackupPlanChanged) before the first write
+  requires: BKP-05, BKP-10, BKP-06, BKP-08, LOG-03, LOG-04
+  scope: ArchiveRestorePlanner.Plan, ArchiveRestorePlanner.ResolveTime, ArchiveRestorePlanner.Ancestor, WalArchiveScanner.FindCut,
+    RestoreStager.Run, RestoreStager.Preview, RestoreStager.WriteArchivedWal, RestoreMarker.TryRead,
+    DatabaseEngine.CheckRestoreMarkerAtOpen, DatabaseEngine.ForkTimeline, DatabaseEngine.AdoptTimeline
+  on_violation: a restore that opens without error to a state no run produced — a prefix past the target, a frame cut in half, two
+    histories spliced at a segment, a fork crossed, or a clean base whose archived WAL is silently skipped; found when the data
+    is needed
+  verified: RestoreToLsnOracleTests (T12: every frame end as a target, from either base, oracle state; forced crash recovery),
+            FrameCutTests, ArchiveRestorePlannerTests (every refusal; a disagreeing base never mixed; never across a fork),
+            TimelineForkTests, RestoreMarkerV2Tests, RestoreCleanBaseTests
+            (Mutant_AMarkerWithoutForceCrashRecovery_IsReported), RestorePlanTests (AC-A11) — [VerifiesRule("BKP-11")]. Source
+            mutants seen red: fork flipped after FlushToDisk
+  spec: rules/tla/WalArchive.tla (S7) — NoSilentHole (a restore never accepts a target past a hole); the cut is a prefix of the log, whose
+    recovery to exactly the committed prefix is S2's (CommitRecovery.tla)
 
 ### BKP-12: The engine never waits on a backup past its budget
   invariant a data-file writer spends at most CbwStallTimeout in BackupCapture.BeforeWrite per write, and per SavePages

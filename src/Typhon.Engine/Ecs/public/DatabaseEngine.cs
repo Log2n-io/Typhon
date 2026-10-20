@@ -365,6 +365,12 @@ public class DatabaseEngineOptions
     internal bool ForceCrashRecoveryAtOpen { get; set; }
 
     /// <summary>
+    /// Continuous WAL archiving (#1418): null = off. Read once by the constructor, which holds every WAL segment for the archive from the first instant
+    /// (BKP-10). Stands in for the backup options' <c>Archive</c> and <c>StorePath</c> until the backup scheduler (#1416) carries them.
+    /// </summary>
+    internal WalArchiveConfiguration WalArchive { get; set; }
+
+    /// <summary>
     /// Lock acquisition timeout configuration for all engine subsystems.
     /// </summary>
     public TimeoutOptions Timeouts { get; set; } = new();
@@ -2175,6 +2181,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // provider/options; sharing one options across two engines is not a supported path.)
         _options.Wal?.WalDirectory ??= Path.Combine(MMF.BundleDirectory, "wal");
 
+        // WAL archiving (BKP-10) is decided here, once: its floor must hold from the first instant, the open's reclaim and the recovery seal included.
+        ValidateArchiveConfiguration();
+
         _durabilityNode = resourceRegistry.Durability;
         TimeoutOptions.Current = _options.Timeouts;
         _componentCollectionSegmentByStride = new ConcurrentDictionary<int, ChunkBasedSegment<PersistentStore>>();
@@ -2453,6 +2462,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 freesHeldAtClose = true;
             }
 
+            // The WAL archive's final pass (WA-23): after the drains, so it archives what they appended; before the final cycle, which then sees the raised
+            // floor. A close treated as a crash makes no pass, as a crash would not.
+            StopWalArchiverAtClose(_simulateHardCrash || SimulateUncleanShutdownForTest || !_constructed || _archetypeInitIncomplete);
+
             // Checkpoint must dispose first: runs final cycle, writes pages + advances LSN before WAL shuts down
             CheckpointManager?.Dispose();
             CheckpointManager = null;
@@ -2565,7 +2578,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // the persisted CheckpointLSN (clean-reopen path, where NO WAL recovery ran so lastLSN is 0). Using lastLSN alone restarts the reopened writer at LSN 1, below a
         // prior session's CheckpointLSN; RecoveryDriver then skips the entire post-reopen window as already-consolidated (LOG-08 — silent loss of durably-acked commits).
         var frontierLsn = Math.Max(lastLSN, checkpointLsn);
-        WalManager.Initialize(lastSegmentId, frontierLsn > 0 ? frontierLsn + 1 : 1, checkpointLsn);
+        // With archiving configured the open reclaims nothing (WA-3): a close with the store unreachable left segments only the archive floor kept.
+        WalManager.Initialize(lastSegmentId, frontierLsn > 0 ? frontierLsn + 1 : 1, checkpointLsn, ArchiveConfiguration != null ? 0 : long.MaxValue);
         // Seed the durable watermark to the reopen frontier so it MATCHES LastAppendedLsn (= NextLsn-1 = frontierLsn). Initialize advances NextLsn to
         // frontierLsn+1 (LOG-08, LSN monotonic across sessions); without a matching durable seed, DurableLsn stays 0 while LastAppendedLsn=frontierLsn, so
         // the very first checkpoint barrier (CK-02 waits DurableLsn ≥ LastAppendedLsn) blocks for an LSN no frame will ever publish on an idle reopened
@@ -2619,6 +2633,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // CK-08: until the recovery's seal, every cycle is flush-only — the passes write past the cache, and a full cycle among them would advance
         // CheckpointLSN over a half-recovered file.
         CheckpointManager.RecoveryInProgress = CrashRecoveryAtOpen;
+
+        // BKP-10: before the first cycle (the recovery seal's included), so no cycle ever reclaims a segment the archive has not copied.
+        if (ArchiveConfiguration != null)
+        {
+            CheckpointManager.EngageArchiveFloor(ArchiveConfiguration.Options.BacklogLimitBytes);
+        }
+
         CheckpointManager.Start();
 
         // Wire demand-driven flush: when page cache backpressure fires, immediately wake
@@ -2908,7 +2929,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
             // #1143: before the first chunk-segment load (LoadSystemSchemaR1, next in the ctor), so every segment the open loads can rebuild its allocator
             // from what the last clean close recorded instead of reading all of its pages. After an unclean close the summary is never consulted.
-            if (_cleanShutdownAtOpen && !_options.ForceCrashRecoveryAtOpen)
+            if (_cleanShutdownAtOpen && !ForcedCrashRecoveryAtOpen)
             {
                 AdoptChunkSummary();
             }
@@ -2957,7 +2978,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // clear in BuildIndexedFieldInfo sees it. RunWalV2Recovery reads the same flag for the matching Phase-5 rebuild, so clear and rebuild always
                 // agree. The scan below still runs on a clean open: it reads the log, not the data file, and gives InitializeWalManager the LSN frontier
                 // (LOG-08).
-                CrashRecoveryAtOpen = !_cleanShutdownAtOpen || _options.ForceCrashRecoveryAtOpen;
+                CrashRecoveryAtOpen = !_cleanShutdownAtOpen || ForcedCrashRecoveryAtOpen;
 
                 // A crash open completes a segment grow torn by the crash rather than refusing the segment (#1296) — where the WAL can refill what a page
                 // the grow had not written held, as for the segments it replaces (TolerateTornSegmentsAtOpen); a clean open stays strict.
@@ -3496,34 +3517,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 bootstrap.Set(BK_DatabaseId, PackDatabaseId(DatabaseId));
                 bootstrap.Set(BK_TimelineId, PackDatabaseId(TimelineId));
             });
-        }
-    }
-
-    /// <summary>
-    /// Starts a new WAL timeline: persists <paramref name="timelineId"/> as <see cref="BK_TimelineId"/> (one meta flip, durable on return) and adopts it.
-    /// Idempotent: adopting the current timeline writes nothing. The first open of a restored database calls it before accepting transactions, so a crash
-    /// in between replays the adoption rather than losing it.
-    /// </summary>
-    /// <param name="timelineId">The new timeline; never <see cref="Guid.Empty"/>.</param>
-    internal void AdoptTimeline(Guid timelineId)
-    {
-        if (timelineId == Guid.Empty)
-        {
-            throw new ArgumentException("A timeline id cannot be empty.", nameof(timelineId));
-        }
-
-        var bootstrap = MMF.Bootstrap;
-        if (bootstrap.TryGet(BK_TimelineId, out var current) && UnpackDatabaseId(current) == timelineId)
-        {
-            TimelineId = timelineId;
-            return;
-        }
-
-        MMF.MutateBootstrapAndPersist(() => bootstrap.Set(BK_TimelineId, PackDatabaseId(timelineId)));
-        TimelineId = timelineId;
-        if (BackupCoordinator != null)
-        {
-            BackupCoordinator.Lineage.Trusted = false;   // a new timeline starts a new lineage: its first point is full (BKP-06)
         }
     }
 
@@ -4329,6 +4322,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 diff = SchemaValidator.ComputeDiff(schemaName, persistedFields, persisted.Comp, definition,
                     resolver.Renames ?? (IReadOnlyList<(string, string, int)>)[]);
 
+                // Q4 (impl/1418 §3.6): a layout change makes the records written from here on unreplayable onto an image from before it. The timeline
+                // forks before the first byte of the change is written, so no restore replays across it.
+                if (!diff.IsIdentical)
+                {
+                    ForkTimeline(TimelineReason.SchemaChange, switchSegment: false);
+                }
+
                 if (diff.HasBreakingChanges && schemaValidation != SchemaValidationMode.Skip)
                 {
 
@@ -4532,7 +4532,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
         else
         {
-            // Create path: use the provided ChangeSet, or create a new one for standalone registration
+            // Create path: use the provided ChangeSet, or create a new one for standalone registration. A component new to an existing database is a
+            // schema change (Q4): the timeline forks before its table is written.
+            if (_componentsTable != null && !MMF.IsDatabaseFileCreating)
+            {
+                ForkTimeline(TimelineReason.SchemaChange, switchSegment: false);
+            }
+
             var cs = changeSet ?? MMF.CreateChangeSet();
             componentTable = new ComponentTable(this, definition, this, storageMode, changeSet: cs);
 
@@ -4984,6 +4990,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // Reopen re-match by name (claude/design/Ecs/SourceGeneratedRegistry/04-solution-design.md §7.1):
             // restore this archetype's persisted routing id, or assign a fresh one for a newly-added archetype.
             var hasPersisted = TryGetPersistedArchetype(meta, out var persisted);
+
+            // A new archetype on an existing database (Q4): records name (routingId, slot), and an image predating it may hand the id to another
+            // archetype at its open. The timeline forks before the id is used.
+            if (!hasPersisted && !MMF.IsDatabaseFileCreating)
+            {
+                ForkTimeline(TimelineReason.SchemaChange, switchSegment: false);
+            }
+
             var routingId = hasPersisted ? persisted.Arch.RoutingId : _nextRoutingId++;
 
             // A migration invalidates the cluster (new component sizes => new geometry), so the fresh one is allocated below and the old bytes would be
@@ -5604,6 +5618,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         if (result.StoppedAtCorruption)
         {
             LogWalRecoveryStoppedAtCorruption(result.SegmentsScanned, result.MaxLsn);
+            SealTornTailForArchive(walDir);
         }
 
         // LOG-08 across a RECOVERY, not only across a clean reopen (#712). InitializeWalManager has to choose the LSN floor in the constructor, where the

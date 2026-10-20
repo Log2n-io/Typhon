@@ -48,16 +48,20 @@ public static partial class BackupOperations
 
     /// <summary>
     /// Restores a point into a bundle: <paramref name="target"/> is a <c>{name}.typhon</c> path carrying the database's own name, or a directory to put
-    /// it in. Nothing is written before every refusal is checked; an existing bundle is moved aside, never deleted.
+    /// it in. Nothing is written before every refusal is checked; an existing bundle is moved aside, never deleted. For <see cref="PointSelector.AtLsn"/>
+    /// or <see cref="PointSelector.AtTime"/>, the newest point of the timeline at or below the target is restored with the archived WAL replayed up to the
+    /// last transaction ending at or below it (BKP-11).
     /// </summary>
     /// <param name="store">The store directory.</param>
-    /// <param name="point">Which point.</param>
+    /// <param name="point">Which point, or an LSN or a time of an archived timeline.</param>
     /// <param name="target">The bundle path or its parent directory.</param>
     /// <param name="options">Replace, format mismatch, forensics, settle, progress.</param>
     /// <returns>What was restored, and where.</returns>
     /// <exception cref="RestoreRefusedException">The target exists, is live, is misnamed, or the image is of another format revision.</exception>
     /// <exception cref="BackupChainBrokenException">A pack of the point's chain is missing or inconsistent; the message names what is restorable.</exception>
     /// <exception cref="BackupPackCorruptException">A byte the restore needs failed its check.</exception>
+    /// <exception cref="RestoreTargetUnreachableException">An LSN or a time cannot be reached; the message names what can.</exception>
+    /// <exception cref="BackupPlanChangedException">An approved plan no longer holds.</exception>
     public static BackupRestoreResult Restore(string store, PointSelector point, string target, BackupRestoreOptions options = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(store);
@@ -72,12 +76,14 @@ public static partial class BackupOperations
             Cancellation = options.Cancellation,
             Progress = options.Progress,
             Logger = options.Logger,
+            ApprovedPlan = options.ApprovedPlan,
         });
         var view = StoreView.Open(store, trustCatalog: false);
         return new BackupRestoreResult(Summarize(Standing(view, outcome.PointId)), outcome.Target, outcome.DisplacedBundle, outcome.ChainDepth,
             outcome.PagesWritten, outcome.ZeroPages, outcome.TailSegments, outcome.BytesRead, outcome.BytesWritten, outcome.Duration, outcome.SuspectPages,
             outcome.DamagedPages.Select(d => new PackPageDamage(d.PageId, d.PackFile, d.Reason)).ToList(), outcome.NewTimelineId,
-            outcome.SettleFailure?.Message);
+            outcome.SettleFailure?.Message, outcome.TargetLsn, outcome.EffectiveLsn, outcome.TimelineId, outcome.ArchivedSegments,
+            outcome.ForcedCrashRecovery);
     }
 
     /// <summary>Verifies the whole store. Never throws for damage: it reports it.</summary>
@@ -129,10 +135,11 @@ public static partial class BackupOperations
         var restorable = restorableId == 0 ? null : Summarize(Standing(view, restorableId));
         var count = view.Catalog.Packs.Select(p => p.BackupId).Concat(view.Catalog.Unreadable
             .Select(u => PackFormat.TryParseFileName(u.File, out var id, out _, out _) ? id : 0u).Where(id => id != 0)).Distinct().Count();
+        var archive = WalArchiveReport.Coverage(StoreFileSystem.Instance, view);
         if (restorable == null)
         {
             return new BackupStoreStatus(BackupHealth.Failing, count == 0 ? "the store holds no point" : "no point of the store can be restored", count,
-                latestPack == null ? null : Summarize(latestPack), null);
+                latestPack == null ? null : Summarize(latestPack), null, archive);
         }
 
         string warning = null;
@@ -148,9 +155,15 @@ public static partial class BackupOperations
         {
             warning = $"{view.Temps.Count} temporary file(s) of an interrupted backup are left; the next backup deletes them";
         }
+        else if (archive.Find(static c => c.UncoveredGaps.Count > 0) is { } gapped)
+        {
+            var g = gapped.UncoveredGaps[0];
+            warning = $"the WAL archive of timeline {gapped.TimelineId} misses LSN {g.FromLsn}..{g.ToLsn} ({g.Reason}) and no point lies past it: "
+                      + "nothing after it can be restored to an LSN until the next point";
+        }
 
         return new BackupStoreStatus(warning == null ? BackupHealth.Ok : BackupHealth.Warning, warning ?? "the newest point is restorable", count,
-            latestPack == null ? null : Summarize(latestPack), restorable);
+            latestPack == null ? null : Summarize(latestPack), restorable, archive);
     }
 
     /// <summary>
