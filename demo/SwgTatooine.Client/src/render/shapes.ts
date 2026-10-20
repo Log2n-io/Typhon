@@ -4,7 +4,7 @@
  * Faces lying on the ground (y = 0) are left out: the camera is always above it.
  */
 
-export type ShapeKind = 'box' | 'arrow' | 'prism' | 'mound' | 'quad';
+export type ShapeKind = 'box' | 'arrow' | 'prism' | 'mound' | 'quad' | 'dome';
 
 export interface ShapeData {
   positions: number[];
@@ -135,6 +135,47 @@ function mound(b: ShapeData, sides: number): void {
   }
 }
 
+/**
+ * A hemisphere: the shuttleport, and the only curved thing on the planet.
+ *
+ * <b>It exists to be found.</b> A port is one of a city's ~190 structures and was drawn as a slightly paler box, so
+ * finding the one building a flight leaves from meant clicking buildings until the inspector said `kind` 2. A dome,
+ * taller than anything around it and the only shape that is not a box, is a landmark: a person walks towards it.
+ */
+function dome(b: ShapeData, sides: number, rings: number): void {
+  const ringAt = (r: number): [number, number, number][] => {
+    const phi = (r / rings) * (Math.PI / 2);
+    const radius = Math.cos(phi) * 0.5;
+    const y = Math.sin(phi);
+    const out: [number, number, number][] = [];
+    for (let s = 0; s < sides; s++) {
+      const a = (s / sides) * Math.PI * 2;
+      out.push([Math.sin(a) * radius, y, Math.cos(a) * radius]);
+    }
+
+    return out;
+  };
+
+  let lower = ringAt(0);
+  for (let r = 1; r < rings; r++) {
+    const upper = ringAt(r);
+    for (let s = 0; s < sides; s++) {
+      const n = (s + 1) % sides;
+      // Corner order copied from `mound`'s sides, which is what makes u × v point away from the axis.
+      face(b, [lower[n], upper[n], upper[s], lower[s]]);
+    }
+
+    lower = upper;
+  }
+
+  // A fan to the pole rather than one more band: the top ring's radius is cos(π/2) = 0, so its quads would be
+  // degenerate and `face` would normalise a zero-length normal into a black cap.
+  const apex: [number, number, number] = [0, 1, 0];
+  for (let s = 0; s < sides; s++) {
+    face(b, [lower[(s + 1) % sides], apex, lower[s]]);
+  }
+}
+
 /** A unit quad in xy, corners at ±1: the far band's screen-facing sprite, expanded in the vertex shader. */
 function quad(b: ShapeData): void {
   b.positions.push(-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0);
@@ -160,6 +201,9 @@ export function buildShape(kind: ShapeKind): ShapeData {
       break;
     case 'quad':
       quad(b);
+      break;
+    case 'dome':
+      dome(b, 16, 5);
       break;
   }
 

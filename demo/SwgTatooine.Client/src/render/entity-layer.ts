@@ -49,10 +49,17 @@ export class EntityLayer {
   private arraysVersion = -1;
   private readonly screen: ScreenPoint = { x: 0, y: 0, w: 0 };
 
-  constructor(archetype: number, style: LayerStyle, scene: Scene) {
+  /**
+   * @param archetype Which archetype's store this layer draws.
+   * @param style Its art.
+   * @param scene The Babylon scene.
+   * @param onlyStyle Draw only this style index, or -1 for all; see {@link LayerPacker}.
+   * @param omitStyle Skip this style index, or -1 for none.
+   */
+  constructor(archetype: number, style: LayerStyle, scene: Scene, onlyStyle = -1, omitStyle = -1) {
     this.archetype = archetype;
     this.style = style;
-    this.packer = new LayerPacker(archetype, style);
+    this.packer = new LayerPacker(archetype, style, onlyStyle, omitStyle);
     this.nearMesh = createShapeMesh(`near-${archetype}`, style.shape, scene);
     this.farMesh = createShapeMesh(`far-${archetype}`, 'quad', scene);
     this.nearMesh.renderingGroupId = SCENE_GROUP;

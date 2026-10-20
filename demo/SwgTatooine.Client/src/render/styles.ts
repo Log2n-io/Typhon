@@ -104,6 +104,29 @@ STRUCTURE_SIZES[StructureKind.Factory] = [22, 11, 22];
 STRUCTURE_SIZES[StructureKind.Harvester] = [6, 14, 6];
 STRUCTURE_SIZES[StructureKind.CampObject] = [4, 3, 4];
 
+/**
+ * The style key of the shuttleport's own layer — a synthetic name, so no archetype the catalog declares can collide
+ * with it. See {@link SHUTTLEPORT_SIZE} for why a port is drawn by a second layer over the same archetype.
+ */
+export const SHUTTLEPORT_STYLE = 'WorldObject/Shuttleport';
+
+/**
+ * A blue, and the one saturated colour in the scene.
+ *
+ * Everything else on the ground is sand, bone or pale stone, deliberately, so one primary reads as "this is the thing
+ * you are looking for" from the far side of a 456 m city disc without any labelling.
+ */
+const SHUTTLEPORT_COLOR: [number, number, number] = [0.13, 0.48, 1];
+
+/**
+ * 32 m across and 24 m tall, against a building's 18 × 9.
+ *
+ * The footprint is kept near the 30 m it was so that the server's 20 m boarding radius still sits OUTSIDE the dome's
+ * wall — a player who can see the prompt is standing beside the port, not inside it. The height is what makes it
+ * visible over the buildings between.
+ */
+const SHUTTLEPORT_SIZE: [number, number, number] = [32, 24, 32];
+
 const CREATURE_COLORS: [number, number, number][] = [
   [0.58, 0.47, 0.36],
   [0.5, 0.52, 0.46],
@@ -196,6 +219,20 @@ const STYLE_INPUTS: Readonly<Record<string, StyleInput>> = {
     heading: 'velocity',
     spritePixels: 5,
     spriteLift: 1.5,
+  },
+  [SHUTTLEPORT_STYLE]: {
+    shape: 'dome',
+    // One colour and one size at every index, because this layer only ever draws one kind: the style index packed per
+    // instance is the raw `kind` field (2 for a port), so the arrays have to answer at 2 as well as at 0.
+    colors: fill([], STYLE_COUNT, SHUTTLEPORT_COLOR),
+    sizes: fill([], STYLE_COUNT, SHUTTLEPORT_SIZE),
+    tints: fill([], TINT_COUNT, NO_TINT),
+    flattenMode: -1,
+    heading: 'grid',
+    // Far-band sprite: bigger and lifted higher than a structure's 3 px, so a port is a visible dot from outside the
+    // city it serves. Walking towards it is the whole point.
+    spritePixels: 9,
+    spriteLift: 14,
   },
 };
 

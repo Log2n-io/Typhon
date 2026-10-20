@@ -103,6 +103,10 @@ function optional(store: ArchetypeStore, name: string): FieldArray | null {
 export class LayerPacker {
   readonly archetype: number;
   readonly style: LayerStyle;
+  /** The only style index this layer draws, or -1 for all of them. See the constructor. */
+  readonly onlyStyle: number;
+  /** A style index this layer skips, or -1. */
+  readonly omitStyle: number;
 
   /** Per near instance: `(x, y, z, packed)` in render space, altitude included (CLI3D-04). */
   nearData = new Float32Array(0);
@@ -130,9 +134,23 @@ export class LayerPacker {
   private band = new Uint8Array(0);
   private yaw = new Float32Array(0);
 
-  constructor(archetype: number, style: LayerStyle) {
+  /**
+   * @param archetype Which archetype's store this layer draws.
+   * @param style Its art.
+   * @param onlyStyle Draw only entities whose style index is this one, or -1 for all.
+   * @param omitStyle Skip entities whose style index is this one, or -1 for none.
+   *
+   * @remarks
+   * <b>The two filters are what let one archetype be drawn by two layers with different SHAPES.</b> A shape is a mesh
+   * and a mesh belongs to a layer, so per-instance size and colour were the only things that could vary within one —
+   * which is why every structure was a box. A shuttleport is now a second layer over the same store that takes only
+   * `kind` 2 while the first omits it: two meshes, one archetype, and no instance drawn twice.
+   */
+  constructor(archetype: number, style: LayerStyle, onlyStyle = -1, omitStyle = -1) {
     this.archetype = archetype;
     this.style = style;
+    this.onlyStyle = onlyStyle;
+    this.omitStyle = omitStyle;
     this.ensureCapacity(INITIAL_CAPACITY);
   }
 
@@ -192,6 +210,8 @@ export class LayerPacker {
     let far = 0;
 
     const dims = store.dims;
+    const onlyStyle = this.onlyStyle;
+    const omitStyle = this.omitStyle;
     const at = this.placement;
     // Resolved once per frame, not per entity: the override names a netId and the loop has the slot.
     const predicted = view.predicted;
@@ -218,6 +238,12 @@ export class LayerPacker {
 
       const raw = fields.style === null ? 0 : fields.style[slot];
       const styleIndex = fields.styleIsFlag ? (raw > 0 ? 1 : 0) : raw;
+      // Before the frustum test and before any slot state is touched: a filtered-out entity belongs to the other layer
+      // over this store, which keeps its own band and heading for it.
+      if ((onlyStyle >= 0 && styleIndex !== onlyStyle) || styleIndex === omitStyle) {
+        continue;
+      }
+
       const bound = styleIndex >= 0 && styleIndex < bounds.radius.length ? styleIndex : 0;
       const cy = ry + bounds.centerY[bound];
       const dx = rx - view.eyeX;

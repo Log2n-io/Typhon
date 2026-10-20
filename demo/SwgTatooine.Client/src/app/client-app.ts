@@ -26,7 +26,7 @@ import { altitudeField, altitudeOf, Placement } from '../data/placement';
 import { replicationStatsOf } from '../data/replication-stats';
 import { SpeedClass, type DataSource, type EventSink } from '../data/source';
 import { describeFields } from '../data/swg-format';
-import { AGG_GRID, FASTEST_TICK_PERIOD_MS, SWG_SCHEMA, TICK_PERIOD_MS } from '../data/swg-schema';
+import { AGG_GRID, FASTEST_TICK_PERIOD_MS, StructureKind, SWG_SCHEMA, TICK_PERIOD_MS } from '../data/swg-schema';
 import { CITIES, PLANET_HALF_EXTENT_M } from '../data/world-data';
 import { AttackLines } from '../render/attack-lines';
 import {
@@ -45,7 +45,7 @@ import type { SceneProfile } from '../render/scene-profile';
 import { Heightfield } from '../terrain/heightfield';
 import type { TerrainBaked } from '../terrain/terrain.worker';
 import { Labels } from '../render/labels';
-import { styleFor } from '../render/styles';
+import { SHUTTLEPORT_STYLE, styleFor } from '../render/styles';
 import { RenderOrigin, extractFrustumPlanes, invertMatrix4, rayGroundT, unprojectRay } from '../render/view-math';
 import { useChat } from '../state/chat-store';
 import { crossingKindOf, sameRealm, type RealmView, type SceneKind } from '../data/realm-view';
@@ -225,6 +225,13 @@ const SHUTTLE_PROMPT_M = 20;
 
 /** Frames between port searches; see ClientApp.updateShuttlePrompt. */
 const SHUTTLE_SEARCH_FRAMES = 8;
+
+/**
+ * The archetype that holds every structure, by the name the catalog gives it.
+ *
+ * Two things ask for it - the shuttleport prompt's field scan and the dome layer - and both must mean the same one.
+ */
+const STRUCTURE_ARCHETYPE = 'WorldObject';
 
 export class ClientApp {
   private readonly canvas: HTMLCanvasElement;
@@ -1191,6 +1198,14 @@ export class ClientApp {
     // number and `follow` would fly to. A store swap is exactly the case 05-client.md § 6 wrote the selection rules for.
     useUi.getState().select(0);
 
+    // Everything resolved against the OLD catalog goes with it. The archetype index is the dangerous one: the catalog
+    // numbers archetypes in its own order and `sameArchetypes` exists precisely because that order can differ, so a
+    // cached index would read another archetype's `kind` and `region` after a swap. The prompt itself is dropped
+    // because it names a port from a world this session may no longer be in.
+    this.shuttleArchetype = -1;
+    this.shuttleFrames = 0;
+    useUi.getState().setShuttleport(null);
+
     // The Babylon layers are rebuilt only when the archetypes themselves changed. A seed or population change also
     // reaches here with the same schema, and disposing meshes, materials and shaders to build identical ones on a button
     // press is churn for nothing.
@@ -1203,8 +1218,10 @@ export class ClientApp {
     }
 
     this.bindLayers();
-    this.layerStats = this.layers.map((_, index) => ({
-      archetype: this.archetypes.infos[index],
+    // From the ARCHETYPES and not from the layers: there is one more layer than there are archetypes (the shuttleport's
+    // dome), and these rows are indexed by archetype everywhere they are read.
+    this.layerStats = this.archetypes.infos.map((info) => ({
+      archetype: info,
       held: 0,
       near: 0,
       far: 0,
@@ -1217,9 +1234,33 @@ export class ClientApp {
     this.applyUi(useUi.getState());
   }
 
-  /** One layer per archetype of the current schema, each with the style its NAME selects. */
+  /**
+   * One layer per archetype of the current schema, each with the style its NAME selects, plus one for the shuttleport.
+   *
+   * <b>The port layer is APPENDED, so the first `infos.length` entries stay 1:1 with the archetypes</b> - which is what
+   * `layerStats` and `publishStats` index by. Everything that merely iterates the list (update, pick, bind, dispose,
+   * `screenOf`) picks the extra layer up for free, the two places that count rows do not see it, and `publishStats`
+   * folds its instances into its archetype's own row.
+   */
   private buildLayers(): EntityLayer[] {
-    return this.archetypes.infos.map((info, index) => new EntityLayer(index, styleFor(info.name), this.scene));
+    const layers = this.archetypes.infos.map(
+      (info, index) =>
+        new EntityLayer(
+          index,
+          styleFor(info.name),
+          this.scene,
+          -1,
+          // A port is drawn by the layer below instead, as a dome. Omitted here so it is not drawn twice, one mesh
+          // inside the other.
+          info.name === STRUCTURE_ARCHETYPE ? StructureKind.Shuttleport : -1,
+        ),
+    );
+    const structures = this.archetypes.infos.findIndex((info) => info.name === STRUCTURE_ARCHETYPE);
+    if (structures >= 0) {
+      layers.push(new EntityLayer(structures, styleFor(SHUTTLEPORT_STYLE), this.scene, StructureKind.Shuttleport, -1));
+    }
+
+    return layers;
   }
 
   private bindLayers(): void {
@@ -1270,10 +1311,12 @@ export class ClientApp {
   }
 
   private applyUi(state: UiState): void {
-    // By NAME, and visible unless the user turned it off: a schema may hold an archetype the UI has never named.
-    this.layers.forEach((layer, index) => {
-      layer.visible = state.layers[this.archetypes.name(index)] ?? true;
-    });
+    // By NAME, and visible unless the user turned it off: a schema may hold an archetype the UI has never named. Keyed
+    // on the layer's own archetype rather than its position, because the shuttleport's layer shares one with the
+    // structures and follows that toggle.
+    for (const layer of this.layers) {
+      layer.visible = state.layers[this.archetypes.name(layer.archetype)] ?? true;
+    }
     for (let i = 0; i < this.heatChannels.length; i++) {
       this.heatMask[i] = state.heatmap[this.heatChannels[i].name] ?? false;
     }
@@ -1332,7 +1375,12 @@ export class ClientApp {
 
     // The shuttleport prompt. Published on change only, like `playing` above, and only for a session that has a body to
     // fly: a god camera is not standing anywhere.
-    this.updateShuttlePrompt(playing, ui);
+    //
+    // `haveEyeSubject` and not `playing` alone, because the search reads `eyeX`/`eyeZ` and those are only written when
+    // the eye subject was located this frame. `playing` stays true across a despawn, a realm crossing and a reconnect
+    // before the SELF entity arrives — and the prompt then measured from wherever the avatar last stood, offering a
+    // boarding the server answers with ShuttleNotAtPort. The camera latch below already gated on both.
+    this.updateShuttlePrompt(playing && haveEyeSubject, ui);
 
     // A10: a player arrives in third person, behind their own avatar. Done here rather than in the store's initial state
     // because it depends on the session being a player's, which is only known once the catalog has arrived — and done
@@ -1716,8 +1764,12 @@ export class ClientApp {
     let next: ShuttleportPrompt | null = null;
     if (playing) {
       if (this.shuttleArchetype < 0) {
-        this.shuttleArchetype = this.archetypes.infos.findIndex((info) => info.name === 'WorldObject');
+        this.shuttleArchetype = this.archetypes.infos.findIndex((info) => info.name === STRUCTURE_ARCHETYPE);
       }
+
+      // Resolved against THIS catalog: `adopt` replaces the archetype set on every store swap and handles the two
+      // differing, so an index cached across one would read another archetype's `kind` and `region`. It is reset there
+      // with `select(0)`, for the same reason.
 
       if (this.shuttleArchetype >= 0) {
         // The predicted position when there is one, for the reason the camera uses it: the prompt has to agree with
@@ -1799,6 +1851,16 @@ export class ClientApp {
       row.held = this.world.archetypeStore(i).liveCount;
       row.near = this.layers[i].nearCount;
       row.far = this.layers[i].farCount;
+    }
+
+    // The layers past the archetypes are the extra ones (the shuttleport's dome): their instances belong to the row of
+    // the archetype they draw, or the panel would report a drawn count that misses every port.
+    for (let i = layers.length; i < this.layers.length; i++) {
+      // An extra layer draws an archetype of this same schema, so its index is always one of the rows above.
+      const extra = this.layers[i];
+      const row = layers[extra.archetype];
+      row.near += extra.nearCount;
+      row.far += extra.farCount;
     }
 
     const js = this.frameJsSummary;
