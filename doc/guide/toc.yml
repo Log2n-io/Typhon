@@ -16,6 +16,8 @@
   href: 05-systems.md
 - name: 6 — Operating
   href: 06-operating.md
+- name: Backup & restore in production
+  href: backup-and-restore.md
 - name: 7 — Serving remote clients
   href: 07-subscriptions.md
 - name: Embedding without the runtime
