@@ -59,7 +59,7 @@ set -e
 # A deadlock is a violated property too: the liveness half of a protocol (CommitStamp's reservation order) is TLC's deadlock check.
 if grep -q "No error has been found" "$out"; then
   result="GREEN"
-elif grep -qE "(Invariant .* is violated|Temporal property .* is violated|Action property .* is violated|Error: Invariant|Error: Deadlock reached)" "$out"; then
+elif grep -qE "(Invariant .* is violated|Temporal property .* is violated|Temporal properties were violated|Action property .* is violated|Error: Invariant|Error: Deadlock reached)" "$out"; then
   result="VIOLATION"
 else
   result="ERROR"

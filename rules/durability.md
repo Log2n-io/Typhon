@@ -3380,7 +3380,8 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
   verified: BackupFailurePathTests.SinkThrowsMidScan_TheNextIncrementalCoversEverything (+ Mutant_APageOfTheFailedCaptureIsMissing_IsReported),
             BackupFailurePathTests.DisposeDuringCapture_ClosesCleanly_AndTheMapHoldsThePageSet (each phase),
             CbwStallTests (the incremental after a stall holds the aborted set); source mutant seen red: no merge on failure
-  spec: rules/tla/BackupCapture.tla (S6) — ChangeMapComplete over the Abort action
+  spec: rules/tla/BackupCapture.tla (S6) — ChangeMapComplete over the abort's four steps (flag, uninstall request, removal under
+    the drained gate, merge of the DETACHED map); mutant -mutant-mergeimageset (merging the image set, null for a full capture)
 
 ### BKP-08: A published pack is never modified, and its id names one content for the store's life `[fatal]`
   invariant a pack is visible under {BackupId:D8}-{K}.tpack only complete: written as *.tpack.tmp, fsynced, then moved
@@ -3436,3 +3437,6 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
             ten uninstall budgets, an uncapped attempt, AdmitWaiters returning at once, a per-run deadline, a slot wait
             without the abort token, a plain publish or drain of the ready bits, the checkpoint
             and WAL waits without the close's token, the coordinator disposed (blocks freed) after a failed join
+  spec: rules/tla/BackupCapture.tla (S6) — HookNotRemovedUnderWriter, and under weak fairness without any timeout
+    (BackupCapture-liveness.cfg) WritersProgress and GateReopens; mutants -mutant-uninstallnogate, -mutant-noabortrelease,
+    -mutant-timeoutkeepsgate
