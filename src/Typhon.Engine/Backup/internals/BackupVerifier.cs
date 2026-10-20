@@ -112,6 +112,9 @@ internal sealed class VerifyOptions
 
     public CancellationToken Cancellation { get; init; }
 
+    /// <summary><c>(phase, done, total)</c>: <c>"packs"</c> verified of the scope's, then a deep verify's integrity scan phases.</summary>
+    public Action<string, long, long> Progress { get; init; }
+
     public ILogger Logger { get; init; }
 }
 
@@ -196,10 +199,13 @@ internal static class BackupVerifier
 
         var packs = new Dictionary<string, PackVerification>(StringComparer.Ordinal);
         long bytesRead = 0;
+        var verified = 0;
+        options.Progress?.Invoke("packs", 0, files.Count);
         foreach (var file in files)
         {
             options.Cancellation.ThrowIfCancellationRequested();
             packs[file] = VerifyPack(fs, view, file, level, options, ref bytesRead);
+            options.Progress?.Invoke("packs", ++verified, files.Count);
         }
 
         view = WithoutDeletedPacks(fs, view, packs, pointIds, out var removed);
@@ -548,7 +554,12 @@ internal static class BackupVerifier
         try
         {
             using var source = PackChainPageSource.Open(fs, view, chain);
-            report = IntegrityScanner.Scan(source, new IntegrityOptions { Depth = ScanDepth.Deep, Cancellation = options.Cancellation });
+            report = IntegrityScanner.Scan(source, new IntegrityOptions
+            {
+                Depth = ScanDepth.Deep,
+                Cancellation = options.Cancellation,
+                Progress = options.Progress,
+            });
         }
         catch (Exception e) when (e is BackupException or IOException)
         {

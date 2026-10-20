@@ -40,6 +40,7 @@ public static partial class BackupOperations
             Full = options.Full,
             WalDirectory = options.WalDirectory,
             Cancellation = options.Cancellation,
+            Progress = options.Progress,
             Logger = options.Logger,
         });
         var view = StoreView.Open(store, log: options.Logger, trustCatalog: false);
@@ -91,15 +92,53 @@ public static partial class BackupOperations
     /// <param name="level">Quick or full.</param>
     /// <exception cref="System.IO.DirectoryNotFoundException">The directory is not a store.</exception>
     /// <exception cref="BackupFormatUnsupportedException">The store was written by a newer format.</exception>
-    public static BackupVerifyReport Verify(string store, BackupVerifyLevel level) =>
-        Convert(BackupVerifier.VerifyStore(store, (VerifyLevel)level));
+    public static BackupVerifyReport Verify(string store, BackupVerifyLevel level) => Verify(store, level, null);
+
+    /// <summary>Verifies the whole store, cancellable and with progress. Never throws for damage: it reports it.</summary>
+    /// <param name="store">The store directory.</param>
+    /// <param name="level">Quick, full or deep.</param>
+    /// <param name="options">Cancellation, progress, logging; <c>null</c> = none.</param>
+    /// <exception cref="System.IO.DirectoryNotFoundException">The directory is not a store.</exception>
+    /// <exception cref="BackupFormatUnsupportedException">The store was written by a newer format.</exception>
+    /// <exception cref="OperationCanceledException">Cancelled through <see cref="BackupVerifyOptions.Cancellation"/>.</exception>
+    public static BackupVerifyReport Verify(string store, BackupVerifyLevel level, BackupVerifyOptions options) =>
+        Convert(BackupVerifier.VerifyStore(store, (VerifyLevel)level, Internal(options)));
 
     /// <summary>Verifies one point: the packs of its chain, and whether it is restorable. Never throws for damage.</summary>
     /// <param name="store">The store directory.</param>
     /// <param name="point">Which point.</param>
     /// <param name="level">Quick or full.</param>
-    public static BackupVerifyReport Verify(string store, PointSelector point, BackupVerifyLevel level) =>
-        Convert(BackupVerifier.VerifyPoint(store, point, (VerifyLevel)level));
+    public static BackupVerifyReport Verify(string store, PointSelector point, BackupVerifyLevel level) => Verify(store, point, level, null);
+
+    /// <summary>Verifies one point, cancellable and with progress. Never throws for damage.</summary>
+    /// <param name="store">The store directory.</param>
+    /// <param name="point">Which point.</param>
+    /// <param name="level">Quick, full or deep.</param>
+    /// <param name="options">Cancellation, progress, logging; <c>null</c> = none.</param>
+    /// <exception cref="OperationCanceledException">Cancelled through <see cref="BackupVerifyOptions.Cancellation"/>.</exception>
+    public static BackupVerifyReport Verify(string store, PointSelector point, BackupVerifyLevel level, BackupVerifyOptions options) =>
+        Convert(BackupVerifier.VerifyPoint(store, point, (VerifyLevel)level, Internal(options)));
+
+    private static VerifyOptions Internal(BackupVerifyOptions options) =>
+        options == null ? null : new VerifyOptions { Cancellation = options.Cancellation, Progress = options.Progress, Logger = options.Logger };
+
+    /// <summary>
+    /// What an exception a backup operation threw means to its caller: <c>typhon backup</c> maps it to its exit code, the Workbench to its error category,
+    /// so the same failure is reported the same way by both. By exception type, never by message.
+    /// </summary>
+    /// <param name="exception">What the operation threw.</param>
+    /// <returns><see cref="BackupFailureKind.Defect"/> for an exception that is not an outcome of the operation.</returns>
+    public static BackupFailureKind Classify(Exception exception) => exception switch
+    {
+        BackupPlanChangedException => BackupFailureKind.PlanChanged,
+        RestoreTargetUnreachableException or BackupChainBrokenException or BackupPackCorruptException => BackupFailureKind.StoreDamaged,
+        RestoreRefusedException or DatabaseLockedException or BackupStoreMismatchException or BackupStoreLockedException
+            or BackupFormatUnsupportedException or NotSupportedException => BackupFailureKind.Refused,
+        TyphonException { ErrorCode: TyphonErrorCode.BackupNotConfigured } => BackupFailureKind.Refused,
+        OperationCanceledException or System.IO.IOException or UnauthorizedAccessException or TyphonException or InvalidOperationException
+            => BackupFailureKind.Failed,
+        _ => BackupFailureKind.Defect,
+    };
 
     /// <summary>What the store holds, from its catalog (rebuilt in memory when stale).</summary>
     /// <param name="store">The store directory.</param>

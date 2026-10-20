@@ -180,14 +180,11 @@ internal static class BackupCli
     /// lock (a refusal: the store will not run where it cannot exclude another writer); <see cref="InvalidOperationException"/> when it has no
     /// backup id left (and its misuse checks).
     /// </remarks>
-    internal static int ExitCodeFor(Exception ex) => ex switch
+    internal static int ExitCodeFor(Exception ex) => BackupOperations.Classify(ex) switch
     {
-        RestoreTargetUnreachableException => ExitStoreDamaged,
-        RestoreRefusedException or DatabaseLockedException or BackupStoreMismatchException or BackupStoreLockedException
-            or BackupFormatUnsupportedException or BackupPlanChangedException or NotSupportedException => ExitRefused,
-        TyphonException { ErrorCode: TyphonErrorCode.BackupNotConfigured } => ExitRefused,
-        BackupChainBrokenException or BackupPackCorruptException => ExitStoreDamaged,
-        OperationCanceledException or IOException or UnauthorizedAccessException or TyphonException or InvalidOperationException => ExitFailed,
+        BackupFailureKind.Refused or BackupFailureKind.PlanChanged => ExitRefused,
+        BackupFailureKind.StoreDamaged => ExitStoreDamaged,
+        BackupFailureKind.Failed => ExitFailed,
         _ => -1,
     };
 

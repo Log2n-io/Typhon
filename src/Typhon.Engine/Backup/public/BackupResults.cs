@@ -57,8 +57,51 @@ public sealed class BackupCreateOptions
     /// <summary>Stops the capture; nothing is published.</summary>
     public CancellationToken Cancellation { get; init; }
 
+    /// <summary>Called with the image's pages read so far and its total (an incremental reads only its changed pages, so it jumps).</summary>
+    public Action<long, long> Progress { get; init; }
+
     /// <summary>Where the store logs.</summary>
     public ILogger Logger { get; init; }
+}
+
+/// <summary>Options of <see cref="BackupOperations.Verify(string, BackupVerifyLevel, BackupVerifyOptions)"/>.</summary>
+[PublicAPI]
+public sealed class BackupVerifyOptions
+{
+    /// <summary>Stops the verify between packs and during a deep verify's scan: it throws <see cref="OperationCanceledException"/>, reporting nothing.</summary>
+    public CancellationToken Cancellation { get; init; }
+
+    /// <summary>
+    /// <c>(phase, done, total)</c>: <c>"packs"</c> verified of the scope's packs, then, for <see cref="BackupVerifyLevel.Deep"/>, the integrity scan's own
+    /// phases over the point's image.
+    /// </summary>
+    public Action<string, long, long> Progress { get; init; }
+
+    /// <summary>Where the store logs.</summary>
+    public ILogger Logger { get; init; }
+}
+
+/// <summary>
+/// What a backup operation's exception means to its caller (<see cref="BackupOperations.Classify"/>): the one mapping <c>typhon backup</c>'s exit codes
+/// and the Workbench's error categories share, so the same failure reads the same in both.
+/// </summary>
+[PublicAPI]
+public enum BackupFailureKind
+{
+    /// <summary>Not an outcome of the operation but a defect: let it surface with its stack.</summary>
+    Defect = 0,
+
+    /// <summary>The operation failed (I/O, cancelled, an aborted capture, another backup running); a retry may succeed.</summary>
+    Failed,
+
+    /// <summary>The store cannot serve the request: a chain is broken, a pack is corrupt, a target LSN or time cannot be reached.</summary>
+    StoreDamaged,
+
+    /// <summary>Refused before anything was written: a live or existing target, a locked or foreign store, a format mismatch, backup not configured.</summary>
+    Refused,
+
+    /// <summary>A reviewed plan no longer holds (<see cref="BackupPlanChangedException"/>): nothing was written; plan again.</summary>
+    PlanChanged,
 }
 
 /// <summary>Options of <see cref="BackupOperations.Restore"/>.</summary>
