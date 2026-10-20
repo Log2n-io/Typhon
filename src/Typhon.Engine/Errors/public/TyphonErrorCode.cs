@@ -28,7 +28,9 @@ public enum TyphonErrorCode
     /// <summary>Structural data corruption or an integrity violation (see <see cref="CorruptionException"/>).</summary>
     DataCorruption                  = 2003,
 
-    /// <summary>A storage capacity limit was exceeded.</summary>
+    /// <summary>
+    /// A storage capacity limit was exceeded: a commit that needs more of the page cache than it has (see <see cref="TransactionExceedsPageCacheException"/>).
+    /// </summary>
     StorageCapacityExceeded         = 2004,
 
     /// <summary>A page failed CRC32C verification — torn or corrupted (see <see cref="PageCorruptionException"/>).</summary>

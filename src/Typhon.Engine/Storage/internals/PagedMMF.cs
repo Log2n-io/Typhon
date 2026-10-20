@@ -2041,6 +2041,18 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     [ThreadStatic] private static long t_publishSince;
 
     /// <summary>
+    /// The change set of the commit this thread is running, up to its WAL append; null otherwise (#831). A back-pressure wait reads it to tell a commit that
+    /// holds the cache itself from one waiting on others: nothing can free a slot for the first (<see cref="ThrowIfTheCommitHoldsTheCache"/>).
+    /// </summary>
+    internal static ChangeSet CommitMarks
+    {
+        get => t_commitMarks;
+        set => t_commitMarks = value;
+    }
+
+    [ThreadStatic] private static ChangeSet t_commitMarks;
+
+    /// <summary>
     /// Non-zero on a thread inside a walk whose every page reference is a scan accessor's slot-reference pin (EP-02) — the entity-map walks and the SoA scan
     /// a query passes a yield point to (#1364). A back-pressure wait there moves the thread's epoch (#1230): pins hold its pages, the epoch holds none of
     /// them, and left at the minimum it protected every page every other thread tagged while it waited, until the whole cache was epoch-held and all of
@@ -2329,6 +2341,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         int lapDirty = 0, lapEpochHeld = 0, dirtyCount = 0, epochCount = 0;
         long backpressureSince = 0;
         var overload = default(OverloadBudget);
+        long lapServed = -1;
+        var lapsUnserved = 0;
 
         while (true)
         {
@@ -2567,6 +2581,19 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                         }
                         else
                         {
+                            // #831: a commit before its append that holds every slot a wait could get back is refused at once, never left to time out. Only
+                            // after a whole lap in which no page was served to anyone: the check counts what is held for good, and errs toward the wait.
+                            if (lapComplete && !refreshed && t_publishSince == 0 && t_commitMarks is { } commitMarks && commitMarks.Owner == this)
+                            {
+                                var served = ServedUnderPressure;
+                                lapsUnserved = served == lapServed ? lapsUnserved + 1 : 0;
+                                lapServed = served;
+                                if (lapsUnserved >= CommitRefusalUnservedLaps)
+                                {
+                                    ThrowIfTheCommitHoldsTheCache(commitMarks);
+                                }
+                            }
+
                             // The timeout is honoured only at the end of a lap (#1137): a page that stays evictable is found before the allocation
                             // gives up, whatever the cache size or the configured timeout — so the timeout can be overrun by at most one lap. Until
                             // then a strategy that gives up just does not wait.
@@ -3590,6 +3617,69 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
         return (debt, acw, slotRef, epochHeld, marked, epochOnly, unevictable, total);
     }
+
+    /// <summary>
+    /// Whole laps in which no page was served to anyone, before a commit that holds the cache is refused (#831): long enough for any thread that is still
+    /// working to give back a slot it only references.
+    /// </summary>
+    internal const int CommitRefusalUnservedLaps = 2;
+
+    /// <summary>
+    /// #831: throws <see cref="TransactionExceedsPageCacheException"/> when the waiting commit itself holds every slot a wait could get back, so its wait
+    /// could never end. Held for good while it waits: the pages its change set marks, which only its own thread releases (PS-05a), and — when its pin is
+    /// the cache's floor — every page tagged since that pin, since a wait that keeps its pin does not move the floor and every later tag is younger.
+    /// A page held by slot references or a live chunk writer counts too, owed a write or not, since the checkpoint skips a page under a writer (CP-11):
+    /// neither carries an owner, and the commit's own accessors hold their windows' pages that way, but the caller asks only after
+    /// <see cref="CommitRefusalUnservedLaps"/> laps in which no page was served, which a thread still working would have ended by letting one go.
+    /// Writeback debt alone and other owners' marks are counted as able to come back, so the check errs toward the wait.
+    /// </summary>
+    private void ThrowIfTheCommitHoldsTheCache(ChangeSet commitMarks)
+    {
+        var epochs = EpochManager;
+        var pinned = epochs is { IsCurrentThreadInScope: true } ? epochs.CurrentThreadPinnedEpoch : 0;
+        var holdsFloor = pinned != 0 && pinned <= epochs.MinActiveEpoch;
+
+        // One pass: a page is held when the commit's pin keeps it, or when slot references or a live writer do and no mark does; the commit's own marks are
+        // added after, those the pass did not already count.
+        int pinnedPages = 0, referencedPages = 0;
+        for (var i = 0; i < MemPagesCount; i++)
+        {
+            var pi = Slot(i);
+            if (pi.PageState is PageState.Free or PageState.Reserved)
+            {
+                continue;
+            }
+
+            if (holdsFloor && Volatile.Read(ref pi.AccessEpoch) >= pinned)
+            {
+                pinnedPages++;
+            }
+            else if ((Volatile.Read(ref pi.SlotRefCount) > 0 || Volatile.Read(ref pi.ActiveChunkWriters) > 0) && Volatile.Read(ref pi.DirtyCounter) == 0)
+            {
+                // Owed a write too, it stays: the checkpoint skips a page under a live writer (CP-11).
+                referencedPages++;
+            }
+        }
+
+        var held = pinnedPages + referencedPages;
+        var marks = commitMarks.EnumerateMarkedPages();
+        while (marks.MoveNext())
+        {
+            if (!holdsFloor || Volatile.Read(ref Slot(marks.Current).AccessEpoch) < pinned)
+            {
+                held++;
+            }
+        }
+
+        if (held >= MemPagesCount - ReservedSlotCount)
+        {
+            Interlocked.Increment(ref RefusedOversizedCommits);
+            ThrowHelper.ThrowTransactionExceedsPageCache(held, MemPagesCount, commitMarks.MarkedPageCount, pinnedPages);
+        }
+    }
+
+    /// <summary>Commits refused by <see cref="ThrowIfTheCommitHoldsTheCache"/>, process-wide (tests).</summary>
+    internal static long RefusedOversizedCommits;
 
     /// <summary>
     /// Test seam: called on the throwing thread just before a back-pressure timeout throws, while the pins that held the cache are still in place — a stress

@@ -395,10 +395,19 @@ lock ordering and deadlock prevention are still to come.
             reconciles), the staging buffer. Never one the epoch alone protects: a ChangeSet accessor's evicted slots are released when any
             B+Tree write returns its warm accessors in batch mode (ChangeSet.FlushDeferredEvictions), so an address from one is valid only while
             it is still in the window. Between its entries the publish moves its epoch too while the cache is under pressure, every
-            PressuredEpochRefreshInterval entries and never under a live index cursor (Transaction.RefreshBetweenPublishSteps): an entry keeps
-            nothing it read for the next. Waiting with their pins, the publishes held the 32 MiB market's cache: 4,599 of the 4,649 waits 2,000
+            PressuredEpochRefreshInterval entries and never under a live index cursor (Transaction.RefreshBetweenCommitSteps): an entry keeps
+            nothing it read for the next. At the same points it gives back its change set's dirty marks (#831): what it published stays owed a
+            write, which keeps it from eviction until the checkpoint writes it (PS-10) and is what the cycle collects (CK-13). Kept to the end, the
+            marks held the publish's whole write set: 10 000 updates of a component with three indexes into 8 MiB, 300 000 into 256 MiB, filled the
+            cache with them and stopped the engine. Waiting with their pins, the publishes held the 32 MiB market's cache: 4,599 of the 4,649 waits 2,000
             or more epochs behind, and the engine stopped (CommitPublishIncompleteException) in two of six storms; refreshed and restarted, in
             none of six. A write past its first latch still waits with its pin (about 17 % of the publish's rounds, measured)
+  invariant the rollback of a commit that failed before its append moves its epoch between its entries while the cache is under pressure, as the
+            publish does (Transaction.RefreshBetweenCommitSteps): the spawns it un-places (UnplaceSpawns), the revisions it voids (RollbackComponent)
+            and the spawned chunks the dispose frees (CleanupEcsState). An entry keeps nothing it read for the next. Held for the whole rollback, the
+            failed commit's pin kept the cache its commit had filled, so the rollback met the same wall and so did the dispose's retry (#831). The
+            placement before the append does NOT move its epoch, on purpose: its pin makes an oversized commit meet the wall in PREPARE, where it is
+            refused (PS-22); moved on, the commit reached its publish, which keeps every mark it takes, and stopped the engine (AP-03)
   never epoch-tag the pages of a read whose length grows with the data: the tags pin every page for the caller's whole scope, and a
         transaction's scope lasts until its next epoch refresh, up to 128 opens, spawns or enumerated entities later (EP-03)
   scope: PagedMMF.AcquirePageForRead, PagedMMF.ReleasePageForRead, IPageStore.AcquirePageForRead, IPageStore.ReleasePageForRead,
@@ -418,7 +427,7 @@ lock ordering and deadlock prevention are still to come.
          EcsQuery.ScanPerArchetypeBTree, EcsQuery.ScanPerArchetypeBTreeSelective, EcsQuery.ExecuteSpatial, RangeEnumerator,
          DatabaseEngine.CheckClusterVisibilitySummaries, Transaction.EnumerateArchetypeEntities, ArchetypeClusterState.RebuildSpatialStateFromData,
          FreeQuarantine.Free, PagedMMF.BeginRestartableIndexWrite, PagedMMF.EndRestartableIndexWrite, PagedMMF.DisarmIndexRestart,
-         PagedMMF.AwaitPageAfterIndexRestart, BackpressureIndexRestart, Transaction.RefreshBetweenPublishSteps, BTree.DeferredReclaim,
+         PagedMMF.AwaitPageAfterIndexRestart, BackpressureIndexRestart, Transaction.RefreshBetweenCommitSteps, BTree.DeferredReclaim,
          DeferredCleanupManager.FreeChunkWaitingRefreshed, DeferredCleanupManager.CleanupEntityRevisionsBatched
   on_violation: once the data outgrows the page cache, the read waits for evictions its own tags forbid —
                 `PageCacheBackpressureTimeoutException` with every slot epoch-protected and none dirty. MarketHardeningTests' trading
@@ -434,8 +443,9 @@ lock ordering and deadlock prevention are still to come.
             snapshot, and the spatial layer's rebuild map, serial and parallel (ArchetypeClusterState.RebuildSpatialStateFromData, #1305). Its
             reduce files a cluster's stray slots through an epoch-tagged accessor of its own: one page per cluster that has strays
   note: read-only reads only. Crash recovery's write passes (replay, rebuilds, scrubs) release their pages at batch points (CK-08). A write
-        outside recovery cannot release its pages early — its ChangeSet's marks keep them resident until its unit of work ends,
-        which bounds a transaction's write set by the cache. EP-01's other latent sites are not converted, nor are three query reads that still
+        outside recovery keeps its pages resident by its ChangeSet's marks until its next release point: a transaction's epoch refresh (every
+        128 operations), PREPARE's component pass (every 1 024 entries), the publish and a failed commit's rollback between entries under
+        pressure (#831). The spawn placement has none (above), so a commit whose PREPARE needs more than the cache is refused (PS-22). EP-01's other latent sites are not converted, nor are three query reads that still
         epoch-tag what they touch: an `OrderBy` merge's streams (KWayMergeHelper), the spatial cluster walk (AabbClusterEnumerator) and an
         `AllowMultiple` key's VSBS buffer (RangeEnumerator, through GetBufferReadOnlyAccessor, which keeps chunk addresses across loads)
   verified: WholeSegmentScanTests — a segment four times the cache: the load scan, an allocation's search across room bits on full pages and
@@ -470,6 +480,13 @@ lock ordering and deadlock prevention are still to come.
   verified: ClusterVisibilitySummaryIntegrityTests.TheAudit_OfAnEntityMapLargerThanTheCache_Completes — the integrity check's cluster-visibility
             audit and a transaction's EnumerateArchetypeEntities walk an EntityMap larger than an 8 MiB cache [VerifiesRule]. Each walked it
             through an epoch-tagged accessor, and the market's integrity check timed out once its audit map outgrew 64 MiB; both mutations killed
+  verified: CommitExceedingThePageCacheTests.APublishLargerThanTheCache_GivesBackItsMarks_AndCommits [VerifiesRule] — 20 000 updates of a
+            component with three indexes commit into 8 MiB, every value and index entry the new one (without the marks given back, the publish
+            fails and the engine stops); PublishLargerThanTheCacheRecoveryTests — the same publish, then a hard crash: recovered whole
+  verified: CommitExceedingThePageCacheTests.ACommitLargerThanTheCache_IsRefusedBeforeItsTimeout_AndRollsBackClean — the refused commit's rollback
+            completes and its dispose throws nothing (with the rollback's refreshes removed, the dispose throws a back-pressure timeout after 5 s);
+            ACommitJustOverTheLimit_IsRefusedBeforeItsAppend — 50 000 spawns into 8 MiB are refused before the append (with a refresh between the
+            placements, the publish failed and stopped the engine)
   verified: ClusterRebuildMergeTests.TheRebuild_OfAClusterSegmentLargerThanTheCache_Completes — the spatial rebuild of a cluster segment larger than an
             8 MiB cache, under one epoch scope as the open's, serial and on 4 workers [VerifiesRule]; epoch-tagged again, both time out
 

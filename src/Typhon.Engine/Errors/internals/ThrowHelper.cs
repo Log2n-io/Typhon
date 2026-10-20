@@ -121,6 +121,11 @@ internal static class ThrowHelper
         => throw new PageCacheBackpressureTimeoutException(dirtyPageCount, epochProtectedCount, waitDuration, pinnedThreads, oldestPinLag, markedPageCount,
             epochOnlyCount);
 
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static void ThrowTransactionExceedsPageCache(int heldPages, int cachePages, int markedPages, int pinnedPages)
+        => throw new TransactionExceedsPageCacheException(heldPages, cachePages, markedPages, pinnedPages);
+
     // --- Durability ---
 
     [DoesNotReturn]

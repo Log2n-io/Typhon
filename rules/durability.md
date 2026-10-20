@@ -253,7 +253,7 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
          DatabaseEngine.LatchCommitPipelineFailure, DatabaseEngine.CommitPipelineFailure, DatabaseEngine.PinnedCommitFloor,
          DatabaseEngine.WriteTickFence, DatabaseEngine.FenceMustNotAppend, DurabilityLog.Stop, DurabilityLog.Append,
          CheckpointManager.PrepareCrashStop, DatabaseEngine.AppendFenceBatch, DatabaseEngine.AppendFenceBlockBatch,
-         DatabaseEngine.RemoveEmptyClosingRealms, Transaction.RefreshBetweenPublishSteps, BackpressureIndexRestart
+         DatabaseEngine.RemoveEmptyClosingRealms, Transaction.RefreshBetweenCommitSteps, BackpressureIndexRestart
   status: the component publish's acts under the chain lock cannot throw: its handle is rebuilt from PREPARE's coordinates,
           re-checked under the lock taken with an unbounded wait (AP-05), and its acts are field writes and copies. Its Phase A
           (indexes and views, AP-07), under the lock since #1263, allocates and can throw: B+Tree nodes past the publish limit,
@@ -1023,7 +1023,9 @@ CK-08 (flush-only cycles) are later increments.
 ### CK-13: A checkpoint never passes a commit that is between its append and its publish `[fatal]` `[silent]`
   invariant CheckpointLSN < the first LSN appended by any commit still between its WAL append and the end of its publish
   invariant a commit records its first LSN (its floor) inside the append, after claiming it and before publishing the WAL frame, and
-            withdraws it once every publish-time page effect is in memory and marked dirty, or when the commit throws. A commit that
+            withdraws it once every publish-time page effect is in memory and registered as modified — owed a write, which is what the cycle
+            collects (PS-10), whether or not the publish still holds its dirty mark on it (it gives marks back between entries under pressure, #831) —
+            or when the commit throws. A commit that
             throws after its append, before its publish completed, first pins its floor on the engine (`PinnedCommitFloor`, AP-03),
             which holds the checkpoint below its records until the engine is reopened
   invariant the cycle reads the lowest floor AFTER its barrier and BEFORE collecting dirty pages. A barrier that covers a record has drained
@@ -1904,12 +1906,15 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   never release marks taken by another owner (that is #385's lost write)
   never retain a mark "for the checkpoint to consume" (that is #824's leak)
   never let the checkpoint, SavePages, or any writer touch DirtyCounter at all
+  invariant an owner may give its marks back before it ends, at a point where it holds no address a mark alone protects: a transaction at its
+            epoch refresh, PREPARE's component pass every 1 024 entries, a publish and a failed commit's rollback between entries under
+            pressure (Transaction.RefreshBetweenCommitSteps, #831). The page stays owed a write (PS-10), so it is not evicted unwritten
   invariant at quiesce — no unit of work open, no checkpoint running — every page has DirtyCounter == 0
   invariant an owner releases its marks on its throw path too (#1382): a transaction's and a unit of work's dispose release them in a finally,
             whatever their rollback, drain or registry write threw, and so does the checkpoint's metadata hook for its local set. A cleanup drain
             releases the marks of the entries it has committed whenever it moves its epoch (DeferredCleanupManager.EpochYield.Refresh): it is
             unbounded, and kept to its end its marks held every page it had touched — 3,434 of a 64 MiB cache, while it waited on back-pressure
-  scope: ChangeSet.AddByMemPageIndex / ReleaseDirtyMarks / Reset, PagedMMF.DecrementDirtyByDelta,
+  scope: ChangeSet.AddByMemPageIndex / ReleaseDirtyMarks / Reset, PagedMMF.DecrementDirtyByDelta, Transaction.RefreshBetweenCommitSteps,
          UnitOfWork.Dispose, Transaction.Dispose, EntityAccessor, ChunkBasedSegment.GrowChunkCapacity (its local set, released in a finally),
          DeferredCleanupManager.EpochYield, DatabaseEngine.PersistArchetypeState
   verified: ChangeSetDirtyMarkConservationTests; SegmentGrowAtomicityTests.AChunkSegmentGrowThatThrows_StillReleasesItsLocalChangeSet (the
@@ -2416,15 +2421,28 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             it. Every change is logged (a warning entering Overloaded or Starved), raised (DatabaseEngine.StorageHealthChanged), and published as the profiler gauge
             PageCacheHealthState with the cumulative back-pressure rounds and overload extensions, and in the resource tree. Evaluated at most every
             100 ms, from the back-pressure rounds, from allocations while degraded and from the checkpoint loop's wakes: nothing on the healthy path
+  invariant a commit before its append whose wait can never end is refused at once, not left to time out (#831): after
+            CommitRefusalUnservedLaps (2) whole laps in which no page was served to anyone, its wait counts the slots held for good — the pages its
+            own change set marks (PagedMMF.CommitMarks, set for the commit's length), every page tagged since its pin when that pin is the cache's
+            floor (a wait that keeps its pin never moves the floor), and the pages held only by slot references or a live chunk writer, which carry no
+            owner and which a thread still working would have let go of within those laps. When they fill every slot but the reserve's, it throws
+            TransactionExceedsPageCacheException (StorageCapacityExceeded, not transient), and the commit rolls back. Debt alone and other owners'
+            marks count as able to come back, so the check errs toward the wait. Never past the append (AP-03), nor in a wait that moved its epoch
   scope: PagedMMF.OverloadBudget, PagedMMF.ServedUnderPressure, PagedMMF.OverloadWaitExtensions, PagedMMF.EvaluateStorageHealth, PagedMMF.StorageHealth,
-         TimeoutOptions.PageCacheOverloadWaitCeiling, StorageHealthState, DatabaseEngine.StorageHealth, DatabaseEngine.StorageHealthChanged
+         TimeoutOptions.PageCacheOverloadWaitCeiling, StorageHealthState, DatabaseEngine.StorageHealth, DatabaseEngine.StorageHealthChanged,
+         PagedMMF.CommitMarks, PagedMMF.ThrowIfTheCommitHoldsTheCache, PagedMMF.CommitRefusalUnservedLaps, TransactionExceedsPageCacheException
   verified: StorageOverloadTests [VerifiesRule] — the budget: its first timeout, an extension per timeout with a page served, none without, the
             ceiling, no grace period past a caller's own timeout; an open, and a page request outside one, held on back-pressure for three timeouts
             go through while pages are served and give up while it lasts when none are; the state escalates Healthy, Pressured, Overloaded,
             Starved and steps down once calm, raising the public event; an engine falling idle after a burst steps back to Healthy, never Starved.
             Mutants killed: no extension (the served cases fail), an extension without progress (the unserved cases), the main loop's extension
             removed (the page request), the starved clock running while idle (the idle case)
-  on_violation: a wait that throws while the cache is serving pages fails work the engine would have completed a moment later — under a 16-writer
+  verified: CommitExceedingThePageCacheTests [VerifiesRule] — 100 000 spawns committed at once into an 8 MiB cache are refused in under a second, at
+            the default 5 s timeout: the exception holds the cache's 1 024 pages, nothing is left marked or visible, and the next commit goes through;
+            40 000, which fit, commit and none is refused. Without the check, the commit waits its timeout out and throws a back-pressure timeout
+  on_violation: a commit too large for the cache waited out its back-pressure timeout — 25 s for 100 000 spawns into 8 MiB — and threw one that
+                advised running fewer concurrent transactions, with one running;
+                a wait that throws while the cache is serving pages fails work the engine would have completed a moment later — under a 16-writer
                 storm over 64 MiB, the timeouts that made 35-45 % of the market's runs fail; a state never published leaves an application that
                 gave the engine too little cache or disk with slowness and no reason
 
