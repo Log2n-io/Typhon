@@ -12,8 +12,6 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Typhon.Workbench")]
 
 // Test / sample friend assemblies
-[assembly: InternalsVisibleTo("AntHill.Core")]
-[assembly: InternalsVisibleTo("AntHill.Demo")]
 [assembly: InternalsVisibleTo("Typhon.Benchmark")]
 // Added 2026-06-29: competitive benchmark harness needs InMemoryWalFileIO for zero-disk D0 CPU measurement
 // (same genuine internal reuse as Typhon.Benchmark — measures the commit path without WAL-writer disk noise).
@@ -46,3 +44,7 @@ using System.Runtime.CompilerServices;
 //   "Typhon.Shell.Extensibility" — builds clean.
 //   "Typhon.Workbench.Fixtures"  — builds clean.
 //   "Typhon.Workbench.Tests"     — builds clean (it goes through Typhon.Workbench's surface only).
+//
+// Dropped 2026-10-20 (#851: a demo uses no InternalsVisibleTo):
+//   "AntHill.Core"               — builds clean.
+//   "AntHill.Demo"               — read two profiler drop counters off the internal TyphonEvent; TyphonProfiler exposes both.

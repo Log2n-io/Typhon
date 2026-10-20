@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using Typhon.Profiler;
 
 namespace Typhon.Engine;
 
@@ -466,6 +467,16 @@ public static class TyphonProfiler
 
     /// <summary>Total events dropped across all slots due to ring-buffer overflow.</summary>
     public static long TotalDroppedEvents => TyphonEvent.TotalDroppedEvents;
+
+    /// <summary>
+    /// <see cref="TotalDroppedEvents"/> broken down by <see cref="TraceEventKind"/>: which events overflow their ring, and so which buffer to grow. Read it
+    /// after <see cref="Stop"/>; the per-ring counters are written lock-free by the producer threads.
+    /// </summary>
+    /// <remarks>
+    /// Spans only. Dropped instants (tick and phase markers, GC, memory, ...) count in <see cref="TotalDroppedEvents"/> but not here, so the values can sum
+    /// to less than the total; the gap is the instants dropped.
+    /// </remarks>
+    public static IReadOnlyDictionary<TraceEventKind, long> DroppedEventsByKind => TyphonEvent.DroppedEventsByKind;
 
     /// <summary>
     /// Snapshot of total exporter-queue drops captured at <see cref="Stop"/> time (before the exporter list is cleared). Non-zero
