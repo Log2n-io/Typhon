@@ -47,6 +47,10 @@ services.AddTyphon(o => o.DatabaseFile("world.typhon").Backup(new BackupOptions
         MinKeep = 3, MaxAge = TimeSpan.FromDays(7), MaxCount = 0, MaxTotalBytes = 0, CompactThreshold = 24, KeepLastDrilled = true,
     },
     DrillWindow = TimeSpan.FromDays(1),                          // health warns when no drill is that recent; 0 = not monitored
+    Archive   = new ArchiveOptions                               // optional: continuous WAL archiving into the same store (RPO = seconds)
+    {
+        MaxSegmentAge = TimeSpan.FromSeconds(30), BacklogLimitBytes = 8L << 30,
+    },
 }));
 
 var point  = await engine.Backup.CreateAsync();                  // on demand, into the configured store
@@ -70,7 +74,7 @@ typhon backup prune   --store S --min-keep 3 --max-age 7d [--dry-run]
 
 ## ⚠️ Guarantees & limits
 
-- **Not yet built:** WAL archiving (seconds of RPO, restore to an LSN or a time, `typhon backup log`) and the Workbench backup panel.
+- **Not yet built:** the Workbench backup panel.
 - **Zero transaction-path cost.** The only steady-state cost is one atomic bit-set per data-file page write; a backup's
   copy-before-write runs on the checkpoint's write path, never on a commit.
 - **I/O proportional to change.** An incremental copies only the pages written since the previous point; a full or

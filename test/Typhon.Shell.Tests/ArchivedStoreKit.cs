@@ -79,7 +79,7 @@ internal sealed class ArchivedStoreKit : IDisposable
         dbe.RegisterComponentFromAccessor<LedgerEntry>();
         dbe.InitializeArchetypes();
         kit.Timeline = dbe.TimelineId;
-        var archiver = dbe.CreateWalArchiver(dbe.ArchiveConfiguration.Options, kit.Store, null, startWorker: false);
+        var archiver = dbe.CreateWalArchiver(dbe.ArchiveConfiguration, kit.Store, null, startWorker: false);
         var seconds = 0;
         kit.Tick(archiver, seconds);
         var capture = dbe.BackupCoordinator.CaptureAsync(new FileSystemBackupStore(kit.Store), BackupKind.Full, CancellationToken.None);
@@ -166,11 +166,15 @@ internal sealed class ArchivedStoreKit : IDisposable
             .AddScopedDatabaseEngine(o =>
             {
                 o.Wal = new WalWriterOptions { UseFUA = false, SegmentSize = SegmentSize, InitialSegmentSize = SegmentSize, PreAllocateSegments = 1 };
-                o.WalArchive = archived
-                    ? new WalArchiveConfiguration
+                o.Backup = archived
+                    ? new BackupOptions
                     {
-                        Options = new ArchiveOptions { MaxSegmentAge = TimeSpan.FromSeconds(5), BacklogLimitBytes = 64L * SegmentSize },
                         StorePath = Store,
+                        Interval = TimeSpan.Zero,
+                        Retention = null,
+                        Archive = new ArchiveOptions { MaxSegmentAge = TimeSpan.FromSeconds(5), BacklogLimitBytes = 64L * SegmentSize },
+                        ManualTickForTest = true,
+                        ArchiverByTest = true,
                     }
                     : null;
             });

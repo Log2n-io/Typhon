@@ -57,6 +57,33 @@ internal sealed class PruneArchiveTests
         Assert.That(result.Skipped, Is.Empty);
     }
 
+    /// <summary>
+    /// Retention's archive step as wired (#1416 merge): the engine's retention names its live timeline and the needless ones go; a caller that sees only the
+    /// store (<c>typhon backup prune</c>, the facade: <see cref="Guid.Empty"/>) deletes no timeline whole, since any of them may be a live engine's.
+    /// </summary>
+    [Test]
+    [CancelAfter(10_000)]
+    public void TheDefaultPruner_WithoutTheLiveTimeline_DeletesNoTimelineWhole()
+    {
+        var fs = Seed(new InMemorySparseFileSystem());
+        using (var session = BackupStore.OpenForWrite(Root, ArchiveTestKit.Database, false, fs))
+        {
+            RetentionExecutor.DefaultArchivePruner(session, [(Kept, 300)], Guid.Empty);
+        }
+
+        Assert.That(Ids(fs, Kept), Is.EqualTo(new long[] { 3, 4, 5 }), "the kept timeline is still pruned below its floor");
+        Assert.That(Ids(fs, Gone), Is.EqualTo(new long[] { 1, 2 }), "a timeline with no kept point may be live: kept whole");
+        Assert.That(Ids(fs, Live), Is.EqualTo(new long[] { 1, 2 }));
+
+        using (var session = BackupStore.OpenForWrite(Root, ArchiveTestKit.Database, false, fs))
+        {
+            RetentionExecutor.DefaultArchivePruner(session, [(Kept, 300)], Live);
+        }
+
+        Assert.That(fs.DirectoryExists(new WalArchivePaths(Root).Timeline(Gone)), Is.False, "with the live timeline known, a needless one goes whole");
+        Assert.That(Ids(fs, Live), Is.EqualTo(new long[] { 1, 2 }));
+    }
+
     [Test]
     [CancelAfter(10_000)]
     public void ABusyTimeline_IsSkippedAndReported()

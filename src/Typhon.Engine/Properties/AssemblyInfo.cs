@@ -23,8 +23,9 @@ using System.Runtime.CompilerServices;
 // Added 2026-07-19 (#514 D1): archetype catalog ids are now engine-assigned (no author-set [Archetype(Id=N)]), so the Workbench controller tests resolve an
 // archetype's runtime id via Archetype<T>.Metadata instead of a hardcoded literal.
 [assembly: InternalsVisibleTo("Typhon.Workbench.Tests")]
-// Added 2026-10-21 (#1418): `typhon backup log` and `restore --lsn/--time` are tested over a real WAL archive, and until #1416's public BackupOptions
-// lands archiving is configured, and the archiver driven, only through internals (DatabaseEngineOptions.WalArchive, CreateWalArchiver).
+// Added 2026-10-21 (#1418): `typhon backup log` and `restore --lsn/--time` are tested over a real WAL archive whose segments, samples and point the test
+// lays down on a logical clock: the kit builds the archiver with CreateWalArchiver's seams and drives its Step and ArchivePending itself, and captures
+// through the coordinator. The public BackupOptions configures archiving, but cannot make that archive deterministic.
 [assembly: InternalsVisibleTo("Typhon.Shell.Tests")]
 [assembly: InternalsVisibleTo("Typhon.IOProfileRunner")]
 [assembly: InternalsVisibleTo("Typhon.MonitoringDemo")]

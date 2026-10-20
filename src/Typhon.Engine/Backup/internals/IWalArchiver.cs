@@ -99,11 +99,3 @@ internal enum ArchiveGapReason : byte
 internal readonly record struct WalArchiveState(WalArchiveCondition Condition, Guid TimelineId, long ArchivedThroughLsn, long LagBytes,
     long BacklogBytes, double LagSeconds, long GapsTotal, long LastGapFromLsn, long LastGapToLsn, ArchiveGapReason LastGapReason,
     DateTime LastArchivedSealUtc, string LastError);
-
-/// <summary>Where archiving is configured until the backup options (#1416) carry it: the options and the store the archive is written to.</summary>
-internal sealed class WalArchiveConfiguration
-{
-    public required ArchiveOptions Options { get; init; }
-
-    public required string StorePath { get; init; }
-}

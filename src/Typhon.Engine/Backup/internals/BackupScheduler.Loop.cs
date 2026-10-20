@@ -69,7 +69,9 @@ internal sealed partial class BackupScheduler
         _timeline = _engine.TimelineId;
         _schedule = new ScheduleState(_options.Interval, Stopwatch.Frequency);
         _requests = _options.AcceptRequests ? new BackupRequestFile(_engine.MMF.BundleDirectory) : null;
-        _archiver = ArchiverFactory != null ? ArchiverFactory() : _engine.CreateWalArchiver(_options.Archive, _options.StorePath);
+        _archiver = ArchiverFactory != null ? ArchiverFactory()
+            : _options.ArchiverByTest ? null
+            : _engine.CreateWalArchiver(_options.Archive, _options.StorePath);
         OnStarted();
         if (!ManualTicks && !_engine.BackupOptions.ManualTickForTest)
         {

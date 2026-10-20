@@ -10,8 +10,11 @@ namespace Typhon.Engine;
 /// </summary>
 public partial class DatabaseEngine
 {
-    /// <summary>The archiving configuration this engine opened with; null when archiving is off.</summary>
-    internal WalArchiveConfiguration ArchiveConfiguration => _options.WalArchive;
+    /// <summary>
+    /// The archiving configuration this engine opened with (<see cref="BackupOptions.Archive"/>, written to <see cref="BackupOptions.StorePath"/>); null when
+    /// archiving is off.
+    /// </summary>
+    internal ArchiveOptions ArchiveConfiguration => _options.Backup?.Archive;
 
     /// <summary>The archiver <see cref="CreateWalArchiver(ArchiveOptions, string)"/> built; null until then. The close stops it before its final checkpoint.</summary>
     internal WalArchiver WalArchiver { get; private set; }
@@ -19,18 +22,13 @@ public partial class DatabaseEngine
     /// <summary>Refuses the open, before anything is written for the WAL, when archiving is configured with options that cannot be used.</summary>
     private void ValidateArchiveConfiguration()
     {
-        var archive = _options.WalArchive;
+        var archive = ArchiveConfiguration;
         if (archive == null)
         {
             return;
         }
 
-        if (archive.Options == null)
-        {
-            throw new ArgumentException("WAL archiving is configured without its ArchiveOptions.");
-        }
-
-        if (!archive.Options.Validate(_options.Wal, archive.StorePath, out var error))
+        if (!archive.Validate(_options.Wal, _options.Backup.StorePath, out var error))
         {
             throw new ArgumentException(error);
         }

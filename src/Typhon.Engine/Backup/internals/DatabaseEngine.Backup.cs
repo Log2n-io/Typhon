@@ -17,7 +17,6 @@ public partial class DatabaseEngine
     /// </summary>
     private void ConfigureBackup()
     {
-        ValidateArchiveConfiguration();
         var backup = _options.Backup;
         if (backup == null)
         {

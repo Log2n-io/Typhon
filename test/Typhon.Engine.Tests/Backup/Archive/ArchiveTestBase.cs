@@ -19,6 +19,9 @@ abstract partial class ArchiveTestBase<T> : BackupTestBase<T> where T : ArchiveT
     /// <summary>Whether the engine opens with archiving configured.</summary>
     protected virtual bool ArchivingOn => true;
 
+    /// <summary>The backup scheduler builds and drives the archiver, as in production; false: the test builds its own and drives it on its clock.</summary>
+    protected virtual bool SchedulerBuildsArchiver => false;
+
     /// <summary>Set to open restored bundles without archiving (read when an engine is resolved).</summary>
     protected bool SuppressArchiving { get; set; }
 
@@ -36,11 +39,17 @@ abstract partial class ArchiveTestBase<T> : BackupTestBase<T> where T : ArchiveT
         o.Wal.SegmentSize = SegmentSize;
         o.Wal.InitialSegmentSize = SegmentSize;
         o.Wal.PreAllocateSegments = 1;
-        o.WalArchive = ArchivingOn && !SuppressArchiving
-            ? new WalArchiveConfiguration
+        // Archiving is configured through the engine's backup options (#1416), with no schedule and no retention; the archiver is the test's own, driven
+        // on its logical clock (ArchiverByTest), so the scheduler builds none and runs no thread.
+        o.Backup = ArchivingOn && !SuppressArchiving
+            ? new BackupOptions
             {
-                Options = new ArchiveOptions { MaxSegmentAge = TimeSpan.FromSeconds(5), BacklogLimitBytes = BacklogLimit },
                 StorePath = StorePath,
+                Interval = TimeSpan.Zero,
+                Retention = null,
+                Archive = new ArchiveOptions { MaxSegmentAge = TimeSpan.FromSeconds(5), BacklogLimitBytes = BacklogLimit },
+                ManualTickForTest = true,
+                ArchiverByTest = !SchedulerBuildsArchiver,
             }
             : null;
     }
@@ -108,7 +117,7 @@ abstract partial class ArchiveTestBase<T> : BackupTestBase<T> where T : ArchiveT
 
     /// <summary>The engine's archiver, its worker not started unless <paramref name="start"/>: the test drives Step and ArchivePending itself.</summary>
     protected static WalArchiver NewArchiver(DatabaseEngine dbe, IStoreFileSystem fs = null, bool start = false) =>
-        dbe.CreateWalArchiver(dbe.ArchiveConfiguration.Options, StorePath, fs, start);
+        dbe.CreateWalArchiver(dbe.ArchiveConfiguration, StorePath, fs, start);
 
     /// <summary><paramref name="seconds"/> on the monotonic clock the archiver ages segments by.</summary>
     protected static long Mono(double seconds) => (long)(seconds * Stopwatch.Frequency);

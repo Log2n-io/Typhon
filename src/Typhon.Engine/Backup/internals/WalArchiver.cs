@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
+using Typhon.Profiler;
 
 namespace Typhon.Engine.Internals;
 
@@ -449,7 +450,24 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
                     next = snap.Next;
                 }
 
-                if (!ArchiveOne(next))
+                // One BackupArchiveSegment span (trace kind 74) per segment: an exception is a failed copy (the catch below records it).
+                var span = TyphonEvent.BeginBackupArchiveSegment(next.Id);
+                bool archived;
+                try
+                {
+                    archived = ArchiveOne(next, ref span);
+                }
+                catch
+                {
+                    span.Outcome = (byte)BackupArchiveSegmentOutcome.Failed;
+                    throw;
+                }
+                finally
+                {
+                    span.Dispose();
+                }
+
+                if (!archived)
                 {
                     return;
                 }
@@ -722,8 +740,12 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
         return false;
     }
 
-    /// <summary>Archives one sealed segment (impl/1418 §3.3 ArchiveOne). False when archiving must stop or retry later.</summary>
-    private bool ArchiveOne(in WalSealedSegment s)
+    /// <summary>
+    /// Archives one sealed segment (impl/1418 §3.3 ArchiveOne). False when archiving must stop or retry later. Sets the span's outcome
+    /// (<see cref="BackupArchiveSegmentOutcome"/>): published or already archived ⇒ Archived, with the archived file's bytes; diverged or no timeline to
+    /// write to ⇒ Failed; the archiver stopping, or the segment reclaimed by a released cycle before its copy ⇒ Abandoned.
+    /// </summary>
+    private bool ArchiveOne(in WalSealedSegment s, ref BackupArchiveSegmentEvent span)
     {
         var archivedThrough = ArchivedThroughLsn;
 
@@ -734,6 +756,7 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
         {
             if (_stopped)
             {
+                span.Outcome = (byte)BackupArchiveSegmentOutcome.Abandoned;
                 return false;
             }
 
@@ -741,6 +764,7 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
             if (!_reader.OpenSegmentForArchive(s.Path, s.WrittenBytes))
             {
                 // Reclaimed by a released cycle (or no valid header): gone from the list too; the next segment's continuity records the gap.
+                span.Outcome = (byte)BackupArchiveSegmentOutcome.Abandoned;
                 return true;
             }
 
@@ -758,6 +782,7 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
         if (archivedThrough > 0 && scan.FirstRecordLsn != 0 && scan.FirstRecordLsn <= archivedThrough)
         {
             Diverge($"segment {s.Id} holds LSN {scan.FirstRecordLsn}, inside the archive (archived through {archivedThrough})");
+            span.Outcome = (byte)BackupArchiveSegmentOutcome.Failed;
             return false;
         }
 
@@ -766,6 +791,7 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
         var target = OpenTimeline(entry);
         if (target == null)
         {
+            span.Outcome = (byte)BackupArchiveSegmentOutcome.Failed;
             return false;
         }
 
@@ -843,8 +869,12 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
             if (published.Outcome == ArchivePublishOutcome.Diverged)
             {
                 Diverge($"segment {s.Id} is archived with other bytes (another database copy archives to this timeline)");
+                span.Outcome = (byte)BackupArchiveSegmentOutcome.Failed;
                 return false;
             }
+
+            span.Outcome = (byte)BackupArchiveSegmentOutcome.Archived;
+            span.Bytes = published.Segment.FileLength;
 
             if (published.Outcome == ArchivePublishOutcome.Published)
             {
@@ -890,9 +920,6 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
             _engine.CheckpointManager?.RaiseArchiveFloor(end + 1);
         }
 
-        // TODO(#1416 merge): emit BackupArchiveSegment span (trace kind 74) around ArchiveOne: segment id (s.Id), raw bytes (scan.ArchiveLength), stored
-        // bytes (published.Segment.FileLength), duration (read + scan + compress + publish + raise), outcome (Published | AlreadyArchived | Diverged |
-        // Failed). #1416 defines kind 74 with its own 44–49 in the profiler/Workbench pipeline.
         WalArchiveLog.SegmentArchived(_log, s.Id, s.FirstLsn, s.LastLsn, scan.ArchiveLength, published.Segment.FileLength);
         return true;
     }

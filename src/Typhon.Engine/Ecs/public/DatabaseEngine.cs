@@ -365,12 +365,6 @@ public class DatabaseEngineOptions
     internal bool ForceCrashRecoveryAtOpen { get; set; }
 
     /// <summary>
-    /// Continuous WAL archiving (#1418): null = off. Read once by the constructor, which holds every WAL segment for the archive from the first instant
-    /// (BKP-10). Stands in for the backup options' <c>Archive</c> and <c>StorePath</c> until the backup scheduler (#1416) carries them.
-    /// </summary>
-    internal WalArchiveConfiguration WalArchive { get; set; }
-
-    /// <summary>
     /// Lock acquisition timeout configuration for all engine subsystems.
     /// </summary>
     public TimeoutOptions Timeouts { get; set; } = new();
@@ -2637,7 +2631,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // BKP-10: before the first cycle (the recovery seal's included), so no cycle ever reclaims a segment the archive has not copied.
         if (ArchiveConfiguration != null)
         {
-            CheckpointManager.EngageArchiveFloor(ArchiveConfiguration.Options.BacklogLimitBytes);
+            CheckpointManager.EngageArchiveFloor(ArchiveConfiguration.BacklogLimitBytes);
         }
 
         CheckpointManager.Start();

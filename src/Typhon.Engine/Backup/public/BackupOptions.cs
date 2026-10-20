@@ -57,6 +57,9 @@ public sealed class BackupOptions
     /// <summary>Continuous WAL archiving into the same store (Layer 2, #1418); <c>null</c>: off.</summary>
     public ArchiveOptions Archive { get; init; }
 
+    /// <summary>Test seam: the scheduler builds no archiver; the test builds one with <c>CreateWalArchiver</c>'s seams and drives it itself.</summary>
+    internal bool ArchiverByTest { get; init; }
+
     /// <summary>Test seam: the scheduler starts no thread; the test drives its ticks on logical clocks.</summary>
     internal bool ManualTickForTest { get; init; }
 

@@ -144,10 +144,42 @@ internal static class RetentionExecutor
     }
 
     /// <summary>
-    /// The archive prune every retention runs. TODO(#1418): <c>WalArchiveStore.PruneArchive(session, floors, liveTimeline)</c>, which takes each
-    /// <c>wal/&lt;t&gt;/archive.lock</c> per operation; until it is on this branch there is no <c>wal/</c> to prune, so it does nothing.
+    /// The archive prune every retention runs: <see cref="WalArchiveStore.PruneArchive"/>, which takes each <c>wal/&lt;t&gt;/archive.lock</c> per operation.
+    /// A caller that does not know the database's live timeline (<see cref="Guid.Empty"/>: <c>typhon backup prune</c> and the facade, which see a store,
+    /// not an engine) deletes no timeline whole: each one without a kept point is kept from LSN 0, since it may be the live one — a restored engine
+    /// archives its new timeline before its first point. The engine's own retention passes its timeline, and the other ones go.
     /// </summary>
-    internal static readonly ArchivePruner DefaultArchivePruner = static (_, _, _) => { };
+    internal static readonly ArchivePruner DefaultArchivePruner = static (session, floors, liveTimeline) =>
+    {
+        if (liveTimeline == Guid.Empty)
+        {
+            var all = new List<(Guid TimelineId, long KeepFromLsn)>(floors);
+            foreach (var t in WalArchiveStore.ListTimelines(session.FileSystem, session.Root))
+            {
+                if (!Contains(floors, t))
+                {
+                    all.Add((t, 0));
+                }
+            }
+
+            floors = all;
+        }
+
+        WalArchiveStore.PruneArchive(session, floors, liveTimeline);
+    };
+
+    private static bool Contains(IReadOnlyList<(Guid TimelineId, long KeepFromLsn)> floors, Guid timeline)
+    {
+        foreach (var (t, _) in floors)
+        {
+            if (t == timeline)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     private static bool IsSubset(IReadOnlyList<string> subset, IReadOnlyList<string> of)
     {
