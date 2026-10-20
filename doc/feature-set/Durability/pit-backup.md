@@ -7,7 +7,7 @@ description: 'Online, forward-incremental page backups; each point is a frozen d
 # Point-in-Time Incremental Backup
 > Online, forward-incremental page backups; each point is a frozen data-file image plus a short WAL tail, restored through crash recovery.
 
-**Status:** 📋 Planned · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Durability](./README.md)
+**Status:** 🚧 Partial · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Durability](./README.md)
 **Assumes:** [Crash Recovery (RecoveryDriver)](crash-recovery/README.md)
 
 ## 🎯 What it solves
@@ -35,38 +35,41 @@ recovery point objective down to seconds and allows restoring to any LSN or time
 
 ## 💻 Usage
 
-Not implemented. The sketch below is the *intended* shape:
+The engine backs itself up on a schedule into its store, applies the retention policy after each point, and publishes its health:
 
 ```csharp
-// Illustrative only — not a real/current Typhon API.
-// services.AddTyphon(o => o.DatabaseFile("world.typhon").Backup(b =>
-// {
-//     b.StorePath = "/backups/world";
-//     b.Interval  = TimeSpan.FromHours(1);                         // required: no implicit default
-//     b.Retention = new BackupRetentionPolicy                     // every limit stated; 0 = no limit
-//     {
-//         MinKeep = 3, MaxAge = TimeSpan.FromDays(7), MaxCount = 0, MaxTotalBytes = 0, CompactThreshold = 24, KeepLastDrilled = true,
-//     };
-//     b.Archive   = new ArchiveOptions { MaxSegmentAge = TimeSpan.FromSeconds(30), BacklogLimitBytes = 8L << 30 };
-// }));
-// var point = await engine.Backup.CreateAsync();                    // on demand
+services.AddTyphon(o => o.DatabaseFile("world.typhon").Backup(new BackupOptions
+{
+    StorePath = "/backups/world",
+    Interval  = TimeSpan.FromHours(1),                          // required: 0 = no schedule (on demand and requests only)
+    Retention = new BackupRetentionPolicy                        // required (null = no automatic retention); every limit stated, 0 = none
+    {
+        MinKeep = 3, MaxAge = TimeSpan.FromDays(7), MaxCount = 0, MaxTotalBytes = 0, CompactThreshold = 24, KeepLastDrilled = true,
+    },
+    DrillWindow = TimeSpan.FromDays(1),                          // health warns when no drill is that recent; 0 = not monitored
+}));
+
+var point  = await engine.Backup.CreateAsync();                  // on demand, into the configured store
+var health = engine.Backup.Status.Health;                         // Off, Ok, Warning, Degraded, Failing — and Status.ReasonText says why
+services.AddTyphonBackupMetrics();                               // the Typhon.Backup meter: health, ages, chain depth, store bytes, RPO
 ```
 
+The `typhon` tool does the rest, offline or by asking the running engine through its bundle directory:
+
 ```
-# Planned CLI (the `typhon` tool, beside check / repair)
-typhon backup create  <bundle> [--store S] [--full]     # online via the running engine, or offline
-typhon backup status  <bundle>                           # exit code = health, for monitoring
-typhon backup list    --store S
+typhon backup create  <bundle> [--store S] [--full] [--wait]   # asks the running engine, or captures a closed database
+typhon backup status  <bundle> | --store S [--stale-after 1d]  # exit code = health: 0 ok, 1 warning/degraded, 3 failing/off
+typhon backup list    --store S [--restorable]                 # points, chains, sizes, drill results
 typhon backup verify  --store S [--level quick|full|deep]
-typhon backup restore --store S [--point X | --lsn L | --time T] --to <bundle>
-typhon backup drill   --store S                          # restore to scratch, open, check, delete
-typhon backup compact --store S
+typhon backup restore --store S [--point X] --to <bundle>
+typhon backup drill   --store S --scratch D                    # restore to scratch, open, check deep, record, delete
+typhon backup compact --store S [--point X]
 typhon backup prune   --store S --min-keep 3 --max-age 7d [--dry-run]
 ```
 
 ## ⚠️ Guarantees & limits
 
-- **Not implemented.** Everything above is design.
+- **Not yet built:** WAL archiving (seconds of RPO, restore to an LSN or a time, `typhon backup log`) and the Workbench backup panel.
 - **Zero transaction-path cost.** The only steady-state cost is one atomic bit-set per data-file page write; a backup's
   copy-before-write runs on the checkpoint's write path, never on a commit.
 - **I/O proportional to change.** An incremental copies only the pages written since the previous point; a full or
@@ -79,6 +82,12 @@ typhon backup prune   --store S --min-keep 3 --max-age 7d [--dry-run]
   same checks `typhon check` uses.
 - **Backup never endangers the engine.** A backup that cannot keep up aborts and retries; an unreachable store degrades
   health (and, with archiving, the recovery point), it does not stop the engine.
+- **Health never looks better than the backups are.** Stale backups, failures in a row, an unreachable store, a failed
+  drill each lower it; a stopped engine's last status degrades by itself as time passes.
+- **A drill proves a point restores.** It restores into a scratch directory, opens the database (recovery runs), checks it
+  deep and records the result in the store. The `typhon` tool drills a point whose WAL tail it can replay without the
+  application's assemblies; a point whose tail holds the application's records is drilled in-process, by a host that
+  passes its own opener (`BackupDrillOptions.OpenAndClose`).
 - **One store per database**, a local or mounted filesystem path. Remote object stores, encryption and logical
   (entity-level) export are out of scope for now.
 

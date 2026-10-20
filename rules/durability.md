@@ -3559,9 +3559,10 @@ lifecycle (#1415: BKP-13, BKP-14) and the ops loop (#1416: BKP-15, BKP-16). BKP-
   on_violation: monitoring says Ok while nothing restorable is being produced — the failure mode a backup exists to prevent
   verified: BackupHealthEvaluatorTests (every row of the table alone, the worst winning, a seeded property over random inputs),
             BackupSchedulerTests (logical clocks: grace then interval, a restart reading the store, a new timeline, a wall clock set back a day),
-            ScheduleStateTests, BackupRequestTests.AStoppedEnginesStatus_DegradesByItself — [VerifiesRule("BKP-15")]; [RuleMutant("BKP-15")]: an evaluator that forgets a timeline with no point, a
-            wall-clock schedule (the clock set back a day stops it), a last success taken from another timeline (a restored database waits an
-            Interval)
+            ScheduleStateTests, BackupRequestTests.AStoppedEnginesStatus_DegradesByItself, BackupOpsLoopTests (AC-O1: Ok, Degraded, Failing,
+            Ok again, the same in the status, the status file, the gauge and ReadStatus) — [VerifiesRule("BKP-15")]; [RuleMutant("BKP-15")]: an
+            evaluator that forgets a timeline with no point, a wall-clock schedule (the clock set back a day stops it), a last success taken
+            from another timeline (a restored database waits an Interval)
 
 ### BKP-16: The ops loop never endangers the engine and writes only to its store
   invariant no exception leaves the scheduler's tick or a backup job: every failure becomes state and health (BackupOpsState, BackupStatus)
