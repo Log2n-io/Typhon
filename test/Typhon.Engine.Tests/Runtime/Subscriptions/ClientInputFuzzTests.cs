@@ -544,7 +544,10 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
         Tick(harness, seed, messages);
         Tick(harness, seed, messages);
         TestContext.Out.WriteLine($"seed {seed}: {messages} messages, {hellosMutated} mutated HELLOs, closes "
-            + $"{string.Join(", ", closes.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}×{kv.Value}"))}, tick {_tick}, acks {harness.Assembler.AcksWritten}");
+            + $"{string.Join(", ", closes.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}×{kv.Value}"))}, tick {_tick}, acks {harness.Assembler.AcksWritten}, "
+            + $"lagging {harness.Assembler.SessionsClosedLagging}, degraded {harness.Assembler.SessionsDegraded}, longest skip run {harness.Assembler.LongestSkipRun} of {harness.Assembler.CloseBoundTicks}, "
+            + $"frames {harness.Assembler.FramesProduced} produced / {harness.Assembler.FramesSkipped} skipped, oversize {harness.Assembler.OversizeSkips}, "
+            + $"owed resets {harness.Assembler.OwedResets}, meter {harness.Assembler.MeterViolations}/{harness.Assembler.MeterChecks}");
 
         Assert.Multiple(() =>
         {
