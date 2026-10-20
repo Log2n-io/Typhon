@@ -3281,6 +3281,11 @@ public unsafe partial class Transaction
                 // Must iterate all component slots (not just svSlots) because spatial-only components
                 // without B+Tree indexes are not in the svSlots array.
                 // Skip for cluster entities — per-archetype R-Tree is used instead.
+
+                // No epoch refresh between placements, unlike the publish and the rollback (#831). The pin is what stops an oversized commit HERE,
+                // before its append: it keeps every page the placement touched, so the commit meets the wall as soon as the publish would, and is refused
+                // (TransactionExceedsPageCacheException) with nothing to undo but itself. Moved on, it placed 50 000 spawns into 8 MiB, appended, and its
+                // publish — which keeps every mark it takes, ~380 pages more than PREPARE's 542 — stopped the engine (CommitPublishIncompleteException).
             }
         }
         finally
@@ -3335,7 +3340,7 @@ public unsafe partial class Transaction
                     continue;
                 }
 
-                RefreshBetweenPublishSteps();
+                RefreshBetweenCommitSteps();
                 if (!ctx.HasMapAccessor || entry.Id.ArchetypeId != ctx.LastArchId)
                 {
                     DisposeSpawnAccessors(ref ctx);
@@ -3718,6 +3723,7 @@ public unsafe partial class Transaction
                 }
 
                 entry.Placed = false;
+                RefreshBetweenCommitSteps();
             }
         }
         finally
@@ -4239,7 +4245,7 @@ public unsafe partial class Transaction
         {
             foreach (var entityId in _pendingDestroys)
             {
-                RefreshBetweenPublishSteps();
+                RefreshBetweenCommitSteps();
                 var meta = _dbe.GetMetaByRouting(entityId.ArchetypeId);
                 if (meta == null)
                 {
@@ -5437,6 +5443,8 @@ public unsafe partial class Transaction
                         {
                             table.CompRevTableSegment.FreeChunk(cri.CompRevTableFirstChunkId);
                         }
+
+                        RefreshBetweenCommitSteps();
                     }
                     else
                     {

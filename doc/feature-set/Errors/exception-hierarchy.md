@@ -55,6 +55,7 @@ catch (TyphonException ex)
 | `StorageException` | `TyphonException` | `false` | — |
 | `CorruptionException` / `PageCorruptionException` | `StorageException` | `false` | `ComponentName`, `PageIndex` / `ExpectedCrc`, `ComputedCrc` |
 | `DatabaseLockedException` | `StorageException` | `false` | `OwnerPid`, `OwnerMachine`, `StartedAt` |
+| `TransactionExceedsPageCacheException` | `StorageException` | `false` | `HeldPages`, `CachePages`, `MarkedPages`, `PinnedPages` |
 | `DurabilityException` | `TyphonException` | `false` | — |
 | `WalWriteException`, `WalSegmentException`, `WalClaimTooLargeException` | `DurabilityException` | `false` | `SegmentPath` / `RequestedBytes`, `BufferCapacity` |
 | `CommitDurabilityUncertainException` | `DurabilityException` | `false` | `HighLsn` |

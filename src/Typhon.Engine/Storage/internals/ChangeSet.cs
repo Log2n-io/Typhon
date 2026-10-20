@@ -48,6 +48,18 @@ public class ChangeSet
         _markedPages = new HashSet<int>();
     }
 
+    /// <summary>The page cache whose pages this change set marks.</summary>
+    internal PagedMMF Owner => _owner;
+
+    /// <summary>
+    /// The pages this change set holds a mark on, by memory page index. For its writer's thread only (PS-05a): a back-pressure wait counts what the commit
+    /// waiting on it holds itself (<see cref="PagedMMF.CommitMarks"/>).
+    /// </summary>
+    internal HashSet<int>.Enumerator EnumerateMarkedPages() => _markedPages.GetEnumerator();
+
+    /// <summary>How many pages this change set holds a mark on.</summary>
+    internal int MarkedPageCount => _markedPages.Count;
+
     /// <summary>
     /// Marks entry to a mutating method; throws naming BOTH threads if another is already inside. Compiled out entirely in Release.
     /// </summary>

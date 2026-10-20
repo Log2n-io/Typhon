@@ -118,7 +118,7 @@ public unsafe partial class Transaction : EntityAccessor
     // mid-drain throw the abort path releases only [_publishDrainIndex, Count), so each retained lock is released exactly once.
     private int _publishDrainIndex;
 
-    /// <summary>The publish's entries so far, for its pressured epoch refresh cadence (<see cref="RefreshBetweenPublishSteps"/>).</summary>
+    /// <summary>The commit's steps so far, for its pressured epoch refresh cadence (<see cref="RefreshBetweenCommitSteps"/>).</summary>
     private int _publishStepCount;
 
     /// <summary>
@@ -2043,7 +2043,11 @@ public unsafe partial class Transaction : EntityAccessor
     private struct RollbackAction : IEntryAction
     {
         public Transaction Tx;
-        public void Process(ref CommitContext ctx) => Tx.RollbackComponent(ref ctx);
+        public void Process(ref CommitContext ctx)
+        {
+            Tx.RollbackComponent(ref ctx);
+            Tx.RefreshBetweenCommitSteps();
+        }
     }
 
     /// <summary>
@@ -2477,19 +2481,25 @@ public unsafe partial class Transaction : EntityAccessor
         element.IsolationFlag && (contentChunkId != 0 ? element.ComponentChunkId == contentChunkId : element.ComponentChunkId == 0 && element.TSN == TSN);
 
     /// <summary>
-    /// Between two entries of a commit's publish — component entries, spawns, destroys, staged writes — while the cache is under pressure: moves the
-    /// thread's epoch, with its warm accessors', every <see cref="EntityAccessor.PressuredEpochRefreshInterval"/> entries (#1382), the transactions'
-    /// pressured cadence (EP-03). An entry keeps nothing it read for the next: what it wrote is dirty-marked, and the accessors it shares with the next
-    /// re-resolve every address. Held for the whole publish instead, its pin kept every page the other threads tagged meanwhile, for as long as the
-    /// publish's back-pressure waits lasted (AP-03). Every entry would bump the global epoch 1.3 million times a storm, each one sending every other
-    /// thread's warm accessors down their cold path. Never under a live index cursor of this thread's (#1199): a commit made inside an index scan.
+    /// Between two entries of a commit's publish — component entries, spawns, destroys, staged writes — and of the rollback of a commit that failed before
+    /// its append (#831), while the cache is under pressure, every <see cref="EntityAccessor.PressuredEpochRefreshInterval"/> entries: moves the thread's
+    /// epoch, with its warm accessors' (#1382), the transactions' pressured cadence (EP-03), and gives back the change set's dirty marks (#831). An entry
+    /// keeps nothing it read for the next: the accessors it shares with the next re-resolve every address. What it wrote stays safe unmarked: a page
+    /// registered as modified owes a write, which only a durable write discharges and which keeps it from eviction till then (PS-10), and the checkpoint
+    /// collects it by that debt, not by its mark; a page still in an accessor's dirty slot is held by its live writer until registered.
+    /// Held for the whole publish, the pin kept every page the other threads tagged meanwhile, for as long as the publish's back-pressure waits lasted
+    /// (AP-03); the marks kept the publish's whole write set resident, and a publish larger than the cache — 10 000 updates of a component with three
+    /// indexes into 8 MiB, 300 000 into 256 MiB — waited out its bound and stopped the engine. Every entry would bump the global epoch 1.3 million times a
+    /// storm, each one sending every other thread's warm accessors down their cold path. Never under a live index cursor of this thread's (#1199): a
+    /// commit made inside an index scan.
     /// </summary>
-    private void RefreshBetweenPublishSteps()
+    private void RefreshBetweenCommitSteps()
     {
         if ((++_publishStepCount & (EntityAccessor.PressuredEpochRefreshInterval - 1)) == 0 && _dbe.MMF.UnderPressure
             && EntityAccessor.LiveIndexCursors == 0)
         {
             ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(_epochManager.RefreshScope());
+            _changeSet?.ReleaseDirtyMarks();
             Interlocked.Increment(ref PagedMMF.PublishStepRefreshes);
         }
     }
@@ -2513,7 +2523,7 @@ public unsafe partial class Transaction : EntityAccessor
         //
         // Batch mode, as PREPARE's pass: the index moves made here since #1262 (Phase A) return their B+Tree warm accessors without a CommitChanges each,
         // and one flush per 1 024 entries, and at the end, registers their dirty pages. The end is before CK-13's floor is withdrawn, so a checkpoint
-        // that passes these records collects those pages. Unlike PREPARE's flush, this one does not release the ChangeSet's dirty marks mid-publish.
+        // that passes these records collects those pages. Under pressure the marks are given back between entries (RefreshBetweenCommitSteps, #831).
         ChunkBasedSegment<PersistentStore>.EnterBatchMode();
         try
         {
@@ -2521,7 +2531,7 @@ public unsafe partial class Transaction : EntityAccessor
             {
                 PublishComponent(_publishEntries[_publishDrainIndex]);
                 _publishDrainIndex++;
-                RefreshBetweenPublishSteps();
+                RefreshBetweenCommitSteps();
                 if ((_publishDrainIndex & 0x3FF) == 0)
                 {
                     ChunkBasedSegment<PersistentStore>.ExitBatchMode();
@@ -3112,7 +3122,7 @@ public unsafe partial class Transaction : EntityAccessor
                 }
 
                 PublishStagedEntry(info, staged.Key, staged.Value);
-                RefreshBetweenPublishSteps();
+                RefreshBetweenCommitSteps();
             }
         }
 
@@ -3905,6 +3915,10 @@ public unsafe partial class Transaction : EntityAccessor
         // success-return point.
         _dbe.TransactionChain.IncrementCommitTotal();
         var preparedEntries = false;
+
+        // #831: a back-pressure wait inside this commit, up to its append, can tell that the commit itself holds the cache (PagedMMF.CommitMarks).
+        var outerCommitMarks = PagedMMF.CommitMarks;
+        PagedMMF.CommitMarks = _changeSet;
         try
         {
             // Must sit inside the try so the finally still runs if this property access ever gains side effects that can throw.
@@ -4165,6 +4179,7 @@ public unsafe partial class Transaction : EntityAccessor
             // VIS-03: a commit that failed before its commit point gives its card back. A leaked reservation would block its window for good, and a
             // retried commit of this transaction would wait on itself. A no-op on success (released after the publish).
             ReleaseCommitCard();
+            PagedMMF.CommitMarks = outerCommitMarks;
             scope.Dispose();
         }
     }
