@@ -808,7 +808,9 @@ CK-08 (flush-only cycles) are later increments.
             reader holding the lock sees the old segment as active or as sealed, never as neither (online backup's tail
             snapshot, BKP-04)
   scope: `WalSegmentManager._sealedLock` — guards `RotateSegment` (ActiveSegment assignment + Add), `MarkReclaimable`,
-         `SealedSegmentCount`, `GetAllSegmentPaths`, `WalSegmentManager.SnapshotForTail`, reopen-reconcile Add
+         `SealedSegmentCount`, `GetAllSegmentPaths`, `WalSegmentManager.SnapshotForTail`, reopen-reconcile Add, and the WAL
+         archive's reads: `WalSegmentManager.ArchiveSnapshot` (the archiver's step, a few field copies, no I/O under the lock) and
+         `WalSegmentManager.BytesHeldBetween` (step 8's backlog sum, BKP-10)
   verified: SegmentSnapshotTests.SnapshotDuringARotation_SeesTheSegmentBeingSealed (a rotation paused between creating and
             publishing the new segment; assigning ActiveSegment outside the lock turns it red)
   on_violation: TXW-7 — `List<T>` corruption under concurrent structural mutation → a fatal latch in a background thread
@@ -1409,6 +1411,9 @@ either durability, recoverability, or consistency.
   note the `<` is load-bearing for online backup (BKP-04): a crash with meta = C keeps exactly the segments with
     `lastLSN ≥ C`, recovery resumes the TSN counter above every commit stamp it scans in them (RB-05), and a backup's
     tail copies that same set so a restore is that crash state
+  note the WAL archive's floor (BKP-10, W1′) joins the trim with the same `<`: with archiving configured step 8 and the open's
+    reconcile also keep every segment with `lastLSN ≥ archiveFloor` (= the archive's end + 1), unless the backlog policy released
+    it. A third floor, never a weaker one: the checkpoint frontier is unchanged, the floors combine by `min`
   scope: WalSegmentManager.cs, CheckpointManager.cs
   on_violation: premature recycling → WAL records needed for crash recovery
     are gone; data loss without detection

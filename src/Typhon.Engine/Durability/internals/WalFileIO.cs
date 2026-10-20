@@ -48,6 +48,15 @@ internal sealed class WalFileIO : IWalFileIO
     }
 
     /// <inheritdoc />
+    public SafeFileHandle OpenSegmentForArchive(string path)
+    {
+        // Delete sharing as well (WA-5): a checkpoint that reclaims the segment while the archiver reads it must delete it, not fail its cycle. Linux:
+        // any share but None takes a shared flock, compatible with the writer's.
+        var options = OperatingSystem.IsWindows() ? NoBuffering : FileOptions.None;
+        return File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, options);
+    }
+
+    /// <inheritdoc />
     public void WriteAligned(SafeFileHandle handle, long offset, ReadOnlySpan<byte> data) => RandomAccess.Write(handle, data, offset);
 
     /// <inheritdoc />

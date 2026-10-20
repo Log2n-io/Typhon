@@ -2175,6 +2175,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // provider/options; sharing one options across two engines is not a supported path.)
         _options.Wal?.WalDirectory ??= Path.Combine(MMF.BundleDirectory, "wal");
 
+        // WAL archiving (BKP-10) is decided here, once: its floor must hold from the first instant, the open's reclaim and the recovery seal included.
+        ValidateArchiveConfiguration();
+
         _durabilityNode = resourceRegistry.Durability;
         TimeoutOptions.Current = _options.Timeouts;
         _componentCollectionSegmentByStride = new ConcurrentDictionary<int, ChunkBasedSegment<PersistentStore>>();
@@ -2562,7 +2565,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // the persisted CheckpointLSN (clean-reopen path, where NO WAL recovery ran so lastLSN is 0). Using lastLSN alone restarts the reopened writer at LSN 1, below a
         // prior session's CheckpointLSN; RecoveryDriver then skips the entire post-reopen window as already-consolidated (LOG-08 — silent loss of durably-acked commits).
         var frontierLsn = Math.Max(lastLSN, checkpointLsn);
-        WalManager.Initialize(lastSegmentId, frontierLsn > 0 ? frontierLsn + 1 : 1, checkpointLsn);
+        // With archiving configured the open reclaims nothing (WA-3): a close with the store unreachable left segments only the archive floor kept.
+        WalManager.Initialize(lastSegmentId, frontierLsn > 0 ? frontierLsn + 1 : 1, checkpointLsn, ArchiveConfiguration != null ? 0 : long.MaxValue);
         // Seed the durable watermark to the reopen frontier so it MATCHES LastAppendedLsn (= NextLsn-1 = frontierLsn). Initialize advances NextLsn to
         // frontierLsn+1 (LOG-08, LSN monotonic across sessions); without a matching durable seed, DurableLsn stays 0 while LastAppendedLsn=frontierLsn, so
         // the very first checkpoint barrier (CK-02 waits DurableLsn ≥ LastAppendedLsn) blocks for an LSN no frame will ever publish on an idle reopened
@@ -2616,6 +2620,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // CK-08: until the recovery's seal, every cycle is flush-only — the passes write past the cache, and a full cycle among them would advance
         // CheckpointLSN over a half-recovered file.
         CheckpointManager.RecoveryInProgress = CrashRecoveryAtOpen;
+
+        // BKP-10: before the first cycle (the recovery seal's included), so no cycle ever reclaims a segment the archive has not copied.
+        if (ArchiveConfiguration != null)
+        {
+            CheckpointManager.EngageArchiveFloor(ArchiveConfiguration.Options.BacklogLimitBytes);
+        }
+
         CheckpointManager.Start();
 
         // Wire demand-driven flush: when page cache backpressure fires, immediately wake

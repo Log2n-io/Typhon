@@ -59,6 +59,18 @@ internal sealed class InMemoryWalFileIO : IWalFileIO
     public SafeFileHandle OpenSegmentForRead(string path) => OpenSegment(path, false);
 
     /// <inheritdoc />
+    /// <remarks>Models delete sharing: the handle is bound to the segment's content, so a <see cref="Delete"/> while it is open removes the name only and
+    /// the handle keeps reading, as a delete-pending file does.</remarks>
+    public SafeFileHandle OpenSegmentForArchive(string path)
+    {
+        var handle = OpenSegment(path, false);
+        _archiveHandles[handle.DangerousGetHandle()] = Segments[NormalizePath(path)];
+        return handle;
+    }
+
+    private readonly ConcurrentDictionary<nint, MemorySegment> _archiveHandles = new();
+
+    /// <inheritdoc />
     public void WriteAligned(SafeFileHandle handle, long offset, ReadOnlySpan<byte> data)
     {
         var seg = FindSegment(handle);
@@ -178,11 +190,17 @@ internal sealed class InMemoryWalFileIO : IWalFileIO
     public void Dispose()
     {
         _handleToPath.Clear();
+        _archiveHandles.Clear();
         Segments.Clear();
     }
 
     private MemorySegment FindSegment(SafeFileHandle handle)
     {
+        if (_archiveHandles.TryGetValue(handle.DangerousGetHandle(), out var bound))
+        {
+            return bound;
+        }
+
         if (_handleToPath.TryGetValue(handle.DangerousGetHandle(), out var path))
         {
             if (Segments.TryGetValue(path, out var seg))
