@@ -191,7 +191,8 @@ internal sealed class PackWriter : IBackupPointSink, IDisposable
             throw;
         }
         _seen = new ulong[(imagePages + 63) >> 6];
-        _index = new PackIndexRuns(_fs, TempPath + PackFormat.SidecarInfix, _options.IndexHeapEntries);
+        _index = new PackIndexRuns(_fs, TempPath + PackFormat.SidecarInfix, _options.IndexHeapEntries, _options.Owner,
+            $"Backup.Pack{_identity.BackupId}.Index");
         _header.WriteTo(Reserve(PackFormat.HeaderSize));
         _fill += PackFormat.HeaderSize;
         if (_options.DataGapBytes > 0)
