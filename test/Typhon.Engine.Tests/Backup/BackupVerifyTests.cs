@@ -69,6 +69,61 @@ internal sealed class BackupVerifyTests
         Assert.That(report.Verdict, Is.EqualTo(notRestorable.Length == report.Points.Count ? VerifyVerdict.NoRestorablePoint : VerifyVerdict.Damaged));
     }
 
+    /// <summary>
+    /// DL-11: verify takes no lock, so a retention in another process can delete packs between its listing and its opens. Staged at the opens of
+    /// verify (store.json, the rebuild's #1 #2 #3, then the checks' #1 …): after the rebuild read #1 and #2 (open 4), and at the checks' first open
+    /// (open 5). A deleted point leaves the report; it is not damage. A pack still listed but unopenable is (the next test).
+    /// </summary>
+    [TestCase(VerifyLevel.Quick, 4)]
+    [TestCase(VerifyLevel.Full, 4)]
+    [TestCase(VerifyLevel.Quick, 5)]
+    [TestCase(VerifyLevel.Full, 5)]
+    [CancelAfter(15_000)]
+    public void APackDeletedDuringVerify_IsNotDamage(VerifyLevel level, int deleteAtOpen)
+    {
+        var (inner, _) = NewStore();
+        var opens = 0;
+        var fs = new HookedFileSystem(inner)
+        {
+            BeforeOpenRead = _ =>
+            {
+                // Retention deletes descending.
+                if (++opens == deleteAtOpen)
+                {
+                    inner.DeleteFile(Root + "/packs/00000002-I.tpack");
+                    inner.DeleteFile(Root + "/packs/00000001-F.tpack");
+                }
+            },
+        };
+
+        var report = BackupVerifier.VerifyStore(Root, level, null, fs);
+
+        Assert.That(opens, Is.GreaterThan(deleteAtOpen), "premise: the deletes ran inside the verify");
+        Assert.That(report.Verdict, Is.EqualTo(VerifyVerdict.Ok), string.Join("\n", report.AllFindings));
+        Assert.That(report.RemovedPoints, Is.EqualTo(2));
+        Assert.That(report.Points.Select(p => (p.Id, p.Restorable)), Is.EqualTo(new[] { (3u, true) }));
+        Assert.That(report.Packs.Select(p => p.BackupId), Is.EqualTo(new uint[] { 3 }));
+    }
+
+    [Test]
+    [CancelAfter(15_000)]
+    public void APackThatCannotBeOpenedButIsStillListed_IsDamage()
+    {
+        var (inner, _) = NewStore();
+        var opens = 0;
+        var fs = new HookedFileSystem(inner)
+        {
+            BeforeOpenRead = path => opens += path.EndsWith("00000001-F.tpack", StringComparison.Ordinal) ? 1 : 0,
+            OpenReadFails = path => opens == 2 && path.EndsWith("00000001-F.tpack", StringComparison.Ordinal),
+        };
+
+        var report = BackupVerifier.VerifyStore(Root, VerifyLevel.Quick, null, fs);
+
+        Assert.That(report.RemovedPoints, Is.Zero);
+        Assert.That(report.Points.Where(p => !p.Restorable).Select(p => p.Id), Is.EquivalentTo(new uint[] { 1, 2 }));
+        Assert.That(report.Verdict, Is.EqualTo(VerifyVerdict.Damaged));
+    }
+
     [TestCase(VerifyLevel.Quick)]
     [TestCase(VerifyLevel.Full)]
     [CancelAfter(15_000)]

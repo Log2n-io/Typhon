@@ -102,7 +102,7 @@ public static class BackupOperations
     {
         var view = StoreView.Open(store);
         var points = view.Catalog.Packs.OrderBy(p => p.BackupId).ThenBy(p => p.Kind).Select(Summarize).ToList();
-        var chains = view.Catalog.Chains.Select(c => new BackupChainSummary(c.ChainId, c.BaseId, c.HeadBackupId, c.Depth)).ToList();
+        var chains = view.Catalog.Chains.Select(c => new BackupChainSummary(c.ChainId, c.BaseId, c.HeadBackupId, c.Depth, c.HeadDepth)).ToList();
         var unreadable = view.Catalog.Unreadable.Select(u => new KeyValuePair<string, string>(u.File, u.Reason)).ToList();
         var temps = view.Temps.Select(t => t.Name).ToList();
         IReadOnlyList<uint> restorable = null;
@@ -171,6 +171,6 @@ public static class BackupOperations
         return new BackupVerifyReport((BackupVerifyLevel)r.Level, (BackupVerifyVerdict)r.Verdict,
             r.Packs.Select(p => new BackupPackVerification(p.File, p.BackupId, (BackupPackStatus)p.Status, p.Findings.Select(F).ToList())).ToList(),
             r.Points.Select(p => new BackupPointVerification(p.Id, p.Restorable, p.BrokenBy)).ToList(),
-            r.StoreFindings.Select(F).ToList(), r.Duration, r.BytesRead);
+            r.StoreFindings.Select(F).ToList(), r.Duration, r.BytesRead, r.RemovedPoints);
     }
 }

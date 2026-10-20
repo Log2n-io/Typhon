@@ -86,6 +86,9 @@ internal sealed class VerifyReport
 
     public long BytesRead { get; init; }
 
+    /// <summary>Points whose packs a concurrent retention deleted while verify ran: left out of the report, not reported damaged (DL-11).</summary>
+    public int RemovedPoints { get; init; }
+
     public IEnumerable<VerifyFinding> AllFindings => StoreFindings.Concat(Packs.SelectMany(p => p.Findings));
 }
 
@@ -191,6 +194,8 @@ internal static class BackupVerifier
             packs[file] = VerifyPack(fs, view, file, level, options, ref bytesRead);
         }
 
+        view = WithoutDeletedPacks(fs, view, packs, pointIds, out var removed);
+
         // Points: restorable iff the chain resolves and every pack of it verified without damage (BKP-VER-06/07 for the links).
         var points = new List<PointVerification>();
         foreach (var id in pointIds)
@@ -237,7 +242,76 @@ internal static class BackupVerifier
             StoreFindings = storeFindings,
             Duration = clock.Elapsed,
             BytesRead = bytesRead,
+            RemovedPoints = removed,
         };
+    }
+
+    /// <summary>
+    /// DL-11: readers take no lock, so a retention can delete packs between verify's listing, its catalog rebuild and its opens. A pack of the view
+    /// that is no longer in <c>packs/</c> once the packs are checked is no pack of the store: it leaves the report, the points are resolved again
+    /// without it, and a point left with no pack is dropped (counted, not damaged). One still listed but unopenable stays what it is: damage.
+    /// </summary>
+    private static StoreView WithoutDeletedPacks(IStoreFileSystem fs, StoreView view, Dictionary<string, PackVerification> packs,
+        SortedSet<uint> pointIds, out int removed)
+    {
+        removed = 0;
+        var listed = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var f in fs.EnumerateFiles(view.Paths.Packs))
+        {
+            listed.Add(f.Name);
+        }
+
+        var kept = new List<CatalogPack>(view.Catalog.Packs.Count);
+        foreach (var p in view.Catalog.Packs)
+        {
+            if (listed.Contains(p.File))
+            {
+                kept.Add(p);
+            }
+            else
+            {
+                packs.Remove(p.File);
+            }
+        }
+
+        if (kept.Count == view.Catalog.Packs.Count)
+        {
+            return view;
+        }
+
+        var filtered = new StoreView
+        {
+            Paths = view.Paths,
+            Identity = view.Identity,
+            Catalog = StoreCatalog.Build(view.Identity, view.Catalog.Fingerprint, view.Catalog.HighWaterBackupId, kept,
+                new List<CatalogUnreadable>(view.Catalog.Unreadable)),
+            Temps = view.Temps,
+            CatalogFromFile = false,
+        };
+        foreach (var id in new List<uint>(pointIds))
+        {
+            var (compacted, original) = filtered.Find(id);
+            if (compacted == null && original == null && !IsUnreadable(filtered, id))
+            {
+                pointIds.Remove(id);
+                removed++;
+            }
+        }
+
+        return filtered;
+    }
+
+    private static bool IsUnreadable(StoreView view, uint id)
+    {
+        foreach (var u in view.Catalog.Unreadable)
+        {
+            if (PackFormat.TryParseFileName(u.File, out var uid, out _, out _) && uid == id)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

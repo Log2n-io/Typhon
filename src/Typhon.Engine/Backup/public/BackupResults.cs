@@ -198,17 +198,20 @@ public sealed record BackupPointVerification(uint BackupId, bool Restorable, IRe
 /// <param name="StoreFindings">Findings about the store or about chain links.</param>
 /// <param name="Duration">Wall time.</param>
 /// <param name="BytesRead">Bytes read from the store.</param>
+/// <param name="RemovedPoints">Points a concurrent retention deleted while the verify ran: left out, not damage.</param>
 [PublicAPI]
 public sealed record BackupVerifyReport(BackupVerifyLevel Level, BackupVerifyVerdict Verdict, IReadOnlyList<BackupPackVerification> Packs,
-    IReadOnlyList<BackupPointVerification> Points, IReadOnlyList<BackupVerifyFinding> StoreFindings, TimeSpan Duration, long BytesRead);
+    IReadOnlyList<BackupPointVerification> Points, IReadOnlyList<BackupVerifyFinding> StoreFindings, TimeSpan Duration, long BytesRead,
+    int RemovedPoints);
 
 /// <summary>A chain's head in a store.</summary>
 /// <param name="ChainId">The chain.</param>
 /// <param name="BaseId">Its base point (0 when the base pack is gone).</param>
 /// <param name="HeadBackupId">Its newest point.</param>
-/// <param name="Depth">Its points in the store.</param>
+/// <param name="Depth">Its points in the store (a compacted point counts once).</param>
+/// <param name="HeadDepth">The packs a restore of its head reads, a compacted base preferred; 0 when the head does not resolve.</param>
 [PublicAPI]
-public sealed record BackupChainSummary(Guid ChainId, uint BaseId, uint HeadBackupId, int Depth);
+public sealed record BackupChainSummary(Guid ChainId, uint BaseId, uint HeadBackupId, int Depth, int HeadDepth);
 
 /// <summary>What a store holds.</summary>
 /// <param name="StoreId">The store's identity.</param>

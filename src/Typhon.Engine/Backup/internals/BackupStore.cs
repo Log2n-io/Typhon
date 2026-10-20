@@ -164,6 +164,10 @@ internal sealed class StoreView
 
                 packs.Add(CatalogPack.From(f.Name, f.Length, reader.Header, reader.Footer));
             }
+            catch (FileNotFoundException)
+            {
+                // Deleted since the listing (retention, under another process's store.lock): no longer a pack of the store, not an unreadable one (DL-11).
+            }
             catch (Exception ex) when (ex is BackupException or IOException or UnauthorizedAccessException)
             {
                 BackupLog.PackUnreadable(log, paths.Root, f.Name, ex.Message);
@@ -338,7 +342,26 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
     /// <see cref="BackupStoreMismatchException"/> when it belongs to another database.
     /// </summary>
     public static BackupStore OpenForWrite(string root, Guid databaseId, bool createIfMissing, IStoreFileSystem fs = null, ILogger log = null,
+        PackWriterOptions writerOptions = null) =>
+        Open(root, databaseId, createIfMissing, PurposeBackup, fs, log, writerOptions);
+
+    /// <summary>
+    /// Opens an existing store for maintenance (compaction, retention): its identity comes from <c>store.json</c>, nothing is created, and the lock
+    /// holder is named <paramref name="purpose"/> in another writer's refusal (DL-10). Throws as <see cref="OpenForWrite"/>.
+    /// </summary>
+    public static BackupStore OpenForMaintenance(string root, string purpose, IStoreFileSystem fs = null, ILogger log = null,
         PackWriterOptions writerOptions = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(purpose);
+        return Open(root, Guid.Empty, createIfMissing: false, purpose, fs, log, writerOptions);
+    }
+
+    /// <summary>The lock holder's purpose for a capture.</summary>
+    public const string PurposeBackup = "backup";
+
+    /// <summary><paramref name="databaseId"/> empty: maintenance, the store's own identity is taken as it is.</summary>
+    private static BackupStore Open(string root, Guid databaseId, bool createIfMissing, string purpose, IStoreFileSystem fs, ILogger log,
+        PackWriterOptions writerOptions)
     {
         fs ??= StoreFileSystem.Instance;
         log ??= NullLogger.Instance;
@@ -363,7 +386,7 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
         {
             var holder = TryReadHolder(fs, paths);
             throw new BackupStoreLockedException(root, holder?.Pid ?? 0, holder?.Machine,
-                holder == null ? DateTimeOffset.MinValue : new DateTimeOffset(holder.StartedUtc, TimeSpan.Zero));
+                holder == null ? DateTimeOffset.MinValue : new DateTimeOffset(holder.StartedUtc, TimeSpan.Zero), holder?.Purpose);
         }
 
         try
@@ -380,8 +403,10 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
                 }
             }
 
-            WriteHolder(fs, paths);
-            var identity = OpenOrCreateIdentity(fs, paths, databaseId, createIfMissing);
+            WriteHolder(fs, paths, purpose);
+            var identity = databaseId == Guid.Empty
+                ? StoreView.ReadIdentity(fs, paths) ?? throw new DirectoryNotFoundException($"'{root}' is not a backup store: it has no store.json.")
+                : OpenOrCreateIdentity(fs, paths, databaseId, createIfMissing);
             var store = new BackupStore(fs, log, writerOptions, paths, identity, storeLock);
             storeLock = null;
             store.Initialize();
@@ -585,6 +610,42 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
     }
 
     /// <summary>
+    /// Starts the compacted pack of <paramref name="source"/>, an incremental point of this store (05 §2, DL-10): <c>{X}-C.tpack.tmp</c> under X's
+    /// own id (none is allocated, <c>store.hwm</c> is not written), its header X's with <c>Kind = Compacted</c>, <c>ParentId = 0</c> and
+    /// <c>BaseId = X</c>. The caller writes X's image and tail into it, as <c>BackupCompactor</c> does.
+    /// </summary>
+    public PackWriter BeginCompaction(CatalogPack source)
+    {
+        ObjectDisposedException.ThrowIf(_lock == null, this);
+        ArgumentNullException.ThrowIfNull(source);
+        if (_open is { IsOpen: true })
+        {
+            throw new InvalidOperationException("A point is already being written in this session.");
+        }
+
+        if (source.Kind != BackupKind.Incremental)
+        {
+            throw new InvalidOperationException($"Point #{source.BackupId} is a {source.Kind} pack: only an incremental point is compacted.");
+        }
+
+        if (source.StoreId != _identity.StoreId || source.DatabaseId != _identity.DatabaseId)
+        {
+            throw new BackupStoreMismatchException(_paths.Root, _identity.DatabaseId, source.DatabaseId, $"Point #{source.BackupId} is not this store's.");
+        }
+
+        if (_view.Find(source.BackupId).Compacted != null)
+        {
+            throw new InvalidOperationException($"Point #{source.BackupId} is already compacted.");
+        }
+
+        var identity = new PackIdentity(source.DatabaseId, source.StoreId, source.ChainId, source.BackupId, 0, source.BackupId, BackupKind.Compacted,
+            source.TimelineId, source.FormatRevision, source.EngineVersion, source.Offline);
+        var temp = _paths.PackPath(PackFormat.FileName(source.BackupId, BackupKind.Compacted) + PackFormat.TempSuffix);
+        _open = new PackWriter(_fs, _fs.OpenCreateNew(temp), identity, this, _writerOptions, _log);
+        return _open;
+    }
+
+    /// <summary>
     /// <c>max(store.hwm, every pack id, every temp id, every id this session allocated) + 1</c>, made durable in <c>store.hwm</c> before the
     /// caller creates its temp: an id is never reused, even after its pack is deleted (BKP-08, DC-6).
     /// </summary>
@@ -690,7 +751,7 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
         }
     }
 
-    private static void WriteHolder(IStoreFileSystem fs, in StorePaths paths)
+    private static void WriteHolder(IStoreFileSystem fs, in StorePaths paths, string purpose)
     {
         try
         {
@@ -699,7 +760,7 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
                 Pid = Environment.ProcessId,
                 Machine = Environment.MachineName,
                 StartedUtc = DateTime.UtcNow,
-                Purpose = "backup",
+                Purpose = purpose,
             }, BackupJsonContext.Default.StoreLockHolder);
             fs.DeleteFile(paths.LockHolder);
             using var file = fs.OpenCreateNew(paths.LockHolder);

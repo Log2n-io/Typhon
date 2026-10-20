@@ -248,7 +248,8 @@ internal sealed class BackupListCommand : Command<BackupListCommand.Settings>
         console.Write(table);
         foreach (var c in listing.Chains)
         {
-            console.MarkupLine($"Chain {c.ChainId.ToString()[..8]}: base #{c.BaseId}, head #{c.HeadBackupId}, {c.Depth} point(s).");
+            console.MarkupLine($"Chain {c.ChainId.ToString()[..8]}: base #{c.BaseId}, head #{c.HeadBackupId}, {c.Depth} point(s), restore of the head reads "
+                               + $"{c.HeadDepth} pack(s).");
         }
 
         foreach (var u in listing.UnreadablePacks)
@@ -334,6 +335,11 @@ internal sealed class BackupVerifyCommand : Command<BackupVerifyCommand.Settings
         console.MarkupLine($"[{colour}]{report.Verdict}[/] — {report.Level} verify of {report.Packs.Count} pack(s), "
                            + $"{report.Points.Count(p => p.Restorable)} of {report.Points.Count} point(s) restorable, {BackupCli.Bytes(report.BytesRead)} read "
                            + $"in {report.Duration.TotalMilliseconds:0} ms.");
+        if (report.RemovedPoints > 0)
+        {
+            console.MarkupLine($"[grey]{report.RemovedPoints} point(s) were deleted by a retention while the verify ran; they are left out.[/]");
+        }
+
         foreach (var f in report.StoreFindings.Concat(report.Packs.SelectMany(p => p.Findings)))
         {
             var page = f.PageId >= 0 ? $" page {f.PageId}" : "";
@@ -535,7 +541,7 @@ internal sealed class BackupStatusCommand : Command<BackupSettings>
             var head = listing.Points.LastOrDefault(p => p.BackupId == c.HeadBackupId);
             return new
             {
-                c.ChainId, c.BaseId, c.HeadBackupId, c.Depth,
+                c.ChainId, c.BaseId, c.HeadBackupId, c.Depth, c.HeadDepth,
                 HeadPointLsn = head?.PointLsn, HeadAgeSeconds = head == null ? (double?)null : Math.Round((utcNow - head.TailEndUtc).TotalSeconds),
             };
         }).ToList();
@@ -563,10 +569,11 @@ internal sealed class BackupStatusCommand : Command<BackupSettings>
 
         if (chains.Count > 0)
         {
-            var table = new Table().AddColumns("Chain", "Base", "Head", "Depth", "Head P", "Head age");
+            var table = new Table().AddColumns("Chain", "Base", "Head", "Points", "Head depth", "Head P", "Head age");
             foreach (var c in chains)
             {
-                table.AddRow(c.ChainId.ToString()[..8], $"#{c.BaseId}", $"#{c.HeadBackupId}", c.Depth.ToString(), c.HeadPointLsn?.ToString() ?? "-",
+                table.AddRow(c.ChainId.ToString()[..8], $"#{c.BaseId}", $"#{c.HeadBackupId}", c.Depth.ToString(), c.HeadDepth.ToString(),
+                    c.HeadPointLsn?.ToString() ?? "-",
                     c.HeadAgeSeconds.HasValue ? BackupCli.Age(TimeSpan.FromSeconds(c.HeadAgeSeconds.Value)) : "-");
             }
 

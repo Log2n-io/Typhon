@@ -59,6 +59,60 @@ internal sealed class BackupStoreTests
         Assert.DoesNotThrow(() => BackupStore.OpenForWrite(Root, image.DatabaseId, true, fs).Dispose());
     }
 
+    /// <summary>DL-10: maintenance opens an existing store under its own identity, creates nothing, and names what it is doing.</summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void AMaintenanceSession_OpensAnExistingStoreOnly_AndNamesItsPurposeToASecondWriter()
+    {
+        var image = BackupTestImages.Clean;
+        var fs = NewFs();
+        Assert.Throws<DirectoryNotFoundException>(() => BackupStore.OpenForMaintenance(Root, "prune", fs));
+        Assert.That(fs.DirectoryExists(Root), Is.False, "nothing is created");
+
+        Guid storeId;
+        using (var store = BackupStore.OpenForWrite(Root, image.DatabaseId, true, fs))
+        {
+            storeId = store.StoreId;
+        }
+
+        using (var maintenance = BackupStore.OpenForMaintenance(Root, "prune", fs))
+        {
+            Assert.That((maintenance.StoreId, maintenance.DatabaseId), Is.EqualTo((storeId, image.DatabaseId)));
+            var ex = Assert.Throws<BackupStoreLockedException>(() => BackupStore.OpenForWrite(Root, image.DatabaseId, true, fs));
+            Assert.That(ex.HolderPurpose, Is.EqualTo("prune"));
+            Assert.That(ex.Message, Does.Contain("(prune)"));
+        }
+
+        fs.DeleteFile(Root + "/store.json");
+        Assert.Throws<DirectoryNotFoundException>(() => BackupStore.OpenForMaintenance(Root, "prune", fs), "no store.json, no store");
+    }
+
+    /// <summary>DL-10: a compaction keeps its point's id: no id is allocated and store.hwm is not written. Only an uncompacted incremental qualifies.</summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void BeginCompaction_KeepsThePointsId_AndRefusesABaseOrACompactedPoint()
+    {
+        var image = BackupTestImages.Clean;
+        var fs = NewFs();
+        using var store = BackupStore.OpenForWrite(Root, image.DatabaseId, true, fs);
+        var full = StoreTestKit.WritePoint(store, image);
+        StoreTestKit.WritePoint(store, image, full.ChainId, pages: [2]);
+        var hwm = fs.ReadAll(Root + "/store.hwm");
+
+        var incremental = store.View.Find(2).Original;
+        using (var writer = store.BeginCompaction(incremental))
+        {
+            Assert.That(writer.TempPath, Does.EndWith("/packs/00000002-C.tpack.tmp"));
+            Assert.That((writer.BackupId, writer.ChainId), Is.EqualTo((2u, full.ChainId)));
+            Assert.Throws<InvalidOperationException>(() => store.BeginCompaction(incremental), "one pack at a time");
+        }
+
+        Assert.That(fs.ReadAll(Root + "/store.hwm"), Is.EqualTo(hwm), "no id allocated");
+        Assert.That(fs.FileExists(Root + "/packs/00000002-C.tpack.tmp"), Is.False, "an abandoned compaction leaves nothing");
+        Assert.Throws<InvalidOperationException>(() => store.BeginCompaction(store.View.Find(1).Original), "a full point is already a base");
+        Assert.That(store.AllocateBackupId(), Is.EqualTo(3u));
+    }
+
     [Test]
     [CancelAfter(15_000)]
     public void AStoreOfAnotherDatabase_IsRefused()

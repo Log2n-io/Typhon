@@ -33,15 +33,18 @@ public sealed class BackupStoreLockedException : BackupException
     /// <param name="holderPid">The holder's process id, or <c>0</c> when it could not be read.</param>
     /// <param name="holderMachine">The holder's machine, or <c>null</c> when it could not be read.</param>
     /// <param name="holderSince">When the holder took the lock, or <see cref="DateTimeOffset.MinValue"/> when unknown.</param>
-    public BackupStoreLockedException(string storePath, int holderPid, string holderMachine, DateTimeOffset holderSince)
+    /// <param name="holderPurpose">What the holder is doing (<c>backup</c>, <c>compact</c>, <c>prune</c>), or <c>null</c> when unknown.</param>
+    public BackupStoreLockedException(string storePath, int holderPid, string holderMachine, DateTimeOffset holderSince, string holderPurpose = null)
         : base(TyphonErrorCode.BackupStoreLocked, holderPid > 0
-            ? $"The backup store '{storePath}' is in use by PID {holderPid} on {holderMachine} since {holderSince:u}."
+            ? $"The backup store '{storePath}' is in use by PID {holderPid} on {holderMachine}{(holderPurpose == null ? "" : $" ({holderPurpose})")} "
+              + $"since {holderSince:u}."
             : $"The backup store '{storePath}' is in use by another writer.")
     {
         StorePath = storePath;
         HolderPid = holderPid;
         HolderMachine = holderMachine;
         HolderSince = holderSince;
+        HolderPurpose = holderPurpose;
     }
 
     /// <summary>The store directory.</summary>
@@ -55,6 +58,9 @@ public sealed class BackupStoreLockedException : BackupException
 
     /// <summary>When the holder took the lock, or <see cref="DateTimeOffset.MinValue"/> when unknown.</summary>
     public DateTimeOffset HolderSince { get; }
+
+    /// <summary>What the holder is doing (<c>backup</c>, <c>compact</c>, <c>prune</c>), or <c>null</c> when unknown.</summary>
+    public string HolderPurpose { get; }
 
     /// <inheritdoc />
     public override bool IsTransient => true;
