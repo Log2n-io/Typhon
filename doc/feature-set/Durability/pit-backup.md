@@ -43,7 +43,10 @@ Not implemented. The sketch below is the *intended* shape:
 // {
 //     b.StorePath = "/backups/world";
 //     b.Interval  = TimeSpan.FromHours(1);                         // required: no implicit default
-//     b.Retention = new BackupRetentionPolicy { MaxAge = TimeSpan.FromDays(7), MinKeep = 3 };
+//     b.Retention = new BackupRetentionPolicy                     // every limit stated; 0 = no limit
+//     {
+//         MinKeep = 3, MaxAge = TimeSpan.FromDays(7), MaxCount = 0, MaxTotalBytes = 0, CompactThreshold = 24, KeepLastDrilled = true,
+//     };
 //     b.Archive   = new ArchiveOptions { MaxSegmentAge = TimeSpan.FromSeconds(30), BacklogLimitBytes = 8L << 30 };
 // }));
 // var point = await engine.Backup.CreateAsync();                    // on demand
@@ -58,7 +61,7 @@ typhon backup verify  --store S [--level quick|full|deep]
 typhon backup restore --store S [--point X | --lsn L | --time T] --to <bundle>
 typhon backup drill   --store S                          # restore to scratch, open, check, delete
 typhon backup compact --store S
-typhon backup prune   --store S --max-age 7d --min-keep 3
+typhon backup prune   --store S --min-keep 3 --max-age 7d [--dry-run]
 ```
 
 ## ⚠️ Guarantees & limits
