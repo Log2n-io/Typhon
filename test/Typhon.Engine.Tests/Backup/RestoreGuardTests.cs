@@ -59,6 +59,30 @@ internal sealed class RestoreGuardTests
         Assert.That(fs.DirectoryExists(bundle + ".restoring"), Is.False, "nothing staged");
     }
 
+    /// <summary>A cancel reaches the swap even when the image is smaller than one write batch (the materializer's only check): nothing publishes.</summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void ACancelledRestore_OfAnImageSmallerThanABatch_PublishesNothing()
+    {
+        var (fs, image) = StoreWithOnePoint();
+        var bundle = Bundle(image);
+        PlantOldBundle(fs, bundle);
+        var before = Snapshot(fs, bundle);
+        using var cancelled = new System.Threading.CancellationTokenSource();
+        cancelled.Cancel();
+
+        Assert.Catch<OperationCanceledException>(() => RestoreStager.Run(Store, PointSelector.Latest, bundle, new RestoreOptions
+        {
+            Replace = true,
+            Cancellation = cancelled.Token,
+        }, fs));
+
+        Assert.That(Snapshot(fs, bundle), Is.EqualTo(before), "the existing bundle is untouched");
+        // Only the transient restore lock may remain (a Unix lock file is left behind unheld, and so is this file system's).
+        var left = fs.AllFiles.Where(f => f.StartsWith(bundle + ".", StringComparison.Ordinal) && f != bundle + RestoreStager.LockSuffix).ToList();
+        Assert.That(left, Is.Empty, "no staging and nothing displaced");
+    }
+
     [Test]
     [CancelAfter(15_000)]
     public void Replace_MovesTheOldBundleAside_NeverDeletesIt()

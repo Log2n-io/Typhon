@@ -207,6 +207,10 @@ internal static class RestoreStager
             {
                 staged = Stage(fs, view, chain, packs, meta, staging, newTimeline, archivePlan, options);
                 Recheck(fs, log, target, hold);
+
+                // The materializer only checks between full write batches, so an image smaller than one would publish after a cancel: the last
+                // point a cancel can still discard everything is here, before the swap.
+                options.Cancellation.ThrowIfCancellationRequested();
             }
             catch
             {
