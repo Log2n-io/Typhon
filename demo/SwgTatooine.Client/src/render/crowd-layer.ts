@@ -262,7 +262,9 @@ export class CrowdLayer {
       }
 
       const out = slot.graph.update(body.speed, true, clock);
-      const atlas = this.plan.slotOf(outfit.id, out.clip);
+      // <b>By ROLE, not by clip name.</b> See `AnimOutput.role`: the atlas is keyed on the role because an
+      // outfit may carry its own copy of one, and a clip name finds nothing without saying so.
+      const atlas = this.plan.slotOf(outfit.id, out.role);
       if (atlas !== null) {
         bucket.animator.play(i, atlas, clock, out.rate);
       }
@@ -308,10 +310,14 @@ export class CrowdLayer {
 
         // The arrays `packTiers` just filled are the ones already bound; only their first `count` entries are live.
         mesh.thinInstanceCount = count;
-        mesh.thinInstancePartialBufferUpdate('matrix', count * 16, 0);
-        mesh.thinInstancePartialBufferUpdate('crowdClipA', count * 4, 0);
-        mesh.thinInstancePartialBufferUpdate('crowdClipB', count * 4, 0);
-        mesh.thinInstancePartialBufferUpdate('crowdFade', count * 2, 0);
+        // <b>The argument is a COUNT OF INSTANCES, not a count of floats.</b> Babylon multiplies it by the buffer's
+        // own stride to build the view it uploads (`thinInstanceMesh.pure.js`), so passing `count * stride` asks for
+        // `count * stride * stride` floats and throws `RangeError: Invalid typed array length` — inside the render
+        // loop, once per mesh per frame, which is why nothing was ever drawn and no single frame reported an error.
+        mesh.thinInstancePartialBufferUpdate('matrix', count, 0);
+        mesh.thinInstancePartialBufferUpdate('crowdClipA', count, 0);
+        mesh.thinInstancePartialBufferUpdate('crowdClipB', count, 0);
+        mesh.thinInstancePartialBufferUpdate('crowdFade', count, 0);
         this.drawCalls++;
         this.trianglesDrawn += lod.triangles * count;
       }

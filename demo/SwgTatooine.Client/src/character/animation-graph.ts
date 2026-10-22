@@ -89,6 +89,17 @@ export function locomotionFrom(walkMps: number, runMps: number, height: number):
 
 export interface AnimOutput {
   readonly clip: string;
+  /**
+   * The ROLE that chose the clip — `idle`, `walk`, `run`, `attack`…
+   *
+   * <b>Both are reported because the two consumers address a clip differently, and conflating them is silent.</b> The
+   * rig plays a clip by NAME, because that is what an `AnimationGroup` is called. The crowd's atlas is keyed by ROLE,
+   * because an outfit may bake its own copy of a role and `casual_bald` fills `run` with `Run_Carry`. Handing the name
+   * to something expecting the role simply finds nothing: no throw, no warning — in the crowd it left every clip slot
+   * zeroed, which made the shader's frame count zero, which made its modulo a division by zero, which put NaN into
+   * every bone index and drew nothing at all.
+   */
+  readonly role: string;
   readonly loop: boolean;
   readonly rate: number;
   /** Changes whenever a one-shot starts, including a repeat of the same clip. */
@@ -201,18 +212,19 @@ export class AnimationGraph {
     if (action?.kind === 'jump' && grounded && now - action.start > 0.25) {
       this.action = null;
     } else if (action !== null) {
-      return { clip: action.clip, loop: false, rate: 1, serial: this.serial };
+      return { clip: action.clip, role: action.kind, loop: false, rate: 1, serial: this.serial };
     }
 
     const tuning = this.tuningValue;
     if (speed < tuning.idleBelow) {
-      return { clip: this.clipOf('idle'), loop: true, rate: 1, serial: this.serial };
+      return { clip: this.clipOf('idle'), role: 'idle', loop: true, rate: 1, serial: this.serial };
     }
 
     const run = speed >= tuning.runFrom;
     const clipSpeed = run ? tuning.runClipSpeed : tuning.walkClipSpeed;
     const rate = Math.min(tuning.maxRate, Math.max(tuning.minRate, speed / clipSpeed));
-    return { clip: this.clipOf(run ? 'run' : 'walk'), loop: true, rate, serial: this.serial };
+    const role = run ? 'run' : 'walk';
+    return { clip: this.clipOf(role), role, loop: true, rate, serial: this.serial };
   }
 
   /** The running one-shot, expired ones cleared. A jump never expires on its own: it ends on landing. */

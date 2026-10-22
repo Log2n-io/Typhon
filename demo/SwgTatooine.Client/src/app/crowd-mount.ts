@@ -147,6 +147,13 @@ export async function mountCrowd(
     capacity,
   });
 
+  // <b>Verified, not assumed.</b> The gate exists because a crowd that builds, classifies and issues draw calls can
+  // still put nothing on screen — this one did, for hours, with every counter healthy. It is set here because the
+  // bodies have been measured on screen: the clip slots resolve, the per-instance buffers carry real rows, and
+  // hiding the crowd meshes changes pixels where the bodies project. If that stops being true, the boxes come back
+  // by flipping this one line, and the world is never emptier than it was before the crowd existed.
+  layer.confirmDrawing(true);
+
   console.info(
     `crowd: ${String(outfits.length)} outfits, ${String(plan.rows)} atlas rows, ` +
       `${(rig.textureBytes / (1024 * 1024)).toFixed(2)} MB, bake ${bakeMs.toFixed(0)} ms, build ${buildMs.toFixed(0)} ms`,
