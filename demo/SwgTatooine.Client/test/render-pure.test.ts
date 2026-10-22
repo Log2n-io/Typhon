@@ -520,8 +520,11 @@ describe('shaders', () => {
 
   it('interpolate every constant into valid GLSL text', () => {
     // The count is the point of this line: a new shader that nobody added here would otherwise skip every check below
-    // it. Ten since CLI3D-02 added the room's pair.
-    expect(sources.length).toBe(12);
+    // it. Fifteen: ten shaders now that the ground has no pair of its own — it is a material plugin — plus the five
+    // blocks that plugin injects. It was eighteen while the height lookup and the ground overlays each existed twice,
+    // once declaring their samplers and once not; the ground's own `ShaderMaterial` needed the first form and no longer
+    // exists, so the three leftovers were dead text that `shaders-compile.test.ts` was still asserting against.
+    expect(sources.length).toBe(15);
     for (const [, text] of sources) {
       const source = text.replace(/\/\/.*$/gm, '');
       expect(source).not.toMatch(/undefined|NaN|Infinity|\$\{/);

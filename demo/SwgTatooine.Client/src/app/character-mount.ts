@@ -2,7 +2,7 @@ import type { TransformNode } from '@babylonjs/core/Meshes/transformNode';
 import { axisVector, placement, yawForHeading } from '../assets/asset-frame';
 import type { AssetLibrary } from '../assets/asset-library';
 import { AnimationGraph, locomotionFrom } from '../character/animation-graph';
-import type { AssetLighting } from '../render/asset-lighting';
+import type { SceneLighting } from '../render/scene-lighting';
 import { turnToward } from '../math/vec';
 import { CharacterRig } from '../render/character-rig';
 import { prepareAsset } from './asset-mount';
@@ -86,7 +86,7 @@ export async function mountCharacter(
   library: AssetLibrary,
   assetId: string,
   root: TransformNode,
-  lighting: AssetLighting,
+  lighting: SceneLighting,
 ): Promise<CharacterMount> {
   const asset = await library.acquire(assetId);
   const animations = asset.descriptor.animations;

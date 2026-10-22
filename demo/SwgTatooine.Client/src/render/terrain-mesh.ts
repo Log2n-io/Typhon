@@ -114,6 +114,25 @@ export class TerrainMesh {
     this.texture.wrapU = Texture.CLAMP_ADDRESSMODE;
     this.texture.wrapV = Texture.CLAMP_ADDRESSMODE;
     this.fieldUniform = new Float32Array([grid.originM, grid.spacingM, grid.posts, 1 / grid.posts]);
+    // <b>Identity matrices, because a standard material's vertex shader insists on them.</b> Using any thin-instance
+    // buffer makes Babylon define `INSTANCES`/`THIN_INSTANCES`, and `instancesVertex` then builds
+    // `finalWorld = mat4(world0, world1, world2, world3)` from four attributes this mesh never had: the raw shader
+    // that used to draw the terrain had no such include, so nothing missed them. An unbound attribute reads
+    // `(0, 0, 0, 1)`, which makes that matrix rank-1 and smears every node across the viewport.
+    //
+    // The nodes are placed from `nodeData` in the vertex shader, so the per-instance matrix is genuinely identity and
+    // `finalWorld` collapses to the mesh's own world matrix — the render-origin translation `place` sets. 8192
+    // identities is 512 KB uploaded once and never touched again, and an instance attribute is fetched per instance
+    // rather than per vertex, so the per-frame cost is nil.
+    const identities = new Float32Array(MAX_NODES * 16);
+    for (let i = 0; i < MAX_NODES; i++) {
+      identities[i * 16] = 1;
+      identities[i * 16 + 5] = 1;
+      identities[i * 16 + 10] = 1;
+      identities[i * 16 + 15] = 1;
+    }
+
+    this.mesh.thinInstanceSetBuffer('matrix', identities, 16, true);
     this.mesh.thinInstanceSetBuffer('nodeData', this.selection.data, 4, false);
     this.mesh.thinInstanceSetBuffer('nodeMorph', this.selection.morph, 2, false);
     this.mesh.forcedInstanceCount = 0;

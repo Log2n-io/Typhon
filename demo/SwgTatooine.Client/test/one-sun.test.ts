@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
+import { GROUND_ALBEDO } from '../src/render/shaders';
 import { SHADOW_BACKOFF_M, SHADOW_MAP_SIZE, SHADOW_RADIUS_M, SUN_DIRECTION } from '../src/render/sun';
 
 /**
@@ -24,6 +25,21 @@ import { SHADOW_BACKOFF_M, SHADOW_MAP_SIZE, SHADOW_RADIUS_M, SUN_DIRECTION } fro
  */
 
 const SRC = fileURLToPath(new URL('../src', import.meta.url));
+
+/**
+ * A source file with its comments stripped, so a name in prose is not a use.
+ *
+ * These checks assert that a constant is ABSENT, and every one of them explains in a comment which constant and why —
+ * which is precisely the text a naive search finds. Read the code.
+ *
+ * @param parts The path under `src`.
+ * @returns The file's code, comments replaced by a space.
+ */
+function sourceCode(...parts: string[]): string {
+  return readFileSync(join(SRC, ...parts), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ');
+}
 
 /** Every `.ts`/`.tsx` file under `src`. */
 function sources(dir: string): string[] {
@@ -67,13 +83,55 @@ describe('the scene has one sun', () => {
     expect(offenders, 'a sun-shaped vector literal outside sun.ts').toEqual([]);
   });
 
-  it('is what the ground shader is given, rather than a vector of its own', async () => {
-    const shaders = await import('../src/render/shaders');
-    // The ground takes the direction as a uniform. A literal here would be a fourth sun, and the one surface that
-    // covers the whole screen.
-    expect(shaders.GROUND_FRAGMENT).toContain('uniform vec3 uSunDirection');
-    expect(shaders.GROUND_FRAGMENT).toContain('dot(ground, -uSunDirection)');
-    expect(shaders.GROUND_FRAGMENT).not.toContain('0.42, 0.84, 0.34');
+  it('lights the ground through Babylon, not through a vector of its own', () => {
+    // The terrain is a material plugin now: Babylon applies the sun, so the albedo must carry no light of its own.
+    expect(GROUND_ALBEDO, 'a hard-coded sun left in the albedo').not.toContain('0.42, 0.84, 0.34');
+    expect(GROUND_ALBEDO, 'the albedo must not light itself').not.toContain('lambert');
+  });
+
+  it('lights the terrain and the buildings through one transport', () => {
+    // <b>One sun direction was never enough.</b> Both surfaces agreed about where the light came from and still
+    // disagreed about everything else: the terrain was a `StandardMaterial` with a hand-written 0.66 ambient floor and
+    // a 0.5 diffuse, the buildings a `PBRMaterial` lit by `scene.environmentTexture`. Two light transports, matched by
+    // eye at one time of day under one palette, which is the kind of agreement that comes apart the moment the
+    // environment, the exposure or the planet changes.
+    //
+    // So: same material class, and the constants that stood in for the sky are gone.
+    const terrain = sourceCode('render', 'terrain-material.ts');
+    expect(terrain, 'the terrain must be the same material class as the assets').toContain('new PBRMaterial(');
+    expect(terrain, 'a StandardMaterial terrain cannot share the assets\' light transport').not.toContain(
+      'new StandardMaterial(',
+    );
+    expect(terrain, 'the hand-rolled sun share is the sky constant coming back').not.toMatch(/diffuseColor\s*=/);
+    expect(terrain, 'the ambient floor belongs to the environment probe').not.toMatch(/ambientColor\s*=/);
+
+    // And the scene ambient the port briefly used to carry that floor: `scene.ambientColor` reaches a StandardMaterial
+    // and, because PBR defaults its own `ambientColor` to black, never reached a building — the inconsistency wearing
+    // the costume of a fix.
+    const ground = sourceCode('render', 'ground.ts');
+    expect(ground, 'a scene ambient floor is terrain-only light by construction').not.toMatch(/scene\.ambientColor/);
+  });
+
+  it('converts the terrain albedo to linear, because PBR composes in linear and outputs gamma', () => {
+    // A `StandardMaterial` writes `gl_FragColor` in whatever space it was handed; `pbr.fragment` ends with
+    // `toGammaSpace` via `applyImageProcessing`. The palette is authored as sRGB, so handing it over raw brightens the
+    // whole desert — and breaks the match with the assets, whose albedo textures the glTF loader marks `GAMMAALBEDO`
+    // and linearises for exactly this reason. This is the one line that keeps the two in the same space.
+    const terrain = sourceCode('render', 'terrain-material.ts');
+    expect(terrain, 'the albedo must be linearised before PBR composes with it').toContain(
+      'surfaceAlbedo = toLinearSpace(color)',
+    );
+  });
+
+  it('owns the sun on the scene, not on the asset mount', () => {
+    // `mountAssets` reports its failures and swallows them, deliberately: a 404 on the catalogue is not a reason for
+    // the simulation to stop being watchable. While the sun and the environment were created inside it, that made every
+    // such failure put out the light for the terrain too — which is only harmless as long as the terrain lights itself,
+    // and it no longer does.
+    const mount = sourceCode('app', 'asset-mount.ts');
+    expect(mount, 'the mount must not create the lighting it is handed').not.toContain('new SceneLighting(');
+    const app = sourceCode('app', 'client-app.ts');
+    expect(app, 'the app owns the scene lighting').toContain('new SceneLighting(');
   });
 
   it('frames a shadow slab that is smaller than the planet and deeper than the tallest thing in it', () => {

@@ -5,6 +5,7 @@ import type { RealmView, SceneKind } from '../data/realm-view';
 import type { Heightfield } from '../terrain/heightfield';
 import type { GroundSampler } from '../terrain/ground-sampler';
 import type { DebugView } from '../data/source';
+import type { SceneLighting } from './scene-lighting';
 import { Ground, paletteFor, type GroundPalette, type GroundView } from './ground';
 import { cameraBoundsFor, type CameraBounds, type SceneProfile, type SceneStats } from './scene-profile';
 
@@ -26,9 +27,9 @@ export class PlanetProfile implements SceneProfile {
   private palette: GroundPalette = paletteFor(0);
   private readonly terrainStats = { triangles: 0, nodes: 0, finestM: 0, capped: false };
 
-  constructor(scene: Scene, field: Heightfield, planetHalfExtentM: number) {
+  constructor(scene: Scene, field: Heightfield, planetHalfExtentM: number, lighting: SceneLighting) {
     this.field = field;
-    this.groundLayer = new Ground(scene, field);
+    this.groundLayer = new Ground(scene, field, lighting);
     this.current = cameraBoundsFor(planetView(planetHalfExtentM));
   }
 

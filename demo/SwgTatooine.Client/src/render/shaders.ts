@@ -1,5 +1,4 @@
 import { CITIES, PLANET_HALF_EXTENT_M, POIS } from '../data/world-data';
-import { NODE_GRID } from './terrain-mesh';
 import { SELECTED_MESH_SCALE, SELECTED_SPRITE_SCALE, STYLE_COUNT, TINT_COUNT } from './styles';
 import { SELECTED_BIT, STYLE_LIMIT } from './view-math';
 
@@ -210,10 +209,25 @@ void main(void) {
  * It is not bit-identical and does not need to be: GLSL `mix(x, y, a)` is `x·(1−a) + y·a` where the CPU computes
  * `x + (y − x)·a`, and the CPU works in float64. **Measured worst divergence over ±140 m of relief: 1.25e-5 m.**
  */
-const HEIGHT_SAMPLER = `
-uniform sampler2D uHeight;
+/**
+ * What the height lookup DECLARES, kept apart from what it computes — and <b>without the sampler</b>.
+ *
+ * <b>A material plugin must NOT declare its own samplers.</b> Babylon declares the ones named in `getSamplers` and
+ * assigns each a texture unit; a second declaration of the same name is a redefinition the driver rejects, and
+ * skipping `getSamplers` to avoid that leaves the sampler with no unit at all. The fragment stage then reads garbage
+ * — which is how the terrain's per-pixel normal became NaN and the whole planet rendered black. `uHeight` is named in
+ * {@link TerrainMaterialPlugin.getSamplers} and declared once per stage there.
+ *
+ * There used to be a second copy of this WITH the sampler, for the ground's own `ShaderMaterial`. That shader is gone
+ * and the copy outlived it as dead text that `shaders-compile.test.ts` was still asserting against — a test passing on
+ * a string no driver ever sees. One declaration, and it is the one that compiles.
+ */
+export const HEIGHT_UNIFORMS = `
 uniform vec4 uField;
+`;
 
+/** The height lookup and the ground normal, without their declarations. */
+export const HEIGHT_FUNCTIONS = `
 float heightAt(vec2 planet) {
   float last = uField.z - 1.0;
   vec2 f = clamp((planet - uField.x) / uField.y, vec2(0.0), vec2(last));
@@ -246,45 +260,7 @@ vec3 groundNormal(vec2 planet) {
 }
 `;
 
-export const GROUND_VERTEX = `
-precision highp float;
-attribute vec3 position;
-/** Per instance: the node's planet origin, its size in metres, spare. */
-attribute vec4 nodeData;
-/** Per instance: where the morph toward the parent grid begins and ends, in metres of camera distance. */
-attribute vec2 nodeMorph;
-uniform mat4 world;
-uniform mat4 viewProjection;
-/** Camera in planet metres (xz) and its altitude (y), for the morph's distance. */
-uniform vec3 uCameraPlanet;
-varying vec2 vPlanet;
-varying vec3 vRender;
-varying float vHeightM;
-${HEIGHT_SAMPLER}
 
-void main(void) {
-  // The vertex is a FRACTION of its node, and the node is a fixed cell of the world — so this planet coordinate is a
-  // constant of the terrain, not of the camera. That is the whole reason for the quadtree: two earlier meshes were
-  // centred on the camera, and their vertices slid across the ground whenever it moved sideways.
-  vec2 grid = position.xz;
-  vec2 planet = nodeData.xy + grid * nodeData.z;
-
-  // CDLOD morph. Approaching the distance at which this node is replaced by its four children, blend each vertex onto the
-  // grid its PARENT has — drop the odd half of the grid coordinate — so the swap, when it comes, moves nothing. This is
-  // what closes the T-junction at a level boundary and removes the pop, without a stitching strip or a skirt.
-  float toCamera = distance(vec3(planet.x, heightAt(planet), planet.y), uCameraPlanet);
-  float morph = clamp((toCamera - nodeMorph.x) / max(nodeMorph.y - nodeMorph.x, 1e-3), 0.0, 1.0);
-  vec2 coarse = floor(grid * ${f(NODE_GRID)} * 0.5 + 0.5) * 2.0 / ${f(NODE_GRID)};
-  planet = nodeData.xy + mix(grid, coarse, morph) * nodeData.z;
-
-  float h = heightAt(planet);
-  vec4 w = world * vec4(planet.x, h, planet.y, 1.0);
-  vPlanet = planet;
-  vHeightM = h;
-  vRender = w.xyz;
-  gl_Position = viewProjection * w;
-}
-`;
 
 /**
  * The inside of a room: a floor grid at the realm's own replication cell, and plain walls.
@@ -460,13 +436,19 @@ const PLANET = f(PLANET_HALF_EXTENT_M);
 /** Slots in the ground shader's hull array: the engine's own `PushGeometry.MaxVertices`, so a hull always fits whole. */
 export const HULL_SLOTS = 16;
 
-export const GROUND_FRAGMENT = `
-precision highp float;
-uniform vec3 uCamera;
-uniform vec2 uFog;
+/**
+ * What the ground's albedo is computed FROM: the place tables, the overlays and the palette.
+ *
+ * <b>Declarations only, and no samplers.</b> `uHeat` and `uCells` are registered in
+ * {@link TerrainMaterialPlugin.getSamplers} and declared beside `uHeight` there; see {@link HEIGHT_UNIFORMS} for what
+ * declaring a sampler twice, or nowhere, costs. `uHeight` and `uField` are the height lookup's.
+ *
+ * `uSkyColor` is not here either, and that is the port's doing: the albedo used to mix itself towards the sky over a
+ * fog density it was handed, and the scene's own `fogColor` carries that now.
+ */
+export const GROUND_OVERLAY_UNIFORMS = `
 uniform vec4 uCities[${CITIES.length}];
 uniform vec4 uPois[${POIS.length}];
-uniform sampler2D uHeat;
 uniform vec4 uHeatRect;
 uniform vec4 uHeatMask;
 uniform float uHeatNear;
@@ -474,8 +456,6 @@ uniform vec2 uViewCenter;
 uniform float uHeatAlpha;
 uniform float uGrid;
 uniform vec4 uSelection;
-uniform vec3 uSkyColor;
-uniform sampler2D uCells;
 uniform vec4 uCellRect;
 uniform float uCellAlpha;
 uniform vec4 uReplGrid;
@@ -485,12 +465,10 @@ uniform vec3 uPalette2;
 uniform vec4 uHull[${HULL_SLOTS}];
 uniform float uHullCount;
 uniform vec4 uSessionDisc;
-varying vec2 vPlanet;
-varying vec3 vRender;
-varying float vHeightM;
-${HEIGHT_SAMPLER}
+`;
 
-float hash(vec2 p) {
+/** The ground's own helpers, without the height lookup: the plugin injects that separately. */
+export const GROUND_HELPER_FUNCTIONS = `float hash(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
   p += dot(p, p + 45.32);
   return fract(p.x * p.y);
@@ -530,119 +508,16 @@ vec3 heatRamp(float t) {
   vec3 hot = vec3(0.95, 0.15, 0.10);
   return t < 0.5 ? mix(cold, mid, t * 2.0) : mix(mid, hot, (t - 0.5) * 2.0);
 }
+`;
 
-uniform vec3 uSunDirection;
 
-/*
- * The sun's shadow map, sampled by this shader rather than by Babylon.
+/**
+ * The albedo itself, leaving the answer in `color`.
  *
- * The terrain is drawn by a raw ShaderMaterial, which is outside the material framework that would otherwise inject
- * Babylon's own shadow includes and the light's uniforms. So the map arrives as an ordinary texture and the comparison
- * is written out here — which is why AssetLighting asks its generator for a PLAIN depth map: PCF and the exponential
- * variants change what is stored, and one of them needs a hardware comparison sampler that texture2D cannot read at
- * all.
- *
- * uShadow is (on, minZ, maxZ, texel), the light's own near and far planes.
- *
- * WHAT IS STORED IS THE LIGHT-VIEW DEPTH IN METRES, not the clip-space z. Babylon's shadow pass writes
- * (z + minZ) / (minZ + maxZ) where z is the distance from the shadow camera, and the two are nothing like each other:
- * for a terminal 231 m away the texture holds 0.5596 while the clip reading gives 0.0027, so every comparison answers
- * "lit" and no shadow is ever drawn. Measured in the browser, which is the only reason this is written correctly.
- *
- * The projection is orthographic, so clip z is linear in view depth and the metres are recovered exactly:
- * view = minZ + (ndc.z * 0.5 + 0.5) * (maxZ - minZ). Verified against a stored texel at 0.55983 computed to 0.55957
- * stored, a tenth of a metre apart over a 413 m range.
+ * Ends with the colour computed and nothing done to it, so each path finishes its own way: this file's shader lights
+ * it, fogs it and writes `gl_FragColor`; the plugin assigns it to `baseColor` and lets Babylon do both.
  */
-uniform sampler2D uShadowMap;
-uniform vec4 uShadow;
-uniform mat4 uShadowMatrix;
-/** x: the perpendicular depth bias in metres; the rest is spare. */
-uniform vec4 uShadowBias;
-
-/*
- * How much of the sun reaches a point on the ground: 1 in the open, 0 in full shadow.
- *
- * A 4x4 PERCENTAGE-CLOSER KERNEL, which is what Babylon would do for us if the ground were one of its own materials.
- * It is not — the terrain is a raw ShaderMaterial, outside the framework that injects the shadow includes, and
- * ShadowDepthWrapper solves the CASTING side of that problem, not the receiving one. So the filter is written here.
- *
- * Sixteen taps on a 4x4 grid spanning +/- 1.5 texels, each weighted by how much of the pixel's own texel footprint it
- * covers, which is a box filter over three texels. The first version took four hard taps a quarter of a texel apart:
- * they nearly always landed in the SAME texel, so every pixel read one depth, and the result was a shadow with the
- * texel grid visible in its edge. Sixteen weighted taps over three texels cost fifteen extra reads of a cached
- * texture and give an edge about 10 cm wide at this map.
- *
- * BIAS IS SLOPE-SCALED. The depth the map holds is the caster's, and the ground under it is a different surface: how
- * far apart they can be within one texel depends on how obliquely the sun strikes the ground. A flat bias big enough
- * for the worst case lifts every shadow off its caster.
- *
- * Outside the slab there is no information, and the honest answer there is "lit" — the alternative is a hard line
- * across the desert where the map ends.
- */
-/*
- * One percentage-closer tap, interpolated BETWEEN texels.
- *
- * This is the whole difference between a soft shadow and a blocky one, and it is not a quality constant. A tap that
- * reads the nearest texel and compares it answers 0 or 1, and it answers the SAME 0 or 1 for every pixel that falls in
- * that texel — so the output is piecewise constant over the texel grid however many taps are averaged, because the taps
- * all move together and all cross a boundary at the same moment. Measured on a 4 096 map over 128 m, which is 3.1 cm of
- * ground per texel: still visibly blocky, because the blocks were never about resolution.
- *
- * What hardware PCF does, and what this does by hand, is compare the four texels AROUND the point and interpolate the
- * four answers by the sub-texel position. The result moves continuously as the pixel moves. Four reads instead of one.
- */
-float pcfTap(vec2 uv, float ref, float texel, float size) {
-  vec2 t = (uv * size) - 0.5;
-  vec2 f = fract(t);
-  vec2 base = (floor(t) + 0.5) * texel;
-  float s00 = step(ref, texture2D(uShadowMap, base).r);
-  float s10 = step(ref, texture2D(uShadowMap, base + vec2(texel, 0.0)).r);
-  float s01 = step(ref, texture2D(uShadowMap, base + vec2(0.0, texel)).r);
-  float s11 = step(ref, texture2D(uShadowMap, base + vec2(texel, texel)).r);
-  return mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);
-}
-
-float shadowAt(vec3 world, vec3 normal) {
-  if (uShadow.x < 0.5) {
-    return 1.0;
-  }
-
-  vec4 clip = uShadowMatrix * vec4(world, 1.0);
-  vec3 ndc = clip.xyz / clip.w;
-  vec2 uv = (ndc.xy * 0.5) + 0.5;
-  // Fade the last tenth of the slab rather than ending it, or the map's edge is a straight line across the desert.
-  vec2 edge = abs(uv - 0.5) * 2.0;
-  float inside = 1.0 - smoothstep(0.8, 1.0, max(edge.x, edge.y));
-  if (inside <= 0.0) {
-    return 1.0;
-  }
-
-  // Into metres from the shadow camera, then into the same ratio Babylon's FLOAT shadow map stored. Asking the
-  // generator for PCF instead makes it write a hardware depth texture with a comparison mode, which this cannot read
-  // at all; the two must change together, and today they cannot. See asset-lighting.ts.
-  float viewZ = uShadow.y + (((ndc.z * 0.5) + 0.5) * (uShadow.z - uShadow.y));
-  // Slope-scaled: cosine of the sun against the ground, floored so a surface edge-on to it does not ask for infinity.
-  float facing = max(abs(dot(normal, uSunDirection)), 0.25);
-  float slack = uShadowBias.x / facing;
-  float ref = ((viewZ - slack) + uShadow.y) / (uShadow.y + uShadow.z);
-
-  float texel = uShadow.w;
-  float size = 1.0 / texel;
-  // <b>Two by two, not three by three.</b> The smoothness comes from the bilinear tap, not from the number of them:
-  // nine taps cost 36 texture reads against sixteen and buy a wider penumbra, not a less blocky one. Measured in the
-  // browser, 3x3 put the Babylon frame at 2.83 ms against 1.70 with no shadow at all; 2x2 is the same picture for half
-  // the extra. Half a texel apart, so the four straddle the point: about 6 cm of soft edge at 3.1 cm a texel.
-  float lit = 0.0;
-  lit += pcfTap(uv + (vec2(-0.5, -0.5) * texel), ref, texel, size);
-  lit += pcfTap(uv + (vec2(0.5, -0.5) * texel), ref, texel, size);
-  lit += pcfTap(uv + (vec2(-0.5, 0.5) * texel), ref, texel, size);
-  lit += pcfTap(uv + (vec2(0.5, 0.5) * texel), ref, texel, size);
-
-  // Back to fully lit at the slab's edge, so a shadow fades out instead of being cut off.
-  return mix(1.0, lit * 0.25, inside);
-}
-
-void main(void) {
+export const GROUND_ALBEDO = `
   float edge = max(abs(vPlanet.x), abs(vPlanet.y));
   // The ground's three colours are uniforms, not literals: a further planet is the same terrain under a different
   // palette (decision 3 — one bake for every planet), so this is what makes planet 1 read as somewhere else.
@@ -749,24 +624,7 @@ void main(void) {
   if (edge > ${PLANET}) {
     color *= 0.35;
   }
-
-  // Lighting last, over EVERY overlay rather than only the sand. An overlay is paint on the ground, so it takes the
-  // ground's light; shading the sand alone would leave a city disc looking like a decal hovering over the slope it is on.
-  // A fixed sun, because nothing in this demo has a time of day — but THE sun, from sun.ts, and no longer a vector of
-  // this shader's own. There were three of those pointing in different directions, which nothing could see until a
-  // building cast a shadow onto ground shaded as if the sun were somewhere else.
-  // A high sun and plenty of ambient: a desert at midday has bright sand and soft shadows, and a low sun with a 0.45
-  // floor put near-black on any face turned away from it.
-  float lambert = clamp(dot(ground, -uSunDirection), 0.0, 1.0);
-  // The sun's own term is what a shadow takes away; the ambient floor is what keeps a shadowed dune readable rather
-  // than black, which is also what one looks like under a bright sky.
-  color *= 0.66 + (0.5 * lambert * shadowAt(vRender, ground));
-
-  float dist = distance(vRender, uCamera);
-  // Haze density and its ceiling both come from the CPU, because they depend on the camera ALTITUDE: see fogFor in
-  // ground.ts. A fixed density cannot serve both views — the value that leaves a 22 km map view readable leaves the
-  // horizon at eye level as a dark band of ground, which is what the planet-edge darkening looks like from down there.
-  float fog = 1.0 - exp(-dist * uFog.x);
-  gl_FragColor = vec4(mix(color, uSkyColor, clamp(fog, 0.0, uFog.y)), 1.0);
-}
 `;
+
+
+

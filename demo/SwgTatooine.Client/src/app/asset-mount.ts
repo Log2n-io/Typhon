@@ -5,11 +5,14 @@ import { AssetLibrary, type LoadedAsset } from '../assets/asset-library';
 import { configureDecoders } from '../assets/decoders';
 import { mountCharacter, type CharacterMount } from './character-mount';
 import type { AssetSet } from '../data/server-config';
-import { AssetLighting } from '../render/asset-lighting';
+import type { SceneLighting } from '../render/scene-lighting';
 import { SCENE_GROUP } from '../render/render-groups';
 
 /**
- * Opens the server's published asset set: the decoders, the lighting PBR needs, the catalogue, and the avatar.
+ * Opens the server's published asset set: the decoders, the catalogue, and the avatar.
+ *
+ * <b>The lighting is a parameter, not something this creates.</b> See {@link SceneLighting}: this function is allowed to
+ * fail and be swallowed, and the terrain is lit by the same sun, so a missing GLB must not be able to put out the sky.
  *
  * <b>It owns the root every placement hangs off, and nothing else that is placed.</b> Structures are placed by
  * `static-assets.ts` from what the server replicated, and the avatar by `character-mount.ts` from the body this session
@@ -39,7 +42,7 @@ const AVATAR_ASSET = 'casual2_male';
  * @param asset The loaded asset, whose container is cached by the library.
  * @param lighting The scene's asset lighting.
  */
-export function prepareAsset(asset: LoadedAsset, lighting: AssetLighting): void {
+export function prepareAsset(asset: LoadedAsset, lighting: SceneLighting): void {
   for (const mesh of asset.container.meshes) {
     mesh.renderingGroupId = SCENE_GROUP;
   }
@@ -51,7 +54,7 @@ export interface AssetMount {
   readonly library: AssetLibrary;
   /** The node every placement hangs off, which carries the render origin; see {@link AssetMount.rebase}. */
   readonly root: TransformNode;
-  readonly lighting: AssetLighting;
+  readonly lighting: SceneLighting;
   /** The rigged avatar, or `null` when the catalogue publishes no character to be one. */
   readonly character: CharacterMount | null;
   /**
@@ -70,16 +73,18 @@ export interface AssetMount {
  * @param scene The live scene.
  * @param set The asset set the server announced, already validated by `server-config`.
  * @param origin The render origin as it stands now; the root follows it from there.
- * @returns The mount, which owns everything it created.
+ * @param lighting The scene's sun and environment, created by the app and outliving this mount.
+ * @returns The mount, which owns everything it created — the lighting excepted, which it did not.
  */
 export async function mountAssets(
   scene: Scene,
   set: AssetSet,
   origin: { readonly x: number; readonly z: number },
+  lighting: SceneLighting,
 ): Promise<AssetMount> {
   // Before the first load, so no asset pays the decoder's download and compile on its own critical path — and so nothing
   // is ever fetched from a third-party CDN, which is Babylon's default and has no business in a game's boot path.
-  const vendorRoot = configureDecoders();
+  configureDecoders();
   // The glTF loader and its extensions, registered lazily: only the plugin metadata is in the bundle, and a loader's body
   // is dynamically imported when something is actually loaded.
   //
@@ -89,7 +94,6 @@ export async function mountAssets(
   // requested. One supported call is the better trade.
   registerBuiltInLoaders();
 
-  const lighting = new AssetLighting(scene, vendorRoot);
   const library = await AssetLibrary.open(scene, set.base, set.catalogue);
   // Once per container, children included — an instance inherits both from what it instances.
   library.onLoad = (asset) => {
@@ -136,7 +140,7 @@ export async function mountAssets(
     dispose(): void {
       character?.dispose();
       root.dispose();
-      lighting.dispose();
+      // Not the lighting: the app created it and the terrain is still lit by it.
     },
   };
 }

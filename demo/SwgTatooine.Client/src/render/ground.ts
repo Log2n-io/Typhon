@@ -1,10 +1,9 @@
 import { Texture } from '@babylonjs/core/Materials/Textures/texture';
 import { RawTexture } from '@babylonjs/core/Materials/Textures/rawTexture';
-import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial';
 import { Color3 } from '@babylonjs/core/Maths/math.color';
-import type { BaseTexture } from '@babylonjs/core/Materials/Textures/baseTexture';
-import { Matrix, Vector2, Vector3, Vector4 } from '@babylonjs/core/Maths/math.vector';
-import type { Scene } from '@babylonjs/core/scene';
+import type { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial';
+import { Vector2, Vector3, Vector4 } from '@babylonjs/core/Maths/math.vector';
+import { Scene } from '@babylonjs/core/scene';
 import type { AggregateGrid, DebugGrid, PushGeometry } from '@typhondb/client';
 import { PushShape } from '@typhondb/client';
 import type { DebugView } from '../data/source';
@@ -13,9 +12,10 @@ import { CITIES, POIS } from '../data/world-data';
 import { CELL_TEXTURE_SIZE, fillDeliveredCells, hullUniform, type CellRect } from './debug-cells';
 import { fillHeatmap, slabAt } from './heatmap-fill';
 import { SCENE_GROUP } from './render-groups';
-import { GROUND_FRAGMENT, GROUND_VERTEX, HULL_SLOTS } from './shaders';
+import { HULL_SLOTS } from './shaders';
 import { TerrainMesh, TerrainView } from './terrain-mesh';
-import { SHADOW_BIAS_M, SUN_DIRECTION } from './sun';
+import type { SceneLighting } from './scene-lighting';
+import { createTerrainMaterial, type TerrainMaterialPlugin } from './terrain-material';
 
 /** What the ground draws this frame; the caller keeps one and rewrites it, so a frame allocates nothing. */
 export class GroundView {
@@ -46,26 +46,8 @@ export class GroundView {
   /** How many pixels of terrain geometric error the viewer accepts. */
   pixelTolerance = 8;
 
-  /**
-   * The sun's shadow map for this frame, or `null` for an unshadowed ground.
-   *
-   * <b>On the view rather than through a method on the profile</b>, because the ground is two layers down behind
-   * `SceneProfile` and a room and a starfield have no business taking a sun's shadow. A realm that does not want one
-   * leaves this null and never looks at it.
-   */
-  shadow: GroundShadow | null = null;
 }
 
-/** What the ground needs to read the sun's shadow map itself. */
-export interface GroundShadow {
-  readonly map: BaseTexture;
-  /** The light's view-projection: a render-space position into the map's clip space. */
-  readonly transform: Matrix;
-  /** The light's near and far planes, which its shadow pass encoded depth against. */
-  readonly depth: readonly [number, number];
-  /** The map's side, in texels. */
-  readonly size: number;
-}
 
 /**
  * A planet's ground and sky, keyed by the `palette` field of its `AppTag`.
@@ -169,7 +151,7 @@ export function fogFor(altitudeM: number, out: Vector2): void {
  */
 export class Ground {
   private readonly terrain: TerrainMesh;
-  private readonly material: ShaderMaterial;
+  private readonly material: PBRMaterial;
   private readonly scene: Scene;
   private readonly cameraPlanet = new Vector3();
   private readonly terrainView = new TerrainView();
@@ -187,77 +169,40 @@ export class Ground {
   private readonly hull: number[] = new Array<number>(HULL_SLOTS * 4).fill(0);
   private readonly rect: CellRect = { x: 0, z: 0, width: 1, height: 1 };
 
-  /** (on, minZ, maxZ, texel) — what the sun's shadow pass wrote its depth against; see `shadowAt`. */
-  private readonly shadow = new Vector4(0, 0, 1, 0);
+  /** Where every terrain uniform goes: the plugin binds them onto the effect when Babylon draws the sub-mesh. */
+  private readonly plugin: TerrainMaterialPlugin;
 
-  constructor(scene: Scene, field: Heightfield) {
+  /** The scene's sun and sky, so that {@link setPalette} can light the world the colour the world is. */
+  private readonly lighting: SceneLighting;
+
+  constructor(scene: Scene, field: Heightfield, lighting: SceneLighting) {
     this.scene = scene;
+    this.lighting = lighting;
     this.terrain = new TerrainMesh(scene, field);
     const mesh = this.terrain.mesh;
     mesh.renderingGroupId = SCENE_GROUP;
 
     this.heat = new HeatmapTexture(scene);
     this.cells = new DeliveredCellsTexture(scene);
-    const material = new ShaderMaterial(
-      'ground',
-      scene,
-      { vertexSource: GROUND_VERTEX, fragmentSource: GROUND_FRAGMENT },
-      {
-        attributes: ['position', 'nodeData', 'nodeMorph'],
-        uniforms: [
-          'world',
-          'viewProjection',
-          'uCamera',
-          'uCities',
-          'uPois',
-          'uHeatMask',
-          'uHeatRect',
-          'uHeatNear',
-          'uViewCenter',
-          'uHeatAlpha',
-          'uGrid',
-          'uSelection',
-          'uSkyColor',
-          'uCellRect',
-          'uCellAlpha',
-          'uReplGrid',
-          'uHull',
-          'uHullCount',
-          'uSessionDisc',
-          'uCameraPlanet',
-          'uFog',
-          'uField',
-          'uSunDirection',
-          'uShadow',
-          'uShadowBias',
-          'uShadowMatrix',
-        ],
-        samplers: ['uHeat', 'uCells', 'uHeight', 'uShadowMap'],
-      },
-    );
-    material.backFaceCulling = false;
-    material.setArray4(
+    const { material, plugin } = createTerrainMaterial(scene);
+    this.plugin = plugin;
+    plugin.heightTexture = this.terrain.texture;
+    const u = this.terrain.fieldUniform;
+    plugin.field.set(u[0], u[1], u[2], u[3]);
+    plugin.setArray4(
       'uCities',
       CITIES.flatMap((c) => [c.x, c.z, c.radius, 0]),
     );
-    material.setArray4(
+    plugin.setArray4(
       'uPois',
-      POIS.flatMap((p) => [p.x, p.z, p.radius, 0]),
+      POIS.flatMap((poi) => [poi.x, poi.z, poi.radius, 0]),
     );
-    material.setTexture('uHeat', this.heat.texture);
-    material.setTexture('uCells', this.cells.texture);
-    material.setTexture('uHeight', this.terrain.texture);
-    const u = this.terrain.fieldUniform;
-    material.setVector4('uField', new Vector4(u[0], u[1], u[2], u[3]));
-    material.setColor3('uSkyColor', SKY);
-    material.setVector3('uSunDirection', SUN_DIRECTION);
-    // Off until something hands over a map; `uShadowMap` still has to be bound to SOMETHING, because a sampler left
-    // unset is a warning per frame and, on some drivers, a black texture read as "everything is in shadow".
-    material.setVector4('uShadow', this.shadow);
-    material.setVector4('uShadowBias', new Vector4(SHADOW_BIAS_M, 0, 0, 0));
-    material.setMatrix('uShadowMatrix', Matrix.Identity());
-    material.setTexture('uShadowMap', this.terrain.texture);
+    plugin.setTexture('uHeat', this.heat.texture);
+    plugin.setTexture('uCells', this.cells.texture);
     mesh.material = material;
+    // <b>The whole reason this material exists.</b> A raw ShaderMaterial cannot receive a Babylon shadow, which forced
+    // the generator to store a format a hand-written sampler could read and so ruled out every filter worth having.
+    mesh.receiveShadows = true;
     this.material = material;
 
     // After the field is assigned, not beside the other setters above: setPalette reads `this.material`.
@@ -272,39 +217,20 @@ export class Ground {
    * GLSL without a second material.
    */
   setPalette(palette: GroundPalette): void {
-    this.material.setColor3('uPalette0', palette.base);
-    this.material.setColor3('uPalette1', palette.rock);
-    this.material.setColor3('uPalette2', palette.peak);
-    this.material.setColor3('uSkyColor', palette.sky);
-  }
-
-  /**
-   * Gives the ground the sun's shadow map for this frame, or takes it away.
-   *
-   * <b>The matrix every frame, because the slab follows the camera.</b> Babylon rebuilds the light's view-projection
-   * when the light moves, so this has to be re-read rather than captured once — a stale matrix shadows the ground the
-   * camera was standing on a minute ago, which reads as the shadows sliding off the buildings.
-   *
-   * @param map The generator's map, or `null` to light the ground unshadowed.
-   * @param transform The light's view-projection, which takes a render-space position into the map's clip space.
-   * @param depth The light's near and far planes, which its shadow pass encoded depth against.
-   * @param size The map's side in texels, for the filter's own step.
-   */
-  setShadow(map: BaseTexture | null, transform: Matrix | null, depth: readonly [number, number], size: number): void {
-    if (map === null || transform === null) {
-      if (this.shadow.x !== 0) {
-        this.shadow.set(0, 0, 1, 0);
-        this.material.setVector4('uShadow', this.shadow);
-      }
-
-      return;
-    }
-
-    // One texel, which is the kernel's own step: it spreads its taps over +/- 1.5 of these.
-    this.shadow.set(1, depth[0], depth[1], 1 / size);
-    this.material.setVector4('uShadow', this.shadow);
-    this.material.setMatrix('uShadowMatrix', transform);
-    this.material.setTexture('uShadowMap', map);
+    // <b>One palette, and now it decides the LIGHT as well.</b> These three colours already chose the terrain's albedo
+    // and the haze; handing the sky and the sand to the lighting makes them choose the ambient too, so an ice planet is
+    // lit by a cold sky instead of by the studio its environment probe happened to be baked in. See
+    // {@link SceneLighting.setSky} for what that costs and why the probe's own harmonics are the wrong sky.
+    this.scene.fogColor = palette.sky;
+    this.lighting.setSky(palette.sky, palette.base);
+    // <b>No ambient floor here any more.</b> The ground shader used to carry `0.66` itself, and the port kept it as a
+    // scene ambient because a StandardMaterial under one sun is black in shadow. A `scene.ambientColor` is multiplied by
+    // each material's own, and PBR's default for that is black — so the constant reached the terrain and never reached a
+    // building, which is precisely the inconsistency it was papering over. The terrain is a PBRMaterial now and takes
+    // its sky from `scene.environmentTexture`, the same probe the buildings do.
+    this.plugin.setColor3('uPalette0', palette.base);
+    this.plugin.setColor3('uPalette1', palette.rock);
+    this.plugin.setColor3('uPalette2', palette.peak);
   }
 
   /** Re-uploads the height texture after the field has been re-baked, and takes the quadtree the worker measured. */
@@ -340,13 +266,11 @@ export class Ground {
     this.terrainView.camZ = view.centerZ;
     this.terrainView.pixelsPerMetre = view.pixelsPerMetre;
     this.terrainView.pixelTolerance = view.pixelTolerance;
-    const shadow = view.shadow;
-    this.setShadow(shadow?.map ?? null, shadow?.transform ?? null, shadow?.depth ?? [0, 1], shadow?.size ?? 1);
     this.terrain.place(this.terrainView);
     // The camera in PLANET metres, which is what the morph measures against — every node is anchored to the world, so
     // nothing here is relative to a render origin.
     this.cameraPlanet.set(view.centerX, view.eyeY, view.centerZ);
-    this.material.setVector3('uCameraPlanet', this.cameraPlanet);
+    this.plugin.setVector3('uCameraPlanet', this.cameraPlanet);
     this.camera.set(view.eyeX, view.eyeY, view.eyeZ);
     this.center.set(view.viewCenterX, view.viewCenterZ);
     this.mask.set(
@@ -362,7 +286,7 @@ export class Ground {
       // One texel per cell: the shader maps the grid's extent onto the whole texture.
       this.heat.dispose();
       this.heat = new HeatmapTexture(this.scene, dims[0], dims[1]);
-      this.material.setTexture('uHeat', this.heat.texture);
+      this.plugin.setTexture('uHeat', this.heat.texture);
     }
 
     // The camera's own altitude picks the slab; a flat grid has one and this is always 0 (CLI3D-04).
@@ -373,9 +297,14 @@ export class Ground {
       anyHeat ||= mask[i];
     }
 
-    const m = this.material;
+    const m = this.plugin;
     // The render origin never offsets altitude, so `eyeY` IS the camera's height above sea level.
+    // <b>The haze is the SCENE's now.</b> Density depends on the camera's altitude for the reason it always did: one
+    // figure cannot serve both a 22 km map view and the horizon at eye level. `fogFor` still decides it; only the
+    // consumer changed, from a uniform the ground shader read to the scene every Babylon material reads.
     fogFor(view.eyeY, this.fog);
+    this.scene.fogMode = Scene.FOGMODE_EXP2;
+    this.scene.fogDensity = this.fog.x;
     m.setVector2('uFog', this.fog);
     m.setVector3('uCamera', this.camera);
     m.setVector2('uViewCenter', this.center);
@@ -400,30 +329,30 @@ export class Ground {
       this.replGrid.set(0, 0, 1, 0);
       this.cellRect.set(0, 0, 1, 1);
       this.sessionDisc.set(0, 0, 0, 0);
-      this.material.setVector4('uReplGrid', this.replGrid);
-      this.material.setVector4('uCellRect', this.cellRect);
-      this.material.setVector4('uSessionDisc', this.sessionDisc);
-      this.material.setFloat('uCellAlpha', 0);
-      this.material.setFloat('uHullCount', 0);
-      this.material.setArray4('uHull', this.hull);
+      this.plugin.setVector4('uReplGrid', this.replGrid);
+      this.plugin.setVector4('uCellRect', this.cellRect);
+      this.plugin.setVector4('uSessionDisc', this.sessionDisc);
+      this.plugin.setFloat('uCellAlpha', 0);
+      this.plugin.setFloat('uHullCount', 0);
+      this.plugin.setArray4('uHull', this.hull);
       return;
     }
 
     this.replGrid.set(grid.origin[0], grid.origin[1], grid.cellM, 1);
-    this.material.setVector4('uReplGrid', this.replGrid);
+    this.plugin.setVector4('uReplGrid', this.replGrid);
 
     const delivered = geometry === null ? 0 : this.cells.update(geometry, grid, this.rect);
     this.cellRect.set(this.rect.x, this.rect.z, Math.max(this.rect.width, 1), Math.max(this.rect.height, 1));
-    this.material.setVector4('uCellRect', this.cellRect);
-    this.material.setFloat('uCellAlpha', delivered > 0 ? 1 : 0);
+    this.plugin.setVector4('uCellRect', this.cellRect);
+    this.plugin.setFloat('uCellAlpha', delivered > 0 ? 1 : 0);
 
     let hullCount = 0;
     if (geometry !== null && geometry.shape === PushShape.Region) {
       hullCount = hullUniform(geometry, this.hull, HULL_SLOTS);
     }
 
-    this.material.setArray4('uHull', this.hull);
-    this.material.setFloat('uHullCount', hullCount);
+    this.plugin.setArray4('uHull', this.hull);
+    this.plugin.setFloat('uHullCount', hullCount);
 
     // R′ as the SESSION holds it, which is what a sphere profile's overlay is for; a region has no radius.
     const sphere = geometry !== null && geometry.shape === PushShape.Sphere;
@@ -433,7 +362,7 @@ export class Ground {
       sphere ? geometry.radiusM : 0,
       sphere ? 1 : 0,
     );
-    this.material.setVector4('uSessionDisc', this.sessionDisc);
+    this.plugin.setVector4('uSessionDisc', this.sessionDisc);
   }
 
   /**

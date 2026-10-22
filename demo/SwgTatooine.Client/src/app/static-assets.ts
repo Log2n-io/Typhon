@@ -3,7 +3,7 @@ import { placement } from '../assets/asset-frame';
 import type { AssetLibrary, Instance } from '../assets/asset-library';
 import { assetForStructure, structureYaw } from '../assets/structure-assets';
 import type { AssetSet } from '../data/server-config';
-import type { AssetLighting } from '../render/asset-lighting';
+import type { SceneLighting } from '../render/scene-lighting';
 
 /**
  * The structures the server placed, drawn as published assets.
@@ -50,7 +50,7 @@ interface Standing {
 export class StaticAssets {
   private readonly library: AssetLibrary;
   /** Marks each placement as a shadow caster, or `null` on a mount without lighting (the tests'). */
-  private readonly lighting: AssetLighting | null;
+  private readonly lighting: SceneLighting | null;
   private readonly set: AssetSet;
   private readonly root: TransformNode;
   private readonly budget: number;
@@ -69,7 +69,7 @@ export class StaticAssets {
     root: TransformNode,
     set: AssetSet,
     budgetPerFrame = 2,
-    lighting: AssetLighting | null = null,
+    lighting: SceneLighting | null = null,
   ) {
     this.set = set;
     this.library = library;

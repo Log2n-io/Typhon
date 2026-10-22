@@ -17,6 +17,7 @@ import {
   slotOf,
   WorldStore,
 } from '@typhondb/client';
+import { configureDecoders } from '../assets/decoders';
 import { CameraInput, isTyping } from '../camera/camera-input';
 import { EyeCamera } from '../camera/eye-camera';
 import { MapCamera } from '../camera/map-camera';
@@ -42,7 +43,8 @@ import {
 } from '../render/entity-layer';
 import { NONE_HIDDEN } from '../render/layer-packer';
 import { FLAT_GROUND, type GroundSampler } from '../terrain/ground-sampler';
-import { GroundView, SKY, type GroundShadow } from '../render/ground';
+import { GroundView, SKY } from '../render/ground';
+import { SceneLighting } from '../render/scene-lighting';
 import { PlanetProfile } from '../render/planet-profile';
 import { InteriorProfile } from '../render/interior-profile';
 import { SpaceProfile } from '../render/space-profile';
@@ -420,6 +422,17 @@ export class ClientApp {
    * the whole GLB set, which is the largest single allocation this client makes.
    */
   private assets: AssetMount | null = null;
+
+  /**
+   * The scene's sun and its environment probe, for every lit surface: the terrain, and the published assets once they
+   * mount.
+   *
+   * <b>Created here rather than by {@link mountAssets}, which is where it used to live.</b> That was right while the
+   * buildings were the only lit thing in the scene and wrong the moment the terrain became a `PBRMaterial`, because
+   * mounting assets is allowed to fail and be swallowed — a 404 on the catalogue, a decoder that will not load — and
+   * none of those is a reason for the desert to go black. See {@link SceneLighting}.
+   */
+  private readonly lighting: SceneLighting;
   /** Set by {@link dispose}, read by {@link gone}: what tells an in-flight asset load that there is nothing to mount on. */
   private disposed = false;
   private readonly unsubscribe: () => void;
@@ -449,6 +462,10 @@ export class ClientApp {
     this.camera.inputs.clear();
     this.instrumentation = new SceneInstrumentation(this.scene);
     this.instrumentation.captureFrameTime = true;
+    // Before the profiles, so no frame is ever drawn by a material that compiled against a scene with no sun and no
+    // environment. `configureDecoders` is pure configuration and idempotent; `mountAssets` calls it again for the
+    // decoders themselves, and this needs it only for the vendored `.env` path.
+    this.lighting = new SceneLighting(this.scene, configureDecoders());
 
     // The ground is REAL before anything reads it, and that is a correctness property rather than a nicety.
     //
@@ -462,7 +479,7 @@ export class ClientApp {
     this.view.ground = this.field;
     this.eyeCamera.ground = this.field;
     this.adoptTerrain(terrain);
-    this.planetProfile = new PlanetProfile(this.scene, this.field, PLANET_HALF_EXTENT_M);
+    this.planetProfile = new PlanetProfile(this.scene, this.field, PLANET_HALF_EXTENT_M, this.lighting);
     this.profiles.set('planet', this.planetProfile);
     this.profile = this.planetProfile;
     this.planetProfile.enter(PLANET_AT_START);
@@ -607,7 +624,7 @@ export class ClientApp {
     try {
       // Anchored on the city the camera starts over, so what is placed is under the viewer rather than somewhere they
       // have to be told to fly to.
-      const mount = await mountAssets(this.scene, set, this.origin);
+      const mount = await mountAssets(this.scene, set, this.origin, this.lighting);
       if (this.gone()) {
         // The session was torn down while the catalogue was in flight; its scene took the instances with it.
         mount.dispose();
@@ -722,6 +739,8 @@ export class ClientApp {
     this.staticAssets = null;
     this.assets?.dispose();
     this.assets = null;
+    // After the mount, which holds instances of meshes this lit.
+    this.lighting.dispose();
     this.scene.dispose();
     this.engine.dispose();
   }
@@ -1114,44 +1133,24 @@ export class ClientApp {
   }
 
   /**
-   * Puts the sun's shadow slab over the camera's own patch of ground and hands the ground its map.
+   * Puts the sun's shadow slab over the camera's own patch of ground.
    *
-   * <b>Centred on what the camera is looking at, on the ground, in RENDER space.</b> The slab is 192 m across against a
-   * 16 km planet, so where it sits is the whole question: on the eye it would cover the sky behind a first-person
+   * <b>Centred on what the camera is looking at, on the ground, in RENDER space.</b> The slab is 128 m across against
+   * a 16 km planet, so where it sits is the whole question: on the eye it would cover the sky behind a first-person
    * camera and half of what is in front; on the planet coordinate it would be five kilometres from the scene, because
    * everything the client draws is relative to an origin snapped near the camera.
+   *
+   * Nothing is handed to the ground any more: the terrain is a Babylon material now and Babylon shadows it.
    *
    * @param wanted Whether the viewer wants shadows at all.
    * @param targetX What the camera orbits, planet east.
    * @param targetZ The same, north.
    * @param originX The render origin this frame, planet east.
    * @param originZ The same, north.
-   * @returns What the ground needs to sample the map, or `null` when nothing is casting.
    */
-  private shadowFor(
-    wanted: boolean,
-    targetX: number,
-    targetZ: number,
-    originX: number,
-    originZ: number,
-  ): GroundShadow | null {
-    const lighting = this.assets?.lighting ?? null;
-    if (lighting === null) {
-      // No published assets, so nothing in the scene casts: the entities are sprites and impostors and the terrain
-      // cannot shadow itself (its height lives in a texture the shadow pass knows nothing about).
-      return null;
-    }
-
-    lighting.setShadows(wanted);
-    const map = lighting.shadowMap;
-    const transform = lighting.shadowTransform;
-    if (map === null || transform === null) {
-      return null;
-    }
-
-    // The ground under the camera's target, so the slab is centred on the ground rather than on the eye above it.
-    lighting.frameShadows(targetX - originX, this.profile.ground.heightAt(targetX, targetZ), targetZ - originZ);
-    return { map, transform, depth: lighting.shadowDepthValues, size: map.getSize().width };
+  private frameSun(wanted: boolean, targetX: number, targetZ: number, originX: number, originZ: number): void {
+    this.lighting.setShadows(wanted);
+    this.lighting.frameShadows(targetX - originX, this.profile.ground.heightAt(targetX, targetZ), targetZ - originZ);
   }
 
   /**
@@ -1896,7 +1895,7 @@ export class ClientApp {
     // quantities — a 12 px dot is 12 px to the viewer whatever the backing store does — so only this one is scaled.
     g.pixelsPerMetre = view.pixelsPerMetre * this.renderScale;
     g.pixelTolerance = ui.terrainPixelError;
-    g.shadow = this.shadowFor(ui.shadows, cam.targetX, cam.targetZ, view.originX, view.originZ);
+    this.frameSun(ui.shadows, cam.targetX, cam.targetZ, view.originX, view.originZ);
     g.nearRadius = nearRadius;
     g.heatMask = this.heatMask;
     g.showGrid = ui.showGrid;

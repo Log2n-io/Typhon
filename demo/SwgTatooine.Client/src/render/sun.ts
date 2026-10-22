@@ -19,6 +19,39 @@ import { Vector3 } from '@babylonjs/core/Maths/math.vector';
 export const SUN_DIRECTION = new Vector3(-0.45, -0.8, -0.4).normalize();
 
 /**
+ * How bright the sun is, and how bright the sky it is balanced against.
+ *
+ * <b>These three are one decision and they live together because the RATIO is what matters.</b> Split across two files
+ * they drift, and a drift here is not a bug anyone can see in a diff: it is the desert slowly losing its shadows.
+ *
+ * The sky is {@link SceneLighting.setSky}'s irradiance on a surface facing straight up, as a multiple of the planet
+ * palette's own sky colour; the bounce is what a surface facing DOWN gets back from the sand, as a fraction of that.
+ * Together they are the diffuse half of the environment — the half that used to be a `0.66` constant in the ground
+ * shader, invisible to every building in the scene.
+ *
+ * <b>Chosen by measurement, against the look that came before the port.</b> Over the same patch of open ground, the
+ * same avatar shadow and the same 1 400 x 900 frame:
+ *
+ * | lighting                                  | lit sand        | shadow / lit | R − B |
+ * |-------------------------------------------|-----------------|--------------|-------|
+ * | the old hand-rolled `0.66 + 0.5 * lambert`| (173, 154, 125) | 0.50         | 48    |
+ * | PBR on the stock probe, sun 1.5           | (192, 174, 168) | 0.72         | 24    |
+ * | <b>PBR on the planet's sky, these</b>     | (170, 149, 118) | 0.46         | 52    |
+ *
+ * The middle row is why this exists. The probe shipped with the asset pipeline is a studio environment and its diffuse
+ * harmonics are BLUE-dominant — measured, from the file: a flat term of (0.547, 0.483, 0.621) and a sky term of
+ * (0.21, 0.23, 0.41). On a horizontal desert it supplied 69 % of the light, which cost the sand half its warmth and
+ * flattened every shadow. A world whose clear colour and haze are a warm dust sky cannot be lit by a blue one.
+ */
+export const SUN_INTENSITY = 2.2;
+
+/** @see {@link SUN_INTENSITY} — the sky's irradiance, as a multiple of the palette's sky colour. */
+export const SKY_IRRADIANCE = 0.5;
+
+/** @see {@link SUN_INTENSITY} — what the ground bounces back up, as a fraction of {@link SKY_IRRADIANCE}. */
+export const GROUND_BOUNCE = 0.35;
+
+/**
  * Half the edge of the ground square the sun's shadow map covers, in metres.
  *
  * <b>A slab around the camera, not the world.</b> Tatooine is 16 km across and a map that covered it would put a metre
@@ -40,16 +73,6 @@ export const SHADOW_RADIUS_M = 64;
  * edge of a shadow two metres long — the first live frames had the texel grid in them.
  */
 export const SHADOW_MAP_SIZE = 4096;
-
-/**
- * How far the shadow test is allowed to be wrong, in metres, before a surface shadows itself.
- *
- * <b>Slope-scaled, not flat.</b> A flat bias has to be as large as the worst case — ground nearly edge-on to the sun,
- * where one texel spans metres of depth — and that much slack everywhere detaches a shadow from the thing casting it
- * (a body appears to hover). Scaling it by how obliquely the sun strikes the ground pays the large bias only where it
- * is needed. The constant is the perpendicular case.
- */
-export const SHADOW_BIAS_M = 0.06;
 
 /**
  * How far back along the sun's own direction its shadow camera sits, in metres.

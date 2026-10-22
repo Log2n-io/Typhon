@@ -3,8 +3,6 @@ import { describe, expect, it } from 'vitest';
 import {
   ENTITY_FRAGMENT,
   ENTITY_VERTEX,
-  GROUND_FRAGMENT,
-  GROUND_VERTEX,
   LINE_FRAGMENT,
   LINE_VERTEX,
   ROOM_FRAGMENT,
@@ -13,6 +11,10 @@ import {
   SPACE_VERTEX,
   SPRITE_FRAGMENT,
   SPRITE_VERTEX,
+  GROUND_ALBEDO,
+  GROUND_HELPER_FUNCTIONS,
+  GROUND_OVERLAY_UNIFORMS,
+  HEIGHT_FUNCTIONS,
 } from '../src/render/shaders';
 
 /**
@@ -31,8 +33,6 @@ import {
  */
 
 const SHADERS: ReadonlyArray<readonly [string, string]> = [
-  ['GROUND_VERTEX', GROUND_VERTEX],
-  ['GROUND_FRAGMENT', GROUND_FRAGMENT],
   ['ENTITY_VERTEX', ENTITY_VERTEX],
   ['ENTITY_FRAGMENT', ENTITY_FRAGMENT],
   ['SPRITE_VERTEX', SPRITE_VERTEX],
@@ -89,13 +89,32 @@ describe('every shader declares what it reads', () => {
     });
   }
 
-  it('the ground fragment still carries the parts a splice removed', () => {
-    // Named one by one, so a failure says which piece went missing rather than that something did.
-    expect(GROUND_FRAGMENT, 'the planet-space varying').toContain('varying vec2 vPlanet');
-    expect(GROUND_FRAGMENT, 'the render-space varying the fog and the shadow both read').toContain('varying vec3 vRender');
-    expect(GROUND_FRAGMENT, 'the palette uniforms').toContain('uniform vec3 uPalette0');
-    expect(GROUND_FRAGMENT, 'the ground-normal helper').toContain('vec3 groundNormal(');
-    expect(GROUND_FRAGMENT, 'the shadow lookup that was spliced in').toContain('float shadowAt(');
-    expect(GROUND_FRAGMENT, 'and its bilinear tap').toContain('float pcfTap(');
+  it('the ground albedo still carries the parts a splice removed', () => {
+    // Named one by one, so a failure says which piece went missing rather than that something did. The ground is a
+    // material plugin now, so these are the shared strings it injects rather than a shader of its own.
+    //
+    // <b>And they are the strings the plugin ACTUALLY injects.</b> This used to assert against `GROUND_HELPERS` and a
+    // `GROUND_OVERLAY_UNIFORMS` that still declared its own samplers — two blocks left over from the ground's own
+    // `ShaderMaterial`, kept compiling by nothing, while the material injected near-identical copies beside them. A
+    // splice into the copies would have passed here. There is one of each now, and this names it.
+    expect(HEIGHT_FUNCTIONS, 'the height lookup').toContain('float heightAt(');
+    expect(HEIGHT_FUNCTIONS, 'the ground-normal helper').toContain('vec3 groundNormal(');
+    expect(GROUND_HELPER_FUNCTIONS, 'the noise the albedo calls').toContain('float noise(');
+    expect(GROUND_OVERLAY_UNIFORMS, 'the palette uniforms').toContain('uniform vec3 uPalette0');
+    expect(GROUND_ALBEDO, 'the albedo itself').toContain('vec3 color');
+  });
+
+  it('declares no sampler that the material plugin also declares', () => {
+    // Babylon assigns a texture unit to each name in `getSamplers` and declares it; a second declaration of the same
+    // name is a redefinition the driver rejects, and skipping `getSamplers` to dodge that leaves the sampler with no
+    // unit at all — which is how the terrain's per-pixel normal became NaN and the whole planet rendered black. These
+    // shared blocks are injected into a plugin, so a `sampler2D` in any of them is that bug coming back.
+    for (const [name, src] of [
+      ['HEIGHT_FUNCTIONS', HEIGHT_FUNCTIONS],
+      ['GROUND_HELPER_FUNCTIONS', GROUND_HELPER_FUNCTIONS],
+      ['GROUND_OVERLAY_UNIFORMS', GROUND_OVERLAY_UNIFORMS],
+    ] as const) {
+      expect(src, `${name} declares a sampler the plugin must own`).not.toContain('uniform sampler2D');
+    }
   });
 });

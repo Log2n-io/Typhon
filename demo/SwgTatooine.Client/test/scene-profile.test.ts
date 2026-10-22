@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { NullEngine } from '@babylonjs/core/Engines/nullEngine';
 import { Scene } from '@babylonjs/core/scene';
 import { RealmFrame } from '@typhondb/client';
 import { realmViewOf, type RealmView } from '../src/data/realm-view';
 import { InteriorProfile } from '../src/render/interior-profile';
 import { PlanetProfile } from '../src/render/planet-profile';
+import { SceneLighting } from '../src/render/scene-lighting';
 import { cameraBoundsFor } from '../src/render/scene-profile';
 import { PALETTES, paletteFor } from '../src/render/ground';
 import { buildBox, buildRoom } from '../src/render/room-mesh';
@@ -177,10 +178,40 @@ describe('the profiles, on a NullEngine', () => {
     return new Scene(new NullEngine());
   }
 
+  /**
+   * Babylon'''s texture loader reaches for `XMLHttpRequest`, which vitest'''s node environment does not have.
+   *
+   * A `NullEngine` creates no GPU texture and these cases load none, but the request is issued before the engine is
+   * consulted — so without this the run carries two unhandled `ReferenceError`s that have nothing to do with what is
+   * being tested. The stub answers nothing on purpose: a case here that started depending on a real fetch should fail,
+   * not quietly pass on a mock.
+   */
+  beforeAll(() => {
+    const host = globalThis as unknown as { XMLHttpRequest?: unknown };
+    host.XMLHttpRequest ??= class {
+      open(): void {}
+      send(): void {}
+      setRequestHeader(): void {}
+      addEventListener(): void {}
+      abort(): void {}
+    };
+  });
+
+  /**
+   * A planet, with the lighting it is now built against.
+   *
+   * The terrain is a `PBRMaterial` lit by the scene, and its palette sets the sky that lights it — so a profile needs
+   * a {@link SceneLighting} the way it needs a scene. The vendor root is never fetched here: a `NullEngine` loads no
+   * texture, which is exactly what these cases want.
+   */
+  function planetOn(s: Scene, field: Heightfield): PlanetProfile {
+    return new PlanetProfile(s, field, 8192, new SceneLighting(s, '/vendor/'));
+  }
+
   it('gives the planet its heightfield and a room the flat floor', () => {
     const s = scene();
     const field = new Heightfield();
-    const planet = new PlanetProfile(s, field, 8192);
+    const planet = planetOn(s, field);
     const room = new InteriorProfile(s, 64);
     expect(planet.ground).toBe(field);
     expect(room.ground).toBe(FLAT_GROUND);
@@ -202,7 +233,7 @@ describe('the profiles, on a NullEngine', () => {
     // and the height texture. What the round trip has to preserve is what `dispose` would take.
     const s = scene();
     const field = new Heightfield();
-    const planet = new PlanetProfile(s, field, 8192);
+    const planet = planetOn(s, field);
     const room = new InteriorProfile(s, 64);
 
     planet.enter(PLANET);
