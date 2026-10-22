@@ -22,6 +22,7 @@ import { CameraInput, isTyping } from '../camera/camera-input';
 import { EyeCamera } from '../camera/eye-camera';
 import { MapCamera } from '../camera/map-camera';
 import { mountAssets, type AssetMount } from './asset-mount';
+import { mountCrowd, type CrowdMount } from './crowd-mount';
 import { StaticAssets, type StructureSample } from './static-assets';
 import { groundOnShapes, prepareShape, pushOut, type AssetShape, type PlacedShape, type Position } from './structure-collision';
 import { meanAndP95, regionDue } from './frame-policy';
@@ -41,7 +42,7 @@ import {
   type PickRay,
   type PredictedOverride,
 } from '../render/entity-layer';
-import { NONE_HIDDEN } from '../render/layer-packer';
+import { NONE_HIDDEN, type CrowdBody } from '../render/layer-packer';
 import { FLAT_GROUND, type GroundSampler } from '../terrain/ground-sampler';
 import { GroundView, SKY } from '../render/ground';
 import { SceneLighting } from '../render/scene-lighting';
@@ -197,6 +198,8 @@ class MutableFrameView implements FrameView {
   ground: GroundSampler = FLAT_GROUND;
   predicted: PredictedOverride | null = null;
   hidden: ReadonlySet<number> = NONE_HIDDEN;
+  crowd: CrowdBody[] | null = null;
+  perSecond = 1;
 }
 
 /** Reused each frame so a predicted body costs no allocation; the packer only reads it. */
@@ -250,6 +253,24 @@ const SHUTTLE_SEARCH_FRAMES = 8;
  * Two things ask for it - the shuttleport prompt's field scan and the dome layer - and both must mean the same one.
  */
 const STRUCTURE_ARCHETYPE = 'WorldObject';
+
+/**
+ * The archetypes whose bodies are drawn as rigged characters rather than as boxes.
+ *
+ * <b>`Creature` is deliberately not one of them.</b> A bantha is a body the server steers exactly as it steers an
+ * NPC, and the published catalogue has nineteen humanoids and no animals — dressing a creature in a kimono would be
+ * worse than the box it gets today. The moment a creature mesh is published this is the one line that changes.
+ */
+const CHARACTER_ARCHETYPES: readonly string[] = ['CityNpc', 'Player'];
+
+/**
+ * The most bodies the crowd will draw at once, per outfit.
+ *
+ * Buffers are sized once from this, per outfit per detail level, so it is paid in memory whether or not the bodies
+ * arrive: nineteen outfits at 2 048 is about 16 MB of Float32Array. Bodies past it in a frame are simply not drawn by
+ * the crowd — they keep their sprite — which is the right failure for a figure that only a pathological view reaches.
+ */
+const CROWD_CAPACITY = 2048;
 
 export class ClientApp {
   private readonly canvas: HTMLCanvasElement;
@@ -433,6 +454,17 @@ export class ClientApp {
    * none of those is a reason for the desert to go black. See {@link SceneLighting}.
    */
   private readonly lighting: SceneLighting;
+
+  /**
+   * Every replicated body drawn as a character, or `null` before the catalogue lands and on a run that publishes none.
+   *
+   * Held rather than reached through the asset mount because it outlives a failed mount the way the lighting does: a
+   * crowd that cannot be built is a run with boxes, not a run with nothing.
+   */
+  private crowd: CrowdMount | null = null;
+
+  /** Reused each frame: the bodies the character layers diverted, handed to the crowd and then cleared. */
+  private readonly crowdBodies: CrowdBody[] = [];
   /** Set by {@link dispose}, read by {@link gone}: what tells an in-flight asset load that there is nothing to mount on. */
   private disposed = false;
   private readonly unsubscribe: () => void;
@@ -633,6 +665,14 @@ export class ClientApp {
 
       this.assets = mount;
       this.assetSet = set;
+      // After the mount, because it reads the same library — and deliberately not inside it: a crowd that will not
+      // build must not cost the street its buildings, and a street that will not load must not cost the crowd.
+      try {
+        this.crowd = await mountCrowd(this.scene, mount.library, this.lighting, CROWD_CAPACITY);
+      } catch (error) {
+        console.error('crowd: not mounted', error);
+      }
+
       this.shapeCache = [];
       this.staticAssets = new StaticAssets(mount.library, mount.root, set, undefined, mount.lighting);
     } catch (error) {
@@ -737,6 +777,8 @@ export class ClientApp {
 
     this.staticAssets?.dispose();
     this.staticAssets = null;
+    this.crowd?.dispose();
+    this.crowd = null;
     this.assets?.dispose();
     this.assets = null;
     // After the mount, which holds instances of meshes this lit.
@@ -1599,6 +1641,11 @@ export class ClientApp {
           info.name === STRUCTURE_ARCHETYPE ? StructureKind.Shuttleport : -1,
         ),
     );
+    for (const [index, info] of this.archetypes.infos.entries()) {
+      // The near band of a people layer becomes the crowd; its far band stays the sprite it already was.
+      layers[index].drawsCharacters = CHARACTER_ARCHETYPES.includes(info.name);
+    }
+
     const structures = this.archetypes.infos.findIndex((info) => info.name === STRUCTURE_ARCHETYPE);
     if (structures >= 0) {
       layers.push(new EntityLayer(structures, styleFor(SHUTTLEPORT_STYLE), this.scene, StructureKind.Shuttleport, -1));
@@ -1865,8 +1912,29 @@ export class ClientApp {
 
     view.hidden = hidden;
 
+    // <b>The crowd collects as the layers pack, not in a pass of its own.</b> Everything a body needs — its place in
+    // render space, its heading, its ground speed — is computed by the packer anyway, so a character layer diverts its
+    // near band into this array instead of writing a box. A second pass would evaluate every body twice.
+    const crowd = this.crowd;
+    const bodies = this.crowdBodies;
+    bodies.length = 0;
+    view.crowd = crowd === null ? null : bodies;
+    view.perSecond = 1000 / this.clock.tickPeriodMs;
+
     for (const layer of this.layers) {
       layer.update(view);
+    }
+
+    if (crowd !== null) {
+      // The gait figures are the SERVER's; before the owner block lands they are NaN and the graph falls back to the
+      // clips' own speeds, which is the same thing the avatar does.
+      crowd.layer.update(
+        bodies,
+        view,
+        now / 1000,
+        live?.selfNumber('walkMps') ?? Number.NaN,
+        live?.selfNumber('runMps') ?? Number.NaN,
+      );
     }
 
     this.attacks.update(view);

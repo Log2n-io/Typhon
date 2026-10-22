@@ -89,6 +89,18 @@ export class CrowdLayer {
   private tunedRun = Number.NaN;
 
   private readonly scratch = { matrix: new Matrix(), quat: new Quaternion(), pos: new Vector3() };
+
+  /**
+   * When this layer started, in the same units the caller's clock uses.
+   *
+   * <b>The crowd's clock is SECONDS SINCE THIS LAYER BEGAN, never since the epoch, and the layer subtracts it here so
+   * that no caller can get it wrong.</b> `crowdTime` reaches the shader as a float32 uniform. Epoch seconds are about
+   * 1.79e9, where float32 steps in units of 128 — so `crowdTime - clipStart` is pure quantisation noise, `floor(f)`
+   * leaves the texture, `texelFetch` returns zero, every bone matrix is zero and every vertex of every body collapses
+   * to a point. Nothing errors: the draw calls, the instance counts, the defines and the matrices all stay perfectly
+   * correct, and the crowd is simply invisible.
+   */
+  private origin = Number.NaN;
   /** Per-tier totals for the HUD, rebuilt each frame. */
   readonly tierTotals = new Int32Array(SPRITE_TIER + 1);
   /** netIds the crowd drew this frame: what the entity packer must skip so a body is not drawn twice. */
@@ -128,6 +140,28 @@ export class CrowdLayer {
         tuning: locomotionFrom(Number.NaN, Number.NaN, outfit.height),
       };
     });
+
+    // <b>Bound once, at full capacity, and never re-bound.</b> Two reasons, and the first is a bug this cost an
+    // evening: Babylon decides `INSTANCES`/`THIN_INSTANCES` when it compiles the effect, from whether the mesh has
+    // thin instances AT THAT MOMENT. Binding the matrix buffer later leaves an effect whose `finalWorld` is the
+    // mesh's own — so every body drew stacked at the origin, as one small blob, while the matrices reaching the GPU
+    // were perfectly correct. Nothing errors; the draw call count and the instance count both look right.
+    //
+    // The second is cost: `thinInstanceSetBuffer` builds a VertexBuffer, so calling it per frame per level rebuilds
+    // nineteen outfits' worth of them every frame. The contents are written in place and pushed with a PARTIAL
+    // update bounded by the live count, which is the spike's own hard-won note — `thinInstanceBufferUpdated` uploads
+    // the whole capacity whatever the count.
+    for (const [which, bucket] of this.buckets.entries()) {
+      for (const [level, lod] of this.outfits[which].lods.entries()) {
+        const target = bucket.targets[level];
+        lod.mesh.thinInstanceSetBuffer('matrix', target[0], 16, false);
+        lod.mesh.thinInstanceSetBuffer('crowdClipA', target[1], 4, false);
+        lod.mesh.thinInstanceSetBuffer('crowdClipB', target[2], 4, false);
+        lod.mesh.thinInstanceSetBuffer('crowdFade', target[3], 2, false);
+        lod.mesh.thinInstanceCount = 0;
+        lod.mesh.isVisible = false;
+      }
+    }
   }
 
   /** Where the crowd's clock is, in seconds since it started. Not epoch seconds: float32 loses milliseconds there. */
@@ -144,8 +178,10 @@ export class CrowdLayer {
    *
    * @param bodies Every body in range, in render space.
    * @param view The active camera, for culling and for the projected-size tiers.
-   * @param now Seconds since the crowd started. There is no `dt`: every crossfade and every clip phase is derived
-   * from absolute time, on the GPU, which is what makes a body that keeps walking cost nothing per frame.
+   * @param now A monotonic clock in seconds. Its ZERO does not matter: the layer records its own start and works
+   * relative to it, because the shader's copy is a float32 and epoch seconds have no resolution left in one. There is
+   * no `dt` — every crossfade and clip phase is derived from absolute time on the GPU, which is what makes a body
+   * that keeps walking cost nothing per frame.
    * @param walkMps The server's own walk speed, for the gait thresholds. Never a literal in this client.
    * @param runMps The server's own run speed.
    */
@@ -156,7 +192,12 @@ export class CrowdLayer {
     walkMps: number,
     runMps: number,
   ): void {
-    this.skin.time = now;
+    if (!Number.isFinite(this.origin)) {
+      this.origin = now;
+    }
+
+    const clock = now - this.origin;
+    this.skin.time = clock;
     this.drawn.clear();
     this.tierTotals.fill(0);
     for (const bucket of this.buckets) {
@@ -210,10 +251,10 @@ export class CrowdLayer {
         bucket.tiers[i] = CULLED;
       }
 
-      const out = slot.graph.update(body.speed, true, now);
+      const out = slot.graph.update(body.speed, true, clock);
       const atlas = this.plan.slotOf(outfit.id, out.clip);
       if (atlas !== null) {
-        bucket.animator.play(i, atlas, now, out.rate);
+        bucket.animator.play(i, atlas, clock, out.rate);
       }
 
       // Yaw only: a body leans with the ground nowhere in this client, and the matrix is the whole placement because
@@ -255,12 +296,12 @@ export class CrowdLayer {
           continue;
         }
 
-        const target = bucket.targets[level];
-        mesh.thinInstanceSetBuffer('matrix', target[0], 16, true);
-        mesh.thinInstanceSetBuffer('crowdClipA', target[1], 4, true);
-        mesh.thinInstanceSetBuffer('crowdClipB', target[2], 4, true);
-        mesh.thinInstanceSetBuffer('crowdFade', target[3], 2, true);
+        // The arrays `packTiers` just filled are the ones already bound; only their first `count` entries are live.
         mesh.thinInstanceCount = count;
+        mesh.thinInstancePartialBufferUpdate('matrix', count * 16, 0);
+        mesh.thinInstancePartialBufferUpdate('crowdClipA', count * 4, 0);
+        mesh.thinInstancePartialBufferUpdate('crowdClipB', count * 4, 0);
+        mesh.thinInstancePartialBufferUpdate('crowdFade', count * 2, 0);
         this.drawCalls++;
         this.trianglesDrawn += lod.triangles * count;
       }

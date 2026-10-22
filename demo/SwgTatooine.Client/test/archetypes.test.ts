@@ -140,6 +140,8 @@ describe('archetype identity', () => {
       ground: FLAT_GROUND,
       predicted: null,
       hidden: new Set<number>(),
+      crowd: null,
+      perSecond: 1,
     });
 
     expect(packer.nearCount + packer.farCount).toBe(1);
@@ -189,6 +191,8 @@ describe('archetype identity', () => {
         ground: FLAT_GROUND,
         predicted: null,
         hidden: new Set<number>(),
+        crowd: null,
+        perSecond: 1,
       });
     }).not.toThrow();
     expect(packer.nearCount + packer.farCount).toBe(1);

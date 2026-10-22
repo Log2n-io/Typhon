@@ -3,6 +3,8 @@ import { MaterialPluginBase } from '@babylonjs/core/Materials/materialPluginBase
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial';
 import { ShadowDepthWrapper } from '@babylonjs/core/Materials/shadowDepthWrapper';
 import type { UniformBuffer } from '@babylonjs/core/Materials/uniformBuffer';
+import type { AbstractEngine } from '@babylonjs/core/Engines/abstractEngine';
+import type { SubMesh } from '@babylonjs/core/Meshes/subMesh';
 import type { Scene } from '@babylonjs/core/scene';
 
 import type { CrowdRig } from './crowd-rig';
@@ -58,10 +60,15 @@ export class CrowdSkinPlugin extends MaterialPluginBase {
     };
   }
 
-  override bindForSubMesh(uniformBuffer: UniformBuffer): void {
+  override bindForSubMesh(uniformBuffer: UniformBuffer, _scene: Scene, _engine: AbstractEngine, subMesh: SubMesh): void {
     uniformBuffer.updateFloat('crowdTime', this.time);
     uniformBuffer.updateFloat('crowdFps', this.rig.fps);
-    uniformBuffer.setTexture('crowdVat', this.rig.texture);
+    // <b>On the EFFECT, not through the uniform buffer.</b> A sampler is not a uniform-buffer member — the UBO holds
+    // the two floats above — and `uniformBuffer.setTexture` reaches the effect only when the buffer happens to be
+    // carrying one. Measured: with the UBO call alone every `texelFetch` returned zero, so every bone matrix was zero
+    // and every body collapsed to a point. Nothing errors, nothing warns, and the geometry, the instance matrices and
+    // the defines all stay correct — the crowd is simply not there.
+    subMesh.effect?.setTexture('crowdVat', this.rig.texture);
   }
 
   override getCustomCode(shaderType: string): Record<string, string> | null {

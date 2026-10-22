@@ -45,6 +45,32 @@ export interface FrameView {
    * the frame it stops being hidden it re-enters at whatever band its size then deserves rather than at a stale one.
    */
   readonly hidden: ReadonlySet<number>;
+  /**
+   * Where a character layer puts its near band instead of packing it as a box.
+   *
+   * `null` leaves every layer drawing boxes, which is what a session with no published characters does — and what
+   * every layer that is not characters does regardless.
+   */
+  readonly crowd: CrowdBody[] | null;
+  /**
+   * Multiplies a replicated velocity into metres per SECOND.
+   *
+   * <b>It is `1000 / tickPeriodMs`, and it is here because forgetting it is a defect this client has shipped.</b>
+   * What arrives on the wire is a velocity per TICK, which is what keeps a changing tick period from distorting
+   * history; a clip rate derived from it directly makes a sprinting body play its walk at the slowest rate it has.
+   */
+  readonly perSecond: number;
+}
+
+/** One replicated body, as a character layer hands it to the crowd. */
+export interface CrowdBody {
+  readonly netId: number;
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  /** Ground speed, metres per second. */
+  readonly speed: number;
+  readonly heading: number;
 }
 
 /** No entity hidden, for a caller that hides none. */
@@ -153,6 +179,8 @@ export class LayerPacker {
   readonly style: LayerStyle;
   /** The only style index this layer draws, or -1 for all of them. See the constructor. */
   readonly onlyStyle: number;
+  /** Whether this layer's near band is drawn by the crowd as rigged characters rather than as boxes. */
+  drawsCharacters = false;
   /** A style index this layer skips, or -1. */
   readonly omitStyle: number;
 
@@ -265,6 +293,8 @@ export class LayerPacker {
     const predicted = view.predicted;
     const predictedNetId = predicted === null ? 0 : predicted.netId;
     const hidden = view.hidden;
+    // Null for every layer that is not characters, so nothing else pays for the branch below.
+    const crowd = this.drawsCharacters ? view.crowd : null;
     for (let i = 0; i < count; i++) {
       const slot = live[i];
       // <b>Before the evaluation, not after it.</b> A hidden entity is one something else draws — the rigged avatar,
@@ -335,6 +365,25 @@ export class LayerPacker {
         // A still entity keeps the last heading it had as one.
         if (byVelocity && (at.vx !== 0 || at.vz !== 0)) {
           yaws[slot] = Math.atan2(at.vx, at.vz);
+        }
+
+        // <b>A character layer's near band IS the crowd.</b> Everything a body needs has just been computed — its
+        // place in render space, its heading, its ground velocity — so diverting it here costs one branch and avoids
+        // evaluating all of it a second time somewhere else. The far band is untouched: below the near threshold a
+        // body is a sprite, which is the same seam the crowd's own coarsest tier stops at.
+        //
+        // The speed handed over is metres per SECOND. What the store carries is per TICK — the defect this client has
+        // already shipped once, where a sprinting character played the walk clip at its slowest rate.
+        if (crowd !== null) {
+          crowd.push({
+            netId,
+            x: rx,
+            y: ry,
+            z: rz,
+            speed: Math.hypot(at.vx, at.vz) * view.perSecond,
+            heading: yaws[slot],
+          });
+          continue;
         }
 
         // (x, y, z, packed), with yaw in its own buffer: the four slots were full, and widening the state word to hold a

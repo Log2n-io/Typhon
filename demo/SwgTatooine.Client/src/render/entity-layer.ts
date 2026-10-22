@@ -46,6 +46,20 @@ export class EntityLayer {
   private nearUploader: PrefixUploader | null = null;
   private farUploader: PrefixUploader | null = null;
   private yawUploader: PrefixUploader | null = null;
+  /**
+   * Whether this layer's NEAR band is drawn by the crowd as rigged characters instead of as boxes.
+   *
+   * The far band is unaffected either way: below the near threshold a body is a sprite, which is where the crowd's
+   * own coarsest tier stops too.
+   */
+  get drawsCharacters(): boolean {
+    return this.packer.drawsCharacters;
+  }
+
+  set drawsCharacters(value: boolean) {
+    this.packer.drawsCharacters = value;
+  }
+
   /** The packer's arrays the GPU buffers were created over. */
   private arraysVersion = -1;
   private readonly screen: ScreenPoint = { x: 0, y: 0, w: 0 };

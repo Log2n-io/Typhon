@@ -60,6 +60,8 @@ function view(): FrameView {
     ground: FLAT_GROUND,
     predicted: null,
     hidden: new Set<number>(),
+    crowd: null,
+    perSecond: 1,
   };
 }
 
