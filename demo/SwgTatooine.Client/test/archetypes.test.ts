@@ -141,6 +141,7 @@ describe('archetype identity', () => {
       predicted: null,
       hidden: new Set<number>(),
       crowd: null,
+      crowdDraws: false,
       perSecond: 1,
     });
 
@@ -192,6 +193,7 @@ describe('archetype identity', () => {
         predicted: null,
         hidden: new Set<number>(),
         crowd: null,
+        crowdDraws: false,
         perSecond: 1,
       });
     }).not.toThrow();

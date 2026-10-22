@@ -53,6 +53,14 @@ export interface FrameView {
    */
   readonly crowd: CrowdBody[] | null;
   /**
+   * Whether the crowd is actually drawing the bodies it is handed.
+   *
+   * Until it is, a character layer collects for the crowd AND still draws its own box, so the world is never emptier
+   * than it was before the crowd existed. A body drawn twice is a visible bug; a body drawn by nobody is an invisible
+   * one, and the second is worse.
+   */
+  readonly crowdDraws: boolean;
+  /**
    * Multiplies a replicated velocity into metres per SECOND.
    *
    * <b>It is `1000 / tickPeriodMs`, and it is here because forgetting it is a defect this client has shipped.</b>
@@ -383,7 +391,13 @@ export class LayerPacker {
             speed: Math.hypot(at.vx, at.vz) * view.perSecond,
             heading: yaws[slot],
           });
-          continue;
+          // <b>Only STOP drawing the box once the crowd is known to be drawing a body in its place.</b> Diverting
+          // unconditionally is how a bring-up bug became a worse regression than the thing it was replacing: the
+          // crowd drew nothing, the boxes were already gone, and the street was empty. The flag is owned by the crowd
+          // itself and is false until it has put pixels on screen.
+          if (view.crowdDraws) {
+            continue;
+          }
         }
 
         // (x, y, z, packed), with yaw in its own buffer: the four slots were full, and widening the state word to hold a

@@ -108,6 +108,16 @@ export class CrowdLayer {
   private drawCalls = 0;
   private trianglesDrawn = 0;
 
+  /**
+   * Whether the crowd is drawing bodies, which is what lets the entity layers stop drawing boxes for them.
+   *
+   * <b>It is not "the crowd mounted".</b> A crowd that builds, classifies and issues draw calls while putting no
+   * pixels on screen is exactly the state this spent an evening in, and every counter looked healthy throughout — the
+   * outfits, the atlas rows, the tier totals, the draw calls and the triangle count were all correct and the street
+   * was empty. The layer cannot answer this itself: it knows what it submitted, not what came out.
+   */
+  isDrawing = false;
+
   constructor(options: CrowdLayerOptions) {
     this.outfits = options.outfits;
     this.plan = options.plan;
@@ -306,6 +316,15 @@ export class CrowdLayer {
         this.trianglesDrawn += lod.triangles * count;
       }
     }
+  }
+
+  /**
+   * Records that the crowd has been SEEN to draw, which is the only thing that retires the boxes.
+   *
+   * @param drawing Whether bodies are reaching the screen.
+   */
+  confirmDrawing(drawing: boolean): void {
+    this.isDrawing = drawing;
   }
 
   /** Hides every crowd mesh — what a profile with no bodies, or a torn-down session, leaves behind. */

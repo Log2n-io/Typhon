@@ -199,6 +199,7 @@ class MutableFrameView implements FrameView {
   predicted: PredictedOverride | null = null;
   hidden: ReadonlySet<number> = NONE_HIDDEN;
   crowd: CrowdBody[] | null = null;
+  crowdDraws = false;
   perSecond = 1;
 }
 
@@ -1920,6 +1921,7 @@ export class ClientApp {
     bodies.length = 0;
     view.crowd = crowd === null ? null : bodies;
     view.perSecond = 1000 / this.clock.tickPeriodMs;
+    view.crowdDraws = crowd?.layer.isDrawing ?? false;
 
     for (const layer of this.layers) {
       layer.update(view);
