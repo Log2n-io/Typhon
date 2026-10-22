@@ -1,4 +1,4 @@
-import type { ClipDesc, RoleMap } from '../assets/descriptor';
+import { clipsForRole, type ClipDesc, type RoleMap } from '../assets/descriptor';
 
 /**
  * Which clip a character plays, decided from its motion and from one-shot events — and nothing else.
@@ -230,12 +230,7 @@ export class AnimationGraph {
   }
 
   private clipsOf(role: string): readonly string[] {
-    const clips = this.roles[role];
-    if (clips === undefined) {
-      throw new Error(`no clip for role "${role}"`);
-    }
-
-    return typeof clips === 'string' ? [clips] : clips;
+    return clipsForRole(this.roles, role);
   }
 
   private clipOf(role: string): string {

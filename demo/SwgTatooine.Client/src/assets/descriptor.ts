@@ -82,6 +82,42 @@ export interface ClipDesc {
 /** Gameplay roles mapped to clip names; a role may offer several clips (attacks). */
 export type RoleMap = Readonly<Partial<Record<string, string | readonly string[]>>>;
 
+/**
+ * The clips a rig offers for a gameplay role.
+ *
+ * <b>One definition, because a role is the ONLY way a clip is addressed.</b> `casual_bald` publishes no `Run` and
+ * fills the run role with `Run_Carry`; nothing outside its descriptor knows that, and nothing should. A second copy of
+ * this resolution is a second place for a rig's naming to leak into code.
+ *
+ * @param roles The descriptor's role map.
+ * @param role The gameplay role.
+ * @returns Its clips, a single name normalised to a one-element list.
+ * @throws If the rig declares no clip for the role — deliberately, and where the rig is mounted rather than in a
+ * render loop: a character that cannot idle or walk is a catalogue fault, not a frame-time condition.
+ */
+export function clipsForRole(roles: RoleMap, role: string): readonly string[] {
+  const clips = roles[role];
+  if (clips === undefined) {
+    throw new Error(`no clip for role "${role}"`);
+  }
+
+  return typeof clips === 'string' ? [clips] : clips;
+}
+
+/**
+ * One detail level of a skinned asset: the node that carries it, and what it costs.
+ *
+ * <b>The node name is a label, not a selector.</b> The published GLBs carry two EMPTY transform nodes also called
+ * `Body_LOD1` and `Body_LOD2`, siblings of the armature — residue of the exporter's `regroup_lods` step. The real
+ * meshes are leaves under an intermediate node itself named `Body`. Code that picks a level by matching this name
+ * against the scene graph finds the decoys; pick by "has vertices and a skeleton" and use this only to know how many
+ * levels to expect and what each one costs.
+ */
+export interface LodDesc {
+  readonly node: string;
+  readonly triangles: number;
+}
+
 export interface Descriptor {
   readonly schema: number;
   readonly id: string;
@@ -95,6 +131,21 @@ export interface Descriptor {
     readonly materials: readonly string[];
     readonly ao_px?: number;
     readonly skinned?: boolean;
+    /** Skinned assets: how many joints the one skin has. 23 for every character in the Quaternius pack. */
+    readonly joints?: number;
+    /**
+     * The detail levels inside this asset's GLB, coarsest LAST — `[{ node: 'Body' }, { node: 'Body_LOD1' }, …]`.
+     *
+     * <b>Levels are nodes in the one file, not separate assets.</b> All of them are bound to the same skin, which is
+     * what lets one baked bone texture drive every level of a character. LOD1 and LOD2 arrive hidden through
+     * `KHR_node_visibility`; switching level is a visibility toggle, not a load.
+     *
+     * <b>Every published character has carried this since catalogue `dd7c11021d4b`, and nothing read it.</b> It was
+     * absent from this type while being present in every descriptor on disk — so the client fetched three levels of
+     * geometry per character and drew only the finest. No non-character asset declares it: buildings have no LODs at
+     * all (`ASSET_PIPELINE.md` §8), which is why a distant structure is still the renderer's own box.
+     */
+    readonly lods?: readonly LodDesc[];
   };
   readonly bounds: { readonly render: readonly [Vec3, Vec3]; readonly collision: readonly [Vec3, Vec3] | null };
   readonly collision: {
