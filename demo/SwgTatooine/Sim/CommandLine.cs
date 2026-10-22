@@ -154,8 +154,8 @@ public static class CommandLine
         c.Unpaced = r.Switch("--unpaced", "tick back to back, for count-only comparisons; never for timings");
         c.CollisionAudit = r.Switch("--collision-audit", "re-check every written position against a fresh spatial query, and report any found inside a "
             + "structure; an independent oracle, far too slow for a normal run") || c.CollisionAudit;
-        c.CollideCrowd = r.Switch("--collide-crowd", "collide the scripted crowd with structures too, to measure collision at a population no "
-            + "number of real sessions reaches on one box") || c.CollideCrowd;
+        c.CollideCrowd = !r.Switch("--no-collide-crowd", "let the scripted crowd walk through structures; collision then costs only the bodies "
+            + "real sessions drive, which is what every tick figure published before 2026-10-22 was measured with");
         c.WorkerCount = r.Int("--workers", c.WorkerCount, "worker threads; 0 takes the processor count", min: 0, max: 4096);
         c.WarmTicks = r.Int("--warm", c.WarmTicks, "ticks run before measuring starts", min: 0);
         c.MeasuredTicks = r.Int("--ticks", c.MeasuredTicks, "ticks measured", min: 1);

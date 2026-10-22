@@ -255,16 +255,28 @@ public sealed class SimConfig
     /// the system DAG is driven at and what a per-tick cost is measured against.
     /// </summary>
     /// <summary>
-    /// Whether the scripted crowd is collided against structures as well, so collision can be measured at a population
-    /// no number of real sessions will reach on one box.
+    /// Whether the scripted crowd is collided against structures as well. <b>On</b>; <c>--no-collide-crowd</c> turns it off.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>A measuring instrument, off by default, and it does change the simulation.</b> Only a client-driven body
-    /// collides in a normal run: the crowd exists to make the rest of the server work and walking it through a wall
-    /// costs nothing anyone can see. Collision is per BODY, though, so the cost of 3 000 colliding bodies is a question
-    /// the crowd can answer and real sessions cannot — the bot driver on this workstation tops out well below 3 000
-    /// sessions while the server is still idle, so a measurement taken through sessions measures the driver.
+    /// <b>It was off, as a measuring instrument, and it is on because the thing it was measuring is the thing being
+    /// simulated.</b> The scripted crowd is 320 × <c>--pop</c> player-shaped bodies whose whole purpose is to stand for
+    /// a player population — and a real player collides. A crowd that walks through walls was therefore under-stating
+    /// what that population costs, in the one demo that exists to say what it costs. It also looks wrong the moment
+    /// anybody watches it, which since 2026-10-22 they can: the client draws those bodies as characters.
+    /// </para>
+    /// <para>
+    /// <b>Measured on 2026-10-22, 3 202 bodies against 101 blocking primitives across seven towns</b>, 16 km world at
+    /// <c>--pop 10</c>, 168 458 entities, one live session at a 1 280 m radius: tick p50 <b>4.32 ms → 6.06 ms</b> of a
+    /// 100 ms budget, no overlap across eight samples an arm, zero overruns. <c>PlayerMove</c> took 168 µs → 1 709 µs,
+    /// which is 89 % of the delta and exactly where the loop is — about <b>0.48 µs per body per tick</b>. That figure
+    /// is against THIS collider set, with the static-neighbourhood disc rejecting most candidates; a denser set, or
+    /// bodies packed tightly enough to churn their discs, will not scale from it linearly.
+    /// </para>
+    /// <para>
+    /// <b>Every tick figure published before that date was taken with this off</b>, so they are not comparable to a
+    /// default run any more. <c>--no-collide-crowd</c> reproduces the old arm, and a measurement that compares against
+    /// a number from the archive must pass it.
     /// </para>
     /// <para>
     /// <b>Why it is a config flag and not an environment variable like <c>SWG_NO_COLLISION</c>.</b> That one is an A/B
@@ -273,7 +285,7 @@ public sealed class SimConfig
     /// and its branch sits beside a controller-kind test the loop already performs — so it costs nothing to read here.
     /// </para>
     /// </remarks>
-    public bool CollideCrowd;
+    public bool CollideCrowd = true;
 
     public int TickRateHz = 10;
 
