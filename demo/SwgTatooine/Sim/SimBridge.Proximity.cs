@@ -838,6 +838,31 @@ public sealed partial class SimBridge
                     continue;
                 }
             }
+            if (turned.Radius > 0f)
+            {
+                // <b>Out along the radius, which for a circle IS the axis of least penetration.</b> Resolving a round
+                // collider on x or z instead would eject a body sideways along a tangent -- and over a 21.6 m plaza
+                // that is twenty metres of travel to escape something it was standing a centimetre inside.
+                var cxr = originX + ((turned.MinX + turned.MaxX) * 0.5f);
+                var czr = originZ + ((turned.MinZ + turned.MaxZ) * 0.5f);
+                var rx = x - cxr;
+                var rz = z - czr;
+                var rd = MathF.Sqrt((rx * rx) + (rz * rz));
+                var want = turned.Radius + half;
+                if (rd >= want)
+                {
+                    continue;
+                }
+
+                // Dead centre: there is no radius to push along, so any direction will do and +X is as good as the next.
+                var ux = rd > 1e-6f ? rx / rd : 1f;
+                var uz = rd > 1e-6f ? rz / rd : 0f;
+                x = Math.Clamp(cxr + (ux * want), -worldHalf + half, worldHalf - half);
+                z = Math.Clamp(czr + (uz * want), -worldHalf + half, worldHalf - half);
+                moved = true;
+                continue;
+            }
+
             minX += originX - half;
             maxX += originX + half;
             minZ += originZ - half;
@@ -1106,8 +1131,7 @@ public sealed partial class SimBridge
                     continue;
                 }
 
-                if (x > turned.MinX + originX - half && x < turned.MaxX + originX + half
-                    && z > turned.MinZ + originZ - half && z < turned.MaxZ + originZ + half)
+                if (turned.Touches(x - originX, z - originZ, half))
                 {
                     best = top;
                 }
@@ -1137,7 +1161,7 @@ public sealed partial class SimBridge
             _ => (b.SlopeX, b.SlopeZ),
         };
 
-        return new AssetColliders.PlanBox(minX, minZ, maxX, maxZ, b.MinY, b.MaxY, b.PlaneY, sx, sz);
+        return new AssetColliders.PlanBox(minX, minZ, maxX, maxZ, b.MinY, b.MaxY, b.PlaneY, sx, sz, b.Radius);
     }
 
     /// <summary>The distance from a point to the nearest of one structure's own primitives, placed and turned.</summary>
@@ -1171,7 +1195,8 @@ public sealed partial class SimBridge
             var maxX = turned.MaxX + originX;
             var minZ = turned.MinZ + originZ;
             var maxZ = turned.MaxZ + originZ;
-            var inside = x > minX && x < maxX && z > minZ && z < maxZ;
+            var outsideBy = turned.OutsideBy(x - originX, z - originZ);
+            var inside = outsideBy <= 0f;
 
             if (known && (originY + turned.TopAt(x - originX, z - originZ) <= stepTop || originY + turned.MinY >= headTop))
             {
@@ -1183,9 +1208,7 @@ public sealed partial class SimBridge
                 if (!inside)
                 {
                     // Approaching it: the disc may reach its edge and no further.
-                    var ax = MathF.Max(MathF.Max(minX - x, 0f), x - maxX);
-                    var az = MathF.Max(MathF.Max(minZ - z, 0f), z - maxZ);
-                    nearest = MathF.Min(nearest, MathF.Sqrt((ax * ax) + (az * az)));
+                    nearest = MathF.Min(nearest, outsideBy);
                     continue;
                 }
 
@@ -1196,16 +1219,21 @@ public sealed partial class SimBridge
                 }
 
                 // On a flat floor the ground cannot change until its edge, which is exactly how far the disc may reach.
+                if (turned.Radius > 0f)
+                {
+                    var ix = x - ((minX + maxX) * 0.5f);
+                    var iz = z - ((minZ + maxZ) * 0.5f);
+                    nearest = MathF.Min(nearest, turned.Radius - MathF.Sqrt((ix * ix) + (iz * iz)));
+                    continue;
+                }
+
                 nearest = MathF.Min(nearest, MathF.Min(MathF.Min(x - minX, maxX - x), MathF.Min(z - minZ, maxZ - z)));
                 continue;
             }
 
-            var dx = MathF.Max(MathF.Max(minX - x, 0f), x - maxX);
-            var dz = MathF.Max(MathF.Max(minZ - z, 0f), z - maxZ);
-            var d = MathF.Sqrt((dx * dx) + (dz * dz));
-            if (d < nearest)
+            if (outsideBy < nearest)
             {
-                nearest = d;
+                nearest = outsideBy;
             }
         }
 

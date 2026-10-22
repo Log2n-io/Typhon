@@ -97,8 +97,48 @@ public sealed class AssetColliders
     /// </remarks>
     internal readonly record struct PlanBox(
         float MinX, float MinZ, float MaxX, float MaxZ, float MinY = 0f, float MaxY = 0f, float PlaneY = float.NaN,
-        float SlopeX = 0f, float SlopeZ = 0f)
+        float SlopeX = 0f, float SlopeZ = 0f, float Radius = 0f)
     {
+        /// <summary>
+        /// How far (<paramref name="x"/>, <paramref name="z"/>) lies outside this collider's plan, in metres; zero inside it.
+        /// </summary>
+        /// <param name="x">The point, east.</param>
+        /// <param name="z">The point, north.</param>
+        /// <returns>The distance to the plan's boundary from outside, or zero within it.</returns>
+        /// <remarks>
+        /// <b>A round collider is round, and treating one as the square around it is what walled off the shuttleport.</b>
+        /// Its plaza is a 21.6 m cylinder; as an AABB that is a 43.2 m square whose corners stand 8.9 m out into open
+        /// desert, 1.3 m thick with a flat top. A body walking in along the diagonal was pushed back to a radius of 25.7
+        /// to 30.5 m -- it could not reach the plaza at all, on ground where nothing is drawn. The same is true of its
+        /// landing pad, its tower and every lamp post, and the error grows with the radius, which is why the largest
+        /// collider in the world was the worst affected.
+        /// </remarks>
+        internal readonly float OutsideBy(float x, float z)
+        {
+            if (Radius > 0f)
+            {
+                var rx = x - ((MinX + MaxX) * 0.5f);
+                var rz = z - ((MinZ + MaxZ) * 0.5f);
+                var d = MathF.Sqrt((rx * rx) + (rz * rz)) - Radius;
+                return d > 0f ? d : 0f;
+            }
+
+            var dx = MathF.Max(MathF.Max(MinX - x, 0f), x - MaxX);
+            var dz = MathF.Max(MathF.Max(MinZ - z, 0f), z - MaxZ);
+            return MathF.Sqrt((dx * dx) + (dz * dz));
+        }
+
+        /// <summary>Whether a body of this half-extent standing here overlaps the collider's plan.</summary>
+        /// <param name="x">The body, east.</param>
+        /// <param name="z">The body, north.</param>
+        /// <param name="half">Its half-extent.</param>
+        /// <returns>Whether the two plans meet.</returns>
+        /// <remarks>
+        /// Grown by the body rather than shrunk to a point, which is the same convention the push-out and the ground rule
+        /// have always used: the body is a square and this is generous by its corner, deliberately.
+        /// </remarks>
+        internal readonly bool Touches(float x, float z, float half) => OutsideBy(x, z) < half;
+
         /// <summary>
         /// The top of this collider above (<paramref name="x"/>, <paramref name="z"/>), in the asset's own frame.
         /// </summary>
@@ -155,6 +195,40 @@ public sealed class AssetColliders
 
     /// <summary>The plane height a box publishes: its own, or its AABB top for a box that has no separate plane.</summary>
     private static float Plane(in PlanBox b) => float.IsNaN(b.PlaneY) ? b.MaxY : b.PlaneY;
+
+    /// <summary>
+    /// The published format revision this reader was written against, and the descriptor <c>schema</c> it accepts.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b><c>C:\Dev\Misc\BlenderGenTest\ASSET_FORMAT.md</c> is the contract</b>, owned by the <c>blender-models</c>
+    /// session, and it carries a revision number with a changelog. A consumer that knows revision N reads the entries
+    /// after N and nothing else, so recording the number here is what makes the next diff mechanical instead of a
+    /// re-read of the whole spec.
+    /// </para>
+    /// <para>
+    /// <b><see cref="DescriptorSchema"/> is the breaking-change number and is NOT the revision.</b> It moves only when a
+    /// field is removed, renamed, or changes type or meaning; an added field or a new enum value keeps it. A descriptor
+    /// carrying a schema this build does not know is not read at all — the structure keeps the footprint box every
+    /// structure had before the asset pipeline — rather than being parsed hopefully and collided wrongly.
+    /// </para>
+    /// </remarks>
+    internal const int FormatRevision = 4;
+
+    /// <summary>The one descriptor schema this reader understands. See <see cref="FormatRevision"/>.</summary>
+    internal const int DescriptorSchema = 1;
+
+    /// <summary>Whether a descriptor announces a schema this build reads.</summary>
+    /// <param name="root">The descriptor's root object.</param>
+    /// <returns>Whether to read it.</returns>
+    /// <remarks>
+    /// Rule 1 of the format's own reader rules. Refusing by returning nothing rather than by throwing is the same
+    /// judgement the rest of this file makes: a descriptor this build cannot read is a published asset to fix, not a
+    /// server to stop.
+    /// </remarks>
+    private static bool Readable(JsonElement root) =>
+        root.TryGetProperty("schema", out var schema) && schema.ValueKind == JsonValueKind.Number
+            && schema.GetInt32() == DescriptorSchema;
 
     /// <summary>The steepest top face a body walks up, as a gradient: <c>tan(46 degrees)</c>.</summary>
     /// <remarks>The testbench's `maxSlopeDeg`, so a ramp that is climbable there is climbable here.</remarks>
@@ -336,10 +410,11 @@ public sealed class AssetColliders
                 }
 
                 var b = boxes[i];
-                // Six numbers, not four: the vertical span travels, because the client has to make the same
-                // floor-or-wall decision the server makes or its prediction fights the authority on every step.
+                // Ten numbers, not four: the vertical span, the top plane and the plan radius all travel, because the
+                // client has to make the same floor-or-wall decision the server makes or its prediction fights the
+                // authority on every step. The radius is zero for a box, which is most of them.
                 json.Append(FormattableString.Invariant(
-                    $"[{b.MinX:R},{b.MinZ:R},{b.MaxX:R},{b.MaxZ:R},{b.MinY:R},{b.MaxY:R},{Plane(b):R},{b.SlopeX:R},{b.SlopeZ:R}]"));
+                    $"[{b.MinX:R},{b.MinZ:R},{b.MaxX:R},{b.MaxZ:R},{b.MinY:R},{b.MaxY:R},{Plane(b):R},{b.SlopeX:R},{b.SlopeZ:R},{b.Radius:R}]"));
             }
 
             json.Append(']');
@@ -534,7 +609,7 @@ public sealed class AssetColliders
     /// <param name="HalfX">Half width.</param>
     /// <param name="HalfZ">Half depth, which is how thick the slab a body crosses is.</param>
     /// <param name="Exists">Whether this asset publishes a door at all.</param>
-    internal readonly record struct DoorPlan(float CenterX, float CenterZ, float HalfX, float HalfZ, bool Exists);
+    internal readonly record struct DoorPlan(float CenterX, float CenterZ, float HalfX, float HalfZ, float ForwardX, float ForwardZ, bool Exists);
 
     /// <summary>
     /// The room a door leads to, in the room own local frame: where a body arrives, and the way back out.
@@ -549,7 +624,8 @@ public sealed class AssetColliders
     /// <param name="DoorX">Local X of the doorway leading back out.</param>
     /// <param name="DoorZ">Local Z.</param>
     /// <param name="DoorHalfX">Half width of that doorway.</param>
-    /// <param name="DoorHalfZ">Half depth.</param>
+    /// <param name="DoorForwardX">Direction through it, the way a body leaves.</param>
+    /// <param name="DoorForwardZ">Direction through it.</param>
     /// <param name="Exists">Whether the door named a room this could be read from.</param>
     internal readonly record struct RoomPlan(
         float EntryX,
@@ -557,7 +633,8 @@ public sealed class AssetColliders
         float DoorX,
         float DoorZ,
         float DoorHalfX,
-        float DoorHalfZ,
+        float DoorForwardX,
+        float DoorForwardZ,
         bool Exists);
 
     /// <summary>The room behind an asset door, or a <see cref="RoomPlan"/> whose Exists is false.</summary>
@@ -602,6 +679,11 @@ public sealed class AssetColliders
         target = null;
         targetSpawn = null;
         using var doc = JsonDocument.Parse(json);
+        if (!Readable(doc.RootElement))
+        {
+            return default;
+        }
+
         if (!doc.RootElement.TryGetProperty("portals", out var portals) || portals.ValueKind != JsonValueKind.Array)
         {
             return default;
@@ -615,6 +697,12 @@ public sealed class AssetColliders
                 continue;
             }
 
+            var (fx, fz) = ForwardOf(portal, out var known);
+            if (!known)
+            {
+                continue;
+            }
+
             target = portal.TryGetProperty("target", out var t) ? t.GetString() : null;
             targetSpawn = portal.TryGetProperty("target_spawn", out var ts) ? ts.GetString() : null;
             return new DoorPlan(
@@ -622,10 +710,58 @@ public sealed class AssetColliders
                 centre[2].GetSingle(),
                 half[0].GetSingle(),
                 half[2].GetSingle(),
+                fx,
+                fz,
                 true);
         }
 
         return default;
+    }
+
+    /// <summary>
+    /// The direction through a doorway, in the asset's own frame: its local forward axis turned by its own rotation.
+    /// </summary>
+    /// <param name="portal">The portal element.</param>
+    /// <returns>The ground-plane components of the forward vector.</returns>
+    /// <remarks>
+    /// <b>The axis is LOCAL and the rotation is not decoration.</b> Every portal in this pack declares its forward as
+    /// "-Z", which reads like a constant and is not one: an interior's door back out carries a rot of a half turn
+    /// [0, -1, 0, 0], so its forward in the asset's frame is +Z. Taking the string at face value points the crossing
+    /// the wrong way, and because the exterior's rot happens to be the identity it would be right everywhere a body
+    /// goes IN and wrong everywhere it tries to come OUT — nobody would ever leave a room, and nothing would throw.
+    /// </remarks>
+    private static (float X, float Z) ForwardOf(JsonElement portal, out bool known)
+    {
+        // <b>Rule 3: an axis this build does not know is not -Z.</b> Every portal in the pack today declares "-Z", which
+        // is exactly what makes a silent default dangerous: it would be right for every asset that exists and wrong,
+        // without a word, for the first one that does not. A door whose direction cannot be read is no door.
+        var axis = portal.TryGetProperty("forward", out var f) ? f.GetString() : null;
+        known = true;
+        var (ax, ay, az) = axis switch
+        {
+            "+X" => (1f, 0f, 0f),
+            "-X" => (-1f, 0f, 0f),
+            "+Y" => (0f, 1f, 0f),
+            "-Y" => (0f, -1f, 0f),
+            "+Z" => (0f, 0f, 1f),
+            "-Z" => (0f, 0f, -1f),
+            _ => Unknown(out known),
+        };
+
+        if (!portal.TryGetProperty("rot", out var rot) || rot.ValueKind != JsonValueKind.Array || rot.GetArrayLength() < 4)
+        {
+            return (ax, az);
+        }
+
+        // v + 2q_v x (q_v x v + w v), the usual quaternion rotation written out: no vector type is worth a dependency here.
+        var qx = rot[0].GetSingle();
+        var qy = rot[1].GetSingle();
+        var qz = rot[2].GetSingle();
+        var qw = rot[3].GetSingle();
+        var tx = ((qy * az) - (qz * ay)) + (qw * ax);
+        var ty = ((qz * ax) - (qx * az)) + (qw * ay);
+        var tz = ((qx * ay) - (qy * ax)) + (qw * az);
+        return (ax + (2f * ((qy * tz) - (qz * ty))), az + (2f * ((qx * ty) - (qy * tx))));
     }
 
     /// <summary>Reads a room: the named spawn to arrive at, and the first portal leading back out.</summary>
@@ -635,6 +771,11 @@ public sealed class AssetColliders
     internal static RoomPlan ReadRoom(string json, string spawnId)
     {
         using var doc = JsonDocument.Parse(json);
+        if (!Readable(doc.RootElement))
+        {
+            return default;
+        }
+
         var entryX = 0f;
         var entryZ = 0f;
         var haveEntry = false;
@@ -664,13 +805,18 @@ public sealed class AssetColliders
 
         var back = ReadDoor(json);
         return haveEntry && back.Exists
-            ? new RoomPlan(entryX, entryZ, back.CenterX, back.CenterZ, back.HalfX, back.HalfZ, true)
+            ? new RoomPlan(entryX, entryZ, back.CenterX, back.CenterZ, back.HalfX, back.ForwardX, back.ForwardZ, true)
             : default;
     }
 
     internal static PlanBox[] ReadBlocking(string json)
     {
         using var doc = JsonDocument.Parse(json);
+        if (!Readable(doc.RootElement))
+        {
+            return [];
+        }
+
         if (!doc.RootElement.TryGetProperty("collision", out var collision) || collision.ValueKind != JsonValueKind.Object
             || !collision.TryGetProperty("shapes", out var shapes) || shapes.ValueKind != JsonValueKind.Array
             || !collision.TryGetProperty("colliders", out var colliders) || colliders.ValueKind != JsonValueKind.Array)
@@ -696,7 +842,15 @@ public sealed class AssetColliders
             }
 
             var shape = shapes[index];
-            var (hx, hy, hz) = HalfExtents(shape);
+            var (hx, hy, hz, radius) = HalfExtents(shape);
+            if (!float.IsFinite(hx) || hx < 0f)
+            {
+                // Rule 3: an unknown `shapes[].type` is skipped rather than guessed. It used to fall through to zeros,
+                // which is not "no shape" but a degenerate box AT A POSITION -- something a body can be exactly inside
+                // and never be pushed out of, published by a pipeline this build is simply older than.
+                continue;
+            }
+
             var rot = collider.TryGetProperty("rot", out var r) ? Quat(r) : (0f, 0f, 0f, 1f);
 
             // The primitive's own extent along each world axis, which is |R| applied to its half extents: the same
@@ -716,7 +870,12 @@ public sealed class AssetColliders
             //
             // <b>The AABB's top and the plane's height at the centre are two different numbers</b>, and keeping only the
             // second is what made a body fly: `TopAt` then had nothing to clamp its extrapolation against.
-            var box = new PlanBox(-(x + ex), z - ez, -(x - ex), z + ez, y - ey, y + ey, y + lift, -slopeX, slopeZ);
+            // <b>Round in plan only while it still stands up.</b> A cylinder tilted off vertical has an ellipse for a
+            // plan and a circle is then the wrong answer in the other direction — too small — so it keeps the bounding
+            // box it always had. Every round collider in this pack stands upright; the test is for the pack that does not.
+            var upright = radius > 0f && MathF.Abs(Rotate(rot, 0f, 1f, 0f).Y) > 0.999f;
+            var box = new PlanBox(-(x + ex), z - ez, -(x - ex), z + ez, y - ey, y + ey, y + lift, -slopeX, slopeZ,
+                upright ? radius : 0f);
             if (!float.IsFinite(box.MinX) || !float.IsFinite(box.MinZ) || !float.IsFinite(box.MaxX) || !float.IsFinite(box.MaxZ)
                 || !float.IsFinite(box.MinY) || !float.IsFinite(box.MaxY) || !float.IsFinite(box.PlaneY)
                 || !float.IsFinite(box.SlopeX) || !float.IsFinite(box.SlopeZ))
@@ -732,17 +891,20 @@ public sealed class AssetColliders
         return boxes.ToArray();
     }
 
-    private static (float X, float Y, float Z) HalfExtents(JsonElement shape)
+    /// <summary>The half extents of a shape, and the radius of its plan when that plan is a circle.</summary>
+    /// <param name="shape">The shape element.</param>
+    /// <returns>Its half extents along its own axes, and its plan radius — zero for a box.</returns>
+    private static (float X, float Y, float Z, float Radius) HalfExtents(JsonElement shape)
     {
         var type = shape.TryGetProperty("type", out var t) ? t.GetString() : null;
         switch (type)
         {
             case "box":
                 var half = shape.GetProperty("half");
-                return ((float)half[0].GetDouble(), (float)half[1].GetDouble(), (float)half[2].GetDouble());
+                return ((float)half[0].GetDouble(), (float)half[1].GetDouble(), (float)half[2].GetDouble(), 0f);
             case "sphere":
                 var radius = (float)shape.GetProperty("radius").GetDouble();
-                return (radius, radius, radius);
+                return (radius, radius, radius, radius);
             case "cylinder":
             case "capsule":
                 var r = (float)shape.GetProperty("radius").GetDouble();
@@ -750,9 +912,11 @@ public sealed class AssetColliders
 
                 // Both are along their local +Y, as the contract states. A capsule's caps add its radius to the height;
                 // a cylinder's do not.
-                return (r, type == "capsule" ? hh + r : hh, r);
+                return (r, type == "capsule" ? hh + r : hh, r, r);
             default:
-                return (0f, 0f, 0f);
+                // NOT zeros: a zero box is a real box at a real position. NaN is the one value every caller's finiteness
+                // test already rejects, and the caller skips the collider. See rule 3.
+                return (float.NaN, float.NaN, float.NaN, 0f);
         }
     }
 
@@ -810,6 +974,15 @@ public sealed class AssetColliders
         // projected back — which for a unit normal is simply h / ny... no: the face centre is offset along n, and the
         // plane through it has height (n . (centre + n h) - n . centre) / ny = h / ny above the centre.
         return (-nx / ny, -nz / ny, h / ny);
+    }
+
+    /// <summary>An axis this build does not know, for <see cref="ForwardOf"/>'s switch.</summary>
+    /// <param name="known">Set to false.</param>
+    /// <returns>Zero, which the caller discards.</returns>
+    private static (float X, float Y, float Z) Unknown(out bool known)
+    {
+        known = false;
+        return (0f, 0f, 0f);
     }
 
     /// <summary>One of a box's axes as a unit normal plus the half extent along it.</summary>

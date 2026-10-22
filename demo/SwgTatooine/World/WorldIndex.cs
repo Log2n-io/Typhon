@@ -57,6 +57,26 @@ public sealed class WorldIndex
     /// through walls, which is what the scripted crowd used to do; with collision on it stopped at the wall and no interior was ever entered. The asset's
     /// own doorway is where a viewer sees a door, so it is where the crossing has to be for the two to agree.
     /// </remarks>
+    /// <summary>
+    /// Sine and cosine of a placement quarter turn, in the sense the RENDERER turns the building.
+    /// </summary>
+    /// <param name="quarters">The replicated quarter turns, 0 to 3.</param>
+    /// <returns>The pair, for (x, z) -> (x cos - z sin, x sin + z cos).</returns>
+    /// <remarks>
+    /// <b>Measured against the drawn building, not derived.</b> The obvious table is mirrored: Babylon turns about +Y in
+    /// the opposite sense to the textbook 2-D rotation this formula is written as, so quarters 1 and 3 come out swapped.
+    /// Quarters 0 and 2 agree either way, which is exactly what makes the mistake survive a casual look — half the
+    /// buildings in the world had their door placed on the wrong side, and the other half were perfect. Checked by
+    /// transforming the published door through the placed instance own world matrix in the browser and comparing.
+    /// </remarks>
+    public static (float Sin, float Cos) QuarterTurn(byte quarters) => quarters switch
+    {
+        1 => (-1f, 0f),
+        2 => (0f, -1f),
+        3 => (1f, 0f),
+        _ => (0f, 1f),
+    };
+
     public int PlaceDoors(AssetColliders shapes)
     {
         ArgumentNullException.ThrowIfNull(shapes);
@@ -75,14 +95,7 @@ public sealed class WorldIndex
                 continue;
             }
 
-            // A quarter turn about +Y, the same one the renderer draws the building at: (x, z) -> (x cos - z sin, x sin + z cos).
-            var (sin, cos) = PortalFacings[j].Yaw switch
-            {
-                1 => (1f, 0f),
-                2 => (0f, -1f),
-                3 => (-1f, 0f),
-                _ => (0f, 1f),
-            };
+            var (sin, cos) = QuarterTurn(PortalFacings[j].Yaw);
 
             var (cx, cz) = Portals[j];
             Portals[j] = (cx + ((door.CenterX * cos) - (door.CenterZ * sin)), cz + ((door.CenterX * sin) + (door.CenterZ * cos)));

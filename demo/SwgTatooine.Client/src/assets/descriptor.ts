@@ -45,7 +45,15 @@ export interface PortalDesc {
   readonly center: Vec3;
   readonly rot: Quat;
   readonly half: Vec3;
-  /** The local axis that points through the door, the way a body crosses it. Always "-Z" in schema 1. */
+  /**
+   * The LOCAL axis that points through the door — a name, not a direction.
+   *
+   * <b>Rotate it by this portal's own `rot`, then by the placement.</b> Every portal in the pack declares `"-Z"`, which
+   * reads like a constant and is not one: an interior's door back out carries a half turn, so its forward in the
+   * asset's frame is `+Z`. Reading the string as a direction gets every entrance right — the exterior's `rot` is the
+   * identity — and every exit exactly backwards, so a body could walk into a house and never walk out, with nothing
+   * raised anywhere. `ASSET_PIPELINE.md` §5.2 states the rule.
+   */
   readonly forward: string;
   readonly target: string;
   readonly target_spawn: string;

@@ -61,18 +61,28 @@ public sealed class RealmDirectoryChecks
     [Test]
     public void ASingleFlatWorld_StillPublishesAWellFormedDocument()
     {
-        // The default run: one planet, no interiors, no space. The client treats a directory missing `space` as valid
-        // and one missing `interiors` as unusable, so the degenerate shape has to stay well formed rather than
-        // collapsing to something its parser rejects and reports as "no realms at all".
+        // The default run: one planet, no space. The client treats a directory missing `space` as valid and one missing
+        // `interiors` as unusable, so the barest shape has to stay well formed rather than collapsing to something its
+        // parser rejects and reports as "no realms at all".
+        //
+        // <b>`perPlanet` is asserted against the map rather than written as a literal, and it is no longer zero.</b>
+        // Interiors were a switch when this case was written and are now unconditional, so a world with none of them
+        // cannot be built: every Tatooine has the same seven cities and the same 617 enterable buildings, whatever
+        // --pop says. What this still pins is the one empty-loop risk that IS reachable -- a single planet, where the
+        // `planets` array writes one element and no separator -- and that the two interior numbers are the layout rule
+        // the client is told rather than a list.
         var dir = Worlds.NewDirectory();
         try
         {
             using var sim = new TatooineSim(Worlds.Small(dir));
             sim.Initialize();
 
+            var enterable = WorldBuilder.CountEnterable(sim.Map);
+            Assert.That(enterable, Is.GreaterThan(0), "precondition: interiors are unconditional, so the map has enterable buildings");
             Assert.That(
                 sim.RealmDirectoryJson(),
-                Is.EqualTo("{\"planets\":[{\"id\":0,\"appTag\":0}],\"interiors\":{\"first\":1,\"perPlanet\":0}}"));
+                Is.EqualTo("{\"planets\":[{\"id\":0,\"appTag\":0}],\"interiors\":{\"first\":1,\"perPlanet\":"
+                    + enterable.ToString(System.Globalization.CultureInfo.InvariantCulture) + "}}"));
         }
         finally
         {

@@ -179,6 +179,29 @@ public sealed partial class SimBridge
         return MathF.Abs(lateral) <= door.HalfX;
     }
 
+    /// <summary>The crossing rule, for a test: no world, no realms, just a doorway and a step.</summary>
+    /// <param name="centerX">The doorway's centre.</param>
+    /// <param name="centerZ">The doorway's centre.</param>
+    /// <param name="forwardX">The direction through it.</param>
+    /// <param name="forwardZ">The direction through it.</param>
+    /// <param name="halfX">Half the opening's width.</param>
+    /// <param name="fromX">Where the body stood.</param>
+    /// <param name="fromZ">Where the body stood.</param>
+    /// <param name="toX">Where it stands now.</param>
+    /// <param name="toZ">Where it stands now.</param>
+    /// <returns>Whether the step went through.</returns>
+    internal static bool CrossedDoorForTest(
+        float centerX,
+        float centerZ,
+        float forwardX,
+        float forwardZ,
+        float halfX,
+        float fromX,
+        float fromZ,
+        float toX,
+        float toZ) =>
+        CrossedDoor(new DoorPlane(centerX, centerZ, forwardX, forwardZ, halfX), fromX, fromZ, toX, toZ);
+
     /// <summary>The doorway of planet <paramref name="planet"/>'s portal <paramref name="portal"/>, in planet coordinates.</summary>
     /// <param name="planet">The planet realm.</param>
     /// <param name="portal">The portal index.</param>
@@ -198,15 +221,11 @@ public sealed partial class SimBridge
             return null;
         }
 
-        // The published forward is -Z in schema 1, turned by the quarter the building was spawned at.
-        var (fx, fz) = yaw switch
-        {
-            1 => (1f, 0f),
-            2 => (0f, 1f),
-            3 => (-1f, 0f),
-            _ => (0f, -1f),
-        };
-
+        // The asset's own forward, turned by the quarter the building was spawned at. NOT the "-Z" the field names:
+        // that is a local axis, and the portal's own rotation is part of the answer. See AssetColliders.ForwardOf.
+        var (sin, cos) = QuarterTurn(yaw);
+        var fx = (plan.ForwardX * cos) - (plan.ForwardZ * sin);
+        var fz = (plan.ForwardX * sin) + (plan.ForwardZ * cos);
         var (cx, cz) = index.Portals[portal];
         return new DoorPlane(cx, cz, fx, fz, plan.HalfX);
     }
@@ -246,6 +265,130 @@ public sealed partial class SimBridge
         state.Activity = PlayerActivity.Idle;
         state.ActivityTicks = (10 * _config.TickRateHz) + (int)(Hash01(salt ^ 0x1F83D9ABu) * 30 * _config.TickRateHz);
     }
+
+    /// <summary>
+    /// A body a client is driving has walked somewhere: if that step went through a doorway, queue the crossing.
+    /// </summary>
+    /// <param name="id">The body.</param>
+    /// <param name="realm">The realm it is in.</param>
+    /// <param name="halfExtent">Its half-extent, for the landing.</param>
+    /// <param name="fromX">Where it stood after the previous step resolved.</param>
+    /// <param name="fromZ">Where it stood after the previous step resolved.</param>
+    /// <param name="toX">Where it stands now.</param>
+    /// <param name="toZ">Where it stands now.</param>
+    /// <returns>Whether a crossing was queued.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Possessed bodies had no way through a door at all.</b> Every portal path in this class is reached from
+    /// <c>PlayerThink</c>, which returns at its first test for anything a client is driving (SWG-01: two deciders on one
+    /// entity is the bug that guard exists for). So the scripted crowd walked in and out of buildings while a player could
+    /// stand in the doorway for ever. This is the other half, and it decides from geometry alone -- where the body was and
+    /// where it is -- so it needs no activity, no timer and no server-side intent, and cannot fight the client for the
+    /// entity.
+    /// </para>
+    /// <para>
+    /// <b>Both directions, and the realm says which.</b> On a planet a step may cross any door of the city the body stands
+    /// in; in an interior the only door is the one back out. Asking the city rather than the planet is what keeps this a
+    /// handful of plane tests: the dense case is a town of about 170 doors, and a body is in at most one town.
+    /// </para>
+    /// </remarks>
+    private bool TryCrossDoor(EntityId id, ushort realm, float halfExtent, float fromX, float fromZ, float toX, float toZ)
+    {
+        if (!InteriorsActive || AssetShapes == null || (fromX == toX && fromZ == toZ))
+        {
+            return false;
+        }
+
+        if (realm < _config.Planets)
+        {
+            var city = CityAt(toX, toZ);
+            if (city < 0)
+            {
+                return false;
+            }
+
+            var (first, count) = _index.CityPortals[city];
+            for (var j = first; j < first + count; j++)
+            {
+                var door = PlanetDoor(realm, j);
+                if (door.HasValue && CrossedDoor(door.Value, fromX, fromZ, toX, toZ))
+                {
+                    return EnterRoom(id, realm, j, halfExtent);
+                }
+            }
+
+            return false;
+        }
+
+        var k = realm - _config.Planets;
+        var planet = (ushort)(k / InteriorsPerPlanet);
+        var portal = k % InteriorsPerPlanet;
+        var back = RoomDoor(planet, portal);
+        if (!back.HasValue || !CrossedDoor(back.Value, fromX, fromZ, toX, toZ))
+        {
+            return false;
+        }
+
+        var index = PlanetIndexes[planet];
+        var (yaw, asset) = index.PortalFacings[portal];
+        var plan = AssetShapes.DoorFor(asset);
+        var (doorX, doorZ) = index.Portals[portal];
+        var (sin, cos) = QuarterTurn(yaw);
+        var half = (_config.WorldEdgeM * 0.5f) - halfExtent;
+
+        // A step back out along the doorway's outward normal, which is the one direction the facade is not.
+        var outX = doorX - (((plan.ForwardX * cos) - (plan.ForwardZ * sin)) * DoorStepM);
+        var outZ = doorZ - (((plan.ForwardX * sin) + (plan.ForwardZ * cos)) * DoorStepM);
+        _teleports.Enqueue(new TeleportRequest(id, planet, Math.Clamp(outX, -half, half), Math.Clamp(outZ, -half, half), halfExtent, CrossingKind.Exit));
+        return true;
+    }
+
+    /// <summary>Queues a client-driven body into the room behind planet <paramref name="planet"/>'s portal.</summary>
+    /// <param name="id">The body.</param>
+    /// <param name="planet">The planet it is leaving.</param>
+    /// <param name="portal">Which door.</param>
+    /// <param name="halfExtent">Its half-extent.</param>
+    /// <returns>Whether the crossing was queued.</returns>
+    private bool EnterRoom(EntityId id, ushort planet, int portal, float halfExtent)
+    {
+        if ((uint)portal >= (uint)InteriorsPerPlanet)
+        {
+            return false;
+        }
+
+        var realm = (ushort)(_config.Planets + (planet * InteriorsPerPlanet) + portal);
+        var room = AssetShapes.RoomFor(PlanetIndexes[planet].PortalFacings[portal].Asset);
+
+        // The published arrival point when the asset names a room, and the middle of the realm when it does not: a door
+        // whose interior will not read is a publishing fault, and refusing the crossing would strand the body in a wall.
+        var x = room.Exists ? room.EntryX : WorldBuilder.InteriorEdgeM * 0.5f;
+        var z = room.Exists ? room.EntryZ : 6f;
+        _teleports.Enqueue(new TeleportRequest(id, realm, x, z, halfExtent, CrossingKind.Enter));
+        return true;
+    }
+
+    /// <summary>The doorway back out of planet <paramref name="planet"/>'s interior <paramref name="portal"/>, in room coordinates.</summary>
+    /// <param name="planet">The planet that owns it.</param>
+    /// <param name="portal">Which interior.</param>
+    /// <returns>The doorway, or null when the asset publishes no room.</returns>
+    private DoorPlane? RoomDoor(ushort planet, int portal)
+    {
+        if (AssetShapes == null || (uint)portal >= (uint)PlanetIndexes[planet].PortalFacings.Count)
+        {
+            return null;
+        }
+
+        var room = AssetShapes.RoomFor(PlanetIndexes[planet].PortalFacings[portal].Asset);
+
+        // A room is drawn at the identity, so its doorway needs no placement applied. Its forward is the one the
+        // descriptor's own rotation gives, which for every interior in this pack is the opposite of the way in.
+        return room.Exists ? new DoorPlane(room.DoorX, room.DoorZ, room.DoorForwardX, room.DoorForwardZ, room.DoorHalfX) : null;
+    }
+
+    /// <summary>Sine and cosine of a placement quarter turn; see <see cref="WorldIndex.QuarterTurn"/> for why it is not the obvious table.</summary>
+    /// <param name="quarters">The quarter turns, 0 to 3.</param>
+    /// <returns>The pair.</returns>
+    private static (float Sin, float Cos) QuarterTurn(byte quarters) => WorldIndex.QuarterTurn(quarters);
 
     /// <summary>
     /// Apply last tick's crossings: one side transaction with the Commit discipline, so the crossings are committed — atomically, each in one realm or the

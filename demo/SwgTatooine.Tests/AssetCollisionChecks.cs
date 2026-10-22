@@ -158,7 +158,7 @@ public sealed class AssetCollisionChecks
     public void EveryColliderIsKeptWithItsVerticalSpan()
     {
         const string json = """
-            {"collision":{"band_m":2.0,
+            {"schema":1,"collision":{"band_m":2.0,
               "shapes":[{"type":"box","half":[3.1,1.0,3.65]},{"type":"box","half":[1.9,0.15,2.15]},
                         {"type":"box","half":[2.0,0.12,0.5]},{"type":"cylinder","radius":1.2,"half_height":1.0}],
               "colliders":[
@@ -196,7 +196,7 @@ public sealed class AssetCollisionChecks
         // A 2 x 0.2 x 0.2 bar turned 45 degrees about Y: its plan box must grow to about 1.56 on each axis.
         var s = (float)Math.Sin(Math.PI / 8);
         var c = (float)Math.Cos(Math.PI / 8);
-        var json = "{\"collision\":{\"shapes\":[{\"type\":\"box\",\"half\":[2.0,1.0,0.2]}],\"colliders\":[{\"shape\":0,"
+        var json = "{\"schema\":1,\"collision\":{\"shapes\":[{\"type\":\"box\",\"half\":[2.0,1.0,0.2]}],\"colliders\":[{\"shape\":0,"
             + "\"name\":\"Bar\",\"pos\":[0,1.0,0],\"rot\":[0," + s.ToString(System.Globalization.CultureInfo.InvariantCulture)
             + ",0," + c.ToString(System.Globalization.CultureInfo.InvariantCulture) + "]}]}}";
 

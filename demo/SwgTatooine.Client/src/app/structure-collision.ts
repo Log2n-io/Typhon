@@ -38,12 +38,48 @@ export interface PlanBox {
   readonly maxZ: number;
   /** Underside, measured from the asset's own origin — the ground it stands on. */
   readonly minY: number;
-  /** Top, at the box's plan centre. */
+  /** The bounding box's own top. */
   readonly maxY: number;
+  /**
+   * The top face's height at the box's plan centre — which is NOT `maxY` for a tilted collider.
+   *
+   * <b>This number was on the wire and this end was reading past it.</b> The server publishes nine, and the parser
+   * here was written for eight: it took the plane as `slopeX` and `slopeX` as `slopeZ`. A house entry ramp then
+   * predicted as a FLAT slab at its bounding box's top — 0.79 m above the desert, which is a wall — so the client
+   * refused to walk up a ramp the server was perfectly happy to carry a body up, and the body stuck at its foot.
+   */
+  readonly planeY: number;
   /** How the top face rises per metre east; 0 for a flat collider. */
   readonly slopeX: number;
   /** How it rises per metre north. */
   readonly slopeZ: number;
+  /**
+   * The radius of the collider's plan when that plan is a circle, and 0 when it is the rectangle above.
+   *
+   * A round collider taken as the square around it is what walled off the shuttleport: its plaza is a 21.6 m cylinder,
+   * whose bounding square has corners 8.9 m out in open desert.
+   */
+  readonly radius: number;
+}
+
+/**
+ * How far a point lies outside a collider's plan, in metres; 0 inside it. The server's `PlanBox.OutsideBy`.
+ */
+export function outsideBy(box: PlanBox, x: number, z: number): number {
+  if (box.radius > 0) {
+    const rx = x - (box.minX + box.maxX) / 2;
+    const rz = z - (box.minZ + box.maxZ) / 2;
+    return Math.max(Math.hypot(rx, rz) - box.radius, 0);
+  }
+
+  const dx = Math.max(box.minX - x, 0, x - box.maxX);
+  const dz = Math.max(box.minZ - z, 0, z - box.maxZ);
+  return Math.hypot(dx, dz);
+}
+
+/** Whether a body of this half-extent standing here overlaps the collider's plan. The server's `PlanBox.Touches`. */
+export function touches(box: PlanBox, x: number, z: number, half: number): boolean {
+  return outsideBy(box, x, z) < half;
 }
 
 /** The steepest top face a body walks up, as a gradient: `tan(46°)`, the server's `MaxWalkableGrade`. */
@@ -69,7 +105,10 @@ export function topAt(box: PlanBox, x: number, z: number): number {
   const pz = Math.min(Math.max(z, box.minZ), box.maxZ);
   const cx = (box.minX + box.maxX) / 2;
   const cz = (box.minZ + box.maxZ) / 2;
-  return box.maxY + box.slopeX * (px - cx) + box.slopeZ * (pz - cz);
+  // NOT `maxY`, which is the bounding box's roof: a 22-degree ramp's plane sits 0.83 m below it at the centre, and
+  // reading the roof flattens the ramp into a kerb three steps tall. The server's `TopAt` reads `PlaneY` here too.
+  const plane = Number.isFinite(box.planeY) ? box.planeY : box.maxY;
+  return plane + box.slopeX * (px - cx) + box.slopeZ * (pz - cz);
 }
 
 /** Whether a collider's top face is shallow enough to stand on. */
@@ -92,13 +131,13 @@ export function turn(quarters: number, box: PlanBox): PlanBox {
   switch (quarters & 3) {
     case 1:
       return { minX: box.minZ, minZ: -box.maxX, maxX: box.maxZ, maxZ: -box.minX, minY: box.minY, maxY: box.maxY,
-               slopeX: box.slopeZ, slopeZ: negate(box.slopeX) };
+               planeY: box.planeY, slopeX: box.slopeZ, slopeZ: negate(box.slopeX), radius: box.radius };
     case 2:
       return { minX: -box.maxX, minZ: -box.maxZ, maxX: -box.minX, maxZ: -box.minZ, minY: box.minY, maxY: box.maxY,
-               slopeX: negate(box.slopeX), slopeZ: negate(box.slopeZ) };
+               planeY: box.planeY, slopeX: negate(box.slopeX), slopeZ: negate(box.slopeZ), radius: box.radius };
     case 3:
       return { minX: -box.maxZ, minZ: box.minX, maxX: -box.minZ, maxZ: box.maxX, minY: box.minY, maxY: box.maxY,
-               slopeX: negate(box.slopeZ), slopeZ: box.slopeX };
+               planeY: box.planeY, slopeX: negate(box.slopeZ), slopeZ: box.slopeX, radius: box.radius };
     default:
       return box;
   }
@@ -137,7 +176,8 @@ export function prepareShape(boxes: readonly PlanBox[]): AssetShape {
       maxZ = Math.max(maxZ, box.maxZ);
     }
 
-    bounds.push({ minX, minZ, maxX, maxZ, minY: -Infinity, maxY: Infinity, slopeX: 0, slopeZ: 0 });
+    bounds.push({ minX, minZ, maxX, maxZ, minY: -Infinity, maxY: Infinity, planeY: Infinity, slopeX: 0, slopeZ: 0,
+                  radius: 0 });
   }
 
   return { turned, bounds };
@@ -231,12 +271,7 @@ export function groundOnShapes(
         continue;
       }
 
-      if (
-        at.x > placed.x + box.minX - half &&
-        at.x < placed.x + box.maxX + half &&
-        at.z > placed.z + box.minZ - half &&
-        at.z < placed.z + box.maxZ + half
-      ) {
+      if (touches(box, at.x - placed.x, at.z - placed.z, half)) {
         best = top;
       }
     }
@@ -295,6 +330,32 @@ export function pushOut(
 
       for (const box of placed.shape.turned[placed.quarters & 3]) {
         if (!blocks(box, placed.y, feetY, at.x - placed.x, at.z - placed.z)) {
+          continue;
+        }
+
+        if (box.radius > 0) {
+          // Out along the radius, which for a circle IS the shallowest axis. Resolving on x or z would eject the body
+          // along a tangent, and over a 21.6 m plaza that is twenty metres of travel to leave something it was a
+          // centimetre inside.
+          const cxr = placed.x + (box.minX + box.maxX) / 2;
+          const czr = placed.z + (box.minZ + box.maxZ) / 2;
+          const rd = Math.hypot(at.x - cxr, at.z - czr);
+          const want = box.radius + half;
+          if (rd >= want) {
+            continue;
+          }
+
+          // Dead centre: no radius to push along, so +X is as good as any other direction.
+          const ux = rd > 1e-6 ? (at.x - cxr) / rd : 1;
+          const uz = rd > 1e-6 ? (at.z - czr) / rd : 0;
+          at.x = cxr + ux * want;
+          at.z = czr + uz * want;
+          if (worldHalf > 0) {
+            at.x = Math.min(Math.max(at.x, -worldHalf + half), worldHalf - half);
+            at.z = Math.min(Math.max(at.z, -worldHalf + half), worldHalf - half);
+          }
+
+          moved = true;
           continue;
         }
 

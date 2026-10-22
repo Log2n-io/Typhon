@@ -198,7 +198,7 @@ function readAssets(value: unknown): AssetSet | null {
  * Every box is checked: this is parsed input that decides where a body may stand, and a non-finite edge would make a
  * body "inside" that box from everywhere, with nothing to push it back out.
  */
-function readCollision(value: unknown, assets: number): readonly (readonly PlanBox[])[] {
+export function readCollision(value: unknown, assets: number): readonly (readonly PlanBox[])[] {
   const out: PlanBox[][] = [];
   for (let i = 0; i < assets; i++) {
     out.push([]);
@@ -223,8 +223,12 @@ function readCollision(value: unknown, assets: number): readonly (readonly PlanB
         continue;
       }
 
-      // Six since the character controller landed; a four-number box from an older server is a wall of unknown
-      // height, which is the reading that keeps it blocking rather than silently turning into a floor.
+      // <b>Ten numbers, and counting them wrong is silent.</b> The server publishes
+      // [minX, minZ, maxX, maxZ, minY, maxY, planeY, slopeX, slopeZ, radius]; this read nine-number boxes as though
+      // the slopes began at index 6, so it took the top PLANE for `slopeX` and `slopeX` for `slopeZ`. Nothing threw:
+      // every ramp simply predicted as a flat slab at its bounding box's top, which is a wall, and a body stuck at the
+      // foot of one while the server walked it up. A short box from an older server is a wall of unknown height, which
+      // is the reading that keeps it blocking rather than silently becoming a floor.
       out[i].push({
         minX: box[0],
         minZ: box[1],
@@ -232,8 +236,10 @@ function readCollision(value: unknown, assets: number): readonly (readonly PlanB
         maxZ: box[3],
         minY: box.length > 5 ? box[4] : 0,
         maxY: box.length > 5 ? box[5] : Number.POSITIVE_INFINITY,
-        slopeX: box.length > 7 ? box[6] : 0,
-        slopeZ: box.length > 7 ? box[7] : 0,
+        planeY: box.length > 8 ? box[6] : Number.POSITIVE_INFINITY,
+        slopeX: box.length > 8 ? box[7] : 0,
+        slopeZ: box.length > 8 ? box[8] : 0,
+        radius: box.length > 9 ? box[9] : 0,
       });
     }
   }

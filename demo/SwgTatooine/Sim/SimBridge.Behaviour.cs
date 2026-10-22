@@ -1123,6 +1123,27 @@ public sealed partial class SimBridge
                         }
                     }
 
+                    // <b>A door, before the position is written.</b> The step is resolved now -- pushed out of whatever it
+                    // walked into -- so this is the first and only moment both ends of it are known and both are legal
+                    // places to stand. A body stopped by a door frame never reaches the plane and so cannot cross, which
+                    // is the behaviour wanted: you go through a doorway, not through a wall beside one.
+                    //
+                    // Only for a body a client drives. The scripted crowd keeps its own path through PlayerThink, which
+                    // walks to a door and calls EnterPortal on arrival; running both for one body would queue the
+                    // crossing twice.
+                    if (controls[slot].Kind != ControllerKind.Scripted
+                        && TryCrossDoor(cluster.GetEntityId(slot), cluster.Realm.Value, mh, prox.FromX[m], prox.FromZ[m], mx, mz))
+                    {
+                        // <b>Nothing else to do, and deliberately no attempt to stop the body.</b> EnterPortal parks the
+                        // crowd because PlayerThink owns its velocity; this system does not own anybody velocity -- it
+                        // reads it and writes positions -- and a client keeps steering its own body regardless. The tick
+                        // of movement before TeleportTick applies the crossing is at most a stride, in a realm the body is
+                        // about to leave, and the teleport overwrites the position anyway. It cannot queue twice either:
+                        // the body is now past the plane, so the next step starts on the inside and the directed test
+                        // refuses it.
+                        _ = slot;
+                    }
+
                     // Re-sampled because the push moved the body, for the reason the grade step re-samples: the altitude
                     // written has to be the ground under the position actually written -- and the ground includes any
                     // published surface the body is standing ON, which the terrain alone knows nothing about.

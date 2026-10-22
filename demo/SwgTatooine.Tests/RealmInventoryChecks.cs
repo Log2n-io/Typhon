@@ -55,10 +55,25 @@ public sealed class RealmInventoryChecks
             "a row carries a state name the client does not know");
     }
 
-    /// <summary>AC-5: the barest world this demo can build still produces a document the client can read.</summary>
+    /// <summary>AC-5: a world that has not ticked still produces a document the client can read.</summary>
     /// <remarks>
-    /// One planet, no interiors, no space, no dungeons: the case where every loop that writes a row has nothing to write,
-    /// which is exactly where a hand-built document grows a trailing comma or an unclosed array.
+    /// <para>
+    /// One planet and no census yet: the case where the state every row reports has never been evaluated, which is
+    /// where a hand-built document grows a trailing comma or an unclosed array.
+    /// </para>
+    /// <para>
+    /// <b>This asked for one row and one row only until interiors became unconditional.</b> There is no longer a world
+    /// without them — every Tatooine has the same 617 enterable buildings — so the document is now capped at
+    /// <see cref="TatooineSim.RealmInventoryMaxRows"/> rows with the rest counted. What the case pins instead is the
+    /// invariant the single row was standing in for and which survives the change: every realm is either listed or
+    /// counted, exactly once. A document that dropped realms, or double-counted them, read as plausible before.
+    /// </para>
+    /// <para>
+    /// <b>And every interior is listed as live here, which is correct and worth seeing.</b> Dormancy is decided on a
+    /// tick and this world has not had one, so nothing has been put to sleep yet; the rows go away on the first census.
+    /// That is why the dormancy proof is <c>RealmChecks.InteriorsGoDormantAtScale_AndAnyOccupiedOneIsPinned</c> and not
+    /// this case.
+    /// </para>
     /// </remarks>
     [Test]
     public void OnePlanetAndNothingElseStillProducesAReadableDocument()
@@ -72,16 +87,25 @@ public sealed class RealmInventoryChecks
             using var doc = Parse(sim.RealmInventoryJson());
             var root = doc.RootElement;
             var realms = root.GetProperty("realms");
+            var listed = realms.GetArrayLength();
+            var omitted = root.GetProperty("omitted").GetInt32();
+
+            // One planet plus its interiors, which is every realm this world has registered.
+            var total = 1 + sim.InteriorsPerPlanet;
             Assert.Multiple(() =>
             {
-                Assert.That(realms.GetArrayLength(), Is.EqualTo(1), "a one-planet world has exactly one realm to list");
-                Assert.That(realms[0].GetProperty("id").GetInt32(), Is.Zero);
-                Assert.That(root.GetProperty("omitted").GetInt32(), Is.Zero);
+                Assert.That(listed, Is.GreaterThan(0).And.LessThanOrEqualTo(TatooineSim.RealmInventoryMaxRows),
+                    "the document lists some realms and never more than the cap");
+                Assert.That(listed + omitted, Is.EqualTo(total), "a realm was dropped from the document, or counted twice");
+                Assert.That(realms[0].GetProperty("id").GetInt32(), Is.Zero, "the planet is listed first, where a selector expects it");
                 Assert.That(root.GetProperty("censusTick").GetInt64(), Is.EqualTo(-1), "a world that has not ticked has no census");
                 Assert.That(root.GetProperty("counts").GetProperty("active").GetInt32(), Is.GreaterThanOrEqualTo(0));
             });
 
-            AssertRowShape(realms[0]);
+            foreach (var realm in realms.EnumerateArray())
+            {
+                AssertRowShape(realm);
+            }
         }
         finally
         {
