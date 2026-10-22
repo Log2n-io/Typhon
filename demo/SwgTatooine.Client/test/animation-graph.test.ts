@@ -121,14 +121,26 @@ describe('one-shots', () => {
   it('alternate attacks, and change serial even when the clip repeats', () => {
     const g = graph();
     g.fire('attack', 0);
-    const first = g.update(0, true, 0);
+    const first = { ...g.update(0, true, 0) };
     g.fire('attack', 1);
-    const second = g.update(0, true, 1);
+    const second = { ...g.update(0, true, 1) };
     g.fire('attack', 2);
-    const third = g.update(0, true, 2);
+    const third = { ...g.update(0, true, 2) };
     expect([first.clip, second.clip, third.clip]).toEqual(['Punch', 'SwordSlash', 'Punch']);
     // The serial is what makes the rig restart a clip it is already playing — two punches in a row are two punches.
     expect(third.serial).not.toBe(first.serial);
+  });
+
+  it('hands back ONE output object, reused — a caller that keeps it keeps a moving target', () => {
+    // `update` runs once per body per frame and a crowd is thousands of bodies, so a fresh literal was a quarter of
+    // a million objects a second on the render path. Both callers read the fields and keep nothing, which is what
+    // makes this safe; this test is here so that stops being an accident. Copy before you store.
+    const g = graph();
+    const idle = g.update(0, true, 0);
+    expect(idle.role).toBe('idle');
+    const walking = g.update(1.2, true, 0.1);
+    expect(walking).toBe(idle);
+    expect(idle.role).toBe('walk');
   });
 
   it('hold death until a respawn, and refuse everything else meanwhile', () => {

@@ -132,3 +132,74 @@ describe('the crowd animator', () => {
     expect(a.takeDirty()).toBe(false);
   });
 });
+
+describe('a body keeps its own clip when its index moves', () => {
+  it('carries clip, fade and phase from the index it had to the index it has', () => {
+    const a = new CrowdAnimator(8, FPS);
+    a.play(5, WALK, 0, 1);
+    const phase = a.cycleOf(5, 0.7);
+    expect(phase).toBeGreaterThan(0);
+
+    // The packer rebuilt its list and this body is now at 2. Nothing about the body changed.
+    a.beginFrame();
+    a.carry(5, 2);
+    expect(a.cycleOf(2, 0.7)).toBeCloseTo(phase, 6);
+    expect(frameOf(a.clipA, 2 * 4, 0.7, FPS)).toBe(frameOf(a.clipA, 2 * 4, 0.7, FPS));
+    // Playing the same clip at the same rate on the carried row is a no-op, which is the whole point: the stride
+    // continues instead of restarting at frame 0.
+    a.play(2, WALK, 0.7, 1);
+    expect(a.cycleOf(2, 0.7)).toBeCloseTo(phase, 6);
+  });
+
+  it('survives two bodies swapping index, which is what a naive in-place move destroys', () => {
+    const a = new CrowdAnimator(8, FPS);
+    a.play(0, WALK, 0, 1);
+    a.play(1, RUN, 0, 1);
+    a.beginFrame();
+    a.carry(0, 1);
+    a.carry(1, 0);
+    expect(a.clipA[0 * 4]).toBe(RUN.startRow);
+    expect(a.clipA[1 * 4]).toBe(WALK.startRow);
+  });
+
+  it('starts a body that was not here last frame from nothing, not from the stranger in its slot', () => {
+    const a = new CrowdAnimator(8, FPS);
+    a.play(3, RUN, 0, 1);
+    a.beginFrame();
+    a.clear(3);
+    expect(a.clipA[3 * 4 + 1]).toBe(0);
+    expect(a.weightOf(3, 0)).toBe(1);
+  });
+});
+
+describe('a rate change on the clip already playing', () => {
+  it('re-times the clip instead of being ignored, so the feet keep up with the ground', () => {
+    const a = new CrowdAnimator(4, FPS);
+    a.play(0, WALK, 0, 1);
+    const slow = frameOf(a.clipA, 0, 1, FPS);
+    // Same role, same clip, twice the ground speed: this is what locomotion does between 1.0 and 2.5 m/s.
+    a.play(0, WALK, 1, 2);
+    expect(a.clipA[3]).toBe(2);
+    // The phase is preserved across the re-time — a foot that was down stays down.
+    expect(a.cycleOf(0, 1)).toBeCloseTo((slow - WALK.startRow) / WALK.frames, 1);
+    // …and it now advances at twice the rate.
+    const before = frameOf(a.clipA, 0, 1, FPS);
+    const after = frameOf(a.clipA, 0, 1 + 1 / FPS, FPS);
+    expect(after - before).toBe(2);
+  });
+
+  it('does not crossfade a clip with itself, which would blend one pose with its own past', () => {
+    const a = new CrowdAnimator(4, FPS);
+    a.play(0, WALK, 0, 1);
+    a.play(0, WALK, 1, 2);
+    expect(a.weightOf(0, 1)).toBe(1);
+  });
+
+  it('still does nothing at all when neither the clip nor the rate moved', () => {
+    const a = new CrowdAnimator(4, FPS);
+    a.play(0, WALK, 0, 1.5);
+    const before = [...a.clipA.subarray(0, 4)];
+    a.play(0, WALK, 9, 1.5);
+    expect([...a.clipA.subarray(0, 4)]).toEqual(before);
+  });
+});

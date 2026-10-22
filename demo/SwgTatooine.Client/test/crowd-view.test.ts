@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { ENTER_NEAR_PX } from '../src/render/view-math';
+import { ENTER_NEAR_PX, LEAVE_NEAR_PX } from '../src/render/view-math';
 import {
   CULLED,
   HYSTERESIS,
@@ -74,6 +74,24 @@ describe('the crowd tiers', () => {
     expect(tierFor(39, CULLED)).toBe(2);
     expect(tierFor(7, CULLED)).toBe(2);
     expect(tierFor(6.9, CULLED)).toBe(SPRITE_TIER);
+  });
+
+  it('hands the body back at exactly the pixel the packer takes it, with no window in between', () => {
+    // The crowd's own hysteresis would leave the last tier at 7 x 0.85 = 5.95 px, while the packer holds Band.Near
+    // — and therefore skips the box — until 5. Between the two the body was drawn by NOBODY.
+    const last = TIER_ENTER_PX.length - 1;
+    expect(tierFor(ENTER_NEAR_PX * (1 - HYSTERESIS), last)).toBe(last);
+    expect(tierFor(LEAVE_NEAR_PX, last)).toBe(last);
+    expect(tierFor(LEAVE_NEAR_PX - 0.01, last)).toBe(SPRITE_TIER);
+  });
+
+  it('does not take the body back EARLY either, which would draw it twice', () => {
+    // The clamp is on leaving only. A body arriving from the sprite band must wait for the packer's own 7 px, or
+    // between 5 and 7 the packer draws its sprite and the crowd draws a mesh in the same place.
+    const last = TIER_ENTER_PX.length - 1;
+    expect(tierFor(ENTER_NEAR_PX - 0.01, SPRITE_TIER)).toBe(SPRITE_TIER);
+    expect(tierFor(ENTER_NEAR_PX, SPRITE_TIER)).toBe(last);
+    expect(tierFor(LEAVE_NEAR_PX + 0.5, CULLED)).toBe(SPRITE_TIER);
   });
 
   it('is sticky, so a body standing on a boundary does not flicker between two meshes', () => {

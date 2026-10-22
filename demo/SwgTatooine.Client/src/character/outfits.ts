@@ -108,8 +108,14 @@ export function wearableOutfits(described: ReadonlyMap<string, Descriptor>): str
 
     // A character with no animations cannot be driven, and one with no locomotion cannot walk. Both are catalogue
     // faults rather than run-time conditions, but a crowd is not the place to discover them.
+    //
+    // <b>Every role {@link CROWD_ROLES} drives, not just two.</b> `AnimationGraph` throws on a missing role and
+    // locomotion asks for one every frame, so an outfit admitted here without `run` takes the render loop down on the
+    // first body that breaks into one — inside the frame, which is exactly where that constructor's check says it
+    // must never happen. Admitting `idle` and `walk` while the graph demanded three was a disagreement between two
+    // files that each looked right alone.
     const roles = descriptor.animations?.roles;
-    if (roles?.idle === undefined || roles.walk === undefined) {
+    if (roles === undefined || CROWD_ROLES.some((role) => roles[role] === undefined)) {
       continue;
     }
 

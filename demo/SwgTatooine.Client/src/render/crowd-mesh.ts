@@ -8,6 +8,8 @@ import '@babylonjs/core/Meshes/thinInstanceMesh';
 import type { Scene } from '@babylonjs/core/scene';
 
 import type { Instance } from '../assets/asset-library';
+import type { LodDesc } from '../assets/descriptor';
+import { lodLevelOf } from './asset-lod';
 import { SCENE_GROUP } from './render-groups';
 import { rigOffset, skinnedPrimitives, type CrowdRig } from './crowd-rig';
 
@@ -38,14 +40,6 @@ export interface CrowdOutfit {
   dispose(): void;
 }
 
-const LOD_SUFFIX = /_LOD(\d+)/i;
-
-/** The detail level a primitive belongs to, read from the node name Babylon derived for it. */
-export function lodLevelOf(meshName: string): number {
-  const m = LOD_SUFFIX.exec(meshName);
-  return m === null ? 0 : Number(m[1]);
-}
-
 /**
  * Merges one outfit into one mesh per detail level.
  *
@@ -55,9 +49,10 @@ export function lodLevelOf(meshName: string): number {
  * @param material The shared crowd material.
  * @param height The body's height, from its descriptor's render bounds.
  * @param name A label for the meshes.
+ * @param declared What the descriptor says the levels are, so the name-based split has a second source to agree with.
  * @returns The outfit's levels, finest first.
- * @throws If the levels are not contiguous from 0, if a primitive carries more than four influences, or if a
- * primitive has a texture — all of which would otherwise be lost in silence.
+ * @throws If the levels are not contiguous from 0, if they disagree with the descriptor, if a primitive carries
+ * more than four influences, or if a primitive has a texture — all of which would otherwise be lost in silence.
  */
 export function buildCrowdOutfit(
   scene: Scene,
@@ -66,6 +61,7 @@ export function buildCrowdOutfit(
   material: Material,
   height: number,
   name = instance.id,
+  declared: readonly LodDesc[] | null = null,
 ): CrowdOutfit {
   const parts = skinnedPrimitives(instance);
   const skeleton = parts.at(0)?.skeleton ?? null;
@@ -89,6 +85,17 @@ export function buildCrowdOutfit(
     if (!levels.has(level)) {
       throw new Error(`crowd: ${name} has LOD${String(highest)} but no LOD${String(level)}`);
     }
+  }
+
+  // <b>Against what the descriptor DECLARES, because the split above is by NAME.</b> `lodLevelOf` answers 0 for any
+  // name it does not recognise, so an outfit published with other node names merges all three of its levels into one
+  // mesh: three times the triangles, z-fighting, no throw — and the gap check above sees a perfectly contiguous
+  // ladder of one. This file otherwise filters primitives by what they ARE and never by what they are called
+  // (`crowd-rig.ts`); the names are unavoidable here, so the count is checked against a second source.
+  if (declared !== null && declared.length !== highest + 1) {
+    throw new Error(
+      `crowd: ${name} declares ${String(declared.length)} detail levels and its meshes name ${String(highest + 1)}`,
+    );
   }
 
   const lods: CrowdLod[] = [];

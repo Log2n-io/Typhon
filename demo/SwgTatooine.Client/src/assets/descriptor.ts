@@ -116,6 +116,13 @@ export function clipsForRole(roles: RoleMap, role: string): readonly string[] {
 export interface LodDesc {
   readonly node: string;
   readonly triangles: number;
+  /**
+   * The largest distance, in metres, a point of this level departs from the full-detail surface.
+   *
+   * Published since catalogue `f131e3e086ab` and absent before it. It is what lets a level be chosen by what the
+   * viewer would LOSE rather than by a distance somebody tuned: see `render/asset-lod.ts`. Level 0 states 0.
+   */
+  readonly error_m?: number;
 }
 
 export interface Descriptor {
@@ -142,8 +149,14 @@ export interface Descriptor {
      *
      * <b>Every published character has carried this since catalogue `dd7c11021d4b`, and nothing read it.</b> It was
      * absent from this type while being present in every descriptor on disk — so the client fetched three levels of
-     * geometry per character and drew only the finest. No non-character asset declares it: buildings have no LODs at
-     * all (`ASSET_PIPELINE.md` §8), which is why a distant structure is still the renderer's own box.
+     * geometry per character and drew only the finest.
+     *
+     * <b>And `KHR_node_visibility` is NOT what hides the coarse levels here.</b> Measured against catalogue
+     * `f131e3e086ab`, every level of every placed structure arrived enabled and visible: one `tat_house_large` drew
+     * 9 428 triangles instead of 5 675, with LOD1 and LOD2 z-fighting inside LOD0, and 40 % of all structure geometry
+     * on screen was a coarse level nobody asked for. Whoever draws a multi-level asset owns the choice — for
+     * structures that is `render/asset-lod.ts` through `app/static-assets.ts`, and for characters the crowd, which
+     * merges each level into a mesh of its own.
      */
     readonly lods?: readonly LodDesc[];
   };

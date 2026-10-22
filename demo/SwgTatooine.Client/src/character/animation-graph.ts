@@ -87,8 +87,15 @@ export function locomotionFrom(walkMps: number, runMps: number, height: number):
   };
 }
 
+/**
+ * What the graph decided this frame.
+ *
+ * <b>Reused, never fresh.</b> `update` runs once per body per frame and a crowd is thousands of bodies, so returning
+ * a literal was a quarter of a million objects a second on the render path. The caller reads it and is done with it
+ * before the next call; nobody may keep it. Mutable for that reason alone — treat it as read-only.
+ */
 export interface AnimOutput {
-  readonly clip: string;
+  clip: string;
   /**
    * The ROLE that chose the clip — `idle`, `walk`, `run`, `attack`…
    *
@@ -99,11 +106,11 @@ export interface AnimOutput {
    * zeroed, which made the shader's frame count zero, which made its modulo a division by zero, which put NaN into
    * every bone index and drew nothing at all.
    */
-  readonly role: string;
-  readonly loop: boolean;
-  readonly rate: number;
+  role: string;
+  loop: boolean;
+  rate: number;
   /** Changes whenever a one-shot starts, including a repeat of the same clip. */
-  readonly serial: number;
+  serial: number;
 }
 
 type ActionKind = 'jump' | 'attack' | 'hit' | 'roll' | 'death';
@@ -122,6 +129,18 @@ export class AnimationGraph {
   private readonly durations = new Map<string, number>();
   private readonly roles: RoleMap;
   private tuningValue: LocomotionTuning;
+  /** This graph's one output; see {@link AnimOutput}. */
+  private readonly out: AnimOutput = { clip: '', role: '', loop: true, rate: 1, serial: 0 };
+  /**
+   * The three locomotion clips, resolved once.
+   *
+   * `clipsForRole` wraps a string-valued role in a fresh array every call (`descriptor.ts`), so asking it for the
+   * walk clip every frame allocated an array per body per frame on top of the output object. A role map does not
+   * change after construction.
+   */
+  private readonly idleClip: string;
+  private readonly walkClip: string;
+  private readonly runClip: string;
 
   constructor(roles: RoleMap, clips: readonly ClipDesc[], tuning: LocomotionTuning) {
     this.roles = roles;
@@ -139,6 +158,11 @@ export class AnimationGraph {
         throw new Error(`character has no "${role}" clip, which locomotion needs every frame`);
       }
     }
+
+    // Resolved here, where the throw above has just proved all three exist.
+    this.idleClip = clipsForRole(roles, 'idle')[0];
+    this.walkClip = clipsForRole(roles, 'walk')[0];
+    this.runClip = clipsForRole(roles, 'run')[0];
   }
 
   get dead(): boolean {
@@ -212,19 +236,29 @@ export class AnimationGraph {
     if (action?.kind === 'jump' && grounded && now - action.start > 0.25) {
       this.action = null;
     } else if (action !== null) {
-      return { clip: action.clip, role: action.kind, loop: false, rate: 1, serial: this.serial };
+      return this.say(action.clip, action.kind, false, 1);
     }
 
     const tuning = this.tuningValue;
     if (speed < tuning.idleBelow) {
-      return { clip: this.clipOf('idle'), role: 'idle', loop: true, rate: 1, serial: this.serial };
+      return this.say(this.idleClip, 'idle', true, 1);
     }
 
     const run = speed >= tuning.runFrom;
     const clipSpeed = run ? tuning.runClipSpeed : tuning.walkClipSpeed;
     const rate = Math.min(tuning.maxRate, Math.max(tuning.minRate, speed / clipSpeed));
-    const role = run ? 'run' : 'walk';
-    return { clip: this.clipOf(role), role, loop: true, rate, serial: this.serial };
+    return run ? this.say(this.runClip, 'run', true, rate) : this.say(this.walkClip, 'walk', true, rate);
+  }
+
+  /** Fills the one output object. */
+  private say(clip: string, role: string, loop: boolean, rate: number): AnimOutput {
+    const out = this.out;
+    out.clip = clip;
+    out.role = role;
+    out.loop = loop;
+    out.rate = rate;
+    out.serial = this.serial;
+    return out;
   }
 
   /** The running one-shot, expired ones cleared. A jump never expires on its own: it ends on landing. */

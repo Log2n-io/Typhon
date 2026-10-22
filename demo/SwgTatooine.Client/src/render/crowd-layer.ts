@@ -8,6 +8,7 @@ import { CrowdAnimator } from '../character/crowd-anim';
 import { outfitFor } from '../character/outfits';
 import type { CrowdSkinPlugin } from './crowd-material';
 import type { CrowdOutfit } from './crowd-mesh';
+import type { CrowdBody } from './layer-packer';
 import { CULLED, SPRITE_TIER, classify, packTiers, type ViewParams } from './crowd-view';
 
 /**
@@ -32,23 +33,19 @@ import { CULLED, SPRITE_TIER, classify, packTiers, type ViewParams } from './cro
  *   that stops feet sliding.
  */
 
-/** What one body looks like to this layer, per frame. */
-export interface CrowdBody {
-  readonly netId: number;
-  /** Render-space metres — the origin is subtracted by the caller, as it is for every other instanced thing. */
-  readonly x: number;
-  readonly y: number;
-  readonly z: number;
-  /** Ground speed in metres per SECOND. The caller converts; see the class note. */
-  readonly speed: number;
-  readonly heading: number;
-}
+// <b>One declaration of the hand-over, in the file that writes it.</b> This had its own structurally identical copy,
+// which meant two sources of truth for the one contract between the packer and the crowd — and the note that the
+// speed is metres per SECOND while the store carries metres per TICK lived on only one of them. Re-exported so this
+// file's readers still find it where they expect it.
+export type { CrowdBody } from './layer-packer';
 
 /** Per-body state that must survive a frame. */
 interface Slot {
   netId: number;
   outfit: number;
   graph: AnimationGraph;
+  /** The gait figures this graph was tuned with; see the retune note in `update`. */
+  tunedAt: number;
 }
 
 export interface CrowdLayerOptions {
@@ -68,15 +65,38 @@ export class CrowdLayer {
   private readonly skin: CrowdSkinPlugin;
   private readonly described: readonly Descriptor[];
   private readonly capacity: number;
+  /** How many bodies ONE outfit may draw; see {@link bucketCapacity}. */
+  private readonly bucketCapacity: number;
+  /** Whether a bucket has ever been full, so the warning is said once rather than per frame. */
+  private overflowed = false;
 
-  /** Per-outfit, per-body state. A body lives in the bucket of the outfit it wears. */
-  private readonly buckets: {
+  /**
+   * Per-outfit, per-body state. A body lives in the bucket of the outfit it wears.
+   *
+   * <b>Readable, deliberately.</b> Everything interesting about this layer is what survives between two `update`
+   * calls — a body's clip across an index change, its tier's hysteresis, whether the tuning was rebuilt — and none
+   * of it can be asserted from the outside without this. The same handle is what a live session reads through
+   * `window.__typhon` to answer "what is the crowd actually holding", which is how both of this file's silent
+   * failures were finally seen. Nothing outside writes to it.
+   */
+  readonly buckets: {
     readonly animator: CrowdAnimator;
     readonly matrices: Float32Array;
-    readonly heights: Float32Array;
-    readonly tiers: Uint8Array;
-    readonly slots: (Slot | null)[];
-    readonly byNetId: Map<number, number>;
+    tiers: Uint8Array;
+    /** Last frame's tiers, which a carried body takes its hysteresis from. Swapped with `tiers` each frame. */
+    previousTiers: Uint8Array;
+    slots: (Slot | null)[];
+    /**
+     * Last frame's slots, read by a body that moved index.
+     *
+     * <b>Ping-ponged, not written in place.</b> Two bodies that swap index would otherwise destroy each other: the
+     * first writes its slot over the index the second has not read from yet, and the second is handed its neighbour's
+     * animation graph. Reading one array and writing another cannot do that whatever the permutation.
+     */
+    previousSlots: (Slot | null)[];
+    /** Where each netId sat LAST frame. Rebuilt as this frame is placed; see the identity note on the class. */
+    byNetId: Map<number, number>;
+    previousByNetId: Map<number, number>;
     readonly counts: Int32Array;
     readonly slotOf: Int8Array;
     readonly targets: Float32Array[][];
@@ -87,6 +107,13 @@ export class CrowdLayer {
   /** The gait figures the tunings were built from; see `update`. */
   private tunedWalk = Number.NaN;
   private tunedRun = Number.NaN;
+  /**
+   * Bumped whenever the tunings are rebuilt, so a live body adopts the new one and a dormant one is not walked.
+   *
+   * <b>Pushed to the bodies that exist rather than to the capacity.</b> Sweeping `slots` from here also read the
+   * wrong array: the per-frame ping-pong means the live slots are in `previousSlots` at the point this runs.
+   */
+  private tuningSerial = 0;
 
   private readonly scratch = { matrix: new Matrix(), quat: new Quaternion(), pos: new Vector3() };
 
@@ -125,6 +152,8 @@ export class CrowdLayer {
     this.described = options.described;
     this.capacity = options.capacity;
 
+    const share = bucketCapacity(this.capacity, this.outfits.length);
+    this.bucketCapacity = share;
     this.buckets = this.outfits.map((outfit) => {
       const levels = outfit.lods.length;
       // A tier with no level of its own draws the coarsest the outfit has; the sprite tier draws nothing here.
@@ -132,19 +161,21 @@ export class CrowdLayer {
         t >= SPRITE_TIER ? -1 : Math.min(t, levels - 1),
       );
       return {
-        animator: new CrowdAnimator(this.capacity, this.plan.fps),
-        matrices: new Float32Array(this.capacity * 16),
-        heights: new Float32Array(this.capacity),
-        tiers: new Uint8Array(this.capacity).fill(CULLED),
-        slots: new Array<Slot | null>(this.capacity).fill(null),
+        animator: new CrowdAnimator(share, this.plan.fps),
+        matrices: new Float32Array(share * 16),
+        tiers: new Uint8Array(share).fill(CULLED),
+        previousTiers: new Uint8Array(share).fill(CULLED),
+        slots: new Array<Slot | null>(share).fill(null),
+        previousSlots: new Array<Slot | null>(share).fill(null),
         byNetId: new Map<number, number>(),
+        previousByNetId: new Map<number, number>(),
         counts: new Int32Array(levels),
         slotOf,
         targets: outfit.lods.map(() => [
-          new Float32Array(this.capacity * 16),
-          new Float32Array(this.capacity * 4),
-          new Float32Array(this.capacity * 4),
-          new Float32Array(this.capacity * 2),
+          new Float32Array(share * 16),
+          new Float32Array(share * 4),
+          new Float32Array(share * 4),
+          new Float32Array(share * 2),
         ]),
         count: 0,
         tuning: locomotionFrom(Number.NaN, Number.NaN, outfit.height),
@@ -186,7 +217,8 @@ export class CrowdLayer {
   /**
    * Draws one frame.
    *
-   * @param bodies Every body in range, in render space.
+   * @param bodies The pooled body records; only the first `count` are this frame's.
+   * @param count How many of `bodies` are live. The array keeps its capacity across frames, so its length is not it.
    * @param view The active camera, for culling and for the projected-size tiers.
    * @param now A monotonic clock in seconds. Its ZERO does not matter: the layer records its own start and works
    * relative to it, because the shader's copy is a float32 and epoch seconds have no resolution left in one. There is
@@ -197,6 +229,7 @@ export class CrowdLayer {
    */
   update(
     bodies: readonly CrowdBody[],
+    count: number,
     view: ViewParams,
     now: number,
     walkMps: number,
@@ -212,20 +245,35 @@ export class CrowdLayer {
     this.tierTotals.fill(0);
     for (const bucket of this.buckets) {
       bucket.count = 0;
+      // This frame's rows start blank and last frame's become readable, so a body that moved index can take its own
+      // clip, fade and tier with it. See `CrowdAnimator.beginFrame`.
+      bucket.animator.beginFrame();
+      const tiers = bucket.previousTiers;
+      bucket.previousTiers = bucket.tiers;
+      bucket.tiers = tiers;
+      const byNetId = bucket.previousByNetId;
+      bucket.previousByNetId = bucket.byNetId;
+      bucket.byNetId = byNetId;
+      bucket.byNetId.clear();
+      const slots = bucket.previousSlots;
+      bucket.previousSlots = bucket.slots;
+      bucket.slots = slots;
     }
 
     // The server's gait figures change about never, and a tuning per outfit per frame is an allocation per outfit per
     // frame for nothing — the avatar path learned the same thing. Rebuilt only when a figure actually moves.
-    if (walkMps !== this.tunedWalk || runMps !== this.tunedRun) {
+    //
+    // <b>`Object.is`, because both figures are NaN until the owner block lands and `NaN !== NaN`.</b> With `!==` this
+    // test passed on EVERY frame of the first seconds of every session: eighteen `locomotionFrom` allocations and a
+    // walk of eighteen times the whole capacity, inside the render loop, to rebuild tunings identical to the ones
+    // already there. The guard was written to prevent exactly that and inverted itself on the one value it had to
+    // handle.
+    if (!Object.is(walkMps, this.tunedWalk) || !Object.is(runMps, this.tunedRun)) {
       this.tunedWalk = walkMps;
       this.tunedRun = runMps;
+      this.tuningSerial++;
       for (const [which, bucket] of this.buckets.entries()) {
         bucket.tuning = locomotionFrom(walkMps, runMps, this.outfits[which].height);
-        for (const slot of bucket.slots) {
-          if (slot !== null) {
-            slot.graph.tuning = bucket.tuning;
-          }
-        }
       }
     }
 
@@ -235,19 +283,42 @@ export class CrowdLayer {
     }
 
     // ---- place every body in its outfit's bucket -----------------------------------------------------------------
-    for (const body of bodies) {
+    for (let b = 0; b < count; b++) {
+      const body = bodies[b];
       const which = outfitFor(body.netId, outfitCount);
       const bucket = this.buckets[which];
       const outfit = this.outfits[which];
-      if (bucket.count >= this.capacity) {
+      if (bucket.count >= this.bucketCapacity) {
+        // A costume worn by far more than its share. Saying so once beats a body silently not being drawn: the
+        // headroom below is four times the expected share, so reaching it means the hash is not spreading, not that
+        // the crowd is busy.
+        if (!this.overflowed) {
+          this.overflowed = true;
+          console.warn(`crowd: outfit ${outfit.id} exceeded its ${String(this.bucketCapacity)} bodies; some are not drawn`);
+        }
+
         continue;
       }
 
       const i = bucket.count++;
-      // The slot may be holding another body's state: a netId is not an identity across a RESET, and the arrays are
-      // rebuilt as bodies come and go. Re-pin, and forget the stride of whoever was here.
-      let slot = bucket.slots[i];
-      if (slot === null || slot.netId !== body.netId) {
+      bucket.byNetId.set(body.netId, i);
+
+      // <b>A body is its netId, never its index.</b> The index is a position in a list the packer rebuilds every
+      // frame — it pushes in live-slot order, filtered by frustum and by band — so one body ahead leaving the view
+      // shifts everyone behind it by one. Treating the index as the identity restarted those bodies' clips, lost
+      // their crossfades and their tier hysteresis, and allocated an `AnimationGraph` per shifted body per frame.
+      // Measured as a foot popping back to the start of its stride whenever the camera turned.
+      const was = bucket.previousByNetId.get(body.netId);
+      let slot: Slot | null = null;
+      if (was !== undefined) {
+        slot = bucket.previousSlots[was];
+        if (slot !== null) {
+          bucket.animator.carry(was, i);
+          bucket.tiers[i] = bucket.previousTiers[was] ?? CULLED;
+        }
+      }
+
+      if (slot === null) {
         const descriptor = this.described[which];
         const roles = descriptor.animations?.roles ?? {};
         const clips = descriptor.animations?.clips ?? [];
@@ -255,11 +326,16 @@ export class CrowdLayer {
           netId: body.netId,
           outfit: which,
           graph: new AnimationGraph(roles, clips, bucket.tuning),
+          tunedAt: this.tuningSerial,
         };
-        bucket.slots[i] = slot;
         bucket.animator.clear(i);
         bucket.tiers[i] = CULLED;
+      } else if (slot.tunedAt !== this.tuningSerial) {
+        slot.graph.tuning = bucket.tuning;
+        slot.tunedAt = this.tuningSerial;
       }
+
+      bucket.slots[i] = slot;
 
       const out = slot.graph.update(body.speed, true, clock);
       // <b>By ROLE, not by clip name.</b> See `AnimOutput.role`: the atlas is keyed on the role because an
@@ -275,7 +351,6 @@ export class CrowdLayer {
       this.scratch.pos.set(body.x, body.y, body.z);
       Matrix.ComposeToRef(ONE, this.scratch.quat, this.scratch.pos, this.scratch.matrix);
       this.scratch.matrix.copyToArray(bucket.matrices, i * 16);
-      bucket.heights[i] = outfit.height;
       this.drawn.add(body.netId);
     }
 
@@ -284,7 +359,9 @@ export class CrowdLayer {
     this.trianglesDrawn = 0;
     for (const [which, bucket] of this.buckets.entries()) {
       const outfit = this.outfits[which];
-      classify(bucket.matrices, bucket.count, bucket.heights, view, bucket.tiers, this.tierTotals);
+      // One height for the whole bucket: every body in it wears the same outfit, so an array of 2 048 copies of one
+      // constant was 2 048 copies of one constant. `classify` has taken a scalar since it was written.
+      classify(bucket.matrices, bucket.count, outfit.height, view, bucket.tiers, this.tierTotals);
       packTiers(
         bucket.tiers,
         bucket.count,
@@ -354,3 +431,26 @@ export class CrowdLayer {
 
 /** Reused: every body is drawn at its published size. */
 const ONE = Vector3.One();
+
+/**
+ * How many bodies one outfit's bucket holds.
+ *
+ * <b>A share of the crowd, not the whole of it.</b> Every bucket at full capacity sized the client for 2 048 bodies
+ * IN EVERY COSTUME at once, which cannot happen: the cap is 2 048 bodies in total. At nineteen outfits that was about
+ * 16 MB of CPU arrays and 12 MB of GPU vertex buffers to hold at most 2 048 bodies' worth of data.
+ *
+ * The headroom is four times the expected share. {@link outfitFor} is a hash, so the counts are multinomial: 2 048
+ * bodies over nineteen buckets expects 108 each with a standard deviation of about 10, and four times the mean is
+ * more than thirty deviations out. The floor keeps a tiny crowd from having buckets of one or two.
+ *
+ * @param capacity The most bodies the crowd draws at once, across every outfit.
+ * @param outfits How many outfits share them.
+ * @returns The per-outfit capacity.
+ */
+export function bucketCapacity(capacity: number, outfits: number): number {
+  if (outfits <= 1) {
+    return capacity;
+  }
+
+  return Math.min(capacity, Math.max(64, Math.ceil((capacity / outfits) * 4)));
+}

@@ -8,7 +8,15 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { GROUND_ALBEDO } from '../src/render/shaders';
-import { SHADOW_BACKOFF_M, SHADOW_MAP_SIZE, SHADOW_RADIUS_M, SUN_DIRECTION } from '../src/render/sun';
+import {
+  SHADOW_BACKOFF_M,
+  SHADOW_FAR_M,
+  SHADOW_MAP_SIZE,
+  SHADOW_NEAR_M,
+  SHADOW_RADIUS_M,
+  SHADOW_SLAB_REACH_M,
+  SUN_DIRECTION,
+} from '../src/render/sun';
 
 /**
  * The scene has ONE sun, and every surface is lit by it.
@@ -143,5 +151,46 @@ describe('the scene has one sun', () => {
     // The shadow camera has to clear the tallest caster, or whatever is nearer the light than the near plane stops
     // casting altogether.
     expect(SHADOW_BACKOFF_M).toBeGreaterThan(SHADOW_RADIUS_M);
+  });
+});
+
+describe('the reach that decides which meshes are offered to the shadow map', () => {
+  /**
+   * The furthest a point of the shadow volume can be from the slab's centre, horizontally — computed the long way,
+   * by walking the corners of the box the light actually renders, so the closed form in `sun.ts` has something
+   * independent to agree with.
+   */
+  function furthestCorner(): number {
+    const d = SUN_DIRECTION;
+    // Two axes orthogonal to the light, which is what the ortho slab is measured in.
+    const up = Math.abs(d.y) > 0.9 ? { x: 1, y: 0, z: 0 } : { x: 0, y: 1, z: 0 };
+    const rx = { x: up.y * d.z - up.z * d.y, y: up.z * d.x - up.x * d.z, z: up.x * d.y - up.y * d.x };
+    const rl = Math.hypot(rx.x, rx.y, rx.z);
+    const r = { x: rx.x / rl, y: rx.y / rl, z: rx.z / rl };
+    const u = { x: d.y * r.z - d.z * r.y, y: d.z * r.x - d.x * r.z, z: d.x * r.y - d.y * r.x };
+
+    let worst = 0;
+    for (const depth of [SHADOW_NEAR_M - SHADOW_BACKOFF_M, SHADOW_FAR_M - SHADOW_BACKOFF_M]) {
+      for (const sx of [-SHADOW_RADIUS_M, SHADOW_RADIUS_M]) {
+        for (const sy of [-SHADOW_RADIUS_M, SHADOW_RADIUS_M]) {
+          const x = d.x * depth + r.x * sx + u.x * sy;
+          const z = d.z * depth + r.z * sx + u.z * sy;
+          worst = Math.max(worst, Math.hypot(x, z));
+        }
+      }
+    }
+
+    return worst;
+  }
+
+  it('covers every corner of the volume the sun actually renders', () => {
+    // A reach that is short drops a caster that could have shadowed, silently and only at certain sun angles —
+    // the failure this test exists for. Being generous costs a few meshes in a list; being short costs a shadow.
+    expect(SHADOW_SLAB_REACH_M).toBeGreaterThanOrEqual(furthestCorner());
+  });
+
+  it('is not so generous that it stops meaning anything', () => {
+    // It must still exclude the far town: the range structures are drawn to is 1 280 m.
+    expect(SHADOW_SLAB_REACH_M).toBeLessThan(250);
   });
 });

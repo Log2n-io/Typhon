@@ -36,9 +36,12 @@ export interface CrowdRig {
   /** The canonical inverse bind matrices, by bone index — what {@link rigOffset} rebases an outfit against. */
   readonly inverseBind: readonly Matrix[];
   readonly textureBytes: number;
-  /** The texture's contents, kept so a bone socket or a CPU-side check can read a pose without the GPU. */
-  readonly data: Float32Array;
   dispose(): void;
+
+  // <b>The texture's own contents are NOT kept.</b> They were, "so a bone socket or a CPU-side check can read a pose
+  // without the GPU" — a megabyte held for a reader that was never written. The bake builds the array anyway, so the
+  // day something needs it, it is one field away; until then it is a megabyte.
+
 }
 
 /** A loaded source outfit: its skinned primitives and its animation groups. */
@@ -139,7 +142,6 @@ export function bakeClipAtlas(scene: Scene, plan: AtlasPlan, sources: ReadonlyMa
     boneNames: boneNames ?? [],
     inverseBind: inverseBind ?? [],
     textureBytes: data.byteLength,
-    data,
     dispose() {
       texture.dispose();
     },

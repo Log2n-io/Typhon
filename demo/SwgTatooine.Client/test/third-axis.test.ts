@@ -62,6 +62,7 @@ function view(): FrameView {
     hidden: new Set<number>(),
     crowd: null,
     crowdDraws: false,
+    crowdCount: 0,
     perSecond: 1,
   };
 }

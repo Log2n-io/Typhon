@@ -15,6 +15,8 @@
  * Babylon's `Frustum.GetPlanesToRef` convention.
  */
 
+import { LEAVE_NEAR_PX } from './view-math';
+
 /** Tier of a body outside the frustum. */
 export const CULLED = 255;
 
@@ -60,7 +62,21 @@ export interface ViewParams {
 export function tierFor(pixels: number, previous: number): number {
   let tier = SPRITE_TIER;
   for (const [t, enter] of TIER_ENTER_PX.entries()) {
-    const threshold = previous !== CULLED && previous <= t ? enter * (1 - HYSTERESIS) : enter;
+    const sticky = previous !== CULLED && previous <= t;
+    let threshold = sticky ? enter * (1 - HYSTERESIS) : enter;
+    // <b>At the bottom, BOTH thresholds are the entity layer's, not ours.</b> Everywhere else the hysteresis is ours
+    // to choose, because both sides of the boundary are meshes this layer draws. Here the other side is the packer's
+    // sprite band, and the two must agree exactly: it enters `Band.Near` at 7 px and holds it — skipping the box —
+    // until 5. Our own 7 × 0.85 = 5.95 left a window from 5.00 to 5.95 px where the crowd had handed the body back
+    // and the packer had not taken it, so it was drawn by NOBODY.
+    //
+    // Only the leaving threshold is clamped. Lowering the entry one to 5 as well would have the crowd draw a mesh
+    // from 5 px while the packer still called the body Far and drew its sprite — the opposite failure, drawn TWICE,
+    // and the one §4.3 names as the visible of the two.
+    if (sticky && t === TIER_ENTER_PX.length - 1) {
+      threshold = Math.min(threshold, LEAVE_NEAR_PX);
+    }
+
     if (pixels >= threshold) {
       tier = t;
       break;

@@ -16,6 +16,7 @@ import {
   SHADOW_MAP_SIZE,
   SHADOW_NEAR_M,
   SHADOW_RADIUS_M,
+  SHADOW_SLAB_REACH_M,
   SKY_IRRADIANCE,
   SUN_DIRECTION,
   SUN_INTENSITY,
@@ -73,6 +74,9 @@ export class SceneLighting {
   private readonly scene: Scene;
   private readonly environment: CubeTexture;
   private generator: ShadowGenerator | null = null;
+  /** Where {@link frameShadows} last put the slab, which {@link withinSlab} tests against. */
+  private slabX = 0;
+  private slabZ = 0;
   /** Whether anything is being rendered into the shadow map; see {@link setShadows} for why this is not a dispose. */
   private casting = false;
   /** The sky and the sand this world is lit by; see {@link setSky}. */
@@ -227,7 +231,14 @@ export class SceneLighting {
       //
       // The predicate is re-evaluated from `scene.meshes` every frame, which costs a flag test per mesh (about 250 of
       // them) and is correct by construction: a disposed placement is not in the scene, so it cannot be in the list.
-      map.renderListPredicate = (mesh) => this.casting && mesh.isEnabled() && mesh.isVisible && isCaster(mesh);
+      // <b>And a distance test, because the slab is 64 m and the world is not.</b> A caster outside it cannot put a
+      // pixel in the map however long it is kept in the list; it is pure per-frame cost in the list build and in the
+      // depth pass. That was harmless while structures were drawn to 220 m, and it stopped being harmless when the
+      // range went to 1 280: the list went from about 50 casters to 377. Measured either way the frame holds 60 fps
+      // — 6.51 ms against 6.06 ms mean, arms overlapping — so this is not a rescue, it is declining to render a
+      // kilometre of geometry into a map that cannot show it.
+      map.renderListPredicate = (mesh) =>
+        this.casting && mesh.isEnabled() && mesh.isVisible && isCaster(mesh) && this.withinSlab(mesh);
       map.renderList = [];
     }
 
@@ -248,12 +259,32 @@ export class SceneLighting {
       return;
     }
 
+    this.slabX = x;
+    this.slabZ = z;
+
     // Back along the direction the light travels, which is where the light comes FROM.
     this.sun.position.set(
       x - (SUN_DIRECTION.x * SHADOW_BACKOFF_M),
       y - (SUN_DIRECTION.y * SHADOW_BACKOFF_M),
       z - (SUN_DIRECTION.z * SHADOW_BACKOFF_M),
     );
+  }
+
+  /**
+   * Whether a mesh is near enough to the shadow slab to put anything in it.
+   *
+   * Generous by a mesh's own bounding radius plus a margin, so a long wall whose origin is outside the slab but whose
+   * body crosses it still casts. Reading the bounding sphere costs nothing here: Babylon keeps it on the mesh.
+   *
+   * @param mesh The candidate caster.
+   * @returns Whether it can reach the slab.
+   */
+  private withinSlab(mesh: AbstractMesh): boolean {
+    const centre = mesh.getBoundingInfo().boundingSphere.centerWorld;
+    const dx = centre.x - this.slabX;
+    const dz = centre.z - this.slabZ;
+    const reach = SHADOW_SLAB_REACH_M + mesh.getBoundingInfo().boundingSphere.radiusWorld;
+    return dx * dx + dz * dz <= reach * reach;
   }
 
   /**

@@ -34,6 +34,7 @@ function view(selectedNetId = 0): FrameView {
     hidden: new Set<number>(),
     crowd: null,
     crowdDraws: false,
+    crowdCount: 0,
     perSecond: 1,
   };
 }

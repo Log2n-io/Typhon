@@ -100,3 +100,22 @@ export const SHADOW_BACKOFF_M = 120;
  */
 export const SHADOW_NEAR_M = 5;
 export const SHADOW_FAR_M = 230;
+
+/**
+ * How far from the slab's centre, horizontally, a mesh's own centre can be and still reach the shadow volume.
+ *
+ * <b>Derived from the slab, not chosen.</b> The volume is a box ±{@link SHADOW_RADIUS_M} across in the light's own
+ * axes, running from {@link SHADOW_NEAR_M} to {@link SHADOW_FAR_M} along {@link SUN_DIRECTION} with the light placed
+ * {@link SHADOW_BACKOFF_M} back. So a point in it is at most the slab's half-diagonal (64·√2 ≈ 91 m) off the centre
+ * line, plus however far the depth range runs either side of the centre projected onto the ground — the light is
+ * tilted, so that is the direction's horizontal magnitude, about 0.60.
+ *
+ * <b>Anything past it cannot put a pixel in the map, at any distance, ever.</b> It is still iterated and still
+ * drawn into the depth pass, which was invisible while structures were drawn to 220 m and stopped being invisible
+ * when the range went to 1 280: 377 casters where fifty could matter. A mesh adds its own bounding radius to this,
+ * so a long wall whose origin is outside still casts.
+ */
+export const SHADOW_SLAB_REACH_M =
+  SHADOW_RADIUS_M * Math.SQRT2 +
+  Math.max(SHADOW_FAR_M - SHADOW_BACKOFF_M, SHADOW_BACKOFF_M - SHADOW_NEAR_M) *
+    Math.hypot(SUN_DIRECTION.x, SUN_DIRECTION.z);

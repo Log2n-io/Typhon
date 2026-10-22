@@ -60,6 +60,8 @@ export interface FrameView {
    * one, and the second is worse.
    */
   readonly crowdDraws: boolean;
+  /** How many of {@link crowd} this frame filled. The array keeps its capacity, so its length is not the count. */
+  crowdCount: number;
   /**
    * Multiplies a replicated velocity into metres per SECOND.
    *
@@ -70,15 +72,36 @@ export interface FrameView {
   readonly perSecond: number;
 }
 
-/** One replicated body, as a character layer hands it to the crowd. */
+/**
+ * One replicated body, as a character layer hands it to the crowd.
+ *
+ * <b>Reused across frames, never allocated per body.</b> The array below is rebuilt every frame from the bodies in
+ * the near band; writing a fresh literal per body put an object per body per frame on the packer's hot path. A caller
+ * reads a record within the frame it was handed and keeps nothing.
+ */
 export interface CrowdBody {
-  readonly netId: number;
-  readonly x: number;
-  readonly y: number;
-  readonly z: number;
+  netId: number;
+  x: number;
+  y: number;
+  z: number;
   /** Ground speed, metres per second. */
-  readonly speed: number;
-  readonly heading: number;
+  speed: number;
+  heading: number;
+}
+
+/**
+ * The crowd's hand-over array, grown in place.
+ *
+ * @param bodies The array the app reuses.
+ * @param n How many are already written this frame.
+ * @returns The record to write into.
+ */
+export function crowdSlot(bodies: CrowdBody[], n: number): CrowdBody {
+  if (n >= bodies.length) {
+    bodies.push({ netId: 0, x: 0, y: 0, z: 0, speed: 0, heading: 0 });
+  }
+
+  return bodies[n];
 }
 
 /** No entity hidden, for a caller that hides none. */
@@ -383,14 +406,16 @@ export class LayerPacker {
         // The speed handed over is metres per SECOND. What the store carries is per TICK — the defect this client has
         // already shipped once, where a sprinting character played the walk clip at its slowest rate.
         if (crowd !== null) {
-          crowd.push({
-            netId,
-            x: rx,
-            y: ry,
-            z: rz,
-            speed: Math.hypot(at.vx, at.vz) * view.perSecond,
-            heading: yaws[slot],
-          });
+          // Into the record already there, not a new one: see `CrowdBody`. `view.crowdCount` is the live length, so
+          // the array keeps its capacity across frames and the crowd reads exactly what this frame wrote.
+          const body = crowdSlot(crowd, view.crowdCount);
+          body.netId = netId;
+          body.x = rx;
+          body.y = ry;
+          body.z = rz;
+          body.speed = Math.hypot(at.vx, at.vz) * view.perSecond;
+          body.heading = yaws[slot];
+          view.crowdCount++;
           // <b>Only STOP drawing the box once the crowd is known to be drawing a body in its place.</b> Diverting
           // unconditionally is how a bring-up bug became a worse regression than the thing it was replacing: the
           // crowd drew nothing, the boxes were already gone, and the street was empty. The flag is owned by the crowd

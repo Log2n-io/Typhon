@@ -4,7 +4,7 @@ import { placement } from '../assets/asset-frame';
 import type { AssetLibrary } from '../assets/asset-library';
 import type { Descriptor } from '../assets/descriptor';
 import { planClipAtlas, type AtlasPlan } from '../character/clip-atlas';
-import { RIG_OUTFIT, wearableOutfits } from '../character/outfits';
+import { CROWD_ROLES, RIG_OUTFIT, wearableOutfits } from '../character/outfits';
 import { bakeClipAtlas, type BakeSource, type CrowdRig } from '../render/crowd-rig';
 import { CrowdLayer } from '../render/crowd-layer';
 import { createCrowdMaterial, type CrowdSkinPlugin } from '../render/crowd-material';
@@ -50,12 +50,22 @@ export async function mountCrowd(
   capacity: number,
 ): Promise<CrowdMount | null> {
   // Descriptors first: a few KB each, and enough to plan the whole atlas before a single GLB is fetched.
+  // <b>All at once.</b> Awaiting them one at a time is one serial round trip per asset in the whole catalogue — not
+  // just per character — on the load path, for files of a few KB each.
   const described = new Map<string, Descriptor>();
-  for (const id of library.ids) {
-    try {
-      described.set(id, await library.describe(id));
-    } catch {
-      // A descriptor that will not fetch is a deployment fault for that asset alone; the rest of the crowd stands.
+  const fetched = await Promise.all(
+    library.ids.map(async (id) => {
+      try {
+        return [id, await library.describe(id)] as const;
+      } catch {
+        // A descriptor that will not fetch is a deployment fault for that asset alone; the rest of the crowd stands.
+        return null;
+      }
+    }),
+  );
+  for (const entry of fetched) {
+    if (entry !== null) {
+      described.set(entry[0], entry[1]);
     }
   }
 
@@ -72,6 +82,25 @@ export async function mountCrowd(
   }
 
   const plan = planClipAtlas(described, joints);
+
+  // <b>Every outfit must resolve every driven role, checked here, once.</b> `plan.slotOf` returning null is the
+  // quietest failure this design has: the layer skips `play`, the clip slot stays zero, the shader reads a frame
+  // count of zero and every vertex of that body collapses to a point — with the draw calls, the instance counts and
+  // the tier totals all still correct. It is one renamed catalogue id away, because {@link RIG_OUTFIT} is a literal:
+  // lose `casual_male` and the atlas plans zero rows while everything downstream reports health.
+  const unresolved: string[] = [];
+  for (const id of wearable) {
+    for (const role of CROWD_ROLES) {
+      if (plan.slotOf(id, role) === null) {
+        unresolved.push(`${id}/${role}`);
+      }
+    }
+  }
+
+  if (unresolved.length > 0) {
+    console.warn(`crowd: ${String(unresolved.length)} outfit/role pairs have no atlas row, starting ${unresolved[0]}; the crowd stands down`);
+    return null;
+  }
 
   // ---- the bake: load only the outfits the plan names as sources ------------------------------------------------
   const sources = new Map<string, BakeSource>();
@@ -112,7 +141,7 @@ export async function mountCrowd(
         // Height from this outfit's own render bounds. A constant would be wrong for every outfit but one, and it
         // drives the projected-size tier, the cull sphere AND the clip rate.
         const height = descriptor.bounds.render[1][1];
-        outfits.push(buildCrowdOutfit(scene, instance, rig, material, height, id));
+        outfits.push(buildCrowdOutfit(scene, instance, rig, material, height, id, descriptor.render.lods ?? null));
         outfitDescriptors.push(descriptor);
       } finally {
         instance.dispose();

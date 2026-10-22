@@ -80,11 +80,16 @@ import { nextTravel } from './travel';
 /**
  * How far from the camera a structure is drawn as its published asset, in metres.
  *
- * Past this it is the renderer's own shape, which is what every structure was before the asset pipeline. The figure is
- * about a city block: far enough that the street ahead is built before the viewer reaches it, near enough that a city's
- * worth of GLBs is not resident at once.
+ * Past this it is the renderer's own shape — the box every structure was before the asset pipeline. The figure used to
+ * be 220 m, about a city block, because a placement cost its FULL geometry however small it was on screen; a town's
+ * worth of them at full detail was not affordable and the box was the honest fallback.
+ *
+ * <b>Levels of detail are what make this figure a different question.</b> A `tat_house_large` past 166 m is its 721
+ * triangle LOD2, a thirty-ninth of what it was, so the range is now set by how far a session HOLDS structures rather
+ * than by what they cost. 1 280 m is the demo's own `playerMaxRadiusM`: past it the server is not sending them, so
+ * nothing is drawn as a box that could have been drawn as a building.
  */
-const STATIC_ASSET_RANGE_M = 220;
+const STATIC_ASSET_RANGE_M = 1280;
 
 const STATS_INTERVAL_MS = 250;
 const REGION_INTERVAL_MS = 200;
@@ -200,6 +205,7 @@ class MutableFrameView implements FrameView {
   hidden: ReadonlySet<number> = NONE_HIDDEN;
   crowd: CrowdBody[] | null = null;
   crowdDraws = false;
+  crowdCount = 0;
   perSecond = 1;
 }
 
@@ -1907,6 +1913,10 @@ export class ClientApp {
       hidden.add(avatar);
     }
 
+    this.assetView.eyeX = cam.eyeX;
+    this.assetView.eyeY = cam.eyeY;
+    this.assetView.eyeZ = cam.eyeZ;
+    this.assetView.pixelsPerMetre = view.pixelsPerMetre;
     for (const netId of this.updateStaticAssets(cam.eyeX, cam.eyeZ)) {
       hidden.add(netId);
     }
@@ -1918,7 +1928,9 @@ export class ClientApp {
     // near band into this array instead of writing a box. A second pass would evaluate every body twice.
     const crowd = this.crowd;
     const bodies = this.crowdBodies;
-    bodies.length = 0;
+    // Not `length = 0`: the records are pooled and reused, so the array keeps its capacity and `crowdCount` is what
+    // says how many of them this frame filled.
+    view.crowdCount = 0;
     view.crowd = crowd === null ? null : bodies;
     view.perSecond = 1000 / this.clock.tickPeriodMs;
     view.crowdDraws = crowd?.layer.isDrawing ?? false;
@@ -1932,6 +1944,7 @@ export class ClientApp {
       // clips' own speeds, which is the same thing the avatar does.
       crowd.layer.update(
         bodies,
+        view.crowdCount,
         view,
         now / 1000,
         live?.selfNumber('walkMps') ?? Number.NaN,
@@ -2464,13 +2477,12 @@ export class ClientApp {
     if (archetype < 0) {
       // Still told, with nothing: a frame that skipped the call would leave the placed instances standing AND stop
       // reporting them as hidden, so every one of them would be drawn twice.
-      this.structureSamples.length = 0;
-      return layer.update(this.structureSamples);
+      return layer.update(this.structureSamples, 0, this.assetView);
     }
 
     const store = this.world.archetypeStore(archetype);
     const samples = this.structureSamples;
-    samples.length = 0;
+    let taken = 0;
     const kindField = store.fieldIndex('kind');
     const yawField = store.fieldIndex('yaw');
     const assetField = store.fieldIndex('asset');
@@ -2493,23 +2505,36 @@ export class ClientApp {
           continue;
         }
 
-        samples.push({
-          netId: store.netIds[slot],
-          x: at.x,
-          y: altitudeOf(ground, slot, at, this.field),
-          z: at.z,
-          kind: kinds[slot],
-          yaw: yaws === null ? 0 : yaws[slot],
-          asset: assets === null ? -1 : assets[slot],
-        });
+        // Into the record already there: the array keeps its capacity across frames, which is what the field's own
+        // comment asks for and what a fresh literal per structure per frame was not doing.
+        if (taken >= samples.length) {
+          samples.push({ netId: 0, x: 0, y: 0, z: 0, kind: 0, yaw: 0, asset: -1 });
+        }
+
+        const sample = samples[taken++];
+        sample.netId = store.netIds[slot];
+        sample.x = at.x;
+        sample.y = altitudeOf(ground, slot, at, this.field);
+        sample.z = at.z;
+        sample.kind = kinds[slot];
+        sample.yaw = yaws === null ? 0 : yaws[slot];
+        sample.asset = assets === null ? -1 : assets[slot];
       }
     }
 
-    return layer.update(samples);
+    return layer.update(samples, taken, this.assetView);
   }
 
   /** Reused each frame: the structures in range, which is tens of entries and must not allocate. */
   private readonly structureSamples: StructureSample[] = [];
+
+  /**
+   * Reused each frame: where the camera is, in PLANET metres, for the structures' detail level.
+   *
+   * Planet rather than render space because that is the frame the samples themselves are read in — the origin is
+   * subtracted when a thing is handed to the renderer, and a structure's instance carries its own planet placement.
+   */
+  private readonly assetView = { eyeX: 0, eyeY: 0, eyeZ: 0, pixelsPerMetre: 0 };
 
   /** The netIds the packer must skip this frame, rewritten in place. */
   private readonly hidden = new Set<number>();
