@@ -102,6 +102,7 @@ public static class WorldRebuild
 
         // Grown on demand: the door count is a property of the world on disk, and trusting the map's count here would make a mismatch invisible.
         var doors = new (float X, float Z)[16];
+        var facings = new (byte Yaw, byte Asset)[16];
         var doorsSeen = new bool[16];
         var maxDoor = -1;
 
@@ -151,10 +152,12 @@ public static class WorldRebuild
                     {
                         var grown = Math.Max(st.PortalIndex + 1, doors.Length * 2);
                         Array.Resize(ref doors, grown);
+                        Array.Resize(ref facings, grown);
                         Array.Resize(ref doorsSeen, grown);
                     }
 
                     doors[st.PortalIndex] = (x, z);
+                    facings[st.PortalIndex] = ((byte)st.Yaw, (byte)st.Asset);
                     doorsSeen[st.PortalIndex] = true;
                     maxDoor = Math.Max(maxDoor, st.PortalIndex);
                 }
@@ -184,6 +187,7 @@ public static class WorldRebuild
             }
 
             index.Portals.Add(doors[j]);
+            index.PortalFacings.Add(facings[j]);
         }
     }
 

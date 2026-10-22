@@ -34,11 +34,22 @@ public sealed class ProximityChecks
     /// A player's half-extent, as <c>WorldBuilder</c> builds one.
     /// </summary>
     /// <remarks>
-    /// One metre, not the half-metre an earlier version of this fixture used and attributed to the world: 0.5 is the city
-    /// NPC's. It matters because every grown-box case below is 2 m wider than it looks, and the planner's street between two
-    /// structures is 2 m — so at the real radius the grown boxes abut exactly, which is the case that broke the push.
+    /// <b>The world's constant, because this fixture claims to be testing the body the world has.</b> It said one metre and
+    /// argued for it against an earlier half-metre — and by then <c>WorldBuilder</c> had moved to
+    /// <see cref="TatooineData.PlayerBodyHalfM"/>, so the fixture was exercising a body three times the real one while its
+    /// own comment asserted otherwise. The geometry that argument was protecting is worth keeping and is pinned on its own
+    /// terms in <see cref="Abutting"/>, where it is a property of the GEOMETRY rather than a claim about the player.
     /// </remarks>
-    private const float Half = 1f;
+    private const float Half = TatooineData.PlayerBodyHalfM;
+
+    /// <summary>
+    /// The half-extent at which two structures either side of the planner's 2 m street have their grown boxes abut exactly.
+    /// </summary>
+    /// <remarks>
+    /// Kept because that abutment is the case that once broke the push-out, and it is a fact about the street and the
+    /// growth rule rather than about any particular body: a body of this size is the one that meets it.
+    /// </remarks>
+    private const float Abutting = 1f;
 
     /// <summary>Wide enough that no geometry case here is clamped by the world edge.</summary>
     private const float WorldHalf = 10_000f;
@@ -125,9 +136,10 @@ public sealed class ProximityChecks
     [Test]
     public void ABodyBetweenTwoFootprintsTooCloseToStandBetween_IsReportedUnresolved()
     {
-        // A 1.6 m gap, which a 2 m body cannot occupy: the grown boxes overlap by 0.4 m.
-        ProximityBox[] alley = [Box(0f, 0f, 10f, 10f), Box(11.6f, 0f, 21.6f, 10f)];
-        var x = 10.8f;
+        // A 0.4 m gap, which the 0.6 m body cannot occupy: the grown boxes overlap by 0.2 m. The figures are the body's,
+        // so they moved when the body did — an alley is only too narrow relative to what is walking down it.
+        ProximityBox[] alley = [Box(0f, 0f, 10f, 10f), Box(10.4f, 0f, 20.4f, 10f)];
+        var x = 10.2f;
         var z = 5f;
         Assert.That(SimBridge.PushOutForTest(alley, Half, WorldHalf, ref x, ref z, out var stuck), Is.True);
         Assert.That(stuck, Is.True, "an alley narrower than the body resolved cleanly, which cannot be true");
@@ -305,11 +317,12 @@ public sealed class ProximityChecks
             Assert.That(SimBridge.DiscHolds(in disc, RealmId.Default, 0, 104f, 100f, Half), Is.True, "four metres inside a ten-metre disc");
             Assert.That(SimBridge.DiscHolds(in disc, RealmId.Default, 0, 112f, 100f, Half), Is.False, "two metres outside it");
 
-            // The disc measures to a SURFACE, so the body's own radius is what it may not spend: nine metres from a
-            // ten-metre disc leaves one, which a body one metre in radius has exactly used up.
-            Assert.That(SimBridge.DiscHolds(in disc, RealmId.Default, 0, 109.5f, 100f, Half), Is.False,
-                "9.5 m from the anchor leaves 0.5 m to a surface 10 m away, which a body 1 m in radius has already crossed");
-            Assert.That(SimBridge.DiscHolds(in disc, RealmId.Default, 0, 108f, 100f, Half), Is.True, "eight metres leaves two, and the body needs one");
+            // The disc measures to a SURFACE, so the body's own half-extent is what it may not spend. Written against the
+            // constant rather than against numbers that quietly assume a particular body: 0.2 m of slack is less than the
+            // body needs whatever the body is, and 2 m is more.
+            Assert.That(SimBridge.DiscHolds(in disc, RealmId.Default, 0, 100f + (10f - Half) + 0.2f, 100f, Half), Is.False,
+                "the remaining gap to the surface is smaller than the body's own half-extent, so the body has already crossed it");
+            Assert.That(SimBridge.DiscHolds(in disc, RealmId.Default, 0, 108f, 100f, Half), Is.True, "eight metres leaves two, and the body needs less");
         });
     }
 
@@ -695,21 +708,30 @@ public sealed class ProximityChecks
     }
 
     /// <summary>
-    /// The scripted crowd is not collided.
+    /// The scripted crowd is collided, and <c>--no-collide-crowd</c> is what stops it.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <b>This asserted the opposite, and the opposite was the default until 2026-10-22.</b> The crowd walked through
+    /// walls because it was drawn as boxes and nobody could see it; it is drawn as people now, so it collides. The
+    /// behaviour this fixture was built to pin is still worth pinning — it is just the flagged arm rather than the
+    /// default one, and both are checked here so neither can drift without a failure.
+    /// </para>
+    /// <para>
     /// Compared against the ticks the runtime actually <b>ran</b>, not the window the configuration asked for: the runtime
     /// overshoots by a dozen ticks or so, and an earlier version spent most of its slack on that overshoot and would have
     /// failed on a loaded box with a message blaming the controller gate.
+    /// </para>
     /// </remarks>
     [Test]
     [Category("Integration")]
-    public void TheScriptedCrowdIsNotCollided()
+    public void TheScriptedCrowdIsCollided_AndTheFlagStopsIt()
     {
         var dir = Worlds.NewDirectory();
         try
         {
             var config = Config(dir, 200);
+            config.CollideCrowd = false;
             using var sim = new TatooineSim(config);
             sim.Initialize();
 
@@ -727,8 +749,21 @@ public sealed class ProximityChecks
                 Assert.That(players, Is.GreaterThan(1), "a world with one player cannot show that the crowd is left alone");
                 Assert.That(steps, Is.GreaterThan(0), "the possessed body never took a step, so nothing was measured");
                 Assert.That(steps, Is.LessThanOrEqualTo(sim.Executed),
-                    $"{steps} colliding steps over {sim.Executed} ticks for one possessed body: the crowd is being collided too");
+                    $"--no-collide-crowd, yet {steps} colliding steps over {sim.Executed} ticks for one possessed body: the crowd is being collided too");
             });
+
+            // And the default, which is the arm the world actually runs in: every body is on the collision path, so the
+            // step count is a multiple of the population rather than of the one body a client is driving.
+            var defaults = Config(Worlds.NewDirectory(), 200);
+            using var collided = new TatooineSim(defaults);
+            collided.Initialize();
+            Drive(collided, collided.Index.Players[0], 0f, 0f, step, 0f);
+            collided.Run();
+            var (heldAll, refreshedAll, _, _, _, _, _) = collided.ProximityTotals;
+            var all = heldAll + refreshedAll;
+            TestContext.Out.WriteLine($"colliding by default: {all} steps over {collided.Executed} ticks, {collided.Index.Players.Count} players");
+            Assert.That(all, Is.GreaterThan(collided.Executed * 2),
+                $"the crowd collides by default, so {all} steps over {collided.Executed} ticks is barely more than the one possessed body would make alone");
         }
         finally
         {

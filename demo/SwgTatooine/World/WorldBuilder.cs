@@ -117,12 +117,19 @@ public static class WorldBuilder
                         // reopened from disk can rebuild the same list in the same order (P-2) — the realm a door leads to depends on this index.
                         portalIndex = index.Portals.Count;
                         index.Portals.Add((x, z));
+                        // Filled below, once SpawnStructure has drawn the turn and the asset. See WorldIndex.PlaceDoors.
+                        index.PortalFacings.Add((0, 0));
                     }
 
                     // The entity's bounds are its FOOTPRINT, not a uniform 12 m for every kind. They used to be the latter, which
                     // made the dome and a terminal the same size to every spatial query and to anything asking what stands at a
                     // point -- and collision has to ask exactly that.
-                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), half, kind, ownerRegion: cityIndex + 1, tickPeriod: 0, ref rng, portalIndex);
+                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), half, kind, ownerRegion: cityIndex + 1, tickPeriod: 0, ref rng, out var turned,
+                        portalIndex);
+                    if (portalIndex >= 0)
+                    {
+                        index.PortalFacings[portalIndex] = turned;
+                    }
                     census.StaticObjects++;
                 }
 
@@ -338,7 +345,7 @@ public static class WorldBuilder
                 for (var i = 0; i < poi.Props; i++)
                 {
                     var (x, z, _) = plan.Place(ref rng, poi.X, poi.Z, poi.Radius, propHalf);
-                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), propHalf, StructureKind.PoiProp, ownerRegion: poiIndex + 1, tickPeriod: 0, ref rng);
+                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), propHalf, StructureKind.PoiProp, ownerRegion: poiIndex + 1, tickPeriod: 0, ref rng, out _);
                     census.StaticObjects++;
                 }
 
@@ -583,7 +590,7 @@ public static class WorldBuilder
                 }
 
                 // ownerRegion 0: these stand in the wild, and 0 is how Structure.OwnerRegion spells "no region" now that it is a sparse index's key.
-                SpawnStructure(tx, x, z, terrain.GroundAt(x, z), half, kind, ownerRegion: 0, tickPeriod: period, ref rng);
+                SpawnStructure(tx, x, z, terrain.GroundAt(x, z), half, kind, ownerRegion: 0, tickPeriod: period, ref rng, out _);
                 census.PlayerStructures++;
             }
 
@@ -907,7 +914,7 @@ public static class WorldBuilder
     /// buildings and the props inside an interior, and an interior's floor is 0 rather than the planet's relief.
     /// </param>
     private static void SpawnStructure(Transaction tx, float x, float z, float groundY, float halfExtent, int kind, int ownerRegion, int tickPeriod,
-        ref Rng rng, int portalIndex = -1)
+        ref Rng rng, out (byte Yaw, byte Asset) turned, int portalIndex = -1)
     {
         var bounds = default(StructurePlacement);
         bounds.SetAt(x, z, groundY, halfExtent);
@@ -925,6 +932,8 @@ public static class WorldBuilder
             // Staggered, so the economy does not arrive as a once-a-minute spike that the median tick never sees.
             TickCountdown = tickPeriod == 0 ? 0 : rng.NextInt(1, tickPeriod),
         };
+        // Handed back rather than re-read: both are drawn from the world's RNG here, and a door needs them to find its doorway.
+        turned = ((byte)s.Yaw, (byte)s.Asset);
         tx.Spawn<WorldObject>(
             WorldObject.Bounds.Set(in bounds),
             WorldObject.Struct.Set(in s),

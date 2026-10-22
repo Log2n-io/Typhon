@@ -58,7 +58,6 @@ public sealed class RealmCostChecks
         config.TickRateHz = 40;
         config.WorkerCount = 2;
         config.Planets = 2;
-        config.Interiors = true;
         config.Space = true;
 
         // The two rate knobs this fixture reads back: planet 1 and space are unobserved, so they run at their divisor, and planet 0 — where the sessions are —

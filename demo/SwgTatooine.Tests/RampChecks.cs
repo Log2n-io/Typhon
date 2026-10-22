@@ -27,8 +27,8 @@ public sealed class RampChecks
     /// <summary>The structure this fixture's ramp belongs to.</summary>
     private static readonly EntityId House = EntityId.FromRawValue(31);
 
-    /// <summary>The body's half-extent, a player's.</summary>
-    private const float Half = 1f;
+    /// <summary>The body's half-extent, a player's — the world's own constant, not a figure repeated here.</summary>
+    private const float Half = TatooineData.PlayerBodyHalfM;
 
     /// <summary>The desert the ramp rises out of, in metres above sea level.</summary>
     private const float Terrain = -1f;

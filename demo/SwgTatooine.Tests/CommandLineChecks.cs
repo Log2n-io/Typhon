@@ -427,14 +427,13 @@ public sealed class CommandLineChecks
     [Test]
     public void AWellFormedLineParses()
     {
-        var config = CommandLine.Parse(["--hz", "20", "--pop", "2.5", "--serve", "9001", "--max-clients", "4", "--interiors"]);
+        var config = CommandLine.Parse(["--hz", "20", "--pop", "2.5", "--serve", "9001", "--max-clients", "4"]);
         Assert.Multiple(() =>
         {
             Assert.That(config.TickRateHz, Is.EqualTo(20));
             Assert.That(config.PopulationScale, Is.EqualTo(2.5f));
             Assert.That(config.ServePort, Is.EqualTo(9001));
             Assert.That(config.MaxClients, Is.EqualTo(4));
-            Assert.That(config.Interiors, Is.True);
             Assert.That(config.HelpText, Is.Null, "a line that is not asking for help gets a configuration");
         });
     }

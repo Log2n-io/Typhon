@@ -241,7 +241,6 @@ public sealed class ChatChecks
     public void ChatIsHeardWithinFiftyMetresAndOnlyInTheSpeakersRealm()
     {
         var config = Config();
-        config.Interiors = true;
         using var sim = new TatooineSim(config);
         sim.Initialize();
         _harness = new SessionHarness(sim);

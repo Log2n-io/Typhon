@@ -334,7 +334,8 @@ public sealed partial class TatooineSim : IDisposable
         TatooineReplication.ViewableRealms = 1;
 
         Map = TatooineMap.Build(_config);
-        InteriorsPerPlanet = _config.Interiors ? WorldBuilder.CountEnterable(Map) : 0;
+        // Every enterable building has one. See SimConfig.InteriorNpcs for why this stopped being a switch.
+        InteriorsPerPlanet = WorldBuilder.CountEnterable(Map);
         var realms = _config.Planets * (1 + InteriorsPerPlanet);
         SpaceRealm = _config.Space ? realms++ : -1;
 

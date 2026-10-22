@@ -93,6 +93,7 @@ public sealed partial class TatooineSim
         // The same shapes the served path collides against. A measured run is the only way to put thousands of bodies
         // on the collision path (--collide-crowd), and without this it would measure the footprint fallback instead.
         var shapes = AssetShapesOverride ?? LoadAssetColliders(OpenAssetOrigin());
+        PlaceDoors(shapes);
 
         _bridge = new SimBridge(_config, Map, Index)
         {

@@ -142,8 +142,15 @@ describe('structure collision', () => {
  * above where the authority has it, and the reconciler spends the session pulling it back down.
  */
 describe('walking a published ramp', () => {
-  /** A 1 m body, as the server publishes it. */
-  const HALF = 1;
+  /**
+   * The body's half-extent, as the server publishes it in `playerBodyHalfM`.
+   *
+   * <b>It must be the server's figure, because the whole point of this file is that the two agree step for step.</b> It
+   * said 1 m, and said the server published that, long after the server moved to 0.3 — so the client's half of the
+   * contract was being checked against a body three times too wide, which is exactly the disagreement a reconciler
+   * would have spent the session correcting.
+   */
+  const HALF = 0.3;
   /** The desert the ramp rises out of. */
   const TERRAIN = -1;
 

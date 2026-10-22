@@ -98,7 +98,6 @@ public sealed class RealmInventoryChecks
         {
             var config = Worlds.Small(dir);
             config.Planets = 2;
-            config.Interiors = true;
             config.Space = true;
 
             // Interiors stay simulated rather than sleeping, so this case sees them listed and the next one sees them
@@ -149,7 +148,6 @@ public sealed class RealmInventoryChecks
             config.Unpaced = false;
             config.TickRateHz = 40;
             config.WorkerCount = 1;
-            config.Interiors = true;
             config.Shuttles = false;
             config.InteriorSleepS = 0.1f;
 
@@ -203,7 +201,6 @@ public sealed class RealmInventoryChecks
         {
             var config = Worlds.Small(dir);
             config.Planets = 2;
-            config.Interiors = true;
             config.Space = true;
             config.Dungeons = 2;
 
@@ -274,7 +271,6 @@ public sealed class RealmInventoryChecks
         {
             var config = Worlds.Small(dir);
             config.Planets = 2;
-            config.Interiors = true;
 
             // Nothing sleeps, so every interior is awake and the cap has to bite.
             config.InteriorSleepS = 0f;

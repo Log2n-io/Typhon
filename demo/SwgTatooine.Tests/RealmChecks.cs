@@ -161,7 +161,6 @@ public sealed class PortalTests
         try
         {
             var config = Worlds.Small(dir);
-            config.Interiors = true;
             config.Shuttles = false;
             using var sim = new TatooineSim(config);
             sim.Initialize();
@@ -249,7 +248,6 @@ public sealed class OccupiedInteriorTests
     {
         _dir = Worlds.NewDirectory();
         var config = Worlds.Small(_dir);
-        config.Interiors = true;
         config.Shuttles = false;
         config.Dungeons = 0;
 
@@ -357,10 +355,18 @@ public sealed class GalaxyTests
         _dir = Worlds.NewDirectory();
         var config = Worlds.Small(_dir);
         config.Planets = 2;
-        config.Interiors = true;
         config.Space = true;
         config.InteriorShare = 1f;
         config.InteriorStayS = 15f;   // 15-60 s: some players are still inside when the run stops, and early ones have left
+
+        // <b>The crowd walks through walls here, deliberately.</b> What this fixture is about is the teleport system —
+        // that a crossing happens in every direction and the realm bookkeeping survives it — and the scripted crowd
+        // steers in a straight line at its destination with no way around an obstacle. With collision on (the default
+        // since 2026-10-22) a body whose door is behind another building walks into that building and stands there,
+        // which cut measured entries from 47 to 12 over 2 000 ticks and to zero in a window this short. That is a real
+        // limitation and it has its own work; letting it decide this fixture would turn a crossing test into a
+        // navigation test and it would fail for a reason it does not name.
+        config.CollideCrowd = false;
         config.ShuttleShare = 1f;
         config.ShuttleIntervalS = 2f;
         config.BoardingWindowS = 1f;

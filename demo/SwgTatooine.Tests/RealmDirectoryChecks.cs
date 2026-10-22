@@ -33,7 +33,6 @@ public sealed class RealmDirectoryChecks
         {
             var config = Worlds.Small(dir);
             config.Planets = 3;
-            config.Interiors = true;
             config.Space = true;
             config.Dungeons = 2;
 

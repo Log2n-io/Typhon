@@ -84,7 +84,6 @@ internal sealed class RealmScaleGalaxy : IDisposable
         var config = Worlds.Small(_dir);
         config.PopulationScale = population;
         config.Planets = planets;
-        config.Interiors = true;
 
         // Deliberately off: each would add a served realm on its own schedule. See the remarks.
         config.Space = false;

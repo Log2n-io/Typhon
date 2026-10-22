@@ -82,7 +82,6 @@ public static class CommandLine
         c.PopulationScale = r.Float("--pop", c.PopulationScale, "multiplier on every population count", min: 0.0001f);
         c.CellSizeM = r.Float("--cell", c.CellSizeM, "spatial cell edge, m; 0 derives 256 m scaled with the world", min: 0f);
         c.Planets = r.Int("--planets", c.Planets, "how many planet realms to build", min: 1);
-        c.Interiors = r.Switch("--interiors", "give buildings interior realms");
         c.InteriorNpcs = r.Int("--interior-npcs", c.InteriorNpcs, "NPCs per interior", min: 0);
         c.InteriorShare = r.Float("--interior-share", c.InteriorShare, "share of players that go indoors", min: 0f, max: 1f);
         c.InteriorStayS = r.Float("--interior-stay", c.InteriorStayS, "seconds a player stays indoors", min: 0.001f);

@@ -56,7 +56,6 @@ public sealed class RealmCrossingChecks
         config.TickRateHz = 40;
         config.WorkerCount = 1;
         config.Planets = 2;
-        config.Interiors = true;
         config.Shuttles = false;
 
         // <b>No dungeons, and the announcement case depends on it.</b> A dungeon opening or closing emits a RealmNews on planet 0's subtree too, which would

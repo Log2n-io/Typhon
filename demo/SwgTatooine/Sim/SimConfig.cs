@@ -118,13 +118,14 @@ public sealed class SimConfig
     public int Planets = 1;
 
     /// <summary>
-    /// Every city <c>Building</c> gets an interior: a realm of its own (one 64 m cell), a portal pair (the door on its planet ↔ the entrance inside) and
-    /// <see cref="InteriorNpcs"/> NPCs. Players walk in and out through a serial TeleportSystem. Off reproduces the simulation without interiors.
+    /// NPCs standing in each interior.
+    ///
+    /// <para><b>Every city building has an interior; it is not a switch any more.</b> It was <c>--interiors</c>, off, because interiors were a realms
+    /// feature being measured against a run without them — and a client that drew buildings as boxes had nothing to walk into anyway. Both ended: the client
+    /// draws the published building, the published asset carries a doorway and a room behind it, and a world whose doors open onto nothing is the one
+    /// version of this demo nobody wants to look at. Set <see cref="InteriorNpcs"/> to 0 for an empty room; there is no way to have no room.</para>
     /// </summary>
-    public bool Interiors;
-
-    /// <summary>NPCs standing in each interior. [EST] Per interior, NOT scaled by the population scale: an interior's crowd is a room's, whatever the
-    /// planet's population.</summary>
+    /// <remarks>Per interior, NOT scaled by the population scale: an interior's crowd is a room's, whatever the planet's population. [EST]</remarks> [EST] Per interior,</summary>
     public int InteriorNpcs = 3;
 
     /// <summary>
@@ -839,7 +840,7 @@ public sealed class SimConfig
     public string Label =>
         $"{WorldEdgeKm:N0}km x{PopulationScale:N1} cell={ResolveCellSize():N0}m floors={ClusterTargetExtentRatio:G}/{ClusterRepairExtentRatio:G} "
         + $"unit={RepairWorstClustersPerUnit} shuttles={(!Shuttles ? "off" : ShuttleBurst ? "burst" : "trickle")}{(Unpaced ? " unpaced" : "")}"
-        + $"{(Planets > 1 ? $" planets={Planets}" : "")}{(Interiors ? " interiors" : "")}{(Space ? " space" : "")}";
+        + $"{(Planets > 1 ? $" planets={Planets}" : "")}{(Space ? " space" : "")}";
 }
 
 /// <summary>How the awareness system drains its interest queries.</summary>

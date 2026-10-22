@@ -40,7 +40,6 @@ public sealed class RealmCensusChecks
         // of ticks. Nothing under test depends on the period beyond the cadence arithmetic, which is asserted directly.
         config.TickRateHz = 40;
         config.WorkerCount = 1;
-        config.Interiors = true;
         config.Shuttles = false;
         return config;
     }

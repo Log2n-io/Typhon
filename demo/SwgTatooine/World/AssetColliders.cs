@@ -204,6 +204,12 @@ public sealed class AssetColliders
     /// </remarks>
     internal float MaxOverhangM { get; private set; }
 
+    /// <summary>Each asset's published doorway, indexed as <see cref="StructureAssets.Table"/> counts them.</summary>
+    private DoorPlan[] _doorByIndex = [];
+
+    /// <summary>Each asset's room, same indexing.</summary>
+    private RoomPlan[] _roomByIndex = [];
+
     /// <summary>
     /// The overhang of each reserved footprint SIZE, so a gate can charge a structure its own asset's reach rather
     /// than the worst asset's.
@@ -356,6 +362,8 @@ public sealed class AssetColliders
 
         var wanted = new HashSet<string>(Verified, StringComparer.Ordinal);
         var catalogue = JsonDocument.Parse(File.ReadAllText(Path.Combine(origin.Directory, origin.CatalogueName)));
+        var doorByIndex = new DoorPlan[StructureAssets.Table.Length];
+        var roomByIndex = new RoomPlan[StructureAssets.Table.Length];
         var byIndex = new PlanBox[StructureAssets.Table.Length][];
         for (var i = 0; i < byIndex.Length; i++)
         {
@@ -381,7 +389,18 @@ public sealed class AssetColliders
                 var path = Path.Combine(origin.Directory, file.GetString() ?? string.Empty);
                 if (File.Exists(path))
                 {
-                    byIndex[index] = ReadBlocking(File.ReadAllText(path));
+                    var text = File.ReadAllText(path);
+                    byIndex[index] = ReadBlocking(text);
+                    doorByIndex[index] = ReadDoor(text, out var room, out var spawn);
+                    if (room != null && assets.TryGetProperty(room, out var roomEntry)
+                        && roomEntry.TryGetProperty("descriptor", out var roomFile))
+                    {
+                        var roomPath = Path.Combine(origin.Directory, roomFile.GetString() ?? string.Empty);
+                        if (File.Exists(roomPath))
+                        {
+                            roomByIndex[index] = ReadRoom(File.ReadAllText(roomPath), spawn);
+                        }
+                    }
                 }
             }
         }
@@ -389,6 +408,8 @@ public sealed class AssetColliders
         var colliders = new AssetColliders(byIndex);
         colliders._overhangByHalf = OverhangTableOf(byIndex);
         colliders.MaxOverhangM = OverhangOf(byIndex);
+        colliders._doorByIndex = doorByIndex;
+        colliders._roomByIndex = roomByIndex;
         return colliders;
     }
 
@@ -496,6 +517,157 @@ public sealed class AssetColliders
     /// read from a descriptor has to take the same mirror or it lands on the other side of the building from the wall
     /// it describes. Doing it at load means the per-contact path is a translate and a quarter turn.
     /// </remarks>
+    /// <summary>
+    /// The doorway an asset publishes, in its own local frame, or <see langword="default"/> when it has none.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The pack has always published this and the server has never read it.</b> A descriptor's <c>portals</c> array carries the door as a box —
+    /// centre, half extents and the local axis a body crosses it along — and <c>WorldIndex.Portals</c> stored the building's OWN position instead. That was
+    /// invisible while the scripted crowd walked through walls: it arrived at the centre of the building, which is where the door was said to be. The moment
+    /// the crowd started colliding, every body stopped at the wall three metres short of its door and no interior was ever entered again.</para>
+    /// <para><b>Only the first.</b> Every enterable asset in this pack publishes exactly one, and a second would need a rule for choosing between them that
+    /// nothing in the world yet has — the realm a door leads to is its index, and an asset with two doors is two realms or one, both of which are a design
+    /// decision rather than a parsing one.</para>
+    /// </remarks>
+    /// <param name="CenterX">Local X of the doorway's centre.</param>
+    /// <param name="CenterZ">Local Z.</param>
+    /// <param name="HalfX">Half width.</param>
+    /// <param name="HalfZ">Half depth, which is how thick the slab a body crosses is.</param>
+    /// <param name="Exists">Whether this asset publishes a door at all.</param>
+    internal readonly record struct DoorPlan(float CenterX, float CenterZ, float HalfX, float HalfZ, bool Exists);
+
+    /// <summary>
+    /// The room a door leads to, in the room own local frame: where a body arrives, and the way back out.
+    /// </summary>
+    /// <remarks>
+    /// <b>Read from the interior asset the door names, not invented.</b> A structure portal publishes a target and a target spawn; the asset it names
+    /// opens with a spawn to arrive at and a portal of its own leading back. Before this the server had no room data at all, which is why the client draws
+    /// a generic box and says so in InteriorProfile.
+    /// </remarks>
+    /// <param name="EntryX">Local X of the point a body arrives at.</param>
+    /// <param name="EntryZ">Local Z.</param>
+    /// <param name="DoorX">Local X of the doorway leading back out.</param>
+    /// <param name="DoorZ">Local Z.</param>
+    /// <param name="DoorHalfX">Half width of that doorway.</param>
+    /// <param name="DoorHalfZ">Half depth.</param>
+    /// <param name="Exists">Whether the door named a room this could be read from.</param>
+    internal readonly record struct RoomPlan(
+        float EntryX,
+        float EntryZ,
+        float DoorX,
+        float DoorZ,
+        float DoorHalfX,
+        float DoorHalfZ,
+        bool Exists);
+
+    /// <summary>The room behind an asset door, or a <see cref="RoomPlan"/> whose Exists is false.</summary>
+    /// <param name="assetIndex">The asset, indexed as <see cref="StructureAssets.Table"/> counts them.</param>
+    /// <returns>The room.</returns>
+    internal RoomPlan RoomFor(int assetIndex) =>
+        (uint)assetIndex < (uint)_roomByIndex.Length ? _roomByIndex[assetIndex] : default;
+
+    /// <summary>The doorway published for an asset, or a <see cref="DoorPlan"/> whose <c>Exists</c> is false.</summary>
+    /// <param name="assetIndex">The asset, indexed as <see cref="StructureAssets.Table"/> counts them.</param>
+    /// <returns>The door.</returns>
+    internal DoorPlan DoorFor(int assetIndex) =>
+        (uint)assetIndex < (uint)_doorByIndex.Length ? _doorByIndex[assetIndex] : default;
+
+    /// <summary>How many assets publish a door, for the boot line.</summary>
+    internal int DoorCount
+    {
+        get
+        {
+            var n = 0;
+            foreach (var door in _doorByIndex)
+            {
+                n += door.Exists ? 1 : 0;
+            }
+
+            return n;
+        }
+    }
+
+    /// <summary>Reads the first doorway an asset publishes.</summary>
+    /// <param name="json">The descriptor.</param>
+    /// <returns>The door, or one whose <c>Exists</c> is false.</returns>
+    internal static DoorPlan ReadDoor(string json) => ReadDoor(json, out _, out _);
+
+    /// <summary>Reads the first doorway an asset publishes, and which room it names.</summary>
+    /// <param name="json">The descriptor.</param>
+    /// <param name="target">The asset id of the room behind it, or null.</param>
+    /// <param name="targetSpawn">The spawn in that room a body arrives at, or null.</param>
+    /// <returns>The door, or one whose Exists is false.</returns>
+    internal static DoorPlan ReadDoor(string json, out string target, out string targetSpawn)
+    {
+        target = null;
+        targetSpawn = null;
+        using var doc = JsonDocument.Parse(json);
+        if (!doc.RootElement.TryGetProperty("portals", out var portals) || portals.ValueKind != JsonValueKind.Array)
+        {
+            return default;
+        }
+
+        foreach (var portal in portals.EnumerateArray())
+        {
+            if (!portal.TryGetProperty("center", out var centre) || centre.ValueKind != JsonValueKind.Array || centre.GetArrayLength() < 3
+                || !portal.TryGetProperty("half", out var half) || half.ValueKind != JsonValueKind.Array || half.GetArrayLength() < 3)
+            {
+                continue;
+            }
+
+            target = portal.TryGetProperty("target", out var t) ? t.GetString() : null;
+            targetSpawn = portal.TryGetProperty("target_spawn", out var ts) ? ts.GetString() : null;
+            return new DoorPlan(
+                centre[0].GetSingle(),
+                centre[2].GetSingle(),
+                half[0].GetSingle(),
+                half[2].GetSingle(),
+                true);
+        }
+
+        return default;
+    }
+
+    /// <summary>Reads a room: the named spawn to arrive at, and the first portal leading back out.</summary>
+    /// <param name="json">The interior asset descriptor.</param>
+    /// <param name="spawnId">Which spawn a body arrives at; the first is used when it is not found.</param>
+    /// <returns>The room, or one whose Exists is false.</returns>
+    internal static RoomPlan ReadRoom(string json, string spawnId)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var entryX = 0f;
+        var entryZ = 0f;
+        var haveEntry = false;
+        if (doc.RootElement.TryGetProperty("spawns", out var spawns) && spawns.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var spawn in spawns.EnumerateArray())
+            {
+                if (!spawn.TryGetProperty("pos", out var pos) || pos.ValueKind != JsonValueKind.Array || pos.GetArrayLength() < 3)
+                {
+                    continue;
+                }
+
+                var named = spawn.TryGetProperty("id", out var id) && string.Equals(id.GetString(), spawnId, StringComparison.Ordinal);
+                if (named || !haveEntry)
+                {
+                    entryX = pos[0].GetSingle();
+                    entryZ = pos[2].GetSingle();
+                    haveEntry = true;
+                }
+
+                if (named)
+                {
+                    break;
+                }
+            }
+        }
+
+        var back = ReadDoor(json);
+        return haveEntry && back.Exists
+            ? new RoomPlan(entryX, entryZ, back.CenterX, back.CenterZ, back.HalfX, back.HalfZ, true)
+            : default;
+    }
+
     internal static PlanBox[] ReadBlocking(string json)
     {
         using var doc = JsonDocument.Parse(json);

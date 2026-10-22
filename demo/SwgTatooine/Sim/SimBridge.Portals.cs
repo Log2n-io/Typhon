@@ -124,6 +124,93 @@ public sealed partial class SimBridge
             Math.Clamp(portZ + (MathF.Sin(a) * r), -half, half), halfExtent, CrossingKind.InterPlanet));
     }
 
+    /// <summary>A doorway in the frame a body walks in, as the crossing test needs it.</summary>
+    /// <param name="CenterX">Where the opening is.</param>
+    /// <param name="CenterZ">Where the opening is.</param>
+    /// <param name="ForwardX">Unit vector through the door, the way a body crosses it.</param>
+    /// <param name="ForwardZ">Unit vector through the door.</param>
+    /// <param name="HalfX">Half the opening width, across the forward.</param>
+    private readonly record struct DoorPlane(float CenterX, float CenterZ, float ForwardX, float ForwardZ, float HalfX);
+
+    /// <summary>
+    /// Whether a step crossed a doorway, going in.
+    /// </summary>
+    /// <param name="door">The doorway.</param>
+    /// <param name="fromX">Where the body stood after the previous step resolved.</param>
+    /// <param name="fromZ">Where the body stood after the previous step resolved.</param>
+    /// <param name="toX">Where it stands after this one resolved.</param>
+    /// <param name="toZ">Where it stands after this one resolved.</param>
+    /// <returns>Whether it went through.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>A directed crossing of the doorway's mid-plane, not "is the body inside the doorway box".</b> The published opening is 0.8 m deep and the tick
+    /// is 10 Hz, so a sampled test is a function of speed: a run covers 0.50 m in a tick and fits, a burst run covers 0.91 m and can be in front of the
+    /// opening on one tick and behind it on the next without ever being inside it, and a mount at 1.20 m never fits at all. The door would have worked for
+    /// a walker and failed silently for anyone in a hurry. A segment against the plane is tick-rate independent, and it is what the physics session asked
+    /// for when it was shown the sampled version.
+    /// </para>
+    /// <para>
+    /// <b>Direction is what makes it need no state.</b> Crossing counts only from the outside face to the inside one, so a body that stops in a doorway and
+    /// turns round leaves against the forward and does not fire; and the arrival spawn on the far side is published clear of the twin opening (0.65 m
+    /// outside it going out, 0.8 m going in), so an arrival cannot re-trigger. No per-body armed flag, which the testbench needed because it tested
+    /// containment.
+    /// </para>
+    /// <para>
+    /// <b>In the plane, not in the volume — so the height of the probe does not enter.</b> The published opening spans 0.7 m to 3.75 m in asset space with
+    /// the threshold at 0.7, so a body's feet sit exactly on the bottom face and a containment test has to probe the mid-body to be stable. A plane test in
+    /// the ground plane has no such sensitivity. What it does assume is that a body cannot be at a door's position and at another altitude: true while
+    /// every published door is at ground level and the collision pass keeps bodies out of walls, and false the day a building has a balcony door.
+    /// </para>
+    /// </remarks>
+    private static bool CrossedDoor(in DoorPlane door, float fromX, float fromZ, float toX, float toZ)
+    {
+        var d0 = ((fromX - door.CenterX) * door.ForwardX) + ((fromZ - door.CenterZ) * door.ForwardZ);
+        var d1 = ((toX - door.CenterX) * door.ForwardX) + ((toZ - door.CenterZ) * door.ForwardZ);
+        if (d0 >= 0f || d1 < 0f)
+        {
+            return false;
+        }
+
+        // Where the step met the plane, and how far off the middle of the opening that was: a body walking past the wall beside a door must not enter it.
+        var t = d0 / (d0 - d1);
+        var px = fromX + ((toX - fromX) * t);
+        var pz = fromZ + ((toZ - fromZ) * t);
+        var lateral = ((px - door.CenterX) * -door.ForwardZ) + ((pz - door.CenterZ) * door.ForwardX);
+        return MathF.Abs(lateral) <= door.HalfX;
+    }
+
+    /// <summary>The doorway of planet <paramref name="planet"/>'s portal <paramref name="portal"/>, in planet coordinates.</summary>
+    /// <param name="planet">The planet realm.</param>
+    /// <param name="portal">The portal index.</param>
+    /// <returns>The doorway, or null when the asset publishes none.</returns>
+    private DoorPlane? PlanetDoor(ushort planet, int portal)
+    {
+        var index = PlanetIndexes[planet];
+        if ((uint)portal >= (uint)index.Portals.Count || AssetShapes == null)
+        {
+            return null;
+        }
+
+        var (yaw, asset) = index.PortalFacings[portal];
+        var plan = AssetShapes.DoorFor(asset);
+        if (!plan.Exists)
+        {
+            return null;
+        }
+
+        // The published forward is -Z in schema 1, turned by the quarter the building was spawned at.
+        var (fx, fz) = yaw switch
+        {
+            1 => (1f, 0f),
+            2 => (0f, 1f),
+            3 => (-1f, 0f),
+            _ => (0f, -1f),
+        };
+
+        var (cx, cz) = index.Portals[portal];
+        return new DoorPlane(cx, cz, fx, fz, plan.HalfX);
+    }
+
     /// <summary>At the door: queue the crossing into portal <see cref="PlayerState.ShuttleDest"/>'s interior on planet <paramref name="planet"/>.</summary>
     private void EnterPortal(ref PlayerState state, EntityId id, ushort planet, float halfExtent, uint salt)
     {

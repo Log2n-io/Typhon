@@ -432,7 +432,6 @@ public sealed class SpectateChecks
     public void ReleasingLeavesTheViewerWhereTheSubjectWas()
     {
         var config = Config();
-        config.Interiors = true;
         using var sim = new TatooineSim(config);
         sim.Initialize();
         _harness = new SessionHarness(sim);
