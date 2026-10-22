@@ -1,6 +1,6 @@
 import '@babylonjs/core/Meshes/thinInstanceMesh';
 import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial';
-import { Vector2, Vector3 } from '@babylonjs/core/Maths/math.vector';
+import { Vector2 } from '@babylonjs/core/Maths/math.vector';
 import type { Mesh } from '@babylonjs/core/Meshes/mesh';
 import type { Scene } from '@babylonjs/core/scene';
 import type { ArchetypeStore } from '@typhondb/client';
@@ -10,6 +10,7 @@ import { PrefixUploader } from './prefix-upload';
 import { SCENE_GROUP } from './render-groups';
 import { ENTITY_FRAGMENT, ENTITY_VERTEX, SPRITE_FRAGMENT, SPRITE_VERTEX } from './shaders';
 import { SELECTED_MESH_SCALE, SELECTED_SPRITE_SCALE, type LayerStyle } from './styles';
+import { SUN_DIRECTION } from './sun';
 import {
   packedStyle,
   pickInstances,
@@ -23,7 +24,7 @@ import {
 export type { FrameView, PredictedOverride } from './layer-packer';
 export type { PickHit, PickRay } from './view-math';
 
-const SUN = new Vector3(-0.45, -0.8, -0.4).normalize();
+const SUN = SUN_DIRECTION;
 
 /**
  * One archetype on screen: the {@link LayerPacker} evaluates, culls, bands and packs every live entity on the CPU; this uploads

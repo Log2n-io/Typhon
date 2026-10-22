@@ -26,14 +26,17 @@ const LEFT = ['KeyA', 'ArrowLeft'];
 const RIGHT = ['KeyD', 'ArrowRight'];
 
 /**
- * Held with a direction, walks instead of using the selected gait.
+ * Held with a direction, travels at the SELECTED gait; a direction on its own walks.
  *
- * <b>Shift is both the walk modifier and the gait shortcuts' prefix, and the two do not collide.</b> Shift+2 is a press
- * that LATCHES a gait and is over; Shift held with W is a state that means "walk now". So selecting a speeder and then
- * holding Shift+W walks, which is what a person who is holding shift is asking for, and letting go of shift returns to the
- * speeder. Nothing is unreachable either way.
+ * <b>Walking is what a body does, and speed is what you ask for</b> (2026-10-21, Loïc). The gait ladder is run, burst
+ * run and two speeders — every rung is a deliberate thing, so none of them is the right thing to be doing by accident
+ * while crossing a room.
+ *
+ * <b>Shift is both this modifier and the gait shortcuts' prefix, and the two do not collide.</b> Shift+2 is a press that
+ * LATCHES which gait Shift gives and is over; Shift held with W is a state that means "that gait, now". So selecting a
+ * speeder and then holding Shift+W rides it, and letting go walks. Nothing is unreachable either way.
  */
-const WALK = ['ShiftLeft', 'ShiftRight'];
+const RUN = ['ShiftLeft', 'ShiftRight'];
 
 /** Whether any of a set of codes is held. */
 function any(keys: ReadonlySet<string>, codes: readonly string[]): boolean {
@@ -99,7 +102,7 @@ export function movementIntent(
 
   return {
     heading: Math.atan2(dz, dx),
-    speedClass: any(keys, WALK) ? SpeedClass.walk : gait,
+    speedClass: any(keys, RUN) ? gait : SpeedClass.walk,
   };
 }
 

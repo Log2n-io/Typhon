@@ -152,6 +152,10 @@ public static class CommandLine
         r.Group("runtime and scheduling");
         c.TickRateHz = r.Int("--hz", c.TickRateHz, "tick rate; 10 is the baseline the published numbers are quoted at", min: 1, max: 100_000);
         c.Unpaced = r.Switch("--unpaced", "tick back to back, for count-only comparisons; never for timings");
+        c.CollisionAudit = r.Switch("--collision-audit", "re-check every written position against a fresh spatial query, and report any found inside a "
+            + "structure; an independent oracle, far too slow for a normal run") || c.CollisionAudit;
+        c.CollideCrowd = r.Switch("--collide-crowd", "collide the scripted crowd with structures too, to measure collision at a population no "
+            + "number of real sessions reaches on one box") || c.CollideCrowd;
         c.WorkerCount = r.Int("--workers", c.WorkerCount, "worker threads; 0 takes the processor count", min: 0, max: 4096);
         c.WarmTicks = r.Int("--warm", c.WarmTicks, "ticks run before measuring starts", min: 0);
         c.MeasuredTicks = r.Int("--ticks", c.MeasuredTicks, "ticks measured", min: 1);
@@ -189,6 +193,7 @@ public static class CommandLine
         // --sweep-worlds sets the house pattern for a list. Split in Validate so the help text shows the raw form.
         var origins = r.Str("--origin", null, "origins a browser may connect from, comma-separated. Required when --bind is not loopback", "<url,url>");
         c.ClientDirectory = r.Str("--client-dir", c.ClientDirectory, "directory of built client files to serve; the repo's dist/ when unset", "<path>");
+        c.AssetDirectory = r.Str("--assets", c.AssetDirectory, "published asset folder (the exporter's build/assets) to serve at /assets", "<path>");
         c.TlsChainPath = r.Str("--tls-chain", c.TlsChainPath, "PEM chain to serve https with (certbot's fullchain.pem)", "<path>");
         c.TlsKeyPath = r.Str("--tls-key", c.TlsKeyPath, "PEM private key matching --tls-chain (certbot's privkey.pem)", "<path>");
         c.TlsPort = r.Int("--tls-port", c.TlsPort, "port https is served on; 443 needs CAP_NET_BIND_SERVICE", min: 1, max: 65535);
@@ -263,9 +268,14 @@ public static class CommandLine
 
         // A hosting flag without --serve is a command line that cannot do what it says: there is no host to bind, no origin to admit and no client to serve.
         // Refused rather than ignored, which is this parser's whole character (SWG-07).
+        //
+        // <b>--assets is NOT one of them any more.</b> It was, while an asset folder only fed the web host; it now also carries the collision shapes the
+        // tick pushes bodies out of, and a measured run is the only way to put thousands of bodies on that path (--collide-crowd). Refusing it here made the
+        // measured run silently collide against footprint boxes -- the fallback no real client ever meets -- or refuse the command line outright.
         if (c.ServePort == 0 && (c.BindAddress != null || c.Origins.Length > 0 || c.ClientDirectory != null))
         {
-            throw new ArgumentException("--bind, --origin and --client-dir configure the web host, which only exists with --serve <port>.");
+            throw new ArgumentException("--bind, --origin and --client-dir configure the web host, which only exists with --serve <port>. "
+                + "--assets is accepted without it: it also carries the collision shapes a measured run collides against.");
         }
 
         if (c.AuthIterations > 0 && c.AuthIterations < Accounts.PasswordHash.MinimumIterations)
@@ -327,6 +337,14 @@ public static class CommandLine
             // Checked here rather than left to the host, which skips a missing directory silently: a deployment whose payload unpacked wrong would serve a
             // WebSocket and no page, and the operator would be looking at the browser.
             throw new ArgumentException($"--client-dir '{c.ClientDirectory}' does not exist.");
+        }
+
+        if (c.AssetDirectory != null && !System.IO.Directory.Exists(c.AssetDirectory))
+        {
+            // Only the directory here. Whether it holds a publishable catalogue is AssetOrigin.Open's judgement, made at
+            // startup where its error can name the file that is wrong; duplicating that check in the parser would mean two
+            // places to keep in step with the asset contract.
+            throw new ArgumentException($"--assets '{c.AssetDirectory}' does not exist.");
         }
 
         if (c.ServePort == 0)

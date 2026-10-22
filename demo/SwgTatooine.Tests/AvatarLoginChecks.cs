@@ -24,6 +24,7 @@ namespace SwgTatooine.Tests;
 /// spatial archetype — the one thing <c>EW-02</c> forbids outright.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 internal sealed class AvatarLoginChecks
@@ -180,6 +181,7 @@ internal sealed class AvatarLoginChecks
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
+    [Category("Integration")]
     public void AFirstLoginCreatesACharacterAndSpawnsInATown()
     {
         using var sim = Start(Config());
@@ -211,6 +213,7 @@ internal sealed class AvatarLoginChecks
     /// </summary>
     [Test]
     [CancelAfter(60_000)]
+    [Category("Integration")]
     public void ArrivalsAreSpreadAcrossTheTowns()
     {
         using var sim = Start(Config());
@@ -279,6 +282,7 @@ internal sealed class AvatarLoginChecks
     /// </summary>
     [Test]
     [CancelAfter(60_000)]
+    [Category("Integration")]
     public void APinnedSpawnSpreadPutsEveryArrivalOnOnePoint()
     {
         var config = Config();
@@ -309,6 +313,7 @@ internal sealed class AvatarLoginChecks
     /// </remarks>
     [Test]
     [CancelAfter(90_000)]
+    [Category("Integration")]
     public void LogOutAndBackIn_TheAvatarIsWhereItLeft()
     {
         using var sim = Start(Config());
@@ -347,6 +352,7 @@ internal sealed class AvatarLoginChecks
     /// </remarks>
     [Test]
     [CancelAfter(120_000)]
+    [Category("Integration")]
     public void AcrossARestart_TheAvatarIsStillWhereItLeft()
     {
         var account = AnAccount(0x5003);
@@ -390,6 +396,7 @@ internal sealed class AvatarLoginChecks
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
+    [Category("Integration")]
     public void ASecondSessionForOneAccount_IsRefused()
     {
         using var sim = Start(Config());
@@ -427,6 +434,7 @@ internal sealed class AvatarLoginChecks
     /// </remarks>
     [Test]
     [CancelAfter(90_000)]
+    [Category("Integration")]
     public void ThePooledCrowdIsUnaffectedByAHuman()
     {
         using var sim = Start(Config());
@@ -473,6 +481,7 @@ internal sealed class AvatarLoginChecks
     /// </remarks>
     [Test]
     [CancelAfter(180_000)]
+    [Category("Integration")]
     public void ManyLoginsAndLogouts_LeakNothing()
     {
         const int rounds = 20;
@@ -540,6 +549,7 @@ internal sealed class AvatarLoginChecks
     /// </remarks>
     [Test]
     [CancelAfter(180_000)]
+    [Category("Integration")]
     public void AReconnectInTheSameTickAsItsOwnDisconnectIsBound()
     {
         const int rounds = 12;
@@ -586,6 +596,7 @@ internal sealed class AvatarLoginChecks
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
+    [Category("Integration")]
     public void ASecondSessionForOneAccountIsRefusedOnceAsADuplicate()
     {
         using var sim = Start(Config(saveIntervalS: 0d));
@@ -622,6 +633,7 @@ internal sealed class AvatarLoginChecks
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
+    [Category("Integration")]
     public void ASessionThatClosesBeforeItIsBoundLeavesNothingBehind()
     {
         const int rounds = 15;
@@ -665,6 +677,7 @@ internal sealed class AvatarLoginChecks
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
+    [Category("Integration")]
     public void AReopenedDatabaseHasNoOrphanedAvatars()
     {
         var account = AnAccount(0x500A);
@@ -710,6 +723,7 @@ internal sealed class AvatarLoginChecks
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
+    [Category("Integration")]
     public void AGracefulShutdownSavesEveryAvatarsPosition()
     {
         // Far longer than this case runs, so a cadence save is impossible and only the shutdown can account for a write.
@@ -764,6 +778,7 @@ internal sealed class AvatarLoginChecks
     /// </remarks>
     [Test]
     [CancelAfter(90_000)]
+    [Category("Integration")]
     public void TheCadenceSavesWhileTheAvatarIsStillLoggedIn()
     {
         // Four ticks at 50 Hz. Rounded to ticks by ConfigureAvatars, which is why this is expressed in seconds.
@@ -799,6 +814,7 @@ internal sealed class AvatarLoginChecks
     /// </remarks>
     [Test]
     [CancelAfter(90_000)]
+    [Category("Integration")]
     public void WithTheCadenceOff_NothingIsSavedUntilTheLogout()
     {
         using var sim = Start(Config(saveIntervalS: 0d));
@@ -842,6 +858,7 @@ internal sealed class AvatarLoginChecks
     /// </remarks>
     [Test]
     [CancelAfter(120_000)]
+    [Category("Integration")]
     public void AKillWithNoLogoutCostsAtMostTheCadence()
     {
         var account = AnAccount(0x6003);

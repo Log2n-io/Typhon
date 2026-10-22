@@ -59,6 +59,7 @@ function view(): FrameView {
     selectedNetId: 0,
     ground: FLAT_GROUND,
     predicted: null,
+    hidden: new Set<number>(),
   };
 }
 

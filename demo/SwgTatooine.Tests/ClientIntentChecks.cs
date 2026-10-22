@@ -20,6 +20,7 @@ namespace SwgTatooine.Tests;
 /// transport is in-process rather than a socket.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class ClientIntentChecks
@@ -27,8 +28,14 @@ public sealed class ClientIntentChecks
     /// <summary>Slow enough that one tick of travel is a distance an assertion can separate from two.</summary>
     private const int TickRateHz = 10;
 
-    /// <summary>What <c>PlayerRunSpeedMps</c> covers in one tick at <see cref="TickRateHz"/>: 0.5 m.</summary>
-    private const float StepM = TatooineData.PlayerRunSpeedMps / TickRateHz;
+    /// <summary>What a GRANTED run covers in one tick at <see cref="TickRateHz"/>.</summary>
+    /// <remarks>
+    /// Through the gait ladder's scale rather than from <c>PlayerRunSpeedMps</c> raw. What these cases measure is that a
+    /// run moves a body by one tick's worth of the speed the server GRANTS for it, and what it grants is the raw figure
+    /// times <see cref="TatooineData.PlayerGaitScale"/> — scaling the ladder failed six of them at once, every one for a
+    /// reason that had nothing to do with what it checks.
+    /// </remarks>
+    private const float StepM = TatooineData.PlayerRunSpeedMps * TatooineData.PlayerGaitScale / TickRateHz;
 
     private string _dir;
 
@@ -141,6 +148,7 @@ public sealed class ClientIntentChecks
     /// </para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void AMoveToTenKilometresAwayMovesThePlayerByOneTickOfTravel()
     {
         var config = Config();
@@ -174,6 +182,7 @@ public sealed class ClientIntentChecks
     /// The destination is clamped to the world, so a client cannot aim a player at coordinates the world does not have.
     /// </summary>
     [Test]
+    [Category("Integration")]
     public void AMoveToOutsideTheWorldIsClamped()
     {
         var config = Config();
@@ -199,6 +208,7 @@ public sealed class ClientIntentChecks
     /// is where the engine puts stateless syntax.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void ANotANumberDestinationNeverReachesTheTick()
     {
         using var world = new Possessed(Config());
@@ -234,6 +244,7 @@ public sealed class ClientIntentChecks
     /// </para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void ARunThatStartsMidTickIsPaidForTheRestOfThatTick()
     {
         using var world = new Possessed(Config());
@@ -268,6 +279,7 @@ public sealed class ClientIntentChecks
     /// The commonest case in the game and the one the move phase has to go out of its way for: the new velocity is exactly zero, so a move phase that tested
     /// "standing still" before reading the bias would discard the last fraction of every run anyone ever makes.
     /// </remarks>
+    [Category("Integration")]
     [TestCase((byte)0, TestName = "AStopOnTheBoundaryPaysTheRunNothingMore")]
     [TestCase((byte)64, TestName = "AStopAQuarterIntoATickPaysTheRunThatQuarter")]
     [TestCase((byte)255, TestName = "AStopAtTheEndOfATickPaysTheRunTheWholeTick")]
@@ -307,6 +319,7 @@ public sealed class ClientIntentChecks
     /// </para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void ABiasIsPaidOnceInMetresAndEvenToAStandingPlayer()
     {
         using var world = new Possessed(Config());
@@ -351,6 +364,7 @@ public sealed class ClientIntentChecks
     /// key — so this is the path almost all of the traffic takes, and it has to be exactly the old one.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void APhaseOfZeroLeavesNoBiasAtAll()
     {
         using var world = new Possessed(Config());
@@ -366,6 +380,7 @@ public sealed class ClientIntentChecks
 
     /// <summary>A heading and a run class walk the player at the run speed and no faster.</summary>
     [Test]
+    [Category("Integration")]
     public void AMoveDirWalksAtTheClassItAsksFor()
     {
         using var world = new Possessed(Config());
@@ -397,6 +412,7 @@ public sealed class ClientIntentChecks
     /// a literal, because a literal in this test would be the third copy.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void AnAvatarCarriesTheSpeedsItsSessionIsEntitledTo()
     {
         using var world = new Possessed(Config());
@@ -499,7 +515,10 @@ public sealed class ClientIntentChecks
 
         Assert.Multiple(() =>
         {
-            Assert.That(fastest, Is.EqualTo(TatooineData.PlayerSpeederFastSpeedMps),
+            // The GRANTED figure, scale included: the ladder's top and the threshold are both scaled, and the point of
+            // this assertion is that they are scaled by the same thing. Comparing against the raw constant would fail
+            // whenever the ladder is scaled, which is the one case where the two could genuinely drift apart.
+            Assert.That(fastest, Is.EqualTo(TatooineData.PlayerSpeederFastSpeedMps * TatooineData.PlayerGaitScale),
                 "the fastest granted class is not the one the threshold is computed from");
             Assert.That(TatooineReplication.MaxSpeedMps, Is.GreaterThan(fastest),
                 "an entity at the declared maximum reads as a teleport on about half its ticks");
@@ -510,6 +529,7 @@ public sealed class ClientIntentChecks
 
     /// <summary>Speed class 0 stops the player, which is why stop is a class rather than a fourth command type.</summary>
     [Test]
+    [Category("Integration")]
     public void SpeedClassZeroStops()
     {
         using var world = new Possessed(Config());
@@ -549,6 +569,7 @@ public sealed class ClientIntentChecks
     /// </para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void ASpeedClassTheServerDoesNotGrantIsRefusedAndCounted()
     {
         using var world = new Possessed(Config());
@@ -577,6 +598,7 @@ public sealed class ClientIntentChecks
     /// is, and this is the only visible consequence in the whole intent path.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void AStoppedPlayerIsIdleOnTheWire()
     {
         using var world = new Possessed(Config());
@@ -604,6 +626,7 @@ public sealed class ClientIntentChecks
     /// its guess was accepted. An identity nothing holds is the clearest case of "never shown".
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void ATargetTheSessionWasNeverShownIsRefused()
     {
         using var world = new Possessed(Config());
@@ -629,6 +652,7 @@ public sealed class ClientIntentChecks
     /// same client.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void AClearIsToldApartFromARefusal()
     {
         using var world = new Possessed(Config());
@@ -667,6 +691,7 @@ public sealed class ClientIntentChecks
     /// </para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void APossessedPlayerIsNotDecidedForByTheSimulation()
     {
         using var world = new Possessed(Config());
@@ -709,6 +734,7 @@ public sealed class ClientIntentChecks
     /// </para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void AnAvatarWhoseClientLeavesIsDestroyed()
     {
         var config = Config();
@@ -749,6 +775,7 @@ public sealed class ClientIntentChecks
     /// client held it — while the systems that act on those states went on acting on it.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void ClaimingAPlayerNormalisesItsActivity()
     {
         using var world = new Possessed(Config());
@@ -778,6 +805,7 @@ public sealed class ClientIntentChecks
     /// </para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void ADungeonNeverDrawsAPossessedPlayer()
     {
         var config = Config();
@@ -822,6 +850,7 @@ public sealed class ClientIntentChecks
     /// replication declared, every figure taken after this would describe a world where some players stand still.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void AMeasurementRunPossessesNobody()
     {
         var config = Config();
@@ -953,6 +982,7 @@ public sealed class ClientIntentChecks
     /// </remarks>
     [Test]
     [CancelAfter(90_000)]
+    [Category("Integration")]
     public void ASetTargetAtADeadEntityTheClientCanSeeIsRefused()
     {
         var config = Config();

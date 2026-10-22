@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -25,6 +25,7 @@ namespace SwgTatooine.Tests;
 /// that does not work is invisible for ninety days and then takes the site down; an <c>/auth</c> gate that does not hold is
 /// invisible until somebody points a load at it. Neither shows up in a deployment that looks healthy on the day it is made.
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 internal sealed class PublicTlsChecks
 {

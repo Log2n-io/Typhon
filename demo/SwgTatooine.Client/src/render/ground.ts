@@ -2,7 +2,8 @@ import { Texture } from '@babylonjs/core/Materials/Textures/texture';
 import { RawTexture } from '@babylonjs/core/Materials/Textures/rawTexture';
 import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial';
 import { Color3 } from '@babylonjs/core/Maths/math.color';
-import { Vector2, Vector3, Vector4 } from '@babylonjs/core/Maths/math.vector';
+import type { BaseTexture } from '@babylonjs/core/Materials/Textures/baseTexture';
+import { Matrix, Vector2, Vector3, Vector4 } from '@babylonjs/core/Maths/math.vector';
 import type { Scene } from '@babylonjs/core/scene';
 import type { AggregateGrid, DebugGrid, PushGeometry } from '@typhondb/client';
 import { PushShape } from '@typhondb/client';
@@ -14,6 +15,7 @@ import { fillHeatmap, slabAt } from './heatmap-fill';
 import { SCENE_GROUP } from './render-groups';
 import { GROUND_FRAGMENT, GROUND_VERTEX, HULL_SLOTS } from './shaders';
 import { TerrainMesh, TerrainView } from './terrain-mesh';
+import { SHADOW_BIAS_M, SUN_DIRECTION } from './sun';
 
 /** What the ground draws this frame; the caller keeps one and rewrites it, so a frame allocates nothing. */
 export class GroundView {
@@ -42,7 +44,27 @@ export class GroundView {
   /** Screen pixels per metre at one metre, for the terrain's screen-space error budget. */
   pixelsPerMetre = 1000;
   /** How many pixels of terrain geometric error the viewer accepts. */
-  pixelTolerance = 2;
+  pixelTolerance = 8;
+
+  /**
+   * The sun's shadow map for this frame, or `null` for an unshadowed ground.
+   *
+   * <b>On the view rather than through a method on the profile</b>, because the ground is two layers down behind
+   * `SceneProfile` and a room and a starfield have no business taking a sun's shadow. A realm that does not want one
+   * leaves this null and never looks at it.
+   */
+  shadow: GroundShadow | null = null;
+}
+
+/** What the ground needs to read the sun's shadow map itself. */
+export interface GroundShadow {
+  readonly map: BaseTexture;
+  /** The light's view-projection: a render-space position into the map's clip space. */
+  readonly transform: Matrix;
+  /** The light's near and far planes, which its shadow pass encoded depth against. */
+  readonly depth: readonly [number, number];
+  /** The map's side, in texels. */
+  readonly size: number;
 }
 
 /**
@@ -165,6 +187,9 @@ export class Ground {
   private readonly hull: number[] = new Array<number>(HULL_SLOTS * 4).fill(0);
   private readonly rect: CellRect = { x: 0, z: 0, width: 1, height: 1 };
 
+  /** (on, minZ, maxZ, texel) — what the sun's shadow pass wrote its depth against; see `shadowAt`. */
+  private readonly shadow = new Vector4(0, 0, 1, 0);
+
   constructor(scene: Scene, field: Heightfield) {
     this.scene = scene;
     this.terrain = new TerrainMesh(scene, field);
@@ -202,8 +227,12 @@ export class Ground {
           'uCameraPlanet',
           'uFog',
           'uField',
+          'uSunDirection',
+          'uShadow',
+          'uShadowBias',
+          'uShadowMatrix',
         ],
-        samplers: ['uHeat', 'uCells', 'uHeight'],
+        samplers: ['uHeat', 'uCells', 'uHeight', 'uShadowMap'],
       },
     );
     material.backFaceCulling = false;
@@ -221,6 +250,13 @@ export class Ground {
     const u = this.terrain.fieldUniform;
     material.setVector4('uField', new Vector4(u[0], u[1], u[2], u[3]));
     material.setColor3('uSkyColor', SKY);
+    material.setVector3('uSunDirection', SUN_DIRECTION);
+    // Off until something hands over a map; `uShadowMap` still has to be bound to SOMETHING, because a sampler left
+    // unset is a warning per frame and, on some drivers, a black texture read as "everything is in shadow".
+    material.setVector4('uShadow', this.shadow);
+    material.setVector4('uShadowBias', new Vector4(SHADOW_BIAS_M, 0, 0, 0));
+    material.setMatrix('uShadowMatrix', Matrix.Identity());
+    material.setTexture('uShadowMap', this.terrain.texture);
     mesh.material = material;
     this.material = material;
 
@@ -240,6 +276,35 @@ export class Ground {
     this.material.setColor3('uPalette1', palette.rock);
     this.material.setColor3('uPalette2', palette.peak);
     this.material.setColor3('uSkyColor', palette.sky);
+  }
+
+  /**
+   * Gives the ground the sun's shadow map for this frame, or takes it away.
+   *
+   * <b>The matrix every frame, because the slab follows the camera.</b> Babylon rebuilds the light's view-projection
+   * when the light moves, so this has to be re-read rather than captured once — a stale matrix shadows the ground the
+   * camera was standing on a minute ago, which reads as the shadows sliding off the buildings.
+   *
+   * @param map The generator's map, or `null` to light the ground unshadowed.
+   * @param transform The light's view-projection, which takes a render-space position into the map's clip space.
+   * @param depth The light's near and far planes, which its shadow pass encoded depth against.
+   * @param size The map's side in texels, for the filter's own step.
+   */
+  setShadow(map: BaseTexture | null, transform: Matrix | null, depth: readonly [number, number], size: number): void {
+    if (map === null || transform === null) {
+      if (this.shadow.x !== 0) {
+        this.shadow.set(0, 0, 1, 0);
+        this.material.setVector4('uShadow', this.shadow);
+      }
+
+      return;
+    }
+
+    // One texel, which is the kernel's own step: it spreads its taps over +/- 1.5 of these.
+    this.shadow.set(1, depth[0], depth[1], 1 / size);
+    this.material.setVector4('uShadow', this.shadow);
+    this.material.setMatrix('uShadowMatrix', transform);
+    this.material.setTexture('uShadowMap', map);
   }
 
   /** Re-uploads the height texture after the field has been re-baked, and takes the quadtree the worker measured. */
@@ -275,6 +340,8 @@ export class Ground {
     this.terrainView.camZ = view.centerZ;
     this.terrainView.pixelsPerMetre = view.pixelsPerMetre;
     this.terrainView.pixelTolerance = view.pixelTolerance;
+    const shadow = view.shadow;
+    this.setShadow(shadow?.map ?? null, shadow?.transform ?? null, shadow?.depth ?? [0, 1], shadow?.size ?? 1);
     this.terrain.place(this.terrainView);
     // The camera in PLANET metres, which is what the morph measures against — every node is anchored to the world, so
     // nothing here is relative to a render origin.

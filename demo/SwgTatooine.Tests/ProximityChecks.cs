@@ -25,6 +25,7 @@ namespace SwgTatooine.Tests;
 /// and a disc written with a hardcoded realm passed, because only the pure helper was ever asked about realms.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class ProximityChecks
@@ -57,7 +58,7 @@ public sealed class ProximityChecks
     {
         var x = -5f;
         var z = 5f;
-        Assert.That(SimBridge.PushOut(OneBox, Half, WorldHalf, ref x, ref z, out var stuck), Is.False, "nothing was touched, so nothing should have moved");
+        Assert.That(SimBridge.PushOutForTest(OneBox, Half, WorldHalf, ref x, ref z, out var stuck), Is.False, "nothing was touched, so nothing should have moved");
         Assert.Multiple(() =>
         {
             Assert.That(x, Is.EqualTo(-5f));
@@ -72,7 +73,7 @@ public sealed class ProximityChecks
         // Well inside, nearest to the west face.
         var x = 1f;
         var z = 5f;
-        Assert.That(SimBridge.PushOut(OneBox, Half, WorldHalf, ref x, ref z, out var stuck), Is.True);
+        Assert.That(SimBridge.PushOutForTest(OneBox, Half, WorldHalf, ref x, ref z, out var stuck), Is.True);
         Assert.Multiple(() =>
         {
             Assert.That(Touches(OneBox[0], x, z), Is.False, $"still inside the building at ({x}, {z})");
@@ -95,7 +96,7 @@ public sealed class ProximityChecks
         ProximityBox[] corner = [Box(0f, 0f, 20f, 5f), Box(0f, 5f, 5f, 20f)];
         var x = 5.2f;
         var z = 5.2f;
-        SimBridge.PushOut(corner, Half, WorldHalf, ref x, ref z, out var stuck);
+        SimBridge.PushOutForTest(corner, Half, WorldHalf, ref x, ref z, out var stuck);
         Assert.Multiple(() =>
         {
             Assert.That(Touches(corner[0], x, z), Is.False, $"inside the first box at ({x}, {z})");
@@ -128,7 +129,7 @@ public sealed class ProximityChecks
         ProximityBox[] alley = [Box(0f, 0f, 10f, 10f), Box(11.6f, 0f, 21.6f, 10f)];
         var x = 10.8f;
         var z = 5f;
-        Assert.That(SimBridge.PushOut(alley, Half, WorldHalf, ref x, ref z, out var stuck), Is.True);
+        Assert.That(SimBridge.PushOutForTest(alley, Half, WorldHalf, ref x, ref z, out var stuck), Is.True);
         Assert.That(stuck, Is.True, "an alley narrower than the body resolved cleanly, which cannot be true");
     }
 
@@ -136,7 +137,7 @@ public sealed class ProximityChecks
     public void ADiscIsTheDistanceToTheNearestSurface()
     {
         // Twelve metres west of the box's west face, with the probe centred where the body is.
-        var clear = SimBridge.DiscFor(OneBox, -12f, 5f, 50f, -12f, 5f);
+        var clear = SimBridge.DiscForForTest(OneBox, -12f, 5f, 50f, -12f, 5f);
         Assert.That(clear, Is.EqualTo(12f).Within(1e-3f));
     }
 
@@ -150,7 +151,7 @@ public sealed class ProximityChecks
     [Test]
     public void ADiscWithNothingNearIt_IsCappedByTheLeash()
     {
-        var clear = SimBridge.DiscFor([], 0f, 0f, 500f, 0f, 0f);
+        var clear = SimBridge.DiscForForTest([], 0f, 0f, 500f, 0f, 0f);
         Assert.That(clear, Is.EqualTo(SimBridge.ProximityLeashM));
     }
 
@@ -166,15 +167,132 @@ public sealed class ProximityChecks
     public void ADiscNeverReachesPastWhatTheProbeSaw()
     {
         // A probe of 10 m taken at the origin, for a body that ended up 4 m away: only 6 m of it was ever examined.
-        var clear = SimBridge.DiscFor([], 0f, 0f, 10f, 4f, 0f);
+        var clear = SimBridge.DiscForForTest([], 0f, 0f, 10f, 4f, 0f);
         Assert.That(clear, Is.EqualTo(6f).Within(1e-3f));
+    }
+
+    /// <summary>
+    /// A body INSIDE a footprint gets the distance to the structure's walls, not zero.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is what keeps an indoor body from paying a radius query every tick.</b> A footprint is the ground the
+    /// world reserved; the asset standing on it is walls with a gap where its door is, and a body in the middle of a
+    /// room is legitimately inside the one while metres from the others. Measured against the footprint its clearance
+    /// is zero, the disc is spent on arrival, and the body queries again on the very next tick for as long as it stays
+    /// indoors.
+    /// </para>
+    /// <para>
+    /// The doorway below is the published houses' — two walls either side of a 1.2 m gap at z = 0 — so a body standing
+    /// 3 m north of it is 2.8 m from the wall face and should be told so.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void ADiscInsideAFootprintIsMeasuredToTheWallsAndNotToTheFootprint()
+    {
+        var entity = EntityId.FromRawValue(7);
+        AssetColliders.PlanBox[] doorway =
+        [
+            new(-4.6f, -0.2f, -0.6f, 0.2f, 0f, 2.5f),
+            new(0.6f, -0.2f, 4.6f, 0.2f, 0f, 2.5f),
+        ];
+
+        // A 10 m footprint centred on the origin, which the body is standing in the middle of.
+        ProximityBox[] house = [new(-5f, -5f, 5f, 5f, 0f, entity)];
+        var shapes = StructureShapes.ForTest(0.4f, entity, StructureShapes.Shape.Primitives, doorway, 0f, 0f, 0);
+
+        // Standing square in front of a wall, 3 m north of a face at z = 0.2.
+        var facingWall = SimBridge.DiscFor(house, 2f, 3f, 50f, 2f, 3f, ref shapes);
+        Assert.That(facingWall, Is.EqualTo(2.8f).Within(1e-3f), "the distance to the wall face, not zero");
+
+        // Standing in the doorway's own lane, where the nearest wall is the jamb 0.6 m to the side.
+        var facingDoor = SimBridge.DiscFor(house, 0f, 3f, 50f, 0f, 3f, ref shapes);
+        Assert.That(facingDoor, Is.EqualTo(MathF.Sqrt((0.6f * 0.6f) + (2.8f * 2.8f))).Within(1e-3f), "the corner distance to the jamb");
+        Assert.That(facingDoor, Is.GreaterThan(facingWall), "and the open lane is the roomier of the two");
+
+        var footprintOnly = SimBridge.DiscForForTest(house, 0f, 3f, 50f, 0f, 3f);
+        Assert.That(footprintOnly, Is.Zero, "and without the asset the footprint still spends the disc, as it must");
+    }
+
+    /// <summary>
+    /// A footprint whose real shape is not loaded constrains the disc no more than open desert does.
+    /// </summary>
+    /// <remarks>
+    /// The shuttleport reserves a 46 m square at the centre of every city, which is where bodies spawn and crowd. It is
+    /// walked through until its walls are loaded (see <c>StructureShapes.Shape.None</c>), so a disc measured against it
+    /// would promise nothing while blocking nothing — the busiest ground on the planet never holding a disc.
+    /// </remarks>
+    [Test]
+    public void ADiscIgnoresAFootprintThatBlocksNothing()
+    {
+        var entity = EntityId.FromRawValue(9);
+        ProximityBox[] port = [new(-23f, -23f, 23f, 23f, 0f, entity)];
+        var shapes = StructureShapes.ForTest(0.4f, entity, StructureShapes.Shape.None, [], 0f, 0f, 0);
+
+        var clear = SimBridge.DiscFor(port, 0f, 0f, 500f, 0f, 0f, ref shapes);
+        Assert.That(clear, Is.EqualTo(SimBridge.ProximityLeashM), "a structure that blocks nothing should leave the leash standing");
+    }
+
+    /// <summary>
+    /// Outside a footprint the disc is charged the overhang, because a wall may stand that far outside the box measured.
+    /// </summary>
+    /// <remarks>
+    /// The gate grows by the same figure for the same reason. Without the charge a body could hold a disc that reaches
+    /// 0.4 m into a wall it was never told about, and spend a tick inside it before the refresh ejected it.
+    /// </remarks>
+    [Test]
+    public void ADiscOutsideAFootprintIsChargedTheOverhang()
+    {
+        var shapes = StructureShapes.ForTest(0.4f, default, StructureShapes.Shape.Footprint, [], 0f, 0f, 0);
+        var clear = SimBridge.DiscFor(OneBox, -12f, 5f, 50f, -12f, 5f, ref shapes);
+        Assert.That(clear, Is.EqualTo(11.6f).Within(1e-3f), "twelve metres of ground less the furthest a wall may overhang it");
+    }
+
+    /// <summary>
+    /// A full neighbour set bounds the disc by the farthest box it kept, because the boxes it dropped are unknown.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>"The nearest sixteen were kept" is measured from the PROBE CENTRE; the disc is measured from where the body
+    /// ended up.</b> The push moves the body off the centre by up to its own radius plus the asset overhang, so the
+    /// comfortable argument — every dropped box is farther than every kept one, hence farther than the minimum the
+    /// disc takes — says nothing about distances from the BODY. A dropped box on the side the body was pushed towards
+    /// can be nearer to it than anything kept, and the disc would then promise ground a wall is standing on.
+    /// </para>
+    /// <para>
+    /// The case below is that geometry, staged: every kept box is 10 m from the centre and 12 m from the body, so the
+    /// unbounded disc would be 12 m, while a dropped box could sit at 10 m from the centre and therefore 8 m from the
+    /// body. The bound — farthest kept, less the drift — gives 8 m, which is exactly the distance a dropped box is
+    /// guaranteed not to beat. A run with the set NOT full is unaffected, which the second half asserts.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void ADiscFromAFullSetIsBoundedByTheFarthestBoxItKept()
+    {
+        // One box 10 m east of the probe centre; the body ended up 2 m WEST of the centre, so 12 m from that box.
+        ProximityBox[] kept = [new(10f, -1f, 20f, 1f, 100f)];
+        var unbounded = SimBridge.DiscForForTest(kept, 0f, 0f, 50f, -2f, 0f);
+        Assert.That(unbounded, Is.EqualTo(12f).Within(1e-3f), "with room to spare the disc is the distance to the surface");
+
+        var bounded = SimBridge.DiscForForTest(kept, 0f, 0f, 50f, -2f, 0f, overflowed: true);
+        Assert.That(bounded, Is.EqualTo(8f).Within(1e-3f), "a full set may promise only the farthest kept box less the drift");
+        Assert.That(bounded, Is.LessThan(unbounded), "the bound has to cost something or it is not a bound");
+    }
+
+    /// <summary>The overflow bound never makes a disc negative, however far the push moved the body.</summary>
+    [Test]
+    public void ADiscFromAFullSetIsNeverNegative()
+    {
+        ProximityBox[] kept = [new(1f, -1f, 2f, 1f, 1f)];
+        var clear = SimBridge.DiscForForTest(kept, 0f, 0f, 50f, -40f, 0f, overflowed: true);
+        Assert.That(clear, Is.Zero);
     }
 
     /// <summary>A body pushed clear outside its own probe gets no disc at all, rather than a negative one.</summary>
     [Test]
     public void ADiscForABodyPushedOutsideItsProbe_IsZero()
     {
-        var clear = SimBridge.DiscFor([], 0f, 0f, 10f, 14f, 0f);
+        var clear = SimBridge.DiscForForTest([], 0f, 0f, 10f, 14f, 0f);
         Assert.That(clear, Is.Zero);
     }
 
@@ -343,6 +461,7 @@ public sealed class ProximityChecks
     /// walked through it — measured at 35 m past the far face — and three of these assertions fail.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void AClientsBodyWalkedIntoABuilding_StopsAtItsWall()
     {
         var dir = Worlds.NewDirectory();
@@ -408,6 +527,7 @@ public sealed class ProximityChecks
     /// Sliding only exists once a velocity is integrated every tick, and that is here.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void AClientsBodyWalkingObliquelyIntoAWall_SlidesAlongIt()
     {
         var dir = Worlds.NewDirectory();
@@ -461,6 +581,7 @@ public sealed class ProximityChecks
     /// reason the design is affordable, so it needs a case where two members' neighbour sets must not be confused.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void TwoClientBodiesInOneCluster_EachGetsItsOwnNeighbours()
     {
         var dir = Worlds.NewDirectory();
@@ -529,6 +650,7 @@ public sealed class ProximityChecks
     /// </para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void ABodyCrossingATown_IsNeverGivenAPositionInsideAStructure()
     {
         var dir = Worlds.NewDirectory();
@@ -581,6 +703,7 @@ public sealed class ProximityChecks
     /// failed on a loaded box with a message blaming the controller gate.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void TheScriptedCrowdIsNotCollided()
     {
         var dir = Worlds.NewDirectory();
@@ -606,6 +729,214 @@ public sealed class ProximityChecks
                 Assert.That(steps, Is.LessThanOrEqualTo(sim.Executed),
                     $"{steps} colliding steps over {sim.Executed} ticks for one possessed body: the crowd is being collided too");
             });
+        }
+        finally
+        {
+            Worlds.Delete(dir);
+        }
+    }
+
+    /// <summary>
+    /// A structure's own geometry, read from the entity: where it stands, which asset it is, and its quarter turn.
+    /// </summary>
+    /// <param name="sim">The world.</param>
+    /// <param name="box">The footprint to find the entity for.</param>
+    /// <returns>The structure behind that footprint.</returns>
+    private static (float X, float Z, int Asset, int Yaw, int Kind) StructureAt(TatooineSim sim, in ProximityBox box)
+    {
+        var cx = (box.MinX + box.MaxX) * 0.5f;
+        var cz = (box.MinZ + box.MaxZ) * 0.5f;
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        foreach (var cluster in tx.GetClusterEnumerator<WorldObject>())
+        {
+            var places = cluster.GetReadOnlySpan(WorldObject.Bounds);
+            var structs = cluster.GetReadOnlySpan(WorldObject.Struct);
+            var realms = cluster.GetReadOnlySpan(WorldObject.Realm);
+            for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+            {
+                var idx = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                if (realms[idx].Value != 0)
+                {
+                    continue;
+                }
+
+                var p = places[idx];
+                if (MathF.Abs(p.X - cx) < 0.01f && MathF.Abs(p.Z - cz) < 0.01f)
+                {
+                    return (p.X, p.Z, structs[idx].Asset, structs[idx].Yaw, structs[idx].Kind);
+                }
+            }
+        }
+
+        Assert.Fail("no structure entity stands at the footprint this case picked");
+        return default;
+    }
+
+    /// <summary>
+    /// Pre-rotates a box so that the server's own quarter turn maps it to the world box this case wants.
+    /// </summary>
+    /// <param name="yaw">The structure's quarter turn.</param>
+    /// <param name="wanted">The box as it should end up, relative to the structure's origin.</param>
+    /// <returns>The box to publish in the asset's own frame.</returns>
+    /// <remarks>
+    /// Four turns are the identity, so turning by <c>4 - yaw</c> is the inverse. Written this way so the case states
+    /// the geometry it is actually testing — a wall across the body's lane — rather than geometry that happens to land
+    /// there for one seed's random orientation.
+    /// </remarks>
+    /// <summary>How tall the test walls are: above a step and below head height, so they are unambiguously walls.</summary>
+    private const float WallTopM = 2.5f;
+
+    private static AssetColliders.PlanBox Unturn(int yaw, AssetColliders.PlanBox wanted)
+    {
+        var b = wanted;
+        for (var i = 0; i < (4 - (yaw % 4)) % 4; i++)
+        {
+            var t = SimBridge.TurnForTest(1, b);
+            b = new AssetColliders.PlanBox(t.MinX, t.MinZ, t.MaxX, t.MaxZ, b.MinY, b.MaxY);
+        }
+
+        return b;
+    }
+
+    /// <summary>
+    /// <b>The narrow phase runs: a body stops at the published WALL, metres inside the footprint that contains it.</b>
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the case the rest of the fixture could not make.</b> Every other end-to-end case here builds a world
+    /// with no asset set, so <c>AssetShapes</c> is null and every structure collides as its footprint box — the whole
+    /// suite would stay green with the second level of the test deleted. Loïc asked, in those words, whether anything
+    /// tested against the children rather than the root bounding volume. Nothing did.
+    /// </para>
+    /// <para>
+    /// <b>The two predictions are 6.7 m apart, which is what makes it a proof rather than a check.</b> The wall is a
+    /// slab 2 m either side of the structure's origin; its footprint is 9 m. A body walked east into it rests at the
+    /// SLAB's west face if the asset's primitives are consulted, and at the FOOTPRINT's west face — seven metres
+    /// earlier — if they are not. Deleting the <c>Shape.Primitives</c> branch fails this on the first assertion.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void AClientsBodyStopsAtThePublishedWall_NotAtTheFootprintAroundIt()
+    {
+        var dir = Worlds.NewDirectory();
+        try
+        {
+            var config = Config(dir, 140);
+            using var sim = new TatooineSim(config);
+            sim.Initialize();
+
+            var boxes = Structures(sim);
+            Assert.That(boxes, Is.Not.Empty, "the world has no structures, so this proves nothing");
+
+            // <b>A WIDE structure, deliberately.</b> The proof is that the body stops at a wall strictly INSIDE the
+            // footprint, so the footprint has to be wider than the slab: picked against a terminal (1.6 m across) the
+            // slab sticks out of it, the body stops short of the footprint, and the case asserts the wrong direction.
+            const float Runway = 6f;
+            const float SlabHalf = 2f;
+            var wide = boxes.FindAll(b => b.MaxX - b.MinX >= (4f * SlabHalf) && b.MaxZ - b.MinZ >= (4f * SlabHalf));
+            Assert.That(wide, Is.Not.Empty, "no structure in this world is wide enough to hold the test wall inside it");
+            var target = WithClearGroundWest(wide, Runway);
+            var s = StructureAt(sim, in target);
+
+            // A wall slab 2 m either side of the structure's origin, across the lane the body will run along. Published
+            // in the asset's own frame, so the server's quarter turn puts it back where this case wants it.
+            var slab = Unturn(s.Yaw, new AssetColliders.PlanBox(-SlabHalf, -SlabHalf, SlabHalf, SlabHalf, 0f, WallTopM));
+            var byIndex = new AssetColliders.PlanBox[StructureAssets.Table.Length][];
+            for (var i = 0; i < byIndex.Length; i++)
+            {
+                byIndex[i] = [];
+            }
+
+            Assert.That(s.Asset, Is.LessThan(byIndex.Length), "the structure this case picked publishes no asset, so there is no narrow phase to prove");
+            byIndex[s.Asset] = [slab];
+            sim.AssetShapesOverride = AssetColliders.FromBoxesForTest(byIndex);
+
+            var lane = s.Z;
+            var startX = target.MinX - Runway;
+            var half = Drive(sim, sim.Index.Players[0], startX, lane, TatooineData.PlayerRunSpeedMps / config.TickRateHz, 0f);
+
+            sim.Run();
+
+            float endX;
+            using (var tx = sim.Dbe.CreateQuickTransaction())
+            {
+                endX = tx.Open(sim.Index.Players[0]).Read(Player.Bounds).X;
+            }
+
+            var atTheWall = s.X - SlabHalf - half;
+            var atTheFootprint = target.MinX - half;
+            var (held, refreshed, _, contacts, _, _, _) = sim.ProximityTotals;
+            TestContext.Out.WriteLine($"structure kind {s.Kind} asset {s.Asset} yaw {s.Yaw} at ({s.X:F2}, {s.Z:F2}); footprint west {target.MinX:F2}; "
+                + $"body {startX:F2} -> {endX:F2}; wall predicts {atTheWall:F2}, footprint predicts {atTheFootprint:F2}; "
+                + $"steps {held + refreshed}, contacts {contacts}");
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(contacts, Is.GreaterThan(0), "the body never touched anything: the case did not aim it at the structure");
+                Assert.That(endX, Is.GreaterThan(atTheFootprint + 1f),
+                    $"the body stopped at the FOOTPRINT ({endX:F2}): the narrow phase did not run, and only the root box was tested");
+                Assert.That(endX, Is.EqualTo(atTheWall).Within(0.1f), "the body did not come to rest against the published wall");
+            });
+        }
+        finally
+        {
+            Worlds.Delete(dir);
+        }
+    }
+
+    /// <summary>
+    /// <b>And it is the wall that blocks, not the footprint: a lane with no primitive in it is walked straight through.</b>
+    /// </summary>
+    /// <remarks>
+    /// The other half of the proof. The same structure publishes a wall that stops 3 m short of the body's lane, so a
+    /// body aimed down that lane crosses the whole footprint and comes out the far side. If the footprint box were the
+    /// collider — or if an asset with primitives silently fell back to it — the body would stop at the west face. This
+    /// is what makes a doorway a doorway, stated as the thing that can fail.
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void AClientsBodyWalksThroughAFootprintWhereThePublishedAssetHasNoWall()
+    {
+        var dir = Worlds.NewDirectory();
+        try
+        {
+            var config = Config(dir, 200);
+            using var sim = new TatooineSim(config);
+            sim.Initialize();
+
+            var boxes = Structures(sim);
+            var target = WithClearGroundWest(boxes, 6f);
+            var s = StructureAt(sim, in target);
+
+            // A slab well to the NORTH of the lane: inside the footprint, nowhere near the body's path.
+            var slab = Unturn(s.Yaw, new AssetColliders.PlanBox(-2f, 3f, 2f, 7f, 0f, WallTopM));
+            var byIndex = new AssetColliders.PlanBox[StructureAssets.Table.Length][];
+            for (var i = 0; i < byIndex.Length; i++)
+            {
+                byIndex[i] = [];
+            }
+
+            Assert.That(s.Asset, Is.LessThan(byIndex.Length), "the structure this case picked publishes no asset");
+            byIndex[s.Asset] = [slab];
+            sim.AssetShapesOverride = AssetColliders.FromBoxesForTest(byIndex);
+
+            var startX = target.MinX - 6f;
+            Drive(sim, sim.Index.Players[0], startX, s.Z, TatooineData.PlayerRunSpeedMps / config.TickRateHz, 0f);
+
+            sim.Run();
+
+            float endX;
+            using (var tx = sim.Dbe.CreateQuickTransaction())
+            {
+                endX = tx.Open(sim.Index.Players[0]).Read(Player.Bounds).X;
+            }
+
+            TestContext.Out.WriteLine($"structure asset {s.Asset} yaw {s.Yaw} at ({s.X:F2}, {s.Z:F2}); footprint {target.MinX:F2}..{target.MaxX:F2}; "
+                + $"body {startX:F2} -> {endX:F2}");
+
+            Assert.That(endX, Is.GreaterThan(s.X),
+                $"the body stopped at ({endX:F2}), short of the structure's own origin: an empty lane was treated as solid");
         }
         finally
         {

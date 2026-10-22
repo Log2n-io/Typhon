@@ -21,6 +21,7 @@ namespace SwgTatooine.Tests;
 /// counter would be green in the same build as an event that reaches everybody.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class ChatChecks
@@ -236,6 +237,7 @@ public sealed class ChatChecks
     /// not be able to choose.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void ChatIsHeardWithinFiftyMetresAndOnlyInTheSpeakersRealm()
     {
         var config = Config();

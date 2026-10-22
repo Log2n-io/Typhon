@@ -101,6 +101,32 @@ public sealed class SitePlanner
         return (x, z, false);
     }
 
+    /// <summary>
+    /// Records a box at a spot the caller chose, counting a collision the way <see cref="Place"/> does.
+    /// </summary>
+    /// <param name="x">East.</param>
+    /// <param name="z">North.</param>
+    /// <param name="halfM">Half-edge.</param>
+    /// <returns>Whether the spot was clear.</returns>
+    /// <remarks>
+    /// <b>For a structure whose position is decided rather than drawn</b> — the shuttleport, which stands at its city's
+    /// centre. <see cref="TryPlaceAt"/> is the wrong tool there: it records nothing on a collision, so the structure
+    /// would exist in the world and not in the planner, and every later building could be planted inside it with
+    /// <see cref="Crowded"/> reporting nothing. This records either way and counts the overlap, which is exactly
+    /// <see cref="Place"/>'s contract for a draw that ran out of attempts.
+    /// </remarks>
+    public bool PlaceAt(float x, float z, float halfM)
+    {
+        var clear = !Overlaps(x, z, halfM);
+        if (!clear)
+        {
+            Crowded++;
+        }
+
+        Add(x, z, halfM);
+        return clear;
+    }
+
     /// <summary>Draws a spot inside a disc, and records it ONLY if one was found.</summary>
     /// <param name="rng">The world's RNG; every attempt consumes a draw.</param>
     /// <param name="cx">Disc centre, east.</param>

@@ -31,6 +31,7 @@ function view(selectedNetId = 0): FrameView {
     selectedNetId,
     ground: FLAT_GROUND,
     predicted: null,
+    hidden: new Set<number>(),
   };
 }
 
@@ -96,6 +97,21 @@ describe('LayerPacker', () => {
     packer.pack(view());
     expect(packer.nearCount + packer.farCount).toBe(1);
     expect(packer.nearCount === 1 ? packer.nearNetIds[0] : packer.farNetIds[0]).toBe(21);
+  });
+
+  it('skips the one body something else is drawing, and draws it again when nothing is', () => {
+    // The rigged avatar stands in for the ridden body. Both drawn would be a capsule inside a character, and the
+    // capsule — a sprite at any distance — would be the visible one.
+    const { packer, place } = setup();
+    place(51, 0, 100);
+    place(52, 10, 100);
+
+    packer.pack({ ...view(), hidden: new Set([51]) });
+    expect(packer.nearCount).toBe(1);
+    expect(packer.nearNetIds[0]).toBe(52);
+
+    packer.pack(view());
+    expect(packer.nearCount).toBe(2);
   });
 
   it('marks the selected entity', () => {

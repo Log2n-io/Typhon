@@ -874,6 +874,19 @@ public struct PlayerProximity
     /// </summary>
     [Field] public float ClearM;
 
+    /// <summary>
+    /// The top of the published surface the body was standing on when the disc was taken, or
+    /// <see cref="float.NegativeInfinity"/> for a body standing on the terrain.
+    /// </summary>
+    /// <remarks>
+    /// <b>Carried on the disc because the held path must not read a neighbour, and must not forget the floor either.</b>
+    /// A body on a building's deck is lifted onto it by the refresh; if the tick that HOLDS its disc re-sampled the
+    /// terrain, the body would drop through the deck, its feet would be below the deck's top, and the floor it was
+    /// standing on would become a wall and eject it — a refresh, a lift, a drop, for ever. Measured before this field
+    /// existed: 418 contacts in 468 steps, and a body that could not walk at all.
+    /// </remarks>
+    [Field] public float SurfaceY;
+
     /// <summary>The realm the anchor was taken in. A disc from another realm says nothing about this one.</summary>
     [Field] public ushort Realm;
 
@@ -1074,6 +1087,38 @@ public struct Structure
 {
     /// <summary>See <see cref="StructureKind"/>.</summary>
     [Field, OnEnter(CodecKind.U8, Name = "kind", Saturate = true)] public int Kind;
+
+    /// <summary>
+    /// Which way this structure faces: a quarter turn about +Y, 0 to 3, the way the renderer counts its yaw — one
+    /// quarter sends +Z to +X, so a point <c>(x, z)</c> goes to <c>(z, -x)</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The world's, not the renderer's.</b> A client used to invent this from a hash of the position, which was fine
+    /// while a structure was a box — a box looks the same whichever quarter turn you give it. It stops being fine the
+    /// moment the thing has a door and a collision shape: the server would be pushing a body out of a wall that the
+    /// client had drawn on the other side of the building. Two copies of a rule are two answers, and this is the half
+    /// that has to be right.
+    /// </para>
+    /// <para>
+    /// <b>Quarter turns rather than a free angle</b>, because that is what the site planner's axis-aligned boxes admit:
+    /// a square footprint stays axis-aligned under a quarter turn, so collision keeps working on 2-D AABBs and a
+    /// building still faces along the street. Replicated on enter with <c>kind</c> — a building never turns.
+    /// </para>
+    /// </remarks>
+    [Field, OnEnter(CodecKind.U8, Name = "yaw", Saturate = true)] public int Yaw;
+
+    /// <summary>
+    /// Which published asset this structure is, as an index into the table the server publishes, or
+    /// <see cref="StructureAssets.NoAsset"/> for a kind nothing stands in for.
+    /// </summary>
+    /// <remarks>
+    /// <b>The server picks, and says so.</b> It is the side that pushes bodies out of this asset's walls, so it cannot
+    /// let the renderer pick a different one — the wall you cannot walk through would not be the wall you can see.
+    /// Replicating the CHOICE rather than the rule also keeps the two sides from needing the same random draw, which
+    /// they could not have: a client numbers entities by netId and the world builds them by EntityId.
+    /// </remarks>
+    [Field, OnEnter(CodecKind.U8, Name = "asset", Saturate = true)] public int Asset;
 
     /// <summary>
     /// This building's slot in the planet's door list — the index that decides which interior realm it leads to — or -1 when the building is not enterable.

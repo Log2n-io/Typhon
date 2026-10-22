@@ -25,6 +25,7 @@ namespace SwgTatooine.Tests;
 /// difference — a pre-check would let both through under contention.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 internal sealed class AccountStoreChecks
@@ -59,6 +60,7 @@ internal sealed class AccountStoreChecks
     /// <summary>AC A-1 (the identity half): an account can be made and then logged into.</summary>
     [Test]
     [CancelAfter(15_000)]
+    [Category("Integration")]
     public void Signup_ThenLogin_Succeeds()
     {
         Assert.That(AccountStore.TrySignup(Dbe, "Han_Solo", GoodPassword, out var created), Is.EqualTo(AccountStore.SignupOutcome.Created));
@@ -79,6 +81,7 @@ internal sealed class AccountStoreChecks
     /// </remarks>
     [Test]
     [CancelAfter(15_000)]
+    [Category("Integration")]
     public void NameCase_IsNotPartOfTheIdentity()
     {
         Assert.That(AccountStore.TrySignup(Dbe, "Leia", GoodPassword, out var created), Is.EqualTo(AccountStore.SignupOutcome.Created));
@@ -95,6 +98,7 @@ internal sealed class AccountStoreChecks
     /// <summary>AC A-2: a taken name is refused, and the refusal is the index's.</summary>
     [Test]
     [CancelAfter(15_000)]
+    [Category("Integration")]
     public void SignupWithATakenName_IsRefused()
     {
         Assert.That(AccountStore.TrySignup(Dbe, "Chewie", GoodPassword, out _), Is.EqualTo(AccountStore.SignupOutcome.Created));
@@ -116,6 +120,7 @@ internal sealed class AccountStoreChecks
     /// </remarks>
     [Test]
     [CancelAfter(30_000)]
+    [Category("Integration")]
     public void SimultaneousSignupsForOneName_ExactlyOneWins()
     {
         const int racers = 8;
@@ -173,6 +178,7 @@ internal sealed class AccountStoreChecks
     /// <summary>A wrong password is refused, and distinguishably from an absent account only to the server.</summary>
     [Test]
     [CancelAfter(15_000)]
+    [Category("Integration")]
     public void WrongPassword_AndUnknownName_AreBothRefused()
     {
         Assert.That(AccountStore.TrySignup(Dbe, "Jabba", GoodPassword, out _), Is.EqualTo(AccountStore.SignupOutcome.Created));
@@ -189,6 +195,7 @@ internal sealed class AccountStoreChecks
     /// <summary>A name or password the rules refuse never reaches the KDF or the engine.</summary>
     [Test]
     [CancelAfter(15_000)]
+    [Category("Integration")]
     public void BadNamesAndShortPasswords_AreRefusedBeforeAnythingIsWritten()
     {
         Assert.Multiple(() =>
@@ -206,6 +213,7 @@ internal sealed class AccountStoreChecks
     /// <summary>A login stamps the account, which is the one write a login makes.</summary>
     [Test]
     [CancelAfter(15_000)]
+    [Category("Integration")]
     public void Login_StampsLastSeen()
     {
         Assert.That(AccountStore.TrySignup(Dbe, "Ackbar", GoodPassword, out _), Is.EqualTo(AccountStore.SignupOutcome.Created));
@@ -238,6 +246,7 @@ internal sealed class AccountStoreChecks
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
+    [Category("Integration")]
     public void WhileTheWorldTicks_ConcurrentSignupsAndLogins_AllSucceed()
     {
         const int threads = 4;

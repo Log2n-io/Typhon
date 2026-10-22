@@ -36,6 +36,7 @@ namespace SwgTatooine.Tests;
 /// does nothing, this one that a player in combat is heard about.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class AttackEventChecks
@@ -258,6 +259,7 @@ public sealed class AttackEventChecks
     }
 
     [Test]
+    [Category("Integration")]
     public void TheCatalogDeclaresAttackWithTheFieldsAClientDrawsALineFrom()
     {
         using var sim = new TatooineSim(Config());
@@ -280,6 +282,7 @@ public sealed class AttackEventChecks
     }
 
     [Test]
+    [Category("Integration")]
     public void ALandedBlowIsEmittedAndComesOffTheWireDecodable()
     {
         using var sim = new TatooineSim(Config());

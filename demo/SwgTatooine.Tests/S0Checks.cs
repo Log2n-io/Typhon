@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using NUnit.Framework;
 using Typhon.Engine;
@@ -133,6 +133,7 @@ internal static class S0
 /// the creature home — so every living wanderer was snapped to its lair's exact centre once per AI cycle. Measured before the fix: 96 % of wanderers within
 /// 3 m of the centre, 1 278 of them at exactly 0 m. A world of point clusters is the one thing a cell-size sweep must not be measured on.
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class CreatureDispersionTests
@@ -210,6 +211,7 @@ public sealed class CreatureDispersionTests
 /// short run, so it never exercises a real revival at all. A flag that were raised and never cleared would teleport its creature home on every tick for the
 /// rest of the run — pinned to a point, invisible in the aggregate, and the same corruption of the workload that S0-1 was.
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class CreatureRevivalTests
@@ -323,6 +325,7 @@ public sealed class SimulationDeterminismTests
             Worlds.Delete(dir);
         }
     }
+    [Category("Integration")]
 
     [Test]
     public void SameSeed_ReproducesTheRun_AndADifferentSeedDoesNot()

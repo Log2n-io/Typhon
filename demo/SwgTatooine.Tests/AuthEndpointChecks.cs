@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
@@ -33,6 +33,7 @@ namespace SwgTatooine.Tests;
 /// way it could silently stop testing the real configuration.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 internal sealed class AuthEndpointChecks
@@ -103,6 +104,7 @@ internal sealed class AuthEndpointChecks
     /// <summary>AC A-1 (the HTTP half): a signup returns a usable token, and a login returns another.</summary>
     [Test]
     [CancelAfter(30_000)]
+    [Category("Integration")]
     public async Task SignupAndLogin_BothReturnAValidToken()
     {
         var signup = await _client.PostAsJsonAsync("/auth/signup", new AuthRequest("Han_Solo", GoodPassword), AuthJson.Default.AuthRequest);
@@ -132,6 +134,7 @@ internal sealed class AuthEndpointChecks
     /// <summary>AC A-2 over the wire: a taken name is 409 with a sentence a signup form can show.</summary>
     [Test]
     [CancelAfter(30_000)]
+    [Category("Integration")]
     public async Task ATakenName_Is409_WithTheSentenceAFormShows()
     {
         await _client.PostAsJsonAsync("/auth/signup", new AuthRequest("Chewie", GoodPassword), AuthJson.Default.AuthRequest);
@@ -152,6 +155,7 @@ internal sealed class AuthEndpointChecks
     /// </remarks>
     [Test]
     [CancelAfter(30_000)]
+    [Category("Integration")]
     public async Task AWrongPasswordAndAnUnknownNameAreIndistinguishable()
     {
         await _client.PostAsJsonAsync("/auth/signup", new AuthRequest("Jabba", GoodPassword), AuthJson.Default.AuthRequest);
@@ -173,6 +177,7 @@ internal sealed class AuthEndpointChecks
     /// <summary>A refused name or password comes back as 400 with the rule, so a form can explain itself.</summary>
     [Test]
     [CancelAfter(30_000)]
+    [Category("Integration")]
     public async Task ABadNameOrPasswordIs400WithTheRule()
     {
         var badName = await _client.PostAsJsonAsync("/auth/signup", new AuthRequest("9lives", GoodPassword), AuthJson.Default.AuthRequest);
@@ -190,6 +195,7 @@ internal sealed class AuthEndpointChecks
     /// <summary>The limiter is wired, and its refusal is a 429 rather than a dropped connection.</summary>
     [Test]
     [CancelAfter(30_000)]
+    [Category("Integration")]
     public async Task PastTheRateLimitTheEndpointAnswers429()
     {
         // This test needs its own tiny limiter, so a second host is built rather than loosening the fixture's.

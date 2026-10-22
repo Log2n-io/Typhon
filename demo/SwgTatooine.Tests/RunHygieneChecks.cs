@@ -14,6 +14,7 @@ namespace SwgTatooine.Tests;
 /// Every case here builds a real small world, because every one of the four is about what happens over time in a process that is running — which is exactly
 /// what a unit test of the pieces in isolation cannot see.
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class RunHygieneChecks
@@ -67,6 +68,7 @@ public sealed class RunHygieneChecks
     /// </para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void TheViewsOutliveTheTransactionThatCreatedThem()
     {
         var config = Config();
@@ -111,16 +113,18 @@ public sealed class RunHygieneChecks
     /// </para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void TheArrivalReportIsFiveCountersThatAddUp()
     {
         var config = Config();
         config.Unpaced = true;
         config.TickRateHz = 10;
 
-        // Twelve times the fixture's population, because the THRESHOLD counters need a burst of sixteen at one port and smaller worlds do not produce one:
+        // Sixteen times the fixture's population, because the THRESHOLD counters need a burst of sixteen at one port and smaller worlds do not produce one:
         // measured, pop 0.5 gives a largest burst of 2 and pop 2 gives 7, so `AtLeast16` stayed 0 and every assertion about it held with the counter deleted.
-        // At pop 6 the largest burst is 19 and `AtLeast16` reaches 1, which is what makes it a checked number rather than a named one.
-        config.PopulationScale = 6f;
+        // Pop 6 gave 19 until the shuttleport moved to its city's centre (2026-10-22): every player's walk to the port changed with it and the largest burst
+        // fell to 13, which is the counter being honest about a different world rather than a counter that broke. Re-measured at pop 8.
+        config.PopulationScale = 8f;
         config.WarmTicks = 0;
         config.MeasuredTicks = 600;
         config.ShuttleIntervalS = 2f;
@@ -367,6 +371,7 @@ public sealed class RunHygieneChecks
     /// </para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void AKickedSessionIsToldWhyBeforeItsLinkCloses()
     {
         var config = Config();
@@ -419,6 +424,7 @@ public sealed class RunHygieneChecks
     /// </para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void EverySessionOpenAtShutdownIsKickedExactlyOnce()
     {
         var config = Config();

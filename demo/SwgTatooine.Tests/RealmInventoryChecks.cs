@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Text.Json;
@@ -23,6 +23,7 @@ namespace SwgTatooine.Tests;
 /// up as a failure instead of as a passing assertion against a broken document.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class RealmInventoryChecks
@@ -138,6 +139,7 @@ public sealed class RealmInventoryChecks
     /// list two seconds after it leaves is the demonstration, not a limitation of it.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void ADormantInteriorIsCountedAndNotListed()
     {
         var dir = Worlds.NewDirectory();

@@ -15,8 +15,17 @@ export interface RealmSwitchTargets {
   setCameraBounds(bounds: CameraBounds): void;
   /** Puts the map camera at a point, without smoothing. */
   jumpCamera(x: number, z: number, distanceM: number): void;
-  /** Drops the app's own per-selection caches — the eye camera's subject and the selection label's key. */
+  /**
+   * Drops the app's own per-selection caches — the selection label's key — and marks the eye camera's subject as
+   * REBASED rather than gone: the netIds changed under it, the body did not.
+   */
   forgetSelectionCaches(): void;
+  /**
+   * Discards where the viewer is looking, so the eye camera re-aims at its subject's own facing.
+   *
+   * Only a crossing does this. Inside one realm the aim stays valid through any number of resets.
+   */
+  forgetEyeAim(): void;
   /** Drops the app's record of the region it last sent, which is in the old realm's coordinate frame. */
   forgetRegion(): void;
   /** Drops the app's record of the view radius it last asked for, which the new session was never told. */
@@ -83,6 +92,10 @@ export function resetForRealm(next: RealmView | null, targets: RealmSwitchTarget
   if (next === null) {
     return;
   }
+
+  // The aim as well as the coordinates: arriving somewhere else facing the way you faced in the last realm is the same
+  // class of nonsense as arriving at the old realm's coordinates.
+  targets.forgetEyeAim();
 
   // Bounds BEFORE the jump, and the order is load-bearing: the jump's own clamp is the new realm's only if the new
   // realm's limits are already in place. The other way round, arriving in an interior would clamp the destination

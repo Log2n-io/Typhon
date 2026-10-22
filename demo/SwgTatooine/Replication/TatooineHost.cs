@@ -251,6 +251,10 @@ public static class TatooineHost
     /// The address to bind, or <see langword="null"/> for loopback. <c>0.0.0.0</c> binds every interface.
     /// </param>
     /// <param name="clientRoot">A directory of built client files to serve at the root, or <see langword="null"/> for none.</param>
+    /// <param name="assets">
+    /// The published asset set to serve at <c>/assets</c> and announce in <c>/typhon/demo.json</c>, or <see langword="null"/>
+    /// for a run with no assets — see <see cref="AssetOrigin"/>.
+    /// </param>
     /// <param name="origins">Origins a browser may connect from; empty allows any, which is the right default for a demo on a developer's machine.</param>
     /// <param name="realmsJson">The realm directory to publish at <c>/typhon/demo.json</c>, or <see langword="null"/> to publish none.</param>
     /// <param name="realmInventory">
@@ -259,7 +263,8 @@ public static class TatooineHost
     /// <returns>A task that completes when the host has stopped.</returns>
     public static async Task ServeAsync(TyphonRuntime runtime, int port, string clientRoot = null, string[] origins = null, string realmsJson = null,
         Func<string> realmInventory = null, string bindAddress = null, int authBurst = 0, int authRefillMs = 0, string originSecret = null,
-        bool authInsideVpcOnly = false, string tlsChainPath = null, string tlsKeyPath = null, int tlsPort = 443, int redirectPort = 0)
+        bool authInsideVpcOnly = false, string tlsChainPath = null, string tlsKeyPath = null, int tlsPort = 443, int redirectPort = 0,
+        AssetOrigin assets = null, AssetColliders assetShapes = null, double worldHalfM = 0)
     {
         ArgumentNullException.ThrowIfNull(runtime);
 
@@ -407,6 +412,15 @@ public static class TatooineHost
 
         app.UseWebSockets();
 
+        // The asset set before the client's own files, and on its own file provider: /assets is a deployment of its own,
+        // cached forever by content-addressed name, and must not be shadowed by whatever a client root happens to contain.
+        if (assets != null)
+        {
+            assets.MapOn(app);
+            Console.WriteLine($"  /assets: {assets.AssetCount} asset(s) and {assets.TextureCount} shared texture(s) from {assets.Directory}");
+            Console.WriteLine($"           pinned to {assets.CatalogueName} for this run; announced in /typhon/demo.json");
+        }
+
         if (!string.IsNullOrEmpty(clientRoot) && Directory.Exists(clientRoot))
         {
             app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = new PhysicalFileProvider(clientRoot) });
@@ -476,10 +490,30 @@ public static class TatooineHost
             // SetViewRadius, between its profile's own radius and the cap the engine's window bound allows. Told here so the
             // client's slider has both ends from the server and no figure of its own — a radius mirrored in the client would be
             // a number the server can never correct, which is the shape of bug `no-speed-literals.test.ts` exists for.
+            // The last figure is how wide a body is, which the client needs to predict the same push-out this server
+            // applies. Told for the reason every speed is told: a figure mirrored in a client is one this server can
+            // never correct.
+            var radiusM = Json(TatooineReplication.PlayerRadiusM);
+            var maxRadiusM = Json(TatooineReplication.PlayerMaxRadiusM);
+            // The DEFAULT as well as the two ends, because they are three different numbers: the floor is what a session
+            // may narrow itself to, the ceiling is what the grid's window allows, and the default is what this profile
+            // actually serves. Publishing only the floor made the slider start at the narrowest radius the server would
+            // accept, which is not the radius the session was being served.
+            var defaultRadiusM = Json(TatooineReplication.HumanRadiusM);
+            var bodyHalfM = Json(TatooineData.PlayerBodyHalfM);
+            // The world's edge as well, because the server clamps every push-out to it and a client that predicts past
+            // it diverges from an authority that did not.
+            var worldEdge = Json(worldHalfM);
             var player = FormattableString.Invariant(
-                $",\"playerRadiusM\":{Json(TatooineReplication.PlayerRadiusM)},\"playerMaxRadiusM\":{Json(TatooineReplication.PlayerMaxRadiusM)}");
+                    $",\"playerRadiusM\":{radiusM},\"playerMaxRadiusM\":{maxRadiusM},\"playerDefaultRadiusM\":{defaultRadiusM}")
+                + FormattableString.Invariant($",\"playerBodyHalfM\":{bodyHalfM},\"worldHalfM\":{worldEdge}");
+            // Where the assets are and WHICH catalogue version this process is pinned to. The client is told rather than
+            // left to discover it: both ends read the same descriptors, and the only way two readers of a mutable pointer
+            // stay in step is if neither of them reads it. Absent from a run started without --assets, like the two above.
+            var assetSet = assets == null ? string.Empty : assets.DemoJson(assetShapes);
             return Results.Text(
-                FormattableString.Invariant($"{{\"godRegionMaxEdgeM\":{Json(edge)},\"maxViewRadiusM\":{Json(radius)}{player}{realms}}}"),
+                FormattableString.Invariant(
+                    $"{{\"godRegionMaxEdgeM\":{Json(edge)},\"maxViewRadiusM\":{Json(radius)}{player}{assetSet}{realms}}}"),
                 "application/json");
         });
 

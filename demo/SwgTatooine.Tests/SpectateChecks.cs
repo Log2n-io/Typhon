@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using NUnit.Framework;
 using Typhon.Engine;
@@ -22,6 +22,7 @@ namespace SwgTatooine.Tests;
 /// archetype and non-zero id. (This paragraph used to say netIds were allocated densely per view, which was never the mechanism.)
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class SpectateChecks
@@ -298,6 +299,7 @@ public sealed class SpectateChecks
     /// <para>So the assertion is the opposite of what it was: the viewer arrives. The world still ticking afterwards is the other half.</para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void AskingForARealmWhileRidingEndsTheRideAndGoesThere()
     {
         var config = Config();
@@ -359,6 +361,7 @@ public sealed class SpectateChecks
     /// so a case built on those two alone passed with the whole release drain removed. Measured that way, not reasoned.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void ReleasingGivesTheSessionItsOwnCameraBack()
     {
         using var sim = new TatooineSim(Config());
@@ -425,6 +428,7 @@ public sealed class SpectateChecks
     /// </para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void ReleasingLeavesTheViewerWhereTheSubjectWas()
     {
         var config = Config();
@@ -510,6 +514,7 @@ public sealed class SpectateChecks
     /// <para>Sent without a tick between them. The viewer arriving is the assertion; the world still running is the other half.</para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void StoppingAndThenAskingForARealmInOneTickLandsThere_AndNeverThrows()
     {
         var config = Config();
@@ -559,6 +564,7 @@ public sealed class SpectateChecks
     /// ever. The realm ask at the end is what proves the anchor is really gone rather than merely unreported.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void ASubjectThatDiesEndsTheRide_WithoutTheClientAskingForIt()
     {
         using var sim = new TatooineSim(Config());
@@ -622,6 +628,7 @@ public sealed class SpectateChecks
     /// actually holds, and <c>SELF</c> staying on the session's OWN player — never the bot it named — is what the gate is for.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void APlayersSessionMayNotRide_AndTheEngineIsWhatRefusesIt()
     {
         using var sim = new TatooineSim(Config());
@@ -663,6 +670,7 @@ public sealed class SpectateChecks
     /// produces a refusal and a release produces none, from the same client.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void ASubjectTheSessionWasNeverShownIsRefused_AndIsToldApartFromARelease()
     {
         using var sim = new TatooineSim(Config());

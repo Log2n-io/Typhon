@@ -24,6 +24,7 @@ namespace SwgTatooine.Tests;
 /// rounds and costs a few hundred microseconds, so the round-trip cases use it sparingly and the rest pass a small factor.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 public sealed class AccountCredentialChecks
 {

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using NUnit.Framework;
 using SwgTatooine.World.Terrain;
@@ -21,6 +21,7 @@ namespace SwgTatooine.Tests;
 /// on the planet that may have 200 m of mesa under it.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class TerrainAltitudeChecks
@@ -71,6 +72,7 @@ public sealed class TerrainAltitudeChecks
     }
 
     [Test]
+    [Category("Integration")]
     public void AnAltitudeIsResampled_NeverIntegrated()
     {
         // A creature walked across relief must carry the ground's altitude at every step, not a smoothed or accumulated

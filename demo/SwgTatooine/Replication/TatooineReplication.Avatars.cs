@@ -1081,7 +1081,7 @@ public static partial class TatooineReplication
     private static EntityId SpawnAvatar(Transaction tx, SessionId session, in Character profile)
     {
         var bounds = default(PlayerPlacement);
-        bounds.SetAt(profile.LastPosition.X, profile.LastPosition.Z, profile.LastPosition.Y, 1f);
+        bounds.SetAt(profile.LastPosition.X, profile.LastPosition.Z, profile.LastPosition.Y, TatooineData.PlayerBodyHalfM);
 
         var state = new PlayerState
         {

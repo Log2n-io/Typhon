@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Threading;
 using System.Threading.Tasks;
 using NUnit.Framework;
@@ -70,6 +70,7 @@ internal sealed class FleetRunnerChecks
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
+    [Category("Integration")]
     public async Task AFleetThatOpensNothingFaultsAndStaysRestartable()
     {
         await using var runner = new FleetRunner();
@@ -117,6 +118,7 @@ internal sealed class FleetRunnerChecks
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
+    [Category("Integration")]
     public async Task SnapshottingFromAnotherThreadDuringARampNeverThrows()
     {
         await using var runner = new FleetRunner();

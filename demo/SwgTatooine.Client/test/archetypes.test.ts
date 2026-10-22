@@ -139,6 +139,7 @@ describe('archetype identity', () => {
       selectedNetId: 0,
       ground: FLAT_GROUND,
       predicted: null,
+      hidden: new Set<number>(),
     });
 
     expect(packer.nearCount + packer.farCount).toBe(1);
@@ -187,6 +188,7 @@ describe('archetype identity', () => {
         selectedNetId: 0,
         ground: FLAT_GROUND,
         predicted: null,
+        hidden: new Set<number>(),
       });
     }).not.toThrow();
     expect(packer.nearCount + packer.farCount).toBe(1);

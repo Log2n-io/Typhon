@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -25,6 +25,7 @@ namespace SwgTatooine.Tests;
 /// <c>OnParentDelete = CascadeAction.Delete</c>, which is what makes "an operator can delete an account" leave nothing behind.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 internal sealed class CharacterStoreChecks
@@ -110,6 +111,7 @@ internal sealed class CharacterStoreChecks
     /// </remarks>
     [Test]
     [CancelAfter(30_000)]
+    [Category("Integration")]
     public void AnAccountWithNoCharacter_FindsNothing()
     {
         var withOne = Account("Leia");
@@ -132,6 +134,7 @@ internal sealed class CharacterStoreChecks
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
+    [Category("Integration")]
     public void EveryAccountResolvesToItsOwnCharacter()
     {
         const int people = 200;
@@ -272,6 +275,7 @@ internal sealed class CharacterStoreChecks
     /// </remarks>
     [Test]
     [CancelAfter(30_000)]
+    [Category("Integration")]
     public void DeletingTheAccount_TakesTheCharacterWithIt()
     {
         var kept = Account("Wicket");

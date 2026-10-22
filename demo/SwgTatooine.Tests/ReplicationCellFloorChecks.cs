@@ -1,4 +1,4 @@
-using NUnit.Framework;
+﻿using NUnit.Framework;
 
 namespace SwgTatooine.Tests;
 
@@ -19,6 +19,7 @@ namespace SwgTatooine.Tests;
 /// broken code.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 internal sealed class ReplicationCellFloorChecks
@@ -47,6 +48,7 @@ internal sealed class ReplicationCellFloorChecks
 
     /// <summary>A world small enough to scale the spatial cell under the window bound still starts replication.</summary>
     [Test]
+    [Category("Integration")]
     public void AWorldScaledBelowTheWindowBoundStillStartsReplication()
     {
         var config = Worlds.Small(_dir);

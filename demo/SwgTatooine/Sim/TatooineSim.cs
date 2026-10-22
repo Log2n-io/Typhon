@@ -304,7 +304,12 @@ public sealed partial class TatooineSim : IDisposable
         // with a 16 km one. A third rather than a fifth leaves a cell of headroom under the engine's bound, and is the value this was before #1372 coupled
         // the two cells. The floor only ever makes the replication cell COARSER than the spatial one, which is the cheap direction — the 2.4x above is the
         // penalty for a FINER replication grid, so flooring it does not spend what that coupling bought.
-        TatooineReplication.ReplicationCellM = Math.Max(cell, TatooineReplication.PlayerRadiusM / 3d);
+        // <b>And large enough that the ceiling can still reach the radius a renderer is SERVED.</b> The ceiling is five
+        // cells (PlayerMaxRadiusM), so a cell under HumanRadiusM / 5 makes the maximum smaller than the starting radius
+        // and the engine refuses the profile outright at Start — which a world scaled down with --world did, by name.
+        TatooineReplication.ReplicationCellM = Math.Max(
+            Math.Max(cell, TatooineReplication.PlayerRadiusM / 3d),
+            TatooineReplication.HumanRadiusM / 5d);
         var planetGrid = SpatialGridConfig.Flat(
             worldMin: new Vector2(-half, -half),
             worldMax: new Vector2(half, half),

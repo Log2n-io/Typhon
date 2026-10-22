@@ -27,6 +27,7 @@ namespace SwgTatooine.Tests;
 /// than the twenty minutes the default cadence would make it.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class ShuttleBoardingChecks
@@ -72,6 +73,7 @@ public sealed class ShuttleBoardingChecks
     /// <summary>A client standing at its port and naming another city is flown there.</summary>
     [Test]
     [CancelAfter(90_000)]
+    [Category("Integration")]
     public void AClientAtAPortIsFlownToTheCityItNamed()
     {
         using var sim = new TatooineSim(Config());
@@ -108,6 +110,7 @@ public sealed class ShuttleBoardingChecks
     /// <summary>Standing nowhere near a port is refused, and the refusal says which of the two reasons it was.</summary>
     [Test]
     [CancelAfter(90_000)]
+    [Category("Integration")]
     public void AClientAwayFromAPortIsRefused()
     {
         using var sim = new TatooineSim(Config());
@@ -136,6 +139,7 @@ public sealed class ShuttleBoardingChecks
 
     /// <summary>A destination that is the city it is standing in, or no city at all, is refused as a destination.</summary>
     /// <param name="dest">The destination asked for.</param>
+    [Category("Integration")]
     [TestCase(0, TestName = "AskingForTheCityItIsStandingInIsRefused")]
     [TestCase(9999, TestName = "AskingForACityThatDoesNotExistIsRefused")]
     [TestCase(-1, TestName = "AskingForANegativeCityIsRefused")]
@@ -172,6 +176,7 @@ public sealed class ShuttleBoardingChecks
     /// well with a boarding radius ten times too large — and the client's own prompt threshold is a copy of this number,
     /// which makes it the kind of constant that drifts quietly. One metre inside and one metre outside pin it.
     /// </remarks>
+    [Category("Integration")]
     [TestCase(ShuttleBoardM - 1f, true, TestName = "JustInsideTheBoardingRadiusIsAccepted")]
     [TestCase(ShuttleBoardM + 1f, false, TestName = "JustOutsideTheBoardingRadiusIsRefused")]
     [CancelAfter(90_000)]
@@ -206,6 +211,7 @@ public sealed class ShuttleBoardingChecks
     /// </remarks>
     [Test]
     [CancelAfter(90_000)]
+    [Category("Integration")]
     public void WalkingAwayCancelsTheBoarding()
     {
         using var sim = new TatooineSim(Config());
@@ -244,6 +250,7 @@ public sealed class ShuttleBoardingChecks
     /// </remarks>
     [Test]
     [CancelAfter(120_000)]
+    [Category("Integration")]
     public void AClientIsNeverFlownToAnotherPlanet()
     {
         var config = Config();

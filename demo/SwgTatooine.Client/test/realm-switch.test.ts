@@ -21,6 +21,7 @@ interface Spy extends RealmSwitchTargets {
   /** The order the calls arrived in, so a test can assert that bounds precede the jump. */
   order: string[];
   selectionCaches: number;
+  eyeAims: number;
   regions: number;
   radii: number;
 }
@@ -31,6 +32,7 @@ function spy(): Spy {
     bounds: [],
     order: [],
     selectionCaches: 0,
+    eyeAims: 0,
     regions: 0,
     radii: 0,
     setCameraBounds(bounds) {
@@ -44,12 +46,27 @@ function spy(): Spy {
     forgetSelectionCaches() {
       calls.selectionCaches++;
     },
+    forgetEyeAim() {
+      calls.eyeAims++;
+      calls.order.push('aim');
+    },
     forgetRegion() {
       calls.regions++;
     },
     forgetViewRadius() {
       calls.radii++;
     },
+  };
+  return calls;
+}
+
+/** A spy that asserts the aim is dropped, and dropped before the camera is moved. */
+function spyWithAim(): Spy {
+  const calls = spy();
+  const original = calls.forgetEyeAim.bind(calls);
+  calls.forgetEyeAim = () => {
+    original();
+    expect(calls.jumps, 'the aim is dropped before the jump, not after it').toHaveLength(0);
   };
   return calls;
 }
@@ -109,6 +126,10 @@ describe('resetForRealm', () => {
     expect(calls.radii).toBe(1);
   });
 
+  it('forgets where the viewer was looking, because a facing is as realm-bound as a coordinate', () => {
+    resetForRealm(INTERIOR, spyWithAim());
+  });
+
   it('jumps the camera to the new realm — to its CENTRE, which an interior does not share with the origin', () => {
     // The assertion the whole `centre + half` shape exists for. A client that jumped to (0, 0) would put the camera
     // on the corner of the room, outside everything in it.
@@ -141,7 +162,7 @@ describe('resetForRealm', () => {
     // — and the camera is left describing a world it is not in.
     const calls = spy();
     resetForRealm(INTERIOR, calls);
-    expect(calls.order).toEqual(['bounds', 'jump']);
+    expect(calls.order).toEqual(['aim', 'bounds', 'jump']);
   });
 
   it('still clears everything when the session was left in NO realm, and moves no camera', () => {
@@ -171,6 +192,7 @@ describe('the camera actually lands inside the realm', () => {
         camera.jumpTo(x, z, distanceM);
       },
       forgetSelectionCaches: () => {},
+      forgetEyeAim: () => {},
       forgetRegion: () => {},
       forgetViewRadius: () => {},
     });
@@ -208,6 +230,16 @@ describe('resetForSession — a reset that did not move the session', () => {
     expect([calls.jumps, calls.bounds, calls.order]).toEqual([[], [], []]);
   });
 
+  it('keeps where the viewer is looking, because a RESET renumbers the view and does not move their head', () => {
+    // The bug this pins: a server RESET arrives every twenty seconds or so for a standing session, and the camera used
+    // to re-aim itself at the avatar's own facing each time — discarding wherever the viewer had turned to look, for a
+    // frame in which nothing about the subject changed except its netId.
+    settleInARealm();
+    const calls = spy();
+    resetForSession(calls);
+    expect(calls.eyeAims, 'only a crossing invalidates the aim').toBe(0);
+  });
+
   it('is idempotent, which is what lets a crossing run it twice — once for the reset, once for the realm', () => {
     settleInARealm();
     const calls = spy();
@@ -218,6 +250,6 @@ describe('resetForSession — a reset that did not move the session', () => {
     expect([ui.selectedNetId, useChat.getState().lines.length]).toEqual([0, 0]);
     // The second pass still did the camera work, which is the half only a crossing has.
     expect(calls.jumps).toHaveLength(1);
-    expect(calls.order).toEqual(['bounds', 'jump']);
+    expect(calls.order).toEqual(['aim', 'bounds', 'jump']);
   });
 });

@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using NUnit.Framework;
 
 namespace SwgTatooine.Tests;
@@ -54,6 +54,7 @@ public sealed class RealmScaleChecks
     /// world has four planets instead of two, so it registers one realm per enterable building twice over.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void OccupiedInteriorsSetTheSerialCostAndRegisteredOnesDoNot()
     {
         const int Occupied = 4;
@@ -104,6 +105,7 @@ public sealed class RealmScaleChecks
     /// </para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void TheSerialPassesPerServedRealmAreTheSameAtOneInteriorAndAtSixteen()
     {
         using var galaxy = RealmScaleGalaxy.Create(planets: 2, occupied: 1, tickRateHz: Hz);
@@ -158,6 +160,7 @@ public sealed class RealmScaleChecks
     /// registry into hundreds. One per tick is a number, so it is asserted as one rather than as a band.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void PolicyIsEvaluatedOncePerTickHoweverManyRealmsAreRegistered()
     {
         using var galaxy = RealmScaleGalaxy.Create(planets: 4, occupied: 2, tickRateHz: Hz);

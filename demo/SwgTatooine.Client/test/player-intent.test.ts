@@ -84,10 +84,15 @@ describe('movementIntent', () => {
     expect(movementIntent(held('ArrowLeft'), 0.7)).toEqual(movementIntent(held('KeyA'), 0.7));
   });
 
-  it('runs by default and walks with shift', () => {
-    expect(movementIntent(held('KeyW'), 0)?.speedClass).toBe(SpeedClass.run);
-    expect(movementIntent(held('KeyW', 'ShiftLeft'), 0)?.speedClass).toBe(SpeedClass.walk);
-    expect(movementIntent(held('KeyW', 'ShiftRight'), 0)?.speedClass).toBe(SpeedClass.walk);
+  it('walks by default and travels at the latched gait with shift', () => {
+    // Inverted on 2026-10-21 (Loïc): every rung of the ladder is a deliberate thing, so none of them is what a body
+    // should be doing by accident while crossing a room.
+    expect(movementIntent(held('KeyW'), 0)?.speedClass).toBe(SpeedClass.walk);
+    expect(movementIntent(held('KeyW', 'ShiftLeft'), 0)?.speedClass).toBe(SpeedClass.run);
+    expect(movementIntent(held('KeyW', 'ShiftRight'), 0)?.speedClass).toBe(SpeedClass.run);
+    // Shift gives whatever Shift+1..4 last latched, not a fixed gait.
+    expect(movementIntent(held('KeyW', 'ShiftLeft'), 0, SpeedClass.speeder)?.speedClass).toBe(SpeedClass.speeder);
+    expect(movementIntent(held('KeyW'), 0, SpeedClass.speeder)?.speedClass).toBe(SpeedClass.walk);
   });
 
   /**

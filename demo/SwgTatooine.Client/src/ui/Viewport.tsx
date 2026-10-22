@@ -195,9 +195,23 @@ export function Viewport() {
           useUi
             .getState()
             .setPlayerRadiusRange(
-              config.player === null ? null : { min: config.player.radiusM, max: config.player.maxRadiusM },
+              config.player === null
+                ? null
+                : {
+                    min: config.player.radiusM,
+                    max: config.player.maxRadiusM,
+                    def: config.player.defaultRadiusM,
+                  },
             );
           useUi.getState().setRealms(config.realms);
+          // The published asset set, when this server serves one. Mounted here rather than in the constructor because it
+          // is the server that says whether there is anything to mount, and that answer arrives over HTTP.
+          if (config.assets !== null) {
+            void app.mountAssets(config.assets);
+          }
+
+          // How wide a body is, so prediction pushes out of a wall the way the server does.
+          app.setBodyHalf(config.body.halfM, config.body.worldHalfM);
         }
       });
 

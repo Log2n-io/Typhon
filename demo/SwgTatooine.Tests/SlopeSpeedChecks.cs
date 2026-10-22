@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using NUnit.Framework;
 using SwgTatooine.World.Terrain;
@@ -29,6 +29,7 @@ namespace SwgTatooine.Tests;
 /// measured the scheduler.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class SlopeSpeedChecks
@@ -211,6 +212,7 @@ public sealed class SlopeSpeedChecks
     /// </para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void TheRunningWorldSlowsCreaturesOnSteeperGroundThanAverage()
     {
         // A bigger population than the other cases use, on purpose: the assertion is a ratio of two medians, and at the

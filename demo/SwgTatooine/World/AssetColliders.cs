@@ -1,0 +1,669 @@
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text.Json;
+
+namespace SwgTatooine;
+
+/// <summary>
+/// The collision primitives of the published assets, reduced to what a two-dimensional simulation can use: per asset, a
+/// list of plan-view boxes in the asset's own frame.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>This is the narrow half of a two-level test.</b> The spatial index already answers "which structures are near
+/// this body" with their footprints and no component read, which rejects almost every pair — 335 contacts in 17 700
+/// ticks on a live run. Only a body that has actually entered a footprint pays for the primitives behind it, and then a
+/// house is ten to fourteen boxes, which is nothing.
+/// </para>
+/// <para>
+/// <b>Why a doorway works without anything knowing what a door is.</b> The walls of an asset are separate primitives,
+/// so the opening between them is simply a place with no box in it. Collision needs no notion of an entrance; it needs
+/// the geometry the artist authored, which is exactly what the descriptor carries.
+/// </para>
+/// </remarks>
+public sealed class AssetColliders
+{
+    /// <summary>
+    /// The height, in metres above an asset's own origin, that a primitive must cross to block a body.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A two-dimensional simulation has no "up", so it has to be told what a person would walk over.</b> The
+    /// published assets make the answer easy, because their collision is authored in a band above the walkable floor
+    /// and everything else is furniture of a different height:
+    /// </para>
+    /// <code>
+    ///   houses:  walls, pilasters, towers   y 0.60 .. 2.70   cross 1.6   BLOCK
+    ///            steps / step top           y 0.50 .. 1.00   below       walk over
+    ///            plinth                     y 0.00 .. 0.70   below       walk over
+    ///            entry ramp                 below ground     below       walk over
+    ///            court gate lintel          y 2.46 .. 2.70   above       walk under
+    ///   port:    walls, towers, pylons      y 0.30 .. 2.30   cross 1.6   BLOCK
+    ///            pad, stairs, stair top     y 0.30 .. 1.26   below       walk over
+    ///            lamp post                  y 0.30 .. 1.05   below       walk over
+    ///            plaza, entry ramp          below 0.30       below       walk over
+    /// </code>
+    /// <para>
+    /// So one comparison selects the walls and leaves the doorway between them open, keeps the steps that lead to it
+    /// passable, and lets a body walk under a gate's lintel.
+    /// </para>
+    /// <para>
+    /// <b>It was 1.0, and that was wrong.</b> The shuttleport's landing deck and its stairs reach 1.26 m, so a line
+    /// below that turned the surface a player is meant to stand on into a wall — and the shuttleport now stands at the
+    /// centre of every city, where players spawn. The suite said so in three places at once: a body moving 24 m in a
+    /// tick, which is the push out of a 46 m square. At 1.6 the deck is walkable, the ring wall and the gate pylons
+    /// still block, and the houses' selection is unchanged — every wall of theirs spans 0.6 to 2.7 and nothing else of
+    /// theirs reaches 1.6 at all. The heights were measured from the published descriptors by the `blender-models`
+    /// session; this is still a heuristic, and still why a per-collider role in the descriptor is the real fix.
+    /// </para>
+    /// </remarks>
+    internal const float ChestM = 1.6f;
+
+    /// <summary>
+    /// The assets whose primitives this reads. Everything else keeps the single footprint box the world planted it with.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>An allow-list, because <see cref="ChestM"/> is a heuristic and heuristics have to be checked per asset.</b>
+    /// Each of these was read collider by collider — the houses here, the shuttleport by the `blender-models` session —
+    /// and the rule selects exactly their walls. An asset nobody has read keeps the single footprint box the world
+    /// planted it with, which is what every structure had before the asset pipeline.
+    /// </para>
+    /// <para>
+    /// <b>The real fix is in the descriptor, not here.</b> The exporter knows what each collider is for; a
+    /// <c>role: "solid" | "walkable"</c> per collider would make this list and this constant both unnecessary, and is
+    /// the proposal in front of Loïc. Until then, an asset is added here only after its colliders have been read.
+    /// </para>
+    /// </remarks>
+    private static readonly string[] Verified = ["tat_house_small", "tat_house_large", "tat_shuttleport"];
+
+    /// <summary>One primitive as this simulation sees it: an axis-aligned box in the asset's own plan.</summary>
+    /// <param name="MinX">West edge, metres from the asset origin.</param>
+    /// <param name="MinZ">South edge.</param>
+    /// <param name="MaxX">East edge.</param>
+    /// <param name="MaxZ">North edge.</param>
+    /// <param name="MinX">West edge, in the asset's frame.</param>
+    /// <param name="MinZ">South edge.</param>
+    /// <param name="MaxX">East edge.</param>
+    /// <param name="MaxZ">North edge.</param>
+    /// <param name="MinY">Underside, measured from the asset's own origin — the ground it stands on.</param>
+    /// <param name="MaxY">Top.</param>
+    /// <remarks>
+    /// <b>The vertical span is what turns a box into a floor, a step or a wall, and it used to be thrown away.</b>
+    /// A collider was kept only if it spanned a fixed height above the GROUND, so a building's deck became a wall and
+    /// everything standing on that deck was discarded as something you walk under. Which it is depends on where the
+    /// body's feet are, not on an absolute line, so the span travels with the box and the decision is made per contact.
+    /// </remarks>
+    internal readonly record struct PlanBox(
+        float MinX, float MinZ, float MaxX, float MaxZ, float MinY = 0f, float MaxY = 0f, float PlaneY = float.NaN,
+        float SlopeX = 0f, float SlopeZ = 0f)
+    {
+        /// <summary>
+        /// The top of this collider above (<paramref name="x"/>, <paramref name="z"/>), in the asset's own frame.
+        /// </summary>
+        /// <param name="x">A point inside the plan box, east.</param>
+        /// <param name="z">The same point, north.</param>
+        /// <returns>The height of the top face there.</returns>
+        /// <remarks>
+        /// <b>A ramp is a slab rotated about its length, and its bounding box is a wall.</b> `tat_house_small`'s entry
+        /// ramp is 0.3 m thick and tilted 10 degrees; flattened to an AABB it becomes a 1.57 m block, which is three
+        /// steps tall and therefore impassable. Keeping the top PLANE instead costs two floats and makes the same
+        /// geometry climbable at its low end and solid at its high one — which is what a ramp is.
+        ///
+        /// Flat for every axis-aligned collider, where both slopes are zero and this is just <see cref="MaxY"/>.
+        /// </remarks>
+        internal readonly float TopAt(float x, float z)
+        {
+            if (SlopeX == 0f && SlopeZ == 0f)
+            {
+                return MaxY;
+            }
+
+            // <b>Over the box's own plan, and nowhere else.</b> Every caller evaluates the top at the BODY's position
+            // and only afterwards asks whether the body overlaps the box -- and the overlap test is generous by the
+            // body's half-extent. So the plane was being read up to `half` metres outside the slab it describes, which
+            // on a 0.4 gradient is 0.12 m of lift that is not there. That answer becomes the next tick's feet, and the
+            // next tick reads a little further out again: a ratchet that no single evaluation can show, because each
+            // one looks reasonable. A top face exists over its own footprint; past the edge, the edge's height stands.
+            x = x < MinX ? MinX : (x > MaxX ? MaxX : x);
+            z = z < MinZ ? MinZ : (z > MaxZ ? MaxZ : z);
+
+            var cx = (MinX + MaxX) * 0.5f;
+            var cz = (MinZ + MaxZ) * 0.5f;
+            // <b>NOT clamped to MaxY, and that is measured rather than assumed.</b> A clamp looks obviously right — a
+            // plane extrapolated past the ends of the tilted slab it describes climbs into empty air — but MaxY is the
+            // plane's height AT THE CENTRE on the wire, not the box's roof, so clamping to it flattens every ramp to a
+            // kerb. Measured on the published house: its entry ramp spans z 6.889..11.25 with MaxY −0.128 and a −0.40
+            // gradient, so the true surface at z = 8 is +0.30 and the clamp returned −0.128. The ramp stopped being
+            // climbable the moment the clamp landed.
+            //
+            // The over-reach a clamp would remove is small: for a 0.3 m plank at 22 degrees it is 4 cm at the corner of
+            // its own bounding box. Fixing it properly means publishing the AABB top as a NINTH number so there is
+            // something honest to clamp against — see PlaneY, which is carried but not yet on the wire.
+            var plane = float.IsNaN(PlaneY) ? MaxY : PlaneY;
+            return plane + (SlopeX * (x - cx)) + (SlopeZ * (z - cz));
+        }
+
+        /// <summary>Whether the top face is shallow enough to stand on rather than slide off.</summary>
+        /// <remarks>
+        /// The gradient of the steepest line on the plane. <see cref="MaxWalkableGrade"/> is the testbench's 46 degrees,
+        /// which the published entry ramps (21.8 degrees) and stairs (about 10) sit well inside.
+        /// </remarks>
+        internal readonly bool Walkable => ((SlopeX * SlopeX) + (SlopeZ * SlopeZ)) <= MaxWalkableGrade * MaxWalkableGrade;
+    }
+
+    /// <summary>The plane height a box publishes: its own, or its AABB top for a box that has no separate plane.</summary>
+    private static float Plane(in PlanBox b) => float.IsNaN(b.PlaneY) ? b.MaxY : b.PlaneY;
+
+    /// <summary>The steepest top face a body walks up, as a gradient: <c>tan(46 degrees)</c>.</summary>
+    /// <remarks>The testbench's `maxSlopeDeg`, so a ramp that is climbable there is climbable here.</remarks>
+    internal const float MaxWalkableGrade = 1.0355f;
+
+    /// <summary>By <c>Structure.Asset</c>: the index the wire carries, so a contact needs no name lookup.</summary>
+    private readonly PlanBox[][] _byIndex;
+
+    private AssetColliders(PlanBox[][] byIndex) => _byIndex = byIndex;
+
+    /// <summary>How many assets carry collision, for the startup line.</summary>
+    internal int AssetCount
+    {
+        get
+        {
+            var n = 0;
+            foreach (var boxes in _byIndex)
+            {
+                if (boxes.Length > 0)
+                {
+                    n++;
+                }
+            }
+
+            return n;
+        }
+    }
+
+    /// <summary>
+    /// How far the furthest primitive of any asset reaches PAST the ground the world reserved for it, in metres.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The amount by which the cheap gate must grow.</b> A footprint is what the world reserved, and an asset is
+    /// not obliged to fit inside it: `tat_house_large` is 18.8 m across against an 18 m footprint, so 0.4 m of its
+    /// wall lies outside the box that decides whether to look at its walls at all — a body arriving along the long
+    /// axis would be rejected while already inside one. Growing the gate by this fixes it without touching the world's
+    /// packing or what the renderer draws, both of which the footprint also decides.
+    /// </para>
+    /// <para>
+    /// <b>The overhang, not the reach — and the difference is the whole value of the gate.</b> This was briefly the
+    /// absolute distance from an asset's origin to its furthest primitive, which for `tat_shuttleport` is 23 m. Every
+    /// footprint in the world then grew by 23 m, so a body anywhere in a city passed the gate for several structures
+    /// at once and paid a <c>TryOpen</c> and two component reads for each, on the one path built to avoid exactly
+    /// that. Measured against each kind's own reservation the figure is 0.4 m, and the gate is a gate again.
+    /// </para>
+    /// </remarks>
+    internal float MaxOverhangM { get; private set; }
+
+    /// <summary>
+    /// The overhang of each reserved footprint SIZE, so a gate can charge a structure its own asset's reach rather
+    /// than the worst asset's.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Keyed on the reservation's half-extent, because that is the one thing about a structure a gate already
+    /// knows.</b> The broad phase answers with the box the spatial index holds and nothing else — no component, no
+    /// asset id, no kind — and that box IS the reservation
+    /// (<c>WorldBuilder</c> writes <see cref="StructureFootprint.HalfExtentM"/> of the kind straight into it). The
+    /// reservation is a function of the kind and the kind picks the asset, so the half-extent identifies the overhang
+    /// without opening anything.
+    /// </para>
+    /// <para>
+    /// <b>Why this is worth a table.</b> <see cref="MaxOverhangM"/> is the maximum over every asset — 2.25 m, which the
+    /// house ramps set — and charging it to every structure made a terminal that overhangs nothing by a centimetre
+    /// behave like a house with a ramp: its gate grew by 2.25 m, and worse, <see cref="SimBridge.DiscFor"/> took 2.25 m
+    /// off the clearance to it, so every body near one held a disc 2.25 m smaller than the truth and refreshed sooner.
+    /// Six of the eight kinds overhang by nothing at all.
+    /// </para>
+    /// <para>
+    /// <b>Entries are merged by MAX</b>, so two kinds reserving the same square share the larger figure and the answer
+    /// stays conservative. An unrecognised size falls back to <see cref="MaxOverhangM"/>, which is what the whole world
+    /// used before this existed.
+    /// </para>
+    /// </remarks>
+    private (float HalfM, float OverhangM)[] _overhangByHalf = [];
+
+    /// <summary>
+    /// How much the sizes in <see cref="_overhangByHalf"/> may be off by and still be recognised, in metres.
+    /// </summary>
+    /// <remarks>
+    /// <b>A tolerance, because the half-extent is measured back out of a box and not read.</b> The index holds
+    /// <c>centre ± half</c> as two floats, so a structure 8 km from the origin rounds each end and
+    /// <c>(MaxX − MinX) / 2</c> comes back a fraction of a millimetre off the constant that produced it. The published
+    /// reservations are 0.8, 2.5, 3, 7, 9, 11 and 23.1 m, so the closest pair is 0.5 m apart — a hundred times this —
+    /// and <c>AssetCollisionChecks.NoTwoReservationsAreCloseEnoughToBeConfused</c> pins that, because a size matched to
+    /// the wrong kind would under-charge the overhang and that is a correctness bug rather than a slower gate.
+    /// </remarks>
+    internal const float HalfExtentToleranceM = 0.05f;
+
+    /// <summary>
+    /// How far past the reservation an asset standing on a square of this size reaches, in metres.
+    /// </summary>
+    /// <param name="halfM">The reservation's half-extent, as the broad-phase box gives it.</param>
+    /// <returns>That size's overhang, or <see cref="MaxOverhangM"/> for a size this table does not know.</returns>
+    internal float OverhangFor(float halfM)
+    {
+        foreach (ref readonly var entry in _overhangByHalf.AsSpan())
+        {
+            if (MathF.Abs(entry.HalfM - halfM) <= HalfExtentToleranceM)
+            {
+                return entry.OverhangM;
+            }
+        }
+
+        return MaxOverhangM;
+    }
+
+    /// <summary>The table <see cref="OverhangFor"/> reads, for the test that pins its sizes apart.</summary>
+    internal ReadOnlySpan<(float HalfM, float OverhangM)> OverhangTable => _overhangByHalf;
+
+    /// <summary>How many blocking primitives were kept in total.</summary>
+    internal int BoxCount
+    {
+        get
+        {
+            var n = 0;
+            foreach (var boxes in _byIndex)
+            {
+                n += boxes.Length;
+            }
+
+            return n;
+        }
+    }
+
+    /// <summary>The blocking primitives of an asset, in its own frame, or an empty span for one with none.</summary>
+    /// <param name="assetIndex">A <c>Structure.Asset</c>.</param>
+    /// <returns>Its plan boxes.</returns>
+    internal ReadOnlySpan<PlanBox> For(int assetIndex) => ArrayFor(assetIndex);
+
+    /// <summary>
+    /// The same boxes as the array behind them, for a caller that has to STORE the reference.
+    /// </summary>
+    /// <param name="assetIndex">A <c>Structure.Asset</c>.</param>
+    /// <returns>Its plan boxes; never <see langword="null"/>.</returns>
+    /// <remarks>
+    /// A <see langword="ref"/> struct may not hold a span whose provenance the compiler cannot see, even when the
+    /// array behind it outlives everything — so the one caller that memoises keeps the array and converts at use.
+    /// </remarks>
+    internal PlanBox[] ArrayFor(int assetIndex) =>
+        (uint)assetIndex < (uint)_byIndex.Length ? _byIndex[assetIndex] : [];
+
+    /// <summary>
+    /// The blocking primitives of every asset, as the JSON the client collides against.
+    /// </summary>
+    /// <returns>An array of arrays, indexed by <c>Structure.Asset</c>; an empty inner array means "use the footprint".</returns>
+    /// <remarks>
+    /// <b>Published rather than re-derived, and that is the whole point.</b> The client used to read the same
+    /// descriptors and apply the same chest-height rule, which meant it also had to know which assets that rule had
+    /// been checked against — a list that lives here and was on no wire. It invented a wall across the shuttleport's
+    /// landing pad, at the centre of every city, and fought the authority about it for ever. Sending the geometry
+    /// instead leaves exactly one reader of a descriptor's collision, one copy of the rule, and one list of what it has
+    /// been verified against.
+    /// </remarks>
+    internal string ToJson()
+    {
+        var json = new System.Text.StringBuilder("[");
+        for (var index = 0; index < _byIndex.Length; index++)
+        {
+            if (index > 0)
+            {
+                json.Append(',');
+            }
+
+            json.Append('[');
+            var boxes = _byIndex[index];
+            for (var i = 0; i < boxes.Length; i++)
+            {
+                if (i > 0)
+                {
+                    json.Append(',');
+                }
+
+                var b = boxes[i];
+                // Six numbers, not four: the vertical span travels, because the client has to make the same
+                // floor-or-wall decision the server makes or its prediction fights the authority on every step.
+                json.Append(FormattableString.Invariant(
+                    $"[{b.MinX:R},{b.MinZ:R},{b.MaxX:R},{b.MaxZ:R},{b.MinY:R},{b.MaxY:R},{Plane(b):R},{b.SlopeX:R},{b.SlopeZ:R}]"));
+            }
+
+            json.Append(']');
+        }
+
+        return json.Append(']').ToString();
+    }
+
+    /// <summary>
+    /// Reads the descriptors of every asset the world may place, from the folder the origin serves.
+    /// </summary>
+    /// <param name="origin">The pinned asset set.</param>
+    /// <returns>The collider table, empty when the catalogue publishes none of the assets this world uses.</returns>
+    /// <remarks>
+    /// Only the assets on <see cref="Verified"/> are read; everything else keeps its footprint box.
+    /// </remarks>
+    internal static AssetColliders Load(SwgTatooine.Replication.AssetOrigin origin)
+    {
+        ArgumentNullException.ThrowIfNull(origin);
+
+        var wanted = new HashSet<string>(Verified, StringComparer.Ordinal);
+        var catalogue = JsonDocument.Parse(File.ReadAllText(Path.Combine(origin.Directory, origin.CatalogueName)));
+        var byIndex = new PlanBox[StructureAssets.Table.Length][];
+        for (var i = 0; i < byIndex.Length; i++)
+        {
+            byIndex[i] = [];
+        }
+
+        using (catalogue)
+        {
+            if (!catalogue.RootElement.TryGetProperty("assets", out var assets))
+            {
+                return new AssetColliders(byIndex);
+            }
+
+            for (var index = 0; index < StructureAssets.Table.Length; index++)
+            {
+                var id = StructureAssets.Table[index];
+                if (!wanted.Contains(id) || !assets.TryGetProperty(id, out var entry)
+                    || !entry.TryGetProperty("descriptor", out var file))
+                {
+                    continue;
+                }
+
+                var path = Path.Combine(origin.Directory, file.GetString() ?? string.Empty);
+                if (File.Exists(path))
+                {
+                    byIndex[index] = ReadBlocking(File.ReadAllText(path));
+                }
+            }
+        }
+
+        var colliders = new AssetColliders(byIndex);
+        colliders._overhangByHalf = OverhangTableOf(byIndex);
+        colliders.MaxOverhangM = OverhangOf(byIndex);
+        return colliders;
+    }
+
+    /// <summary>A table built straight from boxes, for a test that does not want a catalogue on disk.</summary>
+    /// <param name="byIndex">Each asset's plan boxes, indexed as <see cref="StructureAssets.Table"/> counts them.</param>
+    /// <returns>The table, with its overhang measured the way <see cref="Load"/> measures it.</returns>
+    internal static AssetColliders FromBoxesForTest(PlanBox[][] byIndex) =>
+        new(byIndex) { _overhangByHalf = OverhangTableOf(byIndex), MaxOverhangM = OverhangOf(byIndex) };
+
+    /// <summary>
+    /// The largest amount by which any asset's primitives reach past the ground its kind reserves, in metres.
+    /// </summary>
+    /// <param name="byIndex">Each asset's plan boxes, indexed as <see cref="StructureAssets.Table"/> counts them.</param>
+    /// <returns>The overhang, never negative — an asset that fits inside its reservation asks for no growth.</returns>
+    /// <remarks>
+    /// Measured per asset against <see cref="StructureFootprint.HalfExtentM"/> of the kind that picks it
+    /// (<see cref="StructureAssets.KindOf"/>), then maximised. Taking the maximum over assets rather than keeping the
+    /// figure per asset is deliberate: the gate's whole purpose is to decide WITHOUT reading a component, and which
+    /// asset a structure is lives in one.
+    /// </remarks>
+    internal static float OverhangOf(PlanBox[][] byIndex)
+    {
+        var overhang = 0f;
+        foreach (var (_, each) in OverhangTableOf(byIndex))
+        {
+            overhang = MathF.Max(overhang, each);
+        }
+
+        return overhang;
+    }
+
+    /// <summary>
+    /// The overhang of each reserved footprint size, merged by maximum over the assets that stand on it.
+    /// </summary>
+    /// <param name="byIndex">Each asset's plan boxes, indexed as <see cref="StructureAssets.Table"/> counts them.</param>
+    /// <returns>One entry per reservation size any asset names, never negative.</returns>
+    /// <remarks>
+    /// Measured per asset against <see cref="StructureFootprint.HalfExtentM"/> of the kind that picks it
+    /// (<see cref="StructureAssets.KindOf"/>). An asset that fits inside its reservation still earns an entry, with an
+    /// overhang of zero: that is the whole point — six of the eight kinds are such, and the old single maximum charged
+    /// them the house ramps' 2.25 m.
+    /// </remarks>
+    internal static (float HalfM, float OverhangM)[] OverhangTableOf(PlanBox[][] byIndex)
+    {
+        ArgumentNullException.ThrowIfNull(byIndex);
+
+        var table = new List<(float HalfM, float OverhangM)>();
+        for (var index = 0; index < byIndex.Length; index++)
+        {
+            var reach = 0f;
+            foreach (var box in byIndex[index])
+            {
+                reach = MathF.Max(reach, MathF.Max(MathF.Abs(box.MinX), MathF.Abs(box.MaxX)));
+                reach = MathF.Max(reach, MathF.Max(MathF.Abs(box.MinZ), MathF.Abs(box.MaxZ)));
+            }
+
+            if (index >= StructureAssets.KindOf.Length)
+            {
+                // No asset in this slot at all, so there is no reservation to compare a reach to. A kind with no
+                // published asset gets no entry either, and falls back to the worst case the way the whole world did.
+                continue;
+            }
+
+            // <b>An asset that publishes NO colliders overhangs by zero, which is a measurement and not an absence.</b>
+            // Skipping it here was the bug this comment replaces: the terminals declare no collision, so they earned no
+            // entry, so every terminal fell back to the worst case - the house ramps 2.25 m - which is the one case the
+            // table was built to fix. A structure with no collider geometry is collided as its footprint box, and a
+            // footprint box reaches exactly as far as itself.
+
+            var reserved = StructureFootprint.HalfExtentM(StructureAssets.KindOf[index]);
+            var overhang = MathF.Max(0f, reach - reserved);
+            var at = -1;
+            for (var i = 0; i < table.Count; i++)
+            {
+                if (MathF.Abs(table[i].HalfM - reserved) <= HalfExtentToleranceM)
+                {
+                    at = i;
+                    break;
+                }
+            }
+
+            if (at < 0)
+            {
+                table.Add((reserved, overhang));
+            }
+            else if (overhang > table[at].OverhangM)
+            {
+                // Two assets on one reservation: the larger reach decides, or the smaller one's gate would reject the
+                // larger one's walls.
+                table[at] = (reserved, overhang);
+            }
+        }
+
+        return [.. table];
+    }
+
+    /// <summary>
+    /// The blocking primitives of one descriptor, as plan boxes in the WORLD's frame convention.
+    /// </summary>
+    /// <param name="json">A descriptor document.</param>
+    /// <returns>Its blocking boxes; empty when it declares no collision.</returns>
+    /// <remarks>
+    /// <b>The X mirror is applied here, once.</b> A descriptor is in the glTF frame, which is right-handed, and the
+    /// world is the renderer's left-handed one — the loader puts every model under a root that mirrors X, so anything
+    /// read from a descriptor has to take the same mirror or it lands on the other side of the building from the wall
+    /// it describes. Doing it at load means the per-contact path is a translate and a quarter turn.
+    /// </remarks>
+    internal static PlanBox[] ReadBlocking(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        if (!doc.RootElement.TryGetProperty("collision", out var collision) || collision.ValueKind != JsonValueKind.Object
+            || !collision.TryGetProperty("shapes", out var shapes) || shapes.ValueKind != JsonValueKind.Array
+            || !collision.TryGetProperty("colliders", out var colliders) || colliders.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var boxes = new List<PlanBox>();
+        foreach (var collider in colliders.EnumerateArray())
+        {
+            if (!collider.TryGetProperty("shape", out var shapeIndex) || !collider.TryGetProperty("pos", out var pos))
+            {
+                continue;
+            }
+
+            var index = shapeIndex.GetInt32();
+            if (shapes.ValueKind != JsonValueKind.Array || index < 0 || index >= shapes.GetArrayLength()
+                || pos.ValueKind != JsonValueKind.Array || pos.GetArrayLength() < 3)
+            {
+                // A descriptor this build cannot read is a published asset to fix, not a server to stop: the structure
+                // keeps its footprint box, which is what every structure had before the asset pipeline.
+                continue;
+            }
+
+            var shape = shapes[index];
+            var (hx, hy, hz) = HalfExtents(shape);
+            var rot = collider.TryGetProperty("rot", out var r) ? Quat(r) : (0f, 0f, 0f, 1f);
+
+            // The primitive's own extent along each world axis, which is |R| applied to its half extents: the same
+            // conservative box the testbench builds for its broad phase, and exact for the axis-aligned majority.
+            var (ex, ey, ez) = RotatedExtent(rot, hx, hy, hz);
+            // <b>Every collider is kept, with its vertical span.</b> Whether one is a floor, a step or a wall depends
+            // on the height of the feet that meet it, and that is not known here — see PlanBox and PushOutOfShapes.
+            var y = (float)pos[1].GetDouble();
+            var x = (float)pos[0].GetDouble();
+            var z = (float)pos[2].GetDouble();
+
+            // The top face's own plane, so a ramp stays a ramp instead of becoming a wall its own height.
+            var (slopeX, slopeZ, lift) = TopPlane(rot, hx, hy, hz);
+
+            // Mirrored in X, which turns [min, max] into [-max, -min] and flips the sign of any slope along it.
+            // Y is not mirrored: up is up in both frames.
+            //
+            // <b>The AABB's top and the plane's height at the centre are two different numbers</b>, and keeping only the
+            // second is what made a body fly: `TopAt` then had nothing to clamp its extrapolation against.
+            var box = new PlanBox(-(x + ex), z - ez, -(x - ex), z + ez, y - ey, y + ey, y + lift, -slopeX, slopeZ);
+            if (!float.IsFinite(box.MinX) || !float.IsFinite(box.MinZ) || !float.IsFinite(box.MaxX) || !float.IsFinite(box.MaxZ)
+                || !float.IsFinite(box.MinY) || !float.IsFinite(box.MaxY) || !float.IsFinite(box.PlaneY)
+                || !float.IsFinite(box.SlopeX) || !float.IsFinite(box.SlopeZ))
+            {
+                // A non-finite box is "inside" every test it takes part in, on both sides of the wire: it would make a
+                // body collide with everything and never leave. Dropped here, where it is a file to fix.
+                continue;
+            }
+
+            boxes.Add(box);
+        }
+
+        return boxes.ToArray();
+    }
+
+    private static (float X, float Y, float Z) HalfExtents(JsonElement shape)
+    {
+        var type = shape.TryGetProperty("type", out var t) ? t.GetString() : null;
+        switch (type)
+        {
+            case "box":
+                var half = shape.GetProperty("half");
+                return ((float)half[0].GetDouble(), (float)half[1].GetDouble(), (float)half[2].GetDouble());
+            case "sphere":
+                var radius = (float)shape.GetProperty("radius").GetDouble();
+                return (radius, radius, radius);
+            case "cylinder":
+            case "capsule":
+                var r = (float)shape.GetProperty("radius").GetDouble();
+                var hh = (float)shape.GetProperty("half_height").GetDouble();
+
+                // Both are along their local +Y, as the contract states. A capsule's caps add its radius to the height;
+                // a cylinder's do not.
+                return (r, type == "capsule" ? hh + r : hh, r);
+            default:
+                return (0f, 0f, 0f);
+        }
+    }
+
+    private static (float X, float Y, float Z, float W) Quat(JsonElement r) =>
+        r.GetArrayLength() < 4
+            ? (0f, 0f, 0f, 1f)
+            : ((float)r[0].GetDouble(), (float)r[1].GetDouble(), (float)r[2].GetDouble(), (float)r[3].GetDouble());
+
+    /// <summary>
+    /// The top face of a rotated box, as a gradient and the height of that face above the box's centre.
+    /// </summary>
+    /// <param name="q">The collider's rotation.</param>
+    /// <param name="hx">Half extent along its own X.</param>
+    /// <param name="hy">Half extent along its own Y.</param>
+    /// <param name="hz">Half extent along its own Z.</param>
+    /// <returns>How the top rises per metre east and north, and how far it sits above the centre at the centre.</returns>
+    /// <remarks>
+    /// Of the box's six faces the one that faces most nearly upwards is the one a body would stand on, so its outward
+    /// normal is the one worth keeping. A plane through a point with normal <c>n</c> has height
+    /// <c>y = p.y - (n.x dx + n.z dz) / n.y</c>, which is where the two gradients come from; a face normal pointing
+    /// straight up gives zero for both and the flat case costs nothing.
+    /// </remarks>
+    private static (float SlopeX, float SlopeZ, float Lift) TopPlane((float X, float Y, float Z, float W) q, float hx, float hy, float hz)
+    {
+        Span<(float X, float Y, float Z, float H)> axes =
+        [
+            Axis(Rotate(q, 1f, 0f, 0f), hx),
+            Axis(Rotate(q, 0f, 1f, 0f), hy),
+            Axis(Rotate(q, 0f, 0f, 1f), hz),
+        ];
+
+        var best = 0;
+        for (var i = 1; i < axes.Length; i++)
+        {
+            if (MathF.Abs(axes[i].Y) > MathF.Abs(axes[best].Y))
+            {
+                best = i;
+            }
+        }
+
+        var (nx, ny, nz, h) = axes[best];
+        if (ny < 0f)
+        {
+            // Take the face that points UP, not the opposite one.
+            (nx, ny, nz) = (-nx, -ny, -nz);
+        }
+
+        if (ny <= 1e-4f)
+        {
+            // Edge-on: no top face worth speaking of, so the bounding box's own top is the honest answer.
+            return (0f, 0f, 0f);
+        }
+
+        // The face centre sits h along the normal from the box centre, so the plane's height AT the box centre is h/1
+        // projected back — which for a unit normal is simply h / ny... no: the face centre is offset along n, and the
+        // plane through it has height (n . (centre + n h) - n . centre) / ny = h / ny above the centre.
+        return (-nx / ny, -nz / ny, h / ny);
+    }
+
+    /// <summary>One of a box's axes as a unit normal plus the half extent along it.</summary>
+    private static (float X, float Y, float Z, float H) Axis((float X, float Y, float Z) v, float h) => (v.X, v.Y, v.Z, h);
+
+    /// <summary>The axis-aligned extent of a box of these half extents under this rotation.</summary>
+    private static (float X, float Y, float Z) RotatedExtent((float X, float Y, float Z, float W) q, float hx, float hy, float hz)
+    {
+        var (ax, ay, az) = Rotate(q, hx, 0f, 0f);
+        var (bx, by, bz) = Rotate(q, 0f, hy, 0f);
+        var (cx, cy, cz) = Rotate(q, 0f, 0f, hz);
+        return (
+            MathF.Abs(ax) + MathF.Abs(bx) + MathF.Abs(cx),
+            MathF.Abs(ay) + MathF.Abs(by) + MathF.Abs(cy),
+            MathF.Abs(az) + MathF.Abs(bz) + MathF.Abs(cz));
+    }
+
+    /// <summary><c>q v q*</c>, expanded.</summary>
+    private static (float X, float Y, float Z) Rotate((float X, float Y, float Z, float W) q, float vx, float vy, float vz)
+    {
+        var tx = 2f * ((q.Y * vz) - (q.Z * vy));
+        var ty = 2f * ((q.Z * vx) - (q.X * vz));
+        var tz = 2f * ((q.X * vy) - (q.Y * vx));
+        return (
+            vx + (q.W * tx) + ((q.Y * tz) - (q.Z * ty)),
+            vy + (q.W * ty) + ((q.Z * tx) - (q.X * tz)),
+            vz + (q.W * tz) + ((q.X * ty) - (q.Y * tx)));
+    }
+}

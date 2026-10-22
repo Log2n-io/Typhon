@@ -5,6 +5,20 @@ import type { SourceStats } from '../data/source';
 
 /** A snapshot the renderer publishes four times a second for the HUD and the inspector. */
 
+/** Where the drawn body's feet are, against where the collision rule says the ground is. */
+export interface FeetReport {
+  /** The lowest point of the drawn body, metres above sea level. */
+  readonly bottomY: number;
+  /** The height field under it. */
+  readonly terrainY: number;
+  /** The terrain raised by any published floor within a step — what it should be standing on. */
+  readonly surfaceY: number;
+  /** What the server says this body's altitude is. */
+  readonly serverY: number;
+  /** `bottomY - surfaceY`: zero when the feet are on the ground, positive when the body is in the air. */
+  readonly gapM: number;
+}
+
 export interface LayerStats {
   /** The archetype this row is about, as the source's schema names it. */
   readonly archetype: ArchetypeInfo;
@@ -86,6 +100,14 @@ export interface FrameStats {
   readonly gaitMps: number;
   /** Ground height under the camera target, metres — 0 while the terrain is still baking. */
   readonly groundM: number;
+  /**
+   * Where the avatar's lowest vertex is against the surface it should rest on, or `null` when none is drawn.
+   *
+   * <b>The instrument for "the character is flying".</b> That claim is about the distance between two numbers nobody
+   * could read: the altitude the collision rule computed and where the mesh actually ended up. `gapM` is that
+   * distance, measured off Babylon's own bounding boxes, so it answers the question wherever the body is standing.
+   */
+  readonly feet: FeetReport | null;
   /** How long the heightfield bake took, milliseconds; 0 until it lands. */
   readonly terrainBakeMs: number;
   /** Triangles the terrain drew last frame: the quadtree's selected nodes times the node grid. */

@@ -386,6 +386,49 @@ export class Predictor {
     this.publish();
   }
 
+  /**
+   * Moves the prediction to where collision put it.
+   *
+   * <b>It shifts the integration, not the published position.</b> `x` is recomputed every step as the pure
+   * integration plus the correction, so writing it would be erased on the next frame — the body would be pushed out of
+   * the wall on screen and keep integrating INTO it, which is the standing error this exists to remove rather than a
+   * fix for it.
+   *
+   * The correction term is deliberately untouched: it is the reconciliation against the authority, and the authority
+   * applies the same push-out, so the two converge rather than fight.
+   *
+   * @param x Where collision put the body, east.
+   * @param z Where collision put it, north.
+   *
+   * @remarks
+   * The history ring was recorded earlier in this frame's {@link step}, so the sample for this instant holds the
+   * uncollided position and the next one holds the collided one. The reconciler compares against an authority that was
+   * itself pushed out, so the residual is one frame of a push the server also made.
+   */
+  placeAt(x: number, z: number): void {
+    if (!Number.isFinite(x) || !Number.isFinite(z)) {
+      // A non-finite push would poison the integration with no way back: `error` becomes NaN, so neither the snap nor
+      // the adopt threshold fires again and the correction accumulates NaN for the rest of the session.
+      return;
+    }
+
+    this.pureX += x - this.x;
+    this.pureZ += z - this.z;
+
+    // <b>And the sample this frame already recorded, or the corrector integrates the push for ever.</b> `step` records
+    // into the ring BEFORE collision runs, so the newest sample would hold the un-collided position: the reconciler
+    // would then measure one frame of penetration every frame, against an authority that was itself pushed out. It
+    // does not show on screen — the two terms cancel in `publish` — but `corr` drifts without bound (measured at
+    // −0.49 m/s walking into a wall, −28.5 m after a minute), which is exactly the windup this class is built to not
+    // have.
+    if (this.head >= 0) {
+      this.atX[this.head] = this.pureX;
+      this.atZ[this.head] = this.pureZ;
+    }
+
+    this.publish();
+  }
+
   private publish(): void {
     this.x = this.pureX + this.corrX;
     this.z = this.pureZ + this.corrZ;

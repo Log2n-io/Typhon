@@ -28,9 +28,30 @@ describe("a player's view radius", () => {
     expect(useUi.getState().playerRadius).toBeNull();
   });
 
-  it("starts at the profile's own radius, which is what the session is already served", () => {
+  it("starts at the range's floor when the server states no default, as every server did before the figure existed", () => {
     useUi.getState().setPlayerRadiusRange({ min: 192, max: 320 });
     expect(useUi.getState().playerRadius).toBe(192);
+  });
+
+  it("starts at what the server actually SERVES, which is neither end of the range", () => {
+    // The floor is the narrowest a session may ask to be, not the radius it has: a renderer is served 1 024 m of a
+    // 192..1 280 m range, and a slider that opened at 192 reported a view distance five times smaller than the one the
+    // session was being given.
+    useUi.getState().setPlayerRadiusRange({ min: 192, max: 1280, def: 1024 });
+    expect(useUi.getState().playerRadius).toBe(1024);
+  });
+
+  it('clamps a default the server states outside its own range rather than honouring it', () => {
+    useUi.getState().setPlayerRadiusRange({ min: 192, max: 320, def: 4000 });
+    expect(useUi.getState().playerRadius).toBe(320);
+  });
+
+  it('keeps a radius the person already chose when the range is re-stated', () => {
+    useUi.getState().setPlayerRadiusRange({ min: 192, max: 1280, def: 1024 });
+    useUi.getState().setPlayerRadius(640);
+    // A re-fetch must not pull the slider back to the default: the person's ask outlives the config.
+    useUi.getState().setPlayerRadiusRange({ min: 192, max: 1280, def: 1024 });
+    expect(useUi.getState().playerRadius).toBe(640);
   });
 
   it('accepts anything inside the range', () => {

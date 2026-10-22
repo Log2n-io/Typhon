@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using NUnit.Framework;
 using Typhon.Engine;
 
@@ -21,6 +21,7 @@ namespace SwgTatooine.Tests;
 /// run shorter than <c>DungeonStayS</c>.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 public sealed class DungeonReopenChecks
 {
@@ -35,6 +36,7 @@ public sealed class DungeonReopenChecks
     }
 
     [Test]
+    [Category("Integration")]
     public void AWorldReopenedWithADungeonStillOpenKeepsTicking()
     {
         var dir = Worlds.NewDirectory();

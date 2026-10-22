@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using NUnit.Framework;
 using Typhon.Engine;
@@ -29,6 +29,7 @@ namespace SwgTatooine.Tests;
 /// All three would move the number being measured for reasons that have nothing to do with the measurement.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 internal sealed class RealmScaleGalaxy : IDisposable
 {
     private readonly string _dir;

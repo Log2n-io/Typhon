@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
@@ -33,6 +33,7 @@ namespace SwgTatooine.Tests;
 /// in them. That invariant is invisible to a type system and would survive any amount of review.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 internal sealed class BotAccountChecks
 {
@@ -548,6 +549,7 @@ internal sealed class BotProvisionerChecks
     }
 
     /// <summary>A fresh population signs itself up, and every token it is handed is one the game would admit.</summary>
+    [Category("Integration")]
     [Test]
     [CancelAfter(60_000)]
     public async Task AFreshPopulationSignsUpAndGetsAdmissibleTokens()
@@ -582,6 +584,7 @@ internal sealed class BotProvisionerChecks
     }
 
     /// <summary>A second run of the same fleet makes no HTTP call at all: the stored tokens are still good.</summary>
+    [Category("Integration")]
     [Test]
     [CancelAfter(60_000)]
     public async Task ASecondPassReusesTheStoredTokens()
@@ -612,6 +615,7 @@ internal sealed class BotProvisionerChecks
     /// This is the case that justifies deriving rather than storing passwords. With a password file, losing it loses the accounts;
     /// with a derivation, losing it costs one extra round trip per bot.
     /// </remarks>
+    [Category("Integration")]
     [Test]
     [CancelAfter(60_000)]
     public async Task APopulationWhoseFileWasLostLogsInInstead()
@@ -645,6 +649,7 @@ internal sealed class BotProvisionerChecks
     /// the fleet reported "check the scheme and the port". Restarting a server while keeping the file is the ordinary case; on a
     /// fresh box it is the only case.
     /// </remarks>
+    [Category("Integration")]
     [Test]
     [CancelAfter(60_000)]
     public async Task APopulationWhoseServerLostTheAccountsSignsUpAgain()
@@ -723,6 +728,7 @@ internal sealed class BotProvisionerChecks
     /// The message is asserted because the symptom — a thousand 401s against accounts the file says exist — has exactly one cause
     /// and an operator should not have to deduce it.
     /// </remarks>
+    [Category("Integration")]
     [Test]
     [CancelAfter(60_000)]
     public async Task AWrongKeyIsReportedAsAKeyMismatch()
@@ -769,6 +775,7 @@ internal sealed class BotProvisionerChecks
     /// a credential in the file without any property being named one — and that is the only way this invariant ever breaks.
     /// </para>
     /// </remarks>
+    [Category("Integration")]
     [Test]
     [CancelAfter(60_000)]
     public async Task NoPasswordReachesTheAccountsFile()

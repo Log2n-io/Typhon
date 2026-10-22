@@ -1,4 +1,4 @@
-using NUnit.Framework;
+﻿using NUnit.Framework;
 using Typhon.Client;
 using Typhon.Protocol;
 using SwgTatooine.Bots.Brain;
@@ -22,6 +22,7 @@ namespace SwgTatooine.Tests;
 /// would conclude. A hand-built store would have agreed with whatever the scan did.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class PerceptionChecks
@@ -50,6 +51,7 @@ public sealed class PerceptionChecks
     /// <summary>Standing at a port, a bot sees its own body, learns the port, and knows it can board.</summary>
     [Test]
     [CancelAfter(90_000)]
+    [Category("Integration")]
     public void StandingAtAPortItLearnsThePortAndKnowsItCanBoard()
     {
         using var sim = new TatooineSim(Worlds.Small(_dir));
@@ -90,6 +92,7 @@ public sealed class PerceptionChecks
     /// </remarks>
     [Test]
     [CancelAfter(90_000)]
+    [Category("Integration")]
     public void WalkingOutOfRangeForgetsTheProximityAndNotThePort()
     {
         using var sim = new TatooineSim(Worlds.Small(_dir));

@@ -463,6 +463,24 @@ public static partial class TatooineReplication
     /// </remarks>
     public const double PlayerRadiusM = 192d;
 
+    /// <summary>How far a session with a RENDERER is served, in metres: the radius a connecting player gets before touching the slider.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Separate from <see cref="PlayerRadiusM"/> because the two serve different things.</b> That one is a headless
+    /// bot's sphere and the floor of what a session may ask for, and it is also what the demo's CPU figures are taken
+    /// on — raising it would multiply every bot's replicated set by the square of the change (1 024 against 192 is
+    /// 28x the area) and make every number before the change incomparable with every number after it. A renderer, on
+    /// the other hand, is looking at a horizon: at 192 m a building three streets away does not exist, which reads as
+    /// the city popping into being as you walk rather than as a view distance.
+    /// </para>
+    /// <para>
+    /// Inside <see cref="PlayerMaxRadiusM"/>'s 1 280 m, so the window the engine sizes at <c>Start</c> is unchanged and
+    /// this costs nothing it was not already paying: the profiles that carry it already declare the maximum, and the
+    /// window is sized for the maximum rather than for the current radius.
+    /// </para>
+    /// </remarks>
+    public const double HumanRadiusM = 1024d;
+
     /// <summary>The widest a player may set its own sphere to, in metres (<c>SetViewRadius</c>).</summary>
     /// <remarks>
     /// <para>
@@ -624,7 +642,7 @@ public static partial class TatooineReplication
     /// server that wanted the detector tight would cap the ladder instead.
     /// </para>
     /// </remarks>
-    internal const double MaxSpeedMps = TatooineData.PlayerSpeederFastSpeedMps * 1.05;
+    internal const double MaxSpeedMps = TatooineData.PlayerSpeederFastSpeedMps * TatooineData.PlayerGaitScale * 1.05;
 
     private static SubscriptionsCommands _pushCommands;
 
@@ -1252,7 +1270,7 @@ public static partial class TatooineReplication
         subs.Profile(SpectateProfile, p =>
         {
             p.Detection(detection)
-                .Sphere(PlayerRadiusM, leave: PlayerLeaveM, max: PlayerMaxRadiusM)
+                .Sphere(HumanRadiusM, leave: PlayerLeaveM, max: PlayerMaxRadiusM)
                 .AroundControlled()
                 .Of<Player>()
                 .Of<CityNpc>()
@@ -1273,7 +1291,7 @@ public static partial class TatooineReplication
         subs.Profile(HumanProfile, p =>
         {
             p.Detection(detection)
-                .Sphere(PlayerRadiusM, leave: PlayerLeaveM, max: PlayerMaxRadiusM)
+                .Sphere(HumanRadiusM, leave: PlayerLeaveM, max: PlayerMaxRadiusM)
                 .AroundControlled()
                 .Of<Player>()
                 .Of<CityNpc>()
@@ -2685,11 +2703,11 @@ public static partial class TatooineReplication
     internal static float SpeedFor(byte speedClass) => speedClass switch
     {
         SpeedClasses.Stop => 0f,
-        SpeedClasses.Walk => TatooineData.PlayerRunSpeedMps * 0.5f,
-        SpeedClasses.Run => TatooineData.PlayerRunSpeedMps,
-        SpeedClasses.Burst => TatooineData.PlayerBurstRunSpeedMps,
-        SpeedClasses.Speeder => TatooineData.PlayerSpeederSpeedMps,
-        SpeedClasses.SpeederFast => TatooineData.PlayerSpeederFastSpeedMps,
+        SpeedClasses.Walk => TatooineData.PlayerRunSpeedMps * 0.5f * TatooineData.PlayerGaitScale,
+        SpeedClasses.Run => TatooineData.PlayerRunSpeedMps * TatooineData.PlayerGaitScale,
+        SpeedClasses.Burst => TatooineData.PlayerBurstRunSpeedMps * TatooineData.PlayerGaitScale,
+        SpeedClasses.Speeder => TatooineData.PlayerSpeederSpeedMps * TatooineData.PlayerGaitScale,
+        SpeedClasses.SpeederFast => TatooineData.PlayerSpeederFastSpeedMps * TatooineData.PlayerGaitScale,
         _ => 0f,
     };
 

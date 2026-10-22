@@ -89,7 +89,11 @@ public static class StructureFootprint
     {
         StructureKind.Building => 9f,        // 18 x 18
         StructureKind.Terminal => 0.8f,      // 1.6 x 1.6
-        StructureKind.Shuttleport => 16f,    // 32 x 32, the dome
+        // 46.2 x 46.2, the published `tat_shuttleport`'s own footprint (2026-10-22). It was 16 (32 x 32) while the asset
+        // was 46 across, so a dome stood over the ground its neighbours were planted on. The asset is what a shuttleport
+        // IS, so the reservation follows it rather than the other way round; the cost is ~1 100 m2 more of a city's disc,
+        // which the build reports as `Crowded` if any city cannot afford it.
+        StructureKind.Shuttleport => 23.1f,
         StructureKind.PoiProp => 2.5f,       // 5 x 5
         StructureKind.PlayerHouse => 7f,     // 14 x 14
         StructureKind.Factory => 11f,        // 22 x 22

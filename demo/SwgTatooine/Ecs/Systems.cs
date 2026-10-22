@@ -116,6 +116,11 @@ internal sealed class PlayerMoveSystem : QuerySystem
         // without constraining it -- and if a later feature does place one, this edge is already right.
         .Reads<StructurePlacement>()
 
+        // And WHAT that structure is: a body that has entered a footprint asks which asset stands there and which way it
+        // faces, so it can be pushed out of the asset's own walls rather than out of its bounding box. Read on contacts
+        // only (see StructureShapes in SimBridge.Proximity.cs), but declared here because ED-05 is about saying so.
+        .Reads<Structure>()
+
         // Which bodies collide at all: a client's, never the scripted crowd's. PlayerThink already reads it for the
         // mirror-image reason -- it decides for the bodies this does not.
         .Reads<PlayerControl>()

@@ -29,18 +29,28 @@ public sealed partial class TatooineSim
     /// <returns>A task that completes when the host has stopped.</returns>
     public async Task ServeAsync(int port, string clientRoot, string bindAddress = null, string[] origins = null)
     {
-        StartReplication();
+        // Opened BEFORE the runtime is replicating: a published folder that is missing its catalogue is a deployment
+        // fault, and the moment to say so is before a session can connect and be served a world with no geometry.
+        var assets = OpenAssetOrigin();
+        var shapes = LoadAssetColliders(assets);
+        StartReplication(shapes);
         try
         {
             await TatooineHost
                 .ServeAsync(
                     _runtime, port, clientRoot, origins, RealmDirectoryJson(), RealmInventoryJson, bindAddress, _config.AuthBurst, _config.AuthRefillMs,
-                    _config.OriginSecret, _config.AuthLocalOnly, _config.TlsChainPath, _config.TlsKeyPath, _config.TlsPort, _config.RedirectPort)
+                    _config.OriginSecret, _config.AuthLocalOnly, _config.TlsChainPath, _config.TlsKeyPath, _config.TlsPort, _config.RedirectPort,
+                    assets, shapes, _config.WorldEdgeM * 0.5)
                 .ConfigureAwait(false);
         }
         finally
         {
             _runtime.Shutdown();
+
+            // What the run did, on the way out. A served run is the only place this feature meets a real client
+            // population, so it is the only place its counters mean anything -- and a run that has to be killed to
+            // end still gets to say what it measured.
+            PrintProximityReport();
         }
     }
 
@@ -63,7 +73,45 @@ public sealed partial class TatooineSim
     /// <see cref="TyphonRuntime.StartSubscriptionTransport"/> and receives the same frames a WebSocket would carry. Going through the web host instead would
     /// test Kestrel, bind a port, and make a check that is about a <c>KICK</c> fail for a reason that has nothing to do with one.
     /// </remarks>
-    public void StartReplication()
+    /// <summary>The published asset folder this run serves and collides against, or <see langword="null"/> without <c>--assets</c>.</summary>
+    /// <returns>The origin, validated.</returns>
+    /// <exception cref="ArgumentException">The folder, its pointer, or the catalogue it names is missing or malformed.</exception>
+    internal AssetOrigin OpenAssetOrigin() => _config.AssetDirectory == null ? null : AssetOrigin.Open(_config.AssetDirectory);
+
+    /// <summary>
+    /// The collision shapes behind the footprints, read once.
+    /// </summary>
+    /// <param name="assets">What <see cref="OpenAssetOrigin"/> returned, or <see langword="null"/>.</param>
+    /// <returns>The collider table, or <see langword="null"/> on a run with no asset set.</returns>
+    /// <remarks>
+    /// <b>Both the served and the measured path need this, and for a while only the served one had it.</b> Collision is
+    /// per body and a measured run is the only way to put thousands of bodies on it, so a measured run that could not
+    /// load the shapes could only ever measure the footprint fallback — the path a real client never takes. Only the
+    /// assets whose colliders have been checked against the blocking rule are loaded; everything else keeps its
+    /// footprint box (see <see cref="AssetColliders"/>).
+    /// </remarks>
+    internal static AssetColliders LoadAssetColliders(AssetOrigin assets)
+    {
+        if (assets == null)
+        {
+            return null;
+        }
+
+        var shapes = AssetColliders.Load(assets);
+        // The gate's growth PER RESERVATION, not just the worst of them: a terminal reserving 1.6 m and overhanging
+        // nothing is the common case, and a line reporting only the maximum hid that every structure was charged it.
+        var gates = new System.Text.StringBuilder();
+        foreach (var (halfM, overhangM) in shapes.OverhangTable)
+        {
+            gates.Append(gates.Length == 0 ? " gate" : ",").Append(FormattableString.Invariant($" {halfM * 2f:F1} m +{overhangM:F2}"));
+        }
+
+        Console.WriteLine($"  collision: {shapes.AssetCount} asset(s), {shapes.BoxCount} blocking primitive(s),"
+            + $"{gates} (worst +{shapes.MaxOverhangM:F2} m)");
+        return shapes;
+    }
+
+    public void StartReplication(AssetColliders shapes = null)
     {
         // Before anything else, so a misconfigured SWG_AUTH_KEY stops the server here rather than surfacing as a wrapped
         // TypeInitializationException inside the admission hook, on a transport thread, for the first client that connects.
@@ -83,6 +131,10 @@ public sealed partial class TatooineSim
             ShipView = _shipView,
             LairView = _lairView,
             StructureView = _structureView,
+
+            // Null on a run without --assets, which is what keeps the asset pipeline out of a measurement that does
+            // not want it. Handed to the constructor so there is no moment at which the bridge exists without it.
+            AssetShapes = shapes,
         };
 
         _runtime = TyphonRuntime.Create(Dbe, BuildServeSchedule, new RuntimeOptions
@@ -103,6 +155,14 @@ public sealed partial class TatooineSim
             // would make the two arms differ in more than the thing being measured.
             Subscriptions = new SubscriptionsOptions
             {
+                // <b>One ping a second, so the server's silence bound is 3 s rather than 750 ms.</b> The bound is
+                // `3 s / PingHz` (SkipPolicy.SilenceBoundTicks) and the engine's default of 4 therefore cuts any
+                // session it has not heard from for three quarters of a second. That is defensible for a machine-driven
+                // client and wrong for a browser: Chrome throttles a background tab's timers to about 1 Hz, so merely
+                // alt-tabbing exceeded it — measured here as 141 `closedSilent` closures in one evening against a server
+                // whose tick p50 was 1.2 ms of a 100 ms budget with zero overruns. A long GC or a slow frame did it too.
+                PingHz = 1,
+
                 AllowAutomaticPushDetection = _config.SubscriptionsPushAutomatic,
 
                 // The replication cell, set in Initialize. It TRACKS the planet's spatial cell and is not equal to it: a floor of PlayerRadiusM / 3 applies,

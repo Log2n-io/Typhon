@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
 using NUnit.Framework;
@@ -24,6 +24,7 @@ namespace SwgTatooine.Tests;
 /// would consult — so a plan that is right about a spot the entity did not end up at cannot pass.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class WorldLayoutChecks

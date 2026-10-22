@@ -183,7 +183,9 @@ public sealed class SitePlannerChecks
         {
             Assert.That(StructureFootprint.HalfExtentM(StructureKind.Building), Is.EqualTo(9f), "STRUCTURE_SIZES says a building is 18 x 18");
             Assert.That(StructureFootprint.HalfExtentM(StructureKind.Terminal), Is.EqualTo(0.8f), "STRUCTURE_SIZES says a terminal is 1.6 x 1.6");
-            Assert.That(StructureFootprint.HalfExtentM(StructureKind.Shuttleport), Is.EqualTo(16f), "STRUCTURE_SIZES says the dome is 32 x 32");
+            // 46.2 x 46.2 since 2026-10-22: the reservation follows the published `tat_shuttleport`, which is what a
+            // shuttleport IS, rather than the 32 m square it used to be planted in and stand over.
+            Assert.That(StructureFootprint.HalfExtentM(StructureKind.Shuttleport), Is.EqualTo(23.1f), "STRUCTURE_SIZES says the dome is 46.2 x 46.2");
             Assert.That(StructureFootprint.HalfExtentM(StructureKind.Factory), Is.EqualTo(11f), "STRUCTURE_SIZES says a factory is 22 x 22");
 
             // An unknown kind takes a building's footprint rather than none: a kind with no footprint could be planted

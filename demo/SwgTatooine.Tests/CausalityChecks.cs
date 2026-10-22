@@ -95,6 +95,7 @@ internal static class Causality
 /// worlds. What each test must not do is re-derive its expectation from the same counter it is checking, which is why the durability assertion is an identity
 /// between two independently produced numbers (the WAL's own watermark, and the count of things that wrote to it).
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class CausalityLoopTests
@@ -256,6 +257,7 @@ public sealed class CausalityLoopTests
 /// and nothing else does from <see cref="AiMode.Pursue"/> while the target is alive and open.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class CreatureLeashTests

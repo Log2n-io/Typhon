@@ -97,7 +97,9 @@ STRUCTURE_COLORS[StructureKind.CampObject] = [0.66, 0.55, 0.4];
 const STRUCTURE_SIZES: [number, number, number][] = [];
 STRUCTURE_SIZES[StructureKind.Building] = [18, 9, 18];
 STRUCTURE_SIZES[StructureKind.Terminal] = [1.6, 2.6, 1.6];
-STRUCTURE_SIZES[StructureKind.Shuttleport] = [30, 5, 30];
+// 46.2 across, matching the server's reservation and the published asset. The box is only ever seen beyond the range
+// at which the asset itself is placed, so this is the far-field stand-in for it rather than a second opinion.
+STRUCTURE_SIZES[StructureKind.Shuttleport] = [46.2, 5, 46.2];
 STRUCTURE_SIZES[StructureKind.PoiProp] = [5, 4, 5];
 STRUCTURE_SIZES[StructureKind.PlayerHouse] = [14, 7, 14];
 STRUCTURE_SIZES[StructureKind.Factory] = [22, 11, 22];

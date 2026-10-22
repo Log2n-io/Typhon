@@ -149,6 +149,7 @@ internal static class Worlds
 /// <summary>
 /// Realms G1d: a portal crossing keeps the entity — same id, same components — and moves it between the planet's index and the interior's.
 /// </summary>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class PortalTests
@@ -232,6 +233,7 @@ public sealed class PortalTests
 /// condition is not the absence of an occupant.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class OccupiedInteriorTests

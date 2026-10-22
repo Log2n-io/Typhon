@@ -25,6 +25,7 @@ namespace SwgTatooine.Tests;
 /// build as a broken encoder.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 internal sealed class FakeLink : ISubscriptionLink
 {
     private readonly List<byte[]> _sent = [];

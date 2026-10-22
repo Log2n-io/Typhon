@@ -24,6 +24,7 @@ namespace SwgTatooine.Tests;
 /// claim matches the net rather than the intention.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class PauseChecks
@@ -93,6 +94,7 @@ public sealed class PauseChecks
     }
 
     [Test]
+    [Category("Integration")]
     public void APausedWorldStopsMoving_AndAResumedOneMovesAgain()
     {
         using var sim = new TatooineSim(Config());
@@ -129,6 +131,7 @@ public sealed class PauseChecks
     }
 
     [Test]
+    [Category("Integration")]
     public void APausedServerKeepsTickingAndKeepsTalkingToItsClients()
     {
         using var sim = new TatooineSim(Config());
@@ -158,6 +161,7 @@ public sealed class PauseChecks
     }
 
     [Test]
+    [Category("Integration")]
     public void APlayerSessionMayNotStopEveryoneElsesWorld()
     {
         using var sim = new TatooineSim(Config());

@@ -72,6 +72,18 @@ export function Hud() {
             <td>Altitude</td>
             <td>{fmt(stats.altitude, 0)} m</td>
           </tr>
+          {stats.feet === null ? null : (
+            <tr>
+              {/* The gap between the bottom of the drawn body and the surface the collision rule says is under it.
+                  0.00 means the feet are on the ground. Anything else is the body in the air, and the three figures
+                  beside it say which of the four numbers involved is the one that disagrees. */}
+              <td>Feet</td>
+              <td style={{ color: Math.abs(stats.feet.gapM) > 0.05 ? '#ff6b6b' : undefined }}>
+                {`${fmt(stats.feet.gapM, 2)} m gap · body ${fmt(stats.feet.bottomY, 2)} · surface `}
+                {`${fmt(stats.feet.surfaceY, 2)} · terrain ${fmt(stats.feet.terrainY, 2)} · server ${fmt(stats.feet.serverY, 2)}`}
+              </td>
+            </tr>
+          )}
           <tr>
             {/* Which of Shift+1..4 is selected, and what the SERVER says it is worth — the figure is replicated, so a
                 dash here means the owner block has not arrived and the predictor is in its no-prediction fallback,

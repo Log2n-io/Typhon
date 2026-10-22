@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using NUnit.Framework;
@@ -26,6 +26,7 @@ namespace SwgTatooine.Tests;
 /// its own documentation names this use ("for an application with no session in the realm — a headless server, a benchmark, a test").
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class RealmCrossingChecks
@@ -265,6 +266,7 @@ public sealed class RealmCrossingChecks
     /// portal geometry in between.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void Switch_IsOneResetRealmFrame()
     {
         using var sim = new TatooineSim(Config());
@@ -307,6 +309,7 @@ public sealed class RealmCrossingChecks
     /// </para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void Portal_RoundTrip_NetIdStable()
     {
         using var sim = new TatooineSim(Config());
@@ -434,6 +437,7 @@ public sealed class RealmCrossingChecks
     /// </para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void Announcement_ReachesInteriorsOfItsPlanetOnly()
     {
         using var sim = new TatooineSim(Config());

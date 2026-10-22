@@ -20,10 +20,14 @@ import {
 import { CameraInput, isTyping } from '../camera/camera-input';
 import { EyeCamera } from '../camera/eye-camera';
 import { MapCamera } from '../camera/map-camera';
+import { mountAssets, type AssetMount } from './asset-mount';
+import { StaticAssets, type StructureSample } from './static-assets';
+import { groundOnShapes, prepareShape, pushOut, type AssetShape, type PlacedShape, type Position } from './structure-collision';
 import { meanAndP95, regionDue } from './frame-policy';
 import { resolveArchetypes, type ArchetypeInfo, type ArchetypeView } from '../data/archetypes';
 import { altitudeField, altitudeOf, Placement } from '../data/placement';
 import { replicationStatsOf } from '../data/replication-stats';
+import type { AssetSet } from '../data/server-config';
 import { SpeedClass, type DataSource, type EventSink } from '../data/source';
 import { describeFields } from '../data/swg-format';
 import { AGG_GRID, FASTEST_TICK_PERIOD_MS, StructureKind, SWG_SCHEMA, TICK_PERIOD_MS } from '../data/swg-schema';
@@ -36,8 +40,9 @@ import {
   type PickRay,
   type PredictedOverride,
 } from '../render/entity-layer';
+import { NONE_HIDDEN } from '../render/layer-packer';
 import { FLAT_GROUND, type GroundSampler } from '../terrain/ground-sampler';
-import { GroundView, SKY } from '../render/ground';
+import { GroundView, SKY, type GroundShadow } from '../render/ground';
 import { PlanetProfile } from '../render/planet-profile';
 import { InteriorProfile } from '../render/interior-profile';
 import { SpaceProfile } from '../render/space-profile';
@@ -64,10 +69,19 @@ import {
 } from './player-intent';
 import { Predictor, speedForClass } from './predictor';
 import { DEFAULT_THIRD_PERSON_M } from '../camera/eye-camera';
-import { useStats, type Inspection } from '../state/stats-store';
+import { useStats, type FeetReport, type Inspection } from '../state/stats-store';
 import { useUi, type ShuttleportPrompt, type UiState } from '../state/ui-store';
 import { nearestShuttleport } from './shuttle';
 import { nextTravel } from './travel';
+
+/**
+ * How far from the camera a structure is drawn as its published asset, in metres.
+ *
+ * Past this it is the renderer's own shape, which is what every structure was before the asset pipeline. The figure is
+ * about a city block: far enough that the street ahead is built before the viewer reaches it, near enough that a city's
+ * worth of GLBs is not resident at once.
+ */
+const STATIC_ASSET_RANGE_M = 220;
 
 const STATS_INTERVAL_MS = 250;
 const REGION_INTERVAL_MS = 200;
@@ -180,6 +194,7 @@ class MutableFrameView implements FrameView {
   selectedNetId = 0;
   ground: GroundSampler = FLAT_GROUND;
   predicted: PredictedOverride | null = null;
+  hidden: ReadonlySet<number> = NONE_HIDDEN;
 }
 
 /** Reused each frame so a predicted body costs no allocation; the packer only reads it. */
@@ -390,10 +405,23 @@ export class ClientApp {
   private lastReleaseMs = Number.NEGATIVE_INFINITY;
   /** The altitude of whichever camera drew the last frame, for the HUD. */
   private activeAltitude = 0;
+
+  /** The altitude the predicted body is standing at, carried frame to frame; see {@link groundUnder}. */
+  private predictedFeet = Number.NaN;
+
   private selectionText = '';
   /** The netId and archetype {@link selectionText} was built for: netIds are reused, by another archetype too. */
   private selectionTextNetId = 0;
   private selectionTextArchetype = -1;
+  /**
+   * The published assets, once mounted, or `null` on a run whose server announced none.
+   *
+   * Held so that `dispose` releases the containers and the environment texture: a reload that leaves them behind leaks
+   * the whole GLB set, which is the largest single allocation this client makes.
+   */
+  private assets: AssetMount | null = null;
+  /** Set by {@link dispose}, read by {@link gone}: what tells an in-flight asset load that there is nothing to mount on. */
+  private disposed = false;
   private readonly unsubscribe: () => void;
 
   /**
@@ -557,6 +585,55 @@ export class ClientApp {
     });
   }
 
+  /**
+   * Places the server's published assets, once, when it announced a set.
+   *
+   * <b>Opt-in, and silent when there is nothing to mount.</b> The asset set lives outside this repository and a server
+   * started without `--assets` publishes none, so every path here has to be one a run with no assets never takes: this
+   * client draws exactly what it drew before, and nothing in the frame loop asks whether assets exist.
+   *
+   * Failures are reported and swallowed. A missing decoder, a 404 on a descriptor or a catalogue schema this build does
+   * not read are all deployment faults, and none of them is a reason for the session — the simulation, the crowd, the
+   * terrain — to stop being watchable.
+   *
+   * @param set The asset set from `/typhon/demo.json`.
+   * @returns When the arrangement is placed, or when it has failed and said so.
+   */
+  async mountAssets(set: AssetSet): Promise<void> {
+    if (this.assets !== null || this.gone()) {
+      return;
+    }
+
+    try {
+      // Anchored on the city the camera starts over, so what is placed is under the viewer rather than somewhere they
+      // have to be told to fly to.
+      const mount = await mountAssets(this.scene, set, this.origin);
+      if (this.gone()) {
+        // The session was torn down while the catalogue was in flight; its scene took the instances with it.
+        mount.dispose();
+        return;
+      }
+
+      this.assets = mount;
+      this.assetSet = set;
+      this.shapeCache = [];
+      this.staticAssets = new StaticAssets(mount.library, mount.root, set, undefined, mount.lighting);
+    } catch (error) {
+      console.error('assets: not mounted', error);
+    }
+  }
+
+  /**
+   * Whether this app is over: torn down by {@link dispose}, or holding a scene something else disposed.
+   *
+   * <b>A method rather than a field, deliberately.</b> TypeScript carries a property's narrowing across an `await`, so a
+   * second read of `this.scene.isDisposed` after an early return on the same expression is "always false" to the compiler
+   * and to the linter — the type system proving away the exact race the second check exists for. A call is not narrowed.
+   */
+  private gone(): boolean {
+    return this.disposed || this.scene.isDisposed;
+  }
+
   /** What the renderer is drawing from, for {@link expose}: the store, the grid and the resolved archetypes. */
   get debug(): {
     world: WorldStore;
@@ -621,6 +698,7 @@ export class ClientApp {
       delete host.__typhon;
     }
 
+    this.disposed = true;
     this.engine.stopRenderLoop();
     this.resizeObserver.disconnect();
     this.ratioQuery?.removeEventListener('change', this.onRatioChange);
@@ -640,6 +718,10 @@ export class ClientApp {
       profile.dispose();
     }
 
+    this.staticAssets?.dispose();
+    this.staticAssets = null;
+    this.assets?.dispose();
+    this.assets = null;
     this.scene.dispose();
     this.engine.dispose();
   }
@@ -772,6 +854,10 @@ export class ClientApp {
     const step = nextRide(this.ride, source.spectatingNetId, source.selfNetId, ui.selectedNetId, source.resetCount);
     this.ride = step.state;
     if (step.action.kind === 'adopt') {
+      // A DELIBERATE change of subject, so the aim goes with it: the viewer asked to ride something else, and keeping
+      // the angle they were watching the previous body from would point the camera at nothing in particular.
+      this.eyeSubject = 0;
+      this.eyeRebased = false;
       // The camera as well as the selection, because the reset dropped both: `select(0)` returns the camera to god
       // mode, so re-selecting alone would leave the viewer looking at their subject from above after every door.
       // Riding IS riding — the viewer can still leave eye mode by hand, and the next crossing puts them back in it.
@@ -846,8 +932,13 @@ export class ClientApp {
         this.mapCamera.jumpTo(x, z, distanceM);
       },
       forgetSelectionCaches: () => {
-        this.eyeSubject = 0;
+        // NOT `eyeSubject = 0`, which is what this used to do and what made every reset re-aim the camera. A reset
+        // reallocates netIds; it does not move the viewer's head. See `eyeRebased`.
+        this.eyeRebased = true;
         this.selectionTextNetId = 0;
+      },
+      forgetEyeAim: () => {
+        this.eyeSubject = 0;
       },
       forgetRegion: () => {
         this.regionX = Number.NaN;
@@ -934,17 +1025,259 @@ export class ClientApp {
     if (netId === 0) {
       this.predictor.stop();
       this.predictedSubject = 0;
+      this.predictedFeet = Number.NaN;
       return;
     }
 
     if (this.predictedSubject !== netId) {
       this.predictedSubject = netId;
       this.predictor.start(nowMs, this.eyeX, this.eyeZ);
+      // A different body, so the altitude carried from the last one says nothing about this one: a session that was
+      // spectating someone on a roof must not read that roof as the step its own feet are leaving.
+      this.predictedFeet = Number.NaN;
       return;
     }
 
     this.predictor.step(nowMs, dt, this.eyeX, this.eyeZ, this.clock.renderDelayMs);
+
+    // <b>And then out of the walls, the way the server will.</b> Prediction integrates the intent; without this it
+    // walks through a building and reconciliation pulls back against a server that keeps pushing out, which settles
+    // into a standing error rather than a transient — `predictor.ts` sizes it at 0.8 m here and 2.1 m at the delay
+    // ceiling. That is the difference between standing in a 1.2 m doorway and standing in its jamb.
+    const half = this.bodyHalfM;
+    const at = this.predictedAt;
+    at.x = this.predictor.x;
+    at.z = this.predictor.z;
+    const count = half > 0 ? this.gatherStructureShapes() : 0;
+    if (count === 0) {
+      // Nothing published within reach, so the planet's own relief is the whole answer — and saying so is what stops a
+      // body that has just walked off a deck from keeping that deck's altitude for the rest of the session.
+      this.predictedFeet = this.field.heightAt(at.x, at.z);
+      return;
+    }
+
+    // <b>One base for both samples of the frame.</b> The floor test is relative to where the feet WERE, so sampling the
+    // ground twice against a moving base would let one frame climb two steps: the body would mount a 0.8 m ledge at
+    // 60 Hz that it refuses at 30. The previous frame's altitude is the base, and both samples share it.
+    const base = this.predictedFeet;
+    // The feet, so the predictor makes the same floor-or-wall call the server makes: a deck the body is standing
+    // on is not a wall, and a box more than a step above it is.
+    if (pushOut(this.placedShapes, count, half, this.worldHalfM, at, this.groundUnder(at, count, half, base))) {
+      this.predictor.placeAt(at.x, at.z);
+      // What the predictor actually took: `placeAt` refuses a non-finite push, so its own position is the authority on
+      // where the body ended up and `at` is only a request.
+      at.x = this.predictor.x;
+      at.z = this.predictor.z;
+    }
+
+    // <b>Where it ENDED UP, which is the altitude the frame draws.</b> Sampling only before the push-out leaves the
+    // avatar standing at the height of the spot it was ejected from, and that spot is inside a wall.
+    this.predictedFeet = this.groundUnder(at, count, half, base);
   }
+
+  /**
+   * The structures near the predicted body, with the shapes to push out of.
+   *
+   * <b>Pooled, because this runs every frame.</b> The entries are reused and a count returned rather than a fresh
+   * array of fresh literals per structure per frame — the same reason the packer evaluates into typed arrays.
+   *
+   * The geometry is the server's, published once per session and pre-turned per asset, so a frame does no parsing, no
+   * trigonometry and no allocation.
+   *
+   * @returns How many entries of {@link placedShapes} are live.
+   */
+  /**
+   * Where a body standing here would have its feet, so the push-out can tell a floor from a wall.
+   *
+   * <b>The terrain raised by whatever published surface is within a step of `feet`</b>, which is the client's half of
+   * the server's `GroundOnShapes`. A surface more than a step above the feet is not climbed, so the answer depends on
+   * where the feet were — which is why the base is a parameter and not read from the field: one frame must sample twice,
+   * before and after the push-out, and both samples have to be relative to the same previous altitude.
+   *
+   * @param at Where to stand.
+   * @param count How many entries of {@link placedShapes} are live.
+   * @param half The body's half-extent.
+   * @param feet The altitude the feet were at, or `NaN` on the first frame — then the terrain stands for it.
+   */
+  private groundUnder(at: Position, count: number, half: number, feet: number): number {
+    const terrain = this.field.heightAt(at.x, at.z);
+    return groundOnShapes(this.placedShapes, count, half, at, terrain, Number.isFinite(feet) ? feet : terrain);
+  }
+
+  /**
+   * The altitude the locally predicted body stands at, or `NaN` when nothing is predicted.
+   *
+   * Written by {@link advancePrediction} once the push-out has settled, and read by the frame that draws the avatar.
+   */
+  get predictedGroundY(): number {
+    return this.predictedFeet;
+  }
+
+  /**
+   * Puts the sun's shadow slab over the camera's own patch of ground and hands the ground its map.
+   *
+   * <b>Centred on what the camera is looking at, on the ground, in RENDER space.</b> The slab is 192 m across against a
+   * 16 km planet, so where it sits is the whole question: on the eye it would cover the sky behind a first-person
+   * camera and half of what is in front; on the planet coordinate it would be five kilometres from the scene, because
+   * everything the client draws is relative to an origin snapped near the camera.
+   *
+   * @param wanted Whether the viewer wants shadows at all.
+   * @param targetX What the camera orbits, planet east.
+   * @param targetZ The same, north.
+   * @param originX The render origin this frame, planet east.
+   * @param originZ The same, north.
+   * @returns What the ground needs to sample the map, or `null` when nothing is casting.
+   */
+  private shadowFor(
+    wanted: boolean,
+    targetX: number,
+    targetZ: number,
+    originX: number,
+    originZ: number,
+  ): GroundShadow | null {
+    const lighting = this.assets?.lighting ?? null;
+    if (lighting === null) {
+      // No published assets, so nothing in the scene casts: the entities are sprites and impostors and the terrain
+      // cannot shadow itself (its height lives in a texture the shadow pass knows nothing about).
+      return null;
+    }
+
+    lighting.setShadows(wanted);
+    const map = lighting.shadowMap;
+    const transform = lighting.shadowTransform;
+    if (map === null || transform === null) {
+      return null;
+    }
+
+    // The ground under the camera's target, so the slab is centred on the ground rather than on the eye above it.
+    lighting.frameShadows(targetX - originX, this.profile.ground.heightAt(targetX, targetZ), targetZ - originZ);
+    return { map, transform, depth: lighting.shadowDepthValues, size: map.getSize().width };
+  }
+
+  /**
+   * Where the avatar's lowest vertex actually is, against what the collision rule says is under it.
+   *
+   * <b>An instrument, and the reason it exists is that this session could not tell.</b> "The character is flying" was
+   * reported five times and argued about from screenshots; the drawn altitude, the height field, the published floor
+   * and the mesh's own extent are four different numbers and any one of them can be the wrong one. This puts the gap
+   * between the bottom of the body as Babylon actually has it and the surface it should be resting on into the HUD,
+   * so the answer is readable wherever the body happens to be standing.
+   *
+   * @returns The report, or `null` when no avatar is drawn.
+   */
+  private feetReport(): FeetReport | null {
+    const character = this.assets?.character ?? null;
+    if (character === null || character.subjectNetId === 0) {
+      return null;
+    }
+
+    const bottomY = character.rig.lowestY();
+    if (!Number.isFinite(bottomY)) {
+      return null;
+    }
+
+    const predicted = this.view.predicted;
+    const x = predicted === null ? this.evalX : predicted.x;
+    const z = predicted === null ? this.evalZ : predicted.z;
+    const terrainY = this.field.heightAt(x, z);
+
+    // What the collision rule says is under it: the terrain, raised by any published floor within a step.
+    let surfaceY = terrainY;
+    const half = this.bodyHalfM;
+    if (half > 0) {
+      const count = this.gatherStructureShapes();
+      if (count > 0) {
+        this.predictedAt.x = x;
+        this.predictedAt.z = z;
+        surfaceY = this.groundUnder(this.predictedAt, count, half, this.predictedFeet);
+      }
+    }
+
+    return { bottomY, terrainY, surfaceY, serverY: this.evalY, gapM: bottomY - surfaceY };
+  }
+
+  private gatherStructureShapes(): number {
+    const set = this.assetSet;
+    if (set === null) {
+      return 0;
+    }
+
+    const pool = this.placedShapes;
+    let count = 0;
+    for (const sample of this.structureSamples) {
+      const shape = this.shapeFor(set, sample.asset);
+      if (shape === null) {
+        continue;
+      }
+
+      if (count === pool.length) {
+        pool.push({ shape, x: sample.x, z: sample.z, quarters: sample.yaw, y: sample.y });
+      } else {
+        const entry = pool[count];
+        entry.shape = shape;
+        entry.x = sample.x;
+        entry.z = sample.z;
+        entry.quarters = sample.yaw;
+        entry.y = sample.y;
+      }
+
+      count++;
+    }
+
+    return count;
+  }
+
+  /** One asset's geometry, pre-turned on first use; `null` for an asset that collides as its footprint. */
+  private shapeFor(set: AssetSet, assetIndex: number): AssetShape | null {
+    if (assetIndex < 0 || assetIndex >= set.collision.length) {
+      return null;
+    }
+
+    let shape = this.shapeCache[assetIndex];
+    if (shape === undefined) {
+      const boxes = set.collision[assetIndex];
+      // An asset the server collides as its footprint publishes no boxes, and the client must do the same rather than
+      // invent geometry the authority does not have.
+      shape = boxes.length === 0 ? null : prepareShape(boxes);
+      this.shapeCache[assetIndex] = shape;
+    }
+
+    return shape;
+  }
+
+  /**
+   * The prepared geometry by asset index.
+   *
+   * Three states, and the type has to carry all three: a shape, `null` for an asset the server collides as its
+   * footprint, and `undefined` for one not yet prepared. `noUncheckedIndexedAccess` is off in this project, so the
+   * sentinel has to be in the element type or the compiler reads the miss as unreachable.
+   */
+  private shapeCache: (AssetShape | null | undefined)[] = [];
+
+  /** Reused each frame: the structures the predicted body may be inside, pooled. */
+  private readonly placedShapes: PlacedShape[] = [];
+
+  /** Reused: the predicted position being pushed out. */
+  private readonly predictedAt = { x: 0, z: 0 };
+
+  /** Half a body's width, from the server; 0 before it has said, which predicts no collision rather than guessing. */
+  private bodyHalfM = 0;
+
+  /**
+   * Tells this app how wide a body is.
+   *
+   * @param halfM The server's own half-extent, or 0 for a server that does not publish one.
+   */
+  setBodyHalf(halfM: number, worldHalfM: number): void {
+    this.bodyHalfM = Number.isFinite(halfM) && halfM > 0 ? halfM : 0;
+    this.worldHalfM = Number.isFinite(worldHalfM) && worldHalfM > 0 ? worldHalfM : 0;
+  }
+
+  /** Half the world's edge, from the server: the push-out clamps to it exactly where the server's does. */
+  private worldHalfM = 0;
+
+  /** The announced asset set, for resolving a structure's replicated asset index. */
+  private assetSet: AssetSet | null = null;
 
   /** The netId {@link predictor} is anchored on, so a change of avatar re-anchors instead of integrating from the old one. */
   private predictedSubject = 0;
@@ -959,6 +1292,17 @@ export class ClientApp {
     // already sent the change and moved `lastIntent` on. Comparing with that would hide every transition from the
     // predictor, which would then integrate whole frames while the server integrated from the key — the error the split
     // exists to remove, reintroduced at the frame scale.
+    // The facing of one's OWN body comes from the intent, not from the replicated velocity, and the difference only
+    // shows at a stop. A corrected body is walked backwards by the replicated motion for a tick or two, so a facing
+    // taken from that vector turns the character round — and then LATCHES, because the moment the velocity reaches
+    // exactly zero `headingOf` keeps its last value, which is the one the correction produced. The intent has no such
+    // state: a release says "stop", never "go the other way", so the heading it last asked for is the one to keep.
+    // Only for a body this session steers; everything else has nothing but its velocity to be read from.
+    if (intent !== null && intent.speedClass !== SpeedClass.stop) {
+      this.intentHeading = intent.heading;
+      this.haveIntentHeading = true;
+    }
+
     const changedAtMs = this.predictedClass === gaitOf(intent) ? Number.NaN : this.takeDeclaredChange(nowMs);
     this.predictedClass = gaitOf(intent);
 
@@ -1441,10 +1785,21 @@ export class ClientApp {
       const camZ = predicting ? this.predictor.z : playing ? this.eyeZ : this.selectedZ;
       if (this.eyeSubject !== eyeNetId) {
         this.eyeSubject = eyeNetId;
-        this.eyeCamera.jumpTo(camX, camY, camZ, playing ? this.eyeHeading : this.selectedHeading);
+        if (this.eyeRebased) {
+          // The SAME body under a new id: a `RESET` empties the store and netIds are allocated densely per view, so an
+          // id held across one almost never survives. Re-aiming here is what made the camera snap to the avatar's own
+          // facing every twenty seconds or so, discarding wherever the viewer had turned to look — for a frame in which
+          // nothing about the subject changed except its number.
+          this.eyeCamera.follow(camX, camY, camZ);
+        } else {
+          this.eyeCamera.jumpTo(camX, camY, camZ, playing ? this.eyeHeading : this.selectedHeading);
+        }
       } else {
         this.eyeCamera.follow(camX, camY, camZ);
       }
+
+      // Consumed by the first eye frame after the reset, whichever branch took it: a rebase describes one renumbering.
+      this.eyeRebased = false;
 
       this.eyeCamera.update(dt);
     } else {
@@ -1457,6 +1812,9 @@ export class ClientApp {
     const cam = inEye ? this.eyeCamera : this.mapCamera;
     this.activeAltitude = cam.altitude;
     this.origin.follow(cam.targetX, cam.targetZ);
+    // The placements are held in planet coordinates, so they follow the origin the frame it snaps. One node, every frame:
+    // cheaper than asking whether it moved.
+    this.assets?.rebase(this.origin.x, this.origin.z);
     const view = this.view;
     view.renderTick = this.clock.renderTick;
     view.renderFrac = this.clock.renderFrac;
@@ -1494,12 +1852,26 @@ export class ClientApp {
     const matrix = this.scene.getTransformMatrix().m;
     extractFrustumPlanes(matrix, view.planes);
 
+    // What something other than the packer is drawing: the rigged avatar, and every structure standing as an asset.
+    const hidden = this.hidden;
+    hidden.clear();
+    const avatar = this.driveAvatar(live, now, dt);
+    if (avatar !== 0) {
+      hidden.add(avatar);
+    }
+
+    for (const netId of this.updateStaticAssets(cam.eyeX, cam.eyeZ)) {
+      hidden.add(netId);
+    }
+
+    view.hidden = hidden;
+
     for (const layer of this.layers) {
       layer.update(view);
     }
 
     this.attacks.update(view);
-    this.sendRegion(now, ui.viewRadius, cam.targetX, cam.targetZ);
+    this.sendRegion(now, ui.viewRadius, cam.targetX, cam.targetZ, playing);
     this.sendViewRadius(ui.playerRadius);
     // `stats` builds a whole snapshot — objects, a template string, a pass over the byte window — so it is read four
     // times a second by `publishStats`, never once a frame. The radius the server is actually serving has its own cheap
@@ -1524,6 +1896,7 @@ export class ClientApp {
     // quantities — a 12 px dot is 12 px to the viewer whatever the backing store does — so only this one is scaled.
     g.pixelsPerMetre = view.pixelsPerMetre * this.renderScale;
     g.pixelTolerance = ui.terrainPixelError;
+    g.shadow = this.shadowFor(ui.shadows, cam.targetX, cam.targetZ, view.originX, view.originZ);
     g.nearRadius = nearRadius;
     g.heatMask = this.heatMask;
     g.showGrid = ui.showGrid;
@@ -1623,13 +1996,22 @@ export class ClientApp {
   /** The radius last asked for, so an unchanged slider sends nothing. */
   private sentViewRadius: number | null = null;
 
-  private sendRegion(now: number, radius: number, x: number, z: number): void {
+  private sendRegion(now: number, radius: number, x: number, z: number, playing: boolean): void {
     if (
       this.source === null ||
       // A ride anchors the session on an entity, so the profile is a sphere around IT and the region is not read at all.
       // Sending one anyway is not merely waste: a 1 500 m disc quantized into a 64 m interior collapses to a degenerate
       // hull, which the server refuses and counts — so the HUD grew a refusal warning that meant nothing was wrong.
       rideOwnsTheView(this.ride) ||
+      // <b>And a session steering its own body is anchored for exactly the same reason, which this used not to say.</b>
+      // The server's geometry for an anchored session is a sphere around the avatar; a region it is also sent is a
+      // DIFFERENT geometry, and switching between the two costs a full `RESET` every time — "a session whose committed
+      // geometry is a ClientRegion's holds what its hull named: only a RESET says what it holds now"
+      // (`PushReplication.Geometry.cs`). Measured in the browser at one reset per region sent, 3 for 3 over 45 s, and
+      // none at all over the next 45 with the sends suppressed. Each one empties the store, renumbers every netId and
+      // re-sends the view: visible as a hitch, as a chat clear, and — until the fix beside this one — as the camera
+      // snapping back to the avatar's facing every twenty seconds.
+      playing ||
       !regionDue(
         x,
         z,
@@ -1909,6 +2291,179 @@ export class ClientApp {
     return true;
   }
 
+  /**
+   * Draws this session's own body as a rigged character, and says which netId the packer must therefore skip.
+   *
+   * <b>The subject is the body this session is anchored on</b> — the ride's when it has one, the session's own
+   * otherwise. A god camera is anchored on nothing and gets no character, which is right: it is a camera, not a person.
+   *
+   * <b>Predicted where the packer is predicted.</b> The rig stands at the same place the capsule would have, including
+   * the locally predicted position (A14), because the two are the same body and a character half a metre behind its own
+   * nameplate is worse than either choice alone. The VELOCITY stays the server's, which is what the heading and the clip
+   * both come from.
+   *
+   * @param live The session's source, or `null` before one is started.
+   * @param nowMs This frame's `performance.now()`.
+   * @param dt Seconds since the last frame.
+   * @returns The netId the packer must not draw, or 0.
+   */
+  private driveAvatar(live: DataSource | null, nowMs: number, dt: number): number {
+    const character = this.assets?.character ?? null;
+    if (character === null) {
+      return 0;
+    }
+
+    const subject = rideSubjectOf(this.ride) || (live?.selfNetId ?? 0);
+    if (subject === 0 || !this.evaluate(subject)) {
+      character.park();
+      return 0;
+    }
+
+    // What the server says this session's gaits are worth. NaN until the owner block arrives, which the tuning reads as
+    // "no figures yet" and answers with the clips' own speeds rather than with a gait it invented.
+    if (live !== null) {
+      character.retune(live.selfNumber('walkMps'), live.selfNumber('runMps'));
+    }
+
+    const predicted = this.view.predicted;
+    const own = predicted !== null && predicted.netId === subject;
+    const x = own ? predicted.x : this.evalX;
+    const z = own ? predicted.z : this.evalZ;
+    // <b>The altitude the prediction settled on</b>, which is the terrain raised by any published floor, deck or ramp
+    // under the feet. Re-sampled at the predicted position for the same reason the packer re-samples there: a body
+    // walking a dune at the altitude the server last confirmed reads as its feet sinking into the sand. Sampling the
+    // TERRAIN here — which is what this line did until the ramps landed — walks the avatar up a building's entry ramp
+    // at desert level and into its ground floor from below: the collision agrees the body is on the ramp, and only the
+    // renderer disagrees. The server's own figure is the fallback, for the frames before a prediction exists.
+    // <b>Bounded by the authority, exactly as the position is.</b> The server runs the same floor-or-wall rule over the
+    // same colliders and its answer is the one the world agrees on; the client predicts it only to avoid a frame of lag
+    // while climbing. So a prediction that disagrees with the server by more than a step is not a lead, it is a bug —
+    // and the visible result of trusting it was an avatar standing in the air above a ramp. Within a step the
+    // prediction stands, which is what keeps a climb smooth.
+    // <b>The surface the collision rule computed, not the bare height field.</b> A published floor — a step, a deck, a
+    // ramp — is what the body is standing ON, and the server agrees: measured at a house's doorstep, the height field
+    // said 132.13 while both this client's sampler and the server said 132.92, and drawing the terrain put the avatar
+    // 0.79 m inside the stone.
+    //
+    // This was briefly reverted to the height field while chasing an avatar that appeared to fly. It did not fly: the
+    // ground shader had stopped compiling and the terrain was not being drawn at all, so a body standing correctly on
+    // it had nothing underneath. The HUD's `Feet` row exists so that confusion cannot be repeated — it reports this
+    // gap, and it is what identified both faults.
+    //
+    // The prediction leads the server by the render delay, so it is preferred; the server's own figure stands before
+    // there is a prediction to use.
+    const predictedY = this.predictedGroundY;
+    const y = own ? (Number.isFinite(predictedY) ? predictedY : this.evalY) : this.evalY;
+    // `own` is this session steering this body, which is exactly when an intent exists for it.
+    this.avatarHeading =
+      own && this.haveIntentHeading ? this.intentHeading : headingOf(this.evalVx, this.evalVz, this.avatarHeading);
+    // <b>Replicated velocity is metres per TICK, not per second</b> (the SDK's motion codec: a velocity per tick is what
+    // makes a changing tick period harmless). The heading does not care — `atan2` is scale-free, which is why the body
+    // faced the right way while walking at a fiftieth of its speed — but the clip does: at 50 Hz a 12 m/s run arrives as
+    // 0.24 and chooses the walk clip at its slowest rate. The period is the server's own, through the clock.
+    const perSecond = 1000 / this.clock.tickPeriodMs;
+    const speed = Math.hypot(this.evalVx, this.evalVz) * perSecond;
+    // Wall time in seconds: what the graph measures is how long a one-shot has been playing, which is a property of the
+    // animation and not of the simulation. The render tick is the wrong clock for it — it is an integer, it is the
+    // server's, and it stops when the stream does while the clip is still on screen.
+    character.update(subject, x, y, z, speed, this.avatarHeading, nowMs / 1000, dt);
+    return subject;
+  }
+
+  /**
+   * Keeps the structures near the camera drawn as published assets, and says which the packer must skip.
+   *
+   * <b>Range, not frustum</b>: turning on the spot must not unload the street behind the viewer. The set a session holds
+   * at all is already bounded by its interest radius, so this is a second, smaller bound inside it — the distance at
+   * which a building is worth its geometry rather than its box.
+   *
+   * @param eyeX The camera's planet X.
+   * @param eyeZ Its planet Z.
+   * @returns The netIds drawn as assets.
+   */
+  private updateStaticAssets(eyeX: number, eyeZ: number): ReadonlySet<number> {
+    const layer = this.staticAssets;
+    if (layer === null) {
+      return NONE_HIDDEN;
+    }
+
+    // BY NAME, never by the schema's index. The live catalog decides the order its archetypes arrive in, and it is not
+    // this schema's: `Archetype.WorldObject` is 0 here while the server's catalog put `CityNpc` there. Reading the
+    // store at a constant index drew every city NPC as a building and asked a creature store for a `kind` field it does
+    // not have — C10's lesson, which the layers already follow and this did not.
+    const archetype = this.archetypes.indexOf('WorldObject');
+    if (archetype < 0) {
+      // Still told, with nothing: a frame that skipped the call would leave the placed instances standing AND stop
+      // reporting them as hidden, so every one of them would be drawn twice.
+      this.structureSamples.length = 0;
+      return layer.update(this.structureSamples);
+    }
+
+    const store = this.world.archetypeStore(archetype);
+    const samples = this.structureSamples;
+    samples.length = 0;
+    const kindField = store.fieldIndex('kind');
+    const yawField = store.fieldIndex('yaw');
+    const assetField = store.fieldIndex('asset');
+    if (store.hasPosition && kindField >= 0) {
+      const kinds = store.fieldAt(kindField);
+      // A catalog that does not replicate it leaves every structure facing +X, which is what the mock does.
+      const yaws = yawField < 0 ? null : store.fieldAt(yawField);
+      // A catalog that does not replicate it leaves every structure without an asset, which draws the renderer's own
+      // shape — the behaviour of every structure before the asset pipeline.
+      const assets = assetField < 0 ? null : store.fieldAt(assetField);
+      const ground = altitudeField(store);
+      const reach = STATIC_ASSET_RANGE_M * STATIC_ASSET_RANGE_M;
+      for (let i = 0; i < store.liveCount; i++) {
+        const slot = store.live[i];
+        evaluateSlot(store, slot, this.clock.renderTick, this.clock.renderFrac, this.scratch, 0);
+        const at = this.placement.read(store.dims, this.scratch, 0);
+        const dx = at.x - eyeX;
+        const dz = at.z - eyeZ;
+        if (dx * dx + dz * dz > reach) {
+          continue;
+        }
+
+        samples.push({
+          netId: store.netIds[slot],
+          x: at.x,
+          y: altitudeOf(ground, slot, at, this.field),
+          z: at.z,
+          kind: kinds[slot],
+          yaw: yaws === null ? 0 : yaws[slot],
+          asset: assets === null ? -1 : assets[slot],
+        });
+      }
+    }
+
+    return layer.update(samples);
+  }
+
+  /** Reused each frame: the structures in range, which is tens of entries and must not allocate. */
+  private readonly structureSamples: StructureSample[] = [];
+
+  /** The netIds the packer must skip this frame, rewritten in place. */
+  private readonly hidden = new Set<number>();
+
+  /** The structures-as-assets layer, once the asset set is mounted. */
+  private staticAssets: StaticAssets | null = null;
+
+  /** The avatar's facing, kept across frames: a body that stops keeps the heading it stopped with. */
+  private avatarHeading = 0;
+
+  /** The heading this session last ASKED to move in, which is where its own body faces; see {@link sendMovementIntent}. */
+  private intentHeading = 0;
+  /** Whether {@link intentHeading} has ever been set — before the first step there is nothing to face but the velocity. */
+  private haveIntentHeading = false;
+
+  /**
+   * Whether the next eye frame is looking at the same body under a new netId, after a `RESET` renumbered the view.
+   *
+   * It exists because "the subject's id changed" and "the subject changed" are not the same fact, and the camera used
+   * to act on the first while meaning the second.
+   */
+  private eyeRebased = false;
+
   /** {@link evaluate}'s output: one subject's interpolated placement, valid until the next call. */
   private evalX = 0;
   private evalZ = 0;
@@ -1978,6 +2533,7 @@ export class ClientApp {
               speederFastMps: this.source.selfNumber('speederFastMps'),
             }),
       groundM: this.profile.ground.heightAt(this.groundView.centerX, this.groundView.centerZ),
+      feet: this.feetReport(),
       terrainBakeMs: this.terrainBakeMs,
       terrainTriangles: this.profile.stats.triangles,
       terrainNodes: this.profile.stats.nodes,

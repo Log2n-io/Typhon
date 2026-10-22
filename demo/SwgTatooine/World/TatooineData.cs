@@ -83,8 +83,79 @@ public static class TatooineData
     /// <summary>[CORE3] A building's awareness radius — <c>CLOSEOBJECTRANGE * 4</c>, and the cap on any refresh scan.</summary>
     public const float BuildingAwarenessRadiusM = 768f;
 
+    /// <summary>Half the width of a player's body, in metres: what collision pushes out of a wall.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>0.3, from the published character's own capsule</b> (`casual2_male`: radius 0.3, half-height 0.525 for a
+    /// 1.65 m body). It was 1 — a literal written when nothing in the world had an interior, so a body was a
+    /// person-sized thing that had to not overlap a box, and two metres across was as good an answer as any.
+    /// </para>
+    /// <para>
+    /// <b>It stops being as good an answer as any the moment a building has a door.</b> The published doorways are
+    /// 1.2 m wide, which leaves 0.6 m from the centre line to each jamb, and the portal volume in front of a door is
+    /// 0.8 m deep: a body of half-extent 1 is pushed out before it reaches either, so it could never enter a building
+    /// and could never trigger a portal. At 0.3 it fits with 0.3 m of clearance each side.
+    /// </para>
+    /// <para>
+    /// <b>Smaller is also cheaper, which is why this needed no measurement to justify.</b> The clear-disc test is the
+    /// distance to the nearest surface minus the body's own half-extent, so a smaller body holds more slack and the
+    /// cached disc survives more steps — the 83.2 % of steps that already skip the spatial layer can only go up. The
+    /// push-out does less work for the same reason.
+    /// </para>
+    /// <para>
+    /// The 2-D sim gives a body a SQUARE, not a circle: a half-extent of 0.3 is a 0.6 m square, which circumscribes the
+    /// 0.6 m-diameter capsule the asset declares. Creatures keep their own 1.5 (<c>WorldBuilder.SpawnCreature</c>)
+    /// until something non-human has a reason to go indoors.
+    /// </para>
+    /// </remarks>
+    public const float PlayerBodyHalfM = 0.3f;
+
+    /// <summary>
+    /// How high a step the body climbs without being stopped by it, in metres.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the number that decides what a wall IS.</b> A collider whose top is within a step of the feet is
+    /// something the body steps onto; anything taller is something it walks into. Measured against the published
+    /// assets by the `blender-models` session: the house door steps are 0.30-0.36 m and the shuttleport's deck stands
+    /// 1.26 m above the plaza, reached by its own stairs and ramps rather than in one step. 0.4 is the testbench's
+    /// value (`physics/character-motor.ts`), so the two sides agree about what is climbable.
+    /// </remarks>
+    public const float PlayerStepM = 0.4f;
+
+    /// <summary>How tall the body is, in metres: a collider starting above this is walked under.</summary>
+    /// <remarks>From the published character capsule, and the testbench's `height`.</remarks>
+    public const float PlayerHeightM = 1.65f;
+
+    /// <summary>How far a body follows the ground down in one tick, in metres — walking down steps and ramps.</summary>
+    /// <remarks>
+    /// Without it a body walking off a ledge leaves the ground for a tick and the altitude it replicates jumps. The
+    /// testbench calls it `snapDistance` and uses the same figure.
+    /// </remarks>
+    public const float PlayerSnapM = 0.45f;
+
     /// <summary>[WIKI] Player run speed on foot, unencumbered.</summary>
     public const float PlayerRunSpeedMps = 5f;
+
+    /// <summary>
+    /// What a SESSION's gait ladder is multiplied by: 2, so a player walks, runs and rides at twice the sourced figures.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Asked for to make the demo quicker to move around in</b> (Loïc, 2026-10-21), and applied to the ladder a session
+    /// steers with rather than to the speeds above. The distinction is the one
+    /// <see cref="PlayerSpeederSpeedMps"/> already makes for the mount: scripted players, creatures, shuttles and portal
+    /// arrivals read <see cref="PlayerRunSpeedMps"/> directly and keep their own pace, so the world this demo exists to
+    /// MEASURE moves exactly as it did — only the person playing is faster.
+    /// </para>
+    /// <para>
+    /// <b>It scales the teleport ceiling with it, and that is not optional.</b>
+    /// <see cref="Replication.TatooineReplication.MaxSpeedMps"/> is sized from the top gait, so a ladder scaled without it
+    /// would have the engine read a legitimate fast speeder as a teleport. The width that ceiling buys was computed when
+    /// the ladder was last raised: 75.6 m/s needs 12 387 of a 16-bit code's 32 767, and "a further doubling would still
+    /// fit; 6x from here would not" — which is exactly the headroom this spends.
+    /// </para>
+    /// </remarks>
+    public const float PlayerGaitScale = 2f;
 
     /// <summary>[WIKI] Mount and speeder speed, the middle of the 11.8-12.5 range across mount types.</summary>
     /// <remarks>

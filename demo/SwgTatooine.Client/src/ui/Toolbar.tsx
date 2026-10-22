@@ -34,7 +34,7 @@ function controlHint(playing: boolean, cameraMode: 'god' | 'eye'): string {
   }
 
   return playing
-    ? 'WASD: walk · Shift: walk slowly · Drag: look · Wheel: pull back · Click: target'
+    ? 'WASD: walk · Shift: run · Drag: look · Wheel: pull back · Click: target'
     : 'Drag: look · Wheel: pull back · Q/E: turn · R/F: tilt · Click: inspect';
 }
 
@@ -237,7 +237,7 @@ export function Toolbar() {
             is shown, and the player's takes precedence because a session that can play is being played. */}
         {playing && range !== null ? (
           <label className="slider">
-            Served radius {ui.playerRadius ?? range.min} m
+            Served radius {ui.playerRadius ?? range.def} m
             <input
               type="range"
               // Both ends are the server's (`/typhon/demo.json`): its profile's own radius, and the ceiling the
@@ -248,7 +248,7 @@ export function Toolbar() {
               // 320 m to 1 280 m when the demo matched its replication cell to its spatial one, and 16 m steps over a
               // 1 km range is 68 drag positions of pointless precision. A 64th of the range, rounded to 8 m.
               step={Math.max(8, Math.round((range.max - range.min) / 64 / 8) * 8)}
-              value={ui.playerRadius ?? range.min}
+              value={ui.playerRadius ?? range.def}
               onChange={(e) => {
                 ui.setPlayerRadius(Number(e.target.value));
               }}
@@ -389,6 +389,16 @@ export function Toolbar() {
             }}
           >
             Grid
+          </button>
+          {/* The sun's shadow map: a GPU cost with a toggle, because a 2 048 map is re-rendered over every structure the
+              session holds and an impostor cannot cast at all — so what it buys depends on how near something real is. */}
+          <button
+            className={ui.shadows ? 'active' : ''}
+            onClick={() => {
+              ui.setShadows(!ui.shadows);
+            }}
+          >
+            Shadows
           </button>
           {/*
             A14. Offered only to a session that HAS a predicted avatar: for a god camera there is no prediction to contrast

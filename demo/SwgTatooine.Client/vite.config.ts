@@ -18,6 +18,15 @@ export default defineConfig({
     proxy: {
       // The live server (M1): Subscriptions v2 over WebSocket.
       '/ws': { target: 'ws://127.0.0.1:8080', ws: true },
+      // What the process was started with, and the live realm inventory beside it: proxied so a dev page reads the real
+      // server's configuration — including whether it serves assets — instead of behaving like a page served from a file.
+      '/typhon': { target: 'http://127.0.0.1:8080' },
+      // The published asset set (`--assets`). Proxied rather than copied so every GLB is fetched from ONE folder URL on
+      // this origin, which is what keeps the shared KTX2 library down to a single GPU texture per file.
+      '/assets': { target: 'http://127.0.0.1:8080' },
+      // Sign-up and log-in. Without this the dev page can only be a spectator: the POST reaches Vite, which has no such
+      // route and answers 404, and the session never gets the token that `/ws` needs to give it an avatar.
+      '/auth': { target: 'http://127.0.0.1:8080' },
     },
   },
   preview: { port: 5191, strictPort: true },

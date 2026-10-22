@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using NUnit.Framework;
@@ -32,6 +32,7 @@ namespace SwgTatooine.Tests;
 /// is read by every case here.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class RealmCostChecks
@@ -340,6 +341,7 @@ public sealed class RealmCostChecks
     /// </remarks>
     [Test]
     [Order(5)]
+    [Category("Integration")]
     public void AnInteriorTheLastSessionLeavesStopsBeingServedAndStopsCosting()
     {
         var before = _stats.Realms.Single(r => r.Realm == _observed);

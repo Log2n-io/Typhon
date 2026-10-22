@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using NUnit.Framework;
 using Typhon.Engine;
@@ -26,6 +26,7 @@ namespace SwgTatooine.Tests;
 /// city, so an unparked session would usually be in one and occasionally not, which is a flake rather than a test.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class CityGroupChecks
@@ -63,6 +64,7 @@ public sealed class CityGroupChecks
     /// <summary>A player in a city is told that city's set is complete, which means it holds every structure the city has.</summary>
     [Test]
     [CancelAfter(60_000)]
+    [Category("Integration")]
     public void APlayerInACityIsServedTheWholeCityAndToldWhenItIsComplete()
     {
         using var sim = new TatooineSim(Config());

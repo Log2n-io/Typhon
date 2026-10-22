@@ -1,6 +1,7 @@
 import { evaluateSlot, MAX_MOTION_STRIDE, type ArchetypeStore, type FieldArray } from '@typhondb/client';
 import { SELECTED_SPRITE_SCALE, type LayerStyle } from './styles';
 import { altitudeField, altitudeOf, Placement } from '../data/placement';
+import { structureYaw } from '../assets/structure-assets';
 import { Band, chooseBand, packState, sphereInFrustum } from './view-math';
 import type { GroundSampler } from '../terrain/ground-sampler';
 
@@ -33,7 +34,21 @@ export interface FrameView {
    * one integer compare per entity per frame, on the one archetype that holds the player.
    */
   readonly predicted: PredictedOverride | null;
+  /**
+   * The entities this loop must NOT draw: bodies something else is drawing in their place.
+   *
+   * The rigged avatar is one of them, and every structure standing as a published asset is another. Both drawn would be
+   * the renderer's own shape inside the model — and the cheap half would be the visible one at any distance where its
+   * sprite is the larger.
+   *
+   * <b>Skipped before the band is chosen, and that is deliberate</b>: a hidden entity leaves no band state behind, so
+   * the frame it stops being hidden it re-enters at whatever band its size then deserves rather than at a stale one.
+   */
+  readonly hidden: ReadonlySet<number>;
 }
+
+/** No entity hidden, for a caller that hides none. */
+export const NONE_HIDDEN: ReadonlySet<number> = new Set<number>();
 
 /** A position substituted for one entity's own during packing. */
 export interface PredictedOverride {
@@ -49,9 +64,17 @@ interface FieldReaders {
   readonly mode: FieldArray | null;
   /** The server's own altitude for each entity, or `null` when the catalog has none (the mock). */
   readonly ground: FieldArray | null;
+  /**
+   * Which way a structure faces, in quarter turns, or `null` for an archetype that does not replicate one.
+   *
+   * <b>The world's orientation beats the renderer's guess.</b> `gridYaw` invents a quarter turn from the position, which
+   * is fine for a box and wrong the moment the thing has a door and a collision shape the server pushes bodies out of.
+   * Null still means `gridYaw`, which is what a lair, a prop and the mock still get.
+   */
+  readonly yaw: FieldArray | null;
 }
 
-const NO_FIELDS: FieldReaders = { style: null, styleIsFlag: false, mode: null, ground: null };
+const NO_FIELDS: FieldReaders = { style: null, styleIsFlag: false, mode: null, ground: null, yaw: null };
 const INITIAL_CAPACITY = 1024;
 
 /**
@@ -65,20 +88,45 @@ const INITIAL_CAPACITY = 1024;
 function readersFor(name: string, store: ArchetypeStore): FieldReaders {
   switch (name) {
     case 'WorldObject':
-      return { style: optional(store, 'kind'), styleIsFlag: false, mode: null, ground: altitudeField(store) };
+      return {
+        style: optional(store, 'kind'),
+        styleIsFlag: false,
+        mode: null,
+        ground: altitudeField(store),
+        yaw: optional(store, 'yaw'),
+      };
     case 'CreatureLair':
-      return { style: optional(store, 'missionId'), styleIsFlag: true, mode: null, ground: altitudeField(store) };
+      return {
+        style: optional(store, 'missionId'),
+        styleIsFlag: true,
+        mode: null,
+        ground: altitudeField(store),
+        yaw: null,
+      };
     case 'Creature':
       return {
         style: optional(store, 'template'),
         styleIsFlag: false,
         mode: optional(store, 'mode'),
         ground: altitudeField(store),
+        yaw: null,
       };
     case 'CityNpc':
-      return { style: null, styleIsFlag: false, mode: optional(store, 'mode'), ground: altitudeField(store) };
+      return {
+        style: null,
+        styleIsFlag: false,
+        mode: optional(store, 'mode'),
+        ground: altitudeField(store),
+        yaw: null,
+      };
     case 'Player':
-      return { style: null, styleIsFlag: false, mode: optional(store, 'activity'), ground: altitudeField(store) };
+      return {
+        style: null,
+        styleIsFlag: false,
+        mode: optional(store, 'activity'),
+        ground: altitudeField(store),
+        yaw: null,
+      };
     default:
       return NO_FIELDS;
   }
@@ -216,8 +264,17 @@ export class LayerPacker {
     // Resolved once per frame, not per entity: the override names a netId and the loop has the slot.
     const predicted = view.predicted;
     const predictedNetId = predicted === null ? 0 : predicted.netId;
+    const hidden = view.hidden;
     for (let i = 0; i < count; i++) {
       const slot = live[i];
+      // <b>Before the evaluation, not after it.</b> A hidden entity is one something else draws — the rigged avatar,
+      // a structure standing as its published asset — and evaluating its motion, its altitude and its frustum sphere
+      // only to drop it is work for nothing. The set is empty for every layer but the two that have one, so the size
+      // check is what keeps the crowd from paying a hash lookup at all.
+      if (hidden.size !== 0 && hidden.has(netIds[slot])) {
+        continue;
+      }
+
       evaluateSlot(store, slot, tick, frac, motion, 0);
       at.read(dims, motion, 0);
       // A14: the predicted body. The VELOCITY is left authoritative on purpose — it is what the mesh takes its heading from,
@@ -261,7 +318,11 @@ export class LayerPacker {
       if (seenNetId[slot] !== netId) {
         seenNetId[slot] = netId;
         bands[slot] = Band.Unset;
-        yaws[slot] = byVelocity ? (netId * 2.399963) % (Math.PI * 2) : gridYaw(at.x, at.z);
+        yaws[slot] = byVelocity
+          ? (netId * 2.399963) % (Math.PI * 2)
+          : fields.yaw === null
+            ? gridYaw(at.x, at.z)
+            : structureYaw(fields.yaw[slot]);
       }
 
       const pixels = (bounds.extent[bound] * view.pixelsPerMetre) / distance;

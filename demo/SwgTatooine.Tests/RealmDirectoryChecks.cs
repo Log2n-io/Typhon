@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using NUnit.Framework;
 
 namespace SwgTatooine.Tests;
@@ -20,6 +20,7 @@ namespace SwgTatooine.Tests;
 /// parse-then-check-fields test would accept a document the client's own parser rejects.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class RealmDirectoryChecks

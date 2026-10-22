@@ -61,7 +61,7 @@ export class TerrainView {
   /** Screen pixels a one-metre object covers at one metre — the perspective half of the error projection. */
   pixelsPerMetre = 1000;
   /** Pixels of geometric error the viewer accepts. Smaller selects more, smaller nodes. */
-  pixelTolerance = 2;
+  pixelTolerance = 8;
   /** Nodes entirely beyond this are dropped. */
   maxDistanceM = 40_000;
 }

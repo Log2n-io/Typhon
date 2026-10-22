@@ -2,7 +2,7 @@
 // API by accident. The same exemption `styles.test.ts` takes, for the same reason: this has to read the source off disk.
 /// <reference types="node" />
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
@@ -52,6 +52,24 @@ function sources(dir: string): string[] {
 /** The mock's movement speeds, which no live path may read. */
 const MOCK_SPEEDS = ['PLAYER_RUN_SPEED_MPS', 'PLAYER_MOUNT_SPEED_MPS'];
 
+/**
+ * Declarations that name a speed but are not a MOVEMENT speed, by the file that may declare them.
+ *
+ * <b>One entry, and the distinction it rests on is real.</b> `REFERENCE_WALK_CLIP_SPEED` is the ground speed at which
+ * the walk clip's feet do not slide — a property of the animation in the GLB, measured by eye on that rig, about which
+ * the server has no opinion and which it could not correct if it had one. Getting it wrong makes the feet skate; it
+ * cannot make the body drift away from where the server says it is, which is the failure this file exists to prevent.
+ *
+ * It is listed here rather than renamed past the pattern on purpose: the next person to add a speed-shaped constant
+ * should meet this check and have to argue the same case, instead of finding a precedent for calling a gait something
+ * else. The right long-term home is the asset descriptor — a clip knows its own authored speed, and the exporter could
+ * publish it — at which point this entry goes away.
+ */
+const NOT_MOVEMENT_SPEEDS: Readonly<Record<string, readonly string[]>> = {
+  // Keyed with forward slashes whatever the platform writes; the lookup normalises.
+  'character/animation-graph.ts': ['REFERENCE_WALK_CLIP_SPEED', 'REFERENCE_RUN_CLIP_SPEED'],
+};
+
 /** The names a speed constant would plausibly be given, as an identifier being DECLARED. */
 const SPEED_DECLARATION =
   /\b(?:const|let|var|readonly)\s+([A-Za-z_$][\w$]*(?:SPEED|Speed|speed|MPS|Mps|mps)[\w$]*)\s*(?::[^=]+)?=\s*[-\d.]/;
@@ -64,8 +82,12 @@ describe('client source', () => {
       const lines = text.split('\n');
       for (let i = 0; i < lines.length; i++) {
         const match = SPEED_DECLARATION.exec(lines[i]);
-        if (match !== null) {
-          offenders.push(`${path.slice(SRC.length + 1)}:${i + 1} declares ${match[1]}`);
+        const relative = path
+          .slice(SRC.length + 1)
+          .split(sep)
+          .join('/');
+        if (match !== null && !(NOT_MOVEMENT_SPEEDS[relative] ?? []).includes(match[1])) {
+          offenders.push(`${relative}:${i + 1} declares ${match[1]}`);
         }
       }
     }

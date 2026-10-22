@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 using NUnit.Framework;
 using Typhon.Engine;
 using Typhon.Protocol;
@@ -22,6 +22,7 @@ namespace SwgTatooine.Tests;
 /// and it is then unregistered — which is exactly the sequence <c>SimBridge.Close</c> performs, minus the party.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class RealmClosedChecks
@@ -202,6 +203,7 @@ public sealed class RealmClosedChecks
     /// open is the third: a realm ending is not the viewer's fault, and closing the link would be the easy answer that loses the client.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void ASessionInARealmThatIsTornDownIsPutBackOnThePlanetAndStaysOpen()
     {
         using var sim = new TatooineSim(Config());

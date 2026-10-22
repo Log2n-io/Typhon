@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using NUnit.Framework;
 using Typhon.Engine;
 
@@ -12,6 +12,7 @@ namespace SwgTatooine.Tests;
 /// that had already been cloned out from under it, and a constructor that dereferenced the argument it was about to
 /// null-check. Kept in one fixture so the reason each exists stays attached to it.
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class ReviewFixChecks

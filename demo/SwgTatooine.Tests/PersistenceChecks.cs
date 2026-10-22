@@ -81,6 +81,7 @@ internal static class Persisted
 /// thing WP-3's scoping did. What is asserted here is the settled answer: <c>--persist</c> opts in, there is no <c>--fresh</c>, and the process id is out of the
 /// name unconditionally.
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class PersistenceSurfaceTests
@@ -92,6 +93,7 @@ public sealed class PersistenceSurfaceTests
 
     [TearDown]
     public void Cleanup() => Worlds.Delete(_dir);
+    [Category("Integration")]
 
     [Test]
     public void TheDatabaseNameCarriesNoProcessId_SoAKilledRunLeavesOne()
@@ -113,6 +115,7 @@ public sealed class PersistenceSurfaceTests
                 "the process id is back in the database name, so every killed run will leave its own file again");
         });
     }
+    [Category("Integration")]
 
     [Test]
     public void WithoutPersist_TheDatabaseIsDeletedAtStart_AndTheWorldIsFresh()
@@ -144,6 +147,7 @@ public sealed class PersistenceSurfaceTests
             Assert.That(found, Is.False, "a player from the previous run survived, so the database was not deleted");
         }
     }
+    [Category("Integration")]
 
     [Test]
     public void WithPersist_TheWorldIsReopened_AndAMutationSurvives()
@@ -183,6 +187,7 @@ public sealed class PersistenceSurfaceTests
             Assert.That(MathF.Abs(at.Z - Marker), Is.LessThan(1f));
         }
     }
+    [Category("Integration")]
 
     [Test]
     public void APersistedDatabaseReopensHealthy_WhichIsWhatTheFinalCheckpointIsFor()
@@ -257,6 +262,7 @@ public sealed class WorldIndexRebuildTests
 
     [TearDown]
     public void Cleanup() => Worlds.Delete(_dir);
+    [Category("Integration")]
 
     [Test]
     public void AReopenedWorld_HasTheSameCensus()
@@ -278,6 +284,7 @@ public sealed class WorldIndexRebuildTests
             Assert.That(sim.Census.CreaturesByTemplate, Is.EqualTo(_built.CreaturesByTemplate), "creature composition by template");
         });
     }
+    [Category("Integration")]
 
     [Test]
     public void AReopenedWorldsIndexComesFromTheEntities_NotFromTheGenerator()
@@ -297,6 +304,7 @@ public sealed class WorldIndexRebuildTests
                 $"the doors moved when the seed changed (built {_geometry.Doors.Count}, rebuilt {sim.Index.Portals.Count})");
         });
     }
+    [Category("Integration")]
 
     [Test]
     public void AReopenedWorld_KeepsItsRealms_AndItsSpatialIndexStillAnswers()
@@ -322,6 +330,7 @@ public sealed class WorldIndexRebuildTests
             Assert.That(players.Count, Is.EqualTo(_built.Players), "the index answered, but not for every player");
         });
     }
+    [Category("Integration")]
 
     [Test]
     public void AReopenedWorldsTravellers_HeadForRealPlaces_NotForTheOrigin()
@@ -358,6 +367,7 @@ public sealed class WorldIndexRebuildTests
             Assert.That(sim.Index.Shuttleports, Has.Count.EqualTo(sim.Index.Cities.Count), "every city needs its port, or its passengers walk into the desert");
         });
     }
+    [Category("Integration")]
 
     [Test]
     public void PossessionDoesNotSurviveARestart()
@@ -411,6 +421,7 @@ public sealed class WorldIndexRebuildTests
 /// which is not the claim — and it would have missed the thing this actually found: under the engine's default exception policy the event never fires at all, so
 /// the demo's abort reporting had been dead code.
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class CrashArtefactTests
@@ -483,6 +494,7 @@ public sealed class CrashArtefactTests
             Assert.That(config, Does.Contain("cell-m:"));
         });
     }
+    [Category("Integration")]
 
     [Test]
     public void ARunThatDoesNotFault_WritesNoArtefact()

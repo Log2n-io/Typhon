@@ -90,6 +90,21 @@ public sealed partial class SimBridge
             throw new InvalidOperationException($"--fault-at-tick {_config.FaultAtTick}: deliberate fault to exercise the crash artefact (P-3).");
         }
 
+        // The static neighbourhood, every 300 ticks and BEFORE the measured-window gate below, because a served run never
+        // reaches that window and is stopped rather than asked to exit. To stderr for the reason TatooineReplication.ReportTick
+        // uses it: a redirected stdout is block-buffered and a killed process never flushes it, which is exactly when these
+        // numbers are being collected.
+        if (ctx.TickNumber % 300 == 0 && ctx.TickNumber > 0)
+        {
+            var (ph, pr, pb, pc, pn, po, pu) = ProximityTotals;
+            if (ph + pr > 0)
+            {
+                System.Console.Error.WriteLine(
+                    $"  proximity (cumulative, tick {ctx.TickNumber}): {ph + pr} colliding steps, {ph} held, {pr} refreshed in {pb} queries, "
+                    + $"{pn} neighbours, {pc} contacts, {pu} unresolved, {po} sets full");
+            }
+        }
+
         // Measured ticks only. The run polls for its last tick and shuts down after it, and the ticks started in between (always one or two when unpaced)
         // used to land in a trailing window of their own, which every reader took for the last window.
         if (ctx.TickNumber < _config.WarmTicks || ctx.TickNumber >= _config.WarmTicks + _config.MeasuredTicks)

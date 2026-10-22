@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using NUnit.Framework;
@@ -26,6 +26,7 @@ namespace SwgTatooine.Tests;
 /// what A-1 — walk around in a browser — verifies in one second.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 internal sealed class HumanProfileChecks
@@ -88,6 +89,7 @@ internal sealed class HumanProfileChecks
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
+    [Category("Integration")]
     public void AllThreePlayerFacingProfilesAreDeclared()
     {
         var names = _sim.Runtime.Subscriptions.Profiles.Select(p => p.Name).ToHashSet(StringComparer.Ordinal);
@@ -110,6 +112,7 @@ internal sealed class HumanProfileChecks
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
+    [Category("Integration")]
     public void TheHumanProfileCarriesBuildingsAndTheMeasurementProfileDoesNot()
     {
         var human = ArchetypesOf(TatooineReplication.HumanProfile);
@@ -140,6 +143,7 @@ internal sealed class HumanProfileChecks
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
+    [Category("Integration")]
     public void TheSpectateAndHumanProfilesAgreeToday_AndAreStillSeparate()
     {
         Assert.Multiple(() =>
@@ -157,6 +161,7 @@ internal sealed class HumanProfileChecks
     /// them. Either everybody pays for buildings or nobody does, and the browser is what this phase is for.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void APlayerSessionIsServedTheHumanProfileByDefault()
     {
         Assert.That(TatooineReplication.PlayerProfileName, Is.EqualTo(TatooineReplication.HumanProfile));

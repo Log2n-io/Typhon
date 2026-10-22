@@ -150,7 +150,25 @@ describe("the player's radius range", () => {
   it('is read from a server that states it', async () => {
     serve(PLAYER_BODY);
     const config = await fetchServerConfig();
-    expect(config?.player).toEqual({ radiusM: 192, maxRadiusM: 320 });
+    // No default published, so the floor stands for it — which is what every server did before the figure existed.
+    expect(config?.player).toEqual({ radiusM: 192, maxRadiusM: 320, defaultRadiusM: 192 });
+    // The body's width and the world's edge are read APART from the radius range: they are unrelated figures, and
+    // coupling them meant a server publishing one but not the other disabled collision prediction entirely.
+    expect(config?.body).toEqual({ halfM: 0, worldHalfM: 0 });
+  });
+
+  it("carries the DEFAULT apart from the two ends, because it is a third figure", async () => {
+    // The floor is the narrowest a session may ask to be and the ceiling is what the grid's window allows; neither is
+    // the radius the profile actually serves, and a slider opened at the floor reported a view the session did not have.
+    serve(PLAYER_BODY.replace('"playerMaxRadiusM":320', '"playerMaxRadiusM":1280,"playerDefaultRadiusM":1024'));
+    const config = await fetchServerConfig();
+    expect(config?.player).toEqual({ radiusM: 192, maxRadiusM: 1280, defaultRadiusM: 1024 });
+  });
+
+  it('clamps a default outside the range it was published with, rather than trusting it', async () => {
+    serve(PLAYER_BODY.replace('"playerMaxRadiusM":320', '"playerMaxRadiusM":320,"playerDefaultRadiusM":4000'));
+    const config = await fetchServerConfig();
+    expect(config?.player?.defaultRadiusM).toBe(320);
   });
 
   it('is null from a server that does not state it, leaving the rest of the config readable', async () => {

@@ -22,6 +22,7 @@ namespace SwgTatooine.Tests;
 /// already that test; restating the formula in an assertion would only prove the formula was copied correctly.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class ViewRadiusChecks
@@ -291,6 +292,7 @@ public sealed class ViewRadiusChecks
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
+    [Category("Integration")]
     public void AWiderRadiusDeliversMoreBuildings()
     {
         using var sim = new TatooineSim(Config());
@@ -335,6 +337,7 @@ public sealed class ViewRadiusChecks
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
+    [Category("Integration")]
     public void NarrowingBackDropsWhatIsNowOutOfRange()
     {
         using var sim = new TatooineSim(Config());
@@ -385,6 +388,7 @@ public sealed class ViewRadiusChecks
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
+    [Category("Integration")]
     public void ARadiusOutsideTheRangeIsRefusedAndCounted()
     {
         using var sim = new TatooineSim(Config());

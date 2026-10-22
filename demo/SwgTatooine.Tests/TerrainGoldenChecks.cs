@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Globalization;
 using System.IO;
 using System.Text.Json;
@@ -125,6 +125,7 @@ public sealed class TerrainGoldenChecks
     }
 
     [Test]
+    [Category("Integration")]
     public void TheWholeField_HashesToTheGoldenDigest()
     {
         // The 128-post grid pins the tree; this pins the whole field at a resolution where the parts that DEPEND on

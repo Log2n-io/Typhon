@@ -254,6 +254,27 @@ public sealed class SimConfig
     /// Simulation rate. SWG's server ran its main loop at roughly 10 Hz for AI and movement broadcast; this is the tick
     /// the system DAG is driven at and what a per-tick cost is measured against.
     /// </summary>
+    /// <summary>
+    /// Whether the scripted crowd is collided against structures as well, so collision can be measured at a population
+    /// no number of real sessions will reach on one box.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A measuring instrument, off by default, and it does change the simulation.</b> Only a client-driven body
+    /// collides in a normal run: the crowd exists to make the rest of the server work and walking it through a wall
+    /// costs nothing anyone can see. Collision is per BODY, though, so the cost of 3 000 colliding bodies is a question
+    /// the crowd can answer and real sessions cannot — the bot driver on this workstation tops out well below 3 000
+    /// sessions while the server is still idle, so a measurement taken through sessions measures the driver.
+    /// </para>
+    /// <para>
+    /// <b>Why it is a config flag and not an environment variable like <c>SWG_NO_COLLISION</c>.</b> That one is an A/B
+    /// switch and is a <see langword="static readonly"/> so both arms are the same binary and the JIT folds the branch.
+    /// This one selects a POPULATION rather than toggling a code path, it belongs in the run's reported configuration,
+    /// and its branch sits beside a controller-kind test the loop already performs — so it costs nothing to read here.
+    /// </para>
+    /// </remarks>
+    public bool CollideCrowd;
+
     public int TickRateHz = 10;
 
     /// <summary>
@@ -374,6 +395,22 @@ public sealed class SimConfig
     /// what the deployed unit passes.
     /// </remarks>
     public string ClientDirectory;
+
+    /// <summary>
+    /// <c>--assets</c>: a published asset folder to serve at <c>/assets</c>, or <see langword="null"/> to serve none.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The exporter's <c>build/assets</c>: flat, content-addressed GLBs, descriptors and shared KTX2 textures, with a
+    /// <c>catalogue.json</c> pointer. The server pins the immutable catalogue that pointer names and announces it in
+    /// <c>/typhon/demo.json</c>, so the client never has to discover a version — see <see cref="Replication.AssetOrigin"/>.
+    /// </para>
+    /// <para>
+    /// <b>Unset serves nothing, and the client then draws what it always drew.</b> The asset set lives outside this
+    /// repository, so a run that does not name one must still be a working run.
+    /// </para>
+    /// </remarks>
+    public string AssetDirectory;
 
     /// <summary>
     /// <c>--live</c>: the TCP port the profiler serves the Workbench on; 0 is off.

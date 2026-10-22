@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using NUnit.Framework;
 using SwgTatooine.World.Terrain;
 
@@ -57,6 +57,7 @@ public sealed class TerrainBandChecks
     }
 
     [Test]
+    [Category("Integration")]
     public void ABandedBake_ReproducesTheWholeGridBakePostForPost()
     {
         Heightfield whole = new(HeightGrid.Create(Posts, Spacing, -8192));

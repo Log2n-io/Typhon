@@ -11,6 +11,7 @@
     "dev": "vite",
     "build": "npm run typecheck && vite build",
     "preview": "vite preview",
+    "vendor": "node scripts/fetch-vendor.mjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
     "lint": "eslint .",
     "format": "prettier --write .",
@@ -20,6 +21,7 @@
   },
   "dependencies": {
     "@babylonjs/core": "9.26.2",
+    "@babylonjs/loaders": "9.26.2",
     "@typhondb/client": "file:../../src/Typhon.Client.TypeScript",
     "react": "19.3.0",
     "react-dom": "19.3.0",

@@ -5,7 +5,19 @@ import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
 export default defineConfig(
-  { ignores: ['dist', 'node_modules', 'eslint.config.js', 'vite.config.ts', 'vitest.config.ts'] },
+  // `public/vendor` is Babylon's own run-time, mirrored by `npm run vendor`; `scripts` is node-side tooling, like the
+  // configs beside it.
+  {
+    ignores: [
+      'dist',
+      'node_modules',
+      'public/vendor',
+      'scripts',
+      'eslint.config.js',
+      'vite.config.ts',
+      'vitest.config.ts',
+    ],
+  },
   js.configs.recommended,
   tseslint.configs.strictTypeChecked,
   reactHooks.configs.flat['recommended-latest'],

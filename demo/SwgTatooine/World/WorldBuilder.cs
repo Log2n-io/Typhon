@@ -97,7 +97,14 @@ public static class WorldBuilder
                 {
                     var kind = i == 0 ? StructureKind.Shuttleport : (i % 9 == 0 ? StructureKind.Terminal : StructureKind.Building);
                     var half = StructureFootprint.HalfExtentM(kind);
-                    var (x, z, _) = plan.Place(ref rng, city.X, city.Z, city.Radius, half);
+
+                    // <b>The shuttleport stands at the city's centre, and the city is built around it</b> (Loïc,
+                    // 2026-10-22). It is placed first, so reserving the middle costs nothing and every later building
+                    // avoids it: a town square rather than a dome wherever the first random draw happened to land. It
+                    // also puts the one structure a traveller is looking for where a traveller would look for it.
+                    var (x, z, _) = i == 0
+                        ? (city.X, city.Z, plan.PlaceAt(city.X, city.Z, half))
+                        : plan.Place(ref rng, city.X, city.Z, city.Radius, half);
                     var portalIndex = -1;
                     if (i == 0)
                     {
@@ -711,7 +718,7 @@ public static class WorldBuilder
                 }
 
                 var bounds = default(PlayerPlacement);
-                bounds.SetAt(x, z, terrain.GroundAt(x, z), 1f);
+                bounds.SetAt(x, z, terrain.GroundAt(x, z), TatooineData.PlayerBodyHalfM);
                 var state = new PlayerState
                 {
                     Activity = activity,
@@ -909,6 +916,11 @@ public static class WorldBuilder
             Kind = kind,
             PortalIndex = portalIndex,
             TickPeriod = tickPeriod,
+
+            // A quarter turn, drawn here so it is the world's and not a renderer's guess. The shuttleport keeps 0: it
+            // is the one structure whose orientation means something, because its landing pad is where shuttles arrive.
+            Yaw = kind == StructureKind.Shuttleport ? 0 : rng.NextInt(0, 4),
+            Asset = StructureAssets.Pick(kind, ref rng),
 
             // Staggered, so the economy does not arrive as a once-a-minute spike that the median tick never sees.
             TickCountdown = tickPeriod == 0 ? 0 : rng.NextInt(1, tickPeriod),

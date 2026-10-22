@@ -926,6 +926,10 @@ public sealed partial class SimBridge
         // cluster loop because one cluster is one batch and every cluster reuses these buffers.
         var prox = CollisionDisabled ? null : (_proximity ??= new ProximityScratch());
 
+        // Hoisted: read once for the whole tick rather than per body, beside the controller-kind test it widens.
+        // See SimConfig.CollideCrowd -- off in every normal run, and the only way to put 3 000 bodies on this path.
+        var collideCrowd = _config.CollideCrowd;
+
         // Read once per worker pass, not per body: a disc taken before the last static placement is retired, and the value
         // only ever moves when something fixed is created, destroyed or moved.
         var generation = Volatile.Read(ref _structureGeneration);
@@ -989,6 +993,9 @@ public sealed partial class SimBridge
                 var x = Math.Clamp(p.X + (move.VelX * k) + biasX, -half + h, half - h);
                 var z = Math.Clamp(p.Z + (move.VelZ * k) + biasZ, -half + h, half - h);
                 var gy = GroundAt(cluster.Realm, x, z);
+
+                // The floor this body is standing on, if the disc it holds remembers one; -inf until a refresh says so.
+                var discSurface = float.NegativeInfinity;
                 Slow(cluster.Realm, in p, ref x, ref z, ref gy, h, half);
 
                 // The step is settled now: integrated, held inside the world and shortened by the grade. Everything a fixed
@@ -998,7 +1005,7 @@ public sealed partial class SimBridge
                 // not finite by throwing, and an exception out of a system body aborts the tick. A client intent carrying NaN
                 // is the only way to get one here, and dropping it back to the uncollided path is the same answer the
                 // simulation gave before collision existed.
-                if (prox != null && controls[idx].Kind != ControllerKind.Scripted && float.IsFinite(x) && float.IsFinite(z))
+                if (prox != null && (collideCrowd || controls[idx].Kind != ControllerKind.Scripted) && float.IsFinite(x) && float.IsFinite(z))
                 {
                     if (discs.IsEmpty)
                     {
@@ -1012,6 +1019,12 @@ public sealed partial class SimBridge
                         prox.Half[pending] = h;
                         prox.CandX[pending] = x;
                         prox.CandZ[pending] = z;
+
+                        // Where it came from and how high it stood: the resolver walks the path rather than testing
+                        // the endpoint, and decides what each box IS against the feet that meet it.
+                        prox.FromX[pending] = places[idx].X;
+                        prox.FromZ[pending] = places[idx].Z;
+                        prox.FeetY[pending] = places[idx].Y;
                         prox.Count[pending] = 0;
                         prox.Overflow[pending] = false;
                         prox.Probe[pending] = new BSphere2F
@@ -1025,16 +1038,20 @@ public sealed partial class SimBridge
                     }
 
                     held++;
+                    discSurface = discs[idx].SurfaceY;
                     if (audit)
                     {
                         // The held path matters MORE to the oracle than the refreshed one: a disc that wrongly decided
                         // nothing was near is the failure the disc's own bookkeeping cannot see.
-                        Audit(cluster.Realm, x, z, h);
+                        Audit(ctx.Accessor, cluster.Realm, x, z, h, places[idx].Y);
                     }
                 }
 
                 var nb = default(PlayerPlacement);
-                nb.SetAt(x, z, gy, h);
+
+                // A held disc remembers the floor the body is standing on; without it the body drops to the terrain
+                // and the floor becomes a wall. Bodies with no disc (scripted, or collision off) keep the terrain.
+                nb.SetAt(x, z, discSurface > gy ? discSurface : gy, h);
                 if (batched)
                 {
                     next[idx] = nb;
@@ -1081,6 +1098,9 @@ public sealed partial class SimBridge
                 batches++;
                 refreshed += pending;
 
+                // Loop-invariant, and it carries the one-entry memo that keeps a body inside a footprint from
+                // re-opening its structure on every pass; see StructureShapes.
+                var shapes = new StructureShapes(ctx.Accessor, AssetShapes);
                 for (var m = 0; m < pending; m++)
                 {
                     var slot = prox.Slot[m];
@@ -1094,7 +1114,7 @@ public sealed partial class SimBridge
                     }
 
                     var boxes = prox.Neighbours(m);
-                    if (PushOut(boxes, mh, half, ref mx, ref mz, out var stuck))
+                    if (PushOut(boxes, mh, half, ref mx, ref mz, out var stuck, ref shapes, prox.FeetY[m], prox.FromX[m], prox.FromZ[m]))
                     {
                         contacts++;
                         if (stuck)
@@ -1104,24 +1124,30 @@ public sealed partial class SimBridge
                     }
 
                     // Re-sampled because the push moved the body, for the reason the grade step re-samples: the altitude
-                    // written has to be the ground under the position actually written.
-                    var mgy = GroundAt(cluster.Realm, mx, mz);
+                    // written has to be the ground under the position actually written -- and the ground includes any
+                    // published surface the body is standing ON, which the terrain alone knows nothing about.
+                    var mterrain = GroundAt(cluster.Realm, mx, mz);
+                    var mgy = GroundOnShapes(boxes, mh, mx, mz, mterrain, prox.FeetY[m], ref shapes);
                     var probe = prox.Probe[m];
                     discs[slot] = new PlayerProximity
                     {
                         AnchorX = mx,
                         AnchorZ = mz,
 
+                        // Only the surface, not the ground: the terrain under a body changes as it walks and is
+                        // re-sampled every tick, while the deck it is standing on does not.
+                        SurfaceY = mgy > mterrain ? mgy : float.NegativeInfinity,
+
                         // A full set is still correct, because the sink keeps the NEAREST sixteen: every box it dropped is
                         // farther than every box it held, hence farther than the disc this takes the minimum of.
-                        ClearM = DiscFor(boxes, probe.CenterX, probe.CenterY, probe.Radius, mx, mz),
+                        ClearM = DiscFor(boxes, probe.CenterX, probe.CenterY, probe.Radius, mx, mz, ref shapes, prox.Overflow[m], mgy),
                         Realm = cluster.Realm.Value,
                         Generation = (ushort)generation,
                     };
 
                     if (audit)
                     {
-                        Audit(cluster.Realm, mx, mz, mh);
+                        Audit(ctx.Accessor, cluster.Realm, mx, mz, mh, mgy);
                     }
 
                     var mb = default(PlayerPlacement);

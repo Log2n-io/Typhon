@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading;
 using NUnit.Framework;
@@ -18,6 +18,7 @@ namespace SwgTatooine.Tests;
 /// ones the panel is about. Walking the clusters through the transaction is what makes them visible, so a case that
 /// pins it is what stops somebody moving this back into a <c>QuerySystem</c> for looking tidier.
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 public sealed class RealmCensusChecks
@@ -100,6 +101,7 @@ public sealed class RealmCensusChecks
     /// mechanism under test: an occupancy bit the census misreads would have to be missed by the index in the same way.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void TheCensusCountsWhatEachRealmActuallyHolds()
     {
         using var sim = new TatooineSim(Config());
@@ -145,6 +147,7 @@ public sealed class RealmCensusChecks
     /// is the whole reason the census is shaped the way it is.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void ARealmThePolicyPutToSleepIsStillCounted()
     {
         var config = Config();
@@ -187,6 +190,7 @@ public sealed class RealmCensusChecks
     /// stopped gating would be a forty-fold regression that every other case here would still pass.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void TheCensusRunsOnItsCadenceAndNotEveryTick()
     {
         var config = Config();
@@ -229,6 +233,7 @@ public sealed class RealmCensusChecks
     /// <see cref="SimConfig.RealmCensusHz"/> a real switch rather than a documented intention.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void ACensusHzOfZeroTakesNoCensusAtAll()
     {
         var config = Config();
@@ -251,6 +256,7 @@ public sealed class RealmCensusChecks
     /// here is the same one the portal path commits, and what is under test is the census following it.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void APlayerCrossingIntoARealmIsCountedThere()
     {
         using var sim = new TatooineSim(Config());
@@ -290,6 +296,7 @@ public sealed class RealmCensusChecks
     /// picking up its neighbour's population — and every realm a document mentions goes through here.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void ARealmIsLookedUpByItsOwnIdAndNotItsNeighbours()
     {
         using var sim = new TatooineSim(Config());

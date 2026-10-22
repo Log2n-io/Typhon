@@ -82,8 +82,13 @@ export interface UiState {
    * to be — and the first panel to read it would get the other one's bound.
    */
   readonly playerRadius: number | null;
-  /** The range {@link playerRadius} may be set over, metres, or `null` while the server has not said. */
-  readonly playerRadiusRange: { readonly min: number; readonly max: number } | null;
+  /**
+   * The range {@link playerRadius} may be set over, metres, or `null` while the server has not said.
+   *
+   * `def` is what the server serves before the slider is touched, which is a third number and not either end: the floor
+   * is the narrowest a session may ask to be, and starting the slider there showed a radius the session did not have.
+   */
+  readonly playerRadiusRange: { readonly min: number; readonly max: number; readonly def: number } | null;
   /**
    * Heatmap channels by archetype NAME. Which channels exist is the aggregate grid's to say, and the server's grid holds
    * three (`Creature`, `CityNpc`, `Player`) where the client's old constant assumed four in a different order — so a
@@ -93,8 +98,24 @@ export interface UiState {
   readonly showGrid: boolean;
   /** Draw the `DEBUG` block the server sends: replication grid, delivered cells, session shape (CLI3D-03). */
   readonly showDebug: boolean;
-  /** Terrain geometric error the viewer accepts, in screen pixels. Smaller is finer ground and costs GPU. */
+  /**
+   * Terrain geometric error the viewer accepts, in screen pixels. Smaller is finer ground and costs GPU.
+   *
+   * <b>Eight, because the quadtree's cost in triangles is roughly the inverse square of this.</b> Two pixels asks for
+   * ground accurate to a quarter of the error eight allows, over the whole visible planet, and measured in game that is
+   * 15 million triangles — a figure that has nothing to do with how the terrain looks at a metre of eye height and
+   * everything to do with how far the horizon is. The slider still reaches 0.25 for anyone who wants to see what the
+   * bake can do.
+   */
   readonly terrainPixelError: number;
+  /**
+   * Whether the sun casts: buildings shadow each other and the ground, and the avatar shadows the ground.
+   *
+   * A toggle rather than a constant because it is the one scene setting with a GPU cost worth A/B-ing — a 2 048 map
+   * re-rendered every frame over every structure the session holds — and because an impostor cannot cast, so what it
+   * buys depends on how close the camera is to something real.
+   */
+  readonly shadows: boolean;
   /** `god` looks down on the world; `eye` stands in it, riding the selection (CLI3D-10). */
   readonly cameraMode: 'god' | 'eye';
   /**
@@ -173,12 +194,13 @@ export interface UiState {
   /** Asks for a player radius, clamped to the server's range. Ignored until the range is known. */
   readonly setPlayerRadius: (radius: number) => void;
   /** Adopts the server's range, and starts at its own radius — which is what the session is already being served. */
-  readonly setPlayerRadiusRange: (range: { min: number; max: number } | null) => void;
+  readonly setPlayerRadiusRange: (range: { min: number; max: number; def?: number } | null) => void;
   readonly toggleHeatmap: (name: string) => void;
   readonly setShowGrid: (on: boolean) => void;
   readonly setShowDebug: (on: boolean) => void;
   /** Sets the terrain's screen-space error budget, in pixels. */
   readonly setTerrainPixelError: (pixels: number) => void;
+  readonly setShadows: (shadows: boolean) => void;
   readonly setCameraMode: (mode: 'god' | 'eye') => void;
   /** Tells the store this session has an avatar to ride; see {@link UiState.playing}. */
   readonly setPlaying: (playing: boolean) => void;
@@ -224,7 +246,8 @@ export const useUi = create<UiState>()((set, get) => ({
   heatmap: { Creature: true },
   showGrid: true,
   showDebug: false,
-  terrainPixelError: 2,
+  terrainPixelError: 8,
+  shadows: true,
   cameraMode: 'god',
   playing: false,
   showAuthoritative: false,
@@ -277,16 +300,22 @@ export const useUi = create<UiState>()((set, get) => ({
     });
   },
 
-  setPlayerRadiusRange: (playerRadiusRange) => {
-    set((s) => ({
-      playerRadiusRange,
-      // Starts at the profile's own radius, which is what the session is already served — so adopting the range changes
-      // nothing until the person moves the slider. An existing value is kept, clamped, so a re-fetch does not reset it.
-      playerRadius:
-        playerRadiusRange === null
-          ? null
-          : Math.min(Math.max(s.playerRadius ?? playerRadiusRange.min, playerRadiusRange.min), playerRadiusRange.max),
-    }));
+  setPlayerRadiusRange: (range) => {
+    set((s) => {
+      if (range === null) {
+        return { playerRadiusRange: null, playerRadius: null };
+      }
+
+      // The default is the server's when it states one and its floor otherwise, which is what every server published
+      // before the figure existed.
+      const def = Math.min(Math.max(range.def ?? range.min, range.min), range.max);
+      return {
+        playerRadiusRange: { min: range.min, max: range.max, def },
+        // Starts at what the session is ALREADY SERVED — so adopting the range changes nothing until the person moves
+        // the slider. An existing value is kept, clamped, so a re-fetch does not reset it.
+        playerRadius: Math.min(Math.max(s.playerRadius ?? def, range.min), range.max),
+      };
+    });
   },
   toggleHeatmap: (name) => {
     set((s) => ({ heatmap: { ...s.heatmap, [name]: !(s.heatmap[name] ?? false) } }));
@@ -346,6 +375,9 @@ export const useUi = create<UiState>()((set, get) => ({
   },
   setFollow: (follow) => {
     set({ follow });
+  },
+  setShadows: (shadows) => {
+    set({ shadows });
   },
   setTerrainPixelError: (pixels: number) => {
     set({ terrainPixelError: pixels });

@@ -3,9 +3,10 @@ import { SpeedClass } from '../data/source';
 /**
  * The gait a player is travelling at, and the keyboard shortcut that selects it.
  *
- * <b>A latched selection, not a held modifier.</b> Shift+1..4 chooses how fast this character moves and it stays chosen;
- * the alternative — hold a key to go fast — cannot be combined with holding W, A, S or D on most keyboards and would make
- * the fastest gait the one you cannot steer in. So the person presses once and then plays.
+ * <b>A latched selection of what SHIFT gives, not of how the body moves by default.</b> A direction key walks; Shift
+ * held with it travels at the gait Shift+1..4 last chose, and that choice stays chosen. The alternative — a held key per
+ * gait — cannot be combined with holding W, A, S or D on most keyboards and would make the fastest gait the one you
+ * cannot steer in. So the person presses once to pick a gear, and then holds Shift to use it.
  *
  * <b>Four gaits, two of which are honest about being made up.</b> 1 is a run and 2 is SWG's Burst Run at its source
  * multiplier; 3 and 4 are travel gaits well past anything SWG had — the swoop's 14.7 m/s was the game's ceiling — and
@@ -29,7 +30,7 @@ const GAIT_KEYS: ReadonlyMap<string, number> = new Map([
   ['Digit4', SpeedClass.speederFast],
 ]);
 
-/** What a session starts at: a run, which is what every session did before gaits existed. */
+/** What Shift gives until something else is latched: a run, which is what every session did before gaits existed. */
 export const DEFAULT_GAIT: number = SpeedClass.run;
 
 /**

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using NUnit.Framework;
 using SwgTatooine.Accounts;
 using Typhon.Engine;
@@ -27,6 +27,7 @@ namespace SwgTatooine.Tests;
 /// because a client that proved the ACCOUNT has made a stronger claim than one that merely held a token.
 /// </para>
 /// </remarks>
+[Category("Integration")]
 [TestFixture]
 [NonParallelizable]
 internal sealed class ResumeAvatarChecks
@@ -143,6 +144,7 @@ internal sealed class ResumeAvatarChecks
     // ── the hold ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     [Test]
+    [Category("Integration")]
     public void ALinkThatDiesLeavesTheAvatarStandingAndTheClientThatComesBackGetsThatSameBody()
     {
         using var sim = Start();
@@ -187,6 +189,7 @@ internal sealed class ResumeAvatarChecks
     }
 
     [Test]
+    [Category("Integration")]
     public void AClientThatSaidGoodbyeIsRetiredAtOnceAndItsTokenNamesNothing()
     {
         using var sim = Start();
@@ -221,6 +224,7 @@ internal sealed class ResumeAvatarChecks
     // ── the deadline ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     [Test]
+    [Category("Integration")]
     public void AGraceThatElapsesRetiresTheHeldAvatarAndSavesWhereItStood()
     {
         // Short enough to elapse inside a test, and long enough that the close and the first few ticks are comfortably inside it.
@@ -269,6 +273,7 @@ internal sealed class ResumeAvatarChecks
     /// what is under test as much as the count.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void AGodSessionsExpiryIsNotAnOrphan()
     {
         using var sim = Start(resumeGraceS: 0.25d);
@@ -298,6 +303,7 @@ internal sealed class ResumeAvatarChecks
     /// number now, and this case is what says the number tracks the thing.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void AHoldIsCountedWhileItStandsAndNotAfterwards()
     {
         using var sim = Start(resumeGraceS: 0.25d);
@@ -334,6 +340,7 @@ internal sealed class ResumeAvatarChecks
     /// already retired the hold, so the demo sees an expiry with nothing behind it — for a reason that is the system working.
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void AnExpiryAfterATakeoverIsNotAnOrphan()
     {
         using var sim = Start(resumeGraceS: 0.25d);
@@ -357,6 +364,7 @@ internal sealed class ResumeAvatarChecks
     // ── the takeover ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     [Test]
+    [Category("Integration")]
     public void AFreshLoginForAHeldAccountTakesItsOwnBodyOverRatherThanBeingRefused()
     {
         using var sim = Start();
@@ -398,6 +406,7 @@ internal sealed class ResumeAvatarChecks
     }
 
     [Test]
+    [Category("Integration")]
     public void ASecondClientForAPlayingAccountIsStillRefused()
     {
         using var sim = Start();
@@ -433,6 +442,7 @@ internal sealed class ResumeAvatarChecks
     /// </para>
     /// </remarks>
     [Test]
+    [Category("Integration")]
     public void AGracefulShutdownSavesAHeldAvatarsPositionToo()
     {
         using var sim = Start(saveIntervalS: 3_600d);
@@ -475,6 +485,7 @@ internal sealed class ResumeAvatarChecks
     // ── the option ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     [Test]
+    [Category("Integration")]
     public void AServerWithNoGraceIssuesNoTokenAndRetiresOnADroppedLink()
     {
         using var sim = Start(resumeGraceS: 0d);

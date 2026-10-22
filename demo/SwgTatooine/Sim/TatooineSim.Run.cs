@@ -74,12 +74,29 @@ public sealed partial class TatooineSim
     /// <para><c>--unpaced</c> (<see cref="SimConfig.Unpaced"/>) is the one exception, for count-only comparisons: ticks back to back, with the overload
     /// response off so that nothing is shed.</para>
     /// </remarks>
+    /// <summary>
+    /// Collider geometry for a measured run, in place of reading a published asset folder.
+    /// </summary>
+    /// <remarks>
+    /// <b>For the tests that have to prove the NARROW phase runs.</b> Every other end-to-end case here builds a world
+    /// with no asset set, so <c>AssetShapes</c> is null and every structure collides as the footprint box — which means
+    /// the suite could be entirely green while the second level of the test did nothing at all. A test that wants to
+    /// walk a body into a published wall needs geometry without depending on a folder outside the repository, and this
+    /// is the seam that gives it one. Null in every real run.
+    /// </remarks>
+    internal AssetColliders AssetShapesOverride { get; set; }
+
     public RunResult Run()
     {
         BuildViews();
 
+        // The same shapes the served path collides against. A measured run is the only way to put thousands of bodies
+        // on the collision path (--collide-crowd), and without this it would measure the footprint fallback instead.
+        var shapes = AssetShapesOverride ?? LoadAssetColliders(OpenAssetOrigin());
+
         _bridge = new SimBridge(_config, Map, Index)
         {
+            AssetShapes = shapes,
             Dbe = Dbe,
             PlanetIndexes = Indexes,
             InteriorsPerPlanet = InteriorsPerPlanet,

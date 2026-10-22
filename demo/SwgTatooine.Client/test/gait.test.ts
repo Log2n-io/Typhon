@@ -92,25 +92,27 @@ describe('a gait on screen', () => {
 describe('a movement intent at a gait', () => {
   const held = (...codes: string[]) => new Set(codes);
 
-  it('asks for the selected gait', () => {
-    expect(movementIntent(held('KeyW'), 0, SpeedClass.speeder)?.speedClass).toBe(SpeedClass.speeder);
-    expect(movementIntent(held('KeyW'), 0, SpeedClass.speederFast)?.speedClass).toBe(SpeedClass.speederFast);
-    expect(movementIntent(held('KeyW'), 0, SpeedClass.burst)?.speedClass).toBe(SpeedClass.burst);
+  it('asks for the selected gait when shift is held', () => {
+    expect(movementIntent(held('KeyW', 'ShiftLeft'), 0, SpeedClass.speeder)?.speedClass).toBe(SpeedClass.speeder);
+    expect(movementIntent(held('KeyW', 'ShiftLeft'), 0, SpeedClass.speederFast)?.speedClass).toBe(
+      SpeedClass.speederFast,
+    );
+    expect(movementIntent(held('KeyW', 'ShiftLeft'), 0, SpeedClass.burst)?.speedClass).toBe(SpeedClass.burst);
   });
 
   /** Unchanged for a caller that has no gait to pass, which is every test written before they existed. */
-  it('runs when no gait is given', () => {
-    expect(movementIntent(held('KeyW'), 0)?.speedClass).toBe(SpeedClass.run);
+  it('runs on shift when no gait is given', () => {
+    expect(movementIntent(held('KeyW', 'ShiftLeft'), 0)?.speedClass).toBe(SpeedClass.run);
   });
 
   /**
-   * <b>Shift+direction still walks, at any gait.</b> Shift is the walk modifier AND the shortcuts' prefix: the press
-   * latches, the hold means "walk now". A speeder that could not be slowed to a walk would make the shortcuts a one-way
-   * door, and a walk that stopped working once a gait was selected would be a silent regression of A9.
+   * <b>A direction on its own walks, whatever is latched</b> (inverted 2026-10-21, Loïc). Shift is the gait modifier AND
+   * the shortcuts' prefix: the press latches which gait Shift gives, the hold uses it. A speeder that could not be
+   * dropped to a walk would make the shortcuts a one-way door.
    */
-  it('walks on shift, whatever the gait', () => {
-    expect(movementIntent(held('KeyW', 'ShiftLeft'), 0, SpeedClass.speederFast)?.speedClass).toBe(SpeedClass.walk);
-    expect(movementIntent(held('KeyW', 'ShiftRight'), 0, SpeedClass.speeder)?.speedClass).toBe(SpeedClass.walk);
+  it('walks without shift, whatever the gait', () => {
+    expect(movementIntent(held('KeyW'), 0, SpeedClass.speederFast)?.speedClass).toBe(SpeedClass.walk);
+    expect(movementIntent(held('KeyW'), 0, SpeedClass.speeder)?.speedClass).toBe(SpeedClass.walk);
   });
 
   /** A stop is a stop at every gait: cancelling keys mean stand still, and the gait is what you resume at. */
