@@ -1,4 +1,4 @@
-﻿using SwgTatooine.Server.Accounts;
+using SwgTatooine.Server.Accounts;
 using SwgTatooine.Server.Terrain;
 using System;
 using System.IO;
@@ -67,31 +67,13 @@ public sealed partial class TatooineSim
     public TyphonRuntime Runtime => _runtime;
 
     /// <summary>
-    /// Everything <see cref="ServeAsync"/> does except the web host: the views, the bridge, the replication declarations and a started runtime.
+    /// The published asset folder this run serves and collides against, or <see langword="null"/> when the config names none: a measured run without
+    /// <c>--assets</c>, or a check. <c>Program</c> never serves without one (<see cref="ServedAssetRoot"/>).
     /// </summary>
-    /// <remarks>
-    /// <b>Split out so that replication can be exercised without a socket.</b> A transport is a seam
-    /// (<c>design/Subscriptions/04-transport.md § 2</c>): a test starts its own in-process transport against
-    /// <see cref="TyphonRuntime.StartSubscriptionTransport"/> and receives the same frames a WebSocket would carry. Going through the web host instead would
-    /// test Kestrel, bind a port, and make a check that is about a <c>KICK</c> fail for a reason that has nothing to do with one.
-    /// </remarks>
-    /// <summary>The published asset folder this run serves and collides against, or <see langword="null"/> without <c>--assets</c>.</summary>
     /// <returns>The origin, validated.</returns>
     /// <exception cref="ArgumentException">The folder, its pointer, or the catalogue it names is missing or malformed.</exception>
     internal AssetOrigin OpenAssetOrigin() => _config.AssetDirectory == null ? null : AssetOrigin.Open(_config.AssetDirectory);
 
-    /// <summary>
-    /// The collision shapes behind the footprints, read once.
-    /// </summary>
-    /// <param name="assets">What <see cref="OpenAssetOrigin"/> returned, or <see langword="null"/>.</param>
-    /// <returns>The collider table, or <see langword="null"/> on a run with no asset set.</returns>
-    /// <remarks>
-    /// <b>Both the served and the measured path need this, and for a while only the served one had it.</b> Collision is
-    /// per body and a measured run is the only way to put thousands of bodies on it, so a measured run that could not
-    /// load the shapes could only ever measure the footprint fallback — the path a real client never takes. Only the
-    /// assets whose colliders have been checked against the blocking rule are loaded; everything else keeps its
-    /// footprint box (see <see cref="AssetColliders"/>).
-    /// </remarks>
     /// <summary>
     /// Moves every planet's doors from their buildings' centres to the doorways the assets publish.
     /// </summary>
@@ -121,6 +103,18 @@ public sealed partial class TatooineSim
             + $"{shapes.DoorCount:N0} asset(s) publish one");
     }
 
+    /// <summary>
+    /// The collision shapes behind the footprints, read once.
+    /// </summary>
+    /// <param name="assets">What <see cref="OpenAssetOrigin"/> returned, or <see langword="null"/>.</param>
+    /// <returns>The collider table, or <see langword="null"/> on a run with no asset set.</returns>
+    /// <remarks>
+    /// <b>Both the served and the measured path need this, and for a while only the served one had it.</b> Collision is
+    /// per body and a measured run is the only way to put thousands of bodies on it, so a measured run that could not
+    /// load the shapes could only ever measure the footprint fallback — the path a real client never takes. Only the
+    /// assets whose colliders have been checked against the blocking rule are loaded; everything else keeps its
+    /// footprint box (see <see cref="AssetColliders"/>).
+    /// </remarks>
     internal static AssetColliders LoadAssetColliders(AssetOrigin assets)
     {
         if (assets == null)
@@ -142,6 +136,15 @@ public sealed partial class TatooineSim
         return shapes;
     }
 
+    /// <summary>
+    /// Everything <see cref="ServeAsync"/> does except the web host: the views, the bridge, the replication declarations and a started runtime.
+    /// </summary>
+    /// <remarks>
+    /// <b>Split out so that replication can be exercised without a socket.</b> A transport is a seam
+    /// (<c>design/Subscriptions/04-transport.md § 2</c>): a test starts its own in-process transport against
+    /// <see cref="TyphonRuntime.StartSubscriptionTransport"/> and receives the same frames a WebSocket would carry. Going through the web host instead would
+    /// test Kestrel, bind a port, and make a check that is about a <c>KICK</c> fail for a reason that has nothing to do with one.
+    /// </remarks>
     public void StartReplication(AssetColliders shapes = null)
     {
         // Before anything else, so a misconfigured SWG_AUTH_KEY stops the server here rather than surfacing as a wrapped
@@ -339,6 +342,54 @@ public sealed partial class TatooineSim
         }
 
         return null;
+    }
+
+    /// <summary>The published asset folder a served run uses: <c>--assets</c>, else one beside the binary, else the repository's.</summary>
+    /// <param name="assetDirectory"><c>--assets</c>, or <see langword="null"/>.</param>
+    /// <param name="baseDirectory">The process's base directory.</param>
+    /// <returns>The folder to open, never <see langword="null"/>.</returns>
+    /// <exception cref="ArgumentException">No folder holding a <see cref="AssetOrigin.PointerName"/> was found.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>A served run without assets is refused, not degraded.</b> Collision, portals, seats and interactions all come from the descriptors; a world served
+    /// on footprint boxes is one no client can play, so the moment to say so is before the world is built.
+    /// </para>
+    /// <para>
+    /// <c>&lt;binary&gt;/assets</c> is a deployment's layout (<c>scripts/publish-swg.ps1</c> copies the set there);
+    /// <c>demo/SwgTatooine/SwgTatooine.Assets/build/assets</c>, walked up to from the binary, is a dev tree's, where <c>assets.py fetch published</c> unpacks
+    /// it. Served from where it is rather than copied into <c>bin/</c>, the way <see cref="DefaultClientRoot"/> serves the client: a copy goes stale on the
+    /// next fetch. A measured run does not come here: what it collides against is part of what it measures, so it stays what <c>--assets</c> says.
+    /// </para>
+    /// </remarks>
+    public static string ServedAssetRoot(string assetDirectory, string baseDirectory)
+    {
+        if (assetDirectory != null)
+        {
+            return assetDirectory;
+        }
+
+        var beside = Path.Combine(baseDirectory, "assets");
+        if (File.Exists(Path.Combine(beside, AssetOrigin.PointerName)))
+        {
+            return beside;
+        }
+
+        var directory = new DirectoryInfo(baseDirectory);
+        while (directory != null)
+        {
+            var candidate = Path.Combine(directory.FullName, "demo", "SwgTatooine", "SwgTatooine.Assets", "build", "assets");
+            if (File.Exists(Path.Combine(candidate, AssetOrigin.PointerName)))
+            {
+                return candidate;
+            }
+
+            directory = directory.Parent;
+        }
+
+        throw new ArgumentException(
+            $"--serve needs the published asset set, and there is none: no --assets, no {AssetOrigin.PointerName} in '{beside}', and no "
+            + $"demo/SwgTatooine/SwgTatooine.Assets/build/assets above '{baseDirectory}'. "
+            + "Fetch it with: python demo/SwgTatooine/SwgTatooine.Assets/scripts/assets.py fetch published");
     }
 
     /// <summary>The towns new characters are spread across, from the map and <c>--spawn-spread</c>.</summary>

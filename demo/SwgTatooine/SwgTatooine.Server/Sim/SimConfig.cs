@@ -252,10 +252,6 @@ public sealed class SimConfig
     // ── Runtime ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Simulation rate. SWG's server ran its main loop at roughly 10 Hz for AI and movement broadcast; this is the tick
-    /// the system DAG is driven at and what a per-tick cost is measured against.
-    /// </summary>
-    /// <summary>
     /// Whether the scripted crowd is collided against structures as well. <b>On</b>; <c>--no-collide-crowd</c> turns it off.
     /// </summary>
     /// <remarks>
@@ -288,6 +284,10 @@ public sealed class SimConfig
     /// </remarks>
     public bool CollideCrowd = true;
 
+    /// <summary>
+    /// Simulation rate. SWG's server ran its main loop at roughly 10 Hz for AI and movement broadcast; this is the tick
+    /// the system DAG is driven at and what a per-tick cost is measured against.
+    /// </summary>
     public int TickRateHz = 10;
 
     /// <summary>
@@ -410,17 +410,17 @@ public sealed class SimConfig
     public string ClientDirectory;
 
     /// <summary>
-    /// <c>--assets</c>: a published asset folder to serve at <c>/assets</c>, or <see langword="null"/> to serve none.
+    /// <c>--assets</c>: the published asset folder to serve at <c>/assets</c> and collide against, or <see langword="null"/> for none.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The exporter's <c>build/assets</c>: flat, content-addressed GLBs, descriptors and shared KTX2 textures, with a
-    /// <c>catalogue.json</c> pointer. The server pins the immutable catalogue that pointer names and announces it in
-    /// <c>/typhon/demo.json</c>, so the client never has to discover a version — see <see cref="AssetOrigin"/>.
+    /// <c>SwgTatooine.Assets/build/assets</c> (fetched by its <c>scripts/assets.py fetch published</c>, or built there): flat,
+    /// revision-named GLBs, descriptors and shared KTX2 textures, with a <c>catalogue.json</c> pointer. The server pins the immutable catalogue that pointer
+    /// names and announces it in <c>/typhon/demo.json</c>, so the client never has to discover a version — see <see cref="AssetOrigin"/>.
     /// </para>
     /// <para>
-    /// <b>Unset serves nothing, and the client then draws what it always drew.</b> The asset set lives outside this
-    /// repository, so a run that does not name one must still be a working run.
+    /// <b>A served run always has one.</b> Unset, <c>Program</c> finds it beside the binary or in the repository, and refuses to serve when it cannot
+    /// (<see cref="TatooineSim.ServedAssetRoot"/>). Unset on a measured run means no assets: footprint boxes only, the shape the checks build directly.
     /// </para>
     /// </remarks>
     public string AssetDirectory;

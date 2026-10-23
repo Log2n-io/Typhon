@@ -201,8 +201,8 @@ public sealed class AssetColliders
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b><c>C:\Dev\Misc\BlenderGenTest\ASSET_FORMAT.md</c> is the contract</b>, owned by the <c>blender-models</c>
-    /// session, and it carries a revision number with a changelog. A consumer that knows revision N reads the entries
+    /// <b><c>demo/SwgTatooine/SwgTatooine.Assets/ASSET_FORMAT.md</c> is the contract</b>, and it carries a revision number
+    /// with a changelog. A consumer that knows revision N reads the entries
     /// after N and nothing else, so recording the number here is what makes the next diff mechanical instead of a
     /// re-read of the whole spec.
     /// </para>
@@ -213,7 +213,7 @@ public sealed class AssetColliders
     /// structure had before the asset pipeline — rather than being parsed hopefully and collided wrongly.
     /// </para>
     /// </remarks>
-    internal const int FormatRevision = 4;
+    internal const int FormatRevision = 5;
 
     /// <summary>The one descriptor schema this reader understands. See <see cref="FormatRevision"/>.</summary>
     internal const int DescriptorSchema = 1;
@@ -582,17 +582,6 @@ public sealed class AssetColliders
     }
 
     /// <summary>
-    /// The blocking primitives of one descriptor, as plan boxes in the WORLD's frame convention.
-    /// </summary>
-    /// <param name="json">A descriptor document.</param>
-    /// <returns>Its blocking boxes; empty when it declares no collision.</returns>
-    /// <remarks>
-    /// <b>The X mirror is applied here, once.</b> A descriptor is in the glTF frame, which is right-handed, and the
-    /// world is the renderer's left-handed one — the loader puts every model under a root that mirrors X, so anything
-    /// read from a descriptor has to take the same mirror or it lands on the other side of the building from the wall
-    /// it describes. Doing it at load means the per-contact path is a translate and a quarter turn.
-    /// </remarks>
-    /// <summary>
     /// The doorway an asset publishes, in its own local frame, or <see langword="default"/> when it has none.
     /// </summary>
     /// <remarks>
@@ -809,6 +798,17 @@ public sealed class AssetColliders
             : default;
     }
 
+    /// <summary>
+    /// The blocking primitives of one descriptor, as plan boxes in the WORLD's frame convention.
+    /// </summary>
+    /// <param name="json">A descriptor document.</param>
+    /// <returns>Its blocking boxes; empty when it declares no collision.</returns>
+    /// <remarks>
+    /// <b>The X mirror is applied here, once.</b> A descriptor is in the glTF frame, which is right-handed, and the
+    /// world is the renderer's left-handed one — the loader puts every model under a root that mirrors X, so anything
+    /// read from a descriptor has to take the same mirror or it lands on the other side of the building from the wall
+    /// it describes. Doing it at load means the per-contact path is a translate and a quarter turn.
+    /// </remarks>
     internal static PlanBox[] ReadBlocking(string json)
     {
         using var doc = JsonDocument.Parse(json);

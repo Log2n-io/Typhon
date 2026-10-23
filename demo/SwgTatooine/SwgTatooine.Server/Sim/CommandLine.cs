@@ -193,7 +193,7 @@ public static class CommandLine
         // --sweep-worlds sets the house pattern for a list. Split in Validate so the help text shows the raw form.
         var origins = r.Str("--origin", null, "origins a browser may connect from, comma-separated. Required when --bind is not loopback", "<url,url>");
         c.ClientDirectory = r.Str("--client-dir", c.ClientDirectory, "directory of built client files to serve; the repo's dist/ when unset", "<path>");
-        c.AssetDirectory = r.Str("--assets", c.AssetDirectory, "published asset folder (the exporter's build/assets) to serve at /assets", "<path>");
+        c.AssetDirectory = r.Str("--assets", c.AssetDirectory, "published asset folder; found beside the binary or in the repo when unset", "<path>");
         c.TlsChainPath = r.Str("--tls-chain", c.TlsChainPath, "PEM chain to serve https with (certbot's fullchain.pem)", "<path>");
         c.TlsKeyPath = r.Str("--tls-key", c.TlsKeyPath, "PEM private key matching --tls-chain (certbot's privkey.pem)", "<path>");
         c.TlsPort = r.Int("--tls-port", c.TlsPort, "port https is served on; 443 needs CAP_NET_BIND_SERVICE", min: 1, max: 65535);

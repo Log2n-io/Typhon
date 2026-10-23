@@ -10,12 +10,12 @@ import { fetchServerConfig } from '../src/data/server-config';
  */
 
 const CATALOGUE = {
-  schema: 1,
-  version: '5cc29ba99154',
+  schema: 2,
+  version: 7,
   assets: {
-    tat_house_small: { rev: 4, descriptor: 'tat_house_small.aaaa.json', glb: 'tat_house_small.bbbb.glb' },
+    tat_house_small: { rev: 4, descriptor: 'tat_house_small-4.json', glb: 'tat_house_small-4.glb' },
   },
-  textures: ['sandstone_basecolor.cccc.ktx2'],
+  textures: ['sandstone_basecolor-1.ktx2'],
 };
 
 const DEMO = {
@@ -23,7 +23,7 @@ const DEMO = {
   maxViewRadiusM: 2048,
   playerRadiusM: 192,
   playerMaxRadiusM: 1280,
-  assets: { base: '/assets/', catalogue: 'catalogue.5cc29ba99154.json' },
+  assets: { base: '/assets/', catalogue: 'catalogue-7.json' },
 };
 
 /** A fetch that answers one body for everything, so a test says what it is testing and nothing else. */
@@ -58,7 +58,7 @@ describe('the announced asset set', () => {
     // rather than re-deriving it from descriptors it would also have to filter.
     expect(config?.assets).toEqual({
       base: '/assets/',
-      catalogue: 'catalogue.5cc29ba99154.json',
+      catalogue: 'catalogue-7.json',
       structures: [],
       collision: [],
     });
@@ -91,9 +91,13 @@ describe('the announced asset set', () => {
     // on a version that can change under it while the server stays pinned to the one it read at startup.
     for (const catalogue of [
       'catalogue.json',
-      'catalogue..json',
-      '../catalogue.abc.json',
-      'catalogue.abc.json.br',
+      'catalogue-.json',
+      'catalogue-0.json',
+      'catalogue-07.json',
+      'catalogue-ab.json',
+      'catalogue.5cc29ba99154.json',
+      '../catalogue-7.json',
+      'catalogue-7.json.br',
       '',
     ]) {
       globalThis.fetch = answering({ ...DEMO, assets: { ...DEMO.assets, catalogue } });
@@ -106,7 +110,7 @@ describe('the announced asset set', () => {
     for (const assets of [
       {},
       { base: '/assets/' },
-      { catalogue: 'catalogue.ab.json' },
+      { catalogue: 'catalogue-7.json' },
       { base: 1, catalogue: 2 },
       null,
       'x',
@@ -133,20 +137,21 @@ describe('the asset library', () => {
     }) as unknown as typeof fetch;
 
     // The scene is never touched by `open`, which is why this runs in a node environment with no engine at all.
-    const library = await AssetLibrary.open(null as never, '/assets/', 'catalogue.5cc29ba99154.json');
-    expect(calls).toEqual(['/assets/catalogue.5cc29ba99154.json']);
-    expect(library.version).toBe('5cc29ba99154');
+    const library = await AssetLibrary.open(null as never, '/assets/', 'catalogue-7.json');
+    expect(calls).toEqual(['/assets/catalogue-7.json']);
+    expect(library.version).toBe('7');
     expect(library.ids).toEqual(['tat_house_small']);
   });
 
   it('refuses a catalogue schema it does not read', async () => {
-    globalThis.fetch = answering({ ...CATALOGUE, schema: 2 });
-    await expect(AssetLibrary.open(null as never, '/assets/', 'catalogue.ab.json')).rejects.toThrow('schema 2');
+    // Schema 1 is the content-hashed format this client no longer reads.
+    globalThis.fetch = answering({ ...CATALOGUE, schema: 1 });
+    await expect(AssetLibrary.open(null as never, '/assets/', 'catalogue-7.json')).rejects.toThrow('schema 1');
   });
 
   it('reports the HTTP status when the catalogue is not there', async () => {
     globalThis.fetch = answering(null, false, 404);
-    await expect(AssetLibrary.open(null as never, '/assets/', 'catalogue.ab.json')).rejects.toThrow('HTTP 404');
+    await expect(AssetLibrary.open(null as never, '/assets/', 'catalogue-7.json')).rejects.toThrow('HTTP 404');
   });
 
   it('fetches a descriptor once, however many callers ask for it', async () => {
@@ -164,7 +169,7 @@ describe('the asset library', () => {
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) } as Response);
     }) as unknown as typeof fetch;
 
-    const library = await AssetLibrary.open(null as never, '/assets/', 'catalogue.5cc29ba99154.json');
+    const library = await AssetLibrary.open(null as never, '/assets/', 'catalogue-7.json');
     const [a, b] = await Promise.all([library.describe('tat_house_small'), library.describe('tat_house_small')]);
     expect(a).toBe(b);
     expect(descriptors).toBe(1);
@@ -173,7 +178,7 @@ describe('the asset library', () => {
 
   it('names an asset the catalogue does not publish', async () => {
     globalThis.fetch = answering(CATALOGUE);
-    const library = await AssetLibrary.open(null as never, '/assets/', 'catalogue.5cc29ba99154.json');
-    await expect(library.describe('tat_shuttleport')).rejects.toThrow('not in catalogue 5cc29ba99154');
+    const library = await AssetLibrary.open(null as never, '/assets/', 'catalogue-7.json');
+    await expect(library.describe('tat_shuttleport')).rejects.toThrow('not in catalogue 7');
   });
 });

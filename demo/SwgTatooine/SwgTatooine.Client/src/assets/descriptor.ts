@@ -1,7 +1,8 @@
 import type { Quat, Vec3 } from '../math/vec';
 
 /**
- * The published asset contract, schema 1 (ASSET_PIPELINE.md § 5). Everything here is in the asset's **glTF frame**:
+ * The published asset contract (`SwgTatooine.Assets/ASSET_FORMAT.md`): descriptors at schema 1, the catalogue at schema 2.
+ * Everything here is in the asset's **glTF frame**:
  * metres, +Y up, right-handed, positions relative to the asset origin. Converting to the world frame is
  * `asset-frame.ts`'s job and nobody else's.
  *
@@ -20,7 +21,8 @@ export interface CatalogueEntry {
 
 export interface Catalogue {
   readonly schema: number;
-  readonly version: string;
+  /** Counts up from 1; the immutable file is `catalogue-<version>.json`. */
+  readonly version: number;
   readonly assets: Readonly<Partial<Record<string, CatalogueEntry>>>;
   readonly textures: readonly string[];
 }

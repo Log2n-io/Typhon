@@ -14,7 +14,7 @@ namespace SwgTatooine.Tests;
 /// <b>What these are for.</b> The server and the client read the same descriptors — the server for collision, portals and
 /// spawns, the client to draw them — so the one failure that matters is the two of them disagreeing about which catalogue
 /// they are reading. <c>catalogue.json</c> is a mutable pointer, and two readers of a mutable pointer are in step only by
-/// luck; what is announced is <c>catalogue.&lt;version&gt;.json</c>, resolved once.
+/// luck; what is announced is <c>catalogue-&lt;version&gt;.json</c>, resolved once.
 /// </para>
 /// <para>
 /// Pure parse and resolution checks, plus a temporary folder: no host, no socket, no world.
@@ -24,9 +24,8 @@ namespace SwgTatooine.Tests;
 public sealed class AssetOriginChecks
 {
     private const string Body = """
-        {"schema":1,"assets":{"tat_house_small":{"rev":4,"descriptor":"a.json","glb":"a.glb"},
-        "shuttle":{"rev":2,"descriptor":"b.json","glb":"b.glb"}},"textures":["t1.ktx2","t2.ktx2","t3.ktx2"],
-        "version":"5cc29ba99154"}
+        {"schema":2,"version":7,"assets":{"tat_house_small":{"rev":4,"descriptor":"tat_house_small-4.json","glb":"tat_house_small-4.glb"},
+        "shuttle":{"rev":2,"descriptor":"shuttle-2.json","glb":"shuttle-2.glb"}},"textures":["t1-1.ktx2","t2-1.ktx2","t3-1.ktx2"]}
         """;
 
     /// <summary>A catalogue body yields its version and its counts, which is all the server wants from it.</summary>
@@ -36,7 +35,7 @@ public sealed class AssetOriginChecks
         var (version, assets, textures) = AssetOrigin.ReadCatalogue(Body, "catalogue.json");
         Assert.Multiple(() =>
         {
-            Assert.That(version, Is.EqualTo("5cc29ba99154"));
+            Assert.That(version, Is.EqualTo("7"));
             Assert.That(assets, Is.EqualTo(2));
             Assert.That(textures, Is.EqualTo(3));
         });
@@ -55,36 +54,36 @@ public sealed class AssetOriginChecks
             Assert.That(() => AssetOrigin.ReadCatalogue("not json", "c.json"), Throws.ArgumentException, "not JSON at all");
             Assert.That(() => AssetOrigin.ReadCatalogue("[1,2]", "c.json"), Throws.ArgumentException, "JSON, but not an object");
             Assert.That(
-                () => AssetOrigin.ReadCatalogue("""{"schema":2,"assets":{"a":{}},"version":"ab"}""", "c.json"),
+                () => AssetOrigin.ReadCatalogue("""{"schema":1,"assets":{"a":{}},"version":"5cc29ba99154"}""", "c.json"),
                 Throws.ArgumentException,
-                "a schema we do not read");
+                "schema 1, the content-hashed format this server no longer reads");
             Assert.That(
-                () => AssetOrigin.ReadCatalogue("""{"schema":1,"assets":{"a":{}}}""", "c.json"),
+                () => AssetOrigin.ReadCatalogue("""{"schema":2,"assets":{"a":{}}}""", "c.json"),
                 Throws.ArgumentException,
                 "no version");
             Assert.That(
-                () => AssetOrigin.ReadCatalogue("""{"schema":1,"assets":{},"version":"ab"}""", "c.json"),
+                () => AssetOrigin.ReadCatalogue("""{"schema":2,"assets":{},"version":1}""", "c.json"),
                 Throws.ArgumentException,
                 "nothing published");
         });
     }
 
     /// <summary>
-    /// A version that is not plain alphanumeric is refused, because it becomes a file name, a URL and a JSON string.
+    /// A version that is not a positive integer is refused, because it becomes a file name, a URL and a JSON string.
     /// </summary>
     /// <remarks>
     /// The catalogue is a file this process merely found on disk. A version of <c>../../etc/passwd</c> or one carrying a
-    /// quote would be an injection point in all three places at once, and the exporter has no reason to emit either.
+    /// quote would be an injection point in all three places at once; an integer cannot be either, so nothing else is read.
     /// </remarks>
     [Test]
-    public void AVersionThatIsNotANameIsRefused()
+    public void AVersionThatIsNotAPositiveIntegerIsRefused()
     {
         Assert.Multiple(() =>
         {
-            foreach (var bad in new[] { "../x", "a/b", "a\"b", "a b", "", new string('f', 65) })
+            foreach (var bad in new[] { "\"7\"", "\"../x\"", "0", "-1", "1.5", "4294967296", "null", "true" })
             {
                 Assert.That(
-                    () => AssetOrigin.ReadCatalogue($"{{\"schema\":1,\"assets\":{{\"a\":{{}}}},\"version\":\"{bad}\"}}", "c.json"),
+                    () => AssetOrigin.ReadCatalogue($"{{\"schema\":2,\"assets\":{{\"a\":{{}}}},\"version\":{bad}}}", "c.json"),
                     Throws.ArgumentException,
                     $"version '{bad}'");
             }
@@ -99,18 +98,18 @@ public sealed class AssetOriginChecks
         try
         {
             File.WriteAllText(Path.Combine(dir, "catalogue.json"), Body);
-            File.WriteAllText(Path.Combine(dir, "catalogue.5cc29ba99154.json"), Body);
+            File.WriteAllText(Path.Combine(dir, "catalogue-7.json"), Body);
 
             var origin = AssetOrigin.Open(dir);
             Assert.Multiple(() =>
             {
-                Assert.That(origin.Version, Is.EqualTo("5cc29ba99154"));
-                Assert.That(origin.CatalogueName, Is.EqualTo("catalogue.5cc29ba99154.json"), "the immutable name, never the pointer");
+                Assert.That(origin.Version, Is.EqualTo("7"));
+                Assert.That(origin.CatalogueName, Is.EqualTo("catalogue-7.json"), "the immutable name, never the pointer");
                 Assert.That(origin.AssetCount, Is.EqualTo(2));
                 Assert.That(origin.TextureCount, Is.EqualTo(3));
                 // The base, the pinned catalogue, and the table that turns a structure's replicated `asset` index into
                 // an asset id — the mapping the server owns because it collides against what it names.
-                Assert.That(origin.DemoJson(), Does.StartWith(",\"assets\":{\"base\":\"/assets/\",\"catalogue\":\"catalogue.5cc29ba99154.json\","));
+                Assert.That(origin.DemoJson(), Does.StartWith(",\"assets\":{\"base\":\"/assets/\",\"catalogue\":\"catalogue-7.json\","));
                 Assert.That(origin.DemoJson(), Does.Contain("\"structures\":[\"tat_house_large\",\"tat_house_small\""));
                 Assert.That(origin.DemoJson(), Does.EndWith("]}"));
             });

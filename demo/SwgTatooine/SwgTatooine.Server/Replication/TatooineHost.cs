@@ -1,6 +1,7 @@
 ﻿using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging;
@@ -234,6 +235,24 @@ public static class TatooineHost
         return address;
     }
 
+    /// <summary>Serves the built client from <paramref name="clientRoot"/>: <c>index.html</c> at the root, every other file by its path.</summary>
+    /// <param name="app">The host being built.</param>
+    /// <param name="clientRoot">The client's build output (<c>dist/</c>).</param>
+    /// <remarks>
+    /// <b><c>.env</c> is mapped because ASP.NET answers 404 for an extension it has no type for.</b> Babylon's prefiltered environment is
+    /// <c>vendor/babylon-&lt;version&gt;/environmentSpecular.env</c>: Vite serves it in development, this host refused it, and every served run drew
+    /// without image-based lighting with nothing but a 404 in the browser console to say so. Mapped by name rather than by serving every unknown type, so a
+    /// stray file in a build output is still not served.
+    /// </remarks>
+    internal static void MapClient(WebApplication app, string clientRoot)
+    {
+        var files = new PhysicalFileProvider(clientRoot);
+        var types = new FileExtensionContentTypeProvider();
+        types.Mappings[".env"] = "application/octet-stream";
+        app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
+        app.UseStaticFiles(new StaticFileOptions { FileProvider = files, ContentTypeProvider = types });
+    }
+
     /// <summary>
     /// Serves a running Tatooine over WebSocket until the process is asked to stop.
     /// </summary>
@@ -413,7 +432,7 @@ public static class TatooineHost
         app.UseWebSockets();
 
         // The asset set before the client's own files, and on its own file provider: /assets is a deployment of its own,
-        // cached forever by content-addressed name, and must not be shadowed by whatever a client root happens to contain.
+        // cached forever by revision name, and must not be shadowed by whatever a client root happens to contain.
         if (assets != null)
         {
             assets.MapOn(app);
@@ -423,8 +442,7 @@ public static class TatooineHost
 
         if (!string.IsNullOrEmpty(clientRoot) && Directory.Exists(clientRoot))
         {
-            app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = new PhysicalFileProvider(clientRoot) });
-            app.UseStaticFiles(new StaticFileOptions { FileProvider = new PhysicalFileProvider(clientRoot) });
+            MapClient(app, clientRoot);
         }
 
         // Identity (A2), before the WebSocket route for no technical reason beyond reading order: a client signs up or logs in here, then presents the token

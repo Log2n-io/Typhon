@@ -10,7 +10,7 @@
     to the URL for the browser-side mock instead, which needs no server and is the only source with a latency slider.
 
 .PARAMETER Port
-    The port to serve on. Default 8080.
+    The port to serve on. Default 5080.
 
 .PARAMETER Pop
     Population multiplier. 1.0 is the full planet (~17 700 entities); 0.2 is a comfortable default for looking at.
@@ -57,7 +57,7 @@
 param(
     [Parameter(Position = 0, ValueFromRemainingArguments)]
     [string[]] $ServerArgs = @(),
-    [int]    $Port        = 8080,
+    [int]    $Port        = 5080,
     [double] $Pop         = 0.2,
     [double] $GodRegion   = 3000,
     [int]    $Live        = 0,

@@ -1,0 +1,66 @@
+{
+  "repo": "Log2n-io/Typhon",
+  "tools": {
+    "ktx": {
+      "version": "4.4.2",
+      "platforms": {
+        "windows-x64": {
+          "url": "https://github.com/KhronosGroup/KTX-Software/releases/download/v4.4.2/KTX-Software-4.4.2-Windows-x64.exe",
+          "sha256": "1f323b0fec19794f5e6c0425a61d4b1da396872a10be862d105f4f4b2d2957fe",
+          "format": "nsis"
+        },
+        "windows-arm64": {
+          "url": "https://github.com/KhronosGroup/KTX-Software/releases/download/v4.4.2/KTX-Software-4.4.2-Windows-arm64.exe",
+          "sha256": "86d6edba47f3df597f3b9bceda6e4da8b4205b43c8386519e1c0d2ce804c4284",
+          "format": "nsis"
+        },
+        "linux-x64": {
+          "url": "https://github.com/KhronosGroup/KTX-Software/releases/download/v4.4.2/KTX-Software-4.4.2-Linux-x86_64.tar.bz2",
+          "sha256": "a8781bad05f9624edbf910b7f258cd0a4ba7d3e63b49ecc0a0ab440bf6a0a245",
+          "format": "tar"
+        },
+        "linux-arm64": {
+          "url": "https://github.com/KhronosGroup/KTX-Software/releases/download/v4.4.2/KTX-Software-4.4.2-Linux-arm64.tar.bz2",
+          "sha256": "60382e7b842177b8048bd58ccdc770383f8ef65b94452a25d3afdb55f2405c5a",
+          "format": "tar"
+        },
+        "macos-x64": {
+          "url": "https://github.com/KhronosGroup/KTX-Software/releases/download/v4.4.2/KTX-Software-4.4.2-Darwin-x86_64.pkg",
+          "sha256": "efecc685ab891a6e119a9fdc8cbe038e135f9a367eb2f5d8a059553f947f1fea",
+          "format": "pkg"
+        },
+        "macos-arm64": {
+          "url": "https://github.com/KhronosGroup/KTX-Software/releases/download/v4.4.2/KTX-Software-4.4.2-Darwin-arm64.pkg",
+          "sha256": "500bd8f9d63358c3f3a0d83b724c8574436a72c37dc0e4bad90ec1ca38032c3c",
+          "format": "pkg"
+        }
+      }
+    },
+    "gltfpack": {
+      "version": "1.3",
+      "fallback": "build it from https://github.com/zeux/meshoptimizer (tag v1.3) into tools/gltfpack/bin/",
+      "platforms": {
+        "windows-x64": {
+          "url": "https://github.com/zeux/meshoptimizer/releases/download/v1.3/gltfpack-windows.zip",
+          "sha256": "f6e9c09d66af23da3da71b86f0652d2413e81c734e0aecd1cd3d0e6e6e8645c0",
+          "format": "zip"
+        },
+        "windows-arm64": {
+          "url": "https://github.com/zeux/meshoptimizer/releases/download/v1.3/gltfpack-windows.zip",
+          "sha256": "f6e9c09d66af23da3da71b86f0652d2413e81c734e0aecd1cd3d0e6e6e8645c0",
+          "format": "zip"
+        },
+        "linux-x64": {
+          "url": "https://github.com/zeux/meshoptimizer/releases/download/v1.3/gltfpack-ubuntu.zip",
+          "sha256": "0666d9dc40d60fe5b9a45f3fc24f8e6ca87112974bd5de9ca57152aa13d06017",
+          "format": "zip"
+        },
+        "macos-arm64": {
+          "url": "https://github.com/zeux/meshoptimizer/releases/download/v1.3/gltfpack-macos.zip",
+          "sha256": "1002fe6a437aa005eca541502c27b8d2b184f91f4ad0c6d282e3614a1e35e75a",
+          "format": "zip"
+        }
+      }
+    }
+  }
+}

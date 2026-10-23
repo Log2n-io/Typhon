@@ -22,7 +22,7 @@ namespace SwgTatooine.Tests;
 /// <para>
 /// <b>A real Kestrel rather than a unit test of the middleware.</b> Everything that can go wrong here is a header: a GLB
 /// served as <c>application/octet-stream</c>, a <c>.br</c> body sent without <c>Content-Encoding</c> (which reaches the
-/// browser as a corrupt glTF), a hashed file served with revalidation instead of <c>immutable</c>. None of those are
+/// browser as a corrupt glTF), a published file served with revalidation instead of <c>immutable</c>. None of those are
 /// visible from the C# side of the call — only from the response.
 /// </para>
 /// <para>
@@ -32,7 +32,7 @@ namespace SwgTatooine.Tests;
 [TestFixture]
 public sealed class AssetOriginHostChecks
 {
-    private const string Catalogue = """{"schema":1,"assets":{"house":{"rev":1,"descriptor":"house.aaaa.json","glb":"house.bbbb.glb"}},"textures":["t.cccc.ktx2"],"version":"abc123"}""";
+    private const string Catalogue = """{"schema":2,"assets":{"house":{"rev":1,"descriptor":"house-1.json","glb":"house-1.glb"}},"textures":["t-1.ktx2"],"version":3}""";
 
     /// <summary>What a brotli sidecar holds here. Not real brotli — nothing in this fixture decodes it.</summary>
     private const string Compressed = "pretend-this-is-brotli";
@@ -49,11 +49,11 @@ public sealed class AssetOriginHostChecks
         _dir = Path.Combine(Path.GetTempPath(), $"assets-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_dir);
         File.WriteAllText(Path.Combine(_dir, "catalogue.json"), Catalogue);
-        File.WriteAllText(Path.Combine(_dir, "catalogue.abc123.json"), Catalogue);
-        File.WriteAllText(Path.Combine(_dir, "house.bbbb.glb"), Raw);
-        File.WriteAllText(Path.Combine(_dir, "house.bbbb.glb.br"), Compressed);
-        File.WriteAllText(Path.Combine(_dir, "house.aaaa.json"), "{}");
-        File.WriteAllText(Path.Combine(_dir, "t.cccc.ktx2"), "pretend-this-is-ktx2");
+        File.WriteAllText(Path.Combine(_dir, "catalogue-3.json"), Catalogue);
+        File.WriteAllText(Path.Combine(_dir, "house-1.glb"), Raw);
+        File.WriteAllText(Path.Combine(_dir, "house-1.glb.br"), Compressed);
+        File.WriteAllText(Path.Combine(_dir, "house-1.json"), "{}");
+        File.WriteAllText(Path.Combine(_dir, "t-1.ktx2"), "pretend-this-is-ktx2");
 
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.SetMinimumLevel(LogLevel.Error);
@@ -88,11 +88,11 @@ public sealed class AssetOriginHostChecks
         }
     }
 
-    /// <summary>A GLB arrives as a glTF binary, cached forever, because its name carries its content's hash.</summary>
+    /// <summary>A GLB arrives as a glTF binary, cached forever, because a published name never gets new bytes.</summary>
     [Test]
     public async Task AGlbIsAGltfBinaryCachedForever()
     {
-        using var response = await _client.GetAsync("/assets/house.bbbb.glb");
+        using var response = await _client.GetAsync("/assets/house-1.glb");
         var body = await response.Content.ReadAsStringAsync();
         Assert.Multiple(() =>
         {
@@ -115,7 +115,7 @@ public sealed class AssetOriginHostChecks
     [Test]
     public async Task ACallerThatTakesBrotliGetsTheSidecar()
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, "/assets/house.bbbb.glb");
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/assets/house-1.glb");
         request.Headers.Add("Accept-Encoding", "gzip, deflate, br");
 
         using var response = await _client.SendAsync(request);
@@ -135,7 +135,7 @@ public sealed class AssetOriginHostChecks
     [Test]
     public async Task ACallerThatRefusesBrotliGetsTheIdentityBytes()
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, "/assets/house.bbbb.glb");
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/assets/house-1.glb");
         request.Headers.Add("Accept-Encoding", "gzip, br;q=0");
 
         using var response = await _client.SendAsync(request);
@@ -151,7 +151,7 @@ public sealed class AssetOriginHostChecks
     [Test]
     public async Task ATextureIsKtx2AndIsNotPrecompressed()
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, "/assets/t.cccc.ktx2");
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/assets/t-1.ktx2");
         request.Headers.Add("Accept-Encoding", "br");
 
         using var response = await _client.SendAsync(request);
@@ -169,7 +169,7 @@ public sealed class AssetOriginHostChecks
     [Test]
     public async Task ThePointerIsRevalidatedAndTheVersionIsNot()
     {
-        using var pinned = await _client.GetAsync("/assets/catalogue.abc123.json");
+        using var pinned = await _client.GetAsync("/assets/catalogue-3.json");
         using var pointer = await _client.GetAsync("/assets/catalogue.json");
         Assert.Multiple(() =>
         {
@@ -188,7 +188,7 @@ public sealed class AssetOriginHostChecks
         try
         {
             using var traversal = await _client.GetAsync($"/assets/../{Path.GetFileName(secret)}");
-            using var absent = await _client.GetAsync("/assets/house.zzzz.glb");
+            using var absent = await _client.GetAsync("/assets/house-9.glb");
             Assert.Multiple(() =>
             {
                 Assert.That(traversal.StatusCode, Is.Not.EqualTo(HttpStatusCode.OK));

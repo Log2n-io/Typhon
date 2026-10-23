@@ -50,7 +50,7 @@ const ASSET_LOAD_OPTIONS = { pluginOptions: { gltf: { animationStartMode: ANIMAT
  * comes from one root. Do not shard the asset base.
  *
  * <b>The catalogue is the immutable one the server named.</b> `catalogue.json` is a mutable pointer for tools; the server
- * announces `catalogue.<version>.json` in `/typhon/demo.json` because it reads the same descriptors for collision and
+ * announces `catalogue-<version>.json` in `/typhon/demo.json` because it reads the same descriptors for collision and
  * portals, and two readers of a mutable pointer agree only by luck.
  */
 
@@ -110,10 +110,10 @@ export class AssetLibrary {
     }
 
     const catalogue = (await response.json()) as Catalogue;
-    if (catalogue.schema !== 1) {
+    if (catalogue.schema !== 2) {
       // The descriptors are a contract with the server, so a schema this build does not know is refused rather than
       // read for the fields that happen to look familiar.
-      throw new Error(`${catalogueName}: schema ${String(catalogue.schema)}, and this client reads schema 1`);
+      throw new Error(`${catalogueName}: schema ${String(catalogue.schema)}, and this client reads schema 2`);
     }
 
     return new AssetLibrary(scene, base, catalogue);
@@ -124,7 +124,7 @@ export class AssetLibrary {
   }
 
   get version(): string {
-    return this.catalogue.version;
+    return String(this.catalogue.version);
   }
 
   /**

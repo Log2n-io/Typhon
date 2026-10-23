@@ -2,6 +2,7 @@
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.FileProviders;
 using System;
+using System.Globalization;
 using System.IO;
 using System.Text.Json;
 
@@ -13,8 +14,9 @@ namespace SwgTatooine.Server;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Static files rather than object storage, and that is not a shortcut.</b> Every published name carries a hash of its
-/// own content, so a file never changes and a change is a new name. That makes the hosting choice reversible: the client
+/// <b>Static files rather than object storage, and that is not a shortcut.</b> Every published name carries its revision
+/// (<c>&lt;asset&gt;-&lt;rev&gt;.glb</c>) and the exporter refuses to give a published name new bytes, so a file never changes
+/// and a change is a new name. That makes the hosting choice reversible: the client
 /// learns where the assets are from <c>/typhon/demo.json</c> and from nowhere else, so moving this set behind S3 or a CDN
 /// later is a configuration change with no code on either side. At a few megabytes in one folder, paying for credentials,
 /// CORS and a second deployment today would buy nothing that cannot be bought on the day it matters.
@@ -23,7 +25,7 @@ namespace SwgTatooine.Server;
 /// <b>The server decides the version, and the client is told.</b> Server and client read the same descriptors — the server
 /// for collision, portals and spawns, the client to draw them — so a run where the two disagree is a run where a wall is
 /// in two places. <c>catalogue.json</c> is only a mutable pointer for tools; what is announced is the immutable
-/// <c>catalogue.&lt;version&gt;.json</c> this process read at startup. A rollout therefore leaves old clients working,
+/// <c>catalogue-&lt;version&gt;.json</c> this process read at startup. A rollout therefore leaves old clients working,
 /// because nothing they already fetched was overwritten.
 /// </para>
 /// <para>
@@ -41,8 +43,11 @@ public sealed class AssetOrigin
     /// <summary>The mutable pointer the exporter writes beside the immutable catalogues. Served, but never announced.</summary>
     public const string PointerName = "catalogue.json";
 
-    /// <summary>The one catalogue schema this server and its client understand.</summary>
-    public const int Schema = 1;
+    /// <summary>
+    /// The one catalogue schema this server and its client understand: 2, revision-named files and an integer version
+    /// (<c>SwgTatooine.Assets/ASSET_FORMAT.md</c>).
+    /// </summary>
+    public const int Schema = 2;
 
     /// <summary>
     /// Extensions that have a brotli sidecar. KTX2 has none: it is already entropy-coded, and the measured gain is 0%.
@@ -60,11 +65,11 @@ public sealed class AssetOrigin
     /// <summary>The published folder on disk. <b>Flat</b>, and it must stay flat — see <see cref="MapOn"/>.</summary>
     public string Directory { get; }
 
-    /// <summary>The catalogue version this process is pinned to.</summary>
+    /// <summary>The catalogue version this process is pinned to: a positive integer, as text.</summary>
     public string Version { get; }
 
     /// <summary>The immutable catalogue's file name, which is what the client is told to fetch.</summary>
-    public string CatalogueName => $"catalogue.{Version}.json";
+    public string CatalogueName => $"catalogue-{Version}.json";
 
     /// <summary>How many assets that catalogue publishes, for the startup line.</summary>
     public int AssetCount { get; }
@@ -76,7 +81,7 @@ public sealed class AssetOrigin
     /// Reads <paramref name="directory"/>'s pointer, pins the immutable catalogue it names, and refuses anything it cannot
     /// stand behind.
     /// </summary>
-    /// <param name="directory">A published asset folder: the exporter's <c>build/assets</c>, or a copy of it.</param>
+    /// <param name="directory">A published asset folder: <c>SwgTatooine.Assets/build/assets</c>, or a copy of it.</param>
     /// <returns>The pinned origin.</returns>
     /// <exception cref="ArgumentException">The folder, the pointer, or the catalogue it names, is missing or malformed.</exception>
     /// <remarks>
@@ -98,11 +103,12 @@ public sealed class AssetOrigin
         if (!File.Exists(pointer))
         {
             throw new ArgumentException(
-                $"'{root}' holds no {PointerName}, so it is not a published asset folder. Point --assets at the exporter's build/assets.");
+                $"'{root}' holds no {PointerName}, so it is not a published asset folder. Point --assets at SwgTatooine.Assets/build/assets "
+                + "(python scripts/assets.py fetch published).");
         }
 
         var (version, assets, textures) = ReadCatalogue(File.ReadAllText(pointer), PointerName);
-        var pinned = Path.Combine(root, $"catalogue.{version}.json");
+        var pinned = Path.Combine(root, $"catalogue-{version}.json");
         if (!File.Exists(pinned))
         {
             // The publish order is blobs, then the immutable catalogue, then the pointer (ASSET_PIPELINE.md 6.4). A pointer
@@ -121,7 +127,7 @@ public sealed class AssetOrigin
     /// <param name="json">A catalogue document.</param>
     /// <param name="name">What to call it in an error message.</param>
     /// <returns>Its version, how many assets it lists and how many shared textures.</returns>
-    /// <exception cref="ArgumentException">It is not a schema-1 catalogue, or its version is not a name we would put in a URL.</exception>
+    /// <exception cref="ArgumentException">It is not a schema-2 catalogue, or its version is not a positive integer.</exception>
     internal static (string Version, int Assets, int Textures) ReadCatalogue(string json, string name)
     {
         JsonDocument doc;
@@ -149,18 +155,15 @@ public sealed class AssetOrigin
                     + "rather than half-understood.");
             }
 
-            if (!body.TryGetProperty("version", out var version) || version.ValueKind != JsonValueKind.String)
+            // It becomes a file name, a URL and a JSON string value, so it is read as what it is, an integer, and nothing a file
+            // this process merely found on disk could smuggle into any of the three.
+            if (!body.TryGetProperty("version", out var version) || version.ValueKind != JsonValueKind.Number
+                || !version.TryGetInt32(out var number) || number < 1)
             {
-                throw new ArgumentException($"{name} has no string 'version'.");
+                throw new ArgumentException($"{name} has no positive integer 'version'.");
             }
 
-            var text = version.GetString();
-            if (!IsNameable(text))
-            {
-                // It becomes a file name, a URL and a JSON string value. Anything else in it would be an injection point in
-                // all three, through a file this process merely found on disk.
-                throw new ArgumentException($"{name} has version '{text}', which is not 1-64 alphanumeric characters.");
-            }
+            var text = number.ToString(CultureInfo.InvariantCulture);
 
             var assets = body.TryGetProperty("assets", out var a) && a.ValueKind == JsonValueKind.Object ? CountProperties(a) : 0;
             var textures = body.TryGetProperty("textures", out var t) && t.ValueKind == JsonValueKind.Array ? t.GetArrayLength() : 0;
@@ -201,7 +204,7 @@ public sealed class AssetOrigin
     }
 
     /// <summary>
-    /// Serves this folder at <see cref="RequestPath"/>: hashed names cached forever, brotli sidecars when the caller takes
+    /// Serves this folder at <see cref="RequestPath"/>: revision names cached forever, brotli sidecars when the caller takes
     /// them, and the pointer revalidated.
     /// </summary>
     /// <param name="app">The host, before the client's own static files.</param>
@@ -313,24 +316,6 @@ public sealed class AssetOrigin
         }
 
         return false;
-    }
-
-    private static bool IsNameable(string value)
-    {
-        if (string.IsNullOrEmpty(value) || value.Length > 64)
-        {
-            return false;
-        }
-
-        foreach (var c in value)
-        {
-            if (!char.IsAsciiLetterOrDigit(c))
-            {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     private static int CountProperties(JsonElement element)

@@ -37,7 +37,7 @@ export interface RealmDirectory {
  * <b>Announced rather than discovered, for the same reason every speed is.</b> The server reads the same descriptors the
  * client draws — `collision`, `portals`, `spawns` — so a run where the two read different catalogue versions is a run
  * where a wall is in two places. `catalogue.json` is a mutable pointer and two readers of a mutable pointer agree only by
- * luck, so what arrives here is the immutable `catalogue.<version>.json` the server resolved at startup.
+ * luck, so what arrives here is the immutable `catalogue-<version>.json` the server resolved at startup.
  */
 export interface AssetSet {
   /** The folder URL every asset is fetched from, with its trailing slash. One root, never sharded. */
@@ -159,7 +159,7 @@ function readRealms(value: unknown): RealmDirectory | null {
 /**
  * The asset set, or `null` for a server that publishes none or publishes something unusable.
  *
- * <b>A relative base only.</b> Everything about a published asset is cached by content-addressed name and fetched
+ * <b>A relative base only.</b> Everything about a published asset is cached by its immutable revision name and fetched
  * same-origin, through this server or through Vite's proxy to it in development; honouring an absolute URL from this
  * document would let the one answer a page trusts about where its own code's data lives point anywhere at all. The day
  * assets move to a CDN, that is a decision taken here, in code, and not one a server can take on the client's behalf.
@@ -185,7 +185,7 @@ function readAssets(value: unknown): AssetSet | null {
     return null;
   }
 
-  if (!/^catalogue\.[0-9a-zA-Z]{1,64}\.json$/.test(catalogue)) {
+  if (!/^catalogue-[1-9][0-9]{0,8}\.json$/.test(catalogue)) {
     return null;
   }
 

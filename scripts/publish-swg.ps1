@@ -18,7 +18,8 @@
         <out>/
           SwgTatooine.Server          the server (no .NET runtime needed on the box)
           client/                      index.html + hashed assets
-          VERSION                      commit, branch, UTC build time, RID
+          assets/                      the published 3D asset set (SwgTatooine.Assets/build/assets), found by the server
+          VERSION                      commit, branch, UTC build time, RID, asset catalogue
           run.sh                       the exact command, with --client-dir already pointed at client/
 
     The server's own `--client-dir` default walks up from the binary looking for demo/SwgTatooine/SwgTatooine.Client/dist, which
@@ -124,6 +125,17 @@ else
     Copy-Item -Recurse -Force $dist (Join-Path $OutDir 'client')
 }
 
+# The asset set, beside the binary under assets/, where the server looks for it first. Required: the server refuses to
+# serve without it (collision, portals and seats come from its descriptors), so a payload without it could never start.
+$assets = Join-Path $repo 'demo/SwgTatooine/SwgTatooine.Assets/build/assets'
+$pointer = Join-Path $assets 'catalogue.json'
+if (-not (Test-Path $pointer))
+{
+    throw "no asset set in $assets. Fetch it: python demo/SwgTatooine/SwgTatooine.Assets/scripts/assets.py fetch published"
+}
+Copy-Item -Recurse -Force $assets (Join-Path $OutDir 'assets')
+$catalogue = (Get-Content -Raw $pointer | ConvertFrom-Json).version
+
 # Identify the payload. A deploy that cannot say which commit it is carrying is a deploy nobody can roll back with
 # confidence, and `git describe` is one line.
 $commit = (& git -C $repo rev-parse HEAD).Trim()
@@ -135,6 +147,7 @@ $dirty = if ((& git -C $repo status --porcelain)) { ' (working tree dirty)' } el
     "built   $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))"
     "runtime $Runtime"
     "client  $(if ($SkipClient) { 'NOT INCLUDED (-SkipClient)' } else { 'included' })"
+    "assets  catalogue $catalogue"
 ) | Set-Content -Path (Join-Path $OutDir 'VERSION') -Encoding utf8
 
 # The command the unit file runs, written beside the binary so that the payload documents its own invocation — including

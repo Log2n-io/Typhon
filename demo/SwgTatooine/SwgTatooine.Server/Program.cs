@@ -35,6 +35,27 @@ internal static class Program
             return 0;
         }
 
+        // Resolved and opened before the world is built, because the world build reads the colliders from it. Here and not in the parse: the parse is pure,
+        // and a check that parses "--serve 8080" must not depend on whether this machine has fetched the assets. Opened once here only to be judged: a folder
+        // with no catalogue used to surface after the world build, as a crash artefact and exit 3, for what is a wrong command line.
+        try
+        {
+            if (config.ServePort > 0)
+            {
+                config.AssetDirectory = TatooineSim.ServedAssetRoot(config.AssetDirectory, AppContext.BaseDirectory);
+            }
+
+            if (config.AssetDirectory != null)
+            {
+                AssetOrigin.Open(config.AssetDirectory);
+            }
+        }
+        catch (ArgumentException ex)
+        {
+            Console.Error.WriteLine($"SwgTatooine.Server: {ex.Message}");
+            return 2;
+        }
+
         // A profiler flag cannot take effect in this process, so it is refused rather than ignored (W1). Checked here — after --help, before any work — because
         // --help must still list the flags, and because a refusal is only useful before a world has been built. The gate's state is deliberately NOT consulted:
         // see ProfilerStatus.MustRefuse for why "it is already on" was the worse silence of the two.

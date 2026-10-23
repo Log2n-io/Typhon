@@ -4,3 +4,7 @@ package-lock.json
 
 # Babylon's own run-time, mirrored by `npm run vendor`.
 public/vendor
+
+# MSBuild output of SwgTatooine.Client.csproj, the content-only project that puts this folder in the solution.
+bin
+obj
