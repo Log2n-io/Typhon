@@ -338,6 +338,9 @@ class SchemaValidationIntegrationTests : TestBase<SchemaValidationIntegrationTes
             using var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
             dbe.RegisterComponentFromAccessor<CompFieldAddV2>();
 
+            // The migration commits when the open completes (SCHEMA-09), not at registration.
+            dbe.InitializeArchetypes();
+
             // Read UserSchemaVersion from bootstrap dictionary
             var userSchemaVersion = dbe.MMF.Bootstrap.GetInt(DatabaseEngine.BK_UserSchemaVersion);
             Assert.That(userSchemaVersion, Is.GreaterThan(0), "UserSchemaVersion should be > 0 after schema change");

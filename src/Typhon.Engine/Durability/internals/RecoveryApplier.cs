@@ -124,6 +124,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         Track(bornTsn);
         TrackEntityKey(entityIdRaw);
         EnsureArchetype(archetypeId);
+        slots = MigrateSlots(slots);
         BeginEntity();  // a spawn builds fresh storage, so there is no prior handle to release — only the content chunks to remember
 
         if (_hasClusterAccessor)
@@ -457,6 +458,9 @@ internal sealed unsafe class RecoveryApplier : IDisposable
             return;
         }
 
+        // Converted only for an entity the replay applies to: an absent one is a no-op (AP-12), whatever its values are.
+        slots = MigrateSlots(slots);
+
         if (_hasClusterAccessor)
         {
             ApplySlotToExistingCluster(entityIdRaw, readBuf, slots);
@@ -652,6 +656,51 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         var handle = ComponentRevisionManager.GetRevisionElement(ref info.CompRevTableAccessor, chainRootChunkId, compRevInfo.CurRevisionIndex);
         handle.Publish(tsn);
     }
+
+    /// <summary>
+    /// Converts the entity's final committed values of every component this open migrated from their WAL layout to the table's (#1469). Done once per
+    /// value, before any write path, so the cluster HEAD copy and the revision chain receive the same bytes.
+    /// </summary>
+    /// <returns><paramref name="slots"/> itself when no value needed converting.</returns>
+    private IReadOnlyCollection<SlotData> MigrateSlots(IReadOnlyCollection<SlotData> slots)
+    {
+        if (slots == null || !_dbe.HasComponentMigrations)
+        {
+            return slots;
+        }
+
+        var any = false;
+        foreach (var slot in slots)
+        {
+            if (IsMigratedSlot(slot.SlotIndex))
+            {
+                any = true;
+                break;
+            }
+        }
+
+        if (!any)
+        {
+            return slots;
+        }
+
+        var result = new SlotData[slots.Count];
+        var index = 0;
+        foreach (var value in slots)
+        {
+            var slot = value;
+            if (IsMigratedSlot(slot.SlotIndex))
+            {
+                slot.Payload = _dbe.MigrateWalPayload(_engineState.SlotToComponentTable[slot.SlotIndex], slot.Payload);
+            }
+            result[index++] = slot;
+        }
+
+        return result;
+    }
+
+    private bool IsMigratedSlot(ushort slotIndex)
+        => slotIndex < _metadata.ComponentCount && _dbe.IsMigratedThisOpen(_engineState.SlotToComponentTable[slotIndex]);
 
     /// <summary>Resets the per-entity scratch that <see cref="ApplyCollectionFolds"/> consumes. Called at the top of every entity apply.</summary>
     private void BeginEntity()

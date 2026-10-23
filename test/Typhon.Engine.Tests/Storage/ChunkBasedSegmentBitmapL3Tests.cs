@@ -963,6 +963,58 @@ public class ChunkBasedSegmentBitmapL3Tests
         Assert.That(segment.Length, Is.EqualTo(3), "without growing");
     }
 
+    /// <summary>
+    /// A bitmap's last word has bits past the page's last chunk, which name no chunk. A torn page can have them set, and the load's count ignores them:
+    /// <see cref="ChunkBasedSegment{TStore}.FreeAllChunksFrom"/> neither counts nor clears them, or the allocated count drifts below the bitmap's (#1463).
+    /// </summary>
+    [Test]
+    [VerifiesRule("EP-02")]
+    public void FreeAllChunksFrom_IgnoresTheBitsPastAPagesLastChunk()
+    {
+        var segment = _pmmf.AllocateChunkBasedSegment(PageBlockType.None, 3, 256);   // an index segment's stride: fewer than 64 chunks a page
+        while (segment.FreeChunkCount > 0)
+        {
+            segment.AllocateChunk(false);
+        }
+
+        // The root page is the segment's directory and holds no chunk: the two others do.
+        var pages = new[] { (Index: 1, Chunks: segment.ChunkCountPerPage), (Index: 2, Chunks: segment.ChunkCountPerPage) };
+        Assert.That(segment.ChunkCountPerPage % 64, Is.Not.Zero, "premise: a page's last bitmap word has padding bits");
+        foreach (var (pageIndex, chunks) in pages)
+        {
+            var page = segment.AcquirePageForRead(pageIndex, out var memPageIndex);
+            try
+            {
+                page.Metadata<long>()[chunks >> 6] |= -1L << (chunks % 64);
+            }
+            finally
+            {
+                segment.ReleasePageForRead(memPageIndex);
+            }
+        }
+
+        using (EpochGuard.Enter(_pmmf.EpochManager))
+        {
+            segment.FreeAllChunksFrom(1);
+        }
+
+        Assert.That(segment.AllocatedChunkCount, Is.EqualTo(1), "chunk 0 only: the padding bits are not counted as frees");
+        Assert.That(segment.AllocatedChunkCount, Is.EqualTo(CountAllocatedChunks(segment)));
+        foreach (var (pageIndex, chunks) in pages)
+        {
+            var page = segment.AcquirePageForRead(pageIndex, out var memPageIndex);
+            try
+            {
+                var padding = -1L << (chunks % 64);
+                Assert.That(page.Metadata<long>()[chunks >> 6] & padding, Is.EqualTo(padding), $"page {pageIndex}: the padding bits are left as they were");
+            }
+            finally
+            {
+                segment.ReleasePageForRead(memPageIndex);
+            }
+        }
+    }
+
     /// <summary>Chunks whose bitmap bit is set: the ground truth the allocated count must equal.</summary>
     private static int CountAllocatedChunks(ChunkBasedSegment<PersistentStore> segment)
     {

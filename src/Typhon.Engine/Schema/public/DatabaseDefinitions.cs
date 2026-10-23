@@ -225,8 +225,8 @@ public class DatabaseDefinitions
     private static void ThrowUnmappableField(Type componentType, string fieldName, Type fieldType) =>
         throw new InvalidOperationException(
             $"Component '{componentType.Name}' field '{fieldName}' has type '{fieldType.Name}', which has no schema field type. Use one of the supported "
-            + "types (the primitives, String64 / String1024 / VarString, the Point / Quaternion / AABB / BSphere families, a nested [Component] struct, "
-            + "ComponentCollection<T>, EntityId, or EntityLink<T> for a typed entity reference). A field with no schema type was previously dropped "
+            + "types (the primitives, String64 / String1024 / VarString / Variant, the Point / Quaternion / AABB / BSphere families, a nested [Component] "
+            + "struct, ComponentCollection<T>, EntityId, or EntityLink<T> for a typed entity reference). A field with no schema type was previously dropped "
             + "silently, which left it invisible to the Workbench, un-indexable and absent from replication.");
 
     /// <summary>
@@ -426,6 +426,16 @@ public class DatabaseDefinitions
             // Index processing
             if (f.HasIndex)
             {
+                // A Variant is the String64 text "tt:data", so a B+Tree would order it by those bytes: type tag first, then the value as decimal text. "si:10"
+                // sorts before "si:9", and the same number held as an int and as a long is two keys ("si:5", "sl:5"). Every range would be wrong, so it is
+                // refused here by name rather than by the ordinal range DoesFieldTypeSupportIndex happens to end at String64 (#1449).
+                if (fieldType == FieldType.Variant)
+                {
+                    throw new InvalidOperationException(
+                        $"[Index] on Variant field '{f.Name}' of component '{spec.Name}' is not supported: a Variant is stored as tagged text (\"si:42\"), "
+                        + "whose byte order is not the order of the values it holds. Index a field of the value's own type instead.");
+                }
+
                 field.HasIndex = true;
                 field.IndexAllowMultiple = f.IndexAllowMultiple;
                 field.IsIndexAuto = false;

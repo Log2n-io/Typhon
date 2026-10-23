@@ -120,6 +120,7 @@ class OperationalToolingTests : TestBase<OperationalToolingTests>
         {
             using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
             dbe.RegisterComponentFromAccessor<OpsCompV2>();
+            dbe.InitializeArchetypes(); // the migration, and its journal row, commit when the open completes (SCHEMA-09)
 
             var history = dbe.GetSchemaHistory();
             Assert.That(history.Count, Is.GreaterThanOrEqualTo(1));
@@ -232,6 +233,7 @@ class OperationalToolingTests : TestBase<OperationalToolingTests>
         {
             using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
             dbe.RegisterComponentFromAccessor<OpsCompV2>();
+            dbe.InitializeArchetypes(); // the migration, and its journal row, commit when the open completes (SCHEMA-09)
 
             var history = dbe.GetSchemaHistory();
 

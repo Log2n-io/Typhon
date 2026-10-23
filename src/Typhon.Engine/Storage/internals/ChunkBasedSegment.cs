@@ -1062,6 +1062,9 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
     /// <summary>The frees held back from reuse. Diagnostic.</summary>
     internal int QuarantinedFreeCount => _freeQuarantine?.Count ?? 0;
 
+    /// <summary>Whether this segment's frees are held back from reuse (<see cref="QuarantineFrees"/>): a free of it may wait for a checkpoint.</summary>
+    internal bool HoldsFrees => _freeQuarantine != null;
+
     /// <summary>
     /// Frees <paramref name="chunkId"/> at once, never held (CK-17): for a chunk no committed revision ever named — a rolled-back transaction's content.
     /// </summary>
@@ -1242,15 +1245,19 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
             {
                 var metadata = page.Metadata<long>();
                 var from = pageIndex == firstPage ? firstOffset : 0;
+                var chunksOnPage = ChunksOnPage(pageIndex);
                 var changed = false;
                 for (var w = from >> 6; w < BitmapLongsOnPage(pageIndex); w++)
                 {
                     var keep = from > w * 64 ? (1L << (from - w * 64)) - 1 : 0L;   // the bits below the first chunk freed stay
+                    // The last word's bits past the page's last chunk name no chunk: a torn page can have them set, and the load's count masks them
+                    // (CountAllocatedBits) — counted here, the allocated count drifted below the chunks actually allocated.
+                    var valid = chunksOnPage - w * 64 >= 64 ? -1L : (1L << (chunksOnPage - w * 64)) - 1;
                     var word = metadata[w];
-                    var cleared = word & ~keep;
+                    var cleared = word & ~keep & valid;
                     if (cleared != 0)
                     {
-                        metadata[w] = word & keep;
+                        metadata[w] = word & ~cleared;
                         freed += BitOperations.PopCount((ulong)cleared);
                         changed = true;
                     }

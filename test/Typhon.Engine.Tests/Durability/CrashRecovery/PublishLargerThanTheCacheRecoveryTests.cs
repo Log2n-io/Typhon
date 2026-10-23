@@ -90,6 +90,7 @@ internal sealed class PublishLargerThanTheCacheRecoveryTests
     [Test]
     [CancelAfter(60_000)]
     [VerifiesRule("CK-13")]
+    [VerifiesRule("EP-02")]
     public void APublishThatGaveBackItsMarks_IsRecoveredWhole_AfterAHardCrash()
     {
         const int n = 20_000;
@@ -128,15 +129,18 @@ internal sealed class PublishLargerThanTheCacheRecoveryTests
             Assert.That(Interlocked.Read(ref PagedMMF.PublishStepRefreshes) - refreshes, Is.GreaterThan(0),
                 "premise: the publish gave its marks back under pressure");
             Assert.That(dbe.CheckpointManager.TotalPagesWritten - written, Is.GreaterThan(0), "premise: the checkpoint wrote pages meanwhile");
+            var indexSegment = dbe._archetypeStates[ArchetypeRegistry.GetMetadata<CompDArch>().ArchetypeId].ClusterState.IndexSegment;
+            Assert.That(indexSegment.Length, Is.GreaterThan((long)PagedMMF.MinimumCacheSize / PagedMMF.PageSize),
+                "premise: the index segment the crash open clears is larger than the cache it reopens with (#1463)");
 
             // Power cut: the cache is discarded, no clean-shutdown marker. What the checkpoint wrote mid-publish is on the data file; the rest is in the WAL.
             dbe.SimulateHardCrash();
         }
 
-        // Reopened with 64 MiB: the crash open's index clear walks its segment through epoch-tagged reads, and an 8 MiB cache cannot hold that walk — a
-        // separate defect of the crash open (#1463). The cache size is not part of the database.
+        // Reopened with the same 8 MiB cache, smaller than the index segment the crash open clears: the clear reads and releases one bitmap page at a time
+        // (EP-02). Epoch-tagged, it pinned the whole cache and the open timed out on back-pressure (#1463).
         _serviceProvider.Dispose();
-        _serviceProvider = BuildProvider(8 * PagedMMF.MinimumCacheSize);
+        _serviceProvider = BuildProvider(PagedMMF.MinimumCacheSize);
         using (var scope2 = _serviceProvider.CreateScope())
         {
             var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();

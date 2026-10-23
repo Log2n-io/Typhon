@@ -1,10 +1,12 @@
+using System;
+
 namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Durability-layer owner of the persisted <b>checkpoint watermark</b> — the <c>CheckpointLSN</c> + <c>CleanShutdown</c>
 /// pair carried in the meta-pair bootstrap block (MinimalWal design 04 §6, M12). The storage layer
 /// (<see cref="ManagedPagedMMF"/>) persists this as an opaque bootstrap value via
-/// <see cref="ManagedPagedMMF.MutateBootstrapAndPersist"/>; it does <b>not</b> know these bytes are a log-sequence
+/// <see cref="ManagedPagedMMF.MutateBootstrapAndPersist(System.Action)"/>; it does <b>not</b> know these bytes are a log-sequence
 /// number. This keeps <c>src/Typhon.Engine/Storage/</c> free of WAL/LSN identifiers (grep gate, 08 §7.1).
 /// <para>
 /// This static helper is the seed of the design's eventual <c>SnapshotStore</c> (04 §20), which will absorb the full
@@ -48,8 +50,16 @@ internal static class DurabilityWatermarks
     /// Advances the checkpoint-LSN watermark (preserving the clean-shutdown flag) and flips the meta pair — the
     /// generation flip is the atomic, fsynced commit point (CK-05). Called by the checkpoint cycle.
     /// </summary>
-    internal static void UpdateCheckpointLsn(ManagedPagedMMF mmf, long checkpointLsn)
-        => mmf.MutateBootstrapAndPersist(() => Write(mmf, checkpointLsn, Read(mmf).CleanShutdown));
+    /// <param name="mmf">The data file.</param>
+    /// <param name="checkpointLsn">The new watermark.</param>
+    /// <param name="sameFlip">A further bootstrap mutation made durable by the same flip — a staged schema commit (SCHEMA-09); null for none.</param>
+    /// <param name="undoSameFlip">Reverts <paramref name="sameFlip"/> in memory when the flip's write fails; null for none.</param>
+    internal static void UpdateCheckpointLsn(ManagedPagedMMF mmf, long checkpointLsn, Action sameFlip = null, Action undoSameFlip = null)
+        => mmf.MutateBootstrapAndPersist(() =>
+        {
+            Write(mmf, checkpointLsn, Read(mmf).CleanShutdown);
+            sameFlip?.Invoke();
+        }, undoSameFlip);
 
     // Set while an open that followed a clean close is in progress, and cleared when it completes (#1147, CS-04). Found set, it means that open never
     // completed: the next one must recover, but the WAL holds nothing past the clean close to rebuild a damaged segment from, so it must not replace one

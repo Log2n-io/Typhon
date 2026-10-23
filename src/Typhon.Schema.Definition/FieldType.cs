@@ -141,6 +141,7 @@ public static class DatabaseSchemaExtensions
 
         if (t == typeof(float)) return (FieldType.Float, FieldType.None);
         if (t == typeof(String64)) return (FieldType.String64, FieldType.None);
+        if (t == typeof(Variant)) return (FieldType.Variant, FieldType.None);
         if (t == typeof(String1024)) return (FieldType.String1024, FieldType.None);
         if (t == typeof(VarString)) return (FieldType.String, FieldType.None);
 
@@ -232,6 +233,7 @@ public static class DatabaseSchemaExtensions
             case FieldType.Point4D: return 32;
 
             case FieldType.String: return 32;  // Don't count the overflow in VSB
+            case FieldType.Variant:
             case FieldType.String64: return 64;
             case FieldType.String1024: return 1024;
 
