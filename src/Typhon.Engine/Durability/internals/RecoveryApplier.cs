@@ -655,7 +655,11 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         handle.Publish(tsn);
     }
 
-    /// <summary>将最终提交的旧布局值转换一次，供所有恢复写入路径共用。</summary>
+    /// <summary>
+    /// Converts the entity's final committed values of every component this open migrated from their WAL layout to the table's (#1469). Done once per
+    /// value, before any write path, so the cluster HEAD copy and the revision chain receive the same bytes.
+    /// </summary>
+    /// <returns><paramref name="slots"/> itself when no value needed converting.</returns>
     private IReadOnlyCollection<SlotData> MigrateSlots(IReadOnlyCollection<SlotData> slots)
     {
         if (slots == null || !_dbe.HasComponentMigrations)
@@ -663,20 +667,38 @@ internal sealed unsafe class RecoveryApplier : IDisposable
             return slots;
         }
 
-        // 只转换聚合后的最终提交值，且每个 slot 只转换一次；cluster HEAD 和 revision chain 使用同一份结果。
+        var any = false;
+        foreach (var slot in slots)
+        {
+            if (IsMigratedSlot(slot.SlotIndex))
+            {
+                any = true;
+                break;
+            }
+        }
+
+        if (!any)
+        {
+            return slots;
+        }
+
         var result = new SlotData[slots.Count];
         var index = 0;
         foreach (var value in slots)
         {
             var slot = value;
-            if (slot.SlotIndex < _metadata.ComponentCount)
+            if (IsMigratedSlot(slot.SlotIndex))
             {
                 slot.Payload = _dbe.MigrateWalPayload(_engineState.SlotToComponentTable[slot.SlotIndex], slot.Payload);
             }
             result[index++] = slot;
         }
+
         return result;
     }
+
+    private bool IsMigratedSlot(ushort slotIndex)
+        => slotIndex < _metadata.ComponentCount && _dbe.IsMigratedThisOpen(_engineState.SlotToComponentTable[slotIndex]);
 
     /// <summary>Resets the per-entity scratch that <see cref="ApplyCollectionFolds"/> consumes. Called at the top of every entity apply.</summary>
     private void BeginEntity()

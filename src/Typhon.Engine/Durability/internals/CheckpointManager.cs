@@ -117,6 +117,33 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// </summary>
     internal Action PersistDurableMetadataHook { get; set; }
 
+    /// <summary>The commit waiting for the next cycle that advances CheckpointLSN (<see cref="StageMetaCommit"/>); null when none.</summary>
+    private StagedMetaCommit _stagedMetaCommit;
+
+    /// <summary>
+    /// Stages <paramref name="commit"/> for the next cycle that advances CheckpointLSN: its mutation is written in that cycle's watermark flip, so the two
+    /// become durable together or not at all (SCHEMA-09). One commit at a time.
+    /// </summary>
+    internal void StageMetaCommit(StagedMetaCommit commit)
+    {
+        ArgumentNullException.ThrowIfNull(commit);
+        if (Interlocked.CompareExchange(ref _stagedMetaCommit, commit, null) != null)
+        {
+            throw new InvalidOperationException("A meta commit is already staged for the next checkpoint cycle.");
+        }
+    }
+
+    /// <summary>
+    /// Withdraws <paramref name="commit"/>: no cycle will flip it from here on. False when a flip already made it durable — the caller must then treat it as
+    /// committed.
+    /// </summary>
+    internal bool UnstageMetaCommit(StagedMetaCommit commit)
+    {
+        var cancelled = commit.Cancel();
+        Interlocked.CompareExchange(ref _stagedMetaCommit, null, commit);
+        return cancelled;
+    }
+
     /// <summary>
     /// Wired by <see cref="DatabaseEngine"/> to <see cref="TransactionChain.LowestInFlightLsn"/>: the first LSN of any commit still between its WAL
     /// append and the end of its publish, <see cref="long.MaxValue"/> for none. The cycle keeps CheckpointLSN below it (CK-13): those
@@ -1290,6 +1317,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
         var cycle = Interlocked.Increment(ref _cyclesStarted);
         var covered = false;
         var sw = Stopwatch.GetTimestamp();
+        StagedMetaCommit stagedCommit = null;
 
         // CheckpointCycle span wraps the full cycle. DirtyPageCount is set after collection (not known at span-begin time).
         var cycleScope = TyphonEvent.BeginCheckpointCycle(targetLsn, reason);
@@ -1306,6 +1334,9 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             // Test seam (A1.12): lets CheckpointResilienceTests inject a transient/fatal fault to exercise CK-06
             // classification. Null in production — one negligible null-check on the background thread.
             CycleFaultInjector?.Invoke();
+
+            // Taken before the hook and the dirty-page collection: every page dirtied before the commit was staged is one this cycle writes (SCHEMA-09).
+            stagedCommit = Interlocked.Exchange(ref _stagedMetaCommit, null);
 
             // The frees made so far wait for this cycle: the pages that stopped naming them were dirtied before them, so this cycle collects and writes
             // them; only once it has written every page is reusing those chunks safe (#1251).
@@ -1432,7 +1463,13 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
 
                 // Step 7: Advance CheckpointLSN in the meta-pair watermark block + fsync — to barrierLsn (the post-flush durable high-water established at
                 // step 1), NOT the stale loop-sampled targetLsn (CK-02/CK-03).
-                DurabilityWatermarks.UpdateCheckpointLsn(_mmf, barrierLsn);
+                // A staged commit rides this flip (SCHEMA-09): durable with the CheckpointLSN it belongs to, or not at all.
+                var flipped = stagedCommit != null
+                    && stagedCommit.TryCommit(() => DurabilityWatermarks.UpdateCheckpointLsn(_mmf, barrierLsn, stagedCommit.Mutate));
+                if (!flipped)
+                {
+                    DurabilityWatermarks.UpdateCheckpointLsn(_mmf, barrierLsn);
+                }
                 Interlocked.Exchange(ref _checkpointLsn, barrierLsn);
 
                 // Every page collected at the start is on disk: the frees sealed then are safe to reuse (#1251).
@@ -1488,6 +1525,12 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
         }
         finally
         {
+            // A cycle that stopped short of its flip hands the commit to the next one, unless the stager gave up or staged another meanwhile.
+            if (stagedCommit is { IsOutstanding: true })
+            {
+                Interlocked.CompareExchange(ref _stagedMetaCommit, stagedCommit, null);
+            }
+
             cycleScope.Dispose();
             PublishCycleEnd(cycle, covered);
         }

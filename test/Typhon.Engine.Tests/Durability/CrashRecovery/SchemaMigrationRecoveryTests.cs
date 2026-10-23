@@ -298,7 +298,7 @@ class SchemaMigrationRecoveryTests : TestBase<SchemaMigrationRecoveryTests>
             }
             if (open == 0 && crashAfterRecovery)
             {
-                // 再次崩溃会从 revision chain 重建 HEAD，验证转换后的值也写进了权威副本。
+                // A second crash rebuilds the HEAD from the revision chain: this proves the converted value also reached the authoritative copy.
                 dbe.SimulateHardCrash();
             }
         }

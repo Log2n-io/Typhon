@@ -156,6 +156,34 @@ discipline (MVCC revision chains vs in-place SV vs heap-backed Transient), so re
              the schema assembly exports instead of one type per bug.
   verified: FieldTypeMappingTests [VerifiesRule] [RuleMutant]
 
+### SCHEMA-09: A schema migration becomes durable in one meta flip, the one that advances CheckpointLSN `[fatal][silent]`
+  invariant ∀ component C, at every durable state of the file: the revision `ComponentR1` records for C is the revision of every WAL record of C above
+            CheckpointLSN, and the segments `ComponentR1` and `ArchetypeR1` name hold C in that revision's layout
+  invariant a migration's durable effects — the new catalog rows of the migrated components and of every archetype re-pointed at new segments, and the
+            `UserSchemaVersion` bump — become durable at ONE instant: the meta flip that carries `BK_SchemaCommit`, which is the same flip that advances
+            CheckpointLSN (the recovery seal on a crash open, a forced checkpoint on a clean one)
+  never a catalog row of a migration is written in place before that flip: the rows go to a durable intent segment, and are written only after it
+  never a segment a migration replaced or abandoned is freed before that flip: until then the catalog names it
+  enforce `BK_SchemaCommit` set ⟹ the open writes the intent's rows before it reads the catalog, then clears the key (component rows in
+          `LoadSystemSchemaR1`, archetype rows as the `ArchetypeR1` table loads)
+  enforce a migrating open whose commit checkpoint does not complete fails, leaving the pre-migration image: catalog, segments and WAL window
+  enforce the open's WAL replay converts a migrated component's values from the layout it migrated from, through the same field map or user migration
+          chain as the table, and refuses a value whose size is not that layout's
+  scope: DatabaseEngine.StageMigratedComponentRow, DatabaseEngine.PrepareSchemaCommit, DatabaseEngine.CompleteSchemaCommit,
+         DatabaseEngine.ApplyCommittedSchemaIntentToComponents, DatabaseEngine.ApplyCommittedSchemaIntentToArchetypes, CheckpointManager.StageMetaCommit,
+         DurabilityWatermarks.UpdateCheckpointLsn, SchemaEvolutionEngine.MigrateWalPayload, RecoveryApplier.MigrateSlots
+  requires CK-05 — the meta flip is the only multi-field atomic write the file has; catalog rows are ordinary pages, written by `SavePages` with no WAL
+  on_violation: two failures, both measured. A migrating crash-open that persisted the new catalog before replaying its window, then failed before the
+                seal, left a new-revision catalog over an old-layout window, and the next open — no migration left to run — copied the window's values in
+                raw: an `int` read back as the float `1.557E-42` (#1469). A migrating clean open that crashed before its first checkpoint left
+                `ComponentR1` naming the new segments while `ArchetypeR1` still named the old EntityMap and cluster the migration had freed: the entity was
+                gone at the next open (#1473). Neither raised an error.
+  rationale: the catalog spans several pages and several tables, so it cannot itself be written atomically; the meta pair can. Redo through an intent keeps
+             the catalog's format unchanged and leaves every reader of `ComponentR1` / `ArchetypeR1` as it is: they only ever see one image. A migration
+             is therefore committed when its open completes — `InitializeArchetypes` — never at registration, which is also when its archetype clusters are
+             migrated: committing the component rows any earlier would publish a catalog whose clusters are still in the old layout.
+  verified: SchemaMigrationAtomicityTests [VerifiesRule]
+
 ---
 
 ## Module: MEMB — The archetype membership channel

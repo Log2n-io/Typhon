@@ -1,3 +1,5 @@
+using System;
+
 namespace Typhon.Engine.Internals;
 
 /// <summary>
@@ -48,8 +50,15 @@ internal static class DurabilityWatermarks
     /// Advances the checkpoint-LSN watermark (preserving the clean-shutdown flag) and flips the meta pair — the
     /// generation flip is the atomic, fsynced commit point (CK-05). Called by the checkpoint cycle.
     /// </summary>
-    internal static void UpdateCheckpointLsn(ManagedPagedMMF mmf, long checkpointLsn)
-        => mmf.MutateBootstrapAndPersist(() => Write(mmf, checkpointLsn, Read(mmf).CleanShutdown));
+    /// <param name="mmf">The data file.</param>
+    /// <param name="checkpointLsn">The new watermark.</param>
+    /// <param name="sameFlip">A further bootstrap mutation made durable by the same flip — a staged schema commit (SCHEMA-09); null for none.</param>
+    internal static void UpdateCheckpointLsn(ManagedPagedMMF mmf, long checkpointLsn, Action sameFlip = null)
+        => mmf.MutateBootstrapAndPersist(() =>
+        {
+            Write(mmf, checkpointLsn, Read(mmf).CleanShutdown);
+            sameFlip?.Invoke();
+        });
 
     // Set while an open that followed a clean close is in progress, and cleared when it completes (#1147, CS-04). Found set, it means that open never
     // completed: the next one must recover, but the WAL holds nothing past the clean close to rebuild a damaged segment from, so it must not replace one

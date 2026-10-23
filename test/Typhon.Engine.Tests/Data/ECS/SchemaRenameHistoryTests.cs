@@ -145,7 +145,7 @@ class SchemaRenameHistoryTests : TestBase<SchemaRenameHistoryTests>
     public void RenameWithAFieldChange_RecordsBothRows()
     {
         OpenAndRegister<HistWidenOldVal>();
-        OpenAndRegister<HistWidenNewVal>();   // renamed AND gained a field in the same open
+        OpenAndRegister<HistWidenNewVal>(initialize: true);   // renamed AND gained a field in the same open; the field change commits with the open
 
         var history = ReadHistory();
         var renames = history.Where(h => h.Kind == SchemaChangeKind.Rename).ToList();
@@ -222,11 +222,16 @@ class SchemaRenameHistoryTests : TestBase<SchemaRenameHistoryTests>
     // ── helpers ──────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>Opens a session, registers one component, closes. No archetypes — the component rename hatch lives entirely in RegisterComponentFromAccessor.</summary>
-    private void OpenAndRegister<T>() where T : unmanaged
+    /// <param name="initialize">Complete the open: a layout change commits only then (SCHEMA-09), where a rename is persisted at registration.</param>
+    private void OpenAndRegister<T>(bool initialize = false) where T : unmanaged
     {
         using var scope = ServiceProvider.CreateScope();
         using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<T>();
+        if (initialize)
+        {
+            dbe.InitializeArchetypes();
+        }
     }
 
     private DatabaseEngine NewArchetypeSession(IServiceScope scope)
