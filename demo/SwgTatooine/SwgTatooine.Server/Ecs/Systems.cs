@@ -660,6 +660,36 @@ internal sealed class PlayerSessionSystem : CallbackSystem
     protected override void Execute(TickContext ctx) => TatooineReplication.SessionTick(ctx);
 }
 
+/// <summary>Applies the writes a thread outside the tick staged (<see cref="StagedWrites"/>): a check placing a player while the server runs.</summary>
+/// <remarks>
+/// <b>Every player component, for the reason <see cref="PlayerSessionSystem"/> gives</b>: <c>DV-01</c> throws on the tick for an undeclared write, and a
+/// staged write may set any of them. After <c>PlayerSessions</c>, because the two share a phase and the deriver refuses two writers of one component in
+/// one phase without an edge — and so that a staged placement is the last word on the tick it lands in, after that tick's intents. Not gated on the
+/// pause: it is how a check stages the world, and a paused world is one it may want to stage.
+/// </remarks>
+internal sealed class StagedWriteSystem : CallbackSystem
+{
+    private readonly StagedWrites _staged;
+
+    public StagedWriteSystem(StagedWrites staged) => _staged = staged;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("StagedWrites")
+        .Phase(SimPhases.Input)
+        .After("PlayerSessions")
+        .Writes<PlayerControl>()
+        .Writes<PlayerMotion>()
+        .Writes<PlayerState>()
+        .Writes<PlayerPlacement>()
+        .Writes<PlayerVitals>()
+        .Writes<PlayerSession>()
+        .Writes<PlayerRealm>()
+        .Writes<PlayerProximity>()
+        .Writes<Inventory>();
+
+    protected override void Execute(TickContext ctx) => _staged.Drain(ctx);
+}
+
 /// <summary>The periodic replication report: cumulative counters, every three hundred ticks.</summary>
 /// <remarks>
 /// In the report phase with every other diagnostic, and separate from <see cref="PlayerSessionSystem"/> because it writes nothing and must not be ordered

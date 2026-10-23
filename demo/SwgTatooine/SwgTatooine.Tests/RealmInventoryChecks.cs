@@ -169,9 +169,7 @@ public sealed class RealmInventoryChecks
         var dir = Worlds.NewDirectory();
         try
         {
-            var config = Worlds.Small(dir);
-            config.Unpaced = false;
-            config.TickRateHz = 40;
+            var config = Worlds.Served(dir);
             config.WorkerCount = 1;
             config.Shuttles = false;
             config.InteriorSleepS = 0.1f;

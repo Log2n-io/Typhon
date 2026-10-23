@@ -40,6 +40,9 @@ public sealed class SlopeSpeedChecks
     [SetUp]
     public void SetUp() => _dir = Worlds.NewDirectory();
 
+    [TearDown]
+    public void TearDown() => Worlds.Delete(_dir);
+
     /// <summary>C1 and C4: the curve falls where it should, never below its floor, and never rewards a descent.</summary>
     [Test]
     public void TheCurveSlowsAClimbAndLeavesEverythingElseAlone()

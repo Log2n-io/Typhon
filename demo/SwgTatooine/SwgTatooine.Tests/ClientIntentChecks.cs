@@ -24,10 +24,13 @@ namespace SwgTatooine.Tests;
 [Category("Integration")]
 [TestFixture]
 [NonParallelizable]
-public sealed class ClientIntentChecks
+internal sealed class ClientIntentChecks : ServedChecks
 {
-    /// <summary>Slow enough that one tick of travel is a distance an assertion can separate from two.</summary>
-    private const int TickRateHz = 10;
+    /// <summary>
+    /// Fast, because every case here waits on ticks and the wait is most of its cost; slow enough that one tick of travel (0.2 m at a run) is a
+    /// distance an assertion can separate from two. Every interval the server reads is in seconds and converted at this rate, so nothing else moves with it.
+    /// </summary>
+    private const int TickRateHz = Worlds.ServedHz;
 
     /// <summary>What a GRANTED run covers in one tick at <see cref="TickRateHz"/>.</summary>
     /// <remarks>
@@ -38,34 +41,9 @@ public sealed class ClientIntentChecks
     /// </remarks>
     private const float StepM = TatooineData.PlayerRunSpeedMps * TatooineData.PlayerGaitScale / TickRateHz;
 
-    private string _dir;
-
-    /// <summary>The harness a case built, so teardown can unhook it from <c>SessionHarness.Until</c>'s keepalive.</summary>
-    private SessionHarness _harness;
-
-    [SetUp]
-    public void SetUp()
-    {
-        _dir = Worlds.NewDirectory();
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-    }
-
-    [TearDown]
-    public void TearDown()
-    {
-        _harness?.Release();
-        _harness = null;
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-        Worlds.Delete(_dir);
-    }
-
     private SimConfig Config()
     {
-        var config = Worlds.Small(_dir);
-        config.Unpaced = false;
-        config.TickRateHz = TickRateHz;
+        var config = Worlds.Served(Dir);
 
         // STAGED, because several cases here place their fixtures a few metres from the capital's centre and need the avatar's 192 m
         // sphere to cover them. By default arrivals are spread over all seven towns, so an avatar can be kilometres away and see none
@@ -332,9 +310,8 @@ public sealed class ClientIntentChecks
         SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the stop to be applied");
         var before = world.Read();
 
-        // Three ticks of slack, so the stamp is still in the future by the time this commits.
-        long owedFor;
-        using (var tx = world.Sim.Dbe.CreateQuickTransaction())
+        // Staged into a tick (EW-02: PlayerMotion is a spatial archetype's), and owed three ticks after the one that writes it.
+        world.Sim.WriteInTick((tx, tick) =>
         {
             var player = tx.OpenMut(world.Entity);
             var move = player.Read(Player.Move);
@@ -342,10 +319,9 @@ public sealed class ClientIntentChecks
             move.VelZ = 0f;
             move.BiasX = OwedX;
             move.BiasZ = OwedZ;
-            owedFor = world.Sim.Runtime.CurrentTickNumber + 3;
-            move.BiasTick = owedFor;
+            move.BiasTick = tick + 3;
             player.Set(Player.Move, move);
-        }
+        });
 
         world.Harness.Ticks(8);
 
@@ -742,7 +718,7 @@ public sealed class ClientIntentChecks
         using var sim = new TatooineSim(config);
         sim.Initialize();
 
-        var harness = _harness = new SessionHarness(sim);
+        var harness = Harness = new SessionHarness(sim);
         var link = harness.Connect(TatooineReplication.PlayerKind);
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar to be spawned");
 
@@ -1011,7 +987,7 @@ public sealed class ClientIntentChecks
 
         sim.Dbe.WriteTickFence(1);
 
-        var harness = _harness = new SessionHarness(sim);
+        var harness = Harness = new SessionHarness(sim);
         var link = harness.Connect(TatooineReplication.PlayerKind);
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar to be spawned");
         harness.Ticks(4);

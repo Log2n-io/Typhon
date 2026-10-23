@@ -24,49 +24,32 @@ namespace SwgTatooine.Tests;
 /// its own client asked.
 /// </para>
 /// <para>
-/// Run with a two-second interval and in burst mode, so the landing the case waits for is tens of ticks away rather
-/// than the twenty minutes the default cadence would make it.
+/// Run with a half-second interval and in burst mode, so the landing the case waits for is tens of ticks away rather
+/// than the two minutes the default cadence would make it.
 /// </para>
 /// </remarks>
 [Category("Integration")]
 [TestFixture]
 [NonParallelizable]
-public sealed class ShuttleBoardingChecks
+internal sealed class ShuttleBoardingChecks : ServedChecks
 {
     /// <summary>The server's boarding radius, as a float so that a <c>[TestCase]</c> can sit either side of it.</summary>
     private const float ShuttleBoardM = (float)TatooineReplication.ShuttleBoardM;
 
-    private string _dir;
-    private SessionHarness _harness;
+    /// <summary>Fast, because the cases wait on ticks; every interval the server reads is in seconds and converted at this rate.</summary>
+    private const int TickRateHz = Worlds.ServedHz;
 
-    [SetUp]
-    public void SetUp()
-    {
-        _dir = Worlds.NewDirectory();
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-    }
-
-    [TearDown]
-    public void TearDown()
-    {
-        _harness?.Release();
-        _harness = null;
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-        Worlds.Delete(_dir);
-    }
+    /// <summary>Seconds between two landings of a port: 25 ticks, which is the room a case has to act between a queue and a landing.</summary>
+    private const float ShuttleIntervalS = 0.5f;
 
     private SimConfig Config()
     {
-        var config = Worlds.Small(_dir);
-        config.Unpaced = false;
-        config.TickRateHz = 10;
+        var config = Worlds.Served(Dir);
         config.WorkerCount = 1;
 
-        // A landing every two seconds, and the whole queue on the landing tick: the default cadence is two minutes, which
+        // A landing every half second, and the whole queue on the landing tick: the default cadence is two minutes, which
         // no case can wait for, and trickle boarding would add a coin flip to a case that is not about the coin.
-        config.ShuttleIntervalS = 2f;
+        config.ShuttleIntervalS = ShuttleIntervalS;
         config.ShuttleBurst = true;
         return config;
     }
@@ -84,7 +67,7 @@ public sealed class ShuttleBoardingChecks
             sim.Index.Shuttleports, Has.Count.EqualTo(sim.Index.Cities.Count),
             "the premise: every city needs its port, or there is nothing to board");
 
-        _harness = new SessionHarness(sim);
+        Harness = new SessionHarness(sim);
         var link = Connect();
 
         const int From = 0;
@@ -100,7 +83,7 @@ public sealed class ShuttleBoardingChecks
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 return Near(sim, player, destPort.X, destPort.Z, 64f);
             },
             $"the player to arrive at city {Dest}'s port");
@@ -116,7 +99,7 @@ public sealed class ShuttleBoardingChecks
     {
         using var sim = new TatooineSim(Config());
         sim.Initialize();
-        _harness = new SessionHarness(sim);
+        Harness = new SessionHarness(sim);
         var link = Connect();
 
         // Well clear of every port: the boarding radius is 20 m and the cities are kilometres apart, so one city's
@@ -129,7 +112,7 @@ public sealed class ShuttleBoardingChecks
 
         // The counter moves inside the tick that refused; the ACKS block reaches the client in the frame that tick publishes, which is assembled
         // after it. Reading the link the instant the counter moves would be reading for an answer that has not been sent yet.
-        _harness.Ticks(3);
+        Harness.Ticks(3);
 
         Assert.Multiple(() =>
         {
@@ -149,7 +132,7 @@ public sealed class ShuttleBoardingChecks
     {
         using var sim = new TatooineSim(Config());
         sim.Initialize();
-        _harness = new SessionHarness(sim);
+        Harness = new SessionHarness(sim);
         var link = Connect();
 
         var port = sim.Index.Shuttleports[0];
@@ -160,7 +143,7 @@ public sealed class ShuttleBoardingChecks
 
         // The counter moves inside the tick that refused; the ACKS block reaches the client in the frame that tick publishes, which is assembled
         // after it. Reading the link the instant the counter moves would be reading for an answer that has not been sent yet.
-        _harness.Ticks(3);
+        Harness.Ticks(3);
 
         Assert.Multiple(() =>
         {
@@ -185,7 +168,7 @@ public sealed class ShuttleBoardingChecks
     {
         using var sim = new TatooineSim(Config());
         sim.Initialize();
-        _harness = new SessionHarness(sim);
+        Harness = new SessionHarness(sim);
         var link = Connect();
 
         var port = sim.Index.Shuttleports[0];
@@ -217,7 +200,7 @@ public sealed class ShuttleBoardingChecks
     {
         using var sim = new TatooineSim(Config());
         sim.Initialize();
-        _harness = new SessionHarness(sim);
+        Harness = new SessionHarness(sim);
         var link = Connect();
 
         const int Dest = 1;
@@ -234,8 +217,8 @@ public sealed class ShuttleBoardingChecks
             new RecordValues { ["heading"] = FieldValue.Of(0.0), ["speedClass"] = FieldValue.Of(2.0), ["changePhase"] = FieldValue.Of(0.0) });
         SessionHarness.Until(() => TatooineReplication.Boardings.Cancelled >= 1, "the queued boarding to be cancelled by the movement");
 
-        // Two full intervals at 10 Hz: if the queue had survived, the next landing would have flown it.
-        _harness.Ticks(45);
+        // Two full intervals and a little: if the queue had survived, the next landing would have flown it.
+        Harness.Ticks((int)(2 * ShuttleIntervalS * TickRateHz) + 5);
 
         Assert.That(
             Near(sim, player, destPort.X, destPort.Z, 128f), Is.False,
@@ -260,7 +243,7 @@ public sealed class ShuttleBoardingChecks
 
         using var sim = new TatooineSim(config);
         sim.Initialize();
-        _harness = new SessionHarness(sim);
+        Harness = new SessionHarness(sim);
         var link = Connect();
 
         const int Dest = 1;
@@ -275,7 +258,7 @@ public sealed class ShuttleBoardingChecks
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 return Near(sim, player, destPort.X, destPort.Z, 128f);
             },
             $"the player to arrive at city {Dest}'s port on its own planet");
@@ -285,10 +268,10 @@ public sealed class ShuttleBoardingChecks
 
     private FakeLink Connect()
     {
-        var link = _harness.Connect(TatooineReplication.PlayerKind);
+        var link = Harness.Connect(TatooineReplication.PlayerKind);
         SessionHarness.Until(() => link.Received(MessageTypes.Welcome), "WELCOME");
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the possession to be claimed by a tick");
-        _harness.Ticks(2);
+        Harness.Ticks(2);
         return link;
     }
 

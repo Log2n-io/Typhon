@@ -26,37 +26,11 @@ namespace SwgTatooine.Tests;
 [Category("Integration")]
 [TestFixture]
 [NonParallelizable]
-public sealed class ViewRadiusChecks
+internal sealed class ViewRadiusChecks : ServedChecks
 {
-    private string _dir;
-
-    private SessionHarness _harness;
-
-    [SetUp]
-    public void SetUp()
-    {
-        _dir = Worlds.NewDirectory();
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-    }
-
-    [TearDown]
-    public void TearDown()
-    {
-        _harness?.Release();
-        _harness = null;
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-        Worlds.Delete(_dir);
-    }
-
     private SimConfig Config()
     {
-        var config = Worlds.Small(_dir);
-        config.Unpaced = false;
-
-        // 40 Hz, as SpectateChecks runs at: every Ticks(1) is a wall-clock wait and these cases step a dozen at a time.
-        config.TickRateHz = 40;
+        var config = Worlds.Served(Dir);
         config.WorkerCount = 1;
         return config;
     }
@@ -298,8 +272,8 @@ public sealed class ViewRadiusChecks
     {
         using var sim = new TatooineSim(Config());
         sim.Initialize();
-        _harness = new SessionHarness(sim);
-        var player = new Player(_harness);
+        Harness = new SessionHarness(sim);
+        var player = new Player(Harness);
         StandOutsideACity(sim, player);
         player.UntilSettled();
 
@@ -314,7 +288,7 @@ public sealed class ViewRadiusChecks
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 after = player.Holding(nameof(WorldObject));
                 return after > before;
             },
@@ -343,8 +317,8 @@ public sealed class ViewRadiusChecks
     {
         using var sim = new TatooineSim(Config());
         sim.Initialize();
-        _harness = new SessionHarness(sim);
-        var player = new Player(_harness);
+        Harness = new SessionHarness(sim);
+        var player = new Player(Harness);
         StandOutsideACity(sim, player);
         player.UntilSettled();
 
@@ -353,7 +327,7 @@ public sealed class ViewRadiusChecks
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 wide = player.Holding(nameof(WorldObject));
                 return TatooineReplication.ViewRadiusAsks.Applied >= 1 && wide > 0;
             },
@@ -361,7 +335,7 @@ public sealed class ViewRadiusChecks
 
         // Ticked a few more times so the sweep has finished: a leave count taken mid-sweep would be compared against a
         // view that was still growing.
-        _harness.Ticks(10);
+        Harness.Ticks(10);
         wide = player.Holding(nameof(WorldObject));
 
         player.AskRadius(0);
@@ -369,7 +343,7 @@ public sealed class ViewRadiusChecks
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 narrow = player.Holding(nameof(WorldObject));
                 return narrow < wide;
             },
@@ -394,8 +368,8 @@ public sealed class ViewRadiusChecks
     {
         using var sim = new TatooineSim(Config());
         sim.Initialize();
-        _harness = new SessionHarness(sim);
-        var player = new Player(_harness);
+        Harness = new SessionHarness(sim);
+        var player = new Player(Harness);
         player.UntilSettled();
 
         var before = player.Holding(nameof(WorldObject));
@@ -407,7 +381,7 @@ public sealed class ViewRadiusChecks
 
         player.AskRadius(16);
         SessionHarness.Until(() => TatooineReplication.ViewRadiusAsks.Refused >= 2, "the undersized radius to be refused");
-        _harness.Ticks(5);
+        Harness.Ticks(5);
 
         var sink = player.Drain();
         Assert.Multiple(() =>

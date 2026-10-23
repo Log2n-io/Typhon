@@ -52,9 +52,7 @@ public sealed class RealmCrossingChecks
 
     private SimConfig Config()
     {
-        var config = Worlds.Small(_dir);
-        config.Unpaced = false;
-        config.TickRateHz = 40;
+        var config = Worlds.Served(_dir);
         config.WorkerCount = 1;
         config.Planets = 2;
         config.Shuttles = false;
@@ -236,23 +234,14 @@ public sealed class RealmCrossingChecks
     /// </summary>
     private static void MoveTo(TatooineSim sim, EntityId id, ushort realm, float x, float z)
     {
-        using var tx = sim.Dbe.CreateQuickTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit);
-        Assert.That(tx.TryOpenMut(id, out var player), Is.True, $"player {id} is not there to move");
-        var state = player.Read(Player.State);
+        using (var tx = sim.Dbe.CreateQuickTransaction())
+        {
+            Assert.That(tx.TryOpen(id, out _), Is.True, $"player {id} is not there to move");
+        }
 
         // Inside with a counter no run reaches, as SimBridge.Open sets it for a dungeon party: PlayerThink would otherwise walk the player straight back out
         // through the door and take the case's precondition with it.
-        state.Activity = PlayerActivity.Inside;
-        state.ActivityTicks = int.MaxValue / 2;
-        player.Set(Player.State, state);
-        var motion = player.Read(Player.Move);
-        motion.VelX = 0f;
-        motion.VelZ = 0f;
-        player.Set(Player.Move, motion);
-        var at = default(PlayerPlacement);
-        at.SetAt(x, z, 0f, player.Read(Player.Bounds).HalfExtent);
-        tx.Teleport(id, Player.Bounds, new RealmId(realm), in at);
-        Assert.That(tx.Commit(), Is.True);
+        Worlds.Park(sim, id, x, z, realm, PlayerActivity.Inside);
     }
 
     /// <summary>

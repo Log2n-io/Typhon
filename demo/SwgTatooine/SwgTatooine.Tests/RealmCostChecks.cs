@@ -54,9 +54,7 @@ public sealed class RealmCostChecks
         TatooineReplication.ResetSessionAccounting();
         TatooineReplication.ResetIntentAccounting();
 
-        var config = Worlds.Small(_dir);
-        config.Unpaced = false;
-        config.TickRateHz = 40;
+        var config = Worlds.Served(_dir);
         config.WorkerCount = 2;
         config.Planets = 2;
         config.Space = true;

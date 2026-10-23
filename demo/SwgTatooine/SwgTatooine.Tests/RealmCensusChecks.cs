@@ -34,12 +34,11 @@ public sealed class RealmCensusChecks
 
     private SimConfig Config()
     {
-        var config = Worlds.Small(_dir);
-        config.Unpaced = false;
+        var config = Worlds.Served(_dir);
 
-        // 40 Hz for the same reason SpectateChecks uses it: every wait in here is wall-clock, and these cases step tens
-        // of ticks. Nothing under test depends on the period beyond the cadence arithmetic, which is asserted directly.
-        config.TickRateHz = 40;
+        // A census every 5 ticks rather than the default once a second: most cases wait for the next one, up to three
+        // times, and at 1 Hz that wait was most of their cost.
+        config.RealmCensusHz = 10f;
         config.WorkerCount = 1;
         config.Shuttles = false;
         return config;
@@ -186,18 +185,16 @@ public sealed class RealmCensusChecks
     /// </summary>
     /// <remarks>
     /// The assertion is on the published tick numbers rather than on a call counter, because the cadence is the whole
-    /// cost story: at 40 Hz and 1 Hz this walk happens forty times less often than it could, and a gate that silently
-    /// stopped gating would be a forty-fold regression that every other case here would still pass.
+    /// cost story: at the default 1 Hz this walk happens fifty times less often than it could at 50 Hz, and a gate that silently
+    /// stopped gating would be a fifty-fold regression that every other case here would still pass.
     /// </remarks>
     [Test]
     [Category("Integration")]
     public void TheCensusRunsOnItsCadenceAndNotEveryTick()
     {
+        // 50 Hz / 10 = one walk every 5 ticks (Config). A shorter period than the obvious 1 Hz on purpose: every tick here is a
+        // real wall-clock wait, and four periods prove the gate exactly as well as four do at fifty ticks each.
         var config = Config();
-
-        // 40 Hz / 8 = one walk every 5 ticks. A shorter period than the obvious 1 Hz on purpose: every tick here is a
-        // real wall-clock wait, and four periods prove the gate exactly as well as four do at ten ticks each.
-        config.RealmCensusHz = 8f;
         using var sim = new TatooineSim(config);
         sim.Initialize();
         var harness = new SessionHarness(sim);
@@ -268,20 +265,12 @@ public sealed class RealmCensusChecks
         var player = sim.Index.Players[0];
         var before = AwaitCensus(sim, harness, sim.Runtime.CurrentTickNumber).Of(interior).Players;
 
-        using (var tx = sim.Dbe.CreateQuickTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit))
-        {
-            tx.Teleport(player, Player.Bounds, new RealmId(interior), Worlds.At(32.5f, 6.5f));
-            Assert.That(tx.Commit(), Is.True);
-        }
+        Worlds.Teleport(sim, player, interior, Worlds.At(32.5f, 6.5f));
 
         var inside = AwaitCensus(sim, harness, sim.Runtime.CurrentTickNumber);
         Assert.That(inside.Of(interior).Players, Is.EqualTo(before + 1), "the crossing was not counted in the interior");
 
-        using (var tx = sim.Dbe.CreateQuickTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit))
-        {
-            tx.Teleport(player, Player.Bounds, RealmId.Default, Worlds.At(0f, 0f));
-            Assert.That(tx.Commit(), Is.True);
-        }
+        Worlds.Teleport(sim, player, RealmId.Default.Value, Worlds.At(0f, 0f));
 
         var outside = AwaitCensus(sim, harness, sim.Runtime.CurrentTickNumber);
         Assert.That(outside.Of(interior).Players, Is.EqualTo(before), "the player left the interior and the count did not");

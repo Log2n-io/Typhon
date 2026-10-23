@@ -21,6 +21,28 @@ internal static class Worlds
         Unpaced = true,
     };
 
+    /// <summary>
+    /// The tick rate of every fixture that serves a world to fake clients: fast, because their waits are ticks and the waits are most of their cost.
+    /// </summary>
+    /// <remarks>
+    /// Every interval the server reads is in seconds and converted at the configured rate (S0-3), so a case that counts ticks and a case that counts
+    /// seconds both mean the same thing at any rate. Not higher, because the gate runs this suite on a free 4-core runner, where a 10 ms budget is one the
+    /// overload manager would start shedding systems against after five slow ticks. One that genuinely waits on seconds of game time, such as a weapon's
+    /// cooldown, is slower at a faster rate and keeps its own (AttackEventChecks).
+    /// </remarks>
+    public const int ServedHz = 50;
+
+    /// <summary>A small world paced at <see cref="ServedHz"/>, for a fixture that serves it to fake clients.</summary>
+    /// <param name="dir">Its database directory.</param>
+    /// <returns>The configuration, which the caller may adjust further.</returns>
+    public static SimConfig Served(string dir)
+    {
+        var config = Small(dir);
+        config.Unpaced = false;
+        config.TickRateHz = ServedHz;
+        return config;
+    }
+
     /// <summary>Which realm an entity is in — 0 is the planet, and on a multi-planet server each planet is one.</summary>
     /// <param name="sim">The simulation.</param>
     /// <param name="entity">The entity.</param>
@@ -47,25 +69,49 @@ internal static class Worlds
     {
         var entity = TatooineReplication.ControlledBy(sim.Dbe, session);
         Assert.That(entity, Is.Not.EqualTo(EntityId.Null), "the session controls no player to place");
-
-        using var tx = sim.Dbe.CreateQuickTransaction();
-        var player = tx.OpenMut(entity);
-
-        var state = player.Read(Player.State);
-        state.Activity = PlayerActivity.Idle;
-        state.ActivityTicks = int.MaxValue / 2;
-        player.Set(Player.State, state);
-        var move = player.Read(Player.Move);
-        move.VelX = 0f;
-        move.VelZ = 0f;
-        player.Set(Player.Move, move);
-
-        var at = default(PlayerPlacement);
-        at.SetAt(x, z, 0f, player.Read(Player.Bounds).HalfExtent);
-        tx.Teleport(entity, Player.Bounds, new RealmId(realm), in at);
-        tx.Commit();
+        Park(sim, entity, x, z, realm);
         return entity;
     }
+
+    /// <summary>Puts a player at a place in a realm, parked in an activity it will not leave.</summary>
+    /// <param name="sim">The simulation.</param>
+    /// <param name="entity">The player.</param>
+    /// <param name="x">Where, east.</param>
+    /// <param name="z">Where, north.</param>
+    /// <param name="realm">Which realm, 0 for the planet.</param>
+    /// <param name="activity">What it is doing there: <c>Idle</c>, or <c>Inside</c> for a player PlayerThink must not walk back out of a room.</param>
+    /// <returns>The tick that applied the placement, or -1 when the runtime was not running yet.</returns>
+    /// <remarks>
+    /// <b>Through <see cref="TatooineSim.WriteInTick(System.Action{Transaction})"/>, never a quick transaction of its own.</b> A placement writes a
+    /// spatial archetype, which a thread outside the tick must not (EW-02): done from the test thread while the server ticked, it raced the fence and
+    /// aborted a tick on CR-05 in two runs of three at 50 Hz.
+    /// </remarks>
+    public static long Park(TatooineSim sim, EntityId entity, float x, float z, ushort realm = 0, int activity = PlayerActivity.Idle)
+        => sim.WriteInTick(tx =>
+        {
+            var player = tx.OpenMut(entity);
+            var state = player.Read(Player.State);
+            state.Activity = activity;
+            state.ActivityTicks = int.MaxValue / 2;
+            player.Set(Player.State, state);
+            var move = player.Read(Player.Move);
+            move.VelX = 0f;
+            move.VelZ = 0f;
+            player.Set(Player.Move, move);
+
+            var at = default(PlayerPlacement);
+            at.SetAt(x, z, 0f, player.Read(Player.Bounds).HalfExtent);
+            tx.Teleport(entity, Player.Bounds, new RealmId(realm), in at);
+        });
+
+    /// <summary>Moves a player to a place in a realm and changes nothing else about it, inside a tick for the reason <c>Park</c> gives.</summary>
+    /// <param name="sim">The simulation.</param>
+    /// <param name="entity">The player.</param>
+    /// <param name="realm">Which realm.</param>
+    /// <param name="at">Where.</param>
+    /// <returns>The tick that applied it, or -1 when the runtime was not running yet.</returns>
+    public static long Teleport(TatooineSim sim, EntityId entity, ushort realm, PlayerPlacement at)
+        => sim.WriteInTick(tx => tx.Teleport(entity, Player.Bounds, new RealmId(realm), in at));
 
     /// <summary>The widest city in a built world: the one whose radius most exceeds a player's sphere.</summary>
     /// <param name="sim">A simulation whose world is built.</param>
@@ -89,25 +135,56 @@ internal static class Worlds
         return (widest, city.X, city.Z, city.Radius);
     }
 
+    /// <summary>
+    /// Where this process's worlds go: one folder per test process, so <see cref="TempWorldsCleanup"/> can remove whatever a case left
+    /// behind, and a sharded run's processes never share one.
+    /// </summary>
+    public static readonly string Root = Path.Combine(
+        Path.GetTempPath(), "typhon-swg-realms", $"{Environment.ProcessId}-{Guid.NewGuid():N}");
+
     public static string NewDirectory()
     {
-        var dir = Path.Combine(Path.GetTempPath(), "typhon-swg-realms", Guid.NewGuid().ToString("N"));
+        var dir = Path.Combine(Root, Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
         return dir;
     }
 
+    /// <summary>Removes a world's directory; a case calls it from its teardown, which NUnit runs whether the case passed or not.</summary>
+    /// <param name="dir">The directory <see cref="NewDirectory"/> handed out.</param>
+    /// <remarks>
+    /// <b>Retried once after a collection, and said out loud when it still fails.</b> A database file still mapped by a handle waiting for its
+    /// finalizer refuses the delete; swallowing that silently is how 768 directories and 12 GB built up in <c>%TEMP%</c> unnoticed. What
+    /// survives is removed with <see cref="Root"/> at the end of the run, and counted there.
+    /// </remarks>
     public static void Delete(string dir)
     {
-        try
+        if (string.IsNullOrEmpty(dir))
         {
-            if (Directory.Exists(dir))
-            {
-                Directory.Delete(dir, recursive: true);
-            }
+            return;
         }
-        catch (IOException)
+
+        for (var attempt = 0; attempt < 2; attempt++)
         {
-            // best effort: a file still mapped by a finalizer-pending handle is removed with the temp directory later
+            try
+            {
+                if (Directory.Exists(dir))
+                {
+                    Directory.Delete(dir, recursive: true);
+                }
+
+                return;
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                if (attempt == 0)
+                {
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+                    continue;
+                }
+
+                TestContext.Progress.WriteLine($"could not delete the world at {dir}: {e.Message} (left for the end-of-run sweep)");
+            }
         }
     }
 

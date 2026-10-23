@@ -163,13 +163,17 @@ public sealed partial class TatooineSim
         };
 
         var total = _config.WarmTicks + _config.MeasuredTicks;
+
+        // Ticks are numbered from 0, so tick `total` is the first one past the request: the exact stop (SimBridge.HaltAtTick).
+        _bridge.HaltAtTick = total;
         var gcBefore = GcSnapshot.Take();
         _runtime.Start();
 
         // Poll rather than sleep for a computed duration: a tick that overruns would make a duration-based wait stop
-        // early and measure fewer ticks than it reported.
+        // early and measure fewer ticks than it reported. An aborted tick ends the wait too: AbortTickAndStop stops the runtime, so the count can
+        // never be reached and the loop used to sit out the whole deadline — eighteen seconds for a forty-tick run.
         var deadline = DateTime.UtcNow.AddSeconds(10 + (total * 2.0 / Math.Max(1, _config.TickRateHz)));
-        while (_runtime.CurrentTickNumber < total && DateTime.UtcNow < deadline)
+        while (_runtime.CurrentTickNumber < total && DateTime.UtcNow < deadline && TickAbort == null)
         {
             Thread.Sleep(5);
         }
@@ -178,8 +182,8 @@ public sealed partial class TatooineSim
         _runtime.Shutdown();
 
         // Unpaced, the loop keeps ticking between the poll above noticing the count and Shutdown actually landing, so a run executes AT LEAST `total` ticks
-        // and an unknown number more. Two runs of the same seed therefore end in different states. The measured window is clamped to `total` below so at
-        // least the denominator is the same every run; an exact stop needs a tick limit the runtime does not offer (reported as an engine gap).
+        // and an unknown number more. Those simulate nothing (SimBridge.HaltAtTick), so two runs of one seed end in the same world; the measured window is
+        // clamped to `total` below so the timing denominator is the same too.
         Executed = _runtime.CurrentTickNumber;
         LastGc = GcSnapshot.Take() - gcBefore;
 
@@ -197,6 +201,51 @@ public sealed partial class TatooineSim
         LastStats = _bridge.DrainStats();
         return result;
     }
+
+    /// <summary>Writes staged from outside the tick; see <see cref="WriteInTick(Action{Transaction, long})"/>.</summary>
+    public StagedWrites Staged { get; } = new();
+
+    private bool _drainsStagedWrites;
+
+    /// <summary>
+    /// Writes to the world from a thread outside the tick, the one way that is allowed: with no runtime yet, directly; with one ticking, staged and
+    /// applied by a tick, and this waits for it.
+    /// </summary>
+    /// <param name="write">The write, given a transaction it must not commit — that is done for it — and the tick it runs on (-1 with no runtime).</param>
+    /// <returns>The tick that applied it, or -1 when no runtime was running.</returns>
+    /// <remarks>
+    /// <b>EW-02</b>: a thread outside the DAG must never write a spatial archetype, and every placement is one. A quick transaction from the test thread
+    /// while the server ticked raced the fence — measured, a CR-05 abort in two runs of three at 50 Hz. Only a serving run drains staged writes; a measured
+    /// run has no outside caller, so asking during one is a mistake reported as one.
+    /// </remarks>
+    public long WriteInTick(Action<Transaction, long> write)
+    {
+        ArgumentNullException.ThrowIfNull(write);
+        if (_runtime == null)
+        {
+            using var tx = Dbe.CreateQuickTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit);
+            write(tx, -1);
+            if (!tx.Commit())
+            {
+                throw new InvalidOperationException("a write made before the runtime started did not commit");
+            }
+
+            return -1;
+        }
+
+        if (!_drainsStagedWrites)
+        {
+            throw new InvalidOperationException("this runtime is a measured run, which drains no staged writes: write before Run, or serve");
+        }
+
+        return Staged.Apply(
+            write,
+            () => TickAbort is { } abort ? abort.Fault ?? new InvalidOperationException($"tick {abort.Tick} aborted in {abort.SystemName}: {abort.Reason}") : null,
+            TimeSpan.FromSeconds(10));
+    }
+
+    /// <inheritdoc cref="WriteInTick(Action{Transaction, long})"/>
+    public long WriteInTick(Action<Transaction> write) => WriteInTick((tx, _) => write(tx));
 
     /// <summary>The crash artefact this run wrote, or <see langword="null"/> when it did not crash (P-3).</summary>
     public string CrashArtefactPath { get; private set; }
@@ -665,6 +714,8 @@ public sealed partial class TatooineSim
         if (replicating)
         {
             dag.Add(new PlayerSessionSystem());
+            dag.Add(new StagedWriteSystem(Staged));
+            _drainsStagedWrites = true;
             dag.Add(new ReplicationReportSystem());
 
             // The realm inventory's population (CLI3D-11). Here rather than beside SpatialTelemetry so a measured run

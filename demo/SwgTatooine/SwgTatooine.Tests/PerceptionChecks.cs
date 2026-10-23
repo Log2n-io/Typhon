@@ -26,44 +26,23 @@ namespace SwgTatooine.Tests;
 [Category("Integration")]
 [TestFixture]
 [NonParallelizable]
-public sealed class PerceptionChecks
+internal sealed class PerceptionChecks : ServedChecks
 {
-    private string _dir;
-    private SessionHarness _harness;
-
-    [SetUp]
-    public void SetUp()
-    {
-        _dir = Worlds.NewDirectory();
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-    }
-
-    [TearDown]
-    public void TearDown()
-    {
-        _harness?.Release();
-        _harness = null;
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-        Worlds.Delete(_dir);
-    }
-
     /// <summary>Standing at a port, a bot sees its own body, learns the port, and knows it can board.</summary>
     [Test]
     [CancelAfter(90_000)]
     [Category("Integration")]
     public void StandingAtAPortItLearnsThePortAndKnowsItCanBoard()
     {
-        using var sim = new TatooineSim(Worlds.Small(_dir));
+        using var sim = new TatooineSim(Worlds.Served(Dir));
         sim.Initialize();
-        _harness = new SessionHarness(sim);
+        Harness = new SessionHarness(sim);
         var link = Connect();
 
         const int From = 0;
         var port = sim.Index.Shuttleports[From];
         Worlds.Park(sim, link.Session, port.X, port.Z);
-        _harness.Ticks(6);
+        Harness.Ticks(6);
 
         var store = new WorldStore(link.Plan);
         var eyes = new Perception();
@@ -96,14 +75,14 @@ public sealed class PerceptionChecks
     [Category("Integration")]
     public void WalkingOutOfRangeForgetsTheProximityAndNotThePort()
     {
-        using var sim = new TatooineSim(Worlds.Small(_dir));
+        using var sim = new TatooineSim(Worlds.Served(Dir));
         sim.Initialize();
-        _harness = new SessionHarness(sim);
+        Harness = new SessionHarness(sim);
         var link = Connect();
 
         var port = sim.Index.Shuttleports[0];
         Worlds.Park(sim, link.Session, port.X, port.Z);
-        _harness.Ticks(6);
+        Harness.Ticks(6);
 
         var store = new WorldStore(link.Plan);
         var eyes = new Perception();
@@ -112,7 +91,7 @@ public sealed class PerceptionChecks
 
         // Well outside ShuttleBoardM, still inside the sphere that delivers the port.
         Worlds.Park(sim, link.Session, port.X + 60f, port.Z);
-        _harness.Ticks(6);
+        Harness.Ticks(6);
         var away = Replay(link, store, eyes, facilities);
 
         Assert.Multiple(() =>
@@ -132,10 +111,10 @@ public sealed class PerceptionChecks
     /// </remarks>
     private FakeLink Connect()
     {
-        var link = _harness.Connect(TatooineReplication.PlayerKind);
+        var link = Harness.Connect(TatooineReplication.PlayerKind);
         SessionHarness.Until(() => link.Received(MessageTypes.Welcome), "WELCOME");
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the possession to be claimed by a tick");
-        _harness.Ticks(2);
+        Harness.Ticks(2);
         return link;
     }
 

@@ -27,9 +27,9 @@ public sealed partial class SimBridge
     /// </remarks>
     public void CreatureThinkTick(TickContext ctx)
     {
-        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
-        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
-        if (TatooineReplication.SimulationPaused)
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control), or past a measured run's last tick (Halted). The simulation does nothing;
+        // replication, the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (Halted(ctx.TickNumber))
         {
             return;
         }
@@ -528,9 +528,9 @@ public sealed partial class SimBridge
     /// </remarks>
     public void PlayerThinkTick(TickContext ctx)
     {
-        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
-        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
-        if (TatooineReplication.SimulationPaused)
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control), or past a measured run's last tick (Halted). The simulation does nothing;
+        // replication, the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (Halted(ctx.TickNumber))
         {
             return;
         }
@@ -793,9 +793,9 @@ public sealed partial class SimBridge
     /// <summary>Integrate creature positions. The only creature system that writes a placement component.</summary>
     public void CreatureMoveTick(TickContext ctx)
     {
-        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
-        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
-        if (TatooineReplication.SimulationPaused)
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control), or past a measured run's last tick (Halted). The simulation does nothing;
+        // replication, the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (Halted(ctx.TickNumber))
         {
             return;
         }
@@ -910,9 +910,9 @@ public sealed partial class SimBridge
     /// <summary>Integrate player positions.</summary>
     public void PlayerMoveTick(TickContext ctx)
     {
-        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
-        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
-        if (TatooineReplication.SimulationPaused)
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control), or past a measured run's last tick (Halted). The simulation does nothing;
+        // replication, the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (Halted(ctx.TickNumber))
         {
             return;
         }
@@ -1218,9 +1218,9 @@ public sealed partial class SimBridge
     /// </remarks>
     public void NpcMoveTick(TickContext ctx)
     {
-        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
-        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
-        if (TatooineReplication.SimulationPaused)
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control), or past a measured run's last tick (Halted). The simulation does nothing;
+        // replication, the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (Halted(ctx.TickNumber))
         {
             return;
         }
@@ -1637,9 +1637,9 @@ public sealed partial class SimBridge
     /// </remarks>
     public void EconomyTick(TickContext ctx)
     {
-        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
-        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
-        if (TatooineReplication.SimulationPaused)
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control), or past a measured run's last tick (Halted). The simulation does nothing;
+        // replication, the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (Halted(ctx.TickNumber))
         {
             return;
         }

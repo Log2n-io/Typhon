@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Net;
+using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using NUnit.Framework;
@@ -16,16 +18,55 @@ namespace SwgTatooine.Tests;
 /// Stop in the middle of a ramp, and starts a second run after the first — and each of those found something.
 /// </para>
 /// <para>
-/// <b>No server.</b> Every case here either needs no connection or wants the failure, so the endpoint points at a closed port on
-/// loopback. That keeps them fast and keeps them about the runner rather than about the demo: the cases that need a real server and
+/// <b>No server.</b> Every case here either needs no connection or wants the failure, so the endpoint is a loopback listener that
+/// hangs up on every connection. That keeps them about the runner rather than about the demo: the cases that need a real server and
 /// real accounts are <see cref="BotProvisionerChecks"/>'s.
 /// </para>
 /// </remarks>
 [TestFixture]
 internal sealed class FleetRunnerChecks
 {
-    /// <summary>An endpoint nothing is listening on, so a ramp fails fast and deterministically.</summary>
-    private const string Nowhere = "ws://127.0.0.1:1/ws";
+    /// <summary>An endpoint that hangs up on every connection, so a ramp fails fast and deterministically.</summary>
+    /// <remarks>
+    /// <b>Not a closed port, which is what it was, because on Windows a refused loopback connect is not fast.</b> The stack retries the SYN before it
+    /// believes the reset — about two seconds a connect — and that was this fixture's twenty seconds. A listener that accepts and closes fails the
+    /// WebSocket handshake at once, and a failed handshake is all any case here asks for.
+    /// </remarks>
+    private static string Nowhere => $"ws://127.0.0.1:{((IPEndPoint)_hangUp.LocalEndpoint).Port}/ws";
+
+    private static TcpListener _hangUp;
+    private static CancellationTokenSource _hangingUp;
+
+    [OneTimeSetUp]
+    public void StartHangingUp()
+    {
+        _hangUp = new TcpListener(IPAddress.Loopback, 0);
+        _hangUp.Start();
+        _hangingUp = new CancellationTokenSource();
+        var ct = _hangingUp.Token;
+        _ = Task.Run(async () =>
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    using var socket = await _hangUp.AcceptSocketAsync(ct);
+                }
+                catch (Exception)
+                {
+                    return;   // stopped
+                }
+            }
+        });
+    }
+
+    [OneTimeTearDown]
+    public void StopHangingUp()
+    {
+        _hangingUp.Cancel();
+        _hangUp.Stop();
+        _hangingUp.Dispose();
+    }
 
     /// <summary>A god fleet needs no accounts and no key, which is what makes the panel usable with nothing configured.</summary>
     [Test]
@@ -74,8 +115,9 @@ internal sealed class FleetRunnerChecks
     public async Task AFleetThatOpensNothingFaultsAndStaysRestartable()
     {
         await using var runner = new FleetRunner();
-        // One bot: the contract under test is "faults, says so, stays restartable", which a single refused connect proves.
-        var settings = new FleetSettings { Kind = "god", Endpoint = Nowhere, Count = 1, ConnectRatePerSecond = 100 };
+        // One bot: the contract under test is "faults, says so, stays restartable", which a single refused connect proves. The rate is high because a
+        // ramp opens a chunk of 250 every 250 / rate seconds and gives up after three empty rounds: at 100 a second that was 5 s per attempt.
+        var settings = new FleetSettings { Kind = "god", Endpoint = Nowhere, Count = 1, ConnectRatePerSecond = 100_000 };
 
         Assert.That(async () => await runner.StartAsync(settings), Throws.InstanceOf<Exception>());
 
@@ -123,8 +165,8 @@ internal sealed class FleetRunnerChecks
     {
         await using var runner = new FleetRunner();
 
-        // Eight, not sixty-four: a refused connect costs about two seconds and the batches are paced, so a larger population buys
-        // no extra coverage and cost this fixture fourteen seconds of the suite's budget.
+        // Eight, not sixty-four: a larger population buys no extra coverage. The rate is the ramp's length — three empty rounds of
+        // 250 / 500 s, about a second — which is the window the reader races.
         var settings = new FleetSettings { Kind = "god", Endpoint = Nowhere, Count = 8, ConnectRatePerSecond = 500 };
 
         using var reading = new CancellationTokenSource();

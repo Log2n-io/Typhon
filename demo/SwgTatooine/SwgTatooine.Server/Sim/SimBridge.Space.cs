@@ -29,9 +29,9 @@ public sealed partial class SimBridge
     /// <summary>Integrate every starship one tick towards its waypoint, picking a new one on arrival, and write the moved ones in one batch per cluster.</summary>
     public void ShipMoveTick(TickContext ctx)
     {
-        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
-        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
-        if (TatooineReplication.SimulationPaused)
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control), or past a measured run's last tick (Halted). The simulation does nothing;
+        // replication, the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (Halted(ctx.TickNumber))
         {
             return;
         }
@@ -101,9 +101,9 @@ public sealed partial class SimBridge
     /// <summary>A tenth of the fleet each tick scans a sphere around itself, in its own realm — a deep-grid 3D query.</summary>
     public void ShipScanTick(TickContext ctx)
     {
-        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
-        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
-        if (TatooineReplication.SimulationPaused)
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control), or past a measured run's last tick (Halted). The simulation does nothing;
+        // replication, the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (Halted(ctx.TickNumber))
         {
             return;
         }

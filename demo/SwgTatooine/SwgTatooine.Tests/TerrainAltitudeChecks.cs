@@ -32,6 +32,9 @@ public sealed class TerrainAltitudeChecks
     [SetUp]
     public void SetUp() => _dir = Worlds.NewDirectory();
 
+    [TearDown]
+    public void TearDown() => Worlds.Delete(_dir);
+
     [Test]
     public void EveryPlanetPlacementStandsOnTheGround()
     {

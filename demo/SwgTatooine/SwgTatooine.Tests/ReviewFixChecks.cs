@@ -23,6 +23,9 @@ public sealed class ReviewFixChecks
     [SetUp]
     public void SetUp() => _dir = Worlds.NewDirectory();
 
+    [TearDown]
+    public void TearDown() => Worlds.Delete(_dir);
+
     /// <summary>A rebuild refuses an index that is already filled, rather than appending a second of everything.</summary>
     /// <remarks>
     /// "Must be empty" was a doc comment and nothing else. A second call appends a second copy of every city, POI,

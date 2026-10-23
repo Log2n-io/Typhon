@@ -160,12 +160,7 @@ public sealed class RealmClosedChecks
 
     private SimConfig Config()
     {
-        var config = Worlds.Small(_dir);
-        config.Unpaced = false;
-
-        // 40 Hz for the same reason SpectateChecks uses it: every Ticks(1) here is a real wall-clock wait. One dungeon slot, reserved and left unregistered,
-        // is what this case registers into.
-        config.TickRateHz = 40;
+        var config = Worlds.Served(_dir);
         config.WorkerCount = 1;
         // TWO slots, and this case uses the second. The simulation opens one on its very first tick (the next-dungeon tick starts at 0), so slot 0 is never
         // free to a test; the interval and the stay are pushed past any run of this fixture so that the one it does open neither closes nor is followed by

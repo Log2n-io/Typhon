@@ -97,37 +97,46 @@ public sealed class RunHygieneChecks
     /// The shuttle arrival report is five counters, and they add up.
     /// </summary>
     /// <remarks>
-    /// <para>
     /// <b>Bounded by construction, not by a cap.</b> The <c>List&lt;int&gt;</c> this replaced took one entry per port that saw an arrival, every tick, for the
     /// life of the process — and the report needs a total, a count, a maximum and two thresholds, none of which needs the samples kept. Five scalars cannot
     /// grow, which is a stronger guarantee than a cap a test could measure, so what is asserted here is that they are CORRECT: a bound over a wrong number is
-    /// not progress.
-    /// </para>
-    /// <para>
-    /// <b>The world is bigger and the run longer than elsewhere here, because an arrival is not cheap to provoke.</b> A player decides to travel only while
-    /// it is inside a city, then walks to its port, and after arriving it idles for <c>200 × TickRateHz</c> ticks — so at the fixture's 0.05 population scale
-    /// a two-thousand-tick run produced exactly one arrival, and a case asserting over that would have been reporting on a world in which nothing happened.
-    /// </para>
-    /// <para>
-    /// <b>The most expensive case in the suite, and the cost is what the assertions cost.</b> Every weaker world leaves one of the five counters unexercised —
-    /// see the population comment below for the measurements. A cheaper case that asserted only the three easy ones would name five numbers and check three.
-    /// </para>
+    /// not progress. Groups placed on either side of each threshold, because that is where a counter that is wrong is wrong.
+    /// </remarks>
+    [Test]
+    public void TheArrivalReportIsFiveCountersThatAddUp()
+    {
+        var arrivals = default(ArrivalCounters);
+        foreach (var landed in new[] { 0, 1, 15, 16, 63, 64, 3, 0 })
+        {
+            arrivals.Record(landed);
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(arrivals.Total, Is.EqualTo(162), "every player landed is counted once");
+            Assert.That(arrivals.PortTicks, Is.EqualTo(6), "a tick that landed nobody is not a port-tick");
+            Assert.That(arrivals.Largest, Is.EqualTo(64));
+            Assert.That(arrivals.AtLeast16, Is.EqualTo(3), "16, 63 and 64: the threshold is inclusive and 15 is under it");
+            Assert.That(arrivals.AtLeast64, Is.EqualTo(1), "64 and not 63");
+        });
+    }
+
+    /// <summary>A running world feeds the arrival report: shuttles land players and the counters see them.</summary>
+    /// <remarks>
+    /// What <see cref="TheArrivalReportIsFiveCountersThatAddUp"/> cannot see is whether the shuttle path calls them at all. A player decides to travel only
+    /// while it is inside a city, then walks to its port, so the shuttles run every two seconds with every player a traveller. Measured at this size: seven
+    /// arrivals in thirty seconds of world, under a second of wall clock.
     /// </remarks>
     [Test]
     [Category("Integration")]
-    public void TheArrivalReportIsFiveCountersThatAddUp()
+    public void ARunningWorldFeedsTheArrivalReport()
     {
         var config = Config();
         config.Unpaced = true;
         config.TickRateHz = 10;
-
-        // Sixteen times the fixture's population, because the THRESHOLD counters need a burst of sixteen at one port and smaller worlds do not produce one:
-        // measured, pop 0.5 gives a largest burst of 2 and pop 2 gives 7, so `AtLeast16` stayed 0 and every assertion about it held with the counter deleted.
-        // Pop 6 gave 19 until the shuttleport moved to its city's centre (2026-10-22): every player's walk to the port changed with it and the largest burst
-        // fell to 13, which is the counter being honest about a different world rather than a counter that broke. Re-measured at pop 8.
-        config.PopulationScale = 8f;
+        config.PopulationScale = 0.2f;
         config.WarmTicks = 0;
-        config.MeasuredTicks = 600;
+        config.MeasuredTicks = 300;
         config.ShuttleIntervalS = 2f;
         config.BoardingWindowS = 1f;
         config.ShuttleShare = 1f;
@@ -140,13 +149,9 @@ public sealed class RunHygieneChecks
         var arrivals = sim.Bridge.ArrivalSummary;
         Assert.Multiple(() =>
         {
-            Assert.That(arrivals.Total, Is.GreaterThan(0), "no shuttle landed, so the counters were never exercised");
+            Assert.That(arrivals.Total, Is.GreaterThan(0), "no shuttle landed anyone, so the report was never fed");
             Assert.That(arrivals.PortTicks, Is.GreaterThan(0).And.LessThanOrEqualTo(arrivals.Total), "a port-tick with an arrival carries at least one");
-            Assert.That(arrivals.Largest, Is.GreaterThanOrEqualTo(16).And.LessThanOrEqualTo(arrivals.Total),
-                "no burst reached 16, so the threshold counters below are asserting over two zeros");
-            Assert.That(arrivals.AtLeast16, Is.GreaterThan(0).And.LessThanOrEqualTo(arrivals.PortTicks),
-                "a threshold counts port-ticks, so it cannot exceed them");
-            Assert.That(arrivals.AtLeast64, Is.LessThanOrEqualTo(arrivals.AtLeast16), "every burst of 64 is a burst of 16");
+            Assert.That(arrivals.Largest, Is.GreaterThan(0).And.LessThanOrEqualTo(arrivals.Total));
         });
     }
 

@@ -28,34 +28,11 @@ namespace SwgTatooine.Tests;
 [Category("Integration")]
 [TestFixture]
 [NonParallelizable]
-public sealed class PauseChecks
+internal sealed class PauseChecks : ServedChecks
 {
-    private string _dir;
-    private SessionHarness _harness;
-
-    [SetUp]
-    public void SetUp()
-    {
-        _dir = Worlds.NewDirectory();
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-    }
-
-    [TearDown]
-    public void TearDown()
-    {
-        _harness?.Release();
-        _harness = null;
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-        Worlds.Delete(_dir);
-    }
-
     private SimConfig Config()
     {
-        var config = Worlds.Small(_dir);
-        config.Unpaced = false;
-        config.TickRateHz = 10;
+        var config = Worlds.Served(Dir);
         config.WorkerCount = 1;
         return config;
     }
@@ -100,14 +77,14 @@ public sealed class PauseChecks
     {
         using var sim = new TatooineSim(Config());
         sim.Initialize();
-        _harness = new SessionHarness(sim);
-        var link = _harness.Connect(TatooineReplication.GodKind);
+        Harness = new SessionHarness(sim);
+        var link = Harness.Connect(TatooineReplication.GodKind);
         SessionHarness.Until(() => link.Received(MessageTypes.Welcome), "WELCOME");
-        _harness.Ticks(10);
+        Harness.Ticks(10);
 
         // Running: something must move, or the rest of this proves nothing.
         var a = Positions(sim);
-        _harness.Ticks(10);
+        Harness.Ticks(10);
         var b = Positions(sim);
         Assert.That(Moved(a, b), Is.GreaterThan(0), "nothing moved in a running world, so this cannot tell a pause from a calm");
 
@@ -115,9 +92,9 @@ public sealed class PauseChecks
         SessionHarness.Until(() => TatooineReplication.SimulationPaused, "the pause to be applied by a tick");
 
         // A tick to let whatever was already in flight land, then the window the world must sit still through.
-        _harness.Ticks(2);
+        Harness.Ticks(2);
         var c = Positions(sim);
-        _harness.Ticks(20);
+        Harness.Ticks(20);
         var d = Positions(sim);
         Assert.That(Moved(c, d), Is.Zero, "an entity moved while the simulation was paused: a system is not gated");
 
@@ -126,7 +103,7 @@ public sealed class PauseChecks
 
         // THE deadlock check: the resume arrived at all. A gated session system would never have drained it, and the
         // wait above would have timed out rather than reaching here.
-        _harness.Ticks(20);
+        Harness.Ticks(20);
         var e = Positions(sim);
         Assert.That(Moved(d, e), Is.GreaterThan(0), "the world did not restart after a resume");
     }
@@ -137,17 +114,17 @@ public sealed class PauseChecks
     {
         using var sim = new TatooineSim(Config());
         sim.Initialize();
-        _harness = new SessionHarness(sim);
-        var link = _harness.Connect(TatooineReplication.GodKind);
+        Harness = new SessionHarness(sim);
+        var link = Harness.Connect(TatooineReplication.GodKind);
         SessionHarness.Until(() => link.Received(MessageTypes.Welcome), "WELCOME");
-        _harness.Ticks(10);
+        Harness.Ticks(10);
 
         link.SendCommand("SetPaused", new RecordValues { ["paused"] = FieldValue.Of(1) });
         SessionHarness.Until(() => TatooineReplication.SimulationPaused, "the pause to be applied by a tick");
 
         var tickBefore = sim.Runtime.CurrentTickNumber;
         var framesBefore = link.Sent.Length;
-        _harness.Ticks(20);
+        Harness.Ticks(20);
 
         Assert.Multiple(() =>
         {
@@ -167,13 +144,13 @@ public sealed class PauseChecks
     {
         using var sim = new TatooineSim(Config());
         sim.Initialize();
-        _harness = new SessionHarness(sim);
-        var link = _harness.Connect(TatooineReplication.PlayerKind);
+        Harness = new SessionHarness(sim);
+        var link = Harness.Connect(TatooineReplication.PlayerKind);
         SessionHarness.Until(() => link.Received(MessageTypes.Welcome), "WELCOME");
-        _harness.Ticks(10);
+        Harness.Ticks(10);
 
         link.SendCommand("SetPaused", new RecordValues { ["paused"] = FieldValue.Of(1) });
-        _harness.Ticks(20);
+        Harness.Ticks(20);
 
         // Roles(SessionRole.Spectator): the engine refuses it for a player before the system ever sees it. Narrow, and
         // still nowhere near narrow enough for a real server — see SetPaused's own remarks.

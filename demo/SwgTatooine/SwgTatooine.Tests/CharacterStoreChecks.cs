@@ -39,9 +39,17 @@ internal sealed class CharacterStoreChecks
     /// <summary>A spawn point in the open, far from the origin so a zeroed position is not mistaken for a saved one.</summary>
     private static readonly Point3F Somewhere = new() { X = 1234.5f, Y = 7.5f, Z = -678.25f };
 
+    /// <summary>The work factor before this fixture lowered it.</summary>
+    private int _iterations;
+
     [SetUp]
     public void SetUp()
     {
+        // The floor, not the 600 000 default: nothing here is about the hash, and at the default the two hundred signups of
+        // EveryAccountResolvesToItsOwnCharacter were nine seconds of PBKDF2. The factor is stored per account, so this changes no check.
+        _iterations = PasswordHash.Iterations;
+        PasswordHash.Iterations = PasswordHash.MinimumIterations;
+
         _dir = Worlds.NewDirectory();
         var config = Worlds.Small(_dir);
         config.WarmTicks = 0;
@@ -56,6 +64,7 @@ internal sealed class CharacterStoreChecks
         _sim?.Dispose();
         _sim = null;
         Worlds.Delete(_dir);
+        PasswordHash.Iterations = _iterations;
     }
 
     private DatabaseEngine Dbe => _sim.Dbe;

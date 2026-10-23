@@ -28,36 +28,13 @@ namespace SwgTatooine.Tests;
 [Category("Integration")]
 [TestFixture]
 [NonParallelizable]
-internal sealed class AvatarLoginChecks
+internal sealed class AvatarLoginChecks : ServedChecks
 {
-    private const int TickRateHz = 50;
-
-    private string _dir;
-    private SessionHarness _harness;
-
-    [SetUp]
-    public void SetUp()
-    {
-        _dir = Worlds.NewDirectory();
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-    }
-
-    [TearDown]
-    public void TearDown()
-    {
-        _harness?.Release();
-        _harness = null;
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-        Worlds.Delete(_dir);
-    }
+    private const int TickRateHz = Worlds.ServedHz;
 
     private SimConfig Config(bool persist = false, double saveIntervalS = TatooineReplication.DefaultSaveIntervalSeconds)
     {
-        var config = Worlds.Small(_dir);
-        config.Unpaced = false;
-        config.TickRateHz = TickRateHz;
+        var config = Worlds.Served(Dir);
         config.Persist = persist;
         config.AvatarSaveIntervalS = saveIntervalS;
         return config;
@@ -73,7 +50,7 @@ internal sealed class AvatarLoginChecks
     {
         var sim = new TatooineSim(config);
         sim.Initialize();
-        _harness = new SessionHarness(sim);
+        Harness = new SessionHarness(sim);
         return sim;
     }
 
@@ -84,12 +61,12 @@ internal sealed class AvatarLoginChecks
     /// <returns>The link and the avatar.</returns>
     private (FakeLink Link, EntityId Avatar) LogIn(TatooineSim sim, EntityId account, long expectedBindings = 1)
     {
-        var link = _harness.Connect(TatooineReplication.PlayerKind, account);
+        var link = Harness.Connect(TatooineReplication.PlayerKind, account);
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= expectedBindings, "the avatar to be spawned");
 
         // The bind stages a Control request, which the engine applies in the NEXT tick's prologue — so a case that read the session's
         // subject on the binding tick would see nothing and be right to.
-        _harness.Ticks(2);
+        Harness.Ticks(2);
 
         var avatar = TatooineReplication.ControlledBy(sim.Dbe, link.Session);
         Assert.That(avatar, Is.Not.EqualTo(EntityId.Null), "the session was given no body");
@@ -165,9 +142,10 @@ internal sealed class AvatarLoginChecks
     {
         var start = Where(sim, avatar);
 
-        // Far enough that one tick cannot reach it, so the avatar is genuinely in motion when the ticks below run.
+        // Far enough that one tick cannot reach it, so the avatar is genuinely in motion when the ticks below run. Twenty ticks is two metres at
+        // a walk, twice the floor asserted below.
         link.SendCommand(nameof(MoveTo), ClientSays.MoveTo(start.X + 500f, start.Z + 500f));
-        _harness.Ticks(40);
+        Harness.Ticks(20);
 
         var moved = Where(sim, avatar);
         var travelled = MathF.Sqrt(((moved.X - start.X) * (moved.X - start.X)) + ((moved.Z - start.Z) * (moved.Z - start.Z)));
@@ -221,7 +199,7 @@ internal sealed class AvatarLoginChecks
 
         var points = new List<(float X, float Z)>();
         var towns = new HashSet<string>();
-        for (ulong i = 0; i < 24; i++)
+        for (ulong i = 0; i < 12; i++)
         {
             var (_, avatar) = LogIn(sim, AnAccount(0x6100 + i), expectedBindings: (long)i + 1);
             var at = Where(sim, avatar);
@@ -250,9 +228,10 @@ internal sealed class AvatarLoginChecks
             // here rather than quietly stack the crowd again.
             Assert.That(closest, Is.GreaterThan(1f), "the arrivals are spread, not jittered by centimetres");
 
-            // <b>More than one town, which is the behaviour this test is named for.</b> Twenty-four accounts against weights whose
+            // <b>More than one town, which is the behaviour this test is named for.</b> Twelve accounts against weights whose
             // smallest is 5 % will not reach all seven reliably, and a test that demanded seven would be asserting the sampler's luck
-            // rather than the distribution — so the claim is that arrivals are not all in one place.
+            // rather than the distribution — so the claim is that arrivals are not all in one place, which twelve settle as well as
+            // twenty-four did at half the logins.
             Assert.That(towns, Has.Count.GreaterThan(1), "arrivals must be distributed across towns, not stacked in the capital");
         });
     }
@@ -326,7 +305,7 @@ internal sealed class AvatarLoginChecks
 
         first.Close(CloseCodes.Normal, "logging out");
         SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed >= 1, "the avatar to be saved and destroyed");
-        _harness.Ticks(2);
+        Harness.Ticks(2);
 
         var (_, second) = LogIn(sim, account, expectedBindings: 2);
         var back = Where(sim, second);
@@ -368,8 +347,8 @@ internal sealed class AvatarLoginChecks
 
             link.Close(CloseCodes.Normal, "logging out");
             SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed >= 1, "the avatar to be saved and destroyed");
-            _harness.Ticks(2);
-            _harness.Release();
+            Harness.Ticks(2);
+            Harness.Release();
         }
 
         TatooineReplication.ResetSessionAccounting();
@@ -405,10 +384,10 @@ internal sealed class AvatarLoginChecks
 
         var (incumbent, avatar) = LogIn(sim, account);
 
-        var intruder = _harness.Connect(TatooineReplication.PlayerKind, account);
+        var intruder = Harness.Connect(TatooineReplication.PlayerKind, account);
         SessionHarness.Until(() => TatooineReplication.LoginsRefusedDuplicate >= 1, "the second session for one account to be refused");
         SessionHarness.Until(() => intruder.Closed != null, "the refused session's link to be closed");
-        _harness.Ticks(3);
+        Harness.Ticks(3);
 
         Assert.Multiple(() =>
         {
@@ -455,7 +434,7 @@ internal sealed class AvatarLoginChecks
 
         link.Close(CloseCodes.Normal, "leaving");
         SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed >= 1, "the avatar to go");
-        _harness.Ticks(3);
+        Harness.Ticks(3);
 
         var after = Census(sim);
         Assert.Multiple(() =>
@@ -475,8 +454,8 @@ internal sealed class AvatarLoginChecks
     /// "where you were" silently becomes "where you started"; and a binding left in the maps means an account can never log in again.
     /// </para>
     /// <para>
-    /// Twenty rather than the criterion's fifty, because each round trip costs several ticks of a real runtime and the suite's budget
-    /// is seconds. Fifty belongs in the phase-exit run against a live server, with the Workbench attached — which is W5's job and is
+    /// Ten rather than the criterion's fifty, because each round trip costs several ticks of a real runtime and the suite's budget
+    /// is seconds — and every count asserted here is exact, so a leak is off by one from the first round it happens in. Fifty belongs in the phase-exit run against a live server, with the Workbench attached — which is W5's job and is
     /// where the criterion is actually met.
     /// </para>
     /// </remarks>
@@ -485,7 +464,7 @@ internal sealed class AvatarLoginChecks
     [Category("Integration")]
     public void ManyLoginsAndLogouts_LeakNothing()
     {
-        const int rounds = 20;
+        const int rounds = 10;
 
         // The cadence is OFF for this case, so LocationsSaved counts logouts and nothing else. With it on, the assertion below is
         // timing-dependent: this case spins real ticks waiting on each round, and a slower run crosses the save interval and records
@@ -503,10 +482,10 @@ internal sealed class AvatarLoginChecks
 
             link.Close(CloseCodes.Normal, "round over");
             SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed >= i + 1, $"round {i}'s avatar to be destroyed");
-            _harness.Ticks(2);
+            Harness.Ticks(2);
         }
 
-        _harness.Ticks(4);
+        Harness.Ticks(4);
         var after = Census(sim);
 
         Assert.Multiple(() =>
@@ -563,7 +542,7 @@ internal sealed class AvatarLoginChecks
         {
             // No wait between these two: that is the whole point of the case.
             link.Close(CloseCodes.Normal, "dropped");
-            var next = _harness.Connect(TatooineReplication.PlayerKind, account);
+            var next = Harness.Connect(TatooineReplication.PlayerKind, account);
 
             SessionHarness.Until(
                 () => next.Closed != null || TatooineReplication.ControlledBy(sim.Dbe, next.Session) != EntityId.Null,
@@ -604,11 +583,11 @@ internal sealed class AvatarLoginChecks
         var account = AnAccount(0x5008);
         var (first, _) = LogIn(sim, account);
 
-        var second = _harness.Connect(TatooineReplication.PlayerKind, account);
+        var second = Harness.Connect(TatooineReplication.PlayerKind, account);
         SessionHarness.Until(() => second.Closed != null, "the duplicate session to be refused");
 
         // Several more ticks: this is the window in which the second refusal used to arrive.
-        _harness.Ticks(6);
+        Harness.Ticks(6);
 
         Assert.Multiple(() =>
         {
@@ -645,11 +624,11 @@ internal sealed class AvatarLoginChecks
         for (var round = 0; round < rounds; round++)
         {
             // Connected and dropped with no tick in between, so the bind never sees it as anything but gone.
-            var link = _harness.Connect(TatooineReplication.PlayerKind);
+            var link = Harness.Connect(TatooineReplication.PlayerKind);
             link.Close(CloseCodes.Normal, "changed my mind");
         }
 
-        _harness.Ticks(6);
+        Harness.Ticks(6);
 
         var accounting = TatooineReplication.SessionAccounting;
         Assert.Multiple(() =>
@@ -687,15 +666,15 @@ internal sealed class AvatarLoginChecks
         {
             LogIn(first, account);
             Assert.That(Census(first).Human, Is.EqualTo(1), "the first run must have an avatar to orphan");
-            _harness.Ticks(8);
-            _harness.Release();
+            Harness.Ticks(8);
+            Harness.Release();
 
             // No logout and no shutdown: dropped the way a kill -9 drops it, with the avatar still in the world.
         }
 
         using var second = Start(Config(persist: true, saveIntervalS: 0d));
         Assert.That(second.Reopened, Is.True, "the second run did not reopen the first's database");
-        _harness.Ticks(4);
+        Harness.Ticks(4);
 
         var reopened = Census(second);
         Assert.That(reopened.Human, Is.Zero, "the reopened run came back with an avatar owned by a session that no longer exists");
@@ -748,7 +727,7 @@ internal sealed class AvatarLoginChecks
         Assert.That(Saved(sim, account).X, Is.EqualTo(spawned.X).Within(0.01f), "the cadence must not have saved anything yet");
 
         TatooineReplication.RequestShutdown("test stop");
-        _harness.Ticks(4);
+        Harness.Ticks(4);
 
         var saved = Saved(sim, account);
         Assert.Multiple(() =>
@@ -793,7 +772,7 @@ internal sealed class AvatarLoginChecks
         var walked = WalkAway(sim, link, avatar);
 
         // No logout. Enough ticks that the stagger cannot miss this one session's slot.
-        _harness.Ticks(12);
+        Harness.Ticks(12);
 
         var saved = Saved(sim, account);
         var drift = MathF.Sqrt(((saved.X - walked.X) * (saved.X - walked.X)) + ((saved.Z - walked.Z) * (saved.Z - walked.Z)));
@@ -826,7 +805,9 @@ internal sealed class AvatarLoginChecks
         var atLogin = Saved(sim, account);
 
         WalkAway(sim, link, avatar);
-        _harness.Ticks(30);
+
+        // The window the case above finds a save in, so the two cases watch the same ticks.
+        Harness.Ticks(12);
 
         Assert.Multiple(() =>
         {
@@ -837,7 +818,7 @@ internal sealed class AvatarLoginChecks
         // And the logout still saves, so turning the cadence off costs the cadence and nothing else.
         link.Close(CloseCodes.Normal, "leaving");
         SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed >= 1, "the logout to save and destroy");
-        _harness.Ticks(2);
+        Harness.Ticks(2);
 
         Assert.That(TatooineReplication.LocationsSaved, Is.EqualTo(1), "the logout must still write the position");
     }
@@ -873,8 +854,8 @@ internal sealed class AvatarLoginChecks
             walked = WalkAway(first, link, avatar);
 
             // Let the cadence run, then pull the plug: no Close, no logout, no clean shutdown of the session.
-            _harness.Ticks(12);
-            _harness.Release();
+            Harness.Ticks(12);
+            Harness.Release();
         }
 
         TatooineReplication.ResetSessionAccounting();

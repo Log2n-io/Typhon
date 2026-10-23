@@ -55,9 +55,9 @@ public sealed partial class SimBridge
     /// </remarks>
     public void PlayerCombatTick(TickContext ctx)
     {
-        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
-        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
-        if (TatooineReplication.SimulationPaused)
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control), or past a measured run's last tick (Halted). The simulation does nothing;
+        // replication, the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (Halted(ctx.TickNumber))
         {
             return;
         }
@@ -371,9 +371,9 @@ public sealed partial class SimBridge
     /// </remarks>
     public void CreatureCombatTick(TickContext ctx)
     {
-        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
-        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
-        if (TatooineReplication.SimulationPaused)
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control), or past a measured run's last tick (Halted). The simulation does nothing;
+        // replication, the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (Halted(ctx.TickNumber))
         {
             return;
         }
@@ -544,9 +544,9 @@ public sealed partial class SimBridge
     /// </remarks>
     public void CombatResolveTick(TickContext ctx)
     {
-        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
-        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
-        if (TatooineReplication.SimulationPaused)
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control), or past a measured run's last tick (Halted). The simulation does nothing;
+        // replication, the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (Halted(ctx.TickNumber))
         {
             return;
         }

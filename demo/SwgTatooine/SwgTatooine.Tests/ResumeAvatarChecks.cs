@@ -31,45 +31,22 @@ namespace SwgTatooine.Tests;
 [Category("Integration")]
 [TestFixture]
 [NonParallelizable]
-internal sealed class ResumeAvatarChecks
+internal sealed class ResumeAvatarChecks : ServedChecks
 {
-    private const int TickRateHz = 50;
+    private const int TickRateHz = Worlds.ServedHz;
 
     /// <summary>1001: what a browser sends when its tab closes, and what the engine reads as a link that went away on its own.</summary>
     private const ushort LinkDied = CloseCodes.GoingAway;
 
-    private string _dir;
-    private SessionHarness _harness;
-
-    [SetUp]
-    public void SetUp()
-    {
-        _dir = Worlds.NewDirectory();
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-    }
-
-    [TearDown]
-    public void TearDown()
-    {
-        _harness?.Release();
-        _harness = null;
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-        Worlds.Delete(_dir);
-    }
-
     private TatooineSim Start(double resumeGraceS = 60d, double saveIntervalS = TatooineReplication.DefaultSaveIntervalSeconds)
     {
-        var config = Worlds.Small(_dir);
-        config.Unpaced = false;
-        config.TickRateHz = TickRateHz;
+        var config = Worlds.Served(Dir);
         config.ResumeGraceS = resumeGraceS;
         config.AvatarSaveIntervalS = saveIntervalS;
 
         var sim = new TatooineSim(config);
         sim.Initialize();
-        _harness = new SessionHarness(sim);
+        Harness = new SessionHarness(sim);
         return sim;
     }
 
@@ -82,7 +59,7 @@ internal sealed class ResumeAvatarChecks
     /// <returns>The link and the avatar.</returns>
     private (FakeLink Link, EntityId Avatar) LogIn(TatooineSim sim, EntityId account, long expectedBindings = 1)
     {
-        var link = _harness.Connect(TatooineReplication.PlayerKind, account);
+        var link = Harness.Connect(TatooineReplication.PlayerKind, account);
         return Bound(sim, link, expectedBindings);
     }
 
@@ -96,7 +73,7 @@ internal sealed class ResumeAvatarChecks
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= expectedBindings, "the session to be given a body");
 
         // Control is staged and applied by the next tick's prologue, so a read on the binding tick would see nothing and be right to.
-        _harness.Ticks(2);
+        Harness.Ticks(2);
 
         var avatar = TatooineReplication.ControlledBy(sim.Dbe, link.Session);
         Assert.That(avatar, Is.Not.EqualTo(EntityId.Null), "the session was given no body");
@@ -134,7 +111,9 @@ internal sealed class ResumeAvatarChecks
     {
         var start = Where(sim, avatar);
         link.SendCommand(nameof(MoveTo), ClientSays.MoveTo(start.X + 500f, start.Z + 500f));
-        _harness.Ticks(40);
+
+        // Two metres at a walk, twice the floor asserted below.
+        Harness.Ticks(20);
 
         var moved = Where(sim, avatar);
         var travelled = MathF.Sqrt(((moved.X - start.X) * (moved.X - start.X)) + ((moved.Z - start.Z) * (moved.Z - start.Z)));
@@ -158,7 +137,7 @@ internal sealed class ResumeAvatarChecks
         var walked = WalkAway(sim, first, avatar);
 
         first.Close(LinkDied, "the link died");
-        _harness.Ticks(4);
+        Harness.Ticks(4);
 
         Assert.Multiple(() =>
         {
@@ -168,7 +147,7 @@ internal sealed class ResumeAvatarChecks
             Assert.That(Where(sim, avatar).X, Is.EqualTo(walked.X).Within(0.001f), "and it is standing where its player left it");
         });
 
-        var (second, resumed) = Bound(sim, _harness.ConnectResuming(TatooineReplication.PlayerKind, account, token), 2);
+        var (second, resumed) = Bound(sim, Harness.ConnectResuming(TatooineReplication.PlayerKind, account, token), 2);
 
         Assert.Multiple(() =>
         {
@@ -203,7 +182,7 @@ internal sealed class ResumeAvatarChecks
         // One argument different from the case above, and it is the one the engine reads: a clean 1000 with no error is a client that chose to leave.
         link.Close(CloseCodes.Normal, "logging out");
         SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed >= 1, "the avatar to be retired");
-        _harness.Ticks(2);
+        Harness.Ticks(2);
 
         Assert.Multiple(() =>
         {
@@ -212,7 +191,7 @@ internal sealed class ResumeAvatarChecks
             Assert.That(Exists(sim, avatar), Is.False);
         });
 
-        var (_, fresh) = Bound(sim, _harness.ConnectResuming(TatooineReplication.PlayerKind, account, token), 2);
+        var (_, fresh) = Bound(sim, Harness.ConnectResuming(TatooineReplication.PlayerKind, account, token), 2);
 
         Assert.Multiple(() =>
         {
@@ -236,12 +215,12 @@ internal sealed class ResumeAvatarChecks
         var walked = WalkAway(sim, link, avatar);
 
         link.Close(LinkDied, "the link died");
-        _harness.Ticks(4);
+        Harness.Ticks(4);
 
         Assert.That(TatooineReplication.ResumeHoldsStanding, Is.EqualTo(1), "held first, which is what makes the expiry below mean anything");
 
         SessionHarness.Until(() => TatooineReplication.ResumeHoldsExpired >= 1, "the grace to elapse");
-        _harness.Ticks(2);
+        Harness.Ticks(2);
 
         Assert.Multiple(() =>
         {
@@ -251,7 +230,7 @@ internal sealed class ResumeAvatarChecks
         });
 
         // And the position it was standing at was saved on the way out, so the next login is where the player actually was.
-        var (_, next) = Bound(sim, _harness.Connect(TatooineReplication.PlayerKind, account), 2);
+        var (_, next) = Bound(sim, Harness.Connect(TatooineReplication.PlayerKind, account), 2);
         var where = Where(sim, next);
 
         Assert.Multiple(() =>
@@ -279,13 +258,13 @@ internal sealed class ResumeAvatarChecks
     {
         using var sim = Start(resumeGraceS: 0.25d);
 
-        var god = _harness.Connect(TatooineReplication.GodKind);
-        _harness.Ticks(2);
+        var god = Harness.Connect(TatooineReplication.GodKind);
+        Harness.Ticks(2);
         god.Close(LinkDied, "the link died");
 
         // 40 ticks at 50 Hz is about 0.8 s of wall clock against a 0.25 s grace, so the expiry has certainly been delivered — and read — by the end of it.
         // Waiting on the counter instead would be circular: the claim is that it stays at zero.
-        _harness.Ticks(40);
+        Harness.Ticks(40);
 
         Assert.Multiple(() =>
         {
@@ -314,7 +293,7 @@ internal sealed class ResumeAvatarChecks
         Assert.That(TatooineReplication.ResumeHoldsStanding, Is.Zero, "premise: nothing is held while the client is connected");
 
         link.Close(LinkDied, "the link died");
-        _harness.Ticks(4);
+        Harness.Ticks(4);
 
         Assert.Multiple(() =>
         {
@@ -323,7 +302,7 @@ internal sealed class ResumeAvatarChecks
         });
 
         SessionHarness.Until(() => TatooineReplication.ResumeHoldsExpired >= 1, "the grace to elapse");
-        _harness.Ticks(2);
+        Harness.Ticks(2);
 
         Assert.Multiple(() =>
         {
@@ -349,15 +328,15 @@ internal sealed class ResumeAvatarChecks
 
         var (first, _) = LogIn(sim, account);
         first.Close(LinkDied, "the link died");
-        _harness.Ticks(4);
+        Harness.Ticks(4);
         Assert.That(TatooineReplication.ResumeHoldsStanding, Is.EqualTo(1), "premise: the body is held");
 
         // The same account logs in fresh rather than resuming: the takeover retires the hold and hands this session the body.
-        Bound(sim, _harness.Connect(TatooineReplication.PlayerKind, account), 2);
+        Bound(sim, Harness.Connect(TatooineReplication.PlayerKind, account), 2);
         Assert.That(TatooineReplication.ResumeHoldsTakenOver, Is.EqualTo(1), "premise: the hold was taken over, not expired");
 
         // Then the old session's grace runs out and the engine delivers its expiry.
-        _harness.Ticks(40);
+        Harness.Ticks(40);
 
         Assert.That(TatooineReplication.ResumeExpiriesWithoutHold, Is.Zero,
             "the hold was spent by the takeover, so its expiry arriving with nothing behind it is expected");
@@ -375,12 +354,12 @@ internal sealed class ResumeAvatarChecks
         var walked = WalkAway(sim, link, avatar);
 
         link.Close(LinkDied, "the link died");
-        _harness.Ticks(4);
+        Harness.Ticks(4);
 
         Assert.That(TatooineReplication.ResumeHoldsStanding, Is.EqualTo(1));
 
         // No resume token: the player reopened the browser, or is on another device. The account hold is still standing for the held body.
-        var (second, taken) = Bound(sim, _harness.Connect(TatooineReplication.PlayerKind, account), 2);
+        var (second, taken) = Bound(sim, Harness.Connect(TatooineReplication.PlayerKind, account), 2);
 
         Assert.Multiple(() =>
         {
@@ -416,9 +395,9 @@ internal sealed class ResumeAvatarChecks
         LogIn(sim, account);
 
         // Nothing was dropped and nothing is held: this is the ordinary duplicate login, and the takeover above must not have weakened it.
-        var second = _harness.Connect(TatooineReplication.PlayerKind, account);
+        var second = Harness.Connect(TatooineReplication.PlayerKind, account);
         SessionHarness.Until(() => TatooineReplication.LoginsRefusedDuplicate >= 1, "the second client to be refused");
-        _harness.Ticks(3);
+        Harness.Ticks(3);
 
         Assert.Multiple(() =>
         {
@@ -456,12 +435,12 @@ internal sealed class ResumeAvatarChecks
         Assert.That(Saved(sim, account).X, Is.EqualTo(spawned.X).Within(0.01f), "the cadence must not have saved anything yet");
 
         link.Close(LinkDied, "the link died");
-        _harness.Ticks(4);
+        Harness.Ticks(4);
 
         Assert.That(TatooineReplication.ResumeHoldsStanding, Is.EqualTo(1), "the body is held, so nothing else will write it back");
 
         TatooineReplication.RequestShutdown("test stop");
-        _harness.Ticks(4);
+        Harness.Ticks(4);
 
         var saved = Saved(sim, account);
 
@@ -505,7 +484,7 @@ internal sealed class ResumeAvatarChecks
 
         link.Close(LinkDied, "the link died");
         SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed >= 1, "the avatar to be retired");
-        _harness.Ticks(2);
+        Harness.Ticks(2);
 
         Assert.Multiple(() =>
         {

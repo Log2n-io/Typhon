@@ -729,6 +729,7 @@ public sealed class ProximityChecks
     public void TheScriptedCrowdIsCollided_AndTheFlagStopsIt()
     {
         var dir = Worlds.NewDirectory();
+        var defaultsDir = Worlds.NewDirectory();
         try
         {
             var config = Config(dir, 200);
@@ -755,7 +756,7 @@ public sealed class ProximityChecks
 
             // And the default, which is the arm the world actually runs in: every body is on the collision path, so the
             // step count is a multiple of the population rather than of the one body a client is driving.
-            var defaults = Config(Worlds.NewDirectory(), 200);
+            var defaults = Config(defaultsDir, 200);
             using var collided = new TatooineSim(defaults);
             collided.Initialize();
             Drive(collided, collided.Index.Players[0], 0f, 0f, step, 0f);
@@ -769,6 +770,7 @@ public sealed class ProximityChecks
         finally
         {
             Worlds.Delete(dir);
+            Worlds.Delete(defaultsDir);
         }
     }
 

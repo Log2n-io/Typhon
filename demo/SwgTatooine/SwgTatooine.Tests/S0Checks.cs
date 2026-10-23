@@ -229,9 +229,13 @@ public sealed class CreatureRevivalTests
         config.WarmTicks = 0;
         config.MeasuredTicks = 200;
         config.WorkerCount = 1;
-        config.Unpaced = false;
 
-        // Full population: at 5 % there are too few players for any of them to meet a creature, and the run kills nothing to revive.
+        // Unpaced: every interval is in seconds converted at the configured rate, so 200 ticks are 20 s of world either way, and paced they were 20 s of
+        // wall clock. Nothing here needs an exact stop. Measured unpaced: 63 kills, 55 revivals, two seconds.
+        config.Unpaced = true;
+
+        // Full population: at 5 % there are too few players for any of them to meet a creature, and the run kills nothing to revive. At 40 % it revives six,
+        // which is too few for the one-in-ten ratio asserted below to mean anything.
         config.PopulationScale = 1f;
 
         // 3 s instead of 180: revivals have to happen inside the window for this to test anything.
@@ -311,11 +315,11 @@ public sealed class SimulationDeterminismTests
             config.WorkerCount = 1;
             config.Seed = seed;
 
-            // PACED, and that is load-bearing. Unpaced, the run loop polls every 5 ms and calls Shutdown after the count is reached, so an indeterminate
-            // number of extra ticks execute first and two runs end at different tick numbers — measured here: divergence from the first tick, world
-            // generation itself identical. Reproducing an unpaced run needs a tick limit the runtime does not offer. Paced, the stop is exact and the
-            // fingerprints match to the millimetre.
-            config.Unpaced = false;
+            // Unpaced, which an exact stop makes safe. The run loop polls every 5 ms and shuts down after the count is reached, so an unpaced runtime always
+            // executes a few ticks more; it used to diverge two runs from the first tick, and paced was the workaround. Those extra ticks now simulate
+            // nothing (SimBridge.HaltAtTick), so the world is exactly the requested twenty ticks', and unpaced it is three runs in a fraction of a second
+            // instead of two seconds each.
+            config.Unpaced = true;
             using var sim = new TatooineSim(config);
             sim.Initialize();
             sim.Run();
@@ -354,12 +358,10 @@ public sealed class SimulationDeterminismTests
     /// </para>
     /// </remarks>
     [Test]
-    // <b>Quarantined against #1395: this determinism test depends on wall-clock pacing, which is the one thing it must not.</b> It runs PACED at 50 Hz
-    // for 200 ticks because an unpaced run ends at an indeterminate tick, and on a loaded box a paced runtime does not do the same work in the same
-    // window: two runs of seed 12345 retired different players, which shows up as fingerprints of DIFFERENT LENGTH (708 against 703) diverging on the
-    // first player's X. 6/6 in isolation, red twice in a 379-test host. The fix it wants is an unpaced run with an exact tick limit — the affordance
-    // RunFingerprint's own comment says the runtime does not offer — so quarantining is a holding action, not an answer. What it tests is worth testing.
-    [Category("Quarantine")]
+    [Category("Integration")]
+    // Was quarantined against #1395, for depending on wall-clock pacing: paced at 50 Hz on a loaded box, a runtime does not do the same work in the same
+    // window, and two runs of seed 12345 retired different players (fingerprints of 708 against 703). It runs unpaced now, with the exact stop it was
+    // waiting for (SimBridge.HaltAtTick) and no overload response to shed systems — the same work every run, however loaded the box.
     public void SamePlayerSeed_ReproducesTheRun_AndADifferentSeedDoesNot()
     {
         var a = RunPlayerFingerprint(12345);
@@ -390,14 +392,14 @@ public sealed class SimulationDeterminismTests
             // decision per player and would miss a refactor that changed the SECOND one.
             config.MeasuredTicks = 200;
 
-            // 50 Hz rather than 10, and it costs the test nothing: every timer in the brain counts TICKS, so the same two hundred ticks exercise the same
-            // decisions — paced, they just take four seconds of wall clock instead of twenty, three times over.
+            // 50 Hz: every timer in the brain counts TICKS, so the rate only decides how the seconds-denominated intervals convert. Kept as it was so the
+            // fingerprint describes the world it always did.
             config.TickRateHz = 50;
             config.WorkerCount = 1;
             config.Seed = seed;
 
-            // Paced, for the reason RunFingerprint gives: an unpaced run ends at an indeterminate tick and two runs are not comparable.
-            config.Unpaced = false;
+            // Unpaced, for the reason RunFingerprint gives.
+            config.Unpaced = true;
             using var sim = new TatooineSim(config);
             sim.Initialize();
             sim.Run();

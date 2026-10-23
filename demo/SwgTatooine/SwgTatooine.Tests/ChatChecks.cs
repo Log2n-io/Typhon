@@ -25,34 +25,11 @@ namespace SwgTatooine.Tests;
 [Category("Integration")]
 [TestFixture]
 [NonParallelizable]
-public sealed class ChatChecks
+internal sealed class ChatChecks : ServedChecks
 {
-    private string _dir;
-    private SessionHarness _harness;
-
-    [SetUp]
-    public void SetUp()
-    {
-        _dir = Worlds.NewDirectory();
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-    }
-
-    [TearDown]
-    public void TearDown()
-    {
-        _harness?.Release();
-        _harness = null;
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-        Worlds.Delete(_dir);
-    }
-
     private SimConfig Config()
     {
-        var config = Worlds.Small(_dir);
-        config.Unpaced = false;
-        config.TickRateHz = 10;
+        var config = Worlds.Served(Dir);
         config.WorkerCount = 1;
         return config;
     }
@@ -195,37 +172,17 @@ public sealed class ChatChecks
         }
     }
 
-    /// <summary>Puts the player a session controls at a place in a realm, and returns it.</summary>
+    /// <summary>Puts the player a session controls at a place in a realm, parked: a player that wandered off mid-case would move the distance under test.</summary>
     private static EntityId Park(TatooineSim sim, SessionId session, float x, float z, ushort realm)
     {
-        var entity = TatooineReplication.ControlledBy(sim.Dbe, session);
-        Assert.That(entity, Is.Not.EqualTo(EntityId.Null), "the session controls nothing to speak with");
-
-        using var tx = sim.Dbe.CreateQuickTransaction();
-        var player = tx.OpenMut(entity);
-
-        // Parked and not deciding anything: a player that wandered off mid-case would move the distance under test.
-        var state = player.Read(Player.State);
-        state.Activity = PlayerActivity.Idle;
-        state.ActivityTicks = int.MaxValue / 2;
-        player.Set(Player.State, state);
-        var move = player.Read(Player.Move);
-        move.VelX = 0f;
-        move.VelZ = 0f;
-        player.Set(Player.Move, move);
-
-        var at = default(PlayerPlacement);
-        at.SetAt(x, z, 0f, player.Read(Player.Bounds).HalfExtent);
-        tx.Teleport(entity, Player.Bounds, new RealmId(realm), in at);
-        tx.Commit();
-        return entity;
+        return Worlds.Park(sim, session, x, z, realm);
     }
 
     private Listener Connect(TatooineSim sim)
     {
-        var link = _harness.Connect(TatooineReplication.PlayerKind);
+        var link = Harness.Connect(TatooineReplication.PlayerKind);
         SessionHarness.Until(() => link.Received(MessageTypes.Welcome), "WELCOME");
-        return new Listener(_harness, link);
+        return new Listener(Harness, link);
     }
 
     /// <summary>
@@ -244,12 +201,12 @@ public sealed class ChatChecks
         var config = Config();
         using var sim = new TatooineSim(config);
         sim.Initialize();
-        _harness = new SessionHarness(sim);
+        Harness = new SessionHarness(sim);
 
         var speaker = Connect(sim);
         var listener = Connect(sim);
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 2, "both sessions to possess a player");
-        _harness.Ticks(2);
+        Harness.Ticks(2);
 
         // A line nothing in the world says by itself. The town talks now (SWG-09's own ambient chatter), so counting
         // EVERY chat a listener hears would count the locals — which is what made the first version of this fail in
@@ -263,7 +220,7 @@ public sealed class ChatChecks
         Settle(speaker, listener);
 
         speaker.Link.SendCommand("Say", new RecordValues { ["text"] = FieldValue.Of(Spoken) });
-        _harness.Ticks(6);
+        Harness.Ticks(6);
 
         listener.Drain();
         Assert.That(Utterances(listener, Spoken), Is.EqualTo(1), "40 m apart in one realm, and it was not heard");
@@ -274,7 +231,7 @@ public sealed class ChatChecks
 
         var atSixty = Utterances(listener, Spoken);
         speaker.Link.SendCommand("Say", new RecordValues { ["text"] = FieldValue.Of(Spoken) });
-        _harness.Ticks(6);
+        Harness.Ticks(6);
         listener.Drain();
         Assert.That(Utterances(listener, Spoken), Is.EqualTo(atSixty), "60 m apart and it was heard: the range is not 50 m");
 
@@ -291,7 +248,7 @@ public sealed class ChatChecks
 
         var inside = Utterances(listener, Spoken);
         speaker.Link.SendCommand("Say", new RecordValues { ["text"] = FieldValue.Of(Spoken) });
-        _harness.Ticks(6);
+        Harness.Ticks(6);
         listener.Drain();
         Assert.That(
             Utterances(listener, Spoken),
@@ -336,11 +293,12 @@ public sealed class ChatChecks
     /// It does NOT clear what has been heard: <see cref="Listener.Drain"/> returns the accumulated sink and leaves it. Every
     /// case here therefore compares against a baseline taken just before it, and a new case that assumes a zero count will
     /// be wrong.
-    /// It also spaces the utterances: Say is one a second, and three in quick succession would be rate-limited.
+    /// It also spaces the utterances: Say is one a second with a burst of two, measured on the wall clock, so the third line must come at least a
+    /// second after the first — 0.6 s of ticks here and the six after each send make 1.4 s between the first and the third.
     /// </remarks>
     private void Settle(Listener speaker, Listener listener)
     {
-        _harness.Ticks(14);
+        Harness.Ticks((int)(0.6 * Worlds.ServedHz));
         speaker.Drain();
         listener.Drain();
     }

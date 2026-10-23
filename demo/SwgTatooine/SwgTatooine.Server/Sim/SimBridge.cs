@@ -15,6 +15,24 @@ namespace SwgTatooine.Server;
 /// </remarks>
 public sealed partial class SimBridge : IShuttleBoarding
 {
+    /// <summary>The first tick a measured run does not simulate, or <see cref="long.MaxValue"/> for a server, which runs until it is stopped.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The exact stop the runtime does not offer.</b> <c>Run</c> polls the tick count and then shuts down, so an unpaced runtime always executes a few
+    /// ticks past the count, and how many depends on the box. Two runs of one seed therefore ended in different states, which is why the determinism checks
+    /// had to run paced — slowly, and still not reliably under load (#1395: two runs of seed 12345 diverged in a 379-test host). Past this tick every
+    /// simulation system does what a paused one does, nothing, so the world a run leaves is the world of exactly its requested ticks however late the
+    /// shutdown lands.
+    /// </para>
+    /// <para>Set before the runtime starts and never after, so the plain read in <see cref="Halted"/> needs no fence: the start publishes it.</para>
+    /// </remarks>
+    public long HaltAtTick { get; set; } = long.MaxValue;
+
+    /// <summary>Whether a simulation system should do nothing this tick: the world is paused, or the run is past its last tick.</summary>
+    /// <param name="tick">The tick being executed.</param>
+    /// <returns>Whether to skip it.</returns>
+    private bool Halted(long tick) => TatooineReplication.SimulationPaused || tick >= HaltAtTick;
+
     private readonly SimConfig _config;
     private readonly TatooineMap _map;
     private readonly WorldIndex _index;

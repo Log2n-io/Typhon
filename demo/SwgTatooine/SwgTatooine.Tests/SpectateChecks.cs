@@ -26,37 +26,11 @@ namespace SwgTatooine.Tests;
 [Category("Integration")]
 [TestFixture]
 [NonParallelizable]
-public sealed class SpectateChecks
+internal sealed class SpectateChecks : ServedChecks
 {
-    private string _dir;
-    private SessionHarness _harness;
-
-    [SetUp]
-    public void SetUp()
-    {
-        _dir = Worlds.NewDirectory();
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-    }
-
-    [TearDown]
-    public void TearDown()
-    {
-        _harness?.Release();
-        _harness = null;
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-        Worlds.Delete(_dir);
-    }
-
     private SimConfig Config()
     {
-        var config = Worlds.Small(_dir);
-        config.Unpaced = false;
-
-        // 40 Hz rather than 10: every `Ticks(1)` in here is a real wall-clock wait, and these cases step a dozen ticks
-        // at a time. Nothing under test depends on the period.
-        config.TickRateHz = 40;
+        var config = Worlds.Served(Dir);
         config.WorkerCount = 1;
         return config;
     }
@@ -257,24 +231,24 @@ public sealed class SpectateChecks
     /// which is precisely the state rung 1 was already in.
     /// </remarks>
     [Test]
-    // Quarantined against #1395: a 10 s SpinUntil for the session to be told what it is riding, which is ample on an idle box and not always ample in a
-    // 379-test host. 6/6 in isolation at 3-5 s. Unlike its neighbour in that issue it has no identified mechanism beyond the timeout being a wall-clock
-    // one, so the first thing to try is waiting on the state rather than on a deadline.
-    [Category("Quarantine")]
+    // Was quarantined against #1395: a 10 s wall-clock wait for SELF that took 3-5 s when it passed, so a loaded host could exhaust it. No mechanism was
+    // ever isolated. Since the served fixtures moved to 50 Hz and stopped writing the world from the test thread (EW-02, which raced the fence), it takes
+    // 0.4 s — a 25x margin — and was green 8/8 in isolation, 3/3 in the four-process sharded run and in a 510-test single process (2026-10-23).
+    [Category("Integration")]
     public void RidingABotAnchorsTheSessionOnIt()
     {
         using var sim = new TatooineSim(Config());
         sim.Initialize();
-        _harness = new SessionHarness(sim);
-        var viewer = new Viewer(_harness, TatooineReplication.GodKind);
-        _harness.Ticks(10);
+        Harness = new SessionHarness(sim);
+        var viewer = new Viewer(Harness, TatooineReplication.GodKind);
+        Harness.Ticks(10);
 
         var resetsBefore = viewer.Drain().Resets;
         viewer.Ride(viewer.AnEntityOf(nameof(Player)));
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 return viewer.Drain().SelfNetId != 0;
             },
             "the session to be told what it is riding");
@@ -307,15 +281,15 @@ public sealed class SpectateChecks
         config.Planets = 2;
         using var sim = new TatooineSim(config);
         sim.Initialize();
-        _harness = new SessionHarness(sim);
-        var viewer = new Viewer(_harness, TatooineReplication.GodKind);
-        _harness.Ticks(10);
+        Harness = new SessionHarness(sim);
+        var viewer = new Viewer(Harness, TatooineReplication.GodKind);
+        Harness.Ticks(10);
 
         viewer.Ride(viewer.AnEntityOf(nameof(Player)));
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 return viewer.Drain().SelfNetId != 0;
             },
             "the ride to take hold");
@@ -325,12 +299,12 @@ public sealed class SpectateChecks
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 return viewer.Drain().RealmId == 1;
             },
             "the viewer to arrive in the realm asked for while riding");
 
-        _harness.Ticks(10);
+        Harness.Ticks(10);
         var sink = viewer.Drain();
         Assert.Multiple(() =>
         {
@@ -367,15 +341,15 @@ public sealed class SpectateChecks
     {
         using var sim = new TatooineSim(Config());
         sim.Initialize();
-        _harness = new SessionHarness(sim);
-        var viewer = new Viewer(_harness, TatooineReplication.GodKind);
-        _harness.Ticks(10);
+        Harness = new SessionHarness(sim);
+        var viewer = new Viewer(Harness, TatooineReplication.GodKind);
+        Harness.Ticks(10);
 
         viewer.Ride(viewer.AnEntityOf(nameof(Player)));
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 return viewer.Drain().SelfNetId != 0;
             },
             "the ride to take hold");
@@ -384,7 +358,7 @@ public sealed class SpectateChecks
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 return viewer.Drain().SelfNetId == 0;
             },
             "the release to drop the control");
@@ -395,14 +369,14 @@ public sealed class SpectateChecks
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 return Held(viewer.Drain()) > 0;
             },
             "the released session to be served a world again");
 
         // Realm 0 is where it already is, so what this proves is that the ask was ACCEPTED rather than deferred by an anchor that should be gone.
         viewer.AskRealm(0u);
-        _harness.Ticks(10);
+        Harness.Ticks(10);
 
         Assert.Multiple(() =>
         {
@@ -435,15 +409,15 @@ public sealed class SpectateChecks
         var config = Config();
         using var sim = new TatooineSim(config);
         sim.Initialize();
-        _harness = new SessionHarness(sim);
-        var viewer = new Viewer(_harness, TatooineReplication.GodKind);
-        _harness.Ticks(10);
+        Harness = new SessionHarness(sim);
+        var viewer = new Viewer(Harness, TatooineReplication.GodKind);
+        Harness.Ticks(10);
 
         viewer.Ride(viewer.AnEntityOf(nameof(Player)));
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 return viewer.Drain().SelfNetId != 0;
             },
             "the ride to take hold");
@@ -461,7 +435,7 @@ public sealed class SpectateChecks
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 return viewer.Drain().RealmId == interior;
             },
             "the session to follow its subject through the door");
@@ -470,34 +444,17 @@ public sealed class SpectateChecks
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 return viewer.Drain().SelfNetId == 0;
             },
             "the release to drop the control");
 
-        _harness.Ticks(20);
+        Harness.Ticks(20);
         Assert.That(viewer.Drain().RealmId, Is.EqualTo(interior), "stopping a ride threw the viewer back to the realm their session was opened in");
     }
 
     /// <summary>Puts a player in a realm, parked, the way a portal would.</summary>
-    private static void Park(TatooineSim sim, EntityId entity, ushort realm)
-    {
-        using var tx = sim.Dbe.CreateQuickTransaction();
-        var player = tx.OpenMut(entity);
-        var state = player.Read(Player.State);
-        state.Activity = PlayerActivity.Idle;
-        state.ActivityTicks = int.MaxValue / 2;
-        player.Set(Player.State, state);
-        var move = player.Read(Player.Move);
-        move.VelX = 0f;
-        move.VelZ = 0f;
-        player.Set(Player.Move, move);
-
-        var at = default(PlayerPlacement);
-        at.SetAt(32f, 32f, 0f, player.Read(Player.Bounds).HalfExtent);
-        tx.Teleport(entity, Player.Bounds, new RealmId(realm), in at);
-        tx.Commit();
-    }
+    private static void Park(TatooineSim sim, EntityId entity, ushort realm) => Worlds.Park(sim, entity, 32f, 32f, realm);
 
     /// <summary>
     /// Stopping a ride and asking for a realm in the SAME tick lands the viewer in that realm, and never throws.
@@ -521,15 +478,15 @@ public sealed class SpectateChecks
         config.Planets = 2;
         using var sim = new TatooineSim(config);
         sim.Initialize();
-        _harness = new SessionHarness(sim);
-        var viewer = new Viewer(_harness, TatooineReplication.GodKind);
-        _harness.Ticks(10);
+        Harness = new SessionHarness(sim);
+        var viewer = new Viewer(Harness, TatooineReplication.GodKind);
+        Harness.Ticks(10);
 
         viewer.Ride(viewer.AnEntityOf(nameof(Player)));
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 return viewer.Drain().SelfNetId != 0;
             },
             "the ride to take hold");
@@ -540,12 +497,12 @@ public sealed class SpectateChecks
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 return viewer.Drain().RealmId == 1;
             },
             "the viewer to land in the realm asked for in the same tick as the stop");
 
-        _harness.Ticks(10);
+        Harness.Ticks(10);
         Assert.Multiple(() =>
         {
             Assert.That(sim.Runtime.CurrentTickNumber, Is.GreaterThan(tickBefore + 10), "the runtime stopped: the realm ask reached an anchored session");
@@ -569,15 +526,15 @@ public sealed class SpectateChecks
     {
         using var sim = new TatooineSim(Config());
         sim.Initialize();
-        _harness = new SessionHarness(sim);
-        var viewer = new Viewer(_harness, TatooineReplication.GodKind);
-        _harness.Ticks(10);
+        Harness = new SessionHarness(sim);
+        var viewer = new Viewer(Harness, TatooineReplication.GodKind);
+        Harness.Ticks(10);
 
         viewer.Ride(viewer.AnEntityOf(nameof(Player)));
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 return viewer.Drain().SelfNetId != 0;
             },
             "the ride to take hold");
@@ -594,7 +551,7 @@ public sealed class SpectateChecks
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 return TatooineReplication.SubjectOf(viewer.Link.Session) == EntityId.Null;
             },
             "the server to end a ride whose subject died");
@@ -603,20 +560,19 @@ public sealed class SpectateChecks
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 return Held(viewer.Drain()) > 0;
             },
             "the session to be served a world again");
 
         viewer.AskRealm(0u);
-        _harness.Ticks(10);
+        Harness.Ticks(10);
         Assert.Multiple(() =>
         {
             Assert.That(viewer.Drain().RealmId, Is.Zero, "the session is not where it asked to be after its subject died");
             Assert.That(viewer.Drain().SelfNetId, Is.Zero, "the dead subject's anchor outlived it");
         });
     }
-
 
     /// <summary>
     /// A possessed player's session may not ride, and it is the ENGINE that says so.
@@ -633,16 +589,16 @@ public sealed class SpectateChecks
     {
         using var sim = new TatooineSim(Config());
         sim.Initialize();
-        _harness = new SessionHarness(sim);
-        var viewer = new Viewer(_harness, TatooineReplication.PlayerKind);
-        _harness.Ticks(10);
+        Harness = new SessionHarness(sim);
+        var viewer = new Viewer(Harness, TatooineReplication.PlayerKind);
+        Harness.Ticks(10);
 
         // Its own player, before the ask: a possessed session controls one from the moment it is bound, so "SELF did not change" is only meaningful against
         // what it already was.
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 return viewer.Drain().SelfNetId != 0;
             },
             "the player session to be given a player");
@@ -652,12 +608,12 @@ public sealed class SpectateChecks
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 return viewer.Drain().Refusals.Contains(AckReasons.Forbidden);
             },
             "the ride to be refused for a player");
 
-        _harness.Ticks(5);
+        Harness.Ticks(5);
         Assert.That(viewer.Drain().SelfNetId, Is.EqualTo(own), "a player's session was re-anchored onto the entity it named");
     }
 
@@ -675,22 +631,22 @@ public sealed class SpectateChecks
     {
         using var sim = new TatooineSim(Config());
         sim.Initialize();
-        _harness = new SessionHarness(sim);
-        var viewer = new Viewer(_harness, TatooineReplication.GodKind);
-        _harness.Ticks(10);
+        Harness = new SessionHarness(sim);
+        var viewer = new Viewer(Harness, TatooineReplication.GodKind);
+        Harness.Ticks(10);
 
         viewer.Ride(0xFFFF_FF00u);
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 return viewer.Drain().Refusals.Contains(TatooineReplication.SpectateNoSuchEntity);
             },
             "the unknown identity to be refused");
 
         var refusalsAfterBogus = viewer.Drain().Refusals.Count;
         viewer.Ride(0u);
-        _harness.Ticks(10);
+        Harness.Ticks(10);
 
         Assert.Multiple(() =>
         {

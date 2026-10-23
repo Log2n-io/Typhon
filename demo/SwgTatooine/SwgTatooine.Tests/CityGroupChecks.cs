@@ -30,34 +30,11 @@ namespace SwgTatooine.Tests;
 [Category("Integration")]
 [TestFixture]
 [NonParallelizable]
-public sealed class CityGroupChecks
+internal sealed class CityGroupChecks : ServedChecks
 {
-    private string _dir;
-    private SessionHarness _harness;
-
-    [SetUp]
-    public void SetUp()
-    {
-        _dir = Worlds.NewDirectory();
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-    }
-
-    [TearDown]
-    public void TearDown()
-    {
-        _harness?.Release();
-        _harness = null;
-        TatooineReplication.ResetSessionAccounting();
-        TatooineReplication.ResetIntentAccounting();
-        Worlds.Delete(_dir);
-    }
-
     private SimConfig Config()
     {
-        var config = Worlds.Small(_dir);
-        config.Unpaced = false;
-        config.TickRateHz = 10;
+        var config = Worlds.Served(Dir);
         config.WorkerCount = 1;
         return config;
     }
@@ -79,11 +56,11 @@ public sealed class CityGroupChecks
             Is.GreaterThan(TatooineReplication.PlayerRadiusM),
             "the premise: the widest city must be larger than a player's sphere, or the group set delivers nothing a sphere does not");
 
-        _harness = new SessionHarness(sim);
-        var link = _harness.Connect(TatooineReplication.PlayerKind);
+        Harness = new SessionHarness(sim);
+        var link = Harness.Connect(TatooineReplication.PlayerKind);
         SessionHarness.Until(() => link.Received(MessageTypes.Welcome), "WELCOME");
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the possession to be claimed by a tick");
-        _harness.Ticks(2);
+        Harness.Ticks(2);
 
         Worlds.Park(sim, link.Session, city.X, city.Z);
 
@@ -108,7 +85,7 @@ public sealed class CityGroupChecks
         SessionHarness.Until(
             () =>
             {
-                _harness.Ticks(1);
+                Harness.Ticks(1);
                 Drain();
                 return sink.Completed.Contains((set, widest + 1));
             },

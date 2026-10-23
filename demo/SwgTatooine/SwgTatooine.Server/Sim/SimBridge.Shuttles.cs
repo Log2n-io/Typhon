@@ -43,11 +43,7 @@ public sealed partial class SimBridge
     // saw an arrival, every tick, for the life of the process — and the report it fed needs a total, a count, a maximum and two thresholds, none of which
     // needs the samples kept. In a measured run that was a bounded leak nobody noticed; under `--serve`, which never ends, it was unbounded. Subtracting the
     // list is strictly better than capping it: the report is identical, and there is nothing left to bound.
-    private long _arrivalTotal;
-    private long _arrivalPortTicks;
-    private int _arrivalLargest;
-    private long _arrivalAtLeast16;
-    private long _arrivalAtLeast64;
+    private ArrivalCounters _arrivals;
 
     private readonly List<double> _probeSteadyNs = [];
     private readonly List<double>[] _probePostNs = NewBuckets(ProbeWindowTicks + 1);
@@ -69,8 +65,7 @@ public sealed partial class SimBridge
     /// Exposed so a check can assert the counters that replaced the per-port-tick list. The bound is structural rather than asserted: five scalars cannot
     /// grow, which is a stronger statement than any cap a test could measure.
     /// </remarks>
-    public (long Total, long PortTicks, int Largest, long AtLeast16, long AtLeast64) ArrivalSummary
-        => (_arrivalTotal, _arrivalPortTicks, _arrivalLargest, _arrivalAtLeast16, _arrivalAtLeast64);
+    public ArrivalCounters ArrivalSummary => _arrivals;
 
     private int ShuttleIntervalTicks => Math.Max(1, (int)(_config.ShuttleIntervalS * _config.TickRateHz));
 
@@ -220,9 +215,9 @@ public sealed partial class SimBridge
     /// </summary>
     public void ShuttleTick(TickContext ctx)
     {
-        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
-        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
-        if (TatooineReplication.SimulationPaused)
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control), or past a measured run's last tick (Halted). The simulation does nothing;
+        // replication, the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (Halted(ctx.TickNumber))
         {
             return;
         }
@@ -386,9 +381,9 @@ public sealed partial class SimBridge
     /// </remarks>
     public void ShuttleProbeTick(TickContext ctx)
     {
-        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
-        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
-        if (TatooineReplication.SimulationPaused)
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control), or past a measured run's last tick (Halted). The simulation does nothing;
+        // replication, the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (Halted(ctx.TickNumber))
         {
             return;
         }
@@ -406,11 +401,7 @@ public sealed partial class SimBridge
             if (n > 0)
             {
                 _lastArrivalTick[p] = tick;
-                _arrivalTotal += n;
-                _arrivalPortTicks++;
-                _arrivalLargest = Math.Max(_arrivalLargest, n);
-                _arrivalAtLeast16 += n >= 16 ? 1 : 0;
-                _arrivalAtLeast64 += n >= 64 ? 1 : 0;
+                _arrivals.Record(n);
             }
         }
 
@@ -622,8 +613,8 @@ public sealed partial class SimBridge
 
         Console.WriteLine();
         Console.WriteLine($"  shuttles ({(_config.ShuttleBurst ? "burst" : "trickle")}, every {_config.ShuttleIntervalS:G} s, {_config.BoardingWindowS:G} s window, "
-            + $"share {_config.ShuttleShare:G}): {_arrivalTotal:N0} arrivals in {_arrivalPortTicks:N0} port-ticks; largest {_arrivalLargest} in one "
-            + $"port-tick, >= 16 in {_arrivalAtLeast16}, >= 64 in {_arrivalAtLeast64}");
+            + $"share {_config.ShuttleShare:G}): {_arrivals.Total:N0} arrivals in {_arrivals.PortTicks:N0} port-ticks; largest {_arrivals.Largest} in one "
+            + $"port-tick, >= 16 in {_arrivals.AtLeast16}, >= 64 in {_arrivals.AtLeast64}");
         if (!_config.Probe)
         {
             return;
@@ -721,5 +712,44 @@ public sealed partial class SimBridge
         var copy = values.ToArray();
         Array.Sort(copy);
         return copy[copy.Length / 2];
+    }
+}
+
+/// <summary>The shuttle arrival report: how many players landed, at how many port-ticks, the largest group and how many groups reached 16 and 64.</summary>
+/// <remarks>
+/// Its own type so that the arithmetic can be checked against groups chosen to sit on its thresholds, which no world produces on demand: a burst of sixteen
+/// at one port needed sixteen times the usual population and a twenty-second run.
+/// </remarks>
+public struct ArrivalCounters
+{
+    /// <summary>Players landed.</summary>
+    public long Total;
+
+    /// <summary>Port-ticks on which at least one player landed.</summary>
+    public long PortTicks;
+
+    /// <summary>The most players landed at one port on one tick.</summary>
+    public int Largest;
+
+    /// <summary>Port-ticks that landed sixteen or more.</summary>
+    public long AtLeast16;
+
+    /// <summary>Port-ticks that landed sixty-four or more.</summary>
+    public long AtLeast64;
+
+    /// <summary>Counts the players one port landed on one tick; a tick that landed none is not a port-tick.</summary>
+    /// <param name="landed">How many landed.</param>
+    public void Record(int landed)
+    {
+        if (landed <= 0)
+        {
+            return;
+        }
+
+        Total += landed;
+        PortTicks++;
+        Largest = Math.Max(Largest, landed);
+        AtLeast16 += landed >= 16 ? 1 : 0;
+        AtLeast64 += landed >= 64 ? 1 : 0;
     }
 }
