@@ -447,7 +447,6 @@ internal sealed unsafe class RecoveryApplier : IDisposable
 
         var eid = EntityId.FromRaw(entityIdRaw);
         EnsureArchetype(eid.ArchetypeId);
-        slots = MigrateSlots(slots);
         BeginEntity();
 
         var key = eid.EntityKey;
@@ -458,6 +457,9 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         {
             return;
         }
+
+        // Converted only for an entity the replay applies to: an absent one is a no-op (AP-12), whatever its values are.
+        slots = MigrateSlots(slots);
 
         if (_hasClusterAccessor)
         {

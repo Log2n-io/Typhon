@@ -204,6 +204,7 @@ internal static class SchemaEvolutionEngine
         }
         else
         {
+            // native-alloc: per-value scratch of a crash-open replay, freed before this returns; parenting it in the resource tree per value would churn it
             native = (byte*)NativeMemory.Alloc((nuint)scratchSize);
             scratch = native;
         }

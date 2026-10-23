@@ -121,6 +121,7 @@ class SchemaMigrationRecoveryTests : TestBase<SchemaMigrationRecoveryTests>
 
     [TestCase(false)]
     [TestCase(true)]
+    [VerifiesRule("SCHEMA-09")]
     public void CrashThenMigratingOpen_ReplaysOldLayoutRecords(bool checkpointEntity)
     {
         var id = WriteV1AndClose(crash: true, checkpointEntity);
@@ -135,6 +136,7 @@ class SchemaMigrationRecoveryTests : TestBase<SchemaMigrationRecoveryTests>
     }
 
     [Test]
+    [VerifiesRule("SCHEMA-09")]
     public void CrashThenShrinkingOpen_ReplaysOnlySurvivingFields()
     {
         EntityId id;
@@ -165,6 +167,7 @@ class SchemaMigrationRecoveryTests : TestBase<SchemaMigrationRecoveryTests>
     }
 
     [Test]
+    [VerifiesRule("SCHEMA-09")]
     public void CrashThenWideningOpen_ConvertsFieldTypes()
     {
         var id = WriteV1AndClose(crash: true, checkpointEntity: true);
@@ -182,6 +185,7 @@ class SchemaMigrationRecoveryTests : TestBase<SchemaMigrationRecoveryTests>
 
     [TestCase(false)]
     [TestCase(true)]
+    [VerifiesRule("SCHEMA-09")]
     public void CrashThenMigratingOpen_UsesRegisteredMigrationChain(bool checkpointEntity)
     {
         var id = WriteV1AndClose(crash: true, checkpointEntity);
@@ -207,6 +211,7 @@ class SchemaMigrationRecoveryTests : TestBase<SchemaMigrationRecoveryTests>
 
     [TestCase(false)]
     [TestCase(true)]
+    [VerifiesRule("SCHEMA-09")]
     public void CrashThenMigratingOpen_ReplaysSingleVersionValues(bool checkpointEntity)
     {
         EntityId id;

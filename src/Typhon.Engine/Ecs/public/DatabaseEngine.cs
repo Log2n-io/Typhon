@@ -4376,6 +4376,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         "Breaking schema change for '{Name}': {Summary}. Migration chain registered ({StepCount} step(s))",
                         schemaName, diff.Summary, chain.Value.StepCount);
 
+                    // The chain's functions read and write raw component bytes: types whose sizes are not the stored and the declared layout's would run off
+                    // the end of a slot, or of the replay's scratch, with no error.
+                    ThrowIfMigrationChainDoesNotFit(schemaName, chain.Value, persisted.Comp.CompSize, definition.ComponentStorageSize);
+                    ThrowIfMigrationChangesStorageMode(schemaName, (StorageMode)persisted.Comp.StorageMode, definition.StorageMode);
+
                     // A SingleVersion component's bytes live only in its archetype's cluster slots: its ComponentTable segments are empty and it has no
                     // revision segment to load, so there is nothing for the segment migration to move. The cluster pass runs the chain over every slot
                     // instead (CopyPreMigrationSlot), exactly as it replays a field map for a compatible change (#671).
@@ -4433,6 +4438,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
                         if (SchemaEvolutionEngine.NeedsMigration(diff, oldStride, newStride))
                         {
+                            ThrowIfMigrationChangesStorageMode(schemaName, (StorageMode)persisted.Comp.StorageMode, definition.StorageMode);
+
                             // A SingleVersion component keeps its bytes ONLY in its archetype's cluster slot — its ComponentSegment is never populated, and
                             // every archetype is cluster-backed since #629. Running the ComponentTable migration would load that empty segment at the old
                             // stride and fail with a storage error that says nothing about the real problem. There is nothing for it to move, so skip it and
@@ -5747,6 +5754,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         if (_pendingSchemaCommit != null)
         {
+            // The seal's own wait is soft and fixed; the commit's is neither — it waits for as long as the checkpoint progresses, then fails the open.
+            WaitForSchemaCommit();
             CompleteSchemaCommit();
             _archetypeSpiPersistArmed = true;
         }
@@ -6030,11 +6039,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Every pass has run: the seal's cycle is the recovery's one full cycle (CK-08).
         CheckpointManager.RecoveryInProgress = false;
 
+        // A migration's commit rides this cycle and waits on with its own step (SCHEMA-09); 30 s in production either way.
+        var sealWait = _pendingSchemaCommit != null ? SchemaCommitWaitStepForTest : TimeSpan.FromSeconds(30);
+
         if (frontierLsn <= checkpointLsn)
         {
             // Nothing replayed, but the scrub and the sweep may have freed: held (CK-17) until a checkpoint writes the pages that stopped naming them. A
             // migration's commit needs the cycle too, whatever was replayed (SCHEMA-09).
-            if ((MMF.QuarantinedBytes > 0 || _pendingSchemaCommit != null) && CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(30)))
+            if ((MMF.QuarantinedBytes > 0 || _pendingSchemaCommit != null) && CheckpointManager.ForceCheckpointAndWait(sealWait))
             {
                 MMF.DrainReleases();
 
@@ -6055,7 +6067,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // A timeout here is non-fatal: the recovered state is already correct in the page cache for this session's reads — it just
         // isn't consolidated to the data file yet, so it falls back to being re-replayed on the next open (soft recovery).
         // Recovery's frees, sealed by this cycle, freed once it covered: the open hands the transactions an allocator that reuses them (CK-17).
-        if (CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(30)))
+        if (CheckpointManager.ForceCheckpointAndWait(sealWait))
         {
             MMF.DrainReleases();
         }
@@ -7862,6 +7874,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             {
                 NoteNamedBuffer(named, fieldListSegment, comp.Fields._bufferId);
             }
+
+            // A migration's new rows are named by no durable row until its commit, which comes after this sweep (SCHEMA-09): swept, their field lists
+            // would be freed under a row the commit is about to publish.
+            NotePendingSchemaCommitBuffers(named, fieldListSegment);
 
             var componentNamesSegment = GetComponentCollectionSegment<String64>();
             swept.Add(componentNamesSegment);

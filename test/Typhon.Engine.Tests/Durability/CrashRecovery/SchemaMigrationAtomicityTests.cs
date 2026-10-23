@@ -2,7 +2,9 @@ using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
 using System.IO;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
 
@@ -20,6 +22,32 @@ struct WalSvMigrationConvertedV3
 class WalSvMigrationConvertedArch : Archetype<WalSvMigrationConvertedArch>
 {
     public static readonly Comp<WalSvMigrationConvertedV3> Value = Register<WalSvMigrationConvertedV3>();
+}
+
+// The WalMigration component re-declared SingleVersion together with a field add: a migration that would also change the storage mode.
+[Component("Typhon.Schema.UnitTest.WalMigration", 6, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+struct WalMigrationSingleVersionV6
+{
+    public long C;
+    public int A;
+    public int B;
+}
+
+[Component("Typhon.Schema.UnitTest.WalPeer", 1)]
+[StructLayout(LayoutKind.Sequential)]
+struct WalPeer
+{
+    public int P;
+    public int Q;
+}
+
+// Two components, one of which migrates.
+[Archetype]
+class WalMigrationWithPeerArch : Archetype<WalMigrationWithPeerArch>
+{
+    public static readonly Comp<WalMigrationV1> Value = Register<WalMigrationV1>();
+    public static readonly Comp<WalPeer> Peer = Register<WalPeer>();
 }
 
 /// <summary>
@@ -46,11 +74,13 @@ class SchemaMigrationAtomicityTests : TestBase<SchemaMigrationAtomicityTests>
         }
     }
 
-    // #1473: the migrating open of a cleanly closed database crashes before its first checkpoint. The entity used to be gone at the next open.
+    // #1473: the migrating open of a cleanly closed database is followed by a hard crash, with no write in between. Before SCHEMA-09 nothing had checkpointed
+    // by then and the entity was gone at the next open; now the open's own commit checkpoint is that first checkpoint. The crash BEFORE the commit is
+    // CommitInterruptedAtAnyStage_LeavesExactlyOneImage(Staged, False).
     [TestCase(StorageMode.Versioned)]
     [TestCase(StorageMode.SingleVersion)]
     [VerifiesRule("SCHEMA-09")]
-    public void CleanMigratingOpen_CrashingBeforeItsFirstCheckpoint_KeepsTheEntity(StorageMode mode)
+    public void CleanMigratingOpen_CrashingRightAfterTheOpen_KeepsTheEntity(StorageMode mode)
     {
         var id = SpawnV1(mode, crash: false, updateAfterCheckpoint: false);
 
@@ -287,6 +317,287 @@ class SchemaMigrationAtomicityTests : TestBase<SchemaMigrationAtomicityTests>
         var migration = new MigrationResult { OldCompSize = 8, FieldMap = [] };
         var ex = Assert.Throws<InvalidDataException>(() => SchemaEvolutionEngine.MigrateWalPayload(in migration, new byte[16], 16, "Probe"));
         Assert.That(ex!.Message, Does.Contain("16 bytes").And.Contain("8-byte"));
+    }
+
+    // The seal's cycle takes the commit, then is held; the open stops waiting and withdraws it. Released, the cycle must neither flip the commit nor advance
+    // CheckpointLSN: the window it would consume was replayed into segments the catalog does not name.
+    [Test]
+    [VerifiesRule("SCHEMA-09")]
+    public void CommitWithdrawnWhileItsCycleStillRuns_LeavesCheckpointLsnWhereItWas()
+    {
+        var id = SpawnV1(StorageMode.Versioned, crash: true, updateAfterCheckpoint: true);
+
+        using var held = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        Exception failure = null;
+        long lsnAtOpen;
+        long lsnAfter;
+        var scope = ServiceProvider.CreateScope();
+        var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        try
+        {
+            dbe.RegisterComponentFromAccessor<WalMigrationV2>();
+            lsnAtOpen = DurabilityWatermarks.ReadCheckpointLsn(dbe.MMF);
+            dbe.SchemaCommitWaitStepForTest = TimeSpan.FromMilliseconds(200);
+            dbe.SchemaCommitProbe = s =>
+            {
+                if (s == SchemaCommitStage.Staged)
+                {
+                    dbe.CheckpointManager.BeforeSettleProbe = () =>
+                    {
+                        if (!held.IsSet)
+                        {
+                            held.Set();
+                            release.Wait(TimeSpan.FromSeconds(10));
+                        }
+                    };
+                }
+            };
+
+            try
+            {
+                dbe.InitializeArchetypes();
+            }
+            catch (InvalidOperationException e)
+            {
+                failure = e;
+            }
+
+            Assert.That(held.IsSet, Is.True, "precondition: the cycle carrying the commit was held after it took the commit");
+            release.Set();
+
+            // The held cycle runs to its end before the next one: cycles are serialized.
+            dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromMilliseconds(500));
+            lsnAfter = DurabilityWatermarks.ReadCheckpointLsn(dbe.MMF);
+        }
+        finally
+        {
+            release.Set();
+            dbe.Dispose();
+            scope.Dispose();
+        }
+
+        Assert.That(failure?.Message, Does.Contain("could not be committed"));
+        Assert.That(lsnAfter, Is.EqualTo(lsnAtOpen), "the withdrawn commit's cycle advanced CheckpointLSN past the window");
+
+        using (var reopen = ServiceProvider.CreateScope())
+        {
+            using var next = reopen.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            next.RegisterComponentFromAccessor<WalMigrationV2>();
+            Assert.That(next.HasComponentMigrations, Is.True, "nothing committed: the migration runs again");
+            next.InitializeArchetypes();
+            using var tx = next.CreateQuickTransaction();
+            var value = tx.Open(id).Read(WalMigrationV2Arch.Value);
+            Assert.That((value.A, value.B, value.C), Is.EqualTo((1111, 2222, 0L)), "the window replayed again, and converted");
+        }
+    }
+
+    // The crash open's collection sweep runs before the commit, when no durable row names the migrated row's new field list yet. Swept, the list is freed
+    // under the row the commit publishes; a read-back cannot see it (a freed chunk keeps its bytes), its allocation bit can.
+    [Test]
+    [VerifiesRule("SCHEMA-09")]
+    public void CrashOpenSweep_KeepsTheFieldListOfTheRowItsMigrationCommits()
+    {
+        var id = SpawnV1(StorageMode.Versioned, crash: true, updateAfterCheckpoint: true);
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<WalMigrationV2>();
+            dbe.InitializeArchetypes();
+
+            var fieldList = FieldListBufferOf(dbe, "Typhon.Schema.UnitTest.WalMigration");
+            Assert.That(dbe.GetComponentCollectionSegment<FieldR1>().IsChunkAllocated(fieldList), Is.True,
+                "the committed row names a field list the sweep freed");
+        }
+
+        Assert.That(ReadV2(StorageMode.Versioned, id), Is.EqualTo((1111, 2222, 0L)));
+    }
+
+    // The open after a committed-but-unapplied migration writes the rows itself; stopped inside that, the open after it finishes the job.
+    [TestCase(SchemaCommitStage.ComponentRowsAppliedAtOpen)]
+    [TestCase(SchemaCommitStage.AppliedAtOpen)]
+    [VerifiesRule("SCHEMA-09")]
+    public void OpenStoppedWhileWritingACommittedMigrationsRows_IsFinishedByTheNext(SchemaCommitStage stage)
+    {
+        var id = SpawnV1(StorageMode.Versioned, crash: true, updateAfterCheckpoint: true);
+
+        Assert.Throws<InjectedFault>(() =>
+        {
+            using var scope = ServiceProvider.CreateScope();
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<WalMigrationV2>();
+            dbe.SchemaCommitProbe = s =>
+            {
+                if (s == SchemaCommitStage.Committed)
+                {
+                    throw new InjectedFault("stopped after the flip");
+                }
+            };
+            dbe.InitializeArchetypes();
+        });
+
+        DatabaseEngine.SchemaCommitAtOpenProbeForTest = s =>
+        {
+            if (s == stage)
+            {
+                throw new InjectedFault($"stopped at {s}");
+            }
+        };
+        try
+        {
+            var stopped = Assert.Catch(() =>
+            {
+                using var scope = ServiceProvider.CreateScope();
+                using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            });
+            Assert.That(stopped, Is.InstanceOf<InjectedFault>().Or.Property(nameof(Exception.InnerException)).InstanceOf<InjectedFault>());
+        }
+        finally
+        {
+            DatabaseEngine.SchemaCommitAtOpenProbeForTest = null;
+        }
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            Assert.That(dbe.MMF.Bootstrap.ContainsKey(DatabaseEngine.BK_SchemaCommit), Is.False);
+            dbe.RegisterComponentFromAccessor<WalMigrationV2>();
+            Assert.That(dbe.HasComponentMigrations, Is.False, "the migration had committed");
+            dbe.InitializeArchetypes();
+            using var tx = dbe.CreateQuickTransaction();
+            var value = tx.Open(id).Read(WalMigrationV2Arch.Value);
+            Assert.That((value.A, value.B, value.C), Is.EqualTo((1111, 2222, 0L)));
+        }
+    }
+
+    // Of an archetype's two components only one migrates: the other's window values are replayed as they were, and both land.
+    [Test]
+    [VerifiesRule("SCHEMA-09")]
+    public void CrashOpenMigratingOneComponentOfTwo_ReplaysBoth()
+    {
+        EntityId id;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<WalMigrationV1>();
+            dbe.RegisterComponentFromAccessor<WalPeer>();
+            dbe.InitializeArchetypes();
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                id = tx.Spawn<WalMigrationWithPeerArch>(
+                    WalMigrationWithPeerArch.Value.Set(new WalMigrationV1 { A = 10, B = 20 }),
+                    WalMigrationWithPeerArch.Peer.Set(new WalPeer { P = 30 }));
+                tx.Commit();
+            }
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True);
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                var entity = tx.OpenMut(id);
+                entity.Set(WalMigrationWithPeerArch.Value, new WalMigrationV1 { A = 1111, B = 2222 });
+                entity.Set(WalMigrationWithPeerArch.Peer, new WalPeer { P = 3333 });
+                tx.Commit();
+            }
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<WalMigrationV2>();
+            dbe.RegisterComponentFromAccessor<WalPeer>();
+            dbe.InitializeArchetypes();
+            using var tx = dbe.CreateQuickTransaction();
+            var entity = tx.Open(id);
+            var value = entity.Read(WalMigrationV2Arch.Value);
+            Assert.That((value.A, value.B, value.C), Is.EqualTo((1111, 2222, 0L)));
+            Assert.That(entity.Read(WalMigrationWithPeerArch.Peer).P, Is.EqualTo(3333));
+        }
+    }
+
+    // A widening sign-extends: negative values tell it apart from a zero-extension.
+    [Test]
+    [VerifiesRule("SCHEMA-09")]
+    public void CrashOpenWideningNegativeValues_SignExtendsThem()
+    {
+        EntityId id;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<WalMigrationV1>();
+            dbe.InitializeArchetypes();
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                id = tx.Spawn<WalMigrationArch>(WalMigrationArch.Value.Set(new WalMigrationV1 { A = -5, B = -7 }));
+                tx.Commit();
+            }
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True);
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                tx.OpenMut(id).Set(WalMigrationArch.Value, new WalMigrationV1 { A = -1111, B = -2222 });
+                tx.Commit();
+            }
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<WalMigrationWidenedV4>();
+            dbe.InitializeArchetypes();
+            using var tx = dbe.CreateQuickTransaction();
+            var value = tx.Open(id).Read(WalMigrationWidenedArch.Value);
+            Assert.That((value.A, value.B), Is.EqualTo((-1111L, -2222L)));
+        }
+    }
+
+    [Test]
+    public void MigrationChainWhoseSizesAreNotTheComponents_IsRefused()
+    {
+        SpawnV1(StorageMode.Versioned, crash: false, updateAfterCheckpoint: false);
+
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterByteMigration("Typhon.Schema.UnitTest.WalMigration", 1, 5, 12, 8, (_, _) => { });
+        var ex = Assert.Throws<InvalidOperationException>(() => dbe.RegisterComponentFromAccessor<WalMigrationConvertedV5>());
+        Assert.That(ex!.Message, Does.Contain("the chain's types are not the component's"));
+    }
+
+    [Test]
+    public void MigrationThatAlsoChangesTheStorageMode_IsRefused()
+    {
+        SpawnV1(StorageMode.Versioned, crash: false, updateAfterCheckpoint: false);
+
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        var ex = Assert.Throws<InvalidOperationException>(() => dbe.RegisterComponentFromAccessor<WalMigrationSingleVersionV6>());
+        Assert.That(ex!.Message, Does.Contain("cannot change the storage mode"));
+    }
+
+    [Test]
+    public void CatalogRows_FitASchemaIntentEntry()
+    {
+        var room = DatabaseEngine.SchemaIntentStride - DatabaseEngine.SchemaIntentHeaderSize;
+        Assert.That(Unsafe.SizeOf<ComponentR1>(), Is.LessThanOrEqualTo(room));
+        Assert.That(Unsafe.SizeOf<ArchetypeR1>(), Is.LessThanOrEqualTo(room));
+    }
+
+    /// <summary>The field-list buffer the persisted catalog row of <paramref name="componentName"/> names.</summary>
+    private static int FieldListBufferOf(DatabaseEngine dbe, string componentName)
+    {
+        var table = dbe.GetComponentTable<ComponentR1>();
+        var segment = table.ComponentSegment;
+        for (var chunkId = 1; chunkId < segment.ChunkCapacity; chunkId++)
+        {
+            if (segment.IsChunkAllocated(chunkId) && SystemCrud.Read(table, chunkId, out ComponentR1 row, dbe.EpochManager)
+                && row.Name.AsString == componentName)
+            {
+                return row.Fields._bufferId;
+            }
+        }
+
+        Assert.Fail($"no catalog row for {componentName}");
+        return 0;
     }
 
     /// <summary>

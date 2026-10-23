@@ -1179,12 +1179,24 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     /// Holding the lock across <paramref name="mutate"/> keeps a read-modify-write of one bootstrap field atomic with
     /// respect to the flip. Used for synchronous saves outside the checkpoint cycle.
     /// </summary>
-    internal void MutateBootstrapAndPersist(Action mutate)
+    internal void MutateBootstrapAndPersist(Action mutate) => MutateBootstrapAndPersist(mutate, null);
+
+    /// <param name="mutate">The bootstrap change.</param>
+    /// <param name="undo">Run under the same lock when the persist throws, to take the change back out of memory; null to leave it.</param>
+    internal void MutateBootstrapAndPersist(Action mutate, Action undo)
     {
         lock (_metaLock)
         {
             mutate();
-            PersistMetaNow();
+            try
+            {
+                PersistMetaNow();
+            }
+            catch
+            {
+                undo?.Invoke();
+                throw;
+            }
         }
     }
 

@@ -163,15 +163,22 @@ discipline (MVCC revision chains vs in-place SV vs heap-backed Transient), so re
   invariant a migration's durable effects — the new catalog rows of the migrated components and of every archetype re-pointed at new segments, and the
             `UserSchemaVersion` bump — become durable at ONE instant: the meta flip that carries `BK_SchemaCommit`, which is the same flip that advances
             CheckpointLSN (the recovery seal on a crash open, a forced checkpoint on a clean one)
-  never a catalog row of a migration is written in place before that flip: the rows go to a durable intent segment, and are written only after it
+  never the layout change of a migration reaches a catalog row before that flip: the rows go to a durable intent segment, and are written only after
+        it. (A rename that comes with it is still re-stamped in place at registration, SCHEMA-04: it moves no byte of the layout.)
   never a segment a migration replaced or abandoned is freed before that flip: until then the catalog names it
+  never a buffer the pending rows name is freed before that flip: the crash open's collection sweep counts them as named
+  never a cycle that took a staged commit and cannot flip it — the stager withdrew it — advances CheckpointLSN or recycles the WAL: the window it would
+        consume was replayed into segments the catalog does not name. A withdrawn commit leaves the session flush-only
   enforce `BK_SchemaCommit` set ⟹ the open writes the intent's rows before it reads the catalog, then clears the key (component rows in
           `LoadSystemSchemaR1`, archetype rows as the `ArchetypeR1` table loads)
-  enforce a migrating open whose commit checkpoint does not complete fails, leaving the pre-migration image: catalog, segments and WAL window
+  enforce a migrating open whose commit checkpoint stops making progress fails, leaving the pre-migration image: catalog, segments and WAL window
   enforce the open's WAL replay converts a migrated component's values from the layout it migrated from, through the same field map or user migration
-          chain as the table, and refuses a value whose size is not that layout's
-  scope: DatabaseEngine.StageMigratedComponentRow, DatabaseEngine.PrepareSchemaCommit, DatabaseEngine.CompleteSchemaCommit,
-         DatabaseEngine.ApplyCommittedSchemaIntentToComponents, DatabaseEngine.ApplyCommittedSchemaIntentToArchetypes, CheckpointManager.StageMetaCommit,
+          chain as the table, and refuses a value whose size is not that layout's; a chain whose types are not the stored and declared sizes, and a
+          migration that would also change the storage mode, are refused at registration
+  scope: DatabaseEngine.StageMigratedComponentRow, DatabaseEngine.PrepareSchemaCommit, DatabaseEngine.WaitForSchemaCommit,
+         DatabaseEngine.CompleteSchemaCommit, DatabaseEngine.NotePendingSchemaCommitBuffers, DatabaseEngine.ApplyCommittedSchemaIntentToComponents,
+         DatabaseEngine.ApplyCommittedSchemaIntentToArchetypes, DatabaseEngine.ThrowIfMigrationChainDoesNotFit,
+         DatabaseEngine.ThrowIfMigrationChangesStorageMode, CheckpointManager.StageMetaCommit, CheckpointManager.UnstageMetaCommit, StagedMetaCommit,
          DurabilityWatermarks.UpdateCheckpointLsn, SchemaEvolutionEngine.MigrateWalPayload, RecoveryApplier.MigrateSlots
   requires CK-05 — the meta flip is the only multi-field atomic write the file has; catalog rows are ordinary pages, written by `SavePages` with no WAL
   on_violation: two failures, both measured. A migrating crash-open that persisted the new catalog before replaying its window, then failed before the
@@ -183,7 +190,7 @@ discipline (MVCC revision chains vs in-place SV vs heap-backed Transient), so re
              the catalog's format unchanged and leaves every reader of `ComponentR1` / `ArchetypeR1` as it is: they only ever see one image. A migration
              is therefore committed when its open completes — `InitializeArchetypes` — never at registration, which is also when its archetype clusters are
              migrated: committing the component rows any earlier would publish a catalog whose clusters are still in the old layout.
-  verified: SchemaMigrationAtomicityTests [VerifiesRule]
+  verified: SchemaMigrationAtomicityTests [VerifiesRule] [RuleMutant], SchemaMigrationRecoveryTests [VerifiesRule]
 
 ---
 

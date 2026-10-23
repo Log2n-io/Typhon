@@ -1318,6 +1318,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
         var covered = false;
         var sw = Stopwatch.GetTimestamp();
         StagedMetaCommit stagedCommit = null;
+        var advanced = true;
 
         // CheckpointCycle span wraps the full cycle. DirtyPageCount is set after collection (not known at span-begin time).
         var cycleScope = TyphonEvent.BeginCheckpointCycle(targetLsn, reason);
@@ -1463,13 +1464,22 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
 
                 // Step 7: Advance CheckpointLSN in the meta-pair watermark block + fsync — to barrierLsn (the post-flush durable high-water established at
                 // step 1), NOT the stale loop-sampled targetLsn (CK-02/CK-03).
-                // A staged commit rides this flip (SCHEMA-09): durable with the CheckpointLSN it belongs to, or not at all.
-                var flipped = stagedCommit != null
-                    && stagedCommit.TryCommit(() => DurabilityWatermarks.UpdateCheckpointLsn(_mmf, barrierLsn, stagedCommit.Mutate));
-                if (!flipped)
+                // A staged commit rides this flip (SCHEMA-09): durable with the CheckpointLSN it belongs to, or not at all. One the stager withdrew stops
+                // the cycle here instead: the window this advance would consume is in the layout of a catalog the commit was to replace, and the data the
+                // replay wrote into the migration's segments is named by nothing once the commit is off — advanced, the window would be lost.
+                if (stagedCommit != null)
+                {
+                    advanced = stagedCommit.TryCommit(() => DurabilityWatermarks.UpdateCheckpointLsn(_mmf, barrierLsn, stagedCommit.Mutate,
+                        stagedCommit.Undo));
+                }
+                else
                 {
                     DurabilityWatermarks.UpdateCheckpointLsn(_mmf, barrierLsn);
                 }
+            }
+
+            if (stillSkipped == 0 && advanced)
+            {
                 Interlocked.Exchange(ref _checkpointLsn, barrierLsn);
 
                 // Every page collected at the start is on disk: the frees sealed then are safe to reuse (#1251).
@@ -1495,13 +1505,13 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                     }
                 }
             }
-            else
+            else if (stillSkipped != 0)
             {
                 Interlocked.Increment(ref _consecutiveGatedCycles);
             }
 
             Interlocked.Increment(ref _totalCheckpoints);
-            covered = stillSkipped == 0;
+            covered = stillSkipped == 0 && advanced;
             if (reason == CheckpointReason.DirtyPagePressure)
             {
                 // Counted HERE, beside the cycle counter, not at the call site: RunCheckpointCycle returns early under

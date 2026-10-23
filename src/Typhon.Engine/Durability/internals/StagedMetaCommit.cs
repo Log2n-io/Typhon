@@ -23,14 +23,22 @@ internal sealed class StagedMetaCommit
     private volatile bool _committed;
     private bool _cancelled;
 
-    public StagedMetaCommit(Action mutate)
+    public StagedMetaCommit(Action mutate, Action undo)
     {
         ArgumentNullException.ThrowIfNull(mutate);
+        ArgumentNullException.ThrowIfNull(undo);
         Mutate = mutate;
+        Undo = undo;
     }
 
     /// <summary>Applied to the in-memory bootstrap under the meta lock, in the flip that advances CheckpointLSN.</summary>
     public Action Mutate { get; }
+
+    /// <summary>
+    /// Reverts <see cref="Mutate"/> in the in-memory bootstrap, under the same lock, when the flip's write fails: left there, the next meta write of any kind
+    /// would make the commit durable over a CheckpointLSN that never moved.
+    /// </summary>
+    public Action Undo { get; }
 
     /// <summary>Set once the flip carrying <see cref="Mutate"/> is durable.</summary>
     public bool Committed => _committed;
