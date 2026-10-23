@@ -269,7 +269,8 @@ sealed class WholeSegmentScanTests
     }
 
     /// <summary>
-    /// 共享索引段的容量超过缓存时，清空仍只保留目录 chunk 并重置目录。稀疏段覆盖位图扫描，满段同时覆盖释放节点的写回（#1463）。
+    /// The crash open's clear of a shared index segment four times the cache, inside one epoch scope: it keeps only the directory chunks and empties the
+    /// directory (#1463). The sparse segment has nothing to free past the directory, so it covers the bitmap walk; the full one covers the frees' writes.
     /// </summary>
     [TestCase(false, false, TestName = "SharedIndexClear_SparseIndex64")]
     [TestCase(false, true, TestName = "SharedIndexClear_FullIndex64")]
@@ -315,7 +316,7 @@ sealed class WholeSegmentScanTests
         using var guard = EpochGuard.Enter(pmmf.EpochManager);
         var segment = pmmf.LoadChunkBasedSegment(root, stride);
         var changeSet = pmmf.CreateChangeSet();
-        // 这里只有存储层，没有 checkpoint 线程；背压时写出已完成的位图修改，模拟恢复的 flush-only 排空。
+        // A bare storage layer has no checkpointer: back-pressure writes the freed bitmaps out, as the crash open's flush-only cycle does (CK-08).
         pmmf.OnBackpressure = () => pmmf.SavePages(pmmf.CollectDirtyMemPageIndices()).GetAwaiter().GetResult();
 
         BTreeBase<PersistentStore>.ClearSharedSegment(segment, changeSet);
@@ -327,12 +328,12 @@ sealed class WholeSegmentScanTests
             remaining.Add(chunkId);
         }
 
-        Assert.That(remaining, Is.EqualTo(new[] { 0, 1, 2, 3 }), "目录保留，所有节点已释放");
+        Assert.That(remaining, Is.EqualTo(new[] { 0, 1, 2, 3 }), "the directory chunks stay, every node chunk is freed");
         Assert.That(segment.AllocatedChunkCount, Is.EqualTo(4));
         var accessor = segment.CreateScanAccessor();
         try
         {
-            Assert.That(accessor.GetChunkReadOnly<BTreeDirectoryHeader>(0).EntryCount, Is.Zero, "后续索引从空目录注册");
+            Assert.That(accessor.GetChunkReadOnly<BTreeDirectoryHeader>(0).EntryCount, Is.Zero, "the trees re-register from an empty directory");
         }
         finally
         {
