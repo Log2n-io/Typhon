@@ -116,6 +116,26 @@ public struct SetViewRadius
 }
 
 /// <summary>
+/// "Show me the whole planet." A player switching to the god camera, and back.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>The camera alone could not do it.</b> A player session is served a sphere around its avatar, so a client that flew its camera up looked down on an empty
+/// planet with one lit disc in it. On, the server serves the session <see cref="TatooineReplication.OverviewProfile"/>, the god camera's shape on the avatar's
+/// realm; off, the player profile again, at the radius the player last asked for. The avatar stays bound and steered throughout.
+/// </para>
+/// <para>
+/// <b>Planets only.</b> Refused when the avatar is inside a building, in space or in a dungeon, and ended by the server when the avatar goes into one: the god
+/// camera is a view of a planet's map. Refused too while <c>--max-spectators</c> is full, because an overview costs what a god session does.
+/// </para>
+/// </remarks>
+public struct Overview
+{
+    /// <summary>1 to switch to the god camera, 0 to come back.</summary>
+    public byte On;
+}
+
+/// <summary>
 /// "Fly me to that city." A player standing at its city's shuttleport asking to be flown to another.
 /// </summary>
 /// <remarks>
@@ -391,6 +411,26 @@ public static partial class TatooineReplication
     /// </summary>
     public const string GodRegionProfile = "god-region";
 
+    /// <summary>
+    /// A player session in the god camera (<see cref="Overview"/>): <see cref="GodProfile"/>'s whole world, anchored on the avatar so the session stays in its
+    /// avatar's realm.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A profile of its own, not the god camera's.</b> A god session's realm is placed by the application (<c>ViewRealm</c>); a player's follows its body
+    /// through doors and shuttles. <c>AroundControlled</c> on a <c>World</c> observer names the realm only (12-realms § 1.5), which is exactly that: the god
+    /// camera's view of the planet the player stands on, with the avatar still bound and still steered.
+    /// </para>
+    /// <para>
+    /// <b>No new visibility.</b> Anyone may open an anonymous god session and see all of this already, so a logged-in player is not given anything the
+    /// server was hiding. What it costs is a god session's bandwidth, which is why it counts against <c>--max-spectators</c> while it is on.
+    /// </para>
+    /// </remarks>
+    public const string OverviewProfile = "overview";
+
+    /// <summary><see cref="OverviewProfile"/> under <c>--god-region</c>: <see cref="GodRegionProfile"/>'s shape, anchored on the avatar.</summary>
+    public const string OverviewRegionProfile = "overview-region";
+
     /// <summary>The session kind a client names in <c>HELLO</c>.</summary>
     public const string GodKind = "god";
 
@@ -561,6 +601,12 @@ public static partial class TatooineReplication
 
     /// <summary><c>ACKS</c> reason: a <see cref="BoardShuttle"/> naming a city that does not exist, or the one it is standing in.</summary>
     public const byte ShuttleBadDestination = AckReasons.FirstApplicationReason + 4;
+
+    /// <summary><c>ACKS</c> reason: an <see cref="Overview"/> from a player whose avatar is not on a planet, or that has no avatar yet.</summary>
+    public const byte OverviewNotOnPlanet = AckReasons.FirstApplicationReason + 5;
+
+    /// <summary><c>ACKS</c> reason: an <see cref="Overview"/> while <c>--max-spectators</c> is full.</summary>
+    public const byte OverviewFull = AckReasons.FirstApplicationReason + 6;
 
     /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
     /// <remarks>
@@ -852,6 +898,33 @@ public static partial class TatooineReplication
     /// </remarks>
     private static string GodProfileName => GodRegionMaxEdgeM > 0 ? GodRegionProfile : GodProfile;
 
+    /// <summary>The profile a player in the god camera gets: the god camera's shape, kept on the avatar's realm.</summary>
+    private static string OverviewProfileName => GodRegionMaxEdgeM > 0 ? OverviewRegionProfile : OverviewProfile;
+
+    /// <summary>The player sessions in the god camera (<see cref="Overview"/>). Tick-thread only.</summary>
+    private static readonly HashSet<SessionId> Overviewing = [];
+
+    /// <summary>How many sessions are in <see cref="Overviewing"/>, published for the admission hook, which runs on the transport thread.</summary>
+    private static int _liveOverviews;
+
+    /// <summary>
+    /// The radius each player session last asked for with <see cref="SetViewRadius"/>, so leaving the god camera gives it back.
+    /// </summary>
+    /// <remarks>
+    /// <b>The engine forgets it on purpose:</b> a radius "holds until the session's profile changes, which returns it to the new profile's own radius"
+    /// (<c>SetRadius</c>). An overview is two profile changes, so without this a player who widened its view to 1 280 m came back at 1 024. Tick-thread only.
+    /// </remarks>
+    private static readonly Dictionary<SessionId, double> AskedRadius = [];
+
+    /// <summary>
+    /// Sessions that left the god camera this tick and get their radius back next tick, once the prologue has applied the sphere profile again.
+    /// </summary>
+    /// <remarks>
+    /// <c>SetRadius</c> is checked against the profile applied NOW and throws for one that is not a Sphere; on the tick thread a throw is a dead tick. So the
+    /// radius waits one tick, as <see cref="Releasing"/> does and for the same reason. Tick-thread only.
+    /// </remarks>
+    private static readonly List<SessionId> RadiusToRestore = [];
+
     /// <summary>
     /// Asks the next tick to send every open session a <c>KICK</c> carrying <paramref name="reason"/>, then close it. Callable from any thread.
     /// </summary>
@@ -936,7 +1009,9 @@ public static partial class TatooineReplication
         // A god session stays ANONYMOUS and carries no AppData. It is read-only by role — SessionRole.Spectator — and every game intent is Roles(Player), so
         // there is nothing for an identity to authorise. Requiring a token here would mean a login screen in front of the god camera, which is the one tool
         // that has to work on a box nobody has an account on.
-        return TryReserve(ref _pendingSpectators, System.Threading.Volatile.Read(ref _liveSpectators), MaxSpectators)
+        // Players in the god camera count too: they cost what a god session costs (see Overview).
+        var spectating = System.Threading.Volatile.Read(ref _liveSpectators) + System.Threading.Volatile.Read(ref _liveOverviews);
+        return TryReserve(ref _pendingSpectators, spectating, MaxSpectators)
             ? Admission.Accept(SessionRole.Spectator, SessionLimits.God)
             : Full("spectator", MaxSpectators);
     }
@@ -970,6 +1045,11 @@ public static partial class TatooineReplication
         Spectators.Clear();
         Releasing.Clear();
         Dead.Clear();
+        Overviewing.Clear();
+        System.Threading.Volatile.Write(ref _liveOverviews, 0);
+        System.Threading.Interlocked.Exchange(ref _overviewsRefused, 0);
+        AskedRadius.Clear();
+        RadiusToRestore.Clear();
         MaxClients = 0;
         MaxSpectators = 0;
         PlayerProfileName = HumanProfile;
@@ -1218,6 +1298,24 @@ public static partial class TatooineReplication
                 // wrong the moment something could: a viewer who picked a building got an empty realm and no way to tell it apart from an empty building.
                 p.In(InteriorKind, v => v.World().Of<Player>().Of<CityNpc>().Of<Creature>().Of<WorldObject>());
             });
+
+            // A player in the god camera: the same region, on its avatar's realm. Indoors and in space it is the player's own shape, for the tick between
+            // the avatar crossing a door and the server ending the overview (Overview).
+            subs.Profile(OverviewRegionProfile, p =>
+            {
+                p.Detection(detection)
+                    .ClientRegion(GodRegionMaxEdgeM)
+                    .AroundControlled()
+                    .Near(GodNearBudget)
+                    .Of<Creature>()
+                    .Of<CityNpc>()
+                    .Of<Player>()
+                    .Of<CreatureLair>()
+                    .Of<WorldObject>();
+                p.Aggregate(GodAggregateTileM, rateHz: 1).Of<Creature>().Of<CityNpc>().Of<Player>();
+                p.In(InteriorKind, v => v.World().AroundControlled().Of<Player>().Of<CityNpc>().Of<WorldObject>());
+                p.In(SpaceKind, v => v.World().AroundControlled().Of<Player>());
+            });
         }
         else
         {
@@ -1234,6 +1332,23 @@ public static partial class TatooineReplication
                 // As above: the whole room, because the room is one cell. This profile is already a World over the planet, so indoors it is the same shape
                 // at a different scale — which is exactly what 12-realms § 1.4's variants are for.
                 p.In(InteriorKind, v => v.World().Of<Player>().Of<CityNpc>().Of<Creature>().Of<WorldObject>());
+            });
+
+            // A player in the god camera: the whole planet its avatar is on. AroundControlled on a World names the realm only (12-realms § 1.5), so the
+            // session keeps following its body. Indoors and in space it is the player's own shape, for the tick between the avatar crossing a door and the
+            // server ending the overview (Overview).
+            subs.Profile(OverviewProfile, p =>
+            {
+                p.Detection(detection)
+                    .World()
+                    .AroundControlled()
+                    .Of<Creature>()
+                    .Of<CityNpc>()
+                    .Of<Player>()
+                    .Of<CreatureLair>()
+                    .Of<WorldObject>();
+                p.In(InteriorKind, v => v.World().AroundControlled().Of<Player>().Of<CityNpc>().Of<WorldObject>());
+                p.In(SpaceKind, v => v.World().AroundControlled().Of<Player>());
             });
         }
 
@@ -1378,6 +1493,13 @@ public static partial class TatooineReplication
             .Rate(4, 8)
             .Roles(SessionRole.Player)
             .Field(v => v.RadiusM, Codec.VarUInt, "radiusM"));
+
+        // The god camera for a player. Each accepted ask is a profile change, so a whole RESET of the planet: ViewRealm's rate, once a second with a burst
+        // of two, which a person toggling a button does not reach.
+        subs.Command<Overview>(c => c
+            .Rate(1, 2)
+            .Roles(SessionRole.Player)
+            .Field(v => v.On, Codec.U8, "on"));
 
         // Queued and slow: boarding is a decision, not a state, and a second ask before the first has been answered is a person pressing the key twice.
         // LatestPerSession would be wrong here — two asks naming two cities are two different intentions and the last one is not obviously the wanted one;
@@ -1544,6 +1666,11 @@ public static partial class TatooineReplication
                 // these maps are process-lifetime statics, and a long run that admits and drops spectators would otherwise accumulate one entry per ride.
                 Spectators.Remove(e.Session);
                 Releasing.Remove(e.Session);
+
+                // The same bounded growth, and the overview's place under --max-spectators given back. A resumed session opens on the player profile; its
+                // client asks for the god camera again if it is still in it.
+                Overviewing.Remove(e.Session);
+                AskedRadius.Remove(e.Session);
 
                 // A13: the engine says this link died on its own and is keeping the session's resume record for the grace, so the avatar stays standing
                 // instead of being retired by RetireAvatars this tick. The engine then delivers exactly one of Opened{ResumedFrom} or ResumeExpired
@@ -1717,6 +1844,21 @@ public static partial class TatooineReplication
         // <b>Validated here and not by the engine's own throw, because this runs on the tick thread.</b> `SetRadius` raises
         // ArgumentOutOfRangeException for a radius outside the profile's range, and a throw out of a system is not a refusal — it is a dead tick. So the range
         // is tested first and a bad ask is refused with a reason the client can show.
+        // A radius given back to a session that left the god camera on the tick before, now that the prologue has applied its sphere profile again. Before
+        // this tick's own asks, which then apply on top of it.
+        if (RadiusToRestore.Count > 0)
+        {
+            foreach (var session in RadiusToRestore)
+            {
+                if (!Overviewing.Contains(session) && AskedRadius.TryGetValue(session, out var radius) && radius != 0d)
+                {
+                    subs.SetRadius(session, radius);
+                }
+            }
+
+            RadiusToRestore.Clear();
+        }
+
         foreach (var command in subs.Commands<SetViewRadius>())
         {
             var asked = (double)command.Value.RadiusM;
@@ -1730,6 +1872,15 @@ public static partial class TatooineReplication
                 continue;
             }
 
+            // Kept even when it cannot be applied yet: a session in the god camera is served no sphere right now — SetRadius would throw — and gets this
+            // radius when it leaves (see AskedRadius).
+            AskedRadius[command.Session] = asked;
+            if (Overviewing.Contains(command.Session))
+            {
+                System.Threading.Interlocked.Increment(ref _radiusApplied);
+                continue;
+            }
+
             // The session's own profile must be a Sphere, which a player's is and a god camera's is not — the role filter on the command already keeps
             // spectators out, and this is the second half of that: a session whose profile has not been applied yet would make SetRadius throw.
             if (!subs.SetRadius(command.Session, asked))
@@ -1739,6 +1890,8 @@ public static partial class TatooineReplication
 
             System.Threading.Interlocked.Increment(ref _radiusApplied);
         }
+
+        Overviews(subs);
 
         // Reclaim reservations nobody ever claimed. A reservation is released where its session's `Opened` event is seen, and a session that was accepted but
         // then failed to open — `SessionTable.TryAdmit` can still fail to lease a slot, or throw, after the hook has said yes — produces no such event, so its
@@ -1929,6 +2082,105 @@ public static partial class TatooineReplication
         System.Threading.Volatile.Write(ref _liveClients, players);
         System.Threading.Volatile.Write(ref _liveSpectators, spectators);
     }
+
+    /// <summary>The god camera for players: overviews ended where the avatar left its planet, then this tick's <see cref="Overview"/> asks.</summary>
+    /// <param name="subs">The tick's subscriptions surface.</param>
+    private static void Overviews(SubscriptionsCommands subs)
+    {
+        // Ended by the server, before the asks: an avatar that went through a door, or flew to space, is no longer on a planet, and the god camera is a view of
+        // a planet's map. RealmOf is the realm the session's last frame committed, which for an AroundControlled session is its avatar's.
+        if (Overviewing.Count > 0)
+        {
+            OverviewsEnding.Clear();
+            foreach (var session in Overviewing)
+            {
+                if (!OnPlanet(subs, session))
+                {
+                    OverviewsEnding.Add(session);
+                }
+            }
+
+            foreach (var session in OverviewsEnding)
+            {
+                EndOverview(subs, session);
+            }
+        }
+
+        foreach (var command in subs.Commands<Overview>())
+        {
+            var session = command.Session;
+            var on = command.Value.On != 0;
+
+            // Asking for the state the session is already in is answered by doing nothing: a client that reconnected, or toggled twice inside a tick, is
+            // not refused for agreeing with the server.
+            if (on == Overviewing.Contains(session))
+            {
+                continue;
+            }
+
+            if (!on)
+            {
+                EndOverview(subs, session);
+                continue;
+            }
+
+            // No avatar yet means no realm to look at: the session's first frame has not committed one.
+            if (!BoundPlayer.ContainsKey(session.Value) || !OnPlanet(subs, session))
+            {
+                subs.Reject(command, OverviewNotOnPlanet);
+                System.Threading.Interlocked.Increment(ref _overviewsRefused);
+                continue;
+            }
+
+            // Counted against --max-spectators with the god sessions and the reservations admission holds for them, which is the same sum Admit tests.
+            var spectating = System.Threading.Volatile.Read(ref _liveSpectators) + System.Threading.Volatile.Read(ref _pendingSpectators) + Overviewing.Count;
+            if (MaxSpectators > 0 && spectating >= MaxSpectators)
+            {
+                subs.Reject(command, OverviewFull);
+                System.Threading.Interlocked.Increment(ref _overviewsRefused);
+                continue;
+            }
+
+            subs.Session(session).Profile(OverviewProfileName);
+            Overviewing.Add(session);
+        }
+
+        System.Threading.Volatile.Write(ref _liveOverviews, Overviewing.Count);
+    }
+
+    /// <summary>Puts a session in the god camera back on the player profile, and queues its radius for the next tick (see <see cref="RadiusToRestore"/>).</summary>
+    /// <param name="subs">The tick's subscriptions surface.</param>
+    /// <param name="session">A session in <see cref="Overviewing"/>.</param>
+    private static void EndOverview(SubscriptionsCommands subs, SessionId session)
+    {
+        Overviewing.Remove(session);
+        var request = subs.Session(session).Profile(PlayerProfileName);
+        if (PlayerBudgetBytesPerSecond > 0)
+        {
+            request.SetBudget(PlayerBudgetBytesPerSecond);
+        }
+
+        RadiusToRestore.Add(session);
+    }
+
+    /// <summary>Whether a session's committed realm is a planet: realms <c>0 .. Planets - 1</c>, as <c>TatooineSim</c> registers them.</summary>
+    /// <param name="subs">The tick's subscriptions surface.</param>
+    /// <param name="session">The session.</param>
+    /// <returns><see langword="true"/> on a planet.</returns>
+    private static bool OnPlanet(SubscriptionsCommands subs, SessionId session)
+    {
+        var realm = subs.RealmOf(session);
+        return !realm.IsNone && realm.Value < Planets;
+    }
+
+    /// <summary>The overviews <see cref="Overviews"/> ends this tick, collected first because ending one writes to <see cref="Overviewing"/>.</summary>
+    private static readonly List<SessionId> OverviewsEnding = [];
+
+    /// <summary>How many player sessions are in the god camera now, and how many <see cref="Overview"/> asks were refused.</summary>
+    public static (int Live, long Refused) OverviewAsks =>
+        (System.Threading.Volatile.Read(ref _liveOverviews), System.Threading.Interlocked.Read(ref _overviewsRefused));
+
+    private static long _overviewsRefused;
 
     /// <summary>
     /// Places every player session's disc for this tick, spreading the sessions over the world's players.

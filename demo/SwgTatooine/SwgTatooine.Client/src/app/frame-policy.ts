@@ -45,3 +45,28 @@ export function regionDue(
   const changed = !(moved <= radius * 0.05) || radius !== sentRadius;
   return changed && nowMs - sentMs >= intervalMs;
 }
+
+/** What {@link overviewPolicy} decided: whether to put a player back behind its avatar, and whether to ask for the god camera. */
+export interface OverviewDecision {
+  /** The camera is the god camera off a planet: put the player back behind its avatar. */
+  readonly backToAvatar: boolean;
+  /** Ask the server for the god camera's view (`Overview`); otherwise for the player's own. */
+  readonly overview: boolean;
+}
+
+/**
+ * A player's god camera, decided from the camera mode and the realm the session is in.
+ *
+ * The god camera is a view of a planet's map, so it is wanted on a planet only. A player whose realm is anything else —
+ * an interior, space, a dungeon — is put back behind its avatar; before the first realm arrives (`null`) nothing is
+ * asked and nothing is forced. A god session is never asked about: its camera already sees the planet.
+ */
+export function overviewPolicy(playing: boolean, cameraMode: 'god' | 'eye', scene: string | null): OverviewDecision {
+  if (!playing) {
+    return { backToAvatar: false, overview: false };
+  }
+
+  const onPlanet = scene === 'planet';
+  const backToAvatar = cameraMode === 'god' && scene !== null && !onPlanet;
+  return { backToAvatar, overview: cameraMode === 'god' && onPlanet };
+}

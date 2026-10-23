@@ -32,7 +32,8 @@ import {
   type PlacedShape,
   type Position,
 } from './structure-collision';
-import { meanAndP95, regionDue } from './frame-policy';
+import { meanAndP95, overviewPolicy, regionDue } from './frame-policy';
+import { headingFromVelocity } from '../math/vec';
 import { resolveArchetypes, type ArchetypeInfo, type ArchetypeView } from '../data/archetypes';
 import { altitudeField, altitudeOf, Placement } from '../data/placement';
 import { replicationStatsOf } from '../data/replication-stats';
@@ -42,6 +43,9 @@ import { describeFields } from '../data/swg-format';
 import { AGG_GRID, FASTEST_TICK_PERIOD_MS, StructureKind, SWG_SCHEMA, TICK_PERIOD_MS } from '../data/swg-schema';
 import { CITIES, PLANET_HALF_EXTENT_M } from '../data/world-data';
 import { AttackLines } from '../render/attack-lines';
+import { GameplayGizmos, type GizmoPlacement } from '../render/gameplay-gizmos';
+import { placement } from '../assets/asset-frame';
+import { assetForStructure, structureYaw } from '../assets/structure-assets';
 import {
   EntityLayer,
   type FrameView,
@@ -793,6 +797,8 @@ export class ClientApp {
     this.staticAssets = null;
     this.crowd?.dispose();
     this.crowd = null;
+    this.gizmos?.dispose();
+    this.gizmos = null;
     this.assets?.dispose();
     this.assets = null;
     // After the mount, which holds instances of meshes this lit.
@@ -1259,7 +1265,8 @@ export class ClientApp {
 
     const pool = this.placedShapes;
     let count = 0;
-    for (const sample of this.structureSamples) {
+    for (let i = 0; i < this.structureCount; i++) {
+      const sample = this.structureSamples[i];
       const shape = this.shapeFor(set, sample.asset);
       if (shape === null) {
         continue;
@@ -1737,6 +1744,7 @@ export class ClientApp {
     this.adoptSourceReset();
     this.adoptSourceRealm();
     this.adoptSubject(now);
+    this.syncOverview();
     this.advanceTransition(now);
     this.clock.update(now);
     // Held keys may stop following: read the UI state after them.
@@ -1839,7 +1847,7 @@ export class ClientApp {
       // must read the eye slot, which is the only one holding the avatar.
       // The PREDICTED position when there is one: the camera and the body must agree, or the view slides off a character
       // standing where the server last confirmed it.
-      const predicting = playing && this.predictor.active && !ui.showAuthoritative;
+      const predicting = playing && this.predictor.active;
       const camX = predicting ? this.predictor.x : playing ? this.eyeX : this.selectedX;
       const camY = playing ? this.eyeY : this.selectedY;
       const camZ = predicting ? this.predictor.z : playing ? this.eyeZ : this.selectedZ;
@@ -1891,11 +1899,10 @@ export class ClientApp {
       this.predictedOverride.netId = live.selfNetId;
       this.predictedOverride.x = this.predictor.x;
       this.predictedOverride.z = this.predictor.z;
-      // The debug toggle renders the SERVER's position instead of the predicted one, so the viewer can A/B the two and watch
-      // the body step back by exactly the lead distance. A side-by-side ghost would need a second mesh instance per frame in
-      // the packer's hot loop; a toggle shows the same quantity for nothing, and arguably more clearly than two meshes 0.3 m
-      // apart. Deviation from `15-client-prediction.md` § 5, recorded there.
-      view.predicted = ui.showAuthoritative ? null : this.predictedOverride;
+      // Always the prediction, "Server pos" or not: that toggle adds a translucent ghost at the server's position beside
+      // this body (`driveAvatar`) rather than moving this one there, so both are on screen and the gap between them is the
+      // lead (prediction.md § 5).
+      view.predicted = this.predictedOverride;
     } else {
       view.predicted = null;
     }
@@ -1927,6 +1934,8 @@ export class ClientApp {
     for (const netId of this.updateStaticAssets(cam.eyeX, cam.eyeZ)) {
       hidden.add(netId);
     }
+
+    this.updateGizmos(ui);
 
     view.hidden = hidden;
 
@@ -2085,6 +2094,31 @@ export class ClientApp {
   /** The radius last asked for, so an unchanged slider sends nothing. */
   private sentViewRadius: number | null = null;
 
+  /**
+   * Keeps what the server serves in step with the camera: a player in the god camera on a planet is served the planet
+   * (`Overview`), and is back behind its avatar anywhere else.
+   *
+   * <b>The camera alone is not the god camera for a player.</b> Its session is served a sphere around the avatar, so a
+   * camera flown up over it looked down on an empty planet with one lit disc. Asked every frame with the state wanted,
+   * which the source turns into one command per change; a new session (a resume) starts off and is asked again.
+   */
+  private syncOverview(): void {
+    const source = this.source;
+    if (source === null) {
+      return;
+    }
+
+    const ui = useUi.getState();
+    const decision = overviewPolicy(ui.playing, ui.cameraMode, source.realm?.scene ?? null);
+    if (decision.backToAvatar) {
+      // Through a door, onto a shuttle to space or into a dungeon: the server ends the overview on its side for the same
+      // crossing.
+      ui.setCameraMode('eye');
+    }
+
+    source.setOverview(decision.overview);
+  }
+
   private sendRegion(now: number, radius: number, x: number, z: number, playing: boolean): void {
     if (
       this.source === null ||
@@ -2100,7 +2134,10 @@ export class ClientApp {
       // none at all over the next 45 with the sends suppressed. Each one empties the store, renumbers every netId and
       // re-sends the view: visible as a hitch, as a chat clear, and — until the fix beside this one — as the camera
       // snapping back to the avatar's facing every twenty seconds.
-      playing ||
+      //
+      // Except in the god camera (`Overview`), where the session's profile is the god camera's: under `--god-region` its
+      // region IS what the server serves, exactly as for a god session.
+      (playing && !this.source.overview) ||
       !regionDue(
         x,
         z,
@@ -2405,6 +2442,7 @@ export class ClientApp {
     const subject = rideSubjectOf(this.ride) || (live?.selfNetId ?? 0);
     if (subject === 0 || !this.evaluate(subject)) {
       character.park();
+      this.assets?.ghost?.park();
       return 0;
     }
 
@@ -2444,8 +2482,12 @@ export class ClientApp {
     const predictedY = this.predictedGroundY;
     const y = own ? (Number.isFinite(predictedY) ? predictedY : this.evalY) : this.evalY;
     // `own` is this session steering this body, which is exactly when an intent exists for it.
+    // Otherwise from the replicated velocity, in the rig's convention (`headingFromVelocity`): the SDK's `headingOf` is a
+    // Babylon yaw, and fed here it turned a body walking north to face east.
     this.avatarHeading =
-      own && this.haveIntentHeading ? this.intentHeading : headingOf(this.evalVx, this.evalVz, this.avatarHeading);
+      own && this.haveIntentHeading
+        ? this.intentHeading
+        : headingFromVelocity(this.evalVx, this.evalVz, this.avatarHeading);
     // <b>Replicated velocity is metres per TICK, not per second</b> (the SDK's motion codec: a velocity per tick is what
     // makes a changing tick period harmless). The heading does not care — `atan2` is scale-free, which is why the body
     // faced the right way while walking at a fiftieth of its speed — but the clip does: at 50 Hz a 12 m/s run arrives as
@@ -2456,8 +2498,38 @@ export class ClientApp {
     // animation and not of the simulation. The render tick is the wrong clock for it — it is an integer, it is the
     // server's, and it stops when the stream does while the clip is still on screen.
     character.update(subject, x, y, z, speed, this.avatarHeading, nowMs / 1000, dt);
+    this.driveGhost(own, subject, speed, nowMs, dt);
     return subject;
   }
+
+  /**
+   * "Server pos": the avatar again, translucent, where the SERVER says it is — interpolated like every other entity,
+   * facing its replicated velocity — beside the predicted body. The gap between the two is the prediction's lead.
+   *
+   * Only for this session's own steered body: there is nothing predicted to compare a ridden entity with.
+   */
+  private driveGhost(own: boolean, subject: number, speed: number, nowMs: number, dt: number): void {
+    const ghost = this.assets?.ghost ?? null;
+    if (ghost === null) {
+      return;
+    }
+
+    if (!own || !useUi.getState().showAuthoritative) {
+      ghost.park();
+      return;
+    }
+
+    if (ghost.subjectNetId === 0) {
+      // Appearing, it faces the way the avatar does until the server's velocity says otherwise.
+      this.ghostHeading = this.avatarHeading;
+    }
+
+    this.ghostHeading = headingFromVelocity(this.evalVx, this.evalVz, this.ghostHeading);
+    ghost.update(subject, this.evalX, this.evalY, this.evalZ, speed, this.ghostHeading, nowMs / 1000, dt);
+  }
+
+  /** Where the ghost last faced, kept while the server's velocity is zero. */
+  private ghostHeading = 0;
 
   /**
    * Keeps the structures near the camera drawn as published assets, and says which the packer must skip.
@@ -2471,6 +2543,9 @@ export class ClientApp {
    * @returns The netIds drawn as assets.
    */
   private updateStaticAssets(eyeX: number, eyeZ: number): ReadonlySet<number> {
+    // Nothing is in range until this frame says so: `structureSamples` keeps its records across frames, so the count is
+    // what says how many are this frame's (see `structureCount`).
+    this.structureCount = 0;
     const layer = this.staticAssets;
     if (layer === null) {
       return NONE_HIDDEN;
@@ -2529,11 +2604,21 @@ export class ClientApp {
       }
     }
 
+    this.structureCount = taken;
     return layer.update(samples, taken, this.assetView);
   }
 
   /** Reused each frame: the structures in range, which is tens of entries and must not allocate. */
   private readonly structureSamples: StructureSample[] = [];
+
+  /**
+   * How many of {@link structureSamples} are this frame's.
+   *
+   * <b>The array is pooled, so its length is its high-water mark, not this frame's count.</b> Collision used to walk all of
+   * it, so the prediction pushed the body out of structures that had left range — and, through a door, out of the planet's
+   * buildings inside a 64 m room, where the server had none.
+   */
+  private structureCount = 0;
 
   /**
    * Reused each frame: where the camera is, in PLANET metres, for the structures' detail level.
@@ -2542,6 +2627,68 @@ export class ClientApp {
    * subtracted when a thing is handed to the renderer, and a structure's instance carries its own planet placement.
    */
   private readonly assetView = { eyeX: 0, eyeY: 0, eyeZ: 0, pixelsPerMetre: 0 };
+
+  /**
+   * The debug overlay ("Gizmos", "Colliders"): drawn over the structures this frame placed, from their descriptors and
+   * from the colliders the server published, plus the player's own collision body.
+   */
+  private updateGizmos(ui: UiState): void {
+    const assets = this.assets;
+    const set = this.assetSet;
+    if (assets === null || set === null) {
+      return;
+    }
+
+    const options = { markers: ui.showGizmos, colliders: ui.showColliders };
+    if (this.gizmos === null) {
+      if (!options.markers && !options.colliders) {
+        return;
+      }
+
+      this.gizmos = new GameplayGizmos(this.scene, assets.root);
+    }
+
+    const pool = this.gizmoPlacements;
+    let count = 0;
+    if (options.markers || options.colliders) {
+      for (let i = 0; i < this.structureCount; i++) {
+        const sample = this.structureSamples[i];
+        const id = assetForStructure(set, sample.asset);
+        if (id === null) {
+          continue;
+        }
+
+        pool[count++] = {
+          netId: sample.netId,
+          asset: id,
+          descriptor: assets.library.described(id),
+          pose: placement([sample.x, sample.y, sample.z], structureYaw(sample.yaw)),
+          shape: this.shapeFor(set, sample.asset),
+          quarters: sample.yaw,
+          x: sample.x,
+          y: sample.y,
+          z: sample.z,
+        };
+      }
+    }
+
+    this.gizmos.update(pool, count, options, (asset) => assets.library.described(asset));
+
+    // The body the prediction collides: the server's square, at the predicted feet. Only for a body this client steers.
+    const predicted = this.view.predicted;
+    const feetY = this.predictedGroundY;
+    this.gizmos.setBody(
+      options.markers && predicted !== null && this.bodyHalfM > 0 && Number.isFinite(feetY)
+        ? { x: predicted.x, y: feetY, z: predicted.z, half: this.bodyHalfM, height: assets.character?.height ?? 1.65 }
+        : null,
+    );
+  }
+
+  /** The debug overlay, created the first time it is switched on. */
+  private gizmos: GameplayGizmos | null = null;
+
+  /** Reused each frame: the placements the overlay is told about. */
+  private readonly gizmoPlacements: GizmoPlacement[] = [];
 
   /** The netIds the packer must skip this frame, rewritten in place. */
   private readonly hidden = new Set<number>();

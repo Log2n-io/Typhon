@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { shortestAngle, turnToward } from '../src/math/vec';
+import { headingFromVelocity, shortestAngle, turnToward } from '../src/math/vec';
+import { yawForHeading } from '../src/assets/asset-frame';
+import { movementIntent } from '../src/app/player-intent';
 
 /**
  * The facing clamp that keeps a reconciliation from spinning the character round.
@@ -60,5 +62,48 @@ describe('turnToward', () => {
   it('snaps on a non-positive step, which is what a paused frame asks for', () => {
     expect(turnToward(0, 2, 0)).toBe(2);
     expect(turnToward(0, 2, -1)).toBe(2);
+  });
+});
+
+/**
+ * A body is drawn facing the way it moves. The defect: the avatar's facing from its replicated velocity used the SDK's
+ * `headingOf` (a Babylon yaw, 0 along +Z) where the rig takes radians from +X towards +Z, so with "Server pos" on, or
+ * riding someone, a body walking north faced east — mirrored about the diagonal.
+ */
+describe('headingFromVelocity', () => {
+  /** Where the rig's model forward (+Z) ends up for a heading: a turn of `θ` about +Y takes +Z to (sin θ, 0, cos θ). */
+  const facing = (heading: number): [number, number] => {
+    const yaw = yawForHeading(heading);
+    return [Math.sin(yaw), Math.cos(yaw)];
+  };
+
+  it('draws the model facing its velocity, in every direction', () => {
+    for (const [vx, vz] of [
+      [1, 0],
+      [0, 1],
+      [-1, 0],
+      [0, -1],
+      [0.6, 0.8],
+      [-0.3, 0.95],
+    ]) {
+      const [fx, fz] = facing(headingFromVelocity(vx, vz, 0));
+      const len = Math.hypot(vx, vz);
+      expect(fx, `vx for (${vx}, ${vz})`).toBeCloseTo(vx / len, 9);
+      expect(fz, `vz for (${vx}, ${vz})`).toBeCloseTo(vz / len, 9);
+    }
+  });
+
+  it('agrees with the intent heading for the same motion', () => {
+    // W at a camera yaw moves along (sin yaw, cos yaw): the velocity the server then replicates.
+    for (const yaw of [0, 0.7, 2.1, -1.3]) {
+      const intent = movementIntent(new Set(['KeyW']), yaw);
+      expect(intent).not.toBeNull();
+      const fromVelocity = headingFromVelocity(Math.sin(yaw), Math.cos(yaw), 0);
+      expect(shortestAngle(fromVelocity - (intent?.heading ?? NaN)), `yaw ${yaw}`).toBeCloseTo(0, 9);
+    }
+  });
+
+  it('keeps the last heading when the body is still', () => {
+    expect(headingFromVelocity(0, 0, 1.25)).toBe(1.25);
   });
 });

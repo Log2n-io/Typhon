@@ -141,6 +141,11 @@ function factoryFor(
         // was never anchored to. The rate-limited case says nothing at all without this.
         useUi.getState().setCameraMode('god');
       },
+      onOverviewRefused: () => {
+        // Refused off a planet, or with the spectator places full: the session is still served the player's own view,
+        // so a camera left up in the sky would look down on one lit disc. Back behind the avatar.
+        useUi.getState().setCameraMode('eye');
+      },
     });
 }
 

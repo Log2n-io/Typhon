@@ -1,3 +1,4 @@
+import { Material } from '@babylonjs/core/Materials/material';
 import type { TransformNode } from '@babylonjs/core/Meshes/transformNode';
 import { axisVector, placement, yawForHeading } from '../assets/asset-frame';
 import type { AssetLibrary } from '../assets/asset-library';
@@ -80,6 +81,9 @@ export interface CharacterMount {
  * @param assetId Which character — a `kind: "character"` asset with `animations` in its descriptor.
  * @param root The node the arrangement hangs off, which carries the render origin.
  * @param lighting Gives the rig's materials their share of baked AO on direct light.
+ * @param ghostAlpha Draws this rig translucent at this opacity, on its own copies of the materials, and casting no
+ *   shadow: the "Server pos" ghost, which stands where the server says the avatar is beside the predicted body. Omitted
+ *   for an ordinary, opaque character.
  * @returns The mount, parked until something gives it a subject.
  */
 export async function mountCharacter(
@@ -87,6 +91,7 @@ export async function mountCharacter(
   assetId: string,
   root: TransformNode,
   lighting: SceneLighting,
+  ghostAlpha?: number,
 ): Promise<CharacterMount> {
   const asset = await library.acquire(assetId);
   const animations = asset.descriptor.animations;
@@ -101,9 +106,27 @@ export async function mountCharacter(
   // the AO factor are the container's either way.
   prepareAsset(asset, lighting);
   const instance = await library.instantiate(assetId, placement([0, 0, 0], 0), root);
-  // <b>The avatar casts too, and it is marked here rather than with the structures.</b> A skinned mesh cannot be
-  // instanced — Babylon refuses — so this one is a clone, which `static-assets` never sees.
-  lighting.castShadows(instance.meshes);
+  const ghostMaterials: Material[] = [];
+  if (ghostAlpha === undefined) {
+    // <b>The avatar casts too, and it is marked here rather than with the structures.</b> A skinned mesh cannot be
+    // instanced — Babylon refuses — so this one is a clone, which `static-assets` never sees.
+    lighting.castShadows(instance.meshes);
+  } else {
+    // Its OWN materials: the clone shares the container's, so making those translucent would ghost the avatar too. A
+    // depth pre-pass keeps the limbs from showing through the body, which a translucent skinned mesh otherwise does.
+    for (const mesh of instance.meshes) {
+      const material = mesh.material?.clone(`${mesh.material.name}#ghost`) ?? null;
+      if (material === null) {
+        continue;
+      }
+
+      material.alpha = ghostAlpha;
+      material.transparencyMode = Material.MATERIAL_ALPHABLEND;
+      material.needDepthPrePass = true;
+      mesh.material = material;
+      ghostMaterials.push(material);
+    }
+  }
 
   const [min, max] = asset.descriptor.bounds.render;
   const height = max[1] - min[1];
@@ -163,6 +186,9 @@ export async function mountCharacter(
     dispose(): void {
       rig.dispose();
       instance.dispose();
+      for (const material of ghostMaterials) {
+        material.dispose();
+      }
     },
   };
 }

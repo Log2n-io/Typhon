@@ -75,6 +75,18 @@ export function turnToward(current: number, target: number, maxStep: number): nu
   return current + Math.sign(delta) * maxStep;
 }
 
+/**
+ * The heading a ground velocity points along, in the server's and the character rig's convention: radians from +X
+ * towards +Z (`yawForHeading`). `fallback` when the body is still.
+ *
+ * <b>Not the SDK's `headingOf`</b>, which is `atan2(vx, vz)`: a Babylon yaw, 0 along +Z, the convention the cameras and
+ * the crowd's instance rotation use. Fed to the rig, it drew a body walking along +Z facing +X, mirrored about the
+ * diagonal — the avatar's facing whenever it was not the player's own intent (the "Server pos" view, a ride).
+ */
+export function headingFromVelocity(vx: number, vz: number, fallback: number): number {
+  return vx === 0 && vz === 0 ? fallback : Math.atan2(vz, vx);
+}
+
 /** Rotation of `angle` radians about +Y — Babylon's `rotation.y`, which turns +Z towards +X. */
 export function quatFromYaw(angle: number): Quat {
   return [0, Math.sin(angle / 2), 0, Math.cos(angle / 2)];

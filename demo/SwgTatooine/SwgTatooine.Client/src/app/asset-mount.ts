@@ -50,6 +50,9 @@ export function prepareAsset(asset: LoadedAsset, lighting: SceneLighting): void 
   lighting.adopt(asset.container.meshes);
 }
 
+/** How opaque the "Server pos" ghost is: enough to read its pose, little enough to see the predicted body through it. */
+export const GHOST_ALPHA = 0.4;
+
 export interface AssetMount {
   readonly library: AssetLibrary;
   /** The node every placement hangs off, which carries the render origin; see {@link AssetMount.rebase}. */
@@ -57,6 +60,11 @@ export interface AssetMount {
   readonly lighting: SceneLighting;
   /** The rigged avatar, or `null` when the catalogue publishes no character to be one. */
   readonly character: CharacterMount | null;
+  /**
+   * The same character at {@link GHOST_ALPHA}, drawn where the SERVER says the avatar is while "Server pos" is on, beside
+   * the predicted one; `null` when there is no avatar.
+   */
+  readonly ghost: CharacterMount | null;
   /**
    * Moves the arrangement to follow the render origin. Called every frame; cheap, because it moves one node.
    *
@@ -111,16 +119,20 @@ export async function mountAssets(
   // The avatar: the one asset whose absence must not stop the rest being drawn, because a catalogue is built elsewhere
   // and may simply not publish characters.
   let character: CharacterMount | null = null;
+  let ghost: CharacterMount | null = null;
   if (library.catalogue.assets[AVATAR_ASSET] === undefined) {
     console.warn(`assets: ${AVATAR_ASSET} is not in ${library.version}; the avatar stays a capsule`);
   } else {
     try {
       character = await mountCharacter(library, AVATAR_ASSET, root, lighting);
+      ghost = await mountCharacter(library, AVATAR_ASSET, root, lighting, GHOST_ALPHA);
     } catch (error) {
       // A 404, a GLB that will not parse, a character published without animations: none of them is a reason for the
       // street to go undrawn. The catalogue check above was only one of the three ways this fails.
       console.warn(`assets: ${AVATAR_ASSET} did not mount; the avatar stays a capsule`, error);
+      character?.dispose();
       character = null;
+      ghost = null;
     }
   }
 
@@ -134,11 +146,13 @@ export async function mountAssets(
     root,
     lighting,
     character,
+    ghost,
     rebase(originX: number, originZ: number): void {
       root.position.set(-originX, 0, -originZ);
     },
     dispose(): void {
       character?.dispose();
+      ghost?.dispose();
       root.dispose();
       // Not the lighting: the app created it and the terrain is still lit by it.
     },

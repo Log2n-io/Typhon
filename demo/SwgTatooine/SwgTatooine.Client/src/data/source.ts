@@ -290,6 +290,16 @@ export interface DataSource {
    * timetable becomes visible to whoever is waiting for it.
    */
   boardShuttle(destCity: number): void;
+  /**
+   * Asks for the god camera's view of the planet (`Overview`), or to come back to the player's own, keeping the avatar.
+   *
+   * <b>Idempotent, so it can be called every frame</b> with the state the UI wants: only a change is sent, and a new
+   * session starts from the server's own state (off). The server refuses it off a planet and when `--max-spectators` is
+   * full, and ends it when the avatar goes indoors; {@link TyphonSourceOptions.onOverviewRefused} says so.
+   */
+  setOverview(on: boolean): void;
+  /** Whether the last {@link setOverview} the server has not refused asked for the god camera. */
+  readonly overview: boolean;
   readonly stats: SourceStats;
   /** The simulated link's control, or null for a real connection. */
   readonly latency: LatencyControl | null;
@@ -311,6 +321,8 @@ export interface TyphonSourceOptions {
    * @param reason The `ACKS` reason, or `travel.REASON_NOT_SENT` when nothing left the client.
    */
   readonly onShuttleRefused?: (reason: number) => void;
+  /** The server refused the god camera, or the local rate limit did. The session is still served the player's own view. */
+  readonly onOverviewRefused?: () => void;
   /** The server's WebSocket URL, which must speak `typhon.3`. */
   readonly url: string;
   /** The clock render time comes from; the source feeds it every frame. */
@@ -368,6 +380,7 @@ export class TyphonSource implements DataSource {
   private setViewRadiusCommand: MessagePlan | null = null;
 
   private boardShuttleCommand: MessagePlan | null = null;
+  private overviewCommand: MessagePlan | null = null;
 
   /** The sphere radius last asked for, metres; 0 for none asked. See {@link effectiveRadiusM}. */
   private askedViewRadiusM = 0;
@@ -733,6 +746,35 @@ export class TyphonSource implements DataSource {
   /** The sequence of the boarding ask awaiting an answer, or -1; see {@link SourceOptions.onShuttleRefused}. */
   private pendingBoardSeq = -1;
 
+  setOverview(on: boolean): void {
+    // Absent from a god session's catalog view, whose camera already sees the planet.
+    if (this.overviewCommand === null || on === this.overviewAsked || this.ticks === 0) {
+      return;
+    }
+
+    const seq = this.commands?.enqueue(this.overviewCommand, { on: on ? 1 : 0 }) ?? CommandRefused.RateLimited;
+    if (seq < 0) {
+      // Nothing was sent, so no ack will come. The belief stays what the server has.
+      this.options.onOverviewRefused?.();
+      return;
+    }
+
+    this.overviewAsked = on;
+    this.pendingOverviewSeq = on ? seq : -1;
+    this.sendPending();
+  }
+
+  /** What this client last asked the server for; the server's state on a new session is off. */
+  private overviewAsked = false;
+
+  /** The sequence of the god-camera ask awaiting an answer, or -1. Only an ask to switch on can be refused. */
+  private pendingOverviewSeq = -1;
+
+  /** Whether this session's last accepted ask put it in the god camera. Read by the app to send regions while it is. */
+  get overview(): boolean {
+    return this.overviewAsked;
+  }
+
   /** The netId this client last asked to ride; see {@link DataSource.spectatingNetId}. */
   get spectatingNetId(): number {
     return this.spectating;
@@ -788,6 +830,10 @@ export class TyphonSource implements DataSource {
 
   private onWelcome(session: SessionInfo, connection: Connection): void {
     const plan = session.plan;
+    // A new session, resumed or not, opens on the player's own profile: the app asks for the god camera again if it is
+    // still in it.
+    this.overviewAsked = false;
+    this.pendingOverviewSeq = -1;
     this.applier = new FrameApplier(plan, {
       clock: this.options.clock,
       onEvent: (event) => {
@@ -853,6 +899,7 @@ export class TyphonSource implements DataSource {
     this.setTargetCommand = plan.commandByName('SetTarget');
     this.setViewRadiusCommand = plan.commandByName('SetViewRadius');
     this.boardShuttleCommand = plan.commandByName('BoardShuttle');
+    this.overviewCommand = plan.commandByName('Overview');
     this.commands = new CommandQueue({ plan });
     this.region =
       plan.clientRegion === null
@@ -972,6 +1019,13 @@ export class TyphonSource implements DataSource {
       if (seq === this.pendingBoardSeq) {
         this.pendingBoardSeq = -1;
         this.options.onShuttleRefused?.(applier.acks.reason[i]);
+      }
+
+      // A refused god camera: the session is still served the player's own view, so the belief goes back to off.
+      if (seq === this.pendingOverviewSeq) {
+        this.pendingOverviewSeq = -1;
+        this.overviewAsked = false;
+        this.options.onOverviewRefused?.();
       }
     }
 

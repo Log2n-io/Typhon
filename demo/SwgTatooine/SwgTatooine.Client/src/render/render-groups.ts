@@ -10,3 +10,10 @@
  * *is* the occlusion; no other mechanism is needed.
  */
 export const SCENE_GROUP = 1;
+
+/**
+ * The debug gizmos (portals, spawns, interactions, colliders): drawn after the scene with its depth cleared, so a portal box
+ * half inside a wall, or a collider inside the mesh it stands for, shows through it. A gizmo hidden by the thing it
+ * describes would be no use for checking that the two agree.
+ */
+export const GIZMO_GROUP = 2;

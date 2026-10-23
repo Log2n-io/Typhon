@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { meanAndP95, regionDue } from '../src/app/frame-policy';
+import { meanAndP95, overviewPolicy, regionDue } from '../src/app/frame-policy';
 
 describe('meanAndP95', () => {
   const run = (values: number[]): number[] => {
@@ -38,5 +38,34 @@ describe('regionDue', () => {
   it('sends at most once per interval', () => {
     expect(due(500, 1000, 199)).toBe(false);
     expect(due(500, 1000, 200)).toBe(true);
+  });
+});
+
+/**
+ * A player's god camera (`Overview`): asked on a planet only, and left everywhere else. The defect it guards: the camera
+ * flew up while the session was still served a sphere around the avatar, so the god camera showed one lit disc.
+ */
+describe('overviewPolicy', () => {
+  it('asks for the god camera when a player is in it on a planet', () => {
+    expect(overviewPolicy(true, 'god', 'planet')).toEqual({ backToAvatar: false, overview: true });
+  });
+
+  it('asks for the player view behind the avatar', () => {
+    expect(overviewPolicy(true, 'eye', 'planet')).toEqual({ backToAvatar: false, overview: false });
+  });
+
+  it('puts a player back behind its avatar anywhere but a planet', () => {
+    for (const scene of ['interior', 'space', 'dungeon']) {
+      expect(overviewPolicy(true, 'god', scene), scene).toEqual({ backToAvatar: true, overview: false });
+    }
+  });
+
+  it('forces nothing before the first realm arrives', () => {
+    expect(overviewPolicy(true, 'god', null)).toEqual({ backToAvatar: false, overview: false });
+  });
+
+  it('never asks for a god session, whose camera already sees the planet', () => {
+    expect(overviewPolicy(false, 'god', 'planet')).toEqual({ backToAvatar: false, overview: false });
+    expect(overviewPolicy(false, 'eye', 'interior')).toEqual({ backToAvatar: false, overview: false });
   });
 });

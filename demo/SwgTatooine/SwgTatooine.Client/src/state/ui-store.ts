@@ -127,15 +127,22 @@ export interface UiState {
    */
   readonly playing: boolean;
   /**
-   * Draw the avatar where the SERVER says it is, rather than where the client predicted (A14).
+   * Also draw the avatar where the SERVER says it is, as a translucent ghost beside the predicted body (A14, prediction.md § 5).
    *
    * <b>A diagnostic, and the answer to a fair objection.</b> Prediction makes the displayed position a fiction, in a demo
-   * whose whole point is that the engine is the authority — so the fiction has to be inspectable. Toggling this steps the body
-   * back by exactly the lead distance, which makes the latency something the demo SHOWS rather than only measures.
+   * whose whole point is that the engine is the authority — so the fiction has to be inspectable. The gap between the two
+   * bodies is the lead, which makes the latency something the demo SHOWS rather than only measures.
    */
   readonly showAuthoritative: boolean;
   readonly showLabels: boolean;
   readonly showAttacks: boolean;
+  /**
+   * Debug: draw the placed structures' portals (blue, with an arrow along the crossing), spawns (green), interactions
+   * (magenta) and bot approach paths (yellow), and the player's collision body (white), from the same data the game uses.
+   */
+  readonly showGizmos: boolean;
+  /** Debug: draw the colliders the server published and the prediction pushes against (orange; walls' tops redder). */
+  readonly showColliders: boolean;
   /** Per archetype NAME; an archetype the user has not touched is visible. */
   readonly layers: NameFlags;
   readonly paused: boolean;
@@ -219,6 +226,8 @@ export interface UiState {
   readonly clearShuttleRefusal: () => void;
   readonly setShowAuthoritative: (showAuthoritative: boolean) => void;
   readonly setShowLabels: (on: boolean) => void;
+  readonly setShowGizmos: (on: boolean) => void;
+  readonly setShowColliders: (on: boolean) => void;
   readonly setShowAttacks: (on: boolean) => void;
   readonly toggleLayer: (name: string) => void;
   readonly setPaused: (paused: boolean) => void;
@@ -253,6 +262,8 @@ export const useUi = create<UiState>()((set, get) => ({
   showAuthoritative: false,
   showLabels: true,
   showAttacks: true,
+  showGizmos: false,
+  showColliders: false,
   layers: {},
   paused: false,
   latencyMs: 40,
@@ -347,6 +358,12 @@ export const useUi = create<UiState>()((set, get) => ({
   },
   setShowLabels: (showLabels) => {
     set({ showLabels });
+  },
+  setShowGizmos: (showGizmos) => {
+    set({ showGizmos });
+  },
+  setShowColliders: (showColliders) => {
+    set({ showColliders });
   },
   setShowAttacks: (showAttacks) => {
     set({ showAttacks });

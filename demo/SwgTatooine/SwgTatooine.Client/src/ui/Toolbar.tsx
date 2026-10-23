@@ -39,10 +39,19 @@ function controlHint(playing: boolean, cameraMode: 'god' | 'eye'): string {
 }
 
 /** What the camera button offers, which is a different thing for a player and for a god camera. */
-function cameraButtonTitle(playing: boolean, cameraMode: 'god' | 'eye', selectedNetId: number): string {
+function cameraButtonTitle(
+  playing: boolean,
+  cameraMode: 'god' | 'eye',
+  selectedNetId: number,
+  onPlanet: boolean,
+): string {
   if (playing) {
+    if (cameraMode === 'eye' && !onPlanet) {
+      return 'The god camera is a view of a planet: it is not available here.';
+    }
+
     return cameraMode === 'eye'
-      ? 'Leave your avatar and fly the map freely. Your character stays where it is, and the world is still served around it.'
+      ? 'Leave your avatar and fly over the whole planet, served as the god camera sees it. Your character stays where it is.'
       : 'Go back behind your own character. Drag to look, wheel to pull back over its shoulder.';
   }
 
@@ -280,37 +289,44 @@ export function Toolbar() {
             />
           </label>
         )}
-        <div className="row wrap">
-          {CITIES.map((c) => (
-            <button
-              key={c.name}
-              onClick={() => {
-                ui.flyTo(c.x, c.z, 1400);
-              }}
-            >
-              {c.name}
-            </button>
-          ))}
-        </div>
-        <div className="row wrap">
-          {POIS.map((p) => (
-            <button
-              key={p.name}
-              onClick={() => {
-                ui.flyTo(p.x, p.z, 900);
-              }}
-            >
-              {p.name}
-            </button>
-          ))}
-          <button
-            onClick={() => {
-              ui.flyTo(0, 0, 21000);
-            }}
-          >
-            Whole planet
-          </button>
-        </div>
+        {/* Places to fly the god camera to, so shown only where they do something: in the god camera, on a planet. Behind
+            an avatar or in an entity's eyes the camera is not the map's, and indoors the places are not in this realm. The
+            mock has no realm and is always a planet. */}
+        {ui.cameraMode === 'god' && (realmScene === 'planet' || realmScene === null) && (
+          <>
+            <div className="row wrap">
+              {CITIES.map((c) => (
+                <button
+                  key={c.name}
+                  onClick={() => {
+                    ui.flyTo(c.x, c.z, 1400);
+                  }}
+                >
+                  {c.name}
+                </button>
+              ))}
+            </div>
+            <div className="row wrap">
+              {POIS.map((p) => (
+                <button
+                  key={p.name}
+                  onClick={() => {
+                    ui.flyTo(p.x, p.z, 900);
+                  }}
+                >
+                  {p.name}
+                </button>
+              ))}
+              <button
+                onClick={() => {
+                  ui.flyTo(0, 0, 21000);
+                }}
+              >
+                Whole planet
+              </button>
+            </div>
+          </>
+        )}
       </section>
 
       <section>
@@ -400,21 +416,6 @@ export function Toolbar() {
           >
             Shadows
           </button>
-          {/*
-            A14. Offered only to a session that HAS a predicted avatar: for a god camera there is no prediction to contrast
-            with the authority, so the button would toggle nothing — the same rule the camera-mode button follows.
-          */}
-          {ui.playing ? (
-            <button
-              className={ui.showAuthoritative ? 'active' : ''}
-              title="Draw your avatar where the server says it is, instead of where this client predicted. The gap is the latency."
-              onClick={() => {
-                ui.setShowAuthoritative(!ui.showAuthoritative);
-              }}
-            >
-              Server pos
-            </button>
-          ) : null}
           <button
             className={ui.showLabels ? 'active' : ''}
             onClick={() => {
@@ -429,15 +430,59 @@ export function Toolbar() {
             // cannot tell the direction of.
             className={!ui.playing && ui.cameraMode === 'eye' ? 'active' : ''}
             // A player's eye view rides its own avatar, so a selection is not what makes it available. Testing the
-            // selection alone left a logged-in player with no way back to the god camera at all.
-            disabled={ui.selectedNetId === 0 && !ui.playing}
-            title={cameraButtonTitle(ui.playing, ui.cameraMode, ui.selectedNetId)}
+            // selection alone left a logged-in player with no way back to the god camera at all. A player's god camera
+            // is a view of a planet, so off one it cannot be entered (the server would refuse it).
+            disabled={
+              (ui.selectedNetId === 0 && !ui.playing) ||
+              (ui.playing && ui.cameraMode === 'eye' && realmScene !== 'planet')
+            }
+            title={cameraButtonTitle(ui.playing, ui.cameraMode, ui.selectedNetId, realmScene === 'planet')}
             onClick={() => {
               ui.setCameraMode(ui.cameraMode === 'eye' ? 'god' : 'eye');
             }}
           >
             {ui.playing ? (ui.cameraMode === 'eye' ? 'God camera' : 'Third person') : 'Eye view'}
           </button>
+        </div>
+      </section>
+
+      {/* Views of what the game itself is doing, rather than of the world: none of them changes anything. */}
+      <section>
+        <h3>Debug</h3>
+        <div className="row wrap">
+          <button
+            className={ui.showGizmos ? 'active' : ''}
+            title="Portals (blue, the arrow crosses them), spawns (green), interactions (magenta), bot approach paths (yellow) and your collision body (white), drawn from the data the game uses and through walls."
+            onClick={() => {
+              ui.setShowGizmos(!ui.showGizmos);
+            }}
+          >
+            Gizmos
+          </button>
+          <button
+            className={ui.showColliders ? 'active' : ''}
+            title="The colliders the server published and your prediction is pushed out of (orange; a top too steep to stand on is redder), with the sloped top the collision reads."
+            onClick={() => {
+              ui.setShowColliders(!ui.showColliders);
+            }}
+          >
+            Colliders
+          </button>
+          {/*
+            A14. Offered only to a session that HAS a predicted avatar: for a god camera there is no prediction to contrast
+            with the authority, so the button would toggle nothing — the same rule the camera-mode button follows.
+          */}
+          {ui.playing ? (
+            <button
+              className={ui.showAuthoritative ? 'active' : ''}
+              title="Also draw your avatar, translucent, where the server says it is, beside where this client predicted it. The gap is the latency."
+              onClick={() => {
+                ui.setShowAuthoritative(!ui.showAuthoritative);
+              }}
+            >
+              Server pos
+            </button>
+          ) : null}
           <button
             className={ui.showDebug ? 'active' : ''}
             disabled={!canDebug}

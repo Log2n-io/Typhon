@@ -60,6 +60,8 @@ export interface PortalDesc {
   readonly target: string;
   readonly target_spawn: string;
   readonly exit_spawn: string;
+  /** How a bot reaches the portal, feet height, in the asset's frame (ASSET_FORMAT.md 5.7); absent is none. */
+  readonly approach?: readonly Vec3[];
 }
 
 export interface SpawnDesc {
@@ -81,6 +83,8 @@ export interface ChildDesc {
   readonly asset: string;
   readonly pos: Vec3;
   readonly rot: Quat;
+  /** How a bot reaches the child's interaction, feet height, in this asset's frame (ASSET_FORMAT.md 5.7); absent is none. */
+  readonly approach?: readonly Vec3[];
 }
 
 export interface ClipDesc {

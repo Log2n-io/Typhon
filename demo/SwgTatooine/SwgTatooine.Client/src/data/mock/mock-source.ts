@@ -121,6 +121,13 @@ export class MockSource implements DataSource, LatencyControl {
 
   boardShuttle(): void {}
 
+  /** The mock serves its whole world to every camera already. */
+  setOverview(): void {}
+
+  get overview(): boolean {
+    return false;
+  }
+
   /** The mock controls nothing: it has no sessions and no SELF block. */
   get selfNetId(): number {
     return 0;
