@@ -5,6 +5,7 @@ exec(open(os.path.join(TH_ROOT, "scripts", "th_helpers.py")).read(), globals())
 # Bot approach paths (th_helpers.make_approach; descriptor portals[].approach / children[].approach). Asset-local,
 # feet height; a bot reaches the first point by open-ground navigation, then walks the points in order.
 # Heights follow the collision: ENTRY_SLOPE ramps (0.4) down to the terrain at z 0, then landings and steps.
+# Interior exits start on a nav node instead: th_interior_nav.py.
 
 ob = bpy.data.objects
 out = {}

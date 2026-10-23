@@ -19,7 +19,8 @@ from mathutils import Vector, Matrix, Quaternion
 #   4. glTF export (separate files, EXT_meshopt_compression geometry), then packed into a GLB here: textures
 #      re-encoded to KTX2 (KHR_texture_basisu); the shared library ones stay EXTERNAL (same <stem>-<rev> URI from every
 #      GLB, same folder -> the client caches one GPU texture), the AO is embedded
-#   5. descriptor: bounds, collision (shape library + colliders), portals, spawns, interactions, child assets
+#   5. descriptor: bounds, collision (shape library + colliders), portals, spawns, interactions, child assets,
+#      approach paths; interiors also their navigation graph (th_nav.py)
 #   6. buildings only: two coarser levels in the same GLB (see LODs below), listed in descriptor render.lods
 # Everything in the descriptor is in the glTF frame (metres, Y-up, right-handed), like the GLB.
 # Catalogue: catalogue-<version>.json (immutable, what the game server pins and announces) + catalogue.json (pointer).
@@ -28,6 +29,7 @@ from mathutils import Vector, Matrix, Quaternion
 
 exec(open(os.path.join(TH_ROOT, "scripts", "th_publish.py")).read(), globals())   # ROOT_DIR, OUT_DIR, SCHEMA,
                                                                                    # sha, publish, write_catalogue
+exec(open(os.path.join(TH_ROOT, "scripts", "th_nav.py")).read(), globals())       # nav_block (interiors)
 STAGE_DIR = os.path.join(ROOT_DIR, "build", "_stage")
 TEX_DIR = os.path.normcase(os.path.join(ROOT_DIR, "textures"))
 KTX_EXE = tool("ktx")                                                     # KTX-Software 4.4.2 (Khronos)
@@ -720,6 +722,7 @@ def descriptor(root, glb_name, me, materials, ao_res):
     if root.get("asset_kind") == "building":
         d["foundation_depth"] = 1.0
     targets = {}                                                  # marker object name -> (object, its entry)
+    nav_nodes = []
     for o in descendants(root):
         loc, rot = local_pose(root, o)
         if "portal_id" in o:
@@ -738,10 +741,20 @@ def descriptor(root, glb_name, me, materials, ao_res):
                                "pose": {"clip": o["seat_clip"], "at": o["seat_clip_at"]}}
         elif o.instance_type == 'COLLECTION' and "asset_ref" in o:
             key, e = "children", {"asset": o["asset_ref"], "pos": gv(loc), "rot": gq(rot)}
+        elif "nav_node" in o:
+            nav_nodes.append((o.name, gv(loc)))
+            continue
         else:
             continue
         d.setdefault(key, []).append(e)                           # seats[] only on assets that have one
         targets[o.name] = (o, e)
+    if d["kind"] == "interior":
+        if not nav_nodes:
+            raise ValueError(f"{aid}: an interior needs NAV_* nodes (th_interior_nav.py)")
+        d["nav"] = nav_block(aid, [p for _, p in sorted(nav_nodes)], body_obbs(d), col_bounds,
+                             [BODY_HALF, (BODY_HEIGHT - BODY_STEP) / 2, BODY_HALF], BODY_STEP)
+    elif nav_nodes:
+        raise ValueError(f"{aid}: NAV_* nodes are for interiors only")
     for o in descendants(root):
         if o.type == 'CURVE' and "approach_for" in o:
             t, entry = targets.get(o["approach_for"], (None, None))
@@ -751,6 +764,10 @@ def descriptor(root, glb_name, me, materials, ao_res):
             path = [gv(m @ Vector(p.co[:3])) for s in o.data.splines for p in s.points]
             check_approach(o.name, d, path, entry, t, root)
             entry["approach"] = path
+    if d["kind"] == "interior":
+        for p in d["portals"]:
+            if "approach" not in p:
+                raise ValueError(f"{aid}: portal {p['id']!r} has no approach (an interior's exit needs one)")
     return d
 
 
@@ -805,15 +822,29 @@ def aabb_obb_overlap(ca, ha, cb, rb, hb, eps=1e-6):
     return True
 
 
+def body_obbs(d):
+    """Every collider a body walking the asset meets: its own and its children's."""
+    obbs = collider_obbs(d["collision"])
+    for c in d["children"]:
+        cc, _ = collision_block(c["asset"])
+        if cc:
+            obbs += collider_obbs(cc, c["pos"], c["rot"])
+    return obbs
+
+
 def check_approach(name, d, path, entry, target, root):
-    """Raises unless the path starts outside the collision footprint, ends at its target and the body clears every
-    collider of the asset and its children along it."""
+    """Raises unless the path starts outside the collision footprint (an interior's: on a nav node), ends at its
+    target and the body clears every collider of the asset and its children along it."""
     if len(path) < 2:
         raise ValueError(f"{name}: an approach needs at least two points")
-    (x0, _, z0), (x1, _, z1) = d["bounds"]["collision"]
-    px, _, pz = path[0]
-    if x0 - BODY_HALF < px < x1 + BODY_HALF and z0 - BODY_HALF < pz < z1 + BODY_HALF:
-        raise ValueError(f"{name}: first point {path[0]} is inside the collision footprint (+{BODY_HALF})")
+    if "nav" in d:                                                # interior: it starts on a nav node
+        if min(np.linalg.norm(np.array(n) - path[0]) for n in d["nav"]["nodes"]) > 0.01:
+            raise ValueError(f"{name}: first point {path[0]} is not a nav node")
+    else:
+        (x0, _, z0), (x1, _, z1) = d["bounds"]["collision"]
+        px, _, pz = path[0]
+        if x0 - BODY_HALF < px < x1 + BODY_HALF and z0 - BODY_HALF < pz < z1 + BODY_HALF:
+            raise ValueError(f"{name}: first point {path[0]} is inside the collision footprint (+{BODY_HALF})")
     end = np.array(path[-1])
     if "portal_id" in target:
         loc = qmat(entry["rot"]).T @ (end - np.array(entry["center"]))
@@ -833,11 +864,7 @@ def check_approach(name, d, path, entry, target, root):
         stand = np.array(gv(m.translation))
         if np.hypot(*(end - stand)[[0, 2]]) > 0.05:
             raise ValueError(f"{name}: last point {path[-1]} is not the stand point {stand.tolist()}")
-    obbs = collider_obbs(d["collision"])
-    for c in d["children"]:
-        cc, _ = collision_block(c["asset"])
-        if cc:
-            obbs += collider_obbs(cc, c["pos"], c["rot"])
+    obbs = body_obbs(d)
     ha = np.array([BODY_HALF, (BODY_HEIGHT - BODY_STEP) / 2, BODY_HALF])
     for a, b in zip(path, path[1:]):
         a, b = np.array(a), np.array(b)
@@ -896,8 +923,8 @@ def export_asset(root, shared_written):
                                       export_meshopt_extension='EXT_meshopt_compression')
         glb = pack_glb(gltf_path, shared_written, hidden=[o.name for o, _ in levels])
         glb_name = asset_name(aid, "glb")
-        publish(glb_name, glb)
         d = descriptor(root, glb_name, ob.data, sorted({m.name.split(":", 1)[1] for m in temp_mats}), res)
+        publish(glb_name, glb)                             # after the descriptor's checks: a refused one publishes nothing
         d["render"]["hidden_faces_removed"] = culled
         if levels:
             def tris(o):

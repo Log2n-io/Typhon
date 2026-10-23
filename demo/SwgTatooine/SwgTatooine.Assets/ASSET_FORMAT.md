@@ -4,7 +4,7 @@ The contract between the asset pipeline (`scripts/th_export.py`, `scripts/th_cha
 and everything that reads `build/assets/`: SwgTatooine.Server (`AssetOrigin`, `AssetColliders`), SwgTatooine.Client and
 the asset testbench.
 
-**Format revision 6** (2026-10-23). Every change to what is published gets a revision and an entry in the
+**Format revision 7** (2026-10-23). Every change to what is published gets a revision and an entry in the
 [changelog](#changelog) **before** it is published. A consumer that knows revision N reads the entries after N and
 nothing else.
 
@@ -30,6 +30,9 @@ live and how to get them: [README.md](README.md). This file only says what is th
 
 - **Everything is in the glTF frame**, the same as the GLB: metres, +Y up, right-handed, and each descriptor's values
   are asset-local (origin = the asset origin; the placement's transform applies on top).
+- **A left-handed reader** (Babylon) mirrors **every** position and rotation it reads, not only the meshes and
+  colliders: portals, spawns, interactions, seats, children, approaches, nav. Mirroring part of it puts the doors at
+  the mirror image of the drawn doorways.
 - **Quaternions** are `[x, y, z, w]`.
 - **Box half extents** are `[hx, hy, hz]` in the box's local axes.
 - **Fronts:** buildings, vehicles and props face **+Z** (their nose / door side); characters declare it (`forward`).
@@ -96,6 +99,7 @@ the revision is unambiguous. A file named in a catalogue exists before that cata
 | `spawns` | object[] | Section 5.4 |
 | `interactions` | object[] | Section 5.5 |
 | `children` | object[] | Section 5.6 |
+| `nav` | object | Interiors: section 5.9 |
 
 ### 5.2 Collision
 
@@ -129,7 +133,8 @@ the revision is unambiguous. A file named in a catalogue exists before that cata
 - `target`: the asset id entered. `target_spawn`: the spawn id there. `exit_spawn`: this asset's spawn id where one
   arrives when coming back out.
 - Today: `tat_house_small.front` ↔ `tat_house_small_interior.front`, `tat_house_large.front` ↔
-  `tat_house_large_interior.front`. One portal per asset (the server's realm numbering assumes it).
+  `tat_house_large_interior.front`. One portal per asset today; the server reads only the first, so a second door
+  needs reader work.
 
 ### 5.4 Spawns
 
@@ -155,10 +160,12 @@ in this frame.
 
 ### 5.7 Approach paths (`portals[].approach`, `children[].approach`)
 
-`[[x, y, z], …]`, asset frame, feet height: how a bot reaches the portal, or the child's interaction.
+`[[x, y, z], …]`, asset frame, feet height: how a bot reaches the portal, or the child's interaction. Every interior
+portal has one: the way out.
 
 1. The first point is on open ground, outside `bounds.collision` by at least 0.3 m. Reach it with open-ground
    navigation. (Whether it is free in the *world* depends on the neighbours: the placer checks that.)
+   **Interiors:** the first point is one of `nav.nodes` (5.9). Reach it through the graph.
 2. Walk the points in order (one per change of slope or heading).
 3. The last point is:
    - **portal:** inside the box and at least 0.2 m past its mid-plane, so walking it fires the crossing;
@@ -167,6 +174,40 @@ in this frame.
 
 The exporter refuses a path whose ends break 1 or 3, or along which a 0.3 m square body (0.4 m above the feet to
 1.65 m) overlaps a collider of the asset or its children.
+
+### 5.9 Interior navigation (`nav`)
+
+How a bot anywhere inside an interior reaches any other point, the exit portal's approach first among them.
+Interiors only; every interior has it. The floor is flat (`y` 0).
+
+```json
+"nav": { "nodes": [[x, y, z], …],
+         "edges": [[i, j], …],
+         "cells": {"origin": [x, z], "size": 0.5, "cols": C, "rows": R, "node": [n, …]} }
+```
+
+- `nodes`: waypoints, asset frame, feet height.
+- `edges`: undirected, by node index. The body (the 5.7 one) walks straight between the two without touching a
+  collider. The graph is connected. Cost = distance.
+- `cells`: a grid over the floor in the x-z plane. Cell `(col, row)` spans `x` from `origin[0] + col × size`, `z`
+  from `origin[1] + row × size`; its node is `node[row × cols + col]`. From **every** position in a cell where the
+  body stands, walking straight to that node touches no collider (checked every 0.1 m). `-1`: no such position (wall,
+  furniture, outside the walls).
+- Grid positions outside the `cols × rows` range, and `-1` cells, are not navigable. A body at a `-1` cell stands
+  against an obstacle near the cell's edge: use the nearest cell with a node.
+
+To go from `a` to `b`:
+
+1. Look up both cells: nodes `na` and `nb`.
+2. Walk from `a` straight to `na`.
+3. Walk the shortest edge path from `na` to `nb` (Dijkstra; the graphs have about a dozen nodes).
+4. Walk from `nb` straight to `b`. Same cell guarantee, read backwards.
+
+To leave: walk to the exit portal's `approach[0]` this way, then the approach itself. Its last point crosses the
+portal.
+
+The exporter refuses a node inside a collider, a disconnected graph, and a cell where the body stands but no node
+serves every position.
 
 ### 5.8 Kind-specific fields
 
@@ -202,6 +243,12 @@ The exporter refuses a path whose ends break 1 or 3, or along which a 0.3 m squa
 
 Newest first. *Additive*: readers may ignore it. *Semantic*: a value's meaning or a rule changed, same fields.
 *Breaking*: `schema` changes. Each entry names the first catalogue carrying it and what a reader has to do.
+
+### Revision 7: 2026-10-23, catalogue `4` (additive)
+- `nav` on interiors (5.9): waypoint graph plus a cell lookup. Exit portals carry an `approach` that starts on a nav
+  node (5.7). `tat_house_small_interior-5`, `tat_house_large_interior-5`.
+- Reader: for bots that must move inside an interior or leave it, read `nav` and the exit portal's `approach`.
+  Otherwise nothing.
 
 ### Revision 6: 2026-10-23, catalogue `3` (additive)
 - Kind `creature` (5.1, 5.2, 5.8, 6): `rat`, `frog`, `snake`, `snake_angry`, `spider`, `wasp`. Skinned and animated

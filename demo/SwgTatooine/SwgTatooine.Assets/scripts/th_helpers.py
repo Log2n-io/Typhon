@@ -351,6 +351,19 @@ def make_approach(root, name, target, pts):
     return o
 
 
+def make_nav_node(root, name, loc):
+    """NAV_*: a waypoint of an interior's navigation graph (descriptor nav, th_nav.py), asset-local, feet height.
+    Nodes are indexed in name order; th_export.py derives the edges and the cell lookup and refuses a graph that
+    leaves part of the floor unreachable."""
+    _replace(name)
+    n = bpy.data.objects.new(name, None)
+    n.empty_display_type = 'SPHERE'; n.empty_display_size = 0.15
+    n.location = loc; n.show_in_front = True
+    n["nav_node"] = True
+    root.users_collection[0].objects.link(n); n.parent = root
+    return n
+
+
 def make_spawn(root, name, spawn_id, loc, yaw):
     _replace(name)
     s = bpy.data.objects.new(name, None)
