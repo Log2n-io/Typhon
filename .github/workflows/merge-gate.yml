@@ -164,6 +164,9 @@ jobs:
               # these two lines a change to the bots would run no tests at all, which is the #774 class exactly.
               - 'demo/SwgTatooine/SwgTatooine.Bots/**'
               - 'src/Typhon.Client/**'
+              # The SWG suite runs through the engine's sharder, from its own plan.
+              - 'bench/aws/shard.py'
+              - 'bench/aws/shards-swg.json'
               # Typhon.Shell.Tests reaches the Workbench through its own references — surfaced by the closure check,
               # not by reading the csproj.
               - 'tools/Typhon.Workbench/**'
@@ -866,7 +869,7 @@ jobs:
             test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj \
             test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj \
             test/Typhon.Subscriptions.AspNetCore.Tests/Typhon.Subscriptions.AspNetCore.Tests.csproj \
-            demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj             demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj \
+            demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj \
             demo/AsteroidField/AsteroidField.Tests/AsteroidField.Tests.csproj ; do
             name=$(basename "$proj" .csproj)
             echo "::group::${name}"
@@ -875,6 +878,16 @@ jobs:
               --logger "trx;LogFileName=${name}.trx" --results-directory TestResults || rc=1
             echo "::endgroup::"
           done
+
+          # The SWG demo's suite in four processes, the way the engine's runs (bench/aws/shards-swg.json): its
+          # process-static state rules out fixtures in parallel in one process, and most of its time is paced ticks,
+          # so four processes overlap almost freely — 103 s in one, 35 s in four, measured on a dev box. The sharder
+          # also brings the engine's retry policy and plan-integrity check. It runs --no-build, hence the build.
+          echo "::group::SwgTatooine.Tests (4 shards)"
+          dotnet build demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj -c Release || rc=1
+          SHARD_REPO="$PWD" SHARD_PROJECT=demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj \
+            SHARD_PLAN=bench/aws/shards-swg.json python3 bench/aws/shard.py run --results-dir TestResults/swg-shards || rc=1
+          echo "::endgroup::"
           exit $rc
 
       - name: Upload trx
@@ -882,7 +895,9 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: aux-tests-trx
-          path: TestResults/*.trx
+          path: |
+            TestResults/*.trx
+            TestResults/swg-shards/*.trx
           if-no-files-found: ignore
 
   # ---- The client SDKs: the .NET client suite and the TypeScript SDK, both against the golden vectors. Free runner. ----

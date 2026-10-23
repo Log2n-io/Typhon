@@ -8,6 +8,10 @@ after a normal commit: seconds.
 USAGE
     python3 scripts/build-test-affected-map.py            # incremental (default)
     python3 scripts/build-test-affected-map.py --force    # full rebuild
+    python3 scripts/build-test-affected-map.py --suite swg  # the SWG demo's map (coverage/test-affected-map-swg.json)
+
+SUITES (scripts/affected_suites.py): `engine` is test/Typhon.Engine.Tests and the map below; `swg` is the demo's suite,
+whose map keys the engine's src/ AND the demo's own trees (server, bots, test helpers). Each suite has its own cache.
 
 Cache: coverage/per_fixture/<fixture>.xml is the per-fixture cobertura output.
 The JSON map at coverage/test-affected-map.json is re-pivoted from cached XMLs
@@ -31,20 +35,35 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-TEST_PROJ = "test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj"
-TEST_DIR = REPO_ROOT / "test/Typhon.Engine.Tests"
-PER_FIXTURE_DIR = REPO_ROOT / "coverage/per_fixture"
-MAP_PATH = REPO_ROOT / "coverage/test-affected-map.json"
-FIXTURES_LIST = REPO_ROOT / "coverage/fixtures.txt"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from affected_suites import ENGINE, REPO_ROOT, SUITES, Suite  # noqa: E402
 
-# Any sequence of modifiers. The fixed shape this replaced — one optional access modifier, then one of static/sealed/abstract — never matched
-# `unsafe class`, `sealed partial class` or `public unsafe class`, so those fixtures were never discovered, never collected, and never selected by
-# test-affected.py: AabbClusterEnumeratorDrainTests (`unsafe class`) was invisible to the map on the day it was written.
-FIXTURE_CLASS_RE = re.compile(
-    r"^\s*(?:(?:public|internal|private|protected|static|sealed|abstract|unsafe|partial|file)\s+)*class\s+(\w+(?:Tests?|Spec))\b",
-    re.M,
-)
+# Rebound by main() from --suite; the engine's by default, so every path is the one it always was.
+SUITE: Suite = ENGINE
+TEST_PROJ = ENGINE.test_proj
+TEST_DIR = ENGINE.test_dir_path
+PER_FIXTURE_DIR = REPO_ROOT / ENGINE.per_fixture_dir
+MAP_PATH = REPO_ROOT / ENGINE.map_path
+FIXTURES_LIST = REPO_ROOT / "coverage/fixtures.txt"
+FIXTURE_CLASS_RE = ENGINE.fixture_class
+
+
+def use_suite(suite: Suite) -> None:
+    global SUITE, TEST_PROJ, TEST_DIR, PER_FIXTURE_DIR, MAP_PATH, FIXTURES_LIST, FIXTURE_CLASS_RE
+    SUITE, TEST_PROJ, TEST_DIR = suite, suite.test_proj, suite.test_dir_path
+    PER_FIXTURE_DIR, MAP_PATH = REPO_ROOT / suite.per_fixture_dir, REPO_ROOT / suite.map_path
+    FIXTURES_LIST = REPO_ROOT / "coverage/fixtures.txt" if suite is ENGINE else PER_FIXTURE_DIR / "fixtures.txt"
+    FIXTURE_CLASS_RE = suite.fixture_class
+
+
+def repo_relative(filename: str) -> str | None:
+    """A cobertura filename as a repo-relative path, or None. The build's PathMap writes `/_/` for the repo root; a path without it falls back to
+    the last `src/`, which is what this script always did."""
+    filename = filename.replace("\\", "/")
+    if "/_/" in filename:
+        return filename[filename.rfind("/_/") + 3:]
+    idx = filename.rfind("src/")
+    return filename[idx:] if idx != -1 else None
 
 
 def discover_fixtures() -> dict[str, Path]:
@@ -79,6 +98,7 @@ def collect_fixture(fixture: str, output_xml: Path) -> bool:
         "dotnet-coverage", "collect",
         "-o", str(output_xml),
         "-f", "cobertura",
+        *(["-s", str(REPO_ROOT / SUITE.coverage_settings)] if SUITE.coverage_settings else []),
         "dotnet", "test", TEST_PROJ,
         "--no-build", "-c", "Debug",
         "--filter", f"FullyQualifiedName~{fixture}.",
@@ -118,14 +138,8 @@ def parse_per_file_coverage(cobertura_xml: Path) -> dict[str, int]:
     root = tree.getroot()
     counts: dict[str, int] = {}
     for cls in root.findall(".//class"):
-        filename = cls.get("filename", "").replace("\\", "/")
-        if not filename:
-            continue
-        idx = filename.rfind("src/")
-        if idx == -1:
-            continue
-        rel = filename[idx:]
-        if "/obj/" in rel:
+        rel = repo_relative(cls.get("filename", ""))
+        if not rel or "/obj/" in rel or not rel.startswith(SUITE.covered_roots):
             continue
         hits = sum(1 for line in cls.findall(".//line") if int(line.get("hits", 0)) > 0)
         if hits > 0:
@@ -155,7 +169,9 @@ def main():
                     help="Re-collect every fixture, ignoring any cached XML.")
     ap.add_argument("--only", nargs="+", default=None,
                     help="Re-collect only these fixtures (overrides incremental check). Useful for fixing failed runs.")
+    ap.add_argument("--suite", choices=sorted(SUITES), default=ENGINE.name, help="Which suite's map to build (default: engine).")
     args = ap.parse_args()
+    use_suite(SUITES[args.suite])
 
     fixtures = discover_fixtures()
     if fixtures:

@@ -201,7 +201,6 @@ AUX=(
   test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj
   demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj
   demo/AsteroidField/AsteroidField.Tests/AsteroidField.Tests.csproj
-  demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj
 )
 # Built when --build asks, OR when the Release assembly is simply not there. `suite_step` passes `--no-build`, so a project
 # never built in Release on this box fails with "test assembly not found" — which reads as a broken script rather than a
@@ -215,6 +214,15 @@ for proj in "${AUX[@]}"; do
   fi
   suite_step "${name} (Release, gate: aux-tests)" "$proj" "pre-push-${name}.trx"
 done
+
+# The SWG demo's suite, sharded as aux-tests runs it (bench/aws/shards-swg.json): four processes, 35 s instead of 103.
+SWG=demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj
+if [ "$BUILD" -eq 1 ] || [ -z "$(find "$(dirname "$SWG")/bin/Release" -name "SwgTatooine.Tests.dll" -print -quit 2>/dev/null)" ]; then
+  step "build SwgTatooine.Tests (Release)" dotnet build "$SWG" -c Release
+fi
+step "SwgTatooine.Tests (Release, 4 shards, gate: aux-tests)" \
+  env SHARD_REPO="$PWD" SHARD_PROJECT="$SWG" SHARD_PLAN=bench/aws/shards-swg.json SHARD_CONFIG=Release \
+  python3 bench/aws/shard.py run --results-dir "$(dirname "$SWG")/TestResults/pre-push-shards"
 if command -v npm >/dev/null 2>&1; then
   step "TypeScript SDK check (gate: subscriptions-sdk)" bash -c 'cd src/Typhon.Client.TypeScript && npm ci --silent && npm run check'
 else

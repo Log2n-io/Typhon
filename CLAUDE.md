@@ -113,6 +113,7 @@ The script:
 - `--build` builds the test project first. Without it the last build runs, and a test binary older than your edit tests the old code.
 - Accepts multiple files; unions the affected fixtures.
 - For test-side edits, the file IS the fixture — no inversion needed.
+- Files under `demo/SwgTatooine/` select from the SWG demo's suite instead, with its own map (`coverage/test-affected-map-swg.json`, built by `build-test-affected-map.py --suite swg`) and its own shard plan (`bench/aws/shards-swg.json`); see `scripts/affected_suites.py`.
 
 **Default workflow when iterating:**
 1. Edit a file.

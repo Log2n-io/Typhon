@@ -1,0 +1,79 @@
+[
+  {
+    "filter": "(Category!=Quarantine)&(Category!=Nightly)&(Category!=Manual)&(Category!=Sensitive)&(Category!=TelemetryGated)&(Category!=ChecksOffGated)&(FullyQualifiedName!~SwgTatooine.Tests.ClientIntentChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.AuthEndpointChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.AttackEventChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.WorldIndexRebuildTests.)&(FullyQualifiedName!~SwgTatooine.Tests.CharacterStoreChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.RunHygieneChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.FleetRunnerChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.AccountCredentialChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.TerrainAltitudeChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.CrashArtefactTests.)&(FullyQualifiedName!~SwgTatooine.Tests.ReviewFixChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.AuthRateLimiterChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.GalaxyTests.)&(FullyQualifiedName!~SwgTatooine.Tests.CreatureRevivalTests.)&(FullyQualifiedName!~SwgTatooine.Tests.BotBrainChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.CausalityLoopTests.)&(FullyQualifiedName!~SwgTatooine.Tests.RoundColliderChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.CreatureDispersionTests.)&(FullyQualifiedName!~SwgTatooine.Tests.DriveByCombatIsGoneTests.)&(FullyQualifiedName!~SwgTatooine.Tests.ResumeAvatarChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.AccountStoreChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.RealmCensusChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.ChatChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.RealmCostChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.ViewRadiusChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.PerceptionChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.PublicTlsChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.DungeonReopenChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.FrontDoorChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.WorldLayoutChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.TerrainGoldenChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.AuthTokenChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.BotRosterChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.RoutingChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.BotIndexPoolChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.RampChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.PortalCrossingChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.RealmScaleChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.BotProvisionerChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.SpectateChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.ProximityChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.PersistenceSurfaceTests.)&(FullyQualifiedName!~SwgTatooine.Tests.RealmCrossingChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.HumanProfileChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.CityGroupChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.RealmDirectoryChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.ReplicationCellFloorChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.AssetOriginHostChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.CommandLineChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.ProfilerFlagChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.AssetOriginChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.HostingFlagChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.RealmTagChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.OccupiedInteriorTests.)&(FullyQualifiedName!~SwgTatooine.Tests.SitePlannerChecks.)&(FullyQualifiedName!~SwgTatooine.Tests.StandingSurfaceChecks.)",
+    "classes": [
+      "<catch-all>"
+    ]
+  },
+  {
+    "filter": "(Category!=Quarantine)&(Category!=Nightly)&(Category!=Manual)&(Category!=Sensitive)&(Category!=TelemetryGated)&(Category!=ChecksOffGated)&(FullyQualifiedName~SwgTatooine.Tests.ClientIntentChecks.|FullyQualifiedName~SwgTatooine.Tests.AuthEndpointChecks.|FullyQualifiedName~SwgTatooine.Tests.AttackEventChecks.|FullyQualifiedName~SwgTatooine.Tests.WorldIndexRebuildTests.|FullyQualifiedName~SwgTatooine.Tests.CharacterStoreChecks.|FullyQualifiedName~SwgTatooine.Tests.RunHygieneChecks.|FullyQualifiedName~SwgTatooine.Tests.FleetRunnerChecks.|FullyQualifiedName~SwgTatooine.Tests.AccountCredentialChecks.|FullyQualifiedName~SwgTatooine.Tests.TerrainAltitudeChecks.|FullyQualifiedName~SwgTatooine.Tests.CrashArtefactTests.|FullyQualifiedName~SwgTatooine.Tests.ReviewFixChecks.|FullyQualifiedName~SwgTatooine.Tests.AuthRateLimiterChecks.|FullyQualifiedName~SwgTatooine.Tests.GalaxyTests.|FullyQualifiedName~SwgTatooine.Tests.CreatureRevivalTests.|FullyQualifiedName~SwgTatooine.Tests.BotBrainChecks.|FullyQualifiedName~SwgTatooine.Tests.CausalityLoopTests.|FullyQualifiedName~SwgTatooine.Tests.RoundColliderChecks.|FullyQualifiedName~SwgTatooine.Tests.CreatureDispersionTests.|FullyQualifiedName~SwgTatooine.Tests.DriveByCombatIsGoneTests.)",
+    "classes": [
+      "SwgTatooine.Tests.ClientIntentChecks",
+      "SwgTatooine.Tests.AuthEndpointChecks",
+      "SwgTatooine.Tests.AttackEventChecks",
+      "SwgTatooine.Tests.WorldIndexRebuildTests",
+      "SwgTatooine.Tests.CharacterStoreChecks",
+      "SwgTatooine.Tests.RunHygieneChecks",
+      "SwgTatooine.Tests.FleetRunnerChecks",
+      "SwgTatooine.Tests.AccountCredentialChecks",
+      "SwgTatooine.Tests.TerrainAltitudeChecks",
+      "SwgTatooine.Tests.CrashArtefactTests",
+      "SwgTatooine.Tests.ReviewFixChecks",
+      "SwgTatooine.Tests.AuthRateLimiterChecks",
+      "SwgTatooine.Tests.GalaxyTests",
+      "SwgTatooine.Tests.CreatureRevivalTests",
+      "SwgTatooine.Tests.BotBrainChecks",
+      "SwgTatooine.Tests.CausalityLoopTests",
+      "SwgTatooine.Tests.RoundColliderChecks",
+      "SwgTatooine.Tests.CreatureDispersionTests",
+      "SwgTatooine.Tests.DriveByCombatIsGoneTests"
+    ]
+  },
+  {
+    "filter": "(Category!=Quarantine)&(Category!=Nightly)&(Category!=Manual)&(Category!=Sensitive)&(Category!=TelemetryGated)&(Category!=ChecksOffGated)&(FullyQualifiedName~SwgTatooine.Tests.ResumeAvatarChecks.|FullyQualifiedName~SwgTatooine.Tests.AccountStoreChecks.|FullyQualifiedName~SwgTatooine.Tests.RealmCensusChecks.|FullyQualifiedName~SwgTatooine.Tests.ChatChecks.|FullyQualifiedName~SwgTatooine.Tests.RealmCostChecks.|FullyQualifiedName~SwgTatooine.Tests.ViewRadiusChecks.|FullyQualifiedName~SwgTatooine.Tests.PerceptionChecks.|FullyQualifiedName~SwgTatooine.Tests.PublicTlsChecks.|FullyQualifiedName~SwgTatooine.Tests.DungeonReopenChecks.|FullyQualifiedName~SwgTatooine.Tests.FrontDoorChecks.|FullyQualifiedName~SwgTatooine.Tests.WorldLayoutChecks.|FullyQualifiedName~SwgTatooine.Tests.TerrainGoldenChecks.|FullyQualifiedName~SwgTatooine.Tests.AuthTokenChecks.|FullyQualifiedName~SwgTatooine.Tests.BotRosterChecks.|FullyQualifiedName~SwgTatooine.Tests.RoutingChecks.|FullyQualifiedName~SwgTatooine.Tests.BotIndexPoolChecks.|FullyQualifiedName~SwgTatooine.Tests.RampChecks.|FullyQualifiedName~SwgTatooine.Tests.PortalCrossingChecks.)",
+    "classes": [
+      "SwgTatooine.Tests.ResumeAvatarChecks",
+      "SwgTatooine.Tests.AccountStoreChecks",
+      "SwgTatooine.Tests.RealmCensusChecks",
+      "SwgTatooine.Tests.ChatChecks",
+      "SwgTatooine.Tests.RealmCostChecks",
+      "SwgTatooine.Tests.ViewRadiusChecks",
+      "SwgTatooine.Tests.PerceptionChecks",
+      "SwgTatooine.Tests.PublicTlsChecks",
+      "SwgTatooine.Tests.DungeonReopenChecks",
+      "SwgTatooine.Tests.FrontDoorChecks",
+      "SwgTatooine.Tests.WorldLayoutChecks",
+      "SwgTatooine.Tests.TerrainGoldenChecks",
+      "SwgTatooine.Tests.AuthTokenChecks",
+      "SwgTatooine.Tests.BotRosterChecks",
+      "SwgTatooine.Tests.RoutingChecks",
+      "SwgTatooine.Tests.BotIndexPoolChecks",
+      "SwgTatooine.Tests.RampChecks",
+      "SwgTatooine.Tests.PortalCrossingChecks"
+    ]
+  },
+  {
+    "filter": "(Category!=Quarantine)&(Category!=Nightly)&(Category!=Manual)&(Category!=Sensitive)&(Category!=TelemetryGated)&(Category!=ChecksOffGated)&(FullyQualifiedName~SwgTatooine.Tests.RealmScaleChecks.|FullyQualifiedName~SwgTatooine.Tests.BotProvisionerChecks.|FullyQualifiedName~SwgTatooine.Tests.SpectateChecks.|FullyQualifiedName~SwgTatooine.Tests.ProximityChecks.|FullyQualifiedName~SwgTatooine.Tests.PersistenceSurfaceTests.|FullyQualifiedName~SwgTatooine.Tests.RealmCrossingChecks.|FullyQualifiedName~SwgTatooine.Tests.HumanProfileChecks.|FullyQualifiedName~SwgTatooine.Tests.CityGroupChecks.|FullyQualifiedName~SwgTatooine.Tests.RealmDirectoryChecks.|FullyQualifiedName~SwgTatooine.Tests.ReplicationCellFloorChecks.|FullyQualifiedName~SwgTatooine.Tests.AssetOriginHostChecks.|FullyQualifiedName~SwgTatooine.Tests.CommandLineChecks.|FullyQualifiedName~SwgTatooine.Tests.ProfilerFlagChecks.|FullyQualifiedName~SwgTatooine.Tests.AssetOriginChecks.|FullyQualifiedName~SwgTatooine.Tests.HostingFlagChecks.|FullyQualifiedName~SwgTatooine.Tests.RealmTagChecks.|FullyQualifiedName~SwgTatooine.Tests.OccupiedInteriorTests.|FullyQualifiedName~SwgTatooine.Tests.SitePlannerChecks.|FullyQualifiedName~SwgTatooine.Tests.StandingSurfaceChecks.)",
+    "classes": [
+      "SwgTatooine.Tests.RealmScaleChecks",
+      "SwgTatooine.Tests.BotProvisionerChecks",
+      "SwgTatooine.Tests.SpectateChecks",
+      "SwgTatooine.Tests.ProximityChecks",
+      "SwgTatooine.Tests.PersistenceSurfaceTests",
+      "SwgTatooine.Tests.RealmCrossingChecks",
+      "SwgTatooine.Tests.HumanProfileChecks",
+      "SwgTatooine.Tests.CityGroupChecks",
+      "SwgTatooine.Tests.RealmDirectoryChecks",
+      "SwgTatooine.Tests.ReplicationCellFloorChecks",
+      "SwgTatooine.Tests.AssetOriginHostChecks",
+      "SwgTatooine.Tests.CommandLineChecks",
+      "SwgTatooine.Tests.ProfilerFlagChecks",
+      "SwgTatooine.Tests.AssetOriginChecks",
+      "SwgTatooine.Tests.HostingFlagChecks",
+      "SwgTatooine.Tests.RealmTagChecks",
+      "SwgTatooine.Tests.OccupiedInteriorTests",
+      "SwgTatooine.Tests.SitePlannerChecks",
+      "SwgTatooine.Tests.StandingSurfaceChecks"
+    ]
+  }
+]

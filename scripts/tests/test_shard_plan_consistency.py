@@ -37,6 +37,11 @@ class PlanConsistencyTests(unittest.TestCase):
         with open(shard.SHARDS_JSON, encoding="utf-8") as fh:
             self.assertEqual(shard.plan_problems(json.load(fh)), [])
 
+    def test_the_committed_swg_plan_is_consistent(self):
+        # The SWG demo's suite runs through the same sharder from its own plan (aux-tests), so the same edit can break it.
+        with open(os.path.join(REPO, "bench", "aws", "shards-swg.json"), encoding="utf-8") as fh:
+            self.assertEqual(shard.plan_problems(json.load(fh)), [])
+
     def test_a_generated_plan_is_consistent(self):
         self.assertEqual(shard.plan_problems(plan(["N.A", "N.B"], ["N.C"])), [])
 
