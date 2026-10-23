@@ -228,18 +228,11 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
 
         using var guard = EpochGuard.Enter(segment.Store.EpochManager);
 
-        // Free node chunks by bitmap only — torn-safe: a torn node page is reclaimed, never parsed (FreeChunk touches only the page's occupancy metadata).
-        var capacity = segment.ChunkCapacity;
-        for (var chunkId = DirectoryChunkCount; chunkId < capacity; chunkId++)
-        {
-            if (segment.IsChunkAllocated(chunkId))
-            {
-                segment.FreeChunk(chunkId);
-            }
-        }
+        // 按页清除节点位图并释放页引用，保留目录；逐 chunk 检查或 FreeChunk 都会累积 epoch 标记，使大于缓存的段无法清空（EP-02，#1463）。
+        segment.FreeAllChunksFrom(DirectoryChunkCount);
 
         // A segment that has never hosted a tree has no reserved directory chunk yet — the first BTree ctor reserves 0-3. Nothing to clear.
-        if (!segment.IsChunkAllocated(0))
+        if (!segment.IsChunkAllocatedUnpinned(0))
         {
             return;
         }

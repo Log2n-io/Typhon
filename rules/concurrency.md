@@ -320,6 +320,9 @@ lock ordering and deadlock prevention are still to come.
             directory — takes each page with AcquirePageForRead and releases it (ReleasePageForRead) before it takes the next. It never epoch-tags them.
             One such walk writes: ChunkBasedSegment.FreeAllChunksFrom clears bitmap words through the read pin, with nothing allocating or freeing
             concurrently, and records the page modified (CP-04) before it releases it
+  invariant 共享索引段的清空通过 ChunkBasedSegment.FreeAllChunksFrom(DirectoryChunkCount) 按页释放节点，保留目录 chunk 并将目录计数清零
+            （BTreeBase.ClearSharedSegment，#1463）。位图修改记录写回债务，由恢复的 flush-only cycle 排空；逐 chunk 调用 FreeChunk
+            会重新给页面打上 epoch 标记，因此仅将分配检查换成 IsChunkAllocatedUnpinned 仍不能清空大于缓存的已分配段
   invariant the query scans in scope — the occupancy count, the entity-map count, existence check and collect, the SoA cluster scan, the B+Tree
             range enumeration and Path A's cluster walk, and the spatial query's visibility probes — read through a scan accessor
             (ChunkBasedSegment.CreateScanAccessor): its 32-slot window pins each page by SlotRefCount, taken with AcquirePageForRead, and releases
@@ -419,7 +422,7 @@ lock ordering and deadlock prevention are still to come.
          RawValuePagedHashMap.AnyEntry, EcsQuery.ScanClusterSoa, EcsQuery.FillSnapshotColumn, EnabledGate.IsPresentAtSnapshot,
          EntityVisibility.IsVisiblePendingInScan, Transaction.RefreshEpochBeforeDrain, DeferredCleanupManager.EpochYield,
          LogicalSegment.AcquirePageForRead, LogicalSegment.WalkForwardChainPageCount, LogicalSegment.VerifyGrownChainLinks,
-         LogicalSegment.VerifyDirectoryAgainst, ChunkBasedSegment.PageHasFreeChunkFrom, ChunkBasedSegment.FreeAllChunksFrom,
+         LogicalSegment.VerifyDirectoryAgainst, ChunkBasedSegment.PageHasFreeChunkFrom, ChunkBasedSegment.FreeAllChunksFrom, BTreeBase.ClearSharedSegment,
          ChunkBasedSegment.ScanForAllocatorState, ChunkBasedSegment.AllocatedChunks, ChunkBasedSegment.IsChunkAllocatedUnpinned,
          ArchetypeClusterState.RebuildActiveList, ComponentRevisionManager.EnumerateVersionedChainHeads,
          ChunkBasedSegment.CreateScanAccessor, ChunkAccessor.LoadIntoSlot, RawValuePagedHashMap.HeadLatch, EcsQuery.TryCountViaOccupancy,
@@ -453,6 +456,10 @@ lock ordering and deadlock prevention are still to come.
             one epoch scope, and each fails with every one of the 128 slots epoch-protected when its reads are epoch-tagged again
             [VerifiesRule]; the same fixture pins the pair's semantics (not evicted until released, no epoch tag, no clock bump, readers
             racing eviction always get their page)
+  verified: WholeSegmentScanTests.TheSharedIndexClear_ReleasesASegmentLargerThanTheCache [VerifiesRule] — 普通和 String64 索引段均为缓存的四倍，
+            稀疏段和满段都能清空，且只保留目录 chunk 0–3、目录计数归零；
+            SharedIndexClearRecoveryTests.AnIndexSegmentLargerThanTheCache_RecoversWithTheSameCache [VerifiesRule] — 索引段超过 8 MiB 缓存后硬崩溃，
+            用相同缓存恢复，每个索引均只返回更新后的键，实体数据保持已提交值
   verified: QueryScanCacheBoundTests.PagesAWriterTagsDuringALongWalk_AreNotHeldByTheWalksEpoch [VerifiesRule] — a writer commits 8 000 updates at
             a walk's second yield; by its fourth, fewer than 16 pages are epoch-protected, the entity-map count and the SoA scan alike (604 with the
             yield's refresh removed). AWalkWaitingOnBackpressure_DoesNotHoldTheCacheWithItsEpoch [VerifiesRule] — the yield refresh off, a writer

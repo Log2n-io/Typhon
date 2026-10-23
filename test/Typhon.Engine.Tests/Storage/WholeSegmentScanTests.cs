@@ -267,4 +267,76 @@ sealed class WholeSegmentScanTests
 
         Assert.That(allocated, Is.EqualTo(segment.AllocatedChunkCount), "every allocated chunk counted");
     }
+
+    /// <summary>
+    /// 共享索引段的容量超过缓存时，清空仍只保留目录 chunk 并重置目录。稀疏段覆盖位图扫描，满段同时覆盖释放节点的写回（#1463）。
+    /// </summary>
+    [TestCase(false, false, TestName = "SharedIndexClear_SparseIndex64")]
+    [TestCase(false, true, TestName = "SharedIndexClear_FullIndex64")]
+    [TestCase(true, false, TestName = "SharedIndexClear_SparseString64")]
+    [TestCase(true, true, TestName = "SharedIndexClear_FullString64")]
+    [CancelAfter(60_000)]
+    [VerifiesRule("EP-02")]
+    public unsafe void TheSharedIndexClear_ReleasesASegmentLargerThanTheCache(bool string64, bool full)
+    {
+        var name = $"ep02_index_{string64}_{full}";
+        var stride = string64 ? sizeof(IndexString64Chunk) : 256;
+        int root;
+        using (var buildProvider = SegmentGrowTestKit.CreateProvider(SegmentPages * 2, name, _bundles))
+        using (var buildScope = buildProvider.CreateScope())
+        {
+            var mmf = buildScope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+            using var buildGuard = EpochGuard.Enter(mmf.EpochManager);
+            var buildChanges = mmf.CreateChangeSet();
+            var built = mmf.AllocateChunkBasedSegment(PageBlockType.None, SegmentPages, stride, buildChanges);
+            var allocated = full ? built.ChunkCapacity : BTreeBase<PersistentStore>.DirectoryChunkCount;
+            while (built.AllocatedChunkCount < allocated)
+            {
+                built.AllocateChunk(false, buildChanges);
+            }
+
+            var directory = built.CreateChunkAccessor(buildChanges);
+            try
+            {
+                directory.GetChunk<BTreeDirectoryHeader>(0, true).EntryCount = 9;
+            }
+            finally
+            {
+                directory.Dispose();
+            }
+
+            buildChanges.SaveChanges();
+            root = built.RootPageIndex;
+        }
+
+        using var provider = ReopenSmall(name);
+        using var scope = provider.CreateScope();
+        var pmmf = scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var guard = EpochGuard.Enter(pmmf.EpochManager);
+        var segment = pmmf.LoadChunkBasedSegment(root, stride);
+        var changeSet = pmmf.CreateChangeSet();
+        // 这里只有存储层，没有 checkpoint 线程；背压时写出已完成的位图修改，模拟恢复的 flush-only 排空。
+        pmmf.OnBackpressure = () => pmmf.SavePages(pmmf.CollectDirtyMemPageIndices()).GetAwaiter().GetResult();
+
+        BTreeBase<PersistentStore>.ClearSharedSegment(segment, changeSet);
+        changeSet.SaveChanges();
+
+        var remaining = new List<int>();
+        foreach (var chunkId in segment.AllocatedChunks())
+        {
+            remaining.Add(chunkId);
+        }
+
+        Assert.That(remaining, Is.EqualTo(new[] { 0, 1, 2, 3 }), "目录保留，所有节点已释放");
+        Assert.That(segment.AllocatedChunkCount, Is.EqualTo(4));
+        var accessor = segment.CreateScanAccessor();
+        try
+        {
+            Assert.That(accessor.GetChunkReadOnly<BTreeDirectoryHeader>(0).EntryCount, Is.Zero, "后续索引从空目录注册");
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+    }
 }
