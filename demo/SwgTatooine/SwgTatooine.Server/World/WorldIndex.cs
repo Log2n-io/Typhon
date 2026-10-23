@@ -48,16 +48,6 @@ public sealed class WorldIndex
     public List<(byte Yaw, byte Asset)> PortalFacings { get; } = [];
 
     /// <summary>
-    /// Moves every door from its building's centre to the doorway the asset publishes.
-    /// </summary>
-    /// <param name="shapes">The loaded asset colliders, which carry each asset's doorway.</param>
-    /// <returns>How many doors moved.</returns>
-    /// <remarks>
-    /// <b>Called once, after the shapes load and before the first tick.</b> A door at the centre of a building is reachable only by a body that walks
-    /// through walls, which is what the scripted crowd used to do; with collision on it stopped at the wall and no interior was ever entered. The asset's
-    /// own doorway is where a viewer sees a door, so it is where the crossing has to be for the two to agree.
-    /// </remarks>
-    /// <summary>
     /// Sine and cosine of a placement quarter turn, in the sense the RENDERER turns the building.
     /// </summary>
     /// <param name="quarters">The replicated quarter turns, 0 to 3.</param>
@@ -77,6 +67,16 @@ public sealed class WorldIndex
         _ => (0f, 1f),
     };
 
+    /// <summary>
+    /// Moves every door from its building's centre to the doorway the asset publishes.
+    /// </summary>
+    /// <param name="shapes">The loaded asset colliders, which carry each asset's doorway.</param>
+    /// <returns>How many doors moved.</returns>
+    /// <remarks>
+    /// <b>Called once, after the shapes load and before the first tick.</b> A door at the centre of a building is reachable only by a body that walks
+    /// through walls, which is what the scripted crowd used to do; with collision on it stopped at the wall and no interior was ever entered. The asset's
+    /// own doorway is where a viewer sees a door, so it is where the crossing has to be for the two to agree.
+    /// </remarks>
     public int PlaceDoors(AssetColliders shapes)
     {
         ArgumentNullException.ThrowIfNull(shapes);

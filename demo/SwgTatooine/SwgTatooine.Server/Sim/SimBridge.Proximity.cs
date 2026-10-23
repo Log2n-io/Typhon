@@ -271,15 +271,6 @@ public sealed partial class SimBridge
     private static readonly bool CollisionDisabled = Environment.GetEnvironmentVariable("SWG_NO_COLLISION") == "1";
 
     /// <summary>
-    /// How far a body may walk from its anchor before its disc is refreshed, in metres — the cap on
-    /// <see cref="PlayerProximity.ClearM"/>.
-    /// </summary>
-    /// <remarks>
-    /// The disc is usually narrower than this: it is the distance to the nearest surface, and the leash only stops a body
-    /// in open desert from holding one disc for ever. At a run of 5 m/s and ten ticks a second, 32 m is 64 ticks of
-    /// walking — so the refresh population is a fraction of the bodies that moved, which is the whole point.
-    /// </remarks>
-    /// <summary>
     /// The published assets' collision primitives, or <see langword="null"/> on a run with no asset set.
     /// </summary>
     /// <remarks>
@@ -297,6 +288,15 @@ public sealed partial class SimBridge
     /// </remarks>
     internal AssetColliders AssetShapes { get; init; }
 
+    /// <summary>
+    /// How far a body may walk from its anchor before its disc is refreshed, in metres — the cap on
+    /// <see cref="PlayerProximity.ClearM"/>.
+    /// </summary>
+    /// <remarks>
+    /// The disc is usually narrower than this: it is the distance to the nearest surface, and the leash only stops a body
+    /// in open desert from holding one disc for ever. At a run of 5 m/s and ten ticks a second, 32 m is 64 ticks of
+    /// walking — so the refresh population is a fraction of the bodies that moved, which is the whole point.
+    /// </remarks>
     internal const float ProximityLeashM = 32f;
 
     /// <summary>

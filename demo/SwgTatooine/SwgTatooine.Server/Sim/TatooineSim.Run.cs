@@ -63,18 +63,6 @@ public sealed partial class TatooineSim
     public SimBridge Bridge => _bridge;
 
     /// <summary>
-    /// Build the views, wire the schedule and run the configured number of ticks.
-    /// </summary>
-    /// <remarks>
-    /// <para><b>The runtime is driven at the simulation's own tick rate, not as fast as it will go.</b> A saturated loop
-    /// would report throughput, and throughput is not the question a game server asks — it asks whether a tick fits in
-    /// its budget. Running at 10 Hz with a 100 ms budget also keeps the overload manager out of the measurement: a
-    /// sustained overrun makes the runtime start shedding systems, and a measurement taken while work is being dropped
-    /// is not a measurement of the work.</para>
-    /// <para><c>--unpaced</c> (<see cref="SimConfig.Unpaced"/>) is the one exception, for count-only comparisons: ticks back to back, with the overload
-    /// response off so that nothing is shed.</para>
-    /// </remarks>
-    /// <summary>
     /// Collider geometry for a measured run, in place of reading a published asset folder.
     /// </summary>
     /// <remarks>
@@ -86,6 +74,18 @@ public sealed partial class TatooineSim
     /// </remarks>
     internal AssetColliders AssetShapesOverride { get; set; }
 
+    /// <summary>
+    /// Build the views, wire the schedule and run the configured number of ticks.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The runtime is driven at the simulation's own tick rate, not as fast as it will go.</b> A saturated loop
+    /// would report throughput, and throughput is not the question a game server asks — it asks whether a tick fits in
+    /// its budget. Running at 10 Hz with a 100 ms budget also keeps the overload manager out of the measurement: a
+    /// sustained overrun makes the runtime start shedding systems, and a measurement taken while work is being dropped
+    /// is not a measurement of the work.</para>
+    /// <para><c>--unpaced</c> (<see cref="SimConfig.Unpaced"/>) is the one exception, for count-only comparisons: ticks back to back, with the overload
+    /// response off so that nothing is shed.</para>
+    /// </remarks>
     public RunResult Run()
     {
         BuildViews();

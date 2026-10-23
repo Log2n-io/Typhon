@@ -810,6 +810,9 @@ public sealed class ProximityChecks
         return default;
     }
 
+    /// <summary>How tall the test walls are: above a step and below head height, so they are unambiguously walls.</summary>
+    private const float WallTopM = 2.5f;
+
     /// <summary>
     /// Pre-rotates a box so that the server's own quarter turn maps it to the world box this case wants.
     /// </summary>
@@ -821,9 +824,6 @@ public sealed class ProximityChecks
     /// the geometry it is actually testing — a wall across the body's lane — rather than geometry that happens to land
     /// there for one seed's random orientation.
     /// </remarks>
-    /// <summary>How tall the test walls are: above a step and below head height, so they are unambiguously walls.</summary>
-    private const float WallTopM = 2.5f;
-
     private static AssetColliders.PlanBox Unturn(int yaw, AssetColliders.PlanBox wanted)
     {
         var b = wanted;
