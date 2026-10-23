@@ -4592,6 +4592,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     internal ComponentTable GetComponentTableByWalTypeId(ushort id) => _componentTableByWalTypeId.GetValueOrDefault(id);
 
+    /// <summary>WAL 属于打开前的布局；在回放写入新表和 cluster 之前应用相同的组件迁移（#1469）。</summary>
+    internal byte[] MigrateWalPayload(ComponentTable table, byte[] payload)
+        => _migratedComponents != null && _migratedComponents.TryGetValue(table.Definition.Name, out var migration)
+            ? SchemaEvolutionEngine.MigrateWalPayload(migration, payload, table.Definition.ComponentStorageSize)
+            : payload;
+
+    internal bool HasComponentMigrations => _migratedComponents is { Count: > 0 };
+
     /// <summary>
     /// Find a ComponentTable by the component's schema name (from [Component] attribute).
     /// Used as a fallback when the CLR type doesn't match (schema evolution: V1 type → V2 table).

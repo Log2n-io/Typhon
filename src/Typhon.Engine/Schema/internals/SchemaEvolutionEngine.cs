@@ -30,6 +30,9 @@ internal readonly struct MigrationResult
 
     /// <inheritdoc cref="FieldMap"/>
     public int OldCompSize { get; init; }
+
+    /// <summary>同一次打开期间回放旧布局的 WAL 时，复用表迁移执行过的用户迁移链。</summary>
+    public MigrationChain? Chain { get; init; }
 }
 
 /// <summary>
@@ -102,6 +105,51 @@ internal static class SchemaEvolutionEngine
         }
 
         return entries.ToArray();
+    }
+
+    /// <summary>将 WAL 中的旧组件值转换到本次打开已迁移的布局，新增字段保持零值。</summary>
+    internal static unsafe byte[] MigrateWalPayload(MigrationResult migration, byte[] payload, int newSize)
+    {
+        var result = new byte[newSize];
+        fixed (byte* src = payload, dst = result)
+        {
+            if (migration.Chain is { } chain)
+            {
+                if (chain.MaxIntermediateSize <= 1024)
+                {
+                    ExecuteChainStackalloc(chain, payload, dst, newSize, chain.MaxIntermediateSize);
+                }
+                else
+                {
+                    var bufA = ArrayPool<byte>.Shared.Rent(chain.MaxIntermediateSize);
+                    var bufB = ArrayPool<byte>.Shared.Rent(chain.MaxIntermediateSize);
+                    try
+                    {
+                        ExecuteChainPooled(chain, payload, dst, newSize, bufA, bufB);
+                    }
+                    finally
+                    {
+                        ArrayPool<byte>.Shared.Return(bufA);
+                        ArrayPool<byte>.Shared.Return(bufB);
+                    }
+                }
+            }
+            else
+            {
+                foreach (var entry in migration.FieldMap)
+                {
+                    if (entry.NeedsWidening)
+                    {
+                        ApplyWidening(src + entry.OldOffset, dst + entry.NewOffset, entry.OldType, entry.NewType, entry.OldSize, entry.NewSize);
+                    }
+                    else
+                    {
+                        Buffer.MemoryCopy(src + entry.OldOffset, dst + entry.NewOffset, entry.NewSize, entry.OldSize);
+                    }
+                }
+            }
+        }
+        return result;
     }
 
     /// <summary>
@@ -577,6 +625,7 @@ internal static class SchemaEvolutionEngine
             // entity PKs read as 0, no positions are collected, and the SingleVersion components sitting NEXT TO the migrated one come back zeroed with no
             // error. This value is about the archetype's geometry, not about this component's own migration strategy.
             OldCompSize = persistedComp.CompSize,
+            Chain = chain,
         };
     }
 

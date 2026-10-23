@@ -124,6 +124,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         Track(bornTsn);
         TrackEntityKey(entityIdRaw);
         EnsureArchetype(archetypeId);
+        slots = MigrateSlots(slots);
         BeginEntity();  // a spawn builds fresh storage, so there is no prior handle to release — only the content chunks to remember
 
         if (_hasClusterAccessor)
@@ -446,6 +447,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
 
         var eid = EntityId.FromRaw(entityIdRaw);
         EnsureArchetype(eid.ArchetypeId);
+        slots = MigrateSlots(slots);
         BeginEntity();
 
         var key = eid.EntityKey;
@@ -651,6 +653,29 @@ internal sealed unsafe class RecoveryApplier : IDisposable
 
         var handle = ComponentRevisionManager.GetRevisionElement(ref info.CompRevTableAccessor, chainRootChunkId, compRevInfo.CurRevisionIndex);
         handle.Publish(tsn);
+    }
+
+    /// <summary>将最终提交的旧布局值转换一次，供所有恢复写入路径共用。</summary>
+    private IReadOnlyCollection<SlotData> MigrateSlots(IReadOnlyCollection<SlotData> slots)
+    {
+        if (slots == null || !_dbe.HasComponentMigrations)
+        {
+            return slots;
+        }
+
+        // 只转换聚合后的最终提交值，且每个 slot 只转换一次；cluster HEAD 和 revision chain 使用同一份结果。
+        var result = new SlotData[slots.Count];
+        var index = 0;
+        foreach (var value in slots)
+        {
+            var slot = value;
+            if (slot.SlotIndex < _metadata.ComponentCount)
+            {
+                slot.Payload = _dbe.MigrateWalPayload(_engineState.SlotToComponentTable[slot.SlotIndex], slot.Payload);
+            }
+            result[index++] = slot;
+        }
+        return result;
     }
 
     /// <summary>Resets the per-entity scratch that <see cref="ApplyCollectionFolds"/> consumes. Called at the top of every entity apply.</summary>
