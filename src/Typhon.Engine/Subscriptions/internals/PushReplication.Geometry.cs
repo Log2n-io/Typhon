@@ -490,7 +490,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         }
 
         var pz = TEvent.Deep ? z : 0f;
-        if (viewRadius > 0 && !Within(st.PAnchorX, st.PAnchorY, st.PAnchorZ, x, y, pz, (double)viewRadius * viewRadius))
+        if (viewRadius > 0 && !Within(st.PViewX, st.PViewY, st.PViewZ, x, y, pz, (double)viewRadius * viewRadius))
         {
             return false;
         }
@@ -2116,6 +2116,9 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             st.PAnchorX = st.AnchorX;
             st.PAnchorY = st.AnchorY;
             st.PAnchorZ = st.AnchorZ;
+            st.PViewX = st.AnchorX;
+            st.PViewY = st.AnchorY;
+            st.PViewZ = st.AnchorZ;
             st.POriginX = st.OriginX;
             st.POriginY = st.OriginY;
             st.POriginZ = st.OriginZ;
@@ -2131,6 +2134,9 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         }
 
         var vz = TEvent.Deep ? viewpoint.Z : 0d;
+        st.PViewX = viewpoint.X;
+        st.PViewY = viewpoint.Y;
+        st.PViewZ = vz;
         double ax, ay, az;
         int oOriginX, oOriginY, oOriginZ;
         ReadOnlySpan<ushort> o;

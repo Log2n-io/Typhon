@@ -1081,7 +1081,7 @@
   note the "stops being served" half is OBSERVABLE from outside since SWG-08: RuntimeStatsSnapshot.Realms carries a row per REGISTERED realm with
     Served plus its cumulative enters/updates/leaves/cells/resets/events, so "this realm cost nothing" and "this realm has no replication state at all"
     are distinguishable without reaching into the hub — which is what lets the claim be checked at workload scale rather than on three realms.
-  note verified at workload scale by demo/SwgTatooine.Tests RealmCostChecks (a two-planet galaxy, ~1 200 interiors), which is NOT cited in verified:
+  note verified at workload scale by demo/SwgTatooine/SwgTatooine.Tests RealmCostChecks (a two-planet galaxy, ~1 200 interiors), which is NOT cited in verified:
     above because the coverage audit scans test/ only. Its load-bearing case is AnInteriorTheLastSessionLeavesStopsBeingServedAndStopsCosting: a realm
     is given replication state only when a session ENTERS it, so every assertion over realms no session was ever in passes whether or not
     PushHub.SweepUnplaced releases a realm it is finished with — proved by mutant, which left the other four cases green.
@@ -1091,7 +1091,7 @@
     RealmPolicyEvaluations is its companion and the honest half: policy is allowed to be O(registered), and what must hold of it is that it runs once per
     tick. The counter is NOT exhaustive and its own remarks enumerate what it leaves out — PrepareBlocks's two bootstrap-guarded walks, and the per-chunk
     stages (CountWorkers, PlaceWorker, FoldFarChunk) which run on worker threads where a shared add would measure itself.
-    Measured at workload scale by demo/SwgTatooine.Tests RealmScaleChecks (again not citable above — the audit scans test/ only): 15.016 serial passes per
+    Measured at workload scale by demo/SwgTatooine/SwgTatooine.Tests RealmScaleChecks (again not citable above — the audit scans test/ only): 15.016 serial passes per
     served realm per tick, flat from 2 to 17 served realms, and 75.04 against 75.33 per tick at 1 236 and at 2 472 registered realms. Falsified by mutant —
     one per-tick loop over RealmTable.Registered in the push prologue takes the per-served figure to 633 and the two registered figures to 1 311 against
     2 547, reddening both cases while leaving the policy case correctly green.
@@ -1317,7 +1317,8 @@
     each once, in emission order (worker slot, then call order); Broadcast routes to every session, ToOwner to the session whose Control is the named
     entity when the frame is built, ToSession to the session EmitTo names; Near and ToKnown to every session that sees the event's point, or a named
     entity's v̂ — its v̂ before this tick too, when this tick moved it to another cell (was ∨ is) — against its committed or pending geometry (inside the sphere with the point's cell delivered — SUB-16's test; a World session: the cell
-    delivered), and Near with a radius only within it of the session's viewpoint
+    delivered), and Near with a radius only within it of the session's viewpoint — where the gather saw it this tick, never the anchor, which
+    trails a sphere's viewpoint by up to its slack (R′ / 48)
   invariant ToKnown also reaches every session that holds a named entity through a group (14 § 3): a key of the entity's — its current one, or the one
     this tick's change or leave moved it from (was ∨ is) — that the session holds before or after the frame, with the fill's cursor past the entity's
     netId, so a session is told of a member only once the fill has entered it; a positioned member in the session's realm, a positionless one in any
@@ -1343,6 +1344,8 @@
   verified: EventDeliveryTests.EveryEventReachesExactlyItsSessionsAtEverySkipRate (random broadcast and owner events, skip 0–90 %: once each, in order,
     received + lost = routed; Near and ToKnown included), EventDeliveryTests.AnEventReachesItsSessionsWithItsValues,
     EventDeliveryTests.EveryCodecShapeRoundTripsAndADeclaredNarrowingClamps, EventDeliveryTests.AnEnumValueOutsideItsNamesDropsOnlyItsEvent, EventDeliveryTests.GeometricRoutesDedupeRespectTheirRadiusAndNameTheDestroyed,
+    EventDeliveryTests.ANearRadiusIsMeasuredFromTheViewpointNotTheTrailingAnchor (a viewpoint walked across the radius inside the anchor's slack, both
+    ways; red in both directions when the radius is measured from PAnchor),
     EventDeliveryTests.WorldSessionsLateSessionsAndWorkerOrder, EventDeliveryTests.AKnownEventReachesASessionTheEntityLeftThisTick,
     EventDeliveryTests.ASessionWithNoProfileHearsBroadcastsAndItsOwnEvents; by key: PushGroupEventTests.AnEventNamingAGroupMemberReachesTheSessionsHoldingItsKey
     (a building beyond the Sphere and a positionless shard), PushGroupEventTests.AMemberThatLeftItsTownOrDiedInTheEventsTickIsStillHeardOf,
