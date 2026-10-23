@@ -22,7 +22,7 @@ mkdir -p "$release"
 
 aws s3 cp "s3://$BUCKET/$KEY/server.tar.gz" /tmp/server.tar.gz --quiet
 tar -xzf /tmp/server.tar.gz -C "$release" --strip-components=1
-chmod +x "$release/SwgTatooine" "$release/run.sh"
+chmod +x "$release/SwgTatooine.Server" "$release/run.sh"
 chown -R tatooine:tatooine "$release"
 echo "staged $COMMIT"
 
@@ -53,7 +53,7 @@ if [ "$GATE" = "true" ] && [ -n "$data" ] && [ -d "$data" ]; then
 
     # The new binary, the OLD world. Two hundred ticks is past the reopen and into steady state, which is where a schema
     # mismatch surfaces: an archetype that cannot be opened throws on first access, not at the file header.
-    if ! "$release/SwgTatooine" --persist --db-dir "$gate/world" --ticks 200 --warm 0 --hz 10; then
+    if ! "$release/SwgTatooine.Server" --persist --db-dir "$gate/world" --ticks 200 --warm 0 --hz 10; then
         echo "SCHEMA GATE FAILED: the new build could not open the existing world; the live one is untouched" >&2
         rm -rf "$gate"
 

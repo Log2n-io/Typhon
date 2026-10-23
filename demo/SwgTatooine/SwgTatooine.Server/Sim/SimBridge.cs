@@ -1,7 +1,8 @@
-﻿using System;
+﻿using SwgTatooine.Server.Terrain;
+using System;
 using System.Threading;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// The simulation's behaviour, in one place. The system classes in <c>Ecs/Systems.cs</c> are thin wrappers that declare

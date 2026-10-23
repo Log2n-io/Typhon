@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// A command line that refuses what it does not understand, and that can print itself.

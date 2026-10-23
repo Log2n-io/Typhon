@@ -4,7 +4,7 @@ using System.Diagnostics;
 using System.Numerics;
 using System.Threading;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>Running the simulation and measuring what it cost.</summary>
 public sealed partial class TatooineSim

@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Text.Json;
 using Typhon.Engine;
 using NUnit.Framework;
+using SwgTatooine.Server;
 
 namespace SwgTatooine.Tests;
 

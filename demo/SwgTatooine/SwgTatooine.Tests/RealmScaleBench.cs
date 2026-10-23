@@ -33,7 +33,7 @@ namespace SwgTatooine.Tests;
 /// cref="RealmScaleChecks"/> and do run in CI, because they are checks.
 /// </para>
 /// <para>
-/// <b>Run it with:</b> <c>dotnet test demo/SwgTatooine.Tests/SwgTatooine.Tests.csproj -c Release --filter "FullyQualifiedName~RealmScaleBench" --
+/// <b>Run it with:</b> <c>dotnet test demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj -c Release --filter "FullyQualifiedName~RealmScaleBench" --
 /// NUnit.DisplayName=FullName</c> (add <c>--logger "console;verbosity=normal"</c> to see the per-pair lines). It takes several minutes: twelve galaxies of
 /// 2 472 realms, each measured over a window of ticks. Every world is deleted as its galaxy is disposed.
 /// </para>

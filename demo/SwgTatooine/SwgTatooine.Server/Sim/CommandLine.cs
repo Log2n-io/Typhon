@@ -1,6 +1,7 @@
-﻿using System;
+﻿using SwgTatooine.Server.Accounts;
+using System;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>Argument parsing for the simulation driver. Every knob in <see cref="SimConfig"/> that a sweep moves, plus the flags that pick a mode.</summary>
 /// <remarks>
@@ -45,11 +46,11 @@ public static class CommandLine
     /// <summary>What <c>--help</c> prints before the flags.</summary>
     private const string Usage =
         """
-        SwgTatooine — a server-side Star Wars Galaxies workload for the Typhon engine.
+        SwgTatooine.Server — a server-side Star Wars Galaxies workload for the Typhon engine.
 
-          usage: SwgTatooine [flags]          measure a fixed number of ticks and report
-                 SwgTatooine --serve <port>    serve the same world over WebSocket, forever
-                 SwgTatooine --sweep           run the partitioning matrix and write a report
+          usage: SwgTatooine.Server [flags]          measure a fixed number of ticks and report
+                 SwgTatooine.Server --serve <port>    serve the same world over WebSocket, forever
+                 SwgTatooine.Server --sweep           run the partitioning matrix and write a report
 
           --serve now REQUIRES its port. A bare --serve used to mean 8080, and so did a malformed one:
           `--serve 808O` listened on 8080 and said nothing. Every flag names its value or is refused.
@@ -277,10 +278,10 @@ public static class CommandLine
                 + "--assets is accepted without it: it also carries the collision shapes a measured run collides against.");
         }
 
-        if (c.AuthIterations > 0 && c.AuthIterations < Accounts.PasswordHash.MinimumIterations)
+        if (c.AuthIterations > 0 && c.AuthIterations < PasswordHash.MinimumIterations)
         {
             throw new ArgumentException(
-                $"--auth-iterations {c.AuthIterations} is below the floor of {Accounts.PasswordHash.MinimumIterations}. Below that a leaked hash table is "
+                $"--auth-iterations {c.AuthIterations} is below the floor of {PasswordHash.MinimumIterations}. Below that a leaked hash table is "
                 + "crackable on one laptop, so the hashing would read as protection without being any.");
         }
 

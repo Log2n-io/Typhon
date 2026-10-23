@@ -3,7 +3,7 @@ using System.IO;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 
-namespace SwgTatooine.Replication;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// The server's TLS certificate, loaded from PEM files and reloaded when they change on disk.

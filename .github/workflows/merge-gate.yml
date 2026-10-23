@@ -155,14 +155,14 @@ jobs:
               - 'demo/AntHill/**'
               - 'demo/AsteroidField/**'
               # The SWG demo's realm checks (Realms G1d) build the demo itself.
-              - 'demo/SwgTatooine/**'
-              - 'demo/SwgTatooine.Tests/**'
+              - 'demo/SwgTatooine/SwgTatooine.Server/**'
+              - 'demo/SwgTatooine/SwgTatooine.Tests/**'
               # The bot fleet, and Typhon.Client through it (B5, 2026-10-14). SwgTatooine.Tests references the bots so
               # one fixture can put a real provisioner against a real /auth host -- the thing worth testing is that a
               # DERIVED password satisfies the SERVER's own rules, which needs both assemblies in one place. Adding
               # that reference moved both paths into this job's closure, and check-gate-filters.py caught it: without
               # these two lines a change to the bots would run no tests at all, which is the #774 class exactly.
-              - 'demo/SwgTatooine.Bots/**'
+              - 'demo/SwgTatooine/SwgTatooine.Bots/**'
               - 'src/Typhon.Client/**'
               # Typhon.Shell.Tests reaches the Workbench through its own references — surfaced by the closure check,
               # not by reading the csproj.
@@ -176,7 +176,7 @@ jobs:
             # them executed by CI — while Phase A put the login form and the whole input path into that app. That is the shape
             # of #774: a suite nobody runs cannot be said to pass, and this one guards what a player actually touches.
             game_client:
-              - 'demo/SwgTatooine.Client/**'
+              - 'demo/SwgTatooine/SwgTatooine.Client/**'
             sdk:
               - 'src/Typhon.Protocol/**'
               - 'src/Typhon.Generators.Protocol/**'
@@ -866,7 +866,7 @@ jobs:
             test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj \
             test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj \
             test/Typhon.Subscriptions.AspNetCore.Tests/Typhon.Subscriptions.AspNetCore.Tests.csproj \
-            demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj             demo/SwgTatooine.Tests/SwgTatooine.Tests.csproj \
+            demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj             demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj \
             demo/AsteroidField/AsteroidField.Tests/AsteroidField.Tests.csproj ; do
             name=$(basename "$proj" .csproj)
             echo "::group::${name}"
@@ -956,7 +956,7 @@ jobs:
           node-version: '22'
 
       - name: Check — SWG browser client
-        working-directory: demo/SwgTatooine.Client
+        working-directory: demo/SwgTatooine/SwgTatooine.Client
         run: |
           npm ci
           npm run check
@@ -1039,7 +1039,7 @@ jobs:
           case "$auxt" in failure|cancelled) echo "aux-tests failed"; fail=1 ;; esac
           # subscriptions-sdk is path-gated the same way.
           case "$sdk" in failure|cancelled) echo "subscriptions-sdk failed"; fail=1 ;; esac
-          # game-client too: skipped when demo/SwgTatooine.Client/** is untouched (I11).
+          # game-client too: skipped when demo/SwgTatooine/SwgTatooine.Client/** is untouched (I11).
           case "$client" in failure|cancelled) echo "game-client failed"; fail=1 ;; esac
           # native-sdk too: 'skipped' when nothing it builds changed.
           case "$native" in failure|cancelled) echo "native-sdk failed"; fail=1 ;; esac

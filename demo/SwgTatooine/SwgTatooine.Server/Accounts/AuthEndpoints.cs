@@ -1,12 +1,12 @@
-using System;
-using System.Globalization;
-using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using System;
+using System.Globalization;
+using System.Text.Json.Serialization;
 
-namespace SwgTatooine.Accounts;
+namespace SwgTatooine.Server.Accounts;
 
 /// <summary>The body a client posts to <c>/auth/signup</c> and <c>/auth/login</c>.</summary>
 /// <param name="Name">The account name.</param>
@@ -113,7 +113,7 @@ public static class AuthEndpoints
     public static IServiceCollection AddAuthJson(this IServiceCollection services)
     {
         ArgumentNullException.ThrowIfNull(services);
-        services.ConfigureHttpJsonOptions(o => o.SerializerOptions.TypeInfoResolverChain.Insert(0, AuthJson.Default));
+        services.ConfigureHttpJsonOptions(o => o.SerializerOptions.TypeInfoResolverChain.Insert(0, Accounts.AuthJson.Default));
         return services;
     }
 

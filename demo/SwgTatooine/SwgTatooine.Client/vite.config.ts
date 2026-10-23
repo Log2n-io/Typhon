@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
 // The SDK is consumed from its sources, so a change to it is picked up without building its dist (05-client § 2).
-const sdkRoot = fileURLToPath(new URL('../../src/Typhon.Client.TypeScript', import.meta.url));
+const sdkRoot = fileURLToPath(new URL('../../../src/Typhon.Client.TypeScript', import.meta.url));
 const sdkEntry = `${sdkRoot}/src/index.ts`;
 
 export default defineConfig({

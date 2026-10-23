@@ -2,6 +2,7 @@
 using Typhon.Client;
 using Typhon.Protocol;
 using SwgTatooine.Bots.Brain;
+using SwgTatooine.Server;
 
 namespace SwgTatooine.Tests;
 

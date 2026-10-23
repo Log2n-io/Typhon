@@ -74,7 +74,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
-$exe = Join-Path $repo "demo/SwgTatooine/bin/$Configuration/net10.0/SwgTatooine.exe"
+$exe = Join-Path $repo "demo/SwgTatooine/SwgTatooine.Server/bin/$Configuration/net10.0/SwgTatooine.Server.exe"
 
 # Always, not only when the exe is missing: building only when absent means an edited source file runs as its old binary,
 # which is the "stale test bin" failure this repository has been bitten by before. msbuild's own up-to-date check makes a
@@ -88,8 +88,8 @@ else
     Write-Host "  workers $([Environment]::ProcessorCount) — the processor count. Do NOT run the bots on this box at the same time." -ForegroundColor Yellow
 }
 
-Write-Host "Building SwgTatooine ($Configuration)..." -ForegroundColor Cyan
-& dotnet build (Join-Path $repo 'demo/SwgTatooine/SwgTatooine.csproj') -c $Configuration --nologo -v q
+Write-Host "Building SwgTatooine.Server ($Configuration)..." -ForegroundColor Cyan
+& dotnet build (Join-Path $repo 'demo/SwgTatooine/SwgTatooine.Server/SwgTatooine.Server.csproj') -c $Configuration --nologo -v q
 if ($LASTEXITCODE -ne 0) { throw "build failed with exit code $LASTEXITCODE" }
 
 # One shared implementation, because two copies of this contract drifted: this script cleared TYPHON__PROFILER__TRACE and

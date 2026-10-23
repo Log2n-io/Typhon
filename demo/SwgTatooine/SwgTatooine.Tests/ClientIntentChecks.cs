@@ -1,6 +1,7 @@
 ﻿using System;
-using SwgTatooine.World.Terrain;
 using NUnit.Framework;
+using SwgTatooine.Server;
+using SwgTatooine.Server.Terrain;
 using Typhon.Engine;
 using Typhon.Protocol;
 

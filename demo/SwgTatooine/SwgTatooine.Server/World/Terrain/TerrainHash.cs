@@ -1,13 +1,13 @@
 using System;
 
-namespace SwgTatooine.World.Terrain;
+namespace SwgTatooine.Server.Terrain;
 
 /// <summary>
 /// The terrain's noise primitive: an <b>integer hash</b> rather than the usual <c>fract(sin(dot(…)))</c>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// This is a transcription of <c>demo/SwgTatooine.Client/src/terrain/hash.ts</c>, and the two must agree to the last bit.
+/// This is a transcription of <c>demo/SwgTatooine/SwgTatooine.Client/src/terrain/hash.ts</c>, and the two must agree to the last bit.
 /// Three runtimes produce heights for the same post — this one, the browser client, and indirectly the GPU, which samples
 /// the baked field as a texture — and an entity whose server altitude disagrees with the ground the client drew is an
 /// entity that floats or sinks.
@@ -22,7 +22,7 @@ namespace SwgTatooine.World.Terrain;
 /// <para>
 /// The float part is <see cref="double"/> throughout, which IEEE-754 pins exactly <b>given the same operation order</b> —
 /// so the order below is transcribed rather than rearranged, and <c>TerrainGoldenChecks</c> holds it to
-/// <c>demo/SwgTatooine.Client/test/golden/terrain-hash.json</c>, the same file the TypeScript test reads.
+/// <c>demo/SwgTatooine/SwgTatooine.Client/test/golden/terrain-hash.json</c>, the same file the TypeScript test reads.
 /// </para>
 /// </remarks>
 public static class TerrainHash

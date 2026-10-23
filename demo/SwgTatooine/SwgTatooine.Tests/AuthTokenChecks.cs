@@ -4,7 +4,8 @@ using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using NUnit.Framework;
-using SwgTatooine.Accounts;
+using SwgTatooine.Server;
+using SwgTatooine.Server.Accounts;
 using Typhon.Engine;
 
 namespace SwgTatooine.Tests;

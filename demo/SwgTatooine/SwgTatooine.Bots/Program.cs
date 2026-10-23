@@ -1,4 +1,4 @@
-using SwgTatooine;
+using SwgTatooine.Server;
 using SwgTatooine.Bots;
 using System;
 using System.Threading;
@@ -11,7 +11,7 @@ using System.Threading.Tasks;
 // The report is the product. A load generator that only prints "done" cannot distinguish a server that carried a hundred
 // sessions for an hour from one that shed them in the first minute and left the generator reconnecting.
 //
-// The default is a WEBSOCKET endpoint because that is what `SwgTatooine --serve <port>` listens on, and nothing else. A tcp://
+// The default is a WEBSOCKET endpoint because that is what `SwgTatooine.Server --serve <port>` listens on, and nothing else. A tcp://
 // default read plausibly and connected to nothing: the swarm printed its first line and exited zero, having measured a server it
 // never reached. The scheme and the port have to name what the server actually serves.
 
@@ -28,7 +28,7 @@ try
     var r = new ArgReader(args, Usage);
     r.Group("swarm");
     r.Switch("--help", "print this list and exit (or -h as the first argument)");
-    endpoint = r.Str("--endpoint", "ws://127.0.0.1:9100/ws", "the server's WebSocket endpoint (`SwgTatooine --serve <port>` listens at ws://host:<port>/ws)",
+    endpoint = r.Str("--endpoint", "ws://127.0.0.1:9100/ws", "the server's WebSocket endpoint (`SwgTatooine.Server --serve <port>` listens at ws://host:<port>/ws)",
         "<uri>");
     bots = r.Int("--bots", defaults.Count, "sessions to open", min: 1);
 
@@ -256,7 +256,7 @@ stopping.CancelAfter(TimeSpan.FromSeconds(seconds));
 // failure here rather than left to the reader, because the numbers that follow are the kind a reader trusts.
 if (opened == 0)
 {
-    Console.Error.WriteLine($"no session opened against {endpoint}. Check the scheme and the port: `SwgTatooine --serve <port>` "
+    Console.Error.WriteLine($"no session opened against {endpoint}. Check the scheme and the port: `SwgTatooine.Server --serve <port>` "
         + "listens for WEBSOCKET connections at ws://host:<port>/ws and for nothing else.");
     return 2;
 }
@@ -511,7 +511,7 @@ partial class Program
     /// <summary>What <c>--help</c> prints before the flags.</summary>
     private const string Usage =
         """
-        SwgTatooine.Bots — scripted sessions against a running SwgTatooine server, and a report of what happened to them.
+        SwgTatooine.Bots — scripted sessions against a running SwgTatooine.Server, and a report of what happened to them.
 
           usage: SwgTatooine.Bots [flags]                 a swarm of sessions for --seconds, then the report
                  SwgTatooine.Bots --fuzz <clients> [...]  hostile connections instead of a swarm

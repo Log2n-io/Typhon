@@ -1,8 +1,8 @@
-﻿using System;
+﻿using SwgTatooine.Server.Accounts;
+using System;
 using System.Collections.Generic;
-using SwgTatooine.Accounts;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// A5: a login spawns the account's avatar where its character left off, and a logout saves and destroys it.

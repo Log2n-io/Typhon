@@ -2,7 +2,7 @@
 using System.Numerics;
 using System.Threading;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// Destroy missions: the loop that puts a target in front of a player and takes it away again.

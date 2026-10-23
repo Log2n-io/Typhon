@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// The collision primitives of the published assets, reduced to what a two-dimensional simulation can use: per asset, a
@@ -431,7 +431,7 @@ public sealed class AssetColliders
     /// <remarks>
     /// Only the assets on <see cref="Verified"/> are read; everything else keeps its footprint box.
     /// </remarks>
-    internal static AssetColliders Load(SwgTatooine.Replication.AssetOrigin origin)
+    internal static AssetColliders Load(AssetOrigin origin)
     {
         ArgumentNullException.ThrowIfNull(origin);
 

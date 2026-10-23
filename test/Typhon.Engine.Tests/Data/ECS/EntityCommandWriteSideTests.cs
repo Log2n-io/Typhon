@@ -36,7 +36,7 @@ struct CmdOwner
     /// <remarks>
     /// <b>A <c>long</c> and not an <see cref="EntityId"/>, and the reason is a finding rather than a preference:</b> the schema builder knows no mapping
     /// for <c>EntityId</c>, so a <c>[Field] public EntityId</c> member is silently skipped — a component whose ONLY field is one fails registration with a
-    /// bare "sequence contains no elements" out of LINQ that names neither the component nor the field. <c>demo/SwgTatooine/Ecs/Components.cs</c> declares
+    /// bare "sequence contains no elements" out of LINQ that names neither the component nor the field. <c>demo/SwgTatooine/SwgTatooine.Server/Ecs/Components.cs</c> declares
     /// three such members and gets away with it only because those components carry other fields too. Not this fixture's subject; it carries the raw value
     /// so the test asserts what it is about — that the 8 bytes handed to the caller are the 8 bytes stored.
     /// </remarks>

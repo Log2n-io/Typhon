@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// Dungeon instances (Realms G2): a realm registered while the engine runs, when a party enters it, and unregistered once it is emptied — the lifecycle

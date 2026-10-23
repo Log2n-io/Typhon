@@ -4,7 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// The partitioning study: run the same world under a matrix of settings and report what each cost.
@@ -114,8 +114,8 @@ public static class Sweep
 
         w.AppendLine("# Typhon under a Star Wars Galaxies server workload — partitioning sweep");
         w.AppendLine();
-        w.AppendLine(CultureInfo.InvariantCulture, $"Generated {DateTime.Now:yyyy-MM-dd HH:mm} by `SwgTatooine --sweep`.");
-        w.AppendLine("Source: `demo/SwgTatooine/`. Not a CI test — an instrument.");
+        w.AppendLine(CultureInfo.InvariantCulture, $"Generated {DateTime.Now:yyyy-MM-dd HH:mm} by `SwgTatooine.Server --sweep`.");
+        w.AppendLine("Source: `demo/SwgTatooine/SwgTatooine.Server/`. Not a CI test — an instrument.");
         w.AppendLine();
         w.AppendLine("## What is being measured");
         w.AppendLine();

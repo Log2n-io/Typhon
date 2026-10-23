@@ -1,7 +1,7 @@
 using System;
 using System.Threading.Tasks;
 
-namespace SwgTatooine.World.Terrain;
+namespace SwgTatooine.Server.Terrain;
 
 /// <summary>
 /// Baking the planet in horizontal bands, so the bake uses every core instead of one.

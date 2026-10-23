@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// The fence's intra-cell maintenance per archetype, averaged over the measured window. The census's "last tick" table is one tick of hundreds; an A/B

@@ -1,4 +1,4 @@
-﻿namespace SwgTatooine;
+﻿namespace SwgTatooine.Server;
 
 /// <summary>
 /// The DAG-local phases the simulation runs in. The phase list is the causal order, but it binds only through the access

@@ -11,8 +11,9 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
-using SwgTatooine.Accounts;
 using SwgTatooine.Bots;
+using SwgTatooine.Server;
+using SwgTatooine.Server.Accounts;
 
 namespace SwgTatooine.Tests;
 

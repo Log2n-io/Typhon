@@ -1,7 +1,7 @@
 ﻿using System.Runtime.InteropServices;
 using Typhon.Protocol;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 // Components

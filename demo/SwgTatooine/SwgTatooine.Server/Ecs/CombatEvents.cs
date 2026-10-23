@@ -1,6 +1,6 @@
 ﻿using System.Runtime.InteropServices;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// One thing that happened to somebody else's entity: damage landed, or a mission paid out. The demo's only

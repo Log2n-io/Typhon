@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using NUnit.Framework;
+using SwgTatooine.Server;
 using Typhon.Engine;
 
 namespace SwgTatooine.Tests;
@@ -152,7 +153,7 @@ public sealed class ProfilerFlagChecks
         Assert.That(lines.Length, Is.GreaterThan(3), "it is a multi-line explanation, not a one-liner");
         foreach (var line in lines)
         {
-            Assert.That(line, Does.StartWith("SwgTatooine: "));
+            Assert.That(line, Does.StartWith("SwgTatooine.Server: "));
         }
     }
 

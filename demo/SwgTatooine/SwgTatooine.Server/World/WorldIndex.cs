@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// The handles and geometry the simulation systems need after the world is built: entity ids they must address directly,

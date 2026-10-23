@@ -1,6 +1,6 @@
 ﻿using System;
 using NUnit.Framework;
-using SwgTatooine.World.Terrain;
+using SwgTatooine.Server.Terrain;
 
 namespace SwgTatooine.Tests;
 

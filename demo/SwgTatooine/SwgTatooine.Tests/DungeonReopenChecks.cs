@@ -1,5 +1,6 @@
 ﻿using System.IO;
 using NUnit.Framework;
+using SwgTatooine.Server;
 using Typhon.Engine;
 
 namespace SwgTatooine.Tests;

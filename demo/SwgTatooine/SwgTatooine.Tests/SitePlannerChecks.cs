@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using NUnit.Framework;
-using SwgTatooine;
+using SwgTatooine.Server;
 
 namespace SwgTatooine.Tests;
 
@@ -172,7 +172,7 @@ public sealed class SitePlannerChecks
 
     /// <summary>The footprints are the ones the browser draws, which is the only reason planning means anything.</summary>
     /// <remarks>
-    /// These are pinned against <c>demo/SwgTatooine.Client/src/render/styles.ts</c>. If a size changes there and not
+    /// These are pinned against <c>demo/SwgTatooine/SwgTatooine.Client/src/render/styles.ts</c>. If a size changes there and not
     /// here, the server plans with a box the client does not draw and the overlap comes back on screen while every case
     /// above still passes.
     /// </remarks>

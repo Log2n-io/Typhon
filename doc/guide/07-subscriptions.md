@@ -536,7 +536,7 @@ await client.SendCommandAsync("MoveTo", new RecordValues
 });
 ```
 
-The SWG Tatooine demo (`demo/SwgTatooine`, `demo/SwgTatooine.Client`, `demo/SwgTatooine.Bots`) is a complete, measured example of all of
+The SWG Tatooine demo (`demo/SwgTatooine`, `demo/SwgTatooine/SwgTatooine.Client`, `demo/SwgTatooine/SwgTatooine.Bots`) is a complete, measured example of all of
 the above: 270 k entities, 1 000 player sessions at 50 Hz, a browser client, and bot swarms. Serving those 1 000 sessions costs the
 replication track **about 2 ms per tick** (1.5–1.95 ms measured) on a Ryzen 9 7950X (16 cores): a tenth of the 20 ms tick budget.
 

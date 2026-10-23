@@ -1,6 +1,7 @@
 ﻿using System;
 using NUnit.Framework;
-using SwgTatooine.Accounts;
+using SwgTatooine.Server;
+using SwgTatooine.Server.Accounts;
 using Typhon.Engine;
 using Typhon.Protocol;
 

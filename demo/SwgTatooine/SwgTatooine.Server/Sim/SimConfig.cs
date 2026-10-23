@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// Everything the simulation is parameterised by. Two axes are swept for the partitioning study — <see cref="WorldEdgeKm"/>
@@ -403,7 +403,7 @@ public sealed class SimConfig
     /// </summary>
     /// <remarks>
     /// <b>Without this a published server serves no client at all.</b> The fallback walks up from the binary looking for
-    /// <c>demo/SwgTatooine.Client/dist</c>, which exists in a dev tree and in no deployment — so the artefact
+    /// <c>demo/SwgTatooine/SwgTatooine.Client/dist</c>, which exists in a dev tree and in no deployment — so the artefact
     /// <c>scripts/publish-swg.ps1</c> builds would answer 404 for the root and leave nothing but a WebSocket. The flag is
     /// what the deployed unit passes.
     /// </remarks>
@@ -416,7 +416,7 @@ public sealed class SimConfig
     /// <para>
     /// The exporter's <c>build/assets</c>: flat, content-addressed GLBs, descriptors and shared KTX2 textures, with a
     /// <c>catalogue.json</c> pointer. The server pins the immutable catalogue that pointer names and announces it in
-    /// <c>/typhon/demo.json</c>, so the client never has to discover a version — see <see cref="Replication.AssetOrigin"/>.
+    /// <c>/typhon/demo.json</c>, so the client never has to discover a version — see <see cref="AssetOrigin"/>.
     /// </para>
     /// <para>
     /// <b>Unset serves nothing, and the client then draws what it always drew.</b> The asset set lives outside this

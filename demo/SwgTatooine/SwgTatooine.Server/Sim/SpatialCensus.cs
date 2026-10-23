@@ -1,7 +1,7 @@
 using System;
 using System.Numerics;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// Where the spatial layer's density actually landed, per archetype, read off the engine after a run.

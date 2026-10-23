@@ -1,10 +1,10 @@
-﻿using System;
+﻿using SwgTatooine.Server.Accounts;
+using System;
 using System.Collections.Generic;
 using System.Numerics;
-using SwgTatooine.Accounts;
 using Typhon.Protocol;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>A god camera asks to look at another planet (Realms G3): the planet's realm id.</summary>
 public struct ViewRealm

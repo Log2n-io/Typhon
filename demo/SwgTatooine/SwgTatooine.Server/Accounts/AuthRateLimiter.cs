@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 
-namespace SwgTatooine.Accounts;
+namespace SwgTatooine.Server.Accounts;
 
 /// <summary>
 /// A token bucket per key, used to rate-limit <c>/auth</c> by client address AND by account name (A2).

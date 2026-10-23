@@ -3,7 +3,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Threading;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// Building interiors (Realms G1b): every enterable city building is a realm of its own, entered and left through a portal pair — the door on the planet

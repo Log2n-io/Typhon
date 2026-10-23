@@ -1,6 +1,6 @@
 using System;
 
-namespace SwgTatooine.World.Terrain;
+namespace SwgTatooine.Server.Terrain;
 
 /// <summary>What a layer is confined to. <see cref="FeatherM"/> is how far inside the edge the weight ramps from 0 to 1.</summary>
 public enum BoundaryKind

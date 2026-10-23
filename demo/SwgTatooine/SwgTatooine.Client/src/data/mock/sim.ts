@@ -16,7 +16,7 @@ import { clampToPlanet, randomWildernessPoint, weightedCity, type MockWorld } fr
 import { PLAYER_MOUNT_SPEED_MPS, PLAYER_RUN_SPEED_MPS } from './mock-speeds';
 
 /**
- * The mock simulation: the behaviour of `demo/SwgTatooine/Sim/SimBridge.*.cs`, with the fixes the live-demo design
+ * The mock simulation: the behaviour of `demo/SwgTatooine/SwgTatooine.Server/Sim/SimBridge.*.cs`, with the fixes the live-demo design
  * schedules before any client (`03-server.md` § 10, `06-gameplay.md` § 3), so god mode shows causality:
  *
  * - no snap-to-lair: a creature returns to its lair only when revived (S0-1); spawns clamped to the planet (S0-2);

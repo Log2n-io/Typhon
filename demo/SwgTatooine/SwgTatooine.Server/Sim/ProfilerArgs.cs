@@ -2,7 +2,7 @@
 using System.Globalization;
 using System.Text;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// What the command line and the environment asked of the profiler, and the message for a request this process cannot honour (W1, W2).
@@ -250,7 +250,7 @@ public static class ProfilerArgs
                    {powershell}
                    or a POSIX shell, which is how the deployed server does it:
 
-                     {posix}{Environment.ProcessPath ?? "SwgTatooine"} <your other flags>
+                     {posix}{Environment.ProcessPath ?? "SwgTatooine.Server"} <your other flags>
 
                    or let a launcher do both:
 
@@ -261,7 +261,7 @@ public static class ProfilerArgs
         var prefixed = new StringBuilder();
         foreach (var line in body.Replace("\r\n", "\n").Split('\n'))
         {
-            prefixed.Append("SwgTatooine: ").Append(line).Append(Environment.NewLine);
+            prefixed.Append("SwgTatooine.Server: ").Append(line).Append(Environment.NewLine);
         }
 
         return prefixed.ToString().TrimEnd();

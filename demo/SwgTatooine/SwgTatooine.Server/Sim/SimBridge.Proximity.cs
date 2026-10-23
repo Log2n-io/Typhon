@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Threading;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// One structure's footprint as the neighbourhood passes it around: the tight world box the narrowphase already read, and

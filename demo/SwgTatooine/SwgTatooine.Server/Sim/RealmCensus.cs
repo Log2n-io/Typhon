@@ -2,7 +2,7 @@ using System;
 using System.Numerics;
 using System.Threading;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>What one realm held when the census last walked it.</summary>
 /// <param name="Realm">The realm id.</param>

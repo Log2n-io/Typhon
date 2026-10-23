@@ -2,7 +2,7 @@
 using System.Collections.Generic;
 using System.Numerics;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// Rebuilding a planet's <see cref="WorldIndex"/> and <see cref="WorldCensus"/> from the entities on disk, for a world that is reopened rather than built (P-2).

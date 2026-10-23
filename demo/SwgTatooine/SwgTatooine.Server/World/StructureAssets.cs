@@ -1,4 +1,4 @@
-﻿namespace SwgTatooine;
+﻿namespace SwgTatooine.Server;
 
 /// <summary>
 /// Which published asset a structure IS: the server's answer, which the client is told rather than left to guess.

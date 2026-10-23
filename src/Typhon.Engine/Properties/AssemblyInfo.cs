@@ -39,7 +39,7 @@ using System.Runtime.CompilerServices;
 // The debt cannot grow while it waits: scripts/check-blueprint-public-api.py ratchets the exact set of demo files
 // allowed to touch internals, and fails both when a new one appears AND when a listed one is cleaned without the
 // list being tightened. The demo's replication code is already clean and the same script asserts it.
-[assembly: InternalsVisibleTo("SwgTatooine")]
+[assembly: InternalsVisibleTo("SwgTatooine.Server")]
 // Re-added 2026-05-25 (#376 Stage-3 4A): the `with-queries` trace fixture must emit QueryPlan + phase SPAN
 // records, whose typed `EncodeTo` encoders are internal source-generated `[TraceEvent]` ref structs
 // (QueryPlanEvent et al.) with NO public surface. Genuine internal-implementation reuse — the fixture drives

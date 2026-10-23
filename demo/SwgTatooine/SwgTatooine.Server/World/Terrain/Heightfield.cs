@@ -1,6 +1,6 @@
 using System;
 
-namespace SwgTatooine.World.Terrain;
+namespace SwgTatooine.Server.Terrain;
 
 /// <summary>
 /// The baked heightfield: the one source of truth for ground height on this server, and the same field the browser client
@@ -8,7 +8,7 @@ namespace SwgTatooine.World.Terrain;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A transcription of <c>demo/SwgTatooine.Client/src/terrain/heightfield.ts</c>. <b>Everything interpolates these posts;
+/// A transcription of <c>demo/SwgTatooine/SwgTatooine.Client/src/terrain/heightfield.ts</c>. <b>Everything interpolates these posts;
 /// nothing re-evaluates the layer tree.</b> That is what keeps the altitude this server writes on a placement and the
 /// ground the client draws under it in agreement: they are not two implementations of one function, they are two readers
 /// of one array — built from one spec and held to one golden.

@@ -3,8 +3,9 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
-using SwgTatooine.Accounts;
 using NUnit.Framework;
+using SwgTatooine.Server;
+using SwgTatooine.Server.Accounts;
 using Typhon.Engine;
 using Typhon.Protocol;
 

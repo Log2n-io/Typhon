@@ -16,7 +16,7 @@ import { useUi } from '../state/ui-store';
 /**
  * Which world the client shows (`05-client.md` § 11, C4).
  *
- * <b>Live by default.</b> The page is normally served by `SwgTatooine --serve`, from the same origin as `/ws`, so the
+ * <b>Live by default.</b> The page is normally served by `SwgTatooine.Server --serve`, from the same origin as `/ws`, so the
  * engine is one relative URL away and showing the browser-side mock instead would be showing a simulation of the thing
  * the client exists to prove. `?source=mock` asks for the mock, which is still the only way to drive the client without
  * a server and the only source with a latency slider.

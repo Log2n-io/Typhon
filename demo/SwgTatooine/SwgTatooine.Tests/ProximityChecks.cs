@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Numerics;
 using NUnit.Framework;
+using SwgTatooine.Server;
 using Typhon.Engine;
 using Typhon.Schema.Definition;
 

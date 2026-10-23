@@ -1,4 +1,4 @@
-namespace SwgTatooine.Accounts;
+namespace SwgTatooine.Server.Accounts;
 
 /// <summary>
 /// The rules an account name has to pass, and the single normalisation every path shares (A2).

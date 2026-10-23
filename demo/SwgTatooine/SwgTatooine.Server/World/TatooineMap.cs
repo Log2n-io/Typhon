@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>A named settlement, with the extent it occupies and the population it carries.</summary>
 public readonly struct CityDef

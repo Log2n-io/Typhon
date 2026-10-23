@@ -39,7 +39,7 @@
     `$env:` assignment persists for a whole shell session and would otherwise keep profiling every later run in it.
 
     It has to be set here rather than passed to the server, because the server cannot switch its own profiler on: the
-    engine's master gate is baked before `Main` runs. `demo/SwgTatooine/Sim/ProfilerArgs.cs` has the mechanism.
+    engine's master gate is baked before `Main` runs. `demo/SwgTatooine/SwgTatooine.Server/Sim/ProfilerArgs.cs` has the mechanism.
 
 .PARAMETER BindAddress
     The address the profiler port binds. Loopback when unset — a routable address publishes your telemetry.
@@ -67,8 +67,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root   = Split-Path -Parent $PSScriptRoot
-$client = Join-Path $root 'demo/SwgTatooine.Client'
-$exe    = Join-Path $root 'demo/SwgTatooine/bin/Release/net10.0/SwgTatooine.exe'
+$client = Join-Path $root 'demo/SwgTatooine/SwgTatooine.Client'
+$exe    = Join-Path $root 'demo/SwgTatooine/SwgTatooine.Server/bin/Release/net10.0/SwgTatooine.Server.exe'
 
 # $ErrorActionPreference='Stop' does NOT cover a native command's exit code here: $PSNativeCommandUseErrorActionPreference
 # is False on PowerShell 7.6 by default, so npm and dotnet failures fall through and the stale exe runs. Checked by hand.
@@ -86,7 +86,7 @@ if ($Rebuild -or -not (Test-Path (Join-Path $client 'dist/index.html'))) {
 
 # Always, not only when absent: see swg-serve.ps1. An edited source file otherwise runs as its old binary.
 Write-Host 'Building the server (Release)...' -ForegroundColor Cyan
-dotnet build (Join-Path $root 'demo/SwgTatooine/SwgTatooine.csproj') -c Release --nologo -v q
+dotnet build (Join-Path $root 'demo/SwgTatooine/SwgTatooine.Server/SwgTatooine.Server.csproj') -c Release --nologo -v q
 if ($LASTEXITCODE -ne 0) { throw "server build failed with exit code $LASTEXITCODE" }
 
 # Its own database directory, created here: the demo VALIDATES --db-dir and refuses one that does not exist rather than

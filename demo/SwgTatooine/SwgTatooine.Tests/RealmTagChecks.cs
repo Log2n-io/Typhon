@@ -1,5 +1,6 @@
 using System;
 using NUnit.Framework;
+using SwgTatooine.Server;
 
 namespace SwgTatooine.Tests;
 
@@ -11,7 +12,7 @@ namespace SwgTatooine.Tests;
 /// <b>Every expectation here is a hand-written literal, and that is the point.</b> A test that composed a tag with the
 /// same shifts <see cref="RealmTag"/> uses would pass for any layout at all, including one that had silently moved — so
 /// it would prove the code agrees with itself and nothing else. The numbers below are the same numbers written out in
-/// <c>demo/SwgTatooine.Client/test/realm-view.test.ts</c>, so the pair of files is what actually holds the two languages
+/// <c>demo/SwgTatooine/SwgTatooine.Client/test/realm-view.test.ts</c>, so the pair of files is what actually holds the two languages
 /// together. Change one and the other must be changed in the same commit.
 /// </para>
 /// <para>

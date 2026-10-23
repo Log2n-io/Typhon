@@ -8,8 +8,7 @@
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <OutputType>Exe</OutputType>
-    <AssemblyName>SwgTatooine</AssemblyName>
-    <RootNamespace>SwgTatooine</RootNamespace>
+    <AssemblyName>SwgTatooine.Server</AssemblyName>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>default</LangVersion>
     <InvariantGlobalization>true</InvariantGlobalization>
@@ -20,16 +19,16 @@
     <InternalsVisibleTo Include="SwgTatooine.Tests" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\src\Typhon.Engine\Typhon.Engine.csproj" />
+    <ProjectReference Include="..\..\..\src\Typhon.Engine\Typhon.Engine.csproj" />
     <!-- The browser door (P1-08). It brings the ASP.NET Core framework reference with it, which is why this Exe needs no Web SDK. -->
-    <ProjectReference Include="..\..\src\Typhon.Subscriptions.AspNetCore\Typhon.Subscriptions.AspNetCore.csproj" />
-    <ProjectReference Include="..\..\src\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" />
-    <ProjectReference Include="..\..\src\Typhon.Profiler\Typhon.Profiler.csproj" />
+    <ProjectReference Include="..\..\..\src\Typhon.Subscriptions.AspNetCore\Typhon.Subscriptions.AspNetCore.csproj" />
+    <ProjectReference Include="..\..\..\src\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" />
+    <ProjectReference Include="..\..\..\src\Typhon.Profiler\Typhon.Profiler.csproj" />
     <PackageReference Include="JetBrains.Annotations" Version="2026.2.0" PrivateAssets="all" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.9" />
-    <ProjectReference Include="..\..\src\Typhon.Analyzers\Typhon.Analyzers.csproj"
+    <ProjectReference Include="..\..\..\src\Typhon.Analyzers\Typhon.Analyzers.csproj"
                       ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
-    <ProjectReference Include="..\..\src\Typhon.Generators\Typhon.Generators.csproj"
+    <ProjectReference Include="..\..\..\src\Typhon.Generators\Typhon.Generators.csproj"
                       ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
   </ItemGroup>
 </Project>

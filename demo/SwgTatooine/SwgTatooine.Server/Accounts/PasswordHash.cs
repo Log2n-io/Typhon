@@ -1,9 +1,9 @@
 using System;
 using System.Security.Cryptography;
-using System.Threading;
 using System.Text;
+using System.Threading;
 
-namespace SwgTatooine.Accounts;
+namespace SwgTatooine.Server.Accounts;
 
 /// <summary>
 /// Hashes and verifies an account password (A1).
@@ -22,7 +22,7 @@ namespace SwgTatooine.Accounts;
 /// a constant-time comparison, and a password that is never stored, logged or put in a URL.
 /// </para>
 /// <para>
-/// <b>What is deliberately absent</b> ([11 § 1.3](../../../claude/design/SwgTatooine/11-back-office.md)): no password
+/// <b>What is deliberately absent</b> ([11 § 1.3](../../../../claude/design/SwgTatooine/design/accounts.md)): no password
 /// reset, no lockout policy beyond the rate limits the command classes already provide, and no way for an operator to read
 /// or set a password — the back office can only delete an account.
 /// </para>

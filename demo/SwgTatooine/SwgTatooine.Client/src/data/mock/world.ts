@@ -17,7 +17,7 @@ import { PLAYER_RUN_SPEED_MPS } from './mock-speeds';
 
 /**
  * The mock server's world: every entity of the planet as structure-of-arrays, built the way
- * `demo/SwgTatooine/World/WorldBuilder.cs` builds it (same geography, same counts per population factor, same placement
+ * `demo/SwgTatooine/SwgTatooine.Server/World/WorldBuilder.cs` builds it (same geography, same counts per population factor, same placement
  * rules), so the client sees the same densities it will see from the real server.
  */
 

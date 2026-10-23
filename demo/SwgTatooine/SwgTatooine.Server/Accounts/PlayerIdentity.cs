@@ -1,4 +1,4 @@
-namespace SwgTatooine.Accounts;
+namespace SwgTatooine.Server.Accounts;
 
 /// <summary>
 /// Who an admitted <c>player</c> session is: the account its token named (A3).

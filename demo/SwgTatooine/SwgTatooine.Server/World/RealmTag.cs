@@ -1,10 +1,10 @@
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// What kind of place a realm is, as the <c>AppTag</c>'s top nibble names it.
 /// </summary>
 /// <remarks>
-/// The numbers are a wire contract with <c>demo/SwgTatooine.Client/src/data/realm-view.ts</c> and must not be reordered.
+/// The numbers are a wire contract with <c>demo/SwgTatooine/SwgTatooine.Client/src/data/realm-view.ts</c> and must not be reordered.
 /// </remarks>
 internal enum RealmScene : uint
 {

@@ -21,7 +21,7 @@
     "resolveJsonModule": true,
     "types": ["vite/client"],
     "paths": {
-      "@typhondb/client": ["../../src/Typhon.Client.TypeScript/src/index.ts"]
+      "@typhondb/client": ["../../../src/Typhon.Client.TypeScript/src/index.ts"]
     }
   },
   "include": ["src", "test"]

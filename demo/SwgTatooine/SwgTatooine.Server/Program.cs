@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Diagnostics;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 internal static class Program
 {
@@ -25,7 +25,7 @@ internal static class Program
         }
         catch (ArgumentException ex)
         {
-            Console.Error.WriteLine($"SwgTatooine: {ex.Message}");
+            Console.Error.WriteLine($"SwgTatooine.Server: {ex.Message}");
             return 2;
         }
 
@@ -75,7 +75,7 @@ internal static class Program
                 sim.WriteCrashArtefact($"unhandled {ex.GetType().Name} outside the tick loop", ex);
             }
 
-            Console.Error.WriteLine($"SwgTatooine: {ex}");
+            Console.Error.WriteLine($"SwgTatooine.Server: {ex}");
             return 3;
         }
     }
@@ -107,7 +107,7 @@ internal static class Program
         // end.
         if (config.ServePort > 0)
         {
-            // --client-dir first: DefaultClientRoot walks up from the binary for demo/SwgTatooine.Client/dist, which is a dev tree's layout and
+            // --client-dir first: DefaultClientRoot walks up from the binary for demo/SwgTatooine/SwgTatooine.Client/dist, which is a dev tree's layout and
             // no deployment's.
             var clientRoot = config.ClientDirectory ?? TatooineSim.DefaultClientRoot(AppContext.BaseDirectory);
             sim.ServeAsync(config.ServePort, clientRoot, config.BindAddress, config.Origins).GetAwaiter().GetResult();

@@ -2,7 +2,7 @@ using System;
 using System.Numerics;
 using System.Threading;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// <c>--work-probe</c>: what an interest query does, counted rather than timed, per queried archetype.

@@ -14,7 +14,7 @@ buildings never move and never tick; its creatures move on an AI cadence slower 
 tick and are the only things anything queries around; and exactly one of its archetypes is worth a WAL record. The point
 of this demo is that mixture.
 
-**It is not an API sample.** [`samples/Typhon.Samples.Swg`](../../samples/Typhon.Samples.Swg) is the sample, shaped to
+**It is not an API sample.** [`samples/Typhon.Samples.Swg`](../../../samples/Typhon.Samples.Swg) is the sample, shaped to
 teach the API. This project deliberately shares no code with it: it is shaped to load the spatial layer, and neither
 should constrain the other.
 
@@ -267,8 +267,8 @@ demo's CPU time is bimodal run to run; comparing two configurations needs interl
 ## Running it
 
 ```bash
-dotnet run -c Release --project demo/SwgTatooine -- --pop 16 --cell 1024
-dotnet run -c Release --project demo/SwgTatooine -- --help          # every flag, its default and its range
+dotnet run -c Release --project demo/SwgTatooine/SwgTatooine.Server -- --pop 16 --cell 1024
+dotnet run -c Release --project demo/SwgTatooine/SwgTatooine.Server -- --help          # every flag, its default and its range
 ```
 
 > ### The command line refuses what it does not understand (SWG-07, 2026-09-27)

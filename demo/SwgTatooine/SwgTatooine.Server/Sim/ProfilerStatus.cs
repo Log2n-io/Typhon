@@ -2,7 +2,7 @@
 using System.Globalization;
 using System.Text;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// One line saying whether this run is being profiled, on which port, and which layer asked for it (W2).

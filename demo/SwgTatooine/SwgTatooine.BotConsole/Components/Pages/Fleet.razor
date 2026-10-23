@@ -19,7 +19,7 @@
        over an SSM tunnel on a headless box with no documentation beside it, and "Wander (s)" being read as a population — and set
        to 8000, giving a two-hour dwell and a fleet walking in straight lines — is what a terse label costs. *@
     <div class="grid">
-        <label title="The server's WebSocket endpoint, as a URI. `SwgTatooine --serve <port>` listens at ws://host:<port>/ws and nothing else — a tcp:// URL reads plausibly, connects to nothing, and the run reports a healthy zero. On the bot box this is the server's PRIVATE address, because 07-bots §5 puts both machines in one subnet so the traffic is free and still a real TCP/TLS/WebSocket path.">
+        <label title="The server's WebSocket endpoint, as a URI. `SwgTatooine.Server --serve <port>` listens at ws://host:<port>/ws and nothing else — a tcp:// URL reads plausibly, connects to nothing, and the run reports a healthy zero. On the bot box this is the server's PRIVATE address, because 07-bots §5 puts both machines in one subnet so the traffic is free and still a real TCP/TLS/WebSocket path.">
             Endpoint
             <input @bind="Settings.Endpoint" disabled="@Busy" />
         </label>

@@ -15,7 +15,7 @@ const SCENES: readonly SceneKind[] = ['planet', 'interior', 'space', 'dungeon'];
 /**
  * What the demo's `AppTag` says about a realm.
  *
- * The layout is fixed on both sides — `demo/SwgTatooine/Sim/TatooineSim.cs` writes it, this reads it:
+ * The layout is fixed on both sides — `demo/SwgTatooine/SwgTatooine.Server/Sim/TatooineSim.cs` writes it, this reads it:
  *
  * ```text
  * 31..28  scene      0 planet | 1 interior | 2 space | 3 dungeon

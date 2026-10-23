@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Text;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// What the world actually ended up containing. Reported alongside every measurement, because a fence cost is

@@ -1,4 +1,4 @@
-﻿namespace SwgTatooine;
+﻿namespace SwgTatooine.Server;
 
 /// <summary>
 /// How much ground each kind of structure occupies, as a half-extent in metres.
@@ -6,7 +6,7 @@
 /// <remarks>
 /// <para>
 /// <b>These numbers are the browser's, and the two copies have to agree.</b> The client draws a structure at the size its
-/// style table gives the kind (<c>demo/SwgTatooine.Client/src/render/styles.ts</c>, <c>STRUCTURE_SIZES</c>); the server
+/// style table gives the kind (<c>demo/SwgTatooine/SwgTatooine.Client/src/render/styles.ts</c>, <c>STRUCTURE_SIZES</c>); the server
 /// decides where one may stand. If the server plans with a smaller box than the client draws, buildings overlap on screen
 /// while the plan says they do not — which is exactly the defect this type exists to end. A shared assembly is not
 /// available (the client is TypeScript), so the duplication is deliberate and <c>SitePlannerChecks.TheFootprintsMatchWhatTheClientDraws</c> pins it.

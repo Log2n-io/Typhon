@@ -2,7 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 
-namespace SwgTatooine.World.Terrain;
+namespace SwgTatooine.Server.Terrain;
 
 /// <summary>
 /// The planet's ground height, baked once per process and shared by everything that needs it.

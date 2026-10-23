@@ -70,9 +70,9 @@ if (-not $env:SWG_BOT_KEY) {
 }
 
 $root = Split-Path -Parent $PSScriptRoot
-$exe = Join-Path $root 'demo\SwgTatooine.Bots\bin\Release\net10.0\SwgTatooine.Bots.exe'
+$exe = Join-Path $root 'demo\SwgTatooine\SwgTatooine.Bots\bin\Release\net10.0\SwgTatooine.Bots.exe'
 if (-not (Test-Path $exe)) {
-    Write-Error "$exe not found. Build it: dotnet build demo/SwgTatooine.Bots/SwgTatooine.Bots.csproj -c Release"
+    Write-Error "$exe not found. Build it: dotnet build demo/SwgTatooine/SwgTatooine.Bots/SwgTatooine.Bots.csproj -c Release"
 }
 
 if (-not (Test-Path $AccountsDirectory)) { New-Item -ItemType Directory -Path $AccountsDirectory | Out-Null }

@@ -3,7 +3,8 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using NUnit.Framework;
-using SwgTatooine.Accounts;
+using SwgTatooine.Server;
+using SwgTatooine.Server.Accounts;
 using Typhon.Engine;
 using Typhon.Schema.Definition;
 

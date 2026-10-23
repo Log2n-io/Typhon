@@ -3,7 +3,7 @@ using System.Globalization;
 using System.IO;
 using System.Text.Json;
 using NUnit.Framework;
-using SwgTatooine.World.Terrain;
+using SwgTatooine.Server.Terrain;
 
 namespace SwgTatooine.Tests;
 
@@ -15,8 +15,8 @@ namespace SwgTatooine.Tests;
 /// The server writes an entity's altitude and the browser draws the ground under it. If the two disagree by a metre the
 /// entity floats or sinks by a metre, and no amount of care on either side finds that — each is self-consistent. So the
 /// contract is not "the same algorithm", it is <b>the same bits</b>, and this fixture reads
-/// <c>demo/SwgTatooine.Client/test/golden/terrain-hash.json</c>: the very file
-/// <c>demo/SwgTatooine.Client/test/terrain-hash.test.ts</c> reads. Two copies of a golden is two goldens, and they drift.
+/// <c>demo/SwgTatooine/SwgTatooine.Client/test/golden/terrain-hash.json</c>: the very file
+/// <c>demo/SwgTatooine/SwgTatooine.Client/test/terrain-hash.test.ts</c> reads. Two copies of a golden is two goldens, and they drift.
 /// </para>
 /// <para>
 /// Everything is compared as <b>raw IEEE-754 bits</b> rather than to a tolerance. A tolerance would pass a twin that is
@@ -237,7 +237,7 @@ public sealed class TerrainGoldenChecks
             throw new FileNotFoundException("no Typhon.slnx above the test binary, so the repository root is unknown");
         }
 
-        string path = Path.Combine(dir.FullName, "demo", "SwgTatooine.Client", "test", "golden", "terrain-hash.json");
+        string path = Path.Combine(dir.FullName, "demo", "SwgTatooine", "SwgTatooine.Client", "test", "golden", "terrain-hash.json");
         if (!File.Exists(path))
         {
             throw new FileNotFoundException(

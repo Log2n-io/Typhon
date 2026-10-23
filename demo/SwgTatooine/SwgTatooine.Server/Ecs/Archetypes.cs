@@ -1,6 +1,6 @@
 ﻿using Typhon.Protocol;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 // Archetypes
@@ -178,7 +178,7 @@ public partial class Player : Archetype<Player>
 /// a <c>ComponentValue</c> carries inline — which is a good sign the separation was the right shape anyway.
 /// </para>
 /// <para>
-/// <b>Where this is going</b> ([11 § 1.1](../../../claude/design/SwgTatooine/11-back-office.md)): Account → Character →
+/// <b>Where this is going</b> ([11 § 1.1](../../../../claude/design/SwgTatooine/design/accounts.md)): Account → Character →
 /// Avatar. Credentials here, the persistent character next, and the spatial body last. Keeping the credential half alone means
 /// an operator can delete it, and a login can read it, without touching anything the simulation walks every tick.
 /// </para>

@@ -1,6 +1,6 @@
 using Typhon.Protocol;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// What the simulation's own players say, pre-encoded (SWG-09).

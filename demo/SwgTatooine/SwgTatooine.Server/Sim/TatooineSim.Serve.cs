@@ -1,9 +1,10 @@
-﻿using SwgTatooine.Replication;
+﻿using SwgTatooine.Server.Accounts;
+using SwgTatooine.Server.Terrain;
 using System;
 using System.IO;
 using System.Threading.Tasks;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>Serving the simulation to clients, as opposed to measuring it.</summary>
 /// <remarks>
@@ -145,7 +146,7 @@ public sealed partial class TatooineSim
     {
         // Before anything else, so a misconfigured SWG_AUTH_KEY stops the server here rather than surfacing as a wrapped
         // TypeInitializationException inside the admission hook, on a transport thread, for the first client that connects.
-        Accounts.AuthToken.EnsureConfigured();
+        AuthToken.EnsureConfigured();
 
         BuildViews();
 
@@ -284,25 +285,25 @@ public sealed partial class TatooineSim
 
         // Where the token signing key came from, and NEVER the key itself. Printed because the consequence is invisible otherwise: with a per-process key,
         // every token a browser holds stops working the moment this process restarts, and the operator finds that out from a user rather than from the log.
-        Console.WriteLine(Accounts.AuthToken.KeyIsPersistent
-            ? $"  auth: tokens signed with {Accounts.AuthToken.KeyVariable} — they survive a restart"
+        Console.WriteLine(AuthToken.KeyIsPersistent
+            ? $"  auth: tokens signed with {AuthToken.KeyVariable} — they survive a restart"
             : $"  auth: tokens signed with a key generated for this process — every token stops working on restart. "
-              + $"Set {Accounts.AuthToken.KeyVariable} (openssl rand -base64 32) for an instance that is kept.");
+              + $"Set {AuthToken.KeyVariable} (openssl rand -base64 32) for an instance that is kept.");
 
         // The work factor, and LOUDLY when it has been lowered. A cheaper hash is a legitimate trade for a throwaway demo
         // and an indefensible one for anything holding real credentials, so the difference must be visible in the log
         // rather than buried in a command line nobody re-reads. Applied here, once, before any signup can run.
-        if (_config.AuthIterations > 0 && _config.AuthIterations != Accounts.PasswordHash.DefaultIterations)
+        if (_config.AuthIterations > 0 && _config.AuthIterations != PasswordHash.DefaultIterations)
         {
-            Accounts.PasswordHash.Iterations = _config.AuthIterations;
+            PasswordHash.Iterations = _config.AuthIterations;
             Console.WriteLine(
                 $"  !! password hashing LOWERED to {_config.AuthIterations:N0} iterations from the default "
-                + $"{Accounts.PasswordHash.DefaultIterations:N0}. Cheaper to attack offline if the hash table ever leaks — "
+                + $"{PasswordHash.DefaultIterations:N0}. Cheaper to attack offline if the hash table ever leaks — "
                 + "acceptable for throwaway accounts, not for real credentials. Existing accounts keep their own work factor.");
         }
         else
         {
-            Console.WriteLine($"  auth: passwords hashed with {Accounts.PasswordHash.Iterations:N0} PBKDF2 iterations");
+            Console.WriteLine($"  auth: passwords hashed with {PasswordHash.Iterations:N0} PBKDF2 iterations");
         }
     }
 
@@ -320,7 +321,7 @@ public sealed partial class TatooineSim
     /// <param name="baseDirectory">The process's base directory.</param>
     /// <returns>The directory, whether or not it exists.</returns>
     /// <remarks>
-    /// The client is a Vite build under <c>demo/SwgTatooine.Client/dist</c>, and <c>dotnet build</c> does not run Vite — so a fresh checkout has no client to
+    /// The client is a Vite build under <c>demo/SwgTatooine/SwgTatooine.Client/dist</c>, and <c>dotnet build</c> does not run Vite — so a fresh checkout has no client to
     /// serve and the host says so rather than answering 404 for the root and leaving the operator guessing.
     /// </remarks>
     public static string DefaultClientRoot(string baseDirectory)
@@ -328,7 +329,7 @@ public sealed partial class TatooineSim
         var directory = new DirectoryInfo(baseDirectory);
         while (directory != null)
         {
-            var candidate = Path.Combine(directory.FullName, "demo", "SwgTatooine.Client", "dist");
+            var candidate = Path.Combine(directory.FullName, "demo", "SwgTatooine", "SwgTatooine.Client", "dist");
             if (Directory.Exists(candidate))
             {
                 return candidate;

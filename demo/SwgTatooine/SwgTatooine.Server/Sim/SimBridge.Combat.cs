@@ -2,7 +2,7 @@
 using System.Numerics;
 using System.Threading;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// Combat, death and revival: who fires at whom, and what the hit does.

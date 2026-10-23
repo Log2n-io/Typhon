@@ -468,7 +468,7 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
     /// <c>Work == 0</c>, which a reader answering <see langword="null"/> for every hub lookup would also satisfy — so the session count, the six counters and
     /// <c>Divisor</c> are never read through this path. Reaching the served branch needs an open SESSION, which needs a transport, and this project has no
     /// transport fake: <c>FrameHarness</c> drives the frame assembler directly and never builds a <see cref="TyphonRuntime"/>, so it cannot call
-    /// <c>ReadStats</c> at all. The served arm therefore lives in <c>demo/SwgTatooine.Tests</c> (<c>RealmCostChecks</c>), which has one. Closing the gap here
+    /// <c>ReadStats</c> at all. The served arm therefore lives in <c>demo/SwgTatooine/SwgTatooine.Tests</c> (<c>RealmCostChecks</c>), which has one. Closing the gap here
     /// means giving this project the transport fake the demo project already has.
     /// </para>
     /// </remarks>

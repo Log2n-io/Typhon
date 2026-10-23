@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using NUnit.Framework;
+using SwgTatooine.Server;
 using Typhon.Engine;
 using Typhon.Schema.Definition;
 

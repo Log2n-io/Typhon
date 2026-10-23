@@ -5,7 +5,7 @@ using System.Linq;
 using System.Numerics;
 using System.Threading;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// Shuttle travel — #910's workload: a player in a city walks to that city's shuttleport, queues, and is transported to another city's port while the

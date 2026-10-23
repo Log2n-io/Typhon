@@ -2,7 +2,7 @@ using System;
 using System.Globalization;
 using System.Text;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 public sealed partial class TatooineSim
 {

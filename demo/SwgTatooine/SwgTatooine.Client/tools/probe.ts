@@ -1,10 +1,10 @@
 /**
- * Connects to a running `SwgTatooine --serve` as a god session, asks for a region, and prints what the store holds.
+ * Connects to a running `SwgTatooine.Server --serve` as a god session, asks for a region, and prints what the store holds.
  *
  * A headless version of what the browser shows, for when the two disagree: it uses the same SDK the client does, so a
  * difference between this and the page is the renderer's, and a difference between this and the server is the wire's.
  *
- *   node --experimental-strip-types --no-warnings demo/SwgTatooine.Client/tools/probe.ts [url] [x] [z] [radius]
+ *   node --experimental-strip-types --no-warnings demo/SwgTatooine/SwgTatooine.Client/tools/probe.ts [url] [x] [z] [radius]
  *
  * It runs the SDK's BUILD, where the browser runs its sources through a Vite alias — Node's type stripping does not remap
  * the `.js` specifiers the SDK's sources import each other by, so `dist/` is the only thing importable here. That is a
@@ -27,11 +27,11 @@ import {
   ReconnectingClient,
   RegionSender,
   WireReader,
-} from '../../../src/Typhon.Client.TypeScript/dist/index.js';
+} from '../../../../src/Typhon.Client.TypeScript/dist/index.js';
 
 /** Refuses a build older than the sources it was built from. */
 function requireFreshSdk(): void {
-  const sdk = new URL('../../../src/Typhon.Client.TypeScript/', import.meta.url);
+  const sdk = new URL('../../../../src/Typhon.Client.TypeScript/', import.meta.url);
   const builtAt = statSync(new URL('dist/index.js', sdk)).mtimeMs;
   let newest = 0;
   const walk = (dir: URL): void => {

@@ -1,7 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using NUnit.Framework;
-using SwgTatooine.World.Terrain;
+using SwgTatooine.Server;
+using SwgTatooine.Server.Terrain;
 using Typhon.Engine;
 
 namespace SwgTatooine.Tests;

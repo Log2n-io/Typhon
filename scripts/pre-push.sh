@@ -201,7 +201,7 @@ AUX=(
   test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj
   demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj
   demo/AsteroidField/AsteroidField.Tests/AsteroidField.Tests.csproj
-  demo/SwgTatooine.Tests/SwgTatooine.Tests.csproj
+  demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj
 )
 # Built when --build asks, OR when the Release assembly is simply not there. `suite_step` passes `--no-build`, so a project
 # never built in Release on this box fails with "test assembly not found" — which reads as a broken script rather than a

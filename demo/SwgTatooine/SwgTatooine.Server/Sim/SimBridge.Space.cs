@@ -2,7 +2,7 @@
 using System.Numerics;
 using System.Threading;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// The space realm (Realms G1c): AI starships flying between waypoints in a deep 3D grid, with f64 bounds, and scanning a sphere around themselves.

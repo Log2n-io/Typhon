@@ -11,7 +11,9 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
-using SwgTatooine.Accounts;
+using SwgTatooine.Server;
+using SwgTatooine.Server.Accounts;
+using AuthJson = SwgTatooine.Server.Accounts.AuthJson;
 
 namespace SwgTatooine.Tests;
 
@@ -23,7 +25,7 @@ namespace SwgTatooine.Tests;
 /// <b>This fixture exists because of one specific way the endpoints can be broken while every other test passes.</b> The demo
 /// host builds with <c>WebApplication.CreateSlimBuilder</c>, which configures SOURCE-GENERATED JSON and has no reflection-based
 /// resolver to fall back on. A handler returning an anonymous object, or a body type missing from
-/// <see cref="AuthJson"/>, compiles cleanly and throws on the first request. Nothing short of an actual round trip catches that.
+/// <see cref="Server.AuthJson"/>, compiles cleanly and throws on the first request. Nothing short of an actual round trip catches that.
 /// </para>
 /// <para>
 /// <b>It builds its own slim host rather than calling <c>TatooineHost.ServeAsync</c>.</b> That method also starts the

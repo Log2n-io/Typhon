@@ -1,7 +1,7 @@
 ﻿using System;
 using System.IO;
 using NUnit.Framework;
-using SwgTatooine.Replication;
+using SwgTatooine.Server;
 
 namespace SwgTatooine.Tests;
 

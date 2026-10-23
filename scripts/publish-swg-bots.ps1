@@ -99,7 +99,7 @@ New-Item -ItemType Directory -Force $OutDir | Out-Null
 
 Write-Host "Publishing the fleet runner ($Runtime, self-contained)..." -ForegroundColor Cyan
 Invoke-Checked 'dotnet publish (bots)' {
-    dotnet publish (Join-Path $repo 'demo/SwgTatooine.Bots/SwgTatooine.Bots.csproj') `
+    dotnet publish (Join-Path $repo 'demo/SwgTatooine/SwgTatooine.Bots/SwgTatooine.Bots.csproj') `
         -c Release -r $Runtime --self-contained true `
         -o $OutDir --nologo -v q
 }
@@ -114,7 +114,7 @@ else
     # a second copy of the runtime (~70 MB) for no benefit, and two payloads to keep in step on one box.
     Write-Host "Publishing the control panel ($Runtime, self-contained)..." -ForegroundColor Cyan
     Invoke-Checked 'dotnet publish (console)' {
-        dotnet publish (Join-Path $repo 'demo/SwgTatooine.BotConsole/SwgTatooine.BotConsole.csproj') `
+        dotnet publish (Join-Path $repo 'demo/SwgTatooine/SwgTatooine.BotConsole/SwgTatooine.BotConsole.csproj') `
             -c Release -r $Runtime --self-contained true `
             -o $OutDir --nologo -v q
     }

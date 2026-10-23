@@ -3,7 +3,7 @@ using System.Buffers.Binary;
 using System.Buffers.Text;
 using System.Security.Cryptography;
 
-namespace SwgTatooine.Accounts;
+namespace SwgTatooine.Server.Accounts;
 
 /// <summary>
 /// The opaque bearer token a successful <c>/auth</c> call returns and <c>Admit</c> validates (A2/A3).

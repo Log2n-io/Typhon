@@ -1,6 +1,6 @@
 using System;
 
-namespace SwgTatooine.Accounts;
+namespace SwgTatooine.Server.Accounts;
 
 /// <summary>
 /// Reads, creates and saves a <see cref="Character"/> (A4).
@@ -161,7 +161,7 @@ public static class CharacterStore
 
     /// <summary>What a character starts with.</summary>
     /// <remarks>
-    /// A number rather than zero so the crafting loop ([12](../../../claude/design/SwgTatooine/12-crafting-loop.md)) has something
+    /// A number rather than zero so the crafting loop ([12](../../../../claude/design/SwgTatooine/design/economy-loop.md)) has something
     /// to work with on a fresh character, and small enough that it is not the economy.
     /// </remarks>
     public const long StartingCredits = 1_000;

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Verify the SWG blueprint claim: the demo's replication code is written against Typhon's public API alone.
 
-AC-20 of design/Subscriptions/07-delivery.md makes two claims about `demo/SwgTatooine`, and this script is what
+AC-20 of design/Subscriptions/07-delivery.md makes two claims about `demo/SwgTatooine/SwgTatooine.Server`, and this script is what
 stops either of them decaying into a comment nobody re-checks:
 
   1. The replication code contains no framing, codec, varint or socket code. That is the whole blueprint claim —
@@ -9,7 +9,7 @@ stops either of them decaying into a comment nobody re-checks:
      mean the public surface was not sufficient and nobody noticed.
 
   2. No file under the demo reaches into `Typhon.Engine.Internals` beyond a recorded allow-list, and the list only
-     ever shrinks. The engine still grants `SwgTatooine` friend access because ~980 lines of MEASUREMENT code
+     ever shrinks. The engine still grants `SwgTatooine.Server` friend access because ~980 lines of MEASUREMENT code
      (the work probes and the spatial census) need cluster state the public API does not expose. That is a known
      open item, not a licence: the ratchet below means the debt cannot quietly grow while it waits.
 
@@ -25,10 +25,10 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 #: The blueprint itself — the code that says what to replicate. Held to the strict standard.
-BLUEPRINT_DIRS = ["demo/SwgTatooine/Replication"]
+BLUEPRINT_DIRS = ["demo/SwgTatooine/SwgTatooine.Server/Replication"]
 
 #: Every C# file under the demo is scanned for the internals dependency.
-DEMO_ROOT = "demo/SwgTatooine"
+DEMO_ROOT = "demo/SwgTatooine/SwgTatooine.Server"
 
 #: The engine's own assembly-level grant, which must stay justified.
 ASSEMBLY_INFO = "src/Typhon.Engine/Properties/AssemblyInfo.cs"
@@ -38,11 +38,11 @@ ASSEMBLY_INFO = "src/Typhon.Engine/Properties/AssemblyInfo.cs"
 #: This list is a DEBT REGISTER, not a configuration. Removing an entry is the goal; adding one needs the same
 #: argument the friend line itself needed, which is why the script prints that argument when it fails.
 INTERNALS_ALLOWLIST = {
-    "demo/SwgTatooine/GlobalUsings.cs": "the global using itself; it goes when the last entry below goes",
-    "demo/SwgTatooine/Sim/TatooineSim.cs": "three benchmark knobs (SpatialQueryTuning, ArchetypeClusterState) — P1-23 moves them to SwgTatooine.Bench",
-    "demo/SwgTatooine/Sim/SimBridge.Shuttles.cs": "shuttle-port work probes read ArchetypeClusterState — measurement, moves to SwgTatooine.Bench",
-    "demo/SwgTatooine/Sim/SimBridge.WorkProbe.cs": "per-query work accounting reads ArchetypeClusterState — measurement, moves to SwgTatooine.Bench",
-    "demo/SwgTatooine/Sim/SpatialCensus.cs": "the census reads cluster state and is the last EpochGuard user — measurement, moves to SwgTatooine.Bench",
+    "demo/SwgTatooine/SwgTatooine.Server/GlobalUsings.cs": "the global using itself; it goes when the last entry below goes",
+    "demo/SwgTatooine/SwgTatooine.Server/Sim/TatooineSim.cs": "three benchmark knobs (SpatialQueryTuning, ArchetypeClusterState) — P1-23 moves them to SwgTatooine.Bench",
+    "demo/SwgTatooine/SwgTatooine.Server/Sim/SimBridge.Shuttles.cs": "shuttle-port work probes read ArchetypeClusterState — measurement, moves to SwgTatooine.Bench",
+    "demo/SwgTatooine/SwgTatooine.Server/Sim/SimBridge.WorkProbe.cs": "per-query work accounting reads ArchetypeClusterState — measurement, moves to SwgTatooine.Bench",
+    "demo/SwgTatooine/SwgTatooine.Server/Sim/SpatialCensus.cs": "the census reads cluster state and is the last EpochGuard user — measurement, moves to SwgTatooine.Bench",
 }
 
 #: Internal types the demo can reach only through the friend grant. Named explicitly because the demo's global
@@ -156,17 +156,17 @@ def check_friend_line(violations):
         return
 
     text = read(path)
-    granted = re.search(r'InternalsVisibleTo\("SwgTatooine"\)', text) is not None
+    granted = re.search(r'InternalsVisibleTo\("SwgTatooine\.Server"\)', text) is not None
     debt = len(INTERNALS_ALLOWLIST) > 0
 
     if granted and not debt:
         violations.append(
-            f"{ASSEMBLY_INFO}: the SwgTatooine friend line is still there but no demo file needs it any more — "
+            f"{ASSEMBLY_INFO}: the SwgTatooine.Server friend line is still there but no demo file needs it any more — "
             f"remove it and close AC-20.")
 
     if not granted and debt:
         violations.append(
-            f"{ASSEMBLY_INFO}: the SwgTatooine friend line is gone but {len(INTERNALS_ALLOWLIST)} demo file(s) still "
+            f"{ASSEMBLY_INFO}: the SwgTatooine.Server friend line is gone but {len(INTERNALS_ALLOWLIST)} demo file(s) still "
             f"depend on internals — the demo cannot build.")
 
 

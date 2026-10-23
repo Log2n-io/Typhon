@@ -2,7 +2,7 @@ using System;
 using System.IO;
 using System.Net;
 using NUnit.Framework;
-using SwgTatooine.Replication;
+using SwgTatooine.Server;
 
 namespace SwgTatooine.Tests;
 
@@ -15,7 +15,7 @@ namespace SwgTatooine.Tests;
 /// <b>What these are for.</b> The host called <c>ListenAnyIP</c> unconditionally with <c>AllowAnyOrigin</c>, so
 /// <c>--serve 8080</c> on a laptop published the world to whatever network the laptop was on. Survivable while a session
 /// can only watch; not survivable on the day there is an account to create, which is the next phase. And
-/// <c>DefaultClientRoot</c> walks up from the binary for <c>demo/SwgTatooine.Client/dist</c> — a dev tree's layout and no
+/// <c>DefaultClientRoot</c> walks up from the binary for <c>demo/SwgTatooine/SwgTatooine.Client/dist</c> — a dev tree's layout and no
 /// deployment's — so a published server served a WebSocket and no page, with nothing saying so.
 /// </para>
 /// <para>

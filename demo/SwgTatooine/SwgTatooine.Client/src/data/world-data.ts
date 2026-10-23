@@ -1,5 +1,5 @@
 /**
- * The planet's geography and creature templates, mirrored from `demo/SwgTatooine/World/TatooineData.cs`.
+ * The planet's geography and creature templates, mirrored from `demo/SwgTatooine/SwgTatooine.Server/World/TatooineData.cs`.
  *
  * Coordinates, radii and statistics are the server's numbers (facts about a 2003 game, via SWGEmu Core3 and community
  * wikis). **Display names are original**: every public artefact avoids the franchise's names

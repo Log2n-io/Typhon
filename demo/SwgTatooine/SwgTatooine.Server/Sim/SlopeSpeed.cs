@@ -1,4 +1,4 @@
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// What ground that rises costs to cross — terrain rung (c).

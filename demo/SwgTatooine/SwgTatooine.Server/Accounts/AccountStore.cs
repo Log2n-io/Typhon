@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace SwgTatooine.Accounts;
+namespace SwgTatooine.Server.Accounts;
 
 /// <summary>
 /// Signup and login against the engine, from a Kestrel thread (A2).

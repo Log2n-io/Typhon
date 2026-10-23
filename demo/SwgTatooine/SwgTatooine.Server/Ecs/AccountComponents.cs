@@ -1,10 +1,10 @@
+using SwgTatooine.Server.Accounts;
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using SwgTatooine.Accounts;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// An account: the name somebody types, and when they were last seen. The credential lives next door in <see cref="AccountSecret"/>.
@@ -37,7 +37,7 @@ namespace SwgTatooine;
 /// </para>
 /// <para>
 /// <b>No e-mail, no recovery, no profile.</b> A name and a password, deliberately
-/// ([11 § 1.1](../../../claude/design/SwgTatooine/11-back-office.md)): there is no PII here, so there is no GDPR data store,
+/// ([11 § 1.1](../../../../claude/design/SwgTatooine/design/accounts.md)): there is no PII here, so there is no GDPR data store,
 /// and an operator can delete an account but never read a password.
 /// </para>
 /// </remarks>

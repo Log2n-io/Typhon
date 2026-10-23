@@ -1,8 +1,9 @@
-﻿using System;
+﻿using SwgTatooine.Server.Terrain;
+using System;
 using System.Collections.Generic;
 using System.Threading;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// Turns a <see cref="TatooineMap"/> into entities.

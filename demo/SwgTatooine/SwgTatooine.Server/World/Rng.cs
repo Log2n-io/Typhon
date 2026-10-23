@@ -1,6 +1,6 @@
 using System;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// A small deterministic generator, passed by <c>ref</c> so a whole world build draws from one stream and is reproducible

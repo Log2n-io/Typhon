@@ -22,7 +22,7 @@
   "dependencies": {
     "@babylonjs/core": "9.26.2",
     "@babylonjs/loaders": "9.26.2",
-    "@typhondb/client": "file:../../src/Typhon.Client.TypeScript",
+    "@typhondb/client": "file:../../../src/Typhon.Client.TypeScript",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "zustand": "5.0.15"

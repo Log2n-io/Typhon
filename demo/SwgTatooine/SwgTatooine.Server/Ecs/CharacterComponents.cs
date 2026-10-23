@@ -1,13 +1,13 @@
 using System.Runtime.InteropServices;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// The persistent you: a name, a wallet, and where you were when you logged out (A4).
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>The middle of the three levels</b> ([11 § 1.1](../../../claude/design/SwgTatooine/11-back-office.md)): <see cref="Account"/>
+/// <b>The middle of the three levels</b> ([11 § 1.1](../../../../claude/design/SwgTatooine/design/accounts.md)): <see cref="Account"/>
 /// is credentials, <c>Character</c> is everything that persists about a person's presence in the world, and the <c>Player</c>
 /// cluster archetype is the body — spawned at login and destroyed at logout. The split is what lets an offline character exist
 /// without sitting in the spatial index, which is the honest reason the body is separate rather than a flag on this.

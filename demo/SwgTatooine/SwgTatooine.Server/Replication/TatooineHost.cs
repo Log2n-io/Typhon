@@ -1,19 +1,19 @@
 ﻿using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging;
+using SwgTatooine.Server.Accounts;
 using System;
 using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
-using SwgTatooine.Accounts;
 using Typhon.Subscriptions.AspNetCore;
 
-namespace SwgTatooine.Replication;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// The demo's web host: Tatooine ticking behind a WebSocket, with the browser client served beside it.
@@ -546,7 +546,7 @@ public static class TatooineHost
         Console.WriteLine($"  session table: {TatooineReplication.SessionTableSize} clients and god cameras at once (--max-sessions, 65535 is structural)");
         if (!string.IsNullOrEmpty(clientRoot) && !Directory.Exists(clientRoot))
         {
-            Console.WriteLine($"  !! no client build at {clientRoot}; run `npm run build` in demo/SwgTatooine.Client to serve the viewer");
+            Console.WriteLine($"  !! no client build at {clientRoot}; run `npm run build` in demo/SwgTatooine/SwgTatooine.Client to serve the viewer");
         }
 
         await app.RunAsync().ConfigureAwait(false);

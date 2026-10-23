@@ -26,7 +26,7 @@ namespace Typhon.Engine.Tests.Runtime.Subscriptions;
 /// count, because each one names a different defect and a bare number names none of them.
 /// </para>
 /// <para>
-/// <b>The bot logic is duplicated here rather than referenced.</b> <c>demo/SwgTatooine.Bots</c> is a demo, and a test project referencing a demo would put
+/// <b>The bot logic is duplicated here rather than referenced.</b> <c>demo/SwgTatooine/SwgTatooine.Bots</c> is a demo, and a test project referencing a demo would put
 /// the demo into the engine suite's build closure — which <c>scripts/check-gate-filters.py</c> checks and which would make every gate run rebuild it. What is
 /// under test is that fifty concurrent <c>TyphonClient</c> sessions survive, and that needs the client, not the demo's wrapper around it.
 /// </para>

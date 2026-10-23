@@ -9,7 +9,7 @@ namespace SwgTatooine.Bots.Brain;
 /// delivered. <see cref="FacilityMap"/> is the other half.
 /// </para>
 /// <para>
-/// <b>The same table the browser ships</b> (<c>demo/SwgTatooine.Client/src/data/world-data.ts</c>), with the same
+/// <b>The same table the browser ships</b> (<c>demo/SwgTatooine/SwgTatooine.Client/src/data/world-data.ts</c>), with the same
 /// coordinates and the same display names. Duplicated rather than referenced, deliberately: this process references
 /// <c>Typhon.Client</c> and nothing of the server, which is the blueprint claim the fleet exists to keep honest, and a
 /// load generator reading the server's own tables would be measuring a path no real client takes. The server's

@@ -1,12 +1,11 @@
 ﻿using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.FileProviders;
 using System;
 using System.IO;
 using System.Text.Json;
 
-namespace SwgTatooine.Replication;
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// The published asset set — GLBs, descriptors, shared KTX2 textures — served as plain static HTTP and <b>pinned</b> for

@@ -10,7 +10,7 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
-using SwgTatooine.Replication;
+using SwgTatooine.Server;
 
 namespace SwgTatooine.Tests;
 

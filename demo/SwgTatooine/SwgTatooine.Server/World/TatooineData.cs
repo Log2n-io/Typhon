@@ -1,4 +1,4 @@
-﻿namespace SwgTatooine;
+﻿namespace SwgTatooine.Server;
 
 /// <summary>
 /// Tatooine as Star Wars Galaxies had it, in the game's own coordinates.

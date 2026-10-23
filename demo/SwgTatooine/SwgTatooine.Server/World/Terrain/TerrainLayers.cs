@@ -1,13 +1,13 @@
 using System;
 
-namespace SwgTatooine.World.Terrain;
+namespace SwgTatooine.Server.Terrain;
 
 /// <summary>
 /// A small height-only layer system, in the shape of SWG's terrain engine and at about a third of its scale.
 /// </summary>
 /// <remarks>
 /// <para>
-/// A transcription of <c>demo/SwgTatooine.Client/src/terrain/layers.ts</c>. See <see cref="TerrainHash"/> for why the two
+/// A transcription of <c>demo/SwgTatooine/SwgTatooine.Client/src/terrain/layers.ts</c>. See <see cref="TerrainHash"/> for why the two
 /// must agree to the bit rather than to a tolerance.
 /// </para>
 /// <para>

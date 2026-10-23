@@ -1,14 +1,14 @@
 using System;
 using System.Collections.Generic;
 
-namespace SwgTatooine.World.Terrain;
+namespace SwgTatooine.Server.Terrain;
 
 /// <summary>
 /// The planet's authored layer tree, and the bake that turns it into a field.
 /// </summary>
 /// <remarks>
 /// <para>
-/// A transcription of <c>demo/SwgTatooine.Client/src/terrain/tatooine-terrain.ts</c>. <b>Every constant below is part of
+/// A transcription of <c>demo/SwgTatooine/SwgTatooine.Client/src/terrain/tatooine-terrain.ts</c>. <b>Every constant below is part of
 /// the contract</b>: change one here without changing it there and the server's altitudes stop matching the ground the
 /// browser draws. <c>TerrainGoldenChecks</c> holds both to one golden file.
 /// </para>

@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace SwgTatooine;
+namespace SwgTatooine.Server;
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 // Systems
