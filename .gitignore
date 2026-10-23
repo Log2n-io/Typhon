@@ -212,10 +212,10 @@ Generated_Code/
 # to a newer Visual Studio version. Backup files are not needed,
 # because we have git ;-)
 _UpgradeReport_Files/
-Backup*/
-# ...but the engine's backup feature lives in Backup/ folders (#1411)
-!src/**/Backup/
-!test/**/Backup/
+# Root-anchored, not negated: the engine's backup feature lives in src/**/Backup/ and test/**/Backup/ (#1411), and
+# `sky launch` uploads the workdir through this file with rsync, whose filter ignores `!` re-includes. A
+# `Backup*/` + `!src/**/Backup/` pair kept the folders in git and dropped them from every CI VM's tree (#1472).
+/Backup*/
 UpgradeLog*.XML
 UpgradeLog*.htm
 
