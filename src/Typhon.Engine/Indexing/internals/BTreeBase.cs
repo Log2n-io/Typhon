@@ -1,6 +1,7 @@
 // unset
 
 using System;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 
@@ -214,7 +215,8 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
         => (stride - BTreeDirectoryHeader.Size) / BTreeDirectoryEntry.Size + (DirectoryChunkCount - 1) * (stride / BTreeDirectoryEntry.Size);
 
     /// <summary>
-    /// Torn-safe reset of a shared index segment to empty — used by crash recovery before fresh index trees are (re)built (RB-01). Frees every node chunk
+    /// Torn-safe reset of a shared index segment to empty, before fresh index trees are (re)built — by a crash open (RB-01), and by an open where a
+    /// component gained an index (DatabaseEngine.InitializeArchetypesCore). Both run before the open completes, nothing else writing. Frees every node chunk
     /// (chunkId &gt;= <see cref="DirectoryChunkCount"/>) via the allocation bitmap ONLY — it never reads chunk content, so a torn on-disk index node page is
     /// reclaimed without being parsed (the precondition for retiring FPI on index pages) — then zeroes the chunk-0 directory header so a subsequent fresh
     /// <c>RegisterInDirectory</c> re-registers every tree from an empty directory. The four directory chunks (0-3) stay allocated and are reused.
@@ -229,7 +231,9 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
         using var guard = EpochGuard.Enter(segment.Store.EpochManager);
 
         // Free node chunks by bitmap only — torn-safe: a torn node page is reclaimed, never parsed. A page at a time, each read and released (EP-02): a
-        // per-chunk IsChunkAllocated / FreeChunk epoch-tags every bitmap page, and a segment larger than the cache pinned all of it (#1463).
+        // per-chunk IsChunkAllocated / FreeChunk epoch-tags every bitmap page, and a segment larger than the cache pinned all of it (#1463). It frees at
+        // once, as FreeChunk does on a segment whose frees are never held: an index segment's (CK-17 holds revision, content and collection chunks).
+        Debug.Assert(!segment.HoldsFrees, "FreeAllChunksFrom would free at once chunks a held free must keep until a checkpoint (CK-17)");
         segment.FreeAllChunksFrom(DirectoryChunkCount);
 
         // A segment that has never hosted a tree has no reserved directory chunk yet — the first BTree ctor reserves 0-3. Nothing to clear.

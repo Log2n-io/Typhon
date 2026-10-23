@@ -129,6 +129,9 @@ internal sealed class PublishLargerThanTheCacheRecoveryTests
             Assert.That(Interlocked.Read(ref PagedMMF.PublishStepRefreshes) - refreshes, Is.GreaterThan(0),
                 "premise: the publish gave its marks back under pressure");
             Assert.That(dbe.CheckpointManager.TotalPagesWritten - written, Is.GreaterThan(0), "premise: the checkpoint wrote pages meanwhile");
+            var indexSegment = dbe._archetypeStates[ArchetypeRegistry.GetMetadata<CompDArch>().ArchetypeId].ClusterState.IndexSegment;
+            Assert.That(indexSegment.Length, Is.GreaterThan((long)PagedMMF.MinimumCacheSize / PagedMMF.PageSize),
+                "premise: the index segment the crash open clears is larger than the cache it reopens with (#1463)");
 
             // Power cut: the cache is discarded, no clean-shutdown marker. What the checkpoint wrote mid-publish is on the data file; the rest is in the WAL.
             dbe.SimulateHardCrash();

@@ -319,12 +319,14 @@ lock ordering and deadlock prevention are still to come.
   invariant a read that visits every page of a structure — a segment's chunk bitmaps, its forward chain, a grow's post-condition, a segment's
             directory — takes each page with AcquirePageForRead and releases it (ReleasePageForRead) before it takes the next. It never epoch-tags them.
             One such walk writes: ChunkBasedSegment.FreeAllChunksFrom clears bitmap words through the read pin, with nothing allocating or freeing
-            concurrently, and records the page modified (CP-04) before it releases it
-  invariant the crash open's clear of a shared index segment (BTreeBase.ClearSharedSegment) frees its node chunks through
-            ChunkBasedSegment.FreeAllChunksFrom(DirectoryChunkCount), keeping the directory chunks, and checks chunk 0 with IsChunkAllocatedUnpinned.
-            The pages it frees are owed a write, not held by dirty marks: the recovery's flush-only cycle writes them (CK-08). Asking
-            IsChunkAllocatedUnpinned per chunk is not enough — FreeChunk epoch-tags the page it frees, and a full segment larger than the cache
-            pinned all of it again (#1463)
+            concurrently, and records the page modified (CP-04) before it releases it. It clears and counts only the bits that name a chunk: a
+            torn page's padding bits past its last chunk, which the load's count masks, would drive the allocated count below the bitmap's
+  invariant an open's clear of a shared index segment (BTreeBase.ClearSharedSegment) — a crash open's, and a clean open's when a component gained
+            an index — frees its node chunks through ChunkBasedSegment.FreeAllChunksFrom(DirectoryChunkCount), keeping the directory chunks, and
+            checks chunk 0 with IsChunkAllocatedUnpinned. The pages it frees are owed a write, not held by dirty marks: the checkpoint cycle that
+            back-pressure forces writes them — flush-only on a crash open (CK-08). Asking IsChunkAllocatedUnpinned per chunk is not enough —
+            FreeChunk epoch-tags the page it frees, and a full segment larger than the cache pinned all of it again (#1463). It frees at once:
+            an index segment's frees are never held (CK-17)
   invariant the query scans in scope — the occupancy count, the entity-map count, existence check and collect, the SoA cluster scan, the B+Tree
             range enumeration and Path A's cluster walk, and the spatial query's visibility probes — read through a scan accessor
             (ChunkBasedSegment.CreateScanAccessor): its 32-slot window pins each page by SlotRefCount, taken with AcquirePageForRead, and releases
@@ -462,7 +464,9 @@ lock ordering and deadlock prevention are still to come.
             segments four times the cache, sparse and full, cleared inside one epoch scope: only directory chunks 0-3 stay allocated and the
             directory is empty; each case fails with the 128 slots epoch-protected when the clear walks per chunk again.
             PublishLargerThanTheCacheRecoveryTests.APublishThatGaveBackItsMarks_IsRecoveredWhole_AfterAHardCrash [VerifiesRule] — the crash open of
-            an index segment larger than its 8 MiB cache completes, every key and value the committed one (timed out on back-pressure before)
+            an index segment larger than its 8 MiB cache completes, every key and value the committed one (timed out on back-pressure before).
+            ChunkBasedSegmentBitmapL3Tests.FreeAllChunksFrom_IgnoresTheBitsPastAPagesLastChunk [VerifiesRule] — padding bits set on two pages:
+            the reset leaves the count at chunk 0's alone, equal to the bitmap's, and the padding bits as they were
   verified: QueryScanCacheBoundTests.PagesAWriterTagsDuringALongWalk_AreNotHeldByTheWalksEpoch [VerifiesRule] — a writer commits 8 000 updates at
             a walk's second yield; by its fourth, fewer than 16 pages are epoch-protected, the entity-map count and the SoA scan alike (604 with the
             yield's refresh removed). AWalkWaitingOnBackpressure_DoesNotHoldTheCacheWithItsEpoch [VerifiesRule] — the yield refresh off, a writer
