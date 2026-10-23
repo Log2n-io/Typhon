@@ -38,6 +38,7 @@
     <Folder Name="/demo/SwgTatooine/">
         <Project Path="demo/SwgTatooine/SwgTatooine.BotConsole/SwgTatooine.BotConsole.csproj" />
         <Project Path="demo/SwgTatooine/SwgTatooine.Bots/SwgTatooine.Bots.csproj" />
+        <Project Path="demo/SwgTatooine/SwgTatooine.Client/SwgTatooine.Client.csproj" />
         <Project Path="demo/SwgTatooine/SwgTatooine.Server/SwgTatooine.Server.csproj" />
         <Project Path="demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj" />
     </Folder>
