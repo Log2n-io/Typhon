@@ -139,6 +139,7 @@ class UnmappableFieldTypeTests
     /// of. Asserted on the message because an exception whose text does not locate the problem is barely better than the silence it replaced.
     /// </summary>
     [Test]
+    [VerifiesRule("SCHEMA-08")]
     public void AnUnmappableFieldIsRefusedWithAMessageThatNamesIt()
     {
         var ex = Assert.Throws<InvalidOperationException>(() => Build<UmUnknownField>());
@@ -157,6 +158,7 @@ class UnmappableFieldTypeTests
     /// laid out after its bytes.
     /// </summary>
     [Test]
+    [VerifiesRule("SCHEMA-08")]
     public void AFixedBufferIsStillSkippedRatherThanRefused()
     {
         var def = Build<UmFixedBuffer>();

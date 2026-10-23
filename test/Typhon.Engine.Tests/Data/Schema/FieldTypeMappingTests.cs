@@ -55,6 +55,9 @@ class FieldTypeMappingTests
         foreach (var t in FieldCandidates())
         {
             var field = map(t);
+
+            // A None-mapped type has no width to check, so this verifier cannot see an unmapped type: the real pre-#1449 tables (Variant unmapped AND sized 0)
+            // pass it. The orphan check below is the one that catches #1449; this one catches a type that maps but is sized wrong.
             if (field == FieldType.None || Handles.Contains(field) || KnownMissized.Contains(t))
             {
                 continue;
@@ -104,10 +107,11 @@ class FieldTypeMappingTests
     [VerifiesRule("SCHEMA-08")]
     public void EveryStorageFieldTypeIsProducedBySomeClrType() => AssertEveryStorageFieldTypeIsProduced(Map);
 
-    // The genuineness proof: the tables as they stood before #1449, Variant unmapped and sized 0. Each verifier must reject its half.
+    // The genuineness proof, one mutated table per verifier: the width table with Variant sized 0 but still mapped (the size check skips unmapped types, so
+    // the mapping has to stay intact for it to look), and the mapping table with Variant unmapped. Each verifier must reject its mutant.
     [Test]
     [RuleMutant("SCHEMA-08")]
-    public void Mutant_TheTablesBefore1449_AreRejected()
+    public void Mutant_AMissizedAndAnUnproducedFieldType_AreRejected()
     {
         RuleMutants.AssertDetects("SCHEMA-08", MissizedMarker,
             () => AssertEveryMappedTypeIsSizedAtItsClrWidth(Map, k => k == FieldType.Variant ? 0 : k.FieldSizeInComp()));

@@ -151,10 +151,11 @@ discipline (MVCC revision chains vs in-place SV vs heap-backed Transient), so re
                 looks wrong — but it has no field id: no Workbench column, no index, no foreign key, no replicated field. A field mapped at the wrong width
                 is worse: every field-addressed consumer (index keys and their change guard, WAL field decode, the Workbench raw read) reads a different number
                 of bytes than the struct holds — at width 0, an empty field.
-  rationale: the two tables are written by hand, side by side, and drift one entry at a time. `EntityId` was missing from the first (#1099), and
+  rationale: the two engine tables are written by hand, side by side, and drift one entry at a time. `EntityId` was missing from the first (#1099), and
              `FieldType.Variant` from both at once (#1449): it existed as an enum value that no CLR type produced, sized 0. The tests enumerate every type
-             the schema assembly exports instead of one type per bug.
-  verified: FieldTypeMappingTests [VerifiesRule] [RuleMutant]
+             the schema assembly exports instead of one type per bug. A third copy of the mapping, the CLI's `AssemblySchemaLoader.MapDotNetTypeToFieldType`,
+             is outside this rule's scope and already drifts (no AABB / BSphere, `VarString`, `EntityId` or `EntityLink<T>`); it is tracked separately.
+  verified: FieldTypeMappingTests [VerifiesRule] [RuleMutant], UnmappableFieldTypeTests [VerifiesRule]
 
 ### SCHEMA-09: A schema migration becomes durable in one meta flip, the one that advances CheckpointLSN `[fatal][silent]`
   invariant ∀ component C, at every durable state of the file: the revision `ComponentR1` records for C is the revision of every WAL record of C above
