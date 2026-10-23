@@ -93,7 +93,8 @@ public static class ChatLines
         var lines = activity switch
         {
             PlayerActivity.Combat => Fighting,
-            PlayerActivity.Travelling or PlayerActivity.Roaming or PlayerActivity.ToPortal => Travelling,
+            PlayerActivity.Travelling or PlayerActivity.Roaming or PlayerActivity.ToPortal or PlayerActivity.EnteringDoor
+                or PlayerActivity.LeavingRoom => Travelling,
             PlayerActivity.ToShuttle or PlayerActivity.AwaitingShuttle => Waiting,
             _ => Idle,
         };

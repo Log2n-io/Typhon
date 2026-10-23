@@ -612,8 +612,15 @@ public sealed partial class SimBridge
                 if (state.ActivityTicks > 0)
                 {
                     state.ActivityTicks = Math.Max(0, state.ActivityTicks - k);
-                    if (state.Activity is PlayerActivity.Travelling or PlayerActivity.Roaming or PlayerActivity.Combat or PlayerActivity.ToShuttle
-                        or PlayerActivity.ToPortal)
+
+                    // To, through or out of a door: its own waypoints and the crossing test (SimBridge.Portals).
+                    if (ThinkPortal(ref state, ref move, cluster.GetEntityId(idx), x, z, k, places[idx].HalfExtent))
+                    {
+                        pushSlots |= 1UL << idx;
+                        continue;
+                    }
+
+                    if (state.Activity is PlayerActivity.Travelling or PlayerActivity.Roaming or PlayerActivity.Combat or PlayerActivity.ToShuttle)
                     {
                         var dx = move.DestX - x;
                         var dz = move.DestZ - z;
@@ -629,13 +636,6 @@ public sealed partial class SimBridge
                                 // before giving up and deciding something else.
                                 state.Activity = PlayerActivity.AwaitingShuttle;
                                 state.ActivityTicks = ShuttleWaitTicks;
-                                pushSlots |= 1UL << idx;
-                            }
-                            else if (state.Activity == PlayerActivity.ToPortal)
-                            {
-                                // At the door: queue the crossing, which TeleportSystem applies next tick. Standing still until then, so Move
-                                // writes nothing that the teleport would overwrite.
-                                EnterPortal(ref state, cluster.GetEntityId(idx), realm, places[idx].HalfExtent, Salt(tick, key, 0x0D1CE5A7u));
                                 pushSlots |= 1UL << idx;
                             }
                             else if (state.Activity != PlayerActivity.Combat)
@@ -659,8 +659,8 @@ public sealed partial class SimBridge
 
                 if (realm >= _config.Planets)
                 {
-                    // In an interior and done there: out through the door it came in by.
-                    ExitInterior(ref state, ref move, cluster.GetEntityId(idx), realm, places[idx].HalfExtent, Salt(tick, key, 0x3A0B7C11u));
+                    // In an interior and done there: walk out through its way out.
+                    LeaveRoom(ref state, ref move, cluster.GetEntityId(idx), realm, x, z, places[idx].HalfExtent);
                     pushSlots |= 1UL << idx;
                     continue;
                 }
@@ -934,6 +934,9 @@ public sealed partial class SimBridge
         // only ever moves when something fixed is created, destroyed or moved.
         var generation = Volatile.Read(ref _structureGeneration);
         var audit = prox != null && _config.CollisionAudit;
+
+        // Bodies a door or a shuttle put somewhere else this tick, still in their old realm's cluster until the fence: see _landedThisTick.
+        var landed = LandedThisTick;
         long held = 0;
         long refreshed = 0;
         long batches = 0;
@@ -983,6 +986,11 @@ public sealed partial class SimBridge
                 if (move.VelX == 0f && move.VelZ == 0f && biasX == 0f && biasZ == 0f)
                 {
                     continue;
+                }
+
+                if (landed != null && landed.Contains(cluster.GetEntityId(idx)))
+                {
+                    continue;   // stands on its landing until the fence has moved it into its new realm
                 }
 
                 var p = places[idx];
@@ -1128,28 +1136,19 @@ public sealed partial class SimBridge
                     // places to stand. A body stopped by a door frame never reaches the plane and so cannot cross, which
                     // is the behaviour wanted: you go through a doorway, not through a wall beside one.
                     //
-                    // Only for a body a client drives. The scripted crowd keeps its own path through PlayerThink, which
-                    // walks to a door and calls EnterPortal on arrival; running both for one body would queue the
-                    // crossing twice.
-                    if (controls[slot].Kind != ControllerKind.Scripted
-                        && TryCrossDoor(cluster.GetEntityId(slot), cluster.Realm.Value, mh, prox.FromX[m], prox.FromZ[m], mx, mz))
-                    {
-                        // <b>Nothing else to do, and deliberately no attempt to stop the body.</b> EnterPortal parks the
-                        // crowd because PlayerThink owns its velocity; this system does not own anybody velocity -- it
-                        // reads it and writes positions -- and a client keeps steering its own body regardless. The tick
-                        // of movement before TeleportTick applies the crossing is at most a stride, in a realm the body is
-                        // about to leave, and the teleport overwrites the position anyway. It cannot queue twice either:
-                        // the body is now past the plane, so the next step starts on the inside and the directed test
-                        // refuses it.
-                        _ = slot;
-                    }
+                    // The crossing only for a body a client drives: the scripted crowd crosses on the same test in its own
+                    // think (ThinkPortal), and running both would queue it twice. The disc bound for every body.
+                    var probe = prox.Probe[m];
+                    var doorClear = InteriorsActive
+                        ? DoorsAround(cluster.Realm, in probe, controls[slot].Kind != ControllerKind.Scripted ? cluster.GetEntityId(slot) : EntityId.Null,
+                            mh, prox.FromX[m], prox.FromZ[m], mx, mz)
+                        : float.PositiveInfinity;
 
                     // Re-sampled because the push moved the body, for the reason the grade step re-samples: the altitude
                     // written has to be the ground under the position actually written -- and the ground includes any
                     // published surface the body is standing ON, which the terrain alone knows nothing about.
                     var mterrain = GroundAt(cluster.Realm, mx, mz);
                     var mgy = GroundOnShapes(boxes, mh, mx, mz, mterrain, prox.FeetY[m], ref shapes);
-                    var probe = prox.Probe[m];
                     discs[slot] = new PlayerProximity
                     {
                         AnchorX = mx,
@@ -1161,7 +1160,9 @@ public sealed partial class SimBridge
 
                         // A full set is still correct, because the sink keeps the NEAREST sixteen: every box it dropped is
                         // farther than every box it held, hence farther than the disc this takes the minimum of.
-                        ClearM = DiscFor(boxes, probe.CenterX, probe.CenterY, probe.Radius, mx, mz, ref shapes, prox.Overflow[m], mgy),
+                        ClearM = MathF.Max(0f, MathF.Min(
+                            DiscFor(boxes, probe.CenterX, probe.CenterY, probe.Radius, mx, mz, ref shapes, prox.Overflow[m], mgy),
+                            doorClear)),
                         Realm = cluster.Realm.Value,
                         Generation = (ushort)generation,
                     };

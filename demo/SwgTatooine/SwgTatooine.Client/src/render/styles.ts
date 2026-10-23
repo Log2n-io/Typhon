@@ -93,6 +93,7 @@ STRUCTURE_COLORS[StructureKind.PlayerHouse] = [0.86, 0.8, 0.66];
 STRUCTURE_COLORS[StructureKind.Factory] = [0.62, 0.38, 0.26];
 STRUCTURE_COLORS[StructureKind.Harvester] = [0.45, 0.48, 0.5];
 STRUCTURE_COLORS[StructureKind.CampObject] = [0.66, 0.55, 0.4];
+STRUCTURE_COLORS[StructureKind.Interior] = [0.42, 0.36, 0.3];
 
 const STRUCTURE_SIZES: [number, number, number][] = [];
 STRUCTURE_SIZES[StructureKind.Building] = [18, 9, 18];
@@ -105,6 +106,9 @@ STRUCTURE_SIZES[StructureKind.PlayerHouse] = [14, 7, 14];
 STRUCTURE_SIZES[StructureKind.Factory] = [22, 11, 22];
 STRUCTURE_SIZES[StructureKind.Harvester] = [6, 14, 6];
 STRUCTURE_SIZES[StructureKind.CampObject] = [4, 3, 4];
+// A floor, not a block: the viewer stands INSIDE a room, so its stand-in — seen only while the asset is not placed — must
+// not wall the camera in.
+STRUCTURE_SIZES[StructureKind.Interior] = [20, 0.05, 20];
 
 /**
  * The style key of the shuttleport's own layer — a synthetic name, so no archetype the catalog declares can collide

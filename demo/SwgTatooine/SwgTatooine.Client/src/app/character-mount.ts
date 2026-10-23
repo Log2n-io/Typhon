@@ -71,6 +71,15 @@ export interface CharacterMount {
   ): void;
   /** Parks the rig: nothing to stand in for, so nothing drawn. */
   park(): void;
+  /**
+   * Fades the body, 0 to 1: the camera pulled in close to it — a wall behind — must not look through the inside of a head.
+   *
+   * The testbench's: `mesh.visibility`, with the materials switched to alpha blending and a depth pre-pass while fading
+   * (the glTF loader pins them OPAQUE, which ignores visibility; the pre-pass keeps the limbs from showing through the
+   * body), and back to opaque at 1. The meshes stay `isVisible` — dropping them would drop the shadow, which is what shows
+   * a player where they stand.
+   */
+  setOpacity(opacity: number): void;
   dispose(): void;
 }
 
@@ -106,11 +115,21 @@ export async function mountCharacter(
   // the AO factor are the container's either way.
   prepareAsset(asset, lighting);
   const instance = await library.instantiate(assetId, placement([0, 0, 0], 0), root);
-  const ghostMaterials: Material[] = [];
+  const ownMaterials: Material[] = [];
   if (ghostAlpha === undefined) {
     // <b>The avatar casts too, and it is marked here rather than with the structures.</b> A skinned mesh cannot be
     // instanced — Babylon refuses — so this one is a clone, which `static-assets` never sees.
     lighting.castShadows(instance.meshes);
+
+    // Its OWN materials too, for `setOpacity`: the clone shares the container's, and fading those would fade every other
+    // body drawn from the same asset (the physics session's pitfall).
+    for (const mesh of instance.meshes) {
+      const material = mesh.material?.clone(`${mesh.material.name}#own`) ?? null;
+      if (material !== null) {
+        mesh.material = material;
+        ownMaterials.push(material);
+      }
+    }
   } else {
     // Its OWN materials: the clone shares the container's, so making those translucent would ghost the avatar too. A
     // depth pre-pass keeps the limbs from showing through the body, which a translucent skinned mesh otherwise does.
@@ -124,7 +143,7 @@ export async function mountCharacter(
       material.transparencyMode = Material.MATERIAL_ALPHABLEND;
       material.needDepthPrePass = true;
       mesh.material = material;
-      ghostMaterials.push(material);
+      ownMaterials.push(material);
     }
   }
 
@@ -142,10 +161,29 @@ export async function mountCharacter(
   let facing = 0;
   let tunedWalk = Number.NaN;
   let tunedRun = Number.NaN;
+  let fading = false;
   return {
     rig,
     graph,
     height,
+    setOpacity(opacity: number): void {
+      if (ghostAlpha !== undefined) {
+        return;
+      }
+
+      const nowFading = opacity < 0.999;
+      if (nowFading !== fading) {
+        fading = nowFading;
+        for (const material of ownMaterials) {
+          material.transparencyMode = nowFading ? Material.MATERIAL_ALPHABLEND : Material.MATERIAL_OPAQUE;
+          material.needDepthPrePass = nowFading;
+        }
+      }
+
+      for (const mesh of instance.meshes) {
+        mesh.visibility = opacity;
+      }
+    },
     get subjectNetId(): number {
       return subject;
     },
@@ -186,7 +224,7 @@ export async function mountCharacter(
     dispose(): void {
       rig.dispose();
       instance.dispose();
-      for (const material of ghostMaterials) {
+      for (const material of ownMaterials) {
         material.dispose();
       }
     },

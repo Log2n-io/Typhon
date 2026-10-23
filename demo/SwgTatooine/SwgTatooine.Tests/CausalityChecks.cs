@@ -143,11 +143,16 @@ public sealed class CausalityLoopTests
     public void AC2_EveryTickThatWroteInventory_AdvancedTheDurabilityWatermark()
     {
         var s = _sim.LastStats;
-        var writes = s.CreaturesKilled + s.MissionRewards;
+        var crossings = _sim.CrossingCommits;
+        var writes = s.CreaturesKilled + s.MissionRewards + crossings;
 
         // Each kill pays loot and each completion pays a reward, and both go through the tick's own transaction — so the WAL's durable LSN moves on the ticks
         // that wrote Inventory and on no others. The two numbers come from different places: one from the simulation's counters, the other from the WAL
         // writer thread.
+        //
+        // <b>A door is an Inventory writer too.</b> A crossing teleports the player, and the player carries its Versioned inventory into the other realm's
+        // cluster: one record per tick that crossed, from TeleportTick's own side transaction. The crowd walks through doors since they became stored
+        // portals (six crossings in this window); the old path chose doors and never arrived at one, so this run used to make none.
         //
         // It is also the proof that ClusterDurability.Checkpoint does what it declares. Four thousand ticks of creatures, players and NPCs moving produce no WAL
         // record at all; only the Versioned half of Player does.
@@ -163,8 +168,9 @@ public sealed class CausalityLoopTests
             Assert.That(_sim.WalAdvances, Is.GreaterThan(0), "no tick advanced the durable LSN, so nothing was made durable at all");
             Assert.That(_sim.WalAdvances, Is.LessThanOrEqualTo(writes),
                 $"the durable LSN moved on more ticks than wrote Inventory, so something other than loot and rewards is writing — {_sim.WalWriterBreakdown}");
-            Assert.That(_sim.WalLsnGained, Is.EqualTo(_sim.WalAdvances),
-                $"one WAL record per advancing tick: more would mean an unexpected second writer — {_sim.WalWriterBreakdown}");
+            // One record per advancing tick, plus at most one more on a tick that both looted and crossed: the crossing is a second transaction.
+            Assert.That(_sim.WalLsnGained, Is.InRange(_sim.WalAdvances, _sim.WalAdvances + crossings),
+                $"one WAL record per advancing tick and one per crossing tick: more would mean an unexpected writer — {_sim.WalWriterBreakdown}");
             Assert.That(Causality.TotalCredits(_sim), Is.GreaterThan(_creditsBefore), "credits did not grow, so nothing was actually written");
         });
     }

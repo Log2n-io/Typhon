@@ -29,7 +29,10 @@ public static class WorldBuilder
     /// </summary>
     /// <param name="realm">The planet's realm: every entity spawned here carries it (Realms G1). Planet 0 is Tatooine as it always was; a further planet
     /// is its twin — the same map, populated from its own seed.</param>
-    public static WorldCensus Populate(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldIndex index = null, ushort realm = 0)
+    /// <param name="firstInteriorRealm">The room of this planet's first enterable building; the next building's is the next realm. 0 makes no building
+    /// enterable.</param>
+    public static WorldCensus Populate(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldIndex index = null, ushort realm = 0,
+        int firstInteriorRealm = 0)
     {
         ArgumentNullException.ThrowIfNull(dbe);
         ArgumentNullException.ThrowIfNull(map);
@@ -40,6 +43,7 @@ public static class WorldBuilder
         var rng = new Rng((uint)config.Seed + realm * 0x9E3779B9u);
         index ??= new WorldIndex();
         _realm = realm;
+        _nextInterior = firstInteriorRealm;
 
         if (map.ClampedSites > 0 && realm == 0)
         {
@@ -68,6 +72,9 @@ public static class WorldBuilder
     // threading a parameter through all of them.
     private static ushort _realm;
 
+    // The room the next enterable building leads to, or 0 when this build makes none enterable. Serial for the same reason as _realm.
+    private static int _nextInterior;
+
     // ── Cities ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -90,7 +97,6 @@ public static class WorldBuilder
         {
             var buildings = city.Buildings;
             var npcs = Scale(city.Npcs, config.PopulationScale);
-            var firstPortal = index.Portals.Count;
             var crowdedBefore = plan.Crowded;
             using (var tx = dbe.CreateQuickTransaction())
             {
@@ -106,31 +112,23 @@ public static class WorldBuilder
                     var (x, z, _) = i == 0
                         ? (city.X, city.Z, plan.PlaceAt(city.X, city.Z, half))
                         : plan.Place(ref rng, city.X, city.Z, city.Radius, half);
-                    var portalIndex = -1;
+                    var interior = 0;
                     if (i == 0)
                     {
                         // Kept for shuttle travel (#910). Recording a coordinate the RNG already produced draws nothing, so the world is unchanged.
                         index.Shuttleports.Add((x, z));
                     }
-                    else if (IsEnterable(i))
+                    else if (IsEnterable(i) && _nextInterior != 0)
                     {
-                        // Realms G1b: this building's door. Draws nothing, like the shuttleport above. The slot is written onto the ENTITY as well, so a world
-                        // reopened from disk can rebuild the same list in the same order (P-2) — the realm a door leads to depends on this index.
-                        portalIndex = index.Portals.Count;
-                        index.Portals.Add((x, z));
-                        // Filled below, once SpawnStructure has drawn the turn and the asset. See WorldIndex.PlaceDoors.
-                        index.PortalFacings.Add((0, 0));
+                        // Realms G1b: this building's room, written onto the building. Draws nothing, like the shuttleport above. Its doors and the room
+                        // itself are spawned by BuildInteriors, which needs the published asset to know where they are.
+                        interior = _nextInterior++;
                     }
 
                     // The entity's bounds are its FOOTPRINT, not a uniform 12 m for every kind. They used to be the latter, which
                     // made the dome and a terminal the same size to every spatial query and to anything asking what stands at a
                     // point -- and collision has to ask exactly that.
-                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), half, kind, ownerRegion: cityIndex + 1, tickPeriod: 0, ref rng, out var turned,
-                        portalIndex);
-                    if (portalIndex >= 0)
-                    {
-                        index.PortalFacings[portalIndex] = turned;
-                    }
+                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), half, kind, ownerRegion: cityIndex + 1, tickPeriod: 0, ref rng, interior);
                     census.StaticObjects++;
                 }
 
@@ -207,7 +205,6 @@ public static class WorldBuilder
             }
 
             index.Cities.Add((city.X, city.Z, city.Radius, city.PlayerWeight));
-            index.CityPortals.Add((firstPortal, index.Portals.Count - firstPortal));
             cityIndex++;
         }
     }
@@ -259,6 +256,11 @@ public static class WorldBuilder
     // ── Interiors (Realms G1b) ──────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>Edge of an interior realm, metres: one cell, so an interior costs one cell's structures per archetype present.</summary>
+    /// <remarks>
+    /// <b>Centred on the origin</b>, from -32 to +32 m: a room is authored around its own origin and stands at the realm's, so the room's coordinates —
+    /// its walls, its spawns, its navigation — are the realm's with nothing added. It was 0 to 64 m, and the room, the crowd and the interior NPCs then
+    /// stood in three different places in one realm.
+    /// </remarks>
     public const float InteriorEdgeM = 64f;
 
     /// <summary>A city's building <paramref name="i"/> has an interior: every one but the shuttleport (0) and the mission terminals (multiples of 9).</summary>
@@ -281,51 +283,232 @@ public static class WorldBuilder
     }
 
     /// <summary>
-    /// The NPCs standing in each of one planet's interiors: portal <c>j</c>'s interior is realm <paramref name="firstRealm"/> + j. Its own RNG stream, so the
-    /// planets' worlds are the same with interiors on or off.
+    /// Every enterable building of one planet gets its room: the room as a structure of its interior realm, a <see cref="Portal"/> on each side of the
+    /// door linked to each other, and the NPCs standing inside.
     /// </summary>
-    public static int PopulateInteriors(DatabaseEngine dbe, SimConfig config, WorldIndex index, int firstRealm, WorldCensus census)
+    /// <param name="dbe">The engine.</param>
+    /// <param name="config">The run's configuration, for the seed and the NPC count.</param>
+    /// <param name="shapes">The published assets, or <see langword="null"/> on a run with none: every door is then the stand-in of its footprint.</param>
+    /// <param name="planet">The planet whose buildings are furnished.</param>
+    /// <param name="census">Counts the NPCs and the rooms.</param>
+    /// <returns>How many buildings were given a room.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>After the planet is built, from what the build wrote.</b> A building's room realm is on its <see cref="Structure.InteriorRealm"/>, and its turn,
+    /// asset and position on the entity; this reads them back rather than threading a list out of the build, so what it furnishes is by construction what
+    /// the database holds. Sorted by room so the RNG draws in the same order on every run.
+    /// </para>
+    /// <para>
+    /// <b>Everything a crossing needs is computed here, once, and stored.</b> The door's plane is the published portal, mirrored, turned by the building's
+    /// quarter turn and moved to the building; the landing on each side is the published spawn the other side names. A reopened world needs no asset to
+    /// know its doors — and a door that moved in a later asset revision moves when the world is rebuilt, like the walls.
+    /// </para>
+    /// <para>
+    /// <b>The interior NPCs stand on the room's navigation nodes</b>, which are published as places a body stands clear of everything, and they stay put: they
+    /// are not collided, so a wanderer would walk through the furniture. The node the exit path starts on is left free.
+    /// </para>
+    /// </remarks>
+    public static int BuildInteriors(DatabaseEngine dbe, SimConfig config, AssetColliders shapes, ushort planet, WorldCensus census)
     {
         ArgumentNullException.ThrowIfNull(dbe);
-        var rng = new Rng(((uint)config.Seed ^ 0x51ED27A3u) + ((uint)firstRealm * 0x9E3779B9u));
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(census);
+
+        var houses = new List<(EntityId Id, StructurePlacement Place, Structure Struct)>();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            foreach (var cluster in tx.For<WorldObject>().GetClusterEnumerator())
+            {
+                if (cluster.Realm.Value != planet)
+                {
+                    continue;
+                }
+
+                var places = cluster.GetReadOnlySpan(WorldObject.Bounds);
+                var structs = cluster.GetReadOnlySpan(WorldObject.Struct);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    if (structs[slot].InteriorRealm != 0)
+                    {
+                        houses.Add((cluster.GetEntityId(slot), places[slot], structs[slot]));
+                    }
+                }
+            }
+        }
+
+        houses.Sort((a, b) => a.Struct.InteriorRealm.CompareTo(b.Struct.InteriorRealm));
+        var rng = new Rng(((uint)config.Seed ^ 0x51ED27A3u) + ((uint)planet * 0x9E3779B9u));
+        var spots = new List<(float X, float Z)>();
+        var pairs = new List<(EntityId Front, EntityId Back)>(houses.Count);
         var made = 0;
-        var tx = dbe.CreateQuickTransaction();
+        var tx2 = dbe.CreateQuickTransaction();
         try
         {
-            for (var j = 0; j < index.Portals.Count; j++)
+            foreach (var (houseId, place, st) in houses)
             {
-                var realm = new NpcRealm((ushort)(firstRealm + j));
+                var interior = (ushort)st.InteriorRealm;
+                var door = shapes?.DoorFor(st.Asset) ?? default;
+                if (!door.Exists)
+                {
+                    door = AssetColliders.StandInDoor(place.HalfExtent);
+                }
+
+                var roomAsset = door.TargetAsset;
+                var roomDoor = roomAsset != StructureAssets.NoAsset ? shapes.DoorFor(roomAsset) : default;
+                if (!roomDoor.Exists)
+                {
+                    roomAsset = StructureAssets.NoAsset;
+                    roomDoor = AssetColliders.StandInRoomDoor;
+                }
+
+                // The room, at its realm's origin on its flat floor. A room no asset describes is an open floor and has no structure to stand for it.
+                EntityId roomId = default;
+                if (roomAsset != StructureAssets.NoAsset)
+                {
+                    var roomBounds = default(StructurePlacement);
+                    roomBounds.SetAt(0f, 0f, 0f, StructureFootprint.HalfExtentM(StructureKind.Interior));
+                    var room = new Structure { Kind = StructureKind.Interior, Asset = roomAsset };
+                    roomId = tx2.Spawn<WorldObject>(
+                        WorldObject.Bounds.Set(in roomBounds),
+                        WorldObject.Struct.Set(in room),
+                        WorldObject.Region.Set(new StructureRegion(0)),
+                        WorldObject.Realm.Set(new StructureRealm(interior)));
+                    census.StaticObjects++;
+                }
+
+                // The front door, turned and placed with its building; it lands on the room's entry spawn, in the room's own frame.
+                var (sin, cos) = WorldIndex.QuarterTurn((byte)st.Yaw);
+                var (cx, cz) = Turn(door.CenterX, door.CenterZ, sin, cos);
+                var (fx, fz) = Turn(door.ForwardX, door.ForwardZ, sin, cos);
+                var (hx, hz) = Turn(door.HalfX, door.HalfZ, sin, cos);
+                var front = new PortalDoor
+                {
+                    CenterX = place.X + cx,
+                    CenterZ = place.Z + cz,
+                    ForwardX = fx,
+                    ForwardZ = fz,
+                    HalfWidth = door.HalfX,
+                    ArriveX = door.ArriveX,
+                    ArriveY = door.ArriveY,
+                    ArriveZ = door.ArriveZ,
+                    TargetRealm = interior,
+                    Owner = houseId,
+                };
+                var frontId = tx2.Spawn<Portal>(
+                    Portal.Bounds.Set(new PortalPlacement { Bounds = BoxAt(front.CenterX, front.CenterZ, MathF.Abs(hx), MathF.Abs(hz)) }),
+                    Portal.Door.Set(in front),
+                    Portal.Realm.Set(new PortalRealm(planet)));
+
+                // The way out, in the room at the identity; it lands on the building's exit spawn, turned and placed like the door.
+                var (ex, ez) = Turn(door.ExitX, door.ExitZ, sin, cos);
+                var back = new PortalDoor
+                {
+                    CenterX = roomDoor.CenterX,
+                    CenterZ = roomDoor.CenterZ,
+                    ForwardX = roomDoor.ForwardX,
+                    ForwardZ = roomDoor.ForwardZ,
+                    HalfWidth = roomDoor.HalfX,
+                    ArriveX = place.X + ex,
+                    ArriveY = place.Y + door.ExitY,
+                    ArriveZ = place.Z + ez,
+                    TargetRealm = planet,
+                    Twin = frontId,
+                    Owner = roomId,
+                };
+                var backId = tx2.Spawn<Portal>(
+                    Portal.Bounds.Set(new PortalPlacement { Bounds = BoxAt(back.CenterX, back.CenterZ, roomDoor.HalfX, roomDoor.HalfZ) }),
+                    Portal.Door.Set(in back),
+                    Portal.Realm.Set(new PortalRealm(interior)));
+
+                // The front door's twin is only known now, and an entity spawned in a transaction is not open-able in it: linked once committed.
+                pairs.Add((frontId, backId));
+                made++;
+                spots.Clear();
+                NpcSpots(shapes?.NavFor(roomAsset), roomDoor, spots);
+                var npcRealm = new NpcRealm(interior);
                 for (var n = 0; n < config.InteriorNpcs; n++)
                 {
-                    var c = InteriorEdgeM * 0.5f;
-                    var (x, z) = rng.PointInDisc(c, c, InteriorEdgeM * 0.25f);
+                    var (x, z) = spots.Count > 0
+                        ? spots[rng.NextInt(0, spots.Count)]
+                        : rng.PointInDisc(roomDoor.ExitX, roomDoor.ExitZ, 1.5f);
                     var bounds = default(NpcPlacement);
-                    // An interior is its own realm with its own flat floor, so its altitude is 0 and NOT the planet's
-                    // ground under the building — which is what the building's own placement carries.
+                    // An interior is its own realm with its own flat floor, so its altitude is 0 and NOT the planet's ground under the building.
                     bounds.SetAt(x, z, 0f, 0.5f);
-                    var ai = new NpcBrain { Mode = rng.NextFloat() < 0.5f ? AiMode.Wander : AiMode.Idle, HomeX = x, HomeZ = z, LeashRadius = 6f };
+                    var ai = new NpcBrain { Mode = AiMode.Idle, HomeX = x, HomeZ = z, LeashRadius = 0f };
                     var npcTimers = new NpcTimers { MoveUntilTick = 0, RestUntilTick = rng.NextInt(1, 40) };
                     var move = new NpcMotion { SpeedMps = 1.2f };
-                    tx.Spawn<CityNpc>(CityNpc.Bounds.Set(in bounds), CityNpc.Ai.Set(in ai), CityNpc.Timers.Set(in npcTimers), CityNpc.Move.Set(in move),
-                        CityNpc.Realm.Set(in realm));
+                    tx2.Spawn<CityNpc>(CityNpc.Bounds.Set(in bounds), CityNpc.Ai.Set(in ai), CityNpc.Timers.Set(in npcTimers), CityNpc.Move.Set(in move),
+                        CityNpc.Realm.Set(in npcRealm));
                     census.CityNpcs++;
-                    if (++made % SpawnBatch == 0)
+                }
+
+                if (made % 256 == 0)
+                {
+                    tx2.Commit();
+                    tx2.Dispose();
+                    tx2 = dbe.CreateQuickTransaction();
+                }
+            }
+
+            tx2.Commit();
+        }
+        finally
+        {
+            tx2.Dispose();
+        }
+
+        for (var first = 0; first < pairs.Count; first += 1024)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            using (var portals = tx.For<Portal>())
+            {
+                for (var i = first; i < Math.Min(pairs.Count, first + 1024); i++)
+                {
+                    if (!portals.TryOpenMut(pairs[i].Front, out var entity))
                     {
-                        tx.Commit();
-                        tx.Dispose();
-                        tx = dbe.CreateQuickTransaction();
+                        throw new InvalidOperationException($"The door {pairs[i].Front} spawned a moment ago cannot be opened to link its twin.");
                     }
+
+                    var linked = entity.Read(Portal.Door);
+                    linked.Twin = pairs[i].Back;
+                    entity.Set(Portal.Door, linked);
                 }
             }
 
             tx.Commit();
         }
-        finally
-        {
-            tx.Dispose();
-        }
 
         return made;
+    }
+
+    /// <summary>A point or direction in an asset's plan, turned by a placement's quarter turn.</summary>
+    private static (float X, float Z) Turn(float x, float z, float sin, float cos) => ((x * cos) - (z * sin), (x * sin) + (z * cos));
+
+    /// <summary>A plan box around a centre.</summary>
+    private static AABB2F BoxAt(float x, float z, float halfX, float halfZ) =>
+        new() { MinX = x - halfX, MinY = z - halfZ, MaxX = x + halfX, MaxY = z + halfZ };
+
+    /// <summary>Where an interior's NPCs may stand: its navigation nodes, less the one its exit path starts on.</summary>
+    /// <param name="nav">The room's navigation, or <see langword="null"/>.</param>
+    /// <param name="exit">The room's way out.</param>
+    /// <param name="into">Receives the spots; left empty when there is no navigation.</param>
+    internal static void NpcSpots(NavGraph nav, in AssetColliders.DoorPlan exit, List<(float X, float Z)> into)
+    {
+        ArgumentNullException.ThrowIfNull(into);
+        if (nav == null)
+        {
+            return;
+        }
+
+        var door = nav.NodeExactlyAt(exit.ApproachX, exit.ApproachZ);
+        for (var i = 0; i < nav.NodeCount; i++)
+        {
+            if (i != door)
+            {
+                into.Add(nav.Node(i));
+            }
+        }
     }
 
     // ── Points of interest ──────────────────────────────────────────────────────────────────────────────────────────
@@ -346,7 +529,7 @@ public static class WorldBuilder
                 for (var i = 0; i < poi.Props; i++)
                 {
                     var (x, z, _) = plan.Place(ref rng, poi.X, poi.Z, poi.Radius, propHalf);
-                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), propHalf, StructureKind.PoiProp, ownerRegion: poiIndex + 1, tickPeriod: 0, ref rng, out _);
+                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), propHalf, StructureKind.PoiProp, ownerRegion: poiIndex + 1, tickPeriod: 0, ref rng);
                     census.StaticObjects++;
                 }
 
@@ -591,7 +774,7 @@ public static class WorldBuilder
                 }
 
                 // ownerRegion 0: these stand in the wild, and 0 is how Structure.OwnerRegion spells "no region" now that it is a sparse index's key.
-                SpawnStructure(tx, x, z, terrain.GroundAt(x, z), half, kind, ownerRegion: 0, tickPeriod: period, ref rng, out _);
+                SpawnStructure(tx, x, z, terrain.GroundAt(x, z), half, kind, ownerRegion: 0, tickPeriod: period, ref rng);
                 census.PlayerStructures++;
             }
 
@@ -915,14 +1098,14 @@ public static class WorldBuilder
     /// buildings and the props inside an interior, and an interior's floor is 0 rather than the planet's relief.
     /// </param>
     private static void SpawnStructure(Transaction tx, float x, float z, float groundY, float halfExtent, int kind, int ownerRegion, int tickPeriod,
-        ref Rng rng, out (byte Yaw, byte Asset) turned, int portalIndex = -1)
+        ref Rng rng, int interiorRealm = 0)
     {
         var bounds = default(StructurePlacement);
         bounds.SetAt(x, z, groundY, halfExtent);
         var s = new Structure
         {
             Kind = kind,
-            PortalIndex = portalIndex,
+            InteriorRealm = interiorRealm,
             TickPeriod = tickPeriod,
 
             // A quarter turn, drawn here so it is the world's and not a renderer's guess. The shuttleport keeps 0: it
@@ -933,8 +1116,6 @@ public static class WorldBuilder
             // Staggered, so the economy does not arrive as a once-a-minute spike that the median tick never sees.
             TickCountdown = tickPeriod == 0 ? 0 : rng.NextInt(1, tickPeriod),
         };
-        // Handed back rather than re-read: both are drawn from the world's RNG here, and a door needs them to find its doorway.
-        turned = ((byte)s.Yaw, (byte)s.Asset);
         tx.Spawn<WorldObject>(
             WorldObject.Bounds.Set(in bounds),
             WorldObject.Struct.Set(in s),

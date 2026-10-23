@@ -1,4 +1,4 @@
-import { interiorRealmOf } from '../data/realm-view';
+import { doorRealmOf } from '../data/realm-view';
 import { useStats } from '../state/stats-store';
 import { useUi } from '../state/ui-store';
 
@@ -10,7 +10,8 @@ export function Inspector() {
   const setFollow = useUi((s) => s.setFollow);
   const viewRealm = useUi((s) => s.viewRealm);
   const spectate = useUi((s) => s.spectate);
-  const realms = useUi((s) => s.realms);
+  const walkDoor = useUi((s) => s.walkDoor);
+  const playing = useUi((s) => s.playing);
   const published = useStats((s) => s.stats?.inspection ?? null);
   const realm = useStats((s) => s.stats?.realm ?? null);
   const canViewRealm = useStats((s) => s.stats?.canViewRealm) ?? false;
@@ -23,11 +24,14 @@ export function Inspector() {
   // Stats arrive four times a second: until then, what was published may describe the previous selection.
   const inspection = published?.netId === selectedNetId ? published : null;
 
-  // A door, when the thing picked has one. `portal` rides in with the entity (`Structure.PortalIndex`), so it is read
+  // A door, when the thing picked has one. `interior` rides in with the entity (`Structure.InteriorRealm`), so it is read
   // from the replicated fields by name rather than given a slot of its own in `Inspection` — the inspector already
   // shows every field the server sent, and a second path for one of them would be a second thing to keep in step.
-  const portal = Number(inspection?.fields.find((f) => f.name === 'portal')?.value ?? -1);
-  const door = canViewRealm ? interiorRealmOf(realm, portal, realms?.interiors ?? null) : null;
+  const interior = Number(inspection?.fields.find((f) => f.name === 'interior')?.value ?? 0);
+  const door = canViewRealm ? doorRealmOf(realm, interior) : null;
+
+  // A player can walk in instead: the body is steered to the door's published path and along it, like a bot would be.
+  const walkable = playing && doorRealmOf(realm, interior) !== null;
 
   // The session is anchored on THIS entity. One comparison, because `ride.ts` has already decided which of the ride's
   // two ids is the live one — the asked id before its frame lands, the server's after. Comparing against both here
@@ -112,6 +116,16 @@ export function Inspector() {
             }}
           >
             {riding ? 'Stop' : 'Ride'}
+          </button>
+        )}
+        {walkable && (
+          <button
+            title="Walk your character to this building's door and through it. Any movement key stops the walk."
+            onClick={() => {
+              walkDoor(selectedNetId);
+            }}
+          >
+            Walk in
           </button>
         )}
         <button

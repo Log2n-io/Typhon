@@ -213,12 +213,13 @@ internal ref struct StructureShapes
             // reservation is its asset's own 46 m square and it stands at the centre of every city, which is where
             // bodies spawn: collided as a footprint it ejects them 23 m, and the suite said so in three places at
             // once. Walking through it until its walls are loaded is the smaller wrong answer — and on a run with an
-            // asset set, which is every run that can draw it, the walls are there.
+            // asset set, which is every run that can draw it, the walls are there. A room is the same case and worse:
+            // a body inside a room is ALWAYS inside its footprint, so a room without its walls is an open floor.
             _lastX = 0f;
             _lastZ = 0f;
             _lastY = 0f;
             _lastQuarters = 0;
-            _lastShape = structure.Kind == StructureKind.Shuttleport ? Shape.None : Shape.Footprint;
+            _lastShape = structure.Kind is StructureKind.Shuttleport or StructureKind.Interior ? Shape.None : Shape.Footprint;
             return _lastShape;
         }
 

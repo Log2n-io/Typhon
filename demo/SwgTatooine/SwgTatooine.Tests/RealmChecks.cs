@@ -43,6 +43,25 @@ internal static class Worlds
         return config;
     }
 
+    /// <summary>The planet side of the door into <paramref name="interior"/>, as its row in the world's door table.</summary>
+    /// <param name="sim">The simulation.</param>
+    /// <param name="interior">A room's realm.</param>
+    /// <returns>The row; the case fails when no door leads there.</returns>
+    public static int DoorInto(TatooineSim sim, ushort interior)
+    {
+        var doors = sim.Portals;
+        for (var row = 0; row < doors.Count; row++)
+        {
+            if (doors.Realm[row] < sim.Config.Planets && doors.Door[row].TargetRealm == interior)
+            {
+                return row;
+            }
+        }
+
+        Assert.Fail($"no door leads into realm {interior}");
+        return -1;
+    }
+
     /// <summary>Which realm an entity is in — 0 is the planet, and on a multi-planet server each planet is one.</summary>
     /// <param name="sim">The simulation.</param>
     /// <param name="entity">The entity.</param>
@@ -246,8 +265,9 @@ public sealed class PortalTests
             Assert.That(sim.InteriorsPerPlanet, Is.EqualTo(WorldBuilder.CountEnterable(sim.Map)).And.GreaterThan(0));
 
             var id = sim.Index.Players[0];
-            var door = sim.Index.Portals[0];
-            var interior = (ushort)config.Planets;   // portal 0 of planet 0
+            var interior = (ushort)config.Planets;   // the first building of planet 0
+            var front = sim.Portals.Door[Worlds.DoorInto(sim, interior)];
+            var door = (X: front.CenterX, Z: front.CenterZ);
             int missions;
             using (var tx = dbe.CreateQuickTransaction())
             {
@@ -257,7 +277,7 @@ public sealed class PortalTests
             dbe.WriteTickFence(1_000);
             using (var tx = dbe.CreateQuickTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit))
             {
-                tx.Teleport(id, Player.Bounds, new RealmId(interior), Worlds.At(32.5f, 6.5f));
+                tx.Teleport(id, Player.Bounds, new RealmId(interior), Worlds.At(front.ArriveX, front.ArriveZ));
                 Assert.That(tx.Commit(), Is.True);
             }
 
@@ -345,22 +365,23 @@ public sealed class OccupiedInteriorTests
         _sim.Initialize();
         Assert.That(_sim.InteriorsPerPlanet, Is.GreaterThan(1), "precondition: the map has at least two enterable buildings");
 
-        // Portal 0 of planet 0, and portal 1 as the one nobody enters.
+        // The first building of planet 0, and the second as the one nobody enters.
         _occupied = (ushort)config.Planets;
         _empty = (ushort)(config.Planets + 1);
         _player = _sim.Index.Players[0];
-        var (doorX, doorZ) = _sim.Index.Portals[0];
+        var row = Worlds.DoorInto(_sim, _occupied);
+        var (doorX, doorZ) = _sim.Portals.ApproachStart[row];
 
         using (var tx = _sim.Dbe.CreateQuickTransaction())
         {
             var player = tx.OpenMut(_player);
 
-            // At the door and walking to it, which is the state TryWalkToPortal leaves a player in on the tick before it arrives. ShuttleDest carries the
-            // portal while the activity is ToPortal (PlayerState.ShuttleDest), and the timer only has to outlast the arrival.
+            // At the start of the door's path and walking to it, which is the state TryWalkToPortal leaves a player in on the tick before it arrives.
+            // ShuttleDest carries the door's row while the activity is ToPortal (PlayerState.ShuttleDest), and the timer only has to outlast the walk.
             var state = player.Read(Player.State);
             state.Activity = PlayerActivity.ToPortal;
             state.ActivityTicks = 200 * config.TickRateHz;
-            state.ShuttleDest = 0;
+            state.ShuttleDest = row;
             player.Set(Player.State, state);
             var move = player.Read(Player.Move);
             move.SpeedMps = TatooineData.PlayerRunSpeedMps;
@@ -548,8 +569,9 @@ public sealed class GalaxyTests
                 continue;   // a sample of the 1 200+ interiors; every planet
             }
 
+            // Both kinds of realm are centred on their origin: a room is in its own coordinates (WorldBuilder.InteriorEdgeM).
             var edge = interior ? WorldBuilder.InteriorEdgeM : _sim.Config.WorldEdgeM;
-            var lo = interior ? 0f : -edge * 0.5f;
+            var lo = -edge * 0.5f;
             for (var q = 0; q < (interior ? 4 : 64); q++)
             {
                 var size = (float)(rng.NextDouble() * edge * (interior ? 0.6 : 0.2)) + 0.37f;

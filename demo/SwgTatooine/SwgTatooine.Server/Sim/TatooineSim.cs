@@ -132,6 +132,12 @@ public sealed partial class TatooineSim : IDisposable
     /// <summary>Interior realms per planet (Realms G1b): the enterable city buildings, 0 without <c>--interiors</c>.</summary>
     public int InteriorsPerPlanet { get; private set; }
 
+    /// <summary>Every door side, as read from the database at open.</summary>
+    public PortalTable Portals { get; private set; }
+
+    /// <summary>The published assets the world was built with, or <see langword="null"/> on a run with none.</summary>
+    private AssetColliders _shapes;
+
     /// <summary>The space realm (Realms G1c), after the planets and the interiors; -1 without <c>--space</c>.</summary>
     public int SpaceRealm { get; private set; } = -1;
 
@@ -271,6 +277,11 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.RegisterComponentFromAccessor<CreatureRealm>();
         Dbe.RegisterComponentFromAccessor<PlayerRealm>();
 
+        // The doors (Realms G1b): one entity per side, stored with the plane, the landing and the links to its twin and its structure.
+        Dbe.RegisterComponentFromAccessor<PortalPlacement>();
+        Dbe.RegisterComponentFromAccessor<PortalDoor>();
+        Dbe.RegisterComponentFromAccessor<PortalRealm>();
+
         // The static neighbourhood's disc: where a body last asked what was near it, and how far it may walk from there.
         Dbe.RegisterComponentFromAccessor<PlayerProximity>();
         Dbe.RegisterComponentFromAccessor<ShipPlacement>();
@@ -373,7 +384,9 @@ public sealed partial class TatooineSim : IDisposable
         }
 
         // Interiors sleep once unobserved for --interior-sleep seconds (G2): a player walking in wakes one, and pins it while inside.
-        var interiorGridConfig = SpatialGridConfig.Flat(Vector2.Zero, new Vector2(WorldBuilder.InteriorEdgeM, WorldBuilder.InteriorEdgeM),
+        // Centred, so a room — authored around its origin and standing at the realm's — is in the realm's own coordinates (WorldBuilder.InteriorEdgeM).
+        var interiorHalf = WorldBuilder.InteriorEdgeM * 0.5f;
+        var interiorGridConfig = SpatialGridConfig.Flat(new Vector2(-interiorHalf, -interiorHalf), new Vector2(interiorHalf, interiorHalf),
             WorldBuilder.InteriorEdgeM);
         // Each interior's parent is its planet (Realms G3): a planet's news reaches the players in its buildings (RouteToRealm, subtree).
         RealmConfig InteriorOf(int planet, int portal) => new()
@@ -423,6 +436,7 @@ public sealed partial class TatooineSim : IDisposable
         // large precisely because a planet is mostly scenery.
         Dbe.SetSpatialBarrierOnly<WorldObject>();
         Dbe.SetSpatialBarrierOnly<CreatureLair>();
+        Dbe.SetSpatialBarrierOnly<Portal>();
 
         // Creatures, players and NPCs move, but every one of those writes goes through cluster.WriteSpatial, which flags
         // migration and AABB growth inline. That is what makes the barrier-only opt-in correct for them as well as for
@@ -444,6 +458,10 @@ public sealed partial class TatooineSim : IDisposable
             Dbe.SetClusterDormancy<CreatureLair>(_config.DormancyTicks);
         }
 
+        // The published assets, read BEFORE the world is built: a building's doors and its room are spawned from them, and stored (see
+        // WorldBuilder.BuildInteriors). A run with none builds the stand-in doors, and a check may hand in its own table first.
+        _shapes = AssetShapesOverride ?? LoadAssetColliders(OpenAssetOrigin());
+
         Indexes = new WorldIndex[_config.Planets];
         for (var planet = 0; planet < _config.Planets; planet++)
         {
@@ -452,27 +470,37 @@ public sealed partial class TatooineSim : IDisposable
             // BUILD or REBUILD, and everything above this line runs either way (P-2). The realm registrations, the grid, SetSpatialBarrierOnly, the dormancy
             // declarations and InitializeArchetypes are all statements about the database rather than about its contents, and a reopened database needs every
             // one of them re-issued — none of them is persisted. Only the contents are, which is why this is the single branch.
+            //
+            // Planet p's buildings lead to realms Planets + p·N onwards, the range registered above. That arithmetic is the registration's and the build's
+            // alone: the build writes each building's room onto it, and from then on the link is read, never computed.
             var census = Reopened
                 ? WorldRebuild.Rebuild(Dbe, Map, Indexes[planet], (ushort)planet, InteriorRealmsOf(planet))
-                : WorldBuilder.Populate(Dbe, Map, _config, Indexes[planet], (ushort)planet);
+                : WorldBuilder.Populate(Dbe, Map, _config, Indexes[planet], (ushort)planet,
+                    InteriorsPerPlanet > 0 ? _config.Planets + (planet * InteriorsPerPlanet) : 0);
 
-            if (InteriorsPerPlanet > 0)
+            // A reopened world's rooms, doors and interior NPCs are already on disk; building them again would put a second set in every building.
+            if (!Reopened && InteriorsPerPlanet > 0)
             {
-                // Portal j of planet p is realm Planets + p·N + j: every planet must have exactly N portals, or the decode reads another door.
-                if (Indexes[planet].Portals.Count != InteriorsPerPlanet)
+                var rooms = WorldBuilder.BuildInteriors(Dbe, _config, _shapes, (ushort)planet, census);
+                if (rooms != InteriorsPerPlanet)
                 {
                     throw new InvalidOperationException(
-                        $"Planet {planet} has {Indexes[planet].Portals.Count} portals where the realm layout reserved {InteriorsPerPlanet}.");
-                }
-
-                // An interior's NPCs are already on disk when the world is reopened; re-populating would put a second set in every building.
-                if (!Reopened)
-                {
-                    WorldBuilder.PopulateInteriors(Dbe, _config, Indexes[planet], _config.Planets + (planet * InteriorsPerPlanet), census);
+                        $"Planet {planet} furnished {rooms} buildings where the realm layout reserved {InteriorsPerPlanet} rooms.");
                 }
             }
 
             Census = planet == 0 ? census : Census.Plus(census);
+        }
+
+        // The doors as the tick reads them, from the entities: the same table whether the world was built or reopened.
+        Portals = PortalTable.Build(Dbe, _shapes, _config.Planets, Map.Cities.Count, _realmSlots);
+        Console.WriteLine($"  doors: {Portals.Count:N0} sides for {InteriorsPerPlanet * _config.Planets:N0} rooms"
+            + (_shapes == null ? ", stand-in geometry (no asset set)" : $", {_shapes.DoorCount} asset(s) publish one"));
+        if (Portals.Count != 2 * InteriorsPerPlanet * _config.Planets)
+        {
+            throw new InvalidOperationException(
+                $"{Portals.Count} door sides in the database where {_config.Planets} planets of {InteriorsPerPlanet} rooms need "
+                + $"{2 * InteriorsPerPlanet * _config.Planets}. The database was built from a different map or content scale.");
         }
 
         if (SpaceRealm >= 0)

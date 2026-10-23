@@ -36,6 +36,11 @@ internal static class StructureAssets
         "bazaar_terminal",
         "crafting_station",
         "mission_terminal",
+
+        // The rooms behind the houses' doors (Realms G1b): a room is a structure of its interior realm, standing at that realm's origin. Never picked by
+        // kind — a room is the asset its house's door names (AssetColliders.DoorPlan.TargetAsset).
+        "tat_house_large_interior",
+        "tat_house_small_interior",
     ];
 
     /// <summary>
@@ -58,6 +63,8 @@ internal static class StructureAssets
         StructureKind.Terminal,
         StructureKind.Terminal,
         StructureKind.Terminal,
+        StructureKind.Interior,
+        StructureKind.Interior,
     ];
 
     /// <summary>The asset a structure of this kind is, as an index into <see cref="Table"/>.</summary>
@@ -76,7 +83,7 @@ internal static class StructureAssets
         StructureKind.Shuttleport => 2,
         StructureKind.Terminal => 3 + rng.NextInt(0, 3),
 
-        // PoiProp, Factory, Harvester, CampObject: nothing published stands in for them.
+        // PoiProp, Factory, Harvester, CampObject: nothing published stands in for them. Interior: the door decides, not the kind.
         _ => NoAsset,
     };
 

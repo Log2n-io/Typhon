@@ -92,14 +92,14 @@ public sealed partial class TatooineSim
 
         // The same shapes the served path collides against. A measured run is the only way to put thousands of bodies
         // on the collision path (--collide-crowd), and without this it would measure the footprint fallback instead.
-        var shapes = AssetShapesOverride ?? LoadAssetColliders(OpenAssetOrigin());
-        PlaceDoors(shapes);
+        var shapes = AssetShapesOverride ?? _shapes;
 
         _bridge = new SimBridge(_config, Map, Index)
         {
             AssetShapes = shapes,
             Dbe = Dbe,
             PlanetIndexes = Indexes,
+            Portals = Portals,
             InteriorsPerPlanet = InteriorsPerPlanet,
             FirstDungeonRealm = FirstDungeonRealm,
             PlayerView = _playerView,
@@ -360,6 +360,9 @@ public sealed partial class TatooineSim
 
     /// <summary>Crossings over the run: into interiors, out of them, between planets (Realms G1b).</summary>
     public (long Entries, long Exits, long InterPlanet) CrossingTotals => _bridge?.CrossingTotals ?? default;
+
+    /// <summary>Ticks whose crossings committed, each a durable write; see <see cref="SimBridge.CrossingCommits"/>.</summary>
+    public long CrossingCommits => _bridge?.CrossingCommits ?? 0;
 
     /// <summary>What the starships did (Realms G1c).</summary>
     public void PrintSpaceReport() => _bridge?.PrintSpaceReport();

@@ -33,8 +33,7 @@ public sealed partial class TatooineSim
         // Opened BEFORE the runtime is replicating: a published folder that is missing its catalogue is a deployment
         // fault, and the moment to say so is before a session can connect and be served a world with no geometry.
         var assets = OpenAssetOrigin();
-        var shapes = LoadAssetColliders(assets);
-        PlaceDoors(shapes);
+        var shapes = _shapes;
         StartReplication(shapes);
         try
         {
@@ -73,35 +72,6 @@ public sealed partial class TatooineSim
     /// <returns>The origin, validated.</returns>
     /// <exception cref="ArgumentException">The folder, its pointer, or the catalogue it names is missing or malformed.</exception>
     internal AssetOrigin OpenAssetOrigin() => _config.AssetDirectory == null ? null : AssetOrigin.Open(_config.AssetDirectory);
-
-    /// <summary>
-    /// Moves every planet's doors from their buildings' centres to the doorways the assets publish.
-    /// </summary>
-    /// <param name="shapes">The loaded colliders, which carry each asset's doorway.</param>
-    /// <remarks>
-    /// <b>Here because this is the first moment both halves exist.</b> The world — and with it every door's position and the turn of the building it is in
-    /// — is built in the constructor; the asset shapes are opened later, by whichever entry point is running. Until they meet, a door is the building's own
-    /// coordinate, which is inside a wall.
-    /// </remarks>
-    private void PlaceDoors(AssetColliders shapes)
-    {
-        // <b>No asset set is a supported configuration, not a fault.</b> A measured run without --assets collides against
-        // footprint boxes and has no published geometry to read a doorway out of, so its doors stay where the world put
-        // them — the building's own coordinate, which is what every run did before this existed.
-        if (shapes == null)
-        {
-            return;
-        }
-
-        var moved = 0;
-        foreach (var index in Indexes)
-        {
-            moved += index.PlaceDoors(shapes);
-        }
-
-        Console.WriteLine($"  doors: {moved:N0} of {Indexes[0].Portals.Count * Indexes.Length:N0} placed at the asset's own doorway, "
-            + $"{shapes.DoorCount:N0} asset(s) publish one");
-    }
 
     /// <summary>
     /// The collision shapes behind the footprints, read once.
@@ -157,6 +127,7 @@ public sealed partial class TatooineSim
         {
             Dbe = Dbe,
             PlanetIndexes = Indexes,
+            Portals = Portals,
             InteriorsPerPlanet = InteriorsPerPlanet,
             FirstDungeonRealm = FirstDungeonRealm,
             PlayerView = _playerView,

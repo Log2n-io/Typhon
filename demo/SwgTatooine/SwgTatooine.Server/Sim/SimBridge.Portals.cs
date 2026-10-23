@@ -6,15 +6,18 @@ using System.Threading;
 namespace SwgTatooine.Server;
 
 /// <summary>
-/// Building interiors (Realms G1b): every enterable city building is a realm of its own, entered and left through a portal pair — the door on the planet
-/// and the entrance inside.
+/// Building interiors (Realms G1b): every enterable city building has a room of its own, in a realm of its own, and a door with a side in each.
 /// </summary>
 /// <remarks>
-/// <para><b>A crossing is a realm change.</b> PlayerThink queues it from its parallel workers; <see cref="TeleportTick"/> applies the queue serially with
-/// <c>Transaction.Teleport</c> in one side transaction per tick (GroupCommit — see <see cref="TeleportTick"/>), and the fence moves each crossing entity into a cluster of its new realm. The entity id
-/// survives: nothing is destroyed and respawned.</para>
-/// <para><b>Realm ids.</b> Planets are <c>[0, Planets)</c>; portal <c>j</c> of planet <c>p</c> leads to realm <c>Planets + p · InteriorsPerPlanet + j</c>.
-/// The id alone locates the door back out, so a player inside carries no extra state.</para>
+/// <para><b>A crossing is a realm change.</b> A body's step over a door plane queues it, from parallel workers; <see cref="TeleportTick"/> applies the
+/// queue serially with <c>Transaction.Teleport</c> in one side transaction per tick (GroupCommit — see <see cref="TeleportTick"/>), and the fence moves
+/// each crossing entity into a cluster of its new realm. The entity id survives: nothing is destroyed and respawned.</para>
+/// <para><b>Everything a crossing reads is stored.</b> Each side of a door is a <see cref="Portal"/> entity carrying its plane, the realm on the other side,
+/// the landing there, its twin and the structure it belongs to; <see cref="PortalTable"/> is those rows laid out for the tick. No realm id is computed
+/// here: the door says where it goes.</para>
+/// <para><b>One test for everyone.</b> A body a client drives crosses when its resolved step goes over a plane (<see cref="DoorsAround"/>, in the collision
+/// pass); the scripted crowd walks the door's published path and crosses on the same test, in <see cref="ThinkPortal"/>. Both land on the published spawn
+/// the door names, and both leave a room through its way out.</para>
 /// </remarks>
 public sealed partial class SimBridge
 {
@@ -27,10 +30,21 @@ public sealed partial class SimBridge
     }
 
     /// <summary>One queued crossing: the player, where it lands, and its placement's half extent.</summary>
-    private readonly record struct TeleportRequest(EntityId Id, ushort Realm, float X, float Z, float HalfExtent, CrossingKind Kind);
+    /// <param name="Y">The feet's published height there, or -∞ for none: the landing is this or the ground, whichever is higher.</param>
+    private readonly record struct TeleportRequest(EntityId Id, ushort Realm, float X, float Z, float HalfExtent, CrossingKind Kind,
+        float Y = float.NegativeInfinity);
 
-    /// <summary>Distance from a door's centre a player leaving the building appears at: outside the 12 m footprint.</summary>
-    private const float DoorStepM = 8f;
+    /// <summary>How long a scripted body may take to walk through a door before it gives up and decides something else, in seconds.</summary>
+    /// <remarks>The path is a few metres; a body that has not crossed in this long is blocked — by another body, or by a neighbour the placer let stand
+    /// on the path — and standing there for ever is the one behaviour that is never right.</remarks>
+    private const float DoorWalkTimeoutS = 15f;
+
+    /// <summary>How long a scripted body may take to walk out of a room before it is put through the door regardless, in seconds.</summary>
+    /// <remarks>Giving up is not an option inside: there is no other way out, and a body that cannot leave would hold its room awake for ever.</remarks>
+    private const float RoomWalkTimeoutS = 30f;
+
+    /// <summary>How close counts as at a waypoint, metres. The steering lands a body exactly on its destination, so this only absorbs a shortened step.</summary>
+    private const float WaypointReachM = 0.05f;
 
     private readonly ConcurrentQueue<TeleportRequest> _teleports = new();
 
@@ -39,6 +53,22 @@ public sealed partial class SimBridge
     private readonly System.Collections.Generic.Dictionary<EntityId, RealmObserver> _interiorPins = [];
     private readonly System.Collections.Generic.List<TeleportRequest> _appliedCrossings = [];
     private long _droppedCrossings;
+
+    /// <summary>
+    /// The bodies <see cref="TeleportTick"/> moved this tick, which <c>PlayerMove</c> leaves where they landed until the fence has put them in their new
+    /// realm's cluster.
+    /// </summary>
+    /// <remarks>
+    /// <b>Teleport runs in the Spawn phase and the move after it</b>, while the fence only moves a crossing body into the new realm's cluster at the end of
+    /// the tick. So a body a client keeps walking through a door was integrated once more in its OLD cluster: at its new coordinates, under the old realm's
+    /// rules — out of a room onto the planet, at the room's flat floor height. A body that then stopped kept that altitude, and the camera that follows the
+    /// server's altitude sat under the terrain. One tick of standing on the landing is the honest answer: it is where the door put it. Written only by
+    /// <see cref="TeleportTick"/>, which is serial, and read during the move phase, which writes nothing here.
+    /// </remarks>
+    private readonly System.Collections.Generic.HashSet<EntityId> _landedThisTick = [];
+
+    /// <summary>The bodies landed this tick, or <see langword="null"/> when none did, which is almost every tick.</summary>
+    private System.Collections.Generic.HashSet<EntityId> LandedThisTick => _landedThisTick.Count > 0 ? _landedThisTick : null;
 
     /// <summary>True when a player inside pins interior <paramref name="realm"/> active (Realms G2) — what the demo checks read.</summary>
     public bool IsInteriorPinned(ushort realm)
@@ -62,21 +92,36 @@ public sealed partial class SimBridge
     private long _teleportTicks;
     private long _teleportCommitTicks;
 
-    /// <summary>Every planet's index, by planet realm: the doors a player leaving an interior walks out of.</summary>
+    /// <summary>Every planet's index, by planet realm: its shuttleports, for a shuttle to another planet.</summary>
     public WorldIndex[] PlanetIndexes { get; init; }
 
-    /// <summary>Interior realms per planet, 0 without <c>--interiors</c>.</summary>
+    /// <summary>Every door side, read from the database at open.</summary>
+    public PortalTable Portals { get; init; }
+
+    /// <summary>Interior realms per planet, 0 without <c>--interiors</c>. Only the report reads it: no crossing computes a realm.</summary>
     public int InteriorsPerPlanet { get; init; }
 
-    private bool InteriorsActive => InteriorsPerPlanet > 0;
+    private bool InteriorsActive => Portals != null && Portals.Count > 0;
 
     /// <summary>Crossings so far: into interiors, out of them, and between planets by shuttle.</summary>
     public (long Entries, long Exits, long InterPlanet) CrossingTotals => (_portalEntries, _portalExits, _interPlanetCrossings);
 
     /// <summary>
+    /// Ticks whose crossings committed at least one teleport: each is one durable write, because a player carries its <c>Inventory</c>, which is
+    /// <c>Versioned</c>, from one realm's cluster to the other's.
+    /// </summary>
+    public long CrossingCommits => _crossingCommits;
+
+    private long _crossingCommits;
+
+    /// <summary>
     /// An idle decision in a city walks into one of its buildings with probability <see cref="SimConfig.InteriorShare"/>. False leaves the decision to the
     /// ordinary idle branch, untouched.
     /// </summary>
+    /// <remarks>
+    /// <b>To the start of the door's path, not to the door.</b> The path's first point is on open ground in front of the ramp, so walking there in a straight
+    /// line from anywhere in town is open-ground navigation; the path from there is published clear of the building's own walls (ASSET_FORMAT.md § 5.7).
+    /// </remarks>
     private bool TryWalkToPortal(ref PlayerState state, ref PlayerMotion move, float x, float z, ushort planet, uint shareSalt, uint pickSalt)
     {
         if (!InteriorsActive || Hash01(shareSalt) >= _config.InteriorShare)
@@ -90,23 +135,172 @@ public sealed partial class SimBridge
             return false;
         }
 
-        // Planets share the map, so a city's run of portals is the same on each; the doors differ (each planet draws its own world).
-        var (first, count) = _index.CityPortals[city];
-        if (count == 0)
+        var doors = Portals.CityDoors(planet, city);
+        if (doors.IsEmpty)
         {
             return false;
         }
 
-        var portal = first + Math.Min(count - 1, (int)(Hash01(pickSalt) * count));
+        var row = doors[Math.Min(doors.Length - 1, (int)(Hash01(pickSalt) * doors.Length))];
         state.Activity = PlayerActivity.ToPortal;
         state.ActivityTicks = 200 * _config.TickRateHz;
-        state.ShuttleDest = portal;
+        state.ShuttleDest = row;
         move.SpeedMps = TatooineData.PlayerRunSpeedMps;
-        var (dx, dz) = PlanetIndexes[planet].Portals[portal];
-        move.DestX = dx;
-        move.DestZ = dz;
+        (move.DestX, move.DestZ) = Portals.ApproachStart[row];
         Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
         return true;
+    }
+
+    /// <summary>
+    /// One think of a scripted body walking to, through or out of a door. False when the body is doing something else.
+    /// </summary>
+    /// <param name="state">Its behaviour.</param>
+    /// <param name="move">Its motion; the velocity is still the one the last think set, which the step just taken was made with.</param>
+    /// <param name="id">The body.</param>
+    /// <param name="x">Where it stands now.</param>
+    /// <param name="z">Where it stands now.</param>
+    /// <param name="k">Ticks since its last visit: the last step was <c>k</c> ticks of velocity.</param>
+    /// <param name="halfExtent">Its half-extent, for the landing.</param>
+    /// <returns>Whether this handled the body.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The crossing is the same test a client's body takes</b>, on the step this body just made: from where it stood, <c>k</c> ticks of its velocity ago,
+    /// to where it stands. That is exact for a body nothing pushed — the crowd is not collided unless <c>--collide-crowd</c> — and still right for one that
+    /// was: a push only shortens the step, which keeps its start on the near side.
+    /// </para>
+    /// <para>
+    /// <b>Waypoints are reached exactly</b>, because the steering caps the last step at the distance left, so the next think finds the body on its waypoint
+    /// and turns it to the next. The coarse "within five metres" every other destination uses would cut the corner of a ramp or a room.
+    /// </para>
+    /// </remarks>
+    private bool ThinkPortal(ref PlayerState state, ref PlayerMotion move, EntityId id, float x, float z, int k, float halfExtent)
+    {
+        if (state.Activity is not (PlayerActivity.ToPortal or PlayerActivity.EnteringDoor or PlayerActivity.LeavingRoom))
+        {
+            return false;
+        }
+
+        var row = state.ShuttleDest;
+        if (!InteriorsActive || (uint)row >= (uint)Portals.Count)
+        {
+            state.Activity = PlayerActivity.Idle;
+            state.ActivityTicks = 0;
+            return true;
+        }
+
+        if (state.Activity != PlayerActivity.ToPortal)
+        {
+            var fromX = x - (move.VelX * k);
+            var fromZ = z - (move.VelZ * k);
+            if (CrossedDoor(PlaneOf(in Portals.Door[row]), fromX, fromZ, x, z))
+            {
+                Cross(ref state, ref move, id, row, halfExtent);
+                return true;
+            }
+        }
+
+        var dx = move.DestX - x;
+        var dz = move.DestZ - z;
+        if ((dx * dx) + (dz * dz) > WaypointReachM * WaypointReachM)
+        {
+            Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+            return true;
+        }
+
+        switch (state.Activity)
+        {
+            case PlayerActivity.ToPortal:
+                // In front of the ramp: now the path, through the door.
+                state.Activity = PlayerActivity.EnteringDoor;
+                state.ActivityTicks = (int)(DoorWalkTimeoutS * _config.TickRateHz);
+                (move.DestX, move.DestZ) = Portals.ApproachEnd[row];
+                break;
+            case PlayerActivity.LeavingRoom:
+                var route = Portals.Route[row];
+                state.ShuttleFrom++;
+                (move.DestX, move.DestZ) = state.ShuttleFrom < route.Length ? route[state.ShuttleFrom] : Portals.ApproachEnd[row];
+                break;
+            default:
+                // At the end of the path without having crossed: something stopped it short of the plane. Decide again.
+                move.VelX = 0f;
+                move.VelZ = 0f;
+                state.Activity = PlayerActivity.Idle;
+                state.ActivityTicks = 0;
+                return true;
+        }
+
+        Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+        return true;
+    }
+
+    /// <summary>
+    /// A scripted body done with a room: out through its way out — or, when walking out already failed, through it regardless.
+    /// </summary>
+    /// <param name="state">Its behaviour.</param>
+    /// <param name="move">Its motion.</param>
+    /// <param name="id">The body.</param>
+    /// <param name="realm">The room's realm.</param>
+    /// <param name="x">Where it stands.</param>
+    /// <param name="z">Where it stands.</param>
+    /// <param name="halfExtent">Its half-extent, for the landing.</param>
+    private void LeaveRoom(ref PlayerState state, ref PlayerMotion move, EntityId id, ushort realm, float x, float z, float halfExtent)
+    {
+        var row = InteriorsActive ? Portals.RoomDoor(realm) : -1;
+        if (row < 0)
+        {
+            // A realm with no way out is not a room this world built. Nothing to walk to; stay idle rather than throw on the tick path.
+            state.Activity = PlayerActivity.Idle;
+            state.ActivityTicks = 10 * _config.TickRateHz;
+            return;
+        }
+
+        if (state.Activity == PlayerActivity.LeavingRoom)
+        {
+            // The walk out timed out. A room has no other exit, so the body goes through the door it could not reach.
+            Cross(ref state, ref move, id, row, halfExtent);
+            return;
+        }
+
+        state.Activity = PlayerActivity.LeavingRoom;
+        state.ActivityTicks = (int)(RoomWalkTimeoutS * _config.TickRateHz);
+        state.ShuttleDest = row;
+        state.ShuttleFrom = 0;
+        move.SpeedMps = TatooineData.PlayerRunSpeedMps;
+        var route = Portals.Route[row];
+        (move.DestX, move.DestZ) = route.Length > 0 ? route[0] : Portals.ApproachEnd[row];
+        Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+    }
+
+    /// <summary>Queues a scripted body through door side <paramref name="row"/> and gives it what it does on the far side.</summary>
+    private void Cross(ref PlayerState state, ref PlayerMotion move, EntityId id, int row, float halfExtent)
+    {
+        var entering = QueueCrossing(id, row, halfExtent);
+
+        // Standing still until TeleportTick applies it, so Move writes nothing the teleport would overwrite.
+        move.VelX = 0f;
+        move.VelZ = 0f;
+        if (entering)
+        {
+            state.Activity = PlayerActivity.Inside;
+            var stayTicks = _config.InteriorStayS * _config.TickRateHz;
+            state.ActivityTicks = Math.Max(1, (int)(stayTicks * (1f + (3f * Hash01((uint)id.EntityKey ^ 0x68E31DA4u)))));
+        }
+        else
+        {
+            state.Activity = PlayerActivity.Idle;
+            state.ActivityTicks = (10 * _config.TickRateHz) + (int)(Hash01((uint)id.EntityKey ^ 0x1F83D9ABu) * 30 * _config.TickRateHz);
+        }
+    }
+
+    /// <summary>Queues the crossing of door side <paramref name="row"/>: to the realm it names, at the landing it names.</summary>
+    /// <returns>Whether the body is going into a room rather than out of one.</returns>
+    private bool QueueCrossing(EntityId id, int row, float halfExtent)
+    {
+        ref readonly var door = ref Portals.Door[row];
+        var entering = door.TargetRealm >= _config.Planets;
+        _teleports.Enqueue(new TeleportRequest(id, (ushort)door.TargetRealm, door.ArriveX, door.ArriveZ, halfExtent,
+            entering ? CrossingKind.Enter : CrossingKind.Exit, door.ArriveY));
+        return entering;
     }
 
     /// <summary>
@@ -131,6 +325,9 @@ public sealed partial class SimBridge
     /// <param name="ForwardZ">Unit vector through the door.</param>
     /// <param name="HalfX">Half the opening width, across the forward.</param>
     private readonly record struct DoorPlane(float CenterX, float CenterZ, float ForwardX, float ForwardZ, float HalfX);
+
+    /// <summary>The plane a stored door side is crossed on.</summary>
+    private static DoorPlane PlaneOf(in PortalDoor door) => new(door.CenterX, door.CenterZ, door.ForwardX, door.ForwardZ, door.HalfWidth);
 
     /// <summary>
     /// Whether a step crossed a doorway, going in.
@@ -202,193 +399,86 @@ public sealed partial class SimBridge
         float toZ) =>
         CrossedDoor(new DoorPlane(centerX, centerZ, forwardX, forwardZ, halfX), fromX, fromZ, toX, toZ);
 
-    /// <summary>The doorway of planet <paramref name="planet"/>'s portal <paramref name="portal"/>, in planet coordinates.</summary>
-    /// <param name="planet">The planet realm.</param>
-    /// <param name="portal">The portal index.</param>
-    /// <returns>The doorway, or null when the asset publishes none.</returns>
-    private DoorPlane? PlanetDoor(ushort planet, int portal)
+    /// <summary>
+    /// How far a body at (<paramref name="x"/>, <paramref name="z"/>) is from the part of a door's plane that counts — the opening, not the wall beside it.
+    /// </summary>
+    /// <param name="door">The door side.</param>
+    /// <param name="x">The body, east.</param>
+    /// <param name="z">The body, north.</param>
+    /// <returns>The distance to the nearest point of the opening's segment in the plane.</returns>
+    internal static float DistanceToOpening(in PortalDoor door, float x, float z)
     {
-        var index = PlanetIndexes[planet];
-        if ((uint)portal >= (uint)index.Portals.Count || AssetShapes == null)
-        {
-            return null;
-        }
-
-        var (yaw, asset) = index.PortalFacings[portal];
-        var plan = AssetShapes.DoorFor(asset);
-        if (!plan.Exists)
-        {
-            return null;
-        }
-
-        // The asset's own forward, turned by the quarter the building was spawned at. NOT the "-Z" the field names:
-        // that is a local axis, and the portal's own rotation is part of the answer. See AssetColliders.ForwardOf.
-        var (sin, cos) = QuarterTurn(yaw);
-        var fx = (plan.ForwardX * cos) - (plan.ForwardZ * sin);
-        var fz = (plan.ForwardX * sin) + (plan.ForwardZ * cos);
-        var (cx, cz) = index.Portals[portal];
-        return new DoorPlane(cx, cz, fx, fz, plan.HalfX);
-    }
-
-    /// <summary>At the door: queue the crossing into portal <see cref="PlayerState.ShuttleDest"/>'s interior on planet <paramref name="planet"/>.</summary>
-    private void EnterPortal(ref PlayerState state, EntityId id, ushort planet, float halfExtent, uint salt)
-    {
-        var portal = state.ShuttleDest;
-        if (planet >= _config.Planets || (uint)portal >= (uint)InteriorsPerPlanet)
-        {
-            state.Activity = PlayerActivity.Idle;
-            state.ActivityTicks = 0;
-            return;
-        }
-
-        var realm = (ushort)(_config.Planets + (planet * InteriorsPerPlanet) + portal);
-        var c = WorldBuilder.InteriorEdgeM * 0.5f;
-        var jitter = (Hash01(salt) - 0.5f) * 8f;
-        _teleports.Enqueue(new TeleportRequest(id, realm, c + jitter, 6f, halfExtent, CrossingKind.Enter));
-        state.Activity = PlayerActivity.Inside;
-        var stayTicks = _config.InteriorStayS * _config.TickRateHz;
-        state.ActivityTicks = Math.Max(1, (int)(stayTicks * (1f + (3f * Hash01(salt ^ 0x68E31DA4u)))));
-    }
-
-    /// <summary>Leaving interior <paramref name="realm"/>: queue the crossing back to its door, a step outside it.</summary>
-    private void ExitInterior(ref PlayerState state, ref PlayerMotion move, EntityId id, ushort realm, float halfExtent, uint salt)
-    {
-        var k = realm - _config.Planets;
-        var planet = k / InteriorsPerPlanet;
-        var (doorX, doorZ) = PlanetIndexes[planet].Portals[k % InteriorsPerPlanet];
-        var a = Hash01(salt) * MathF.PI * 2f;
-        var half = (_config.WorldEdgeM * 0.5f) - halfExtent;
-        _teleports.Enqueue(new TeleportRequest(id, (ushort)planet, Math.Clamp(doorX + (MathF.Cos(a) * DoorStepM), -half, half),
-            Math.Clamp(doorZ + (MathF.Sin(a) * DoorStepM), -half, half), halfExtent, CrossingKind.Exit));
-        move.VelX = 0f;
-        move.VelZ = 0f;
-        state.Activity = PlayerActivity.Idle;
-        state.ActivityTicks = (10 * _config.TickRateHz) + (int)(Hash01(salt ^ 0x1F83D9ABu) * 30 * _config.TickRateHz);
+        // The segment through the centre, across the forward, half the width each way.
+        var ax = -door.ForwardZ;
+        var az = door.ForwardX;
+        var t = Math.Clamp(((x - door.CenterX) * ax) + ((z - door.CenterZ) * az), -door.HalfWidth, door.HalfWidth);
+        var dx = x - (door.CenterX + (ax * t));
+        var dz = z - (door.CenterZ + (az * t));
+        return MathF.Sqrt((dx * dx) + (dz * dz));
     }
 
     /// <summary>
-    /// A body a client is driving has walked somewhere: if that step went through a doorway, queue the crossing.
+    /// The doors near a body's resolved step, in the collision pass: queues the crossing when a client's step went through one, and bounds the body's disc so
+    /// a held step can never go through one unseen.
     /// </summary>
-    /// <param name="id">The body.</param>
-    /// <param name="realm">The realm it is in.</param>
-    /// <param name="halfExtent">Its half-extent, for the landing.</param>
+    /// <param name="realm">The body's realm.</param>
+    /// <param name="probe">The collision pass's probe for this body: the disc it is handed lies inside it.</param>
+    /// <param name="client">The body, when a client drives it; <see cref="EntityId.Null"/> for the scripted crowd, which crosses in its own think.</param>
+    /// <param name="half">Its half-extent.</param>
     /// <param name="fromX">Where it stood after the previous step resolved.</param>
-    /// <param name="fromZ">Where it stood after the previous step resolved.</param>
-    /// <param name="toX">Where it stands now.</param>
-    /// <param name="toZ">Where it stands now.</param>
-    /// <returns>Whether a crossing was queued.</returns>
+    /// <param name="fromZ">Where it stood.</param>
+    /// <param name="toX">Where it stands after this one resolved.</param>
+    /// <param name="toZ">Where it stands.</param>
+    /// <returns>The largest disc the doors allow around (<paramref name="toX"/>, <paramref name="toZ"/>); +∞ with none in reach.</returns>
     /// <remarks>
     /// <para>
-    /// <b>Possessed bodies had no way through a door at all.</b> Every portal path in this class is reached from
-    /// <c>PlayerThink</c>, which returns at its first test for anything a client is driving (SWG-01: two deciders on one
-    /// entity is the bug that guard exists for). So the scripted crowd walked in and out of buildings while a player could
-    /// stand in the doorway for ever. This is the other half, and it decides from geometry alone -- where the body was and
-    /// where it is -- so it needs no activity, no timer and no server-side intent, and cannot fight the client for the
-    /// entity.
+    /// <b>The disc is what makes this needed, and this is what makes the disc safe.</b> A body whose step stays inside its disc skips the query entirely,
+    /// and the disc used to be measured to walls only — so a body could walk through a door plane while held, never asked, and never enter: the doorway is
+    /// open, and the door stands 0.6 m in front of the facade the disc was measured to. Bounding the disc by the distance to every opening in reach means any
+    /// step that could cross one leaves the disc first, and is tested here.
     /// </para>
     /// <para>
-    /// <b>Both directions, and the realm says which.</b> On a planet a step may cross any door of the city the body stands
-    /// in; in an interior the only door is the one back out. Asking the city rather than the planet is what keeps this a
-    /// handful of plane tests: the dense case is a town of about 170 doors, and a body is in at most one town.
+    /// <b>The same probe the walls are found with</b>, against the <see cref="Portal"/> archetype: the disc lies inside the probe, so any opening that could
+    /// meet the disc has its box in the probe. One radius query over a sparse archetype, on the refresh path only.
     /// </para>
     /// </remarks>
-    private bool TryCrossDoor(EntityId id, ushort realm, float halfExtent, float fromX, float fromZ, float toX, float toZ)
+    private float DoorsAround(RealmId realm, in BSphere2F probe, EntityId client, float half, float fromX, float fromZ, float toX, float toZ)
     {
-        if (!InteriorsActive || AssetShapes == null || (fromX == toX && fromZ == toZ))
+        var clear = float.PositiveInfinity;
+        var crossed = client.IsNull || (fromX == toX && fromZ == toZ);
+        var e = Dbe.ClusterSpatialQuery<Portal>(realm).Radius(in probe);
+        try
         {
-            return false;
-        }
-
-        if (realm < _config.Planets)
-        {
-            var city = CityAt(toX, toZ);
-            if (city < 0)
+            while (e.MoveNext())
             {
-                return false;
-            }
-
-            var (first, count) = _index.CityPortals[city];
-            for (var j = first; j < first + count; j++)
-            {
-                var door = PlanetDoor(realm, j);
-                if (door.HasValue && CrossedDoor(door.Value, fromX, fromZ, toX, toZ))
+                var row = Portals.RowOf(e.Current.Entity);
+                if (row < 0)
                 {
-                    return EnterRoom(id, realm, j, halfExtent);
+                    continue;
                 }
+
+                ref readonly var door = ref Portals.Door[row];
+                if (!crossed && CrossedDoor(PlaneOf(in door), fromX, fromZ, toX, toZ))
+                {
+                    // Nothing else to do, and deliberately no attempt to stop the body: this pass does not own its velocity, a client keeps steering it,
+                    // and the teleport overwrites the position. It cannot queue twice either: the next step starts past the plane and the directed test
+                    // refuses it.
+                    QueueCrossing(client, row, half);
+                    crossed = true;
+                }
+
+                // Held only while the centre cannot reach the opening: DiscHolds keeps the centre within ClearM - half of the anchor. A hair short, since
+                // a step that ends exactly on the plane counts as through.
+                clear = MathF.Min(clear, DistanceToOpening(in door, toX, toZ) + half - 0.01f);
             }
-
-            return false;
         }
-
-        var k = realm - _config.Planets;
-        var planet = (ushort)(k / InteriorsPerPlanet);
-        var portal = k % InteriorsPerPlanet;
-        var back = RoomDoor(planet, portal);
-        if (!back.HasValue || !CrossedDoor(back.Value, fromX, fromZ, toX, toZ))
+        finally
         {
-            return false;
+            e.Dispose();
         }
 
-        var index = PlanetIndexes[planet];
-        var (yaw, asset) = index.PortalFacings[portal];
-        var plan = AssetShapes.DoorFor(asset);
-        var (doorX, doorZ) = index.Portals[portal];
-        var (sin, cos) = QuarterTurn(yaw);
-        var half = (_config.WorldEdgeM * 0.5f) - halfExtent;
-
-        // A step back out along the doorway's outward normal, which is the one direction the facade is not.
-        var outX = doorX - (((plan.ForwardX * cos) - (plan.ForwardZ * sin)) * DoorStepM);
-        var outZ = doorZ - (((plan.ForwardX * sin) + (plan.ForwardZ * cos)) * DoorStepM);
-        _teleports.Enqueue(new TeleportRequest(id, planet, Math.Clamp(outX, -half, half), Math.Clamp(outZ, -half, half), halfExtent, CrossingKind.Exit));
-        return true;
+        return clear;
     }
-
-    /// <summary>Queues a client-driven body into the room behind planet <paramref name="planet"/>'s portal.</summary>
-    /// <param name="id">The body.</param>
-    /// <param name="planet">The planet it is leaving.</param>
-    /// <param name="portal">Which door.</param>
-    /// <param name="halfExtent">Its half-extent.</param>
-    /// <returns>Whether the crossing was queued.</returns>
-    private bool EnterRoom(EntityId id, ushort planet, int portal, float halfExtent)
-    {
-        if ((uint)portal >= (uint)InteriorsPerPlanet)
-        {
-            return false;
-        }
-
-        var realm = (ushort)(_config.Planets + (planet * InteriorsPerPlanet) + portal);
-        var room = AssetShapes.RoomFor(PlanetIndexes[planet].PortalFacings[portal].Asset);
-
-        // The published arrival point when the asset names a room, and the middle of the realm when it does not: a door
-        // whose interior will not read is a publishing fault, and refusing the crossing would strand the body in a wall.
-        var x = room.Exists ? room.EntryX : WorldBuilder.InteriorEdgeM * 0.5f;
-        var z = room.Exists ? room.EntryZ : 6f;
-        _teleports.Enqueue(new TeleportRequest(id, realm, x, z, halfExtent, CrossingKind.Enter));
-        return true;
-    }
-
-    /// <summary>The doorway back out of planet <paramref name="planet"/>'s interior <paramref name="portal"/>, in room coordinates.</summary>
-    /// <param name="planet">The planet that owns it.</param>
-    /// <param name="portal">Which interior.</param>
-    /// <returns>The doorway, or null when the asset publishes no room.</returns>
-    private DoorPlane? RoomDoor(ushort planet, int portal)
-    {
-        if (AssetShapes == null || (uint)portal >= (uint)PlanetIndexes[planet].PortalFacings.Count)
-        {
-            return null;
-        }
-
-        var room = AssetShapes.RoomFor(PlanetIndexes[planet].PortalFacings[portal].Asset);
-
-        // A room is drawn at the identity, so its doorway needs no placement applied. Its forward is the one the
-        // descriptor's own rotation gives, which for every interior in this pack is the opposite of the way in.
-        return room.Exists ? new DoorPlane(room.DoorX, room.DoorZ, room.DoorForwardX, room.DoorForwardZ, room.DoorHalfX) : null;
-    }
-
-    /// <summary>Sine and cosine of a placement quarter turn; see <see cref="WorldIndex.QuarterTurn"/> for why it is not the obvious table.</summary>
-    /// <param name="quarters">The quarter turns, 0 to 3.</param>
-    /// <returns>The pair.</returns>
-    private static (float Sin, float Cos) QuarterTurn(byte quarters) => WorldIndex.QuarterTurn(quarters);
 
     /// <summary>
     /// Apply last tick's crossings: one side transaction with the Commit discipline, so the crossings are committed — atomically, each in one realm or the
@@ -401,6 +491,9 @@ public sealed partial class SimBridge
     /// </remarks>
     public void TeleportTick(TickContext ctx)
     {
+        // Last tick's landings have been placed by the fence since; see _landedThisTick.
+        _landedThisTick.Clear();
+
         // Stopped by a client (TatooineReplication.SetPaused, a demo control), or past a measured run's last tick (Halted). The simulation does nothing;
         // replication, the session system and the engine's own stages keep running, or no client could ever ask to resume.
         if (Halted(ctx.TickNumber))
@@ -432,11 +525,12 @@ public sealed partial class SimBridge
                 }
 
                 var nb = default(PlayerPlacement);
-                // The DESTINATION realm decides the altitude: a crossing into a building lands on its flat floor, and one
-                // back out lands on the planet's relief at the door.
-                nb.SetAt(r.X, r.Z, GroundAt(dest, r.X, r.Z), r.HalfExtent);
+                // The DESTINATION realm decides the ground: a room's flat floor, or the planet's relief at the door. A door's landing is a published spawn,
+                // and when that spawn stands on something — the landing at the top of a house's ramp — the feet go there rather than inside it.
+                nb.SetAt(r.X, r.Z, MathF.Max(GroundAt(dest, r.X, r.Z), r.Y), r.HalfExtent);
                 tx.Teleport(r.Id, Player.Bounds, dest, in nb);
                 _appliedCrossings.Add(r);
+                _landedThisTick.Add(r.Id);
                 switch (r.Kind)
                 {
                     case CrossingKind.Enter:
@@ -471,6 +565,11 @@ public sealed partial class SimBridge
 
         _teleportTicks += Stopwatch.GetTimestamp() - start;
         _teleportBatches++;
+        if (_appliedCrossings.Count > 0)
+        {
+            _crossingCommits++;
+        }
+
         _portalEntries += entries;
         _portalExits += exits;
         _interPlanetCrossings += planets;

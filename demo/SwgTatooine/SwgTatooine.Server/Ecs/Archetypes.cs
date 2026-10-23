@@ -39,6 +39,23 @@ public partial class WorldObject : Archetype<WorldObject>
 }
 
 /// <summary>
+/// One side of a door (Realms G1b): a building's front door on its planet, and its room's way out in the interior. Two per enterable building, linked
+/// to each other and to the structure each belongs to — see <see cref="PortalDoor"/>.
+/// </summary>
+/// <remarks>
+/// <b>Not replicated.</b> Nothing a client does needs the door as an entity: it draws the door from the building's asset, and the crossing is the server's.
+/// Static like the scenery, and told so (<c>SetSpatialBarrierOnly</c>).
+/// </remarks>
+[Archetype(1, "Portals", ClusterDurability = ClusterDurability.Checkpoint)]
+public partial class Portal : Archetype<Portal>
+{
+    [Position]
+    public static readonly Comp<PortalPlacement> Bounds = Register<PortalPlacement>();
+    public static readonly Comp<PortalDoor> Door = Register<PortalDoor>();
+    public static readonly Comp<PortalRealm> Realm = Register<PortalRealm>();
+}
+
+/// <summary>
 /// One entity per city, carrying that city's group key and its disc. Not replicated: it exists so the engine can decide which sessions are in which city.
 /// </summary>
 /// <remarks>

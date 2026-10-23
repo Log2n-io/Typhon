@@ -807,11 +807,12 @@ public struct PlayerState
     /// <summary>Which city this player calls home. Travel legs start and end at cities far more often than at random points.</summary>
     [Field] public int HomeCity;
 
-    /// <summary>The city whose shuttleport this player is walking to or queued at (#910). Meaningful only while taking a shuttle.</summary>
+    /// <summary>The city whose shuttleport this player is walking to or queued at (#910) — or, while <see cref="PlayerActivity.LeavingRoom"/>, the
+    /// waypoint of the room's route it is walking to.</summary>
     [Field] public int ShuttleFrom;
 
-    /// <summary>The city the shuttle takes this player to — or, while <see cref="PlayerActivity.ToPortal"/>, the portal it walks to (reused rather
-    /// than a new field: a wider PlayerState would change every run's layout, interiors or not).</summary>
+    /// <summary>The city the shuttle takes this player to — or, while walking to, through or out of a door, the door's row in the <c>PortalTable</c>
+    /// (reused rather than a new field: a wider PlayerState would change every run's layout, interiors or not).</summary>
     [Field] public int ShuttleDest;
 }
 
@@ -1034,11 +1035,23 @@ public static class PlayerActivity
     /// <summary>Queued at the shuttleport; the Shuttle system boards it while the shuttle is down.</summary>
     public const int AwaitingShuttle = 5;
 
-    /// <summary>Walking to a building's door (Realms G1b). <see cref="PlayerState.ShuttleDest"/> holds the portal, in its city's planet.</summary>
+    /// <summary>
+    /// Walking to where a building's door path starts, on open ground in front of its ramp (Realms G1b). <see cref="PlayerState.ShuttleDest"/> holds the
+    /// door, as a <c>PortalTable</c> row.
+    /// </summary>
     public const int ToPortal = 6;
 
     /// <summary>In a building's interior realm; leaves through the same door when the timer runs out.</summary>
     public const int Inside = 7;
+
+    /// <summary>Walking the door path through the door: the crossing fires on the step over its plane, the same test a client's body takes.</summary>
+    public const int EnteringDoor = 8;
+
+    /// <summary>
+    /// Walking out of a room: through its navigation to the way out, then through it. <see cref="PlayerState.ShuttleDest"/> holds the way out's row and
+    /// <see cref="PlayerState.ShuttleFrom"/> the waypoint reached.
+    /// </summary>
+    public const int LeavingRoom = 9;
 }
 
 /// <summary>A creature lair: the object that spawns and owns a population, and what a destroy mission sends a player to break.</summary>
@@ -1121,28 +1134,25 @@ public struct Structure
     [Field, OnEnter(CodecKind.U8, Name = "asset", Saturate = true)] public int Asset;
 
     /// <summary>
-    /// This building's slot in the planet's door list — the index that decides which interior realm it leads to — or -1 when the building is not enterable.
+    /// The realm behind this building's door — its room — or 0 when the building cannot be entered.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Enterability was a property of the loop counter and of nothing else</b> (P-2): <c>WorldBuilder.IsEnterable(i)</c> over the building's index within
-    /// its city, with the result kept only in a <c>List</c> the generator built. So the door list — and with it the mapping "portal <c>j</c> of planet
-    /// <c>p</c> is realm <c>Planets + p·N + j</c>" — existed only in the process that generated the world, and a reopened world could not reconstruct it at
-    /// all. Nothing on the entity distinguished an enterable building from any other.
+    /// <b>The link, stored, rather than an index the realm id was computed from.</b> This was the building's slot in its planet's door list, and the
+    /// interior was <c>Planets + p·N + slot</c> wherever anyone needed it: the server's crossing code, the rebuild, the client's inspector. Now the world
+    /// build assigns the realm once and writes it here, and everything else reads it. The way back is data too: the room's <c>Portal</c> names its twin,
+    /// and the twin names this building as its owner.
     /// </para>
     /// <para>
-    /// Storing the slot rather than a boolean is what makes the rebuild need no ordering convention: a spatial query returns clusters in whatever order the
-    /// index holds them, and sorting by position to recover the build's order would be a second rule to keep in step with the first.
+    /// <b>0 is "none", and it cannot be a room</b>: realm 0 is planet 0. It costs no memory — five ints plus this one is 24 bytes, which is what the struct
+    /// already occupied.
     /// </para>
-    /// <para>It costs no memory: five ints plus this one is 24 bytes, which is what the struct already occupied.</para>
     /// <para>
-    /// <b>Replicated on enter</b> so a viewer can walk into the building it picked. A client cannot derive this: the door
-    /// list is built from <c>IsEnterable(i)</c> over a building's index within its city, which is nowhere in what a
-    /// client is sent — so without this the only way to reach an interior is to type its number. Sent once with the
-    /// entity, like <c>kind</c> and <c>region</c>: a building's door never moves.
+    /// <b>Replicated on enter</b> so a viewer can walk into the building it picked without knowing the realm layout. Sent once with the entity, like
+    /// <c>kind</c> and <c>region</c>: a building's room never changes.
     /// </para>
     /// </remarks>
-    [Field, OnEnter(CodecKind.I16, Name = "portal", Saturate = true)] public int PortalIndex;
+    [Field, OnEnter(CodecKind.U16, Name = "interior", Saturate = true)] public int InteriorRealm;
 
     /// <summary>
     /// Ticks between updates. A building is 0 and never ticks. SWG's own arithmetic sets the others: manufacturing is
@@ -1169,6 +1179,95 @@ public static class StructureKind
     public const int Factory = 5;
     public const int Harvester = 6;
     public const int CampObject = 7;
+
+    /// <summary>
+    /// A building's room: the one structure of an interior realm, at that realm's origin (Realms G1b). Its walls are what a body inside collides with and
+    /// what a client draws, and its <c>Portal</c> is the way back out.
+    /// </summary>
+    public const int Interior = 8;
+}
+
+/// <summary>Where one side of a door stands: the published door box, turned and placed. Never moves.</summary>
+/// <remarks>
+/// Spatial so the collision pass finds the doors near a body with the same kind of radius query it finds the walls with, in the body's own realm. The box
+/// contains the door's mid-plane over the opening's width, so any step that crosses the plane ends near the box.
+/// </remarks>
+[Component("Swg.PortalPlacement", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct PortalPlacement
+{
+    [Field]
+    [SpatialIndex(1.0f)]
+    public AABB2F Bounds;
+}
+
+/// <summary>Which realm a door side is in (Realms G1): a planet for a building's front door, the interior for the room's way out.</summary>
+[Component("Swg.PortalRealm", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct PortalRealm
+{
+    [Field]
+    [RealmKey]
+    public ushort Value;
+
+    public PortalRealm(ushort value) => Value = value;
+}
+
+/// <summary>
+/// One side of a door: the plane a body crosses, where it lands on the other side, and the two links that make a building and its room one thing.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Everything here is in the realm's own frame and already placed</b> — mirrored from the descriptor, turned by the building's quarter turn and moved
+/// to where it stands — so the crossing test is a dot product and the landing a copy. The published asset is read once, when the world is built, and a
+/// reopened world needs no asset to know where its doors are.
+/// </para>
+/// <para>
+/// <b>Two links, both stored.</b> <see cref="Twin"/> is the other side of the same door, in the other realm; <see cref="Owner"/> the structure this side
+/// belongs to — the building on the planet, the room inside. So "which building is this room in" is a room's portal, its twin, the twin's owner, with no
+/// arithmetic on realm ids anywhere.
+/// </para>
+/// </remarks>
+[Component("Swg.PortalDoor", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct PortalDoor
+{
+    /// <summary>Where the mid-plane crosses the floor at the middle of the opening, east.</summary>
+    [Field] public float CenterX;
+
+    /// <summary>The same point, north.</summary>
+    [Field] public float CenterZ;
+
+    /// <summary>The unit direction a body crosses this side in, east component: into the building on the planet, out of the room inside.</summary>
+    [Field] public float ForwardX;
+
+    /// <summary>The same direction, north component.</summary>
+    [Field] public float ForwardZ;
+
+    /// <summary>Half the opening's width: a crossing further off its middle than this went through the wall beside it.</summary>
+    [Field] public float HalfWidth;
+
+    /// <summary>Where a body that crosses lands, in <see cref="TargetRealm"/>'s frame: the published spawn on the far side.</summary>
+    [Field] public float ArriveX;
+
+    /// <summary>The same point, north.</summary>
+    [Field] public float ArriveZ;
+
+    /// <summary>
+    /// The feet's height there: the published spawn's, placed with its structure. A crossing lands at this or the terrain, whichever is higher — the
+    /// house's front spawn is on the landing at the top of its ramp, 0.7 m above the house's origin, and a body put on the terrain under it stood inside
+    /// the landing and was pushed out of it.
+    /// </summary>
+    [Field] public float ArriveY;
+
+    /// <summary>The realm on the far side.</summary>
+    [Field] public int TargetRealm;
+
+    /// <summary>The other side of this door.</summary>
+    [Field] public EntityLink<Portal> Twin;
+
+    /// <summary>The structure this side belongs to: the building, or its room.</summary>
+    [Field] public EntityLink<WorldObject> Owner;
 }
 
 /// <summary>

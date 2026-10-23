@@ -1,6 +1,11 @@
 import { DirectionalLight } from '@babylonjs/core/Lights/directionalLight';
+import type { Light } from '@babylonjs/core/Lights/light';
+import { PointLight } from '@babylonjs/core/Lights/pointLight';
+import { SpotLight } from '@babylonjs/core/Lights/spotLight';
 import { ShadowGenerator } from '@babylonjs/core/Lights/Shadows/shadowGenerator';
 import '@babylonjs/core/Lights/Shadows/shadowGeneratorSceneComponent';
+import { ImageProcessingConfiguration } from '@babylonjs/core/Materials/imageProcessingConfiguration';
+import type { Material } from '@babylonjs/core/Materials/material';
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial';
 import { CubeTexture } from '@babylonjs/core/Materials/Textures/cubeTexture';
 import { Color3 } from '@babylonjs/core/Maths/math.color';
@@ -48,11 +53,11 @@ function isCaster(mesh: AbstractMesh): boolean {
  * invisible and the geometry reads flat. The same probe is the terrain's whole ambient: see
  * {@link createTerrainMaterial} for why the 0.66 constant that stood in for it is gone.
  *
- * <b>Deliberately not touching tone mapping.</b> The asset pipeline asks for Khronos PBR Neutral tone mapping, and it is
- * right to for interiors: lamps and emissive panels clip to flat white without it. But image processing is a property of
- * the whole scene, so turning it on changes the colour of the terrain, the entity bands and the heatmap — every pixel
- * this client already draws — in a change whose subject is one building. It belongs with the interior lighting profiles,
- * where there is something to judge it against.
+ * <b>Tone mapping indoors only.</b> The asset pipeline asks for Khronos PBR Neutral tone mapping, and it is right to for
+ * interiors: lamps and emissive panels clip to flat white without it. Image processing is a property of the whole scene,
+ * though, and on the planet it would change the colour of the terrain, the entity bands and the heatmap — every pixel
+ * this client already draws. Only one realm is ever on screen, so {@link setIndoors} turns it on with the room profile
+ * and off again with the planet's: the testbench keeps it on for both, the one deviation from its lighting.
  *
  * @see {@link ASSET_AO_ON_DIRECT} for what carries the AO in the meantime.
  */
@@ -65,6 +70,19 @@ function isCaster(mesh: AbstractMesh): boolean {
  * suggests 0.3–0.5; this is the middle of it.
  */
 export const ASSET_AO_ON_DIRECT = 0.4;
+
+/** How much of the sky reaches inside a room: the testbench's interior profile. */
+const INDOOR_ENVIRONMENT = 0.15;
+
+/** A lamp's cube shadow map, per face: the testbench's. */
+const LAMP_SHADOW_MAP_SIZE = 1024;
+
+/**
+ * A lamp's shadow depth range, metres: the testbench's 0.05 to 40. Babylon's default follows the camera (0.05 to 10 000
+ * here), which leaves no depth precision at the scale of a room.
+ */
+const LAMP_SHADOW_NEAR_M = 0.05;
+const LAMP_SHADOW_FAR_M = 40;
 
 /** Where the prefiltered environment lives, inside the vendored decoder folder. */
 const ENVIRONMENT = 'environmentSpecular.env';
@@ -142,6 +160,25 @@ export class SceneLighting {
     this.sky.copyFrom(sky);
     this.bounce.copyFrom(bounce);
     this.applySky();
+  }
+
+  /**
+   * Lights a room or the open sky: the testbench's two profiles (`render/lighting.ts`). Indoors there is no sun and only
+   * a dim sky (0.15) — what lights a room is its own lamps, which come with its asset.
+   *
+   * <b>The sun is dimmed to nothing, not disabled.</b> Enabling or disabling a light changes the light count the
+   * materials compiled against, and the placed assets' materials are never recompiled (see {@link setShadows}): the
+   * same failure as disposing the shadow generator. An intensity is a uniform.
+   *
+   * @param indoors Whether the scene is a room.
+   */
+  setIndoors(indoors: boolean): void {
+    this.sun.intensity = indoors ? 0 : SUN_INTENSITY;
+    this.scene.environmentIntensity = indoors ? INDOOR_ENVIRONMENT : 1;
+    // A define, so every material recompiles once — on a crossing, under the curtain, which is when it changes.
+    const processing = this.scene.imageProcessingConfiguration;
+    processing.toneMappingType = ImageProcessingConfiguration.TONEMAPPING_KHR_PBR_NEUTRAL;
+    processing.toneMappingEnabled = indoors;
   }
 
   /** Builds the harmonics from {@link sky} and {@link bounce}. Called on a palette change and on the probe's load. */
@@ -237,8 +274,14 @@ export class SceneLighting {
       // range went to 1 280: the list went from about 50 casters to 377. Measured either way the frame holds 60 fps
       // — 6.51 ms against 6.06 ms mean, arms overlapping — so this is not a rescue, it is declining to render a
       // kilometre of geometry into a map that cannot show it.
+      // A room has no sun (`setIndoors`): nothing is drawn into its map rather than a map for a light of no intensity.
       map.renderListPredicate = (mesh) =>
-        this.casting && mesh.isEnabled() && mesh.isVisible && isCaster(mesh) && this.withinSlab(mesh);
+        this.casting &&
+        this.sun.intensity > 0 &&
+        mesh.isEnabled() &&
+        mesh.isVisible &&
+        isCaster(mesh) &&
+        this.withinSlab(mesh);
       map.renderList = [];
     }
 
@@ -298,6 +341,75 @@ export class SceneLighting {
   castShadows(meshes: readonly AbstractMesh[]): void {
     for (const mesh of meshes) {
       mesh.metadata = { ...(mesh.metadata as object | null), [CASTS_SUN]: true };
+    }
+  }
+
+  /**
+   * Gives a room's lamps their shadows: a cube map each, the testbench's (`render/lighting.ts`, `add`).
+   *
+   * <b>Casters are read from the scene, like the sun's</b> — every marked mesh within the lamp's reach — so the bodies
+   * walking in the room cast as well as its walls and furniture, and nothing has to be told when one leaves.
+   *
+   * <b>Double-sided in the shadow pass only.</b> A room's shell is one-sided, seen from inside: a wall's back face is
+   * what a lamp in the next room sees, and culled it would let that lamp through. The materials are flipped for the
+   * map's render and put back after it.
+   *
+   * <b>Nothing undoes this.</b> A generator belongs to its light and `Light.dispose` disposes it, so it goes when the
+   * room's instance does. The room's own meshes are clones in the scene (`AssetLibrary.instantiate`), which is what lets
+   * their materials take the new shadow defines at all — see {@link setShadows} for what happens to an instance's.
+   *
+   * @param lights The room's lamps.
+   * @param meshes The room's meshes, to receive.
+   */
+  lampShadows(lights: readonly Light[], meshes: readonly AbstractMesh[]): void {
+    for (const mesh of meshes) {
+      mesh.receiveShadows = true;
+    }
+
+    for (const light of lights) {
+      if (!(light instanceof PointLight) && !(light instanceof SpotLight)) {
+        continue;
+      }
+
+      light.shadowMinZ = LAMP_SHADOW_NEAR_M;
+      light.shadowMaxZ = LAMP_SHADOW_FAR_M;
+      const generator = new ShadowGenerator(LAMP_SHADOW_MAP_SIZE, light);
+      generator.usePoissonSampling = true;
+      generator.bias = 0.0005;
+      generator.normalBias = 0.02;
+      const map = generator.getShadowMap();
+      if (map === null) {
+        continue;
+      }
+
+      map.renderListPredicate = (mesh) => {
+        if (!this.casting || !mesh.isEnabled() || !mesh.isVisible || !isCaster(mesh)) {
+          return false;
+        }
+
+        // Read per mesh, not once: the render origin moves under a room as it does under a street.
+        const origin = light.getAbsolutePosition();
+        const sphere = mesh.getBoundingInfo().boundingSphere;
+        return sphere.centerWorld.subtract(origin).length() - sphere.radiusWorld <= LAMP_SHADOW_FAR_M;
+      };
+      map.renderList = [];
+      const culled = new Map<Material, boolean>();
+      map.onBeforeRenderObservable.add(() => {
+        for (const mesh of map.renderList ?? []) {
+          const material = mesh.material;
+          if (material !== null && !culled.has(material)) {
+            culled.set(material, material.backFaceCulling);
+            material.backFaceCulling = false;
+          }
+        }
+      });
+      map.onAfterRenderObservable.add(() => {
+        for (const [material, was] of culled) {
+          material.backFaceCulling = was;
+        }
+
+        culled.clear();
+      });
     }
   }
 

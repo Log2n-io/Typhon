@@ -38,7 +38,24 @@ internal static class Persisted
 
     /// <summary>A copy of the index lists a rebuild has to reproduce.</summary>
     public static (List<(float X, float Z)> Ports, List<(float X, float Z)> Doors) Geometry(TatooineSim sim) =>
-        (new List<(float, float)>(sim.Index.Shuttleports), new List<(float, float)>(sim.Index.Portals));
+        (new List<(float, float)>(sim.Index.Shuttleports), Doors(sim));
+
+    /// <summary>Planet 0's front doors, where their planes are, in the order of the rooms they lead to.</summary>
+    public static List<(float X, float Z)> Doors(TatooineSim sim)
+    {
+        var doors = new List<(int Room, float X, float Z)>();
+        for (var row = 0; row < sim.Portals.Count; row++)
+        {
+            if (sim.Portals.Realm[row] == 0)
+            {
+                ref readonly var d = ref sim.Portals.Door[row];
+                doors.Add((d.TargetRealm, d.CenterX, d.CenterZ));
+            }
+        }
+
+        doors.Sort((a, b) => a.Room.CompareTo(b.Room));
+        return doors.ConvertAll(d => (d.X, d.Z));
+    }
 
     /// <summary>
     /// The largest distance between two coordinate lists, or <see cref="float.MaxValue"/> when they are not the same length.
@@ -301,8 +318,10 @@ public sealed class WorldIndexRebuildTests
             Assert.That(sim.Reopened, Is.True);
             Assert.That(Persisted.MaxDistance(sim.Index.Shuttleports, _geometry.Ports), Is.LessThan(Persisted.CoordinateTolerance),
                 "the shuttleports moved when the seed changed, so they were re-derived from the generator rather than read from the entities");
-            Assert.That(Persisted.MaxDistance(sim.Index.Portals, _geometry.Doors), Is.LessThan(Persisted.CoordinateTolerance),
-                $"the doors moved when the seed changed (built {_geometry.Doors.Count}, rebuilt {sim.Index.Portals.Count})");
+            var doors = Persisted.Doors(sim);
+            Assert.That(doors, Is.Not.Empty, "precondition: the world has doors");
+            Assert.That(Persisted.MaxDistance(doors, _geometry.Doors), Is.LessThan(Persisted.CoordinateTolerance),
+                $"the doors moved when the seed changed (built {_geometry.Doors.Count}, reopened {doors.Count})");
         });
     }
     [Category("Integration")]

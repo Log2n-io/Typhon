@@ -265,7 +265,7 @@ public sealed class RealmCensusChecks
         var player = sim.Index.Players[0];
         var before = AwaitCensus(sim, harness, sim.Runtime.CurrentTickNumber).Of(interior).Players;
 
-        Worlds.Teleport(sim, player, interior, Worlds.At(32.5f, 6.5f));
+        Worlds.Teleport(sim, player, interior, Worlds.At(0f, 1f));
 
         var inside = AwaitCensus(sim, harness, sim.Runtime.CurrentTickNumber);
         Assert.That(inside.Of(interior).Players, Is.EqualTo(before + 1), "the crossing was not counted in the interior");

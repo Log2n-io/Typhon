@@ -132,6 +132,10 @@ export const PLAYER_ACTIVITY_NAMES: readonly string[] = [
   'Roaming',
   'To shuttle',
   'Awaiting shuttle',
+  'To a door',
+  'Inside',
+  'Through a door',
+  'Leaving a room',
 ];
 export const PlayerActivity = {
   Idle: 0,
@@ -142,9 +146,9 @@ export const PlayerActivity = {
   AwaitingShuttle: 5,
 
   /**
-   * Walking to a building's door, with the portal in `ShuttleDest` (Realms G1b).
+   * Walking to where a building's door path starts, in front of its ramp (Realms G1b).
    *
-   * These two were missing while the server had them, which is a quiet way to be wrong: `activity` is a `u8` the
+   * These were missing while the server had them, which is a quiet way to be wrong: `activity` is a `u8` the
    * renderer and the inspector both read, so a body in either state was shown under whatever name the lookup fell
    * through to rather than as unknown.
    */
@@ -152,6 +156,12 @@ export const PlayerActivity = {
 
   /** Inside a building, a dungeon or any other interior realm. */
   Inside: 7,
+
+  /** Walking the door path, through the door. */
+  EnteringDoor: 8,
+
+  /** Walking out of a room through its navigation, then through its way out. */
+  LeavingRoom: 9,
 } as const;
 
 export const CONTROLLER_NAMES: readonly string[] = ['Simulated', 'Bot', 'Human'];
@@ -165,6 +175,7 @@ export const STRUCTURE_KIND_NAMES: readonly string[] = [
   'Factory',
   'Harvester',
   'Camp object',
+  'Room',
 ];
 export const StructureKind = {
   Building: 0,
@@ -175,4 +186,7 @@ export const StructureKind = {
   Factory: 5,
   Harvester: 6,
   CampObject: 7,
+
+  /** A building's room: the one structure of an interior realm, at its origin, drawn from its asset like any building. */
+  Interior: 8,
 } as const;

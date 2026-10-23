@@ -31,6 +31,15 @@ export interface SpectateRequest {
   readonly seq: number;
 }
 
+/**
+ * A pending walk through a door: into the building `netId`, out of the room the body is in (0), or stop walking (-1).
+ * Sequenced so the same ask twice is two asks.
+ */
+export interface DoorWalkRequest {
+  readonly netId: number;
+  readonly seq: number;
+}
+
 /** A pending ask to be flown to a city. */
 export interface BoardRequest {
   /** The destination city's index in the client's own map data. */
@@ -164,6 +173,8 @@ export interface UiState {
   readonly spectateRequest: SpectateRequest | null;
   /** A pending ask to be flown somewhere, or `null`. */
   readonly boardRequest: BoardRequest | null;
+  /** A pending walk through a door, or `null`. */
+  readonly doorWalkRequest: DoorWalkRequest | null;
   /**
    * The shuttleport the avatar is standing at, or `null` when it is not at one.
    *
@@ -213,6 +224,8 @@ export interface UiState {
   readonly setPlaying: (playing: boolean) => void;
   /** Asks the server to fly the avatar to a city; refused unless it is standing at a port. */
   readonly boardShuttle: (city: number) => void;
+  /** Walks the body into building `netId`, out of its room (0), or stops (-1). */
+  readonly walkDoor: (netId: number) => void;
   /** Publishes the port the avatar is standing at, or `null`. Called by the frame loop on change only. */
   readonly setShuttleport: (shuttleport: ShuttleportPrompt | null) => void;
 
@@ -274,6 +287,7 @@ export const useUi = create<UiState>()((set, get) => ({
   realmRequest: null,
   spectateRequest: null,
   boardRequest: null,
+  doorWalkRequest: null,
   shuttleport: null,
   travel: NOT_TRAVELLING,
   shuttleRefusal: null,
@@ -432,6 +446,9 @@ export const useUi = create<UiState>()((set, get) => ({
     // A sequence for the reason every other request carries one: the server may refuse, so asking for the same city
     // twice has to send twice, and without it the second ask would be indistinguishable from no ask at all.
     set((s) => ({ boardRequest: { city, seq: (s.boardRequest?.seq ?? 0) + 1 } }));
+  },
+  walkDoor: (netId) => {
+    set((s) => ({ doorWalkRequest: { netId, seq: (s.doorWalkRequest?.seq ?? 0) + 1 } }));
   },
   setShuttleport: (shuttleport) => {
     set({ shuttleport });

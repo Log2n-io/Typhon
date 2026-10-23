@@ -252,6 +252,19 @@ describe('the profiles, on a NullEngine', () => {
     expect(planet.ground).toBe(field);
   });
 
+  it("draws no box in a building's room, which the structure layer draws from its asset, and keeps it for a dungeon", () => {
+    const s = scene();
+    const room = new InteriorProfile(s, 64, 'interior');
+    const dungeon = new InteriorProfile(s, 64, 'dungeon');
+    const boxes = s.meshes.filter((m) => m.name === 'interior');
+    expect(boxes).toHaveLength(2);
+
+    room.enter(INTERIOR);
+    dungeon.enter(INTERIOR);
+    expect(boxes.map((m) => m.isEnabled())).toEqual([false, true]);
+    expect([room.kind, dungeon.kind]).toEqual(['interior', 'dungeon']);
+  });
+
   it('takes its bounds from the realm it was entered with, not from the one it was built at', () => {
     const room = new InteriorProfile(scene(), 64);
     room.enter(INTERIOR);

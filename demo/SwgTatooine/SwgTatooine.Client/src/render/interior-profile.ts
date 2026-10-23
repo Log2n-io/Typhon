@@ -18,20 +18,20 @@ const WALL = new Color3(0.3, 0.26, 0.23);
 const INTERIOR_SKY = new Color3(0.16, 0.14, 0.13);
 
 /**
- * A room: the inside of a box, sized from the realm's own bounds, with a floor grid at its replication cell.
+ * An indoor scene: no terrain, a dim sky, and — for a dungeon only — the inside of a generic box sized from the realm's
+ * own bounds, with a floor grid at its replication cell.
  *
- * <b>A GENERIC room, and that is the honest scope.</b> The server has no room data — every interior realm is the same
- * 64 m square (`WorldBuilder.InteriorEdgeM`, one constant for every building), its occupants are scattered by
- * `PointInDisc(32, 32, 16)` at altitude 0, and there are no walls, doors or per-building shapes anywhere in the
- * simulation. Drawing something that looked like a particular cantina would be inventing data the server does not have.
- * Real interiors are a server-side feature — room geometry per portal — and not a renderer one.
+ * <b>A building's room draws itself.</b> The server stores each room as a structure of its interior realm, at the realm's
+ * origin, with its published asset (`StructureKind.Interior`), and it reaches this client like any building: the
+ * structure layer places its asset, the walls the body collides with are the ones drawn. So for an interior this
+ * profile draws nothing of its own. A dungeon has no room data, and keeps the box rather than show a void.
  *
  * What this profile is really for is that the planet must stop being drawn. Measured live before it existed: a camera
  * dropped to an interior's centre put the terrain quadtree at **2 281 472 triangles over 1 114 nodes**, against 198 656
  * over 97 from orbit, because the LOD was subdividing at eye level over ground nobody should have been looking at.
  */
 export class InteriorProfile implements SceneProfile {
-  readonly kind: SceneKind = 'interior';
+  readonly kind: SceneKind;
   readonly ground: GroundSampler = FLAT_GROUND;
   readonly sky = INTERIOR_SKY;
   readonly stats = NO_TERRAIN;
@@ -40,9 +40,18 @@ export class InteriorProfile implements SceneProfile {
   private readonly material: ShaderMaterial;
   /** The edge the geometry was built at; every {@link enter} scales the realm's own edge against it. */
   private readonly builtEdgeM: number;
+  /** Whether the generic box is drawn: a dungeon's scene, which has no room of its own. */
+  private readonly drawsBox: boolean;
   private current: CameraBounds;
 
-  constructor(scene: Scene, edgeM: number) {
+  /**
+   * @param scene The scene.
+   * @param edgeM The nominal edge the box is built at.
+   * @param kind `'interior'` for a building's room, which the structure layer draws, or `'dungeon'`, which gets the box.
+   */
+  constructor(scene: Scene, edgeM: number, kind: SceneKind = 'interior') {
+    this.kind = kind;
+    this.drawsBox = kind === 'dungeon';
     // Built at a nominal size and SCALED per realm rather than rebuilt: every interior in this world is the same box,
     // and a realm that is not would still only need a scale. Rebuilding geometry on every door would be the one
     // allocation on the switch path.
@@ -79,7 +88,7 @@ export class InteriorProfile implements SceneProfile {
   }
 
   enter(view: RealmView): void {
-    // The room is placed and scaled from the realm's bounds, which for an interior start at the ORIGIN rather than
+    // The box is placed and scaled from the realm's bounds, which for a dungeon start at the ORIGIN rather than
     // straddling it. A profile that assumed a centred world would put the box on one corner of itself.
     const width = view.maxX - view.minX;
     const depth = view.maxZ - view.minZ;
@@ -89,7 +98,7 @@ export class InteriorProfile implements SceneProfile {
     this.mesh.scaling.set(width / this.builtEdgeM, 1, depth / this.builtEdgeM);
     this.material.setFloat('uCellM', view.cellM > 0 ? view.cellM : 64);
     this.current = cameraBoundsFor(view);
-    this.mesh.setEnabled(true);
+    this.mesh.setEnabled(this.drawsBox);
   }
 
   leave(): void {

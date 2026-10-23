@@ -99,6 +99,8 @@ public static class StructureFootprint
         StructureKind.Factory => 11f,        // 22 x 22
         StructureKind.Harvester => 3f,       // 6 x 6
         StructureKind.CampObject => 2f,      // 4 x 4
+        // 20 x 20, around a room drawn at its realm's origin: the large interior reaches 9.84 m from it (8.2 m the other way), the small 5.6.
+        StructureKind.Interior => 10f,
         _ => 9f,
     };
 }

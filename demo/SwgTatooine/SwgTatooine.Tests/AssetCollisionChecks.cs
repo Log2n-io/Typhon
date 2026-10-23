@@ -460,6 +460,13 @@ public sealed class AssetCollisionChecks
 
         for (var index = 0; index < seen.Length; index++)
         {
+            // A room is never picked by kind: it is the asset its building's door names, and it stands in a realm of its own.
+            if (StructureAssets.KindOf[index] == StructureKind.Interior)
+            {
+                Assert.That(seen[index], Is.False, $"{StructureAssets.Table[index]} is a room and was picked by a kind");
+                continue;
+            }
+
             Assert.That(seen[index], Is.True, $"no kind ever picks {StructureAssets.Table[index]}, so its KindOf entry is unchecked");
         }
     }

@@ -238,7 +238,8 @@ public sealed class RoundColliderChecks
     {
         static string Portal(string forward) => """
             {"schema":1,"portals":[{"id":"front","center":[1.5,2.2,5.45],"rot":[0,0,0,1],"half":[0.95,1.5,0.4],
-              "forward":"AXIS","target":"room","target_spawn":"entry"}]}
+              "forward":"AXIS","target":"room","target_spawn":"entry","exit_spawn":"front"}],
+             "spawns":[{"id":"front","pos":[1.5,0.7,6.3],"rot":[0,0,0,1],"forward":"-Z"}]}
             """.Replace("AXIS", forward, System.StringComparison.Ordinal);
 
         Assert.Multiple(() =>

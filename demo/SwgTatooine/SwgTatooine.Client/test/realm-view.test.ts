@@ -3,7 +3,7 @@ import { RealmFrame } from '@typhondb/client';
 import {
   crossingKindOf,
   decodeAppTag,
-  interiorRealmOf,
+  doorRealmOf,
   realmViewOf,
   sameRealm,
   type RealmView,
@@ -119,35 +119,25 @@ describe('realmViewOf', () => {
   });
 });
 
-describe('interiorRealmOf', () => {
-  const LAYOUT = { first: 3, perPlanet: 617 };
+describe('doorRealmOf', () => {
   const planet1 = realmViewOf(planetFrame(TAG_PLANET_1, 1))!;
 
-  it('applies the layout the server published to the door slot the building carries', () => {
-    // Neither half is derivable on the client: `portal` comes from `IsEnterable(i)` over a building's index within its
-    // city, which is on no wire, and the layout comes from `/typhon/demo.json`.
-    expect(interiorRealmOf(planet1, 4, LAYOUT)).toBe(3 + 617 + 4);
-    expect(interiorRealmOf(realmViewOf(planetFrame(TAG_PLANET_0, 0)), 0, LAYOUT)).toBe(3);
+  it('is the room the building carries, as the server stored it', () => {
+    // Nothing is computed: the realm is the building's own `interior` field, whatever planet it stands on.
+    expect(doorRealmOf(planet1, 624)).toBe(624);
+    expect(doorRealmOf(realmViewOf(planetFrame(TAG_PLANET_0, 0)), 3)).toBe(3);
   });
 
-  it('is null for a building with no door', () => {
-    // -1 is what a building that cannot be entered carries, and it must not become realm `first - 1`.
-    expect(interiorRealmOf(planet1, -1, LAYOUT)).toBeNull();
-  });
-
-  it("is null for a slot outside the planet's door list", () => {
-    expect(interiorRealmOf(planet1, 617, LAYOUT)).toBeNull();
-    expect(interiorRealmOf(planet1, 1.5, LAYOUT)).toBeNull();
+  it('is null for a building with no room', () => {
+    // 0 is what a building that cannot be entered carries; realm 0 is a planet, never a room.
+    expect(doorRealmOf(planet1, 0)).toBeNull();
+    expect(doorRealmOf(planet1, 1.5)).toBeNull();
   });
 
   it('is null anywhere that is not a planet, because only a planet has doors', () => {
-    expect(interiorRealmOf(realmViewOf(interiorFrame()), 0, LAYOUT)).toBeNull();
-    expect(interiorRealmOf(realmViewOf(spaceFrame()), 0, LAYOUT)).toBeNull();
-    expect(interiorRealmOf(null, 0, LAYOUT)).toBeNull();
-  });
-
-  it('is null without a layout, rather than guessing one', () => {
-    expect(interiorRealmOf(planet1, 4, null)).toBeNull();
+    expect(doorRealmOf(realmViewOf(interiorFrame()), 624)).toBeNull();
+    expect(doorRealmOf(realmViewOf(spaceFrame()), 624)).toBeNull();
+    expect(doorRealmOf(null, 624)).toBeNull();
   });
 });
 

@@ -117,7 +117,7 @@ internal sealed class OverviewChecks : ServedChecks
         // Ended by the server: in the god camera, then through a door.
         player.AskOverview(true);
         Until(() => TatooineReplication.OverviewAsks.Live == 1, "the god camera");
-        Worlds.Teleport(sim, avatar, interior, Worlds.At(32.5f, 6.5f));
+        Worlds.Teleport(sim, avatar, interior, Worlds.At(0f, 1f));
         Until(() => player.Drain().RealmId == interior && TatooineReplication.OverviewAsks.Live == 0, "the overview to end inside the building");
 
         // Refused: asked for indoors.

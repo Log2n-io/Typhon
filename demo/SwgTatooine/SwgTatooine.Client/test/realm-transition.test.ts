@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { advance, arrived, askedFor, IDLE, opacityAt, refused } from '../src/app/realm-transition';
+import { advance, arrived, askedFor, blackout, IDLE, opacityAt, refused } from '../src/app/realm-transition';
 
 describe('a crossing the viewer asked for', () => {
   it('fades out from the ask, because that is the only moment there is still a world to fade out of', () => {
@@ -60,21 +60,30 @@ describe('a crossing the viewer asked for', () => {
 });
 
 describe('a crossing the world imposed', () => {
-  it('fades IN only, because the store was already empty when the client heard about it', () => {
-    // A door is server-initiated: `onRealmChanged` fires after the RESET, so there is nothing left to fade out of, and
-    // faking one would mean delaying the frame's apply — which SUB-29 forbids.
-    expect(askedFor(IDLE, 'transition', 1000)).toBe(IDLE);
+  it("fades out on the body's own step through the door, holds over the switch, and fades in after it", () => {
+    // The door is the server's, but the client predicts its own body's step through the plane (`door-crossing.ts`),
+    // so it can start the fade before the RESET lands — the testbench's look, 0.25 s out and 0.35 s in.
+    const out = askedFor(IDLE, 'transition', 1000);
+    expect(out.phase).toBe('out');
+    expect(opacityAt(out, 1125)).toBeCloseTo(0.5, 9);
+    const held = advance(out, 1250);
+    expect(held.phase).toBe('hold');
 
-    const back = arrived(IDLE, 'transition', 1000);
+    const back = arrived(held, 'transition', 1400);
     expect(back.phase).toBe('in');
-    expect(opacityAt(back, 1000)).toBe(1);
-    expect(opacityAt(back, 1120)).toBe(0);
+    expect(opacityAt(back, 1400)).toBe(1);
+    expect(opacityAt(back, 1750)).toBe(0);
   });
 
-  it('is quicker than a journey, because stepping through a doorway is not travel', () => {
-    const door = arrived(IDLE, 'transition', 0);
-    const journey = arrived(IDLE, 'travel', 0);
-    expect(door.durationMs).toBeLessThan(journey.durationMs);
+  it('goes black at once for a door it did not see coming, until the camera is in the new realm', () => {
+    const black = blackout(IDLE, 1000);
+    expect(black.phase).toBe('hold');
+    expect(opacityAt(black, 1000)).toBe(1);
+    expect(blackout(black, 1010)).toBe(black);
+
+    // A fade-out still running is cut to black: the switch does not wait for it, and the frame it lands on is not one to show.
+    const out = askedFor(IDLE, 'transition', 1000);
+    expect(opacityAt(blackout(out, 1050), 1050)).toBe(1);
   });
 
   it('leaves nothing on screen when the session was left in no realm at all', () => {
@@ -130,8 +139,8 @@ describe('the hold limit, which is what keeps a failure cosmetic', () => {
 
   it('returns to idle after the ramp, so nothing is left covering the world', () => {
     const back = arrived(IDLE, 'transition', 0);
-    expect(advance(back, 119).phase).toBe('in');
-    expect(advance(back, 120)).toBe(IDLE);
+    expect(advance(back, 349).phase).toBe('in');
+    expect(advance(back, 350)).toBe(IDLE);
     expect(opacityAt(IDLE, 99999)).toBe(0);
   });
 });

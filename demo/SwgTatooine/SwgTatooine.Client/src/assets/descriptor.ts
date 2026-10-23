@@ -42,6 +42,23 @@ export interface ColliderDesc {
   readonly rot: Quat;
 }
 
+/**
+ * An interior's navigation (ASSET_FORMAT.md § 5.9): waypoints, the edges walked straight between them, and a cell grid
+ * naming for each floor position the node it walks straight to. glTF frame, like everything here.
+ */
+export interface NavDesc {
+  readonly nodes: readonly Vec3[];
+  readonly edges: readonly (readonly [number, number])[];
+  readonly cells: {
+    readonly origin: readonly [number, number];
+    readonly size: number;
+    readonly cols: number;
+    readonly rows: number;
+    /** `node[row * cols + col]`; -1 where no position in the cell is clear. */
+    readonly node: readonly number[];
+  };
+}
+
 export interface PortalDesc {
   readonly id: string;
   readonly center: Vec3;
@@ -186,4 +203,6 @@ export interface Descriptor {
   readonly children: readonly ChildDesc[];
   readonly animations?: { readonly clips: readonly ClipDesc[]; readonly roles: RoleMap };
   readonly foundation_depth?: number;
+  /** Interiors: how to get from anywhere in the room to anywhere else, its way out first (§ 5.9). */
+  readonly nav?: NavDesc;
 }

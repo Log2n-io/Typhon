@@ -24,6 +24,8 @@ import { MapCamera } from '../camera/map-camera';
 import { mountAssets, type AssetMount } from './asset-mount';
 import { mountCrowd, type CrowdMount } from './crowd-mount';
 import { StaticAssets, type StructureSample } from './static-assets';
+import { DoorWalker, pathIn, pathOut } from './door-walk';
+import { crossedDoor, doorPlanes, spawnFacingAt } from './door-crossing';
 import {
   groundOnShapes,
   prepareShape,
@@ -67,8 +69,8 @@ import { Labels } from '../render/labels';
 import { SHUTTLEPORT_STYLE, styleFor } from '../render/styles';
 import { RenderOrigin, extractFrustumPlanes, invertMatrix4, rayGroundT, unprojectRay } from '../render/view-math';
 import { useChat } from '../state/chat-store';
-import { crossingKindOf, sameRealm, type RealmView, type SceneKind } from '../data/realm-view';
-import { advance, arrived } from './realm-transition';
+import { crossingKindOf, sameRealm, type CrossingKind, type RealmView, type SceneKind } from '../data/realm-view';
+import { advance, arrived, askedFor, blackout, opacityAt } from './realm-transition';
 import { resetForRealm, resetForSession, type RealmSwitchTargets } from './realm-switch';
 import { nextRide, NOT_RIDING, rideOwnsTheView, rideSubjectOf, type RideState } from './ride';
 import { DEFAULT_GAIT, gaitFor } from './gait';
@@ -82,7 +84,8 @@ import {
   type MoveIntent,
 } from './player-intent';
 import { Predictor, speedForClass } from './predictor';
-import { DEFAULT_THIRD_PERSON_M } from '../camera/eye-camera';
+import { DEFAULT_THIRD_PERSON_M, MAX_EYE_DISTANCE_M } from '../camera/eye-camera';
+import { bodyOpacityAt, marchEye } from '../camera/eye-clearance';
 import { useStats, type FeetReport, type Inspection } from '../state/stats-store';
 import { useUi, type ShuttleportPrompt, type UiState } from '../state/ui-store';
 import { nearestShuttleport } from './shuttle';
@@ -449,6 +452,16 @@ export class ClientApp {
 
   /** The altitude the predicted body is standing at, carried frame to frame; see {@link groundUnder}. */
   private predictedFeet = Number.NaN;
+
+  /** The realm {@link predictedFeet} was last worked out in; a change means the body just went through a door. */
+  private predictedRealm = -1;
+
+  /** Whether the feet are still the server's, since the body arrived in this realm; see `advancePrediction`. */
+  private feetFromServer = true;
+
+  /** Where the body stood when it arrived in this realm; moving off it hands the feet back to the prediction. */
+  private arrivedX = 0;
+  private arrivedZ = 0;
 
   private selectionText = '';
   /** The netId and archetype {@link selectionText} was built for: netIds are reused, by another archetype too. */
@@ -993,9 +1006,199 @@ export class ClientApp {
     // door, and an ask for one realm interrupted by a door credited the door with the ask.
     const ui = useUi.getState();
     const asked = next !== null && ui.realmRequest?.realmId === next.realmId;
-    ui.setTransition(arrived(ui.transition, crossingKindOf(previous, next, asked), performance.now()));
+    const kind = crossingKindOf(previous, next, asked);
+    const now = performance.now();
 
+    // <b>Through a door, the scene stays black until the camera is behind the body in the new realm.</b> The eye camera
+    // used to treat the switch as a renumbering and GLIDE from the old realm's coordinates to the new ones — ten frames
+    // of a room seen from above — and kept the yaw it had outside, so the room came up turned: the door to one side
+    // instead of behind. `placeArrival` snaps it, facing the way the spawn the body landed on faces, and only then
+    // fades in.
+    const door = kind === 'transition' && (previous?.scene === 'interior' || next?.scene === 'interior');
+    if (door && this.source?.canPlay === true) {
+      ui.setTransition(blackout(ui.transition, now));
+      this.arrival = { kind, sinceMs: now };
+    } else {
+      ui.setTransition(arrived(ui.transition, kind, now));
+      this.arrival = null;
+    }
+
+    this.lastStep = null;
     resetForRealm(next, this.resetTargets());
+  }
+
+  /**
+   * A door crossing whose arrival is not yet placed: the camera has to be snapped behind the body, facing the way the
+   * spawn it landed on faces, before the fade comes back. `null` when there is none.
+   */
+  private arrival: { readonly kind: CrossingKind; readonly sinceMs: number } | null = null;
+
+  /** How long an arrival waits for the spawn it landed on to be known before it is placed anyway, ms. */
+  private static readonly ARRIVAL_WAIT_MS = 1500;
+
+  /**
+   * Places the camera on an arrival through a door, and gives the screen back.
+   *
+   * @returns Whether it was placed this frame.
+   *
+   * @remarks
+   * <b>The facing is the spawn's, read from the descriptor of what the body is standing in</b> — a room's `entry` faces
+   * into the room with its door behind, a house's `front` faces away from the house — because the server has no heading
+   * to send. The structures and their descriptors can arrive a frame or more after the realm does, so the screen stays
+   * black until the spawn is found, for at most {@link ARRIVAL_WAIT_MS}; past that the camera is placed with the yaw it
+   * has, which is what every crossing did before.
+   */
+  private placeArrival(camX: number, camY: number, camZ: number, nowMs: number): boolean {
+    const arrival = this.arrival;
+    if (arrival === null) {
+      return false;
+    }
+
+    const facing = this.spawnFacing(camX, camZ);
+    if (facing === null && nowMs - arrival.sinceMs < ClientApp.ARRIVAL_WAIT_MS) {
+      return false;
+    }
+
+    // The renderer's yaw (0 along +Z), and the server's heading (from +X towards +Z) for the avatar.
+    const yaw = facing === null ? this.eyeCamera.yaw : Math.atan2(facing[0], facing[1]);
+    this.eyeCamera.jumpTo(camX, camY, camZ, yaw);
+    if (facing !== null) {
+      this.intentHeading = Math.atan2(facing[1], facing[0]);
+      this.haveIntentHeading = true;
+      this.avatarHeading = this.intentHeading;
+    }
+
+    const ui = useUi.getState();
+    ui.setTransition(arrived(ui.transition, arrival.kind, nowMs));
+    this.arrival = null;
+    return true;
+  }
+
+  /** The facing of the published spawn a body standing here is on, among the structures in reach, or `null`. */
+  private spawnFacing(x: number, z: number): readonly [number, number] | null {
+    const set = this.assetSet;
+    const library = this.assets?.library ?? null;
+    if (set === null || library === null) {
+      return null;
+    }
+
+    for (let i = 0; i < this.structureCount; i++) {
+      const s = this.structureSamples[i];
+      const id = assetForStructure(set, s.asset);
+      const descriptor = id === null ? null : library.described(id);
+      if (descriptor === null) {
+        // Asked for now rather than waited for with the geometry: a room entered for the first time has not been
+        // placed yet, and its descriptor is a few KB the arrival needs before the screen comes back.
+        if (id !== null) {
+          void library.describe(id).catch(() => undefined);
+        }
+
+        continue;
+      }
+
+      if (descriptor.spawns.length === 0) {
+        continue;
+      }
+
+      const facing = spawnFacingAt(descriptor, placement([s.x, s.y, s.z], structureYaw(s.yaw)), x, z);
+      if (facing !== null) {
+        return facing;
+      }
+    }
+
+    return null;
+  }
+
+  /** How many of {@link placedShapes} the camera's march reads this frame. */
+  private cameraShapes = 0;
+
+  /** The eye camera's wall probe, bound once: a march over the structures gathered this frame. */
+  private readonly eyeClearance = (
+    fx: number,
+    fy: number,
+    fz: number,
+    dx: number,
+    dy: number,
+    dz: number,
+    max: number,
+  ): number => marchEye(this.placedShapes, this.cameraShapes, fx, fy, fz, dx, dy, dz, max);
+
+  /** The curtain's element, found once it is mounted; see {@link paintFade}. */
+  private fadeElement: HTMLElement | null = null;
+
+  /** The opacity last written, so a frame that changes nothing writes nothing. */
+  private fadeOpacity = -1;
+
+  /**
+   * Sets the realm curtain's opacity for THIS frame, from the transition state.
+   *
+   * In the frame loop rather than in React, so the curtain and the scene it hides are painted together: a door arrival
+   * goes black on the frame the realm switches, not a frame or two later over a camera still in the old realm.
+   */
+  private paintFade(nowMs: number): void {
+    if (this.fadeElement === null || !this.fadeElement.isConnected) {
+      this.fadeElement = document.querySelector<HTMLElement>('.realm-fade');
+      this.fadeOpacity = -1;
+    }
+
+    const opacity = opacityAt(useUi.getState().transition, nowMs);
+    if (this.fadeElement !== null && opacity !== this.fadeOpacity) {
+      this.fadeElement.style.opacity = String(opacity);
+      this.fadeOpacity = opacity;
+    }
+  }
+
+  /** The predicted body's position on the previous frame, in its realm, for {@link watchDoors}; `null` after a switch. */
+  private lastStep: { x: number; z: number } | null = null;
+
+  /**
+   * Starts the fade the moment the predicted body steps through a door, before the server's answer arrives.
+   *
+   * @remarks
+   * The same directed plane test the server applies, against the doors of the structures in reach (`door-crossing.ts`).
+   * A prediction can be wrong — a body the server stopped in the jamb — and then the hold's safety valve gives the screen
+   * back; the cost of a wrong guess is a short blink, the cost of no guess is the cut the testbench does not have.
+   */
+  private watchDoors(nowMs: number): void {
+    if (!this.predictor.active) {
+      this.lastStep = null;
+      return;
+    }
+
+    const x = this.predictor.x;
+    const z = this.predictor.z;
+    const from = this.lastStep;
+    this.lastStep = { x, z };
+    const ui = useUi.getState();
+    if (from === null || ui.transition.phase !== 'idle' || (from.x === x && from.z === z)) {
+      return;
+    }
+
+    const set = this.assetSet;
+    const library = this.assets?.library ?? null;
+    if (set === null || library === null) {
+      return;
+    }
+
+    for (let i = 0; i < this.structureCount; i++) {
+      const s = this.structureSamples[i];
+      if (Math.abs(s.x - x) > 25 || Math.abs(s.z - z) > 25) {
+        continue;
+      }
+
+      const id = assetForStructure(set, s.asset);
+      const descriptor = id === null ? null : library.described(id);
+      if (descriptor === null || descriptor.portals.length === 0) {
+        continue;
+      }
+
+      for (const door of doorPlanes(descriptor, placement([s.x, s.y, s.z], structureYaw(s.yaw)))) {
+        if (crossedDoor(door, from.x, from.z, x, z)) {
+          ui.setTransition(askedFor(ui.transition, 'transition', nowMs));
+          return;
+        }
+      }
+    }
   }
 
   /**
@@ -1056,6 +1259,7 @@ export class ClientApp {
 
     profile.enter(next);
     this.scene.clearColor = profile.sky.toColor4(1);
+    this.lighting.setIndoors(profile.kind === 'interior' || profile.kind === 'dungeon');
 
     // The cameras read the ground through the profile, so both have to be re-pointed: the map camera rides it and the
     // eye camera marches it for terrain clearance. A stale sampler is the quiet version of this bug — the picture
@@ -1129,18 +1333,43 @@ export class ClientApp {
     const at = this.predictedAt;
     at.x = this.predictor.x;
     at.z = this.predictor.z;
+    // <b>A body that has just come through a door stands where the SERVER put it</b> — on the landing at the top of a
+    // house's ramp, 0.7 m above the terrain — and the structures that say so arrive a frame or more after the realm does.
+    // Taking the terrain in the meantime made the landing a wall the moment it arrived (more than a step above the feet),
+    // and the prediction pushed the body a metre off it. So until the structures are in, the feet are the server's.
+    //
+    // <b>Until it MOVES, not for one frame</b>: the shapes in reach on the first frames after a switch can be the old
+    // realm's or a partial set, and one frame's server altitude sampled against them came back as the terrain, which then
+    // stood as the base for good. While the body stands where it landed, the server's altitude is the truth.
+    const realmId = this.realm?.realmId ?? -1;
+    if (this.predictedRealm !== realmId) {
+      this.predictedRealm = realmId;
+      this.feetFromServer = true;
+      this.arrivedX = at.x;
+      this.arrivedZ = at.z;
+    }
+
+    const serverFeet = this.feetFromServer && Number.isFinite(this.evalY) ? this.evalY : Number.NaN;
     const count = half > 0 ? this.gatherStructureShapes() : 0;
+
+    // Handed back once the body has moved off its landing AND the shapes around it are in: a body still walking when it
+    // came through has moved before the porch it stands on has arrived, and the terrain taken in that gap made the porch a
+    // wall the moment it did — the body went through it, onto the ground.
+    if (this.feetFromServer && count > 0 && Math.hypot(at.x - this.arrivedX, at.z - this.arrivedZ) > 0.05) {
+      this.feetFromServer = false;
+    }
     if (count === 0) {
       // Nothing published within reach, so the planet's own relief is the whole answer — and saying so is what stops a
       // body that has just walked off a deck from keeping that deck's altitude for the rest of the session.
-      this.predictedFeet = this.field.heightAt(at.x, at.z);
+      const terrain = this.profile.ground.heightAt(at.x, at.z);
+      this.predictedFeet = Number.isFinite(serverFeet) ? Math.max(serverFeet, terrain) : terrain;
       return;
     }
 
     // <b>One base for both samples of the frame.</b> The floor test is relative to where the feet WERE, so sampling the
     // ground twice against a moving base would let one frame climb two steps: the body would mount a 0.8 m ledge at
     // 60 Hz that it refuses at 30. The previous frame's altitude is the base, and both samples share it.
-    const base = this.predictedFeet;
+    const base = Number.isFinite(serverFeet) ? serverFeet : this.predictedFeet;
     // The feet, so the predictor makes the same floor-or-wall call the server makes: a deck the body is standing
     // on is not a wall, and a box more than a step above it is.
     if (pushOut(this.placedShapes, count, half, this.worldHalfM, at, this.groundUnder(at, count, half, base))) {
@@ -1181,7 +1410,7 @@ export class ClientApp {
    * @param feet The altitude the feet were at, or `NaN` on the first frame — then the terrain stands for it.
    */
   private groundUnder(at: Position, count: number, half: number, feet: number): number {
-    const terrain = this.field.heightAt(at.x, at.z);
+    const terrain = this.profile.ground.heightAt(at.x, at.z);
     return groundOnShapes(this.placedShapes, count, half, at, terrain, Number.isFinite(feet) ? feet : terrain);
   }
 
@@ -1240,7 +1469,7 @@ export class ClientApp {
     const predicted = this.view.predicted;
     const x = predicted === null ? this.evalX : predicted.x;
     const z = predicted === null ? this.evalZ : predicted.z;
-    const terrainY = this.field.heightAt(x, z);
+    const terrainY = this.profile.ground.heightAt(x, z);
 
     // What the collision rule says is under it: the terrain, raised by any published floor within a step.
     let surfaceY = terrainY;
@@ -1345,7 +1574,15 @@ export class ClientApp {
   private predictedSubject = 0;
 
   private sendMovementIntent(source: DataSource, nowMs: number, steering: boolean): void {
-    const intent = steering ? movementIntent(this.input.heldKeys, this.eyeCamera.yaw, this.gait) : null;
+    const keyed = steering ? movementIntent(this.input.heldKeys, this.eyeCamera.yaw, this.gait) : null;
+
+    // A walk to or through a door (`walkIn` / `walkOut`) supplies the intent the keys would, so the prediction, the refresh
+    // window and the stop at the end are the keyboard's own. Any key takes the body back.
+    if (keyed !== null) {
+      this.doorWalk.cancel();
+    }
+
+    const intent = keyed ?? this.walkIntent(nowMs);
 
     // A14b: when the gait changed, the instant it changed at — and `NaN` otherwise, which is every other frame. See
     // `gaitChanged` for why a heading change is not one of these.
@@ -1585,9 +1822,10 @@ export class ClientApp {
       return null;
     }
 
-    // A dungeon is served exactly as an interior is — one cell, the same size, the same flat floor — so it is the same
-    // room. They are distinct kinds because they differ in the simulation, not in what they look like.
-    const room = new InteriorProfile(this.scene, INTERIOR_EDGE_M);
+    // A dungeon is served as an interior is — one cell, the same size, the same flat floor — so it is the same indoor
+    // scene. A building's room is a structure the server sends and the structure layer draws; a dungeon has none, so its
+    // profile draws the generic box instead.
+    const room = new InteriorProfile(this.scene, INTERIOR_EDGE_M, kind);
     this.profiles.set(kind, room);
     return room;
   }
@@ -1719,7 +1957,82 @@ export class ClientApp {
       this.source?.boardShuttle(state.boardRequest.city);
     }
 
+    // Walking is this client steering its own body, so nothing is asked of the server but the moves themselves.
+    if (state.doorWalkRequest !== null && state.doorWalkRequest !== previous.doorWalkRequest) {
+      const ask = state.doorWalkRequest.netId;
+      if (ask > 0) {
+        this.walkIn(ask);
+      } else if (ask === 0) {
+        this.walkOut();
+      } else {
+        this.doorWalk.cancel();
+      }
+    }
+
     this.applyUi(state);
+  }
+
+  /** The walk to or through a door under way, if any; see {@link walkIn}. */
+  private readonly doorWalk = new DoorWalker();
+
+  /** This frame's intent from a walk under way, or `null`. */
+  private walkIntent(nowMs: number): MoveIntent | null {
+    if (!this.doorWalk.active) {
+      return null;
+    }
+
+    const x = this.predictor.active ? this.predictor.x : this.eyeX;
+    const z = this.predictor.active ? this.predictor.z : this.eyeZ;
+    return this.doorWalk.intent(x, z, this.realm?.realmId ?? -1, nowMs);
+  }
+
+  /**
+   * Walks this session's body into a building: round it if needed, to where its door's published path starts, along the
+   * path and through the door.
+   *
+   * @param netId The building, as replicated.
+   * @returns Why it did not start, or `null` when it did.
+   */
+  walkIn(netId: number): string | null {
+    const sample = this.structureSamples.slice(0, this.structureCount).find((s) => s.netId === netId) ?? null;
+    if (sample === null) {
+      return 'that building is not in range';
+    }
+
+    return this.startWalk(sample, pathIn);
+  }
+
+  /** Walks this session's body out of the room it is in, through the room's navigation to its way out. */
+  walkOut(): string | null {
+    const room =
+      this.structureSamples.slice(0, this.structureCount).find((s) => s.kind === StructureKind.Interior) ?? null;
+    if (room === null) {
+      return 'not in a room';
+    }
+
+    return this.startWalk(room, pathOut);
+  }
+
+  private startWalk(sample: StructureSample, plan: typeof pathIn): string | null {
+    const set = this.assetSet;
+    const id = set === null ? null : assetForStructure(set, sample.asset);
+    const descriptor = id === null ? null : (this.assets?.library.described(id) ?? null);
+    if (descriptor === null) {
+      return 'its asset is not loaded';
+    }
+
+    if (!this.predictor.active) {
+      return 'this session is not steering a body';
+    }
+
+    const pose = placement([sample.x, sample.y, sample.z], structureYaw(sample.yaw));
+    const route = plan(descriptor, pose, [this.predictor.x, this.predictor.z]);
+    if (route === null) {
+      return 'it publishes no door path';
+    }
+
+    this.doorWalk.start(route.points, route.pathStart, this.realm?.realmId ?? -1, performance.now());
+    return null;
   }
 
   private applyUi(state: UiState): void {
@@ -1840,6 +2153,9 @@ export class ClientApp {
     // has one, stopped for anything that is not a player steering its own body — a god camera, a spectator, or a session whose
     // intents the server refuses.
     this.advancePrediction(playing && haveEyeSubject ? eyeNetId : 0, now, dt);
+    if (playing) {
+      this.watchDoors(now);
+    }
 
     this.eyeCamera.rigid = playing;
     if (inEye) {
@@ -1851,7 +2167,15 @@ export class ClientApp {
       const camX = predicting ? this.predictor.x : playing ? this.eyeX : this.selectedX;
       const camY = playing ? this.eyeY : this.selectedY;
       const camZ = predicting ? this.predictor.z : playing ? this.eyeZ : this.selectedZ;
-      if (this.eyeSubject !== eyeNetId) {
+      if (playing && this.arrival !== null) {
+        // Snapped, every frame until it is placed: under the curtain, but the curtain is a DOM element that reaches full
+        // black a frame after the store asks it to, so a glide from the old realm's coordinates would be on screen.
+        if (!this.placeArrival(camX, camY, camZ, now)) {
+          this.eyeCamera.jumpTo(camX, camY, camZ, this.eyeCamera.yaw);
+        }
+
+        this.eyeSubject = eyeNetId;
+      } else if (this.eyeSubject !== eyeNetId) {
         this.eyeSubject = eyeNetId;
         if (this.eyeRebased) {
           // The SAME body under a new id: a `RESET` empties the store and netIds are allocated densely per view, so an
@@ -1869,9 +2193,33 @@ export class ClientApp {
       // Consumed by the first eye frame after the reset, whichever branch took it: a rebase describes one renumbering.
       this.eyeRebased = false;
 
+      // The testbench's camera (`orbit-camera.ts`): short of the first wall behind the body, and in a room capped at
+      // 1.9 m over the feet — under the 2 m the colliders stop at, so the walls still stop it — and at 7 m back.
+      const indoors = this.profile.kind === 'interior' || this.profile.kind === 'dungeon';
+      this.eyeCamera.maxEyeHeightM = indoors ? 1.9 : Infinity;
+      this.eyeCamera.maxDistanceM = indoors ? 7 : MAX_EYE_DISTANCE_M;
+      this.cameraShapes = this.gatherStructureShapes();
+      this.eyeCamera.clearance = this.cameraShapes > 0 ? this.eyeClearance : null;
       this.eyeCamera.update(dt);
+
+      // A wall that pulled the eye in close fades the body rather than putting the view inside a head.
+      this.assets?.character?.setOpacity(playing ? bodyOpacityAt(this.eyeCamera.effectiveDistance) : 1);
     } else {
       this.eyeSubject = 0;
+    }
+
+    this.paintFade(now);
+
+    // An arrival with no eye camera to place — a session that left eye mode — gives the screen back, and so does one that
+    // was never placed at all, past twice the wait. NOT on `inEye` or `playing`: for the first frames after the reset the
+    // session's own netId and its avatar are not known yet, so both read false while the camera is very much in eye mode —
+    // and giving the screen back then showed the glide this exists to hide.
+    if (
+      this.arrival !== null &&
+      (ui.cameraMode !== 'eye' || now - this.arrival.sinceMs > 2 * ClientApp.ARRIVAL_WAIT_MS)
+    ) {
+      ui.setTransition(arrived(ui.transition, this.arrival.kind, now));
+      this.arrival = null;
     }
 
     // The map camera orbits the ground under its target, so it needs the terrain height there BEFORE it recomputes its eye.
@@ -2412,7 +2760,7 @@ export class ClientApp {
     this.evalZ = read.z;
     this.evalVx = read.vx;
     this.evalVz = read.vz;
-    this.evalY = altitudeOf(altitudeField(store), slot, read, this.field);
+    this.evalY = altitudeOf(altitudeField(store), slot, read, this.profile.ground);
     this.evalArchetype = archetype;
     return true;
   }
@@ -2596,7 +2944,7 @@ export class ClientApp {
         const sample = samples[taken++];
         sample.netId = store.netIds[slot];
         sample.x = at.x;
-        sample.y = altitudeOf(ground, slot, at, this.field);
+        sample.y = altitudeOf(ground, slot, at, this.profile.ground);
         sample.z = at.z;
         sample.kind = kinds[slot];
         sample.yaw = yaws === null ? 0 : yaws[slot];

@@ -1,4 +1,5 @@
 import { FLAT_GROUND, type GroundSampler } from '../terrain/ground-sampler';
+import { EYE_HEIGHT_M, MIN_EYE_DISTANCE_M, WALL_MARGIN_M } from './eye-clearance';
 /**
  * The camera that stands in the world rather than over it (CLI3D-10): it rides an entity, at eye height, looking where
  * the free-look is aimed. One parameter — {@link distance} — takes it from first person (0) to over the shoulder.
@@ -17,8 +18,8 @@ import { FLAT_GROUND, type GroundSampler } from '../terrain/ground-sampler';
  * renderer reads whichever is active without knowing which it is.
  */
 
-/** Height of the eye above the followed entity's own origin, metres. A human's, near enough to read as one. */
-export const EYE_HEIGHT_M = 1.7;
+// Declared with the march that measures walls from it; re-exported because the camera is where callers look for it.
+export { EYE_HEIGHT_M };
 
 /**
  * Pitch bounds, in `MapCamera`'s sign convention — **positive is looking down**, because that is what the scene's
@@ -67,6 +68,23 @@ const GROUND_PROBE_STEPS = 8;
 /** How far the eye must clear the ground. Small: this is a spectator camera, not a character controller. */
 const GROUND_CLEARANCE_M = 0.35;
 
+/**
+ * How fast a pulled-in eye goes back out, seconds (time constant). The testbench released at once and snapped back past
+ * every pillar; the pull-in stays immediate — the eye must never be inside a wall — and only the release eases.
+ */
+const RELEASE_SECONDS = 0.3;
+
+/** How far the eye may travel from a head along a unit direction before touching a building, capped at `max`. */
+export type EyeClearance = (
+  fromX: number,
+  fromY: number,
+  fromZ: number,
+  dx: number,
+  dy: number,
+  dz: number,
+  max: number,
+) => number;
+
 export class EyeCamera {
   /**
    * The ground the eye may not go inside. Flat until the app hands it the baked field, which is also what every test that
@@ -93,6 +111,27 @@ export class EyeCamera {
   /** 0 = first person; larger pulls the eye back along the view, over the subject's shoulder. */
   distance = 0;
 
+  /**
+   * The buildings the eye may not go behind, or `null` for none: the app's march over the structures in reach
+   * (`eye-clearance.ts`). Without it a wall behind the body puts the eye on the far side of the wall.
+   */
+  clearance: EyeClearance | null = null;
+
+  /**
+   * How high above the subject's feet the eye may go, metres — the testbench's interior cap (1.9, under the 2 m band the
+   * colliders stop at). Applied by FLATTENING the pitch for the frame, before the march, so the march tests the ray used.
+   */
+  maxEyeHeightM = Infinity;
+
+  /** How far back the eye may be asked to stand, metres: 7 in a room, where more is only ever a wall. */
+  maxDistanceM = MAX_EYE_DISTANCE_M;
+
+  /** The eye-to-head distance actually used last frame, after walls pulled it in — what the body's fade reads. */
+  effectiveDistance = 0;
+
+  /** The pulled-in distance being released, eased back out; see {@link RELEASE_SECONDS}. */
+  private held = Infinity;
+
   private goalYaw = 0;
   private goalPitch = 0;
   private goalDistance = 0;
@@ -118,7 +157,8 @@ export class EyeCamera {
     this.pitch = this.goalPitch = 0;
     this.distance = this.goalDistance;
     this.placed = true;
-    this.updateEye();
+    this.held = Infinity;
+    this.updateEye(0);
   }
 
   /** The subject moved. Its position is taken as given; the eye glides to it. */
@@ -188,8 +228,9 @@ export class EyeCamera {
     this.anchorZ += (this.subjectZ - this.anchorZ) * follow;
     this.yaw += (this.goalYaw - this.yaw) * k;
     this.pitch += (this.goalPitch - this.pitch) * k;
+    this.goalDistance = Math.min(this.goalDistance, this.maxDistanceM);
     this.distance += (this.goalDistance - this.distance) * k;
-    this.updateEye();
+    this.updateEye(dt);
   }
 
   /** What the ground-relative HUD calls altitude: height above the plane, not above the subject. */
@@ -221,14 +262,23 @@ export class EyeCamera {
     return 40_000;
   }
 
-  private updateEye(): void {
+  private updateEye(dt: number): void {
     const head = this.anchorY + EYE_HEIGHT_M;
+    const distance = Math.min(this.distance, this.maxDistanceM);
+
+    // The cap first, by flattening the pitch for this frame (the testbench's order): the march then tests the ray used.
+    let pitch = this.pitch;
+    const ceiling = this.anchorY + this.maxEyeHeightM;
+    if (distance > 0 && head + Math.sin(pitch) * distance > ceiling) {
+      pitch = Math.asin(clamp((ceiling - head) / distance, -1, 1));
+    }
+
     // Pulling back travels BACKWARD along the view ray, so an over-the-shoulder eye rises as it pitches down — which is
     // what keeps the subject in frame instead of sliding up out of it.
-    const cp = Math.cos(this.pitch);
+    const cp = Math.cos(pitch);
     const dx = -Math.sin(this.yaw) * cp;
     const dz = -Math.cos(this.yaw) * cp;
-    const dy = Math.sin(this.pitch);
+    const dy = Math.sin(pitch);
 
     // Walk out along that ray and stop before the ground. Without this the eye goes **inside the terrain**: 30 m back at
     // level pitch is inside any mesa, and looking up while pulled back put it `30 · sin(85°)` metres BELOW the subject's
@@ -239,7 +289,7 @@ export class EyeCamera {
     // the view off the subject, and the subject is the only reason this camera exists.
     let allowed = 0;
     for (let i = 1; i <= GROUND_PROBE_STEPS; i++) {
-      const t = (this.distance * i) / GROUND_PROBE_STEPS;
+      const t = (distance * i) / GROUND_PROBE_STEPS;
       const y = head + dy * t;
       if (y < this.ground.heightAt(this.anchorX + dx * t, this.anchorZ + dz * t) + GROUND_CLEARANCE_M) {
         break;
@@ -248,9 +298,27 @@ export class EyeCamera {
       allowed = t;
     }
 
-    this.eyeX = this.anchorX + dx * allowed;
-    this.eyeZ = this.anchorZ + dz * allowed;
-    this.eyeY = head + dy * allowed;
+    // And short of the first wall behind the body (the testbench's march): pulled in at once, never inside a wall, and
+    // released over RELEASE_SECONDS so a pillar passing behind does not snap the eye in and out.
+    if (this.clearance !== null && allowed > 0) {
+      const wall = Math.max(
+        MIN_EYE_DISTANCE_M,
+        this.clearance(this.anchorX, head, this.anchorZ, dx, dy, dz, allowed) - WALL_MARGIN_M,
+      );
+      allowed = Math.min(allowed, wall);
+    }
+
+    if (allowed <= this.held || dt <= 0) {
+      this.held = allowed;
+    } else {
+      this.held += (allowed - this.held) * (1 - Math.exp(-dt / RELEASE_SECONDS));
+    }
+
+    const used = Math.min(allowed, this.held);
+    this.effectiveDistance = used;
+    this.eyeX = this.anchorX + dx * used;
+    this.eyeZ = this.anchorZ + dz * used;
+    this.eyeY = head + dy * used;
   }
 }
 

@@ -487,6 +487,8 @@ export class StaticAssets {
         const descriptor = this.library.described(id);
         if (descriptor === null) {
           console.warn(`assets: ${id} placed with no descriptor in hand; every detail level will draw`);
+        } else if (descriptor.kind === 'interior') {
+          this.lighting?.lampShadows(instance.lights, instance.meshes);
         }
 
         // Levels are the PARENT's: a child is a separate asset with its own descriptor and its own ladder, and

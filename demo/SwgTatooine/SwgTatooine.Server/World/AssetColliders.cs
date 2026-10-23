@@ -75,8 +75,13 @@ public sealed class AssetColliders
     /// <c>role: "solid" | "walkable"</c> per collider would make this list and this constant both unnecessary, and is
     /// the proposal in front of Loïc. Until then, an asset is added here only after its colliders have been read.
     /// </para>
+    /// <para>
+    /// <b>The two interiors were read the same way</b> (catalogue 4): walls 0 to 2 m, furniture 0.45 to 1.72 m, and the floor slab below 0, which the
+    /// per-contact floor-or-wall decision sorts exactly as it sorts a house's steps and walls.
+    /// </para>
     /// </remarks>
-    private static readonly string[] Verified = ["tat_house_small", "tat_house_large", "tat_shuttleport"];
+    private static readonly string[] Verified =
+        ["tat_house_small", "tat_house_large", "tat_shuttleport", "tat_house_large_interior", "tat_house_small_interior"];
 
     /// <summary>One primitive as this simulation sees it: an axis-aligned box in the asset's own plan.</summary>
     /// <param name="MinX">West edge, metres from the asset origin.</param>
@@ -213,7 +218,7 @@ public sealed class AssetColliders
     /// structure had before the asset pipeline — rather than being parsed hopefully and collided wrongly.
     /// </para>
     /// </remarks>
-    internal const int FormatRevision = 5;
+    internal const int FormatRevision = 7;
 
     /// <summary>The one descriptor schema this reader understands. See <see cref="FormatRevision"/>.</summary>
     internal const int DescriptorSchema = 1;
@@ -281,8 +286,8 @@ public sealed class AssetColliders
     /// <summary>Each asset's published doorway, indexed as <see cref="StructureAssets.Table"/> counts them.</summary>
     private DoorPlan[] _doorByIndex = [];
 
-    /// <summary>Each asset's room, same indexing.</summary>
-    private RoomPlan[] _roomByIndex = [];
+    /// <summary>Each interior's navigation, same indexing; null for an asset that publishes none.</summary>
+    private NavGraph[] _navByIndex = [];
 
     /// <summary>
     /// The overhang of each reserved footprint SIZE, so a gate can charge a structure its own asset's reach rather
@@ -437,8 +442,7 @@ public sealed class AssetColliders
 
         var wanted = new HashSet<string>(Verified, StringComparer.Ordinal);
         var catalogue = JsonDocument.Parse(File.ReadAllText(Path.Combine(origin.Directory, origin.CatalogueName)));
-        var doorByIndex = new DoorPlan[StructureAssets.Table.Length];
-        var roomByIndex = new RoomPlan[StructureAssets.Table.Length];
+        var texts = new string[StructureAssets.Table.Length];
         var byIndex = new PlanBox[StructureAssets.Table.Length][];
         for (var i = 0; i < byIndex.Length; i++)
         {
@@ -464,28 +468,58 @@ public sealed class AssetColliders
                 var path = Path.Combine(origin.Directory, file.GetString() ?? string.Empty);
                 if (File.Exists(path))
                 {
-                    var text = File.ReadAllText(path);
-                    byIndex[index] = ReadBlocking(text);
-                    doorByIndex[index] = ReadDoor(text, out var room, out var spawn);
-                    if (room != null && assets.TryGetProperty(room, out var roomEntry)
-                        && roomEntry.TryGetProperty("descriptor", out var roomFile))
-                    {
-                        var roomPath = Path.Combine(origin.Directory, roomFile.GetString() ?? string.Empty);
-                        if (File.Exists(roomPath))
-                        {
-                            roomByIndex[index] = ReadRoom(File.ReadAllText(roomPath), spawn);
-                        }
-                    }
+                    texts[index] = File.ReadAllText(path);
+                    byIndex[index] = ReadBlocking(texts[index]);
                 }
             }
         }
 
-        var colliders = new AssetColliders(byIndex);
-        colliders._overhangByHalf = OverhangTableOf(byIndex);
-        colliders.MaxOverhangM = OverhangOf(byIndex);
-        colliders._doorByIndex = doorByIndex;
-        colliders._roomByIndex = roomByIndex;
-        return colliders;
+        return FromDescriptors(byIndex, texts);
+    }
+
+    /// <summary>
+    /// The table from descriptor texts already in memory: each asset's blocking boxes, its doorway and its navigation.
+    /// </summary>
+    /// <param name="byIndex">Each asset's plan boxes, indexed as <see cref="StructureAssets.Table"/> counts them.</param>
+    /// <param name="texts">Each asset's descriptor, same indexing; null where none was read.</param>
+    /// <returns>The table.</returns>
+    /// <remarks>
+    /// <b>A door names the asset behind it, and that asset's spawn is where a body arrives.</b> So a door is resolved against
+    /// the descriptor of its target, which is why the texts are read first and the doors second: the house's door needs the
+    /// room's <c>entry</c>, and the room's door the house's <c>front</c>.
+    /// </remarks>
+    internal static AssetColliders FromDescriptors(PlanBox[][] byIndex, string[] texts)
+    {
+        ArgumentNullException.ThrowIfNull(byIndex);
+        ArgumentNullException.ThrowIfNull(texts);
+
+        var doorByIndex = new DoorPlan[StructureAssets.Table.Length];
+        var navByIndex = new NavGraph[StructureAssets.Table.Length];
+        for (var index = 0; index < texts.Length && index < doorByIndex.Length; index++)
+        {
+            if (texts[index] == null)
+            {
+                continue;
+            }
+
+            var door = ReadDoor(texts[index], out var target, out var targetSpawn);
+            var targetIndex = Array.IndexOf(StructureAssets.Table, target);
+            if (door.Exists && targetIndex >= 0 && targetIndex < texts.Length && texts[targetIndex] != null
+                && TryReadSpawn(texts[targetIndex], targetSpawn, out var arriveX, out var arriveY, out var arriveZ))
+            {
+                doorByIndex[index] = door with { TargetAsset = targetIndex, ArriveX = arriveX, ArriveY = arriveY, ArriveZ = arriveZ };
+            }
+
+            navByIndex[index] = NavGraph.Read(texts[index]);
+        }
+
+        return new AssetColliders(byIndex)
+        {
+            _overhangByHalf = OverhangTableOf(byIndex),
+            MaxOverhangM = OverhangOf(byIndex),
+            _doorByIndex = doorByIndex,
+            _navByIndex = navByIndex,
+        };
     }
 
     /// <summary>A table built straight from boxes, for a test that does not want a catalogue on disk.</summary>
@@ -582,61 +616,113 @@ public sealed class AssetColliders
     }
 
     /// <summary>
-    /// The doorway an asset publishes, in its own local frame, or <see langword="default"/> when it has none.
+    /// An asset's doorway and the two places it connects, in the asset's own plan, in the WORLD's frame convention.
     /// </summary>
     /// <remarks>
-    /// <para><b>The pack has always published this and the server has never read it.</b> A descriptor's <c>portals</c> array carries the door as a box —
-    /// centre, half extents and the local axis a body crosses it along — and <c>WorldIndex.Portals</c> stored the building's OWN position instead. That was
-    /// invisible while the scripted crowd walked through walls: it arrived at the centre of the building, which is where the door was said to be. The moment
-    /// the crowd started colliding, every body stopped at the wall three metres short of its door and no interior was ever entered again.</para>
-    /// <para><b>Only the first.</b> Every enterable asset in this pack publishes exactly one, and a second would need a rule for choosing between them that
-    /// nothing in the world yet has — the realm a door leads to is its index, and an asset with two doors is two realms or one, both of which are a design
-    /// decision rather than a parsing one.</para>
+    /// <para><b>Mirrored in X like every collider, and it was not.</b> A descriptor is in the glTF frame and the world in the renderer's, which mirrors
+    /// X (<see cref="ReadBlocking"/>). The door used to be read unmirrored, so on every placement the plane a body had to cross stood at the mirror image of
+    /// the doorway drawn and collided: 3 m to the side of the large house's door, 4 m on the small one, in the facade. A body walking through the door it
+    /// could see met a wall; the crossing fired only if it pressed the facade on the other side.</para>
+    /// <para><b>Only the first portal.</b> Every enterable asset in this pack publishes exactly one. The world spawns one <c>Portal</c> entity per side
+    /// of a door, so a second portal is a second pair of entities into the same realm; reading it is the only thing missing.</para>
     /// </remarks>
-    /// <param name="CenterX">Local X of the doorway's centre.</param>
-    /// <param name="CenterZ">Local Z.</param>
-    /// <param name="HalfX">Half width.</param>
-    /// <param name="HalfZ">Half depth, which is how thick the slab a body crosses is.</param>
-    /// <param name="Exists">Whether this asset publishes a door at all.</param>
-    internal readonly record struct DoorPlan(float CenterX, float CenterZ, float HalfX, float HalfZ, float ForwardX, float ForwardZ, bool Exists);
+    /// <param name="CenterX">Where the doorway's mid-plane crosses the floor, east of the asset origin.</param>
+    /// <param name="CenterZ">The same point, north.</param>
+    /// <param name="HalfX">Half the opening's width.</param>
+    /// <param name="HalfZ">Half its depth.</param>
+    /// <param name="ForwardX">The direction a body crosses it in, east component.</param>
+    /// <param name="ForwardZ">The same direction, north component.</param>
+    /// <param name="ApproachX">Where a program-driven body starts walking to the door: the published <c>approach</c>'s first point.</param>
+    /// <param name="ApproachZ">The same point, north.</param>
+    /// <param name="ApproachEndX">The approach's last point, past the mid-plane: walking to it fires the crossing.</param>
+    /// <param name="ApproachEndZ">The same point, north.</param>
+    /// <param name="ExitX">This asset's <c>exit_spawn</c>: where a body arrives when it comes back out through this door.</param>
+    /// <param name="ExitZ">The same point, north.</param>
+    /// <param name="ArriveX">The target's <c>target_spawn</c>, in the TARGET asset's plan: where a body going through arrives.</param>
+    /// <param name="ArriveZ">The same point, north.</param>
+    /// <param name="TargetAsset">The asset behind the door, as <see cref="StructureAssets.Table"/> indexes it.</param>
+    /// <param name="Exists">Whether the door was read whole: geometry, both spawns and its target.</param>
+    /// <param name="ExitY">The exit spawn's height above the asset's origin: the feet of a body that comes back out stand there — on a front step,
+    /// not on the terrain under it.</param>
+    /// <param name="ArriveY">The arrival spawn's height above the target asset's origin.</param>
+    internal readonly record struct DoorPlan(
+        float CenterX,
+        float CenterZ,
+        float HalfX,
+        float HalfZ,
+        float ForwardX,
+        float ForwardZ,
+        float ApproachX,
+        float ApproachZ,
+        float ApproachEndX,
+        float ApproachEndZ,
+        float ExitX,
+        float ExitZ,
+        float ArriveX = 0f,
+        float ArriveZ = 0f,
+        int TargetAsset = StructureAssets.NoAsset,
+        bool Exists = false,
+        float ExitY = 0f,
+        float ArriveY = 0f);
 
     /// <summary>
-    /// The room a door leads to, in the room own local frame: where a body arrives, and the way back out.
+    /// The doorway a structure stands in for when no asset is published: its kind's footprint with a door in the front face.
     /// </summary>
+    /// <param name="halfExtentM">The structure's reserved half extent.</param>
+    /// <returns>A door whose geometry is the footprint's, leading nowhere in particular.</returns>
     /// <remarks>
-    /// <b>Read from the interior asset the door names, not invented.</b> A structure portal publishes a target and a target spawn; the asset it names
-    /// opens with a spawn to arrive at and a portal of its own leading back. Before this the server had no room data at all, which is why the client draws
-    /// a generic box and says so in InteriorProfile.
+    /// <b>A run with no asset set still has doors</b> — a measured run without <c>--assets</c>, and every check, since the published assets are not in
+    /// the repository. The crowd walks through them exactly as it walks through a published one, so the workload's shape does not depend on whether a folder
+    /// was found. The plane stands 0.5 m off the face, outside a body pressed against the footprint box, which is the published setback's arithmetic.
     /// </remarks>
-    /// <param name="EntryX">Local X of the point a body arrives at.</param>
-    /// <param name="EntryZ">Local Z.</param>
-    /// <param name="DoorX">Local X of the doorway leading back out.</param>
-    /// <param name="DoorZ">Local Z.</param>
-    /// <param name="DoorHalfX">Half width of that doorway.</param>
-    /// <param name="DoorForwardX">Direction through it, the way a body leaves.</param>
-    /// <param name="DoorForwardZ">Direction through it.</param>
-    /// <param name="Exists">Whether the door named a room this could be read from.</param>
-    internal readonly record struct RoomPlan(
-        float EntryX,
-        float EntryZ,
-        float DoorX,
-        float DoorZ,
-        float DoorHalfX,
-        float DoorForwardX,
-        float DoorForwardZ,
-        bool Exists);
+    internal static DoorPlan StandInDoor(float halfExtentM) => new(
+        CenterX: 0f,
+        CenterZ: halfExtentM + 0.5f,
+        HalfX: 1f,
+        HalfZ: 0.4f,
+        ForwardX: 0f,
+        ForwardZ: -1f,
+        ApproachX: 0f,
+        ApproachZ: halfExtentM + 3f,
+        ApproachEndX: 0f,
+        ApproachEndZ: halfExtentM + 0.25f,
+        ExitX: 0f,
+        ExitZ: halfExtentM + 1.5f,
+        ArriveX: StandInRoomDoor.ExitX,
+        ArriveZ: StandInRoomDoor.ExitZ,
+        TargetAsset: StructureAssets.NoAsset,
+        Exists: true,
 
-    /// <summary>The room behind an asset door, or a <see cref="RoomPlan"/> whose Exists is false.</summary>
-    /// <param name="assetIndex">The asset, indexed as <see cref="StructureAssets.Table"/> counts them.</param>
-    /// <returns>The room.</returns>
-    internal RoomPlan RoomFor(int assetIndex) =>
-        (uint)assetIndex < (uint)_roomByIndex.Length ? _roomByIndex[assetIndex] : default;
+        // Nothing published stands under the way back out of a footprint: the body lands on the terrain.
+        ExitY: float.NegativeInfinity);
+
+    /// <summary>The way out of a room no asset describes: an open floor, arrived at the origin, left through a door 3 m north of it.</summary>
+    internal static readonly DoorPlan StandInRoomDoor = new(
+        CenterX: 0f,
+        CenterZ: 3f,
+        HalfX: 1f,
+        HalfZ: 0.4f,
+        ForwardX: 0f,
+        ForwardZ: 1f,
+        ApproachX: 0f,
+        ApproachZ: 2f,
+        ApproachEndX: 0f,
+        ApproachEndZ: 3.25f,
+        ExitX: 0f,
+        ExitZ: 0f,
+        Exists: true);
 
     /// <summary>The doorway published for an asset, or a <see cref="DoorPlan"/> whose <c>Exists</c> is false.</summary>
     /// <param name="assetIndex">The asset, indexed as <see cref="StructureAssets.Table"/> counts them.</param>
     /// <returns>The door.</returns>
     internal DoorPlan DoorFor(int assetIndex) =>
         (uint)assetIndex < (uint)_doorByIndex.Length ? _doorByIndex[assetIndex] : default;
+
+    /// <summary>An interior's navigation, or <see langword="null"/> for an asset that publishes none.</summary>
+    /// <param name="assetIndex">The asset, indexed as <see cref="StructureAssets.Table"/> counts them.</param>
+    /// <returns>The graph.</returns>
+    internal NavGraph NavFor(int assetIndex) =>
+        (uint)assetIndex < (uint)_navByIndex.Length ? _navByIndex[assetIndex] : null;
 
     /// <summary>How many assets publish a door, for the boot line.</summary>
     internal int DoorCount
@@ -653,16 +739,16 @@ public sealed class AssetColliders
         }
     }
 
-    /// <summary>Reads the first doorway an asset publishes.</summary>
+    /// <summary>Reads the first doorway an asset publishes, without resolving the spawn on its far side.</summary>
     /// <param name="json">The descriptor.</param>
     /// <returns>The door, or one whose <c>Exists</c> is false.</returns>
     internal static DoorPlan ReadDoor(string json) => ReadDoor(json, out _, out _);
 
-    /// <summary>Reads the first doorway an asset publishes, and which room it names.</summary>
+    /// <summary>Reads the first doorway an asset publishes, and which asset and spawn it leads to.</summary>
     /// <param name="json">The descriptor.</param>
-    /// <param name="target">The asset id of the room behind it, or null.</param>
-    /// <param name="targetSpawn">The spawn in that room a body arrives at, or null.</param>
-    /// <returns>The door, or one whose Exists is false.</returns>
+    /// <param name="target">The asset id behind it, or null.</param>
+    /// <param name="targetSpawn">The spawn in that asset a body arrives at, or null.</param>
+    /// <returns>The door with its own side read — geometry, approach, exit spawn — or one whose Exists is false.</returns>
     internal static DoorPlan ReadDoor(string json, out string target, out string targetSpawn)
     {
         target = null;
@@ -680,8 +766,7 @@ public sealed class AssetColliders
 
         foreach (var portal in portals.EnumerateArray())
         {
-            if (!portal.TryGetProperty("center", out var centre) || centre.ValueKind != JsonValueKind.Array || centre.GetArrayLength() < 3
-                || !portal.TryGetProperty("half", out var half) || half.ValueKind != JsonValueKind.Array || half.GetArrayLength() < 3)
+            if (!TryVec3(portal, "center", out var cx, out _, out var cz) || !TryVec3(portal, "half", out var hx, out _, out var hz))
             {
                 continue;
             }
@@ -692,19 +777,110 @@ public sealed class AssetColliders
                 continue;
             }
 
+            // Mirrored once, here: a point (x, z) is (-x, z) in the world's convention and a direction likewise.
+            cx = -cx;
+            fx = -fx;
+            var exitSpawn = portal.TryGetProperty("exit_spawn", out var es) ? es.GetString() : null;
+            if (!TryReadSpawn(doc.RootElement, exitSpawn, out var exitX, out var exitY, out var exitZ))
+            {
+                // A door with nowhere to come back out to cannot be used in both directions, which is what a door is for.
+                continue;
+            }
+
+            // <b>Absent and empty are the same</b> (rule 5), and an asset with no approach still has a door a program can walk through: straight in
+            // along the forward, from 3 m out to a quarter metre past the plane — the same shape every published approach has.
+            var (ax, az, ex, ez) = ReadApproach(portal, out var have);
+            if (!have)
+            {
+                (ax, az) = (cx - (fx * 3f), cz - (fz * 3f));
+                (ex, ez) = (cx + (fx * 0.25f), cz + (fz * 0.25f));
+            }
+
             target = portal.TryGetProperty("target", out var t) ? t.GetString() : null;
             targetSpawn = portal.TryGetProperty("target_spawn", out var ts) ? ts.GetString() : null;
-            return new DoorPlan(
-                centre[0].GetSingle(),
-                centre[2].GetSingle(),
-                half[0].GetSingle(),
-                half[2].GetSingle(),
-                fx,
-                fz,
-                true);
+            return new DoorPlan(cx, cz, hx, hz, fx, fz, ax, az, ex, ez, exitX, exitZ, Exists: true, ExitY: exitY);
         }
 
         return default;
+    }
+
+    /// <summary>The first and last points of a portal's approach path, mirrored; the points between are not needed by anything here.</summary>
+    /// <param name="portal">The portal element.</param>
+    /// <param name="have">Whether it has a usable path of at least two points.</param>
+    /// <returns>The start and the end.</returns>
+    /// <remarks>
+    /// <b>Two points, because a program needs no more:</b> where to walk to first — in front of the ramp — and the direction to follow from there, which
+    /// the end gives. Every path the pack publishes is straight in plan (one heading, its points only change height), so following the line from the
+    /// first to the last is following the path. A bent path would need the points between, and would be read then.
+    /// </remarks>
+    private static (float X, float Z, float EndX, float EndZ) ReadApproach(JsonElement portal, out bool have)
+    {
+        have = false;
+        if (!portal.TryGetProperty("approach", out var path) || path.ValueKind != JsonValueKind.Array || path.GetArrayLength() < 2)
+        {
+            return default;
+        }
+
+        var first = path[0];
+        var last = path[path.GetArrayLength() - 1];
+        if (first.ValueKind != JsonValueKind.Array || first.GetArrayLength() < 3 || last.ValueKind != JsonValueKind.Array || last.GetArrayLength() < 3)
+        {
+            return default;
+        }
+
+        have = true;
+        return (-first[0].GetSingle(), first[2].GetSingle(), -last[0].GetSingle(), last[2].GetSingle());
+    }
+
+    /// <summary>A named spawn's position, mirrored: feet height above the asset's origin, and its plan position.</summary>
+    /// <param name="json">The descriptor holding it.</param>
+    /// <param name="spawnId">Its id.</param>
+    /// <param name="x">East of the asset origin.</param>
+    /// <param name="y">Feet height above it.</param>
+    /// <param name="z">North.</param>
+    /// <returns>Whether it was found.</returns>
+    internal static bool TryReadSpawn(string json, string spawnId, out float x, out float y, out float z)
+    {
+        using var doc = JsonDocument.Parse(json);
+        return TryReadSpawn(doc.RootElement, spawnId, out x, out y, out z);
+    }
+
+    private static bool TryReadSpawn(JsonElement root, string spawnId, out float x, out float y, out float z)
+    {
+        x = 0f;
+        y = 0f;
+        z = 0f;
+        if (spawnId == null || !Readable(root) || !root.TryGetProperty("spawns", out var spawns) || spawns.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        foreach (var spawn in spawns.EnumerateArray())
+        {
+            if (spawn.TryGetProperty("id", out var id) && string.Equals(id.GetString(), spawnId, StringComparison.Ordinal)
+                && TryVec3(spawn, "pos", out x, out y, out z))
+            {
+                x = -x;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>A three-number array property.</summary>
+    private static bool TryVec3(JsonElement element, string name, out float x, out float y, out float z)
+    {
+        x = y = z = 0f;
+        if (!element.TryGetProperty(name, out var v) || v.ValueKind != JsonValueKind.Array || v.GetArrayLength() < 3)
+        {
+            return false;
+        }
+
+        x = v[0].GetSingle();
+        y = v[1].GetSingle();
+        z = v[2].GetSingle();
+        return float.IsFinite(x) && float.IsFinite(y) && float.IsFinite(z);
     }
 
     /// <summary>
@@ -751,51 +927,6 @@ public sealed class AssetColliders
         var ty = ((qz * ax) - (qx * az)) + (qw * ay);
         var tz = ((qx * ay) - (qy * ax)) + (qw * az);
         return (ax + (2f * ((qy * tz) - (qz * ty))), az + (2f * ((qx * ty) - (qy * tx))));
-    }
-
-    /// <summary>Reads a room: the named spawn to arrive at, and the first portal leading back out.</summary>
-    /// <param name="json">The interior asset descriptor.</param>
-    /// <param name="spawnId">Which spawn a body arrives at; the first is used when it is not found.</param>
-    /// <returns>The room, or one whose Exists is false.</returns>
-    internal static RoomPlan ReadRoom(string json, string spawnId)
-    {
-        using var doc = JsonDocument.Parse(json);
-        if (!Readable(doc.RootElement))
-        {
-            return default;
-        }
-
-        var entryX = 0f;
-        var entryZ = 0f;
-        var haveEntry = false;
-        if (doc.RootElement.TryGetProperty("spawns", out var spawns) && spawns.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var spawn in spawns.EnumerateArray())
-            {
-                if (!spawn.TryGetProperty("pos", out var pos) || pos.ValueKind != JsonValueKind.Array || pos.GetArrayLength() < 3)
-                {
-                    continue;
-                }
-
-                var named = spawn.TryGetProperty("id", out var id) && string.Equals(id.GetString(), spawnId, StringComparison.Ordinal);
-                if (named || !haveEntry)
-                {
-                    entryX = pos[0].GetSingle();
-                    entryZ = pos[2].GetSingle();
-                    haveEntry = true;
-                }
-
-                if (named)
-                {
-                    break;
-                }
-            }
-        }
-
-        var back = ReadDoor(json);
-        return haveEntry && back.Exists
-            ? new RoomPlan(entryX, entryZ, back.CenterX, back.CenterZ, back.HalfX, back.ForwardX, back.ForwardZ, true)
-            : default;
     }
 
     /// <summary>

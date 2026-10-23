@@ -48,11 +48,11 @@ public static class WorldRebuild
         // shuttleport, door and player, and none of it fails loudly: `PickCityIndex` walks a weight list summing to 2 and
         // returns early so half the cities stop being reachable, one dungeon can draw the same player into its party
         // twice, and the door check below then throws a message blaming the map for a doubled count of its own making.
-        if (index.Cities.Count != 0 || index.Players.Count != 0 || index.Portals.Count != 0)
+        if (index.Cities.Count != 0 || index.Players.Count != 0)
         {
             throw new InvalidOperationException(
-                $"Rebuild needs an empty index; this one already holds {index.Cities.Count} cities, {index.Players.Count} players and "
-                + $"{index.Portals.Count} doors. Rebuilding on top of a filled index doubles every list it appends to.");
+                $"Rebuild needs an empty index; this one already holds {index.Cities.Count} cities and {index.Players.Count} players. "
+                + "Rebuilding on top of a filled index doubles every list it appends to.");
         }
 
         var census = new WorldCensus();
@@ -80,31 +80,26 @@ public static class WorldRebuild
         // matches the run that built the world instead of being short by however many interiors it had.
         if (interiorRealms.Length > 0)
         {
-            census.CityNpcs += CountNpcsIn(dbe, interiorRealms);
+            var (npcs, rooms) = CountInteriors(dbe, interiorRealms);
+            census.CityNpcs += npcs;
+            census.StaticObjects += rooms;
         }
 
-        BuildCityPortalRuns(map, index);
         return census;
     }
 
     /// <summary>
-    /// The shuttleports and the doors, which only the entities know. Also the static/player-structure split, which <see cref="Structure.Kind"/> states.
+    /// The shuttleports, which only the entities know. Also the static/player-structure split, which <see cref="Structure.Kind"/> states.
     /// </summary>
     /// <remarks>
-    /// Written into pre-sized slots rather than appended, because the order is load-bearing on both lists: <c>Shuttleports[c]</c> must be city <c>c</c>'s port,
-    /// and <c>Portals[j]</c> must be the door that leads to interior realm <c>Planets + p·N + j</c>. A spatial index returns clusters in whatever order it holds
-    /// them, so an append would produce a correct set in an arbitrary order — which is the subtlest way this could look right and be wrong.
+    /// Written into pre-sized slots rather than appended, because the order is load-bearing: <c>Shuttleports[c]</c> must be city <c>c</c>'s port, and a spatial
+    /// index returns clusters in whatever order it holds them. The doors need nothing here: they are <see cref="Portal"/> entities, read as they are by
+    /// <see cref="PortalTable.Build"/>.
     /// </remarks>
     private static void RebuildStructures(Transaction tx, WorldIndex index, WorldCensus census, ushort realm)
     {
         var ports = new (float X, float Z)[index.Cities.Count];
         var portsSeen = new bool[index.Cities.Count];
-
-        // Grown on demand: the door count is a property of the world on disk, and trusting the map's count here would make a mismatch invisible.
-        var doors = new (float X, float Z)[16];
-        var facings = new (byte Yaw, byte Asset)[16];
-        var doorsSeen = new bool[16];
-        var maxDoor = -1;
 
         foreach (var cluster in tx.For<WorldObject>().GetClusterEnumerator())
         {
@@ -145,22 +140,6 @@ public static class WorldRebuild
                     ports[portRegion] = (x, z);
                     portsSeen[portRegion] = true;
                 }
-
-                if (st.PortalIndex >= 0)
-                {
-                    if (st.PortalIndex >= doors.Length)
-                    {
-                        var grown = Math.Max(st.PortalIndex + 1, doors.Length * 2);
-                        Array.Resize(ref doors, grown);
-                        Array.Resize(ref facings, grown);
-                        Array.Resize(ref doorsSeen, grown);
-                    }
-
-                    doors[st.PortalIndex] = (x, z);
-                    facings[st.PortalIndex] = ((byte)st.Yaw, (byte)st.Asset);
-                    doorsSeen[st.PortalIndex] = true;
-                    maxDoor = Math.Max(maxDoor, st.PortalIndex);
-                }
             }
         }
 
@@ -175,52 +154,6 @@ public static class WorldRebuild
             }
 
             index.Shuttleports.Add(ports[c]);
-        }
-
-        for (var j = 0; j <= maxDoor; j++)
-        {
-            if (!doorsSeen[j])
-            {
-                throw new InvalidOperationException(
-                    $"Reopened world: door {j} is missing while door {maxDoor} is present, so the door list has a hole and every interior realm after it "
-                    + "would be off by one.");
-            }
-
-            index.Portals.Add(doors[j]);
-            index.PortalFacings.Add(facings[j]);
-        }
-    }
-
-    /// <summary>Each city's run in <see cref="WorldIndex.Portals"/>, recomputed from the map exactly as the build computes it.</summary>
-    /// <remarks>
-    /// From the map rather than from the entities, and this is the one place where that needs saying: the run lengths follow from
-    /// <c>WorldBuilder.IsEnterable</c> over each city's building count, which the map states. Reading them off the entities instead would need the building's
-    /// index within its city, which nothing stores — and would gain nothing, because the two must agree or the door list is wrong anyway. The count is checked
-    /// against what was actually found.
-    /// </remarks>
-    private static void BuildCityPortalRuns(TatooineMap map, WorldIndex index)
-    {
-        var first = 0;
-        foreach (var city in map.Cities)
-        {
-            var n = 0;
-            for (var i = 0; i < city.Buildings; i++)
-            {
-                n += WorldBuilder.IsEnterable(i) ? 1 : 0;
-            }
-
-            index.CityPortals.Add((first, n));
-            first += n;
-        }
-
-        // No `!= 0` escape hatch: zero doors on disk is exactly the mismatch worth catching. A world built without
-        // --interiors and reopened with it has none, while the map still accounts for `first` of them, and `TryWalkToPortal`
-        // then indexes an empty list inside PlayerThinkTick — a throw from the tick path, which is never allowed.
-        if (index.Portals.Count != first)
-        {
-            throw new InvalidOperationException(
-                $"Reopened world: {index.Portals.Count} doors on disk but the map's city layout accounts for {first}. The database was built from a "
-                + "different map or a different content scale.");
         }
     }
 
@@ -296,26 +229,30 @@ public static class WorldRebuild
         }
     }
 
-    /// <summary>City NPCs across a set of realms — the interiors of one planet.</summary>
-    private static int CountNpcsIn(DatabaseEngine dbe, ReadOnlySpan<ushort> realms)
+    /// <summary>City NPCs and rooms across a set of realms — the interiors of one planet.</summary>
+    private static (int Npcs, int Rooms) CountInteriors(DatabaseEngine dbe, ReadOnlySpan<ushort> realms)
     {
         using var tx = dbe.CreateQuickTransaction();
-        var n = 0;
+        var npcs = 0;
         foreach (var cluster in tx.For<CityNpc>().GetClusterEnumerator())
         {
-            var value = cluster.Realm.Value;
-            foreach (var realm in realms)
+            if (realms.Contains(cluster.Realm.Value))
             {
-                if (value == realm)
-                {
-                    n += BitOperations.PopCount(cluster.OccupancyBits);
-                    break;
-                }
+                npcs += BitOperations.PopCount(cluster.OccupancyBits);
+            }
+        }
+
+        var rooms = 0;
+        foreach (var cluster in tx.For<WorldObject>().GetClusterEnumerator())
+        {
+            if (realms.Contains(cluster.Realm.Value))
+            {
+                rooms += BitOperations.PopCount(cluster.OccupancyBits);
             }
         }
 
         tx.Commit();
-        return n;
+        return (npcs, rooms);
     }
 
     /// <summary>

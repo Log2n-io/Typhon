@@ -43,9 +43,10 @@ export interface AppTagParts {
  * Everything the renderer needs to know about the realm the session is in, derived once per switch.
  *
  * <b>Bounds are carried as a centre and a half-extent, not as a half-extent alone.</b> Every "±8192" in this
- * client assumes a world centred on the origin, and an interior is not one: its grid is `(0,0)...(64,64)`
- * (`WorldBuilder.InteriorEdgeM`). Centre-plus-half makes that a difference in data rather than a special case in
- * every consumer, which is the only reason one camera clamp can serve every scene.
+ * client assumes a world centred on the origin, and not every realm is one: a dungeon's grid is `(0,0)...(64,64)`
+ * (`WorldBuilder.InteriorEdgeM`), while a building's room is centred so it stands in its own coordinates. Centre-plus-half
+ * makes that a difference in data rather than a special case in every consumer, which is the only reason one camera
+ * clamp can serve every scene.
  */
 export interface RealmView {
   readonly scene: SceneKind;
@@ -230,28 +231,20 @@ export function defaultDistanceFor(view: RealmView): number {
 /**
  * The realm a building's door leads to, or `null` when there is none to go to.
  *
- * <b>The client is told the rule, not the arithmetic.</b> `portal` is the building's slot in its planet's door list —
- * which a client cannot derive, because enterability comes from a building's index within its city and that is on no
- * wire — and `first` / `perPlanet` are the layout the server publishes at `/typhon/demo.json`. Putting the two together
- * here keeps the one multiplication in a pure function with a test, rather than inline in a click handler.
+ * <b>Told, not computed.</b> `interior` is the building's room as the server stored it (`Structure.InteriorRealm`), sent
+ * with the entity; 0 means the building cannot be entered, since realm 0 is a planet. It used to be the building's slot
+ * in its planet's door list, turned into a realm here by the layout the server publishes — arithmetic the server no
+ * longer does either.
  *
- * @param from The realm the viewer is in. Only a planet has doors; its `slot` is which planet.
- * @param portal The building's door slot, or -1 for a building that cannot be entered.
+ * @param from The realm the viewer is in. Only a planet's buildings have doors.
+ * @param interior The building's `interior` field.
  */
-export function interiorRealmOf(
-  from: RealmView | null,
-  portal: number,
-  layout: { readonly first: number; readonly perPlanet: number } | null,
-): number | null {
-  if (from === null || layout === null || from.scene !== 'planet') {
+export function doorRealmOf(from: RealmView | null, interior: number): number | null {
+  if (from === null || from.scene !== 'planet') {
     return null;
   }
 
-  if (!Number.isInteger(portal) || portal < 0 || portal >= layout.perPlanet) {
-    return null;
-  }
-
-  return layout.first + from.slot * layout.perPlanet + portal;
+  return Number.isInteger(interior) && interior > 0 ? interior : null;
 }
 
 /** Whether two views are the same realm incarnation: the test the per-frame switch check makes. */

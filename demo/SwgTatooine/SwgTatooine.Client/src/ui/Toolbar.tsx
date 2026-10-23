@@ -174,6 +174,20 @@ export function Toolbar() {
             )}
           </>
         )}
+        {/* In a room, the way back out: the body walks the room's navigation to its door and through it, exactly as a
+            player holding the keys would — the server sees nothing but moves. */}
+        {playing && realmScene === 'interior' && (
+          <div className="row">
+            <button
+              title="Walk your character to this room's door and out through it. Any movement key stops the walk."
+              onClick={() => {
+                ui.walkDoor(0);
+              }}
+            >
+              Walk out
+            </button>
+          </div>
+        )}
         {/* Under the two controls that CHANGE the realm, because it is what those controls are acting on. Renders
             nothing at all against a source that reports no inventory. */}
         <RealmPanel />

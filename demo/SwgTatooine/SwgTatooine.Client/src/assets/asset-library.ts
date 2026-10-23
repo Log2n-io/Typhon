@@ -1,6 +1,8 @@
 import type { AnimationGroup } from '@babylonjs/core/Animations/animationGroup';
 import type { AssetContainer } from '@babylonjs/core/assetContainer';
 import { Light } from '@babylonjs/core/Lights/light';
+import { RegisterPointLight } from '@babylonjs/core/Lights/pointLight.pure';
+import { RegisterSpotLight } from '@babylonjs/core/Lights/spotLight.pure';
 import { LoadAssetContainerAsync } from '@babylonjs/core/Loading/sceneLoader';
 import type { GLTFLoaderAnimationStartMode } from '@babylonjs/loaders/glTF/glTFFileLoader.pure';
 import { Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector';
@@ -19,6 +21,16 @@ import type { Catalogue, Descriptor } from './descriptor';
  * `asset-animation-start.test.ts` asserts this number against the real enum, which a test may import freely.
  */
 const ANIMATION_START_NONE = 0 as GLTFLoaderAnimationStartMode;
+
+/**
+ * <b>A lamp in a GLB cannot be placed without this.</b> `instantiateModelsToScene` clones every light through
+ * `Light.GetConstructorFromName`, a registry the light classes fill only from their side-effect modules — and the glTF
+ * loader's `KHR_lights_punctual` imports the side-effect-FREE `pointLight.pure`. So the room assets, the first published
+ * assets with lamps, loaded and then threw "Could not clone or instantiate node" on every placement: the room was never
+ * drawn. Registering is idempotent. Spot lights too, the other kind the extension creates.
+ */
+RegisterPointLight();
+RegisterSpotLight();
 
 /**
  * <b>Nothing in a container may start playing by itself.</b> The loader's default is
@@ -185,8 +197,14 @@ export class AssetLibrary {
     // one draw per primitive per ASSET. Measured in the browser: zero `InstancedMesh` in the scene until this was
     // passed. Skinned meshes are instanced by nobody — Babylon refuses them itself, a few lines above the flag it
     // reads — so the character keeps its own skeleton and this is safe for it.
+    //
+    // <b>A room is cloned, not instanced.</b> An instance is drawn with its SOURCE mesh's light list, and the source lives
+    // in the container, outside `scene.meshes`, where no light ever registers itself: measured live, every primitive of
+    // `tat_house_large_interior` was lit by `sun` alone and its own three lamps reached nothing but the bodies in it. The
+    // same reach problem as the shadow defines (`SceneLighting.setShadows`). One room is on screen at a time, so
+    // instancing saves nothing there; clones are scene meshes and take their lamps like any other.
     const entries = asset.container.instantiateModelsToScene((name) => `${label}/${name}`, false, {
-      doNotInstantiate: false,
+      doNotInstantiate: asset.descriptor.kind === 'interior',
     });
     for (const node of entries.rootNodes) {
       node.parent = root;
@@ -196,9 +214,12 @@ export class AssetLibrary {
     const lights = entries.rootNodes
       .flatMap((node) => node.getDescendants(false))
       .filter((node): node is Light => node instanceof Light);
-    // An asset's lamps light that asset and nothing else: an interior's lights must not flood the street outside it.
-    for (const light of lights) {
-      light.includedOnlyMeshes = meshes;
+    // A building's lamps light that building and nothing else: they must not flood the street around it. A room's lamps
+    // light the whole room — the bodies in it included, as in the testbench — since nothing else is in its realm.
+    if (asset.descriptor.kind !== 'interior') {
+      for (const light of lights) {
+        light.includedOnlyMeshes = meshes;
+      }
     }
 
     // Children are placed in WORLD space with the composed pose rather than under the parent's glTF root: that root

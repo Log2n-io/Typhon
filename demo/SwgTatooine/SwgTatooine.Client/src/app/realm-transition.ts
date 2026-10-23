@@ -47,14 +47,20 @@ const REFUSED_IN_MS = 140;
 /** How long the screen takes to come back once a fade-out completes over an arrival that already landed. */
 const IN_AFTER_SETTLED_MS = 220;
 
-/** Per-crossing timings, milliseconds. `out` is 0 wherever the client cannot see the crossing coming. */
+/**
+ * Per-crossing timings, milliseconds. `out` is 0 wherever the client cannot see the crossing coming.
+ *
+ * <b>A door is the exception, and the testbench's timings</b> (0.25 s out, 0.35 s in): the client predicts its own body's
+ * step through a door's plane before the server answers (`door-crossing.ts`), so the fade starts on the step, holds
+ * black over the switch, and comes back once the camera is behind the body in the new realm.
+ */
 const TIMING: Record<CrossingKind, { out: number; in: number; caption: string }> = {
   // Asked for, and a journey in the fiction: the shuttle has a boarding window, so time passing is honest here.
   travel: { out: 180, in: 220, caption: 'Travelling…' },
 
   // A door. Server-initiated, so fade IN only, and quick — a crossing that takes longer than stepping through a
   // doorway reads as a loading screen rather than as a step.
-  transition: { out: 0, in: 120, caption: '' },
+  transition: { out: 250, in: 350, caption: '' },
 
   // Nothing travels into space in this demo; the camera looks somewhere else. A dissolve with no caption, because
   // captioning it would claim a journey that does not happen.
@@ -112,6 +118,24 @@ export function arrived(state: TransitionState, kind: CrossingKind, nowMs: numbe
   }
 
   return { phase: 'in', sinceMs: nowMs, durationMs: timing.in, caption: '', settled: true };
+}
+
+/**
+ * Black, now: a door crossing landed, and the new realm must not be seen until the camera has been put in it.
+ *
+ * <b>A fade-out still running is cut to black, not left to finish.</b> The server's switch does not wait for the client's
+ * quarter second: measured live, it landed with the curtain at 61 %, over a frame in which the camera was still between
+ * the old realm's coordinates and the new one's.
+ *
+ * @param state The current state.
+ * @param nowMs When.
+ */
+export function blackout(state: TransitionState, nowMs: number): TransitionState {
+  if (state.phase === 'hold') {
+    return state;
+  }
+
+  return { phase: 'hold', sinceMs: nowMs, durationMs: 0, caption: '', settled: false };
 }
 
 /**

@@ -363,13 +363,13 @@ public sealed class RealmCrossingChecks
 
         var interior = (ushort)sim.Config.Planets;
         using var pin = sim.Dbe.Realms.Observe(new RealmId(interior));
-        var edge = WorldBuilder.InteriorEdgeM * 0.5f;
+        var front = sim.Portals.Door[Worlds.DoorInto(sim, interior)];
 
         // <b>Counted from here, one statement before the crossing.</b> The world ticks on its own thread throughout, so every read above — the realm check, the
         // pin, the commit inside MoveTo — is a window in which an unrelated RESET could arrive and be charged to the crossing. "Exactly one" is only a claim
         // about the crossing if the count starts at the crossing.
         var resetsOnPlanet = viewer.Drain().Resets;
-        MoveTo(sim, player, interior, edge, edge);
+        MoveTo(sim, player, interior, front.ArriveX, front.ArriveZ);
         SessionHarness.Until(
             () =>
             {
@@ -386,9 +386,8 @@ public sealed class RealmCrossingChecks
         var netIdEntering = inside.SelfNetId;
 
         // Back out through the door, to a step outside it. The return leg's count starts here, for the reason the outbound one did.
-        var door = sim.Index.Portals[0];
         var resetsInside = viewer.Drain().Resets;
-        MoveTo(sim, player, 0, door.X + 8f, door.Z);
+        MoveTo(sim, player, 0, front.CenterX - (front.ForwardX * 8f), front.CenterZ - (front.ForwardZ * 8f));
         SessionHarness.Until(
             () =>
             {
