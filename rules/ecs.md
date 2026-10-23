@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-10-06 |
+| Last Updated | 2026-10-23 |
 | Domain | Component schema identity, archetype registry, component-type identity, tick-fence dirty bitmaps, spawn payload staging, entity handles, view lifetime, indexed queries between a write and its fence |
 
 > Type-location: `Ecs/internals/ArchetypeRegistry.cs`, `Ecs/internals/ArchetypeMetadata.cs` (+ `ArchetypeEngineState`), `Ecs/public/DatabaseEngine.cs`
@@ -137,6 +137,24 @@ discipline (MVCC revision chains vs in-place SV vs heap-backed Transient), so re
              `GeneratedSchemaRegistry`, so a component built with the generator is unaffected and the refusal lands only on assemblies built without Typhon's
              tooling, where "rebuild it with the generator" is the remedy (#819).
   verified: ReflectedOffsetProvenanceTests [VerifiesRule]
+
+### SCHEMA-08: A component field is in the schema at its true width, or the component is refused `[silent]`
+  invariant ∀ non-static field F of a component, F not a fixed buffer: `FromType(F.type) ≠ None` — F gets a field id — or registration throws, naming the
+            component, the field and the type
+  invariant ∀ CLR type T with `FromType(T) = K`, K not a handle kind (`Collection`, `Component`): `FieldSizeInComp(K) == sizeof(T)`
+            — one known violation, outside this rule's founding issue: `VarString` is a 1-byte marker that the table sizes as its 32-byte inline
+            handle, stored nowhere yet; `FieldTypeMappingTests.KnownMissized` lists it until it gets a real layout or loses its mapping
+  invariant ∀ storage FieldType K (not `None`, not a flag bit, not a handle kind): some CLR type T has `FromType(T) = K`
+  scope: DatabaseSchemaExtensions.FromType, DatabaseSchemaExtensions.FieldSizeInComp, DatabaseDefinitions.ReflectComponentSpec,
+         DatabaseDefinitions.BuildFromSpec
+  on_violation: a field the mapping skips keeps its bytes in the struct and stays readable from C#, because component values are copied whole, so nothing
+                looks wrong — but it has no field id: no Workbench column, no index, no foreign key, no replicated field. A field mapped at the wrong width
+                is worse: every field-addressed consumer (index keys and their change guard, WAL field decode, the Workbench raw read) reads a different number
+                of bytes than the struct holds — at width 0, an empty field.
+  rationale: the two tables are written by hand, side by side, and drift one entry at a time. `EntityId` was missing from the first (#1099), and
+             `FieldType.Variant` from both at once (#1449): it existed as an enum value that no CLR type produced, sized 0. The tests enumerate every type
+             the schema assembly exports instead of one type per bug.
+  verified: FieldTypeMappingTests [VerifiesRule] [RuleMutant]
 
 ---
 

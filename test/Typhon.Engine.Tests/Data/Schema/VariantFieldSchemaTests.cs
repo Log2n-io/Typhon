@@ -40,6 +40,14 @@ class VariantFieldSchemaTests
         public OnlyVariant(Variant value) => Value = value;
     }
 
+    [Component("Typhon.Test.Variant.Indexed.Generated", 1)]
+    internal struct GeneratedIndexedVariant
+    {
+        [Index] public Variant Value;
+
+        public GeneratedIndexedVariant(Variant value) => Value = value;
+    }
+
     [Component("Typhon.Test.Variant.Indexed", 1)]
     private struct IndexedVariant
     {
@@ -101,11 +109,17 @@ class VariantFieldSchemaTests
         });
     }
 
-    [Test]
-    public void AVariantIndexIsRefusedAtRegistration()
+    // Refused by name, with the reason, on both build paths — not by the generic ordinal check in DBComponentDefinition.Build, which a renumbering of
+    // FieldType would silently turn off.
+    [TestCase(false)]
+    [TestCase(true)]
+    public void AVariantIndexIsRefusedAtRegistration(bool generated)
     {
-        var error = Assert.Throws<Exception>(() => new DatabaseDefinitions().CreateFromAccessor<IndexedVariant>());
+        var type = generated ? typeof(GeneratedIndexedVariant) : typeof(IndexedVariant);
+        Assert.That(GeneratedSchemaRegistry.TryGetComponentSpec(type, out _), Is.EqualTo(generated), "exercise both schema build paths");
 
-        Assert.That(error.Message, Does.Contain("Variant").And.Contain("Value").And.Contain("does not support index"));
+        var error = Assert.Throws<InvalidOperationException>(() => new DatabaseDefinitions().CreateFromAccessor(type));
+
+        Assert.That(error.Message, Does.Contain("Variant field 'Value'").And.Contain("tagged text"));
     }
 }
