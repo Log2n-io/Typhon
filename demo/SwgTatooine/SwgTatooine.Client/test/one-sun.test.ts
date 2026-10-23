@@ -107,7 +107,7 @@ describe('the scene has one sun', () => {
     // So: same material class, and the constants that stood in for the sky are gone.
     const terrain = sourceCode('render', 'terrain-material.ts');
     expect(terrain, 'the terrain must be the same material class as the assets').toContain('new PBRMaterial(');
-    expect(terrain, 'a StandardMaterial terrain cannot share the assets\' light transport').not.toContain(
+    expect(terrain, "a StandardMaterial terrain cannot share the assets' light transport").not.toContain(
       'new StandardMaterial(',
     );
     expect(terrain, 'the hand-rolled sun share is the sky constant coming back').not.toMatch(/diffuseColor\s*=/);

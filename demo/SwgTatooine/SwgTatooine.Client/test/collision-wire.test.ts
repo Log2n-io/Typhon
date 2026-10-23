@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
 import { readCollision } from '../src/data/server-config';
-import { groundOnShapes, prepareShape, pushOut, topAt, type PlacedShape, type PlanBox } from '../src/app/structure-collision';
+import {
+  groundOnShapes,
+  prepareShape,
+  pushOut,
+  topAt,
+  type PlacedShape,
+  type PlanBox,
+} from '../src/app/structure-collision';
 
 /**
  * The ten numbers the server publishes for a collider, read at the indices it publishes them.

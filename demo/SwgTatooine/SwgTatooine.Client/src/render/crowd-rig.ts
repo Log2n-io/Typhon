@@ -41,7 +41,6 @@ export interface CrowdRig {
   // <b>The texture's own contents are NOT kept.</b> They were, "so a bone socket or a CPU-side check can read a pose
   // without the GPU" — a megabyte held for a reader that was never written. The bake builds the array anyway, so the
   // day something needs it, it is one field away; until then it is a megabyte.
-
 }
 
 /** A loaded source outfit: its skinned primitives and its animation groups. */
@@ -78,7 +77,9 @@ export function bakeClipAtlas(scene: Scene, plan: AtlasPlan, sources: ReadonlyMa
     }
 
     if (skeleton.bones.length !== plan.bones) {
-      throw new Error(`crowd: ${step.source} has ${String(skeleton.bones.length)} bones, the plan says ${String(plan.bones)}`);
+      throw new Error(
+        `crowd: ${step.source} has ${String(skeleton.bones.length)} bones, the plan says ${String(plan.bones)}`,
+      );
     }
 
     // The first source defines the canonical skeleton; every later one must agree, because one texture serves them
@@ -103,7 +104,11 @@ export function bakeClipAtlas(scene: Scene, plan: AtlasPlan, sources: ReadonlyMa
       // loop from holding one frame twice — a visible hitch once a second on an idle.
       const at = group.from + (k / plan.fps) * sourceFps;
       for (const targeted of group.targetedAnimations) {
-        assign(targeted.target as Record<string, unknown>, targeted.animation.targetProperty, targeted.animation.evaluate(at));
+        assign(
+          targeted.target as Record<string, unknown>,
+          targeted.animation.targetProperty,
+          targeted.animation.evaluate(at),
+        );
       }
 
       // Recomputed per frame rather than hoisted: nothing in this pack animates an ancestor of the mesh node, but the

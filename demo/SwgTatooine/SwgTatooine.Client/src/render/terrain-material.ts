@@ -111,7 +111,12 @@ export class TerrainMaterialPlugin extends MaterialPluginBase {
    * <b>Through the plugin, not through the material.</b> A `PBRMaterial` has no `setVector3`: its uniforms are a
    * fixed set, and anything a plugin adds is its own to bind. This is called once per sub-mesh per frame.
    */
-  override bindForSubMesh(_uniformBuffer: UniformBuffer, _scene: Scene, _engine: AbstractEngine, subMesh: SubMesh): void {
+  override bindForSubMesh(
+    _uniformBuffer: UniformBuffer,
+    _scene: Scene,
+    _engine: AbstractEngine,
+    subMesh: SubMesh,
+  ): void {
     const effect = subMesh.effect;
     if (effect === null) {
       return;

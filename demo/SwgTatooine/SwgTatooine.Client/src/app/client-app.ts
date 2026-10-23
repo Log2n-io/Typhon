@@ -24,7 +24,14 @@ import { MapCamera } from '../camera/map-camera';
 import { mountAssets, type AssetMount } from './asset-mount';
 import { mountCrowd, type CrowdMount } from './crowd-mount';
 import { StaticAssets, type StructureSample } from './static-assets';
-import { groundOnShapes, prepareShape, pushOut, type AssetShape, type PlacedShape, type Position } from './structure-collision';
+import {
+  groundOnShapes,
+  prepareShape,
+  pushOut,
+  type AssetShape,
+  type PlacedShape,
+  type Position,
+} from './structure-collision';
 import { meanAndP95, regionDue } from './frame-policy';
 import { resolveArchetypes, type ArchetypeInfo, type ArchetypeView } from '../data/archetypes';
 import { altitudeField, altitudeOf, Placement } from '../data/placement';

@@ -157,7 +157,7 @@ describe("the player's radius range", () => {
     expect(config?.body).toEqual({ halfM: 0, worldHalfM: 0 });
   });
 
-  it("carries the DEFAULT apart from the two ends, because it is a third figure", async () => {
+  it('carries the DEFAULT apart from the two ends, because it is a third figure', async () => {
     // The floor is the narrowest a session may ask to be and the ceiling is what the grid's window allows; neither is
     // the radius the profile actually serves, and a slider opened at the floor reported a view the session did not have.
     serve(PLAYER_BODY.replace('"playerMaxRadiusM":320', '"playerMaxRadiusM":1280,"playerDefaultRadiusM":1024'));

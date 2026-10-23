@@ -211,7 +211,15 @@ describe('packing the crowd into its draws', () => {
   });
 
   it('refuses a target set that does not match the sources', () => {
-    expect(() => { packTiers(new Uint8Array(1), 1, Int8Array.from([0]), [{ data: new Float32Array(1), stride: 1 }], [[]], new Int32Array(1)); },
-    ).toThrow(/one target per source/);
+    expect(() => {
+      packTiers(
+        new Uint8Array(1),
+        1,
+        Int8Array.from([0]),
+        [{ data: new Float32Array(1), stride: 1 }],
+        [[]],
+        new Int32Array(1),
+      );
+    }).toThrow(/one target per source/);
   });
 });

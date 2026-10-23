@@ -30,7 +30,13 @@ function character(id: string, roles: Record<string, string> = { idle: 'Idle', w
     kind: 'character',
     frame: 'glTF: metres, +Y up, right-handed',
     render: { glb: `${id}.glb`, triangles: 3216, materials: ['Skin'] },
-    bounds: { render: [[-0.8, 0, -0.3], [0.8, 1.64, 0.3]], collision: null },
+    bounds: {
+      render: [
+        [-0.8, 0, -0.3],
+        [0.8, 1.64, 0.3],
+      ],
+      collision: null,
+    },
     collision: null,
     portals: [],
     spawns: [],
@@ -115,7 +121,10 @@ describe('which characters a crowd may wear', () => {
   it('leaves out the bare reference body', () => {
     // `base_character` is the pack's untextured reference — skin and face, no clothes — and the only one missing a
     // clip. It is a thing to measure against, not a costume to put a citizen in.
-    const described = new Map([['base_character', character('base_character')], ['casual_male', character('casual_male')]]);
+    const described = new Map([
+      ['base_character', character('base_character')],
+      ['casual_male', character('casual_male')],
+    ]);
     expect(wearableOutfits(described)).toEqual(['casual_male']);
   });
 

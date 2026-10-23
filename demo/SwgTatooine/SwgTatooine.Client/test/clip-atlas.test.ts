@@ -59,7 +59,13 @@ function catalogue(): Map<string, Descriptor> {
       kind: 'character',
       frame: 'glTF: metres, +Y up, right-handed',
       render: { glb: `${id}.glb`, triangles: 6492, materials: ['Skin'], joints: 23 },
-      bounds: { render: [[-0.8, 0, -0.3], [0.8, 1.64, 0.3]], collision: null },
+      bounds: {
+        render: [
+          [-0.8, 0, -0.3],
+          [0.8, 1.64, 0.3],
+        ],
+        collision: null,
+      },
       collision: null,
       portals: [],
       spawns: [],
@@ -76,7 +82,13 @@ function catalogue(): Map<string, Descriptor> {
     kind: 'building',
     frame: 'glTF: metres, +Y up, right-handed',
     render: { glb: 'h.glb', triangles: 5675, materials: [] },
-    bounds: { render: [[0, 0, 0], [1, 1, 1]], collision: null },
+    bounds: {
+      render: [
+        [0, 0, 0],
+        [1, 1, 1],
+      ],
+      collision: null,
+    },
     collision: null,
     portals: [],
     spawns: [],

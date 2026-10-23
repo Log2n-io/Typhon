@@ -39,9 +39,29 @@
 export type TravelState =
   | { readonly phase: 'idle' }
   | { readonly phase: 'asking'; readonly city: number; readonly seq: number; readonly sinceMs: number }
-  | { readonly phase: 'queued'; readonly city: number; readonly seq: number; readonly sinceMs: number; readonly fromX: number; readonly fromZ: number }
-  | { readonly phase: 'refused'; readonly city: number; readonly seq: number; readonly reason: number; readonly atMs: number }
-  | { readonly phase: 'boarding'; readonly city: number; readonly seq: number; readonly sinceMs: number; readonly fromX: number; readonly fromZ: number }
+  | {
+      readonly phase: 'queued';
+      readonly city: number;
+      readonly seq: number;
+      readonly sinceMs: number;
+      readonly fromX: number;
+      readonly fromZ: number;
+    }
+  | {
+      readonly phase: 'refused';
+      readonly city: number;
+      readonly seq: number;
+      readonly reason: number;
+      readonly atMs: number;
+    }
+  | {
+      readonly phase: 'boarding';
+      readonly city: number;
+      readonly seq: number;
+      readonly sinceMs: number;
+      readonly fromX: number;
+      readonly fromZ: number;
+    }
   | { readonly phase: 'arrived'; readonly city: number; readonly seq: number; readonly atMs: number }
   | { readonly phase: 'stranded'; readonly city: number; readonly seq: number; readonly atMs: number }
   | { readonly phase: 'done'; readonly seq: number };
@@ -173,7 +193,14 @@ export function nextTravel(prev: TravelState, input: TravelInputs): TravelState 
       }
 
       // Off the queue: something happened, and which thing it was cannot be read yet.
-      return { phase: 'boarding', city: prev.city, seq: prev.seq, sinceMs: nowMs, fromX: prev.fromX, fromZ: prev.fromZ };
+      return {
+        phase: 'boarding',
+        city: prev.city,
+        seq: prev.seq,
+        sinceMs: nowMs,
+        fromX: prev.fromX,
+        fromZ: prev.fromZ,
+      };
     }
 
     case 'boarding': {

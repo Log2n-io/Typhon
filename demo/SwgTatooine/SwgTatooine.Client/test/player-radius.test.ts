@@ -33,7 +33,7 @@ describe("a player's view radius", () => {
     expect(useUi.getState().playerRadius).toBe(192);
   });
 
-  it("starts at what the server actually SERVES, which is neither end of the range", () => {
+  it('starts at what the server actually SERVES, which is neither end of the range', () => {
     // The floor is the narrowest a session may ask to be, not the radius it has: a renderer is served 1 024 m of a
     // 192..1 280 m range, and a slider that opened at 192 reported a view distance five times smaller than the one the
     // session was being given.

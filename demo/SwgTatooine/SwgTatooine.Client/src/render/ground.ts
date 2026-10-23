@@ -45,9 +45,7 @@ export class GroundView {
   pixelsPerMetre = 1000;
   /** How many pixels of terrain geometric error the viewer accepts. */
   pixelTolerance = 8;
-
 }
-
 
 /**
  * A planet's ground and sky, keyed by the `palette` field of its `AppTag`.

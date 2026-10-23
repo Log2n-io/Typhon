@@ -192,17 +192,15 @@ export function Viewport() {
           useUi.getState().setMaxViewRadius(config.maxViewRadiusM);
           // The player sphere's range, which is a different mechanism from the god region above. Null from a server that
           // does not publish it, which leaves the panel saying so rather than offering a slider nothing honours.
-          useUi
-            .getState()
-            .setPlayerRadiusRange(
-              config.player === null
-                ? null
-                : {
-                    min: config.player.radiusM,
-                    max: config.player.maxRadiusM,
-                    def: config.player.defaultRadiusM,
-                  },
-            );
+          useUi.getState().setPlayerRadiusRange(
+            config.player === null
+              ? null
+              : {
+                  min: config.player.radiusM,
+                  max: config.player.maxRadiusM,
+                  def: config.player.defaultRadiusM,
+                },
+          );
           useUi.getState().setRealms(config.realms);
           // The published asset set, when this server serves one. Mounted here rather than in the constructor because it
           // is the server that says whether there is anything to mount, and that answer arrives over HTTP.

@@ -98,7 +98,9 @@ export async function mountCrowd(
   }
 
   if (unresolved.length > 0) {
-    console.warn(`crowd: ${String(unresolved.length)} outfit/role pairs have no atlas row, starting ${unresolved[0]}; the crowd stands down`);
+    console.warn(
+      `crowd: ${String(unresolved.length)} outfit/role pairs have no atlas row, starting ${unresolved[0]}; the crowd stands down`,
+    );
     return null;
   }
 

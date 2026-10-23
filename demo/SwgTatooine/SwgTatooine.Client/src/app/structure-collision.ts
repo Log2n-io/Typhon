@@ -130,14 +130,44 @@ function negate(v: number): number {
 export function turn(quarters: number, box: PlanBox): PlanBox {
   switch (quarters & 3) {
     case 1:
-      return { minX: box.minZ, minZ: -box.maxX, maxX: box.maxZ, maxZ: -box.minX, minY: box.minY, maxY: box.maxY,
-               planeY: box.planeY, slopeX: box.slopeZ, slopeZ: negate(box.slopeX), radius: box.radius };
+      return {
+        minX: box.minZ,
+        minZ: -box.maxX,
+        maxX: box.maxZ,
+        maxZ: -box.minX,
+        minY: box.minY,
+        maxY: box.maxY,
+        planeY: box.planeY,
+        slopeX: box.slopeZ,
+        slopeZ: negate(box.slopeX),
+        radius: box.radius,
+      };
     case 2:
-      return { minX: -box.maxX, minZ: -box.maxZ, maxX: -box.minX, maxZ: -box.minZ, minY: box.minY, maxY: box.maxY,
-               planeY: box.planeY, slopeX: negate(box.slopeX), slopeZ: negate(box.slopeZ), radius: box.radius };
+      return {
+        minX: -box.maxX,
+        minZ: -box.maxZ,
+        maxX: -box.minX,
+        maxZ: -box.minZ,
+        minY: box.minY,
+        maxY: box.maxY,
+        planeY: box.planeY,
+        slopeX: negate(box.slopeX),
+        slopeZ: negate(box.slopeZ),
+        radius: box.radius,
+      };
     case 3:
-      return { minX: -box.maxZ, minZ: box.minX, maxX: -box.minZ, maxZ: box.maxX, minY: box.minY, maxY: box.maxY,
-               planeY: box.planeY, slopeX: negate(box.slopeZ), slopeZ: box.slopeX, radius: box.radius };
+      return {
+        minX: -box.maxZ,
+        minZ: box.minX,
+        maxX: -box.minZ,
+        maxZ: box.maxX,
+        minY: box.minY,
+        maxY: box.maxY,
+        planeY: box.planeY,
+        slopeX: negate(box.slopeZ),
+        slopeZ: box.slopeX,
+        radius: box.radius,
+      };
     default:
       return box;
   }
@@ -176,8 +206,18 @@ export function prepareShape(boxes: readonly PlanBox[]): AssetShape {
       maxZ = Math.max(maxZ, box.maxZ);
     }
 
-    bounds.push({ minX, minZ, maxX, maxZ, minY: -Infinity, maxY: Infinity, planeY: Infinity, slopeX: 0, slopeZ: 0,
-                  radius: 0 });
+    bounds.push({
+      minX,
+      minZ,
+      maxX,
+      maxZ,
+      minY: -Infinity,
+      maxY: Infinity,
+      planeY: Infinity,
+      slopeX: 0,
+      slopeZ: 0,
+      radius: 0,
+    });
   }
 
   return { turned, bounds };

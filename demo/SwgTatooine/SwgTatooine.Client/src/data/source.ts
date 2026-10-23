@@ -715,8 +715,9 @@ export class TyphonSource implements DataSource {
       return;
     }
 
-    const seq = this.commands?.enqueue(this.boardShuttleCommand, { destCity: Math.max(0, Math.round(destCity)) })
-      ?? CommandRefused.RateLimited;
+    const seq =
+      this.commands?.enqueue(this.boardShuttleCommand, { destCity: Math.max(0, Math.round(destCity)) }) ??
+      CommandRefused.RateLimited;
     if (seq < 0) {
       // Nothing was sent, so no ack will ever come for it. Reported immediately rather than left to the panel's
       // timeout: the client knows this one for certain, and two clicks in one tick is enough to cause it.

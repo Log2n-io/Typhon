@@ -264,9 +264,9 @@ export class SceneLighting {
 
     // Back along the direction the light travels, which is where the light comes FROM.
     this.sun.position.set(
-      x - (SUN_DIRECTION.x * SHADOW_BACKOFF_M),
-      y - (SUN_DIRECTION.y * SHADOW_BACKOFF_M),
-      z - (SUN_DIRECTION.z * SHADOW_BACKOFF_M),
+      x - SUN_DIRECTION.x * SHADOW_BACKOFF_M,
+      y - SUN_DIRECTION.y * SHADOW_BACKOFF_M,
+      z - SUN_DIRECTION.z * SHADOW_BACKOFF_M,
     );
   }
 

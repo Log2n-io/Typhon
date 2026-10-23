@@ -60,7 +60,12 @@ export class CrowdSkinPlugin extends MaterialPluginBase {
     };
   }
 
-  override bindForSubMesh(uniformBuffer: UniformBuffer, _scene: Scene, _engine: AbstractEngine, subMesh: SubMesh): void {
+  override bindForSubMesh(
+    uniformBuffer: UniformBuffer,
+    _scene: Scene,
+    _engine: AbstractEngine,
+    subMesh: SubMesh,
+  ): void {
     uniformBuffer.updateFloat('crowdTime', this.time);
     uniformBuffer.updateFloat('crowdFps', this.rig.fps);
     // <b>On the EFFECT, not through the uniform buffer.</b> A sampler is not a uniform-buffer member — the UBO holds

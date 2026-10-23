@@ -294,7 +294,9 @@ export class CrowdLayer {
         // the crowd is busy.
         if (!this.overflowed) {
           this.overflowed = true;
-          console.warn(`crowd: outfit ${outfit.id} exceeded its ${String(this.bucketCapacity)} bodies; some are not drawn`);
+          console.warn(
+            `crowd: outfit ${outfit.id} exceeded its ${String(this.bucketCapacity)} bodies; some are not drawn`,
+          );
         }
 
         continue;

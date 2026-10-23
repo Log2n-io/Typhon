@@ -142,7 +142,9 @@ export function groupLevels(
     }
 
     if (previous !== undefined && error < previous) {
-      console.warn(`assets: ${id} LOD${String(at)} claims a smaller error than the level above it; every level will draw`);
+      console.warn(
+        `assets: ${id} LOD${String(at)} claims a smaller error than the level above it; every level will draw`,
+      );
       return NO_LEVELS;
     }
   }

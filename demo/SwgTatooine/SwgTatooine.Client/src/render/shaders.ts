@@ -260,8 +260,6 @@ vec3 groundNormal(vec2 planet) {
 }
 `;
 
-
-
 /**
  * The inside of a room: a floor grid at the realm's own replication cell, and plain walls.
  *
@@ -510,7 +508,6 @@ vec3 heatRamp(float t) {
 }
 `;
 
-
 /**
  * The albedo itself, leaving the answer in `color`.
  *
@@ -625,6 +622,3 @@ export const GROUND_ALBEDO = `
     color *= 0.35;
   }
 `;
-
-
-

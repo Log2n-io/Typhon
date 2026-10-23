@@ -154,14 +154,16 @@ describe('sorting a placement meshes into levels', () => {
     // The whole rule is `error_m * ppm / d <= tol`. A missing error reads as 0, 0 clears any tolerance, and the
     // coarsest level is then chosen in the doorway you are standing in — silently, and at every distance.
     const unmeasured = [lods[0], { node: 'Body_LOD1', triangles: 3032 }, lods[2]];
-    expect(groupLevels([mesh('h/_x_house_primitive0'), mesh('h/_x_house_LOD1'), mesh('h/_x_house_LOD2')], unmeasured))
-      .toEqual({ levels: [], errors: [] });
+    expect(
+      groupLevels([mesh('h/_x_house_primitive0'), mesh('h/_x_house_LOD1'), mesh('h/_x_house_LOD2')], unmeasured),
+    ).toEqual({ levels: [], errors: [] });
   });
 
   it('refuses a ladder that does not get coarser, because the search assumes it does', () => {
     const scrambled = [lods[0], { node: 'Body_LOD1', triangles: 3032, error_m: 0.4 }, lods[2]];
-    expect(groupLevels([mesh('h/_x_house_primitive0'), mesh('h/_x_house_LOD1'), mesh('h/_x_house_LOD2')], scrambled))
-      .toEqual({ levels: [], errors: [] });
+    expect(
+      groupLevels([mesh('h/_x_house_primitive0'), mesh('h/_x_house_LOD1'), mesh('h/_x_house_LOD2')], scrambled),
+    ).toEqual({ levels: [], errors: [] });
   });
 
   it('keeps a mesh past the declared ladder, with the finest level rather than nowhere', () => {

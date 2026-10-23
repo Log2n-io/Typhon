@@ -22,8 +22,30 @@ import {
 
 /** Two wall boxes with a 1.2 m doorway between them, as the published houses are built. */
 const DOORWAY: PlanBox[] = [
-  { minX: -4.6, minZ: -0.2, maxX: -0.6, maxZ: 0.2, minY: 0, maxY: 2.5, planeY: Number.POSITIVE_INFINITY, radius: 0, slopeX: 0, slopeZ: 0 },
-  { minX: 0.6, minZ: -0.2, maxX: 4.6, maxZ: 0.2, minY: 0, maxY: 2.5, planeY: Number.POSITIVE_INFINITY, radius: 0, slopeX: 0, slopeZ: 0 },
+  {
+    minX: -4.6,
+    minZ: -0.2,
+    maxX: -0.6,
+    maxZ: 0.2,
+    minY: 0,
+    maxY: 2.5,
+    planeY: Number.POSITIVE_INFINITY,
+    radius: 0,
+    slopeX: 0,
+    slopeZ: 0,
+  },
+  {
+    minX: 0.6,
+    minZ: -0.2,
+    maxX: 4.6,
+    maxZ: 0.2,
+    minY: 0,
+    maxY: 2.5,
+    planeY: Number.POSITIVE_INFINITY,
+    radius: 0,
+    slopeX: 0,
+    slopeZ: 0,
+  },
 ];
 
 /** The server's own body half-extent, which it publishes; written here because a test is not a client. */
@@ -61,7 +83,18 @@ describe('structure collision', () => {
   it('turns the doorway with the building, the way the renderer turns it', () => {
     expect(pushOut(placed(1), 1, HALF, NO_EDGE, at(0, 0))).toBe(false);
     expect(pushOut(placed(1), 1, HALF, NO_EDGE, at(0, 2))).toBe(true);
-    expect(turn(1, DOORWAY[0])).toEqual({ minX: -0.2, minZ: 0.6, maxX: 0.2, maxZ: 4.6, minY: 0, maxY: 2.5, planeY: Number.POSITIVE_INFINITY, radius: 0, slopeX: 0, slopeZ: 0 });
+    expect(turn(1, DOORWAY[0])).toEqual({
+      minX: -0.2,
+      minZ: 0.6,
+      maxX: 0.2,
+      maxZ: 4.6,
+      minY: 0,
+      maxY: 2.5,
+      planeY: Number.POSITIVE_INFINITY,
+      radius: 0,
+      slopeX: 0,
+      slopeZ: 0,
+    });
   });
 
   it('brings a box back to itself after four quarters, and moves it after one', () => {
@@ -85,8 +118,30 @@ describe('structure collision', () => {
     const shape = prepareShape(DOORWAY);
     // The bound is a PLAN reject only: it spans every height, because a box it rejects is rejected whatever the feet
     // are doing. The vertical test belongs to the individual box, where the floor-or-wall question is answered.
-    expect(shape.bounds[0]).toEqual({ minX: -4.6, minZ: -0.2, maxX: 4.6, maxZ: 0.2, minY: -Infinity, maxY: Infinity, planeY: Number.POSITIVE_INFINITY, radius: 0, slopeX: 0, slopeZ: 0 });
-    expect(shape.bounds[1]).toEqual({ minX: -0.2, minZ: -4.6, maxX: 0.2, maxZ: 4.6, minY: -Infinity, maxY: Infinity, planeY: Number.POSITIVE_INFINITY, radius: 0, slopeX: 0, slopeZ: 0 });
+    expect(shape.bounds[0]).toEqual({
+      minX: -4.6,
+      minZ: -0.2,
+      maxX: 4.6,
+      maxZ: 0.2,
+      minY: -Infinity,
+      maxY: Infinity,
+      planeY: Number.POSITIVE_INFINITY,
+      radius: 0,
+      slopeX: 0,
+      slopeZ: 0,
+    });
+    expect(shape.bounds[1]).toEqual({
+      minX: -0.2,
+      minZ: -4.6,
+      maxX: 0.2,
+      maxZ: 4.6,
+      minY: -Infinity,
+      maxY: Infinity,
+      planeY: Number.POSITIVE_INFINITY,
+      radius: 0,
+      slopeX: 0,
+      slopeZ: 0,
+    });
   });
 
   it('honours only the live entries of a pooled array', () => {
@@ -103,7 +158,20 @@ describe('structure collision', () => {
   it('clamps to the world edge, where the server clamps', () => {
     // A wall at the very edge: the push would put the body outside, and the server would not have.
     const edge = 100;
-    const wall: PlanBox[] = [{ minX: -1, minZ: -1, maxX: 1, maxZ: 1, minY: 0, maxY: 2.5, planeY: Number.POSITIVE_INFINITY, radius: 0, slopeX: 0, slopeZ: 0 }];
+    const wall: PlanBox[] = [
+      {
+        minX: -1,
+        minZ: -1,
+        maxX: 1,
+        maxZ: 1,
+        minY: 0,
+        maxY: 2.5,
+        planeY: Number.POSITIVE_INFINITY,
+        radius: 0,
+        slopeX: 0,
+        slopeZ: 0,
+      },
+    ];
     const body = at(99.5, 0.5);
     pushOut(placed(0, 99.5, 0, wall), 1, HALF, edge, body);
     expect(body.x).toBeLessThanOrEqual(edge - HALF + 1e-6);
@@ -121,8 +189,46 @@ describe('structure collision', () => {
 
   it('resolves a corner between two walls rather than oscillating', () => {
     const corner: PlacedShape[] = [
-      { shape: prepareShape([{ minX: -4, minZ: -0.2, maxX: 0.2, maxZ: 0.2, minY: 0, maxY: 2.5, planeY: Number.POSITIVE_INFINITY, radius: 0, slopeX: 0, slopeZ: 0 }]), x: 0, z: 0, quarters: 0, y: 0 },
-      { shape: prepareShape([{ minX: -0.2, minZ: -0.2, maxX: 0.2, maxZ: 4, minY: 0, maxY: 2.5, planeY: Number.POSITIVE_INFINITY, radius: 0, slopeX: 0, slopeZ: 0 }]), x: 0, z: 0, quarters: 0, y: 0 },
+      {
+        shape: prepareShape([
+          {
+            minX: -4,
+            minZ: -0.2,
+            maxX: 0.2,
+            maxZ: 0.2,
+            minY: 0,
+            maxY: 2.5,
+            planeY: Number.POSITIVE_INFINITY,
+            radius: 0,
+            slopeX: 0,
+            slopeZ: 0,
+          },
+        ]),
+        x: 0,
+        z: 0,
+        quarters: 0,
+        y: 0,
+      },
+      {
+        shape: prepareShape([
+          {
+            minX: -0.2,
+            minZ: -0.2,
+            maxX: 0.2,
+            maxZ: 4,
+            minY: 0,
+            maxY: 2.5,
+            planeY: Number.POSITIVE_INFINITY,
+            radius: 0,
+            slopeX: 0,
+            slopeZ: 0,
+          },
+        ]),
+        x: 0,
+        z: 0,
+        quarters: 0,
+        y: 0,
+      },
     ];
 
     const body = at(-0.1, 0.1);
@@ -159,7 +265,18 @@ describe('walking a published ramp', () => {
    * box centred at x = -4 puts the top at -1 m at its west lip and +1 m at its head.
    */
   const ramp = (grade: number): PlanBox[] => [
-    { minX: -8, minZ: -2, maxX: 0, maxZ: 2, minY: -3, maxY: 0, planeY: Number.POSITIVE_INFINITY, radius: 0, slopeX: grade, slopeZ: 0 },
+    {
+      minX: -8,
+      minZ: -2,
+      maxX: 0,
+      maxZ: 2,
+      minY: -3,
+      maxY: 0,
+      planeY: Number.POSITIVE_INFINITY,
+      radius: 0,
+      slopeX: grade,
+      slopeZ: 0,
+    },
   ];
 
   const placed = (boxes: PlanBox[]): PlacedShape[] => [{ shape: prepareShape(boxes), x: 0, z: 0, quarters: 0, y: 0 }];
@@ -193,7 +310,22 @@ describe('walking a published ramp', () => {
 
   it('does not step onto the flat ledge the same box becomes without its gradient', () => {
     // What the loader produced before the top plane was kept: a 1 m slab, two metres above the feet.
-    expect(climb([{ minX: -8, minZ: -2, maxX: 0, maxZ: 2, minY: -3, maxY: 1, planeY: Number.POSITIVE_INFINITY, radius: 0, slopeX: 0, slopeZ: 0 }])).toBe(TERRAIN);
+    expect(
+      climb([
+        {
+          minX: -8,
+          minZ: -2,
+          maxX: 0,
+          maxZ: 2,
+          minY: -3,
+          maxY: 1,
+          planeY: Number.POSITIVE_INFINITY,
+          radius: 0,
+          slopeX: 0,
+          slopeZ: 0,
+        },
+      ]),
+    ).toBe(TERRAIN);
   });
 
   it('does not walk up a face too steep to stand on', () => {
