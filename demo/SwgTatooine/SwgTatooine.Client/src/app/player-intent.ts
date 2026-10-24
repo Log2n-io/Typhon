@@ -20,7 +20,16 @@ export interface MoveIntent {
 
   /** The factor the class's speed is multiplied by, Shift+1..4; absent means 1. */
   readonly boost?: number;
+
+  /**
+   * The share of the granted speed to move at, in `(0, 1]` on the wire's 255ths: the swoop's drive accelerating, coasting or
+   * braking (`swoop-drive.ts`). Absent means all of it.
+   */
+  readonly throttle?: number;
 }
+
+/** How far the throttle must move before it is worth sending: 2 % of the granted speed. */
+export const THROTTLE_EPSILON = 0.02;
 
 /** The key codes that mean "go", by the direction they mean in the camera's frame. */
 const FORWARD = ['KeyW', 'ArrowUp'];
@@ -48,22 +57,6 @@ function any(keys: ReadonlySet<string>, codes: readonly string[]): boolean {
   }
 
   return false;
-}
-
-/**
- * The intent at the swoop's class while riding: a held direction key rides, whatever gait Shift would select — there is
- * one speed on a swoop, and the server grants it only to a rider. A stop stays a stop.
- *
- * @param intent The keys' intent.
- * @param riding Whether the avatar is on its swoop.
- * @returns The intent to send.
- */
-export function asRide(intent: MoveIntent | null, riding: boolean): MoveIntent | null {
-  if (intent === null || !riding || intent.speedClass === SpeedClass.stop) {
-    return intent;
-  }
-
-  return { heading: intent.heading, speedClass: SpeedClass.swoop, boost: boostOf(intent) };
 }
 
 /**
@@ -180,6 +173,7 @@ export function intentChanged(next: MoveIntent | null, last: MoveIntent | null):
   return (
     next.speedClass !== last.speedClass ||
     boostOf(next) !== boostOf(last) ||
+    Math.abs(throttleOf(next) - throttleOf(last)) > THROTTLE_EPSILON ||
     Math.abs(shortestAngle(next.heading - last.heading)) > HEADING_EPSILON
   );
 }
@@ -221,6 +215,17 @@ export function gaitChanged(next: MoveIntent | null, last: MoveIntent | null): b
 /** An intent's boost, 1 when it names none. */
 export function boostOf(intent: MoveIntent | null): number {
   return intent?.boost ?? 1;
+}
+
+/** An intent's throttle, 1 when it names none. */
+export function throttleOf(intent: MoveIntent | null): number {
+  return intent?.throttle ?? 1;
+}
+
+/** The throttle as `MoveDir.throttle` carries it: 255ths, and 0 for "all of it". */
+export function throttleByte(intent: MoveIntent | null): number {
+  const t = throttleOf(intent);
+  return t >= 1 ? 0 : Math.max(1, Math.round(t * 255));
 }
 
 /** A difference of two headings, wrapped into [-π, π]. */

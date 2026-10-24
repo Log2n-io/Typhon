@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { boostFor, DEFAULT_BOOST, gaitLabel } from '../src/app/gait';
-import { asRide, boostOf, gaitChanged, intentChanged, movementIntent, stopAfter } from '../src/app/player-intent';
+import { boostOf, gaitChanged, intentChanged, movementIntent, stopAfter, throttleByte } from '../src/app/player-intent';
 import { speedForClass } from '../src/app/predictor';
 import { SpeedClass } from '../src/data/source';
 
@@ -76,10 +76,17 @@ describe('a way of moving on screen', () => {
 describe('a movement intent at a boost', () => {
   const held = (...codes: string[]) => new Set(codes);
 
-  it('carries the boost when walking, running and riding', () => {
+  it('carries the boost when walking and running', () => {
     expect(movementIntent(held('KeyW'), 0, 3)).toMatchObject({ speedClass: SpeedClass.walk, boost: 3 });
     expect(movementIntent(held('KeyW', 'ShiftLeft'), 0, 3)).toMatchObject({ speedClass: SpeedClass.run, boost: 3 });
-    expect(asRide(movementIntent(held('KeyW'), 0, 3), true)).toMatchObject({ speedClass: SpeedClass.swoop, boost: 3 });
+  });
+
+  /** The swoop's throttle on the wire: 255ths, and 0 for "all of it", which is also what an intent with none says. */
+  it('sends a throttle as 255ths, all of it as 0', () => {
+    expect(throttleByte({ heading: 0, speedClass: SpeedClass.swoop })).toBe(0);
+    expect(throttleByte({ heading: 0, speedClass: SpeedClass.swoop, throttle: 1 })).toBe(0);
+    expect(throttleByte({ heading: 0, speedClass: SpeedClass.swoop, throttle: 0.5 })).toBe(128);
+    expect(throttleByte({ heading: 0, speedClass: SpeedClass.swoop, throttle: 0.0001 })).toBe(1);
   });
 
   /** Unchanged for a caller that has no boost to pass, which is every test written before it existed. */

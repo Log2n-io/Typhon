@@ -256,6 +256,7 @@ export interface DataSource {
    *   still belongs to the velocity before it. 0 for a re-send of an unchanged intent, and for a client that cannot
    *   measure it.
    * @param boost The factor the class's speed is multiplied by, 1 to 4 (Shift+1..4); the server refuses more.
+   * @param throttle The share of that to move at, in 255ths, 0 meaning all of it: the swoop's drive.
    *
    * <b>A CLASS, not a speed.</b> Same reason as {@link moveTo}: the client says "run", the server decides what running is.
    *
@@ -266,7 +267,7 @@ export interface DataSource {
    * the old velocity and the new one and the durations are equal. It is not a speed and cannot be used as one: the split
    * is a convex combination of two velocities the server itself granted.
    */
-  moveDir(heading: number, speedClass: number, changePhase?: number, boost?: number): void;
+  moveDir(heading: number, speedClass: number, changePhase?: number, boost?: number, throttle?: number): void;
   /**
    * Names the entity the avatar is attacking, or 0 to clear (`SetTarget`).
    *
@@ -655,12 +656,12 @@ export class TyphonSource implements DataSource {
   }
 
   /** @inheritdoc */
-  moveDir(heading: number, speedClass: number, changePhase = 0, boost = 1): void {
+  moveDir(heading: number, speedClass: number, changePhase = 0, boost = 1, throttle = 0): void {
     if (this.moveDirCommand === null) {
       return;
     }
 
-    this.commands?.enqueue(this.moveDirCommand, { heading, speedClass, changePhase, boost });
+    this.commands?.enqueue(this.moveDirCommand, { heading, speedClass, changePhase, boost, throttle });
     this.sendPending();
   }
 

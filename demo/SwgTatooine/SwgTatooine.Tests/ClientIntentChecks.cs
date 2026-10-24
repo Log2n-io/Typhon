@@ -509,6 +509,43 @@ internal sealed class ClientIntentChecks : ServedChecks
         });
     }
 
+    /// <summary>A throttle scales the granted speed down by its 255ths, 0 meaning all of it — and can never scale it up.</summary>
+    /// <remarks>
+    /// The swoop's drive (client <c>swoop-drive.ts</c>) accelerates and brakes by sending a share of the granted speed. It is safe to take from a client
+    /// only because it is a share: 255 is the most it can name.
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void AThrottleScalesTheGrantedSpeedDown()
+    {
+        using var world = new Possessed(Config());
+
+        float runMps;
+        using (var tx = world.Sim.Dbe.CreateQuickTransaction())
+        {
+            runMps = tx.For<Player>().Open(world.Entity).Read(Player.Move).RunMps;
+        }
+
+        var throttles = new byte[] { 0, 255, 51, 128 };
+        var granted = new float[throttles.Length];
+        for (var i = 0; i < throttles.Length; i++)
+        {
+            var applied = i + 1;
+            world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Run, boost: 2, throttle: throttles[i]));
+            SessionHarness.Until(() => TatooineReplication.Intents.Applied >= applied, $"intent {applied} to be applied");
+            world.Harness.Ticks(1);
+            granted[i] = MathF.Abs(world.Read().VelX) * TickRateHz;
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(granted[0], Is.EqualTo(runMps * 2f).Within(0.01f), "throttle 0 is not the whole of the boosted run");
+            Assert.That(granted[1], Is.EqualTo(runMps * 2f).Within(0.01f), "throttle 255 is not the whole of the boosted run");
+            Assert.That(granted[2], Is.EqualTo(runMps * 2f * 51f / 255f).Within(0.01f), "throttle 51 is not a fifth");
+            Assert.That(granted[3], Is.EqualTo(runMps * 2f * 128f / 255f).Within(0.01f), "throttle 128 is not about half");
+        });
+    }
+
     /// <summary>
     /// The teleport threshold is above the fastest gait, with the margin the engine's test needs.
     /// </summary>

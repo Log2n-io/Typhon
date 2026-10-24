@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  asRide,
   gaitChanged,
   HEADING_EPSILON,
   intentChanged,
@@ -224,27 +223,5 @@ describe('gaitChanged', () => {
 
   it('says nothing changed when nothing is held and nothing was', () => {
     expect(gaitChanged(null, null)).toBe(false);
-  });
-});
-
-describe('asRide', () => {
-  it('rides at the swoop class while mounted, whatever gait Shift would select', () => {
-    expect(asRide({ heading: 1, speedClass: SpeedClass.walk }, true)).toEqual({
-      heading: 1,
-      speedClass: SpeedClass.swoop,
-      boost: 1,
-    });
-    expect(asRide({ heading: 1, speedClass: SpeedClass.run, boost: 4 }, true)).toMatchObject({
-      speedClass: SpeedClass.swoop,
-      boost: 4,
-    });
-  });
-
-  it('leaves a stop a stop, no keys no intent, and walking on foot as it was', () => {
-    const stop = { heading: 0, speedClass: SpeedClass.stop };
-    expect(asRide(stop, true)).toBe(stop);
-    expect(asRide(null, true)).toBeNull();
-    const walk = { heading: 0.5, speedClass: SpeedClass.walk };
-    expect(asRide(walk, false)).toBe(walk);
   });
 });

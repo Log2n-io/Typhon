@@ -1,5 +1,5 @@
 import { Material } from '@babylonjs/core/Materials/material';
-import { Quaternion } from '@babylonjs/core/Maths/math.vector';
+import { Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector';
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode';
 import { axisVector, placement, yawForHeading } from '../assets/asset-frame';
 import type { AssetLibrary, Instance } from '../assets/asset-library';
@@ -88,6 +88,12 @@ export interface CharacterMount {
   setRiding(on: boolean): void;
   /** Whether the body is drawn on its swoop. */
   readonly riding: boolean;
+  /**
+   * The swoop's attitude and hover, drawing only (`swoop-drive.ts`, `swoop-hover.ts`): the bike rolls about its own length
+   * by `roll` radians — positive puts the right side down — pitches its nose up by `pitch`, and floats `lift` metres above
+   * the ground the body stands on. The rider is carried with it. All 0 for a swoop nobody here steers.
+   */
+  setLean(roll: number, pitch: number, lift: number): void;
   /** How far above its feet the body is drawn: the seat's height while riding, 0 on foot. */
   readonly riderLift: number;
   /**
@@ -188,6 +194,11 @@ export async function mountCharacter(
   let swoop: Instance | null = null;
   let swoopLoading = false;
   let seatY = DEFAULT_SEAT_Y;
+  let lean = 0;
+  let nose = 0;
+  let hover = 0;
+  const seatOffset = new Vector3();
+  const seatAt = new Vector3();
   const swoopRoot = new TransformNode('swoop-ride', root.getScene());
   swoopRoot.parent = root;
   swoopRoot.rotationQuaternion = new Quaternion();
@@ -221,7 +232,12 @@ export async function mountCharacter(
       return riding;
     },
     get riderLift(): number {
-      return riding ? seatY : 0;
+      return riding ? seatY + hover : 0;
+    },
+    setLean(roll: number, pitch: number, lift: number): void {
+      lean = roll;
+      nose = pitch;
+      hover = lift;
     },
     setRiding(on: boolean): void {
       if (on === riding) {
@@ -285,9 +301,15 @@ export async function mountCharacter(
       if (riding) {
         // The swoop's origin on the ground and its nose (+Z, as the rider's) along the heading; the rider on the seat,
         // facing the same way (the seat's 180° turn of -Z is +Z), sitting.
-        swoopRoot.position.set(x, y, z);
-        Quaternion.RotationYawPitchRollToRef(yaw, 0, 0, swoopRoot.rotationQuaternion!);
-        rig.setPose(x, y + seatY, z, yaw);
+        // Banked about its own length and floating on its bob; the rider is carried on the seat through the same rotation,
+        // so it leans with the bike rather than staying upright on a tilted seat.
+        const tilt = swoopRoot.rotationQuaternion!;
+        swoopRoot.position.set(x, y + hover, z);
+        // Babylon's pitch puts the nose DOWN for a positive angle, and its roll lifts the right side; both are turned round.
+        Quaternion.RotationYawPitchRollToRef(yaw, -nose, -lean, tilt);
+        seatOffset.set(0, seatY, 0);
+        seatOffset.rotateByQuaternionToRef(tilt, seatAt);
+        rig.setPoseRotation(x + seatAt.x, y + hover + seatAt.y, z + seatAt.z, tilt);
         rig.hold('SitDown');
         return;
       }

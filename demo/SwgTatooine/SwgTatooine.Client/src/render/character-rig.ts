@@ -88,6 +88,14 @@ export class CharacterRig {
     Quaternion.RotationYawPitchRollToRef(yaw, 0, 0, root.rotationQuaternion);
   }
 
+  /** {@link setPose} with a whole rotation rather than a yaw: a rider leaning with the bike it sits on. */
+  setPoseRotation(x: number, y: number, z: number, rotation: Quaternion): void {
+    const root = this.instance.root;
+    root.position.set(x, y, z);
+    root.rotationQuaternion ??= new Quaternion();
+    root.rotationQuaternion.copyFrom(rotation);
+  }
+
   /**
    * Applies one frame of the graph's output.
    *

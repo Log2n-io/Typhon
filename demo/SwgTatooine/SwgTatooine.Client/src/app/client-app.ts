@@ -88,10 +88,13 @@ import { ticketTerminalOf } from './ticket-terminal';
 import { resetForRealm, resetForSession, type RealmSwitchTargets } from './realm-switch';
 import { nextRide, NOT_RIDING, rideOwnsTheView, rideSubjectOf, type RideState } from './ride';
 import { boostFor, DEFAULT_BOOST } from './gait';
+import { driveInputOf, SwoopDrive } from './swoop-drive';
+import { SwoopHover } from './swoop-hover';
 import {
   gaitChanged,
-  asRide,
   boostOf,
+  throttleByte,
+  throttleOf,
   gaitOf,
   intentChanged,
   movementIntent,
@@ -287,6 +290,12 @@ const CLOCK_OPTIONS = {
 
 /** How close to a shuttleport the prompt appears, in metres, before the server has published its own boarding radius (`demo.json` shuttle.boardM). */
 const SHUTTLE_PROMPT_M = 30;
+
+/** At most one swoop intent per this many milliseconds while it curves; see `sendMovementIntent`. */
+const DRIVE_SEND_MS = 50;
+
+/** No hands on the swoop: what it gets while the camera is elsewhere or a menu holds the keys. */
+const PARKED_HANDS = { throttle: false, brake: false, steer: 0 } as const;
 
 /** How far a click-to-walk is searched round the buildings before it goes straight, metres; see `walkTo`. */
 const WALK_SEARCH_M = 300;
@@ -1635,8 +1644,16 @@ export class ClientApp {
     const base = Number.isFinite(serverFeet) ? serverFeet : this.predictedFeet;
     // The feet, so the predictor makes the same floor-or-wall call the server makes: a deck the body is standing
     // on is not a wall, and a box more than a step above it is.
+    const beforeX = at.x;
+    const beforeZ = at.z;
     if (pushOut(this.placedShapes, count, half, this.worldHalfM, at, this.groundUnder(at, count, half, base))) {
       this.predictor.placeAt(at.x, at.z);
+      // A swoop driven into a wall loses the speed it was driving into it, so it slides along and stops head-on rather
+      // than grinding there at full throttle (SwoopDrive.collide).
+      if (this.driving) {
+        this.drive.collide(this.predictor.x - beforeX, this.predictor.z - beforeZ);
+      }
+
       // What the predictor actually took: `placeAt` refuses a non-finite push, so its own position is the authority on
       // where the body ended up and `at` is only a request.
       at.x = this.predictor.x;
@@ -1857,8 +1874,8 @@ export class ClientApp {
   private predictedSubject = 0;
 
   /**
-   * The keys' intent, at the swoop's class while riding: a held direction key rides, whatever gait Shift would select —
-   * there is one speed on a swoop, and the server grants it only to a rider.
+   * The keys' intent: on foot, a direction in the camera's frame; on the swoop, wherever the drive is carrying the bike
+   * ({@link driveIntent}).
    */
   private keyIntent(): MoveIntent | null {
     // The destination menu holds the keys, on every path that reads them — the frame loop's and the keydown flush's: an arrow key in it is not a
@@ -1867,11 +1884,93 @@ export class ClientApp {
       return null;
     }
 
-    return asRide(
-      movementIntent(this.input.heldKeys, this.eyeCamera.yaw, this.boost),
-      this.ridingNow(performance.now()),
-    );
+    if (this.driving) {
+      return this.driveIntent();
+    }
+
+    return movementIntent(this.input.heldKeys, this.eyeCamera.yaw, this.boost);
   }
+
+  /**
+   * The swoop's motion as an intent: where the bike is GOING (not where it points — a slide is the difference) at the share
+   * of the granted swoop speed it is doing, on the wire's 255ths so the predictor integrates exactly what the server will.
+   * `null` once it is parked, which owes the server one stop and then silence, as letting go of the keys does on foot.
+   */
+  private driveIntent(): MoveIntent | null {
+    const source = this.source;
+    const max = source === null ? Number.NaN : speedForClass(SpeedClass.swoop, this.grantedSpeeds(source), this.boost);
+    const speed = this.drive.speed;
+    if (!(max > 0) || !(speed > 0)) {
+      return null;
+    }
+
+    const throttle = Math.max(1, Math.min(255, Math.round((speed / max) * 255))) / 255;
+    return { heading: this.drive.heading, speedClass: SpeedClass.swoop, boost: this.boost, throttle };
+  }
+
+  /**
+   * Advances the swoop under the rider's hands, once a frame before the intent is read: mounted, it is put under the body
+   * facing where the body faced; dismounted, it stops counting. The camera turns with it, keeping whatever angle the viewer
+   * had it at, so a chase view stays a chase view and a look over the shoulder stays one.
+   */
+  private stepDrive(dtS: number, steering: boolean): void {
+    const riding = this.ridingNow(performance.now());
+    if (!riding) {
+      this.driving = false;
+      return;
+    }
+
+    const source = this.source;
+    const max = source === null ? Number.NaN : speedForClass(SpeedClass.swoop, this.grantedSpeeds(source), this.boost);
+    if (!this.driving) {
+      this.driving = true;
+      this.hover.y = Number.NaN;
+      // Facing into the screen when the eye camera is on it — W then goes where the viewer looks, as it did on foot — and
+      // where the body faced otherwise. The body turns onto it at its own rate (`character-mount.ts`). The camera's forward
+      // is (sin yaw, cos yaw) in the ground plane (`movementIntent`), hence the arguments' order.
+      const y = this.eyeCamera.yaw;
+      this.drive.reset(
+        steering
+          ? Math.atan2(Math.cos(y), Math.sin(y))
+          : this.haveIntentHeading
+            ? this.intentHeading
+            : this.avatarHeading,
+      );
+      this.driveYaw = this.drive.yaw;
+    }
+
+    const input = steering && !useUi.getState().ticketMenu ? driveInputOf(this.input.heldKeys) : PARKED_HANDS;
+    if (max > 0) {
+      this.drive.step(dtS, input, max);
+    }
+
+    // The renderer's yaw runs the other way round from a heading (`movementIntent`'s basis), hence the minus.
+    const turned = Math.atan2(Math.sin(this.drive.yaw - this.driveYaw), Math.cos(this.drive.yaw - this.driveYaw));
+    this.driveYaw = this.drive.yaw;
+    if (steering && turned !== 0) {
+      this.eyeCamera.rotateBy(-turned, 0);
+    }
+  }
+
+  /** The swoop's handling while this session rides it; see `swoop-drive.ts`. */
+  private readonly drive = new SwoopDrive();
+
+  /** How high it floats; see `swoop-hover.ts`. Stepped after collision, on the ground the body ended up over. */
+  private readonly hover = new SwoopHover();
+
+  /** The terrain's height, for the hover's footprint: a field so the frame does not allocate a closure. */
+  private readonly terrainAt = (x: number, z: number): number => this.profile.ground.heightAt(x, z);
+
+  /** The hover's height when it is the body's this frame, or `NaN` on foot and before it has a ground to float over. */
+  private get hoverY(): number {
+    return this.driving && this.predictor.active ? this.hover.y : Number.NaN;
+  }
+
+  /** Whether {@link drive} is the body's motion: mounted, as far as {@link ridingNow} knows. */
+  private driving = false;
+
+  /** The drive's yaw last frame, for turning the camera by what the bike turned. */
+  private driveYaw = 0;
 
   /** What the 1 key last asked for, and when: the client draws it at once and the server's `mounted` decides once it has answered. */
   private mountAsked = false;
@@ -1935,7 +2034,7 @@ export class ClientApp {
       this.doorWalk.cancel();
     }
 
-    const intent = keyed ?? this.walkIntent(nowMs);
+    const intent = keyed ?? (this.driving ? null : this.walkIntent(nowMs));
 
     // A14b: when the gait changed, the instant it changed at — and `NaN` otherwise, which is every other frame. See
     // `gaitChanged` for why a heading change is not one of these.
@@ -1970,7 +2069,7 @@ export class ClientApp {
       } else {
         this.predictor.setIntent(
           intent.heading,
-          speedForClass(intent.speedClass, this.grantedSpeeds(source), boostOf(intent)),
+          speedForClass(intent.speedClass, this.grantedSpeeds(source), boostOf(intent)) * throttleOf(intent),
           changedAtMs,
         );
       }
@@ -1986,6 +2085,12 @@ export class ClientApp {
     }
 
     if (!intentChanged(intent, this.lastIntent) && nowMs - this.lastIntentMs < REFRESH_MS) {
+      return;
+    }
+
+    // A swoop in a curve changes heading and throttle every frame; at most one send per DRIVE_SEND_MS keeps it under the
+    // command's 30/s rate, and the predictor is driven by the current intent every frame regardless (above).
+    if (this.driving && gaitOf(intent) === gaitOf(this.lastIntent) && nowMs - this.lastIntentMs < DRIVE_SEND_MS) {
       return;
     }
 
@@ -2107,7 +2212,7 @@ export class ClientApp {
     if (intent === null) {
       const stop = stopAfter(this.lastIntent);
       if (stop !== null) {
-        source.moveDir(stop.heading, stop.speedClass, changePhase, boostOf(stop));
+        source.moveDir(stop.heading, stop.speedClass, changePhase, boostOf(stop), 0);
         this.lastIntentMs = atMs;
       }
 
@@ -2115,7 +2220,7 @@ export class ClientApp {
       return;
     }
 
-    source.moveDir(intent.heading, intent.speedClass, changePhase, boostOf(intent));
+    source.moveDir(intent.heading, intent.speedClass, changePhase, boostOf(intent), throttleByte(intent));
     this.lastIntent = intent;
     this.lastIntentMs = atMs;
   }
@@ -2556,6 +2661,7 @@ export class ClientApp {
     // belong to the map camera's pan. Sending then walked the avatar along a stale facing the person could not see, in response to
     // keys they were using for something else.
     if (playing) {
+      this.stepDrive(dt, inEye);
       this.sendMovementIntent(live, now, inEye);
     }
 
@@ -2563,6 +2669,17 @@ export class ClientApp {
     // has one, stopped for anything that is not a player steering its own body — a god camera, a spectator, or a session whose
     // intents the server refuses.
     this.advancePrediction(playing && haveEyeSubject ? eyeNetId : 0, now, dt);
+    if (this.driving && this.predictor.active) {
+      this.hover.step(
+        dt,
+        this.terrainAt,
+        this.predictedFeet,
+        this.predictor.x,
+        this.predictor.z,
+        this.drive.yaw,
+        this.drive.speed,
+      );
+    }
     if (playing) {
       this.watchDoors(now);
     }
@@ -2575,7 +2692,10 @@ export class ClientApp {
       // standing where the server last confirmed it.
       const predicting = playing && this.predictor.active;
       const camX = predicting ? this.predictor.x : playing ? this.eyeX : this.selectedX;
-      const camY = playing ? this.eyeY : this.selectedY;
+      // On the swoop, the height it floats at: the server stands the body on every bump of the ground, and a camera bolted
+      // to that shook with it (swoop-hover.ts).
+      const hoverY = this.hoverY;
+      const camY = playing ? (Number.isFinite(hoverY) ? hoverY : this.eyeY) : this.selectedY;
       const camZ = predicting ? this.predictor.z : playing ? this.eyeZ : this.selectedZ;
       if (this.faceOutOfGate) {
         // Out of the gate is the port's +Z, which is the renderer's yaw 0: the shuttleport is never turned.
@@ -3403,10 +3523,13 @@ export class ClientApp {
     // `own` is this session steering this body, which is exactly when an intent exists for it.
     // Otherwise from the replicated velocity, in the rig's convention (`headingFromVelocity`): the SDK's `headingOf` is a
     // Babylon yaw, and fed here it turned a body walking north to face east.
+    // On the swoop, where the NOSE points: the intent is where the bike is going, and in a slide the two differ.
     this.avatarHeading =
-      own && this.haveIntentHeading
-        ? this.intentHeading
-        : headingFromVelocity(this.evalVx, this.evalVz, this.avatarHeading);
+      own && this.driving
+        ? this.drive.yaw
+        : own && this.haveIntentHeading
+          ? this.intentHeading
+          : headingFromVelocity(this.evalVx, this.evalVz, this.avatarHeading);
     // <b>Replicated velocity is metres per TICK, not per second</b> (the SDK's motion codec: a velocity per tick is what
     // makes a changing tick period harmless). The heading does not care — `atan2` is scale-free, which is why the body
     // faced the right way while walking at a fiftieth of its speed — but the clip does: at 50 Hz a 12 m/s run arrives as
@@ -3418,6 +3541,12 @@ export class ClientApp {
     // server's, and it stops when the stream does while the clip is still on screen.
     // On the swoop: this session's own ask at once, anyone else's (a ridden subject) as the server replicates it.
     character.setRiding(own ? this.ridingNow(performance.now()) : this.fieldOf(subject, 'mounted') === 1);
+    const hoverY = own ? this.hoverY : Number.NaN;
+    if (Number.isFinite(hoverY)) {
+      character.setLean(this.drive.roll, this.hover.pitch, hoverY - y + this.drive.bob);
+    } else {
+      character.setLean(0, 0, 0);
+    }
     character.update(subject, x, y, z, speed, this.avatarHeading, nowMs / 1000, dt);
     this.driveGhost(own, subject, speed, nowMs, dt);
     return subject;

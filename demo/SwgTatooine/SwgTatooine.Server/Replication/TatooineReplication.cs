@@ -83,6 +83,16 @@ public struct MoveDir
     public byte Boost;
 
     /// <summary>
+    /// The share of the granted speed to move at, in 255ths: a swoop accelerating, coasting or braking under its rider (the client's <c>swoop-drive</c>).
+    /// 0 means all of it — a key held on foot, and a bot, name no throttle.
+    /// </summary>
+    /// <remarks>
+    /// <b>Not a speed, and it cannot be used as one:</b> it only ever scales DOWN what the class and the boost already grant, so the worst a lying client
+    /// can do with it is move slower.
+    /// </remarks>
+    public byte Throttle;
+
+    /// <summary>
     /// How far into the tick this intent CHANGED, in 255ths — the share of the boundary tick that still belongs to the velocity before it. 0 means "the
     /// whole tick is mine", which is what a re-send of an unchanged intent says and what any client that does not measure it sends.
     /// </summary>
@@ -1505,7 +1515,8 @@ public static partial class TatooineReplication
             .Field(m => m.Heading, Codec.F16, "heading")
             .Field(m => m.SpeedClass, Codec.U8, "speedClass")
             .Field(m => m.ChangePhase, Codec.U8, "changePhase")
-            .Field(m => m.Boost, Codec.U8, "boost"));
+            .Field(m => m.Boost, Codec.U8, "boost")
+            .Field(m => m.Throttle, Codec.U8, "throttle"));
         subs.Command<SetTarget>(c => c
             .Rate(4, 8)
             .Roles(SessionRole.Player)
@@ -2799,6 +2810,11 @@ public static partial class TatooineReplication
 
             // A heading is turned into a destination one second of travel away rather than into a velocity, so that this and MoveTo leave the player in the
             // same state and PlayerMove needs to know nothing about which one sent it. A held key re-sends every frame, and each one renews the second.
+            if (command.Value.Throttle != 0)
+            {
+                speed *= command.Value.Throttle / 255f;
+            }
+
             var move = player.Read(Player.Move);
             var place = player.Read(Player.Bounds);
             move.SpeedMps = speed;
