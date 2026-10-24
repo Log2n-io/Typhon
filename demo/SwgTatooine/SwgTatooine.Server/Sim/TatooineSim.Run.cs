@@ -374,6 +374,9 @@ public sealed partial class TatooineSim
     /// <summary>Ticks on which the lair director committed a spawn or a destroy, each a durable write; see <see cref="SimBridge.LairCommits"/>.</summary>
     public long LairCommits => _bridge?.LairCommits ?? 0;
 
+    /// <summary>Mission lairs replaced at their mission's point with their defenders; see <see cref="SimBridge.MissionLairsRehoused"/>.</summary>
+    public long MissionLairsRehoused => _bridge?.MissionLairsRehoused ?? 0;
+
     /// <summary>Routes the scripted crowd planned round a city's buildings, and searches that found no way; see <see cref="SimBridge.RouteTotals"/>.</summary>
     public (long Planned, long Failed) RouteTotals => _bridge?.RouteTotals ?? (0L, 0L);
 
@@ -666,6 +669,9 @@ public sealed partial class TatooineSim
         // The corpses CreatureThink hands to the lair director, which alone may destroy. A few a second at the baseline; sized like the combat queue.
         _bridge.CorpseQueue = dag.CreateEventQueue<CorpseEvent>("Corpses", 1024);
 
+        // The mission lairs MissionTick sends to a player, which the lair director replaces there with their defenders. A handful a minute.
+        _bridge.MissionMoveQueue = dag.CreateEventQueue<MissionMoveEvent>("MissionMoves", 256);
+
         dag.Add(new MissionSystem(_bridge));
         if (_config.Shuttles)
         {
@@ -733,6 +739,8 @@ public sealed partial class TatooineSim
         dag.Add(new LairLifeSystem(_bridge));
         dag.Produces("CreatureThink", _bridge.CorpseQueue)
             .Consumes("LairLife", _bridge.CorpseQueue);
+        dag.Produces("Missions", _bridge.MissionMoveQueue)
+            .Consumes("LairLife", _bridge.MissionMoveQueue);
 
         // Only a server has sessions. In the simulation's own DAG rather than one of its own, because an intent writes PlayerMotion and PlayerThink writes it
         // too — see PlayerSessionSystem.

@@ -1,3 +1,5 @@
+import { ActionBar, HamBar } from './ActionBar';
+import { DownNotice } from './DownNotice';
 import { Chat } from './Chat';
 import { Hud } from './Hud';
 import { Inspector } from './Inspector';
@@ -41,6 +43,9 @@ export function App() {
       <Toolbar />
       <Hud />
       <Chat />
+      <ActionBar />
+      <HamBar />
+      <DownNotice />
       <ShuttlePrompt />
       <NavPane />
       <Inspector />

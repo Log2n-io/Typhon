@@ -29,6 +29,7 @@ export interface CameraRequest {
 import type { RealmDirectory } from '../data/server-config';
 import { askedFor, IDLE, type TransitionState } from '../app/realm-transition';
 import { NOT_TRAVELLING, type TravelState } from '../app/travel';
+import { ACTION_SLOTS, NO_STANCE, stanceAfter } from '../app/action-bar';
 
 /** A pending ask to look at another realm. The sequence makes a repeat of the same realm a new ask. */
 export interface RealmRequest {
@@ -259,6 +260,23 @@ export interface UiState {
   readonly ticketMenu: boolean;
   readonly setTicketMenu: (open: boolean) => void;
 
+  /** The action bar's icon URLs by asset id, once the catalogue is read; empty without one, and the slots show their digit alone. */
+  readonly actionIcons: Readonly<Partial<Record<string, string>>>;
+  readonly setActionIcons: (icons: Readonly<Partial<Record<string, string>>>) => void;
+  /** The combat stance: the attack slot pushed (2–4), or {@link NO_STANCE} for idle; see `action-bar.ts`. */
+  readonly stance: number;
+  /** Back to idle: the avatar crossed into another realm, or the app closed. */
+  readonly dropStance: () => void;
+  /** A pending ask to get on or off the swoop from a click on its slot, or `null`; the 1 key toggles directly. */
+  readonly mountRequest: { readonly seq: number } | null;
+  /** The last slot used, by key or click, for the slot's press flash. */
+  readonly slotUsed: { readonly key: number; readonly seq: number } | null;
+  /**
+   * Uses a slot of the action bar: toggles an attack slot's stance, or asks for the swoop and drops the stance. `fromKey`
+   * says the 1 key already toggled the mount itself, so only the flash and the stance are owed.
+   */
+  readonly pressSlot: (key: number, fromKey: boolean) => void;
+
   /** Publishes this frame's travel state. */
   readonly setTravel: (travel: TravelState) => void;
 
@@ -304,7 +322,8 @@ export const useUi = create<UiState>()((set, get) => ({
   playing: false,
   showAuthoritative: false,
   showLabels: true,
-  showAttacks: true,
+  // The debug lines, off: a fight is shown by its swings, bolts and damage numbers (Loïc, 2026-10-24).
+  showAttacks: false,
   showGizmos: false,
   showColliders: false,
   layers: {},
@@ -491,6 +510,30 @@ export const useUi = create<UiState>()((set, get) => ({
     set((s) => ({ doorWalkRequest: { netId, seq: (s.doorWalkRequest?.seq ?? 0) + 1 } }));
   },
   ticketMenu: false,
+  actionIcons: {},
+  setActionIcons: (actionIcons) => {
+    set({ actionIcons });
+  },
+  stance: NO_STANCE,
+  dropStance: () => {
+    if (get().stance !== NO_STANCE) {
+      set({ stance: NO_STANCE });
+    }
+  },
+  mountRequest: null,
+  slotUsed: null,
+  pressSlot: (key, fromKey) => {
+    const slot = ACTION_SLOTS.find((s) => s.key === key);
+    if (slot === undefined) {
+      return;
+    }
+
+    set((s) => ({
+      slotUsed: { key, seq: (s.slotUsed?.seq ?? 0) + 1 },
+      stance: stanceAfter(s.stance, slot),
+      ...(slot.kind === 'mount' && !fromKey ? { mountRequest: { seq: (s.mountRequest?.seq ?? 0) + 1 } } : {}),
+    }));
+  },
   setTicketMenu: (ticketMenu) => {
     set({ ticketMenu });
   },

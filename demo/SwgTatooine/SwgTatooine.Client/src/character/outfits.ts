@@ -79,7 +79,7 @@ export const CROWD_ROLES: readonly string[] = ['idle', 'walk', 'run'];
  * measured these two across the outfits, and an attack held for 0.7 s is forgiving where a looping idle is not. The day
  * one looks wrong on a costume, measure it with `skin_diff2.py` and add it to that table.
  */
-export const CROWD_ACTION_ROLES: readonly string[] = ['attack', 'death'];
+export const CROWD_ACTION_ROLES: readonly string[] = ['attack', 'death', 'hit'];
 
 /**
  * A role map with the locomotion every crowd body is driven through filled in: a creature that cannot run walks, and one
@@ -127,6 +127,34 @@ export function enemySkins(kinds: readonly { readonly bodies: readonly string[] 
  * not locomotion, so no outfit was measured as diverging on it, and a rider is seen at a swoop's distance.
  */
 export const RIDE_ROLE = 'ride';
+
+/**
+ * The clips a held weapon attacks with (ASSET_FORMAT.md § 5.10: `weapon.clip`), the same on every character: a fist, a
+ * blade, a pistol. Baked into the characters' atlas as roles of their own, {@link clipRole}, so another player's blow
+ * plays its weapon's clip rather than the attack role's first.
+ */
+export const WEAPON_CLIPS: readonly string[] = ['Punch', 'SwordSlash', 'Shoot_OneHanded'];
+
+/**
+ * The clip a knocked-out player gets up with (`PlayerVitals.down` on the server). It falls as a dead one does, with the
+ * `death` role held at its end — `Defeat` ends on its feet (Loïc, 2026-10-24). Baked under {@link clipRole} like the weapons'.
+ */
+export const GET_UP_CLIP = 'StandUp';
+
+/**
+ * A clip baked into the atlas under its own name rather than a descriptor role: the weapons' attacks, the knock-out and the
+ * getting up — clips every character carries and no role map names.
+ */
+export function clipRole(clip: string): string {
+  return `${CLIP_ROLE_PREFIX}${clip}`;
+}
+
+/** The clip a {@link clipRole} names, or `null` for any other role. */
+export function clipOfRole(role: string): string | null {
+  return role.startsWith(CLIP_ROLE_PREFIX) ? role.slice(CLIP_ROLE_PREFIX.length) : null;
+}
+
+const CLIP_ROLE_PREFIX = 'clip:';
 
 /** The clip {@link RIDE_ROLE} plays, held at its end. Clip names are identical across the characters (ASSET_FORMAT § 5.8). */
 export const RIDE_CLIP = 'SitDown';

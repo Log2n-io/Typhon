@@ -6,8 +6,12 @@ import {
   RIDE_CLIP,
   RIDE_ROLE,
   RIG_OUTFIT,
+  WEAPON_CLIPS,
+  GET_UP_CLIP,
   locomotionRoles,
   needsOwnClips,
+  clipOfRole,
+  clipRole,
 } from './outfits';
 
 /**
@@ -94,7 +98,7 @@ export interface AtlasSpec {
 export const CHARACTER_ATLAS: AtlasSpec = {
   rig: RIG_OUTFIT,
   members: (_id, descriptor) => descriptor.kind === 'character',
-  roles: [...CROWD_ROLES, ...CROWD_ACTION_ROLES],
+  roles: [...CROWD_ROLES, ...CROWD_ACTION_ROLES, ...[...WEAPON_CLIPS, GET_UP_CLIP].map(clipRole)],
   ownClips: needsOwnClips,
   ride: true,
 };
@@ -129,7 +133,8 @@ function resolve(descriptor: Descriptor, role: string): { clip: string; duration
 
   let clip: string;
   try {
-    clip = role === RIDE_ROLE ? RIDE_CLIP : clipsForRole(locomotionRoles(animations.roles), role)[0];
+    clip =
+      role === RIDE_ROLE ? RIDE_CLIP : (clipOfRole(role) ?? clipsForRole(locomotionRoles(animations.roles), role)[0]);
   } catch {
     return null;
   }

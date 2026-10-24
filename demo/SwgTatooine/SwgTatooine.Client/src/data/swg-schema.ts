@@ -197,4 +197,7 @@ export const StructureKind = {
 
   /** A mission terminal, placed like a bazaar. */
   MissionTerminal: 10,
+
+  /** A city's town hall: across from its shuttleport's gate, its door facing it, with a room behind the door like a house's. */
+  TownHall: 11,
 } as const;

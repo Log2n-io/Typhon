@@ -5,6 +5,7 @@ import type { Descriptor } from '../src/assets/descriptor';
 import type { AtlasPlan, ClipSlot } from '../src/character/clip-atlas';
 import type { CrowdSkinPlugin } from '../src/render/crowd-material';
 import type { CrowdOutfit } from '../src/render/crowd-mesh';
+import type { CrowdWeapon } from '../src/render/crowd-weapons';
 import { CrowdLayer, bucketCapacity } from '../src/render/crowd-layer';
 import type { CrowdBody } from '../src/render/layer-packer';
 import { CULLED, SPRITE_TIER, type ViewParams } from '../src/render/crowd-view';
@@ -26,6 +27,11 @@ const ROWS: Record<string, ClipSlot> = {
   walk: { startRow: 125, frames: 38, loop: true, source: 'a', clip: 'Walk' },
   run: { startRow: 163, frames: 26, loop: true, source: 'a', clip: 'Run' },
   ride: { startRow: 189, frames: 40, loop: false, source: 'a', clip: 'SitDown' },
+  attack: { startRow: 229, frames: 22, loop: false, source: 'a', clip: 'Punch' },
+  'clip:Shoot_OneHanded': { startRow: 251, frames: 16, loop: false, source: 'a', clip: 'Shoot_OneHanded' },
+  hit: { startRow: 267, frames: 19, loop: false, source: 'a', clip: 'RecieveHit' },
+  death: { startRow: 286, frames: 69, loop: false, source: 'a', clip: 'Death' },
+  'clip:StandUp': { startRow: 430, frames: 39, loop: false, source: 'a', clip: 'StandUp' },
 };
 
 function plan(): AtlasPlan {
@@ -68,8 +74,30 @@ function outfit(id: string, levels = 3, height = 1.67): CrowdOutfit {
 
 function described(): Descriptor {
   return {
-    animations: { clips: [], roles: { idle: 'Idle', walk: 'Walk', run: 'Run' } },
+    animations: {
+      clips: [],
+      roles: { idle: 'Idle', walk: 'Walk', run: 'Run', attack: 'Punch', death: 'Death', hit: 'RecieveHit' },
+    },
   } as unknown as Descriptor;
+}
+
+function weapon(clip = 'Shoot_OneHanded', capacity = 64): CrowdWeapon {
+  return {
+    id: 'blaster_dl44',
+    clip,
+    mesh: fakeMesh(),
+    triangles: 120,
+    targets: [
+      new Float32Array(capacity * 16),
+      new Float32Array(capacity * 4),
+      new Float32Array(capacity * 4),
+      new Float32Array(capacity * 2),
+    ],
+    count: 0,
+    dispose() {
+      /* nothing to release in a fake */
+    },
+  };
 }
 
 /** A frustum that accepts everything, with the eye far enough away to land every body in one tier. */
@@ -119,6 +147,9 @@ function body(netId: number, z: number, speed = 0, mounted = false): CrowdBody {
     dead: false,
     outfit: -1,
     strikes: 0,
+    stance: 0,
+    hits: 0,
+    down: 0,
   };
 }
 
@@ -279,5 +310,100 @@ describe('what is drawn', () => {
     layer.update(pooled, 1, openView(), 0, 1.4, 4);
     expect(layer.drawn.size).toBe(1);
     expect(layer.drawn.has(10)).toBe(true);
+  });
+});
+
+/**
+ * Another player's stance, as everyone else sees it: the weapon in its hand, and its blows played with that weapon's clip.
+ * The weapon is posed by the same placement and clip state as the body holding it, so the two are compared slot for slot.
+ */
+describe('a body in a combat stance', () => {
+  const PISTOL = 3;
+
+  function armed(netId: number, z: number, strikes = 0, mounted = false): CrowdBody {
+    return { ...body(netId, z, 0, mounted), stance: PISTOL, strikes };
+  }
+
+  it("holds its stance's weapon, posed with its own placement and clip", () => {
+    const layer = layerOf([outfit('a')]);
+    const blaster = weapon();
+    layer.setWeapon(PISTOL, blaster);
+    layer.update([body(10, 20), armed(11, 24)], 2, openView(), 0, 1.4, 4);
+
+    const bucket = layer.buckets[0];
+    const i = bucket.byNetId.get(11)!;
+    expect(blaster.count).toBe(1);
+    expect([...blaster.targets[0].subarray(0, 16)]).toEqual([...bucket.matrices.subarray(i * 16, i * 16 + 16)]);
+    expect([...blaster.targets[1].subarray(0, 4)]).toEqual([...bucket.animator.clipA.subarray(i * 4, i * 4 + 4)]);
+    expect(blaster.mesh.thinInstanceCount).toBe(1);
+  });
+
+  it('holds nothing on its swoop, dead, out of a stance, or drawn as a sprite', () => {
+    const layer = layerOf([outfit('a')]);
+    const blaster = weapon();
+    layer.setWeapon(PISTOL, blaster);
+    const corpse = { ...armed(13, 28), dead: true };
+    layer.update([armed(11, 24, 0, true), body(12, 26), corpse, armed(14, 1e5)], 4, openView(), 0, 1.4, 4);
+    expect(blaster.count).toBe(0);
+    expect(blaster.mesh.isVisible).toBe(false);
+  });
+
+  it("plays its weapon's clip on a blow, where a body with no stance plays the attack role", () => {
+    const layer = layerOf([outfit('a')]);
+    layer.setWeapon(PISTOL, weapon());
+    layer.update([armed(11, 24, 0), body(12, 28)], 2, openView(), 0, 1.4, 4);
+    const bucket = layer.buckets[0];
+    layer.update([armed(11, 24, 1), { ...body(12, 28), strikes: 1 }], 2, openView(), 0.5, 1.4, 4);
+
+    expect(bucket.animator.clipA[bucket.byNetId.get(11)! * 4]).toBe(ROWS['clip:Shoot_OneHanded'].startRow);
+    expect(bucket.animator.clipA[bucket.byNetId.get(12)! * 4]).toBe(ROWS.attack.startRow);
+  });
+});
+
+/**
+ * Taking a blow, going down and getting up, as everyone watching sees them: a flinch per blow landed, the death held for a
+ * knock-out as for a death, and `StandUp` out of a knock-out.
+ */
+describe('a body that is hit and goes down', () => {
+  const row = (layer: CrowdLayer, netId: number): number => {
+    const bucket = layer.buckets[0];
+    return bucket.animator.clipA[bucket.byNetId.get(netId)! * 4];
+  };
+
+  it('flinches at each blow it takes', () => {
+    const layer = layerOf([outfit('a')]);
+    layer.update([body(11, 24)], 1, openView(), 0, 1.4, 4);
+    layer.update([{ ...body(11, 24), hits: 1 }], 1, openView(), 0.5, 1.4, 4);
+    expect(row(layer, 11)).toBe(ROWS.hit.startRow);
+  });
+
+  /** `Defeat` ends on its feet, so a knock-out falls as a death does and holds it (Loïc, 2026-10-24). */
+  it('falls with its death when knocked out, and gets up with StandUp', () => {
+    const layer = layerOf([outfit('a')]);
+    layer.update([body(11, 24)], 1, openView(), 0, 1.4, 4);
+    layer.update([{ ...body(11, 24), down: 1 }], 1, openView(), 0.5, 1.4, 4);
+    expect(row(layer, 11)).toBe(ROWS.death.startRow);
+
+    // Still down a while later: held, not replayed, and not interrupted by a blow.
+    layer.update([{ ...body(11, 24), down: 1, hits: 3 }], 1, openView(), 5, 1.4, 4);
+    expect(row(layer, 11)).toBe(ROWS.death.startRow);
+
+    // Up again; the router's count of blows taken only ever grows.
+    layer.update([{ ...body(11, 24), hits: 3 }], 1, openView(), 20, 1.4, 4);
+    expect(row(layer, 11)).toBe(ROWS['clip:StandUp'].startRow);
+  });
+
+  it('dies with its death', () => {
+    const layer = layerOf([outfit('a')]);
+    layer.update([body(11, 24)], 1, openView(), 0, 1.4, 4);
+    layer.update([{ ...body(11, 24), down: 2 }], 1, openView(), 0.5, 1.4, 4);
+    expect(row(layer, 11)).toBe(ROWS.death.startRow);
+  });
+
+  /** A body first seen lying down falls at once, rather than standing about until something changes. */
+  it('lies down at once when first seen down', () => {
+    const layer = layerOf([outfit('a')]);
+    layer.update([{ ...body(11, 24), down: 1 }], 1, openView(), 0, 1.4, 4);
+    expect(row(layer, 11)).toBe(ROWS.death.startRow);
   });
 });

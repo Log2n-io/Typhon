@@ -150,7 +150,8 @@ public sealed partial class SimBridge
                     // creature walked to a place its target had left and parked there for the rest of its life, with the parked population growing over a long
                     // run (gap G6). The chase is also now finite: past MaxChaseRangeM the creature gives up, which is the constant Core3 calls MAX_OOS_RANGE
                     // and which this world declared and never used.
-                    if (ai.Target.IsNull || !ctx.Accessor.TryOpen(ai.Target, out var quarry))
+                    // A downed quarry — knocked out or dead — is nobody's target: the creature lets it lie and goes back to its lair's ground.
+                    if (ai.Target.IsNull || !ctx.Accessor.TryOpen(ai.Target, out var quarry) || quarry.Read(Player.Vitals).Health <= 0)
                     {
                         SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Wander);
                         ClearTarget(in cluster, ref brainsRw, idx);
@@ -260,7 +261,10 @@ public sealed partial class SimBridge
                         while (e.MoveNext())
                         {
                             var hit = e.Current;
-                            if (hit.DistanceSq < bestSq)
+
+                            // A downed player is no threat and no prey. Read only for a hit nearer than the best so far, which in a 24 m bubble is a handful.
+                            if (hit.DistanceSq < bestSq && ctx.Accessor.TryOpen(hit.Entity, out var candidate)
+                                && candidate.Read(Player.Vitals).Health > 0)
                             {
                                 // The query result is in the engine's f64 world frame (#914); the simulation keeps f32 positions.
                                 bestSq = hit.DistanceSq;
@@ -579,6 +583,9 @@ public sealed partial class SimBridge
             var states = cluster.GetSpan(Player.State);
             var motions = cluster.GetSpan(Player.Move);
 
+            // Whether a player is down, read-only: a downed body is left alone.
+            var vitals = cluster.GetReadOnlySpan(Player.Vitals);
+
             // The way round a city's buildings (SimBridge.Routes.cs). Not projected, so a write here reaches no subscriber.
             var routes = cluster.GetSpan(Player.Route);
 
@@ -622,6 +629,21 @@ public sealed partial class SimBridge
                 ref var move = ref motions[idx];
                 var x = places[idx].X;
                 var z = places[idx].Z;
+
+                // Down: it lies where it fell until its combat pass revives it. Nothing here moves it, chats or decides.
+                if (vitals[idx].Down != Downed.Up)
+                {
+                    continue;
+                }
+
+                // A fighter of the crowd draws a pistol, and puts it away once it is doing anything else: its stance is what every client draws in its
+                // hand and swings on each blow. Its shots stay its Activity's (PlayerCombatTick), at the crowd's own range.
+                var wantStance = state.Activity == PlayerActivity.Combat ? Stances.Pistol : Stances.None;
+                if (state.Stance != wantStance)
+                {
+                    state.Stance = wantStance;
+                    pushSlots |= 1UL << idx;
+                }
 
                 // Per player per tick, unlike the creatures': a player draws on nearly every branch below, and there are orders of magnitude fewer of them.
                 var key = cluster.GetEntityId(idx).EntityKey;

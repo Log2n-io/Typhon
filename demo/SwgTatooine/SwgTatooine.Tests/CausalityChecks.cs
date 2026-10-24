@@ -207,9 +207,10 @@ public sealed class CausalityLoopTests
             Assert.That(s.ShotsSkippedNotFighting, Is.GreaterThan(s.PlayerShots), "most player-ticks are not fighting; a zero means the gate is gone");
             Assert.That(s.PlayerShots, Is.GreaterThan(0), "nobody fired at all");
 
-            // Every shot pushed an event, every event was applied to something that was still there.
-            Assert.That(s.DamageApplied, Is.EqualTo(s.PlayerShots + s.CreatureAttacks), "an effect was produced and not applied");
-            Assert.That(s.EventsStale, Is.Zero, "an event named a target that had gone: something now destroys what a shot can name");
+            // Every shot pushed an event, and every event was applied — or named a target the lair director destroyed in between: a mission lair replaced
+            // at its player's side takes its old defenders with it, mid-fight or not (SimBridge.Lairs.cs). Lost is what neither accounts for.
+            Assert.That(s.DamageApplied + s.EventsStale, Is.EqualTo(s.PlayerShots + s.CreatureAttacks), "an effect was produced and neither applied nor counted");
+            Assert.That(s.EventsStale, Is.LessThanOrEqualTo((s.PlayerShots + s.CreatureAttacks) / 50), "more than a blow in fifty named a target that had gone");
             Assert.That(_sim.CombatQueueOverflow, Is.Zero, "the queue dropped an effect: raise its per-tick budget");
         });
     }
@@ -299,7 +300,7 @@ public sealed class CreatureLeashTests
         var chosen = default((EntityId Id, float X, float Z, int Mode, EntityId Target, int Health));
         foreach (var row in Causality.Creatures(_sim))
         {
-            // Inside the world by a margin, for PlayerCloneTests' reason: a spawn region may place a creature past the planet's f32 extent, and a teleport
+            // Inside the world by a margin, for PlayerDownTests' reason: a spawn region may place a creature past the planet's f32 extent, and a teleport
             // onto or away from such a creature is clamped back inside -- which would decide the very distance this case is about.
             var margin = (_sim.Config.WorldEdgeM * 0.5f) - 500f;
             if (row.Mode != AiMode.Dead && row.Health > 0 && MathF.Abs(row.X) < margin && MathF.Abs(row.Z) < margin)
@@ -486,171 +487,5 @@ public sealed class DriveByCombatIsGoneTests
         var after = tx.Open(_creature).Read(Creature.Vitals).Health;
         Assert.That(after, Is.EqualTo(_healthBefore),
             "a roaming player damaged a creature it was standing next to: the activity gate is gone and combat is drive-by again");
-    }
-}
-
-/// <summary>
-/// AC-5: a player reduced to zero health is incapacitated and cloned at the nearest city — one teleport, full health.
-/// </summary>
-/// <remarks>
-/// <b>Driven through the real systems, not by calling the resolver.</b> The world is engineered so that the exchange happens on the first tick — a creature in
-/// <see cref="AiMode.Fighting"/> whose target is a player standing next to it, with the weapon off cooldown and the player on its last few hit points — and then
-/// the tick runs. The producer pushes the damage, the consumer applies it, and the clone is the consumer's. Nothing here reaches past a public entry point.
-/// <para>
-/// It cannot be observed in a long run instead: at 1 400 hit points against creature damage of 12 to 45 a hit, a player survives everything a 4 000-tick window
-/// throws at it. That is a property of the world's numbers rather than of the code, which is exactly why this is its own fixture.
-/// </para>
-/// </remarks>
-[TestFixture]
-[NonParallelizable]
-public sealed class PlayerCloneTests
-{
-    private string _dir;
-    private TatooineSim _sim;
-    private EntityId _player;
-    private (float X, float Z) _diedAt;
-    private int _maxHealth;
-
-    [OneTimeSetUp]
-    public void RunWorld()
-    {
-        _dir = Worlds.NewDirectory();
-        var config = Causality.LongEnough(_dir, 10);
-        config.WorkerCount = 1;
-        _sim = new TatooineSim(config);
-        _sim.Initialize();
-
-        var attacker = EntityId.Null;
-        foreach (var row in Causality.Creatures(_sim))
-        {
-            // INSIDE the world by a margin, and this is not a formality — it is what the fixture was flaky on for four runs in thirty. A spawn region may
-            // place a creature past the planet's f32 extent (the Southern Wastes disc reaches z = -9 100 against a half-extent of 8 192), and teleporting the
-            // player onto such a creature has the position clamped back inside by about a hundred metres — putting the player out of melee reach before the
-            // first tick and leaving the creature swinging at nothing. Filed separately; here it is simply avoided.
-            var margin = (_sim.Config.WorldEdgeM * 0.5f) - 500f;
-            if (row.Mode != AiMode.Dead && row.Health > 0 && MathF.Abs(row.X) < margin && MathF.Abs(row.Z) < margin)
-            {
-                attacker = row.Id;
-                break;
-            }
-        }
-
-        Assert.That(attacker.IsNull, Is.False, "precondition: the world has a living creature inside its own bounds");
-        _player = _sim.Index.Players[0];
-
-        using (var tx = _sim.Dbe.CreateQuickTransaction())
-        {
-            var player = tx.OpenMut(_player);
-            var vitals = player.Read(Player.Vitals);
-            _maxHealth = vitals.MaxHealth;
-
-            // Five hit points: less than the weakest creature's 12, so one hit is fatal whichever creature was picked.
-            vitals.Health = 5;
-            player.Set(Player.Vitals, vitals);
-            var state = player.Read(Player.State);
-            state.Activity = PlayerActivity.Roaming;
-            state.ActivityTicks = int.MaxValue / 2;
-            player.Set(Player.State, state);
-            var move = player.Read(Player.Move);
-            move.VelX = 0f;
-            move.VelZ = 0f;
-
-            var creature = tx.OpenMut(attacker);
-
-            var at = creature.Read(Creature.Bounds);
-            _diedAt = (at.X + 2f, at.Z);
-
-            // The creature is already in the fight: Fighting, naming this player, weapon ready. ThinkCooldown is parked high so CreatureThink does not re-decide
-            // inside the window and leash it home instead — the test is about the exchange, not about how a creature gets into one.
-            var ai = creature.Read(Creature.Ai);
-            ai.Mode = AiMode.Fighting;
-            ai.Target = _player;
-            creature.Set(Creature.Ai, ai);
-            var timers = creature.Read(Creature.Timers);
-            timers.AttackCooldown = 0;
-            timers.ThinkCooldown = int.MaxValue / 2;
-            creature.Set(Creature.Timers, timers);
-
-            // A fighting creature stands still; without this it keeps the velocity its last wander leg left and the move system walks it away from the fight.
-            var cmove = creature.Read(Creature.Move);
-            cmove.VelX = 0f;
-            cmove.VelZ = 0f;
-            creature.Set(Creature.Move, cmove);
-
-            // Destination = where it is about to stand, so PlayerThink's arrival test succeeds and it never steers anywhere: a stale roam destination would
-            // have it walking out of the creature's reach while the fight was still being set up.
-            move.DestX = _diedAt.X;
-            move.DestZ = _diedAt.Z;
-            player.Set(Player.Move, move);
-
-            var here = default(PlayerPlacement);
-            here.SetAt(_diedAt.X, _diedAt.Z, 0f, player.Read(Player.Bounds).HalfExtent);
-            tx.Teleport(_player, Player.Bounds, RealmId.Default, in here);
-            tx.Commit();
-        }
-
-        _sim.Run();
-    }
-
-    [OneTimeTearDown]
-    public void Dispose()
-    {
-        _sim?.Dispose();
-        Worlds.Delete(_dir);
-    }
-
-    [Test]
-    public void APlayerAtZeroHealth_IsClonedAtTheNearestCity_WithFullHealth()
-    {
-        // Read out first: EntityRef is a ref struct and cannot be captured by Assert.Multiple's lambda (CS8175).
-        float health;
-        bool onLane;
-        EntityId target;
-        int activity;
-        using (var tx = _sim.Dbe.CreateQuickTransaction())
-        {
-            var player = tx.Open(_player);
-            var at = player.Read(Player.Bounds);
-
-            // On the lane outside the nearest city's shuttleport gate — not the city's centre, which is the middle of the port's landing pad and where every
-            // clone used to be stuck (2026-10-24). The lane is the rectangle OutsideGate spans.
-            var port = _sim.Index.Shuttleports[NearestCityIndex(_diedAt.X, _diedAt.Z)];
-            var (ax, az) = WorldBuilder.OutsideGate(port.X, port.Z, 0f, 0f);
-            var (bx, bz) = WorldBuilder.OutsideGate(port.X, port.Z, 1f, 1f);
-            onLane = at.X >= ax - 0.01f && at.X <= bx + 0.01f && at.Z >= az - 0.01f && at.Z <= bz + 0.01f;
-            health = player.Read(Player.Vitals).Health;
-            target = player.Read(Player.Session).Target;
-            activity = player.Read(Player.State).Activity;
-        }
-
-        Assert.Multiple(() =>
-        {
-            Assert.That(_sim.LastStats.PlayersIncapacitated, Is.EqualTo(1), "the player was not brought down at all");
-            Assert.That(health, Is.EqualTo(_maxHealth), "a cloned player wakes with full health: no wounds, no insurance");
-            Assert.That(onLane, Is.True, "the clone is not on the gate lane of the city nearest where the player went down");
-            Assert.That(target, Is.EqualTo(EntityId.Null), "a cloned player keeps a target on the far side of the planet");
-            Assert.That(activity, Is.EqualTo(PlayerActivity.Idle), "a cloned player wakes up recovering, not mid-activity");
-        });
-    }
-
-    /// <summary>The city the resolver should have chosen — computed here from the map rather than read back from the code under test.</summary>
-    private int NearestCityIndex(float x, float z)
-    {
-        var bestSq = float.MaxValue;
-        var best = -1;
-        for (var i = 0; i < _sim.Index.Cities.Count; i++)
-        {
-            var c = _sim.Index.Cities[i];
-            var dx = c.X - x;
-            var dz = c.Z - z;
-            var d2 = (dx * dx) + (dz * dz);
-            if (d2 < bestSq)
-            {
-                bestSq = d2;
-                best = i;
-            }
-        }
-
-        return best;
     }
 }

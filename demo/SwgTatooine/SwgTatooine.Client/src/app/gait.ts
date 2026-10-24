@@ -40,7 +40,7 @@ export const DEFAULT_BOOST = 1;
  * @returns A factor of 1 to 4, or `null` to leave the boost alone.
  *
  * @remarks
- * Shift is REQUIRED: the bare 1 is the swoop, and 2..4 are free for whatever a later hotbar wants.
+ * Shift is REQUIRED: the bare digits are the action bar's slots (`action-bar.ts`).
  */
 export function boostFor(code: string, shift: boolean): number | null {
   if (!shift) {

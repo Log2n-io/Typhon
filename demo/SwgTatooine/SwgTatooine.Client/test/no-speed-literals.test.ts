@@ -68,6 +68,9 @@ const MOCK_SPEEDS = ['PLAYER_RUN_SPEED_MPS', 'PLAYER_MOUNT_SPEED_MPS'];
 const NOT_MOVEMENT_SPEEDS: Readonly<Record<string, readonly string[]>> = {
   // Keyed with forward slashes whatever the platform writes; the lookup normalises.
   'character/animation-graph.ts': ['REFERENCE_WALK_CLIP_SPEED', 'REFERENCE_RUN_CLIP_SPEED'],
+  // A blaster bolt's flight: an effect drawn between two bodies the server already placed, timing nothing but its own
+  // impact flash. No body moves by it; getting it wrong makes a bolt look slow, not a player drift.
+  'render/combat-fx.ts': ['BOLT_SPEED_MPS'],
 };
 
 /** The names a speed constant would plausibly be given, as an identifier being DECLARED. */

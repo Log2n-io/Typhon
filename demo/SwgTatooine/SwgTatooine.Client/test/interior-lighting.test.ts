@@ -14,7 +14,7 @@ import { Scene } from '@babylonjs/core/scene';
 import { placement } from '../src/assets/asset-frame';
 import { AssetLibrary, type LoadedAsset } from '../src/assets/asset-library';
 import type { Descriptor } from '../src/assets/descriptor';
-import { SceneLighting } from '../src/render/scene-lighting';
+import { LAMP_SHADOWS_MAX, MAX_LIGHTS_PER_MATERIAL, SceneLighting } from '../src/render/scene-lighting';
 import { SUN_INTENSITY } from '../src/render/sun';
 
 /**
@@ -87,6 +87,31 @@ describe('SceneLighting.lampShadows', () => {
     lighting.lampShadows([lamp], [wall]);
     return { s, lighting, lamp, wall };
   }
+
+  it("shadows a room's brightest lamps only, within a shader's texture units — the town hall's eight", () => {
+    const s = scene();
+    const lighting = new SceneLighting(s, '/vendor/');
+    const lamps = [14, 14, 32, 119, 14, 14, 32, 20].map((w, i) => {
+      const lamp = new PointLight(`lamp${i}`, new Vector3(i, 2.5, 0), s);
+      lamp.intensity = w;
+      return lamp;
+    });
+    lighting.lampShadows(lamps, []);
+    const casting = lamps.filter((l) => l.getShadowGenerator() !== null).map((l) => l.intensity);
+    expect(casting.sort((a, b) => b - a)).toEqual([119, 32, 32, 20]);
+    expect(LAMP_SHADOWS_MAX).toBe(4);
+  });
+
+  it('lets every material take every lamp of the hall and the sun, made before the lighting or after', async () => {
+    const s = scene();
+    const before = new StandardMaterial('before', s);
+    new SceneLighting(s, '/vendor/');
+    const after = new StandardMaterial('after', s);
+    await new Promise((resolve) => setTimeout(resolve, 20)); // the scene announces a material on a timer
+    expect(before.maxSimultaneousLights).toBe(MAX_LIGHTS_PER_MATERIAL);
+    expect(after.maxSimultaneousLights).toBe(MAX_LIGHTS_PER_MATERIAL);
+    expect(MAX_LIGHTS_PER_MATERIAL, 'eight lamps and the sun').toBeGreaterThanOrEqual(9);
+  });
 
   it("gives each lamp the testbench's cube map: Poisson, 0.05 to 40 m, and the room receives", () => {
     const { lamp, wall } = room();

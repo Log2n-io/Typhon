@@ -41,6 +41,10 @@ internal static class StructureAssets
         // kind — a room is the asset its house's door names (AssetColliders.DoorPlan.TargetAsset).
         "tat_house_large_interior",
         "tat_house_small_interior",
+
+        // A city's town hall and its room (2026-10-25).
+        "tat_townhall",
+        "tat_townhall_interior",
     ];
 
     /// <summary>
@@ -65,6 +69,8 @@ internal static class StructureAssets
         StructureKind.MissionTerminal,
         StructureKind.Interior,
         StructureKind.Interior,
+        StructureKind.TownHall,
+        StructureKind.Interior,
     ];
 
     /// <summary>The asset a structure of this kind is, as an index into <see cref="Table"/>.</summary>
@@ -85,6 +91,7 @@ internal static class StructureAssets
         StructureKind.Bazaar => 3,
         StructureKind.CraftingStation => PickCraftingStation(ref rng),
         StructureKind.MissionTerminal => 5,
+        StructureKind.TownHall => 8,
 
         // PoiProp, Factory, Harvester, CampObject: nothing published stands in for them. Interior: the door decides, not the kind.
         _ => NoAsset,

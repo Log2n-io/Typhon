@@ -96,6 +96,7 @@ STRUCTURE_COLORS[StructureKind.CampObject] = [0.66, 0.55, 0.4];
 STRUCTURE_COLORS[StructureKind.Interior] = [0.42, 0.36, 0.3];
 STRUCTURE_COLORS[StructureKind.Bazaar] = [0.85, 0.65, 0.25];
 STRUCTURE_COLORS[StructureKind.MissionTerminal] = [0.35, 0.8, 0.45];
+STRUCTURE_COLORS[StructureKind.TownHall] = [0.84, 0.76, 0.6];
 
 const STRUCTURE_SIZES: [number, number, number][] = [];
 STRUCTURE_SIZES[StructureKind.Building] = [18, 9, 18];
@@ -110,9 +111,11 @@ STRUCTURE_SIZES[StructureKind.PlayerHouse] = [14, 7, 14];
 STRUCTURE_SIZES[StructureKind.Factory] = [22, 11, 22];
 STRUCTURE_SIZES[StructureKind.Harvester] = [6, 14, 6];
 STRUCTURE_SIZES[StructureKind.CampObject] = [4, 3, 4];
+// The server's 35.6 m reservation round the hall's origin, which is not its middle: the far-field stand-in is that square.
+STRUCTURE_SIZES[StructureKind.TownHall] = [35.6, 14, 35.6];
 // A floor, not a block: the viewer stands INSIDE a room, so its stand-in — seen only while the asset is not placed — must
-// not wall the camera in.
-STRUCTURE_SIZES[StructureKind.Interior] = [20, 0.05, 20];
+// not wall the camera in. 28 m, the town hall's room's reach.
+STRUCTURE_SIZES[StructureKind.Interior] = [28, 0.05, 28];
 
 /**
  * The style key of the shuttleport's own layer — a synthetic name, so no archetype the catalog declares can collide

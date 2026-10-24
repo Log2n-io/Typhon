@@ -116,6 +116,8 @@ public sealed partial class SimBridge : IShuttleBoarding
     private long _chaseGivenUp;
     private long _lairHits;
     private long _playersIncapacitated;
+    private long _shotsAtShieldedLair;
+    private long _playersRevived;
     private long _missionRewards;
     private long _missionsAssigned;
     private long _eventsStale;
@@ -234,6 +236,8 @@ public sealed partial class SimBridge : IShuttleBoarding
         ChaseGivenUp = Interlocked.Exchange(ref _chaseGivenUp, 0),
         LairHits = Interlocked.Exchange(ref _lairHits, 0),
         PlayersIncapacitated = Interlocked.Exchange(ref _playersIncapacitated, 0),
+        ShotsAtShieldedLair = Interlocked.Exchange(ref _shotsAtShieldedLair, 0),
+        PlayersRevived = Interlocked.Exchange(ref _playersRevived, 0),
         MissionRewards = Interlocked.Exchange(ref _missionRewards, 0),
         MissionsAssigned = Interlocked.Exchange(ref _missionsAssigned, 0),
         EventsStale = Interlocked.Exchange(ref _eventsStale, 0),
@@ -317,6 +321,12 @@ public struct TickStats
 
     /// <summary>Players reduced to zero health, each one cloned at the nearest city.</summary>
     public long PlayersIncapacitated;
+
+    /// <summary>Shots held because the targeted lair's occupants still stand.</summary>
+    public long ShotsAtShieldedLair;
+
+    /// <summary>Downed players back on their feet: knocked out and up again, or dead and cloned.</summary>
+    public long PlayersRevived;
 
     /// <summary>Destroy missions that paid their owner, each one a <c>Versioned</c> write in the tick's unit of work.</summary>
     public long MissionRewards;

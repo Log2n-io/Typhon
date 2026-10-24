@@ -16,6 +16,27 @@ interface Label {
 /** Selection tag offset above its anchor, CSS pixels. */
 const SELECTION_OFFSET_PX = 18;
 
+/** A health bar over a body: where its top is, in planet metres, and how much health it has left, 0–1. */
+export interface HealthBar {
+  x: number;
+  y: number;
+  z: number;
+  fraction: number;
+  /** A lair its occupants still guard: drawn shielded, because nothing damages it until they are dead. */
+  shielded: boolean;
+}
+
+interface Bar {
+  readonly element: HTMLDivElement;
+  readonly fill: HTMLDivElement;
+  shown: boolean;
+  px: number;
+  py: number;
+  /** The width last written, in whole percent: a style is written only when it changes. */
+  pct: number;
+  shielded: boolean;
+}
+
 /**
  * Place names and the selected entity's tag, as DOM text over the canvas: a handful of labels, projected each frame, with
  * the browser's own text rendering. A label's style is written only when it appears, hides or moves by a pixel, so a
@@ -25,6 +46,8 @@ export class Labels {
   private readonly root: HTMLDivElement;
   private readonly places: Label[] = [];
   private readonly selection: Label;
+  /** The health bars, pooled: one element per bar ever shown at once, hidden when unused. */
+  private readonly bars: Bar[] = [];
   private readonly screen: ScreenPoint = { x: 0, y: 0, w: 0 };
 
   constructor(parent: HTMLElement) {
@@ -96,6 +119,54 @@ export class Labels {
   }
 
   /**
+   * Draws a health bar over each of the first `count` bodies — the enemies fighting this session's avatar — and hides the
+   * rest of the pool.
+   */
+  updateBars(
+    matrix: ArrayLike<number>,
+    originX: number,
+    originZ: number,
+    width: number,
+    height: number,
+    bodies: readonly HealthBar[],
+    count: number,
+  ): void {
+    for (let i = 0; i < count; i++) {
+      if (i >= this.bars.length) {
+        const element = document.createElement('div');
+        element.className = 'label hpbar';
+        element.style.display = 'none';
+        const fill = document.createElement('div');
+        fill.className = 'hpbar-fill';
+        element.appendChild(fill);
+        this.root.appendChild(element);
+        this.bars.push({ element, fill, shown: false, px: Number.NaN, py: Number.NaN, pct: -1, shielded: false });
+      }
+
+      const body = bodies[i];
+      const bar = this.bars[i];
+      const s = projectToScreen(matrix, body.x - originX, body.y, body.z - originZ, width, height, this.screen);
+      // On screen or near it, as the place names are: off it, a bar is a style written for nothing.
+      const shown = s.w > 0 && s.x > -100 && s.x < width + 100 && s.y > -50 && s.y < height + 50;
+      this.placeBar(bar, shown, s.x, s.y);
+      if (body.shielded !== bar.shielded) {
+        bar.shielded = body.shielded;
+        bar.element.classList.toggle('shielded', body.shielded);
+      }
+
+      const pct = Math.round(Math.max(0, Math.min(1, body.fraction)) * 100);
+      if (shown && pct !== bar.pct) {
+        bar.pct = pct;
+        bar.fill.style.width = `${String(pct)}%`;
+      }
+    }
+
+    for (let i = count; i < this.bars.length; i++) {
+      this.placeBar(this.bars[i], false, 0, 0);
+    }
+  }
+
+  /**
    * Hides the place names, leaving the selection's tag alone.
    *
    * <b>Place names belong to the planet.</b> They are built once from `CITIES` and `POIS` and are Tatooine's towns; in a
@@ -116,10 +187,32 @@ export class Labels {
     }
 
     this.hideSelection();
+    for (const bar of this.bars) {
+      this.placeBar(bar, false, 0, 0);
+    }
   }
 
   dispose(): void {
     this.root.remove();
+  }
+
+  private placeBar(bar: Bar, shown: boolean, x: number, y: number): void {
+    if (shown !== bar.shown) {
+      bar.element.style.display = shown ? 'block' : 'none';
+      bar.shown = shown;
+    }
+
+    if (!shown) {
+      return;
+    }
+
+    const px = Math.round(x);
+    const py = Math.round(y);
+    if (px !== bar.px || py !== bar.py) {
+      bar.px = px;
+      bar.py = py;
+      bar.element.style.transform = `translate(${String(px)}px, ${String(py)}px)`;
+    }
   }
 
   private place(label: Label, shown: boolean, x: number, y: number): void {

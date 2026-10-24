@@ -19,12 +19,28 @@ export interface CatalogueEntry {
   readonly glb: string;
 }
 
+/** An asset's icon (ASSET_FORMAT.md, catalogue `icons`): one PNG per size in pixels, drawn at that size. */
+export interface CatalogueIcon {
+  readonly rev: number;
+  readonly png: Readonly<Partial<Record<string, string>>>;
+}
+
 export interface Catalogue {
   readonly schema: number;
   /** Counts up from 1; the immutable file is `catalogue-<version>.json`. */
   readonly version: number;
   readonly assets: Readonly<Partial<Record<string, CatalogueEntry>>>;
   readonly textures: readonly string[];
+  /** Optional: a catalogue without it has no icons. */
+  readonly icons?: Readonly<Partial<Record<string, CatalogueIcon>>>;
+}
+
+/**
+ * The file of an asset's icon at one size, or `null` when the catalogue publishes none — no icon for the asset, or not at
+ * that size. Never another size: an icon is rendered at its own size, and a scaled one is a blurred one.
+ */
+export function iconFile(catalogue: Catalogue, assetId: string, size: number): string | null {
+  return catalogue.icons?.[assetId]?.png[String(size)] ?? null;
 }
 
 export type AssetKind =
@@ -168,11 +184,26 @@ export interface LodDesc {
   readonly error_m?: number;
 }
 
+/**
+ * A hand weapon (ASSET_FORMAT.md § 5.10): the character clip it attacks with, and where it sits in the hand — in the
+ * frame of the character joint `joint`, `pos` in metres with the character's scale removed, `rot` mapping the weapon's
+ * frame into the joint's.
+ */
+export interface WeaponDesc {
+  readonly class: string;
+  readonly clip: string;
+  readonly attach: { readonly joint: string; readonly pos: Vec3; readonly rot: Quat };
+}
+
 export interface Descriptor {
   readonly schema: number;
   readonly id: string;
   readonly kind: AssetKind;
   readonly frame: string;
+  /** Where the asset came from; characters carry the uniform `scale` their pack was published at (§ 5.10 removes it). */
+  readonly source?: { readonly scale?: number };
+  /** Weapons only (§ 5.10). */
+  readonly weapon?: WeaponDesc;
   /** Characters only: the local axis the model faces ("+Z" for the Quaternius rigs). */
   readonly forward?: string;
   readonly render: {

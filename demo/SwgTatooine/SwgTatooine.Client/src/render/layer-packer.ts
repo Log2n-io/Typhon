@@ -71,6 +71,17 @@ export interface FrameView {
    * history; a clip rate derived from it directly makes a sprinting body play its walk at the slowest rate it has.
    */
   readonly perSecond: number;
+  /**
+   * Where an entity in view stands, planet metres, into `out`; false when it is not held. What a body still in a fight
+   * turns to face: its replicated `target`. Absent, nothing is faced.
+   */
+  readonly locate?: ((netId: number, out: PlanarPoint) => boolean) | undefined;
+}
+
+/** A point on the ground plane, planet metres. */
+export interface PlanarPoint {
+  x: number;
+  z: number;
 }
 
 /**
@@ -105,6 +116,12 @@ export interface CrowdBody {
   outfit: number;
   /** How many blows this body has struck, as the router counts the server's `Attack` events. A change plays one. */
   strikes: number;
+  /** A player's replicated combat `stance` (the server's `Stances`, 0 none): the weapon drawn in its hand and swung on a blow. */
+  stance: number;
+  /** How many blows this body has TAKEN, as the combat effects count them on impact. A change plays its hit reaction. */
+  hits: number;
+  /** A player's replicated `down` (the server's `Downed`: 0 up, 1 knocked out, 2 dead): it lies, and falls the matching way. */
+  down: number;
 }
 
 /**
@@ -129,6 +146,9 @@ export function crowdSlot(bodies: CrowdBody[], n: number): CrowdBody {
       dead: false,
       outfit: -1,
       strikes: 0,
+      stance: 0,
+      hits: 0,
+      down: 0,
     });
   }
 
@@ -164,6 +184,12 @@ interface FieldReaders {
   readonly mounted: FieldArray | null;
   /** A creature's outfit among its template's bodies; `null` for every other archetype. */
   readonly skin: FieldArray | null;
+  /** A player's combat stance, for the weapon in its hand; `null` for every other archetype. */
+  readonly stance: FieldArray | null;
+  /** Whom a creature fights — its replicated `target`, a netId in this view — which it faces while it stands; `null` otherwise. */
+  readonly target: FieldArray | null;
+  /** Whether a player is down, and how; `null` for every other archetype. */
+  readonly down: FieldArray | null;
   /** Whether {@link style} is a creature template, which the crowd draws the body by. */
   readonly creature: boolean;
 }
@@ -176,6 +202,9 @@ const NO_FIELDS: FieldReaders = {
   yaw: null,
   mounted: null,
   skin: null,
+  stance: null,
+  down: null,
+  target: null,
   creature: false,
 };
 const INITIAL_CAPACITY = 1024;
@@ -199,6 +228,9 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         yaw: optional(store, 'yaw'),
         mounted: null,
         skin: null,
+        stance: null,
+        down: null,
+        target: null,
         creature: false,
       };
     case 'CreatureLair':
@@ -210,6 +242,9 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         yaw: null,
         mounted: null,
         skin: null,
+        stance: null,
+        down: null,
+        target: null,
         creature: false,
       };
     case 'Creature':
@@ -221,6 +256,9 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         yaw: null,
         mounted: null,
         skin: optional(store, 'skin'),
+        stance: null,
+        down: null,
+        target: optional(store, 'target'),
         creature: true,
       };
     case 'CityNpc':
@@ -232,6 +270,9 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         yaw: null,
         mounted: null,
         skin: null,
+        stance: null,
+        down: null,
+        target: null,
         creature: false,
       };
     case 'Player':
@@ -243,6 +284,9 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         yaw: null,
         mounted: optional(store, 'mounted'),
         skin: null,
+        stance: optional(store, 'stance'),
+        down: optional(store, 'down'),
+        target: null,
         creature: false,
       };
     default:
@@ -267,6 +311,8 @@ function optional(store: ArchetypeStore, name: string): FieldArray | null {
  * instance beside it.
  */
 export class LayerPacker {
+  /** Where a fighting body's quarry stands, reused: see `FrameView.locate`. */
+  private readonly quarry: PlanarPoint = { x: 0, z: 0 };
   readonly archetype: number;
   readonly style: LayerStyle;
   /** The only style index this layer draws, or -1 for all of them. See the constructor. */
@@ -467,9 +513,19 @@ export class LayerPacker {
 
       if (band === Band.Near) {
         // Heading only matters to a mesh, and it comes from the GROUND velocity: a ship climbing keeps its heading.
-        // A still entity keeps the last heading it had as one.
+        // A still entity keeps the last heading it had as one — unless it is fighting someone, whom it faces: a creature
+        // stands still to strike, and the heading its last step left it was rarely towards its quarry.
         if (byVelocity && (at.vx !== 0 || at.vz !== 0)) {
           yaws[slot] = Math.atan2(at.vx, at.vz);
+        } else if (byVelocity && fields.target !== null && view.locate !== undefined) {
+          const quarry = fields.target[slot];
+          if (quarry !== 0 && view.locate(quarry, this.quarry)) {
+            const fx = this.quarry.x - at.x;
+            const fz = this.quarry.z - at.z;
+            if (fx !== 0 || fz !== 0) {
+              yaws[slot] = Math.atan2(fx, fz);
+            }
+          }
         }
 
         // <b>A character layer's near band IS the crowd.</b> Everything a body needs has just been computed — its
@@ -493,6 +549,8 @@ export class LayerPacker {
           body.template = fields.creature ? raw : -1;
           body.skin = fields.skin === null ? 0 : fields.skin[slot];
           body.dead = fields.creature && fields.mode !== null && fields.mode[slot] === AiMode.Dead;
+          body.stance = fields.stance === null ? 0 : fields.stance[slot];
+          body.down = fields.down === null ? 0 : fields.down[slot];
           body.outfit = -1;
           view.crowdCount++;
           // <b>Only STOP drawing the box once the crowd is known to be drawing a body in its place.</b> Diverting

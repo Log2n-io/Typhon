@@ -10,7 +10,7 @@ import type { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh';
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode';
 import type { Scene } from '@babylonjs/core/scene';
 import { poseToWorld, type Pose } from './asset-frame';
-import type { Catalogue, Descriptor } from './descriptor';
+import { iconFile, type Catalogue, type Descriptor } from './descriptor';
 
 /**
  * `GLTFLoaderAnimationStartMode.NONE`, spelled as its value so the glTF loader is not pulled into the boot bundle.
@@ -137,6 +137,12 @@ export class AssetLibrary {
 
   get version(): string {
     return String(this.catalogue.version);
+  }
+
+  /** The URL of an asset's icon at one size, or `null` when the catalogue publishes none; see {@link iconFile}. */
+  iconUrl(id: string, size: number): string | null {
+    const file = iconFile(this.catalogue, id, size);
+    return file === null ? null : this.base + file;
   }
 
   /**

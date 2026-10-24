@@ -5,6 +5,18 @@ using System.Runtime.InteropServices;
 
 namespace SwgTatooine.Server;
 
+/// <summary>
+/// A destroy-mission lair just sent to its player (<c>MissionTick</c>, which may not spawn or destroy): the director replaces it there with a fresh one,
+/// defenders and all.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct MissionMoveEvent
+{
+    public EntityId Lair;
+    public float X;
+    public float Z;
+}
+
 /// <summary>A creature whose corpse has lain long enough: pushed by <c>CreatureThink</c>, which may not destroy, and destroyed by the lair director.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal struct CorpseEvent
@@ -28,8 +40,10 @@ internal struct CorpseEvent
 ///   <see cref="SimConfig.LairReplaceSeconds"/>, of a kind drawn from the site's mix. The world's population is stationary; its entities are not.</item>
 /// </list>
 /// <para>
-/// <b>Destroy-mission lairs are not touched</b> beyond replacing their creatures: the pool and its teleport stay as they are until missions are designed
-/// (Loïc, 2026-10-24). They have no site, never expire, and their completion is <c>MissionTick</c>'s.
+/// <b>Destroy-mission lairs are not touched</b> beyond replacing their creatures, and replacing the lair itself when a mission sends it to its player: the
+/// pool stays as it is until missions are designed (Loïc, 2026-10-24). They have no site, never expire, and their completion is <c>MissionTick</c>'s. The
+/// replacement is what brings the defenders: the pool used to TELEPORT the lair and leave them where they stood, so 381 of 386 live mission camps had nobody
+/// round them (measured, 2026-10-25).
 /// </para>
 /// <para>
 /// <b>Serial, in the Economy phase, through a side transaction</b> — the arrangement <c>DungeonTick</c> already spawns and destroys with. Serial because a
@@ -48,6 +62,14 @@ public sealed partial class SimBridge
 
     /// <summary>The corpses <c>CreatureThink</c> hands over. Created on the schedule, like <see cref="CombatQueue"/>.</summary>
     internal EventQueue<CorpseEvent> CorpseQueue { get; set; }
+
+    /// <summary>The mission lairs <c>MissionTick</c> just sent somewhere, to be replaced there with their defenders.</summary>
+    internal EventQueue<MissionMoveEvent> MissionMoveQueue { get; set; }
+
+    private long _missionLairsRehoused;
+
+    /// <summary>Mission lairs replaced at their mission's point, defenders and all.</summary>
+    public long MissionLairsRehoused => _missionLairsRehoused;
 
     // Per-pass work lists. Serial system, so one set suffices; kept across ticks so a pass allocates nothing once warm.
     private readonly List<(EntityId Lair, ushort Realm, int Site)> _retiring = [];
@@ -81,15 +103,16 @@ public sealed partial class SimBridge
 
         var tick = ctx.TickNumber;
         var pending = CorpseQueue.Count;
+        var moved = MissionMoveQueue.Count;
         var passTicks = Math.Max(1, _config.TickRateHz / LairPassHz);
         var pass = tick % passTicks == 0;
-        if (pending == 0 && !pass)
+        if (pending == 0 && moved == 0 && !pass)
         {
             return;
         }
 
         var respawnTicks = Math.Max(1L, (long)(_config.RespawnSeconds * _config.TickRateHz));
-        var before = _corpsesRemoved + _lairsRetired + _lairsSpawned + _creaturesRespawned;
+        var before = _corpsesRemoved + _lairsRetired + _lairsSpawned + _creaturesRespawned + _missionLairsRehoused;
         using var tx = ctx.CreateSideTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit);
 
         if (pending > 0)
@@ -103,16 +126,61 @@ public sealed partial class SimBridge
             }
         }
 
+        if (moved > 0)
+        {
+            Span<MissionMoveEvent> moves = moved <= 16 ? stackalloc MissionMoveEvent[16] : new MissionMoveEvent[moved];
+            var n = MissionMoveQueue.Drain(moves);
+            for (var i = 0; i < n; i++)
+            {
+                Rehouse(tx, in moves[i], tick);
+            }
+        }
+
         if (pass)
         {
             Pass(tx, tick, respawnTicks);
         }
 
         tx.Commit();
-        if (_corpsesRemoved + _lairsRetired + _lairsSpawned + _creaturesRespawned != before)
+        if (_corpsesRemoved + _lairsRetired + _lairsSpawned + _creaturesRespawned + _missionLairsRehoused != before)
         {
             _lairCommits++;
         }
+    }
+
+    /// <summary>
+    /// Replaces a mission lair at its mission's point with a fresh one — a camp with its defenders round it — carrying the mission over: one destroy (its old
+    /// defenders go in the cascade, wherever they stood) and one spawn.
+    /// </summary>
+    private void Rehouse(Transaction tx, in MissionMoveEvent move, long tick)
+    {
+        if (!tx.TryOpen(move.Lair, out var old))
+        {
+            return;
+        }
+
+        var spawner = old.Read(CreatureLair.Spawner);
+        var vitals = old.Read(CreatureLair.Vitals);
+        var realm = old.Read(CreatureLair.Realm).Value;
+        tx.Destroy(move.Lair);
+        _lairEntities += 1 + spawner.AliveCount;
+
+        var rng = new Rng(Salt(tick, move.Lair.EntityKey, 0x5F356495u));
+        var fresh = WorldBuilder.SpawnLair(tx, ref rng, spawner.CreatureTemplate, move.X, move.Z, site: 0, expireTick: 0, _config,
+            TerrainField.Shared(_config.ContentScale), realm);
+        var lair = tx.OpenMut(fresh);
+        var carried = lair.Read(CreatureLair.Spawner);
+        carried.MissionId = spawner.MissionId;
+        carried.Owner = spawner.Owner;
+        carried.RespawnCooldown = spawner.RespawnCooldown;
+        lair.Set(CreatureLair.Spawner, carried);
+        lair.Set(CreatureLair.Vitals, vitals);
+        _lairEntities += 1 + carried.AliveCount;
+
+        var index = PlanetIndexes[realm];
+        index.Lairs.Remove(move.Lair);
+        index.Lairs.Add(fresh);
+        _missionLairsRehoused++;
     }
 
     /// <summary>Destroys one corpse and tells its lair it has a creature to replace.</summary>
@@ -202,8 +270,10 @@ public sealed partial class SimBridge
             _creaturesRespawned++;
             _lairEntities++;
             spawner.AliveCount++;
+            spawner.Guards++;
             spawner.NextSpawnTick = spawner.AliveCount < spawner.SpawnLimit ? tick + respawnTicks : 0;
             lair.Set(CreatureLair.Spawner, spawner);
+            TatooineReplication.Replicate(in lair);
         }
 
         // The sites, which keep their density by spawning a replacement somewhere else in the same disc.
@@ -239,7 +309,7 @@ public sealed partial class SimBridge
                     continue;
                 }
 
-                var template = at.Templates[rng.NextInt(0, at.Templates.Length)];
+                var template = CreatureTemplates.PickLair(at.Templates, ref rng);
                 var expire = tick + lifeMin + (long)(rng.NextFloat() * lifeSpan);
                 index.Lairs.Add(WorldBuilder.SpawnLair(tx, ref rng, template, x, z, s + 1, expire, _config, terrain, at.Realm));
                 _lairsSpawned++;

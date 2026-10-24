@@ -199,6 +199,63 @@ void main(void) {
 `;
 
 /**
+ * Damage numbers: one quad per glyph, centred on a body's head in the WORLD and sized in screen pixels.
+ *
+ * The anchor is projected like any point of the scene and the glyph is offset from it in clip space, so the depth is the
+ * anchor's: a number behind a wall is hidden by the wall, which an HTML overlay cannot do. The size is constant on screen,
+ * as text should be; the caller drops numbers past a range instead of letting them shrink to nothing.
+ */
+export const DAMAGE_VERTEX = `
+precision highp float;
+attribute vec3 position;
+/** xyz: the head, render space. w: opacity. */
+attribute vec4 dmgAnchor;
+/** x: the glyph's column in the atlas. y: its index in the number. z: the number's length. w: the rise, CSS pixels. */
+attribute vec4 dmgGlyph;
+uniform mat4 viewProjection;
+uniform vec2 uViewport;
+uniform float uGlyphPx;
+uniform float uAspect;
+uniform float uColumns;
+varying vec2 vUv;
+varying float vAlpha;
+
+void main(void) {
+  vec4 c = viewProjection * vec4(dmgAnchor.xyz, 1.0);
+  if (c.w < 0.01) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    vAlpha = 0.0;
+    vUv = vec2(0.0);
+    return;
+  }
+
+  float w = uGlyphPx * uAspect;
+  vec2 px = vec2((dmgGlyph.y - dmgGlyph.z * 0.5 + position.x) * w, position.y * uGlyphPx + dmgGlyph.w);
+  c.xy += px * 2.0 / uViewport * c.w;
+  gl_Position = c;
+  vUv = vec2((dmgGlyph.x + position.x) / uColumns, position.y);
+  vAlpha = dmgAnchor.w;
+}
+`;
+
+export const DAMAGE_FRAGMENT = `
+precision highp float;
+uniform sampler2D uAtlas;
+varying vec2 vUv;
+varying float vAlpha;
+
+void main(void) {
+  vec4 t = texture2D(uAtlas, vUv);
+  float a = t.a * vAlpha;
+  if (a < 0.02) {
+    discard;
+  }
+
+  gl_FragColor = vec4(t.rgb, a);
+}
+`;
+
+/**
  * Bilinear sampling of the height field, spelled out rather than left to the sampler.
  *
  * `uField` is `(originM, spacingM, posts, 1 / posts)` and the texture is R32F sampled NEAREST, so these four taps and the

@@ -80,6 +80,12 @@ internal static class CombatEventKind
     /// AC-1 cannot be met by the simulation at all, only by a test that places a player by hand.
     /// </remarks>
     public const byte MissionAssigned = 2;
+
+    /// <summary>
+    /// A downed player's time is up (<see cref="PlayerVitals.UpTick"/>): a knocked-out one gets up with a fifth of its health, a dead one wakes whole as a clone
+    /// outside the nearest city's shuttleport. Pushed by the player's own combat pass, applied in the drain, which owns the teleport.
+    /// </summary>
+    public const byte Revive = 3;
 }
 
 /// <summary>Which archetype a <see cref="CombatEvent.Target"/> lives in, so the consumer knows what to write.</summary>

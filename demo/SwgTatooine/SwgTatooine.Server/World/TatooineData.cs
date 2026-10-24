@@ -69,6 +69,43 @@ public static class TatooineData
     /// <summary>[WIKI] Ranged weapons reach 0-75 m, which is also the chase cap — not a coincidence.</summary>
     public const float RangedRangeM = 75f;
 
+    /// <summary>
+    /// How far each combat stance reaches, metres, between the two bodies' EDGES (Loïc, 2026-10-24): unarmed 1, one-handed 3, pistol 30. Indexed by
+    /// <c>Stances</c>; no stance reaches nothing, because it does not fight.
+    /// </summary>
+    /// <remarks>
+    /// <b>Edge to edge, not centre to centre</b>: a creature's body keeps the player's at a distance of its own size — a spider is 1.8 m long — so a reach of
+    /// one metre between centres could not be met by a fist on anything bigger than a rat.
+    /// </remarks>
+    public static readonly float[] StanceReachM = [0f, 1f, 3f, 30f];
+
+    /// <summary>
+    /// How often a stance strikes, seconds: about its attack clip's length and a short pause (the clips are <c>Punch</c> 0.75 s, <c>SwordSlash</c>
+    /// 1.04 s, <c>Shoot_OneHanded</c> 0.54 s), so a client that plays a clip per hit shows one blow after another. Indexed by <c>Stances</c>.
+    /// </summary>
+    public static readonly float[] StanceDelaySec = [0f, 1.2f, 1.5f, 1f];
+
+    /// <summary>How long a knocked-out player lies before it gets up, seconds (Loïc, 2026-10-24).</summary>
+    public const float KnockOutSec = 20f;
+
+    /// <summary>The share of its health a knocked-out player gets up with (Loïc, 2026-10-24).</summary>
+    public const float KnockOutRecoveryFraction = 0.2f;
+
+    /// <summary>How long a dead player lies before it wakes as a clone, seconds.</summary>
+    public const float CloneDelaySec = 10f;
+
+    /// <summary>
+    /// The share of its health a player out of a fight gets back each second: a hundredth, so a nearly dead player is whole again in under two minutes of
+    /// standing about. "Out of a fight" is no stance for a person's player and anything but <c>Combat</c> for the crowd's.
+    /// </summary>
+    public const float RegenPerSecFraction = 0.01f;
+
+    /// <summary>
+    /// How long a player must go unhit before it heals, seconds (Loïc, 2026-10-24: "only when I'm not being attacked"). A player out of a stance that
+    /// something is still hitting is being attacked, and heals nothing.
+    /// </summary>
+    public const float RegenQuietSec = 5f;
+
     /// <summary>[CORE3, from the printed manual] Spatial <c>/say</c> carries 50 m.</summary>
     public const float SayRangeM = 50f;
 
@@ -310,15 +347,21 @@ public static class TatooineData
     public static readonly SpawnRegionDef[] SpawnRegions =
     [
         //                  name                       x        z     radius  lairs/km²  the lairs it spawns
-        new SpawnRegionDef("Northern Dune Sea",     -1200f,   5600f,  2600f,   18f,   [CreatureTemplates.Frog, CreatureTemplates.Snake, CreatureTemplates.Wasp]),
+        new SpawnRegionDef("Northern Dune Sea",     -1200f,   5600f,  2600f,   18f,   [CreatureTemplates.Frog, CreatureTemplates.Snake, CreatureTemplates.Wasp, CreatureTemplates.SandNinja]),
         new SpawnRegionDef("Western Dune Sea",      -6200f,   4200f,  2100f,   15f,   [CreatureTemplates.SandNinja, CreatureTemplates.Viper]),
-        new SpawnRegionDef("Jundland Wastes",       -3600f,  -1400f,  2400f,   22f,   [CreatureTemplates.Spider, CreatureTemplates.Viper, CreatureTemplates.Rat]),
-        new SpawnRegionDef("Xelric Draw",            5400f,  -1500f,  1900f,   20f,   [CreatureTemplates.Rat, CreatureTemplates.Wasp]),
+        new SpawnRegionDef("Jundland Wastes",       -3600f,  -1400f,  2400f,   22f,   [CreatureTemplates.Spider, CreatureTemplates.Viper, CreatureTemplates.Rat, CreatureTemplates.Ninja]),
+        new SpawnRegionDef("Xelric Draw",            5400f,  -1500f,  1900f,   20f,   [CreatureTemplates.Rat, CreatureTemplates.Wasp, CreatureTemplates.Soldier]),
         new SpawnRegionDef("Eastern Wastes",         6100f,   3000f,  2200f,   14f,   [CreatureTemplates.Soldier, CreatureTemplates.Spider]),
-        new SpawnRegionDef("Southern Wastes",         800f,  -6800f,  2300f,   17f,   [CreatureTemplates.Rat, CreatureTemplates.Snake]),
+        new SpawnRegionDef("Southern Wastes",         800f,  -6800f,  2300f,   17f,   [CreatureTemplates.Rat, CreatureTemplates.Snake, CreatureTemplates.SandNinja]),
         new SpawnRegionDef("Mos Espa Approach",     -3400f,    600f,  1500f,   21f,   [CreatureTemplates.Ninja, CreatureTemplates.Frog]),
         new SpawnRegionDef("Arid Flats",             2200f,    400f,  2000f,   13f,   [CreatureTemplates.Frog, CreatureTemplates.Wasp, CreatureTemplates.Soldier]),
     ];
+
+    /// <summary>
+    /// The share of a region's lairs that are camps of foes rather than beasts' lairs: half (Loïc, 2026-10-24 — drawn uniformly over a region's kinds, beasts
+    /// outnumbering camps two or three to one in every region, nine lairs in ten were beasts'). Every region names at least one camp.
+    /// </summary>
+    public const float CampShare = 0.5f;
 
     /// <summary>
     /// The lairs a point of interest spawns: humanoid camps, because a landmark is where somebody has settled — Core3 puts the Tuskens at their fort for the
@@ -361,10 +404,44 @@ public static class CreatureTemplates
     public const int Count = 10;
 
     /// <summary>Creatures a lair of each template keeps alive. [EST], shaped by how SWG lairs felt: 4-6 typical, more for a camp.</summary>
-    public static readonly int[] SpawnLimit = [6, 5, 4, 4, 4, 6, 5, 5, 6, 8];
+    public static readonly int[] SpawnLimit = [6, 5, 4, 4, 4, 6, 5, 5, 6, 3];
 
     /// <summary>Hit points. [EST].</summary>
     public static readonly int[] Health = [180, 120, 220, 300, 520, 160, 640, 700, 760, 420];
+
+    /// <summary>Whether a template is a camp of foes — people — rather than a beasts' lair.</summary>
+    public static bool IsCamp(int template) => template is Ninja or SandNinja or Soldier;
+
+    /// <summary>
+    /// A lair's hit points: four of its own occupants', and never under 1 500 — harder to destroy than any foe it holds (Loïc, 2026-10-24), and only once
+    /// they are all dead (<c>Lair.Guards</c>).
+    /// </summary>
+    public static int LairHealth(int template) => System.Math.Max(1500, 4 * Health[template]);
+
+    /// <summary>
+    /// A lair kind for a site: a camp with <see cref="TatooineData.CampShare"/>'s odds when the site names one, a beasts' lair otherwise, uniform within each.
+    /// </summary>
+    public static int PickLair(int[] kinds, ref Rng rng)
+    {
+        var camps = 0;
+        foreach (var k in kinds)
+        {
+            camps += IsCamp(k) ? 1 : 0;
+        }
+
+        var beasts = kinds.Length - camps;
+        var wantCamp = camps > 0 && (beasts == 0 || rng.NextFloat() < TatooineData.CampShare);
+        var pick = rng.NextInt(0, wantCamp ? camps : beasts);
+        foreach (var k in kinds)
+        {
+            if (IsCamp(k) == wantCamp && pick-- == 0)
+            {
+                return k;
+            }
+        }
+
+        return kinds[0];
+    }
 
     /// <summary>Damage per attack. [EST].</summary>
     public static readonly int[] Damage = [12, 8, 16, 24, 34, 14, 38, 40, 32, 26];

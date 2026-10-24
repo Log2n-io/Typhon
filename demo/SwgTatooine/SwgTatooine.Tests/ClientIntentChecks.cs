@@ -1149,64 +1149,321 @@ internal sealed class ClientIntentChecks : ServedChecks
     }
 
     /// <summary>
-    /// A possessed player FIRES at what it targeted: the creature's health goes down and the blow is on the wire.
+    /// A possessed player fights what it targeted only in a combat stance: a target alone is a selection, and the stance is what makes it an attack.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>The gap this closes</b>: the shooter gated on <c>PlayerActivity.Combat</c>, which only the scripted crowd is ever put in, and a session's body spawns
-    /// <c>Idle</c> and becomes <c>Travelling</c> on its first step. So a click on a creature stored a target that no shot was ever fired at — and every other
-    /// case here asserted only that the target was STORED, which it was.
+    /// <b>The gap the first half closes</b>: the shooter gated on <c>PlayerActivity.Combat</c>, which only the scripted crowd is ever put in, so a click on a
+    /// creature stored a target no shot was ever fired at. <b>The second half is the stance</b> (Loïc, 2026-10-24: the action bar's 2–4): with a target and
+    /// no stance, nothing is fired at all.
     /// </para>
-    /// <para>
-    /// A lair of frogs, placed beside the capital before the server ticks (the window <c>WorldBuilder</c> builds in, as the dead-target case does). Frogs are
-    /// passive, so nothing but the avatar starts this fight.
-    /// </para>
+    /// <para>A lair of frogs beside the avatar, its frogs taken away, so the lair is the one thing fought and nothing moves the avatar.</para>
     /// </remarks>
     [Test]
     [CancelAfter(90_000)]
     [Category("Integration")]
-    public void APossessedPlayerFiresAtTheCreatureItTargeted()
+    public void APossessedPlayerFightsItsTargetOnlyInAStance()
     {
-        var config = Config();
-        using var sim = new TatooineSim(config);
-        sim.Initialize();
+        using var world = new Possessed(Config());
+        var lair = StageLair(world, gapM: 10f);
+        var before = LairHealth(world, lair);
 
-        var capital = sim.Map.Cities[0];
-        var terrain = TerrainField.Shared(config.ContentScale);
-        EntityId lair;
-        using (var tx = sim.Dbe.CreateQuickTransaction())
-        {
-            var rng = new Rng(7);
-            lair = WorldBuilder.SpawnLair(tx, ref rng, CreatureTemplates.Frog, capital.X + 12f, capital.Z + 12f, site: 0, expireTick: 0, config, terrain, 0);
-            tx.Commit();
-        }
-
-        sim.Dbe.WriteTickFence(1);
-        var frog = FirstCreatureOf(sim, lair);
-        int before;
-        using (var read = sim.Dbe.CreateQuickTransaction())
-        {
-            before = read.Open(frog).Read(Creature.Vitals).Health;
-        }
-
-        var harness = Harness = new SessionHarness(sim);
-        var link = harness.Connect(TatooineReplication.PlayerKind);
-        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar to be spawned");
-        SessionHarness.Until(() => TatooineReplication.NetIdOf(link.Session, frog) != 0, "the frog to reach the client's view");
-
-        link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(TatooineReplication.NetIdOf(link.Session, frog)));
+        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(TatooineReplication.NetIdOf(world.Link.Session, lair)));
         SessionHarness.Until(() => TatooineReplication.Intents.TargetsSet >= 1, "the target to be accepted");
+        world.Harness.Ticks(3 * Worlds.ServedHz);
+        var idle = LairHealth(world, lair);
 
-        // A weapon cycles in one to three seconds; four seconds of ticks at the served rate is at least one shot.
-        harness.Ticks(4 * Worlds.ServedHz);
+        world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
+        SessionHarness.Until(() => TatooineReplication.StanceAsks.Applied >= 1, "the stance to be applied");
+        world.Harness.Ticks(3 * Worlds.ServedHz);
+        var fought = LairHealth(world, lair);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(idle, Is.EqualTo(before), "a player with a target and no stance fired at it");
+            Assert.That(fought, Is.LessThan(before), "a player in a stance, its target in reach, fired nothing");
+        });
+    }
+
+    /// <summary>
+    /// Each stance reaches its own distance, between the two bodies' edges: unarmed 1 m, one-handed 3 m, pistol 30 m (Loïc, 2026-10-24).
+    /// </summary>
+    /// <remarks>
+    /// Half a metre inside and outside each reach. The lair is static and its frogs are gone, so the gap set is the gap fought across.
+    /// </remarks>
+    /// <param name="stance">The stance taken.</param>
+    /// <param name="gapM">The gap between the avatar's edge and the lair's.</param>
+    /// <param name="hits">Whether it is in reach.</param>
+    [TestCase(Stances.Unarmed, 0.5f, true)]
+    [TestCase(Stances.Unarmed, 1.5f, false)]
+    [TestCase(Stances.OneHanded, 2.5f, true)]
+    [TestCase(Stances.OneHanded, 3.5f, false)]
+    [TestCase(Stances.Pistol, 29.5f, true)]
+    [TestCase(Stances.Pistol, 30.5f, false)]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void AStanceReachesItsOwnDistanceBetweenTheBodiesEdges(byte stance, float gapM, bool hits)
+    {
+        using var world = new Possessed(Config());
+        var lair = StageLair(world, gapM);
+        var before = LairHealth(world, lair);
+
+        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(TatooineReplication.NetIdOf(world.Link.Session, lair)));
+        world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(stance));
+        SessionHarness.Until(
+            () => TatooineReplication.Intents.TargetsSet >= 1 && TatooineReplication.StanceAsks.Applied >= 1,
+            "the target and the stance to be accepted");
+
+        // Every stance strikes at least once in 1.5 s.
+        world.Harness.Ticks(3 * Worlds.ServedHz);
+        var after = LairHealth(world, lair);
+        if (hits)
+        {
+            Assert.That(after, Is.LessThan(before), $"stance {stance} did not reach a lair {gapM} m away");
+        }
+        else
+        {
+            Assert.That(after, Is.EqualTo(before), $"stance {stance} reached a lair {gapM} m away");
+        }
+    }
+
+    /// <summary>
+    /// Taking a stance gets the player off its swoop, mounting drops the stance, and a stance the server does not know is refused and counted.
+    /// </summary>
+    [Test]
+    [Category("Integration")]
+    public void AStanceAndTheSwoopExcludeEachOther()
+    {
+        using var world = new Possessed(Config());
+
+        world.Link.SendCommand(nameof(SetMount), ClientSays.SetMount(true));
+        SessionHarness.Until(() => TatooineReplication.MountAsks.Applied >= 1, "the mount to be applied");
+        world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.OneHanded));
+        SessionHarness.Until(() => TatooineReplication.StanceAsks.Applied >= 1, "the stance to be applied");
+        world.Harness.Ticks(1);
+        var armed = State(world);
+
+        world.Link.SendCommand(nameof(SetMount), ClientSays.SetMount(true));
+        SessionHarness.Until(() => TatooineReplication.MountAsks.Applied >= 2, "the second mount to be applied");
+        world.Harness.Ticks(1);
+        var riding = State(world);
+
+        world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Count));
+        SessionHarness.Until(() => TatooineReplication.StanceAsks.Refused >= 1, "an unknown stance to be refused");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(armed, Is.EqualTo((0, (int)Stances.OneHanded)), "a stance taken on the swoop did not get the player off it");
+            Assert.That(riding, Is.EqualTo((1, (int)Stances.None)), "mounting did not drop the stance");
+        });
+    }
+
+    /// <summary>
+    /// A wild lair cannot be damaged while its occupants stand (Loïc, 2026-10-24: a camp is destroyed once all of them are killed) — and can once none does.
+    /// </summary>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void AWildLairIsShieldedByItsOccupantsUntilNoneStands()
+    {
+        using var world = new Possessed(Config());
+        var lair = StageLair(world, gapM: 10f, site: 1);
+        var before = LairHealth(world, lair);
+        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(TatooineReplication.NetIdOf(world.Link.Session, lair)));
+        world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
+        SessionHarness.Until(
+            () => TatooineReplication.Intents.TargetsSet >= 1 && TatooineReplication.StanceAsks.Applied >= 1,
+            "the target and the stance to be accepted");
+        world.Harness.Ticks(3 * Worlds.ServedHz);
+        var guarded = LairHealth(world, lair);
+
+        world.Sim.WriteInTick((tx, _) =>
+        {
+            var l = tx.OpenMut(lair);
+            var spawner = l.Read(CreatureLair.Spawner);
+            spawner.Guards = 0;
+            l.Set(CreatureLair.Spawner, spawner);
+        });
+        world.Harness.Ticks(3 * Worlds.ServedHz);
+        var open = LairHealth(world, lair);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(guarded, Is.EqualTo(before), "a lair took damage while its occupants stood");
+            Assert.That(open, Is.LessThan(before), "a lair with no occupant standing took no damage");
+        });
+    }
+
+    /// <summary>An occupant killed is one guard fewer between its lair and whoever comes for it.</summary>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void KillingAnOccupantTakesAGuardFromItsLair()
+    {
+        using var world = new Possessed(Config());
+        var lair = StageLair(world, gapM: 10f, site: 1, keepOccupants: true);
+        var frog = EntityId.Null;
+        int guards = 0;
+        world.Sim.WriteInTick((tx, _) =>
+        {
+            guards = tx.Open(lair).Read(CreatureLair.Spawner).Guards;
+            foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+            {
+                var homes = cluster.GetReadOnlySpan(Creature.Home);
+                for (var bits = cluster.OccupancyBits; bits != 0 && frog.IsNull; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    if ((EntityId)homes[slot].Lair == lair)
+                    {
+                        frog = cluster.GetEntityId(slot);
+                    }
+                }
+            }
+
+            // One blow from death.
+            var body = tx.OpenMut(frog);
+            var vitals = body.Read(Creature.Vitals);
+            vitals.Health = 1;
+            body.Set(Creature.Vitals, vitals);
+        });
+        SessionHarness.Until(() => !frog.IsNull && TatooineReplication.NetIdOf(world.Link.Session, frog) != 0, "the frog to reach the client's view");
+
+        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(TatooineReplication.NetIdOf(world.Link.Session, frog)));
+        world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
+        world.Harness.Ticks(3 * Worlds.ServedHz);
 
         int after;
-        using (var read = sim.Dbe.CreateQuickTransaction())
+        using (var tx = world.Sim.Dbe.CreateQuickTransaction())
         {
-            after = read.TryOpen(frog, out var body) ? body.Read(Creature.Vitals).Health : 0;
+            after = tx.Open(lair).Read(CreatureLair.Spawner).Guards;
         }
 
-        Assert.That(after, Is.LessThan(before), $"the frog's health stayed at {before}: a possessed player with a target fired nothing");
+        Assert.Multiple(() =>
+        {
+            Assert.That(guards, Is.EqualTo(CreatureTemplates.SpawnLimit[CreatureTemplates.Frog]), "a lair is born guarded by every occupant it spawned");
+            Assert.That(after, Is.EqualTo(guards - 1), "a kill did not take a guard from its lair");
+        });
+    }
+
+    /// <summary>A downed player lies where it fell: its moves, its mount and its boarding are refused and counted until it is up again.</summary>
+    [Test]
+    [Category("Integration")]
+    public void ADownedPlayersMovesAreRefused()
+    {
+        using var world = new Possessed(Config());
+        world.Sim.WriteInTick((tx, _) =>
+        {
+            var player = tx.OpenMut(world.Entity);
+            var vitals = player.Read(Player.Vitals);
+            vitals.Health = 0;
+            vitals.Down = Downed.KnockedOut;
+            vitals.UpTick = int.MaxValue / 2;
+            player.Set(Player.Vitals, vitals);
+        });
+        world.Harness.Ticks(2);
+        var before = world.Read();
+        var refused = TatooineReplication.RefusedWhileDown;
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Run));
+        world.Link.SendCommand(nameof(SetMount), ClientSays.SetMount(true));
+        SessionHarness.Until(() => TatooineReplication.RefusedWhileDown >= refused + 2, "the move and the mount to be refused");
+        world.Harness.Ticks(3);
+        var after = world.Read();
+        Assert.Multiple(() =>
+        {
+            Assert.That(MathF.Abs(after.X - before.X) + MathF.Abs(after.Z - before.Z), Is.LessThan(0.01f), "a downed player moved");
+            Assert.That(State(world).Mounted, Is.Zero, "a downed player got on its swoop");
+        });
+    }
+
+    /// <summary>
+    /// The catalog carries what the client draws a fight from: <c>SetStance</c>, the player's <c>stance</c>, and the creature's <c>target</c> as an entity
+    /// reference — the netId of the player it fights, in the viewer's own view, which is how a client knows a creature is fighting IT.
+    /// </summary>
+    [Test]
+    [Category("Integration")]
+    public void TheCatalogCarriesTheStanceAndWhomACreatureFights()
+    {
+        using var world = new Possessed(Config());
+        var plan = world.Link.Plan;
+        var player = plan.ArchetypeByName("Player");
+        var creature = plan.ArchetypeByName("Creature");
+        Assert.Multiple(() =>
+        {
+            Assert.That(plan.CommandByName(nameof(SetStance)), Is.Not.Null, "no SetStance command");
+            Assert.That(Array.Find(player.Fields, f => f.Name == "stance")?.Kind, Is.EqualTo(CodecKind.U8), "the player's stance is not replicated");
+            Assert.That(Array.Find(creature.Fields, f => f.Name == "target")?.Kind, Is.EqualTo(CodecKind.EntityRef), "a creature's target is not replicated");
+            var lair = plan.ArchetypeByName("CreatureLair");
+            Assert.That(Array.Find(lair.Fields, f => f.Name == "hp"), Is.Not.Null, "a lair's health is not replicated, so no client can draw its bar");
+            Assert.That(Array.Find(lair.Fields, f => f.Name == "guards")?.Kind, Is.EqualTo(CodecKind.U8), "a lair's standing guards are not replicated");
+            Assert.That(Array.Find(lair.Fields, f => f.Name == "missionId")?.Kind, Is.EqualTo(CodecKind.U8), "a lair's mission is not replicated");
+        });
+    }
+
+    /// <summary>A lair of frogs <paramref name="gapM"/> from the avatar's edge to its own, its frogs taken away, in the client's view.</summary>
+    private static EntityId StageLair(Possessed world, float gapM, int site = 0, bool keepOccupants = false)
+    {
+        var at = world.Read();
+        float selfHalf;
+        using (var tx = world.Sim.Dbe.CreateQuickTransaction())
+        {
+            selfHalf = tx.For<Player>().Open(world.Entity).Read(Player.Bounds).HalfExtent;
+        }
+
+        var config = world.Sim.Config;
+        var terrain = TerrainField.Shared(config.ContentScale);
+        var lair = EntityId.Null;
+        world.Sim.WriteInTick((tx, _) =>
+        {
+            var rng = new Rng(7);
+            lair = WorldBuilder.SpawnLair(tx, ref rng, CreatureTemplates.Frog, at.X + selfHalf + WorldBuilder.LairHalfM + gapM, at.Z, site, expireTick: 0,
+                config, terrain, 0);
+        });
+        SessionHarness.Until(() => !lair.IsNull, "the lair to be spawned");
+
+        // Its frogs away: a frog nudging the avatar would move the gap the case measures. Taken away, not killed: a wild lair still counts them standing.
+        world.Sim.WriteInTick((tx, _) =>
+        {
+            if (keepOccupants)
+            {
+                return;
+            }
+
+            foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+            {
+                var homes = cluster.GetReadOnlySpan(Creature.Home);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    if ((EntityId)homes[slot].Lair == lair)
+                    {
+                        tx.Destroy(cluster.GetEntityId(slot));
+                    }
+                }
+            }
+        });
+
+        world.Harness.Ticks(2);
+        SessionHarness.Until(() => TatooineReplication.NetIdOf(world.Link.Session, lair) != 0, "the lair to reach the client's view");
+        using (var tx = world.Sim.Dbe.CreateQuickTransaction())
+        {
+            Assert.That(tx.Open(lair).Read(CreatureLair.Bounds).HalfExtent, Is.EqualTo(WorldBuilder.LairHalfM).Within(1e-3f), "the gap assumed the lair's size");
+        }
+
+        return lair;
+    }
+
+    private static int LairHealth(Possessed world, EntityId lair)
+    {
+        using var tx = world.Sim.Dbe.CreateQuickTransaction();
+        return tx.Open(lair).Read(CreatureLair.Vitals).Health;
+    }
+
+    private static (int Mounted, int Stance) State(Possessed world)
+    {
+        using var tx = world.Sim.Dbe.CreateQuickTransaction();
+        var state = tx.For<Player>().Open(world.Entity).Read(Player.State);
+        return (state.Mounted, state.Stance);
     }
 
     /// <summary>

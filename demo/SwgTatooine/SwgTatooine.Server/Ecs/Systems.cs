@@ -35,6 +35,9 @@ internal sealed class CreatureThinkSystem : QuerySystem
         // The aggro query reads player positions, and the pursuit re-reads its quarry's; declared, so Shuttle's and PlayerMove's writes are ordered around it
         // (rule ED-05).
         .Reads<PlayerPlacement>()
+
+        // And whether that player is down: a knocked-out or dead player is nobody's quarry.
+        .Reads<PlayerVitals>()
         .Writes<CreatureBrain>()
         .Writes<CreatureMotion>()
 
@@ -63,6 +66,9 @@ internal sealed class PlayerThinkSystem : QuerySystem
         // Declared, because the loop reads it to decide whether this player is the client's (SWG-01). Ordering against PlayerSessions, which writes it,
         // currently survives only through the unrelated PlayerMotion edge — which is rule ED-05's definition of the DAG being lucky rather than informed.
         .Reads<PlayerControl>()
+
+        // Whether a player is down, so a downed body is left lying.
+        .Reads<PlayerVitals>()
         .Writes<PlayerState>()
         .Writes<PlayerMotion>()
 
@@ -401,9 +407,10 @@ internal sealed class CombatResolveSystem : CallbackSystem
         .Writes<CreatureBrain>()
         .Writes<CreatureTimers>()
 
-        // The lair's, which is what lets a destroy mission finish at all.
+        // The lair's, which is what lets a destroy mission finish at all — and its guards, one fewer at each occupant's death.
         .Writes<LairVitals>()
-        .Reads<Lair>()
+        .Writes<Lair>()
+        .Reads<CreatureHome>()
 
         // The player's: health, the clone's teleport and the recovery it wakes up in, and the target that died with it.
         .Writes<PlayerVitals>()

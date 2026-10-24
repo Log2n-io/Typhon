@@ -700,8 +700,21 @@ public struct CreatureVitals
     public readonly bool IsAlive => Health > 0;
 }
 
+/// <summary>How a player at no health is down (<see cref="PlayerVitals.Down"/>).</summary>
+public static class Downed
+{
+    /// <summary>On its feet.</summary>
+    public const int Up = 0;
+
+    /// <summary>Knocked out: lies where it fell, is nobody's target, and gets up with a fifth of its health (<see cref="TatooineData.KnockOutSec"/>).</summary>
+    public const int KnockedOut = 1;
+
+    /// <summary>Dead: lies where it fell, then wakes as a clone outside the nearest city's shuttleport, whole (<see cref="TatooineData.CloneDelaySec"/>).</summary>
+    public const int Dead = 2;
+}
+
 /// <summary>A player's hit points and weapon timing.</summary>
-[Component("Swg.PlayerVitals", 1, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.PlayerVitals", 3, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct PlayerVitals
 {
@@ -711,15 +724,28 @@ public struct PlayerVitals
     [Field] public int AttackCooldown;
     [Field] public int AttackDamage;
 
+    /// <summary>
+    /// Whether the player is down at no health, and how (<see cref="Downed"/>): knocked out or dead, even odds (Loïc, 2026-10-24). Replicated, so every client
+    /// plays the fall — the death, or the knock-out it gets up from.
+    /// </summary>
+    [Field, Replicate(CodecKind.U8, Name = "down", Saturate = true)] public int Down;
+
+    /// <summary>The tick a downed player gets up, or wakes as a clone; 0 on its feet. The player alone sees it, for its countdown.</summary>
+    [Field, Owner(CodecKind.Varu, Name = "upTick", Saturate = true)] public int UpTick;
+
+    /// <summary>The tick a blow last landed on this player, 0 for never: it heals only once nothing has hit it for <see cref="TatooineData.RegenQuietSec"/>.</summary>
+    [Field] public int LastHitTick;
+
     public readonly bool IsAlive => Health > 0;
 }
 
 /// <summary>A lair's structural integrity — what a destroy mission is sent to reduce to zero.</summary>
-[Component("Swg.LairVitals", 1, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.LairVitals", 2, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct LairVitals
 {
-    [Field] public int Health;
+    /// <summary>Its integrity, out of <see cref="MaxHealth"/>: replicated as an 8-bit bar, which every client draws over the lair.</summary>
+    [Field, Fraction(nameof(MaxHealth), Bits = 8, Name = "hp", Group = "vitals")] public int Health;
     [Field] public int MaxHealth;
 
     public readonly bool IsAlive => Health > 0;
@@ -751,6 +777,10 @@ public struct CreatureBrain
 
     /// <summary>The player this creature is fighting, or <c>EntityId.Null</c> when it is not fighting anybody (SWG-02).</summary>
     /// <remarks>
+    /// <b>Replicated as an entity reference</b>, the netId it has in each viewer's own view (0 when it is not in that view): what lets a client draw the
+    /// health bar of every creature fighting IT, and nobody else's.
+    /// </remarks>
+    /// <remarks>
     /// <para>
     /// <b>An entity, not a point, and that is the whole of what SWG-02 adds to the creature's side of a fight.</b> Pursuit used to steer at
     /// <c>CreatureMotion.DestX/DestZ</c> — the position a player occupied on the tick the aggro query found it — and never refreshed it, so a pursuer walked
@@ -768,7 +798,7 @@ public struct CreatureBrain
     /// <c>ClusterSpatialQuery&lt;Player&gt;</c>, so the target is a player by construction. The typed link says so in the schema, which makes the field
     /// indexable and foreign-key-checkable; the bare id did not and could not.
     /// </remarks>
-    [Field] public EntityLink<Player> Target;
+    [Field, Replicate(CodecKind.EntityRef, Name = "target")] public EntityLink<Player> Target;
 
     /// <summary>Which <see cref="CreatureTemplates"/> entry this creature was spawned from — a rat, a ninja, a mission defender (S0-5).</summary>
     /// <remarks>
@@ -912,7 +942,7 @@ public static class AiMode
 /// A player's behaviour. Players are simulated as an activity MIX rather than one loop, because the load a planet
 /// carries is dominated by what fraction of its players are moving at all.
 /// </summary>
-[Component("Swg.PlayerState", 2, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.PlayerState", 3, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct PlayerState
 {
@@ -950,6 +980,17 @@ public struct PlayerState
     /// having put it on one (<c>SetMount</c>). A door or a shuttle puts it back on foot — a swoop does not fit through a 0.8 m door, and nobody flies with one.
     /// </remarks>
     [Field, Replicate(CodecKind.U8, Name = "mounted", Saturate = true)] public int Mounted;
+
+    /// <summary>
+    /// The combat stance a person put this player in (<c>SetStance</c>, the client's action bar 2–4): <c>Stances.None</c> idle, or what it fights with.
+    /// Replicated, so everyone watching draws the weapon in its hand and the weapon's attack on each hit.
+    /// </summary>
+    /// <remarks>
+    /// <b>The gate on a possessed player's shots</b>, and the reach and cadence they have (<see cref="TatooineData.StanceReachM"/>,
+    /// <see cref="TatooineData.StanceDelaySec"/>): a player with a target and no stance does not fight. Mounting, boarding and a door put it back to idle.
+    /// The scripted crowd never holds one; its <see cref="Activity"/> decides its fights.
+    /// </remarks>
+    [Field, Replicate(CodecKind.U8, Name = "stance", Saturate = true)] public int Stance;
 }
 
 /// <summary>
@@ -1191,7 +1232,7 @@ public static class PlayerActivity
 }
 
 /// <summary>A creature lair: the object that spawns and owns a population, and what a destroy mission sends a player to break.</summary>
-[Component("Swg.Lair", 2, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.Lair", 3, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct Lair
 {
@@ -1204,6 +1245,12 @@ public struct Lair
     /// <summary>How many are alive right now.</summary>
     [Field] public int AliveCount;
 
+    /// <summary>
+    /// Its occupants still standing: <see cref="AliveCount"/> less the corpses not yet removed. While any stands the lair cannot be damaged — a camp is
+    /// destroyed once all its occupants are killed (Loïc, 2026-10-24). Replicated, so a client can draw the lair's bar as shielded.
+    /// </summary>
+    [Field, Replicate(CodecKind.U8, Name = "guards", Saturate = true)] public int Guards;
+
     /// <summary>A destroy-mission lair's offer cadence, in ticks (<c>MissionTick</c>). A wild lair's schedule is <see cref="NextSpawnTick"/>.</summary>
     [Field] public int RespawnCooldown;
 
@@ -1211,7 +1258,7 @@ public struct Lair
     [Field] public float SpawnRadius;
 
     /// <summary>Non-zero if this lair belongs to a destroy mission and dies with it.</summary>
-    [Field] public int MissionId;
+    [Field, Replicate(CodecKind.U8, Name = "missionId", Saturate = true)] public int MissionId;
 
     /// <summary>The player this destroy mission was built around, and the one its completion pays (SWG-02); <c>EntityId.Null</c> on a wild lair.</summary>
     /// <remarks>
@@ -1344,6 +1391,11 @@ public static class StructureKind
 
     /// <summary>A mission terminal, placed like a <see cref="Bazaar"/>.</summary>
     public const int MissionTerminal = 10;
+
+    /// <summary>
+    /// A city's town hall: one per city, across the way from its shuttleport's gate with its door facing it, and a room behind the door like a house's.
+    /// </summary>
+    public const int TownHall = 11;
 }
 
 /// <summary>Where one side of a door stands: the published door box, turned and placed. Never moves.</summary>

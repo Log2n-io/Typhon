@@ -59,6 +59,7 @@ public sealed partial class SimBridge
         long issued = 0;
         long completed = 0;
         var writer = ctx.Writer(CombatQueue);
+        var moves = ctx.Writer(MissionMoveQueue);
 
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<CreatureLair>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
@@ -192,6 +193,9 @@ public sealed partial class SimBridge
                     var nb = default(LairPlacement);
                     nb.SetAt(tx, tz, GroundAt(cluster.Realm, tx, tz), places[idx].HalfExtent);
                     cluster.WriteSpatial(CreatureLair.Bounds, idx, nb);
+
+                    // Its defenders stood where it was: the lair director replaces it here with a fresh lair round which they stand (SimBridge.Lairs.cs).
+                    moves.Push(new MissionMoveEvent { Lair = cluster.GetEntityId(idx), X = tx, Z = tz });
 
                     // And TELL the player, which is the half of this loop that was missing: the lair moved, the waypoint did not exist, and a player "going to
                     // fight" walked to a random point in a point-of-interest disc kilometres wide. Sent as an event for the same reason the payout is — this

@@ -103,8 +103,13 @@ public static class StructureFootprint
         StructureKind.Factory => 11f,        // 22 x 22
         StructureKind.Harvester => 3f,       // 6 x 6
         StructureKind.CampObject => 2f,      // 4 x 4
-        // 20 x 20, around a room drawn at its realm's origin: the large interior reaches 9.84 m from it (8.2 m the other way), the small 5.6.
-        StructureKind.Interior => 10f,
+        // 28 x 28, around a room drawn at its realm's origin: the town hall's reaches 14 m from it, the large house's 9.84 m, the small one's 5.6. It was 20 x
+        // 20 before the town hall, and one size for every room keeps a room's broad-phase box what it always was: everything in the realm.
+        StructureKind.Interior => 14f,
+        // 35.6 x 35.6 round the published `tat_townhall`'s origin (2026-10-25), which is not its middle: 30.4 m wide, it runs from 9.6 m behind the origin to
+        // its ramp's foot 17.75 m in front, and a square centred on the origin has to reach the ramp. The 8 m it reserves behind the back wall is the price
+        // of the one rule every structure keeps — its box is centred where it stands — which collision, the push-out and the layout checks all read.
+        StructureKind.TownHall => 17.8f,
         _ => 9f,
     };
 }

@@ -128,6 +128,13 @@ public sealed class SimConfig
     /// <remarks>Per interior, NOT scaled by the population scale: an interior's crowd is a room's, whatever the planet's population. [EST]</remarks> [EST] Per interior,</summary>
     public int InteriorNpcs = 3;
 
+    /// <summary>The fewest NPCs standing in a town hall: each hall draws between this and <see cref="TownHallNpcsMax"/> (Loïc, 2026-10-25: 10 to 20).</summary>
+    /// <remarks>In place of <see cref="InteriorNpcs"/>, which is a house's; not scaled by the population scale either.</remarks>
+    public int TownHallNpcsMin = 10;
+
+    /// <summary>The most NPCs standing in a town hall, inclusive.</summary>
+    public int TownHallNpcsMax = 20;
+
     /// <summary>
     /// Re-check every colliding body's written position against a fresh spatial query, and count the ones that ended up
     /// inside a structure (the static neighbourhood's independent oracle).

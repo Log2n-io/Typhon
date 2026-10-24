@@ -79,9 +79,17 @@ public sealed class AssetColliders
     /// <b>The two interiors were read the same way</b> (catalogue 4): walls 0 to 2 m, furniture 0.45 to 1.72 m, and the floor slab below 0, which the
     /// per-contact floor-or-wall decision sorts exactly as it sorts a house's steps and walls.
     /// </para>
+    /// <para>
+    /// <b>The town hall and its room the same way</b> (catalogue with <c>tat_townhall-1</c>): a plinth 0.9 m up reached by a ramp, its walls 0.9 to 2.9 m on
+    /// it — a house's deck and walls, higher; the room's walls 0 to 2 m, its furniture 0.45 to 1.6 m, and a stage 0.3 m up with its step, whose seats,
+    /// table and lectern stand on it.
+    /// </para>
     /// </remarks>
     private static readonly string[] Verified =
-        ["tat_house_small", "tat_house_large", "tat_shuttleport", "tat_house_large_interior", "tat_house_small_interior"];
+    [
+        "tat_house_small", "tat_house_large", "tat_shuttleport", "tat_house_large_interior", "tat_house_small_interior", "tat_townhall",
+        "tat_townhall_interior",
+    ];
 
     /// <summary>One primitive as this simulation sees it: an axis-aligned box in the asset's own plan.</summary>
     /// <param name="MinX">West edge, metres from the asset origin.</param>

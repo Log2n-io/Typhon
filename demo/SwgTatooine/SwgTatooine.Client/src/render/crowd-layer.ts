@@ -5,9 +5,10 @@ import type { Descriptor } from '../assets/descriptor';
 import { AnimationGraph, locomotionFrom, type LocomotionTuning } from '../character/animation-graph';
 import type { AtlasPlan } from '../character/clip-atlas';
 import { CrowdAnimator } from '../character/crowd-anim';
-import { RIDE_ROLE, locomotionRoles, outfitFor } from '../character/outfits';
+import { GET_UP_CLIP, RIDE_ROLE, clipRole, locomotionRoles, outfitFor } from '../character/outfits';
 import type { CrowdSkinPlugin } from './crowd-material';
 import type { CrowdOutfit } from './crowd-mesh';
+import type { CrowdWeapon } from './crowd-weapons';
 import type { CrowdBody } from './layer-packer';
 import { CULLED, SPRITE_TIER, classify, packTiers, type ViewParams } from './crowd-view';
 
@@ -48,6 +49,10 @@ interface Slot {
   tunedAt: number;
   /** The body's strike count this slot has answered; a body that strikes again plays its attack. See `CrowdBody.strikes`. */
   strikes: number;
+  /** The blows taken this slot has answered; see `CrowdBody.hits`. */
+  hits: number;
+  /** The `down` this slot last played: a change is a fall, or getting up. */
+  down: number;
   /**
    * The one-shot serial last handed to the animator, so a held attack or death is played once and not restarted every
    * frame. `CrowdAnimator.play` restarts a one-shot on every call — two punches in a row are two punches — which is right
@@ -140,6 +145,8 @@ export class CrowdLayer {
     previousByNetId: Map<number, number>;
     readonly counts: Int32Array;
     readonly slotOf: Int8Array;
+    /** The stance each body holds a weapon in this frame, 0 for none: which {@link weapons} draws one in its hand. */
+    readonly held: Uint8Array;
     readonly targets: Float32Array[][];
     count: number;
     tuning: LocomotionTuning;
@@ -157,6 +164,9 @@ export class CrowdLayer {
   private tuningSerial = 0;
 
   private readonly scratch = { matrix: new Matrix(), quat: new Quaternion(), pos: new Vector3() };
+
+  /** The weapons drawn in a body's hand, by the server's stance number; see {@link setWeapon}. */
+  private readonly weapons: (CrowdWeapon | null)[] = [];
 
   /**
    * When this layer started, in the same units the caller's clock uses.
@@ -213,6 +223,7 @@ export class CrowdLayer {
         previousByNetId: new Map<number, number>(),
         counts: new Int32Array(levels),
         slotOf,
+        held: new Uint8Array(share),
         targets: outfit.lods.map(() => [
           new Float32Array(share * 16),
           new Float32Array(share * 4),
@@ -245,6 +256,18 @@ export class CrowdLayer {
         lod.mesh.isVisible = false;
       }
     }
+  }
+
+  /**
+   * Draws `weapon` in the hand of every body whose replicated `stance` is `stance`, and plays its clip on each of their
+   * blows. A weapon that has not loaded is a stance drawn empty-handed, with the attack role's blow.
+   */
+  setWeapon(stance: number, weapon: CrowdWeapon): void {
+    while (this.weapons.length <= stance) {
+      this.weapons.push(null);
+    }
+
+    this.weapons[stance] = weapon;
   }
 
   /** Where the crowd's clock is, in seconds since it started. Not epoch seconds: float32 loses milliseconds there. */
@@ -377,6 +400,9 @@ export class CrowdLayer {
           tunedAt: this.tuningSerial,
           // Answered already: a body coming into view mid-fight is not owed the blows it struck before it was seen.
           strikes: body.strikes,
+          hits: body.hits,
+          // Up, so a body first seen lying down falls at once and holds it.
+          down: 0,
           played: -1,
           acts: roles.attack !== undefined && roles.death !== undefined,
         };
@@ -419,10 +445,28 @@ export class CrowdLayer {
             slot.graph.fire('die', clock);
           }
 
+          if (body.down !== slot.down) {
+            this.fall(slot, outfit.id, body.down, clock);
+          }
+
+          if (body.hits !== slot.hits) {
+            slot.hits = body.hits;
+            if (!slot.graph.dead && this.plan.slotOf(outfit.id, 'hit') !== null) {
+              slot.graph.fire('hit', clock);
+            }
+          }
+
           if (body.strikes !== slot.strikes) {
             slot.strikes = body.strikes;
             if (slot.graph.accepts('attack', clock, true)) {
-              slot.graph.fire('attack', clock);
+              // A body in a stance strikes with its weapon's clip, under the role the atlas baked it as; anything else
+              // alternates the rig's attack role, as the scripted crowd and the creatures always have.
+              const clip = this.weapons[body.stance]?.clip ?? null;
+              if (clip !== null && this.plan.slotOf(outfit.id, clipRole(clip)) !== null) {
+                slot.graph.strike(clip, clock, clipRole(clip));
+              } else {
+                slot.graph.fire('attack', clock);
+              }
             }
           }
         }
@@ -447,17 +491,29 @@ export class CrowdLayer {
       this.scratch.pos.set(body.x, body.y + lift, body.z);
       Matrix.ComposeToRef(ONE, this.scratch.quat, this.scratch.pos, this.scratch.matrix);
       this.scratch.matrix.copyToArray(bucket.matrices, i * 16);
+      // In the hand while it stands in its stance: not on the swoop (the server drops the stance there anyway), not dead.
+      bucket.held[i] =
+        ride === null && !body.dead && body.down === 0 && (this.weapons[body.stance] ?? null) !== null
+          ? body.stance
+          : 0;
       this.drawn.add(body.netId);
     }
 
     // ---- classify, pack and upload ---------------------------------------------------------------------------
     this.drawCalls = 0;
     this.trianglesDrawn = 0;
+    for (const weapon of this.weapons) {
+      if (weapon !== null) {
+        weapon.count = 0;
+      }
+    }
+
     for (const [which, bucket] of this.buckets.entries()) {
       const outfit = this.outfits[which];
       // One height for the whole bucket: every body in it wears the same outfit, so an array of 2 048 copies of one
       // constant was 2 048 copies of one constant. `classify` has taken a scalar since it was written.
       classify(bucket.matrices, bucket.count, outfit.height, view, bucket.tiers, this.tierTotals);
+      this.packWeapons(bucket);
       packTiers(
         bucket.tiers,
         bucket.count,
@@ -495,6 +551,68 @@ export class CrowdLayer {
         this.trianglesDrawn += lod.triangles * count;
       }
     }
+
+    for (const weapon of this.weapons) {
+      if (weapon === null) {
+        continue;
+      }
+
+      const mesh = weapon.mesh;
+      mesh.isVisible = weapon.count > 0;
+      mesh.thinInstanceCount = weapon.count;
+      if (weapon.count > 0) {
+        mesh.thinInstancePartialBufferUpdate('matrix', weapon.count, 0);
+        mesh.thinInstancePartialBufferUpdate('crowdClipA', weapon.count, 0);
+        mesh.thinInstancePartialBufferUpdate('crowdClipB', weapon.count, 0);
+        mesh.thinInstancePartialBufferUpdate('crowdFade', weapon.count, 0);
+        this.drawCalls++;
+        this.trianglesDrawn += weapon.triangles * weapon.count;
+      }
+    }
+  }
+
+  /**
+   * A player going down, or getting up (`CrowdBody.down`): dead or knocked out, it falls with its death and holds it; a
+   * knocked-out body gets up with `StandUp`. A clone wakes elsewhere, already standing.
+   */
+  private fall(slot: Slot, outfit: string, down: number, clock: number): void {
+    const was = slot.down;
+    slot.down = down;
+    if (down !== 0) {
+      slot.graph.fire('die', clock);
+    } else {
+      slot.graph.fire('respawn', clock);
+      if (was === DOWN_KNOCKED_OUT && this.plan.slotOf(outfit, clipRole(GET_UP_CLIP)) !== null) {
+        slot.graph.getUp(GET_UP_CLIP, clock, clipRole(GET_UP_CLIP));
+      }
+    }
+  }
+
+  /**
+   * Copies each body that holds a weapon into that weapon's instances: the body's own placement and clip state, so the
+   * shader poses the weapon on the hand it poses. Only for the tiers drawn as meshes — a sprite or a culled body has no hand.
+   */
+  private packWeapons(bucket: (typeof this.buckets)[number]): void {
+    const animator = bucket.animator;
+    for (let i = 0; i < bucket.count; i++) {
+      const stance = bucket.held[i];
+      const tier = bucket.tiers[i];
+      if (stance === 0 || tier === CULLED || tier >= SPRITE_TIER) {
+        continue;
+      }
+
+      const weapon = this.weapons[stance] ?? null;
+      if (weapon === null || weapon.count >= weapon.targets[1].length / 4) {
+        continue;
+      }
+
+      const k = weapon.count++;
+      const [matrix, clipA, clipB, fade] = weapon.targets;
+      matrix.set(bucket.matrices.subarray(i * 16, i * 16 + 16), k * 16);
+      clipA.set(animator.clipA.subarray(i * 4, i * 4 + 4), k * 4);
+      clipB.set(animator.clipB.subarray(i * 4, i * 4 + 4), k * 4);
+      fade.set(animator.fade.subarray(i * 2, i * 2 + 2), k * 2);
+    }
   }
 
   /**
@@ -515,6 +633,13 @@ export class CrowdLayer {
       }
     }
 
+    for (const weapon of this.weapons) {
+      if (weapon !== null) {
+        weapon.mesh.isVisible = false;
+        weapon.mesh.thinInstanceCount = 0;
+      }
+    }
+
     this.drawn.clear();
   }
 
@@ -522,8 +647,15 @@ export class CrowdLayer {
     for (const outfit of this.outfits) {
       outfit.dispose();
     }
+
+    for (const weapon of this.weapons) {
+      weapon?.dispose();
+    }
   }
 }
+
+/** The server's `Downed.KnockedOut` (`PlayerVitals.Down`): the one fall a body gets up from. */
+const DOWN_KNOCKED_OUT = 1;
 
 /** Reused: every body is drawn at its published size. */
 const ONE = Vector3.One();

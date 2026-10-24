@@ -571,12 +571,14 @@ public sealed partial class SimBridge
                 nb.SetAt(r.X, r.Z, MathF.Max(GroundAt(dest, r.X, r.Z), r.Y), r.HalfExtent);
                 tx.Teleport(r.Id, Player.Bounds, dest, in nb);
 
-                // A swoop does not fit a 0.8 m door, and a rider going through one gets off it: on foot on the far side, whichever way it went.
+                // A swoop does not fit a 0.8 m door, and a rider going through one gets off it: on foot on the far side, whichever way it went. Idle too:
+                // another realm is another fight, and the client drops its stance on the crossing.
                 var rider = tx.OpenMut(r.Id);
                 var riding = rider.Read(Player.State);
-                if (riding.Mounted != 0)
+                if (riding.Mounted != 0 || riding.Stance != Stances.None)
                 {
                     riding.Mounted = 0;
+                    riding.Stance = Stances.None;
                     rider.Set(Player.State, riding);
 
                     // Marked, as SetMount marks it (ADR-067): a replicated field goes out when it is marked, not because the realm changed under it.

@@ -117,6 +117,8 @@ type ActionKind = 'jump' | 'attack' | 'hit' | 'roll' | 'death';
 
 interface Action {
   readonly kind: ActionKind;
+  /** The role reported with the clip: the kind's own, or the one {@link AnimationGraph.strike} names. */
+  readonly role: string;
   readonly clip: string;
   readonly start: number;
   readonly end: number;
@@ -231,12 +233,35 @@ export class AnimationGraph {
     }
   }
 
+  /**
+   * An attack with a named clip: a held weapon's (ASSET_FORMAT.md § 5.10), where {@link fire} alternates the rig's
+   * attack role. Restarts the clip when it is the one already playing — two blows are two.
+   *
+   * @param clip The clip, by name: what the rig plays.
+   * @param now The graph's clock.
+   * @param role The role reported with it: what the crowd's atlas finds the clip's rows by (`clipRole`).
+   */
+  strike(clip: string, now: number, role = 'attack'): void {
+    this.begin('attack', clip, now, this.durations.get(clip) ?? 0.5, role);
+  }
+
+  /** Gets up from a knock-out — which falls as a death does — with `clip` once, movement locked while it plays, then locomotion. */
+  getUp(clip: string, now: number, role: string): void {
+    this.action = null;
+    this.begin('hit', clip, now, this.durations.get(clip) ?? 1, role);
+  }
+
+  /** A clip's length in seconds, or `NaN` for a clip this rig does not have. */
+  durationOf(clip: string): number {
+    return this.durations.get(clip) ?? Number.NaN;
+  }
+
   update(speed: number, grounded: boolean, now: number): AnimOutput {
     const action = this.active(now);
     if (action?.kind === 'jump' && grounded && now - action.start > 0.25) {
       this.action = null;
     } else if (action !== null) {
-      return this.say(action.clip, action.kind, false, 1);
+      return this.say(action.clip, action.role, false, 1);
     }
 
     const tuning = this.tuningValue;
@@ -270,8 +295,14 @@ export class AnimationGraph {
     return this.action;
   }
 
-  private begin(kind: ActionKind, clip: string, now: number, duration = this.durations.get(clip) ?? 0.5): void {
-    this.action = { kind, clip, start: now, end: now + duration };
+  private begin(
+    kind: ActionKind,
+    clip: string,
+    now: number,
+    duration = this.durations.get(clip) ?? 0.5,
+    role: string = kind,
+  ): void {
+    this.action = { kind, role, clip, start: now, end: now + duration };
     this.serial++;
   }
 

@@ -88,6 +88,64 @@ body,
   font-style: italic;
 }
 
+/* The avatar is down: what happened and how long until it is up, top centre over the world. */
+.down-notice {
+  position: absolute;
+  top: 18%;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 12px 22px;
+  border-radius: 10px;
+  background: rgba(16, 14, 12, 0.78);
+  border: 1px solid rgba(255, 225, 170, 0.22);
+  text-align: center;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.down-title {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: #ff5a4a;
+  text-shadow: 0 1px 2px #000;
+}
+
+.down-title.knocked {
+  color: #f0b43c;
+}
+
+.down-sub {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--panel-fg);
+}
+
+/* An enemy's health over its head, while it fights this session's avatar: the HAM bar's red, small. */
+.hpbar {
+  width: 44px;
+  height: 6px;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.75);
+  background: rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+.hpbar-fill {
+  height: 100%;
+  width: 100%;
+  background: linear-gradient(180deg, #f2766a 0%, #c8342a 55%, #8f1f18 100%);
+}
+
+/* A lair its occupants still guard: nothing damages it yet, so its bar is steel rather than blood. */
+.hpbar.shielded {
+  border-color: rgba(190, 215, 255, 0.85);
+}
+
+.hpbar.shielded .hpbar-fill {
+  background: linear-gradient(180deg, #c9d6e6 0%, #7d8ea6 55%, #4c5a6e 100%);
+}
+
 .label-selection {
   font-size: 12px;
   color: #fff;
@@ -354,10 +412,11 @@ button.active {
   z-index: 3;
 }
 
-/* Under about 1010 px a 420 px centred panel reaches into the 300 px chat and the 270 px inspector, so it moves up
-   above the chat instead of across it. The z-index above decides the rest: the prompt is the transient panel and the
-   one whose buttons have to be clickable, so it is on top where they do overlap. */
-@media (max-width: 1010px) {
+/* Under about 1600 px a 420 px centred panel reaches into the action bar, which ends 579 px from the left (the chat
+   and the inspector alone allowed 1010 px), so it moves up above the chat instead of across it. The z-index above
+   decides the rest: the prompt is the transient panel and the one whose buttons have to be clickable, so it is on top
+   where they do overlap. */
+@media (max-width: 1600px) {
   .shuttle {
     bottom: calc(34% + 26px);
   }
@@ -804,4 +863,171 @@ button.active {
 
 .ticket-cancel {
   margin-top: 8px;
+}
+
+/*
+ * The player's bars (ActionBar.tsx): a game's look rather than the tool panels' — a darker, heavier frame, and slots
+ * shaded like small buttons. Each sits one margin (10 px, the panels' own from the screen's edge) right of the left column, whose panels are 300 px of content
+ * plus 2 × 10 px padding and 2 × 1 px border: the column ends at 332 px, not at 310.
+ */
+.gamebar {
+  position: absolute;
+  left: 342px;
+  padding: 6px;
+  background: linear-gradient(180deg, rgba(40, 36, 32, 0.92), rgba(16, 14, 12, 0.92));
+  border: 1px solid rgba(255, 225, 170, 0.22);
+  border-radius: 9px;
+  box-shadow:
+    0 4px 14px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  z-index: 2;
+}
+
+/* The action slots, on the chat's bottom edge. */
+.actionbar {
+  bottom: 10px;
+}
+
+/* The HAM pool, on the toolbar's top edge. */
+.ham {
+  top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ham-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: #f2766a;
+  text-shadow: 0 1px 1px #000;
+}
+
+.ham-bar {
+  position: relative;
+  width: 180px;
+  height: 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(0, 0, 0, 0.7);
+  background: rgba(0, 0, 0, 0.55);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+
+.ham-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 5px;
+  transition: width 0.25s ease-out;
+}
+
+.ham-bar.health .ham-fill {
+  background: linear-gradient(180deg, #f2766a 0%, #c8342a 55%, #8f1f18 100%);
+}
+
+.ham-text {
+  position: relative;
+  display: block;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 12px;
+  text-align: center;
+  color: #fff;
+  text-shadow:
+    0 0 2px #000,
+    0 1px 1px #000;
+}
+
+.slots {
+  display: flex;
+  gap: 5px;
+}
+
+/* 52 px: the 48 px icon at its own size inside a 2 px border. The colour is the slot's (`--slot`), the radial shading keeps it from reading flat. */
+.slot {
+  --slot: #888;
+  position: relative;
+  box-sizing: border-box;
+  width: 52px;
+  height: 52px;
+  padding: 0;
+  border: 2px solid var(--slot);
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at 30% 25%, rgba(255, 255, 255, 0.28), transparent 60%),
+    linear-gradient(
+      160deg,
+      color-mix(in srgb, var(--slot) 55%, #000) 0%,
+      color-mix(in srgb, var(--slot) 20%, #000) 100%
+    );
+  box-shadow:
+    inset 0 -3px 5px rgba(0, 0, 0, 0.45),
+    0 1px 2px rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.slot:hover {
+  filter: brightness(1.2);
+}
+
+/* Pushed: a stance taken, or the swoop ridden. Pressed IN — dark at the top edge, sunk a pixel, its icon a little smaller —
+   with a light rim and the slot's colour glowing round it, so it reads as held down from across the screen, not as the
+   flash every press makes. */
+.slot.on {
+  border-color: color-mix(in srgb, var(--slot) 35%, #fff);
+  background:
+    radial-gradient(circle at 50% 60%, color-mix(in srgb, var(--slot) 45%, transparent), transparent 70%),
+    linear-gradient(
+      160deg,
+      color-mix(in srgb, var(--slot) 25%, #000) 0%,
+      color-mix(in srgb, var(--slot) 50%, #000) 100%
+    );
+  box-shadow:
+    inset 0 4px 7px rgba(0, 0, 0, 0.75),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.3),
+    0 0 10px 2px var(--slot);
+  transform: translateY(2px);
+}
+
+.slot.on .slot-icon {
+  transform: scale(0.9);
+}
+
+.slot-icon {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.slot-key {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  text-shadow:
+    0 0 2px #000,
+    0 1px 1px #000;
+  pointer-events: none;
+}
+
+/* The press: a flash that fades, restarted on every use by remounting. */
+.slot-flash {
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.55);
+  pointer-events: none;
+  animation: slot-flash 0.3s ease-out forwards;
+}
+
+@keyframes slot-flash {
+  to {
+    opacity: 0;
+  }
 }

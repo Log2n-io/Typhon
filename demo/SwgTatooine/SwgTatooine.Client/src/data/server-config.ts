@@ -83,6 +83,8 @@ export interface CreatureKind {
   readonly lair: string;
   /** The assets its creatures wear, at least one. */
   readonly bodies: readonly string[];
+  /** The destroy-mission pool's kind: a lair of it with no mission is dormant, defenderless, and not drawn. */
+  readonly mission: boolean;
 }
 
 export interface ServerConfig {
@@ -248,7 +250,7 @@ export function readCreatureKinds(value: unknown): readonly CreatureKind[] {
   }
 
   return value.map((entry: unknown): CreatureKind => {
-    const { name, lair, bodies } = (typeof entry === 'object' && entry !== null ? entry : {}) as Record<
+    const { name, lair, bodies, mission } = (typeof entry === 'object' && entry !== null ? entry : {}) as Record<
       string,
       unknown
     >;
@@ -259,6 +261,7 @@ export function readCreatureKinds(value: unknown): readonly CreatureKind[] {
       name: typeof name === 'string' ? name : '',
       lair: typeof lair === 'string' ? lair : '',
       bodies: ids,
+      mission: mission === true,
     };
   });
 }

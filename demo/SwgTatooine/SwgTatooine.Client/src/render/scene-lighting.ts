@@ -5,6 +5,7 @@ import { SpotLight } from '@babylonjs/core/Lights/spotLight';
 import { ShadowGenerator } from '@babylonjs/core/Lights/Shadows/shadowGenerator';
 import '@babylonjs/core/Lights/Shadows/shadowGeneratorSceneComponent';
 import { ImageProcessingConfiguration } from '@babylonjs/core/Materials/imageProcessingConfiguration';
+import type { Material } from '@babylonjs/core/Materials/material';
 
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial';
 import { CubeTexture } from '@babylonjs/core/Materials/Textures/cubeTexture';
@@ -85,6 +86,26 @@ const LAMP_SHADOW_MAP_SIZE = 1024;
 const LAMP_SHADOW_NEAR_M = 0.05;
 const LAMP_SHADOW_FAR_M = 40;
 
+/**
+ * How many of a room's lamps cast a shadow: its brightest. The rest still light it.
+ *
+ * <b>Bounded by texture units, not by cost.</b> A cube shadow map is a sampler in every lit material's fragment shader,
+ * and the GPUs this runs on give a shader 16 (measured: WebGL2, Chrome). The town hall's room has eight lamps: eight cube
+ * maps, the sun's map and a PBR material's own five or six textures is that limit, and a shader past it does not compile.
+ * Four keeps every room's look — no house has more than three — and leaves the hall's dimmest four unshadowed.
+ */
+export const LAMP_SHADOWS_MAX = 4;
+
+/**
+ * The lights a material takes, where Babylon's default is 4.
+ *
+ * <b>The default dropped the town hall's brightest lamp.</b> A mesh takes the scene's lights in the scene's order up to
+ * its material's cap, and a room's lamps come after the sun: the hall's eight lamps and the sun lit each mesh with the
+ * sun and the first three, so its 119 W hall lamp — the fourth — lit nothing. A cap is a ceiling, not a cost: a shader
+ * is built for the lights that actually reach its mesh, so the street, with its sun, compiles what it always did.
+ */
+export const MAX_LIGHTS_PER_MATERIAL = 12;
+
 /** Where the prefiltered environment lives, inside the vendored decoder folder. */
 const ENVIRONMENT = 'environmentSpecular.env';
 
@@ -130,6 +151,12 @@ export class SceneLighting {
     this.sun.orthoRight = SHADOW_RADIUS_M;
     this.sun.orthoBottom = -SHADOW_RADIUS_M;
     this.sun.orthoTop = SHADOW_RADIUS_M;
+    for (const material of scene.materials) {
+      takeEveryLight(material);
+    }
+
+    // Announced on a timer (Babylon's `SetImmediate`), so after the material's constructor has set its own cap of 4.
+    scene.onNewMaterialAddedObservable.add(takeEveryLight);
   }
 
   /**
@@ -369,11 +396,12 @@ export class SceneLighting {
       mesh.receiveShadows = true;
     }
 
-    for (const light of lights) {
-      if (!(light instanceof PointLight) && !(light instanceof SpotLight)) {
-        continue;
-      }
-
+    // The brightest cast; see LAMP_SHADOWS_MAX.
+    const lamps = lights
+      .filter((light) => light instanceof PointLight || light instanceof SpotLight)
+      .sort((a, b) => b.intensity - a.intensity)
+      .slice(0, LAMP_SHADOWS_MAX);
+    for (const light of lamps) {
       light.shadowMinZ = LAMP_SHADOW_NEAR_M;
       light.shadowMaxZ = LAMP_SHADOW_FAR_M;
       const generator = new ShadowGenerator(LAMP_SHADOW_MAP_SIZE, light);
@@ -434,5 +462,13 @@ export class SceneLighting {
     this.sun.dispose();
     this.environment.dispose();
     this.scene.environmentTexture = null;
+  }
+}
+
+/** Raises a material's light cap to {@link MAX_LIGHTS_PER_MATERIAL}: any material with one, PBR or standard alike. */
+function takeEveryLight(material: Material): void {
+  const lit = material as Material & { maxSimultaneousLights?: number };
+  if (lit.maxSimultaneousLights !== undefined && lit.maxSimultaneousLights < MAX_LIGHTS_PER_MATERIAL) {
+    lit.maxSimultaneousLights = MAX_LIGHTS_PER_MATERIAL;
   }
 }

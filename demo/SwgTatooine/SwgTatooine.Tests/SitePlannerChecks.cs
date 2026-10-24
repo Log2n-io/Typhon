@@ -59,8 +59,8 @@ public sealed class SitePlannerChecks
         var placed = new List<(float X, float Z, float Half)>();
         for (var i = 0; i < count; i++)
         {
-            // The builder's own kind mix: the first is the port, every ninth a crafting station, the rest buildings.
-            var kind = i == 0 ? StructureKind.Shuttleport : (i % 9 == 0 ? StructureKind.CraftingStation : StructureKind.Building);
+            // The builder's own kind mix: the port, its town hall, every ninth a crafting station, the rest buildings.
+            var kind = WorldBuilder.CityKind(i);
             var half = StructureFootprint.HalfExtentM(kind);
             var (x, z, _) = planner.Place(ref rng, 0f, 0f, radius, half);
             placed.Add((x, z, half));
@@ -188,6 +188,8 @@ public sealed class SitePlannerChecks
             // shuttleport IS, rather than the 32 m square it used to be planted in and stand over.
             Assert.That(StructureFootprint.HalfExtentM(StructureKind.Shuttleport), Is.EqualTo(23.1f), "STRUCTURE_SIZES says the dome is 46.2 x 46.2");
             Assert.That(StructureFootprint.HalfExtentM(StructureKind.Factory), Is.EqualTo(11f), "STRUCTURE_SIZES says a factory is 22 x 22");
+            Assert.That(StructureFootprint.HalfExtentM(StructureKind.TownHall), Is.EqualTo(17.8f), "STRUCTURE_SIZES says a town hall is 35.6 x 35.6");
+            Assert.That(StructureFootprint.HalfExtentM(StructureKind.Interior), Is.EqualTo(14f), "STRUCTURE_SIZES says a room's floor is 28 x 28");
 
             // An unknown kind takes a building's footprint rather than none: a kind with no footprint could be planted
             // inside another structure, and a silent wrong answer is worse than a loud approximate one.

@@ -104,16 +104,20 @@ public static class WorldBuilder
             {
                 for (var i = 0; i < buildings; i++)
                 {
-                    var kind = i == 0 ? StructureKind.Shuttleport : (i % 9 == 0 ? StructureKind.CraftingStation : StructureKind.Building);
+                    var kind = CityKind(i);
                     var half = StructureFootprint.HalfExtentM(kind);
 
                     // <b>The shuttleport stands at the city's centre, and the city is built around it</b> (Loïc,
                     // 2026-10-22). It is placed first, so reserving the middle costs nothing and every later building
                     // avoids it: a town square rather than a dome wherever the first random draw happened to land. It
                     // also puts the one structure a traveller is looking for where a traveller would look for it.
-                    var (x, z, _) = i == 0
-                        ? (city.X, city.Z, plan.PlaceAt(city.X, city.Z, half))
-                        : plan.Place(ref rng, city.X, city.Z, city.Radius, half);
+                    // The town hall is the second, across the way from its gate (Loïc, 2026-10-25), and draws nothing either.
+                    var (x, z, _) = i switch
+                    {
+                        0 => (city.X, city.Z, plan.PlaceAt(city.X, city.Z, half)),
+                        1 => (city.X, city.Z + TownHallZ, plan.PlaceAt(city.X, city.Z + TownHallZ, half)),
+                        _ => plan.Place(ref rng, city.X, city.Z, city.Radius, half),
+                    };
                     var interior = 0;
                     if (i == 0)
                     {
@@ -130,7 +134,8 @@ public static class WorldBuilder
                     // The entity's bounds are its FOOTPRINT, not a uniform 12 m for every kind. They used to be the latter, which
                     // made the dome and a crafting station the same size to every spatial query and to anything asking what stands at a
                     // point -- and collision has to ask exactly that.
-                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), half, kind, ownerRegion: cityIndex + 1, tickPeriod: 0, ref rng, interior);
+                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), half, kind, ownerRegion: cityIndex + 1, tickPeriod: 0, ref rng, interior,
+                        yaw: kind == StructureKind.TownHall ? TownHallYaw : -1);
                     census.StaticObjects++;
                     if (i == 0)
                     {
@@ -260,11 +265,11 @@ public static class WorldBuilder
     public const float GateFacilityZ = GateOutsideZ + 2.3f;
 
     /// <summary>
-    /// The bazaar and the mission terminal at a shuttleport's gate, and the plaza between them kept clear of buildings.
+    /// The bazaar and the mission terminal at a shuttleport's gate, and the corridor between them kept clear of buildings.
     /// </summary>
     /// <remarks>
-    /// Both face north (yaw 0), so the point a user stands at is on the far side from the gate and the passengers walking out between them. The plaza is a
-    /// reservation in the planner and nothing in the world: it only stops a house from being planted across the gate.
+    /// Both face north (yaw 0), so the point a user stands at is on the far side from the gate and the passengers walking out between them. Beyond them
+    /// stands the town hall (<see cref="TownHallZ"/>), which took the place of a plaza reserved there to keep a house from being planted across the gate.
     /// </remarks>
     private static void SpawnGateFacilities(Transaction tx, float portX, float portZ, int cityIndex, TerrainField terrain, WorldCensus census,
         SitePlanner plan)
@@ -283,11 +288,36 @@ public static class WorldBuilder
         // station's width of room in it, and one was free to be planted exactly where a session's passenger is set down (review). Reserved rather than
         // placed, because it stands inside those margins by design.
         plan.Reserve(portX, portZ + GateOutsideZ + 2f, 2.5f);
-
-        // And the plaza beyond the pair, kept clear of houses planted across the way out.
-        plan.TryPlaceAt(portX, portZ + GateFacilityZ + 10.5f, 4f);
         census.StaticObjects += 2;
     }
+
+    /// <summary>What a city's structure <paramref name="i"/> is: the shuttleport first, its town hall second, then a crafting station every ninth.</summary>
+    public static int CityKind(int i) => i switch
+    {
+        0 => StructureKind.Shuttleport,
+        1 => StructureKind.TownHall,
+        _ => i % 9 == 0 ? StructureKind.CraftingStation : StructureKind.Building,
+    };
+
+    /// <summary>
+    /// How far north of its shuttleport's centre a city's town hall stands, metres: across the way from the gate, its door facing it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Its ramp starts where the passengers' ground ends.</b> Turned half round (<see cref="TownHallYaw"/>), the published hall's approach starts 18.25 m
+    /// in front of its origin and its ramp's foot 17.75 m: at 54 m, 35.75 and 36.25 m north of the port, just past the lane an arriving passenger is set
+    /// down on (<see cref="OutsideGate"/>, to 35.2 m), 10.5 m out from the gate, and its doorway 17.5 m out. Nearer and the ramp's foot is under the lane;
+    /// its reservation would clear the gate's pair by the planner's margin from 48.7 m.
+    /// </para>
+    /// <para>
+    /// <b>Planted like the port, at a point rather than drawn</b> (<see cref="SitePlanner.PlaceAt"/>), so it costs no draw and a city too small for it says so
+    /// in <see cref="SitePlanner.Crowded"/>.
+    /// </para>
+    /// </remarks>
+    public const float TownHallZ = 54f;
+
+    /// <summary>A town hall's quarter turn: half round, so its door, on the asset's +Z, faces south to the gate.</summary>
+    public const int TownHallYaw = 2;
 
     /// <summary>How many of one facility kind a city gets beyond the pair at its shuttleport, from its area and the density.</summary>
     /// <param name="radiusM">The city's radius.</param>
@@ -470,7 +500,8 @@ public static class WorldBuilder
     /// </para>
     /// <para>
     /// <b>The interior NPCs stand on the room's navigation nodes</b>, which are published as places a body stands clear of everything, and they stay put: they
-    /// are not collided, so a wanderer would walk through the furniture. The node the exit path starts on is left free.
+    /// are not collided, so a wanderer would walk through the furniture. The node the exit path starts on is left free, and no two stand on one node while a
+    /// node is free: a town hall's 10 to 20 on its 50 nodes drawn with replacement put pairs inside each other.
     /// </para>
     /// </remarks>
     public static int BuildInteriors(DatabaseEngine dbe, SimConfig config, AssetColliders shapes, ushort planet, WorldCensus census)
@@ -593,11 +624,27 @@ public static class WorldBuilder
                 spots.Clear();
                 NpcSpots(shapes?.NavFor(roomAsset), roomDoor, spots);
                 var npcRealm = new NpcRealm(interior);
-                for (var n = 0; n < config.InteriorNpcs; n++)
+                var free = spots.Count;
+                var npcs = st.Kind == StructureKind.TownHall
+                    ? rng.NextInt(config.TownHallNpcsMin, Math.Max(config.TownHallNpcsMin, config.TownHallNpcsMax) + 1)
+                    : config.InteriorNpcs;
+                for (var n = 0; n < npcs; n++)
                 {
-                    var (x, z) = spots.Count > 0
-                        ? spots[rng.NextInt(0, spots.Count)]
-                        : rng.PointInDisc(roomDoor.ExitX, roomDoor.ExitZ, 1.5f);
+                    float x;
+                    float z;
+                    if (free > 0)
+                    {
+                        // Without replacement while a node is free: the one taken is swapped behind the ones left.
+                        var pick = rng.NextInt(0, free);
+                        (x, z) = spots[pick];
+                        free--;
+                        (spots[pick], spots[free]) = (spots[free], spots[pick]);
+                    }
+                    else
+                    {
+                        (x, z) = spots.Count > 0 ? spots[rng.NextInt(0, spots.Count)] : rng.PointInDisc(roomDoor.ExitX, roomDoor.ExitZ, 1.5f);
+                    }
+
                     var bounds = default(NpcPlacement);
                     // An interior is its own realm with its own flat floor, so its altitude is 0 and NOT the planet's ground under the building.
                     bounds.SetAt(x, z, 0f, 0.5f);
@@ -765,7 +812,7 @@ public static class WorldBuilder
             for (var i = 0; i < n; i++)
             {
                 var (lx, lz) = Inside(rng.PointInDisc(at.X, at.Z, at.Radius), config);
-                var template = at.Templates[rng.NextInt(0, at.Templates.Length)];
+                var template = CreatureTemplates.PickLair(at.Templates, ref rng);
                 var expire = lifeMin + (long)(rng.NextFloat() * (lifeMax - lifeMin));
                 var lairId = SpawnLair(tx, ref rng, template, lx, lz, site + 1, expire, config, terrain, _realm);
                 census.Lairs++;
@@ -815,13 +862,15 @@ public static class WorldBuilder
             CreatureTemplate = template,
             SpawnLimit = perLair,
             AliveCount = perLair,
+            Guards = perLair,
             RespawnCooldown = 0,
             SpawnRadius = CreatureTemplates.LairSpawnRadius[template] * config.ContentScale,
             MissionId = 0,
             Site = site,
             ExpireTick = expireTick,
         };
-        var lairVitals = new LairVitals { Health = 2400, MaxHealth = 2400 };
+        var lairHealth = CreatureTemplates.LairHealth(template);
+        var lairVitals = new LairVitals { Health = lairHealth, MaxHealth = lairHealth };
         var lairId = tx.Spawn<CreatureLair>(
             CreatureLair.Bounds.Set(in lairBounds),
             CreatureLair.Spawner.Set(in lair),
@@ -1317,7 +1366,7 @@ public static class WorldBuilder
     /// buildings and the props inside an interior, and an interior's floor is 0 rather than the planet's relief.
     /// </param>
     private static void SpawnStructure(Transaction tx, float x, float z, float groundY, float halfExtent, int kind, int ownerRegion, int tickPeriod,
-        ref Rng rng, int interiorRealm = 0, bool faceNorth = false)
+        ref Rng rng, int interiorRealm = 0, bool faceNorth = false, int yaw = -1)
     {
         var bounds = default(StructurePlacement);
         bounds.SetAt(x, z, groundY, halfExtent);
@@ -1329,7 +1378,7 @@ public static class WorldBuilder
 
             // A quarter turn, drawn here so it is the world's and not a renderer's guess. The shuttleport keeps 0: it
             // is the one structure whose orientation means something, because its landing pad is where shuttles arrive.
-            Yaw = kind == StructureKind.Shuttleport || faceNorth ? 0 : rng.NextInt(0, 4),
+            Yaw = yaw >= 0 ? yaw : kind == StructureKind.Shuttleport || faceNorth ? 0 : rng.NextInt(0, 4),
             Asset = StructureAssets.Pick(kind, ref rng),
 
             // Staggered, so the economy does not arrive as a once-a-minute spike that the median tick never sees.

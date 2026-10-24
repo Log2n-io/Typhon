@@ -203,3 +203,54 @@ describe('LayerPacker', () => {
     expect(packer.nearCount + packer.farCount).toBe(1500);
   });
 });
+
+/**
+ * A creature standing to fight faces whom it fights — its replicated `target`, a netId of this view — rather than the way
+ * its last step left it (Loïc, 2026-10-24: "creatures attacking us are not always facing us").
+ */
+describe('a creature standing in a fight', () => {
+  function creature(target: number) {
+    const world = new WorldStore(SWG_SCHEMA, { maxNetId: 4096 });
+    const store = world.archetypeStore(Archetype.Creature);
+    const packer = new LayerPacker(Archetype.Creature, styleFor('Creature'));
+    packer.bind(store);
+    world.beginFrame(1);
+    const slot = world.enter(Archetype.Creature, 21);
+    // Walked here heading +Z, and stopped.
+    store.resetMotion(slot, [0, 10], [0, 0.5], 1, 0);
+    store.fieldAt(store.fieldIndex('target'))[slot] = target;
+    return { world, store, packer, slot };
+  }
+
+  const quarryAt = (x: number, z: number) => (netId: number, out: { x: number; z: number }) => {
+    if (netId !== 99) {
+      return false;
+    }
+
+    out.x = x;
+    out.z = z;
+    return true;
+  };
+
+  it('turns to face its quarry once it stands', () => {
+    const { world, store, packer, slot } = creature(99);
+    packer.pack({ ...view(), locate: quarryAt(10, 10) });
+    world.beginFrame(2);
+    store.resetMotion(slot, [0, 10], [0, 0], 2, 0);
+    packer.pack({ ...view(), renderTick: 2, locate: quarryAt(10, 10) });
+    // Babylon's yaw, atan2(dx, dz): the quarry is due +X of it.
+    expect(packer.nearYaw[0]).toBeCloseTo(Math.PI / 2, 5);
+  });
+
+  it('keeps its heading with no quarry, or one this view does not hold', () => {
+    for (const target of [0, 77]) {
+      const { world, store, packer, slot } = creature(target);
+      packer.pack({ ...view(), locate: quarryAt(10, 10) });
+      const walked = packer.nearYaw[0];
+      world.beginFrame(2);
+      store.resetMotion(slot, [0, 10], [0, 0], 2, 0);
+      packer.pack({ ...view(), renderTick: 2, locate: quarryAt(10, 10) });
+      expect(packer.nearYaw[0]).toBeCloseTo(walked, 5);
+    }
+  });
+});

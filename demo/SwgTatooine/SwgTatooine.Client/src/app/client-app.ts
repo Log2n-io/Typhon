@@ -7,6 +7,7 @@ import { Scene } from '@babylonjs/core/scene';
 import {
   AggregateGrid,
   archetypeOf,
+  type ArchetypeStore,
   type GridSchema,
   Clock,
   epochAt,
@@ -45,6 +46,9 @@ import { meanAndP95, overviewPolicy, regionDue } from './frame-policy';
 import { headingFromVelocity } from '../math/vec';
 import { resolveArchetypes, type ArchetypeInfo, type ArchetypeView } from '../data/archetypes';
 import { altitudeField, altitudeOf, Placement } from '../data/placement';
+import type { HealthBar } from '../render/labels';
+import { DamageText, type Anchor } from '../render/damage-text';
+import type { AnimationGraph } from '../character/animation-graph';
 import { replicationStatsOf } from '../data/replication-stats';
 import type { AssetSet } from '../data/server-config';
 import { SpeedClass, type DataSource, type EventSink } from '../data/source';
@@ -52,6 +56,8 @@ import { describeFields } from '../data/swg-format';
 import { AGG_GRID, FASTEST_TICK_PERIOD_MS, StructureKind, SWG_SCHEMA, TICK_PERIOD_MS } from '../data/swg-schema';
 import { CITIES, PLANET_HALF_EXTENT_M } from '../data/world-data';
 import { AttackLines } from '../render/attack-lines';
+import { CombatFx } from '../render/combat-fx';
+import { clipRole, GET_UP_CLIP } from '../character/outfits';
 import { GameplayGizmos, type GizmoPlacement } from '../render/gameplay-gizmos';
 import { placement } from '../assets/asset-frame';
 import { assetForStructure, lairQuarter, structureYaw } from '../assets/structure-assets';
@@ -62,7 +68,7 @@ import {
   type PickRay,
   type PredictedOverride,
 } from '../render/entity-layer';
-import { NONE_HIDDEN, type CrowdBody } from '../render/layer-packer';
+import { NONE_HIDDEN, type CrowdBody, type PlanarPoint } from '../render/layer-packer';
 import { enemySkins } from '../character/outfits';
 import { FLAT_GROUND, type GroundSampler } from '../terrain/ground-sampler';
 import { GroundView, SKY } from '../render/ground';
@@ -92,6 +98,7 @@ import { ticketTerminalOf } from './ticket-terminal';
 import { resetForRealm, resetForSession, type RealmSwitchTargets } from './realm-switch';
 import { nextRide, NOT_RIDING, rideOwnsTheView, rideSubjectOf, type RideState } from './ride';
 import { boostFor, DEFAULT_BOOST } from './gait';
+import { ACTION_ICON_SIZE, ACTION_SLOTS, NO_STANCE, serverStance, slotForKey, weaponOf } from './action-bar';
 import { driveInputOf, SwoopDrive } from './swoop-drive';
 import { SwoopHover } from './swoop-hover';
 import {
@@ -109,7 +116,7 @@ import {
 import { Predictor, speedForClass, type GrantedSpeeds } from './predictor';
 import { DEFAULT_THIRD_PERSON_M, MAX_EYE_DISTANCE_M } from '../camera/eye-camera';
 import { bodyOpacityAt, marchEye } from '../camera/eye-clearance';
-import { useStats, type FeetReport, type Inspection } from '../state/stats-store';
+import { useStats, type DownNotice, type FeetReport, type Inspection, type PlayerVitals } from '../state/stats-store';
 import { useUi, type NavRow, type ShuttleportPrompt, type UiState } from '../state/ui-store';
 import { NAV_KINDS, navLabel, nearestFacilities, relativeBearing, type NavTarget } from './nav-finder';
 import { nearestShuttleport } from './shuttle';
@@ -251,6 +258,7 @@ class MutableFrameView implements FrameView {
   crowdDraws = false;
   crowdCount = 0;
   perSecond = 1;
+  locate: ((netId: number, out: PlanarPoint) => boolean) | undefined = undefined;
 }
 
 /** Reused each frame so a predicted body costs no allocation; the packer only reads it. */
@@ -330,6 +338,24 @@ const STRUCTURE_ARCHETYPE = 'WorldObject';
  * the router (`crowd-router.ts`) sends a camp's ninjas and soldiers to the characters' crowd in their outfits and every
  * beast to its own species' crowd. Before, a creature was a box: the catalogue held nineteen humanoids and no animals.
  */
+/** The server's `Stances.Pistol`: a player in it shoots bolts. */
+const PISTOL_STANCE = 3;
+
+/** The server's `Downed.KnockedOut` (`PlayerVitals.down`): the one fall the avatar gets up from. */
+const DOWN_KNOCKED_OUT = 1;
+
+/** A character's height, metres, for aiming and for a damage number over its head. */
+const CHARACTER_HEIGHT_M = 1.75;
+
+/** How near the camera a lair must be for its health bar, metres. */
+const LAIR_BAR_RANGE_M = 60;
+
+/** Where a lair's bar floats, metres above its ground: over a camp's tents and a nest's rim alike. */
+const LAIR_BAR_HEIGHT_M = 3.6;
+
+/** How far above an enemy's head its health bar floats, metres. */
+const ENEMY_BAR_GAP_M = 0.35;
+
 const CHARACTER_ARCHETYPES: readonly string[] = ['CityNpc', 'Player', 'Creature'];
 
 /** The most of one creature species drawn at once. A lair holds four to eight; a view holds a few dozen lairs. */
@@ -382,6 +408,12 @@ export class ClientApp {
   /** How long the bake took, reported in the HUD's session block. On a cache hit this is the ORIGINAL bake's cost. */
   private terrainBakeMs = 0;
   private readonly attacks: AttackLines;
+  /** The fights as they look: swings, bolts, hit reactions and damage numbers, played at render time. */
+  private readonly fx: CombatFx;
+  /** The damage of every blow, over the body it landed on, in the scene. */
+  private readonly damage: DamageText;
+  /** The event sink the source is handed: the debug lines and the effects, each told of every blow. */
+  private readonly events: EventSink;
   private readonly labels: Labels;
   private readonly resizeObserver: ResizeObserver;
 
@@ -616,6 +648,38 @@ export class ClientApp {
     // because it is a pass over 4.19 M posts per level and the frame budget is 2 ms.
     this.planetProfile.refreshTerrain(terrain.nodeError, terrain.nodeMinY, terrain.nodeMaxY);
     this.attacks = new AttackLines(this.scene);
+    // Every blow the server streams, played at render time: the attacker's swing — the crowd's, or this session's avatar's —
+    // a bolt for a shot, and on impact the target's hit reaction and its damage over its head.
+    this.fx = new CombatFx(this.scene);
+    this.damage = new DamageText(this.scene);
+    this.fx.hooks = {
+      strike: (netId) => {
+        this.crowdRouter?.strike(netId);
+        if (netId === this.source?.selfNetId) {
+          this.selfStrikes++;
+        }
+      },
+      impact: (netId, amount) => {
+        this.crowdRouter?.hit(netId);
+        if (netId === this.source?.selfNetId) {
+          this.selfHits++;
+        }
+
+        this.damage.spawn(netId, amount, performance.now());
+      },
+      ranged: (netId) => this.archetypeName(netId) === 'Player' && this.fieldOf(netId, 'stance') === PISTOL_STANCE,
+      aim: (netId) => this.heightOf(netId) * 0.6,
+    };
+    // The debug lines see every blow; the effects play them. One sink for the source, the two behind it.
+    this.events = {
+      onAttack: (tick, attacker, target, damage) => {
+        this.attacks.onAttack(tick, attacker, target);
+        this.fx.push(tick, attacker, target, damage);
+      },
+      onChat: (tick, speaker, text) => {
+        this.attacks.onChat(tick, speaker, text);
+      },
+    };
     this.labels = new Labels(overlay);
 
     this.world = new WorldStore(SWG_SCHEMA);
@@ -677,11 +741,17 @@ export class ClientApp {
           return;
         }
 
-        // The swoop: the top-row 1 on its own (Shift+1 is the run gait, and the pad's 1 is not this key).
-        if (e.code === 'Digit1' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        // The action bar: the top-row digits on their own (Shift+digit is the boost below, and the pad's digits are not
+        // these keys). 1 is the swoop, 2–4 arm an attack.
+        const slot = slotForKey(e.code, e.shiftKey || e.ctrlKey || e.altKey || e.metaKey);
+        if (slot !== null) {
           e.preventDefault();
           if (!e.repeat) {
-            this.toggleMount(e.timeStamp);
+            if (slot.kind === 'mount') {
+              this.toggleMount(e.timeStamp);
+            }
+
+            useUi.getState().pressSlot(slot.key, true);
           }
 
           return;
@@ -780,11 +850,23 @@ export class ClientApp {
 
       this.assets = mount;
       this.assetSet = set;
+      const icons: Record<string, string> = {};
+      for (const slot of ACTION_SLOTS) {
+        const url = mount.library.iconUrl(slot.asset, ACTION_ICON_SIZE);
+        if (url !== null) {
+          icons[slot.asset] = url;
+        }
+      }
+
+      useUi.getState().setActionIcons(icons);
       // After the mount, because it reads the same library — and deliberately not inside it: a crowd that will not
       // build must not cost the street its buildings, and a street that will not load must not cost the crowd.
       try {
         // Read once, for every crowd: the characters and each creature species plan their atlases from these.
         const described = await describeCatalogue(mount.library);
+        this.templateHeights = set.creatures.map(
+          (kind) => described.get(kind.bodies[0] ?? '')?.bounds.render[1][1] ?? 1.5,
+        );
         this.crowd = await mountCrowd(
           this.scene,
           mount.library,
@@ -902,6 +984,9 @@ export class ClientApp {
   }
 
   dispose(): void {
+    // The store outlives the app: a stance must not wait for the next login. Not on a RESET, which only re-sends the
+    // view the player is still standing in.
+    useUi.getState().dropStance();
     // Cleared first: a disposed app left on `window` keeps the whole Babylon scene reachable, and a console inspecting
     // it would be reading a dead one.
     const host = window as unknown as { __typhon?: ClientApp };
@@ -922,6 +1007,8 @@ export class ClientApp {
     this.source = null;
     this.labels.dispose();
     this.attacks.dispose();
+    this.fx.dispose();
+    this.damage.dispose();
     for (const layer of this.layers) {
       layer.dispose();
     }
@@ -1005,7 +1092,7 @@ export class ClientApp {
     // and `adoptSourceWorld` picks it up.
     this.adopt(new WorldStore(SWG_SCHEMA), new AggregateGrid(AGG_GRID));
     this.source = this.createSource(
-      { world: this.world, grid: this.grid, clock: this.clock, events: this.attacks },
+      { world: this.world, grid: this.grid, clock: this.clock, events: this.events },
       state,
     );
     this.source.start();
@@ -1170,6 +1257,8 @@ export class ClientApp {
 
     this.hasLastStep = false;
     this.doorPlaneCache.clear();
+    // Another realm, another fight: the stance does not follow the body through a door or a flight.
+    useUi.getState().dropStance();
     resetForRealm(next, this.resetTargets());
   }
 
@@ -1935,6 +2024,11 @@ export class ClientApp {
       return null;
     }
 
+    // Down: the server refuses its moves, so predicting one would only snap back.
+    if (this.ownDown()) {
+      return null;
+    }
+
     if (this.driving) {
       return this.driveIntent();
     }
@@ -2429,6 +2523,7 @@ export class ClientApp {
     }
 
     this.attacks.bind(this.world);
+    this.fx.bind(this.world);
   }
 
   private onUiChange(state: UiState, previous: UiState): void {
@@ -2469,6 +2564,21 @@ export class ClientApp {
 
     if (state.walkToRequest !== null && state.walkToRequest !== previous.walkToRequest) {
       this.walkTo(state.walkToRequest.x, state.walkToRequest.z);
+    }
+
+    // The swoop's slot clicked: the same toggle as the 1 key.
+    if (state.mountRequest !== null && state.mountRequest !== previous.mountRequest) {
+      this.toggleMount(performance.now());
+    }
+
+    // The stance is the server's to fight with and everyone's to see: said once per change, the drops included.
+    if (state.stance !== previous.stance) {
+      this.source?.setStance(serverStance(state.stance));
+    }
+
+    // A stance taken on the swoop gets off it: nobody fights from the saddle, and mounting drops the stance the other way.
+    if (state.stance !== NO_STANCE && state.stance !== previous.stance && this.ridingNow(performance.now())) {
+      this.toggleMount(performance.now());
     }
 
     // Walking is this client steering its own body, so nothing is asked of the server but the moves themselves.
@@ -2662,6 +2772,12 @@ export class ClientApp {
     if (ui.playing !== playing) {
       ui.setPlaying(playing);
       ui = useUi.getState();
+
+      // The stance is the server's, and it outlives this page: a reload starts the bar idle while the server still holds the
+      // last one. Said once the avatar is ours, so the two agree from the first frame — the bar's choice wins.
+      if (playing) {
+        live.setStance(serverStance(ui.stance));
+      }
     }
 
     // The shuttleport prompt. Published on change only, like `playing` above, and only for a session that has a body to
@@ -2893,6 +3009,7 @@ export class ClientApp {
     view.crowdCount = 0;
     view.crowd = crowd === null ? null : bodies;
     view.perSecond = 1000 / this.clock.tickPeriodMs;
+    view.locate = this.locatePlanar;
     // Only once the router exists: before it, a diverted creature would be routed nowhere and drawn by nobody.
     view.crowdDraws = (crowd?.layer.isDrawing ?? false) && this.crowdRouter !== null;
 
@@ -2919,6 +3036,8 @@ export class ClientApp {
     }
 
     this.attacks.update(view);
+    this.fx.update(view, now / 1000);
+    this.damage.update(view, now, this.headOf);
     this.sendRegion(now, ui.viewRadius, cam.targetX, cam.targetZ, playing);
     this.sendViewRadius(ui.playerRadius);
     // `stats` builds a whole snapshot — objects, a template string, a pass over the byte window — so it is read four
@@ -2971,6 +3090,8 @@ export class ClientApp {
       } else {
         this.labels.hidePlaces();
       }
+
+      this.updateEnemyBars(matrix, view);
 
       if (hasSelection) {
         this.labels.updateSelection(
@@ -3477,6 +3598,16 @@ export class ClientApp {
     return source === null || source.selfNetId === 0 ? Number.NaN : this.fieldOf(source.selfNetId, name);
   }
 
+  /** The controlled avatar's vitals for the HAM panel, or `null` when this session controls none. */
+  private vitals(): PlayerVitals | null {
+    const source = this.source;
+    if (source === null || !source.canPlay || source.selfNetId === 0) {
+      return null;
+    }
+
+    return { health: source.selfNumber('health'), fraction: this.selfField('hp') };
+  }
+
   /** A replicated field of any entity in view, or `NaN`. */
   private fieldOf(netId: number, name: string): number {
     const location = this.world.locate(netId);
@@ -3487,6 +3618,240 @@ export class ClientApp {
     const store = this.world.archetypeStore(archetypeOf(location));
     const field = store.fieldIndex(name);
     return field < 0 ? Number.NaN : store.fieldAt(field)[slotOf(location)];
+  }
+
+  /**
+   * The blows this session's own avatar has struck, as the server's `Attack` events count them, and how many of those it
+   * has played. The avatar swings when the SERVER hits — within the stance's reach, on the stance's beat — so what is
+   * drawn is what happened, on this client as on everyone else's.
+   */
+  private selfStrikes = 0;
+  private selfStrikesPlayed = 0;
+
+  /** The blows this session's avatar has taken, and how many of those it has flinched at. */
+  private selfHits = 0;
+  private selfHitsPlayed = 0;
+
+  /** The `down` the avatar last played. */
+  private avatarDown = 0;
+
+  /**
+   * The avatar going down or getting up: dead or knocked out, it falls with its death and holds it; a knocked-out avatar
+   * gets up with `StandUp`; a clone wakes elsewhere already standing.
+   */
+  private avatarFall(graph: AnimationGraph, from: number, to: number, nowS: number): void {
+    if (to !== 0) {
+      graph.fire('die', nowS);
+    } else {
+      graph.fire('respawn', nowS);
+      if (from === DOWN_KNOCKED_OUT) {
+        graph.getUp(GET_UP_CLIP, nowS, clipRole(GET_UP_CLIP));
+      }
+    }
+  }
+
+  /** The name of the archetype an entity in view belongs to, or `null`. */
+  private archetypeName(netId: number): string | null {
+    const location = this.world.locate(netId);
+    return location === NOT_FOUND ? null : (this.archetypes.infos[archetypeOf(location)]?.name ?? null);
+  }
+
+  /** How tall a body is, metres: a creature's by its template, anyone else's a character's. */
+  private heightOf(netId: number): number {
+    if (this.archetypeName(netId) === 'Creature') {
+      const template = this.fieldOf(netId, 'template');
+      return this.templateHeights[Number.isFinite(template) ? template : -1] ?? 1.5;
+    }
+
+    return CHARACTER_HEIGHT_M;
+  }
+
+  /** Where a body's head is for its damage number, planet metres; bound once, for `Labels.updateDamage`. */
+  private readonly headOf = (netId: number, out: Anchor): boolean => {
+    if (!this.evaluate(netId)) {
+      return false;
+    }
+
+    out.x = this.evalX;
+    out.y = this.evalY + this.heightOf(netId) + 0.25;
+    out.z = this.evalZ;
+    return true;
+  };
+
+  /** How the avatar is down and for how long, for the notice; `null` while it stands. Counted from the server's own tick. */
+  private downNotice(): DownNotice | null {
+    const kind = this.selfField('down');
+    const upTick = this.source?.selfNumber('upTick') ?? Number.NaN;
+    if (!(kind > 0)) {
+      return null;
+    }
+
+    const seconds =
+      Number.isFinite(upTick) && upTick > 0 ? ((upTick - this.clock.latestTick) * this.clock.tickPeriodMs) / 1000 : 0;
+    return { kind, seconds: Math.max(0, seconds) };
+  }
+
+  /** Where an entity in view stands, planet metres; bound once, for `FrameView.locate`. */
+  private readonly locatePlanar = (netId: number, out: PlanarPoint): boolean => {
+    if (!this.evaluate(netId)) {
+      return false;
+    }
+
+    out.x = this.evalX;
+    out.z = this.evalZ;
+    return true;
+  };
+
+  /** Whether this session's own avatar is down: it lies there, and its keys move nothing. */
+  private ownDown(): boolean {
+    return this.selfField('down') > 0;
+  }
+
+  /** The enemy health bars, pooled: the first {@link updateEnemyBars} fills are this frame's. */
+  private readonly enemyBars: HealthBar[] = [];
+
+  /** How tall each creature template's body is, metres, from its first body's descriptor: where its health bar sits. */
+  private templateHeights: readonly number[] = [];
+
+  /**
+   * A health bar over every living creature fighting this session's avatar: its replicated `target` — an entity reference,
+   * so the netId it names is this session's own numbering — is this session's `SELF`. Nobody else's fights get one.
+   */
+  private updateEnemyBars(matrix: ArrayLike<number>, view: FrameView): void {
+    const originX = view.originX;
+    const originZ = view.originZ;
+    const self = this.source?.selfNetId ?? 0;
+    const archetype = self === 0 ? -1 : this.archetypes.indexOf('Creature');
+    let n = 0;
+    if (archetype >= 0) {
+      const store = this.world.archetypeStore(archetype);
+      const targetField = store.fieldIndex('target');
+      const hpField = store.fieldIndex('hp');
+      const templateField = store.fieldIndex('template');
+      if (store.hasPosition && targetField >= 0 && hpField >= 0) {
+        const targets = store.fieldAt(targetField);
+        const hps = store.fieldAt(hpField);
+        const templates = templateField < 0 ? null : store.fieldAt(templateField);
+        const ground = altitudeField(store);
+        for (let i = 0; i < store.liveCount; i++) {
+          const slot = store.live[i];
+          if (targets[slot] !== self || !(hps[slot] > 0)) {
+            continue;
+          }
+
+          evaluateSlot(store, slot, this.clock.renderTick, this.clock.renderFrac, this.scratch, 0);
+          const at = this.placement.read(store.dims, this.scratch, 0);
+          if (n >= this.enemyBars.length) {
+            this.enemyBars.push({ x: 0, y: 0, z: 0, fraction: 0, shielded: false });
+          }
+
+          const bar = this.enemyBars[n++];
+          const template = templates === null ? -1 : templates[slot];
+          bar.x = at.x;
+          bar.y =
+            altitudeOf(ground, slot, at, this.profile.ground) +
+            (this.templateHeights[template] ?? 1.5) +
+            ENEMY_BAR_GAP_M;
+          bar.z = at.z;
+          bar.fraction = hps[slot];
+          bar.shielded = false;
+        }
+      }
+    }
+
+    n = this.lairBars(view, n);
+    this.labels.updateBars(matrix, originX, originZ, this.cssSize.width, this.cssSize.height, this.enemyBars, n);
+  }
+
+  /**
+   * A health bar over every lair and camp near the camera (within {@link LAIR_BAR_RANGE_M}), the dormant mission pool's
+   * aside: steel while its occupants still guard it, red once it can be broken. Appended to {@link enemyBars} after `n`.
+   */
+  private lairBars(view: FrameView, n: number): number {
+    const archetype = this.archetypes.indexOf('CreatureLair');
+    if (archetype < 0) {
+      return n;
+    }
+
+    const store = this.world.archetypeStore(archetype);
+    const hpField = store.fieldIndex('hp');
+    if (!store.hasPosition || hpField < 0) {
+      return n;
+    }
+
+    const hps = store.fieldAt(hpField);
+    const guardField = store.fieldIndex('guards');
+    const guards = guardField < 0 ? null : store.fieldAt(guardField);
+    const missionField = store.fieldIndex('missionId');
+    const missions = missionField < 0 ? null : store.fieldAt(missionField);
+    const ground = altitudeField(store);
+    const reach = LAIR_BAR_RANGE_M * LAIR_BAR_RANGE_M;
+    for (let i = 0; i < store.liveCount; i++) {
+      const slot = store.live[i];
+      if (this.dormantLair(store, slot) || !(hps[slot] > 0)) {
+        continue;
+      }
+
+      evaluateSlot(store, slot, this.clock.renderTick, this.clock.renderFrac, this.scratch, 0);
+      const at = this.placement.read(store.dims, this.scratch, 0);
+      const y = altitudeOf(ground, slot, at, this.profile.ground);
+      const dx = at.x - view.originX - view.eyeX;
+      const dy = y - view.eyeY;
+      const dz = at.z - view.originZ - view.eyeZ;
+      if (dx * dx + dy * dy + dz * dz > reach) {
+        continue;
+      }
+
+      if (n >= this.enemyBars.length) {
+        this.enemyBars.push({ x: 0, y: 0, z: 0, fraction: 0, shielded: false });
+      }
+
+      const bar = this.enemyBars[n++];
+      bar.x = at.x;
+      bar.y = y + LAIR_BAR_HEIGHT_M;
+      bar.z = at.z;
+      bar.fraction = hps[slot];
+      // A wild lair guarded by its occupants: one on a mission is not shielded (its defenders do not follow its teleport).
+      bar.shielded = (guards?.[slot] ?? 0) > 0 && (missions?.[slot] ?? 0) === 0;
+    }
+
+    return n;
+  }
+
+  /** Whether a lair is the mission pool's and has no mission: it waits, defenderless, wherever its last mission left it. */
+  private dormantLair(store: ArchetypeStore, slot: number): boolean {
+    const templateField = store.fieldIndex('template');
+    const missionField = store.fieldIndex('missionId');
+    if (templateField < 0 || missionField < 0) {
+      return false;
+    }
+
+    const kind = this.assetSet?.creatures[store.fieldAt(templateField)[slot]];
+    return kind?.mission === true && store.fieldAt(missionField)[slot] === 0;
+  }
+
+  /** Where the enemy {@link locateEnemy} found last stands. */
+  private enemyX = 0;
+  private enemyZ = 0;
+
+  /**
+   * Whether `netId` is an enemy to attack — a living creature (camp humanoids included) or a standing lair — and if so
+   * where it is, in {@link enemyX} and {@link enemyZ}. Not a player, an NPC or a building: the targets a click can also
+   * pick. Overwrites the last {@link evaluate}.
+   */
+  private locateEnemy(netId: number): boolean {
+    if (netId === 0 || !this.evaluate(netId)) {
+      return false;
+    }
+
+    const name = this.archetypes.infos[this.evalArchetype]?.name;
+    if ((name !== 'Creature' && name !== 'CreatureLair') || !(this.fieldOf(netId, 'hp') > 0)) {
+      return false;
+    }
+
+    this.enemyX = this.evalX;
+    this.enemyZ = this.evalZ;
+    return true;
   }
 
   /** The `WorldObject` archetype's index in the live catalog, or -1 before it is known. */
@@ -3539,6 +3904,9 @@ export class ClientApp {
     }
 
     const subject = rideSubjectOf(this.ride) || (live?.selfNetId ?? 0);
+    // Before the subject's evaluation, which this one would overwrite.
+    const stance = useUi.getState().stance;
+    const engaged = stance !== NO_STANCE && this.locateEnemy(useUi.getState().selectedNetId);
     if (subject === 0 || !this.evaluate(subject)) {
       character.park();
       this.assets?.ghost?.park();
@@ -3601,6 +3969,38 @@ export class ClientApp {
     // server's, and it stops when the stream does while the clip is still on screen.
     // On the swoop: this session's own ask at once, anyone else's (a ridden subject) as the server replicates it.
     character.setRiding(own ? this.ridingNow(performance.now()) : this.fieldOf(subject, 'mounted') === 1);
+    // The stance (action bar 2–4): the weapon in the hand, the body turned to an enemy it targets when it is not walking
+    // somewhere else, and one swing of the weapon's clip per blow the server landed. This session's own body only — a
+    // ridden one is drawn by what is replicated of it.
+    // Down — knocked out or dead — or getting up, from the replicated `down`; and a flinch per blow it took, when standing.
+    const down = this.fieldOf(subject, 'down');
+    const downNow = Number.isFinite(down) ? down : 0;
+    if (downNow !== this.avatarDown) {
+      this.avatarFall(character.graph, this.avatarDown, downNow, nowMs / 1000);
+      this.avatarDown = downNow;
+    }
+
+    if (this.selfHits !== this.selfHitsPlayed) {
+      this.selfHitsPlayed = this.selfHits;
+      if (own && downNow === 0 && !character.riding && character.graph.accepts('hit', nowMs / 1000, true)) {
+        character.graph.fire('hit', nowMs / 1000);
+      }
+    }
+
+    character.setWeapon(own && !character.riding && downNow === 0 ? weaponOf(stance) : null);
+    const weapon = character.weapon;
+    const armed = own && !character.riding && weapon !== null && Number.isFinite(weapon.clipS);
+    if (armed && engaged && speed < character.graph.tuning.idleBelow) {
+      this.avatarHeading = Math.atan2(this.enemyZ - z, this.enemyX - x);
+    }
+
+    if (this.selfStrikes !== this.selfStrikesPlayed) {
+      this.selfStrikesPlayed = this.selfStrikes;
+      if (armed) {
+        character.graph.strike(weapon.clip, nowMs / 1000);
+      }
+    }
+
     const hoverY = own ? this.hoverY : Number.NaN;
     if (Number.isFinite(hoverY)) {
       character.setLean(this.drive.roll, this.hover.pitch, hoverY - y + this.drive.bob);
@@ -3749,8 +4149,15 @@ export class ClientApp {
     const ground = altitudeField(store);
     const reach = STATIC_ASSET_RANGE_M * STATIC_ASSET_RANGE_M;
     let taken = 0;
+    this.dormantLairs.clear();
     for (let i = 0; i < store.liveCount; i++) {
       const slot = store.live[i];
+      // The mission pool's waiting lairs are not places: drawn neither as their camp nor as the renderer's own shape.
+      if (this.dormantLair(store, slot)) {
+        this.dormantLairs.add(store.netIds[slot]);
+        continue;
+      }
+
       evaluateSlot(store, slot, this.clock.renderTick, this.clock.renderFrac, this.scratch, 0);
       const at = this.placement.read(store.dims, this.scratch, 0);
       const dx = at.x - eyeX;
@@ -3773,8 +4180,26 @@ export class ClientApp {
       sample.asset = templates[slot];
     }
 
-    return layer.update(samples, taken, this.assetView);
+    const drawn = layer.update(samples, taken, this.assetView);
+    if (this.dormantLairs.size === 0) {
+      return drawn;
+    }
+
+    this.lairHidden.clear();
+    for (const id of drawn) {
+      this.lairHidden.add(id);
+    }
+
+    for (const id of this.dormantLairs) {
+      this.lairHidden.add(id);
+    }
+
+    return this.lairHidden;
   }
+
+  /** The mission pool's dormant lairs this frame, and what the lair layer must not draw: those and the ones drawn as props. */
+  private readonly dormantLairs = new Set<number>();
+  private readonly lairHidden = new Set<number>();
 
   /**
    * Builds each creature species' crowd, and the router that sends bodies to it.
@@ -3808,7 +4233,6 @@ export class ClientApp {
 
     this.creatureCrowds = mounted;
     this.crowdRouter = new CrowdRouter(set.creatures, this.crowd?.outfits.map((o) => o.id) ?? null, ids);
-    this.attacks.onStrike = (netId) => this.crowdRouter?.strike(netId);
   }
 
   /**
@@ -3973,6 +4397,8 @@ export class ClientApp {
       // What Shift gives, or the swoop while riding, and the boost on it.
       gait: this.ridingNow(performance.now()) ? SpeedClass.swoop : SpeedClass.run,
       boost: this.boost,
+      vitals: this.vitals(),
+      down: this.downNotice(),
       // What the server says that is worth at the boost. NaN before the owner block arrives, which the HUD shows as a
       // dash rather than as a figure it made up.
       gaitMps:

@@ -43,6 +43,7 @@ export class CrowdRouter {
   /** Where a civilian goes: the characters' crowd, dressed by netId; nowhere when there is none. */
   private readonly civilian: Route;
   private readonly strikesByNetId = new Map<number, number>();
+  private readonly hitsByNetId = new Map<number, number>();
 
   /**
    * @param kinds The server's creature templates.
@@ -87,8 +88,17 @@ export class CrowdRouter {
   }
 
   /** Forgets every count: a `RESET` renumbers the world, and a count kept across it would belong to another body. */
+  /** A blow that LANDED on `targetNetId`: its body plays its hit reaction, where it has one. */
+  hit(targetNetId: number): void {
+    this.hitsByNetId.set(targetNetId, (this.hitsByNetId.get(targetNetId) ?? 0) + 1);
+    if (this.hitsByNetId.size > STRIKE_MEMORY) {
+      this.hitsByNetId.clear();
+    }
+  }
+
   forget(): void {
     this.strikesByNetId.clear();
+    this.hitsByNetId.clear();
   }
 
   /**
@@ -106,6 +116,7 @@ export class CrowdRouter {
     for (let b = 0; b < count; b++) {
       const body = bodies[b];
       body.strikes = this.strikesByNetId.get(body.netId) ?? 0;
+      body.hits = this.hitsByNetId.get(body.netId) ?? 0;
       let route: Route;
       if (body.template < 0) {
         route = this.civilian;

@@ -408,7 +408,7 @@ public sealed class AssetCollisionChecks
     [
         StructureKind.Building, StructureKind.CraftingStation, StructureKind.Shuttleport, StructureKind.PoiProp,
         StructureKind.PlayerHouse, StructureKind.Factory, StructureKind.Harvester, StructureKind.CampObject, StructureKind.Bazaar,
-        StructureKind.MissionTerminal,
+        StructureKind.MissionTerminal, StructureKind.TownHall,
     ];
 
     /// <summary>A collider table with a slot per published asset and nothing in any of them.</summary>
@@ -441,7 +441,7 @@ public sealed class AssetCollisionChecks
         [
             StructureKind.Building, StructureKind.CraftingStation, StructureKind.Shuttleport, StructureKind.PoiProp,
             StructureKind.PlayerHouse, StructureKind.Factory, StructureKind.Harvester, StructureKind.CampObject, StructureKind.Bazaar,
-            StructureKind.MissionTerminal,
+            StructureKind.MissionTerminal, StructureKind.TownHall,
         ];
 
         var rng = new Rng(20261022u);

@@ -12,12 +12,16 @@ namespace SwgTatooine.Tests;
 
 /// <summary>
 /// A house and its room as the pack publishes them, cut down to what the doors, the walls near them and the navigation need — the checks cannot read
-/// <c>build/assets</c>, which is not in the repository.
+/// <c>build/assets</c>, which is not in the repository — and a town hall and its room.
 /// </summary>
 /// <remarks>
 /// Figures from <c>tat_house_large-6</c> and <c>tat_house_large_interior-5</c> (catalogue 4): the front door, its spawn and its path; the door slab, the two
 /// pilasters beside it and the house body; the landing in front of the door (0.7 m, where the front spawn stands) and one step up to it in place of the
 /// published ramp; the room's way out, its entry, its front wall and a three-node graph whose cells serve their nearest node.
+/// <para>
+/// The town hall from <c>tat_townhall-1</c> and <c>tat_townhall_interior-1</c>: the hall's door, spawn and every collider, ramp and plinth included; the
+/// room's way out, its entry, the walls round its vestibule and its 51 published nodes and edges, with cells that serve their nearest node.
+/// </para>
 /// </remarks>
 internal static class Published
 {
@@ -26,6 +30,69 @@ internal static class Published
 
     /// <summary>The room's waypoints, glTF frame.</summary>
     public static readonly (float X, float Z)[] Nodes = [(1.5f, 3.0f), (-1.5f, 1.5f), (-1.0f, -2.6f)];
+
+    public static readonly int TownHall = Array.IndexOf(StructureAssets.Table, "tat_townhall");
+    public static readonly int HallRoom = Array.IndexOf(StructureAssets.Table, "tat_townhall_interior");
+
+    /// <summary>The town hall room's waypoints, glTF frame: the first is its way out's.</summary>
+    public static readonly (float X, float Z)[] HallNodes =
+    [
+        (0.0f, 8.6f), (0.0f, 6.2f), (0.0f, 4.6f), (-5.8f, 4.8f), (5.8f, 4.8f), (0.0f, 0.5f), (0.0f, -3.0f), (-5.8f, -1.0f), (5.8f, -1.0f), (-5.8f, -7.0f),
+        (5.8f, -7.0f), (-6.3f, 2.7f), (-8.2f, 2.7f), (-6.3f, -4.5f), (-8.2f, -4.5f), (6.3f, 2.7f), (8.2f, 2.7f), (6.3f, -4.5f), (8.2f, -4.5f), (-8.7f, 4.7f),
+        (-12.2f, 4.6f), (-12.2f, 1.0f), (-8.7f, 0.4f), (-8.6f, -2.0f), (-12.3f, -1.7f), (-12.55f, -4.85f), (-9.0f, -6.8f), (-12.55f, -6.8f), (8.6f, 4.6f),
+        (8.6f, 0.0f), (10.6f, 0.0f), (10.6f, 5.6f), (12.0f, 4.0f), (12.0f, 1.0f), (8.4f, -2.0f), (8.6f, -6.5f), (12.2f, -6.6f), (12.2f, -1.5f), (-3.6f, -6.7f),
+        (3.6f, -6.7f), (-11.6f, -7.6f), (-9.7f, -7.5f), (-10.7f, -4.85f), (9.0f, -7.15f), (10.6f, -6.3f), (12.2f, -4.4f), (10.6f, -2.5f), (1.9f, 6.95f),
+        (1.9f, 9.6f), (-3.45f, -7.6f), (3.45f, -7.6f),
+    ];
+
+    private const string HallEdges =
+        "[0,1],[0,2],[0,5],[0,6],[0,38],[0,39],[0,47],[0,48],[1,2],[1,5],[1,6],[1,48],[2,3],[2,4],[2,5],[2,6],[2,48],[3,7],[3,9],[3,11],[4,8],[4,10],[4,15],"
+        + "[5,6],[5,7],[5,8],[5,11],[5,12],[5,15],[5,16],[6,7],[6,8],[6,13],[6,14],[6,17],[6,18],[7,8],[7,9],[7,11],[7,13],[7,15],[7,16],[7,17],[7,18],[8,10],"
+        + "[8,11],[8,12],[8,13],[8,14],[8,15],[8,17],[9,13],[9,38],[9,49],[10,17],[10,39],[10,50],[11,12],[11,15],[11,16],[12,15],[12,16],[12,19],[12,22],"
+        + "[13,14],[13,17],[13,18],[14,17],[14,18],[14,23],[14,26],[15,16],[16,28],[16,29],[17,18],[17,42],[18,34],[18,35],[18,43],[19,20],[20,21],[21,22],"
+        + "[23,24],[23,26],[24,25],[24,27],[25,27],[25,42],[26,41],[27,40],[28,29],[29,30],[30,33],[31,32],[32,33],[34,35],[34,37],[34,43],[34,46],[35,36],"
+        + "[35,43],[35,44],[36,37],[36,43],[36,44],[36,45],[37,45],[37,46],[38,49],[39,50],[40,41],[43,44],[47,48]";
+
+    public const string TownHallJson = """
+        {"schema":1,"id":"tat_townhall",
+         "portals":[{"id":"front","center":[0.0,2.8,11.3],"rot":[0.0,0.0,0.0,1.0],"half":[1.25,1.9,0.4],"forward":"-Z",
+           "target":"tat_townhall_interior","target_spawn":"entry","exit_spawn":"front",
+           "approach":[[0.0,0.0,18.25],[0.0,0.0,15.25],[0.0,0.9,13.0],[0.0,0.9,11.05]]}],
+         "spawns":[{"id":"front","pos":[0.0,0.9,12.3],"rot":[0.0,-1.0,0.0,0.0],"forward":"-Z"}],
+         "collision":{"shapes":[{"type":"box","half":[1.6,1.0,0.15]},{"type":"box","half":[3.0,0.15,2.55795]},{"type":"box","half":[7.4,1.0,7.4]},
+                                {"type":"box","half":[15.2,0.95,11.3]},{"type":"box","half":[0.33,1.0,0.33]},
+                                {"type":"cylinder","radius":1.7,"half_height":1.0},{"type":"box","half":[3.4,1.0,2.0]},{"type":"box","half":[3.3,1.0,7.4]}],
+           "colliders":[{"shape":0,"pos":[0.0,1.9,10.55],"rot":[0.0,0.0,0.0,1.0]},{"shape":1,"pos":[0.0,-0.18927,15.31929],"rot":[0.189108,0.0,0.0,0.981956]},
+                        {"shape":2,"pos":[0.0,1.9,-1.0],"rot":[0.0,0.0,0.0,1.0]},{"shape":3,"pos":[0.0,-0.05,1.7],"rot":[0.0,0.0,0.0,1.0]},
+                        {"shape":4,"pos":[-2.85,1.9,12.35],"rot":[0.0,0.0,0.0,1.0]},{"shape":4,"pos":[2.85,1.9,12.35],"rot":[0.0,0.0,0.0,1.0]},
+                        {"shape":5,"pos":[-5.1,1.9,8.0],"rot":[0.0,0.0,0.0,1.0]},{"shape":5,"pos":[5.1,1.9,8.0],"rot":[0.0,0.0,0.0,1.0]},
+                        {"shape":6,"pos":[0.0,1.9,8.4],"rot":[0.0,0.0,0.0,1.0]},{"shape":7,"pos":[10.7,1.9,-1.0],"rot":[0.0,0.0,0.0,1.0]},
+                        {"shape":7,"pos":[-10.7,1.9,-1.0],"rot":[0.0,0.0,0.0,1.0]}]}}
+        """;
+
+    public static string HallRoomJson()
+    {
+        var nodes = new StringBuilder();
+        foreach (var (x, z) in HallNodes)
+        {
+            nodes.Append(nodes.Length == 0 ? string.Empty : ",").Append(CultureInfo.InvariantCulture, $"[{x},0,{z}]");
+        }
+
+        return """
+            {"schema":1,"id":"tat_townhall_interior",
+             "portals":[{"id":"front","center":[0.0,1.9,9.4],"rot":[0.0,-1.0,0.0,0.0],"half":[1.3,1.9,0.4],"forward":"-Z",
+               "target":"tat_townhall","target_spawn":"front","exit_spawn":"entry","approach":[[0.0,0.0,8.6],[0.0,0.0,9.65]]}],
+             "spawns":[{"id":"entry","pos":[0.0,0.0,8.4],"rot":[0.0,0.0,0.0,1.0],"forward":"-Z"}],
+             "collision":{"shapes":[{"type":"box","half":[14.0,1.0,0.2]},{"type":"box","half":[14.0,0.2,9.4]},{"type":"box","half":[2.95,1.0,0.2]},
+                                    {"type":"box","half":[0.2,1.0,2.0]},{"type":"box","half":[3.0,1.0,0.2]}],
+               "colliders":[{"shape":0,"pos":[0.0,1.0,-8.2]},{"shape":1,"pos":[0.0,-0.2,1.0]},{"shape":2,"pos":[-4.45,1.0,6.2]},{"shape":2,"pos":[4.45,1.0,6.2]},
+                            {"shape":3,"pos":[3.2,1.0,8.4]},{"shape":4,"pos":[0.0,1.0,10.2]},{"shape":3,"pos":[-3.2,1.0,8.4]}]},
+             "nav":{"nodes":[NODES],"edges":[EDGES],
+                    "cells":{"origin":[-14,-8.5],"size":0.5,"cols":56,"rows":38,"node":[CELLS]}}}
+            """.Replace("NODES", nodes.ToString(), StringComparison.Ordinal)
+            .Replace("EDGES", HallEdges, StringComparison.Ordinal)
+            .Replace("CELLS", Cells(HallNodes, -14f, -8.5f, 56, 38), StringComparison.Ordinal);
+    }
 
     public const string HouseJson = """
         {"schema":1,"id":"tat_house_large",
@@ -39,25 +106,21 @@ internal static class Published
                         {"shape":2,"pos":[2.0,1.7,0.0]},{"shape":3,"pos":[1.5,0.35,6.45]},{"shape":4,"pos":[1.5,0.175,7.45]}]}}
         """;
 
-    public static string RoomJson()
+    /// <summary>A grid of half-metre cells in the glTF frame, each serving its nearest node: what a room with no furniture publishes.</summary>
+    private static string Cells((float X, float Z)[] nodes, float originX, float originZ, int cols, int rows)
     {
-        // A grid over x -3..3, z -4..5 in the glTF frame; every cell serves its nearest node, which is what a room with no furniture publishes.
-        const float OriginX = -3f;
-        const float OriginZ = -4f;
         const float Size = 0.5f;
-        const int Cols = 12;
-        const int Rows = 18;
         var cells = new StringBuilder();
-        for (var row = 0; row < Rows; row++)
+        for (var row = 0; row < rows; row++)
         {
-            for (var col = 0; col < Cols; col++)
+            for (var col = 0; col < cols; col++)
             {
-                var x = OriginX + ((col + 0.5f) * Size);
-                var z = OriginZ + ((row + 0.5f) * Size);
+                var x = originX + ((col + 0.5f) * Size);
+                var z = originZ + ((row + 0.5f) * Size);
                 var best = 0;
-                for (var n = 1; n < Nodes.Length; n++)
+                for (var n = 1; n < nodes.Length; n++)
                 {
-                    if (Sq(Nodes[n].X - x, Nodes[n].Z - z) < Sq(Nodes[best].X - x, Nodes[best].Z - z))
+                    if (Sq(nodes[n].X - x, nodes[n].Z - z) < Sq(nodes[best].X - x, nodes[best].Z - z))
                     {
                         best = n;
                     }
@@ -67,6 +130,13 @@ internal static class Published
             }
         }
 
+        return cells.ToString();
+    }
+
+    public static string RoomJson()
+    {
+        // A grid over x -3..3, z -4..5 in the glTF frame.
+        var cells = Cells(Nodes, -3f, -4f, 12, 18);
         return """
             {"schema":1,"id":"tat_house_large_interior",
              "portals":[{"id":"front","center":[1.5,1.5,3.5],"rot":[0,-1,0,0],"half":[1.0,1.5,0.4],"forward":"-Z",
@@ -79,12 +149,14 @@ internal static class Published
             """.Replace("CELLS", cells.ToString(), StringComparison.Ordinal);
     }
 
-    /// <summary>The table the server builds from those two descriptors.</summary>
+    /// <summary>The table the server builds from those four descriptors.</summary>
     public static AssetColliders Shapes()
     {
         var texts = new string[StructureAssets.Table.Length];
         texts[House] = HouseJson;
         texts[Room] = RoomJson();
+        texts[TownHall] = TownHallJson;
+        texts[HallRoom] = HallRoomJson();
         var byIndex = new AssetColliders.PlanBox[StructureAssets.Table.Length][];
         for (var i = 0; i < byIndex.Length; i++)
         {
@@ -343,6 +415,89 @@ public sealed class InteriorWorldChecks
         Assert.That(rooms, Has.Count.EqualTo(_sim.InteriorsPerPlanet));
     }
 
+    /// <summary>
+    /// Every city has one town hall, straight across from its shuttleport's gate, its door facing the gate and its path starting a short walk out, past the
+    /// ground passengers are set down on (Loïc, 2026-10-25).
+    /// </summary>
+    [Test]
+    public void EveryCity_HasOneTownHall_ItsDoorFacingItsGate()
+    {
+        var ports = new Dictionary<int, (float X, float Z)>();
+        var halls = new Dictionary<int, List<(EntityId Id, float X, float Z, int Yaw)>>();
+        using (var tx = _sim.Dbe.CreateQuickTransaction())
+        {
+            foreach (var cluster in tx.For<WorldObject>().GetClusterEnumerator())
+            {
+                if (cluster.Realm.Value != 0)
+                {
+                    continue;
+                }
+
+                var places = cluster.GetReadOnlySpan(WorldObject.Bounds);
+                var structs = cluster.GetReadOnlySpan(WorldObject.Struct);
+                var regions = cluster.GetReadOnlySpan(WorldObject.Region);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    var region = regions[slot].Value;
+                    if (structs[slot].Kind == StructureKind.Shuttleport)
+                    {
+                        ports[region] = (places[slot].X, places[slot].Z);
+                    }
+                    else if (structs[slot].Kind == StructureKind.TownHall)
+                    {
+                        if (!halls.TryGetValue(region, out var list))
+                        {
+                            halls[region] = list = [];
+                        }
+
+                        list.Add((cluster.GetEntityId(slot), places[slot].X, places[slot].Z, structs[slot].Yaw));
+                    }
+                }
+            }
+        }
+
+        var doors = _sim.Portals;
+        Assert.That(ports, Has.Count.EqualTo(_sim.Map.Cities.Count), "the premise: a port per city");
+        Assert.Multiple(() =>
+        {
+            foreach (var (region, port) in ports)
+            {
+                Assert.That(halls.TryGetValue(region, out var list) ? list.Count : 0, Is.EqualTo(1), $"city {region}: town halls");
+                if (list is not { Count: 1 })
+                {
+                    continue;
+                }
+
+                var hall = list[0];
+                Assert.That(hall.X, Is.EqualTo(port.X).Within(1e-3f), $"city {region}: the hall is not straight across from the gate");
+                Assert.That(hall.Z - port.Z, Is.EqualTo(WorldBuilder.TownHallZ).Within(1e-3f), $"city {region}");
+                Assert.That(hall.Yaw, Is.EqualTo(WorldBuilder.TownHallYaw), $"city {region}: the hall is not turned to face the gate");
+
+                var row = -1;
+                for (var r = 0; r < doors.Count; r++)
+                {
+                    row = doors.Realm[r] == 0 && (EntityId)doors.Door[r].Owner == hall.Id ? r : row;
+                }
+
+                Assert.That(row, Is.GreaterThanOrEqualTo(0), $"city {region}: the hall has no door");
+                if (row < 0)
+                {
+                    continue;
+                }
+
+                var door = doors.Door[row];
+                var (sx, sz) = doors.ApproachStart[row];
+                var gateZ = port.Z + WorldBuilder.GateOutsideZ;
+                var (_, laneEnd) = WorldBuilder.OutsideGate(port.X, port.Z, 0.5f, 1f);
+                Assert.That(door.ForwardZ, Is.GreaterThan(0.99f), $"city {region}: the hall's door is not crossed going north, away from the gate");
+                Assert.That(sx, Is.EqualTo(port.X).Within(0.01f), $"city {region}: the hall's path does not start on the gate's axis");
+                Assert.That(sz, Is.GreaterThan(laneEnd), $"city {region}: the hall's path starts on the ground passengers are set down on");
+                Assert.That(sz - gateZ, Is.LessThan(12f), $"city {region}: the hall's path starts {sz - gateZ:F1} m out from the gate");
+            }
+        });
+    }
+
     [Test]
     public void TheTwoSidesOfEveryDoor_NameEachOther_AndTheirStructures()
     {
@@ -374,7 +529,8 @@ public sealed class InteriorWorldChecks
                 Assert.That(back.TargetRealm, Is.EqualTo(0), "the way out does not lead back to the planet");
                 Assert.That(roomRealm, Is.EqualTo(front.TargetRealm), "the room stands in another realm");
                 Assert.That(roomStruct.Kind, Is.EqualTo(StructureKind.Interior));
-                Assert.That(roomStruct.Asset, Is.EqualTo(Published.Room), "the room is not the asset the door names");
+                Assert.That(roomStruct.Asset, Is.EqualTo(houseStruct.Kind == StructureKind.TownHall ? Published.HallRoom : Published.Room),
+                    "the room is not the asset the door names");
                 Assert.That(doors.RoomDoor(front.TargetRealm), Is.EqualTo(backRow), "the room's realm does not find its way out");
             });
         }
@@ -447,34 +603,86 @@ public sealed class InteriorWorldChecks
         }
     }
 
+    /// <summary>
+    /// A house's room holds <see cref="SimConfig.InteriorNpcs"/>, a town hall's 10 to 20; each stands on a node of its own room, never the one its way out
+    /// starts on, and no two on one node while the room has one free.
+    /// </summary>
     [Test]
     public void TheRoomsNpcs_StandOnItsNodes_AndLeaveTheDoorsFree()
     {
-        var nodes = new HashSet<(float, float)>();
-        for (var n = 1; n < Published.Nodes.Length; n++)
+        static HashSet<(float, float)> Spots((float X, float Z)[] nodes)
         {
-            nodes.Add((-Published.Nodes[n].X, Published.Nodes[n].Z));
+            var spots = new HashSet<(float, float)>();
+            for (var n = 1; n < nodes.Length; n++)
+            {
+                spots.Add((-nodes[n].X, nodes[n].Z));
+            }
+
+            return spots;
         }
 
-        var counted = 0;
+        var houseSpots = Spots(Published.Nodes);
+        var hallSpots = Spots(Published.HallNodes);
+        var halls = new HashSet<int>();
         using var tx = _sim.Dbe.CreateQuickTransaction();
+        foreach (var cluster in tx.For<WorldObject>().GetClusterEnumerator())
+        {
+            var structs = cluster.GetReadOnlySpan(WorldObject.Struct);
+            for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+            {
+                var st = structs[System.Numerics.BitOperations.TrailingZeroCount(bits)];
+                if (st.Kind == StructureKind.TownHall)
+                {
+                    halls.Add(st.InteriorRealm);
+                }
+            }
+        }
+
+        var byRoom = new Dictionary<int, List<(float, float)>>();
         foreach (var cluster in tx.For<CityNpc>().GetClusterEnumerator())
         {
-            if (cluster.Realm.Value < _sim.Config.Planets)
+            var realm = cluster.Realm.Value;
+            if (realm < _sim.Config.Planets)
             {
                 continue;
             }
 
+            var spots = halls.Contains(realm) ? hallSpots : houseSpots;
             var places = cluster.GetReadOnlySpan(CityNpc.Bounds);
             for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
             {
                 var p = places[System.Numerics.BitOperations.TrailingZeroCount(bits)];
-                Assert.That(nodes, Does.Contain((MathF.Round(p.X, 3), MathF.Round(p.Z, 3))), $"an NPC stands at {p.X}, {p.Z}");
-                counted++;
+                var at = (MathF.Round(p.X, 3), MathF.Round(p.Z, 3));
+                Assert.That(spots, Does.Contain(at), $"an NPC of room {realm} stands at {p.X}, {p.Z}");
+                if (!byRoom.TryGetValue(realm, out var list))
+                {
+                    byRoom[realm] = list = [];
+                }
+
+                list.Add(at);
             }
         }
 
-        Assert.That(counted, Is.EqualTo(_sim.Config.InteriorNpcs * _sim.InteriorsPerPlanet));
+        Assert.That(halls, Is.Not.Empty, "the premise: the world has a town hall");
+        Assert.That(byRoom.Keys, Has.Count.EqualTo(_sim.InteriorsPerPlanet), "a room has no NPC");
+        Assert.Multiple(() =>
+        {
+            foreach (var (realm, list) in byRoom)
+            {
+                var hall = halls.Contains(realm);
+                if (hall)
+                {
+                    Assert.That(list, Has.Count.InRange(_sim.Config.TownHallNpcsMin, _sim.Config.TownHallNpcsMax), $"town hall {realm}");
+                }
+                else
+                {
+                    Assert.That(list, Has.Count.EqualTo(_sim.Config.InteriorNpcs), $"house {realm}");
+                }
+
+                var distinct = new HashSet<(float, float)>(list).Count;
+                Assert.That(distinct, Is.EqualTo(Math.Min(list.Count, (hall ? hallSpots : houseSpots).Count)), $"room {realm}: two NPCs on one node");
+            }
+        });
     }
 
     internal static List<string> Snapshot(PortalTable doors)
@@ -619,14 +827,16 @@ public sealed class DoorWalkChecks
     /// </summary>
     /// <remarks>
     /// <b>190 ticks</b>: about 14 on the path, at most 80 inside (2 s stretched up to four times), 3 on the way out — and then an idle of at least 100 ticks,
-    /// so the body is still standing where it came out when the run stops.
+    /// so the body is still standing where it came out when the run stops. A town hall's path is 0.65 m longer, up its ramp onto its plinth, and its room's
+    /// route out a few metres across the vestibule.
     /// </remarks>
-    [Test]
-    public void TheCrowd_WalksInThroughTheDoor_AndOutThroughTheRoom()
+    [TestCase(StructureKind.Building)]
+    [TestCase(StructureKind.TownHall)]
+    public void TheCrowd_WalksInThroughTheDoor_AndOutThroughTheRoom(int kind)
     {
         using var sim = new TatooineSim(Config(190)) { AssetShapesOverride = Published.Shapes() };
         sim.Initialize();
-        var interior = (ushort)sim.Config.Planets;
+        var interior = Worlds.RoomOf(sim, kind);
         var row = Worlds.DoorInto(sim, interior);
         var player = SendToDoor(sim, row);
 
@@ -665,7 +875,7 @@ public sealed class DoorWalkChecks
     {
         using var sim = new TatooineSim(Config(40)) { AssetShapesOverride = Published.Shapes(), FailCrossingCommits = failures };
         sim.Initialize();
-        var interior = (ushort)sim.Config.Planets;
+        var interior = Worlds.RoomOf(sim, StructureKind.Building);
         var row = Worlds.DoorInto(sim, interior);
         var player = SendToDoor(sim, row);
 
@@ -769,7 +979,7 @@ public sealed class DoorWalkChecks
         {
             using var sim = new TatooineSim(Config(ticks)) { AssetShapesOverride = Published.Shapes() };
             sim.Initialize();
-            var interior = (ushort)sim.Config.Planets;
+            var interior = Worlds.RoomOf(sim, StructureKind.Building);
             var back = sim.Portals.Door[sim.Portals.RoomDoor(interior)];
             var player = sim.Index.Players[0];
             const float Walk = 0.2f;
@@ -833,7 +1043,7 @@ public sealed class DoorWalkChecks
     {
         using var sim = new TatooineSim(Config(14)) { AssetShapesOverride = Published.Shapes() };
         sim.Initialize();
-        var interior = (ushort)sim.Config.Planets;
+        var interior = Worlds.RoomOf(sim, StructureKind.Building);
         var front = sim.Portals.Door[Worlds.DoorInto(sim, interior)];
         var player = sim.Index.Players[0];
         const float Walk = 0.2f;
@@ -875,7 +1085,7 @@ public sealed class DoorWalkChecks
     {
         using var sim = new TatooineSim(Config(60)) { AssetShapesOverride = Published.Shapes() };
         sim.Initialize();
-        var interior = (ushort)sim.Config.Planets;
+        var interior = Worlds.RoomOf(sim, StructureKind.Building);
         var front = sim.Portals.Door[Worlds.DoorInto(sim, interior)];
         var player = sim.Index.Players[0];
         const float Walk = 0.2f;

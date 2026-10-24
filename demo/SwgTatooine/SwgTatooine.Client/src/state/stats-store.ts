@@ -19,6 +19,22 @@ export interface FeetReport {
   readonly gapM: number;
 }
 
+/**
+ * What the HAM panel shows. Health is the only pool the game has: no action or mind until something spends them.
+ */
+export interface PlayerVitals {
+  /** Health points, exact: the owner-only `health` (SELF), or `NaN` before it arrives. */
+  readonly health: number;
+  /** Health over its maximum, 0–1, from the replicated `hp` everyone sees (8 bits). */
+  readonly fraction: number;
+}
+
+/** The avatar is down: knocked out (1) or dead (2), the server's `Downed`, and the seconds until it is up or cloned. */
+export interface DownNotice {
+  readonly kind: number;
+  readonly seconds: number;
+}
+
 export interface LayerStats {
   /** The archetype this row is about, as the source's schema names it. */
   readonly archetype: ArchetypeInfo;
@@ -98,6 +114,10 @@ export interface FrameStats {
   readonly gait: number;
   /** The boost Shift+1..4 latched, ×1..×4. */
   readonly boost: number;
+  /** The controlled avatar's vitals, or `null` without one (god camera, before SELF). */
+  readonly vitals: PlayerVitals | null;
+  /** How the controlled avatar is down and for how much longer, or `null` while it stands. */
+  readonly down: DownNotice | null;
   /** What the server grants for {@link gait}, metres per second, or `NaN` before the owner stats arrive. */
   readonly gaitMps: number;
   /** Ground height under the camera target, metres — 0 while the terrain is still baking. */

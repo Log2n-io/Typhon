@@ -342,6 +342,13 @@ internal static class ClientSays
         ["on"] = FieldValue.Of((byte)(on ? 1 : 0)),
     };
 
+    /// <summary>The field values of a <c>SetStance</c>.</summary>
+    /// <param name="stance">One of <c>Stances</c>.</param>
+    public static RecordValues SetStance(byte stance) => new()
+    {
+        ["stance"] = FieldValue.Of(stance),
+    };
+
     /// <summary>The field values of a <c>SetTarget</c>.</summary>
     /// <param name="netId">The target's network identity, or 0 to clear.</param>
     /// <returns>The values.</returns>

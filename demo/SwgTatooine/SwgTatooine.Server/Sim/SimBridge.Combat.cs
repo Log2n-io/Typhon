@@ -66,10 +66,13 @@ public sealed partial class SimBridge
         var minDelay = (int)(TatooineData.MinAttackDelaySec * _config.TickRateHz);
         var delaySpan = Math.Max(1, (int)((TatooineData.MaxAttackDelaySec - TatooineData.MinAttackDelaySec) * _config.TickRateHz));
         var rangeSq = RangedRange * RangedRange;
+        var regenEvery = Math.Max(1, _config.TickRateHz);
+        var regenQuiet = (long)MathF.Round(TatooineData.RegenQuietSec * _config.TickRateHz);
         long shots = 0;
         long idle = 0;
         long outOfRange = 0;
         long noTarget = 0;
+        long shielded = 0;
 
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<Player>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
@@ -95,11 +98,31 @@ public sealed partial class SimBridge
             Span<PlayerVitals> vitalsRw = default;
             Span<PlayerSession> sessionsRw = default;
 
+            // The players whose health this pass gave back, replicated once per cluster (ADR-067).
+            var regenSlots = 0UL;
             var bits = bits0;
             while (bits != 0)
             {
                 var idx = BitOperations.TrailingZeroCount(bits);
                 bits &= bits - 1;
+
+                // Down: knocked out or dead. It does nothing but wait, and asks once to be revived when its time is up; the drain owns the clone's teleport.
+                if (vitals[idx].Down != Downed.Up)
+                {
+                    var upTick = vitals[idx].UpTick;
+                    if (upTick != 0 && ctx.TickNumber >= upTick)
+                    {
+                        writer.Push(new CombatEvent
+                        {
+                            Target = cluster.GetEntityId(idx),
+                            Kind = CombatEventKind.Revive,
+                            TargetKind = CombatTargetKind.Player,
+                        });
+                        PlayerVitalsRw(in cluster, ref vitalsRw)[idx].UpTick = 0;
+                    }
+
+                    continue;
+                }
 
                 // AC-4's first half. A player travelling, idling in a cantina, roaming or waiting for a shuttle does not shoot, and is counted rather than
                 // silently skipped.
@@ -108,12 +131,27 @@ public sealed partial class SimBridge
                 // steering — a step makes it Travelling, a stop Idle — and `Combat` is only ever set for the scripted crowd (PlayerThink, a mission). Gating a
                 // human on it meant a click on a creature stored a target that no shot was ever fired at. It does not acquire one of its own, either: a
                 // person picks what they fight.
-                // A building or an NPC it selected is a target it holds and never fires at (CombatTargetKind.Unshootable).
+                // A building or an NPC it selected is a target it holds and never fires at (CombatTargetKind.Unshootable). And it fights only in a stance
+                // (PlayerState.Stance, the client's action bar 2–4): a target with no stance is a selection, not an attack.
                 var possessed = controls[idx].Kind != ControllerKind.Scripted;
+                var stance = states[idx].Stance;
                 if (possessed
-                        ? sessions[idx].Target.IsNull || sessions[idx].TargetKind == CombatTargetKind.Unshootable
+                        ? sessions[idx].Target.IsNull || sessions[idx].TargetKind == CombatTargetKind.Unshootable || stance <= Stances.None
+                            || stance >= Stances.Count
                         : states[idx].Activity != PlayerActivity.Combat)
                 {
+                    // Out of a fight — no stance, or the crowd not in Combat — a player heals, once a second on its own beat. A person's player holding a stance
+                    // with nothing targeted is still in one.
+                    var max = vitals[idx].MaxHealth;
+                    if ((!possessed || stance <= Stances.None) && vitals[idx].Health > 0 && vitals[idx].Health < max
+                        && (vitals[idx].LastHitTick == 0 || ctx.TickNumber - vitals[idx].LastHitTick >= regenQuiet)
+                        && (ctx.TickNumber + cluster.GetEntityId(idx).EntityKey) % regenEvery == 0)
+                    {
+                        ref var healed = ref PlayerVitalsRw(in cluster, ref vitalsRw)[idx];
+                        healed.Health = Math.Min(max, healed.Health + Math.Max(1, (int)(max * TatooineData.RegenPerSecFraction)));
+                        regenSlots |= 1UL << idx;
+                    }
+
                     idle++;
                     continue;
                 }
@@ -137,7 +175,10 @@ public sealed partial class SimBridge
 
                 if (!target.IsNull)
                 {
-                    var verdict = CheckTarget(ctx, target, targetKind, x, z, rangeSq);
+                    // A stance reaches between the two bodies' edges; the crowd's weapon reaches between centres, as it always has.
+                    var verdict = possessed
+                        ? CheckTarget(ctx, target, targetKind, x, z, 0f, TatooineData.StanceReachM[stance] + places[idx].HalfExtent)
+                        : CheckTarget(ctx, target, targetKind, x, z, rangeSq, -1f);
                     if (verdict == TargetVerdict.Gone)
                     {
                         // Dead, destroyed, or a mission lair returned to the pool. Nobody's choice survives that, so the target is dropped for a possessed
@@ -148,6 +189,17 @@ public sealed partial class SimBridge
                         {
                             continue;
                         }
+                    }
+                    else if (verdict == TargetVerdict.Shielded)
+                    {
+                        // Its occupants first. A person keeps the lair targeted and fires once they are down; the crowd turns to them now.
+                        shielded++;
+                        if (!possessed)
+                        {
+                            PlayerSessionsRw(in cluster, ref sessionsRw)[idx].Target = EntityId.Null;
+                        }
+
+                        continue;
                     }
                     else if (verdict == TargetVerdict.OutOfRange)
                     {
@@ -192,10 +244,17 @@ public sealed partial class SimBridge
                     TargetKind = targetKind,
                 });
 
+                // A stance strikes on its own steady beat, which a client plays one attack clip per hit to; the crowd keeps its random weapon delay.
                 var key = cluster.GetEntityId(idx).EntityKey;
-                PlayerVitalsRw(in cluster, ref vitalsRw)[idx].AttackCooldown =
-                    minDelay + (int)(Hash01(Salt(ctx.TickNumber, key, 0x27220A95u)) * delaySpan);
+                PlayerVitalsRw(in cluster, ref vitalsRw)[idx].AttackCooldown = possessed
+                    ? Math.Max(1, (int)MathF.Round(TatooineData.StanceDelaySec[stance] * _config.TickRateHz))
+                    : minDelay + (int)(Hash01(Salt(ctx.TickNumber, key, 0x27220A95u)) * delaySpan);
                 shots++;
+            }
+
+            if (regenSlots != 0)
+            {
+                TatooineReplication.Replicate(in cluster, regenSlots);
             }
         }
 
@@ -218,6 +277,11 @@ public sealed partial class SimBridge
         {
             Interlocked.Add(ref _shotsWithoutTarget, noTarget);
         }
+
+        if (shielded != 0)
+        {
+            Interlocked.Add(ref _shotsAtShieldedLair, shielded);
+        }
     }
 
     /// <summary>What a stored target is worth this tick.</summary>
@@ -231,22 +295,35 @@ public sealed partial class SimBridge
 
         /// <summary>Destroyed, dead, or no longer a mission lair — not a target any more, whoever chose it.</summary>
         Gone,
+
+        /// <summary>A lair whose occupants still stand: there, and in reach or not, but nothing hits it until they are dead.</summary>
+        Shielded,
     }
 
     /// <summary>Is a stored target still worth shooting at? One entity read, and no spatial query.</summary>
+    /// <param name="ctx">The tick.</param>
+    /// <param name="target">The stored target.</param>
+    /// <param name="kind">What it was classified as when it was stored.</param>
+    /// <param name="x">The shooter's X.</param>
+    /// <param name="z">The shooter's Z.</param>
+    /// <param name="rangeSq">The weapon's reach squared, between centres; read when <paramref name="edgeReach"/> is negative.</param>
+    /// <param name="edgeReach">
+    /// A stance's reach plus the shooter's own half extent: in range when the centre distance minus the target's half extent is within it — the gap
+    /// between the two bodies' edges. Negative for a centre-to-centre reach.
+    /// </param>
     /// <remarks>
     /// Read-only throughout: a rejected target must not dirty the page it lives on, which is why this takes
     /// <c>TryOpen</c> rather than <c>TryOpenMut</c> even though the caller may be about to damage what it finds. The
     /// damage itself happens in the consumer, on one thread, through the tick transaction.
     /// </remarks>
-    private static TargetVerdict CheckTarget(TickContext ctx, EntityId target, byte kind, float x, float z, float rangeSq)
+    private static TargetVerdict CheckTarget(TickContext ctx, EntityId target, byte kind, float x, float z, float rangeSq, float edgeReach)
     {
         if (!ctx.Accessor.TryOpen(target, out var entity))
         {
             return TargetVerdict.Gone;
         }
 
-        float tx, tz;
+        float tx, tz, half;
         switch (kind)
         {
             case CombatTargetKind.Creature:
@@ -259,19 +336,27 @@ public sealed partial class SimBridge
                 var p = entity.Read(Creature.Bounds);
                 tx = p.X;
                 tz = p.Z;
+                half = p.HalfExtent;
                 break;
             }
 
             case CombatTargetKind.Lair:
             {
-                if (!IsStandingLair(entity.Read(CreatureLair.Spawner), entity.Read(CreatureLair.Vitals)))
+                var spawner = entity.Read(CreatureLair.Spawner);
+                if (!IsStandingLair(spawner, entity.Read(CreatureLair.Vitals)))
                 {
                     return TargetVerdict.Gone;
+                }
+
+                if (IsShielded(in spawner))
+                {
+                    return TargetVerdict.Shielded;
                 }
 
                 var p = entity.Read(CreatureLair.Bounds);
                 tx = p.X;
                 tz = p.Z;
+                half = p.HalfExtent;
                 break;
             }
 
@@ -285,6 +370,7 @@ public sealed partial class SimBridge
                 var p = entity.Read(Player.Bounds);
                 tx = p.X;
                 tz = p.Z;
+                half = p.HalfExtent;
                 break;
             }
 
@@ -295,7 +381,14 @@ public sealed partial class SimBridge
 
         var dx = tx - x;
         var dz = tz - z;
-        return (dx * dx) + (dz * dz) <= rangeSq ? TargetVerdict.InRange : TargetVerdict.OutOfRange;
+        var d2 = (dx * dx) + (dz * dz);
+        if (edgeReach >= 0f)
+        {
+            var reach = edgeReach + half;
+            return d2 <= reach * reach ? TargetVerdict.InRange : TargetVerdict.OutOfRange;
+        }
+
+        return d2 <= rangeSq ? TargetVerdict.InRange : TargetVerdict.OutOfRange;
     }
 
     /// <summary>
@@ -354,7 +447,8 @@ public sealed partial class SimBridge
             {
                 var hit = lairs.Current;
                 if (hit.DistanceSq >= bestSq || !ctx.Accessor.TryOpen(hit.Entity, out var candidate)
-                    || !IsStandingLair(candidate.Read(CreatureLair.Spawner), candidate.Read(CreatureLair.Vitals)))
+                    || !IsStandingLair(candidate.Read(CreatureLair.Spawner), candidate.Read(CreatureLair.Vitals))
+                    || IsShielded(candidate.Read(CreatureLair.Spawner)))
                 {
                     continue;
                 }
@@ -542,6 +636,7 @@ public sealed partial class SimBridge
         long killed = 0;
         long lairHits = 0;
         long incapacitated = 0;
+        long revived = 0;
         long rewards = 0;
         long assigned = 0;
         long stale = 0;
@@ -554,6 +649,27 @@ public sealed partial class SimBridge
                 if (Reward(tx, in ev))
                 {
                     rewards++;
+                }
+                else
+                {
+                    stale++;
+                }
+
+                continue;
+            }
+
+            if (ev.Kind == CombatEventKind.Revive)
+            {
+                if (tx.TryOpenMut(ev.Target, out var downed) && Revive(tx, ref downed, ev.Target, out var moved))
+                {
+                    revived++;
+
+                    // A clone stands in a city now, whole: a blow still queued behind this event was struck at the body it left, so it is withdrawn
+                    // rather than drawn between two entities kilometres apart.
+                    if (moved)
+                    {
+                        stale += WithdrawAfterClone(events, i + 1, n, ev.Target);
+                    }
                 }
                 else
                 {
@@ -607,7 +723,9 @@ public sealed partial class SimBridge
                     break;
 
                 default:
-                    landed = ApplyToPlayer(tx, ref target, in ev, ref incapacitated, out var cloned);
+                    // A lethal blow leaves the player down where it stands, health 0, which is what keeps a second shooter from killing it again: every later
+                    // blow in this drain or the next is refused until it is revived.
+                    landed = ApplyToPlayer(ref target, in ev, ctx.TickNumber, ref incapacitated);
                     if (landed)
                     {
                         damageApplied++;
@@ -615,16 +733,6 @@ public sealed partial class SimBridge
                     else
                     {
                         stale++;
-                    }
-
-                    // A clone restores full health, so the `Health <= 0` guard that keeps two shooters from both killing
-                    // one target stops applying to this player for the rest of the drain. Withdraw the rest of its events
-                    // here rather than leaving the guard to fail: the alternative is a blow landing on a player the
-                    // previous event moved to a city, drawn as a Strike between two entities kilometres apart. Bounded by
-                    // the events already drained, which is single digits on a normal tick.
-                    if (cloned)
-                    {
-                        stale += WithdrawAfterClone(events, i + 1, n, ev.Target);
                     }
 
                     break;
@@ -663,6 +771,11 @@ public sealed partial class SimBridge
         if (incapacitated != 0)
         {
             Interlocked.Add(ref _playersIncapacitated, incapacitated);
+        }
+
+        if (revived != 0)
+        {
+            Interlocked.Add(ref _playersRevived, revived);
         }
 
         if (rewards != 0)
@@ -760,6 +873,16 @@ public sealed partial class SimBridge
         TatooineReplication.Replicate(in target);
         killed++;
 
+        // One fewer standing between the lair and whoever comes for it: at none, it can be destroyed.
+        EntityId home = target.Read(Creature.Home).Lair;
+        if (tx.TryOpenMut(home, out var lair))
+        {
+            var spawner = lair.Read(CreatureLair.Spawner);
+            spawner.Guards = Math.Max(0, spawner.Guards - 1);
+            lair.Set(CreatureLair.Spawner, spawner);
+            TatooineReplication.Replicate(in lair);
+        }
+
         // The loot, written to the shooter's Inventory in this transaction. A counter rather than an Item entity, and deliberately: an event cannot spawn
         // another archetype's entity until #907 is fixed, so real items are S3's work and out of WP-3's scope. What the counter DOES exercise is the thing
         // worth exercising — a Versioned write on a cluster archetype, in the tick's unit of work, every time something dies.
@@ -774,9 +897,10 @@ public sealed partial class SimBridge
     private static bool ApplyToLair(ref EntityRefMut target, in CombatEvent ev)
     {
         var v = target.Read(CreatureLair.Vitals);
-        if (!IsStandingLair(target.Read(CreatureLair.Spawner), v))
+        var spawner = target.Read(CreatureLair.Spawner);
+        if (!IsStandingLair(spawner, v) || IsShielded(in spawner))
         {
-            return false;   // broken already this tick, or a mission that ended between the shot and here
+            return false;   // broken already this tick, a mission that ended between the shot and here, or an occupant stood up again
         }
 
         v.Health = Math.Max(0, v.Health - ev.Amount);
@@ -785,22 +909,23 @@ public sealed partial class SimBridge
         return true;
     }
 
-    /// <summary>Damage to a player, and the clone that follows when it runs out of health.</summary>
-    /// <param name="cloned">
-    /// Set when this blow incapacitated the player and moved it to a city. The caller uses it to withdraw every later
-    /// event in the same drain that named this player: the clone restores full health, so the <c>Health &lt;= 0</c> guard
-    /// at the top of this method stops protecting it, and a second lethal blow pushed on the same tick would land on a
-    /// player now standing kilometres from whatever shot it.
-    /// </param>
-    private bool ApplyToPlayer(Transaction tx, ref EntityRefMut target, in CombatEvent ev, ref long incapacitated, out bool cloned)
+    /// <summary>Damage to a player; at no health, the player goes down where it stands.</summary>
+    /// <remarks>
+    /// <b>Knocked out or dead, even odds</b> (Loïc, 2026-10-24), and the roll is the server's, keyed on the player and the tick. Both lie where they fell, stop,
+    /// lose their target and are nobody's target (<c>CreatureThink</c> drops a downed quarry and its aggro skips one). Neither is the end: the player's own
+    /// combat pass asks for a <see cref="CombatEventKind.Revive"/> at <see cref="PlayerVitals.UpTick"/> — a knocked-out one gets up where it lies, a dead one
+    /// wakes as a clone at the nearest city (<see cref="Revive"/>).
+    /// </remarks>
+    private bool ApplyToPlayer(ref EntityRefMut target, in CombatEvent ev, long tick, ref long incapacitated)
     {
-        cloned = false;
         var v = target.Read(Player.Vitals);
         if (v.Health <= 0)
         {
-            return false;   // already down this tick
+            return false;   // already down
         }
 
+        // Being hit is what stops the healing, until it has been quiet a while.
+        v.LastHitTick = (int)Math.Max(1, tick);
         var health = v.Health - ev.Amount;
         if (health > 0)
         {
@@ -810,47 +935,96 @@ public sealed partial class SimBridge
             return true;
         }
 
-        // Incapacitated, then cloned at the nearest city: one teleport, full health, no wounds and no insurance — AC-5. SWG's own sequence put a timer
-        // between the two and offered a revive; that timer adds a state the simulation has to carry and exercises no engine path the teleport does not, so
-        // the two steps are one here and the report says so.
-        v.Health = v.MaxHealth;
+        var dead = Hash01(Salt(tick, ev.Target.EntityKey, 0x7F4A7C15u)) < 0.5f;
+        var lies = dead ? TatooineData.CloneDelaySec : TatooineData.KnockOutSec;
+        v.Health = 0;
         v.AttackCooldown = 0;
+        v.Down = dead ? Downed.Dead : Downed.KnockedOut;
+        v.UpTick = (int)(tick + Math.Max(1, (int)MathF.Round(lies * _config.TickRateHz)));
         target.Set(Player.Vitals, v);
-        var state = target.Read(Player.State);
-        state.Activity = PlayerActivity.Idle;
-        state.ActivityTicks = CloneRecoverySeconds * _config.TickRateHz;
-        target.Set(Player.State, state);
+
+        // Where it fell: a body walking when the blow landed would otherwise slide on at its last velocity.
+        var place = target.Read(Player.Bounds);
         var move = target.Read(Player.Move);
         move.VelX = 0f;
         move.VelZ = 0f;
+        move.DestX = place.X;
+        move.DestZ = place.Z;
         target.Set(Player.Move, move);
 
-        // Its target dies with it, or a cloned player resumes shooting at a creature on the far side of the planet the moment its recovery ends.
+        // Its target falls with it, or it would get up still aiming at whatever it was fighting.
         var session = target.Read(Player.Session);
         session.Target = EntityId.Null;
         target.Set(Player.Session, session);
 
-        var realm = target.Read(Player.Realm).Value;
-        var place = target.Read(Player.Bounds);
-        incapacitated++;
+        // And off its swoop: a body lies on the ground, not on a seat.
+        var state = target.Read(Player.State);
+        if (state.Mounted != 0)
+        {
+            state.Mounted = 0;
+            target.Set(Player.State, state);
+        }
 
-        // Only on a planet. A player incapacitated inside a building or a dungeon is restored where it stands: cloning it to a city would be a cross-realm
-        // teleport competing with the systems that own those crossings, and the interior it is in would keep a pin on a player that had left.
-        if (realm >= _config.Planets)
+        incapacitated++;
+        TatooineReplication.Replicate(in target);
+        return true;
+    }
+
+    /// <summary>
+    /// A downed player's time is up: a knocked-out one gets up where it lies with a fifth of its health; a dead one wakes whole as a clone outside the nearest
+    /// city's shuttleport — one teleport, no wounds and no insurance (AC-5).
+    /// </summary>
+    /// <param name="tx">The tick's transaction, which the teleport goes through.</param>
+    /// <param name="target">The downed player.</param>
+    /// <param name="id">Its identity.</param>
+    /// <param name="moved">Set when it was cloned somewhere else: the caller withdraws the blows still queued against the body it left.</param>
+    /// <returns>Whether it was down, and is up now.</returns>
+    private bool Revive(Transaction tx, ref EntityRefMut target, EntityId id, out bool moved)
+    {
+        moved = false;
+        var v = target.Read(Player.Vitals);
+        if (v.Down == Downed.Up)
+        {
+            return false;
+        }
+
+        var dead = v.Down == Downed.Dead;
+        v.Health = dead ? v.MaxHealth : Math.Max(1, (int)(v.MaxHealth * TatooineData.KnockOutRecoveryFraction));
+        v.Down = Downed.Up;
+        v.UpTick = 0;
+        v.AttackCooldown = 0;
+        target.Set(Player.Vitals, v);
+
+        // The crowd's player wakes idle and stays put a while before deciding anything; a clone puts its weapon away, as a door or a flight does.
+        var state = target.Read(Player.State);
+        state.Activity = PlayerActivity.Idle;
+        state.ActivityTicks = CloneRecoverySeconds * _config.TickRateHz;
+        if (dead)
+        {
+            state.Stance = Stances.None;
+        }
+
+        target.Set(Player.State, state);
+
+        // Only on a planet. A player who died inside a building or a dungeon wakes where it lies: cloning it to a city would be a cross-realm teleport competing
+        // with the systems that own those crossings, and the interior would keep a pin on a player that had left.
+        var realm = target.Read(Player.Realm).Value;
+        if (!dead || realm >= _config.Planets)
         {
             TatooineReplication.Replicate(in target);
             return true;
         }
 
-        var city = CloneSpot((ushort)realm, place.X, place.Z, ev.Target.EntityKey);
+        var place = target.Read(Player.Bounds);
+        var city = CloneSpot((ushort)realm, place.X, place.Z, id.EntityKey);
         var at = default(PlayerPlacement);
         // The realm the player is teleported INTO is the one that owns the ground, and it is the same one the teleport
         // below names. Passing RealmId.Default here was right only because every planet currently shares one field.
         var home = new RealmId((ushort)realm);
         at.SetAt(city.X, city.Z, GroundAt(home, city.X, city.Z), place.HalfExtent);
-        tx.Teleport(ev.Target, Player.Bounds, home, in at);
+        tx.Teleport(id, Player.Bounds, home, in at);
         TatooineReplication.Replicate(in target);
-        cloned = true;
+        moved = true;
         return true;
     }
 
@@ -934,6 +1108,15 @@ public sealed partial class SimBridge
     /// Whether a lair may be damaged: it has health left and, if it is one of the destroy-mission pool, it is on a mission. A dormant pool lair is at full
     /// health between missions and belongs to somebody else's next; shooting it would damage a target nobody was sent to destroy.
     /// </summary>
+    /// <summary>
+    /// Whether a lair's occupants still stand between it and whoever attacks it: nothing damages it until they are dead (Loïc, 2026-10-24).
+    /// </summary>
+    /// <remarks>
+    /// <b>Wild lairs only.</b> A destroy-mission lair teleports to its player and leaves its defenders where they stood, so shielding it by them would make
+    /// it indestructible; the pool keeps its own rules until missions are redesigned around the wild camps.
+    /// </remarks>
+    internal static bool IsShielded(in Lair lair) => lair.Site != 0 && lair.Guards > 0;
+
     internal static bool IsStandingLair(in Lair lair, in LairVitals vitals)
         => vitals.Health > 0 && (lair.CreatureTemplate != CreatureTemplates.MissionDefender || lair.MissionId != 0);
 

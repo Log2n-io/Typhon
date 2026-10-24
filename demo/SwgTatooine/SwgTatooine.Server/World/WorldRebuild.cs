@@ -322,9 +322,10 @@ public static class WorldRebuild
             // Off its swoop too: Mounted is persisted, and nothing the crowd does clears it but a door — a body saved riding came back as a crowd
             // member drawn on a swoop for good.
             var state = player.Read(Player.State);
-            if (state.Mounted != 0)
+            if (state.Mounted != 0 || state.Stance != Stances.None)
             {
                 state.Mounted = 0;
+                state.Stance = Stances.None;
                 player.Set(Player.State, state);
             }
             var session = player.Read(Player.Session);

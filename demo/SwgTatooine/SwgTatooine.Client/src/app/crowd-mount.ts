@@ -1,3 +1,4 @@
+import type { Material } from '@babylonjs/core/Materials/material';
 import type { Scene } from '@babylonjs/core/scene';
 
 import { placement } from '../assets/asset-frame';
@@ -9,6 +10,8 @@ import { bakeClipAtlas, type BakeSource, type CrowdRig } from '../render/crowd-r
 import { CrowdLayer } from '../render/crowd-layer';
 import { createCrowdMaterial, type CrowdSkinPlugin } from '../render/crowd-material';
 import { buildCrowdOutfit, type CrowdOutfit } from '../render/crowd-mesh';
+import { buildCrowdWeapon } from '../render/crowd-weapons';
+import { STANCE_WEAPONS } from './action-bar';
 import type { SceneLighting } from '../render/scene-lighting';
 
 /**
@@ -33,6 +36,8 @@ export interface CrowdMount {
   readonly plan: AtlasPlan;
   readonly outfits: readonly CrowdOutfit[];
   readonly skin: CrowdSkinPlugin;
+  /** The material every outfit is drawn with: a weapon in a hand is drawn with it too. */
+  readonly material: Material;
   /** What the HUD shows: rows, bytes and how many outfits were built. */
   readonly stats: { rows: number; bytes: number; outfits: number; bakeMs: number; buildMs: number };
   dispose(): void;
@@ -98,7 +103,7 @@ export async function mountCrowd(
     return null;
   }
 
-  return build(
+  const mount = await build(
     scene,
     library,
     lighting,
@@ -109,6 +114,40 @@ export async function mountCrowd(
     'crowd',
     (id) => !enemies.has(id),
   );
+  if (mount !== null) {
+    await mountWeapons(scene, library, lighting, described, mount, capacity);
+  }
+
+  return mount;
+}
+
+/**
+ * The weapons a player in a stance holds, one crowd mesh each (`render/crowd-weapons.ts`), handed to the layer by the
+ * server's stance number. One that will not build leaves its stance drawn empty-handed, and says so.
+ */
+async function mountWeapons(
+  scene: Scene,
+  library: AssetLibrary,
+  lighting: SceneLighting,
+  described: ReadonlyMap<string, Descriptor>,
+  mount: CrowdMount,
+  capacity: number,
+): Promise<void> {
+  // The pack's uniform scale, which the rig's joints carry and a weapon's `attach.pos` does not (§ 5.10).
+  const scale = described.get(RIG_OUTFIT)?.source?.scale ?? 1;
+  for (const [stance, id] of STANCE_WEAPONS.entries()) {
+    if (id === null || described.get(id)?.kind !== 'weapon') {
+      continue;
+    }
+
+    try {
+      const weapon = await buildCrowdWeapon(scene, library, id, mount.rig, mount.material, scale, capacity);
+      lighting.castShadows([weapon.mesh]);
+      mount.layer.setWeapon(stance, weapon);
+    } catch (error) {
+      console.warn(`crowd: weapon ${id} was not built; that stance is drawn empty-handed`, error);
+    }
+  }
 }
 
 /**
@@ -284,6 +323,7 @@ async function build(
     plan,
     outfits,
     skin,
+    material,
     stats: { rows: plan.rows, bytes: rig.textureBytes, outfits: outfits.length, bakeMs, buildMs },
     dispose() {
       layer.dispose();

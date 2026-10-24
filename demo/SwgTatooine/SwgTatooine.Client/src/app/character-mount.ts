@@ -1,5 +1,6 @@
 import { Material } from '@babylonjs/core/Materials/material';
 import { Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh';
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode';
 import { axisVector, placement, yawForHeading } from '../assets/asset-frame';
 import type { AssetLibrary, Instance } from '../assets/asset-library';
@@ -89,6 +90,13 @@ export interface CharacterMount {
   /** Whether the body is drawn on its swoop. */
   readonly riding: boolean;
   /**
+   * Puts a weapon in the hand (ASSET_FORMAT.md § 5.10), or empties it (`null`). Loaded on first use, never for the ghost;
+   * until it has arrived the hand is empty and {@link weapon} is `null`. Not drawn while riding.
+   */
+  setWeapon(assetId: string | null): void;
+  /** The weapon in the hand, once loaded: the clip it attacks with, and that clip's length in seconds (`NaN` if the rig lacks it). */
+  readonly weapon: HeldWeapon | null;
+  /**
    * The swoop's attitude and hover, drawing only (`swoop-drive.ts`, `swoop-hover.ts`): the bike rolls about its own length
    * by `roll` radians — positive puts the right side down — pitches its nose up by `pitch`, and floats `lift` metres above
    * the ground the body stands on. The rider is carried with it. All 0 for a swoop nobody here steers.
@@ -106,6 +114,18 @@ export interface CharacterMount {
    */
   setOpacity(opacity: number): void;
   dispose(): void;
+}
+
+/** A weapon a character holds; see {@link CharacterMount.weapon}. */
+export interface HeldWeapon {
+  readonly clip: string;
+  readonly clipS: number;
+}
+
+interface LoadedWeapon extends HeldWeapon {
+  /** The node under the hand's joint the weapon hangs from: enabling it shows the weapon. */
+  readonly holder: TransformNode;
+  readonly instance: Instance;
 }
 
 /**
@@ -182,6 +202,23 @@ export async function mountCharacter(
   const graph = new AnimationGraph(animations.roles, animations.clips, locomotionFrom(Number.NaN, Number.NaN, height));
   rig.setEnabled(false);
 
+  // The skeleton's joints by their glTF name (`<label>/Fist.R` once instantiated): where a weapon is attached. The
+  // animation drives these nodes, so whatever hangs from one moves with the hand.
+  const joints = new Map<string, TransformNode>();
+  for (const node of instance.root.getDescendants(false)) {
+    if (node instanceof TransformNode && !(node instanceof AbstractMesh)) {
+      joints.set(node.name.slice(node.name.lastIndexOf('/') + 1), node);
+    }
+  }
+
+  // The pack's uniform scale, which a joint's world matrix carries and a weapon's `attach.pos` does not (§ 5.10).
+  const characterScale = asset.descriptor.source?.scale ?? 1;
+  const weapons = new Map<string, LoadedWeapon | null>();
+  let wantedWeapon: string | null = null;
+  // Read through a call: after an await, a plain boolean checked twice looks constant to the type checker.
+  let disposed = false;
+  const gone = (): boolean => disposed;
+
   let subject = 0;
   let facing = 0;
   let tunedWalk = Number.NaN;
@@ -224,12 +261,83 @@ export async function mountCharacter(
       });
   };
 
+  const showWeapons = (): void => {
+    for (const [id, held] of weapons) {
+      held?.holder.setEnabled(id === wantedWeapon && subject !== 0 && !riding);
+    }
+  };
+
+  /**
+   * Hangs a weapon from its joint: `weapon world = J × scale(1/s) × translate(pos) × rotate(rot)` (§ 5.10), as two nodes,
+   * because one Babylon node scales BEFORE it translates.
+   */
+  const loadWeapon = async (id: string): Promise<void> => {
+    const desc = (await library.describe(id)).weapon;
+    const joint = desc === undefined ? undefined : joints.get(desc.attach.joint);
+    if (desc === undefined || joint === undefined) {
+      throw new Error(`"${id}" is no weapon, or "${assetId}" has no joint "${desc?.attach.joint ?? '?'}"`);
+    }
+
+    prepareAsset(await library.acquire(id), lighting);
+    if (gone()) {
+      return;
+    }
+
+    const scene = root.getScene();
+    const holder = new TransformNode(`${id}/unscale`, scene);
+    holder.parent = joint;
+    holder.scaling.setAll(1 / characterScale);
+    holder.setEnabled(false);
+    const grip = new TransformNode(`${id}/grip`, scene);
+    grip.parent = holder;
+    grip.position.fromArray(desc.attach.pos);
+    grip.rotationQuaternion = Quaternion.FromArray(desc.attach.rot);
+    const placed = await library.instantiate(id, placement([0, 0, 0], 0), grip, `${assetId}/${id}`);
+    if (gone()) {
+      placed.dispose();
+      holder.dispose();
+      return;
+    }
+
+    // Under a joint everything is already in the glTF frame: the character's own glTF root turned it into Babylon's above
+    // the skeleton. The weapon's root would turn it a second time, so it is made the identity.
+    for (const node of placed.root.getChildren()) {
+      if (node instanceof TransformNode) {
+        node.position.setAll(0);
+        node.rotationQuaternion = Quaternion.Identity();
+        node.scaling.setAll(1);
+      }
+    }
+
+    lighting.castShadows(placed.meshes);
+    weapons.set(id, { holder, instance: placed, clip: desc.clip, clipS: graph.durationOf(desc.clip) });
+    showWeapons();
+  };
+
   return {
     rig,
     graph,
     height,
     get riding(): boolean {
       return riding;
+    },
+    get weapon(): HeldWeapon | null {
+      return wantedWeapon === null ? null : (weapons.get(wantedWeapon) ?? null);
+    },
+    setWeapon(id: string | null): void {
+      if (id === wantedWeapon) {
+        return;
+      }
+
+      wantedWeapon = id;
+      if (id !== null && !weapons.has(id) && ghostAlpha === undefined) {
+        weapons.set(id, null);
+        loadWeapon(id).catch((error: unknown) => {
+          console.warn(`assets: weapon ${id} did not mount; the hand stays empty`, error);
+        });
+      }
+
+      showWeapons();
     },
     get riderLift(): number {
       return riding ? seatY + hover : 0;
@@ -250,6 +358,7 @@ export async function mountCharacter(
       }
 
       swoopRoot.setEnabled(on && subject !== 0);
+      showWeapons();
     },
     setOpacity(opacity: number): void {
       if (ghostAlpha !== undefined) {
@@ -292,6 +401,7 @@ export async function mountCharacter(
         facing = heading;
         rig.setEnabled(true);
         swoopRoot.setEnabled(riding);
+        showWeapons();
       }
 
       // A floor under dt, because `turnToward` snaps when the step is not positive — so a frame reporting zero elapsed
@@ -325,9 +435,17 @@ export async function mountCharacter(
         subject = 0;
         rig.setEnabled(false);
         swoopRoot.setEnabled(false);
+        showWeapons();
       }
     },
     dispose(): void {
+      disposed = true;
+      for (const held of weapons.values()) {
+        held?.instance.dispose();
+        held?.holder.dispose();
+      }
+
+      weapons.clear();
       rig.dispose();
       instance.dispose();
       swoop?.dispose();

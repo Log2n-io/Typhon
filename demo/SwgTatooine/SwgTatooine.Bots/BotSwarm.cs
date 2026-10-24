@@ -241,6 +241,12 @@ public sealed class BotSwarm : IAsyncDisposable
 
     private const string SetMountCommand = "SetMount";
 
+    /// <summary>The server's combat stance command; a bot hunts with the pistol, the one stance that reaches from <c>BotBrain.StrikeM</c>.</summary>
+    private const string SetStanceCommand = "SetStance";
+
+    /// <summary><c>Stances.Pistol</c> on the server.</summary>
+    private const double PistolStance = 3.0;
+
     /// <summary>
     /// The public content a thinking bot walks a city by — walls, doors, terminals — read once per fleet from the server's HTTP surface, as a browser
     /// reads it. Null until loaded, and for good when the server publishes none: the brains then travel and hunt as they always did.
@@ -2427,6 +2433,15 @@ public sealed class BotSwarm : IAsyncDisposable
             if (_brain.Goal == Goal.Hunting && before != Goal.Hunting)
             {
                 HuntsStarted++;
+
+                // A target is fought only in a stance, and a mount or a door drops it, so each hunt draws the pistol again: one command per hunt, not per
+                // target re-named. A server without the command is one where a target alone is a fight.
+                if (Client.Plan.CommandByName(SetStanceCommand) != null)
+                {
+                    await Client.SendCommandAsync(SetStanceCommand, new RecordValues { ["stance"] = FieldValue.Of(PistolStance) }, ct)
+                        .ConfigureAwait(false);
+                    IntentsSent++;
+                }
             }
 
             switch (intent.Kind)

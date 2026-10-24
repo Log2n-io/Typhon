@@ -216,6 +216,24 @@ public sealed class PersistenceSurfaceTests
         }
 
         using var reopened = Persisted.Run(Persisted.Config(_dir, persist: true, ticks: 5));
+
+        // STAGED: one entity destroyed in the reopened world, which is what establishes the cluster visibility state the audit walks — that state lives in
+        // memory and a reopen starts it empty. Left to the five ticks, the precondition held or not by the world's draws: three mission defenders where
+        // there had been eight made them destroy nothing, and the audit had no cluster to look at (2026-10-25).
+        using (var tx = reopened.Dbe.CreateQuickTransaction())
+        {
+            foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+            {
+                if (cluster.OccupancyBits != 0)
+                {
+                    tx.Destroy(cluster.GetEntityId(System.Numerics.BitOperations.TrailingZeroCount(cluster.OccupancyBits)));
+                    break;
+                }
+            }
+
+            tx.Commit();
+        }
+
         var report = reopened.Dbe.RunStorageIntegrityCheck();
 
         Assert.Multiple(() =>

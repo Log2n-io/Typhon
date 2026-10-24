@@ -240,6 +240,38 @@ public static class SpeedClasses
     public const byte MaxBoost = 4;
 }
 
+/// <summary>The combat stances a person puts a player in (<see cref="SetStance"/>), by what it fights with.</summary>
+public static class Stances
+{
+    /// <summary>No stance: idle, and a player in it does not fight whatever it targets.</summary>
+    public const byte None = 0;
+
+    /// <summary>Fists, with a vibroknuckler: reaches 1 m.</summary>
+    public const byte Unarmed = 1;
+
+    /// <summary>A one-handed blade: reaches 3 m.</summary>
+    public const byte OneHanded = 2;
+
+    /// <summary>A pistol: reaches 30 m.</summary>
+    public const byte Pistol = 3;
+
+    /// <summary>The first stance this server does not know.</summary>
+    public const byte Count = 4;
+}
+
+/// <summary>
+/// "Fight with this", or stop (the client's action bar 2–4, each a toggle). <see cref="Stances"/>.
+/// </summary>
+/// <remarks>
+/// <b>A state the server holds and replicates</b> (<c>PlayerState.Stance</c>), because it is what decides whether a possessed player's target is fought and
+/// how far it reaches, and because everyone watching draws it. Taking one gets the player off its swoop: nobody fights from the saddle.
+/// </remarks>
+public struct SetStance
+{
+    /// <summary>The stance, or <see cref="Stances.None"/> to stop fighting.</summary>
+    public byte Stance;
+}
+
 /// <summary>
 /// "Put me on my swoop", or back on foot (the client's 1 key). The swoop is summoned where the player stands, at once: there is nothing to own or call yet.
 /// </summary>
@@ -646,6 +678,12 @@ public static partial class TatooineReplication
 
     /// <summary><c>ACKS</c> reason: a <see cref="SetMount"/> from a player that is not on a planet — a room, a dungeon — or is waiting for a shuttle.</summary>
     public const byte MountNotHere = AckReasons.FirstApplicationReason + 7;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="SetStance"/> naming a stance this server does not know.</summary>
+    public const byte StanceUnknown = AckReasons.FirstApplicationReason + 8;
+
+    /// <summary><c>ACKS</c> reason: a move, a mount or a boarding from a player that is down — knocked out or dead — and cannot.</summary>
+    public const byte PlayerDown = AckReasons.FirstApplicationReason + 9;
 
     /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
     /// <remarks>
@@ -1564,6 +1602,13 @@ public static partial class TatooineReplication
             .Rate(2, 4)
             .Roles(SessionRole.Player)
             .Field(v => v.On, Codec.U8, "on"));
+
+        // A toggle a person presses, and only the last one counts: latest per session, at the mount's rate.
+        subs.Command<SetStance>(c => c
+            .Coalesce(CommandCoalesce.LatestPerSession)
+            .Rate(4, 8)
+            .Roles(SessionRole.Player)
+            .Field(v => v.Stance, Codec.U8, "stance"));
 
         // SWG-09. Queued, because each utterance matters and their order is the conversation; one a second, which is the
         // rate 04-protocol § 4 gives it and roughly what a person types.
@@ -2689,7 +2734,7 @@ public static partial class TatooineReplication
 
         foreach (var command in subs.Commands<MoveTo>())
         {
-            if (!TryOpenControlled(subs, accessor, command.Session, out var player))
+            if (!TryOpenControlled(subs, accessor, command.Session, out var player) || RefusedDown(subs, command, in player))
             {
                 continue;
             }
@@ -2714,7 +2759,7 @@ public static partial class TatooineReplication
         // and nothing else, and whether this player is standing at a port is a fact about the world rather than about the message.
         foreach (var command in subs.Commands<BoardShuttle>())
         {
-            if (!TryOpenControlled(subs, accessor, command.Session, out var player))
+            if (!TryOpenControlled(subs, accessor, command.Session, out var player) || RefusedDown(subs, command, in player))
             {
                 continue;
             }
@@ -2753,8 +2798,9 @@ public static partial class TatooineReplication
             state.ShuttleFrom = from;
             state.ShuttleDest = dest;
 
-            // Nobody boards with a swoop: back on foot, and the client draws it so the moment it queues.
+            // Nobody boards with a swoop, or a drawn weapon: back on foot and idle, and the client draws it so the moment it queues.
             state.Mounted = 0;
+            state.Stance = Stances.None;
             player.Set(Player.State, state);
 
             var waiting = player.Read(Player.Move);
@@ -2770,7 +2816,7 @@ public static partial class TatooineReplication
 
         foreach (var command in subs.Commands<SetMount>())
         {
-            if (!TryOpenControlled(subs, accessor, command.Session, out var player))
+            if (!TryOpenControlled(subs, accessor, command.Session, out var player) || RefusedDown(subs, command, in player))
             {
                 continue;
             }
@@ -2787,6 +2833,13 @@ public static partial class TatooineReplication
             if (state.Mounted != on)
             {
                 state.Mounted = on;
+
+                // Riding is idle: the stance goes with the mount, as the client's 1 key drops it.
+                if (on == 1)
+                {
+                    state.Stance = Stances.None;
+                }
+
                 player.Set(Player.State, state);
                 if (on == 0)
                 {
@@ -2801,9 +2854,45 @@ public static partial class TatooineReplication
             }
         }
 
-        foreach (var command in subs.Commands<MoveDir>())
+        foreach (var command in subs.Commands<SetStance>())
         {
             if (!TryOpenControlled(subs, accessor, command.Session, out var player))
+            {
+                continue;
+            }
+
+            var stance = command.Value.Stance;
+            if (stance >= Stances.Count)
+            {
+                subs.Reject(command, StanceUnknown);
+                System.Threading.Interlocked.Increment(ref _stancesRefused);
+                continue;
+            }
+
+            var state = player.Read(Player.State);
+            if (state.Stance == stance)
+            {
+                continue;
+            }
+
+            state.Stance = stance;
+            if (stance != Stances.None && state.Mounted != 0)
+            {
+                // Off the swoop to fight, at a run at most, as SetMount gets off it.
+                state.Mounted = 0;
+                var move = player.Read(Player.Move);
+                move.SpeedMps = MathF.Min(move.SpeedMps, SpeedFor(SpeedClasses.Run));
+                player.Set(Player.Move, move);
+            }
+
+            player.Set(Player.State, state);
+            Replicate(in player);
+            System.Threading.Interlocked.Increment(ref _stancesApplied);
+        }
+
+        foreach (var command in subs.Commands<MoveDir>())
+        {
+            if (!TryOpenControlled(subs, accessor, command.Session, out var player) || RefusedDown(subs, command, in player))
             {
                 continue;
             }
@@ -2947,6 +3036,27 @@ public static partial class TatooineReplication
     /// passed — counting here made a refused <c>MoveDir</c> both applied and refused, and made every <c>SetTarget</c> a movement intent.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Refuses a command a downed player cannot carry out — it lies where it fell until it gets up or wakes as a clone — and counts it. True when refused.
+    /// </summary>
+    private static bool RefusedDown<T>(SubscriptionsCommands subs, in ClientCommand<T> command, in EntityRefMut player)
+        where T : unmanaged
+    {
+        if (player.Read(Player.Vitals).Down == Downed.Up)
+        {
+            return false;
+        }
+
+        subs.Reject(command, PlayerDown);
+        System.Threading.Interlocked.Increment(ref _refusedDown);
+        return true;
+    }
+
+    /// <summary>How many moves, mounts and boardings a downed player sent and was refused.</summary>
+    public static long RefusedWhileDown => System.Threading.Interlocked.Read(ref _refusedDown);
+
+    private static long _refusedDown;
+
     private static bool TryOpenControlled(SubscriptionsCommands subs, ArchetypeAccessor<Player> accessor, SessionId session, out EntityRefMut player)
     {
         if (!BoundPlayer.TryGetValue(session.Value, out var entity))
@@ -3071,6 +3181,13 @@ public static partial class TatooineReplication
     private static long _mountsApplied;
     private static long _mountsRefused;
 
+    /// <summary>How many <see cref="SetStance"/> asks changed a player's stance, and how many named a stance this server does not know.</summary>
+    public static (long Applied, long Refused) StanceAsks =>
+        (System.Threading.Interlocked.Read(ref _stancesApplied), System.Threading.Interlocked.Read(ref _stancesRefused));
+
+    private static long _stancesApplied;
+    private static long _stancesRefused;
+
     /// <summary>How many <see cref="SetViewRadius"/> asks were applied, and how many were refused as out of range.</summary>
     /// <remarks>
     /// The refusal is the number that says whether a client and this server disagree about the range — the same role the speed class's refusal count plays.
@@ -3102,6 +3219,8 @@ public static partial class TatooineReplication
         System.Threading.Interlocked.Exchange(ref _boardingsCancelled, 0);
         System.Threading.Interlocked.Exchange(ref _mountsApplied, 0);
         System.Threading.Interlocked.Exchange(ref _mountsRefused, 0);
+        System.Threading.Interlocked.Exchange(ref _stancesApplied, 0);
+        System.Threading.Interlocked.Exchange(ref _stancesRefused, 0);
         BoundPlayer.Clear();
 
         // The holds go with it (A13), for the same reason BoundPlayer does: a fixture that resets only the intent accounting would otherwise inherit a hold

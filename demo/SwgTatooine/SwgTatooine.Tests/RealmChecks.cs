@@ -43,6 +43,38 @@ internal static class Worlds
         return config;
     }
 
+    /// <summary>The room of planet 0's first building of a kind: its first house's, or its first town hall's.</summary>
+    /// <param name="sim">The simulation.</param>
+    /// <param name="kind">A <see cref="StructureKind"/> with a room.</param>
+    /// <returns>The room's realm; the case fails when no such building has one.</returns>
+    public static ushort RoomOf(TatooineSim sim, int kind)
+    {
+        var first = int.MaxValue;
+        using (var tx = sim.Dbe.CreateQuickTransaction())
+        {
+            foreach (var cluster in tx.For<WorldObject>().GetClusterEnumerator())
+            {
+                if (cluster.Realm.Value != 0)
+                {
+                    continue;
+                }
+
+                var structs = cluster.GetReadOnlySpan(WorldObject.Struct);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var st = structs[System.Numerics.BitOperations.TrailingZeroCount(bits)];
+                    if (st.Kind == kind && st.InteriorRealm != 0)
+                    {
+                        first = Math.Min(first, st.InteriorRealm);
+                    }
+                }
+            }
+        }
+
+        Assert.That(first, Is.LessThan(int.MaxValue), $"no building of kind {kind} has a room");
+        return (ushort)first;
+    }
+
     /// <summary>The planet side of the door into <paramref name="interior"/>, as its row in the world's door table.</summary>
     /// <param name="sim">The simulation.</param>
     /// <param name="interior">A room's realm.</param>
