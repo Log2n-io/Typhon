@@ -85,6 +85,30 @@ public sealed class BotBrainChecks
         });
     }
 
+    /// <summary>A fight that does not end is given up, and that creature is not hunted again.</summary>
+    /// <remarks>The first live run: two bots named one target from one spot for the whole three minutes — something they could not hurt.</remarks>
+    [Test]
+    public void AHuntThatDoesNotEndIsGivenUp()
+    {
+        var brain = Brain();
+        var quarry = Empty(0f, 0f) with { NearestCreature = 42u, NearestCreatureZ = 10f, NearestCreatureM = 10f };
+        brain.Decide(in quarry, 1);
+        Assert.That(brain.Goal, Is.EqualTo(Goal.Hunting), "the premise: a creature at 10 m is hunted");
+
+        var limit = (long)(BotBrain.HuntSeconds * 4) + 2;
+        for (var tick = 2L; tick <= limit; tick++)
+        {
+            brain.Decide(in quarry, tick);
+        }
+
+        Assert.That(brain.Goal, Is.Not.EqualTo(Goal.Hunting), "a hunt that never ended was never given up");
+        for (var tick = limit + 1; tick < limit + 200; tick++)
+        {
+            brain.Decide(in quarry, tick);
+            Assert.That(brain.Goal, Is.Not.EqualTo(Goal.Hunting), "the creature it gave up on was hunted again");
+        }
+    }
+
     /// <summary>
     /// A creature on the far side of the sphere is ignored, so a bot still travels.
     /// </summary>
@@ -229,8 +253,13 @@ public sealed class BotBrainChecks
         // the body on the city's exact centre, where every candidate threshold agrees, so it passed just as well
         // against the radius — which is what the code actually compared, leaving a bot bound for a 456 m city standing
         // 456 m short of it, outside its own 192 m sphere, never seeing the shuttleport it had come for.
+        // A city kilometres away is ridden, so a tick may be spent asking for the swoop; the movement is the tick after.
         var atTheWall = Empty(city.X + city.Radius - 1f, city.Z);
         var keepGoing = brain.Decide(in atTheWall, 100);
+        if (keepGoing.Kind == IntentKind.Mount)
+        {
+            keepGoing = brain.Decide(in atTheWall, 100);
+        }
 
         Assert.Multiple(() =>
         {
@@ -487,10 +516,10 @@ public sealed class RoutingChecks
         Assert.That(route.Mode, Is.Not.EqualTo(TravelMode.Shuttle), "a bot in the open desert boarded a shuttle from nowhere");
     }
 
-    /// <summary>A journey too short to fly is RIDDEN rather than run, and the speed classes are the server's.</summary>
+    /// <summary>A journey too short to fly is RIDDEN on the swoop rather than run, and the speed classes are the server's.</summary>
     /// <remarks>
-    /// <b>Nothing asserted that a speeder was ever chosen.</b> Every other case here is "(not) the shuttle", so deleting
-    /// the speeder branch outright left them all green — and the speed class a mode asks for, which is the only part of
+    /// <b>Nothing asserted that riding was ever chosen.</b> Every other case here is "(not) the shuttle", so deleting
+    /// the riding branch outright left them all green — and the speed class a mode asks for, which is the only part of
     /// a route that reaches the wire, had no test of its own at all.
     /// </remarks>
     [Test]
@@ -503,13 +532,23 @@ public sealed class RoutingChecks
         var route = Routing.Plan(new Journey(0f, 0f, 900f, 0f, 1, 2, map));
         Assert.Multiple(() =>
         {
-            Assert.That(route.Mode, Is.EqualTo(TravelMode.Speeder), "a 900 m ride was run on foot or flown");
-            Assert.That(route.Seconds, Is.EqualTo(900d / Routing.SpeederMps).Within(0.001), "the ride was not costed at the speeder's speed");
-            Assert.That(Routing.SpeedClassOf(TravelMode.Speeder), Is.EqualTo(4), "a speeder must ask for the class the server grants a speeder");
+            Assert.That(route.Mode, Is.EqualTo(TravelMode.Swoop), "a 900 m ride was run on foot or flown");
+            Assert.That(route.Seconds, Is.EqualTo((900d / Routing.SwoopMps) + Routing.MountSeconds).Within(0.001), "the ride was not costed at the swoop");
+            Assert.That(Routing.SpeedClassOf(TravelMode.Swoop), Is.EqualTo(6), "a swoop must ask for the class the server grants a mounted player");
             Assert.That(Routing.SpeedClassOf(TravelMode.Run), Is.EqualTo(2), "running must ask for the run class");
             Assert.That(Routing.SpeedClassOf(TravelMode.Shuttle), Is.EqualTo(2), "walking to a port is done at a run");
         });
     }
+
+    /// <summary>Thirty seconds on foot is the line: under it the bot runs, over it it rides — at the server's real run, 10 m/s.</summary>
+    /// <remarks>
+    /// Both sides of the line, because the run speed the line is drawn in was wrong for as long as the gait scale existed: at the stale 5 m/s, a 250 m
+    /// hop would be fifty "seconds" and ridden.
+    /// </remarks>
+    [TestCase(250f, TravelMode.Run)]
+    [TestCase(310f, TravelMode.Swoop)]
+    public void ThirtySecondsOnFootIsWhereRidingStarts(float metres, TravelMode expected) =>
+        Assert.That(Routing.Plan(new Journey(0f, 0f, metres, 0f, 0, 0, null)).Mode, Is.EqualTo(expected));
 
     /// <summary>The learned map answers by region and kind, and forgets nothing it has seen.</summary>
     [Test]

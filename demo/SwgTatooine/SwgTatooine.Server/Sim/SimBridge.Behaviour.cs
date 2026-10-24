@@ -548,6 +548,9 @@ public sealed partial class SimBridge
         // number nobody reads inside the tick.
         var skipped = 0L;
 
+        // Bodies a door or a shuttle put somewhere else this tick (Teleport, in Spawn, before this phase): see the possessed branch below.
+        var landed = LandedThisTick;
+
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<Player>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
             : ctx.Accessor.GetClusterEnumerator<Player>(ctx.StartClusterIndex, ctx.EndClusterIndex);
@@ -583,6 +586,19 @@ public sealed partial class SimBridge
                 // and the re-decide below would fire on every tick and overwrite the destination the client just sent.
                 if (controls[idx].Kind != ControllerKind.Scripted)
                 {
+                    // Except that a possessed body a door or a shuttle just moved stands on its landing. Its destination and velocity were the realm it
+                    // left — a point in another frame — so it walked on at it: out through the room's way out a second later, back in through the front,
+                    // or into a room's corner. Here and not in the crossing's own transaction, which is durable: a motion written there was three WAL
+                    // records a crossing tick (CausalityChecks.AC2). Its client renews what it wants on the ticks that follow.
+                    if (landed != null && landed.Contains(cluster.GetEntityId(idx)))
+                    {
+                        ref var stop = ref motions[idx];
+                        stop.VelX = 0f;
+                        stop.VelZ = 0f;
+                        stop.DestX = places[idx].X;
+                        stop.DestZ = places[idx].Z;
+                    }
+
                     skipped++;
                     continue;
                 }

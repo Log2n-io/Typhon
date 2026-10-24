@@ -468,6 +468,10 @@ if (brain)
         $"brain: {decisions.Boardings} shuttle boarding(s) asked for, {decisions.Hunts} hunt(s) begun; "
         + $"{decisions.PortsKnownMax} port(s) known by the best-travelled bot, {decisions.BotsThatCanFly} bot(s) know two or more, "
         + $"{(decisions.Creatures > 0 ? "a creature was in view at least once" : "no creature was EVER in view")}");
+    var errands = swarm.Errands();
+    Console.WriteLine(
+        $"errands: {errands.Mounts} swoop mount/dismount ask(s), {errands.Doors} door crossing(s), {errands.Used} terminal(s) used, "
+        + $"{errands.Paths} walk(s) searched round buildings");
 }
 
 if (swarm.Disconnects.Count == 0)

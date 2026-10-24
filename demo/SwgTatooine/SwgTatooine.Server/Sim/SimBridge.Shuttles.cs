@@ -318,9 +318,10 @@ public sealed partial class SimBridge
                 // (review #4: `phase == 0` let a divided planet's burst passengers miss nearly every shuttle).
                 // A session's passenger boards the moment its shuttle is down, deterministically: its client times the landing from the published
                 // schedule and fades out on touchdown, so a boarding hashed somewhere into the window would hold that client's screen black for up to the
-                // whole of it. The scripted crowd keeps the trickle — it is #910's workload.
+                // whole of it. The scripted crowd keeps the trickle — it is #910's workload. "A session's" is any body a session possesses, stated as
+                // "not the crowd's" rather than as one controller kind, so no kind a possession may carry later can become a branch on bot-ness.
                 var key = cluster.GetEntityId(idx).EntityKey;
-                var session = controls[idx].Kind == ControllerKind.Human;
+                var session = controls[idx].Kind != ControllerKind.Scripted;
                 var board = session || (_config.ShuttleBurst
                     ? phase < k
                     : Hash01(Salt(tick, key, 0x5A17EE21u)) * (window - phase) < k);

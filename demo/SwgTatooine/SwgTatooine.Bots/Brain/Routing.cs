@@ -16,8 +16,8 @@ public enum TravelMode
     /// <summary>On foot, at a run.</summary>
     Run = 0,
 
-    /// <summary>On a speeder.</summary>
-    Speeder,
+    /// <summary>On the swoop: mounted, at four times the run.</summary>
+    Swoop,
 
     /// <summary>Walk to this city's port, wait, fly, walk from the destination's port.</summary>
     Shuttle,
@@ -47,22 +47,32 @@ public readonly record struct Route(TravelMode Mode, double Seconds, float PortX
 /// <summary>Chooses between walking, riding and flying on expected time.</summary>
 public static class Routing
 {
-    /// <summary>A player's run speed, m/s — <c>TatooineData.PlayerRunSpeedMps</c>, the class the server grants by default.</summary>
-    public const double RunMps = 5d;
+    /// <summary>
+    /// A player's run, m/s, as the server GRANTS it: <c>TatooineData.PlayerRunSpeedMps</c> × <c>PlayerGaitScale</c> (5 × 2). This said 5 for as long as
+    /// the gait scale has existed, so every route was costed at half the real run and the thirty-second rule below would have mounted for 150 m.
+    /// </summary>
+    public const double RunMps = 10d;
 
-    /// <summary>A speeder's speed, m/s — <c>TatooineData.PlayerSpeederSpeedMps</c>.</summary>
-    public const double SpeederMps = 24d;
+    /// <summary>The swoop, m/s: four times the run (<c>TatooineData.PlayerSwoopSpeedMps</c> × the gait scale), granted only while mounted.</summary>
+    public const double SwoopMps = 40d;
 
     /// <summary>
-    /// What mounting costs, in seconds.
+    /// A leg longer than this on foot is ridden, in seconds — Loïc's rule for the swoop, the same for a bot as for anyone: thirty seconds of running is
+    /// 300 m.
     /// </summary>
-    /// <remarks>
-    /// <b>Zero on this server, and named rather than omitted.</b> There are no vehicle items and no mount state here, so
-    /// a speeder is a speed class the server grants on request and riding costs nothing to begin. In SWG it cost calling
-    /// and mounting a vehicle, which is seconds — and the moment this server grows one, this constant is where the
-    /// routing learns about it, instead of the comparison quietly staying wrong.
-    /// </remarks>
-    public const double MountSeconds = 0d;
+    public const double RideOverSeconds = 30d;
+
+    /// <summary>`StructureKind.Bazaar`.</summary>
+    public const int BazaarKind = 9;
+
+    /// <summary>`StructureKind.MissionTerminal`.</summary>
+    public const int MissionTerminalKind = 10;
+
+    /// <summary>`SpeedClasses.Swoop`, granted only while mounted.</summary>
+    public const byte SwoopClass = 6;
+
+    /// <summary>What getting on and off costs, in seconds: a <c>SetMount</c> each way and the tick or two each takes to come back as <c>mounted</c>.</summary>
+    public const double MountSeconds = 1d;
 
     /// <summary>The shuttle's cadence, in seconds — <c>SimConfig.ShuttleIntervalS</c>'s default.</summary>
     /// <remarks>
@@ -93,14 +103,11 @@ public static class Routing
         var direct = Distance(journey.FromX, journey.FromZ, journey.ToX, journey.ToZ);
         var best = new Route(TravelMode.Run, direct / RunMps, 0f, 0f);
 
-        // Riding wins every direct comparison while MountSeconds is 0, because 24 m/s beats 5 m/s over any distance.
-        // The comparison is written out rather than collapsed because MountSeconds is the constant that makes it a real
-        // comparison, and a server that grows a vehicle to call is the server where running becomes the right answer
-        // over a street's width.
-        var riding = (direct / SpeederMps) + MountSeconds;
-        if (riding < best.Seconds)
+        // Ridden only past thirty seconds on foot: a rule rather than the cheaper of the two, because the swoop is cheaper over any distance worth a
+        // mount and a person does not summon one to cross a street.
+        if (direct / RunMps > RideOverSeconds)
         {
-            best = new Route(TravelMode.Speeder, riding, 0f, 0f);
+            best = new Route(TravelMode.Swoop, (direct / SwoopMps) + MountSeconds, 0f, 0f);
         }
 
         if (journey.FromRegion <= 0 || journey.Map == null)
@@ -117,16 +124,21 @@ public static class Routing
         // The wait is a distribution, and its mean is what an expectation wants: a bot arriving at an unobserved moment
         // in a cadence of T waits T/2 on average. Using T would make the shuttle look worse than it is by a minute, and
         // using 0 would make it look better than it ever is.
-        var toPort = Distance(journey.FromX, journey.FromZ, from.X, from.Z) / RunMps;
-        var fromPort = Distance(to.X, to.Z, journey.ToX, journey.ToZ) / RunMps;
+        var toPort = LegSeconds(Distance(journey.FromX, journey.FromZ, from.X, from.Z));
+        var fromPort = LegSeconds(Distance(to.X, to.Z, journey.ToX, journey.ToZ));
         var flying = toPort + (ShuttleIntervalSeconds / 2d) + FlightSeconds + fromPort;
         return flying < best.Seconds ? new Route(TravelMode.Shuttle, flying, from.X, from.Z) : best;
     }
 
+    /// <summary>What one leg costs on its own terms: run it, or ride it past the thirty seconds.</summary>
+    /// <param name="metres">Its length.</param>
+    /// <returns>Seconds.</returns>
+    public static double LegSeconds(double metres) => metres / RunMps > RideOverSeconds ? (metres / SwoopMps) + MountSeconds : metres / RunMps;
+
     /// <summary>The speed class a mode asks the server for.</summary>
     /// <param name="mode">The mode.</param>
     /// <returns>The class, as <c>SpeedClasses</c> numbers them.</returns>
-    public static byte SpeedClassOf(TravelMode mode) => mode == TravelMode.Speeder ? (byte)4 : (byte)2;
+    public static byte SpeedClassOf(TravelMode mode) => mode == TravelMode.Swoop ? SwoopClass : (byte)2;
 
     /// <summary>Plain distance.</summary>
     /// <param name="ax">First point, east.</param>

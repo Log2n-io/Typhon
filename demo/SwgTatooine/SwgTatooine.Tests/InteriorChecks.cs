@@ -823,8 +823,8 @@ public sealed class DoorWalkChecks
     /// step over the plane while its disc still held, skip the query — the only place a client's crossing is tested — and never enter. Two metres out at
     /// a walk, on open ground, is exactly that: a wide disc and a plane inside it.
     /// <para>
-    /// <b>14 ticks</b>: the plane is reached on the tenth, and a client's body keeps its velocity indoors — a few ticks more could walk it out again through
-    /// the room's way out, depending on how the building is turned.
+    /// <b>14 ticks</b>: the plane is reached on the tenth. A body used to keep its velocity indoors, so a few ticks more could walk it out again through the
+    /// room's way out; the case below runs long past the crossing for that reason.
     /// </para>
     /// </remarks>
     [Test]
@@ -863,4 +863,58 @@ public sealed class DoorWalkChecks
             Assert.That(Worlds.RealmOf(sim, player), Is.EqualTo(interior));
         });
     }
+
+    /// <summary>A client's body that goes through a door stands on the landing: it does not walk on at a destination from the realm it left.</summary>
+    /// <remarks>
+    /// The fourth live bot run: a bot walked into a house, turned for the way out, crossed — and was carried straight back in, then across the room into its
+    /// far corner, by a destination the crossing had left in the other realm's frame. Sixty ticks is long past every way that walk could end.
+    /// </remarks>
+    [Test]
+    public void AClientsBody_ThroughADoor_StandsOnTheLanding()
+    {
+        using var sim = new TatooineSim(Config(60)) { AssetShapesOverride = Published.Shapes() };
+        sim.Initialize();
+        var interior = (ushort)sim.Config.Planets;
+        var front = sim.Portals.Door[Worlds.DoorInto(sim, interior)];
+        var player = sim.Index.Players[0];
+        const float Walk = 0.2f;
+        using (var tx = sim.Dbe.CreateQuickTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit))
+        {
+            var p = tx.OpenMut(player);
+            p.Set(Player.Control, new PlayerControl { Kind = ControllerKind.Human });
+            var state = p.Read(Player.State);
+            state.Activity = PlayerActivity.Travelling;
+            state.ActivityTicks = int.MaxValue / 2;
+            p.Set(Player.State, state);
+            var move = p.Read(Player.Move);
+            move.VelX = front.ForwardX * Walk;
+            move.VelZ = front.ForwardZ * Walk;
+
+            // A destination far on through the door, in the planet's frame — what a click past the doorway leaves behind.
+            move.DestX = front.CenterX + (front.ForwardX * 500f);
+            move.DestZ = front.CenterZ + (front.ForwardZ * 500f);
+            move.SpeedMps = 2f;
+            move.BiasTick = 0;
+            p.Set(Player.Move, move);
+            var at = default(PlayerPlacement);
+            at.SetAt(front.CenterX - (front.ForwardX * 1.9f), front.CenterZ - (front.ForwardZ * 1.9f), 0f, p.Read(Player.Bounds).HalfExtent);
+            tx.Teleport(player, Player.Bounds, RealmId.Default, in at);
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        sim.Run();
+
+        using var read = sim.Dbe.CreateQuickTransaction();
+        Assert.That(read.TryOpen(player, out var body), Is.True);
+        var place = body.Read(Player.Bounds);
+        Assert.Multiple(() =>
+        {
+            Assert.That(sim.CrossingTotals.Entries, Is.EqualTo(1), "the premise: the body went in");
+            Assert.That(sim.CrossingTotals.Exits, Is.Zero, "the body walked on through the room and out again");
+            Assert.That(Worlds.RealmOf(sim, player), Is.EqualTo(interior));
+            Assert.That(Routing2D(place.X, place.Z, front.ArriveX, front.ArriveZ), Is.LessThan(0.5f), "the body did not stand on the landing");
+        });
+    }
+
+    private static float Routing2D(float ax, float az, float bx, float bz) => MathF.Sqrt(((ax - bx) * (ax - bx)) + ((az - bz) * (az - bz)));
 }

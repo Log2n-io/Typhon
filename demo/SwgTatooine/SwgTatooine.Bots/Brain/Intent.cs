@@ -26,6 +26,12 @@ public enum IntentKind
 
     /// <summary>Queue for the next shuttle to a city (<c>BoardShuttle</c>).</summary>
     Board,
+
+    /// <summary>Walk to a point and stop on it (<c>MoveTo</c>): the click a browser sends, at the run the server grants.</summary>
+    MoveTo,
+
+    /// <summary>Get on the swoop, or off it (<c>SetMount</c>): the browser's 1 key.</summary>
+    Mount,
 }
 
 /// <summary>One decision.</summary>
@@ -34,6 +40,9 @@ public enum IntentKind
 /// <param name="SpeedClass">How fast, as a class the server grants, for <see cref="IntentKind.Move"/>.</param>
 /// <param name="NetId">What to attack, for <see cref="IntentKind.Attack"/>.</param>
 /// <param name="Region">Where to fly, as a city plus one, for <see cref="IntentKind.Board"/>; 0 otherwise.</param>
+/// <param name="X">Where to walk, east, for <see cref="IntentKind.MoveTo"/>.</param>
+/// <param name="Z">Where to walk, north.</param>
+/// <param name="On">For <see cref="IntentKind.Mount"/>: get on (true) or off.</param>
 /// <remarks>
 /// <b>The destination is a region, which is a city plus one, and 0 means none.</b> <c>BoardShuttle</c> itself carries a
 /// bare city index on the wire, so the subtraction happens at the send — once, in the swarm — rather than here. The
@@ -41,10 +50,21 @@ public enum IntentKind
 /// sentinel this project does not keep: <c>Intent.None.Region</c> would then differ from <c>default</c>, and the one
 /// place a city index of 0 is legitimate is exactly where the mistake would be invisible.
 /// </remarks>
-public readonly record struct Intent(IntentKind Kind, float Heading, byte SpeedClass, uint NetId, int Region)
+public readonly record struct Intent(IntentKind Kind, float Heading, byte SpeedClass, uint NetId, int Region, float X = 0f, float Z = 0f, bool On = false)
 {
     /// <summary>Nothing this tick.</summary>
     public static Intent None => new(IntentKind.None, 0f, 0, 0, 0);
+
+    /// <summary>Walk to a point and stop there.</summary>
+    /// <param name="x">East.</param>
+    /// <param name="z">North.</param>
+    /// <returns>The intent.</returns>
+    public static Intent MoveTo(float x, float z) => new(IntentKind.MoveTo, 0f, 0, 0, 0, x, z);
+
+    /// <summary>Get on the swoop, or off it.</summary>
+    /// <param name="on">On (true) or off.</param>
+    /// <returns>The intent.</returns>
+    public static Intent Mount(bool on) => new(IntentKind.Mount, 0f, 0, 0, 0, On: on);
 
     /// <summary>Move on a heading at a speed class.</summary>
     /// <param name="heading">Radians.</param>

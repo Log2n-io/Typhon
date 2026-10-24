@@ -157,6 +157,31 @@ internal sealed class ClientIntentChecks : ServedChecks
         });
     }
 
+    /// <summary>A click runs at the run the server grants a held key, not at half of it.</summary>
+    /// <remarks>
+    /// The case above bounds a <c>MoveTo</c> from above only, so a click that walked at the raw run figure — half the granted one, the gait ladder's scale
+    /// left out — passed it for as long as the scale existed. Ten ticks separate a run from half of one by several steps.
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void AMoveToRunsAtTheGrantedRun()
+    {
+        var config = Config();
+        using var world = new Possessed(config);
+        var before = world.Read();
+
+        world.Link.SendCommand(nameof(MoveTo), ClientSays.MoveTo(before.X + 1_000f, before.Z));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the intent to be applied by a tick");
+        var start = world.Sim.Runtime.CurrentTickNumber;
+        var from = world.Read();
+        world.Harness.Ticks(10);
+        var elapsed = world.Sim.Runtime.CurrentTickNumber - start;
+
+        var after = world.Read();
+        var travelled = MathF.Sqrt(((after.X - from.X) * (after.X - from.X)) + ((after.Z - from.Z) * (after.Z - from.Z)));
+        Assert.That(travelled, Is.GreaterThanOrEqualTo(StepM * (elapsed - 1) * 0.9f), $"a click moved {travelled:F2} m in {elapsed} ticks: slower than a run");
+    }
+
     /// <summary>
     /// The destination is clamped to the world, so a client cannot aim a player at coordinates the world does not have.
     /// </summary>

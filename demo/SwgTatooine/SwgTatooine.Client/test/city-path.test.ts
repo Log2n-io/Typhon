@@ -38,6 +38,17 @@ describe('wallGrid', () => {
   });
 });
 
+describe('round colliders and struts', () => {
+  it('walls off a round pad as its disc, not its square, and a tall leaning strut as a wall', () => {
+    const pad = box({ minX: -12, maxX: 12, minZ: -12, maxZ: 12, minY: 0.3, maxY: 1.26, radius: 12 });
+    const strut = box({ minX: 19.5, maxX: 21.3, minZ: -0.5, maxZ: 0.5, minY: -0.08, maxY: 2.3, slopeX: 0.41 });
+    const grid = wallGrid([placed([pad, strut])], 1, -30, -30, 30, 30, 0.3);
+    expect(lineClear(grid, 10.5, 10.5, 11.5, 9.5)).toBe(true);
+    expect(lineClear(grid, 0, -20, 0, 20)).toBe(false);
+    expect(lineClear(grid, 20.4, -4, 20.4, 4)).toBe(false);
+  });
+});
+
 describe('findPath', () => {
   it('goes round a wall, never through it, and ends on the goal', () => {
     const grid = wallGrid([WALL], 1, -40, -10, 40, 30, 0.3);
@@ -58,6 +69,25 @@ describe('findPath', () => {
   it('walks straight where nothing is in the way: one leg', () => {
     const grid = wallGrid([WALL], 1, -40, -10, 40, 30, 0.3);
     expect(findPath(grid, -30, 0, 30, 5)).toEqual([[30, 5]]);
+  });
+
+  it('steps out of the wall first from a body pressed against it, and every leg after is clear', () => {
+    const house = placed([box({ minX: -3, maxX: 3, minZ: -3, maxZ: 3, maxY: 2.7 })]);
+    const grid = wallGrid([house], 1, -60, -40, 40, 40, 0.3);
+    const path = findPath(grid, 3.3, -2.7, -40, -10);
+    expect(path).not.toBeNull();
+    expect(Math.hypot(path![0][0] - 3.3, path![0][1] + 2.7)).toBeLessThan(1.5);
+    for (let i = 1; i < path!.length; i++) {
+      expect(lineClear(grid, path![i - 1][0], path![i - 1][1], path![i][0], path![i][1])).toBe(true);
+    }
+  });
+
+  it('ends on the open cell beside a goal that stands inside a wall, not inside the wall', () => {
+    const grid = wallGrid([WALL], 1, -40, -10, 40, 30, 0.3);
+    const path = findPath(grid, 0, 0, 0, 10.5);
+    expect(path).not.toBeNull();
+    const [x, z] = path![path!.length - 1];
+    expect(grid.blocked[Math.floor(z - grid.minZ) * grid.cols + Math.floor(x - grid.minX)]).toBe(0);
   });
 
   it('is null when the goal is walled in', () => {

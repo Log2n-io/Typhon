@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using Typhon.Client;
 using Typhon.Protocol;
 
@@ -28,6 +30,11 @@ public sealed class Perception
     private int _creatures = -1;
     private int _kindField = -1;
     private int _regionField = -1;
+    private int _assetField = -1;
+    private int _yawField = -1;
+    private int _mountedArchetype = -1;
+    private int _mountedField = -1;
+    private readonly StoreStructures _view = new();
 
     /// <summary>Reads what this bot can see, and teaches its map any facility in view.</summary>
     /// <param name="store">The bot's store, or null before a catalog has arrived.</param>
@@ -51,10 +58,22 @@ public sealed class Perception
         }
 
         var own = store.Archetypes[ownArchetype];
-        var at = own.HeadPosition(ownSlot);
-        var x = (float)at[0];
-        var z = own.Dims > 1 ? (float)at[1] : 0f;
+        // Where the body IS, at the latest tick the store has heard of — not where its motion segment started. A moving body is sent as a segment
+        // (a start and a velocity) and a new one only when its course changes, so the head position stood still for seconds while the body ran: a
+        // bot steering by it believed itself five seconds behind, which a walk to a door cannot survive.
+        Span<double> motion = stackalloc double[own.MotionStride];
+        MotionEvaluator.EvaluateSlot(own, ownSlot, Math.Max(0L, store.Tick), 0d, motion);
+        var x = (float)motion[0];
+        var z = own.Dims > 1 ? (float)motion[1] : 0f;
 
+        if (_mountedArchetype != ownArchetype)
+        {
+            _mountedArchetype = ownArchetype;
+            _mountedField = FieldOf(store, ownArchetype, "mounted");
+        }
+
+        var mounted = _mountedField >= 0 && store.Archetypes[ownArchetype].Numbers[_mountedField] is { } m && m[ownSlot] == 1;
+        _view.Bind(store, _structures, _kindField, _regionField, _assetField, _yawField);
         var world = new Perceived
         {
             HasBody = true,
@@ -62,6 +81,8 @@ public sealed class Perception
             Z = z,
             Realm = store.Realm?.RealmId ?? 0,
             BoardRefused = BoardRefusedIn(store),
+            Mounted = mounted,
+            Structures = _view,
         };
 
         world = NearestCreature(store, _creatures, x, z, world);
@@ -115,7 +136,7 @@ public sealed class Perception
         return world with { NearestCreature = bestNetId, NearestCreatureX = bestX, NearestCreatureZ = bestZ, NearestCreatureM = (float)best };
     }
 
-    /// <summary>Teaches the map every shuttleport in view, and notices one close enough to board at.</summary>
+    /// <summary>Teaches the map every shuttleport, bazaar and mission terminal in view, and notices a port close enough to board at.</summary>
     /// <param name="store">The store.</param>
     /// <param name="x">The bot, east.</param>
     /// <param name="z">The bot, north.</param>
@@ -143,6 +164,9 @@ public sealed class Perception
             return world;
         }
 
+        var assets = _assetField >= 0 ? set.Numbers[_assetField] : null;
+        var yaws = _yawField >= 0 ? set.Numbers[_yawField] : null;
+
         var port = 0;
         for (var i = 0; i < set.LiveCount; i++)
         {
@@ -153,13 +177,13 @@ public sealed class Perception
                 continue;   // in the wild: it belongs to no city, so there is nothing to remember it under
             }
 
-            // Ports only, and it is a cost decision. A city holds about 190 structures and every one of them was being
-            // filed every tick by every bot standing there — some 380 k hashed writes a second at 500 bots — for a
-            // table whose only reader asks for shuttleports. A POI's props carry a region too, and theirs are numbered
-            // above the cities' (WorldBuilder starts poiIndex at Cities.Count), so they were never confused with a
-            // city's facilities; they were simply filed for nobody.
+            // The three kinds a goal reads, and only those, and it is a cost decision. A city holds about 190 structures and
+            // every one of them was being filed every tick by every bot standing there — some 380 k hashed writes a second at
+            // 500 bots — for a table whose readers ask for ports, bazaars and mission terminals: a dozen per city. A POI's
+            // props carry a region too, and theirs are numbered above the cities' (WorldBuilder starts poiIndex at
+            // Cities.Count), so they are never confused with a city's facilities.
             var kind = (int)kinds[slot];
-            if (kind != Routing.ShuttleportKind)
+            if (kind != Routing.ShuttleportKind && kind != Routing.BazaarKind && kind != Routing.MissionTerminalKind)
             {
                 continue;
             }
@@ -169,8 +193,8 @@ public sealed class Perception
             var pz = set.Dims > 1 ? (float)at[1] : 0f;
 
             // The region is kept as the wire carries it — a city plus one — so that 0 means "none" the whole way through.
-            facilities.Observe(region, kind, px, pz);
-            if (Routing.Distance(x, z, px, pz) <= BoardingM)
+            facilities.Observe(region, kind, px, pz, assets != null ? (int)assets[slot] : -1, yaws != null ? (int)yaws[slot] : 0);
+            if (kind == Routing.ShuttleportKind && Routing.Distance(x, z, px, pz) <= BoardingM)
             {
                 port = region;
             }
@@ -219,7 +243,7 @@ public sealed class Perception
     /// refusal is still the authority: if these two ever disagree the bot walks closer and asks again, which is what a
     /// person does when a prompt does not appear.
     /// </remarks>
-    public const double BoardingM = 20d;
+    public const double BoardingM = 30d;
 
     /// <summary>Resolves the archetype and field indices once per catalog.</summary>
     /// <param name="store">The store to resolve against.</param>
@@ -239,6 +263,9 @@ public sealed class Perception
         // body, bounds-checked only. A field index is meaningful in one archetype and nowhere else.
         _kindField = FieldOf(store, _structures, "kind");
         _regionField = FieldOf(store, _structures, "region");
+        _assetField = FieldOf(store, _structures, "asset");
+        _yawField = FieldOf(store, _structures, "yaw");
+        _mountedArchetype = -1;
     }
 
     private static int IndexOf(WorldStore store, string name)
@@ -271,5 +298,76 @@ public sealed class Perception
         }
 
         return -1;
+    }
+}
+
+/// <summary>The structures a bot holds, read only when a goal asks for them.</summary>
+/// <remarks>
+/// <b>On demand, because a path is planned once a leg and the store is read every tick.</b> Copying a city's 190 structures into a list each tick for
+/// a reader that wants them every few seconds is the cost the facility filter above already declined. The brain calls <see cref="CopyTo"/> when it
+/// plans; a test hands it a list.
+/// </remarks>
+public interface IStructureView
+{
+    /// <summary>Appends every structure held to a list (the list is not cleared).</summary>
+    void CopyTo(List<SeenStructure> into);
+}
+
+/// <summary>A fixed list of structures, for a test or a snapshot.</summary>
+public sealed class ListStructures(IReadOnlyList<SeenStructure> list) : IStructureView
+{
+    /// <inheritdoc/>
+    public void CopyTo(List<SeenStructure> into) => into.AddRange(list);
+}
+
+/// <summary>The view over a bot's store, rebound each tick.</summary>
+internal sealed class StoreStructures : IStructureView
+{
+    private WorldStore _store;
+    private int _archetype = -1;
+    private int _kind = -1;
+    private int _region = -1;
+    private int _asset = -1;
+    private int _yaw = -1;
+
+    public void Bind(WorldStore store, int archetype, int kind, int region, int asset, int yaw)
+    {
+        _store = store;
+        _archetype = archetype;
+        _kind = kind;
+        _region = region;
+        _asset = asset;
+        _yaw = yaw;
+    }
+
+    public void CopyTo(List<SeenStructure> into)
+    {
+        if (_store == null || _archetype < 0 || _asset < 0)
+        {
+            return;
+        }
+
+        var set = _store.Archetypes[_archetype];
+        var kinds = _kind >= 0 ? set.Numbers[_kind] : null;
+        var regions = _region >= 0 ? set.Numbers[_region] : null;
+        var assets = set.Numbers[_asset];
+        var yaws = _yaw >= 0 ? set.Numbers[_yaw] : null;
+        if (assets == null)
+        {
+            return;
+        }
+
+        for (var i = 0; i < set.LiveCount; i++)
+        {
+            var slot = set.Live[i];
+            var at = set.HeadPosition(slot);
+            into.Add(new SeenStructure(
+                (float)at[0],
+                set.Dims > 1 ? (float)at[1] : 0f,
+                kinds != null ? (int)kinds[slot] : 0,
+                (int)assets[slot],
+                yaws != null ? (int)yaws[slot] : 0,
+                regions != null ? (int)regions[slot] : 0));
+        }
     }
 }

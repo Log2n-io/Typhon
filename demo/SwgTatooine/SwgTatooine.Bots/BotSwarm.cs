@@ -236,6 +236,16 @@ public sealed class BotSwarm : IAsyncDisposable
 
     private const string BoardShuttleCommand = "BoardShuttle";
 
+    private const string MoveToCommand = "MoveTo";
+
+    private const string SetMountCommand = "SetMount";
+
+    /// <summary>
+    /// The public content a thinking bot walks a city by — walls, doors, terminals — read once per fleet from the server's HTTP surface, as a browser
+    /// reads it. Null until loaded, and for good when the server publishes none: the brains then travel and hunt as they always did.
+    /// </summary>
+    private BotAssets _assets;
+
     /// <summary>Bots driven concurrently within one tick.</summary>
     /// <remarks>
     /// Large enough that the per-tick cost is a few round trips rather than N of them, small enough that the in-flight sends and their
@@ -908,6 +918,22 @@ public sealed class BotSwarm : IAsyncDisposable
         return (boardings, hunts, portsMax, canFly, creatures);
     }
 
+    /// <summary>What the brains did with the cities, summed over the fleet: swoop asks, doors crossed, terminals used, walks searched.</summary>
+    public (long Mounts, long Doors, long Used, long Paths) Errands()
+    {
+        (long Mounts, long Doors, long Used, long Paths) sum = default;
+        foreach (var bot in Bots)
+        {
+            if (bot != null)
+            {
+                var e = bot.Errands();
+                sum = (sum.Mounts + e.Mounts, sum.Doors + e.Doors, sum.Used + e.Used, sum.Paths + e.Paths);
+            }
+        }
+
+        return sum;
+    }
+
     private readonly Dictionary<ushort, int> _disconnects = [];
     private readonly Lock _reportLock = new();
     private int _faults;
@@ -1004,6 +1030,22 @@ public sealed class BotSwarm : IAsyncDisposable
         // pass plus the timer's wait, which at a few thousand sessions crosses the window exactly while the ramp is also opening
         // sockets: measured, the server closed 880 of 3 000 for silence and the client could only see them as 1006. On its own loop
         // the interval is bounded by the ping pass alone, whatever the rest of the fleet is doing.
+        if (_options.Brain && _options.Kind == "player" && BotProvisioner.AuthBaseFrom(_options.Endpoint) is { } server)
+        {
+            try
+            {
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+                _assets = await BotAssets.LoadAsync(http, server, ct).ConfigureAwait(false);
+                Console.WriteLine(_assets == null
+                    ? "  brain: the server publishes no asset set; bots walk straight lines and enter no building"
+                    : $"  brain: {_assets.Count} structure assets read; bots walk round buildings, through doors and to terminals");
+            }
+            catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException or KeyNotFoundException)
+            {
+                Console.WriteLine($"  !! brain: the asset set could not be read ({e.Message}); bots walk straight lines and enter no building");
+            }
+        }
+
         _pinger = Task.Run(() => PingLoopAsync(_stopping.Token), CancellationToken.None);
         _driver = Task.Run(() => DriveAsync(_stopping.Token), CancellationToken.None);
         _reconciler = Task.Run(() => ReconcileAsync(_stopping.Token), CancellationToken.None);
@@ -1639,7 +1681,7 @@ public sealed class BotSwarm : IAsyncDisposable
     /// </remarks>
     private async Task<Bot> OpenOneAsync(int index, CancellationToken ct)
     {
-        var bot = new Bot(index, _options);
+        var bot = new Bot(index, _options, _assets);
         bot.Client.Disconnected += (code, _) => Note(code, bot.Client.CloseDetail);
 
         // Interlocked, because Fault is raised from each client's OWN receive loop: with N bots these are N threads, and `Faults++` is a
@@ -2157,13 +2199,22 @@ public sealed class BotSwarm : IAsyncDisposable
         /// <returns>The count.</returns>
         public int PortsKnown() => _brain?.Facilities.Count ?? 0;
 
+        /// <summary>What this bot's brain did with the city: swoop asks, doors crossed, terminals used, walks searched.</summary>
+        public (long Mounts, long Doors, long Used, long Paths) Errands() =>
+            _brain == null ? default : (_brain.MountsAsked, _brain.DoorsCrossed, _brain.FacilitiesUsed, _brain.PathsPlanned);
+
         /// <summary>This bot's own decision loop and the eye that feeds it; null unless the run is thinking.</summary>
         private readonly BotBrain _brain;
 
         private readonly Perception _eyes;
+
+        /// <summary>The one bot whose decisions are printed, from <c>SWG_BOT_TRACE</c> (an index, or <c>all</c>); -1 for none.</summary>
+        private static readonly int TraceIndex = int.TryParse(Environment.GetEnvironmentVariable("SWG_BOT_TRACE"), out var i) ? i : -1;
+
+        private static readonly bool TraceAll = Environment.GetEnvironmentVariable("SWG_BOT_TRACE") == "all";
         public readonly NewsCounter News = new();
 
-        public Bot(int index, BotSwarmOptions options)
+        public Bot(int index, BotSwarmOptions options, BotAssets assets = null)
         {
             // Deterministic from the index, so a run is reproducible and two bots are never in the same place. The golden ratio keeps successive angles from
             // clustering, which a plain index × constant does not.
@@ -2182,7 +2233,7 @@ public sealed class BotSwarm : IAsyncDisposable
                 // Its own stream, from its own index, for the reason the wanderer's is: a run has to reproduce, and a thousand bots
                 // sharing one stream would decide in lockstep. A different multiplier from the wanderer's so a bot's course and its
                 // choices are not the same sequence read twice.
-                _brain = new BotBrain(BotMap.Cities, (uint)((index * 2246822519u) | 1u), options.TickHz);
+                _brain = new BotBrain(BotMap.Cities, (uint)((index * 2246822519u) | 1u), options.TickHz, assets);
                 _eyes = new Perception();
             }
             _heading = (float)((index * golden) % (Math.PI * 2));
@@ -2341,6 +2392,26 @@ public sealed class BotSwarm : IAsyncDisposable
 
             var before = _brain.Goal;
             var intent = _brain.Decide(in world, tick);
+            if (TraceAll || Index == TraceIndex)
+            {
+                // A brain is read from what it did, tick by tick: one bot's decisions, to stdout, when SWG_BOT_TRACE names its index.
+                Console.WriteLine(
+                    $"  trace {Index,3} {tick,6} realm {world.Realm} at ({world.X:F1}, {world.Z:F1}) mounted {(world.Mounted ? 1 : 0)} "
+                    + $"{_brain.Goal,-10} {intent.Kind,-6} h {intent.Heading:F2} c {intent.SpeedClass} to ({intent.X:F1}, {intent.Z:F1}) on {intent.On} {_brain.LegState}");
+                if (tick % 200 == 1 && world.Structures != null)
+                {
+                    // What it stands among, now and then: a body that never moves is read off what is around it.
+                    var around = new List<SeenStructure>();
+                    world.Structures.CopyTo(around);
+                    foreach (var s in around)
+                    {
+                        if (Routing.Distance(world.X, world.Z, s.X, s.Z) < 25d)
+                        {
+                            Console.WriteLine($"  trace {Index,3} {tick,6}   near kind {s.Kind} asset {s.Asset} yaw {s.Yaw} at ({s.X:F1}, {s.Z:F1})");
+                        }
+                    }
+                }
+            }
 
             // Counted on the TRANSITION into hunting, not on each SetTarget. A hunt re-names its target every tick it
             // is in strike range, so counting sends made a dozen bots look like five hundred hunts — and this counter
@@ -2370,6 +2441,22 @@ public sealed class BotSwarm : IAsyncDisposable
                     await Client.SendCommandAsync(
                         SetTargetCommand,
                         new RecordValues { ["netId"] = FieldValue.Of((double)intent.NetId) },
+                        ct).ConfigureAwait(false);
+                    IntentsSent++;
+                    break;
+
+                case IntentKind.MoveTo when Client.Plan.CommandByName(MoveToCommand) != null:
+                    await Client.SendCommandAsync(
+                        MoveToCommand,
+                        new RecordValues { ["x"] = FieldValue.Of((double)intent.X), ["z"] = FieldValue.Of((double)intent.Z) },
+                        ct).ConfigureAwait(false);
+                    IntentsSent++;
+                    break;
+
+                case IntentKind.Mount when Client.Plan.CommandByName(SetMountCommand) != null:
+                    await Client.SendCommandAsync(
+                        SetMountCommand,
+                        new RecordValues { ["on"] = FieldValue.Of(intent.On ? 1.0 : 0.0) },
                         ct).ConfigureAwait(false);
                     IntentsSent++;
                     break;

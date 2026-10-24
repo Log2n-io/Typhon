@@ -75,4 +75,10 @@ public readonly struct Perceived
     /// happens once, where a destination reaches the wire.
     /// </remarks>
     public int PortRegion { get; init; }
+
+    /// <summary>Whether the body is riding its swoop: the server's replicated <c>mounted</c>, the only authority on it.</summary>
+    public bool Mounted { get; init; }
+
+    /// <summary>The structures it holds, read when a goal plans a walk; null in a test that needs none.</summary>
+    public IStructureView Structures { get; init; }
 }

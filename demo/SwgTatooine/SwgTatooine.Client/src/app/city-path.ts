@@ -20,6 +20,12 @@ const STEP_M = 0.4;
 /** Height a collider must start under to block a body, metres: anything higher is overhead. */
 const HEAD_M = 1.8;
 
+/**
+ * A sloped collider whose top is under this is a ramp or a flight of steps, metres; a taller one is a leaning strut, and a wall. The published ramps
+ * top out between 0.2 m and 1.26 m (the port's stairs to its pad); the port's ring of struts lean at 2.3 m.
+ */
+const RAMP_TOP_M = 1.5;
+
 /** The walk grid's cell, metres. */
 export const PATH_CELL_M = 1;
 
@@ -71,7 +77,7 @@ export function wallGrid(
 
     for (const box of place.shape.turned[q]) {
       const sloped = box.slopeX !== 0 || box.slopeZ !== 0;
-      if (sloped || box.maxY <= STEP_M || box.minY >= HEAD_M) {
+      if ((sloped && box.maxY <= RAMP_TOP_M) || box.maxY <= STEP_M || box.minY >= HEAD_M) {
         continue;
       }
 
@@ -79,6 +85,25 @@ export function wallGrid(
       const c1 = Math.min(cols - 1, Math.floor((place.x + box.maxX + half - minX) / PATH_CELL_M));
       const r0 = Math.max(0, Math.floor((place.z + box.minZ - half - minZ) / PATH_CELL_M));
       const r1 = Math.min(rows - 1, Math.floor((place.z + box.maxZ + half - minZ) / PATH_CELL_M));
+      if (box.radius > 0) {
+        // A round collider as the disc it is: its bounding square closed the corridor round the port's landing pad, and the server collides with
+        // the cylinder.
+        const cx = place.x + (box.minX + box.maxX) / 2;
+        const cz = place.z + (box.minZ + box.maxZ) / 2;
+        const reach = box.radius + half;
+        for (let r = r0; r <= r1; r++) {
+          for (let c = c0; c <= c1; c++) {
+            const dx = minX + (c + 0.5) * PATH_CELL_M - cx;
+            const dz = minZ + (r + 0.5) * PATH_CELL_M - cz;
+            if (dx * dx + dz * dz <= reach * reach) {
+              blocked[r * cols + c] = 1;
+            }
+          }
+        }
+
+        continue;
+      }
+
       for (let r = r0; r <= r1; r++) {
         blocked.fill(1, r * cols + c0, r * cols + c1 + 1);
       }
@@ -151,8 +176,11 @@ export function findPath(
   toX: number,
   toZ: number,
 ): [number, number][] | null {
-  const start = nearestOpen(grid, cellOf(grid, fromX, fromZ), 4);
-  const goal = nearestOpen(grid, cellOf(grid, toX, toZ), 4);
+  // Eight cells each way: a body pressed into a corner stands in cells its own width has walled off, and a goal can be a few metres into a building.
+  const start = nearestOpen(grid, cellOf(grid, fromX, fromZ), 8);
+  const goal = nearestOpen(grid, cellOf(grid, toX, toZ), 8);
+  const startOpen = start === cellOf(grid, fromX, fromZ);
+  const goalOpen = goal === cellOf(grid, toX, toZ);
   if (start < 0 || goal < 0) {
     return null;
   }
@@ -281,6 +309,12 @@ export function findPath(
   const out: [number, number][] = [];
   let ax = fromX;
   let az = fromZ;
+  if (!startOpen) {
+    // Out of the wall's margin first, to the open cell the search began on: pulled straight from a body pressed against a house, the first leg
+    // crossed the house's corner.
+    [ax, az] = centreOf(grid, start);
+    out.push([ax, az]);
+  }
   let i = 0;
   while (i < cells.length) {
     let j = cells.length - 1;
@@ -293,7 +327,9 @@ export function findPath(
       j--;
     }
 
-    const [px, pz] = j === cells.length - 1 ? [toX, toZ] : centreOf(grid, cells[j]);
+    // The goal itself when its cell is open; the open cell the search ended on when it is not — a walk ending on a point inside a building ends
+    // against its wall.
+    const [px, pz] = j === cells.length - 1 ? (goalOpen ? [toX, toZ] : centreOf(grid, goal)) : centreOf(grid, cells[j]);
     out.push([px, pz]);
     ax = px;
     az = pz;

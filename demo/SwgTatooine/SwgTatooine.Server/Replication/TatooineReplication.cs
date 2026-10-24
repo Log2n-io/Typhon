@@ -2672,7 +2672,10 @@ public static partial class TatooineReplication
             var move = player.Read(Player.Move);
             move.DestX = Math.Clamp(command.Value.X, -half, half);
             move.DestZ = Math.Clamp(command.Value.Z, -half, half);
-            move.SpeedMps = TatooineData.PlayerRunSpeedMps;
+
+            // The run the server GRANTS, through the gait ladder like MoveDir's: the raw figure was half of it, so a click walked at the speed a held
+            // key runs at half — and a bot walking a city by clicks crossed it at a jog.
+            move.SpeedMps = SpeedFor(SpeedClasses.Run);
             CancelBoardingIfWaiting(ref player);
 
             // No phase: a click names a destination, and nothing about WHEN the pointer went down changes where the server is asked to walk to. The split
