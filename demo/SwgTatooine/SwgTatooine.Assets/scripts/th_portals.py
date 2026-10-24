@@ -26,6 +26,10 @@ out.append(door("ASSET_House1", "front", cx=-2.0, y_face=-3.72, z0=0.5, z1=2.8, 
 # large house: door x 0.65..2.35 (local), arch/step face y = -4.85, step top 1.0, door top 3.75
 out.append(door("ASSET_House2", "front", cx=1.5, y_face=-4.85, z0=0.7, z1=3.75, width=1.9,
                 spawn_xy=(1.5, -6.3), spawn_z=0.7))
+# town hall: door x -1.2..1.2, arch surround face y = -10.7, plinth top 0.9, door top 3.8 above it; porch pillars at
+# x +-2.52..3.18, the plinth front at y -13.0
+out.append(door("ASSET_Townhall", "front", cx=0.0, y_face=-10.7, z0=0.9, z1=4.7, width=2.5,
+                spawn_xy=(0.0, -12.3), spawn_z=0.9))
 # the shuttleport office door is cosmetic: no portal
 
 result = out

@@ -39,7 +39,7 @@ PART_M = "th_part_m"        # face attribute: largest dimension of the part the 
 AO_PX_PER_M = 32            # AO is low frequency
 AO_MIN, AO_MAX = 256, 2048
 AO_SAMPLES = 64
-AO_DISTANCE = {"interior": 1.0, "default": 1.5}
+AO_DISTANCE = {"interior": 1.0, "weapon": 0.1, "default": 1.5}
 PROBE_PX, PROBE_SAMPLES = 512, 16
 HIDDEN_AO = 0.02             # a face whose probe AO stays below this everywhere is never visible
 MIN_EVIDENCE = 4             # probe texels a face must cover before it may be culled (thinner faces are kept)
@@ -741,13 +741,17 @@ def descriptor(root, glb_name, me, materials, ao_res):
                                "pose": {"clip": o["seat_clip"], "at": o["seat_clip_at"]}}
         elif o.instance_type == 'COLLECTION' and "asset_ref" in o:
             key, e = "children", {"asset": o["asset_ref"], "pos": gv(loc), "rot": gq(rot)}
+        elif "weapon_marker" in o:
+            key, e = "markers", {"kind": o["weapon_marker"], "pos": gv(loc), "rot": gq(rot), "forward": FORWARD}
         elif "nav_node" in o:
             nav_nodes.append((o.name, gv(loc)))
             continue
         else:
             continue
-        d.setdefault(key, []).append(e)                           # seats[] only on assets that have one
+        d.setdefault(key, []).append(e)                           # seats[] / markers[] only on assets that have them
         targets[o.name] = (o, e)
+    if d["kind"] == "weapon":
+        d["weapon"] = weapon_block(root)
     if d["kind"] == "interior":
         if not nav_nodes:
             raise ValueError(f"{aid}: an interior needs NAV_* nodes (th_interior_nav.py)")
@@ -769,6 +773,17 @@ def descriptor(root, glb_name, me, materials, ao_res):
             if "approach" not in p:
                 raise ValueError(f"{aid}: portal {p['id']!r} has no approach (an interior's exit needs one)")
     return d
+
+
+def weapon_block(root):
+    """A hand weapon's class, attack clip and attach transform (th_weapons.py). attach maps the weapon's glTF frame into
+    the joint's glTF frame (the Blender bone's axes are the joint's, unconverted): grip_basis is the Blender-frame
+    weapon's axes in joint axes, and Rx(+90) takes the glTF-frame weapon to the Blender one."""
+    basis = Matrix([root["grip_basis"][k:k + 3] for k in (0, 3, 6)]) @ Matrix.Rotation(math.pi / 2, 3, 'X')
+    q = basis.to_quaternion()
+    return {"class": root["weapon_class"], "clip": root["weapon_clip"],
+            "attach": {"joint": root["grip_joint"], "pos": [_r(v) for v in root["grip_pos_m"]],
+                       "rot": [_r(q.x, 6), _r(q.y, 6), _r(q.z, 6), _r(q.w, 6)]}}
 
 
 # ---------------- approach paths ----------------
@@ -888,7 +903,8 @@ def export_asset(root, shared_written):
     try:
         ob = build_render_mesh(root, sc)
         lights = lights_of(root, sc)
-        occluders = [ground_plane(sc, FOUNDATION_D if kind == "building" else 0.0)] if kind != "interior" else []
+        # no ground under interiors (they have a floor) nor under hand weapons (modelled round their grip, not on the ground)
+        occluders = [ground_plane(sc, FOUNDATION_D if kind == "building" else 0.0)] if kind not in ("interior", "weapon") else []
         levels = []                                        # LOD1+: (object, error_m)
         with render_settings(sc, AO_DISTANCE.get(kind, AO_DISTANCE["default"])):
             # probe bake to drop faces no ray can reach (resting on/inside other parts, buried caps), then the final

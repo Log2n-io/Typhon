@@ -140,4 +140,80 @@ R = make_root("COL_CreatureNest", "creature_nest", bpy.data.objects["ASSET_Creat
               (0, 7, 0))
 cyl(R, "Body", 0, 0, -0.3, 0.9, 2.15, floor=0.0)
 
+# =============== Soldier camp (th_camps.py; asset origin = its centre on the ground) ===============
+# Tent, fire ring, log seats, the crate stacks, barrel and pennant pole; the spawns stand clear of all of them.
+R = make_root("COL_SoldierCamp", "soldier_camp", bpy.data.objects["ASSET_SoldierCamp"].matrix_world.translation,
+              (0, 5.5, 0))   # behind, short of the terminals
+box(R, "Tent", -1.2, 1.2, 1.0, 3.0, -0.15, 1.8, floor=0.0)
+cyl(R, "Fire", 0.0, -0.4, -0.15, 0.3, 0.55, floor=0.0)
+box(R, "Seat.0", -0.6, 0.6, -1.59, -1.31, -0.15, 0.26, floor=0.0)
+box(R, "Seat.1", 0.81, 1.09, -0.6, 0.5, -0.15, 0.26, floor=0.0)
+box(R, "CratesL", -2.95, -2.05, -1.05, 0.7, -0.15, 1.15, floor=0.0)
+box(R, "CrateR", 1.97, 2.93, -1.33, 0.13, -0.15, 0.58, floor=0.0)
+cyl(R, "Barrel", 2.5, 1.0, -0.15, 0.9, 0.31, floor=0.0)
+cyl(R, "Pole", 2.4, 2.4, -0.15, 2.7, 0.05, floor=0.0)
+
+# =============== Ninja hideout (th_camps.py; asset origin = its centre on the ground) ===============
+# The canopy's back half (lower than a 1.65 m body from y 1.0) as one box down to the ground with the back curtain;
+# the front half stays walkable under it. Front poles, brazier, pots, rolled hides.
+R = make_root("COL_NinjaHideout", "ninja_hideout", bpy.data.objects["ASSET_NinjaHideout"].matrix_world.translation,
+              (0, 5.5, 0))   # behind, short of the terminals
+box(R, "CanopyBack", -1.9, 1.9, 1.0, 2.6, -0.15, 1.7, floor=0.0)
+for i, x in enumerate((-1.86, 1.86)):
+    cyl(R, f"Pole.{i}", x, -0.26, -0.15, 2.3, 0.08, floor=0.0)
+cyl(R, "Brazier", 0.0, -1.4, -0.15, 0.8, 0.35, floor=0.0)
+box(R, "Pots", -2.8, -1.9, 1.3, 2.3, -0.15, 0.62, floor=0.0)
+box(R, "Rolls", 1.8, 2.8, 1.25, 2.15, -0.15, 0.6, floor=0.0)
+
+# =============== Town hall (th_townhall.py; asset origin = its centre on the ground, floor P = 0.9) ===============
+# Plinth and entry ramp (FOUNDATION_D rules), every volume standing on the plinth up to the band, the door's arch
+# surround (the facade a body stops at), the towers and the porch pillars; the porch roof is above the band.
+R = make_root("COL_Townhall", "tat_townhall", bpy.data.objects["ASSET_Townhall"].matrix_world.translation, (0, 32, 0))
+P = 0.9
+box(R, "Plinth", -15.2, 15.2, -13.0, 9.6, -FOUNDATION_D, P, floor=0.0)
+entry_ramp(R, "EntryRamp", 0.0, y_top=-13.0, rise=P, width=6.0)
+box(R, "Hall", -7.4, 7.4, -6.4, 8.4, P, P + 8.4, floor=P)
+box(R, "WingW", -14.0, -7.4, -6.4, 8.4, P, P + 4.0, floor=P)
+box(R, "WingE", 7.4, 14.0, -6.4, 8.4, P, P + 4.0, floor=P)
+box(R, "Vestibule", -3.4, 3.4, -10.4, -6.4, P, P + 5.4, floor=P)
+box(R, "ArchSurround", -1.6, 1.6, -10.7, -10.4, P, P + 4.2, floor=P)
+for i, sx in enumerate((-1, 1)):
+    cyl(R, f"Tower.{i:02d}", sx * 5.1, -8.0, P, P + 11.5, 1.7, floor=P)
+    box(R, f"PorchPillar.{i:02d}", *sorted((sx * 2.52, sx * 3.18)), -12.68, -12.02, P, P + 4.6, floor=P)
+
+# =============== Factory (th_industry.py; asset origin = its centre on the ground, pad top 0.25) ===============
+# Pad (stepped onto), the shed with its base course and eave, the bay frame and console (the stand point at y -2.1 is
+# clear of it), the hopper / chute / bin, the fan housing, the power box and the pipes.
+R = make_root("COL_Factory", "factory", bpy.data.objects["ASSET_Factory"].matrix_world.translation, (0, 7, 0))
+P = 0.25
+box(R, "Pad", -2.8, 2.8, -2.35, 2.35, -FOUNDATION_D, P, floor=0.0)
+box(R, "Body", -2.5, 2.5, -1.3, 2.2, P, 3.12, floor=P)
+box(R, "BayFrame", -1.15, 1.15, -1.38, -1.3, P, 2.55, floor=P)
+box(R, "Console", -0.55, 0.55, -1.75, -1.38, P, 1.17, floor=P)
+box(R, "Output", 1.4, 2.2, -2.2, -1.3, P, 2.25, floor=P)
+box(R, "FanHousing", -2.85, -2.5, -0.62, 1.2, P, 2.45, floor=P)
+box(R, "PowerBox", 2.5, 2.88, 0.4, 1.6, P, 1.7, floor=P)
+box(R, "Pipes", 2.5, 2.67, -0.72, -0.08, P, 3.0, floor=P)
+
+# =============== Resource extractor (th_industry.py; asset origin = its centre on the ground, pad top 0.3) ===============
+# Pad, the derrick as one box over its feet (wellhead, casing and braces inside), the silo (legs, ore bin) as one
+# cylinder, the feeder box, the conveyor's low end (higher up it clears a body) and its two supports, the generator with
+# its exhaust, the fuel tank on its saddles.
+R = make_root("COL_ResourceExtractor", "resource_extractor",
+              bpy.data.objects["ASSET_ResourceExtractor"].matrix_world.translation, (0, 7, 0))
+P = 0.3
+box(R, "Pad", -3.35, 3.35, -2.8, 2.8, -FOUNDATION_D, P, floor=0.0)
+box(R, "Derrick", -2.43, 0.43, -1.13, 1.73, P, 7.2, floor=P)
+cyl(R, "Silo", 2.05, 1.45, P, 4.4, 1.0, floor=P)
+box(R, "Feeder", 0.1, 0.9, -2.0, -1.2, P, 1.25, floor=P)
+_f0, _f1 = Vector((0.5, -1.6, 1.3)), Vector((1.7, 0.9, 4.35))          # th_industry.py F0 / F1
+_a = math.atan2(_f1.y - _f0.y, _f1.x - _f0.x)
+box(R, "ConveyorLow", _f0.x - 0.1, _f0.x + 0.9, _f0.y - 0.27, _f0.y + 0.27, P, 2.3, floor=P, rot_z=_a,
+    pivot=(_f0.x, _f0.y))
+for i, t in enumerate((0.33, 0.66)):
+    _p = _f0.lerp(_f1, t)
+    box(R, f"ConveyorSupport.{i}", _p.x - 0.32, _p.x + 0.32, _p.y - 0.12, _p.y + 0.12, P, _p.z, floor=P)
+box(R, "Generator", -2.95, -0.35, 1.8, 2.7, P, 3.72, floor=P)
+box(R, "Tank", -3.1, -1.5, -2.47, -1.53, P, 1.32, floor=P)
+
 result = STATS

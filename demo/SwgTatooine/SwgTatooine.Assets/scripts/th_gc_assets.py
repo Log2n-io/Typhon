@@ -1,5 +1,5 @@
 """Garbage-collect build/assets (asset-pipeline.md 6.4, claude/ docs): keep catalogue.json and the newest KEEP immutable
-catalogues, plus every file they reference (descriptors, GLBs, shared KTX2) and their .br sidecars; delete the rest.
+catalogues, plus every file they reference (descriptors, GLBs, shared KTX2, icons) and their .br sidecars; delete the rest.
 Plain Python, no Blender. Dry run unless --apply.
 
     python scripts/th_gc_assets.py [--keep N] [--apply]
@@ -27,6 +27,8 @@ for cat in catalogues:
     keep.update(c["textures"])
     for a in c["assets"].values():
         keep.update((a["descriptor"], a["glb"]))
+    for i in c.get("icons", {}).values():
+        keep.update(i["png"].values())
 keep |= {k + ".br" for k in keep}
 
 doomed = sorted(f for f in os.listdir(OUT_DIR) if os.path.isfile(os.path.join(OUT_DIR, f)) and f not in keep)

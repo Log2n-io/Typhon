@@ -11,7 +11,8 @@ import numpy as np
 # Set ONLY = ["TH_Sandstone", ...] before exec() to rebake a subset.
 
 LIB = ["TH_Sandstone", "TH_DomeStone", "TH_DoorWood", "TH_DoorBatten",
-       "TH_Metal", "TH_Duracrete", "TH_ShuttleHull"]
+       "TH_Metal", "TH_Duracrete", "TH_ShuttleHull",
+       "TH_DarkDuracrete", "TH_SteelPlate"]                 # these two: sources in th_industry.py
 TILE_M = 4.0       # metres covered by one tile
 RES = 1024         # tile resolution -> 256 px/m
 OVER = 128         # cross-fade band, px
@@ -133,6 +134,8 @@ try:
     for name in globals().get("ONLY") or LIB:
         src = source_of(name)
         tmp = src.copy()
+        # Cycles' diffuse colour is base x (1 - metallic): bake the base colour itself (the TH_ copy keeps metallic)
+        next(n for n in tmp.node_tree.nodes if n.bl_idname == 'ShaderNodeBsdfPrincipled').inputs['Metallic'].default_value = 0.0
         ob = bake_plane(tmp)
         try:
             col = seamless(bake_pass(ob, tmp, "basecolor"), normal=False)

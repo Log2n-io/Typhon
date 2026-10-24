@@ -46,6 +46,11 @@ def texture_name(stem):
     return f"{stem}-{revision('textures', stem)}.ktx2"
 
 
+def icon_name(aid, size):
+    """An asset's icon at one size: <asset_id>_icon<size>-<rev>.png, rev from revisions.json "icons"."""
+    return f"{aid}_icon{size}-{revision('icons', aid)}.png"
+
+
 def tool(name):
     """A pipeline tool fetched by `scripts/assets.py fetch tools` for this platform: tools/<name>/bin/<name>[.exe]."""
     path = os.path.join(ROOT_DIR, "tools", name, "bin", name + (".exe" if os.name == "nt" else ""))
@@ -84,10 +89,11 @@ def read_catalogue():
     return json.load(open(cat_path, encoding='utf8')) if os.path.exists(cat_path) else {"assets": {}, "textures": []}
 
 
-def write_catalogue(entries, shared, merge_textures, remove=()):
+def write_catalogue(entries, shared, merge_textures, remove=(), icons=None):
     """Merge {asset_id: (descriptor, glb)} into the catalogue, at the revisions of revisions.json.
     merge_textures: keep the previous texture list (partial publish) instead of replacing it with `shared`.
-    remove: asset ids to drop (their files become orphans for th_gc_assets.py).
+    remove: asset ids to drop, with their icons (their files become orphans for th_gc_assets.py).
+    icons: {asset_id: {size: file name}} to merge (th_icons.py); the previous icons are kept otherwise.
     A catalogue that changed gets the next version, published as catalogue-<version>.json (immutable: what servers pin
     and clients fetch); catalogue.json is the mutable pointer to it, for tools and the server's startup."""
     prev = read_catalogue()
@@ -95,9 +101,17 @@ def write_catalogue(entries, shared, merge_textures, remove=()):
     for aid, (desc_name, glb_name) in entries.items():
         assets[aid] = {"rev": revision("assets", aid), "descriptor": desc_name, "glb": glb_name}
     textures = sorted(set(prev.get("textures", [])) | shared if merge_textures else shared)
-    names = [a[k] for a in assets.values() for k in ("descriptor", "glb")] + textures
+    icon_map = {k: v for k, v in prev.get("icons", {}).items() if k in assets}
+    for aid, files in (icons or {}).items():
+        if aid not in assets:
+            raise KeyError(f"icon for {aid}: the asset is not in the catalogue")
+        icon_map[aid] = {"rev": revision("icons", aid), "png": {str(k): v for k, v in sorted(files.items())}}
+    names = ([a[k] for a in assets.values() for k in ("descriptor", "glb")] + textures
+             + [f for i in icon_map.values() for f in i["png"].values()])
     digests = {n: hashlib.sha256(open(os.path.join(OUT_DIR, n), 'rb').read()).hexdigest() for n in sorted(names)}
     content = {"assets": dict(sorted(assets.items())), "textures": textures, "sha256": digests}
+    if icon_map:                                       # absent when there are none: a catalogue without icons is unchanged
+        content["icons"] = dict(sorted(icon_map.items()))
     same = prev.get("schema") == CATALOGUE_SCHEMA and all(prev.get(k) == v for k, v in content.items())
     if same:
         return prev

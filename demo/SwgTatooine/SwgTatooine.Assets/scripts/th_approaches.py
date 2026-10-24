@@ -22,6 +22,12 @@ out["house1"] = make_approach(ob["ASSET_House1"], "APPROACH_House1_front", ob["P
 out["house2"] = make_approach(ob["ASSET_House2"], "APPROACH_House2_front", ob["PORTAL_House2_front"], [
     (1.5, -11.75, 0.0), (1.5, -8.75, 0.0), (1.5, -7.0, 0.7), (1.5, -5.9, 0.7), (1.5, -5.2, 0.96)]).name
 
+# town hall: ramp meets z 0 at y -15.25, its top (0.9) at -13.0 (the plinth front); flat porch to the arch surround
+# (facade y -10.7), portal centre y -11.3, between the porch pillars (|x| >= 2.52). Collision footprint ends at
+# y -17.75.
+out["townhall"] = make_approach(ob["ASSET_Townhall"], "APPROACH_Townhall_front", ob["PORTAL_Townhall_front"], [
+    (0.0, -18.25, 0.0), (0.0, -15.25, 0.0), (0.0, -13.0, 0.9), (0.0, -11.05, 0.9)]).name
+
 # shuttleport ticket terminal: straight up the gate ramp (meets z 0 at y -21.85, its top end 0.2 at -21.35) to the
 # terminal's stand point, 0.9 m in front of it, on the ramp's top. Derived from the terminal's placement (moved by
 # hand); th_export.py refuses it if the terminal moves somewhere this no longer fits. Collision footprint ends at

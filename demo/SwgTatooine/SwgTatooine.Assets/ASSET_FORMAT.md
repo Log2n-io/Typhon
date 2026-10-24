@@ -1,10 +1,11 @@
 # Asset format
 
-The contract between the asset pipeline (`scripts/th_export.py`, `scripts/th_character.py`, `scripts/th_creature.py`)
+The contract between the asset pipeline (`scripts/th_export.py`, `scripts/th_character.py`, `scripts/th_creature.py`,
+`scripts/th_icons.py`)
 and everything that reads `build/assets/`: SwgTatooine.Server (`AssetOrigin`, `AssetColliders`), SwgTatooine.Client and
 the asset testbench.
 
-**Format revision 7** (2026-10-23). Every change to what is published gets a revision and an entry in the
+**Format revision 10** (2026-10-25). Every change to what is published gets a revision and an entry in the
 [changelog](#changelog) **before** it is published. A consumer that knows revision N reads the entries after N and
 nothing else.
 
@@ -24,7 +25,8 @@ live and how to get them: [README.md](README.md). This file only says what is th
    it. Never fall back to a default meaning.
 4. **Arrays have a fixed arity and order, listed here, forever.** A vec3 is 3 numbers, a quaternion 4, an AABB two
    vec3. New data is a new *named* field, never an extra element appended to an existing array.
-5. **Absent and empty are the same** for optional arrays (`seats`, `approach`, `lods`): treat a missing one as `[]`.
+5. **Absent and empty are the same** for optional arrays (`seats`, `approach`, `lods`, `markers`): treat a missing one as `[]`.
+   Likewise the catalogue's optional `icons` map: missing means `{}`.
 
 ## 2. Frames and units
 
@@ -51,9 +53,11 @@ live and how to get them: [README.md](README.md). This file only says what is th
 | `<asset_id>-<rev>.json` | no | Descriptor (section 5) |
 | `<asset_id>-<rev>.glb` | no | Render (section 6) |
 | `<texture>_<basecolor\|normal>-<rev>.ktx2` | no | Shared texture, referenced by URI from GLBs |
-| `<file>.br` | no | Brotli-11 copy of every `.json` and `.glb` (not of `.ktx2`) |
+| `<asset_id>_icon<size>-<rev>.png` | no | An asset's icon, `<size>` × `<size>` pixels (section 4) |
+| `<file>.br` | no | Brotli-11 copy of every `.json` and `.glb` (not of `.ktx2` or `.png`) |
 
-`<rev>` is the revision `revisions.json` assigns to that asset or texture. Revisions are decided by a person and bumped
+`<rev>` is the revision `revisions.json` assigns to that asset, texture or icon (an icon's revision is its own, not its
+asset's). Revisions are decided by a person and bumped
 by hand; they are not derived from the bytes, because the build is not bit-reproducible. **A published name never gets
 new bytes**: the publisher refuses to overwrite one, so every file can be cached `immutable`, and the catalogue's
 `sha256` map records what each name was published with. Asset ids and texture stems are snake_case, so the `-` before
@@ -66,6 +70,7 @@ the revision is unambiguous. A file named in a catalogue exists before that cata
   "version":  12,
   "assets":   { "<asset_id>": { "rev": 6, "descriptor": "<asset_id>-6.json", "glb": "<asset_id>-6.glb" } },
   "textures": [ "<texture>_<basecolor|normal>-1.ktx2" ],
+  "icons":    { "<asset_id>": { "rev": 1, "png": { "32": "<asset_id>_icon32-1.png", "48": "<asset_id>_icon48-1.png" } } },
   "sha256":   { "<file name>": "<64 hex digits>" } }
 ```
 
@@ -73,7 +78,12 @@ the revision is unambiguous. A file named in a catalogue exists before that cata
   published set changes; a publish that changes nothing writes no new catalogue.
 - `rev` is the asset's revision, the one in its file names.
 - `textures` lists the shared textures any GLB of this catalogue references.
-- `sha256` has one entry per descriptor, GLB and texture the catalogue names (not the `.br` copies): the SHA-256 of the
+- `icons` (optional, revision 9): icons of some of the `assets`, keyed by asset id. `png` maps a size in pixels (a
+  string) to a square PNG of that size: RGBA, transparent background, sRGB, the asset alone, rendered at that size
+  (no scaling). `rev` is the icon's revision, the one in its file names. Sizes today: `32`, `48`. Icons today:
+  `swoop`, `sword_vibroblade`, `blaster_dl44`, `vibroknuckler`. A crop may leave part of the asset out (the swoop's
+  nose).
+- `sha256` has one entry per descriptor, GLB, texture and icon the catalogue names (not the `.br` copies): the SHA-256 of the
   bytes that name was published with. A reader may verify a file against it; the server and the client do not.
 
 ## 5. Descriptor
@@ -84,7 +94,7 @@ the revision is unambiguous. A file named in a catalogue exists before that cata
 |---|---|---|
 | `schema` | int | 1 |
 | `id` | string | Asset id (snake_case, = catalogue key) |
-| `kind` | enum | `building`, `interior`, `interactable`, `prop`, `vehicle`, `character`, `creature` |
+| `kind` | enum | `building`, `interior`, `interactable`, `prop`, `vehicle`, `character`, `creature`, `weapon` |
 | `frame` | string | `"glTF: metres, +Y up, right-handed"`, informative |
 | `render.glb` | string | GLB file name |
 | `render.triangles` | int | LOD0 triangles |
@@ -93,8 +103,8 @@ the revision is unambiguous. A file named in a catalogue exists before that cata
 | `render.hidden_faces_removed` | int | Informative |
 | `render.lods` | object[] | Optional. Levels, LOD0 first: `{node, triangles, error_m?}`. `node` is the GLB node name. `error_m` (buildings): upper bound of the level's deviation from LOD0 in metres; switch when `error_m × pixels_per_metre / distance` falls under ~1 px. Characters have no `error_m` yet |
 | `bounds.render` | AABB | `[[minX, minY, minZ], [maxX, maxY, maxZ]]` of the LOD0 mesh |
-| `bounds.collision` | AABB | Same, of the colliders |
-| `collision` | object | Section 5.2 |
+| `bounds.collision` | AABB | Same, of the colliders. `null` on weapons |
+| `collision` | object | Section 5.2. `null` on weapons |
 | `portals` | object[] | Section 5.3 |
 | `spawns` | object[] | Section 5.4 |
 | `interactions` | object[] | Section 5.5 |
@@ -120,6 +130,7 @@ the revision is unambiguous. A file named in a catalogue exists before that cata
 - Characters: one capsule, feet at y = 0.
 - Creatures: one box `Body`, axis-aligned in the asset frame: the bounds of every frame of the idle clip. A flier's
   box covers the bob of its hover, which its idle clip holds (the origin stays on the ground).
+- Weapons: none. A held weapon does not collide; hit tests use its `markers` (5.10).
 
 ### 5.3 Portals
 
@@ -133,7 +144,7 @@ the revision is unambiguous. A file named in a catalogue exists before that cata
 - `target`: the asset id entered. `target_spawn`: the spawn id there. `exit_spawn`: this asset's spawn id where one
   arrives when coming back out.
 - Today: `tat_house_small.front` ↔ `tat_house_small_interior.front`, `tat_house_large.front` ↔
-  `tat_house_large_interior.front`. One portal per asset today; the server reads only the first, so a second door
+  `tat_house_large_interior.front`, `tat_townhall.front` ↔ `tat_townhall_interior.front`. One portal per asset today; the server reads only the first, so a second door
   needs reader work.
 
 ### 5.4 Spawns
@@ -142,6 +153,8 @@ the revision is unambiguous. A file named in a catalogue exists before that cata
 
 - `creature_nest`: `creature.0` to `creature.3`, on the ground 1.2 m outside its rim, facing out: where the creatures it
   releases appear. Which creatures, how many and how often is gameplay, not asset data.
+- `soldier_camp`, `ninja_hideout`: `creature.0` to `creature.3`, the nest's ids, on the ground inside the camp, facing
+  out from its centre, each body square clear of the colliders: where its humanoid enemies appear.
 
 ### 5.5 Interactions
 
@@ -151,6 +164,10 @@ within `radius` metres.
 | `kind` | Asset | Meaning |
 |---|---|---|
 | `shuttle_ticket` | ticket_terminal | Opens the shuttle destination menu |
+| `bazaar` | bazaar_terminal | Opens the bazaar (player market) |
+| `mission` | mission_terminal | Opens the mission list |
+| `crafting` | crafting_station | Opens crafting |
+| `manufacture` | factory | Opens the factory's manufacturing menu (start producing items) |
 | `mount` | vehicles | Get on (and off) here. `seat`: the id of the `seats[]` entry it puts the user in |
 
 ### 5.6 Children
@@ -174,6 +191,21 @@ portal has one: the way out.
 
 The exporter refuses a path whose ends break 1 or 3, or along which a 0.3 m square body (0.4 m above the feet to
 1.65 m) overlaps a collider of the asset or its children.
+
+### 5.8 Kind-specific fields
+
+| Field | Kinds | Content |
+|---|---|---|
+| `foundation_depth` | building | 1.0: geometry continues this far below y = 0 so uneven terrain shows no gap |
+| `seats` | vehicle | `[{id, pos, rot, forward, pose}]`. Put the rider's root at `pos`, turned so the character's own `forward` axis points along the seat's forward; it then moves with the vehicle. `pose`: `{clip, at}`, the character clip to show, `at: "end"` = its last frame, held |
+| `forward` | character, creature | The local axis the model faces (`"+Z"`) |
+| `animations` | character | `clips: [{name, duration (s), loop}]`; `roles: {role: clip name, or a list for attack}` (idle, walk, run, jump, roll, attack, hit, death, victory). Clip names are identical across the characters |
+| `animations` | creature | `clips` as for characters; `roles: {role: clip name}`, always `idle`, `walk`, `attack`, `death`, sometimes `run`, `jump`. One clip may serve two roles (the frog hops: `walk` = `jump` = `Jump`; the wasp: `idle` = `walk` = `Flying`). Clip names are per creature |
+| `render.skinned`, `render.joints` | character, creature | `true`; joint count (characters: 23, one skeleton shared by every character; creatures: one skeleton each, 15 to 39 joints) |
+| `flies` | creature | `true` when its idle and walk clips hold it in the air (the hover is in the animation; the origin stays on the ground) |
+| `source` | character, creature | `{pack, file, license, scale}`: provenance and the uniform scale applied |
+| `weapon` | weapon | `{class, clip, attach}`: section 5.10 |
+| `markers` | weapon | `[{kind, pos, rot, forward}]`: section 5.10 |
 
 ### 5.9 Interior navigation (`nav`)
 
@@ -209,18 +241,35 @@ portal.
 The exporter refuses a node inside a collider, a disconnected graph, and a cell where the body stands but no node
 serves every position.
 
-### 5.8 Kind-specific fields
+### 5.10 Weapons (`weapon`, `markers`)
 
-| Field | Kinds | Content |
-|---|---|---|
-| `foundation_depth` | building | 1.0: geometry continues this far below y = 0 so uneven terrain shows no gap |
-| `seats` | vehicle | `[{id, pos, rot, forward, pose}]`. Put the rider's root at `pos`, turned so the character's own `forward` axis points along the seat's forward; it then moves with the vehicle. `pose`: `{clip, at}`, the character clip to show, `at: "end"` = its last frame, held |
-| `forward` | character, creature | The local axis the model faces (`"+Z"`) |
-| `animations` | character | `clips: [{name, duration (s), loop}]`; `roles: {role: clip name, or a list for attack}` (idle, walk, run, jump, roll, attack, hit, death, victory). Clip names are identical across the characters |
-| `animations` | creature | `clips` as for characters; `roles: {role: clip name}`, always `idle`, `walk`, `attack`, `death`, sometimes `run`, `jump`. One clip may serve two roles (the frog hops: `walk` = `jump` = `Jump`; the wasp: `idle` = `walk` = `Flying`). Clip names are per creature |
-| `render.skinned`, `render.joints` | character, creature | `true`; joint count (characters: 23, one skeleton shared by every character; creatures: one skeleton each, 15 to 39 joints) |
-| `flies` | creature | `true` when its idle and walk clips hold it in the air (the hover is in the animation; the origin stays on the ground) |
-| `source` | character, creature | `{pack, file, license, scale}`: provenance and the uniform scale applied |
+Hand weapons a character holds and fights with. Frame: origin = the middle of the grip, where the fist closes; +Y
+along the grip towards the thumb (a sword's blade, a pistol's top); **+Z = the way the weapon points** (a blade's
+edge, the barrel), like every asset's front.
+
+```json
+"weapon":  { "class": "blaster", "clip": "Shoot_OneHanded",
+             "attach": { "joint": "Fist.R", "pos": [x, y, z], "rot": [x, y, z, w] } },
+"markers": [ { "kind": "muzzle", "pos": [x, y, z], "rot": [x, y, z, w], "forward": "-Z" } ]
+```
+
+- `class`: `sword`, `blaster`, `knuckler` (enum, rule 3).
+- `clip`: the character clip it attacks with: `SwordSlash`, `Shoot_OneHanded`, `Punch`. These clip names are the same
+  on every character (5.8).
+- `attach`: where the weapon sits in the hand, in the frame of the character joint `joint`, by name.
+  - `pos` is in **metres**: the character's scale is removed first.
+  - `rot` maps the weapon frame into the joint frame.
+  - The same values fit every character, since they share one skeleton.
+  - Each weapon has its own `rot`, because the clips hold the fist differently.
+- Placement, with `J` the joint's world matrix (it carries the character's uniform scale `s`, its `source.scale`):
+  `weapon world = J × scale(1/s) × translate(pos) × rotate(rot)`.
+- A renderer that skins on the GPU from baked joint matrices, and so has no joint node, can draw the weapon as a mesh
+  skinned to that joint, weight 1. Put each vertex `v` in bind space once, at load:
+  `v_bind = inverse(inverseBindMatrix[joint]) × scale(1/s) × translate(pos) × rotate(rot) × v`.
+- `markers`, in the weapon frame, local -Z = `forward` as for every marker:
+  - `muzzle` (blasters): where a bolt leaves, its forward the shot's direction.
+  - `blade_base`, `blade_tip` (swords, knuckler): the blade's ends, for trails and hit tests.
+- Placement is approximate: there are no finger joints, and the hand is a closed fist the grip passes through.
 
 ## 6. GLB
 
@@ -236,6 +285,7 @@ serves every position.
 - **Characters:** one skin, 23 joints; the animations are the descriptor's `clips`, by name; they play in place.
 - **Creatures:** one skin, one primitive per flat-colour material (base colour factor, no texture, no AO); the root
   node carries the publish scale and turn; the animations are the descriptor's `clips`, by name; they play in place.
+- **Weapons:** static, no skin, like props: flat-colour materials with an embedded AO map, in the weapon frame (5.10).
 
 ---
 
@@ -243,6 +293,31 @@ serves every position.
 
 Newest first. *Additive*: readers may ignore it. *Semantic*: a value's meaning or a rule changed, same fields.
 *Breaking*: `schema` changes. Each entry names the first catalogue carrying it and what a reader has to do.
+
+### Revision 10: 2026-10-25, catalogue `11` (additive)
+- Interaction kind `manufacture` (5.5), on the new `factory`.
+- Not a format change, also new: `factory` and `resource_extractor` (kind `building`, no portal, no interior; made by
+  `scripts/th_industry.py`) and the shared textures `darkduracrete` and `steelplate`.
+- Reader: to open the manufacturing menu, read interaction kind `manufacture`. Otherwise nothing (rule 3: skip the
+  unknown kind).
+
+### Revision 9: 2026-10-24, catalogue `10` (additive)
+- Catalogue `icons` (3, 4): per-asset PNG icons at 32 and 48 px for `swoop`, `sword_vibroblade`, `blaster_dl44`,
+  `vibroknuckler`, made by `scripts/th_icons.py`. Catalogue `schema` stays 2.
+- Reader: to show an asset's icon, read `icons[<asset_id>].png[<size>]` and fetch that file like any other of the
+  catalogue. Otherwise nothing.
+
+### Revision 8: 2026-10-24, catalogue `5` (additive)
+- Kind `weapon` (5.1, 5.2, 5.8, 5.10, 6), with `weapon` and `markers`: `sword_vibroblade`, `sword_curved`,
+  `sword_ryyk`, `blaster_dl44`, `blaster_dh17`, `blaster_scout`, `vibroknuckler`. `collision` and `bounds.collision`
+  are `null` on them.
+- Section 5.9 moved after 5.8, unchanged.
+- Not a format change, also new: `soldier_camp` and `ninja_hideout` (kind `prop`, catalogue `7`), lair centres for
+  humanoid enemies with spawns `creature.0`-`3` (5.4). Catalogue `6` carried a first revision of both, replaced.
+- Not a format change, also new: `tat_townhall` (kind `building`) and `tat_townhall_interior` (kind `interior`, with
+  `nav`), paired through their `front` portals (5.3); both in catalogue `9` (the interior alone in `8`).
+- Reader: to show held weapons, read kind `weapon` and attach by `weapon.attach`. Otherwise nothing (rule 3: skip the
+  unknown kind).
 
 ### Revision 7: 2026-10-23, catalogue `4` (additive)
 - `nav` on interiors (5.9): waypoint graph plus a cell lookup. Exit portals carry an `approach` that starts on a nav

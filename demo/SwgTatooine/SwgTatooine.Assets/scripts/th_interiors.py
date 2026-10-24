@@ -95,7 +95,7 @@ def union(name, solids, col):
     return base
 
 
-def build_shell(name, col, rooms, outer, cuts, dome):
+def build_shell(name, col, rooms, outer, cuts, domes):
     shell = union(name, outer, col)
     inner = union(f"_{name}_inner", rooms + cuts, col)
     apply_bool(shell, inner, 'DIFFERENCE')
@@ -107,12 +107,12 @@ def build_shell(name, col, rooms, outer, cuts, dome):
     hidden = [f for f in bm.faces
               if not any(inside(s, f.calc_center_median() + f.normal * 0.03) for s in rooms + cuts)]
     bmesh.ops.delete(bm, geom=hidden, context='FACES')
-    dcx, dcy, dcz, dr = dome
     for f in bm.faces:
         c = f.calc_center_median()
         if f.normal.z > 0.9 and abs(c.z) < 0.02:
             f.material_index = 1
-        elif c.z > dcz + 0.01 and (c.x - dcx) ** 2 + (c.y - dcy) ** 2 <= (dr + 0.05) ** 2:
+        elif any(c.z > dcz + 0.01 and (c.x - dcx) ** 2 + (c.y - dcy) ** 2 <= (dr + 0.05) ** 2
+                 for dcx, dcy, dcz, dr in domes):
             f.material_index = 2
         else:
             f.material_index = 0
@@ -202,14 +202,17 @@ def build(spec):
     root["asset_id"] = spec["asset_id"]; root["asset_kind"] = "interior"
     short = spec["root"][len("ASSET_"):]
 
-    shell, culled = build_shell(f"{short}_Shell", acol, spec["rooms"], spec["outer"], spec["cuts"], spec["dome"])
+    # one dome / skylight (the houses' "dome", "skylight") or several ("domes", "skylights")
+    domes = spec.get("domes") or [spec["dome"]]
+    shell, culled = build_shell(f"{short}_Shell", acol, spec["rooms"], spec["outer"], spec["cuts"], domes)
     pieces = [shell]
     d = spec["door"]
     pieces += door_leaf(short, acol, d["cx"], d["y_w"], d["w"], d["zs"])
     for i, s in enumerate(c for c in spec["cuts"] if c[0] == 'hcyl'):
         pieces.append(window_pane(f"{short}_Window.{i:02d}", acol, s))
-    sx, sy, sz, sr = spec["skylight"]
-    pieces.append(mk(f"{short}_Skylight", cyl_bm(sx, sy, sz - 0.01, sz, sr), MAT["daylight"], acol, bevel=0))
+    for i, (sx, sy, sz, sr) in enumerate(spec.get("skylights") or [spec["skylight"]]):
+        pieces.append(mk(f"{short}_Skylight" + (f".{i:02d}" if i else ""), cyl_bm(sx, sy, sz - 0.01, sz, sr),
+                         MAT["daylight"], acol, bevel=0))
     for name, bm, mat, bevel in spec["furniture"]:
         pieces.append(mk(f"{short}_{name}", bm, MAT[mat], acol, bevel=bevel))
     for ob in pieces:
@@ -403,4 +406,275 @@ LARGE = dict(
     camera=((-2.7, -3.7, 1.8), (5.5, 2.8, 1.8), 16),
 )
 
-result = {k: build(s) for k, s in (("small", SMALL), ("large", LARGE))}
+
+# =========================== town hall ===========================
+# Inside th_townhall.py's volumes (same plan coordinates). Vestibule x +-3 (y -10..-6.4, 5 m, small dome) through a
+# 3 m arch into the assembly hall x +-7, y -6..8: walls 8 m under a dome to 12.9 m with an oculus, two colonnades
+# (x +-4.6) leaving an open floor for crowds, a stage across the back (0.3 m, a ramp-like step) with the council table,
+# chairs, lectern and a great banner, a brass chandelier. Four side rooms (3.6 m, small domes), each through an arch
+# in a hall side wall: archives and the mayor's office west, the clerk's office and a lounge east.
+def lib_mat(name, rgb, rough=0.8, metal=0.0):
+    """Get-or-create flat material shared with th_townhall.py (same values there)."""
+    m = bpy.data.materials.get(name)
+    if m is None:
+        m, _, b = simple_mat(name)
+        b.inputs['Base Color'].default_value = (*rgb, 1); b.inputs['Roughness'].default_value = rough
+        b.inputs['Metallic'].default_value = metal
+        m.diffuse_color = (*rgb, 1)
+    return m
+
+
+MAT["banner"] = lib_mat("TH_Banner", (0.36, 0.05, 0.04), 0.9)
+MAT["brass"] = lib_mat("TH_Brass", (0.62, 0.46, 0.2), 0.4, 0.8)
+MAT["leaf"] = flat_mat("TH_Leaf", (0.16, 0.26, 0.10), 0.9)
+
+TH_COLUMNS = [(sx * 4.6, y) for sx in (-1, 1) for y in (-3.5, -0.5, 2.5, 5.5)]
+TH_STAGE_Y, TH_STAGE_H = 5.4, 0.3
+CLERK_CONSOLES = [(-5.45, -4.25), (-1.7, -0.5)]                      # the first against the filing cabinets: no niche
+ARCHIVE_STOOLS = [(-10.5, -1.6), (-8.9, -2.8)]                       # none between table and shelf: no pocket
+
+
+def th_banner_y(x, y_wall, z_top, z_bot, w, face):
+    """Banner on a wall facing +-Y (face = the side it hangs on, +1: towards +Y), pointed foot."""
+    h = w / 2
+    pts = [(x - h, z_top), (x + h, z_top), (x + h, z_bot + 0.35), (x, z_bot), (x - h, z_bot + 0.35)]
+    return prism(pts, *sorted((y_wall, y_wall + face * 0.03)))
+
+
+def th_banner_x(y, x_wall, z_top, z_bot, w, face):
+    h = w / 2
+    pts = [(y - h, z_top), (y + h, z_top), (y + h, z_bot + 0.35), (y, z_bot), (y - h, z_bot + 0.35)]
+    return prism(pts, *sorted((x_wall, x_wall + face * 0.03)), 'YZ')
+
+
+def shrub(x, y, r=0.4, h=1.0):
+    """Planter with a conical shrub: [(bmesh, material key, bevel)] x 2."""
+    return [(cyl_bm(x, y, 0.0, 0.6, r, r - 0.06), "floor", 0.02),
+            (cyl_bm(x, y, 0.6, 0.6 + h, r + 0.05, 0.05, seg=7), "leaf", 0)]
+
+
+def townhall_furniture():
+    f = []
+    add = lambda name, bm, mat, bevel=0: f.append((name, bm, mat, bevel))
+    # ---- assembly hall ----
+    for k, (x, y) in enumerate(TH_COLUMNS):
+        add(f"ColumnBase.{k:02d}", cyl_bm(x, y, 0.0, 0.3, 0.45), "wall", 0.02)
+        add(f"ColumnShaft.{k:02d}", cyl_bm(x, y, 0.3, 7.3, 0.32), "wall")
+        add(f"ColumnCapital.{k:02d}", cyl_bm(x, y, 7.3, 7.7, 0.32, 0.5), "wall")
+        add(f"ColumnAbacus.{k:02d}", box_bm(x - 0.55, x + 0.55, y - 0.55, y + 0.55, 7.7, 8.0), "wall", 0.02)
+    add("Stage", box_bm(-7.0, 7.0, TH_STAGE_Y, 8.0, 0.0, TH_STAGE_H), "wood", 0.02)
+    add("StageStep", box_bm(-7.0, 7.0, TH_STAGE_Y - 0.4, TH_STAGE_Y, 0.0, TH_STAGE_H / 2), "wood", 0.02)
+    s = TH_STAGE_H
+    add("CouncilTable", box_bm(-3.0, 3.0, 6.2, 7.0, s, s + 0.72), "wood_dark", 0.02)
+    add("CouncilTableTop", box_bm(-3.1, 3.1, 6.15, 7.05, s + 0.72, s + 0.78), "wood", 0.01)
+    for i, x in enumerate((-2.4, -1.2, 0.0, 1.2, 2.4)):
+        back = 2.1 if x == 0.0 else 1.6                              # the mayor's seat stands out
+        add(f"CouncilSeat.{i}", box_bm(x - 0.28, x + 0.28, 7.2, 7.7, s, s + 0.48), "banner", 0.02)
+        add(f"CouncilBack.{i}", box_bm(x - 0.28, x + 0.28, 7.7, 7.85, s, s + back), "wood_dark", 0.01)
+    add("CouncilCrest", hcyl_bm(0.0, 7.68, s + 1.85, 0.14, 0.04, (0, 1), seg=10), "brass")
+    add("Lectern", box_bm(-0.35, 0.35, 5.55, 5.95, s, s + 1.05), "wood_dark", 0.01)
+    add("LecternTop", box_bm(-0.42, 0.42, 5.5, 6.0, s + 1.05, s + 1.12, (0, 0, 0.1, 0)), "wood", 0.01)
+    add("LecternEmblem", hcyl_bm(0.0, 5.54, s + 0.65, 0.17, 0.03, (0, 1), seg=10), "brass")
+    add("GreatBanner", th_banner_y(0.0, 7.97, 6.9, 2.7, 2.2, -1), "banner")
+    add("GreatBannerRod", hcyl_bm(0.0, 7.93, 6.95, 0.04, 2.6, (1, 0), seg=6), "brass")
+    add("GreatBannerEmblem", hcyl_bm(0.0, 7.93, 5.5, 0.5, 0.03, (0, 1), seg=16), "brass")
+    for i, sx in enumerate((-1, 1)):
+        add(f"WallBanner.{i}", th_banner_x(1.0, sx * 6.97, 5.0, 2.5, 1.0, -sx), "banner")
+        add(f"WallBannerRod.{i}", hcyl_bm(sx * 6.93, 1.0, 5.05, 0.03, 1.3, (0, 1), seg=6), "brass")
+        add(f"WallBannerEmblem.{i}", hcyl_bm(sx * 6.94, 1.0, 4.2, 0.22, 0.03, (1, 0), seg=12), "brass")
+        add(f"HallBench.{i}", box_bm(*sorted((sx * 6.5, sx * 6.95)), -1.5, 3.3, 0.0, 0.45), "wood", 0.02)
+        for bm, mat, bevel in shrub(sx * 2.3, -5.55):
+            add(f"HallPlanter.{i}{mat[0]}", bm, mat, bevel)
+    add("Runner", box_bm(-1.2, 1.2, -9.8, TH_STAGE_Y - 0.4, 0.0, 0.012), "rug")
+    # chandelier: brass ring under the dome on four rods, eight lamps
+    add("ChandelierRing", annulus_bm(0.0, 1.0, 6.9, 7.05, 2.0, 2.25, seg=24), "brass")
+    for i in range(4):
+        a = math.pi / 4 + i * math.pi / 2
+        add(f"ChandelierRod.{i}", cyl_bm(2.12 * math.cos(a), 1.0 + 2.12 * math.sin(a), 7.05, 12.6, 0.03, seg=6), "brass")
+    for i in range(8):
+        a = i * math.pi / 4
+        add(f"ChandelierLamp.{i}", cyl_bm(2.12 * math.cos(a), 1.0 + 2.12 * math.sin(a), 7.05, 7.3, 0.12, 0.08, seg=6),
+            "lamp")
+    for i, (x, y0, y1) in enumerate([(-5.0, -5.97, -5.87), (5.0, -5.97, -5.87), (-6.0, 7.87, 7.97), (6.0, 7.87, 7.97)]):
+        add(f"HallSconce.{i}", box_bm(x - 0.15, x + 0.15, y0, y1, 3.0, 3.25), "lamp")
+    # ---- vestibule ----
+    add("NoticeFrame", box_bm(-3.0, -2.9, -9.1, -7.3, 0.9, 2.1), "metal", 0.01)
+    add("NoticeScreen", box_bm(-2.9, -2.88, -9.0, -7.4, 1.0, 2.0), "screen")
+    add("VestibuleBench", box_bm(2.5, 2.95, -9.2, -7.4, 0.0, 0.45), "wood", 0.02)
+    for i, x in enumerate((-2.2, 2.2)):
+        add(f"VestibuleSconce.{i}", box_bm(x - 0.15, x + 0.15, -9.97, -9.87, 3.0, 3.25), "lamp")
+    # ---- archives (west front) ----
+    for i, (y0, y1) in enumerate([(-5.7, 0.3)]):                    # one run: a gap would be a niche no bot leaves
+        add(f"Shelf.{i}", box_bm(-13.55, -13.05, y0, y1, 0.0, 2.2), "wood", 0.02)
+        for j, (z, mat) in enumerate([(0.4, "rug"), (0.95, "fabric"), (1.5, "rug")]):
+            add(f"Books.{i}{j}", box_bm(-13.05, -12.98, y0 + 0.1, y1 - 0.1, z, z + 0.4), mat)
+    add("ReadingTable", box_bm(-11.5, -9.5, -3.5, -2.1, 0.70, 0.76), "wood", 0.01)
+    for i, x in enumerate((-11.24, -9.76)):
+        add(f"ReadingTrestle.{i}", box_bm(x - 0.06, x + 0.06, -3.4, -2.2, 0.0, 0.70), "wood_dark", 0.005)
+    for i, (x, y) in enumerate([(-10.9, -2.6), (-10.2, -3.0)]):
+        add(f"Scroll.{i}", hcyl_bm(x, y, 0.81, 0.05, 0.5, (1, 0.3), seg=6), "fabric")
+    for i, (x, y) in enumerate(ARCHIVE_STOOLS):
+        add(f"ArchiveStool.{i}", cyl_bm(x, y, 0.0, 0.45, 0.2, 0.18), "wood", 0.01)
+    add("RecordConsole", box_bm(-12.8, -11.8, -5.95, -5.45, 0.0, 1.0, (0, 0, 0.15, 0)), "metal", 0.02)
+    add("RecordScreen", box_bm(-12.6, -12.0, -5.46, -5.42, 0.5, 0.92), "screen")
+    add("ArchiveCrate.00", box_bm(-8.4, -7.75, -5.9, -5.25, 0.0, 0.65), "wood_dark", 0.02)
+    add("ArchiveCrate.01", box_bm(-8.3, -7.85, -5.8, -5.35, 0.65, 1.0), "wood_dark", 0.02)
+    add("ArchiveLamp", box_bm(-10.65, -10.35, 0.5, 0.6, 2.4, 2.6), "lamp")
+    # ---- mayor's office (west back) ----
+    add("OfficeRug", box_bm(-12.4, -8.6, 2.2, 6.6, 0.0, 0.012), "rug")
+    add("Desk", box_bm(-12.0, -9.4, 5.3, 6.1, 0.0, 0.74), "wood_dark", 0.02)
+    add("DeskTop", box_bm(-12.08, -9.32, 5.25, 6.15, 0.74, 0.8), "wood", 0.01)
+    add("DeskTerminal", box_bm(-11.0, -10.4, 5.9, 6.0, 0.8, 1.15), "metal", 0.005)
+    add("DeskScreen", box_bm(-10.95, -10.45, 5.86, 5.9, 0.85, 1.1), "screen")
+    add("MayorSeat", box_bm(-11.0, -10.4, 6.5, 7.0, 0.0, 0.5), "banner", 0.02)
+    add("MayorBack", box_bm(-11.0, -10.4, 7.0, 7.12, 0.0, 1.3), "wood_dark", 0.01)
+    for i, x in enumerate((-11.6, -9.8)):
+        add(f"VisitorSeat.{i}", box_bm(x - 0.25, x + 0.25, 4.0, 4.5, 0.0, 0.45), "fabric", 0.02)
+        add(f"VisitorBack.{i}", box_bm(x - 0.25, x + 0.25, 3.88, 4.0, 0.0, 0.9), "wood", 0.01)
+    add("Bookcase", box_bm(-13.55, -13.05, 2.0, 4.0, 0.0, 2.0), "wood", 0.02)
+    add("BookcaseBooks", box_bm(-13.05, -12.98, 2.1, 3.9, 0.9, 1.3), "rug")
+    add("StrongChest", box_bm(-13.4, -12.6, 7.35, 7.9, 0.0, 0.5), "wood_dark", 0.02)
+    for bm, mat, bevel in shrub(-8.1, 7.3, 0.35, 0.9):
+        add(f"OfficePlant.{mat[0]}", bm, mat, bevel)
+    add("OfficeLamp", box_bm(-13.6, -13.5, 6.85, 7.15, 2.2, 2.4), "lamp")
+    # ---- clerk's office (east front) ----
+    add("Counter", box_bm(9.6, 10.0, -5.0, -0.6, 0.0, 1.02), "wood_dark", 0.02)
+    add("CounterTop", box_bm(9.5, 10.15, -5.05, -0.55, 1.02, 1.1), "wood", 0.01)
+    for i, (y0, y1) in enumerate(CLERK_CONSOLES):
+        add(f"ClerkConsole.{i}", box_bm(13.05, 13.55, y0, y1, 0.0, 1.0, (0.15, 0, 0, 0)), "metal", 0.02)
+        add(f"ClerkScreen.{i}", box_bm(13.01, 13.05, y0 + 0.2, y1 - 0.2, 0.5, 0.92), "screen")
+    add("FilingCabinets", box_bm(11.8, 13.4, -5.95, -5.5, 0.0, 1.3), "metal", 0.02)
+    add("ClerkStool", cyl_bm(11.0, -2.8, 0.0, 0.62, 0.22, 0.2), "metal", 0.01)
+    add("WaitingBench", box_bm(7.9, 9.2, -5.95, -5.5, 0.0, 0.45), "wood", 0.02)
+    add("CounterSign", box_bm(9.75, 9.85, -3.3, -2.3, 2.3, 2.7), "screen")
+    add("ClerkLamp", box_bm(8.4, 8.7, -5.97, -5.87, 2.3, 2.5), "lamp")
+    # ---- lounge (east back) ----
+    add("LoungeRug", cyl_bm(10.6, 4.4, 0.0, 0.012, 1.9), "rug")
+    add("LoungeTableTop", cyl_bm(10.6, 4.4, 0.70, 0.76, 0.85), "wood", 0.01)
+    add("LoungeTableLeg", cyl_bm(10.6, 4.4, 0.0, 0.70, 0.12), "wood_dark")
+    add("LoungeTableFoot", cyl_bm(10.6, 4.4, 0.0, 0.05, 0.4), "wood_dark", 0.01)
+    for i in range(4):
+        a = math.pi / 4 + i * math.pi / 2
+        add(f"LoungeStool.{i}", cyl_bm(10.6 + 1.3 * math.cos(a), 4.4 + 1.3 * math.sin(a), 0.0, 0.45, 0.22, 0.2),
+            "fabric", 0.01)
+    add("CouchSeat", box_bm(12.95, 13.55, 2.0, 4.6, 0.0, 0.45), "fabric", 0.03)
+    add("CouchBack", box_bm(13.35, 13.55, 2.0, 4.6, 0.45, 0.9), "fabric", 0.03)
+    for i, (y0, y1) in enumerate([(1.85, 2.0), (4.6, 4.75)]):
+        add(f"CouchArm.{i}", box_bm(12.95, 13.55, y0, y1, 0.0, 0.65), "wood_dark", 0.01)
+    add("Sideboard", box_bm(9.4, 11.6, 7.5, 7.95, 0.0, 0.95), "wood", 0.02)
+    for i, x in enumerate((9.8, 10.5, 11.2)):
+        add(f"SideboardJar.{i}", cyl_bm(x, 7.72, 0.95, 1.27, 0.12, 0.09), "dome", 0.01)
+    for bm, mat, bevel in shrub(8.0, 7.4, 0.35, 0.9):
+        add(f"LoungePlant.{mat[0]}", bm, mat, bevel)
+    add("LoungeLamp", box_bm(10.35, 10.65, 1.0, 1.1, 2.4, 2.6), "lamp")
+    return f
+
+
+def townhall_collision(R):
+    box(R, "Floor", -14.0, 14.0, -10.4, 8.4, -T, 0.0, floor=0.0)
+    walls(R, [("HallFront.00", -7.4, -1.5, -6.4, -6.0), ("HallFront.01", 1.5, 7.4, -6.4, -6.0),
+              ("Back", -14.0, 14.0, 8.0, 8.4),
+              ("HallW.00", -7.4, -7.0, -6.0, -3.6), ("HallW.01", -7.4, -7.0, -1.8, 3.6), ("HallW.02", -7.4, -7.0, 5.4, 8.0),
+              ("HallE.00", 7.0, 7.4, -6.0, -3.6), ("HallE.01", 7.0, 7.4, -1.8, 3.6), ("HallE.02", 7.0, 7.4, 5.4, 8.0),
+              ("WingWFront", -14.0, -7.4, -6.4, -6.0), ("WingEFront", 7.4, 14.0, -6.4, -6.0),
+              ("WingWOuter", -14.0, -13.6, -6.0, 8.0), ("WingEOuter", 13.6, 14.0, -6.0, 8.0),
+              ("WingWDivider", -13.6, -7.4, 0.6, 1.0), ("WingEDivider", 7.4, 13.6, 0.6, 1.0),
+              ("VestibuleW", -3.4, -3.0, -10.4, -6.4), ("VestibuleE", 3.0, 3.4, -10.4, -6.4),
+              ("VestibuleFront", -3.0, 3.0, -10.4, -10.0)])
+    # hall
+    for k, (x, y) in enumerate(TH_COLUMNS):
+        cyl(R, f"Column.{k:02d}", x, y, 0.0, 8.0, 0.45, floor=0.0)
+    s = TH_STAGE_H
+    box(R, "Stage", -7.0, 7.0, TH_STAGE_Y, 8.0, 0.0, s, floor=0.0)
+    ramp(R, "StageStep", (0.0, TH_STAGE_Y - 0.6, 0.0), (0, 1), run=s / ENTRY_SLOPE, rise=s, width=14.0, t=0.3,
+         extend=0.0)                                                 # the two steps as one slope, like the houses'
+    box(R, "CouncilTable", -3.1, 3.1, 6.15, 7.05, s, s + 0.78, floor=s)
+    box(R, "CouncilSeats", -2.68, 2.68, 7.2, 7.85, s, s + 2.1, floor=s)
+    box(R, "Lectern", -0.42, 0.42, 5.5, 6.0, s, s + 1.12, floor=s)
+    for i, sx in enumerate((-1, 1)):
+        box(R, f"HallBench.{i}", *sorted((sx * 6.5, sx * 6.95)), -1.5, 3.3, 0.0, 0.45, floor=0.0)
+        cyl(R, f"HallPlanter.{i}", sx * 2.3, -5.55, 0.0, 1.6, 0.45, floor=0.0)
+    # vestibule
+    box(R, "NoticeBoard", -3.0, -2.88, -9.1, -7.3, 0.9, 2.1, floor=0.0)
+    box(R, "VestibuleBench", 2.5, 2.95, -9.2, -7.4, 0.0, 0.45, floor=0.0)
+    # archives
+    box(R, "Shelf", -13.55, -12.98, -5.7, 0.3, 0.0, 2.2, floor=0.0)
+    box(R, "ReadingTable", -11.5, -9.5, -3.5, -2.1, 0.0, 0.86, floor=0.0)
+    for i, (x, y) in enumerate(ARCHIVE_STOOLS):
+        cyl(R, f"ArchiveStool.{i}", x, y, 0.0, 0.45, 0.2, floor=0.0)
+    box(R, "RecordConsole", -12.8, -11.8, -5.95, -5.42, 0.0, 1.0, floor=0.0)
+    box(R, "ArchiveCrates", -8.4, -7.75, -5.9, -5.25, 0.0, 1.0, floor=0.0)
+    # mayor's office
+    box(R, "Desk", -12.08, -9.32, 5.25, 6.15, 0.0, 1.15, floor=0.0)
+    box(R, "MayorChair", -11.0, -10.4, 6.5, 7.12, 0.0, 1.3, floor=0.0)
+    for i, x in enumerate((-11.6, -9.8)):
+        box(R, f"VisitorChair.{i}", x - 0.25, x + 0.25, 3.88, 4.5, 0.0, 0.9, floor=0.0)
+    box(R, "Bookcase", -13.55, -12.98, 2.0, 4.0, 0.0, 2.0, floor=0.0)
+    box(R, "StrongChest", -13.4, -12.6, 7.35, 7.9, 0.0, 0.5, floor=0.0)
+    cyl(R, "OfficePlant", -8.1, 7.3, 0.0, 1.5, 0.4, floor=0.0)
+    # clerk's office
+    box(R, "Counter", 9.5, 10.15, -5.05, -0.55, 0.0, 1.1, floor=0.0)
+    for i, (y0, y1) in enumerate(CLERK_CONSOLES):
+        box(R, f"ClerkConsole.{i}", 13.01, 13.55, y0, y1, 0.0, 1.0, floor=0.0)
+    box(R, "FilingCabinets", 11.8, 13.4, -5.95, -5.5, 0.0, 1.3, floor=0.0)
+    cyl(R, "ClerkStool", 11.0, -2.8, 0.0, 0.62, 0.22, floor=0.0)
+    box(R, "WaitingBench", 7.9, 9.2, -5.95, -5.5, 0.0, 0.45, floor=0.0)
+    # lounge
+    cyl(R, "LoungeTable", 10.6, 4.4, 0.0, 0.76, 0.85, floor=0.0)
+    for i in range(4):
+        a = math.pi / 4 + i * math.pi / 2
+        cyl(R, f"LoungeStool.{i}", 10.6 + 1.3 * math.cos(a), 4.4 + 1.3 * math.sin(a), 0.0, 0.45, 0.22, floor=0.0)
+    box(R, "Couch", 12.95, 13.55, 1.85, 4.75, 0.0, 0.9, floor=0.0)
+    box(R, "Sideboard", 9.4, 11.6, 7.5, 7.95, 0.0, 1.27, floor=0.0)
+    cyl(R, "LoungePlant", 8.0, 7.4, 0.0, 1.5, 0.4, floor=0.0)
+
+
+_hall_ell = ('ell', 0.0, 1.0, 8.0, 6.5, 0.75)
+_vest_ell = ('ell', 0.0, -8.2, 5.0, 1.7, 0.6)
+_side_ells = [('ell', sx * 10.5, y, 3.6, 2.6, 0.55) for sx in (-1, 1) for y in (-2.7, 4.5)]
+
+
+def _outer_ell(e):
+    _, cx, cy, cz, r, sz = e
+    return ('ell', cx, cy, cz, r + T, (r * sz + T) / (r + T))
+
+
+TOWNHALL = dict(
+    collection="TatooineTownhall_Interior", root="ASSET_TownhallInterior",
+    asset_id="tat_townhall_interior", exterior="tat_townhall", exterior_spawn="front",
+    rooms=[('box', -7.0, 7.0, -6.0, 8.0, 0.0, 8.0), _hall_ell,
+           ('box', -3.0, 3.0, -10.0, -6.4, 0.0, 5.0), _vest_ell,
+           ('box', -13.6, -7.4, -6.0, 0.6, 0.0, 3.6), ('box', -13.6, -7.4, 1.0, 8.0, 0.0, 3.6),
+           ('box', 7.4, 13.6, -6.0, 0.6, 0.0, 3.6), ('box', 7.4, 13.6, 1.0, 8.0, 0.0, 3.6)] + _side_ells,
+    outer=[('box', -7.4, 7.4, -6.4, 8.4, -T, 8.0 + T), _outer_ell(_hall_ell),
+           ('box', -3.4, 3.4, -10.4, -6.0, -T, 5.0 + T), _outer_ell(_vest_ell),
+           ('box', -14.0, -7.0, -6.4, 8.4, -T, 3.6 + T), ('box', 7.0, 14.0, -6.4, 8.4, -T, 3.6 + T)]
+          + [_outer_ell(e) for e in _side_ells],
+    cuts=[('archx', 0.0, 3.0, 0.0, 3.4, -6.5, -5.9),                 # vestibule <-> hall
+          ('archx', 0.0, 2.4, 0.0, 2.6, -10.2, -9.9),                # door recess
+          ('cyl', 0.0, 1.0, 12.5, 13.3, 0.8)]                         # oculus
+         + [('archy', y, 1.8, 0.0, 2.2, sx * 7.2 - 0.3, sx * 7.2 + 0.3) for sx in (-1, 1) for y in (-2.7, 4.5)]
+         + [('hcyl', sx * 7.0, y, 6.0, 0.55, 0.5, (-sx, 0)) for sx in (-1, 1) for y in (-3.5, 1.0, 5.5)]   # clerestory
+         + [('hcyl', x, 8.0, 6.0, 0.55, 0.5, (0, -1)) for x in (-4.5, 4.5)]
+         + [('hcyl', sx * 10.5, -6.0, 1.7, 0.35, 0.5, (0, 1)) for sx in (-1, 1)]                       # side rooms
+         + [('hcyl', sx * 10.5, 8.0, 1.7, 0.35, 0.5, (0, -1)) for sx in (-1, 1)]
+         + [('hcyl', -13.6, 5.8, 1.7, 0.35, 0.5, (1, 0)), ('hcyl', 13.6, 6.0, 1.7, 0.35, 0.5, (-1, 0)),
+            ('hcyl', 13.6, -2.6, 1.7, 0.35, 0.5, (-1, 0))],
+    domes=[(0.0, 1.0, 8.0, 6.5), (0.0, -8.2, 5.0, 1.7)] + [(e[1], e[2], 3.6, 2.6) for e in _side_ells],
+    door=dict(cx=0.0, y_w=-10.0, w=2.4, zs=2.6, top=3.8),
+    skylights=[(0.0, 1.0, 13.3, 0.8)],
+    furniture=townhall_furniture(),
+    lights=[("LightHall", (0.0, 1.0, 6.6), 1500.0), ("LightStage", (0.0, 6.0, 4.5), 400.0),
+            ("LightFloor", (0.0, -3.5, 4.5), 400.0), ("LightVestibule", (0.0, -8.2, 4.0), 250.0),
+            ("LightArchives", (-10.5, -2.7, 2.8), 180.0), ("LightOffice", (-10.5, 4.5, 2.8), 180.0),
+            ("LightClerk", (10.5, -2.7, 2.8), 180.0), ("LightLounge", (10.5, 4.5, 2.8), 180.0)],
+    collision=townhall_collision,
+    origin=(30.0, -45.0, 0.05), collision_origin=(30.0, -72.0, 0.05),
+    camera=((0.0, -5.6, 1.7), (0.0, 6.0, 4.0), 16),
+)
+
+# Builds every interior; INTERIORS_ONLY = {"townhall", ...} set before exec builds a subset. Rebuilding one drops its
+# NAV_* nodes and exit approach with its collection: re-run th_interior_nav.py for it after.
+ONLY = globals().get("INTERIORS_ONLY")
+result = {k: build(s) for k, s in (("small", SMALL), ("large", LARGE), ("townhall", TOWNHALL))
+          if ONLY is None or k in ONLY}

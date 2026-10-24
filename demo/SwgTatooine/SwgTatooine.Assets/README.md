@@ -65,15 +65,18 @@ name must never get new bytes. Hence:
 
 1. **Bump** the asset's revision in `revisions.json` (a new asset starts at 1). For a shared texture, bump the texture
    **and** every asset whose GLB uses it: the GLB names the texture file.
+   An icon has its own revision, under `"icons"`: re-rendering one means bumping that, not its asset's.
 2. **Export only what you bumped:**
    ```
-   # buildings, interiors, interactables, props, vehicles: headless Blender
+   # buildings, interiors, interactables, props, vehicles, weapons: headless Blender
    TH_EXPORT_ONLY=tat_shuttleport,shuttle blender -b blender/tatooine.blend --python scripts/th_export.py   # bash, zsh
    $env:TH_EXPORT_ONLY="tat_shuttleport,shuttle"; blender -b blender/tatooine.blend --python scripts/th_export.py  # PowerShell
    # characters: plain Python, no Blender
    python -I scripts/th_character.py casual2_male
    # creatures (their sources are .blend files, listed in scripts/th_creatures.py): headless Blender, no scene
    blender -b --factory-startup --python scripts/th_creature.py -- rat wasp
+   # icons (revisions.json "icons", listed in scripts/th_icons.py): headless Blender
+   TH_ICONS_ONLY=swoop blender -b blender/tatooine.blend --python scripts/th_icons.py
    ```
    Re-exporting a revision that is already published with other bytes is **refused** (`Unbumped`). Exporting an asset
    that is not in `revisions.json` is refused too. A publish writes `<id>-<rev>.glb/.json` and the next

@@ -45,4 +45,28 @@ root, short = nodes("ASSET_House2Interior", [
 out["large"] = make_approach(root, f"APPROACH_{short}_front", ob[f"PORTAL_{short}_front"],
                              [(1.5, -3.0, 0.0), (1.5, -3.75, 0.0)]).name
 
+# town hall: vestibule x +-3, y -10..-6.4, arch to the hall x +-1.5 (wall y -6.4..-6.0); hall x +-7, y -6..8, columns
+# x +-4.6 (y -3.5, -0.5, 2.5, 5.5), stage y 5.4..8 (council table, seats, lectern; walkable, 0.3 m), benches on the side
+# walls; side-room arches in the hall side walls at y -2.7 and 4.5 (wall x +-7.0..7.4); archives x -13.6..-7.4,
+# y -6..0.6; mayor's office y 1..8; clerk's office (counter x 9.5..10.15, y -5.05..-0.55) and lounge (round table) east.
+# Door x 0, inner wall y -10.
+root, short = nodes("ASSET_TownhallInterior", [
+    (0.0, -8.6),                                                         # .00 door
+    (0.0, -6.2),                                                         # .01 the vestibule arch
+    (0.0, -4.6), (-5.8, -4.8), (5.8, -4.8), (0.0, -0.5), (0.0, 3.0),     # .02-.06 hall floor
+    (-5.8, 1.0), (5.8, 1.0), (-5.8, 7.0), (5.8, 7.0),                    # .07-.10 side aisles, stage ends
+    (-6.3, -2.7), (-8.2, -2.7), (-6.3, 4.5), (-8.2, 4.5),                # .11-.14 west arches
+    (6.3, -2.7), (8.2, -2.7), (6.3, 4.5), (8.2, 4.5),                    # .15-.18 east arches
+    (-8.7, -4.7), (-12.2, -4.6), (-12.2, -1.0), (-8.7, -0.4),            # .19-.22 archives
+    (-8.6, 2.0), (-12.3, 1.7), (-12.55, 4.85), (-9.0, 6.8), (-12.55, 6.8),   # .23-.27 mayor's office (west of the desk)
+    (8.6, -4.6), (8.6, 0.0), (10.6, 0.0), (10.6, -5.6), (12.0, -4.0), (12.0, -1.0),   # .28-.33 clerk's office
+    (8.4, 2.0), (8.6, 6.5), (12.2, 6.6), (12.2, 1.5),                    # .34-.37 lounge
+    (-3.6, 6.7), (3.6, 6.7),                                             # .38-.39 beside the council table
+    (-11.6, 7.6), (-9.7, 7.5), (-10.7, 4.85),                             # .40-.42 behind the mayor, before the desk
+    (9.0, 7.15), (10.6, 6.3), (12.2, 4.4), (10.6, 2.5),                  # .43-.46 round the lounge table
+    (1.9, -6.95), (1.9, -9.6),                                           # .47-.48 off either end of the vestibule bench
+    (-3.45, 7.6), (3.45, 7.6)])                                          # .49-.50 behind the council table's ends
+out["townhall"] = make_approach(root, f"APPROACH_{short}_front", ob[f"PORTAL_{short}_front"],
+                                [(0.0, -8.6, 0.0), (0.0, -9.65, 0.0)]).name
+
 result = out
