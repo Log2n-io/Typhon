@@ -282,6 +282,42 @@ public sealed class InteriorWorldChecks
         Worlds.Delete(_dir);
     }
 
+    /// <summary>
+    /// Every door stores a real landing height, a world without assets included: the terrain where nothing published stands under the landing.
+    /// </summary>
+    /// <remarks>A footprint's stand-in door used to store place.Y + -∞: an infinity in the database that only a <c>max</c> made harmless.</remarks>
+    [Test]
+    public void EveryDoor_StoresARealLandingHeight_WithOrWithoutAssets()
+    {
+        var dir = Worlds.NewDirectory();
+        try
+        {
+            var config = Worlds.Small(dir);
+            config.Shuttles = false;
+            using var bare = new TatooineSim(config);
+            bare.Initialize();
+            var terrain = SwgTatooine.Server.Terrain.TerrainField.Shared(config.ContentScale);
+            foreach (var sim in new[] { _sim, bare })
+            {
+                var doors = sim.Portals;
+                Assert.That(doors.Count, Is.GreaterThan(0));
+                for (var row = 0; row < doors.Count; row++)
+                {
+                    var door = doors.Door[row];
+                    Assert.That(float.IsFinite(door.ArriveY), Is.True, $"row {row} stores {door.ArriveY}");
+                    if (sim == bare && door.TargetRealm < config.Planets)
+                    {
+                        Assert.That(door.ArriveY, Is.EqualTo(terrain.GroundAt(door.ArriveX, door.ArriveZ)).Within(1e-4f), $"row {row}");
+                    }
+                }
+            }
+        }
+        finally
+        {
+            Worlds.Delete(dir);
+        }
+    }
+
     [Test]
     public void EveryEnterableBuilding_HasItsOwnRoom()
     {
@@ -343,6 +379,26 @@ public sealed class InteriorWorldChecks
         }
 
         Assert.That(fronts, Is.EqualTo(_sim.InteriorsPerPlanet));
+    }
+
+    /// <summary>
+    /// The pair is stored by ONE write — the way out names the door into its room — and paired both ways at open.
+    /// </summary>
+    /// <remarks>
+    /// The door into a room used to be linked back in a second pass, after its way out had been committed: a stored world between the two had every
+    /// front door unlinked, and the table refused it at every open after.
+    /// </remarks>
+    [Test]
+    public void EveryDoor_IsLinkedByItsWayOut_AndPairedBothWaysAtOpen()
+    {
+        var doors = _sim.Portals;
+        for (var row = 0; row < doors.Count; row++)
+        {
+            var stored = doors.Door[row].Twin;
+            var intoARoom = doors.Realm[row] < _sim.Config.Planets;
+            Assert.That(stored.IsNull, Is.EqualTo(intoARoom), $"row {row}: only a room's way out stores the link");
+            Assert.That(doors.Twin[doors.Twin[row]], Is.EqualTo(row), $"row {row} is not paired both ways");
+        }
     }
 
     [Test]
@@ -470,6 +526,61 @@ public sealed class InteriorReopenChecks
             Worlds.Delete(dir);
         }
     }
+
+    /// <summary>
+    /// A body that was walking to a door when the world was closed walks into THAT door's room once it is reopened.
+    /// </summary>
+    /// <remarks>
+    /// The walk is persisted (<c>PlayerState.ShuttleDest</c>), and it used to hold the door's ROW — a number the table gives at open, in the order the
+    /// portals enumerate, which nothing keeps across a reopen. It holds the room's realm now, which is stored. A room whose realm id is not its door's
+    /// row, so the two readings name different doors.
+    /// </remarks>
+    [Test]
+    public void ABodyWalkingToADoor_WhenTheWorldCloses_WalksIntoThatRoomOnceReopened()
+    {
+        var dir = Worlds.NewDirectory();
+        try
+        {
+            var config = Worlds.Small(dir);
+            config.Shuttles = false;
+            config.Persist = true;
+            config.Dungeons = 0;
+            config.InteriorShare = 0f;
+            config.InteriorStayS = 30f;
+            config.WarmTicks = 0;
+            config.WorkerCount = 1;
+            ushort interior = 0;
+            EntityId player;
+            using (var built = new TatooineSim(config) { AssetShapesOverride = Published.Shapes() })
+            {
+                built.Initialize();
+                for (var r = config.Planets; r < config.Planets + built.Portals.Count / 2 && interior == 0; r++)
+                {
+                    var front = built.Portals.FrontDoor(r);
+                    if (front >= 0 && front != r)
+                    {
+                        interior = (ushort)r;
+                    }
+                }
+
+                Assert.That(interior, Is.Not.Zero, "every room's realm id equals its door's row: the case cannot tell the two apart");
+                player = DoorWalkChecks.SendToDoor(built, built.Portals.FrontDoor(interior));
+            }
+
+            config.MeasuredTicks = 40;
+            using var reopened = new TatooineSim(config) { AssetShapesOverride = Published.Shapes() };
+            reopened.Initialize();
+            Assert.That(reopened.Reopened, Is.True);
+            reopened.Run();
+
+            using var read = reopened.Dbe.CreateQuickTransaction();
+            Assert.That(read.Open(player).Read(Player.Realm).Value, Is.EqualTo(interior));
+        }
+        finally
+        {
+            Worlds.Delete(dir);
+        }
+    }
 }
 
 /// <summary>
@@ -516,28 +627,7 @@ public sealed class DoorWalkChecks
         sim.Initialize();
         var interior = (ushort)sim.Config.Planets;
         var row = Worlds.DoorInto(sim, interior);
-        var player = sim.Index.Players[0];
-        var (sx, sz) = sim.Portals.ApproachStart[row];
-        using (var tx = sim.Dbe.CreateQuickTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit))
-        {
-            var p = tx.OpenMut(player);
-            var state = p.Read(Player.State);
-            state.Activity = PlayerActivity.ToPortal;
-            state.ActivityTicks = 200 * sim.Config.TickRateHz;
-            state.ShuttleDest = row;
-            p.Set(Player.State, state);
-            var move = p.Read(Player.Move);
-            move.SpeedMps = TatooineData.PlayerRunSpeedMps;
-            move.VelX = 0f;
-            move.VelZ = 0f;
-            move.DestX = sx;
-            move.DestZ = sz;
-            p.Set(Player.Move, move);
-            var at = default(PlayerPlacement);
-            at.SetAt(sx, sz, 0f, p.Read(Player.Bounds).HalfExtent);
-            tx.Teleport(player, Player.Bounds, RealmId.Default, in at);
-            Assert.That(tx.Commit(), Is.True);
-        }
+        var player = SendToDoor(sim, row);
 
         sim.Run();
 
@@ -559,6 +649,107 @@ public sealed class DoorWalkChecks
             Assert.That(place.Y, Is.EqualTo(MathF.Max(back.ArriveY, ground)).Within(0.01f), $"feet at {place.Y:F2}, terrain {ground:F2}");
             Assert.That(back.ArriveY, Is.GreaterThan(float.NegativeInfinity), "the front spawn's height was not stored");
         });
+    }
+
+    /// <summary>
+    /// A crossing whose batch did not commit is tried once more on the next tick, and lands; two failures in a row drop it, and the body stays where it was.
+    /// </summary>
+    /// <remarks>
+    /// Before, the result of the commit was ignored: the body counted as landed, its room was pinned and the crossing counted, all for a crossing that
+    /// never happened. 40 ticks: the plane is reached on about the fourteenth.
+    /// </remarks>
+    [TestCase(1, 1)]
+    [TestCase(2, 0)]
+    public void ACrossingThatDidNotCommit_IsRetriedOnce(int failures, int entries)
+    {
+        using var sim = new TatooineSim(Config(40)) { AssetShapesOverride = Published.Shapes(), FailCrossingCommits = failures };
+        sim.Initialize();
+        var interior = (ushort)sim.Config.Planets;
+        var row = Worlds.DoorInto(sim, interior);
+        var player = SendToDoor(sim, row);
+
+        sim.Run();
+
+        using var read = sim.Dbe.CreateQuickTransaction();
+        var realm = read.Open(player).Read(Player.Realm).Value;
+        Assert.Multiple(() =>
+        {
+            Assert.That(sim.Bridge.FailedCrossingCommits, Is.EqualTo(failures));
+            Assert.That(sim.CrossingTotals.Entries, Is.EqualTo(entries));
+            Assert.That(sim.Bridge.DroppedCrossings, Is.EqualTo(failures - 1));
+            Assert.That(realm, Is.EqualTo(entries == 1 ? interior : (ushort)0), "the body is not where its committed crossings put it");
+        });
+    }
+
+    /// <summary>
+    /// On a planet visited every third tick, a body walking to a door reaches the start of its path and goes in.
+    /// </summary>
+    /// <remarks>
+    /// Waypoints are reached exactly, within 5 cm, and the steering capped one tick's step at the distance left — while a strided realm moves k ticks of
+    /// velocity per visit. The body overshot the start of the path, then overshot back, and stood oscillating there until the walk timed out. 2.4 m
+    /// short of the start, so it has to reach it: 60 ticks are 20 visits.
+    /// </remarks>
+    [Test]
+    public void OnAStridedPlanet_ABodyReachesTheDoorsPath_AndGoesIn()
+    {
+        var config = Config(60);
+        config.Planets = 2;
+        config.PlanetDivisor = 3;
+        using var sim = new TatooineSim(config) { AssetShapesOverride = Published.Shapes() };
+        sim.Initialize();
+        var row = -1;
+        for (var r = 0; r < sim.Portals.Count && row < 0; r++)
+        {
+            if (sim.Portals.Realm[r] == 1)
+            {
+                row = r;
+            }
+        }
+
+        Assert.That(row, Is.GreaterThanOrEqualTo(0), "planet 1 has no door");
+        var interior = (ushort)sim.Portals.Door[row].TargetRealm;
+        var player = SendToDoor(sim, row, back: 2.4f);
+
+        sim.Run();
+
+        using var read = sim.Dbe.CreateQuickTransaction();
+        Assert.That(read.Open(player).Read(Player.Realm).Value, Is.EqualTo(interior));
+    }
+
+    /// <summary>Puts the first player on open ground at a door's path, told to walk it in.</summary>
+    /// <param name="sim">The world.</param>
+    /// <param name="row">The door, on its planet.</param>
+    /// <param name="back">How far short of the path's start it stands, metres, on the line through the path: 0 to stand on it.</param>
+    internal static EntityId SendToDoor(TatooineSim sim, int row, float back = 0f)
+    {
+        var player = sim.Index.Players[0];
+        var (ax, az) = sim.Portals.ApproachStart[row];
+        var (ex, ez) = sim.Portals.ApproachEnd[row];
+        var length = MathF.Max(1e-3f, MathF.Sqrt(((ax - ex) * (ax - ex)) + ((az - ez) * (az - ez))));
+        var sx = ax + ((ax - ex) / length * back);
+        var sz = az + ((az - ez) / length * back);
+        using (var tx = sim.Dbe.CreateQuickTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit))
+        {
+            var p = tx.OpenMut(player);
+            var state = p.Read(Player.State);
+            state.Activity = PlayerActivity.ToPortal;
+            state.ActivityTicks = 200 * sim.Config.TickRateHz;
+            state.ShuttleDest = sim.Portals.Door[row].TargetRealm;
+            p.Set(Player.State, state);
+            var move = p.Read(Player.Move);
+            move.SpeedMps = TatooineData.PlayerRunSpeedMps;
+            move.VelX = 0f;
+            move.VelZ = 0f;
+            move.DestX = ax;
+            move.DestZ = az;
+            p.Set(Player.Move, move);
+            var at = default(PlayerPlacement);
+            at.SetAt(sx, sz, 0f, p.Read(Player.Bounds).HalfExtent);
+            tx.Teleport(player, Player.Bounds, new RealmId(sim.Portals.Realm[row]), in at);
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        return player;
     }
 
     /// <summary>

@@ -338,9 +338,9 @@ public static class WorldBuilder
         }
 
         houses.Sort((a, b) => a.Struct.InteriorRealm.CompareTo(b.Struct.InteriorRealm));
+        var terrain = TerrainField.Shared(config.ContentScale);
         var rng = new Rng(((uint)config.Seed ^ 0x51ED27A3u) + ((uint)planet * 0x9E3779B9u));
         var spots = new List<(float X, float Z)>();
-        var pairs = new List<(EntityId Front, EntityId Back)>(houses.Count);
         var made = 0;
         var tx2 = dbe.CreateQuickTransaction();
         try
@@ -410,19 +410,20 @@ public static class WorldBuilder
                     ForwardZ = roomDoor.ForwardZ,
                     HalfWidth = roomDoor.HalfX,
                     ArriveX = place.X + ex,
-                    ArriveY = place.Y + door.ExitY,
+                    ArriveY = door.ExitOnGround ? terrain.GroundAt(place.X + ex, place.Z + ez) : place.Y + door.ExitY,
                     ArriveZ = place.Z + ez,
                     TargetRealm = planet,
                     Twin = frontId,
                     Owner = roomId,
                 };
-                var backId = tx2.Spawn<Portal>(
+                tx2.Spawn<Portal>(
                     Portal.Bounds.Set(new PortalPlacement { Bounds = BoxAt(back.CenterX, back.CenterZ, roomDoor.HalfX, roomDoor.HalfZ) }),
                     Portal.Door.Set(in back),
                     Portal.Realm.Set(new PortalRealm(interior)));
 
-                // The front door's twin is only known now, and an entity spawned in a transaction is not open-able in it: linked once committed.
-                pairs.Add((frontId, backId));
+                // The pair is linked ONE way, by the way out naming the door into its room: the front door is spawned first and its twin is not
+                // known yet, and a second write to link it back would leave a window in which a stored world had doors half linked. The table pairs
+                // them at open (PortalTable.Build).
                 made++;
                 spots.Clear();
                 NpcSpots(shapes?.NavFor(roomAsset), roomDoor, spots);
@@ -456,27 +457,6 @@ public static class WorldBuilder
         finally
         {
             tx2.Dispose();
-        }
-
-        for (var first = 0; first < pairs.Count; first += 1024)
-        {
-            using var tx = dbe.CreateQuickTransaction();
-            using (var portals = tx.For<Portal>())
-            {
-                for (var i = first; i < Math.Min(pairs.Count, first + 1024); i++)
-                {
-                    if (!portals.TryOpenMut(pairs[i].Front, out var entity))
-                    {
-                        throw new InvalidOperationException($"The door {pairs[i].Front} spawned a moment ago cannot be opened to link its twin.");
-                    }
-
-                    var linked = entity.Read(Portal.Door);
-                    linked.Twin = pairs[i].Back;
-                    entity.Set(Portal.Door, linked);
-                }
-            }
-
-            tx.Commit();
         }
 
         return made;

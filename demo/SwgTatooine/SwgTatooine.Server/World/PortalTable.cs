@@ -85,6 +85,17 @@ public sealed class PortalTable
     /// <returns>The row, or -1.</returns>
     internal int RoomDoor(int realm) => (uint)realm < (uint)_roomDoor.Length ? _roomDoor[realm] : -1;
 
+    /// <summary>The row of the door INTO a room, by the room's realm, or -1 for a realm that is not a room.</summary>
+    /// <param name="realm">A realm id.</param>
+    /// <returns>The row, or -1.</returns>
+    /// <remarks>With <see cref="RoomDoor"/>, how a persisted reference to a door is resolved: rows are numbered in the order the portals enumerate at open,
+    /// which nothing keeps across a reopen, while the room's realm is stored and unique per pair of sides.</remarks>
+    internal int FrontDoor(int realm)
+    {
+        var back = RoomDoor(realm);
+        return back < 0 ? -1 : Twin[back];
+    }
+
     /// <summary>The row of a door side, by its entity, or -1.</summary>
     /// <param name="id">A <see cref="Portal"/> entity.</param>
     /// <returns>The row, or -1.</returns>
@@ -137,16 +148,37 @@ public sealed class PortalTable
             byCity[p] = new List<(int, int)>[cities];
         }
 
+        // Pairs the sides. The link is stored one way — a room's way out names the door into the room (WorldBuilder.BuildInteriors) — so it is
+        // inverted here: one write per pair, and no stored world with a door half linked.
+        Array.Fill(table.Twin, -1);
+        for (var i = 0; i < ids.Count; i++)
+        {
+            var link = table.Door[i].Twin;
+            if (link.IsNull)
+            {
+                continue;
+            }
+
+            var j = table.RowOf(link);
+            if (j < 0 || table.Twin[j] >= 0)
+            {
+                throw new InvalidOperationException(
+                    $"Door {ids[i]} in realm {table.Realm[i]} names a twin that is not in the database, or one another side names too.");
+            }
+
+            table.Twin[i] = j;
+            table.Twin[j] = i;
+        }
+
         using var structures = tx.For<WorldObject>();
         var route = new List<(float X, float Z)>();
         for (var i = 0; i < ids.Count; i++)
         {
             ref readonly var d = ref table.Door[i];
-            table.Twin[i] = table.RowOf(d.Twin);
             if (table.Twin[i] < 0)
             {
                 throw new InvalidOperationException(
-                    $"Door {ids[i]} in realm {table.Realm[i]} names a twin that is not in the database. A door needs both its sides.");
+                    $"Door {ids[i]} in realm {table.Realm[i]} has no other side in the database. A door needs both its sides.");
             }
 
             var onPlanet = table.Realm[i] < planets;

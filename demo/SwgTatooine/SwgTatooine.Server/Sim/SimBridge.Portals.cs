@@ -30,9 +30,10 @@ public sealed partial class SimBridge
     }
 
     /// <summary>One queued crossing: the player, where it lands, and its placement's half extent.</summary>
-    /// <param name="Y">The feet's published height there, or -∞ for none: the landing is this or the ground, whichever is higher.</param>
-    private readonly record struct TeleportRequest(EntityId Id, ushort Realm, float X, float Z, float HalfExtent, CrossingKind Kind,
-        float Y = float.NegativeInfinity);
+    /// <param name="Y">The feet's height there — a door's stored landing, or the ground: the landing is this or the ground, whichever is higher.</param>
+    /// <param name="Retried">Whether this is the second attempt, after a batch that did not commit; a second failure drops it.</param>
+    private readonly record struct TeleportRequest(EntityId Id, ushort Realm, float X, float Z, float HalfExtent, CrossingKind Kind, float Y,
+        bool Retried = false);
 
     /// <summary>How long a scripted body may take to walk through a door before it gives up and decides something else, in seconds.</summary>
     /// <remarks>The path is a few metres; a body that has not crossed in this long is blocked — by another body, or by a neighbour the placer let stand
@@ -53,6 +54,16 @@ public sealed partial class SimBridge
     private readonly System.Collections.Generic.Dictionary<EntityId, RealmObserver> _interiorPins = [];
     private readonly System.Collections.Generic.List<TeleportRequest> _appliedCrossings = [];
     private long _droppedCrossings;
+    private long _failedCrossingCommits;
+
+    /// <summary>Test seam: this many crossing batches are rolled back instead of committed, as a commit that failed would be.</summary>
+    internal int FailCrossingCommits;
+
+    /// <summary>Crossings that never applied: their destination or player gone, or two batches in a row not committed.</summary>
+    internal long DroppedCrossings => _droppedCrossings;
+
+    /// <summary>Crossing batches that did not commit.</summary>
+    internal long FailedCrossingCommits => _failedCrossingCommits;
 
     /// <summary>
     /// The bodies <see cref="TeleportTick"/> moved this tick, which <c>PlayerMove</c> leaves where they landed until the fence has put them in their new
@@ -144,7 +155,7 @@ public sealed partial class SimBridge
         var row = doors[Math.Min(doors.Length - 1, (int)(Hash01(pickSalt) * doors.Length))];
         state.Activity = PlayerActivity.ToPortal;
         state.ActivityTicks = 200 * _config.TickRateHz;
-        state.ShuttleDest = row;
+        state.ShuttleDest = Portals.Door[row].TargetRealm;
         move.SpeedMps = TatooineData.PlayerRunSpeedMps;
         (move.DestX, move.DestZ) = Portals.ApproachStart[row];
         Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
@@ -180,8 +191,11 @@ public sealed partial class SimBridge
             return false;
         }
 
-        var row = state.ShuttleDest;
-        if (!InteriorsActive || (uint)row >= (uint)Portals.Count)
+        // The door is held as its ROOM's realm, not as a row: rows are numbered at open, and this state is persisted (PlayerState.ShuttleDest).
+        var row = !InteriorsActive ? -1
+            : state.Activity == PlayerActivity.LeavingRoom ? Portals.RoomDoor(state.ShuttleDest)
+            : Portals.FrontDoor(state.ShuttleDest);
+        if (row < 0)
         {
             state.Activity = PlayerActivity.Idle;
             state.ActivityTicks = 0;
@@ -203,7 +217,7 @@ public sealed partial class SimBridge
         var dz = move.DestZ - z;
         if ((dx * dx) + (dz * dz) > WaypointReachM * WaypointReachM)
         {
-            Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+            SteerToWaypoint(ref move, x, z, k);
             return true;
         }
 
@@ -229,8 +243,24 @@ public sealed partial class SimBridge
                 return true;
         }
 
-        Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+        SteerToWaypoint(ref move, x, z, k);
         return true;
+    }
+
+    /// <summary>
+    /// Steers at the waypoint so that the next visit finds the body ON it: <paramref name="k"/> ticks of this velocity, in a realm visited every
+    /// <paramref name="k"/>-th tick, end exactly there.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Steer(ref float, ref float, float, float, float, float, float)"/> caps ONE tick's step at the distance left, and Move integrates
+    /// <c>k</c> of them: in a strided realm the body overshot by (k-1) times what was left, then by more on the way back, and never came within
+    /// <see cref="WaypointReachM"/> — it stood oscillating until the walk timed out. Aiming at the point 1/k of the way there caps the step at the
+    /// distance left over k, and changes nothing for a realm visited every tick.
+    /// </remarks>
+    private void SteerToWaypoint(ref PlayerMotion move, float x, float z, int k)
+    {
+        var over = k > 1 ? 1f / k : 1f;
+        Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, x + ((move.DestX - x) * over), z + ((move.DestZ - z) * over));
     }
 
     /// <summary>
@@ -263,7 +293,7 @@ public sealed partial class SimBridge
 
         state.Activity = PlayerActivity.LeavingRoom;
         state.ActivityTicks = (int)(RoomWalkTimeoutS * _config.TickRateHz);
-        state.ShuttleDest = row;
+        state.ShuttleDest = realm;
         state.ShuttleFrom = 0;
         move.SpeedMps = TatooineData.PlayerRunSpeedMps;
         var route = Portals.Route[row];
@@ -314,8 +344,9 @@ public sealed partial class SimBridge
         var r = ArrivalScatterM * MathF.Sqrt(Hash01(salt ^ 0x2F9B1D63u));
         var a = Hash01(salt ^ 0x6C8E9CF5u) * MathF.PI * 2f;
         var half = (_config.WorldEdgeM * 0.5f) - halfExtent;
-        _teleports.Enqueue(new TeleportRequest(id, destPlanet, Math.Clamp(portX + (MathF.Cos(a) * r), -half, half),
-            Math.Clamp(portZ + (MathF.Sin(a) * r), -half, half), halfExtent, CrossingKind.InterPlanet));
+        var x = Math.Clamp(portX + (MathF.Cos(a) * r), -half, half);
+        var z = Math.Clamp(portZ + (MathF.Sin(a) * r), -half, half);
+        _teleports.Enqueue(new TeleportRequest(id, destPlanet, x, z, halfExtent, CrossingKind.InterPlanet, GroundAt(new RealmId(destPlanet), x, z)));
     }
 
     /// <summary>A doorway in the frame a body walks in, as the crossing test needs it.</summary>
@@ -546,8 +577,40 @@ public sealed partial class SimBridge
             }
 
             var commit = Stopwatch.GetTimestamp();
-            tx.Commit();
+            bool committed;
+            if (FailCrossingCommits > 0)
+            {
+                FailCrossingCommits--;
+                committed = false;
+            }
+            else
+            {
+                committed = tx.Commit();
+            }
+
             _teleportCommitTicks += Stopwatch.GetTimestamp() - commit;
+            if (!committed)
+            {
+                // Nothing moved: no body landed, nothing is pinned, nothing is counted. The scripted bodies already believe they are through (their
+                // activity was set when the crossing was queued), so each crossing is tried once more next tick rather than leaving a body inside a
+                // doorway thinking it is in the room; a second failure drops it.
+                foreach (var r in _appliedCrossings)
+                {
+                    _landedThisTick.Remove(r.Id);
+                    if (r.Retried)
+                    {
+                        _droppedCrossings++;
+                    }
+                    else
+                    {
+                        _teleports.Enqueue(r with { Retried = true });
+                    }
+                }
+
+                _appliedCrossings.Clear();
+                entries = exits = planets = 0;
+                _failedCrossingCommits++;
+            }
         }
 
         // Pins follow the COMMITTED crossings only.
@@ -591,6 +654,7 @@ public sealed partial class SimBridge
             + $"{_interPlanetCrossings:N0} inter-planet in {_teleportBatches:N0} batches; per batch "
             + $"{(double)(_portalEntries + _portalExits + _interPlanetCrossings) / batches:F1} crossings, "
             + $"{Stopwatch.GetElapsedTime(0, _teleportTicks / batches).TotalMicroseconds:F0} us of which commit "
-            + $"{Stopwatch.GetElapsedTime(0, _teleportCommitTicks / batches).TotalMicroseconds:F0} us");
+            + $"{Stopwatch.GetElapsedTime(0, _teleportCommitTicks / batches).TotalMicroseconds:F0} us; "
+            + $"{_droppedCrossings:N0} dropped, {_failedCrossingCommits:N0} batches not committed");
     }
 }

@@ -222,6 +222,10 @@ internal static class Worlds
     {
         var ids = new HashSet<EntityId>();
         Span<ClusterSpatialQueryResult> buffer = new ClusterSpatialQueryResult[64];
+
+        // A query walks chunk accessors, which must be taken inside an epoch scope, and off the tick nothing else opens one. A transaction does (its
+        // constructor enters the scope); EpochGuard, which SpatialCensus uses, is internal to the engine. Debug asserts it; Release ran without one.
+        using var scope = dbe.CreateQuickTransaction();
         var e = dbe.ClusterSpatialQuery<Player>(new RealmId(realm)).AABB(in box);
         try
         {
@@ -377,11 +381,11 @@ public sealed class OccupiedInteriorTests
             var player = tx.OpenMut(_player);
 
             // At the start of the door's path and walking to it, which is the state TryWalkToPortal leaves a player in on the tick before it arrives.
-            // ShuttleDest carries the door's row while the activity is ToPortal (PlayerState.ShuttleDest), and the timer only has to outlast the walk.
+            // ShuttleDest carries the room's realm while the activity is ToPortal (PlayerState.ShuttleDest), and the timer only has to outlast the walk.
             var state = player.Read(Player.State);
             state.Activity = PlayerActivity.ToPortal;
             state.ActivityTicks = 200 * config.TickRateHz;
-            state.ShuttleDest = row;
+            state.ShuttleDest = _occupied;
             player.Set(Player.State, state);
             var move = player.Read(Player.Move);
             move.SpeedMps = TatooineData.PlayerRunSpeedMps;

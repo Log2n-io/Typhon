@@ -811,8 +811,9 @@ public struct PlayerState
     /// waypoint of the room's route it is walking to.</summary>
     [Field] public int ShuttleFrom;
 
-    /// <summary>The city the shuttle takes this player to — or, while walking to, through or out of a door, the door's row in the <c>PortalTable</c>
-    /// (reused rather than a new field: a wider PlayerState would change every run's layout, interiors or not).</summary>
+    /// <summary>The city the shuttle takes this player to — or, while walking to, through or out of a door, the realm of the ROOM that door belongs to
+    /// (reused rather than a new field: a wider PlayerState would change every run's layout, interiors or not). The room and not the door's row: this is
+    /// persisted, and rows are numbered at open in an order nothing keeps across a reopen.</summary>
     [Field] public int ShuttleDest;
 }
 
@@ -1037,7 +1038,7 @@ public static class PlayerActivity
 
     /// <summary>
     /// Walking to where a building's door path starts, on open ground in front of its ramp (Realms G1b). <see cref="PlayerState.ShuttleDest"/> holds the
-    /// door, as a <c>PortalTable</c> row.
+    /// door, as the realm of the room it leads into.
     /// </summary>
     public const int ToPortal = 6;
 
@@ -1048,7 +1049,7 @@ public static class PlayerActivity
     public const int EnteringDoor = 8;
 
     /// <summary>
-    /// Walking out of a room: through its navigation to the way out, then through it. <see cref="PlayerState.ShuttleDest"/> holds the way out's row and
+    /// Walking out of a room: through its navigation to the way out, then through it. <see cref="PlayerState.ShuttleDest"/> holds the room's realm and
     /// <see cref="PlayerState.ShuttleFrom"/> the waypoint reached.
     /// </summary>
     public const int LeavingRoom = 9;
@@ -1225,7 +1226,8 @@ public struct PortalRealm
 /// <para>
 /// <b>Two links, both stored.</b> <see cref="Twin"/> is the other side of the same door, in the other realm; <see cref="Owner"/> the structure this side
 /// belongs to — the building on the planet, the room inside. So "which building is this room in" is a room's portal, its twin, the twin's owner, with no
-/// arithmetic on realm ids anywhere.
+/// arithmetic on realm ids anywhere. <see cref="Twin"/> is stored on the room's side only, and paired both ways at open (<c>PortalTable.Build</c>): the
+/// door into a room is spawned before its way out exists, and linking it back afterwards was a second write that left a window with half-linked doors.
 /// </para>
 /// </remarks>
 [Component("Swg.PortalDoor", 1, StorageMode = StorageMode.SingleVersion)]
@@ -1256,14 +1258,14 @@ public struct PortalDoor
     /// <summary>
     /// The feet's height there: the published spawn's, placed with its structure. A crossing lands at this or the terrain, whichever is higher — the
     /// house's front spawn is on the landing at the top of its ramp, 0.7 m above the house's origin, and a body put on the terrain under it stood inside
-    /// the landing and was pushed out of it.
+    /// the landing and was pushed out of it. Always a real height: a door with nothing published under its landing stores the terrain's there.
     /// </summary>
     [Field] public float ArriveY;
 
     /// <summary>The realm on the far side.</summary>
     [Field] public int TargetRealm;
 
-    /// <summary>The other side of this door.</summary>
+    /// <summary>The other side of this door, on a room's way out; none on the door into the room, which the way out names (see the remarks).</summary>
     [Field] public EntityLink<Portal> Twin;
 
     /// <summary>The structure this side belongs to: the building, or its room.</summary>

@@ -74,6 +74,9 @@ public sealed partial class TatooineSim
     /// </remarks>
     internal AssetColliders AssetShapesOverride { get; set; }
 
+    /// <summary>Test seam, handed to the bridge: this many crossing batches are rolled back as if their commit had failed. 0 in every real run.</summary>
+    internal int FailCrossingCommits { get; set; }
+
     /// <summary>
     /// Build the views, wire the schedule and run the configured number of ticks.
     /// </summary>
@@ -100,6 +103,7 @@ public sealed partial class TatooineSim
             Dbe = Dbe,
             PlanetIndexes = Indexes,
             Portals = Portals,
+            FailCrossingCommits = FailCrossingCommits,
             InteriorsPerPlanet = InteriorsPerPlanet,
             FirstDungeonRealm = FirstDungeonRealm,
             PlayerView = _playerView,

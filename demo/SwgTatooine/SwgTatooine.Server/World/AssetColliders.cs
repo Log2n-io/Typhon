@@ -643,8 +643,10 @@ public sealed class AssetColliders
     /// <param name="TargetAsset">The asset behind the door, as <see cref="StructureAssets.Table"/> indexes it.</param>
     /// <param name="Exists">Whether the door was read whole: geometry, both spawns and its target.</param>
     /// <param name="ExitY">The exit spawn's height above the asset's origin: the feet of a body that comes back out stand there — on a front step,
-    /// not on the terrain under it.</param>
+    /// not on the terrain under it. Not read when <paramref name="ExitOnGround"/>.</param>
     /// <param name="ArriveY">The arrival spawn's height above the target asset's origin.</param>
+    /// <param name="ExitOnGround">Whether nothing published stands under the exit, so a body coming out lands on the terrain there — a footprint's stand-in
+    /// door. A flag rather than a height of -∞: the height is stored in the database, and an infinity there is a sentinel every reader must know.</param>
     internal readonly record struct DoorPlan(
         float CenterX,
         float CenterZ,
@@ -663,7 +665,8 @@ public sealed class AssetColliders
         int TargetAsset = StructureAssets.NoAsset,
         bool Exists = false,
         float ExitY = 0f,
-        float ArriveY = 0f);
+        float ArriveY = 0f,
+        bool ExitOnGround = false);
 
     /// <summary>
     /// The doorway a structure stands in for when no asset is published: its kind's footprint with a door in the front face.
@@ -694,7 +697,7 @@ public sealed class AssetColliders
         Exists: true,
 
         // Nothing published stands under the way back out of a footprint: the body lands on the terrain.
-        ExitY: float.NegativeInfinity);
+        ExitOnGround: true);
 
     /// <summary>The way out of a room no asset describes: an open floor, arrived at the origin, left through a door 3 m north of it.</summary>
     internal static readonly DoorPlan StandInRoomDoor = new(
