@@ -144,6 +144,12 @@ public sealed partial class SimBridge
     /// <summary>How many cities a client may name as a destination; 0 when this server runs without shuttles, which refuses every ask.</summary>
     public int CityCount => ShuttlesActive ? _index.Cities.Count : 0;
 
+    /// <inheritdoc/>
+    public int IntervalTicks => ShuttlesActive ? ShuttleIntervalTicks : 0;
+
+    /// <inheritdoc/>
+    public int WindowTicks => ShuttlesActive ? BoardingWindowTicks : 0;
+
     /// <summary>Whether a point stands close enough to a shuttleport to board there, and which city's port it is.</summary>
     /// <param name="x">Where the player is, east.</param>
     /// <param name="z">Where the player is, north.</param>
@@ -310,10 +316,14 @@ public sealed partial class SimBridge
                 // over what remains and certain on the last tick, so nobody queued before the window closes misses the shuttle.
                 // At divisor k a visit stands for k ticks: the landing tick falls inside it when phase < k, and a trickle boarding is k times as likely
                 // (review #4: `phase == 0` let a divided planet's burst passengers miss nearly every shuttle).
+                // A session's passenger boards the moment its shuttle is down, deterministically: its client times the landing from the published
+                // schedule and fades out on touchdown, so a boarding hashed somewhere into the window would hold that client's screen black for up to the
+                // whole of it. The scripted crowd keeps the trickle — it is #910's workload.
                 var key = cluster.GetEntityId(idx).EntityKey;
-                var board = _config.ShuttleBurst
+                var session = controls[idx].Kind == ControllerKind.Human;
+                var board = session || (_config.ShuttleBurst
                     ? phase < k
-                    : Hash01(Salt(tick, key, 0x5A17EE21u)) * (window - phase) < k;
+                    : Hash01(Salt(tick, key, 0x5A17EE21u)) * (window - phase) < k);
                 if (!board)
                 {
                     continue;
@@ -343,6 +353,13 @@ public sealed partial class SimBridge
                     var nb = default(PlayerPlacement);
                     var ax = Math.Clamp(portX + (MathF.Cos(a) * r), -half + h, half - h);
                     var az = Math.Clamp(portZ + (MathF.Sin(a) * r), -half + h, half - h);
+                    if (session)
+                    {
+                        // A session's passenger walks out of the gate rather than appearing anywhere on the pad: just outside it, between the bazaar and
+                        // the mission terminal that stand either side (WorldBuilder.SpawnGateFacilities), spread across the gate's width.
+                        ax = Math.Clamp(portX + ((Hash01(Salt(tick, key, 0x2F9B1D63u)) - 0.5f) * 4.8f), -half + h, half - h);
+                        az = Math.Clamp(portZ + WorldBuilder.GateOutsideZ + 2f, -half + h, half - h);
+                    }
                     // A local hop stays on the planet it left, so that planet's ground is the one that applies. Naming
                     // RealmId.Default worked only because every planet currently shares one field.
                     nb.SetAt(ax, az, GroundAt(cluster.Realm, ax, az), h);

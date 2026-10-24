@@ -215,6 +215,8 @@ export function Viewport() {
 
           // How wide a body is, so prediction pushes out of a wall the way the server does.
           app.setBodyHalf(config.body.halfM, config.body.worldHalfM);
+          // When each port's shuttle is down, so it is drawn landing when the server boards.
+          app.setShuttleSchedule(config.shuttle);
         }
       });
 

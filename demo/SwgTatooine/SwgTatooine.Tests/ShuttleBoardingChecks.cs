@@ -51,6 +51,10 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
         // no case can wait for, and trickle boarding would add a coin flip to a case that is not about the coin.
         config.ShuttleIntervalS = ShuttleIntervalS;
         config.ShuttleBurst = true;
+
+        // Down for one tick: the default 30 s window is clamped to the whole half-second interval, so the port would never be
+        // empty — and a session's passenger boards on any tick its shuttle is down, which leaves a case no room to act.
+        config.BoardingWindowS = 1f / TickRateHz;
         return config;
     }
 
@@ -89,6 +93,43 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
             $"the player to arrive at city {Dest}'s port");
 
         Assert.That(TatooineReplication.Boardings.Refused, Is.Zero, "a valid boarding ask was refused");
+    }
+
+    /// <summary>A session's passenger boards on the first tick its shuttle is down, and walks out of the destination's gate.</summary>
+    /// <remarks>
+    /// Its client times the landing from the published schedule and fades out on touchdown, so a boarding hashed anywhere into the window
+    /// would hold that screen black for up to the whole of it. Hence trickle boarding (the crowd's rule), a 500-tick window and an ask made
+    /// inside it: the trickle boards within three ticks well under one time in a hundred, the session's rule always.
+    /// </remarks>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void ASessionBoardsTheMomentItsShuttleIsDownAndArrivesAtTheGate()
+    {
+        var config = Config();
+        config.ShuttleIntervalS = 10f;
+        config.BoardingWindowS = 10f;
+        config.ShuttleBurst = false;
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+        Harness = new SessionHarness(sim);
+        var link = Connect();
+
+        const int Dest = 1;
+        var port = sim.Index.Shuttleports[0];
+        var destPort = sim.Index.Shuttleports[Dest];
+        var player = Worlds.Park(sim, link.Session, port.X, port.Z);
+
+        link.SendCommand(nameof(BoardShuttle), new RecordValues { ["destCity"] = FieldValue.Of(Dest) });
+        SessionHarness.Until(() => TatooineReplication.Boardings.Queued >= 1, "the boarding ask to be queued by a tick");
+        Harness.Ticks(3);
+
+        var (x, z) = Where(sim, player);
+        Assert.Multiple(() =>
+        {
+            Assert.That(z, Is.EqualTo(destPort.Z + WorldBuilder.GateOutsideZ + 2f).Within(0.01f), "not just outside the destination's gate");
+            Assert.That(System.MathF.Abs(x - destPort.X), Is.LessThanOrEqualTo(2.41f), "not within the gate's width");
+        });
     }
 
     /// <summary>Standing nowhere near a port is refused, and the refusal says which of the two reasons it was.</summary>
@@ -282,6 +323,14 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
     /// <param name="z">The point, north.</param>
     /// <param name="withinM">How close.</param>
     /// <returns>Whether it does.</returns>
+    private static (float X, float Z) Where(TatooineSim sim, EntityId entity)
+    {
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        Assert.That(tx.TryOpen(entity, out var player), Is.True, "the player is gone");
+        var at = player.Read(Player.Bounds);
+        return (at.X, at.Z);
+    }
+
     private static bool Near(TatooineSim sim, EntityId entity, float x, float z, float withinM)
     {
         using var tx = sim.Dbe.CreateQuickTransaction();

@@ -406,7 +406,8 @@ public sealed class AssetCollisionChecks
     private static readonly int[] AllKinds =
     [
         StructureKind.Building, StructureKind.Terminal, StructureKind.Shuttleport, StructureKind.PoiProp,
-        StructureKind.PlayerHouse, StructureKind.Factory, StructureKind.Harvester, StructureKind.CampObject,
+        StructureKind.PlayerHouse, StructureKind.Factory, StructureKind.Harvester, StructureKind.CampObject, StructureKind.Bazaar,
+        StructureKind.MissionTerminal,
     ];
 
     /// <summary>A collider table with a slot per published asset and nothing in any of them.</summary>
@@ -438,7 +439,8 @@ public sealed class AssetCollisionChecks
         int[] kinds =
         [
             StructureKind.Building, StructureKind.Terminal, StructureKind.Shuttleport, StructureKind.PoiProp,
-            StructureKind.PlayerHouse, StructureKind.Factory, StructureKind.Harvester, StructureKind.CampObject,
+            StructureKind.PlayerHouse, StructureKind.Factory, StructureKind.Harvester, StructureKind.CampObject, StructureKind.Bazaar,
+            StructureKind.MissionTerminal,
         ];
 
         var rng = new Rng(20261022u);

@@ -446,10 +446,59 @@ button.active {
   text-align: left;
 }
 
+/* Above the navigation pane, which owns the corner: it is always there while playing, the inspector only with a pick. */
 .inspector {
+  right: 10px;
+  bottom: 128px;
+  width: 270px;
+}
+
+/* The nearest shuttleport, bazaar and mission terminal (NavPane): bottom right, rows of name, distance and an arrow the
+   frame loop turns with the camera. */
+.nav {
   right: 10px;
   bottom: 10px;
   width: 270px;
+  padding: 6px 8px;
+}
+
+.nav-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  border-bottom: 1px solid rgba(110, 170, 220, 0.18);
+  color: #9fd2ff;
+}
+
+.nav-label {
+  flex: 1;
+  text-align: right;
+}
+
+.nav-distance {
+  width: 52px;
+  text-align: right;
+  color: #ffd27a;
+  font-variant-numeric: tabular-nums;
+}
+
+.nav-arrow {
+  display: inline-block;
+  width: 20px;
+  text-align: center;
+  font-size: 17px;
+  line-height: 18px;
+  font-weight: bold;
+  color: #9fd2ff;
+  transform-origin: 50% 50%;
+}
+
+.nav-foot {
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--muted);
+  text-align: right;
 }
 
 /* Chat (SWG-09): bottom left, opposite the inspector, so both can be open at once. */
@@ -741,4 +790,18 @@ button.active {
   100% {
     transform: translateX(320%);
   }
+}
+
+/* The ticket terminal's destination menu (ShuttlePrompt): centred over the view, like the testbench's modal. */
+.ticket-menu {
+  left: 50%;
+  top: 30%;
+  transform: translateX(-50%);
+  width: 300px;
+  z-index: 4;
+  text-align: center;
+}
+
+.ticket-cancel {
+  margin-top: 8px;
 }

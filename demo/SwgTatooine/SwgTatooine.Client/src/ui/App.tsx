@@ -1,6 +1,7 @@
 import { Chat } from './Chat';
 import { Hud } from './Hud';
 import { Inspector } from './Inspector';
+import { NavPane } from './NavPane';
 import { Kicked } from './Kicked';
 import { Login } from './Login';
 import { Toolbar } from './Toolbar';
@@ -41,6 +42,7 @@ export function App() {
       <Hud />
       <Chat />
       <ShuttlePrompt />
+      <NavPane />
       <Inspector />
       <Kicked />
     </div>

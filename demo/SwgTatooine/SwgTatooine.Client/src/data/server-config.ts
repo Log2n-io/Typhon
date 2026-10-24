@@ -1,3 +1,4 @@
+import type { ShuttleSchedule } from '../app/shuttle-flight';
 import type { PlanBox } from '../app/structure-collision';
 
 /**
@@ -100,6 +101,24 @@ export interface ServerConfig {
   readonly realms: RealmDirectory | null;
   /** The published asset set, or `null` from a server started without one — which is a working run, not a broken one. */
   readonly assets: AssetSet | null;
+  /** When each port's shuttle is down (`shuttle-flight.ts`), or `null` from a server where nothing flies. */
+  readonly shuttle: ShuttleSchedule | null;
+}
+
+function readShuttle(value: unknown): ShuttleSchedule | null {
+  if (typeof value !== 'object' || value === null) {
+    return null;
+  }
+
+  const { intervalTicks, windowTicks, ports, boardM } = value as Record<string, unknown>;
+  return isFinitePositive(intervalTicks) &&
+    intervalTicks > 0 &&
+    isFinitePositive(windowTicks) &&
+    isFinitePositive(ports) &&
+    ports > 0 &&
+    isFinitePositive(boardM)
+    ? { intervalTicks, windowTicks, ports, boardM }
+    : null;
 }
 
 function isFinitePositive(value: unknown): value is number {
@@ -295,6 +314,7 @@ export async function fetchServerConfig(): Promise<ServerConfig | null> {
       },
       realms: readRealms((body as Record<string, unknown>).realms),
       assets: readAssets((body as Record<string, unknown>).assets),
+      shuttle: readShuttle((body as Record<string, unknown>).shuttle),
     };
   } catch {
     // A page served from somewhere else, or an older server. Not knowing is a state the UI handles.

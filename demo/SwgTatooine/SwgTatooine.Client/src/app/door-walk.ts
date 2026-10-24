@@ -29,6 +29,9 @@ export const DETOUR_MARGIN_M = 1.2;
 /** How long without getting closer to the next waypoint before the walk gives up, ms. Something is in the way. */
 export const STALL_MS = 3000;
 
+/** How close counts as arrived at the end of a walk that stops there (`start(..., stopAtEnd)`), metres. */
+export const ARRIVED_M = 0.5;
+
 /** An axis-aligned rectangle in the ground plane, world metres. */
 export interface Rect {
   readonly minX: number;
@@ -330,6 +333,7 @@ export class DoorWalker {
   private realm = -1;
   private bestDistance = Infinity;
   private bestAtMs = 0;
+  private stopAtEnd = false;
 
   /** Whether a walk is under way. */
   get active(): boolean {
@@ -349,13 +353,18 @@ export class DoorWalker {
    * @param realm The realm the body is in, so the crossing ends the walk.
    * @param nowMs When.
    */
-  start(points: readonly Waypoint[], pathStart: number, realm: number, nowMs: number): void {
+  /**
+   * @param stopAtEnd Stop on the last point rather than walk on through it: a walk TO somewhere (`ClientApp.walkTo`), not
+   *   through a door, whose last point is past the plane and must never count as reached.
+   */
+  start(points: readonly Waypoint[], pathStart: number, realm: number, nowMs: number, stopAtEnd = false): void {
     this.points = [...points];
     this.next = 0;
     this.pathStart = pathStart;
     this.realm = realm;
     this.bestDistance = Infinity;
     this.bestAtMs = nowMs;
+    this.stopAtEnd = stopAtEnd;
   }
 
   /** Ends the walk; the frame loop stops the body if it was moving. */
@@ -407,6 +416,11 @@ export class DoorWalker {
     }
 
     // Running across open ground, walking the path itself: it climbs a ramp and steps through a doorway.
+    if (this.stopAtEnd && this.next === last && d < ARRIVED_M) {
+      this.cancel();
+      return { heading: Math.atan2(tz - z, tx - x), speedClass: SpeedClass.stop };
+    }
+
     const speedClass = this.next < this.pathStart ? SpeedClass.run : SpeedClass.walk;
     if (this.next === last && last > 0 && d < WAYPOINT_REACH_M) {
       const [px, pz] = this.points[last - 1];

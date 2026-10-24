@@ -1,5 +1,17 @@
 import { create } from 'zustand';
 
+/** One row of the navigation pane. */
+export interface NavRow {
+  /** The `StructureKind` it finds; also what its arrow is found by. */
+  readonly kind: number;
+  readonly label: string;
+  /** Metres, rounded; `Infinity` when none is known. */
+  readonly distanceM: number;
+  /** Where it is (a click walks there), planet metres. */
+  readonly x: number;
+  readonly z: number;
+}
+
 /**
  * UI state only (`05-client.md` C4): toggles, the selection, what the user asked for. World data never enters here; the
  * renderer reads this store with `getState()` each frame and never re-renders React.
@@ -66,6 +78,8 @@ export interface ShuttleportPrompt {
   readonly city: number;
   /** How far the avatar is from it, in metres, rounded — the prompt shows it and a jitter of centimetres is noise. */
   readonly distanceM: number;
+  /** Whether the avatar stands at the port's ticket terminal, where the destination menu is opened (T). */
+  readonly atTerminal: boolean;
 }
 
 /** A set of archetype names held as a map, so a missing name reads as its default rather than as `false`. */
@@ -175,6 +189,19 @@ export interface UiState {
   readonly boardRequest: BoardRequest | null;
   /** A pending walk through a door, or `null`. */
   readonly doorWalkRequest: DoorWalkRequest | null;
+  /** A pending walk to a point around the buildings (a navigation row clicked), or `null`. */
+  readonly walkToRequest: { readonly x: number; readonly z: number; readonly seq: number } | null;
+  readonly walkTo: (x: number, z: number) => void;
+  /**
+   * The navigation pane's rows: the nearest shuttleport, bazaar and mission terminal (`nav-finder.ts`), or empty when
+   * there is nothing to navigate (no avatar, not on a planet). The arrows are turned by the frame loop, not from here.
+   */
+  readonly nav: readonly NavRow[];
+  /** How long the scan that produced {@link nav} took, milliseconds — the browser's clock is coarser than 0.1 ms. */
+  readonly navScanMs: number;
+  /** How many held structures that scan looked at. */
+  readonly navScanned: number;
+  readonly setNav: (nav: readonly NavRow[], scanMs: number, scanned: number) => void;
   /**
    * The shuttleport the avatar is standing at, or `null` when it is not at one.
    *
@@ -228,6 +255,9 @@ export interface UiState {
   readonly walkDoor: (netId: number) => void;
   /** Publishes the port the avatar is standing at, or `null`. Called by the frame loop on change only. */
   readonly setShuttleport: (shuttleport: ShuttleportPrompt | null) => void;
+  /** Whether the ticket terminal's destination menu is open; movement keys are ignored while it is. */
+  readonly ticketMenu: boolean;
+  readonly setTicketMenu: (open: boolean) => void;
 
   /** Publishes this frame's travel state. */
   readonly setTravel: (travel: TravelState) => void;
@@ -288,6 +318,16 @@ export const useUi = create<UiState>()((set, get) => ({
   spectateRequest: null,
   boardRequest: null,
   doorWalkRequest: null,
+  walkToRequest: null,
+  walkTo: (x, z) => {
+    set((s) => ({ walkToRequest: { x, z, seq: (s.walkToRequest?.seq ?? 0) + 1 } }));
+  },
+  nav: [],
+  navScanMs: 0,
+  navScanned: 0,
+  setNav: (nav, navScanMs, navScanned) => {
+    set({ nav, navScanMs, navScanned });
+  },
   shuttleport: null,
   travel: NOT_TRAVELLING,
   shuttleRefusal: null,
@@ -449,6 +489,10 @@ export const useUi = create<UiState>()((set, get) => ({
   },
   walkDoor: (netId) => {
     set((s) => ({ doorWalkRequest: { netId, seq: (s.doorWalkRequest?.seq ?? 0) + 1 } }));
+  },
+  ticketMenu: false,
+  setTicketMenu: (ticketMenu) => {
+    set({ ticketMenu });
   },
   setShuttleport: (shuttleport) => {
     set({ shuttleport });

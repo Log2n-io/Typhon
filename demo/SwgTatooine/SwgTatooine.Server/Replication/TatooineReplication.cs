@@ -176,6 +176,12 @@ public interface IShuttleBoarding
     /// <param name="city">The city whose port it is standing at.</param>
     /// <returns>Whether it is at one.</returns>
     bool TryPortAt(float x, float z, ushort planet, double withinM, out int city);
+
+    /// <summary>Ticks between two landings at one port; 0 when nothing flies.</summary>
+    int IntervalTicks { get; }
+
+    /// <summary>Ticks a shuttle stays down; city <c>c</c>'s port is down while <c>(tick + c × IntervalTicks / CityCount) % IntervalTicks &lt; WindowTicks</c>.</summary>
+    int WindowTicks { get; }
 }
 
 /// <summary>The speed classes a client may ask for, and what each is worth.</summary>
@@ -632,7 +638,7 @@ public static partial class TatooineReplication
     /// The port is a building with a 12 m half extent, so this is about a building's width clear of it — close enough that a person aiming at the port has
     /// arrived, far enough that the last metre of a walk does not decide it. It is also what the client draws its prompt at.
     /// </remarks>
-    public const double ShuttleBoardM = 20d;
+    public const double ShuttleBoardM = 30d;
 
     /// <summary>The simulation's ports and cities, for validating a boarding ask; <see langword="null"/> when the server runs without shuttles.</summary>
     public static IShuttleBoarding ShuttleBoarding { get; set; }

@@ -83,12 +83,22 @@ internal static class StructureAssets
         StructureKind.PlayerHouse => 1,
         StructureKind.Shuttleport => 2,
         StructureKind.Bazaar => 3,
-        StructureKind.Terminal => 4,
+        StructureKind.Terminal => CraftingStation(ref rng),
         StructureKind.MissionTerminal => 5,
 
         // PoiProp, Factory, Harvester, CampObject: nothing published stands in for them. Interior: the door decides, not the kind.
         _ => NoAsset,
     };
+
+    /// <summary>
+    /// The crafting station, drawing what the slot drew when it chose between three terminals: the draw is part of the world's one random stream, and
+    /// dropping it moved every structure planted after the first terminal of the first city.
+    /// </summary>
+    private static int CraftingStation(ref Rng rng)
+    {
+        _ = rng.NextInt(0, 3);
+        return 4;
+    }
 
     /// <summary>The asset id an index names, or <see langword="null"/> for one that names none.</summary>
     /// <param name="index">A <c>Structure.Asset</c>.</param>

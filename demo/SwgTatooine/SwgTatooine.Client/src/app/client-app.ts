@@ -25,6 +25,7 @@ import { mountAssets, type AssetMount } from './asset-mount';
 import { mountCrowd, type CrowdMount } from './crowd-mount';
 import { StaticAssets, type StructureSample } from './static-assets';
 import { DoorWalker, pathIn, pathOut } from './door-walk';
+import { findPath, wallGrid } from './city-path';
 import { beginArrival, carryThrough, stepArrival, type DoorArrival, type DoorCarry } from './door-arrival';
 import { crossedDoor, doorPlanes, spawnNear, type DoorPlane, type SpawnNear } from './door-crossing';
 import {
@@ -72,6 +73,9 @@ import { RenderOrigin, extractFrustumPlanes, invertMatrix4, rayGroundT, unprojec
 import { useChat } from '../state/chat-store';
 import { crossingKindOf, isIndoors, sameRealm, type RealmView, type SceneKind } from '../data/realm-view';
 import { advance, arrived, askedFor, blackout, opacityAt } from './realm-transition';
+import { flightAt, shuttleMoment, type ShuttleSchedule } from './shuttle-flight';
+import { ShuttleView } from './shuttle-view';
+import { ticketTerminalOf } from './ticket-terminal';
 import { resetForRealm, resetForSession, type RealmSwitchTargets } from './realm-switch';
 import { nextRide, NOT_RIDING, rideOwnsTheView, rideSubjectOf, type RideState } from './ride';
 import { DEFAULT_GAIT, gaitFor } from './gait';
@@ -89,7 +93,8 @@ import { Predictor, speedForClass, type GrantedSpeeds } from './predictor';
 import { DEFAULT_THIRD_PERSON_M, MAX_EYE_DISTANCE_M } from '../camera/eye-camera';
 import { bodyOpacityAt, marchEye } from '../camera/eye-clearance';
 import { useStats, type FeetReport, type Inspection } from '../state/stats-store';
-import { useUi, type ShuttleportPrompt, type UiState } from '../state/ui-store';
+import { useUi, type NavRow, type ShuttleportPrompt, type UiState } from '../state/ui-store';
+import { NAV_KINDS, navLabel, nearestFacilities, relativeBearing, type NavTarget } from './nav-finder';
 import { nearestShuttleport } from './shuttle';
 import { nextTravel } from './travel';
 
@@ -111,6 +116,9 @@ const STATS_INTERVAL_MS = 250;
 
 /** How long the client draws its own mount ask before the server's replicated `mounted` decides: a round trip and a few ticks. */
 const MOUNT_ANSWER_MS = 1500;
+
+/** How often the navigation pane rescans for the nearest facilities: five times a second is a walk of a metre or two. */
+const NAV_INTERVAL_MS = 200;
 const REGION_INTERVAL_MS = 200;
 const PICK_RADIUS_PX = 8;
 const FRAME_SAMPLES = 128;
@@ -268,7 +276,16 @@ const CLOCK_OPTIONS = {
 };
 
 /** How close to a shuttleport the prompt appears, in metres: the server's own boarding radius. */
-const SHUTTLE_PROMPT_M = 20;
+const SHUTTLE_PROMPT_M = 40;
+
+/** How far away a port's shuttle is drawn flying in and out, metres: the arrival starts 190 m out and 95 m up. */
+const SHUTTLE_VIEW_M = 1200;
+
+/** The published shuttleport, whose ticket terminal child is where a ticket is bought. */
+const SHUTTLEPORT_ASSET = 'tat_shuttleport';
+
+/** The published ticket terminal. */
+const TICKET_TERMINAL_ASSET = 'ticket_terminal';
 
 /** Frames between port searches; see ClientApp.updateShuttlePrompt. */
 const SHUTTLE_SEARCH_FRAMES = 8;
@@ -608,6 +625,14 @@ export class ClientApp {
           return;
         }
 
+        // The ticket terminal: T opens the destination menu where the avatar stands at one. Not E, the testbench's habit:
+        // Q, E, R and F turn and pitch this client's camera.
+        if (e.code === 'KeyT' && !e.repeat && useUi.getState().shuttleport?.atTerminal === true) {
+          e.preventDefault();
+          useUi.getState().setTicketMenu(true);
+          return;
+        }
+
         // The swoop: the top-row 1 on its own (Shift+1 is the run gait, and the pad's 1 is not this key).
         if (e.code === 'Digit1' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
           e.preventDefault();
@@ -721,6 +746,10 @@ export class ClientApp {
 
       this.shapeCache = [];
       this.staticAssets = new StaticAssets(mount.library, mount.root, set, undefined, mount.lighting);
+      this.shuttleView = new ShuttleView(mount.library, mount.root, mount.lighting);
+      // The descriptors the ticket terminal is read from, asked for now so the first port walked up to has them.
+      void mount.library.describe(SHUTTLEPORT_ASSET).catch(() => undefined);
+      void mount.library.describe(TICKET_TERMINAL_ASSET).catch(() => undefined);
     } catch (error) {
       console.error('assets: not mounted', error);
     }
@@ -802,6 +831,7 @@ export class ClientApp {
     }
 
     this.disposed = true;
+    this.shuttleView?.dispose();
     this.engine.stopRenderLoop();
     this.resizeObserver.disconnect();
     this.ratioQuery?.removeEventListener('change', this.onRatioChange);
@@ -1221,6 +1251,101 @@ export class ClientApp {
     }
 
     return best === null ? null : { doorYaw: Math.atan2(best.fx, best.fz), cameraYaw: this.eyeCamera.yaw, heading };
+  }
+
+  /** The nearest shuttleport, bazaar and mission terminal, rescanned every {@link NAV_INTERVAL_MS}; see `nav-finder.ts`. */
+  private readonly navTargets: NavTarget[] = [];
+  private navAtMs = Number.NEGATIVE_INFINITY;
+  private navShown = false;
+  private navKey = '';
+  /** Where the body stood at the last scan, which the arrows point from. */
+  private navFromX = 0;
+  private navFromZ = 0;
+  /** The pane's arrows by kind, found once they are mounted, and the turn last written to each. */
+  private readonly navArrows = new Map<number, HTMLElement>();
+  private readonly navTurns = new Map<number, number>();
+
+  /**
+   * Rescans for the nearest of each facility kind and publishes the pane's rows when they changed. Only for a playing
+   * avatar on a planet: a room or a spectator has nothing to navigate to, and the pane goes.
+   */
+  private updateNav(nowMs: number): void {
+    if (nowMs - this.navAtMs < NAV_INTERVAL_MS) {
+      return;
+    }
+
+    this.navAtMs = nowMs;
+    const source = this.source;
+    const ui = useUi.getState();
+    if (source === null || !source.canPlay || source.selfNetId === 0 || this.profile.kind !== 'planet') {
+      if (this.navShown) {
+        this.navShown = false;
+        this.navKey = '';
+        ui.setNav([], 0, 0);
+      }
+
+      return;
+    }
+
+    this.navFromX = this.predictor.active ? this.predictor.x : this.eyeX;
+    this.navFromZ = this.predictor.active ? this.predictor.z : this.eyeZ;
+    const started = performance.now();
+    nearestFacilities(this.structureSamples, this.structureCount, this.navFromX, this.navFromZ, this.navTargets);
+    const scanMs = performance.now() - started;
+
+    // Republished only when what it shows changed: a metre of distance or a different target. Five store writes a second
+    // would re-render the pane five times a second for nothing.
+    let key = '';
+    for (const t of this.navTargets) {
+      key += `${t.kind}:${Number.isFinite(t.distance) ? Math.round(t.distance) : -1}:${Math.round(t.x)},${Math.round(t.z)};`;
+    }
+
+    if (key !== this.navKey) {
+      this.navKey = key;
+      this.navShown = true;
+      const rows: NavRow[] = this.navTargets.map((t) => {
+        // A click walks to where the thing is used from: a shuttleport's ticket terminal, not its pad.
+        const at = t.kind === StructureKind.Shuttleport ? this.ticketStandPoint(t.x, t.z) : null;
+        return {
+          kind: t.kind,
+          label: navLabel(t),
+          distanceM: Number.isFinite(t.distance) ? Math.round(t.distance) : Infinity,
+          x: at?.x ?? t.x,
+          z: at?.z ?? t.z,
+        };
+      });
+      ui.setNav(rows, scanMs, this.structureCount);
+    }
+  }
+
+  /** Turns the pane's arrows to the camera, every frame: up is straight ahead (see `relativeBearing`). */
+  private paintNav(yaw: number): void {
+    if (!this.navShown) {
+      return;
+    }
+
+    for (let k = 0; k < NAV_KINDS.length && k < this.navTargets.length; k++) {
+      const target = this.navTargets[k];
+      let arrow = this.navArrows.get(target.kind) ?? null;
+      if (arrow === null || !arrow.isConnected) {
+        arrow = document.querySelector<HTMLElement>(`.nav-arrow[data-nav-kind="${target.kind}"]`);
+        if (arrow === null) {
+          continue;
+        }
+
+        this.navArrows.set(target.kind, arrow);
+        this.navTurns.delete(target.kind);
+      }
+
+      const turn = Number.isFinite(target.distance)
+        ? relativeBearing(this.navFromX, this.navFromZ, target.x, target.z, yaw)
+        : 0;
+      const last = this.navTurns.get(target.kind);
+      if (last === undefined || Math.abs(last - turn) > 0.005) {
+        arrow.style.transform = `rotate(${turn.toFixed(3)}rad)`;
+        this.navTurns.set(target.kind, turn);
+      }
+    }
   }
 
   /** The predicted body's position on the previous frame, in its realm, for {@link watchDoors}; not set after a switch. */
@@ -1756,7 +1881,8 @@ export class ClientApp {
   }
 
   private sendMovementIntent(source: DataSource, nowMs: number, steering: boolean): void {
-    const keyed = steering ? this.keyIntent() : null;
+    // The destination menu holds the keys: an arrow key in it is not a step away from the terminal.
+    const keyed = steering && !useUi.getState().ticketMenu ? this.keyIntent() : null;
 
     // A walk to or through a door (`walkIn` / `walkOut`) supplies the intent the keys would, so the prediction, the refresh
     // window and the stop at the end are the keyboard's own. Any key takes the body back.
@@ -2133,6 +2259,10 @@ export class ClientApp {
       this.source?.boardShuttle(state.boardRequest.city);
     }
 
+    if (state.walkToRequest !== null && state.walkToRequest !== previous.walkToRequest) {
+      this.walkTo(state.walkToRequest.x, state.walkToRequest.z);
+    }
+
     // Walking is this client steering its own body, so nothing is asked of the server but the moves themselves.
     if (state.doorWalkRequest !== null && state.doorWalkRequest !== previous.doorWalkRequest) {
       const ask = state.doorWalkRequest.netId;
@@ -2169,6 +2299,44 @@ export class ClientApp {
    * @param netId The building, as replicated.
    * @returns Why it did not start, or `null` when it did.
    */
+  /**
+   * Walks the body to a point of the city it is in, around the buildings (`city-path.ts`): a run along a path found on
+   * the walls' grid, stopping on the point. Any movement key takes the body back, as for a door.
+   *
+   * @returns Why it did not start, or `null` when it did.
+   */
+  walkTo(x: number, z: number): string | null {
+    if (!this.predictor.active) {
+      return 'this session is not steering a body';
+    }
+
+    const fromX = this.predictor.x;
+    const fromZ = this.predictor.z;
+    const margin = 60;
+    const count = this.gatherStructureShapes();
+    const started = performance.now();
+    const grid = wallGrid(
+      this.placedShapes,
+      count,
+      Math.min(fromX, x) - margin,
+      Math.min(fromZ, z) - margin,
+      Math.max(fromX, x) + margin,
+      Math.max(fromZ, z) + margin,
+      this.bodyHalfM > 0 ? this.bodyHalfM : 0.3,
+    );
+    const path = findPath(grid, fromX, fromZ, x, z);
+    this.lastPathMs = performance.now() - started;
+    if (path === null) {
+      return 'no way round the buildings';
+    }
+
+    this.doorWalk.start(path, path.length, this.realm?.realmId ?? -1, performance.now(), true);
+    return null;
+  }
+
+  /** How long the last {@link walkTo} took to find its path, milliseconds. */
+  lastPathMs = 0;
+
   walkIn(netId: number): string | null {
     const sample = this.structureSamples.slice(0, this.structureCount).find((s) => s.netId === netId) ?? null;
     if (sample === null) {
@@ -2284,6 +2452,7 @@ export class ClientApp {
     // boarding the server answers with ShuttleNotAtPort. The camera latch below already gated on both.
     this.updateShuttlePrompt(playing && haveEyeSubject, ui);
     this.updateTravel(ui);
+    this.driveShuttle(now, ui);
 
     // A10: a player arrives in third person, behind their own avatar. Done here rather than in the store's initial state
     // because it depends on the session being a player's, which is only known once the catalog has arrived — and done
@@ -2343,6 +2512,12 @@ export class ClientApp {
       const camX = predicting ? this.predictor.x : playing ? this.eyeX : this.selectedX;
       const camY = playing ? this.eyeY : this.selectedY;
       const camZ = predicting ? this.predictor.z : playing ? this.eyeZ : this.selectedZ;
+      if (this.faceOutOfGate) {
+        // Out of the gate is the port's +Z, which is the renderer's yaw 0: the shuttleport is never turned.
+        this.faceOutOfGate = false;
+        this.eyeCamera.jumpTo(camX, camY, camZ, 0);
+      }
+
       if (playing && this.arrival !== null) {
         // Snapped, every frame until it is placed: under the curtain, but the curtain is a DOM element that reaches full
         // black a frame after the store asks it to, so a glide from the old realm's coordinates would be on screen.
@@ -2405,6 +2580,8 @@ export class ClientApp {
     this.mapCamera.update(dt);
     const cam = inEye ? this.eyeCamera : this.mapCamera;
     this.activeAltitude = cam.altitude;
+    this.updateNav(now);
+    this.paintNav(cam.yaw);
     this.origin.follow(cam.targetX, cam.targetZ);
     // The placements are held in planet coordinates, so they follow the origin the frame it snaps. One node, every frame:
     // cheaper than asking whether it moved.
@@ -2822,14 +2999,141 @@ export class ClientApp {
           SHUTTLE_PROMPT_M,
         );
         if (port !== null) {
-          next = { city: port.city, distanceM: Math.round(port.distanceM) };
+          next = { city: port.city, distanceM: Math.round(port.distanceM), atTerminal: this.atTicketTerminal(x, z) };
         }
+
+        // The port whose shuttle is drawn: the nearest within sight, which is further than the prompt's reach.
+        const seen = nearestShuttleport(
+          this.world.archetypeStore(this.shuttleArchetype),
+          this.clock.renderTick,
+          this.clock.renderFrac,
+          x,
+          z,
+          SHUTTLE_VIEW_M,
+        );
+        this.flightPort = seen === null ? null : { city: seen.city, x: seen.x, z: seen.z };
       }
+    } else {
+      this.flightPort = null;
     }
 
     const held = ui.shuttleport;
-    if (held === null ? next !== null : next === null || next.city !== held.city || next.distanceM !== held.distanceM) {
+    if (
+      held === null
+        ? next !== null
+        : next === null ||
+          next.city !== held.city ||
+          next.distanceM !== held.distanceM ||
+          next.atTerminal !== held.atTerminal
+    ) {
       ui.setShuttleport(next);
+      if (next === null || !next.atTerminal) {
+        ui.setTicketMenu(false);
+      }
+    }
+  }
+
+  /** The server's shuttle timetable, from `/typhon/demo.json`, or `null` where nothing flies. */
+  private shuttleSchedule: ShuttleSchedule | null = null;
+
+  /** Takes the timetable the server published. */
+  setShuttleSchedule(schedule: ShuttleSchedule | null): void {
+    this.shuttleSchedule = schedule;
+  }
+
+  private shuttleView: ShuttleView | null = null;
+
+  /** The port whose shuttle is drawn, or `null`; found with the prompt's port, every eighth frame. */
+  private flightPort: { readonly city: number; readonly x: number; readonly z: number } | null = null;
+
+  /** The pad's top at {@link flightPort}, cached per port: the published floor at its centre. */
+  private padTop = { x: Number.NaN, z: Number.NaN, y: Number.NaN };
+
+  /** Whether the next eye frame puts the camera facing out of the gate the body just walked out of. */
+  private faceOutOfGate = false;
+
+  /** Where a user stands to use the ticket terminal of the shuttleport at (x, z), or `null` before the descriptors are in. */
+  private ticketStandPoint(x: number, z: number): { x: number; z: number } | null {
+    const library = this.assets?.library ?? null;
+    const port = library?.described(SHUTTLEPORT_ASSET) ?? null;
+    const terminal = library?.described(TICKET_TERMINAL_ASSET) ?? null;
+    if (port === null || terminal === null) {
+      return null;
+    }
+
+    // The shuttleport is never turned and stands on its own ground; the stand point's height does not matter here.
+    return ticketTerminalOf(port, new Map([[TICKET_TERMINAL_ASSET, terminal]]), x, 0, z, 0);
+  }
+
+  /**
+   * Whether a point is at the ticket terminal of a shuttleport in view: within its published interaction radius of
+   * where a user stands to use it (`ticket-terminal.ts`).
+   */
+  private atTicketTerminal(x: number, z: number): boolean {
+    const library = this.assets?.library ?? null;
+    const set = this.assetSet;
+    const port = library?.described(SHUTTLEPORT_ASSET) ?? null;
+    const terminal = library?.described(TICKET_TERMINAL_ASSET) ?? null;
+    if (library === null || set === null || port === null || terminal === null) {
+      return false;
+    }
+
+    const children = new Map([[TICKET_TERMINAL_ASSET, terminal]]);
+    for (let i = 0; i < this.structureCount; i++) {
+      const s = this.structureSamples[i];
+      if (s.kind !== StructureKind.Shuttleport || Math.abs(s.x - x) > 40 || Math.abs(s.z - z) > 40) {
+        continue;
+      }
+
+      const use = ticketTerminalOf(port, children, s.x, s.y, s.z, s.yaw);
+      if (use !== null && Math.hypot(use.x - x, use.z - z) <= use.radiusM) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * The shuttle of the port in view, flown on the server's timetable; and, for a passenger with a ticket, the screen
+   * going black as it touches down — the server boards a session's passenger on that tick and moves it to the
+   * destination, and {@link updateTravel} brings the screen back when it has arrived.
+   */
+  private driveShuttle(nowMs: number, ui: UiState): void {
+    const schedule = this.shuttleSchedule;
+    const port = this.flightPort;
+    const view = this.shuttleView;
+    if (schedule === null || port === null || view === null || this.profile.kind !== 'planet') {
+      view?.update(0, 0, 0, null);
+      return;
+    }
+
+    if (this.padTop.x !== port.x || this.padTop.z !== port.z) {
+      const terrain = this.profile.ground.heightAt(port.x, port.z);
+      const count = this.gatherStructureShapes();
+      this.predictedAt.x = port.x;
+      this.predictedAt.z = port.z;
+      this.padTop = {
+        x: port.x,
+        z: port.z,
+        y: count > 0 ? groundOnShapes(this.placedShapes, count, 0.5, this.predictedAt, terrain, terrain + 3) : terrain,
+      };
+    }
+
+    const tickHz = 1000 / this.clock.tickPeriodMs;
+    const moment = shuttleMoment(this.clock.renderTick + this.clock.renderFrac, port.city, schedule, tickHz);
+    view.update(port.x, this.padTop.y, port.z, flightAt(moment));
+
+    // A passenger with a ticket for this port's shuttle: black as it touches down.
+    const here = ui.shuttleport;
+    if (
+      ui.travel.phase === 'queued' &&
+      moment.landed &&
+      here !== null &&
+      here.city === port.city &&
+      ui.transition.phase === 'idle'
+    ) {
+      ui.setTransition(askedFor(ui.transition, 'travel', nowMs));
     }
   }
 
@@ -2865,6 +3169,12 @@ export class ClientApp {
     if (pending !== null && (next.phase === 'refused' || next.phase === 'idle')) {
       this.travelRefusalSeq = pending.seq;
       ui.clearShuttleRefusal();
+    }
+
+    // Arrived: the screen comes back, on the camera turned to look out of the destination's gate the body walked out of.
+    if (next.phase === 'arrived' && ui.travel.phase !== 'arrived') {
+      ui.setTransition(arrived(ui.transition, 'travel', performance.now()));
+      this.faceOutOfGate = true;
     }
 
     ui.setTravel(next);
