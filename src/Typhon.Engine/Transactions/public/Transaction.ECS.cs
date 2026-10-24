@@ -154,9 +154,13 @@ public unsafe partial class Transaction
     /// <summary>Spawned entity data — flat list for sequential iteration at commit time.</summary>
     private List<SpawnEntry> _spawnedEntities;
 
-    /// <summary>O(1) lookup: EntityId → index into <see cref="_spawnedEntities"/>. Built lazily on first Contains/IndexOf call.</summary>
+    /// <summary>
+    /// O(1) lookup: EntityId → index into <see cref="_spawnedEntities"/>. Built lazily on first Contains/IndexOf call, then extended by the entries appended
+    /// since — never rebuilt, because the list is append-only until <see cref="CleanupEcsState"/> clears both (#1477).
+    /// </summary>
     private Dictionary<EntityId, int> _spawnedEntityIndex;
-    private bool _spawnedEntityIndexStale;
+    /// <summary>How many leading entries of <see cref="_spawnedEntities"/> <see cref="_spawnedEntityIndex"/> holds. An append costs nothing; the next lookup indexes the tail.</summary>
+    private int _spawnedEntityIndexedCount;
 
     /// <summary>Lightweight spawn record: EntityId + EnabledBits + per-slot chunk IDs. No heap allocation.</summary>
     internal struct SpawnEntry
@@ -217,7 +221,7 @@ public unsafe partial class Transaction
         {
             return false;
         }
-        RebuildSpawnedIndex();
+        SyncSpawnedIndex();
         return _spawnedEntityIndex.ContainsKey(id);
     }
 
@@ -228,23 +232,29 @@ public unsafe partial class Transaction
         {
             return -1;
         }
-        RebuildSpawnedIndex();
+        SyncSpawnedIndex();
         return _spawnedEntityIndex.TryGetValue(id, out int idx) ? idx : -1;
     }
 
-    private void RebuildSpawnedIndex()
+    /// <summary>
+    /// Indexes the entries appended since the last lookup. Rebuilding the whole map instead made "spawn one, look one up" quadratic — N(N+1)/2 inserts for N
+    /// spawns, the two-step initialization of a component larger than a spawn value carries (#1477).
+    /// </summary>
+    private void SyncSpawnedIndex()
     {
-        if (!_spawnedEntityIndexStale)
+        var count = _spawnedEntities.Count;
+        if (_spawnedEntityIndexedCount == count)
         {
             return;
         }
-        _spawnedEntityIndex ??= new Dictionary<EntityId, int>(_spawnedEntities.Count);
-        _spawnedEntityIndex.Clear();
-        for (int i = 0; i < _spawnedEntities.Count; i++)
+        System.Diagnostics.Debug.Assert(_spawnedEntityIndexedCount < count, "_spawnedEntities shrank without resetting _spawnedEntityIndexedCount");
+        _spawnedEntityIndex ??= new Dictionary<EntityId, int>(count);
+        var spawns = CollectionsMarshal.AsSpan(_spawnedEntities);
+        for (int i = _spawnedEntityIndexedCount; i < count; i++)
         {
-            _spawnedEntityIndex[_spawnedEntities[i].Id] = i;
+            _spawnedEntityIndex[spawns[i].Id] = i;
         }
-        _spawnedEntityIndexStale = false;
+        _spawnedEntityIndexedCount = count;
     }
 
     /// <summary>Pending entity destroys. Flushed at commit (DiedTSN set). HashSet for O(1) Contains.</summary>
@@ -524,7 +534,6 @@ public unsafe partial class Transaction
         }
 
         _spawnedEntities ??= new List<SpawnEntry>(count);
-        _spawnedEntityIndexStale = true;
 
         for (int n = 0; n < count; n++)
         {
@@ -586,7 +595,6 @@ public unsafe partial class Transaction
                 entry.Stage[slot] = stage;
             }
 
-            _spawnedEntityIndexStale = true;
             _spawnedEntities.Add(entry);
 
             // Epoch refresh every 128 entities to avoid holding epoch too long
@@ -634,7 +642,6 @@ public unsafe partial class Transaction
         {
             _spawnedEntities.EnsureCapacity(_spawnedEntities.Count + count);
         }
-        _spawnedEntityIndexStale = true;
 
         // O2: pre-extend list, then write entries in-place via span — avoids N copies of 138-byte SpawnEntry
         int baseIndex = _spawnedEntities.Count;
@@ -771,8 +778,6 @@ public unsafe partial class Transaction
         {
             _spawnedEntities.EnsureCapacity(_spawnedEntities.Count + count);
         }
-
-        _spawnedEntityIndexStale = true;
 
         var baseIndex = _spawnedEntities.Count;
         CollectionsMarshal.SetCount(_spawnedEntities, baseIndex + count);
@@ -971,9 +976,8 @@ public unsafe partial class Transaction
             entry.Stage[slot] = stage;
         }
 
-        // Store in flat list — index rebuilt lazily on first Contains/IndexOf call
+        // Store in flat list — the next Contains/IndexOf call indexes it (SyncSpawnedIndex)
         _spawnedEntities ??= [];
-        _spawnedEntityIndexStale = true;
         _spawnedEntities.Add(entry);
 
         CheckEpochRefresh();
@@ -5495,6 +5499,7 @@ public unsafe partial class Transaction
 
         _spawnedEntities?.Clear();
         _spawnedEntityIndex?.Clear();
+        _spawnedEntityIndexedCount = 0;
         _pendingDestroys?.Clear();
         _pendingDeathClusters?.Clear();
         _pendingEnableDisable?.Clear();
