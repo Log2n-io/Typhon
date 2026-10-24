@@ -5,10 +5,11 @@ import { SpotLight } from '@babylonjs/core/Lights/spotLight';
 import { ShadowGenerator } from '@babylonjs/core/Lights/Shadows/shadowGenerator';
 import '@babylonjs/core/Lights/Shadows/shadowGeneratorSceneComponent';
 import { ImageProcessingConfiguration } from '@babylonjs/core/Materials/imageProcessingConfiguration';
-import type { Material } from '@babylonjs/core/Materials/material';
+
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial';
 import { CubeTexture } from '@babylonjs/core/Materials/Textures/cubeTexture';
 import { Color3 } from '@babylonjs/core/Maths/math.color';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector';
 import { SphericalPolynomial } from '@babylonjs/core/Maths/sphericalPolynomial';
 import '@babylonjs/core/Materials/Textures/Loaders/envTextureLoader';
 import type { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh';
@@ -351,8 +352,10 @@ export class SceneLighting {
    * walking in the room cast as well as its walls and furniture, and nothing has to be told when one leaves.
    *
    * <b>Double-sided in the shadow pass only.</b> A room's shell is one-sided, seen from inside: a wall's back face is
-   * what a lamp in the next room sees, and culled it would let that lamp through. The materials are flipped for the
-   * map's render and put back after it.
+   * what a lamp in the next room sees, and culled it would let that lamp through. Culling is turned off on the ENGINE for
+   * each caster's draw, in the hook Babylon fires after setting it from the material and before drawing — not by flipping
+   * `material.backFaceCulling`, whose setter marks the material dirty: that was every caster's material re-prepared per
+   * cube face, per lamp, per frame, in the shadow pass and the main pass alike.
    *
    * <b>Nothing undoes this.</b> A generator belongs to its light and `Light.dispose` disposes it, so it goes when the
    * room's instance does. The room's own meshes are clones in the scene (`AssetLibrary.instantiate`), which is what lets
@@ -387,28 +390,17 @@ export class SceneLighting {
           return false;
         }
 
-        // Read per mesh, not once: the render origin moves under a room as it does under a street.
-        const origin = light.getAbsolutePosition();
+        // Read per mesh, not once: the render origin moves under a room as it does under a street. `Distance`, not
+        // `subtract`: this runs per mesh of the scene, per lamp, per frame, and `subtract` allocates.
         const sphere = mesh.getBoundingInfo().boundingSphere;
-        return sphere.centerWorld.subtract(origin).length() - sphere.radiusWorld <= LAMP_SHADOW_FAR_M;
+        return (
+          Vector3.Distance(sphere.centerWorld, light.getAbsolutePosition()) - sphere.radiusWorld <= LAMP_SHADOW_FAR_M
+        );
       };
       map.renderList = [];
-      const culled = new Map<Material, boolean>();
-      map.onBeforeRenderObservable.add(() => {
-        for (const mesh of map.renderList ?? []) {
-          const material = mesh.material;
-          if (material !== null && !culled.has(material)) {
-            culled.set(material, material.backFaceCulling);
-            material.backFaceCulling = false;
-          }
-        }
-      });
-      map.onAfterRenderObservable.add(() => {
-        for (const [material, was] of culled) {
-          material.backFaceCulling = was;
-        }
-
-        culled.clear();
+      const engine = this.scene.getEngine();
+      generator.onBeforeShadowMapRenderMeshObservable.add(() => {
+        engine.setState(false);
       });
     }
   }

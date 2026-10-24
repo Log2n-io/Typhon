@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { placement } from '../src/assets/asset-frame';
 import type { Descriptor } from '../src/assets/descriptor';
-import { crossedDoor, doorPlanes, spawnFacingAt } from '../src/app/door-crossing';
+import { crossedDoor, doorPlanes, spawnFacingAt, spawnNear } from '../src/app/door-crossing';
 
 const IDENTITY = [0, 0, 0, 1] as const;
 const HALF_TURN = [0, -1, 0, 0] as const;
@@ -104,6 +104,19 @@ describe('spawnFacingAt', () => {
       expect(facing![0], `yaw ${yaw}`).toBeCloseTo(-door.fx, 9);
       expect(facing![1], `yaw ${yaw}`).toBeCloseTo(-door.fz, 9);
     }
+  });
+
+  it('finds the spawn a body ran past before the client first saw it', () => {
+    // Measured live at 9.7 m/s: first seen 1.0 m past the room's entry, where a 0.6 m radius found nothing — 1.5 s of
+    // black, then the door beside the body. A run of 10 m/s for ~0.3 s is 3 m.
+    const facing = spawnFacingAt(ROOM, placement([0, 0, 0]), -1.5 - 3, 2.5);
+    expect(facing).not.toBeNull();
+    expect(facing![1]).toBeCloseTo(-1, 9);
+  });
+
+  it('gives the nearest spawn and how far it is, for choosing between structures', () => {
+    const near = spawnNear(ROOM, placement([0, 0, 0]), -2.5, 2.5);
+    expect(near?.distance).toBeCloseTo(1, 6);
   });
 
   it('is null away from every spawn', () => {

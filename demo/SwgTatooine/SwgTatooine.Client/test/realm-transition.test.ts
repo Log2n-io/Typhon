@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { advance, arrived, askedFor, blackout, IDLE, opacityAt, refused } from '../src/app/realm-transition';
+import {
+  advance,
+  arrived,
+  askedFor,
+  blackout,
+  DOOR_HOLD_MS,
+  HOLD_LIMIT_MS,
+  IDLE,
+  opacityAt,
+  refused,
+} from '../src/app/realm-transition';
 
 describe('a crossing the viewer asked for', () => {
   it('fades out from the ask, because that is the only moment there is still a world to fade out of', () => {
@@ -84,6 +94,22 @@ describe('a crossing the world imposed', () => {
     // A fade-out still running is cut to black: the switch does not wait for it, and the frame it lands on is not one to show.
     const out = askedFor(IDLE, 'transition', 1000);
     expect(opacityAt(blackout(out, 1050), 1050)).toBe(1);
+  });
+
+  it('gives the screen back soon when a predicted door is not answered: the prediction was wrong', () => {
+    // A tap on the threshold: the client's body crossed the plane, the server's did not. It was 2.95 s of black.
+    const held = advance(askedFor(IDLE, 'transition', 1000), 1250);
+    expect(held.phase).toBe('hold');
+    expect(advance(held, 1250 + DOOR_HOLD_MS - 1).phase).toBe('hold');
+    const back = advance(held, 1250 + DOOR_HOLD_MS);
+    expect(back.phase).toBe('in');
+    expect(DOOR_HOLD_MS).toBeLessThan(HOLD_LIMIT_MS / 3);
+  });
+
+  it('holds the full limit over a door that HAS switched: the crossing is done, the camera is being placed', () => {
+    const black = blackout(advance(askedFor(IDLE, 'transition', 1000), 1250), 1300);
+    expect(black.holdMs).toBe(HOLD_LIMIT_MS);
+    expect(advance(black, 1300 + DOOR_HOLD_MS + 100).phase).toBe('hold');
   });
 
   it('leaves nothing on screen when the session was left in no realm at all', () => {

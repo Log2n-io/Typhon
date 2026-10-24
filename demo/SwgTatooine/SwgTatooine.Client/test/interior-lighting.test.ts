@@ -116,16 +116,28 @@ describe('SceneLighting.lampShadows', () => {
     expect(predicate(wall)).toBe(false);
   });
 
-  it('renders the casters double-sided in the shadow pass only, and puts the culling back after it', () => {
-    const { lamp, wall } = room();
-    const map = lamp.getShadowGenerator()!.getShadowMap()!;
-    map.renderList = [wall];
-    expect(wall.material!.backFaceCulling).toBe(true);
+  it("renders the casters double-sided in the shadow pass, on the engine's state, never touching a material", () => {
+    const { s, lamp, wall } = room();
+    const engine = s.getEngine();
+    const states: boolean[] = [];
+    const setState = engine.setState.bind(engine);
+    engine.setState = (culling, ...rest) => {
+      states.push(culling);
+      setState(culling, ...rest);
+    };
+    const generator = lamp.getShadowGenerator() as ShadowGenerator;
+    let dirtied = 0;
+    const material = wall.material!;
+    const markAsDirty = material.markAsDirty.bind(material);
+    material.markAsDirty = (flag) => {
+      dirtied++;
+      markAsDirty(flag);
+    };
 
-    map.onBeforeRenderObservable.notifyObservers(0);
-    expect(wall.material!.backFaceCulling).toBe(false);
-    map.onAfterRenderObservable.notifyObservers(0);
-    expect(wall.material!.backFaceCulling).toBe(true);
+    generator.onBeforeShadowMapRenderMeshObservable.notifyObservers(wall as Mesh);
+    expect(states).toEqual([false]);
+    expect(material.backFaceCulling, 'the main pass still culls').toBe(true);
+    expect(dirtied, 'a material marked dirty is re-prepared: per face, per lamp, per frame').toBe(0);
   });
 
   it('goes with the lamp: disposing the room disposes the map', () => {

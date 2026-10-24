@@ -165,6 +165,14 @@ export function realmViewOf(frame: RealmFrame | null): RealmView | null {
  * @param clientAsked The one thing no tag can carry: the same planet-to-planet move is a shuttle ride the world
  * imposed or a camera move the viewer asked for, and only the caller knows which.
  */
+/**
+ * Whether a scene is inside something — a building's room or a dungeon. The one test the lighting, the camera's caps and
+ * a door's blackout share; they used to spell it out each, and the door's left the dungeon out.
+ */
+export function isIndoors(scene: SceneKind): boolean {
+  return scene === 'interior' || scene === 'dungeon';
+}
+
 export function crossingKindOf(previous: RealmView | null, next: RealmView | null, clientAsked: boolean): CrossingKind {
   if (next === null) {
     return 'leave';

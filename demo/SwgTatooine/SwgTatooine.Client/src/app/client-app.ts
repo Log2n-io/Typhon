@@ -25,7 +25,8 @@ import { mountAssets, type AssetMount } from './asset-mount';
 import { mountCrowd, type CrowdMount } from './crowd-mount';
 import { StaticAssets, type StructureSample } from './static-assets';
 import { DoorWalker, pathIn, pathOut } from './door-walk';
-import { crossedDoor, doorPlanes, spawnFacingAt } from './door-crossing';
+import { beginArrival, carryThrough, stepArrival, type DoorArrival, type DoorCarry } from './door-arrival';
+import { crossedDoor, doorPlanes, spawnNear, type DoorPlane, type SpawnNear } from './door-crossing';
 import {
   groundOnShapes,
   prepareShape,
@@ -69,7 +70,7 @@ import { Labels } from '../render/labels';
 import { SHUTTLEPORT_STYLE, styleFor } from '../render/styles';
 import { RenderOrigin, extractFrustumPlanes, invertMatrix4, rayGroundT, unprojectRay } from '../render/view-math';
 import { useChat } from '../state/chat-store';
-import { crossingKindOf, sameRealm, type CrossingKind, type RealmView, type SceneKind } from '../data/realm-view';
+import { crossingKindOf, isIndoors, sameRealm, type RealmView, type SceneKind } from '../data/realm-view';
 import { advance, arrived, askedFor, blackout, opacityAt } from './realm-transition';
 import { resetForRealm, resetForSession, type RealmSwitchTargets } from './realm-switch';
 import { nextRide, NOT_RIDING, rideOwnsTheView, rideSubjectOf, type RideState } from './ride';
@@ -1014,27 +1015,36 @@ export class ClientApp {
     // of a room seen from above — and kept the yaw it had outside, so the room came up turned: the door to one side
     // instead of behind. `placeArrival` snaps it, facing the way the spawn the body landed on faces, and only then
     // fades in.
-    const door = kind === 'transition' && (previous?.scene === 'interior' || next?.scene === 'interior');
+    const door =
+      kind === 'transition' &&
+      ((previous !== null && isIndoors(previous.scene)) || (next !== null && isIndoors(next.scene)));
     if (door && this.source?.canPlay === true) {
       ui.setTransition(blackout(ui.transition, now));
-      this.arrival = { kind, sinceMs: now };
+      // Only a building's door publishes the spawns a facing is read from; a dungeon's has none to wait for.
+      this.arrival = beginArrival(
+        kind,
+        now,
+        previous?.scene === 'interior' || next?.scene === 'interior',
+        this.doorCarry(now),
+      );
     } else {
       ui.setTransition(arrived(ui.transition, kind, now));
       this.arrival = null;
     }
 
-    this.lastStep = null;
+    this.hasLastStep = false;
+    this.doorPlaneCache.clear();
     resetForRealm(next, this.resetTargets());
   }
 
   /**
    * A door crossing whose arrival is not yet placed: the camera has to be snapped behind the body, facing the way the
-   * spawn it landed on faces, before the fade comes back. `null` when there is none.
+   * spawn it landed on faces, before the fade comes back. `null` when there is none. See `door-arrival.ts`.
    */
-  private arrival: { readonly kind: CrossingKind; readonly sinceMs: number } | null = null;
+  private arrival: DoorArrival | null = null;
 
-  /** How long an arrival waits for the spawn it landed on to be known before it is placed anyway, ms. */
-  private static readonly ARRIVAL_WAIT_MS = 1500;
+  /** The spawn facing at a point, bound once for {@link stepArrival}. */
+  private readonly facingAt = (x: number, z: number): readonly [number, number] | null => this.spawnFacing(x, z);
 
   /**
    * Places the camera on an arrival through a door, and gives the screen back.
@@ -1045,7 +1055,7 @@ export class ClientApp {
    * <b>The facing is the spawn's, read from the descriptor of what the body is standing in</b> — a room's `entry` faces
    * into the room with its door behind, a house's `front` faces away from the house — because the server has no heading
    * to send. The structures and their descriptors can arrive a frame or more after the realm does, so the screen stays
-   * black until the spawn is found, for at most {@link ARRIVAL_WAIT_MS}; past that the camera is placed with the yaw it
+   * black until the spawn is found, for at most `ARRIVAL_WAIT_MS` (`door-arrival.ts`); past that the camera is placed with the yaw it
    * has, which is what every crossing did before.
    */
   private placeArrival(camX: number, camY: number, camZ: number, nowMs: number): boolean {
@@ -1054,27 +1064,41 @@ export class ClientApp {
       return false;
     }
 
-    const facing = this.spawnFacing(camX, camZ);
-    if (facing === null && nowMs - arrival.sinceMs < ClientApp.ARRIVAL_WAIT_MS) {
+    const ui = useUi.getState();
+    const step = stepArrival(arrival, ui.transition, camX, camZ, nowMs, this.facingAt);
+    if (step.action === 'abandon') {
+      this.arrival = null;
       return false;
     }
 
-    // The renderer's yaw (0 along +Z), and the server's heading (from +X towards +Z) for the avatar.
-    const yaw = facing === null ? this.eyeCamera.yaw : Math.atan2(facing[0], facing[1]);
-    this.eyeCamera.jumpTo(camX, camY, camZ, yaw);
+    if (step.action === 'wait') {
+      return false;
+    }
+
+    const facing = step.facing;
+    let yaw = this.eyeCamera.yaw;
     if (facing !== null) {
-      this.intentHeading = Math.atan2(facing[1], facing[0]);
+      // The renderer's yaw (0 along +Z), and the server's heading (from +X towards +Z) for the avatar. Carried through the
+      // door when it is known which one was crossed, so the camera keeps its angle to the body; put behind the body otherwise.
+      const spawnYaw = Math.atan2(facing[0], facing[1]);
+      const carried = arrival.carry === null ? null : carryThrough(arrival.carry, spawnYaw);
+      yaw = carried === null ? spawnYaw : carried.yaw;
+      this.intentHeading = carried === null ? Math.atan2(facing[1], facing[0]) : carried.heading;
       this.haveIntentHeading = true;
       this.avatarHeading = this.intentHeading;
     }
 
-    const ui = useUi.getState();
+    this.eyeCamera.jumpTo(camX, camY, camZ, yaw);
     ui.setTransition(arrived(ui.transition, arrival.kind, nowMs));
     this.arrival = null;
     return true;
   }
 
-  /** The facing of the published spawn a body standing here is on, among the structures in reach, or `null`. */
+  /**
+   * The facing of the published spawn nearest a body that has just come through a door, among the structures in reach, or
+   * `null`. The NEAREST across structures, not the first: the search radius is wide enough to reach a running body
+   * (`ARRIVAL_RADIUS_M`), so a neighbour's spawn may be in it too.
+   */
   private spawnFacing(x: number, z: number): readonly [number, number] | null {
     const set = this.assetSet;
     const library = this.assets?.library ?? null;
@@ -1082,6 +1106,7 @@ export class ClientApp {
       return null;
     }
 
+    let best: SpawnNear | null = null;
     for (let i = 0; i < this.structureCount; i++) {
       const s = this.structureSamples[i];
       const id = assetForStructure(set, s.asset);
@@ -1100,13 +1125,13 @@ export class ClientApp {
         continue;
       }
 
-      const facing = spawnFacingAt(descriptor, placement([s.x, s.y, s.z], structureYaw(s.yaw)), x, z);
-      if (facing !== null) {
-        return facing;
+      const near = spawnNear(descriptor, placement([s.x, s.y, s.z], structureYaw(s.yaw)), x, z);
+      if (near !== null && (best === null || near.distance < best.distance)) {
+        best = near;
       }
     }
 
-    return null;
+    return best === null ? null : best.facing;
   }
 
   /** How many of {@link placedShapes} the camera's march reads this frame. */
@@ -1148,8 +1173,55 @@ export class ClientApp {
     }
   }
 
-  /** The predicted body's position on the previous frame, in its realm, for {@link watchDoors}; `null` after a switch. */
-  private lastStep: { x: number; z: number } | null = null;
+  /** The direction of the door the predicted body last stepped through, as a renderer yaw, and when; see {@link doorCarry}. */
+  private crossedDoorYaw = 0;
+  private crossedAtMs = Number.NEGATIVE_INFINITY;
+
+  /**
+   * What to carry through the door that just switched the realm: the door's crossing direction, the camera's yaw and the
+   * body's heading — or `null` when which door was crossed is not known.
+   *
+   * The door is the one the prediction saw the body step through, when that was moments ago; otherwise the nearest of the
+   * doors the watch had in hand to where the body last stood (a crossing the prediction missed: a body the server moved).
+   */
+  private doorCarry(nowMs: number): DoorCarry | null {
+    const heading = this.haveIntentHeading ? this.intentHeading : this.avatarHeading;
+    if (nowMs - this.crossedAtMs < 3000) {
+      return { doorYaw: this.crossedDoorYaw, cameraYaw: this.eyeCamera.yaw, heading };
+    }
+
+    if (!this.hasLastStep) {
+      return null;
+    }
+
+    let best: DoorPlane | null = null;
+    let bestD = 3;
+    for (const entry of this.doorPlaneCache.values()) {
+      for (const plane of entry.planes) {
+        const d = Math.hypot(plane.x - this.lastStepX, plane.z - this.lastStepZ);
+        if (d < bestD) {
+          best = plane;
+          bestD = d;
+        }
+      }
+    }
+
+    return best === null ? null : { doorYaw: Math.atan2(best.fx, best.fz), cameraYaw: this.eyeCamera.yaw, heading };
+  }
+
+  /** The predicted body's position on the previous frame, in its realm, for {@link watchDoors}; not set after a switch. */
+  private lastStepX = 0;
+  private lastStepZ = 0;
+  private hasLastStep = false;
+
+  /**
+   * Each nearby structure's door planes, by netId, with the pose they were built for: a structure does not move, and
+   * building them per frame was a placement, a plane array and its vectors per structure per moving frame.
+   */
+  private readonly doorPlaneCache = new Map<
+    number,
+    { asset: number; x: number; y: number; z: number; yaw: number; planes: readonly DoorPlane[] }
+  >();
 
   /**
    * Starts the fade the moment the predicted body steps through a door, before the server's answer arrives.
@@ -1161,16 +1233,20 @@ export class ClientApp {
    */
   private watchDoors(nowMs: number): void {
     if (!this.predictor.active) {
-      this.lastStep = null;
+      this.hasLastStep = false;
       return;
     }
 
     const x = this.predictor.x;
     const z = this.predictor.z;
-    const from = this.lastStep;
-    this.lastStep = { x, z };
+    const had = this.hasLastStep;
+    const fromX = this.lastStepX;
+    const fromZ = this.lastStepZ;
+    this.lastStepX = x;
+    this.lastStepZ = z;
+    this.hasLastStep = true;
     const ui = useUi.getState();
-    if (from === null || ui.transition.phase !== 'idle' || (from.x === x && from.z === z)) {
+    if (!had || ui.transition.phase !== 'idle' || (fromX === x && fromZ === z)) {
       return;
     }
 
@@ -1192,8 +1268,24 @@ export class ClientApp {
         continue;
       }
 
-      for (const door of doorPlanes(descriptor, placement([s.x, s.y, s.z], structureYaw(s.yaw)))) {
-        if (crossedDoor(door, from.x, from.z, x, z)) {
+      let cached = this.doorPlaneCache.get(s.netId);
+      if (
+        cached?.asset !== s.asset ||
+        cached.x !== s.x ||
+        cached.y !== s.y ||
+        cached.z !== s.z ||
+        cached.yaw !== s.yaw
+      ) {
+        const planes = doorPlanes(descriptor, placement([s.x, s.y, s.z], structureYaw(s.yaw)));
+        cached = { asset: s.asset, x: s.x, y: s.y, z: s.z, yaw: s.yaw, planes };
+        this.doorPlaneCache.set(s.netId, cached);
+      }
+
+      const planes = cached.planes;
+      for (let d = 0; d < planes.length; d++) {
+        if (crossedDoor(planes[d], fromX, fromZ, x, z)) {
+          this.crossedDoorYaw = Math.atan2(planes[d].fx, planes[d].fz);
+          this.crossedAtMs = nowMs;
           ui.setTransition(askedFor(ui.transition, 'transition', nowMs));
           return;
         }
@@ -1259,7 +1351,7 @@ export class ClientApp {
 
     profile.enter(next);
     this.scene.clearColor = profile.sky.toColor4(1);
-    this.lighting.setIndoors(profile.kind === 'interior' || profile.kind === 'dungeon');
+    this.lighting.setIndoors(isIndoors(profile.kind));
 
     // The cameras read the ground through the profile, so both have to be re-pointed: the map camera rides it and the
     // eye camera marches it for terrain clearance. A stale sampler is the quiet version of this bug — the picture
@@ -1486,7 +1578,26 @@ export class ClientApp {
     return { bottomY, terrainY, surfaceY, serverY: this.evalY, gapM: bottomY - surfaceY };
   }
 
+  /**
+   * Fills {@link placedShapes} from this frame's structures, once per refresh of them: the prediction, the camera and the
+   * HUD all ask, and the answer only changes when {@link updateStaticAssets} takes a new set.
+   */
   private gatherStructureShapes(): number {
+    if (this.shapesEpoch === this.structureEpoch && this.shapesSet === this.assetSet) {
+      return this.shapesCount;
+    }
+
+    this.shapesEpoch = this.structureEpoch;
+    this.shapesSet = this.assetSet;
+    this.shapesCount = this.gatherStructureShapesNow();
+    return this.shapesCount;
+  }
+
+  private shapesEpoch = -1;
+  private shapesSet: AssetSet | null = null;
+  private shapesCount = 0;
+
+  private gatherStructureShapesNow(): number {
     const set = this.assetSet;
     if (set === null) {
       return 0;
@@ -2195,7 +2306,7 @@ export class ClientApp {
 
       // The testbench's camera (`orbit-camera.ts`): short of the first wall behind the body, and in a room capped at
       // 1.9 m over the feet — under the 2 m the colliders stop at, so the walls still stop it — and at 7 m back.
-      const indoors = this.profile.kind === 'interior' || this.profile.kind === 'dungeon';
+      const indoors = isIndoors(this.profile.kind);
       this.eyeCamera.maxEyeHeightM = indoors ? 1.9 : Infinity;
       this.eyeCamera.maxDistanceM = indoors ? 7 : MAX_EYE_DISTANCE_M;
       this.cameraShapes = this.gatherStructureShapes();
@@ -2210,16 +2321,18 @@ export class ClientApp {
 
     this.paintFade(now);
 
-    // An arrival with no eye camera to place — a session that left eye mode — gives the screen back, and so does one that
-    // was never placed at all, past twice the wait. NOT on `inEye` or `playing`: for the first frames after the reset the
-    // session's own netId and its avatar are not known yet, so both read false while the camera is very much in eye mode —
-    // and giving the screen back then showed the glide this exists to hide.
-    if (
-      this.arrival !== null &&
-      (ui.cameraMode !== 'eye' || now - this.arrival.sinceMs > 2 * ClientApp.ARRIVAL_WAIT_MS)
-    ) {
-      ui.setTransition(arrived(ui.transition, this.arrival.kind, now));
-      this.arrival = null;
+    // An arrival with no eye camera to place — a session that left eye mode — gives the screen back. An arrival whose
+    // curtain is no longer holding is over: the safety valve already gave the screen back, and lifting it again from black
+    // was a second flash. NOT on `inEye` or `playing`: for the first frames after the reset the session's own netId and its
+    // avatar are not known yet, so both read false while the camera is very much in eye mode — and giving the screen back
+    // then showed the glide this exists to hide.
+    if (this.arrival !== null) {
+      if (ui.transition.phase !== 'hold') {
+        this.arrival = null;
+      } else if (ui.cameraMode !== 'eye') {
+        ui.setTransition(arrived(ui.transition, this.arrival.kind, now));
+        this.arrival = null;
+      }
     }
 
     // The map camera orbits the ground under its target, so it needs the terrain height there BEFORE it recomputes its eye.
@@ -2256,7 +2369,8 @@ export class ClientApp {
     }
 
     this.camera.position.set(view.eyeX, view.eyeY, view.eyeZ);
-    this.camera.rotation.set(cam.pitch, cam.yaw, 0);
+    // The eye camera's VIEW pitch: in a room it places the eye with a flattened one, and the view must look along the same ray.
+    this.camera.rotation.set(inEye ? this.eyeCamera.viewPitch : cam.pitch, cam.yaw, 0);
     // EVERY field of the active camera's contract, `fov` included. It used to be set once in the constructor from the map
     // camera, so eye mode rendered at the map's 0.8 rad while `pixelsPerMetre` above was computed from the eye's 1.1 — a
     // 1.45× disagreement that put every LOD threshold 31 % low and would never throw, only look wrong.
@@ -2894,6 +3008,7 @@ export class ClientApp {
     // Nothing is in range until this frame says so: `structureSamples` keeps its records across frames, so the count is
     // what says how many are this frame's (see `structureCount`).
     this.structureCount = 0;
+    this.structureEpoch++;
     const layer = this.staticAssets;
     if (layer === null) {
       return NONE_HIDDEN;
@@ -2967,6 +3082,9 @@ export class ClientApp {
    * buildings inside a 64 m room, where the server had none.
    */
   private structureCount = 0;
+
+  /** Counts refreshes of {@link structureSamples}, so what is derived from them is rebuilt once per refresh. */
+  private structureEpoch = 0;
 
   /**
    * Reused each frame: where the camera is, in PLANET metres, for the structures' detail level.

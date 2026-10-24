@@ -52,32 +52,49 @@ export function crossedDoor(door: DoorPlane, fromX: number, fromZ: number, toX: 
   return Math.abs((px - door.x) * -door.fz + (pz - door.z) * door.fx) <= door.half;
 }
 
-/** How near a published spawn a body must stand to be taken as having landed on it, metres. */
-export const ARRIVAL_RADIUS_M = 0.6;
+/**
+ * How far from the published spawn it landed on a body may be when the client first sees it, metres.
+ *
+ * <b>Not "standing on it".</b> A body that comes through a door at a run keeps running: the server lands it on the spawn and
+ * moves it on the next tick, and the client's first look at it is a render delay and a tick or two later. Measured at 9.7
+ * m/s, it was first seen 1.0 m past the room's entry, and the 0.6 m this used to be found no spawn: the screen stayed black
+ * for the whole wait and came back with the door beside the body. A run of 10 m/s over about 0.3 s is 3 m; spawns of
+ * different structures stand further apart than this, and the nearest one wins anyway.
+ */
+export const ARRIVAL_RADIUS_M = 4;
+
+/** A published spawn found near a body: the way it faces, and how far the body is from it. */
+export interface SpawnNear {
+  readonly facing: readonly [number, number];
+  readonly distance: number;
+}
 
 /**
- * The direction a body faces on a published spawn of a placed asset it stands on, or `null` when it stands on none.
+ * The published spawn of a placed asset nearest a body, within {@link ARRIVAL_RADIUS_M}, or `null`.
  *
- * @returns The world direction in the ground plane, unit length.
+ * @returns Its facing, the world direction in the ground plane, unit length, and its distance from the body.
  */
+export function spawnNear(descriptor: Descriptor, pose: Pose, x: number, z: number): SpawnNear | null {
+  let best: SpawnNear | null = null;
+  for (const s of descriptor.spawns) {
+    const p = pointToWorld(pose, s.pos);
+    const d = Math.hypot(p[0] - x, p[2] - z);
+    if (d <= ARRIVAL_RADIUS_M && (best === null || d < best.distance)) {
+      const f = directionToWorld(pose, rotate(s.rot, axisVector(s.forward)));
+      const length = Math.hypot(f[0], f[2]) || 1;
+      best = { facing: [f[0] / length, f[2] / length], distance: d };
+    }
+  }
+
+  return best;
+}
+
+/** The facing of {@link spawnNear}, or `null`. */
 export function spawnFacingAt(
   descriptor: Descriptor,
   pose: Pose,
   x: number,
   z: number,
 ): readonly [number, number] | null {
-  let best: readonly [number, number] | null = null;
-  let bestD = ARRIVAL_RADIUS_M;
-  for (const s of descriptor.spawns) {
-    const p = pointToWorld(pose, s.pos);
-    const d = Math.hypot(p[0] - x, p[2] - z);
-    if (d <= bestD) {
-      const f = directionToWorld(pose, rotate(s.rot, axisVector(s.forward)));
-      const length = Math.hypot(f[0], f[2]) || 1;
-      best = [f[0] / length, f[2] / length];
-      bestD = d;
-    }
-  }
-
-  return best;
+  return spawnNear(descriptor, pose, x, z)?.facing ?? null;
 }

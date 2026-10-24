@@ -4,10 +4,20 @@ import {
   crossingKindOf,
   decodeAppTag,
   doorRealmOf,
+  isIndoors,
   realmViewOf,
   sameRealm,
   type RealmView,
 } from '../src/data/realm-view';
+
+describe('isIndoors', () => {
+  it('is a room or a dungeon, and nothing else: the lighting, the camera caps and the door blackout all ask it', () => {
+    expect(isIndoors('interior')).toBe(true);
+    expect(isIndoors('dungeon')).toBe(true);
+    expect(isIndoors('planet')).toBe(false);
+    expect(isIndoors('space')).toBe(false);
+  });
+});
 
 /**
  * The `AppTag` layout, restated here as literals rather than built from the decoder's own shifts.

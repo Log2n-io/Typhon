@@ -108,6 +108,13 @@ export class EyeCamera {
   yaw = 0;
   pitch = 0;
 
+  /**
+   * The pitch the eye was placed with this frame, which the view must aim with: {@link pitch}, or flatter when the room's
+   * ceiling cap ({@link maxEyeHeightM}) flattened it. Aimed with {@link pitch} instead, the view looks below the head by
+   * the difference, and looking down past ~34° in a room put the body off the top of the screen.
+   */
+  viewPitch = 0;
+
   /** 0 = first person; larger pulls the eye back along the view, over the subject's shoulder. */
   distance = 0;
 
@@ -201,8 +208,11 @@ export class EyeCamera {
 
   /** Pulls the eye back from the subject, or pushes it in. `factor < 1` moves toward first person. */
   zoomBy(factor: number): void {
-    // From exactly 0, a multiply can never leave it: stepping out of first person needs an additive nudge.
-    const from = this.goalDistance === 0 ? (factor > 1 ? 1.5 : 0) : this.goalDistance * factor;
+    // From exactly 0, a multiply can never leave it: stepping out of first person needs an additive nudge. From the
+    // distance in USE, not the one asked for: in a room the wheel must move the eye at once, not first unwind the 20 m
+    // the street was viewed from.
+    const goal = Math.min(this.goalDistance, this.maxDistanceM);
+    const from = goal === 0 ? (factor > 1 ? 1.5 : 0) : goal * factor;
     this.goalDistance = clamp(from, 0, MAX_EYE_DISTANCE_M);
   }
 
@@ -228,7 +238,8 @@ export class EyeCamera {
     this.anchorZ += (this.subjectZ - this.anchorZ) * follow;
     this.yaw += (this.goalYaw - this.yaw) * k;
     this.pitch += (this.goalPitch - this.pitch) * k;
-    this.goalDistance = Math.min(this.goalDistance, this.maxDistanceM);
+    // The goal is NOT clamped to `maxDistanceM`: the room's cap is applied where the eye is placed (`updateEye`), so the
+    // street's zoom is still there when the body walks back out. Clamped here, one visit to a room took it for good.
     this.distance += (this.goalDistance - this.distance) * k;
     this.updateEye(dt);
   }
@@ -272,6 +283,8 @@ export class EyeCamera {
     if (distance > 0 && head + Math.sin(pitch) * distance > ceiling) {
       pitch = Math.asin(clamp((ceiling - head) / distance, -1, 1));
     }
+
+    this.viewPitch = pitch;
 
     // Pulling back travels BACKWARD along the view ray, so an over-the-shoulder eye rises as it pitches down — which is
     // what keeps the subject in frame instead of sliding up out of it.

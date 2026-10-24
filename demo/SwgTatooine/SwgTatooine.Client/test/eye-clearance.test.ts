@@ -100,6 +100,33 @@ describe('the eye camera against walls', () => {
     expect(c.effectiveDistance).toBeCloseTo(6, 2);
   });
 
+  it("gives the street's zoom back after a room: the room's cap is not written into the distance asked for", () => {
+    const c = new EyeCamera();
+    c.setDistance(20);
+    c.jumpTo(0, 0, 0, 0);
+    c.maxDistanceM = 7;
+    for (let i = 0; i < 100; i++) {
+      c.update(0.05);
+    }
+
+    expect(c.effectiveDistance).toBeCloseTo(7, 2);
+    c.maxDistanceM = Infinity;
+    for (let i = 0; i < 200; i++) {
+      c.update(0.05);
+    }
+
+    expect(c.effectiveDistance).toBeCloseTo(20, 2);
+  });
+
+  it('zooms from the distance in use under the cap, so the wheel moves the eye at once', () => {
+    const c = new EyeCamera();
+    c.setDistance(20);
+    c.maxDistanceM = 7;
+    c.zoomBy(0.5);
+    c.jumpTo(0, 0, 0, 0);
+    expect(c.effectiveDistance).toBeCloseTo(3.5, 2);
+  });
+
   it('caps the eye under a ceiling by flattening the pitch, not by clamping the height', () => {
     const c = new EyeCamera();
     c.setDistance(6);
@@ -112,6 +139,11 @@ describe('the eye camera against walls', () => {
 
     expect(c.eyeY).toBeLessThanOrEqual(1.9 + 1e-6);
     expect(c.effectiveDistance).toBeCloseTo(6, 2); // still 6 m back, just lower
+
+    // And the view aims along the ray the eye was placed on, so it still looks at the head: placed with the flattened
+    // pitch and aimed with the asked-for one, it looked below the head by the difference.
+    expect(c.viewPitch).toBeLessThan(c.pitch);
+    expect(c.eyeY).toBeCloseTo(1.7 + Math.sin(c.viewPitch) * c.effectiveDistance, 6);
   });
 });
 
