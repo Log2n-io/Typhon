@@ -2361,6 +2361,9 @@ public sealed class BotSwarm : IAsyncDisposable
                 // 0: the intent changed on the tick boundary as far as this bot is concerned. A14b's phase exists to place a human's
                 // keypress inside a tick, and a timer has nothing finer to report.
                 ["changePhase"] = FieldValue.Of(0.0),
+
+                // ×1: a bot moves at what the server grants, as a person who never pressed Shift+2..4 does.
+                ["boost"] = FieldValue.Of(1.0),
             };
 
             await Client.SendCommandAsync(MoveDirCommand, values, ct).ConfigureAwait(false);
@@ -2434,6 +2437,7 @@ public sealed class BotSwarm : IAsyncDisposable
                             ["heading"] = FieldValue.Of((double)intent.Heading),
                             ["speedClass"] = FieldValue.Of((double)intent.SpeedClass),
                             ["changePhase"] = FieldValue.Of(0.0),
+                            ["boost"] = FieldValue.Of(1.0),
                         },
                         ct).ConfigureAwait(false);
                     IntentsSent++;

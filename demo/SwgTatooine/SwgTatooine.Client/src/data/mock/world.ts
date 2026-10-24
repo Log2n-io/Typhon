@@ -200,7 +200,7 @@ export function buildWorld(seed: number, population: number): MockWorld {
       statics.x[s] = p[0]!;
       statics.z[s] = p[1]!;
       statics.kind[s] =
-        i === 0 ? StructureKind.Shuttleport : i % 9 === 0 ? StructureKind.Terminal : StructureKind.Building;
+        i === 0 ? StructureKind.Shuttleport : i % 9 === 0 ? StructureKind.CraftingStation : StructureKind.Building;
       statics.region[s] = ci + 1;
       if (i === 0) {
         shuttleports[ci * 2] = p[0]!;

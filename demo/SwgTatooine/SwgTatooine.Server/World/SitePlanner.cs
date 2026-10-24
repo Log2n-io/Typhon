@@ -196,6 +196,87 @@ public sealed class SitePlanner
     /// </remarks>
     public void Reserve(float x, float z, float halfM) => Add(x, z, halfM);
 
+    /// <summary>How many times <see cref="PushOut"/> steps a body out of one square before it gives up where it stands.</summary>
+    private const int PushOutSteps = 4;
+
+    /// <summary>How far past a square's edge a pushed body is set down, metres, so a float round-off cannot leave it touching.</summary>
+    private const float PushOutClearM = 0.05f;
+
+    /// <summary>
+    /// Moves a body out of whatever planted square it stands in — onto the nearest edge, past it by its own half-extent — and draws nothing.
+    /// </summary>
+    /// <param name="x">East; moved when the body was inside something.</param>
+    /// <param name="z">North; moved when the body was inside something.</param>
+    /// <param name="halfM">The body's half-extent.</param>
+    /// <returns>Whether the body now stands clear of every planted square.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>For bodies, not structures:</b> no margin, because a body may stand right against a wall, and a reservation counts as ground taken, so nobody is
+    /// born across a shuttleport's gate either. NPCs and players used to be dropped by an independent disc draw with no look at what stood there, and
+    /// a city of 46 m shuttleport and 18 m houses put a share of them inside walls, unable to get out.
+    /// </para>
+    /// <para>
+    /// <b>A push rather than a redraw</b>, so it consumes nothing from the world's stream: every body keeps the draw it had and only the ones that landed in
+    /// a structure move. Of the square's four edges the nearest one with open ground past it wins; the planner keeps a street of
+    /// <see cref="StructureFootprint.MarginM"/> between two structures on at least one axis, so there is one. With none open — a reservation inside its
+    /// neighbours' margins — it crosses the nearest and tries again from the square it lands in, a few times at most, never back the way it came.
+    /// </para>
+    /// </remarks>
+    public bool PushOut(ref float x, ref float z, float halfM)
+    {
+        var from = -1;
+        for (var step = 0; step < PushOutSteps; step++)
+        {
+            var hit = FindOverlap(x, z, halfM, 0f);
+            if (hit < 0)
+            {
+                return true;
+            }
+
+            var (ox, oz, oh) = _placed[hit];
+            var reach = oh + halfM + PushOutClearM;
+            var bestX = 0f;
+            var bestZ = 0f;
+            var bestD = float.MaxValue;
+            var anyX = 0f;
+            var anyZ = 0f;
+            var anyD = float.MaxValue;
+            for (var edge = 0; edge < 4; edge++)
+            {
+                var ex = edge switch { 0 => ox - reach, 1 => ox + reach, _ => x };
+                var ez = edge switch { 2 => oz - reach, 3 => oz + reach, _ => z };
+                var d = MathF.Abs(ex - x) + MathF.Abs(ez - z);
+                var next = FindOverlap(ex, ez, halfM, 0f);
+                if (next < 0 && d < bestD)
+                {
+                    (bestX, bestZ, bestD) = (ex, ez, d);
+                }
+                else if (next >= 0 && next != from && d < anyD)
+                {
+                    (anyX, anyZ, anyD) = (ex, ez, d);
+                }
+            }
+
+            if (bestD < float.MaxValue)
+            {
+                x = bestX;
+                z = bestZ;
+                return true;
+            }
+
+            if (anyD == float.MaxValue)
+            {
+                return false;   // every way out leads back where it came from
+            }
+
+            from = hit;
+            x = anyX;
+            z = anyZ;
+        }
+
+        return FindOverlap(x, z, halfM, 0f) < 0;
+    }
+
     /// <summary>Whether a box at this spot would touch one already placed.</summary>
     /// <param name="x">East.</param>
     /// <param name="z">North.</param>
@@ -208,7 +289,15 @@ public sealed class SitePlanner
     /// overlapping pairs. One margin per pair is a 20 m square, 44 %, and the city plants with attempts to spare.
     /// Separating-axis on two axis-aligned squares is two comparisons.
     /// </remarks>
-    private bool Overlaps(float x, float z, float halfM)
+    private bool Overlaps(float x, float z, float halfM) => FindOverlap(x, z, halfM, StructureFootprint.MarginM) >= 0;
+
+    /// <summary>The first placed box a square at this spot touches, with a margin between the two, or -1.</summary>
+    /// <param name="x">East.</param>
+    /// <param name="z">North.</param>
+    /// <param name="halfM">Half-edge.</param>
+    /// <param name="marginM">The gap the pair must keep: <see cref="StructureFootprint.MarginM"/> between structures, none for a body.</param>
+    /// <returns>Its index, or -1.</returns>
+    private int FindOverlap(float x, float z, float halfM, float marginM)
     {
         var reach = halfM;
         var minCx = CellOf(x - reach - _cellM);
@@ -227,17 +316,17 @@ public sealed class SitePlanner
                 for (var i = 0; i < bucket.Count; i++)
                 {
                     var other = _placed[bucket[i]];
-                    var span = reach + other.Half + StructureFootprint.MarginM;
+                    var span = reach + other.Half + marginM;
 
                     if (Math.Abs(x - other.X) < span && Math.Abs(z - other.Z) < span)
                     {
-                        return true;
+                        return bucket[i];
                     }
                 }
             }
         }
 
-        return false;
+        return -1;
     }
 
     /// <summary>Files a placed box in every cell its box touches.</summary>

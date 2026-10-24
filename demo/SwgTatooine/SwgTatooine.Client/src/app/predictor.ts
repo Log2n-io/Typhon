@@ -88,16 +88,13 @@ const HISTORY = 128;
  * What the server granted this player for each speed class, in metres per second.
  *
  * <b>Every gait, read together, because prediction needs the figure BEFORE the server has been told which one is in
- * use.</b> The person presses Shift+3 and the client has to integrate a speeder in that same frame; a single "current
- * speed" stat would arrive a round trip later, and the predictor would spend the round trip integrating the previous gait
- * and then being corrected for it.
+ * use.</b> The person mounts or lets go of Shift and the client has to integrate the new speed in that same frame; a
+ * single "current speed" stat would arrive a round trip later, and the predictor would spend the round trip integrating
+ * the previous gait and then being corrected for it.
  */
 export interface GrantedSpeeds {
   readonly walkMps: number;
   readonly runMps: number;
-  readonly burstMps: number;
-  readonly speederMps: number;
-  readonly speederFastMps: number;
   readonly swoopMps: number;
 }
 
@@ -123,13 +120,13 @@ export interface GrantedSpeeds {
  * refused on the wire, so predicting ANY speed for it would integrate a movement the server never makes — the drift the
  * fallback exists to avoid, with no counter moving.
  */
-export function speedForClass(speedClass: number, speeds: GrantedSpeeds): number {
+export function speedForClass(speedClass: number, speeds: GrantedSpeeds, boost = 1): number {
   if (speedClass === SpeedClass.stop) {
     return 0;
   }
 
   const granted = grantedFor(speedClass, speeds);
-  return Number.isFinite(granted) && granted > 0 ? granted : NaN;
+  return Number.isFinite(granted) && granted > 0 ? granted * boost : NaN;
 }
 
 function grantedFor(speedClass: number, speeds: GrantedSpeeds): number {
@@ -138,12 +135,6 @@ function grantedFor(speedClass: number, speeds: GrantedSpeeds): number {
       return speeds.walkMps;
     case SpeedClass.run:
       return speeds.runMps;
-    case SpeedClass.burst:
-      return speeds.burstMps;
-    case SpeedClass.speeder:
-      return speeds.speederMps;
-    case SpeedClass.speederFast:
-      return speeds.speederFastMps;
     case SpeedClass.swoop:
       return speeds.swoopMps;
     default:

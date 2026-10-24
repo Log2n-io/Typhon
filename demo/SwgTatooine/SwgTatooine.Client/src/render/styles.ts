@@ -86,7 +86,7 @@ function fill<T>(values: readonly T[], length: number, filler: T): T[] {
 
 const STRUCTURE_COLORS: [number, number, number][] = [];
 STRUCTURE_COLORS[StructureKind.Building] = [0.8, 0.72, 0.58];
-STRUCTURE_COLORS[StructureKind.Terminal] = [0.35, 0.75, 0.8];
+STRUCTURE_COLORS[StructureKind.CraftingStation] = [0.35, 0.75, 0.8];
 STRUCTURE_COLORS[StructureKind.Shuttleport] = [0.7, 0.74, 0.8];
 STRUCTURE_COLORS[StructureKind.PoiProp] = [0.55, 0.42, 0.32];
 STRUCTURE_COLORS[StructureKind.PlayerHouse] = [0.86, 0.8, 0.66];
@@ -99,7 +99,7 @@ STRUCTURE_COLORS[StructureKind.MissionTerminal] = [0.35, 0.8, 0.45];
 
 const STRUCTURE_SIZES: [number, number, number][] = [];
 STRUCTURE_SIZES[StructureKind.Building] = [18, 9, 18];
-STRUCTURE_SIZES[StructureKind.Terminal] = [1.6, 2.6, 1.6];
+STRUCTURE_SIZES[StructureKind.CraftingStation] = [1.6, 2.6, 1.6];
 STRUCTURE_SIZES[StructureKind.Bazaar] = [1.2, 1.5, 1.1];
 STRUCTURE_SIZES[StructureKind.MissionTerminal] = [0.63, 1.3, 0.51];
 // 46.2 across, matching the server's reservation and the published asset. The box is only ever seen beyond the range

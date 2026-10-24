@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using NUnit.Framework;
 using SwgTatooine.Bots.Brain;
+using SwgTatooine.Server;
 
 namespace SwgTatooine.Tests;
 
@@ -534,9 +535,12 @@ public sealed class RoutingChecks
         {
             Assert.That(route.Mode, Is.EqualTo(TravelMode.Swoop), "a 900 m ride was run on foot or flown");
             Assert.That(route.Seconds, Is.EqualTo((900d / Routing.SwoopMps) + Routing.MountSeconds).Within(0.001), "the ride was not costed at the swoop");
-            Assert.That(Routing.SpeedClassOf(TravelMode.Swoop), Is.EqualTo(6), "a swoop must ask for the class the server grants a mounted player");
-            Assert.That(Routing.SpeedClassOf(TravelMode.Run), Is.EqualTo(2), "running must ask for the run class");
-            Assert.That(Routing.SpeedClassOf(TravelMode.Shuttle), Is.EqualTo(2), "walking to a port is done at a run");
+            // Against the server's own constants: the bot keeps copies because it may not reference the server, and a copy pinned to a literal here
+            // stayed green when the server renumbered its classes.
+            Assert.That(
+                Routing.SpeedClassOf(TravelMode.Swoop), Is.EqualTo(SpeedClasses.Swoop), "a swoop must ask for the class the server grants a mounted player");
+            Assert.That(Routing.SpeedClassOf(TravelMode.Run), Is.EqualTo(SpeedClasses.Run), "running must ask for the run class");
+            Assert.That(Routing.SpeedClassOf(TravelMode.Shuttle), Is.EqualTo(SpeedClasses.Run), "walking to a port is done at a run");
         });
     }
 

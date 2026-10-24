@@ -419,14 +419,14 @@ internal sealed class ClientIntentChecks : ServedChecks
     {
         using var world = new Possessed(Config());
 
-        // Every gait the client can select, in the order its shortcut does: Shift+1..4 after the walk.
-        var classes = new[] { SpeedClasses.Walk, SpeedClasses.Run, SpeedClasses.Burst, SpeedClasses.Speeder, SpeedClasses.SpeederFast };
+        // Every class a body on foot can ask for: a direction key walks, Shift runs. The swoop's has its own case, which mounts first.
+        var classes = new[] { SpeedClasses.Walk, SpeedClasses.Run };
 
         float[] replicated;
         using (var tx = world.Sim.Dbe.CreateQuickTransaction())
         {
             var move = tx.For<Player>().Open(world.Entity).Read(Player.Move);
-            replicated = [move.WalkMps, move.RunMps, move.BurstMps, move.SpeederMps, move.SpeederFastMps];
+            replicated = [move.WalkMps, move.RunMps];
         }
 
         // What the command path actually grants, observed rather than asserted against a constant: one intent per gait, each
@@ -451,9 +451,8 @@ internal sealed class ClientIntentChecks : ServedChecks
                 Assert.That(granted[i] * TickRateHz, Is.EqualTo(replicated[i]).Within(0.01f),
                     $"the stat for class {classes[i]} is not what an intent at that class is granted");
 
-                // Strictly faster as the ladder rises, which is the only promise the four shortcuts make to the person
-                // pressing them. A pair that collapsed — a copy-paste in SpeedFor, or two classes mapped to one constant —
-                // would leave Shift+3 and Shift+4 indistinguishable and nothing else would notice.
+                // Strictly faster as the ladder rises: a pair that collapsed — a copy-paste in SpeedFor, or two classes mapped to one constant —
+                // would leave Shift doing nothing and nothing else would notice.
                 if (i > 0)
                 {
                     Assert.That(replicated[i], Is.GreaterThan(replicated[i - 1]), $"class {classes[i]} is not faster than {classes[i - 1]}");
@@ -462,30 +461,51 @@ internal sealed class ClientIntentChecks : ServedChecks
         });
     }
 
-    /// <summary>The two travel gaits are the multiples of a landspeeder they were asked to be, and the world's own speed is untouched.</summary>
+    /// <summary>A boost of 1 to 4 multiplies the speed the class is granted, 0 means 1, and a boost past 4 is refused and counted like a class.</summary>
     /// <remarks>
-    /// <b>Pinned as RATIOS because that is how they were specified</b> — Shift+3 at twice a landspeeder and Shift+4 at three times
-    /// Shift+3 — and because the obvious way to implement that was to scale <c>PlayerMountSpeedMps</c>, which would have been
-    /// wrong: mounts, creatures and the shuttle read that same figure, so the planet's whole traffic would have sped up with the
-    /// player. The last assertion is the one that catches that mistake coming back.
+    /// Shift+1..4 in the client (Loïc, 2026-10-24: "more like a cheat code"), on walk, run and the swoop alike. The client multiplies the replicated speed by
+    /// the factor it sent, so the factor the server applies has to be exactly that one — a server that applied a different ladder would drift every
+    /// prediction — and the bound is the server's, so asking for a fifth time the run moves nothing.
     /// </remarks>
     [Test]
-    public void TheTravelGaitsAreMultiplesOfASpeederAndLeaveTheWorldAlone()
+    [Category("Integration")]
+    public void ABoostMultipliesTheGrantedSpeedUpToFour()
     {
+        using var world = new Possessed(Config());
+
+        float runMps;
+        using (var tx = world.Sim.Dbe.CreateQuickTransaction())
+        {
+            runMps = tx.For<Player>().Open(world.Entity).Read(Player.Move).RunMps;
+        }
+
+        // 0 first, which is what a bot that never names a boost sends; then 1..4, each read back from the velocity the server set.
+        var boosts = new byte[] { 0, 1, 2, 3, 4 };
+        var granted = new float[boosts.Length];
+        for (var i = 0; i < boosts.Length; i++)
+        {
+            var applied = i + 1;
+            world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Run, boost: boosts[i]));
+            SessionHarness.Until(() => TatooineReplication.Intents.Applied >= applied, $"intent {applied} to be applied");
+            world.Harness.Ticks(1);
+            granted[i] = MathF.Abs(world.Read().VelX) * TickRateHz;
+        }
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Run, boost: SpeedClasses.MaxBoost + 1));
+        SessionHarness.Until(() => TatooineReplication.Intents.RefusedSpeed >= 1, "the fifth boost to be refused by the tick");
+        world.Harness.Ticks(1);
+        var afterRefusal = MathF.Abs(world.Read().VelX) * TickRateHz;
+
         Assert.Multiple(() =>
         {
-            Assert.That(
-                TatooineData.PlayerSpeederSpeedMps,
-                Is.EqualTo(TatooineData.PlayerMountSpeedMps * 2f),
-                "Shift+3 is specified as twice a landspeeder");
-            Assert.That(
-                TatooineData.PlayerSpeederFastSpeedMps,
-                Is.EqualTo(TatooineData.PlayerSpeederSpeedMps * 3f),
-                "Shift+4 is specified as three times Shift+3");
-            Assert.That(
-                TatooineData.PlayerMountSpeedMps,
-                Is.EqualTo(12f),
-                "the mount speed is the WORLD's, read by creatures and the shuttle: scaling a player gait through it speeds them up too");
+            for (var i = 0; i < boosts.Length; i++)
+            {
+                var factor = Math.Max(1, (int)boosts[i]);
+                Assert.That(granted[i], Is.EqualTo(runMps * factor).Within(0.01f), $"boost {boosts[i]} is not {factor} runs");
+            }
+
+            Assert.That(TatooineReplication.Intents.RefusedSpeed, Is.EqualTo(1), "a boost past the maximum was not refused and counted");
+            Assert.That(afterRefusal, Is.EqualTo(runMps * SpeedClasses.MaxBoost).Within(0.01f), "a refused boost changed the speed");
         });
     }
 
@@ -512,7 +532,8 @@ internal sealed class ClientIntentChecks : ServedChecks
         var fastest = 0f;
         for (byte speedClass = 0; speedClass < SpeedClasses.Count; speedClass++)
         {
-            fastest = MathF.Max(fastest, TatooineReplication.SpeedFor(speedClass));
+            // At the largest boost, which is what a client may ask for on any class.
+            fastest = MathF.Max(fastest, TatooineReplication.SpeedFor(speedClass) * SpeedClasses.MaxBoost);
         }
 
         Assert.Multiple(() =>
@@ -520,8 +541,8 @@ internal sealed class ClientIntentChecks : ServedChecks
             // The GRANTED figure, scale included: the ladder's top and the threshold are both scaled, and the point of
             // this assertion is that they are scaled by the same thing. Comparing against the raw constant would fail
             // whenever the ladder is scaled, which is the one case where the two could genuinely drift apart.
-            Assert.That(fastest, Is.EqualTo(TatooineData.PlayerSpeederFastSpeedMps * TatooineData.PlayerGaitScale),
-                "the fastest granted class is not the one the threshold is computed from");
+            Assert.That(fastest, Is.EqualTo(TatooineData.PlayerSwoopSpeedMps * TatooineData.PlayerGaitScale * SpeedClasses.MaxBoost),
+                "the fastest granted speed is not the one the threshold is computed from");
             Assert.That(TatooineReplication.MaxSpeedMps, Is.GreaterThan(fastest),
                 "an entity at the declared maximum reads as a teleport on about half its ticks");
             Assert.That(TatooineReplication.MaxSpeedMps, Is.EqualTo(fastest * 1.05).Within(0.001),
@@ -559,9 +580,8 @@ internal sealed class ClientIntentChecks : ServedChecks
     /// <remarks>
     /// <para>
     /// <b>Refused rather than clamped</b> because a clamp lets a client ask for whatever it likes on every tick and never learn it is not getting it, and the
-    /// refusal count is the only number that says whether anything is trying. The ceiling is the ladder's top (<c>SpeedClasses.Count</c>) and not the run
-    /// speed any more — the four gait shortcuts grant up to 24 m/s — so what this case sends is a class far past the end of it, which is what a client
-    /// inventing a speed would look like.
+    /// refusal count is the only number that says whether anything is trying. What this case sends is a class far past the end of
+    /// <c>SpeedClasses.Count</c>, which is what a client inventing a speed would look like.
     /// </para>
     /// <para>
     /// <b>The counter is asserted, and it took a fix to the wire declaration to make that possible.</b> The class bound was in the command's

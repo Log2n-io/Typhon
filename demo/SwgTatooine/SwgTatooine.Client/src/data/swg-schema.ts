@@ -168,7 +168,7 @@ export const CONTROLLER_NAMES: readonly string[] = ['Simulated', 'Bot', 'Human']
 
 export const STRUCTURE_KIND_NAMES: readonly string[] = [
   'Building',
-  'Terminal',
+  'Crafting station',
   'Shuttleport',
   'Landmark prop',
   'House',
@@ -181,7 +181,7 @@ export const STRUCTURE_KIND_NAMES: readonly string[] = [
 ];
 export const StructureKind = {
   Building: 0,
-  Terminal: 1,
+  CraftingStation: 1,
   Shuttleport: 2,
   PoiProp: 3,
   PlayerHouse: 4,

@@ -309,7 +309,7 @@ public sealed class AssetCollisionChecks
         Assert.Multiple(() =>
         {
             Assert.That(colliders.MaxOverhangM, Is.EqualTo(0.4f).Within(1e-3f), "the premise: something in this set overhangs");
-            Assert.That(colliders.OverhangFor(StructureFootprint.HalfExtentM(StructureKind.Terminal)), Is.Zero,
+            Assert.That(colliders.OverhangFor(StructureFootprint.HalfExtentM(StructureKind.CraftingStation)), Is.Zero,
                 "a terminal publishes no collider, so it reaches no further than its own footprint");
         });
     }
@@ -392,7 +392,7 @@ public sealed class AssetCollisionChecks
         var colliders = AssetColliders.FromBoxesForTest(byIndex);
 
         const float Edge = TatooineData.PlanetHalfExtentM;
-        foreach (var kind in new[] { StructureKind.Terminal, StructureKind.Building })
+        foreach (var kind in new[] { StructureKind.CraftingStation, StructureKind.Building })
         {
             var half = StructureFootprint.HalfExtentM(kind);
             // Exactly how the world stores it and how the broad phase reads it back.
@@ -405,7 +405,7 @@ public sealed class AssetCollisionChecks
     /// <summary>Every structure kind, so a premise is pinned over the table rather than over the assets that exist today.</summary>
     private static readonly int[] AllKinds =
     [
-        StructureKind.Building, StructureKind.Terminal, StructureKind.Shuttleport, StructureKind.PoiProp,
+        StructureKind.Building, StructureKind.CraftingStation, StructureKind.Shuttleport, StructureKind.PoiProp,
         StructureKind.PlayerHouse, StructureKind.Factory, StructureKind.Harvester, StructureKind.CampObject, StructureKind.Bazaar,
         StructureKind.MissionTerminal,
     ];
@@ -438,7 +438,7 @@ public sealed class AssetCollisionChecks
         var seen = new bool[StructureAssets.Table.Length];
         int[] kinds =
         [
-            StructureKind.Building, StructureKind.Terminal, StructureKind.Shuttleport, StructureKind.PoiProp,
+            StructureKind.Building, StructureKind.CraftingStation, StructureKind.Shuttleport, StructureKind.PoiProp,
             StructureKind.PlayerHouse, StructureKind.Factory, StructureKind.Harvester, StructureKind.CampObject, StructureKind.Bazaar,
             StructureKind.MissionTerminal,
         ];

@@ -13,10 +13,10 @@ const WALK = 2.5;
 const RUN = 5;
 
 /** The whole granted ladder, as a session's owner block carries it. The figures are the server's; these are its. */
-const GRANTED = { walkMps: WALK, runMps: RUN, burstMps: 9.11, speederMps: 12, speederFastMps: 24, swoopMps: 20 };
+const GRANTED = { walkMps: WALK, runMps: RUN, swoopMps: 20 };
 
 /** Before the owner block arrives, every one of them is NaN. */
-const UNKNOWN = { walkMps: NaN, runMps: NaN, burstMps: NaN, speederMps: NaN, speederFastMps: NaN, swoopMps: NaN };
+const UNKNOWN = { walkMps: NaN, runMps: NaN, swoopMps: NaN };
 
 /** A frame at 60 Hz. */
 const FRAME_MS = 16;
@@ -161,20 +161,15 @@ describe('speedForClass', () => {
     expect(speedForClass(SpeedClass.stop, GRANTED)).toBe(0);
     expect(speedForClass(SpeedClass.walk, GRANTED)).toBe(WALK);
     expect(speedForClass(SpeedClass.run, GRANTED)).toBe(RUN);
-    expect(speedForClass(SpeedClass.burst, GRANTED)).toBe(GRANTED.burstMps);
-    expect(speedForClass(SpeedClass.speeder, GRANTED)).toBe(GRANTED.speederMps);
-    expect(speedForClass(SpeedClass.speederFast, GRANTED)).toBe(GRANTED.speederFastMps);
     expect(speedForClass(SpeedClass.swoop, GRANTED)).toBe(GRANTED.swoopMps);
   });
 
   /**
    * Every gait reads its OWN stat, which is the mistake a switch like this invites: a case falling through to `runMps`
-   * predicts a run while the server moves a speeder, and the error grows at 7 m/s with nothing saying so.
+   * predicts a run while the server moves a swoop, and the error grows at 10 m/s with nothing saying so.
    */
   it('reads a different stat for every gait', () => {
-    const speeds = [SpeedClass.walk, SpeedClass.run, SpeedClass.burst, SpeedClass.speeder, SpeedClass.speederFast].map(
-      (gait) => speedForClass(gait, GRANTED),
-    );
+    const speeds = [SpeedClass.walk, SpeedClass.run, SpeedClass.swoop].map((gait) => speedForClass(gait, GRANTED));
 
     expect(new Set(speeds).size).toBe(speeds.length);
   });
@@ -185,7 +180,7 @@ describe('speedForClass', () => {
    */
   it('propagates NaN when the stat has not arrived', () => {
     expect(speedForClass(SpeedClass.run, UNKNOWN)).toBeNaN();
-    expect(speedForClass(SpeedClass.speederFast, UNKNOWN)).toBeNaN();
+    expect(speedForClass(SpeedClass.swoop, UNKNOWN, 4)).toBeNaN();
   });
 
   /**

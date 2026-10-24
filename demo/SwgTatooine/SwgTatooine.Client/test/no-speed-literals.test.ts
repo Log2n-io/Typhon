@@ -122,9 +122,9 @@ describe('client source', () => {
    */
   it('reads the replicated speed stats', () => {
     const predictor = readFileSync(join(SRC, 'app', 'client-app.ts'), 'utf8');
-    // Every gait Shift+1..4 can select, because a gait whose figure the client never reads is a gait it cannot predict —
+    // Every way of moving — walk, run, swoop — because one whose figure the client never reads is one it cannot predict —
     // and the fallback it lands in is silent to the viewer, who just sees the body stutter at that one speed.
-    for (const stat of ['walkMps', 'runMps', 'burstMps', 'speederMps', 'speederFastMps']) {
+    for (const stat of ['walkMps', 'runMps', 'swoopMps']) {
       expect(predictor, `the client predicts a gait without reading what the server grants for it`).toContain(
         `selfNumber('${stat}')`,
       );

@@ -340,12 +340,12 @@ public sealed partial class SimBridge
     private void BoardInterPlanet(EntityId id, ushort fromPlanet, int destCity, float halfExtent, uint salt)
     {
         var destPlanet = (ushort)((fromPlanet + 1 + Math.Min(_config.Planets - 2, (int)(Hash01(salt) * (_config.Planets - 1)))) % _config.Planets);
+        // Outside the destination gate, as a local hop lands (SimBridge.Shuttles), never inside the ring wall.
         var (portX, portZ) = PlanetIndexes[destPlanet].Shuttleports[destCity];
-        var r = ArrivalScatterM * MathF.Sqrt(Hash01(salt ^ 0x2F9B1D63u));
-        var a = Hash01(salt ^ 0x6C8E9CF5u) * MathF.PI * 2f;
+        var (gx, gz) = WorldBuilder.OutsideGate(portX, portZ, Hash01(salt ^ 0x2F9B1D63u), Hash01(salt ^ 0x6C8E9CF5u));
         var half = (_config.WorldEdgeM * 0.5f) - halfExtent;
-        var x = Math.Clamp(portX + (MathF.Cos(a) * r), -half, half);
-        var z = Math.Clamp(portZ + (MathF.Sin(a) * r), -half, half);
+        var x = Math.Clamp(gx, -half, half);
+        var z = Math.Clamp(gz, -half, half);
         _teleports.Enqueue(new TeleportRequest(id, destPlanet, x, z, halfExtent, CrossingKind.InterPlanet, GroundAt(new RealmId(destPlanet), x, z)));
     }
 

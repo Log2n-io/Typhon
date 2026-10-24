@@ -69,7 +69,7 @@ public static class StructureFootprint
     /// </para>
     /// <para>
     /// Computed on one kind's footprint rather than on the mix a caller will actually plant. Eight of every nine city structures are buildings, and the
-    /// error in the other two directions cancels: the dome excludes about three buildings' worth and a terminal about a thirtieth of one.
+    /// error in the other two directions cancels: the dome excludes about three buildings' worth and a crafting station about a thirtieth of one.
     /// </para>
     /// </remarks>
     public static int CapacityOf(float radiusM, int kind)
@@ -88,7 +88,7 @@ public static class StructureFootprint
     public static float HalfExtentM(int kind) => kind switch
     {
         StructureKind.Building => 9f,        // 18 x 18
-        StructureKind.Terminal => 0.8f,      // 1.6 x 1.6
+        StructureKind.CraftingStation => 0.8f,      // 1.6 x 1.6
         // The published terminal and the stand point in front of it with its 0.3 m body square (blender-models, 2026-10-24): `bazaar_terminal` reaches
         // 0.65 m forward and is stood at 1.1 m; `mission_terminal` 0.26 m and 0.65 m. Reserved, or a neighbour is planted on the spot a user stands.
         StructureKind.Bazaar => 1.4f,

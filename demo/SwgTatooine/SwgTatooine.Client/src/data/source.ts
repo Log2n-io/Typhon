@@ -127,12 +127,9 @@ export const SpeedClass = {
   stop: 0,
   walk: 1,
   run: 2,
-  burst: 3,
-  speeder: 4,
-  speederFast: 5,
 
   /** Riding a swoop: granted only while the server has the avatar on one (`SetMount`). */
-  swoop: 6,
+  swoop: 3,
 } as const;
 
 export interface DataSource {
@@ -258,6 +255,7 @@ export interface DataSource {
    *   How far into the server's tick this intent CHANGED, in 255ths — the share of the tick the server drains it in that
    *   still belongs to the velocity before it. 0 for a re-send of an unchanged intent, and for a client that cannot
    *   measure it.
+   * @param boost The factor the class's speed is multiplied by, 1 to 4 (Shift+1..4); the server refuses more.
    *
    * <b>A CLASS, not a speed.</b> Same reason as {@link moveTo}: the client says "run", the server decides what running is.
    *
@@ -268,7 +266,7 @@ export interface DataSource {
    * the old velocity and the new one and the durations are equal. It is not a speed and cannot be used as one: the split
    * is a convex combination of two velocities the server itself granted.
    */
-  moveDir(heading: number, speedClass: number, changePhase?: number): void;
+  moveDir(heading: number, speedClass: number, changePhase?: number, boost?: number): void;
   /**
    * Names the entity the avatar is attacking, or 0 to clear (`SetTarget`).
    *
@@ -657,12 +655,12 @@ export class TyphonSource implements DataSource {
   }
 
   /** @inheritdoc */
-  moveDir(heading: number, speedClass: number, changePhase = 0): void {
+  moveDir(heading: number, speedClass: number, changePhase = 0, boost = 1): void {
     if (this.moveDirCommand === null) {
       return;
     }
 
-    this.commands?.enqueue(this.moveDirCommand, { heading, speedClass, changePhase });
+    this.commands?.enqueue(this.moveDirCommand, { heading, speedClass, changePhase, boost });
     this.sendPending();
   }
 

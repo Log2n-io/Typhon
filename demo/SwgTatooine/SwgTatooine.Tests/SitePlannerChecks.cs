@@ -59,8 +59,8 @@ public sealed class SitePlannerChecks
         var placed = new List<(float X, float Z, float Half)>();
         for (var i = 0; i < count; i++)
         {
-            // The builder's own kind mix: the first is the port, every ninth a terminal, the rest buildings.
-            var kind = i == 0 ? StructureKind.Shuttleport : (i % 9 == 0 ? StructureKind.Terminal : StructureKind.Building);
+            // The builder's own kind mix: the first is the port, every ninth a crafting station, the rest buildings.
+            var kind = i == 0 ? StructureKind.Shuttleport : (i % 9 == 0 ? StructureKind.CraftingStation : StructureKind.Building);
             var half = StructureFootprint.HalfExtentM(kind);
             var (x, z, _) = planner.Place(ref rng, 0f, 0f, radius, half);
             placed.Add((x, z, half));
@@ -182,7 +182,8 @@ public sealed class SitePlannerChecks
         Assert.Multiple(() =>
         {
             Assert.That(StructureFootprint.HalfExtentM(StructureKind.Building), Is.EqualTo(9f), "STRUCTURE_SIZES says a building is 18 x 18");
-            Assert.That(StructureFootprint.HalfExtentM(StructureKind.Terminal), Is.EqualTo(0.8f), "STRUCTURE_SIZES says a terminal is 1.6 x 1.6");
+            Assert.That(
+                StructureFootprint.HalfExtentM(StructureKind.CraftingStation), Is.EqualTo(0.8f), "STRUCTURE_SIZES says a crafting station is 1.6 x 1.6");
             // 46.2 x 46.2 since 2026-10-22: the reservation follows the published `tat_shuttleport`, which is what a
             // shuttleport IS, rather than the 32 m square it used to be planted in and stand over.
             Assert.That(StructureFootprint.HalfExtentM(StructureKind.Shuttleport), Is.EqualTo(23.1f), "STRUCTURE_SIZES says the dome is 46.2 x 46.2");
@@ -192,6 +193,62 @@ public sealed class SitePlannerChecks
             // inside another structure, and a silent wrong answer is worse than a loud approximate one.
             Assert.That(StructureFootprint.HalfExtentM(99), Is.EqualTo(StructureFootprint.HalfExtentM(StructureKind.Building)), "an unknown kind has no footprint");
         });
+    }
+
+    /// <summary>A body drawn inside a structure is pushed just past its nearest edge, and one drawn clear of everything is left exactly where it was.</summary>
+    /// <remarks>Bodies were born wherever a disc draw fell, and the shuttleport at a city's centre held dozens of them inside its ring wall.</remarks>
+    [Test]
+    public void ABodyInsideAStructureIsPushedPastItsNearestEdge()
+    {
+        var plan = new SitePlanner(StructureFootprint.HalfExtentM(StructureKind.Shuttleport));
+        var port = StructureFootprint.HalfExtentM(StructureKind.Shuttleport);
+        plan.PlaceAt(0f, 0f, port);
+
+        // 15 m east and 3 m north of the centre: the east edge is the nearest way out, and north is untouched.
+        var x = 15f;
+        var z = 3f;
+        var clearX = 40f;
+        var clearZ = 3f;
+        Assert.Multiple(() =>
+        {
+            Assert.That(plan.PushOut(ref x, ref z, 0.5f), Is.True, "the body is still inside");
+            Assert.That(x, Is.InRange(port + 0.5f, port + 0.6f), "not set down just past the east edge");
+            Assert.That(z, Is.EqualTo(3f), "moved along the wrong axis");
+            Assert.That(plan.PushOut(ref clearX, ref clearZ, 0.5f), Is.True);
+            Assert.That((clearX, clearZ), Is.EqualTo((40f, 3f)), "a body standing clear was moved");
+        });
+    }
+
+    /// <summary>A body pushed into a neighbour is pushed again; with no gap wide enough for it, the planner says so rather than claim it is clear.</summary>
+    [Test]
+    public void ABodyPushedIntoANeighbourIsPushedAgain_OrReportedStuck()
+    {
+        var plan = new SitePlanner(10f);
+
+        // A 0.2 m gap east of the first square, open ground north of both: the body leaves through the top.
+        plan.Reserve(0f, 0f, 5f);
+        plan.Reserve(10.2f, 0f, 5f);
+        var x = 4.5f;
+        var z = 4.2f;
+        Assert.Multiple(() =>
+        {
+            Assert.That(plan.PushOut(ref x, ref z, 0.5f), Is.True, "a body with open ground a metre north of it was left inside");
+            Assert.That(z, Is.GreaterThanOrEqualTo(5.5f));
+        });
+
+        // Walled in by squares 0.2 m apart, further than its few pushes can cross: there is no spot, and it must not be reported as one.
+        var shut = new SitePlanner(10f);
+        for (var i = -5; i <= 5; i++)
+        {
+            for (var j = -5; j <= 5; j++)
+            {
+                shut.Reserve(i * 10.2f, j * 10.2f, 5f);
+            }
+        }
+
+        var sx = 4.5f;
+        var sz = 0f;
+        Assert.That(shut.PushOut(ref sx, ref sz, 0.5f), Is.False, "a body with nowhere to go was reported clear");
     }
 
     /// <summary>A reservation keeps everything after it out, even where it stands inside its neighbours' margins, and is never counted as crowding.</summary>
@@ -205,7 +262,7 @@ public sealed class SitePlannerChecks
         var plan = new SitePlanner(StructureFootprint.HalfExtentM(StructureKind.Shuttleport));
         plan.PlaceAt(-5.5f, 27.5f, StructureFootprint.HalfExtentM(StructureKind.Bazaar));
         plan.PlaceAt(5.5f, 27.5f, StructureFootprint.HalfExtentM(StructureKind.MissionTerminal));
-        var station = StructureFootprint.HalfExtentM(StructureKind.Terminal);
+        var station = StructureFootprint.HalfExtentM(StructureKind.CraftingStation);
         Assert.That(plan.Fits(0.2f, 27.2f, station), Is.True, "the premise: between the pair a crafting station fits");
 
         plan.Reserve(0f, 27.2f, 2.5f);

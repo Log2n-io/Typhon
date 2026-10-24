@@ -69,7 +69,7 @@ public static class Routing
     public const int MissionTerminalKind = 10;
 
     /// <summary>`SpeedClasses.Swoop`, granted only while mounted.</summary>
-    public const byte SwoopClass = 6;
+    public const byte SwoopClass = 3;
 
     /// <summary>What getting on and off costs, in seconds: a <c>SetMount</c> each way and the tick or two each takes to come back as <c>mounted</c>.</summary>
     public const double MountSeconds = 1d;

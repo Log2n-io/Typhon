@@ -22,9 +22,6 @@ namespace SwgTatooine.Server;
 /// </remarks>
 public sealed partial class SimBridge
 {
-    /// <summary>Radius around the destination port an arriving passenger appears in, metres.</summary>
-    private const float ArrivalScatterM = 15f;
-
     /// <summary>Ticks after an arrival during which the probe reads a port as just arrived at.</summary>
     private const int ProbeWindowTicks = 20;
 
@@ -129,9 +126,9 @@ public sealed partial class SimBridge
             dest = (dest + 1) % _index.Cities.Count;
         }
 
+        // To the gate's lane, where the queue stands (WorldBuilder.OutsideGate), not to the pad: inside the ring wall a straight line meets the wall.
         var (portX, portZ) = PortsOf(planet)[from];
-        move.DestX = portX;
-        move.DestZ = portZ;
+        (move.DestX, move.DestZ) = WorldBuilder.OutsideGate(portX, portZ, Hash01(destSalt ^ 0x7A3D5E1Bu), Hash01(shareSalt ^ 0x4F1BBCDCu));
         move.SpeedMps = TatooineData.PlayerRunSpeedMps;
         state.Activity = PlayerActivity.ToShuttle;
         state.ActivityTicks = 200 * _config.TickRateHz;
@@ -351,19 +348,15 @@ public sealed partial class SimBridge
                 }
                 else
                 {
+                    // Set down outside the gate, on the lane between the bazaar and the mission terminal (WorldBuilder.OutsideGate), never on the pad: a
+                    // body set down inside the ring wall stayed there, because nothing that walks in a straight line finds the gate. A session's passenger
+                    // comes out at the lane's start, spread across its width; the crowd over its depth too.
                     var (portX, portZ) = planetPorts[dest];
-                    var r = ArrivalScatterM * MathF.Sqrt(Hash01(Salt(tick, key, 0x2F9B1D63u)));
-                    var a = Hash01(Salt(tick, key, 0x6C8E9CF5u)) * MathF.PI * 2f;
+                    var (gx, gz) = WorldBuilder.OutsideGate(portX, portZ, Hash01(Salt(tick, key, 0x2F9B1D63u)),
+                        session ? 0f : Hash01(Salt(tick, key, 0x6C8E9CF5u)));
                     var nb = default(PlayerPlacement);
-                    var ax = Math.Clamp(portX + (MathF.Cos(a) * r), -half + h, half - h);
-                    var az = Math.Clamp(portZ + (MathF.Sin(a) * r), -half + h, half - h);
-                    if (session)
-                    {
-                        // A session's passenger walks out of the gate rather than appearing anywhere on the pad: just outside it, between the bazaar and
-                        // the mission terminal that stand either side (WorldBuilder.SpawnGateFacilities), spread across the gate's width.
-                        ax = Math.Clamp(portX + ((Hash01(Salt(tick, key, 0x2F9B1D63u)) - 0.5f) * 4.8f), -half + h, half - h);
-                        az = Math.Clamp(portZ + WorldBuilder.GateOutsideZ + 2f, -half + h, half - h);
-                    }
+                    var ax = Math.Clamp(gx, -half + h, half - h);
+                    var az = Math.Clamp(gz, -half + h, half - h);
                     // A local hop stays on the planet it left, so that planet's ground is the one that applies. Naming
                     // RealmId.Default worked only because every planet currently shares one field.
                     nb.SetAt(ax, az, GroundAt(cluster.Realm, ax, az), h);
@@ -474,12 +467,16 @@ public sealed partial class SimBridge
         _probeCursor++;
     }
 
-    /// <summary>The <paramref name="q"/>-th probe centre: a ring 5-29 m from the port, where arrivals stand. Engine X/Y is world X/Z.</summary>
+    /// <summary>
+    /// The <paramref name="q"/>-th probe centre: a ring 5-29 m round the middle of the gate's lane, where arrivals stand (WorldBuilder.OutsideGate). Engine
+    /// X/Y is world X/Z.
+    /// </summary>
     private static (float X, float Y) ProbeCentre((float X, float Z) port, int q)
     {
+        var (cx, cz) = WorldBuilder.OutsideGate(port.X, port.Z, 0.5f, 0.5f);
         var angle = q * (MathF.PI * 2f / ProbeQueries);
         var r = 5f + ((q % 4) * 8f);
-        return (port.X + (MathF.Cos(angle) * r), port.Z + (MathF.Sin(angle) * r));
+        return (cx + (MathF.Cos(angle) * r), cz + (MathF.Sin(angle) * r));
     }
 
     /// <param name="cs">The Player cluster state.</param>

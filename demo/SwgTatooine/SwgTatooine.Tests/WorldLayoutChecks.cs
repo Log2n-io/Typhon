@@ -108,13 +108,19 @@ public sealed class WorldLayoutChecks
     /// <summary>A world built at a given size, with every structure it holds.</summary>
     /// <param name="km">The planet edge.</param>
     /// <param name="assert">What to check.</param>
-    private static void InAWorldOf(float km, Action<TatooineSim, List<(float X, float Z, float Half, int Kind)>> assert)
+    /// <param name="population">The population scale, when the case needs more bodies than the small world's.</param>
+    private static void InAWorldOf(float km, Action<TatooineSim, List<(float X, float Z, float Half, int Kind)>> assert, float population = 0f)
     {
         var dir = Worlds.NewDirectory();
         try
         {
             var config = Worlds.Small(dir);
             config.WorldEdgeKm = km;
+            if (population > 0f)
+            {
+                config.PopulationScale = population;
+            }
+
             config.WarmTicks = 0;
             config.MeasuredTicks = 0;
             using var sim = new TatooineSim(config);
@@ -142,6 +148,106 @@ public sealed class WorldLayoutChecks
                 Assert.That(sim.Map.ClampedStructures, Is.Zero);
             });
         });
+    }
+
+    /// <summary>
+    /// The real planet: no NPC and no player is born inside a structure, and every queued passenger stands on the lane outside its port's gate.
+    /// </summary>
+    /// <remarks>
+    /// Bodies were dropped by a disc draw that never looked at what stood there. The shuttleport is each city's centre and 46 m across, so the first
+    /// thing a browser saw was dozens of NPCs inside its ring wall with no way out — and some in the walls of a house.
+    /// </remarks>
+    [Test]
+    public void AtTheRealPlanetSize_NoBodyIsBornInsideAStructure()
+    {
+        InAWorldOf(TatooineData.PlanetEdgeM / 1000f, (sim, _) =>
+        {
+            var structures = new SitePlanner(StructureFootprint.HalfExtentM(StructureKind.Shuttleport));
+            var planted = 0;
+            using var tx = sim.Dbe.CreateQuickTransaction();
+            foreach (var cluster in tx.GetClusterEnumerator<WorldObject>())
+            {
+                if (cluster.Realm.Value != 0)
+                {
+                    continue;   // a room's structures stand in its own realm, round its origin
+                }
+
+                var places = cluster.GetReadOnlySpan(WorldObject.Bounds);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var b = places[BitOperations.TrailingZeroCount(bits)].Bounds;
+                    structures.Reserve((b.MinX + b.MaxX) * 0.5f, (b.MinY + b.MaxY) * 0.5f, (b.MaxX - b.MinX) * 0.5f);
+                    planted++;
+                }
+            }
+
+            var inside = new List<string>();
+            var bodies = 0;
+
+            // Inside when the planner would have to move it: the same square test with no margin, read from the entities.
+            void Check(string what, float x, float z, float half)
+            {
+                bodies++;
+                var px = x;
+                var pz = z;
+                if (!structures.PushOut(ref px, ref pz, half) || px != x || pz != z)
+                {
+                    inside.Add($"{what} at ({x:F1}, {z:F1})");
+                }
+            }
+
+            foreach (var cluster in tx.GetClusterEnumerator<CityNpc>())
+            {
+                var places = cluster.GetReadOnlySpan(CityNpc.Bounds);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var p = places[BitOperations.TrailingZeroCount(bits)];
+                    Check("an NPC", p.X, p.Z, p.HalfExtent);
+                }
+            }
+
+            var queued = 0;
+            var offTheLane = new List<string>();
+            foreach (var cluster in tx.GetClusterEnumerator<Player>())
+            {
+                if (cluster.Realm.Value != 0)
+                {
+                    continue;
+                }
+
+                var places = cluster.GetReadOnlySpan(Player.Bounds);
+                var states = cluster.GetReadOnlySpan(Player.State);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var idx = BitOperations.TrailingZeroCount(bits);
+                    var p = places[idx];
+                    if (states[idx].Activity != PlayerActivity.AwaitingShuttle)
+                    {
+                        Check("a player", p.X, p.Z, p.HalfExtent);
+                        continue;
+                    }
+
+                    queued++;
+                    var port = sim.Index.Shuttleports[states[idx].ShuttleFrom];
+                    var lane = p.Z - port.Z - WorldBuilder.GateOutsideZ - 2f;
+                    if (MathF.Abs(p.X - port.X) > (WorldBuilder.GateLaneM * 0.5f) + 0.01f || lane < -0.01f || lane > WorldBuilder.GateLaneDepthM + 0.01f)
+                    {
+                        offTheLane.Add($"({p.X:F1}, {p.Z:F1}) for the port at ({port.X:F0}, {port.Z:F0})");
+                    }
+                }
+            }
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(planted, Is.GreaterThan(0), "the world has no structures, so this proves nothing");
+                Assert.That(bodies, Is.GreaterThan(1000), "the world has hardly any bodies, so this proves nothing");
+                Assert.That(queued, Is.GreaterThan(0), "no passenger was queued at spawn, so the lane is untested");
+                Assert.That(inside, Is.Empty,
+                    $"{inside.Count} of {bodies} bodies were born inside a structure: {string.Join("; ", inside.GetRange(0, Math.Min(5, inside.Count)))}");
+                Assert.That(offTheLane, Is.Empty,
+                    $"{offTheLane.Count} queued passengers are not outside their port's gate: {string.Join("; ", offTheLane.GetRange(0, Math.Min(5, offTheLane.Count)))}");
+            });
+        }, population: 0.5f);   // 160 players, of whom about 5 % are queued at spawn; the small world's 16 queued nobody
     }
 
     /// <summary>

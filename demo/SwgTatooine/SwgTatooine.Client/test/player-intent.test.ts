@@ -85,15 +85,14 @@ describe('movementIntent', () => {
     expect(movementIntent(held('ArrowLeft'), 0.7)).toEqual(movementIntent(held('KeyA'), 0.7));
   });
 
-  it('walks by default and travels at the latched gait with shift', () => {
-    // Inverted on 2026-10-21 (Loïc): every rung of the ladder is a deliberate thing, so none of them is what a body
-    // should be doing by accident while crossing a room.
+  it('walks by default and runs with shift, whatever the boost', () => {
+    // Inverted on 2026-10-21 (Loïc): running is a deliberate thing, not what a body does by accident while crossing a room.
     expect(movementIntent(held('KeyW'), 0)?.speedClass).toBe(SpeedClass.walk);
     expect(movementIntent(held('KeyW', 'ShiftLeft'), 0)?.speedClass).toBe(SpeedClass.run);
     expect(movementIntent(held('KeyW', 'ShiftRight'), 0)?.speedClass).toBe(SpeedClass.run);
-    // Shift gives whatever Shift+1..4 last latched, not a fixed gait.
-    expect(movementIntent(held('KeyW', 'ShiftLeft'), 0, SpeedClass.speeder)?.speedClass).toBe(SpeedClass.speeder);
-    expect(movementIntent(held('KeyW'), 0, SpeedClass.speeder)?.speedClass).toBe(SpeedClass.walk);
+    // The boost Shift+1..4 latched multiplies the speed and never changes the class.
+    expect(movementIntent(held('KeyW', 'ShiftLeft'), 0, 3)?.speedClass).toBe(SpeedClass.run);
+    expect(movementIntent(held('KeyW'), 0, 3)?.speedClass).toBe(SpeedClass.walk);
   });
 
   /**
@@ -233,8 +232,12 @@ describe('asRide', () => {
     expect(asRide({ heading: 1, speedClass: SpeedClass.walk }, true)).toEqual({
       heading: 1,
       speedClass: SpeedClass.swoop,
+      boost: 1,
     });
-    expect(asRide({ heading: 1, speedClass: SpeedClass.speederFast }, true)?.speedClass).toBe(SpeedClass.swoop);
+    expect(asRide({ heading: 1, speedClass: SpeedClass.run, boost: 4 }, true)).toMatchObject({
+      speedClass: SpeedClass.swoop,
+      boost: 4,
+    });
   });
 
   it('leaves a stop a stop, no keys no intent, and walking on foot as it was', () => {

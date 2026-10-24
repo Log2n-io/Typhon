@@ -142,69 +142,30 @@ public static class TatooineData
     /// <remarks>
     /// <para>
     /// <b>Asked for to make the demo quicker to move around in</b> (Loïc, 2026-10-21), and applied to the ladder a session
-    /// steers with rather than to the speeds above. The distinction is the one
-    /// <see cref="PlayerSpeederSpeedMps"/> already makes for the mount: scripted players, creatures, shuttles and portal
-    /// arrivals read <see cref="PlayerRunSpeedMps"/> directly and keep their own pace, so the world this demo exists to
+    /// steers with rather than to the speeds above. Scripted players, creatures, shuttles and portal arrivals read
+    /// <see cref="PlayerRunSpeedMps"/> and <see cref="PlayerMountSpeedMps"/> directly and keep their own pace, so the world this demo exists to
     /// MEASURE moves exactly as it did — only the person playing is faster.
     /// </para>
     /// <para>
     /// <b>It scales the teleport ceiling with it, and that is not optional.</b>
-    /// <see cref="Replication.TatooineReplication.MaxSpeedMps"/> is sized from the top gait, so a ladder scaled without it
-    /// would have the engine read a legitimate fast speeder as a teleport. The width that ceiling buys was computed when
-    /// the ladder was last raised: 75.6 m/s needs 12 387 of a 16-bit code's 32 767, and "a further doubling would still
-    /// fit; 6x from here would not" — which is exactly the headroom this spends.
+    /// <see cref="Replication.TatooineReplication.MaxSpeedMps"/> is sized from the top speed, so a ladder scaled without it
+    /// would have the engine read a legitimate boosted swoop as a teleport. The width that ceiling buys was computed when
+    /// the ladder was last raised: 75.6 m/s needs 12 387 of a 16-bit code's 32 767, which leaves 2.6x — and the swoop at
+    /// the largest boost, 168 m/s with its headroom, spends 2.2x of it.
     /// </para>
     /// </remarks>
     public const float PlayerGaitScale = 2f;
 
     /// <summary>[WIKI] Mount and speeder speed, the middle of the 11.8-12.5 range across mount types.</summary>
     /// <remarks>
-    /// A landspeeder, in the gait ladder: the community's measured figure for the X-34, XP-38, V-35 and AB-1 is 765 m/min
-    /// = 12.75 m/s, and the swoop's 882 m/min = 14.7 m/s is the fastest thing anyone rode. 12 is this range's middle and
-    /// was already here, so the ladder uses it rather than adding a second number six per cent away from it.
+    /// The scripted crowd's mount: the community's measured figure for the X-34, XP-38, V-35 and AB-1 is 765 m/min = 12.75 m/s,
+    /// and the swoop's 882 m/min = 14.7 m/s is the fastest thing anyone rode. A session's swoop is its own figure,
+    /// <see cref="PlayerSwoopSpeedMps"/>.
     /// </remarks>
     public const float PlayerMountSpeedMps = 12f;
 
     /// <summary>A player riding a swoop: four times a run (Loïc, 2026-10-24: "we'll adjust if needed"), 20 m/s before the gait scale.</summary>
     public const float PlayerSwoopSpeedMps = PlayerRunSpeedMps * 4f;
-
-    /// <summary>
-    /// [CORE3] Burst Run: a run multiplied by 1.822, which is 9.11 m/s.
-    /// </summary>
-    /// <remarks>
-    /// Not a guess and not a feel-good number — it is the multiplier in the source. <c>BurstRunCommand</c> calls
-    /// <c>PlayerManager::doBurstRun</c>, which builds the <c>burstrun</c> buff with
-    /// <c>setSpeedMultiplierMod(1.822f)</c> and the same figure for acceleration, for 30 s on a 300 s cooldown. SWG's
-    /// "running fast" is therefore a precise thing, and this is it; the demo grants it continuously because it has no
-    /// action pools to spend and no cooldowns to serve.
-    /// </remarks>
-    public const float PlayerBurstRunSpeedMps = PlayerRunSpeedMps * 1.822f;
-
-    /// <summary>The player's Shift+3 gait: twice a landspeeder, 24 m/s, and invented rather than sourced.</summary>
-    /// <remarks>
-    /// <b>Its own constant rather than <see cref="PlayerMountSpeedMps"/>, because that figure is not only the player's.</b>
-    /// Mounts, creatures and the shuttle read the mount speed too, so scaling the player's travel gait through it would have
-    /// sped the whole planet's traffic up with him. The gait ladder and the world's own speeds are separate things that
-    /// happened to share a number.
-    /// </remarks>
-    public const float PlayerSpeederSpeedMps = PlayerMountSpeedMps * 2f;
-
-    /// <summary>The player's Shift+4 gait: three times Shift+3, 72 m/s, and the only speed here with no source behind it.</summary>
-    /// <remarks>
-    /// <b>Asked for as a way to cross 16 km of planet quickly, and it is honest about being invented.</b> Nothing in SWG
-    /// moved a player at 24 m/s on the ground, let alone 72; the swoop's 14.7 m/s was the ceiling. It earns its place by
-    /// what it exercises rather than by what it reproduces — at 72 m/s a session crosses a 256 m replication cell every
-    /// 3.6 s while the far side of the planet is 16 km away, which is the enter/leave churn no other gait reaches, and it
-    /// is what sizes <see cref="Replication.TatooineReplication.MaxSpeedMps"/>.
-    /// <para>
-    /// <b>That sizing costs nothing here, and it was computed rather than assumed.</b> The teleport threshold sets the velocity
-    /// codec's width for every moving entity in the world, not just for players, so tripling the top gait could have cost a
-    /// width step on all of them. It does not: at a 0.05 m tolerance over a 5 s max age the unit is 2^-13 m, and 75.6 m/s over a
-    /// 20 ms tick needs 12 387 codes against the 32 767 a 16-bit code carries — the same width 24 m/s used, with 2.6x of
-    /// headroom left (<c>ProjectionCompiler.VelocityCodec</c>). A further doubling would still fit; 6x from here would not.
-    /// </para>
-    /// </remarks>
-    public const float PlayerSpeederFastSpeedMps = PlayerSpeederSpeedMps * 3f;
 
     /// <summary>
     /// [WIKI] Weapon delay floor. Combat is continuous and gated per weapon by

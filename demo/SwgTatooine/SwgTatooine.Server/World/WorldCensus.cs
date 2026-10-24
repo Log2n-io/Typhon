@@ -9,7 +9,7 @@ namespace SwgTatooine.Server;
 /// </summary>
 public sealed class WorldCensus
 {
-    /// <summary>Buildings, terminals, shuttleports and point-of-interest props.</summary>
+    /// <summary>Buildings, crafting stations, bazaars and mission terminals, shuttleports and point-of-interest props.</summary>
     public int StaticObjects;
 
     /// <summary>Player houses, factories and harvesters. Static, but a few of them tick.</summary>

@@ -126,7 +126,7 @@ describe('a layer that filters by style', () => {
     const { store } = setup([
       StructureKind.Building,
       StructureKind.Shuttleport,
-      StructureKind.Terminal,
+      StructureKind.CraftingStation,
       StructureKind.Shuttleport,
     ]);
 
@@ -157,7 +157,7 @@ describe('a layer that filters by style', () => {
   });
 
   it('draws nothing when the store holds none of its kind, rather than falling back to drawing all of them', () => {
-    const { store } = setup([StructureKind.Building, StructureKind.Terminal]);
+    const { store } = setup([StructureKind.Building, StructureKind.CraftingStation]);
     const ports = new LayerPacker(Archetype.WorldObject, styleFor(SHUTTLEPORT_STYLE), SHUTTLEPORT_KIND, -1);
     ports.bind(store);
     ports.pack(view());

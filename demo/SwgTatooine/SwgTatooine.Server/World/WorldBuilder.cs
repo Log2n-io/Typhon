@@ -62,7 +62,7 @@ public static class WorldBuilder
         SpawnPointsOfInterest(dbe, map, config, census, ref rng, index, plan);
         SpawnWilderness(dbe, map, config, census, ref rng, index);
         SpawnPlayerStructures(dbe, map, config, census, ref rng, plan);
-        SpawnPlayers(dbe, map, config, census, ref rng, index);
+        SpawnPlayers(dbe, map, config, census, ref rng, index, plan);
         SpawnMissionLairPool(dbe, map, config, census, ref rng, index);
 
         census.Crowded = plan.Crowded;
@@ -103,7 +103,7 @@ public static class WorldBuilder
             {
                 for (var i = 0; i < buildings; i++)
                 {
-                    var kind = i == 0 ? StructureKind.Shuttleport : (i % 9 == 0 ? StructureKind.Terminal : StructureKind.Building);
+                    var kind = i == 0 ? StructureKind.Shuttleport : (i % 9 == 0 ? StructureKind.CraftingStation : StructureKind.Building);
                     var half = StructureFootprint.HalfExtentM(kind);
 
                     // <b>The shuttleport stands at the city's centre, and the city is built around it</b> (Loïc,
@@ -127,7 +127,7 @@ public static class WorldBuilder
                     }
 
                     // The entity's bounds are its FOOTPRINT, not a uniform 12 m for every kind. They used to be the latter, which
-                    // made the dome and a terminal the same size to every spatial query and to anything asking what stands at a
+                    // made the dome and a crafting station the same size to every spatial query and to anything asking what stands at a
                     // point -- and collision has to ask exactly that.
                     SpawnStructure(tx, x, z, terrain.GroundAt(x, z), half, kind, ownerRegion: cityIndex + 1, tickPeriod: 0, ref rng, interior);
                     census.StaticObjects++;
@@ -159,8 +159,12 @@ public static class WorldBuilder
                 for (var i = 0; i < n; i++)
                 {
                     var (x, z) = rng.PointInDisc(city.X, city.Z, city.Radius);
+
+                    // Never born inside a structure: a draw that lands in one is pushed out to its nearest street. The draw used to be taken as it
+                    // fell, and the shuttleport alone — the city's centre, 46 m across — held dozens of NPCs inside its ring wall with no way out.
+                    plan.PushOut(ref x, ref z, NpcHalfM);
                     var bounds = default(NpcPlacement);
-                    bounds.SetAt(x, z, terrain.GroundAt(x, z), 0.5f);
+                    bounds.SetAt(x, z, terrain.GroundAt(x, z), NpcHalfM);
 
                     // A city NPC stands still and thinks rarely. Its leash radius is a few metres because the ones that
                     // move at all are shuffling behind a counter, not patrolling.
@@ -222,6 +226,31 @@ public static class WorldBuilder
     /// server's mirror is on X only, so the published +Z is the world's.
     /// </summary>
     public const float GateOutsideZ = 25.2f;
+
+    /// <summary>How wide the clear ground outside a shuttleport's gate is that passengers stand on, metres: the gate's own width, less a body.</summary>
+    public const float GateLaneM = 4.8f;
+
+    /// <summary>How far out from the gate's outside start that ground reaches, metres: the reserved corridor and into the plaza beyond it.</summary>
+    public const float GateLaneDepthM = 8f;
+
+    /// <summary>
+    /// A spot on the clear ground just outside a shuttleport's gate: where passengers queue for its shuttle and where an arriving one is set down.
+    /// </summary>
+    /// <param name="portX">The port's centre, east.</param>
+    /// <param name="portZ">The port's centre, north.</param>
+    /// <param name="across">0..1 across the lane, west to east.</param>
+    /// <param name="outward">0..1 out from the gate, 0 being the corridor's start.</param>
+    /// <returns>The spot.</returns>
+    /// <remarks>
+    /// Clear by construction rather than by a test: the corridor is reserved and the plaza beyond it planted before any building
+    /// (<see cref="SpawnGateFacilities"/>), and the pair either side stands 5.5 m off the axis, clear of the lane's 2.4. Not the pad: the ring wall's one
+    /// way out is the gate, and nothing that walks in a straight line finds it.
+    /// </remarks>
+    public static (float X, float Z) OutsideGate(float portX, float portZ, float across, float outward) =>
+        (portX + ((across - 0.5f) * GateLaneM), portZ + GateOutsideZ + 2f + (outward * GateLaneDepthM));
+
+    /// <summary>A city NPC's body, half its edge in metres.</summary>
+    private const float NpcHalfM = 0.5f;
 
     /// <summary>The bazaar and the mission terminal beside the gate: either side of its 6 m corridor, a few metres out.</summary>
     public const float GateFacilityX = 5.5f;
@@ -954,7 +983,8 @@ public static class WorldBuilder
 
     // ── Players ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
-    private static void SpawnPlayers(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldCensus census, ref Rng rng, WorldIndex index)
+    private static void SpawnPlayers(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldCensus census, ref Rng rng, WorldIndex index,
+        SitePlanner plan)
     {
         // The planet's ground, baked once per process (see TerrainField). Taken here rather than per entity: the
         // cache lookup is cheap but not free, and this loop runs seventeen thousand times.
@@ -994,8 +1024,10 @@ public static class WorldBuilder
                     // is longer than a measurement. Half the shuttle share of travellers [EST], about 5 % of players at the default. The extra draw is
                     // taken only with shuttles on, so a --no-shuttles world is the pre-shuttle world exactly.
                     activity = PlayerActivity.AwaitingShuttle;
+                    // Outside the gate, not on the pad inside the ring wall, where a passenger left behind could never walk out. Two draws, as the disc
+                    // round the pad took, so every later body is where it was.
                     var port = index.Shuttleports[cityIndex];
-                    (x, z) = rng.PointInDisc(port.X, port.Z, 10f);
+                    (x, z) = OutsideGate(port.X, port.Z, rng.NextFloat(), rng.NextFloat());
                     shuttleDest = (cityIndex + rng.NextInt(1, map.Cities.Count)) % map.Cities.Count;
                     activityTicks = (int)(2f * (config.ShuttleIntervalS + config.BoardingWindowS) * config.TickRateHz);
                 }
@@ -1021,6 +1053,13 @@ public static class WorldBuilder
                     // Six city radii clears the planet for any city near the rim. The shipped map happens to leave 688 m
                     // of margin; a city edit or a radius retune is all it would take to spend it (#1073).
                     (x, z) = Inside(rng.PointInDisc(city.X, city.Z, city.Radius * 6f), config);
+                }
+
+                if (activity != PlayerActivity.AwaitingShuttle)
+                {
+                    // Out of any structure the draw landed in, as a city NPC is (see SpawnCities). Not a queued passenger: its lane is reserved ground,
+                    // which counts as taken.
+                    plan.PushOut(ref x, ref z, TatooineData.PlayerBodyHalfM);
                 }
 
                 var bounds = default(PlayerPlacement);

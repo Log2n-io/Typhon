@@ -1,38 +1,31 @@
 import { describe, expect, it } from 'vitest';
 
-import { DEFAULT_GAIT, gaitDigit, gaitFor, gaitLabel } from '../src/app/gait';
-import { movementIntent } from '../src/app/player-intent';
+import { boostFor, DEFAULT_BOOST, gaitLabel } from '../src/app/gait';
+import { asRide, boostOf, gaitChanged, intentChanged, movementIntent, stopAfter } from '../src/app/player-intent';
+import { speedForClass } from '../src/app/predictor';
 import { SpeedClass } from '../src/data/source';
 
 /**
- * The gait shortcuts: Shift+1..4 choose how fast this character moves.
+ * The boost shortcuts: Shift+1..4 multiply how fast this character walks, runs and rides, by 1 to 4.
  *
- * <b>What is actually at risk is the key MATCHING, which is why most of this file is about codes.</b> The arithmetic is a
+ * <b>What is actually at risk is the key MATCHING, which is why much of this file is about codes.</b> The arithmetic is a
  * four-entry map; the thing that silently fails is matching the wrong property of the event. `KeyboardEvent.key` for
  * Shift+1 is `!` on a US layout and `&` on a French one, so a shortcut written against `key` works for whoever wrote it and
  * for nobody else — and nothing about it looks wrong in review.
  */
 
-describe('the gait a key selects', () => {
-  it('is the four digits of the top row, with shift', () => {
-    expect(gaitFor('Digit1', true)).toBe(SpeedClass.run);
-    expect(gaitFor('Digit2', true)).toBe(SpeedClass.burst);
-    expect(gaitFor('Digit3', true)).toBe(SpeedClass.speeder);
-    expect(gaitFor('Digit4', true)).toBe(SpeedClass.speederFast);
+describe('the boost a key selects', () => {
+  it('is the digit of the top row, with shift', () => {
+    expect(boostFor('Digit1', true)).toBe(1);
+    expect(boostFor('Digit2', true)).toBe(2);
+    expect(boostFor('Digit3', true)).toBe(3);
+    expect(boostFor('Digit4', true)).toBe(4);
   });
 
-  /** Faster as the digit rises, which is the only thing the person pressing them has been told. */
-  it('rises with the digit', () => {
-    const ladder = [gaitFor('Digit1', true), gaitFor('Digit2', true), gaitFor('Digit3', true), gaitFor('Digit4', true)];
-
-    expect(ladder).toEqual([...ladder].sort((a, b) => (a ?? 0) - (b ?? 0)));
-    expect(new Set(ladder).size).toBe(4);
-  });
-
-  /** Shift is required: a bare digit belongs to whatever a later hotbar wants, and a mistyped one must not change speed. */
+  /** Shift is required: the bare 1 is the swoop, and a mistyped digit must not change speed. */
   it('is none without shift', () => {
-    expect(gaitFor('Digit1', false)).toBeNull();
-    expect(gaitFor('Digit4', false)).toBeNull();
+    expect(boostFor('Digit1', false)).toBeNull();
+    expect(boostFor('Digit4', false)).toBeNull();
   });
 
   /**
@@ -40,30 +33,29 @@ describe('the gait a key selects', () => {
    * arrive from a function-key overlay nobody pressed on purpose.
    */
   it('is none on the numeric pad', () => {
-    expect(gaitFor('Numpad1', true)).toBeNull();
-    expect(gaitFor('Numpad4', true)).toBeNull();
+    expect(boostFor('Numpad1', true)).toBeNull();
+    expect(boostFor('Numpad4', true)).toBeNull();
   });
 
   it('is none for a digit outside the four, or any other key', () => {
-    expect(gaitFor('Digit5', true)).toBeNull();
-    expect(gaitFor('Digit0', true)).toBeNull();
-    expect(gaitFor('KeyW', true)).toBeNull();
-    expect(gaitFor('ShiftLeft', true)).toBeNull();
+    expect(boostFor('Digit5', true)).toBeNull();
+    expect(boostFor('Digit0', true)).toBeNull();
+    expect(boostFor('KeyW', true)).toBeNull();
+    expect(boostFor('ShiftLeft', true)).toBeNull();
   });
 
-  /** A session starts at a run, which is what every session did before gaits existed. */
-  it('starts at a run', () => {
-    expect(DEFAULT_GAIT).toBe(SpeedClass.run);
-    expect(gaitFor('Digit1', true)).toBe(DEFAULT_GAIT);
+  /** A session starts unboosted. */
+  it('starts at ×1', () => {
+    expect(DEFAULT_BOOST).toBe(1);
   });
 });
 
-describe('a gait on screen', () => {
-  it('is named, and carries the digit that selects it', () => {
+describe('a way of moving on screen', () => {
+  it('is named', () => {
+    expect(gaitLabel(SpeedClass.walk)).toBe('Walk');
     expect(gaitLabel(SpeedClass.run)).toBe('Run');
-    expect(gaitLabel(SpeedClass.speederFast)).toBe('Speeder (fast)');
-    expect(gaitDigit(SpeedClass.burst)).toBe(2);
-    expect(gaitDigit(SpeedClass.speeder)).toBe(3);
+    expect(gaitLabel(SpeedClass.swoop)).toBe('Swoop');
+    expect(gaitLabel(SpeedClass.stop)).toBe('Stopped');
   });
 
   /**
@@ -75,56 +67,61 @@ describe('a gait on screen', () => {
       expect(gaitLabel(gait)).not.toMatch(/\d/);
     }
   });
-
-  /** Walk and stop have no shortcut: shift-with-a-direction and letting go are how you get them. */
-  it('has no digit for the gaits no shortcut selects', () => {
-    expect(gaitDigit(SpeedClass.walk)).toBe(0);
-    expect(gaitDigit(SpeedClass.stop)).toBe(0);
-  });
 });
 
 /**
- * What the selected gait does to the intent that gets sent.
- *
- * <b>The gait is what MOVEMENT asks for, and nothing else about the intent changes.</b> The heading arithmetic, the
- * cancelling keys and the stop are A9's and are tested in `player-intent.test.ts`; what is new is one substitution.
+ * What the boost does to the intent that gets sent: it rides along, on walk, run and the swoop alike, and nothing else
+ * about the intent changes. The heading arithmetic, the cancelling keys and the stop are A9's (`player-intent.test.ts`).
  */
-describe('a movement intent at a gait', () => {
+describe('a movement intent at a boost', () => {
   const held = (...codes: string[]) => new Set(codes);
 
-  it('asks for the selected gait when shift is held', () => {
-    expect(movementIntent(held('KeyW', 'ShiftLeft'), 0, SpeedClass.speeder)?.speedClass).toBe(SpeedClass.speeder);
-    expect(movementIntent(held('KeyW', 'ShiftLeft'), 0, SpeedClass.speederFast)?.speedClass).toBe(
-      SpeedClass.speederFast,
-    );
-    expect(movementIntent(held('KeyW', 'ShiftLeft'), 0, SpeedClass.burst)?.speedClass).toBe(SpeedClass.burst);
+  it('carries the boost when walking, running and riding', () => {
+    expect(movementIntent(held('KeyW'), 0, 3)).toMatchObject({ speedClass: SpeedClass.walk, boost: 3 });
+    expect(movementIntent(held('KeyW', 'ShiftLeft'), 0, 3)).toMatchObject({ speedClass: SpeedClass.run, boost: 3 });
+    expect(asRide(movementIntent(held('KeyW'), 0, 3), true)).toMatchObject({ speedClass: SpeedClass.swoop, boost: 3 });
   });
 
-  /** Unchanged for a caller that has no gait to pass, which is every test written before they existed. */
-  it('runs on shift when no gait is given', () => {
-    expect(movementIntent(held('KeyW', 'ShiftLeft'), 0)?.speedClass).toBe(SpeedClass.run);
+  /** Unchanged for a caller that has no boost to pass, which is every test written before it existed. */
+  it('is ×1 when none is given', () => {
+    expect(boostOf(movementIntent(held('KeyW', 'ShiftLeft'), 0))).toBe(1);
+    expect(boostOf({ heading: 0, speedClass: SpeedClass.run })).toBe(1);
+  });
+
+  /** The boost does not touch the heading or the class, which belong to the camera and to Shift. */
+  it('leaves the heading and the class alone', () => {
+    const plain = movementIntent(held('KeyD', 'ShiftLeft'), 0.4, 1);
+    const fast = movementIntent(held('KeyD', 'ShiftLeft'), 0.4, 4);
+    expect(fast?.heading).toBe(plain?.heading);
+    expect(fast?.speedClass).toBe(plain?.speedClass);
   });
 
   /**
-   * <b>A direction on its own walks, whatever is latched</b> (inverted 2026-10-21, Loïc). Shift is the gait modifier AND
-   * the shortcuts' prefix: the press latches which gait Shift gives, the hold uses it. A speeder that could not be
-   * dropped to a walk would make the shortcuts a one-way door.
+   * A boost latched under a held key is a CHANGE, both to send and to predict from: the speed is different from that
+   * instant, and a client that waited for the refresh window would integrate the old speed while the server ran the new one.
    */
-  it('walks without shift, whatever the gait', () => {
-    expect(movementIntent(held('KeyW'), 0, SpeedClass.speederFast)?.speedClass).toBe(SpeedClass.walk);
-    expect(movementIntent(held('KeyW'), 0, SpeedClass.speeder)?.speedClass).toBe(SpeedClass.walk);
+  it('is a change when it moves under a held key, and not when nothing is moving', () => {
+    const run1 = movementIntent(held('KeyW', 'ShiftLeft'), 0, 1);
+    const run2 = movementIntent(held('KeyW', 'ShiftLeft'), 0, 2);
+    expect(intentChanged(run2, run1)).toBe(true);
+    expect(gaitChanged(run2, run1)).toBe(true);
+
+    const stop1 = movementIntent(held('KeyW', 'KeyS'), 0, 1);
+    const stop2 = movementIntent(held('KeyW', 'KeyS'), 0, 2);
+    expect(gaitChanged(stop2, stop1)).toBe(false);
   });
 
-  /** A stop is a stop at every gait: cancelling keys mean stand still, and the gait is what you resume at. */
-  it('stops at any gait', () => {
-    expect(movementIntent(held('KeyW', 'KeyS'), 0, SpeedClass.speederFast)?.speedClass).toBe(SpeedClass.stop);
-    expect(movementIntent(held(), 0, SpeedClass.speederFast)).toBeNull();
+  /** The stop owed after a boosted move names the same boost, so the server is not asked for a different speed to stop at. */
+  it('keeps its boost on the stop that ends it', () => {
+    expect(stopAfter(movementIntent(held('KeyW'), 0, 4))).toMatchObject({ speedClass: SpeedClass.stop, boost: 4 });
   });
 
-  /** The gait does not touch the heading, which is the other half of the intent and belongs to the camera. */
-  it('leaves the heading alone', () => {
-    const run = movementIntent(held('KeyD'), 0, SpeedClass.run);
-    const fast = movementIntent(held('KeyD'), 0, SpeedClass.speederFast);
-    expect(fast?.heading).toBe(run?.heading);
+  /** The predictor's speed is the replicated stat times the factor sent — the same product the server applies. */
+  it('multiplies the predicted speed by the factor', () => {
+    const granted = { walkMps: 5, runMps: 10, swoopMps: 40 };
+    expect(speedForClass(SpeedClass.walk, granted, 2)).toBe(10);
+    expect(speedForClass(SpeedClass.run, granted, 3)).toBe(30);
+    expect(speedForClass(SpeedClass.swoop, granted, 4)).toBe(160);
+    expect(speedForClass(SpeedClass.stop, granted, 4)).toBe(0);
   });
 });

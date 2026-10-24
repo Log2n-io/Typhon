@@ -87,10 +87,11 @@ import { ShuttleView } from './shuttle-view';
 import { ticketTerminalOf } from './ticket-terminal';
 import { resetForRealm, resetForSession, type RealmSwitchTargets } from './realm-switch';
 import { nextRide, NOT_RIDING, rideOwnsTheView, rideSubjectOf, type RideState } from './ride';
-import { DEFAULT_GAIT, gaitFor } from './gait';
+import { boostFor, DEFAULT_BOOST } from './gait';
 import {
   gaitChanged,
   asRide,
+  boostOf,
   gaitOf,
   intentChanged,
   movementIntent,
@@ -438,7 +439,7 @@ export class ClientApp {
   private eyeSubject = 0;
 
   /**
-   * The gait Shift+1..4 last selected, and the speed class every movement intent is sent at.
+   * The boost Shift+1..4 last selected, ×1..×4, which every movement intent is sent at — walk, run or swoop.
    *
    * <b>Latched here rather than derived from the held keys, because it is a MODE and not a chord.</b> `movementIntent` is
    * pure in the keys currently down — which is what makes it testable — and a mode is by definition not in them. It is
@@ -448,7 +449,7 @@ export class ClientApp {
    * Per app, so it survives a logout and a realm crossing and is reset by a reload, which is the lifetime of everything
    * else about how this session is being played.
    */
-  private gait: number = DEFAULT_GAIT;
+  private boost: number = DEFAULT_BOOST;
 
   /** The gait shortcut's listener, which is this class's own and not the camera's. */
   private readonly gaitKeys = new AbortController();
@@ -632,7 +633,7 @@ export class ClientApp {
     );
 
     // The gait shortcuts. On `window` like the camera's keys, with the same typing guard — Shift+2 in the chat box is a
-    // quotation mark, not a speeder — and on this class's own AbortController so disposing the app takes it with it.
+    // quotation mark, not a boost — and on this class's own AbortController so disposing the app takes it with it.
     window.addEventListener(
       'keydown',
       (e) => {
@@ -658,12 +659,12 @@ export class ClientApp {
           return;
         }
 
-        const gait = gaitFor(e.code, e.shiftKey);
-        if (gait !== null) {
+        const boost = boostFor(e.code, e.shiftKey);
+        if (boost !== null) {
           // The browser's own Shift+number does nothing on a canvas, but a page that has focus in the sidebar would
           // otherwise type into it, and a repeat of a held digit would re-latch sixty times a second for no effect.
           e.preventDefault();
-          this.gait = gait;
+          this.boost = boost;
         }
 
         this.flushGaitNow(e.timeStamp);
@@ -1867,7 +1868,7 @@ export class ClientApp {
     }
 
     return asRide(
-      movementIntent(this.input.heldKeys, this.eyeCamera.yaw, this.gait),
+      movementIntent(this.input.heldKeys, this.eyeCamera.yaw, this.boost),
       this.ridingNow(performance.now()),
     );
   }
@@ -1920,9 +1921,6 @@ export class ClientApp {
     return {
       walkMps: source.selfNumber('walkMps'),
       runMps: source.selfNumber('runMps'),
-      burstMps: source.selfNumber('burstMps'),
-      speederMps: source.selfNumber('speederMps'),
-      speederFastMps: source.selfNumber('speederFastMps'),
       swoopMps: source.selfNumber('swoopMps'),
     };
   }
@@ -1957,8 +1955,12 @@ export class ClientApp {
       this.haveIntentHeading = true;
     }
 
-    const changedAtMs = this.predictedClass === gaitOf(intent) ? Number.NaN : this.takeDeclaredChange(nowMs);
+    const changedAtMs =
+      this.predictedClass === gaitOf(intent) && this.predictedBoost === boostOf(intent)
+        ? Number.NaN
+        : this.takeDeclaredChange(nowMs);
     this.predictedClass = gaitOf(intent);
+    this.predictedBoost = boostOf(intent);
 
     // A14: the predictor is driven by the CURRENT intent, whether or not this frame sends one. The send is coalesced and rate
     // limited (REFRESH_MS), so a predictor fed only on sends would stand still for up to a third of a second at a time.
@@ -1968,7 +1970,7 @@ export class ClientApp {
       } else {
         this.predictor.setIntent(
           intent.heading,
-          speedForClass(intent.speedClass, this.grantedSpeeds(source)),
+          speedForClass(intent.speedClass, this.grantedSpeeds(source), boostOf(intent)),
           changedAtMs,
         );
       }
@@ -2105,7 +2107,7 @@ export class ClientApp {
     if (intent === null) {
       const stop = stopAfter(this.lastIntent);
       if (stop !== null) {
-        source.moveDir(stop.heading, stop.speedClass, changePhase);
+        source.moveDir(stop.heading, stop.speedClass, changePhase, boostOf(stop));
         this.lastIntentMs = atMs;
       }
 
@@ -2113,13 +2115,16 @@ export class ClientApp {
       return;
     }
 
-    source.moveDir(intent.heading, intent.speedClass, changePhase);
+    source.moveDir(intent.heading, intent.speedClass, changePhase, boostOf(intent));
     this.lastIntent = intent;
     this.lastIntentMs = atMs;
   }
 
   /** The gait the PREDICTOR was last driven with, which is how a transition is still visible after the send took it. */
   private predictedClass: number = SpeedClass.stop;
+
+  /** The boost the predictor was last driven with, for the same reason as {@link predictedClass}. */
+  private predictedBoost = 1;
 
   /**
    * The wire's sub-tick phase for an intent that changed at `atMs`, in 255ths — `MoveDir.changePhase`.
@@ -3688,15 +3693,18 @@ export class ClientApp {
       // The ACTIVE camera's, not the map's: in eye view the map camera is still smoothing along at its own altitude,
       // and reporting that read as "you are 1 474 m up" while standing in a street.
       altitude: this.activeAltitude,
-      gait: this.ridingNow(performance.now()) ? SpeedClass.swoop : this.gait,
-      // What the server says that gait is worth. NaN before the owner block arrives, which the HUD shows as a dash
-      // rather than as a figure it made up.
+      // What Shift gives, or the swoop while riding, and the boost on it.
+      gait: this.ridingNow(performance.now()) ? SpeedClass.swoop : SpeedClass.run,
+      boost: this.boost,
+      // What the server says that is worth at the boost. NaN before the owner block arrives, which the HUD shows as a
+      // dash rather than as a figure it made up.
       gaitMps:
         this.source === null
           ? Number.NaN
           : speedForClass(
-              this.ridingNow(performance.now()) ? SpeedClass.swoop : this.gait,
+              this.ridingNow(performance.now()) ? SpeedClass.swoop : SpeedClass.run,
               this.grantedSpeeds(this.source),
+              this.boost,
             ),
       groundM: this.profile.ground.heightAt(this.groundView.centerX, this.groundView.centerZ),
       feet: this.feetReport(),

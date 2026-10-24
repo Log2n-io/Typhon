@@ -77,6 +77,12 @@ public struct MoveDir
     public byte SpeedClass;
 
     /// <summary>
+    /// The factor the class's speed is multiplied by: 1 to <see cref="SpeedClasses.MaxBoost"/>, the client's Shift+1..4. 0 means 1 — a client or a bot
+    /// that never names a boost moves at the granted speed. Anything above the maximum is refused and counted, as a class is.
+    /// </summary>
+    public byte Boost;
+
+    /// <summary>
     /// How far into the tick this intent CHANGED, in 255ths — the share of the boundary tick that still belongs to the velocity before it. 0 means "the
     /// whole tick is mine", which is what a re-send of an unchanged intent says and what any client that does not measure it sends.
     /// </summary>
@@ -189,19 +195,18 @@ public interface IShuttleBoarding
     int WindowTicks { get; }
 }
 
-/// <summary>The speed classes a client may ask for, and what each is worth.</summary>
+/// <summary>The speed classes a client may ask for, what each is worth, and how far a client may multiply them.</summary>
 /// <remarks>
 /// <para>
 /// <b>A class rather than a speed, because a speed from a client is the speed hack.</b> The server maps the class onto a figure the player is entitled to,
-/// and the mapping is the whole of the entitlement check: a client says "speeder", never "24 m/s", so there is no number on the wire for it to inflate. A
+/// and the mapping is the whole of the entitlement check: a client says "run", never "10 m/s", so there is no number on the wire for it to inflate. A
 /// class this server does not grant is refused and counted rather than clamped, which is what makes an attempt visible instead of merely ineffective.
 /// </para>
 /// <para>
-/// <b>This server grants all of them to everyone, and that is a deliberate deviation from how SWG worked</b> (and from what this type said until the gait
-/// shortcuts were added: "there is no class above Run"). In SWG, Burst Run cost action from all three pools and sat on a five-minute cooldown, and a
-/// speeder needed a vehicle you called and mounted. None of that exists here — no action pools, no vehicle items, no mount state — so the ladder is
-/// offered directly as Shift+1..4 in the client. The ENTITLEMENT STRUCTURE is what is being kept: when a vehicle is a thing you own, the classes stay
-/// where they are and <see cref="TatooineReplication.SpeedFor"/> learns to ask whether this player owns one. Nothing above has to change.
+/// <b>Three ways to move, and a multiplier on all of them</b> (Loïc, 2026-10-24). A direction key walks, Shift runs, and the swoop rides; Shift+1..4 latches
+/// a boost of ×1..×4 that applies to whichever of the three is in use — "more like a cheat code" than a gait, which is why it is a factor and not more
+/// rungs. It replaced the ladder of burst run and two speeders, which let a pedestrian outrun a rider. The boost is bounded here
+/// (<see cref="MaxBoost"/>), so the entitlement is still the server's: a client may ask for at most four times what it is granted.
 /// </para>
 /// </remarks>
 public static class SpeedClasses
@@ -212,23 +217,17 @@ public static class SpeedClasses
     /// <summary>Half of <see cref="Run"/> — SWG had no separate walk figure worth quoting, so this is a fraction rather than a source.</summary>
     public const byte Walk = 1;
 
-    /// <summary>[WIKI] <c>TatooineData.PlayerRunSpeedMps</c> — 5 m/s, an unencumbered player on foot. Shift+1, and the default.</summary>
+    /// <summary>[WIKI] <c>TatooineData.PlayerRunSpeedMps</c> — 5 m/s, an unencumbered player on foot. Shift held with a direction.</summary>
     public const byte Run = 2;
 
-    /// <summary>[CORE3] <c>TatooineData.PlayerBurstRunSpeedMps</c> — Burst Run's 1.822x, 9.11 m/s. Shift+2.</summary>
-    public const byte Burst = 3;
-
-    /// <summary><c>TatooineData.PlayerSpeederSpeedMps</c> — twice a landspeeder, 24 m/s. Shift+3, invented rather than sourced.</summary>
-    public const byte Speeder = 4;
-
-    /// <summary>Three times Shift+3, 72 m/s. Shift+4, invented rather than sourced, and what sizes the teleport threshold.</summary>
-    public const byte SpeederFast = 5;
-
     /// <summary>Riding a swoop: four times <see cref="Run"/>. Granted only to a player <c>SetMount</c> put on one (<c>PlayerState.Mounted</c>).</summary>
-    public const byte Swoop = 6;
+    public const byte Swoop = 3;
 
     /// <summary>The first class this server does not grant.</summary>
-    public const byte Count = 7;
+    public const byte Count = 4;
+
+    /// <summary>The largest boost a client may ask for (<see cref="MoveDir.Boost"/>): Shift+4.</summary>
+    public const byte MaxBoost = 4;
 }
 
 /// <summary>
@@ -706,9 +705,10 @@ public static partial class TatooineReplication
     /// browser-client run confirms dropping it.
     /// </para>
     /// <para>
-    /// <b>It is COMPUTED from the ladder's top, and that is the whole point of the expression.</b> It was 12.6, a hand-written 5 % over the mount's 12 — so
-    /// the day a gait went past 12 m/s, every segment of a player using it would have read as a teleport and the symptom would have been the stutter above,
-    /// in a part of the code that says nothing about speeds. Shift+4 doubled the top gait, and this followed by arithmetic instead of by remembering.
+    /// <b>It is COMPUTED from the fastest thing a player can ask for, and that is the whole point of the expression.</b> It was 12.6, a hand-written 5 % over
+    /// the mount's 12 — so the day a gait went past 12 m/s, every segment of a player using it would have read as a teleport and the symptom would have been
+    /// the stutter above, in a part of the code that says nothing about speeds. The top is now the swoop at the largest boost, 160 m/s: 168 with the
+    /// headroom, 2.2x the 75.6 m/s that measured 12 387 of a 16-bit velocity code's 32 767 at 50 Hz (<c>TatooineData.PlayerGaitScale</c>), so still one width.
     /// </para>
     /// <para>
     /// <b>What it costs is real and is the price of the fastest gait.</b> The threshold sizes the velocity codec
@@ -718,7 +718,7 @@ public static partial class TatooineReplication
     /// server that wanted the detector tight would cap the ladder instead.
     /// </para>
     /// </remarks>
-    internal const double MaxSpeedMps = TatooineData.PlayerSpeederFastSpeedMps * TatooineData.PlayerGaitScale * 1.05;
+    internal const double MaxSpeedMps = TatooineData.PlayerSwoopSpeedMps * TatooineData.PlayerGaitScale * SpeedClasses.MaxBoost * 1.05;
 
     private static SubscriptionsCommands _pushCommands;
 
@@ -1504,7 +1504,8 @@ public static partial class TatooineReplication
             .Precheck(static (in m) => float.IsFinite(m.Heading))
             .Field(m => m.Heading, Codec.F16, "heading")
             .Field(m => m.SpeedClass, Codec.U8, "speedClass")
-            .Field(m => m.ChangePhase, Codec.U8, "changePhase"));
+            .Field(m => m.ChangePhase, Codec.U8, "changePhase")
+            .Field(m => m.Boost, Codec.U8, "boost"));
         subs.Command<SetTarget>(c => c
             .Rate(4, 8)
             .Roles(SessionRole.Player)
@@ -2788,7 +2789,7 @@ public static partial class TatooineReplication
                 continue;
             }
 
-            if (!TrySpeedFor(command.Value.SpeedClass, player.Read(Player.State).Mounted != 0, out var speed))
+            if (!TrySpeedFor(command.Value.SpeedClass, player.Read(Player.State).Mounted != 0, command.Value.Boost, out var speed))
             {
                 System.Threading.Interlocked.Increment(ref _intentsRefusedSpeed);
                 continue;
@@ -2998,25 +2999,27 @@ public static partial class TatooineReplication
         subs.Replicate(in player);
     }
 
-    /// <summary>What a speed class is worth, or nothing when this server does not grant it.</summary>
+    /// <summary>What a speed class is worth at a boost, or nothing when this server does not grant it.</summary>
     /// <param name="speedClass">The class the client asked for.</param>
+    /// <param name="mounted">Whether the player is on its swoop.</param>
+    /// <param name="boost">The multiplier asked for, 0 meaning 1.</param>
     /// <param name="speed">Metres per second.</param>
-    /// <returns><see langword="false"/> for a class above what the player is entitled to.</returns>
+    /// <returns><see langword="false"/> for a class or a boost above what the player is entitled to.</returns>
     /// <remarks>
     /// Every class below <see cref="SpeedClasses.Count"/> is granted to any player but <see cref="SpeedClasses.Swoop"/>, which needs the player on its swoop
-    /// (<paramref name="mounted"/>), and the ladder's top (<c>PlayerSpeederFastSpeedMps</c>) is the ceiling. A class ABOVE it is refused rather than clamped:
-    /// a clamp would let a client ask for more every tick and never learn that it is not getting it, and the refusal is the number that says whether anything
-    /// is trying.
+    /// (<paramref name="mounted"/>), and any boost up to <see cref="SpeedClasses.MaxBoost"/>. Anything above either is refused rather than clamped: a clamp
+    /// would let a client ask for more every tick and never learn that it is not getting it, and the refusal is the number that says whether anything is
+    /// trying.
     /// </remarks>
-    private static bool TrySpeedFor(byte speedClass, bool mounted, out float speed)
+    internal static bool TrySpeedFor(byte speedClass, bool mounted, byte boost, out float speed)
     {
-        if (speedClass >= SpeedClasses.Count || (speedClass == SpeedClasses.Swoop && !mounted))
+        if (speedClass >= SpeedClasses.Count || (speedClass == SpeedClasses.Swoop && !mounted) || boost > SpeedClasses.MaxBoost)
         {
             speed = 0f;
             return false;
         }
 
-        speed = SpeedFor(speedClass);
+        speed = SpeedFor(speedClass) * Math.Max((byte)1, boost);
         return true;
     }
 
@@ -3033,9 +3036,6 @@ public static partial class TatooineReplication
         SpeedClasses.Stop => 0f,
         SpeedClasses.Walk => TatooineData.PlayerRunSpeedMps * 0.5f * TatooineData.PlayerGaitScale,
         SpeedClasses.Run => TatooineData.PlayerRunSpeedMps * TatooineData.PlayerGaitScale,
-        SpeedClasses.Burst => TatooineData.PlayerBurstRunSpeedMps * TatooineData.PlayerGaitScale,
-        SpeedClasses.Speeder => TatooineData.PlayerSpeederSpeedMps * TatooineData.PlayerGaitScale,
-        SpeedClasses.SpeederFast => TatooineData.PlayerSpeederFastSpeedMps * TatooineData.PlayerGaitScale,
         SpeedClasses.Swoop => TatooineData.PlayerSwoopSpeedMps * TatooineData.PlayerGaitScale,
         _ => 0f,
     };

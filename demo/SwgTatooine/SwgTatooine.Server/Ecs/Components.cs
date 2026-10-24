@@ -522,24 +522,15 @@ public struct PlayerMotion
     /// <summary>What this player's RUN is worth, in metres per second. See <see cref="WalkMps"/>.</summary>
     [Field, Owner(CodecKind.F32, Name = "runMps", Group = "move")] public float RunMps;
 
-    /// <summary>What this player's BURST RUN is worth, in metres per second. See <see cref="WalkMps"/>.</summary>
-    [Field, Owner(CodecKind.F32, Name = "burstMps", Group = "move")] public float BurstMps;
-
-    /// <summary>What this player's SPEEDER is worth, in metres per second. See <see cref="WalkMps"/>.</summary>
-    [Field, Owner(CodecKind.F32, Name = "speederMps", Group = "move")] public float SpeederMps;
-
-    /// <summary>What this player's FAST SPEEDER is worth, in metres per second. See <see cref="WalkMps"/>.</summary>
-    /// <remarks>
-    /// <b>Five speeds and not one "current speed", because prediction needs the figure BEFORE the server has been told.</b> The client integrates the gait
-    /// the person just selected, in the same frame they selected it; a single replicated current speed would arrive a round trip later, and the predictor
-    /// would spend that round trip integrating the previous gait and then being corrected. Owner-scoped, so the whole ladder costs twelve bytes to one
-    /// session and nothing to anyone watching.
-    /// </remarks>
-    [Field, Owner(CodecKind.F32, Name = "speederFastMps", Group = "move")] public float SpeederFastMps;
-
     /// <summary>
     /// What this player's SWOOP is worth, in metres per second, granted only while <see cref="PlayerState.Mounted"/>. See <see cref="WalkMps"/>.
     /// </summary>
+    /// <remarks>
+    /// <b>Three speeds and not one "current speed", because prediction needs the figure BEFORE the server has been told.</b> The client integrates the gait
+    /// the person just selected, in the same frame they selected it; a single replicated current speed would arrive a round trip later, and the predictor
+    /// would spend that round trip integrating the previous gait and then being corrected. The boost (<c>MoveDir.Boost</c>) is not replicated: the client
+    /// multiplies by the factor it sent, which the server applies as it is or refuses. Owner-scoped, so these cost one session twelve bytes.
+    /// </remarks>
     [Field, Owner(CodecKind.F32, Name = "swoopMps", Group = "move")] public float SwoopMps;
 
     /// <summary>
@@ -1188,8 +1179,8 @@ public static class StructureKind
 {
     public const int Building = 0;
 
-    /// <summary>A crafting station: the city slots the bazaars and mission terminals used to share at random.</summary>
-    public const int Terminal = 1;
+    /// <summary>A crafting station, in the city slots that were a generic terminal drawing a bazaar, a crafting station or a mission terminal.</summary>
+    public const int CraftingStation = 1;
     public const int Shuttleport = 2;
     public const int PoiProp = 3;
     public const int PlayerHouse = 4;

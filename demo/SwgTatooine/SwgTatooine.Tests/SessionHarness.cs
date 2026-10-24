@@ -325,11 +325,12 @@ internal static class ClientSays
     /// sends and what every case written before A14b means.
     /// </param>
     /// <returns>The values.</returns>
-    public static RecordValues MoveDir(float heading, byte speedClass, byte changePhase = 0) => new()
+    public static RecordValues MoveDir(float heading, byte speedClass, byte changePhase = 0, byte boost = 0) => new()
     {
         ["heading"] = FieldValue.Of(heading),
         ["speedClass"] = FieldValue.Of(speedClass),
         ["changePhase"] = FieldValue.Of(changePhase),
+        ["boost"] = FieldValue.Of(boost),
     };
 
     /// <summary>The field values of a <c>SetMount</c>.</summary>

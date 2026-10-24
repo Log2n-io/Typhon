@@ -61,7 +61,7 @@ internal static class StructureAssets
         StructureKind.PlayerHouse,
         StructureKind.Shuttleport,
         StructureKind.Bazaar,
-        StructureKind.Terminal,
+        StructureKind.CraftingStation,
         StructureKind.MissionTerminal,
         StructureKind.Interior,
         StructureKind.Interior,
@@ -83,7 +83,7 @@ internal static class StructureAssets
         StructureKind.PlayerHouse => 1,
         StructureKind.Shuttleport => 2,
         StructureKind.Bazaar => 3,
-        StructureKind.Terminal => CraftingStation(ref rng),
+        StructureKind.CraftingStation => PickCraftingStation(ref rng),
         StructureKind.MissionTerminal => 5,
 
         // PoiProp, Factory, Harvester, CampObject: nothing published stands in for them. Interior: the door decides, not the kind.
@@ -94,7 +94,7 @@ internal static class StructureAssets
     /// The crafting station, drawing what the slot drew when it chose between three terminals: the draw is part of the world's one random stream, and
     /// dropping it moved every structure planted after the first terminal of the first city.
     /// </summary>
-    private static int CraftingStation(ref Rng rng)
+    private static int PickCraftingStation(ref Rng rng)
     {
         _ = rng.NextInt(0, 3);
         return 4;

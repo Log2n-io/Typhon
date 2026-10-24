@@ -96,6 +96,8 @@ export interface FrameStats {
   readonly altitude: number;
   /** The speed class Shift+1..4 selected: what the next movement intent will ask for. */
   readonly gait: number;
+  /** The boost Shift+1..4 latched, ×1..×4. */
+  readonly boost: number;
   /** What the server grants for {@link gait}, metres per second, or `NaN` before the owner stats arrive. */
   readonly gaitMps: number;
   /** Ground height under the camera target, metres — 0 while the terrain is still baking. */

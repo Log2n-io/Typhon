@@ -81,7 +81,7 @@ export function locomotionFrom(walkMps: number, runMps: number, height: number):
     walkClipSpeed: REFERENCE_WALK_CLIP_SPEED * scale,
     runClipSpeed: REFERENCE_RUN_CLIP_SPEED * scale,
     minRate: 0.6,
-    // A speeder gait moves the body far faster than any clip was authored for. The rate is capped rather than left to
+    // A boosted gait moves the body far faster than any clip was authored for. The rate is capped rather than left to
     // run away: past about 3x the legs are a blur either way, and an uncapped ratio turns the fastest gait into strobing.
     maxRate: 3.0,
   };

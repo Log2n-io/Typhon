@@ -138,6 +138,61 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
         });
     }
 
+    /// <summary>The scripted crowd's passenger is set down on the lane outside the destination's gate too, never on the pad inside the ring wall.</summary>
+    /// <remarks>
+    /// The crowd landed anywhere within 15 m of the port's centre — inside the ring wall, whose one way out is the gate, which nothing that walks in a
+    /// straight line finds. Every shuttle added to the bodies standing trapped round the pad.
+    /// </remarks>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void ACrowdPassengerArrivesOnTheLaneOutsideTheGate()
+    {
+        using var sim = new TatooineSim(Config());
+        sim.Initialize();
+        Harness = new SessionHarness(sim);
+
+        const int Dest = 1;
+        var port = sim.Index.Shuttleports[0];
+        var destPort = sim.Index.Shuttleports[Dest];
+        var player = sim.Index.Players[0];
+        sim.WriteInTick(tx =>
+        {
+            var body = tx.OpenMut(player);
+            var state = body.Read(Player.State);
+            state.Activity = PlayerActivity.AwaitingShuttle;
+            state.ActivityTicks = int.MaxValue / 2;
+            state.ShuttleFrom = 0;
+            state.ShuttleDest = Dest;
+            body.Set(Player.State, state);
+            var move = body.Read(Player.Move);
+            move.VelX = 0f;
+            move.VelZ = 0f;
+            body.Set(Player.Move, move);
+            var at = default(PlayerPlacement);
+            var (x0, z0) = WorldBuilder.OutsideGate(port.X, port.Z, 0.5f, 0f);
+            at.SetAt(x0, z0, 0f, body.Read(Player.Bounds).HalfExtent);
+            tx.Teleport(player, Player.Bounds, RealmId.Default, in at);
+        });
+
+        Assert.That(ControllerOf(sim, player), Is.EqualTo(ControllerKind.Scripted), "the premise: a body of the crowd, not a session's");
+        SessionHarness.Until(
+            () =>
+            {
+                Harness.Ticks(1);
+                return Near(sim, player, destPort.X, destPort.Z, 64f);
+            },
+            $"the passenger to arrive at city {Dest}'s port");
+
+        var (x, z) = Where(sim, player);
+        var lane = z - destPort.Z - WorldBuilder.GateOutsideZ - 2f;
+        Assert.Multiple(() =>
+        {
+            Assert.That(System.MathF.Abs(x - destPort.X), Is.LessThanOrEqualTo((WorldBuilder.GateLaneM * 0.5f) + 0.01f), "not within the gate's width");
+            Assert.That(lane, Is.InRange(-0.01f, WorldBuilder.GateLaneDepthM + 0.01f), "not on the lane outside the gate: inside the ring wall, or past it");
+        });
+    }
+
     /// <summary>Standing nowhere near a port is refused, and the refusal says which of the two reasons it was.</summary>
     [Test]
     [CancelAfter(90_000)]
@@ -261,7 +316,7 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
         // Due east at a run, which is what a held key sends.
         link.SendCommand(
             nameof(MoveDir),
-            new RecordValues { ["heading"] = FieldValue.Of(0.0), ["speedClass"] = FieldValue.Of(2.0), ["changePhase"] = FieldValue.Of(0.0) });
+            ClientSays.MoveDir(0f, SpeedClasses.Run));
         SessionHarness.Until(() => TatooineReplication.Boardings.Cancelled >= 1, "the queued boarding to be cancelled by the movement");
 
         // Two full intervals and a little: if the queue had survived, the next landing would have flown it.
@@ -320,6 +375,14 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the possession to be claimed by a tick");
         Harness.Ticks(2);
         return link;
+    }
+
+    /// <summary>Who drives a player: the crowd's script, or a session.</summary>
+    private static byte ControllerOf(TatooineSim sim, EntityId entity)
+    {
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        Assert.That(tx.TryOpen(entity, out var player), Is.True, "the player is gone");
+        return player.Read(Player.Control).Kind;
     }
 
     /// <summary>Where a player stands now, east and north.</summary>

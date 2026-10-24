@@ -17,6 +17,9 @@ export interface MoveIntent {
   /** Radians, measured from +X towards +Z — the frame the server integrates in. */
   readonly heading: number;
   readonly speedClass: number;
+
+  /** The factor the class's speed is multiplied by, Shift+1..4; absent means 1. */
+  readonly boost?: number;
 }
 
 /** The key codes that mean "go", by the direction they mean in the camera's frame. */
@@ -26,15 +29,13 @@ const LEFT = ['KeyA', 'ArrowLeft'];
 const RIGHT = ['KeyD', 'ArrowRight'];
 
 /**
- * Held with a direction, travels at the SELECTED gait; a direction on its own walks.
+ * Held with a direction, runs; a direction on its own walks.
  *
- * <b>Walking is what a body does, and speed is what you ask for</b> (2026-10-21, Loïc). The gait ladder is run, burst
- * run and two speeders — every rung is a deliberate thing, so none of them is the right thing to be doing by accident
- * while crossing a room.
+ * <b>Walking is what a body does, and speed is what you ask for</b> (2026-10-21, Loïc).
  *
- * <b>Shift is both this modifier and the gait shortcuts' prefix, and the two do not collide.</b> Shift+2 is a press that
- * LATCHES which gait Shift gives and is over; Shift held with W is a state that means "that gait, now". So selecting a
- * speeder and then holding Shift+W rides it, and letting go walks. Nothing is unreachable either way.
+ * <b>Shift is both this modifier and the boost shortcuts' prefix, and the two do not collide.</b> Shift+2 is a press that
+ * LATCHES ×2 and is over; Shift held with W is a state that means "run, now". So ×2 then Shift+W runs twice as fast, and
+ * letting go of Shift walks twice as fast.
  */
 const RUN = ['ShiftLeft', 'ShiftRight'];
 
@@ -62,7 +63,7 @@ export function asRide(intent: MoveIntent | null, riding: boolean): MoveIntent |
     return intent;
   }
 
-  return { heading: intent.heading, speedClass: SpeedClass.swoop };
+  return { heading: intent.heading, speedClass: SpeedClass.swoop, boost: boostOf(intent) };
 }
 
 /**
@@ -87,11 +88,7 @@ export function asRide(intent: MoveIntent | null, riding: boolean): MoveIntent |
  * straight line. Summing two axis speeds would have made diagonal movement 1.41× faster, which is the oldest bug in this
  * genre.
  */
-export function movementIntent(
-  keys: ReadonlySet<string>,
-  yaw: number,
-  gait: number = SpeedClass.run,
-): MoveIntent | null {
+export function movementIntent(keys: ReadonlySet<string>, yaw: number, boost = 1): MoveIntent | null {
   const forward = (any(keys, FORWARD) ? 1 : 0) - (any(keys, BACK) ? 1 : 0);
   const right = (any(keys, RIGHT) ? 1 : 0) - (any(keys, LEFT) ? 1 : 0);
 
@@ -99,7 +96,7 @@ export function movementIntent(
     // Nothing held, or opposites cancelling. Distinguished by whether any direction key is down at all: cancelling keys
     // are a request to stand still, and no keys is no request.
     const asked = any(keys, FORWARD) || any(keys, BACK) || any(keys, LEFT) || any(keys, RIGHT);
-    return asked ? { heading: yaw, speedClass: SpeedClass.stop } : null;
+    return asked ? { heading: yaw, speedClass: SpeedClass.stop, boost } : null;
   }
 
   // The camera's basis in the ground plane, and it has to be the EYE CAMERA's, not a convention invented here.
@@ -118,7 +115,8 @@ export function movementIntent(
 
   return {
     heading: Math.atan2(dz, dx),
-    speedClass: any(keys, RUN) ? gait : SpeedClass.walk,
+    speedClass: any(keys, RUN) ? SpeedClass.run : SpeedClass.walk,
+    boost,
   };
 }
 
@@ -145,7 +143,7 @@ export function stopAfter(last: MoveIntent | null): MoveIntent | null {
     return null;
   }
 
-  return { heading: last.heading, speedClass: SpeedClass.stop };
+  return { heading: last.heading, speedClass: SpeedClass.stop, boost: boostOf(last) };
 }
 
 /**
@@ -179,7 +177,11 @@ export function intentChanged(next: MoveIntent | null, last: MoveIntent | null):
   // Compared as the SHORTEST angle between the two, because heading wraps: a camera crossing ±π moves from 3.14 to -3.14, a raw
   // difference of 2π, and a straight subtraction read that as the sharpest turn possible and re-sent an identical intent every
   // time the viewer happened to face that way.
-  return next.speedClass !== last.speedClass || Math.abs(shortestAngle(next.heading - last.heading)) > HEADING_EPSILON;
+  return (
+    next.speedClass !== last.speedClass ||
+    boostOf(next) !== boostOf(last) ||
+    Math.abs(shortestAngle(next.heading - last.heading)) > HEADING_EPSILON
+  );
 }
 
 /**
@@ -213,7 +215,12 @@ export function gaitOf(intent: MoveIntent | null): number {
  * worth sending. This decides whether the send carries a phase.
  */
 export function gaitChanged(next: MoveIntent | null, last: MoveIntent | null): boolean {
-  return gaitOf(next) !== gaitOf(last);
+  return gaitOf(next) !== gaitOf(last) || (gaitOf(next) !== SpeedClass.stop && boostOf(next) !== boostOf(last));
+}
+
+/** An intent's boost, 1 when it names none. */
+export function boostOf(intent: MoveIntent | null): number {
+  return intent?.boost ?? 1;
 }
 
 /** A difference of two headings, wrapped into [-π, π]. */
