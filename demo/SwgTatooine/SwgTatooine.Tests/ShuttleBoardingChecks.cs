@@ -98,8 +98,9 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
     /// <summary>A session's passenger boards on the first tick its shuttle is down, and walks out of the destination's gate.</summary>
     /// <remarks>
     /// Its client times the landing from the published schedule and fades out on touchdown, so a boarding hashed anywhere into the window
-    /// would hold that screen black for up to the whole of it. Hence trickle boarding (the crowd's rule), a 500-tick window and an ask made
-    /// inside it: the trickle boards within three ticks well under one time in a hundred, the session's rule always.
+    /// would hold that screen black for up to the whole of it. Hence trickle boarding (the crowd's rule), a 500-tick window, and the ask made a few
+    /// ticks after a landing with a single tick allowed: the trickle boards at phase p with probability 1/(500 − p) a tick, so it passes this case
+    /// about one time in two hundred and fifty; the session's rule always. (Three ticks at a uniform phase was 3.7 %, the review found.)
     /// </remarks>
     [Test]
     [CancelAfter(90_000)]
@@ -120,9 +121,14 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
         var destPort = sim.Index.Shuttleports[Dest];
         var player = Worlds.Park(sim, link.Session, port.X, port.Z);
 
+        // Port 0 has no stagger: it lands on every multiple of the interval. Ask just after one.
+        var interval = (long)(10f * TickRateHz);
+        var phase = sim.Runtime.CurrentTickNumber % interval;
+        Harness.Ticks((int)((interval - phase + 3) % interval));
+
         link.SendCommand(nameof(BoardShuttle), new RecordValues { ["destCity"] = FieldValue.Of(Dest) });
         SessionHarness.Until(() => TatooineReplication.Boardings.Queued >= 1, "the boarding ask to be queued by a tick");
-        Harness.Ticks(3);
+        Harness.Ticks(1);
 
         var (x, z) = Where(sim, player);
         Assert.Multiple(() =>
@@ -316,13 +322,7 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
         return link;
     }
 
-    /// <summary>Whether an entity stands within a distance of a point.</summary>
-    /// <param name="sim">The simulation.</param>
-    /// <param name="entity">The player.</param>
-    /// <param name="x">The point, east.</param>
-    /// <param name="z">The point, north.</param>
-    /// <param name="withinM">How close.</param>
-    /// <returns>Whether it does.</returns>
+    /// <summary>Where a player stands now, east and north.</summary>
     private static (float X, float Z) Where(TatooineSim sim, EntityId entity)
     {
         using var tx = sim.Dbe.CreateQuickTransaction();
@@ -331,6 +331,13 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
         return (at.X, at.Z);
     }
 
+    /// <summary>Whether an entity stands within a distance of a point.</summary>
+    /// <param name="sim">The simulation.</param>
+    /// <param name="entity">The player.</param>
+    /// <param name="x">The point, east.</param>
+    /// <param name="z">The point, north.</param>
+    /// <param name="withinM">How close.</param>
+    /// <returns>Whether it does.</returns>
     private static bool Near(TatooineSim sim, EntityId entity, float x, float z, float withinM)
     {
         using var tx = sim.Dbe.CreateQuickTransaction();

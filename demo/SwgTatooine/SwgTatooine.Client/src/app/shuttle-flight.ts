@@ -71,24 +71,38 @@ function bezierTangent(u: number, axis: 0 | 1 | 2): number {
   return a * (P1[axis] - P0[axis]) + b * (P2[axis] - P1[axis]) + c * (P3[axis] - P2[axis]);
 }
 
-/** The pose `t` seconds into the arrival, clamped to it; at {@link ARRIVAL_S} exactly on the pad. */
-export function arrivalPose(t: number): FlightPose {
+/** A pose or a moment written in place: the frame loop keeps one of each rather than allocating them sixty times a second. */
+export type Writable<T> = { -readonly [K in keyof T]: T[K] };
+
+/**
+ * The pose `t` seconds into the arrival, clamped to it; at {@link ARRIVAL_S} exactly on the pad.
+ *
+ * @param out Written and returned when given; a new pose otherwise.
+ */
+export function arrivalPose(
+  t: number,
+  out: Writable<FlightPose> = { x: 0, y: 0, z: 0, yaw: 0, noseUp: 0 },
+): FlightPose {
   if (t < APPROACH_S) {
     // Ease out: fast from the sky, slowing into the hover.
     const u = 1 - (1 - clamp01(t / APPROACH_S)) ** 2;
     const along = Math.atan2(bezierTangent(u, 0), bezierTangent(u, 2));
-    return {
-      x: bezier(u, 0),
-      y: bezier(u, 1),
-      z: bezier(u, 2),
-      // Along the path, settling to the landed heading over the last third; nose up while braking, level in the hover.
-      yaw: along * (1 - smoothstep(clamp01((u - 0.66) / 0.34))),
-      noseUp: 0.14 * Math.sin(Math.PI * u),
-    };
+    out.x = bezier(u, 0);
+    out.y = bezier(u, 1);
+    out.z = bezier(u, 2);
+    // Along the path, settling to the landed heading over the last third; nose up while braking, level in the hover.
+    out.yaw = along * (1 - smoothstep(clamp01((u - 0.66) / 0.34)));
+    out.noseUp = 0.14 * Math.sin(Math.PI * u);
+    return out;
   }
 
   const u = smoothstep(clamp01((t - APPROACH_S) / TOUCHDOWN_S));
-  return { x: 0, y: HOVER_HEIGHT_M * (1 - u), z: 0, yaw: 0, noseUp: 0 };
+  out.x = 0;
+  out.y = HOVER_HEIGHT_M * (1 - u);
+  out.z = 0;
+  out.yaw = 0;
+  out.noseUp = 0;
+  return out;
 }
 
 /** Where a port's shuttle is in its cycle at a tick. */
@@ -109,37 +123,38 @@ export interface ShuttleMoment {
  * @param schedule The server's schedule.
  * @param tickHz The server's tick rate.
  */
-export function shuttleMoment(tick: number, city: number, schedule: ShuttleSchedule, tickHz: number): ShuttleMoment {
+export function shuttleMoment(
+  tick: number,
+  city: number,
+  schedule: ShuttleSchedule,
+  tickHz: number,
+  out: Writable<ShuttleMoment> = { landed: false, untilLandingS: 0, sinceDepartureS: 0 },
+): ShuttleMoment {
   const interval = schedule.intervalTicks;
   const offset = Math.floor((city * interval) / Math.max(1, schedule.ports));
   const phase = (((tick + offset) % interval) + interval) % interval;
-  if (phase < schedule.windowTicks) {
-    return { landed: true, untilLandingS: 0, sinceDepartureS: Infinity };
-  }
-
-  return {
-    landed: false,
-    untilLandingS: (interval - phase) / tickHz,
-    sinceDepartureS: (phase - schedule.windowTicks) / tickHz,
-  };
+  out.landed = phase < schedule.windowTicks;
+  out.untilLandingS = out.landed ? 0 : (interval - phase) / tickHz;
+  out.sinceDepartureS = out.landed ? Infinity : (phase - schedule.windowTicks) / tickHz;
+  return out;
 }
 
 /**
  * The shuttle's pose relative to its pad at a moment of its cycle, or `null` while it is nowhere to be seen — further
  * out than the arrival's first point, either coming or going.
  */
-export function flightAt(moment: ShuttleMoment): FlightPose | null {
+export function flightAt(moment: ShuttleMoment, out?: Writable<FlightPose>): FlightPose | null {
   if (moment.landed) {
-    return arrivalPose(ARRIVAL_S);
+    return arrivalPose(ARRIVAL_S, out);
   }
 
   if (moment.untilLandingS <= ARRIVAL_S) {
-    return arrivalPose(ARRIVAL_S - moment.untilLandingS);
+    return arrivalPose(ARRIVAL_S - moment.untilLandingS, out);
   }
 
   if (moment.sinceDepartureS <= ARRIVAL_S) {
     // The departure: the arrival played backwards.
-    return arrivalPose(ARRIVAL_S - moment.sinceDepartureS);
+    return arrivalPose(ARRIVAL_S - moment.sinceDepartureS, out);
   }
 
   return null;

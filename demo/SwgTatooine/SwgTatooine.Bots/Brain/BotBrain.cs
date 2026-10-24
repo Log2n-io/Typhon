@@ -137,8 +137,11 @@ public sealed class BotBrain
     /// </remarks>
     public const float SearchReachM = 200f;
 
-    /// <summary>A search rectangle no wider than this is searched on half-metre cells, metres: 320 × 320 cells at most.</summary>
-    public const float FineSearchM = 160f;
+    /// <summary>A search rectangle no wider than this is searched on half-metre cells, metres: 440 × 440 cells at most.</summary>
+    public const float FineSearchM = 220f;
+
+    /// <summary>A search that has expanded this many cells without reaching its goal gives up: a walled-off goal must not cost the whole grid.</summary>
+    public const int MaxExpansions = 120_000;
 
     /// <summary>Where a stuck traveller searches a way to, in order: how far along its course, and how far off it (radians).</summary>
     private static readonly (float Metres, float Turn)[] Detours =
@@ -212,7 +215,8 @@ public sealed class BotBrain
     public long PathsPlanned { get; private set; }
 
     /// <summary>The walk in progress, for a trace line: next point, count, where the exact part starts, ridden, how it ended.</summary>
-    public string LegState => $"leg {_leg.Next}/{_leg.Points.Count} exact {_leg.Precise} ride {(_leg.Ride ? 1 : 0)}{(_leg.Dismounted ? "-off" : string.Empty)} end {_leg.Ended}"
+    public string LegState =>
+        $"leg {_leg.Next}/{_leg.Points.Count} exact {_leg.Precise} ride {(_leg.Ride ? 1 : 0)}{(_leg.Dismounted ? "-off" : string.Empty)} end {_leg.Ended}"
         + (_leg.Active ? $" next ({_leg.Points[_leg.Next].X:F1}, {_leg.Points[_leg.Next].Z:F1})" : string.Empty);
 
     /// <summary>The route's first leg when it is flying: the port to walk to.</summary>
@@ -280,6 +284,8 @@ public sealed class BotBrain
             _realmKnown = true;
             _lastRealm = world.Realm;
             _leg.Clear();
+            _room = null;
+            _roomSearchAt = 0;
         }
 
         // Indoors the map is the room's: the planet's coordinates mean nothing there. Whatever the bot was doing, being inside is now the goal, and its
@@ -528,6 +534,7 @@ public sealed class BotBrain
                 {
                     // Round the obstacle on whatever it was travelling on: a rider does not get off to go round a house.
                     _leg.Ride = Mode == TravelMode.Swoop;
+                    _leg.KeepRiding = true;
                     return Follow(in world, tick, out _);
                 }
             }
@@ -552,7 +559,9 @@ public sealed class BotBrain
             {
                 if (!PlanWalk(in world, use[0], use[1..], tick))
                 {
-                    _leg.Clear();
+                    // Abandoned, not cleared: a cleared leg reads as "not yet planned", and the search ran again on every tick until the port was in
+                    // range — a whole-grid A* per tick per bot (review 1).
+                    _leg.Abandon();
                 }
                 else
                 {
@@ -756,7 +765,7 @@ public sealed class BotBrain
         doors.Sort();
         var building = _seen[doors[(int)(Next() % (uint)Math.Min(5, doors.Count))].I];
         var door = _assets.At(building.Asset).Door;
-        var path = Placed(new Facility(building.X, building.Z, building.Asset, building.Yaw), door.Approach);
+        var path = Placed(Facility.Of(building.X, building.Z, building.Asset, building.Yaw), door.Approach);
         if (!PlanWalk(in world, path[0], path[1..], tick))
         {
             return false;
@@ -785,7 +794,7 @@ public sealed class BotBrain
     /// <summary>Inside a room: a look round on the room's graph, a while standing, then out by the published way.</summary>
     private Intent Inside(in Perceived world, long tick)
     {
-        if (RoomOf(in world) is not { } room)
+        if (RoomOf(in world, tick) is not { } room)
         {
             return Intent.None;   // a room this content does not know: stand, as this brain always did indoors
         }
@@ -799,9 +808,10 @@ public sealed class BotBrain
             }
 
             _leg.Clear();
-            if (end == LegEnd.Stuck && _leaving)
+            if (_leaving)
             {
-                _leaving = false;   // try the way out again after a pause
+                // Walked the way out, or stuck on it, and still inside: try again after a pause rather than planning it again every tick (review 4).
+                _leaving = false;
                 _until = tick + Ticks(2);
             }
         }
@@ -812,12 +822,12 @@ public sealed class BotBrain
         }
 
         var (plan, at) = room;
-        if (!_leaving && _until > 0 && Next() % 100u < 50u)
+        var here = BotAssets.Unplace(at.X, at.Z, at.Yaw, (world.X, world.Z));
+        if (!_leaving && _until > 0 && plan.Nav.Nodes.Count > 0 && Next() % 100u < 50u)
         {
             // A look round: the room's graph to one of its nodes, then another pause.
-            // The room stands at its realm's origin, unturned (the server's own reading), so its frame is the body's less the room's position.
             var node = plan.Nav.Nodes[(int)(Next() % (uint)plan.Nav.Nodes.Count)];
-            if (plan.Nav.Route(world.X - at.X, world.Z - at.Z, node.X, node.Z) is { } wander)
+            if (plan.Nav.Route(here.X, here.Z, node.X, node.Z) is { } wander)
             {
                 _leg.Start(Shift(wander, at), 0, tick);
                 _until = tick + Ticks(3 + (Next() % 5u));
@@ -827,36 +837,56 @@ public sealed class BotBrain
 
         // Out: the graph to the way out's first point, then the way out itself, whose last point is past the door.
         var exit = plan.Door.Approach;
-        var route = plan.Nav.Route(world.X - at.X, world.Z - at.Z, exit[0].X, exit[0].Z) ?? [exit[0]];
-        route.AddRange(exit[1..]);
+        var route = plan.Nav.Route(here.X, here.Z, exit[0].X, exit[0].Z) ?? [exit[0]];
+        for (var i = 1; i < exit.Length; i++)
+        {
+            route.Add(exit[i]);
+        }
+
         _leaving = true;
         _until = 0;
         _leg.Start(Shift(route, at), 0, tick);
         return Follow(in world, tick, out _);
     }
 
-    /// <summary>The room it is standing in: the structure in view whose asset publishes a floor graph and a way out.</summary>
-    private (AssetPlan Plan, Facility At)? RoomOf(in Perceived world)
+    /// <summary>The room it is standing in: the structure in view whose asset publishes a floor graph and a way out — found once per stay.</summary>
+    /// <remarks>
+    /// Kept for the stay and dropped at the next crossing: the realm only changes at a door, and copying and scanning every structure in view on every
+    /// tick indoors found the same room each time (review). A room not found yet is looked for again every two seconds, not every tick.
+    /// </remarks>
+    private (AssetPlan Plan, Facility At)? RoomOf(in Perceived world, long tick)
     {
-        if (_assets == null || world.Structures == null)
+        if (_room is { } known)
+        {
+            return known;
+        }
+
+        if (_assets == null || world.Structures == null || tick < _roomSearchAt)
         {
             return null;
         }
 
+        _roomSearchAt = tick + Ticks(2);
         _seen.Clear();
         world.Structures.CopyTo(_seen);
         foreach (var s in _seen)
         {
             if (_assets.At(s.Asset) is { Nav: not null, Door: not null } plan)
             {
-                return (plan, new Facility(s.X, s.Z, s.Asset, s.Yaw));
+                _room = (plan, Facility.Of(s.X, s.Z, s.Asset, s.Yaw));
+                return _room;
             }
         }
 
         return null;
     }
 
-    /// <summary>A room's points (its own frame: a room stands unturned) moved to where it stands.</summary>
+    /// <summary>The room this stay is in, once found; see <see cref="RoomOf"/>.</summary>
+    private (AssetPlan Plan, Facility At)? _room;
+
+    private long _roomSearchAt;
+
+    /// <summary>A room's points (in its own frame) moved to where it stands.</summary>
     private static List<(float X, float Z)> Shift(List<(float X, float Z)> points, Facility at)
     {
         for (var i = 0; i < points.Count; i++)
@@ -895,7 +925,10 @@ public sealed class BotBrain
             // leg from where it stood was a line through whatever it was standing against.
             var heading = Routing.HeadingTo(world.X, world.Z, goal.X, goal.Z);
             var near = SearchReachM * 0.5f;
-            var rest = (float)far - (SearchReachM * 0.75f);
+
+            // Never short of `near`: for a goal just past the search's reach the straight part would otherwise end behind where the first search
+            // left the body, and the walk would double back (review 2).
+            var rest = MathF.Max((float)far - (SearchReachM * 0.75f), near);
             var mid = (X: world.X + (MathF.Cos(heading) * near), Z: world.Z + (MathF.Sin(heading) * near));
             if (searching && Search(from, mid) is { } outOf)
             {
@@ -942,7 +975,9 @@ public sealed class BotBrain
     /// <summary>A searched walk between two points over the structures last copied into <see cref="_seen"/>; null when walled off.</summary>
     private List<(float X, float Z)> Search((float X, float Z) from, (float X, float Z) to)
     {
-        const float Margin = 40f;
+        // Room round both ends for a detour round a building — the largest, a shuttleport, is 46 m across — and small enough that the last stretch
+        // of a long walk (150 m) is searched on half-metre cells.
+        const float Margin = 30f;
         var minX = MathF.Min(from.X, to.X) - Margin;
         var minZ = MathF.Min(from.Z, to.Z) - Margin;
         var maxX = MathF.Max(from.X, to.X) + Margin;
@@ -964,7 +999,7 @@ public sealed class BotBrain
             grid = CityPath.Walls(_seen, _assets, minX, minZ, maxX, maxZ, floorTopM: CityPath.PorchTopM, cell: cell);
         }
 
-        return CityPath.Find(grid, from.X, from.Z, to.X, to.Z);
+        return CityPath.Find(grid, from.X, from.Z, to.X, to.Z, MaxExpansions);
     }
 
     /// <summary>Follows the leg: the next point, how fast, and whether it has ended.</summary>
@@ -988,7 +1023,9 @@ public sealed class BotBrain
         var leg = _leg;
         if (!leg.Active)
         {
-            end = leg.Ended == LegEnd.Going ? LegEnd.Done : leg.Ended;
+            // No leg is not a finished leg: a cleared one reported Done, and a caller counting arrivals would have counted one it never made
+            // (review 7). A leg that ended says how.
+            end = leg.Ended == LegEnd.Going ? LegEnd.Stuck : leg.Ended;
             return Intent.None;
         }
 
@@ -1014,7 +1051,9 @@ public sealed class BotBrain
             {
                 leg.Ended = LegEnd.Done;
                 end = LegEnd.Done;
-                _wantMounted = false;
+
+                // Off at the end of a walk — except a detour's, which hands back to a ride still under way.
+                _wantMounted = leg.KeepRiding && leg.Ride;
                 return Intent.None;
             }
 
@@ -1050,20 +1089,23 @@ public sealed class BotBrain
             leg.Ended = LegEnd.Stuck;
             leg.Next = leg.Points.Count;
             end = LegEnd.Stuck;
-            _wantMounted = false;
+            _wantMounted = leg.KeepRiding && leg.Ride;
             return Intent.Move(0f, 0);
         }
 
         end = LegEnd.Going;
         // Off once, for good, forty metres before the exact part — by distance along the walk, not by which point is next: deciding per waypoint got on
         // and off at every corner of a street, and getting off when the next point was the exact one walked the last 150 m of a long straight at a run.
-        if (leg.Ride && !leg.Dismounted && d + leg.LengthTo(leg.Next, leg.Precise) < 40d)
+        // Not for a detour, whose end is only a direction: getting off before it and back on after cost two SetMounts a detour (review 9).
+        if (leg.Ride && !leg.KeepRiding && !leg.Dismounted && d + leg.LengthTo(leg.Next, leg.Precise) < 40d)
         {
             leg.Dismounted = true;
         }
 
+        // Steered at the swoop's class only while the point is further than a decision and a half at its speed: inside that, a heading renewed at
+        // the driver's rate overshoots the corner (review 8). Fifteen metres at the 4 Hz driver.
         _wantMounted = leg.Ride && !leg.Dismounted;
-        if (world.Mounted && !leg.Dismounted && d > 15d)
+        if (world.Mounted && !leg.Dismounted && d > Math.Max(15d, 1.5d * Routing.SwoopMps / _rate))
         {
             return Intent.Move(Routing.HeadingTo(world.X, world.Z, p.X, p.Z), Routing.SwoopClass);
         }
@@ -1164,6 +1206,9 @@ public sealed class BotBrain
         public bool Ride;
         public bool Dismounted;
 
+        /// <summary>A detour's: ridden to its end, which is only a direction, and not got off before it.</summary>
+        public bool KeepRiding;
+
         /// <summary>The walk from point <paramref name="from"/> to point <paramref name="to"/> along the leg, metres.</summary>
         public double LengthTo(int from, int to)
         {
@@ -1193,6 +1238,7 @@ public sealed class BotBrain
             Precise = precise;
             Ride = false;
             Dismounted = false;
+            KeepRiding = false;
             Best = double.MaxValue;
             BestAt = tick;
             Sent = (float.NaN, float.NaN);
@@ -1207,6 +1253,7 @@ public sealed class BotBrain
             Next = 0;
             Ride = false;
             Dismounted = false;
+            KeepRiding = false;
             Ended = LegEnd.Going;
         }
 

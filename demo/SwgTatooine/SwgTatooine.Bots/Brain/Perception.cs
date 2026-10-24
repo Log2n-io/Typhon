@@ -193,7 +193,7 @@ public sealed class Perception
             var pz = set.Dims > 1 ? (float)at[1] : 0f;
 
             // The region is kept as the wire carries it — a city plus one — so that 0 means "none" the whole way through.
-            facilities.Observe(region, kind, px, pz, assets != null ? (int)assets[slot] : -1, yaws != null ? (int)yaws[slot] : 0);
+            facilities.Observe(region, kind, px, pz, assets != null ? (int)assets[slot] + 1 : 0, yaws != null ? (int)yaws[slot] : 0);
             if (kind == Routing.ShuttleportKind && Routing.Distance(x, z, px, pz) <= BoardingM)
             {
                 port = region;

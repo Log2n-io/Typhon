@@ -160,6 +160,16 @@ export class CrowdAnimator {
     this.dirty = true;
   }
 
+  /** Whether a body is already playing (or holding) a clip — so a one-shot held across frames is not restarted every frame. */
+  isPlaying(i: number, slot: ClipSlot): boolean {
+    const a = i * 4;
+    return (
+      this.clipA[a + 1] !== 0 &&
+      this.clipA[a] === slot.startRow &&
+      this.clipA[a + 1] === (slot.loop ? slot.frames : -slot.frames)
+    );
+  }
+
   /** Where a body's current clip is in its cycle at `now`, 0–1. */
   cycleOf(i: number, now: number): number {
     const a = i * 4;

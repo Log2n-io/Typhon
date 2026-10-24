@@ -180,7 +180,12 @@ public interface IShuttleBoarding
     /// <summary>Ticks between two landings at one port; 0 when nothing flies.</summary>
     int IntervalTicks { get; }
 
-    /// <summary>Ticks a shuttle stays down; city <c>c</c>'s port is down while <c>(tick + c × IntervalTicks / CityCount) % IntervalTicks &lt; WindowTicks</c>.</summary>
+    /// <summary>How many ports the landings are staggered over — the divisor in the formula below; 0 when nothing flies.</summary>
+    int PortCount { get; }
+
+    /// <summary>
+    /// Ticks a shuttle stays down; port <c>c</c> is down while <c>(tick + floor(c × IntervalTicks / Ports)) % IntervalTicks &lt; WindowTicks</c>.
+    /// </summary>
     int WindowTicks { get; }
 }
 
@@ -635,8 +640,8 @@ public static partial class TatooineReplication
 
     /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
     /// <remarks>
-    /// The port is a building with a 12 m half extent, so this is about a building's width clear of it — close enough that a person aiming at the port has
-    /// arrived, far enough that the last metre of a walk does not decide it. It is also what the client draws its prompt at.
+    /// Measured from the port's centre: its ring wall stands about 20 m out and its ticket terminal 21.4 m, so 30 m takes in the terminal and the gate
+    /// just outside it (passengers land 27.2 m out), but not the dome's diagonal corners (32.7 m). The client reads it from demo.json.
     /// </remarks>
     public const double ShuttleBoardM = 30d;
 

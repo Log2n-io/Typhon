@@ -306,6 +306,15 @@ public static class WorldRebuild
             var control = player.Read(Player.Control);
             control.Kind = ControllerKind.Scripted;
             player.Set(Player.Control, control);
+
+            // Off its swoop too: Mounted is persisted, and nothing the crowd does clears it but a door — a body saved riding came back as a crowd
+            // member drawn on a swoop for good.
+            var state = player.Read(Player.State);
+            if (state.Mounted != 0)
+            {
+                state.Mounted = 0;
+                player.Set(Player.State, state);
+            }
             var session = player.Read(Player.Session);
             session.Controller = 0u;
             session.Target = EntityId.Null;

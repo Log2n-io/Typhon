@@ -14,7 +14,8 @@ namespace SwgTatooine.Bots.Brain;
 /// <param name="MaxZ">North edge.</param>
 /// <param name="MinY">Underside, above the structure's base.</param>
 /// <param name="MaxY">Top, above the structure's base.</param>
-/// <param name="Sloped">Whether its top is tilted: a ramp or a flight of steps — or a leaning strut, which <see cref="CityPath"/> tells apart by height.</param>
+/// <param name="Sloped">Whether its top is tilted: a ramp or a flight of steps — or a leaning strut, which <see cref="CityPath"/> tells apart by
+/// height.</param>
 /// <param name="Radius">The radius of its plan when that plan is a circle about the box's centre (a landing pad, a lamp post); 0 for the rectangle.</param>
 public readonly record struct PlanBox(float MinX, float MinZ, float MaxX, float MaxZ, float MinY, float MaxY, bool Sloped, float Radius = 0f);
 
@@ -237,7 +238,9 @@ public sealed class BotAssets
         return new AssetPlan { Id = id, Walls = walls, Door = door, UsePath = use, Nav = nav };
     }
 
-    /// <summary>A child's interaction stand point in the parent's frame: the child's pose (an unturned child, which every published one is) plus its point.</summary>
+    /// <summary>
+    /// A child's interaction stand point in the parent's frame: the child's pose (an unturned child, which every published one is) plus its point.
+    /// </summary>
     private static (float X, float Z)? StandOf(JsonElement child, JsonElement placement)
     {
         if (!child.TryGetProperty("interactions", out var interactions) || interactions.GetArrayLength() == 0)
@@ -250,8 +253,12 @@ public sealed class BotAssets
         return (at.X + local.X, at.Z + local.Z);
     }
 
-    /// <summary>The walls of one asset from <c>demo.json</c>'s ten-number boxes: [minX, minZ, maxX, maxZ, minY, maxY, planeY, slopeX, slopeZ, radius].</summary>
-    /// <remarks>Already in the world's convention — the server publishes them mirrored. A short box is a wall of unknown height, as the browser reads it.</remarks>
+    /// <summary>
+    /// The walls of one asset from <c>demo.json</c>'s ten-number boxes: [minX, minZ, maxX, maxZ, minY, maxY, planeY, slopeX, slopeZ, radius].
+    /// </summary>
+    /// <remarks>
+    /// Already in the world's convention — the server publishes them mirrored. A short box is a wall of unknown height, as the browser reads it.
+    /// </remarks>
     public static PlanBox[] ReadWalls(JsonElement boxes)
     {
         if (boxes.ValueKind != JsonValueKind.Array)
@@ -303,6 +310,22 @@ public sealed class BotAssets
     }
 
     private static float Distance((float X, float Z) a, (float X, float Z) b) => MathF.Sqrt(((a.X - b.X) * (a.X - b.X)) + ((a.Z - b.Z) * (a.Z - b.Z)));
+
+    /// <summary>The inverse of <see cref="Place"/>: a world point in the frame of a structure standing at (x, z) turned by its quarter turns.</summary>
+    public static (float X, float Z) Unplace(float x, float z, int quarters, (float X, float Z) world)
+    {
+        var (sin, cos) = (quarters & 3) switch
+        {
+            1 => (-1f, 0f),
+            2 => (0f, -1f),
+            3 => (1f, 0f),
+            _ => (0f, 1f),
+        };
+
+        var dx = world.X - x;
+        var dz = world.Z - z;
+        return ((dx * cos) + (dz * sin), (dz * cos) - (dx * sin));
+    }
 
     /// <summary>A point of an asset's plan, turned by the structure's quarter turns and moved to where it stands — the server's own placement.</summary>
     /// <param name="x">The structure, east.</param>

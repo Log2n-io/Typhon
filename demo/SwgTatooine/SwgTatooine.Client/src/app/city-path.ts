@@ -125,8 +125,11 @@ function centreOf(grid: WalkGrid, cell: number): [number, number] {
   return [grid.minX + (c + 0.5) * PATH_CELL_M, grid.minZ + (r + 0.5) * PATH_CELL_M];
 }
 
-/** The nearest open cell to one, searching outwards ring by ring, or -1. */
-function nearestOpen(grid: WalkGrid, cell: number, reach: number): number {
+/**
+ * The open cell nearest a walled-off one — of the first ring that has any, the one nearest (towardX, towardZ) — or -1.
+ * The first in scan order was the south-west one, so a walk to a kiosk could end on its far side (review).
+ */
+function nearestOpen(grid: WalkGrid, cell: number, reach: number, towardX: number, towardZ: number): number {
   if (grid.blocked[cell] === 0) {
     return cell;
   }
@@ -134,6 +137,8 @@ function nearestOpen(grid: WalkGrid, cell: number, reach: number): number {
   const c0 = cell % grid.cols;
   const r0 = (cell - c0) / grid.cols;
   for (let ring = 1; ring <= reach; ring++) {
+    let best = -1;
+    let bestD = Infinity;
     for (let dr = -ring; dr <= ring; dr++) {
       for (let dc = -ring; dc <= ring; dc++) {
         if (Math.max(Math.abs(dr), Math.abs(dc)) !== ring) {
@@ -142,10 +147,22 @@ function nearestOpen(grid: WalkGrid, cell: number, reach: number): number {
 
         const r = r0 + dr;
         const c = c0 + dc;
-        if (r >= 0 && r < grid.rows && c >= 0 && c < grid.cols && grid.blocked[r * grid.cols + c] === 0) {
-          return r * grid.cols + c;
+        if (r < 0 || r >= grid.rows || c < 0 || c >= grid.cols || grid.blocked[r * grid.cols + c] !== 0) {
+          continue;
+        }
+
+        const x = grid.minX + (c + 0.5) * PATH_CELL_M - towardX;
+        const z = grid.minZ + (r + 0.5) * PATH_CELL_M - towardZ;
+        const d = x * x + z * z;
+        if (d < bestD) {
+          best = r * grid.cols + c;
+          bestD = d;
         }
       }
+    }
+
+    if (best >= 0) {
+      return best;
     }
   }
 
@@ -177,8 +194,8 @@ export function findPath(
   toZ: number,
 ): [number, number][] | null {
   // Eight cells each way: a body pressed into a corner stands in cells its own width has walled off, and a goal can be a few metres into a building.
-  const start = nearestOpen(grid, cellOf(grid, fromX, fromZ), 8);
-  const goal = nearestOpen(grid, cellOf(grid, toX, toZ), 8);
+  const start = nearestOpen(grid, cellOf(grid, fromX, fromZ), 8, fromX, fromZ);
+  const goal = nearestOpen(grid, cellOf(grid, toX, toZ), 8, fromX, fromZ);
   const startOpen = start === cellOf(grid, fromX, fromZ);
   const goalOpen = goal === cellOf(grid, toX, toZ);
   if (start < 0 || goal < 0) {

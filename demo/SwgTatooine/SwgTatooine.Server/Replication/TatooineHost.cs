@@ -529,13 +529,15 @@ public static class TatooineHost
             // left to discover it: both ends read the same descriptors, and the only way two readers of a mutable pointer
             // stay in step is if neither of them reads it. Absent from a run started without --assets, like the two above.
             var assetSet = assets == null ? string.Empty : assets.DemoJson(assetShapes);
-            // When each port's shuttle is down, so a client can fly it in and land it on the pad in step with the boarding this server does: city c's
-            // port is down while (tick + c × intervalTicks / ports) % intervalTicks < windowTicks. Absent when nothing flies.
+            // When each port's shuttle is down, so a client can fly it in and land it on the pad in step with the boarding this server does: port c is
+            // down while (tick + floor(c × intervalTicks / ports)) % intervalTicks < windowTicks — `ports` the server's own divisor, its port count, not
+            // its city count. Absent when nothing flies.
             var boarding = TatooineReplication.ShuttleBoarding;
             var shuttle = boarding == null || boarding.IntervalTicks == 0
                 ? string.Empty
                 : FormattableString.Invariant(
-                    $",\"shuttle\":{{\"intervalTicks\":{boarding.IntervalTicks},\"windowTicks\":{boarding.WindowTicks},\"ports\":{boarding.CityCount},\"boardM\":{Json(TatooineReplication.ShuttleBoardM)}}}");
+                    $",\"shuttle\":{{\"intervalTicks\":{boarding.IntervalTicks},\"windowTicks\":{boarding.WindowTicks},")
+                  + FormattableString.Invariant($"\"ports\":{boarding.PortCount},\"boardM\":{Json(TatooineReplication.ShuttleBoardM)}}}");
             return Results.Text(
                 FormattableString.Invariant(
                     $"{{\"godRegionMaxEdgeM\":{Json(edge)},\"maxViewRadiusM\":{Json(radius)}{player}{assetSet}{realms}{shuttle}}}"),

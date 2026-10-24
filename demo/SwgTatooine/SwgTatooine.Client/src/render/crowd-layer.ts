@@ -5,7 +5,7 @@ import type { Descriptor } from '../assets/descriptor';
 import { AnimationGraph, locomotionFrom, type LocomotionTuning } from '../character/animation-graph';
 import type { AtlasPlan } from '../character/clip-atlas';
 import { CrowdAnimator } from '../character/crowd-anim';
-import { outfitFor } from '../character/outfits';
+import { RIDE_ROLE, outfitFor } from '../character/outfits';
 import type { CrowdSkinPlugin } from './crowd-material';
 import type { CrowdOutfit } from './crowd-mesh';
 import type { CrowdBody } from './layer-packer';
@@ -59,7 +59,28 @@ export interface CrowdLayerOptions {
   readonly capacity: number;
 }
 
+/** A body drawn seated this frame, in render space: where its swoop goes. */
+export interface CrowdRider {
+  netId: number;
+  x: number;
+  y: number;
+  z: number;
+  heading: number;
+}
+
 export class CrowdLayer {
+  /**
+   * Where a rider's root sits above its swoop's origin, metres: the swoop descriptor's `seats[0].pos[1]` once it is read
+   * (`character-mount.ts` uses the same figure for the avatar).
+   */
+  seatY = 0.62;
+
+  /** The bodies drawn seated this frame, pooled: the first {@link riderCount} are live. */
+  readonly riders: CrowdRider[] = [];
+
+  /** How many of {@link riders} this frame filled. */
+  riderCount = 0;
+
   private readonly outfits: readonly CrowdOutfit[];
   private readonly plan: AtlasPlan;
   private readonly skin: CrowdSkinPlugin;
@@ -242,6 +263,7 @@ export class CrowdLayer {
     const clock = now - this.origin;
     this.skin.time = clock;
     this.drawn.clear();
+    this.riderCount = 0;
     this.tierTotals.fill(0);
     for (const bucket of this.buckets) {
       bucket.count = 0;
@@ -339,18 +361,41 @@ export class CrowdLayer {
 
       bucket.slots[i] = slot;
 
-      const out = slot.graph.update(body.speed, true, clock);
-      // <b>By ROLE, not by clip name.</b> See `AnimOutput.role`: the atlas is keyed on the role because an
-      // outfit may carry its own copy of one, and a clip name finds nothing without saying so.
-      const atlas = this.plan.slotOf(outfit.id, out.role);
-      if (atlas !== null) {
-        bucket.animator.play(i, atlas, clock, out.rate);
+      // A rider sits: the seated clip held at its end, once — a one-shot played again every frame would restart — and the
+      // body raised onto the seat of the swoop drawn under it (`riders`). Locomotion is not consulted while it rides.
+      let lift = 0;
+      const ride = body.mounted ? this.plan.slotOf(outfit.id, RIDE_ROLE) : null;
+      if (ride !== null) {
+        if (!bucket.animator.isPlaying(i, ride)) {
+          bucket.animator.play(i, ride, clock);
+        }
+
+        lift = this.seatY;
+        const r = this.riderCount++;
+        if (r >= this.riders.length) {
+          this.riders.push({ netId: 0, x: 0, y: 0, z: 0, heading: 0 });
+        }
+
+        const rider = this.riders[r];
+        rider.netId = body.netId;
+        rider.x = body.x;
+        rider.y = body.y;
+        rider.z = body.z;
+        rider.heading = body.heading;
+      } else {
+        const out = slot.graph.update(body.speed, true, clock);
+        // <b>By ROLE, not by clip name.</b> See `AnimOutput.role`: the atlas is keyed on the role because an
+        // outfit may carry its own copy of one, and a clip name finds nothing without saying so.
+        const atlas = this.plan.slotOf(outfit.id, out.role);
+        if (atlas !== null) {
+          bucket.animator.play(i, atlas, clock, out.rate);
+        }
       }
 
       // Yaw only: a body leans with the ground nowhere in this client, and the matrix is the whole placement because
       // the glTF root flip is baked into the atlas rather than left on the mesh.
       Quaternion.RotationYawPitchRollToRef(body.heading, 0, 0, this.scratch.quat);
-      this.scratch.pos.set(body.x, body.y, body.z);
+      this.scratch.pos.set(body.x, body.y + lift, body.z);
       Matrix.ComposeToRef(ONE, this.scratch.quat, this.scratch.pos, this.scratch.matrix);
       this.scratch.matrix.copyToArray(bucket.matrices, i * 16);
       this.drawn.add(body.netId);

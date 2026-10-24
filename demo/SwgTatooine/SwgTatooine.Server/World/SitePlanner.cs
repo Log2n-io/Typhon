@@ -179,6 +179,23 @@ public sealed class SitePlanner
         return true;
     }
 
+    /// <summary>Whether a square would fit here without overlapping anything planted, without planting it: for a caller choosing between candidates.</summary>
+    /// <param name="x">Its centre, east.</param>
+    /// <param name="z">Its centre, north.</param>
+    /// <param name="halfM">Half its edge.</param>
+    /// <returns>Whether it fits.</returns>
+    public bool Fits(float x, float z, float halfM) => !Overlaps(x, z, halfM);
+
+    /// <summary>Keeps a square clear of anything planted later, whatever already stands round it: a reservation, never counted as crowding.</summary>
+    /// <param name="x">Its centre, east.</param>
+    /// <param name="z">Its centre, north.</param>
+    /// <param name="halfM">Half its edge.</param>
+    /// <remarks>
+    /// For ground the world needs empty rather than a structure — the corridor passengers walk out of a shuttleport's gate into. It may sit inside the
+    /// margins of what stands beside it, which <see cref="TryPlaceAt"/> would refuse; it only has to keep everything after it out.
+    /// </remarks>
+    public void Reserve(float x, float z, float halfM) => Add(x, z, halfM);
+
     /// <summary>Whether a box at this spot would touch one already placed.</summary>
     /// <param name="x">East.</param>
     /// <param name="z">North.</param>
@@ -191,13 +208,6 @@ public sealed class SitePlanner
     /// overlapping pairs. One margin per pair is a 20 m square, 44 %, and the city plants with attempts to spare.
     /// Separating-axis on two axis-aligned squares is two comparisons.
     /// </remarks>
-    /// <summary>Whether a square would fit here without overlapping anything planted, without planting it: for a caller choosing between candidates.</summary>
-    /// <param name="x">Its centre, east.</param>
-    /// <param name="z">Its centre, north.</param>
-    /// <param name="halfM">Half its edge.</param>
-    /// <returns>Whether it fits.</returns>
-    public bool Fits(float x, float z, float halfM) => !Overlaps(x, z, halfM);
-
     private bool Overlaps(float x, float z, float halfM)
     {
         var reach = halfM;

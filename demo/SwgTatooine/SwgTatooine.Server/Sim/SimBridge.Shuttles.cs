@@ -148,6 +148,9 @@ public sealed partial class SimBridge
     public int IntervalTicks => ShuttlesActive ? ShuttleIntervalTicks : 0;
 
     /// <inheritdoc/>
+    public int PortCount => ShuttlesActive ? Math.Max(1, _index.Shuttleports.Count) : 0;
+
+    /// <inheritdoc/>
     public int WindowTicks => ShuttlesActive ? BoardingWindowTicks : 0;
 
     /// <summary>Whether a point stands close enough to a shuttleport to board there, and which city's port it is.</summary>

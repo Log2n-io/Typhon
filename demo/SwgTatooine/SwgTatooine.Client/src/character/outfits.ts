@@ -73,6 +73,16 @@ export const DIVERGENT_CLIPS: Readonly<Partial<Record<string, readonly string[]>
 export const CROWD_ROLES: readonly string[] = ['idle', 'walk', 'run'];
 
 /**
+ * The crowd's seated pose on a swoop: not a role any descriptor names, so it is resolved to its clip directly — the clip the
+ * avatar holds on the seat (`character-mount.ts`), on its last frame. One copy, the rig's, shared by every outfit: it is
+ * not locomotion, so no outfit was measured as diverging on it, and a rider is seen at a swoop's distance.
+ */
+export const RIDE_ROLE = 'ride';
+
+/** The clip {@link RIDE_ROLE} plays, held at its end. Clip names are identical across the characters (ASSET_FORMAT § 5.8). */
+export const RIDE_CLIP = 'SitDown';
+
+/**
  * Whether an outfit needs its own baked copy of a role, rather than the rig's.
  *
  * @param outfit The outfit's catalogue id.

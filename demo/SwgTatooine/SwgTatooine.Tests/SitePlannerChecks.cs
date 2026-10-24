@@ -193,4 +193,26 @@ public sealed class SitePlannerChecks
             Assert.That(StructureFootprint.HalfExtentM(99), Is.EqualTo(StructureFootprint.HalfExtentM(StructureKind.Building)), "an unknown kind has no footprint");
         });
     }
+
+    /// <summary>A reservation keeps everything after it out, even where it stands inside its neighbours' margins, and is never counted as crowding.</summary>
+    /// <remarks>
+    /// The shuttleport's gate corridor is where a session's passenger is set down. The gate's pair and the dome left a crafting station's width of room
+    /// in it, and one could be planted exactly there.
+    /// </remarks>
+    [Test]
+    public void AReservedSquareKeepsLaterStructuresOut()
+    {
+        var plan = new SitePlanner(StructureFootprint.HalfExtentM(StructureKind.Shuttleport));
+        plan.PlaceAt(-5.5f, 27.5f, StructureFootprint.HalfExtentM(StructureKind.Bazaar));
+        plan.PlaceAt(5.5f, 27.5f, StructureFootprint.HalfExtentM(StructureKind.MissionTerminal));
+        var station = StructureFootprint.HalfExtentM(StructureKind.Terminal);
+        Assert.That(plan.Fits(0.2f, 27.2f, station), Is.True, "the premise: between the pair a crafting station fits");
+
+        plan.Reserve(0f, 27.2f, 2.5f);
+        Assert.Multiple(() =>
+        {
+            Assert.That(plan.Fits(0.2f, 27.2f, station), Is.False, "a crafting station still fits in the reserved corridor");
+            Assert.That(plan.Crowded, Is.Zero, "a reservation inside its neighbours' margins was counted as crowding");
+        });
+    }
 }

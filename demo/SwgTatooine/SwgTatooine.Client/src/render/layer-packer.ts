@@ -87,6 +87,8 @@ export interface CrowdBody {
   /** Ground speed, metres per second. */
   speed: number;
   heading: number;
+  /** On its swoop: drawn seated, and given a swoop under it. */
+  mounted: boolean;
 }
 
 /**
@@ -98,7 +100,7 @@ export interface CrowdBody {
  */
 export function crowdSlot(bodies: CrowdBody[], n: number): CrowdBody {
   if (n >= bodies.length) {
-    bodies.push({ netId: 0, x: 0, y: 0, z: 0, speed: 0, heading: 0 });
+    bodies.push({ netId: 0, x: 0, y: 0, z: 0, speed: 0, heading: 0, mounted: false });
   }
 
   return bodies[n];
@@ -129,9 +131,11 @@ interface FieldReaders {
    * Null still means `gridYaw`, which is what a lair, a prop and the mock still get.
    */
   readonly yaw: FieldArray | null;
+  /** Whether a player rides its swoop (1), for the crowd's seated pose; `null` for an archetype that never rides. */
+  readonly mounted: FieldArray | null;
 }
 
-const NO_FIELDS: FieldReaders = { style: null, styleIsFlag: false, mode: null, ground: null, yaw: null };
+const NO_FIELDS: FieldReaders = { style: null, styleIsFlag: false, mode: null, ground: null, yaw: null, mounted: null };
 const INITIAL_CAPACITY = 1024;
 
 /**
@@ -151,6 +155,7 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         mode: null,
         ground: altitudeField(store),
         yaw: optional(store, 'yaw'),
+        mounted: null,
       };
     case 'CreatureLair':
       return {
@@ -159,6 +164,7 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         mode: null,
         ground: altitudeField(store),
         yaw: null,
+        mounted: null,
       };
     case 'Creature':
       return {
@@ -167,6 +173,7 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         mode: optional(store, 'mode'),
         ground: altitudeField(store),
         yaw: null,
+        mounted: null,
       };
     case 'CityNpc':
       return {
@@ -175,6 +182,7 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         mode: optional(store, 'mode'),
         ground: altitudeField(store),
         yaw: null,
+        mounted: null,
       };
     case 'Player':
       return {
@@ -183,6 +191,7 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         mode: optional(store, 'activity'),
         ground: altitudeField(store),
         yaw: null,
+        mounted: optional(store, 'mounted'),
       };
     default:
       return NO_FIELDS;
@@ -415,6 +424,7 @@ export class LayerPacker {
           body.z = rz;
           body.speed = Math.hypot(at.vx, at.vz) * view.perSecond;
           body.heading = yaws[slot];
+          body.mounted = fields.mounted !== null && fields.mounted[slot] === 1;
           view.crowdCount++;
           // <b>Only STOP drawing the box once the crowd is known to be drawing a body in its place.</b> Diverting
           // unconditionally is how a bring-up bug became a worse regression than the thing it was replacing: the

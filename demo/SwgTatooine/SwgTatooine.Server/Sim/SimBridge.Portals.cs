@@ -568,6 +568,9 @@ public sealed partial class SimBridge
                 {
                     riding.Mounted = 0;
                     rider.Set(Player.State, riding);
+
+                    // Marked, as SetMount marks it (ADR-067): a replicated field goes out when it is marked, not because the realm changed under it.
+                    TatooineReplication.Replicate(in rider);
                 }
 
                 _appliedCrossings.Add(r);

@@ -249,9 +249,13 @@ public static class WorldBuilder
         plan.PlaceAt(mx, z, StructureFootprint.HalfExtentM(StructureKind.MissionTerminal));
         SpawnStructure(tx, mx, z, terrain.GroundAt(mx, z), StructureFootprint.HalfExtentM(StructureKind.MissionTerminal), StructureKind.MissionTerminal,
             ownerRegion: cityIndex + 1, tickPeriod: 0, ref none, faceNorth: true);
-        // Beyond the pair rather than between them: the planner keeps a 2 m margin per pair, which a reservation between two terminals 11 m apart cannot
-        // keep. Nothing planted inside the margin of the terminals and the dome can stand in the corridor between them anyway.
-        plan.TryPlaceAt(portX, portZ + GateFacilityZ + 7.5f, 4f);
+        // The corridor passengers land in (SimBridge.Shuttles: GateOutsideZ + 2, ±2.4 m), reserved: the margins of the pair and the dome leave a crafting
+        // station's width of room in it, and one was free to be planted exactly where a session's passenger is set down (review). Reserved rather than
+        // placed, because it stands inside those margins by design.
+        plan.Reserve(portX, portZ + GateOutsideZ + 2f, 2.5f);
+
+        // And the plaza beyond the pair, kept clear of houses planted across the way out.
+        plan.TryPlaceAt(portX, portZ + GateFacilityZ + 10.5f, 4f);
         census.StaticObjects += 2;
     }
 
@@ -278,7 +282,8 @@ public static class WorldBuilder
     /// side by side as often as not, and a player's nearest terminal is then far away for no reason.
     /// </para>
     /// <para>
-    /// <b>Their own random stream</b>, seeded from the world's and the city, so adding facilities moves nothing else the world draws.
+    /// <b>Their own random stream</b>, seeded from the world's and the city, so their draws take nothing from the world's stream. What they occupy still
+    /// changes where later structures fit — the planner is shared — so the world's layout is not the one it was before facilities existed.
     /// </para>
     /// </remarks>
     private static void SpawnFacilities(Transaction tx, CityDef city, SimConfig config, int cityIndex, TerrainField terrain, WorldCensus census,

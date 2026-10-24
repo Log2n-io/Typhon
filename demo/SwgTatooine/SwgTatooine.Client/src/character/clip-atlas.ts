@@ -1,6 +1,6 @@
 import type { Descriptor } from '../assets/descriptor';
 import { clipsForRole } from '../assets/descriptor';
-import { CROWD_ROLES, RIG_OUTFIT, needsOwnClips } from './outfits';
+import { CROWD_ROLES, RIDE_CLIP, RIDE_ROLE, RIG_OUTFIT, needsOwnClips } from './outfits';
 
 /**
  * Where every crowd clip lives in the one bone-matrix texture, decided before any of it is baked.
@@ -76,7 +76,7 @@ function resolve(descriptor: Descriptor, role: string): { clip: string; duration
 
   let clip: string;
   try {
-    clip = clipsForRole(animations.roles, role)[0];
+    clip = role === RIDE_ROLE ? RIDE_CLIP : clipsForRole(animations.roles, role)[0];
   } catch {
     return null;
   }
@@ -137,6 +137,8 @@ export function planClipAtlas(described: ReadonlyMap<string, Descriptor>, bones:
     }
   }
 
+  const ride = append(RIG_OUTFIT, RIDE_ROLE);
+
   for (const [outfit, descriptor] of described) {
     if (descriptor.kind !== 'character') {
       continue;
@@ -157,6 +159,10 @@ export function planClipAtlas(described: ReadonlyMap<string, Descriptor>, bones:
       if (shared !== undefined) {
         slots.set(key(outfit, role), shared);
       }
+    }
+
+    if (ride !== null) {
+      slots.set(key(outfit, RIDE_ROLE), ride);
     }
   }
 

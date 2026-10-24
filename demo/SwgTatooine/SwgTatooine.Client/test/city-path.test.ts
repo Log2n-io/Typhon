@@ -90,6 +90,15 @@ describe('findPath', () => {
     expect(grid.blocked[Math.floor(z - grid.minZ) * grid.cols + Math.floor(x - grid.minX)]).toBe(0);
   });
 
+  it('ends on the side of a walled goal the walk comes from, not the first open cell in scan order', () => {
+    // A kiosk at the origin, walked to from the west: the open cell beside it must be its west one.
+    const kiosk = placed([box({ minX: -1, maxX: 1, minZ: -1, maxZ: 1, maxY: 1.6 })]);
+    const grid = wallGrid([kiosk], 1, -20, -20, 20, 20, 0.3);
+    const path = findPath(grid, -15, 0, 0, 0);
+    expect(path).not.toBeNull();
+    expect(path![path!.length - 1][0]).toBeLessThan(-1);
+  });
+
   it('is null when the goal is walled in', () => {
     const pen = placed([
       box({ minX: -6, maxX: -5, minZ: -6, maxZ: 6 }),

@@ -83,14 +83,23 @@ public sealed class RoomNav
             node.Add(n.GetInt32());
         }
 
+        // A grid that does not cover its own extent, or a graph with nothing on it, is a room this bot cannot walk: no graph rather than an index
+        // out of range on the first step inside.
+        var cols = cells.GetProperty("cols").GetInt32();
+        var rows = cells.GetProperty("rows").GetInt32();
+        if (nodes.Count == 0 || cols <= 0 || rows <= 0 || node.Count != cols * rows)
+        {
+            return null;
+        }
+
         return new RoomNav(
             [.. nodes],
             [.. edges],
             origin[0].GetSingle(),
             origin[1].GetSingle(),
             cells.GetProperty("size").GetSingle(),
-            cells.GetProperty("cols").GetInt32(),
-            cells.GetProperty("rows").GetInt32(),
+            cols,
+            rows,
             [.. node]);
     }
 
@@ -136,7 +145,9 @@ public sealed class RoomNav
         return best;
     }
 
-    /// <summary>The walk from one point of the room to another, as waypoints ending on <paramref name="toX"/>, <paramref name="toZ"/>; null off the floor.</summary>
+    /// <summary>
+    /// The walk from one point of the room to another, as waypoints ending on <paramref name="toX"/>, <paramref name="toZ"/>; null off the floor.
+    /// </summary>
     public List<(float X, float Z)> Route(float fromX, float fromZ, float toX, float toZ)
     {
         var a = NodeAt(fromX, fromZ);

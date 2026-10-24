@@ -25,6 +25,7 @@ const ROWS: Record<string, ClipSlot> = {
   idle: { startRow: 0, frames: 125, loop: true, source: 'a', clip: 'Idle' },
   walk: { startRow: 125, frames: 38, loop: true, source: 'a', clip: 'Walk' },
   run: { startRow: 163, frames: 26, loop: true, source: 'a', clip: 'Run' },
+  ride: { startRow: 189, frames: 40, loop: false, source: 'a', clip: 'SitDown' },
 };
 
 function plan(): AtlasPlan {
@@ -104,8 +105,8 @@ function layerOf(outfits: readonly CrowdOutfit[], capacity = 64): CrowdLayer {
 }
 
 /** A body at a distance, moving at `speed`. */
-function body(netId: number, z: number, speed = 0): CrowdBody {
-  return { netId, x: 0, y: 0, z, speed, heading: 0 };
+function body(netId: number, z: number, speed = 0, mounted = false): CrowdBody {
+  return { netId, x: 0, y: 0, z, speed, heading: 0, mounted };
 }
 
 describe('a body keeps its animation when the packer reshuffles the list', () => {
@@ -155,6 +156,34 @@ describe('a body keeps its animation when the packer reshuffles the list', () =>
     expect(far).not.toBe(CULLED);
     layer.update([body(11, 2000, 0)], 1, openView(), 0.5, 1.4, 4);
     expect(bucket.tiers[0]).toBe(far);
+  });
+});
+
+describe('a rider', () => {
+  it('sits — the seated clip held, not restarted — raised onto the seat, and is listed for its swoop', () => {
+    const layer = layerOf([outfit('a')]);
+    const bucket = layer.buckets[0];
+    layer.update([body(10, 20, 40, true)], 1, openView(), 0, 1.4, 4);
+    const started = bucket.animator.clipA[2];
+    expect(bucket.animator.clipA[0]).toBe(ROWS.ride.startRow);
+    expect(bucket.animator.clipA[1]).toBe(-ROWS.ride.frames);
+    expect(bucket.matrices[13]).toBeCloseTo(layer.seatY, 6);
+    expect(layer.riderCount).toBe(1);
+    expect(layer.riders[0]).toMatchObject({ netId: 10, z: 20 });
+
+    // A frame later it is still the same sit, from the same start: a one-shot played again would start it over.
+    layer.update([body(10, 30, 40, true)], 1, openView(), 0.5, 1.4, 4);
+    expect(bucket.animator.clipA[2]).toBe(started);
+  });
+
+  it('runs again, on the ground, once it gets off', () => {
+    const layer = layerOf([outfit('a')]);
+    const bucket = layer.buckets[0];
+    layer.update([body(10, 20, 40, true)], 1, openView(), 0, 1.4, 4);
+    layer.update([body(10, 20, 4, false)], 1, openView(), 1, 1.4, 4);
+    expect(bucket.animator.clipA[0]).toBe(ROWS.run.startRow);
+    expect(bucket.matrices[13]).toBe(0);
+    expect(layer.riderCount).toBe(0);
   });
 });
 

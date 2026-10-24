@@ -486,7 +486,7 @@ public struct CreatureMotion
     [Field] public float DestZ;
 }
 
-/// <summary>A player's velocity and destination. Speed changes with the activity: 5 m/s on foot, 12 mounted.</summary>
+/// <summary>A player's velocity and destination. Speed is the class granted for what it is doing: a walk, a run, a speeder, or the swoop while mounted.</summary>
 [Component("Swg.PlayerMotion", 2, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct PlayerMotion
@@ -537,7 +537,9 @@ public struct PlayerMotion
     /// </remarks>
     [Field, Owner(CodecKind.F32, Name = "speederFastMps", Group = "move")] public float SpeederFastMps;
 
-    /// <summary>What this player's SWOOP is worth, in metres per second, granted only while <see cref="PlayerState.Mounted"/>. See <see cref="WalkMps"/>.</summary>
+    /// <summary>
+    /// What this player's SWOOP is worth, in metres per second, granted only while <see cref="PlayerState.Mounted"/>. See <see cref="WalkMps"/>.
+    /// </summary>
     [Field, Owner(CodecKind.F32, Name = "swoopMps", Group = "move")] public float SwoopMps;
 
     /// <summary>
@@ -1201,7 +1203,9 @@ public static class StructureKind
     /// </summary>
     public const int Interior = 8;
 
-    /// <summary>A bazaar terminal: one beside every shuttleport's gate, and more spread over the city by its area (<see cref="SimConfig.FacilityDensityPerKm2"/>).</summary>
+    /// <summary>
+    /// A bazaar terminal: one beside every shuttleport's gate, and more spread over the city by its area (<see cref="SimConfig.FacilityDensityPerKm2"/>).
+    /// </summary>
     public const int Bazaar = 9;
 
     /// <summary>A mission terminal, placed like a <see cref="Bazaar"/>.</summary>

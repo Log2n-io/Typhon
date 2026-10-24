@@ -5,9 +5,16 @@ namespace SwgTatooine.Bots.Brain;
 /// <summary>One facility a bot has seen: where it stands and which asset it is, which is what says where its user stands.</summary>
 /// <param name="X">East.</param>
 /// <param name="Z">North.</param>
-/// <param name="Asset">The replicated asset index; -1 when it was not sent.</param>
+/// <param name="AssetSlot">The replicated asset index plus one; 0 when it was not sent — 0 is "no data", never -1.</param>
 /// <param name="Yaw">Its quarter turns.</param>
-public readonly record struct Facility(float X, float Z, int Asset, int Yaw);
+public readonly record struct Facility(float X, float Z, int AssetSlot, int Yaw)
+{
+    /// <summary>A facility whose asset index is known.</summary>
+    public static Facility Of(float x, float z, int asset, int yaw) => new(x, z, asset + 1, yaw);
+
+    /// <summary>The replicated asset index, or -1 — an index the content refuses — when it was not sent. Read it through <see cref="BotAssets.At"/>.</summary>
+    public int Asset => AssetSlot - 1;
+}
 
 /// <summary>The facilities a bot has seen, remembered by the region they belong to.</summary>
 /// <remarks>
@@ -48,13 +55,13 @@ public sealed class FacilityMap
     /// <param name="kind">Its <c>StructureKind</c>.</param>
     /// <param name="x">Where it is, east.</param>
     /// <param name="z">Where it is, north.</param>
-    /// <param name="asset">The replicated asset index, or -1.</param>
+    /// <param name="assetSlot">The replicated asset index plus one, or 0 when the asset was not sent.</param>
     /// <param name="yaw">Its quarter turns.</param>
     /// <remarks>
     /// <b>The first sighting wins.</b> These structures never move, so a second sighting carries the same coordinates as the first — and a bot standing
     /// in a city is sent the same structures every tick, so overwriting would be a write per structure per bot per tick for data that never changes.
     /// </remarks>
-    public void Observe(int region, int kind, float x, float z, int asset = -1, int yaw = 0)
+    public void Observe(int region, int kind, float x, float z, int assetSlot = 0, int yaw = 0)
     {
         if (region <= 0)
         {
@@ -76,7 +83,7 @@ public sealed class FacilityMap
             }
         }
 
-        list.Add(new Facility(x, z, asset, yaw));
+        list.Add(new Facility(x, z, assetSlot, yaw));
         Count++;
     }
 

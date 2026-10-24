@@ -352,8 +352,6 @@ export class DoorWalker {
    * @param pathStart Which of them starts the door's own path: the walk runs up to it and walks from it.
    * @param realm The realm the body is in, so the crossing ends the walk.
    * @param nowMs When.
-   */
-  /**
    * @param stopAtEnd Stop on the last point rather than walk on through it: a walk TO somewhere (`ClientApp.walkTo`), not
    *   through a door, whose last point is past the plane and must never count as reached.
    */

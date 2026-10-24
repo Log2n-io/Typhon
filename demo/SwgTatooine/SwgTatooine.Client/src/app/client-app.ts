@@ -23,6 +23,8 @@ import { EyeCamera } from '../camera/eye-camera';
 import { MapCamera } from '../camera/map-camera';
 import { mountAssets, type AssetMount } from './asset-mount';
 import { mountCrowd, type CrowdMount } from './crowd-mount';
+import { SWOOP_ASSET } from './character-mount';
+import { CrowdSwoops } from './crowd-swoops';
 import { StaticAssets, type StructureSample } from './static-assets';
 import { DoorWalker, pathIn, pathOut } from './door-walk';
 import { findPath, wallGrid } from './city-path';
@@ -73,7 +75,14 @@ import { RenderOrigin, extractFrustumPlanes, invertMatrix4, rayGroundT, unprojec
 import { useChat } from '../state/chat-store';
 import { crossingKindOf, isIndoors, sameRealm, type RealmView, type SceneKind } from '../data/realm-view';
 import { advance, arrived, askedFor, blackout, opacityAt } from './realm-transition';
-import { flightAt, shuttleMoment, type ShuttleSchedule } from './shuttle-flight';
+import {
+  flightAt,
+  shuttleMoment,
+  type FlightPose,
+  type ShuttleMoment,
+  type ShuttleSchedule,
+  type Writable,
+} from './shuttle-flight';
 import { ShuttleView } from './shuttle-view';
 import { ticketTerminalOf } from './ticket-terminal';
 import { resetForRealm, resetForSession, type RealmSwitchTargets } from './realm-switch';
@@ -275,8 +284,11 @@ const CLOCK_OPTIONS = {
   initialDelayMs: 2 * TICK_PERIOD_MS,
 };
 
-/** How close to a shuttleport the prompt appears, in metres: the server's own boarding radius. */
-const SHUTTLE_PROMPT_M = 40;
+/** How close to a shuttleport the prompt appears, in metres, before the server has published its own boarding radius (`demo.json` shuttle.boardM). */
+const SHUTTLE_PROMPT_M = 30;
+
+/** How far a click-to-walk is searched round the buildings before it goes straight, metres; see `walkTo`. */
+const WALK_SEARCH_M = 300;
 
 /** How far away a port's shuttle is drawn flying in and out, metres: the arrival starts 190 m out and 95 m up. */
 const SHUTTLE_VIEW_M = 1200;
@@ -516,6 +528,9 @@ export class ClientApp {
    */
   private crowd: CrowdMount | null = null;
 
+  /** The swoops under the crowd's riders; see `crowd-swoops.ts`. */
+  private crowdSwoops: CrowdSwoops | null = null;
+
   /** Reused each frame: the bodies the character layers diverted, handed to the crowd and then cleared. */
   private readonly crowdBodies: CrowdBody[] = [];
   /** Set by {@link dispose}, read by {@link gone}: what tells an in-flight asset load that there is nothing to mount on. */
@@ -740,6 +755,17 @@ export class ClientApp {
       // build must not cost the street its buildings, and a street that will not load must not cost the crowd.
       try {
         this.crowd = await mountCrowd(this.scene, mount.library, this.lighting, CROWD_CAPACITY);
+        // Everyone else's riders on their swoops, the seat the avatar's rider uses once the swoop's descriptor says where it is.
+        this.crowdSwoops = new CrowdSwoops(this.scene, mount.library, mount.lighting);
+        void mount.library
+          .describe(SWOOP_ASSET)
+          .then((swoop) => {
+            const seat = swoop.seats?.[0];
+            if (seat !== undefined && this.crowd !== null) {
+              this.crowd.layer.seatY = seat.pos[1];
+            }
+          })
+          .catch(() => undefined);
       } catch (error) {
         console.error('crowd: not mounted', error);
       }
@@ -853,6 +879,8 @@ export class ClientApp {
 
     this.staticAssets?.dispose();
     this.staticAssets = null;
+    this.crowdSwoops?.dispose();
+    this.crowdSwoops = null;
     this.crowd?.dispose();
     this.crowd = null;
     this.gizmos?.dispose();
@@ -968,6 +996,9 @@ export class ClientApp {
 
     this.resetCount = count;
     resetForSession(this.resetTargets());
+    // A new session asked for nothing: neither a mount nor an arrival's turn carries over from the one before.
+    this.mountAskedAtMs = Number.NEGATIVE_INFINITY;
+    this.faceOutOfGate = false;
   }
 
   /**
@@ -1829,6 +1860,12 @@ export class ClientApp {
    * there is one speed on a swoop, and the server grants it only to a rider.
    */
   private keyIntent(): MoveIntent | null {
+    // The destination menu holds the keys, on every path that reads them — the frame loop's and the keydown flush's: an arrow key in it is not a
+    // step away from the terminal, and a flush that skipped this sent one (review).
+    if (useUi.getState().ticketMenu) {
+      return null;
+    }
+
     return asRide(
       movementIntent(this.input.heldKeys, this.eyeCamera.yaw, this.gait),
       this.ridingNow(performance.now()),
@@ -1844,17 +1881,27 @@ export class ClientApp {
    * server's replicated `mounted` after that — so a refused ask (indoors, queued for a shuttle) puts the rider back on foot.
    */
   private ridingNow(nowMs: number): boolean {
-    if (nowMs - this.mountAskedAtMs < MOUNT_ANSWER_MS) {
+    const server = this.selfField('mounted') === 1;
+    // The ask stands until the server has answered — which ends the window early once it agrees — or the window runs out.
+    if (nowMs - this.mountAskedAtMs < MOUNT_ANSWER_MS && server !== this.mountAsked) {
       return this.mountAsked;
     }
 
-    return this.selfField('mounted') === 1;
+    this.mountAskedAtMs = Number.NEGATIVE_INFINITY;
+    return server;
   }
 
   /** The 1 key: onto the swoop, or off it. Not in a room — the swoop does not fit through the door — and only for a playing session. */
   private toggleMount(atMs: number): void {
     const source = this.source;
     if (source === null || !source.canPlay || source.selfNetId === 0 || isIndoors(this.profile.kind)) {
+      return;
+    }
+
+    // Nor with a ticket: the server refuses a mount while its passenger waits for the shuttle, and drawing one for the answer's round trip ran the
+    // prediction tens of metres ahead at the swoop's speed before it snapped back (review).
+    const travel = useUi.getState().travel.phase;
+    if (travel === 'asking' || travel === 'queued' || travel === 'boarding') {
       return;
     }
 
@@ -1882,7 +1929,7 @@ export class ClientApp {
 
   private sendMovementIntent(source: DataSource, nowMs: number, steering: boolean): void {
     // The destination menu holds the keys: an arrow key in it is not a step away from the terminal.
-    const keyed = steering && !useUi.getState().ticketMenu ? this.keyIntent() : null;
+    const keyed = steering ? this.keyIntent() : null;
 
     // A walk to or through a door (`walkIn` / `walkOut`) supplies the intent the keys would, so the prediction, the refresh
     // window and the stop at the end are the keyboard's own. Any key takes the body back.
@@ -2293,15 +2340,13 @@ export class ClientApp {
   }
 
   /**
-   * Walks this session's body into a building: round it if needed, to where its door's published path starts, along the
-   * path and through the door.
-   *
-   * @param netId The building, as replicated.
-   * @returns Why it did not start, or `null` when it did.
-   */
-  /**
    * Walks the body to a point of the city it is in, around the buildings (`city-path.ts`): a run along a path found on
    * the walls' grid, stopping on the point. Any movement key takes the body back, as for a door.
+   *
+   * <b>Searched only near the body.</b> A target past {@link WALK_SEARCH_M} — a port the pane only knows as a city centre,
+   * kilometres off — is searched to that distance along the way and walked straight from there: the grid is the
+   * rectangle round both ends, and at 3 km it was ten million cells and a hundred megabytes in one click (review), for
+   * ground with nothing on it — only held structures are walls at all.
    *
    * @returns Why it did not start, or `null` when it did.
    */
@@ -2312,22 +2357,30 @@ export class ClientApp {
 
     const fromX = this.predictor.x;
     const fromZ = this.predictor.z;
+    const far = Math.hypot(x - fromX, z - fromZ);
+    const reach = Math.min(1, WALK_SEARCH_M / Math.max(far, 1e-6));
+    const toX = fromX + (x - fromX) * reach;
+    const toZ = fromZ + (z - fromZ) * reach;
     const margin = 60;
     const count = this.gatherStructureShapes();
     const started = performance.now();
     const grid = wallGrid(
       this.placedShapes,
       count,
-      Math.min(fromX, x) - margin,
-      Math.min(fromZ, z) - margin,
-      Math.max(fromX, x) + margin,
-      Math.max(fromZ, z) + margin,
+      Math.min(fromX, toX) - margin,
+      Math.min(fromZ, toZ) - margin,
+      Math.max(fromX, toX) + margin,
+      Math.max(fromZ, toZ) + margin,
       this.bodyHalfM > 0 ? this.bodyHalfM : 0.3,
     );
-    const path = findPath(grid, fromX, fromZ, x, z);
+    const path = findPath(grid, fromX, fromZ, toX, toZ);
     this.lastPathMs = performance.now() - started;
     if (path === null) {
       return 'no way round the buildings';
+    }
+
+    if (reach < 1) {
+      path.push([x, z]);
     }
 
     this.doorWalk.start(path, path.length, this.realm?.realmId ?? -1, performance.now(), true);
@@ -2337,6 +2390,13 @@ export class ClientApp {
   /** How long the last {@link walkTo} took to find its path, milliseconds. */
   lastPathMs = 0;
 
+  /**
+   * Walks this session's body into a building: round it if needed, to where its door's published path starts, along the
+   * path and through the door.
+   *
+   * @param netId The building, as replicated.
+   * @returns Why it did not start, or `null` when it did.
+   */
   walkIn(netId: number): string | null {
     const sample = this.structureSamples.slice(0, this.structureCount).find((s) => s.netId === netId) ?? null;
     if (sample === null) {
@@ -2670,6 +2730,7 @@ export class ClientApp {
         live?.selfNumber('walkMps') ?? Number.NaN,
         live?.selfNumber('runMps') ?? Number.NaN,
       );
+      this.crowdSwoops?.update(crowd.layer.riders, crowd.layer.riderCount);
     }
 
     this.attacks.update(view);
@@ -2990,19 +3051,8 @@ export class ClientApp {
         // where the body is drawn, or it appears a stride before or after the player sees themselves arrive.
         const x = this.predictor.active ? this.predictor.x : this.eyeX;
         const z = this.predictor.active ? this.predictor.z : this.eyeZ;
-        const port = nearestShuttleport(
-          this.world.archetypeStore(this.shuttleArchetype),
-          this.clock.renderTick,
-          this.clock.renderFrac,
-          x,
-          z,
-          SHUTTLE_PROMPT_M,
-        );
-        if (port !== null) {
-          next = { city: port.city, distanceM: Math.round(port.distanceM), atTerminal: this.atTicketTerminal(x, z) };
-        }
-
-        // The port whose shuttle is drawn: the nearest within sight, which is further than the prompt's reach.
+        // One search: the port whose shuttle is drawn is the nearest within sight, and the prompt's is that same port when it is within the
+        // server's own boarding radius — published with the schedule, this file's figure only before it arrives.
         const seen = nearestShuttleport(
           this.world.archetypeStore(this.shuttleArchetype),
           this.clock.renderTick,
@@ -3011,6 +3061,11 @@ export class ClientApp {
           z,
           SHUTTLE_VIEW_M,
         );
+        const reach = this.shuttleSchedule?.boardM ?? SHUTTLE_PROMPT_M;
+        if (seen !== null && seen.distanceM <= reach) {
+          next = { city: seen.city, distanceM: Math.round(seen.distanceM), atTerminal: this.atTicketTerminal(x, z) };
+        }
+
         this.flightPort = seen === null ? null : { city: seen.city, x: seen.x, z: seen.z };
       }
     } else {
@@ -3121,21 +3176,36 @@ export class ClientApp {
     }
 
     const tickHz = 1000 / this.clock.tickPeriodMs;
-    const moment = shuttleMoment(this.clock.renderTick + this.clock.renderFrac, port.city, schedule, tickHz);
-    view.update(port.x, this.padTop.y, port.z, flightAt(moment));
+    const moment = shuttleMoment(
+      this.clock.renderTick + this.clock.renderFrac,
+      port.city,
+      schedule,
+      tickHz,
+      this.momentScratch,
+    );
+    view.update(port.x, this.padTop.y, port.z, flightAt(moment, this.poseScratch));
 
-    // A passenger with a ticket for this port's shuttle: black as it touches down.
+    // A passenger with a ticket for this port's shuttle: black as it touches down — once per ticket. A landing the server did not board on would
+    // otherwise fade, release on the hold valve, and fade again every few seconds for the whole window (review).
     const here = ui.shuttleport;
     if (
       ui.travel.phase === 'queued' &&
       moment.landed &&
       here !== null &&
       here.city === port.city &&
-      ui.transition.phase === 'idle'
+      ui.transition.phase === 'idle' &&
+      this.fadedForTicket !== ui.travel.sinceMs
     ) {
+      this.fadedForTicket = ui.travel.sinceMs;
       ui.setTransition(askedFor(ui.transition, 'travel', nowMs));
     }
   }
+
+  /** The ticket (its queue time) the touchdown fade last fired for; see {@link driveShuttle}. */
+  private fadedForTicket = Number.NaN;
+
+  private readonly momentScratch: Writable<ShuttleMoment> = { landed: false, untilLandingS: 0, sinceDepartureS: 0 };
+  private readonly poseScratch: Writable<FlightPose> = { x: 0, y: 0, z: 0, yaw: 0, noseUp: 0 };
 
   /** Frames since the last port search; see {@link updateShuttlePrompt}. */
   private shuttleFrames = 0;
@@ -3174,7 +3244,8 @@ export class ClientApp {
     // Arrived: the screen comes back, on the camera turned to look out of the destination's gate the body walked out of.
     if (next.phase === 'arrived' && ui.travel.phase !== 'arrived') {
       ui.setTransition(arrived(ui.transition, 'travel', performance.now()));
-      this.faceOutOfGate = true;
+      // Only for the eye view, which consumes it: latched in the map, it turned the camera the next time the eye view was entered (review).
+      this.faceOutOfGate = ui.cameraMode === 'eye';
     }
 
     ui.setTravel(next);

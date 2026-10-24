@@ -1040,7 +1040,8 @@ public sealed class BotSwarm : IAsyncDisposable
                     ? "  brain: the server publishes no asset set; bots walk straight lines and enter no building"
                     : $"  brain: {_assets.Count} structure assets read; bots walk round buildings, through doors and to terminals");
             }
-            catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException or KeyNotFoundException)
+            catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException or KeyNotFoundException
+                or InvalidOperationException or FormatException)
             {
                 Console.WriteLine($"  !! brain: the asset set could not be read ({e.Message}); bots walk straight lines and enter no building");
             }
@@ -2397,7 +2398,8 @@ public sealed class BotSwarm : IAsyncDisposable
                 // A brain is read from what it did, tick by tick: one bot's decisions, to stdout, when SWG_BOT_TRACE names its index.
                 Console.WriteLine(
                     $"  trace {Index,3} {tick,6} realm {world.Realm} at ({world.X:F1}, {world.Z:F1}) mounted {(world.Mounted ? 1 : 0)} "
-                    + $"{_brain.Goal,-10} {intent.Kind,-6} h {intent.Heading:F2} c {intent.SpeedClass} to ({intent.X:F1}, {intent.Z:F1}) on {intent.On} {_brain.LegState}");
+                    + $"{_brain.Goal,-10} {intent.Kind,-6} h {intent.Heading:F2} c {intent.SpeedClass} to ({intent.X:F1}, {intent.Z:F1}) on {intent.On} "
+                    + _brain.LegState);
                 if (tick % 200 == 1 && world.Structures != null)
                 {
                     // What it stands among, now and then: a body that never moves is read off what is around it.

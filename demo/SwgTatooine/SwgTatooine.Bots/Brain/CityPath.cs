@@ -22,7 +22,16 @@ public sealed class WalkGrid
         MinZ = minZ;
         Cols = cols;
         Rows = rows;
-        Blocked = new byte[cols * rows];
+        // The thread's own buffer, grown and cleared rather than allocated: a search is a megabyte at a city's size, and a fleet of thousands searching
+        // through the large object heap was tens of megabytes a second of garbage (review).
+        var n = cols * rows;
+        if (t_blocked == null || t_blocked.Length < n)
+        {
+            t_blocked = new byte[Math.Max(n, (t_blocked?.Length ?? 0) * 2)];
+        }
+
+        Array.Clear(t_blocked, 0, n);
+        Blocked = t_blocked;
     }
 
     /// <summary>The cell's edge, metres.</summary>
@@ -36,7 +45,14 @@ public sealed class WalkGrid
 
     public int Rows { get; }
 
+    /// <summary>
+    /// 1 where a body standing in the cell would touch a wall; the first <see cref="Cols"/> × <see cref="Rows"/> entries are this grid's. The thread's
+    /// reused buffer: a grid is good until the same thread builds the next one.
+    /// </summary>
     public byte[] Blocked { get; }
+
+    [ThreadStatic]
+    private static byte[] t_blocked;
 }
 
 /// <summary>
@@ -216,7 +232,11 @@ public static class CityPath
         return (grid.MinX + ((c + 0.5f) * grid.Cell), grid.MinZ + ((r + 0.5f) * grid.Cell));
     }
 
-    private static int NearestOpen(WalkGrid grid, int cell, int reach)
+    /// <summary>
+    /// The open cell nearest a walled-off one — of the first ring that has any, the one nearest <paramref name="towardX"/>, <paramref name="towardZ"/> —
+    /// or -1. The first in scan order was the south-west one, so a walk to a kiosk could end on its far side (review).
+    /// </summary>
+    private static int NearestOpen(WalkGrid grid, int cell, int reach, float towardX, float towardZ)
     {
         if (grid.Blocked[cell] == 0)
         {
@@ -227,6 +247,8 @@ public static class CityPath
         var r0 = cell / grid.Cols;
         for (var ring = 1; ring <= reach; ring++)
         {
+            var best = -1;
+            var bestD = float.PositiveInfinity;
             for (var dr = -ring; dr <= ring; dr++)
             {
                 for (var dc = -ring; dc <= ring; dc++)
@@ -238,11 +260,24 @@ public static class CityPath
 
                     var r = r0 + dr;
                     var c = c0 + dc;
-                    if (r >= 0 && r < grid.Rows && c >= 0 && c < grid.Cols && grid.Blocked[(r * grid.Cols) + c] == 0)
+                    if (r < 0 || r >= grid.Rows || c < 0 || c >= grid.Cols || grid.Blocked[(r * grid.Cols) + c] != 0)
                     {
-                        return (r * grid.Cols) + c;
+                        continue;
+                    }
+
+                    var (x, z) = CentreOf(grid, (r * grid.Cols) + c);
+                    var d = ((x - towardX) * (x - towardX)) + ((z - towardZ) * (z - towardZ));
+                    if (d < bestD)
+                    {
+                        best = (r * grid.Cols) + c;
+                        bestD = d;
                     }
                 }
+            }
+
+            if (best >= 0)
+            {
+                return best;
             }
         }
 
@@ -266,45 +301,67 @@ public static class CityPath
     }
 
     /// <summary>A path around the walls as waypoints — the start excluded, the goal last — or null when there is none inside the grid.</summary>
-    public static List<(float X, float Z)> Find(WalkGrid grid, float fromX, float fromZ, float toX, float toZ)
+    /// <param name="maxExpansions">Cells it may expand before it gives up; a walled-off goal otherwise costs the whole grid.</param>
+    public static List<(float X, float Z)> Find(WalkGrid grid, float fromX, float fromZ, float toX, float toZ, int maxExpansions = int.MaxValue)
     {
         // Eight metres each way: a body pressed into a street corner stands in cells its own width has walled off, and a goal can be a few metres into
         // a building — four cells left a bot wedged in Dry Wells with no search that could start.
         var reach = (int)MathF.Ceiling(8f / grid.Cell);
-        var start = NearestOpen(grid, CellOf(grid, fromX, fromZ), reach);
+        var start = NearestOpen(grid, CellOf(grid, fromX, fromZ), reach, fromX, fromZ);
         var startOpen = start == CellOf(grid, fromX, fromZ);
-        var goal = NearestOpen(grid, CellOf(grid, toX, toZ), reach);
+        var goal = NearestOpen(grid, CellOf(grid, toX, toZ), reach, fromX, fromZ);
         var goalOpen = goal == CellOf(grid, toX, toZ);
         if (start < 0 || goal < 0)
         {
             return null;
         }
 
+        // The thread's buffers, stamped rather than cleared: a cell's cost and parent are this search's only when its stamp is this search's, so a
+        // search touches the cells it expands and nothing else — no megabyte fills, no allocation (review).
         var n = grid.Cols * grid.Rows;
-        var g = new float[n];
-        Array.Fill(g, float.PositiveInfinity);
-        var came = new int[n];
-        Array.Fill(came, -1);
-        var closed = new bool[n];
+        Scratch.Ensure(n);
+        var stamp = ++Scratch.Generation;
+        if (stamp == int.MaxValue)
+        {
+            Array.Clear(Scratch.Seen);
+            Array.Clear(Scratch.Closed);
+            Scratch.Generation = stamp = 1;
+        }
+
+        var g = Scratch.G;
+        var came = Scratch.Came;
+        var seen = Scratch.Seen;
+        var closed = Scratch.Closed;
         var (gx, gz) = CentreOf(grid, goal);
-        var open = new PriorityQueue<int, float>();
+        var open = Scratch.Open;
+        open.Clear();
         g[start] = 0f;
+        came[start] = -1;
+        seen[start] = stamp;
         open.Enqueue(start, Heuristic(grid, start, gx, gz));
         var cols = grid.Cols;
         var blocked = grid.Blocked;
+        var expanded = 0;
+        var reached = start == goal;
         while (open.TryDequeue(out var cell, out _))
         {
-            if (closed[cell])
+            if (closed[cell] == stamp)
             {
                 continue;
             }
 
             if (cell == goal)
             {
+                reached = true;
                 break;
             }
 
-            closed[cell] = true;
+            if (++expanded > maxExpansions)
+            {
+                return null;
+            }
+
+            closed[cell] = stamp;
             var c = cell % cols;
             var r = cell / cols;
             for (var dr = -1; dr <= 1; dr++)
@@ -331,8 +388,9 @@ public static class CityPath
                     }
 
                     var cost = g[cell] + ((dr != 0 && dc != 0 ? MathF.Sqrt(2f) : 1f) * grid.Cell);
-                    if (cost < g[next])
+                    if (seen[next] != stamp || cost < g[next])
                     {
+                        seen[next] = stamp;
                         g[next] = cost;
                         came[next] = cell;
                         open.Enqueue(next, cost + Heuristic(grid, next, gx, gz));
@@ -341,7 +399,7 @@ public static class CityPath
             }
         }
 
-        if (start != goal && came[goal] < 0)
+        if (!reached)
         {
             return null;
         }
@@ -393,6 +451,60 @@ public static class CityPath
         }
 
         return path;
+    }
+
+    /// <summary>One thread's search buffers, grown as needed and never cleared between searches; see the generation stamp in <see cref="Find"/>.</summary>
+    private static class Scratch
+    {
+        [ThreadStatic]
+        private static float[] t_g;
+
+        [ThreadStatic]
+        private static int[] t_came;
+
+        [ThreadStatic]
+        private static int[] t_seen;
+
+        [ThreadStatic]
+        private static int[] t_closed;
+
+        [ThreadStatic]
+        private static PriorityQueue<int, float> t_open;
+
+        [ThreadStatic]
+        private static int t_generation;
+
+        public static float[] G => t_g;
+
+        public static int[] Came => t_came;
+
+        public static int[] Seen => t_seen;
+
+        public static int[] Closed => t_closed;
+
+        public static PriorityQueue<int, float> Open => t_open ??= new PriorityQueue<int, float>();
+
+        public static int Generation
+        {
+            get => t_generation;
+            set => t_generation = value;
+        }
+
+        public static void Ensure(int n)
+        {
+            if (t_g != null && t_g.Length >= n)
+            {
+                return;
+            }
+
+            var size = Math.Max(n, (t_g?.Length ?? 0) * 2);
+            t_g = new float[size];
+            t_came = new int[size];
+
+            // Fresh arrays are all zero, which no live generation is: stamps start at 1.
+            t_seen = new int[size];
+            t_closed = new int[size];
+        }
     }
 
     private static float Heuristic(WalkGrid grid, int cell, float gx, float gz)

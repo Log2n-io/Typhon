@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using NUnit.Framework;
 using SwgTatooine.Bots.Brain;
@@ -348,9 +349,9 @@ public sealed class BotErrandChecks
             Goal.Visiting,
             b =>
             {
-                b.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X + 300f, Here.Z, TerminalAsset, 0);
-                b.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X + 40f, Here.Z, TerminalAsset, 2);
-                b.Facilities.Observe(1, Routing.BazaarKind, Here.X + 40f, Here.Z + 10f, TerminalAsset, 0);
+                b.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X + 300f, Here.Z, TerminalAsset + 1, 0);
+                b.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X + 40f, Here.Z, TerminalAsset + 1, 2);
+                b.Facilities.Observe(1, Routing.BazaarKind, Here.X + 40f, Here.Z + 10f, TerminalAsset + 1, 0);
             },
             () => new Sim { Planet = [new SeenStructure(Here.X + 40f, Here.Z, 10, TerminalAsset, 2, 1)] });
 
@@ -383,7 +384,7 @@ public sealed class BotErrandChecks
         var terminal = (X: Here.X - 380f, Z: Here.Z);
         var (brain, sim) = Choosing(
             Goal.Visiting,
-            b => b.Facilities.Observe(1, Routing.MissionTerminalKind, terminal.X, terminal.Z, TerminalAsset, 0),
+            b => b.Facilities.Observe(1, Routing.MissionTerminalKind, terminal.X, terminal.Z, TerminalAsset + 1, 0),
             () => new Sim
             {
                 X = house.X + 3.4f,
@@ -435,12 +436,16 @@ public sealed class BotErrandChecks
                 Wall = (house.X - 3.3f, house.Z - 3.3f, house.X + 3.3f, house.Z + 3.3f),
             });
 
-        for (var tick = 10L; tick < 400 && sim.X > house.X - 60f; tick++)
+        for (var tick = 10L; tick < 130; tick++)
         {
             sim.Apply(brain.Decide(sim.View(), tick));
         }
 
         Assert.That(sim.X, Is.LessThan(house.X - 60f), $"a rider pressed against a house never got round it; it is at ({sim.X - house.X:F1}, {sim.Z - house.Z:F1})");
+        // From the detour's first step: a fresh brain's first tick gets off whatever it sits on, which is not the detour's doing.
+        var detour = sim.Sent.FindIndex(i => i.Kind == IntentKind.MoveTo);
+        Assert.That(detour, Is.GreaterThanOrEqualTo(0), "the premise: the rider searched a way round");
+        Assert.That(sim.Sent.Skip(detour), Does.Not.Contain(Intent.Mount(false)), "it got off its swoop to go round a house, and on again after");
     }
 
     /// <summary>A detour whose point ahead stands inside a city block is searched nearer instead, and the rider still gets round the house.</summary>
@@ -480,7 +485,7 @@ public sealed class BotErrandChecks
     {
         var (brain, sim) = Choosing(
             Goal.Visiting,
-            b => b.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X + 40f, Here.Z, TerminalAsset, 0),
+            b => b.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X + 40f, Here.Z, TerminalAsset + 1, 0),
             () => new Sim { ShoveM = 0.7f, Planet = [new SeenStructure(Here.X + 40f, Here.Z, 10, TerminalAsset, 0, 1)] });
 
         for (var tick = 10L; tick < 200 && brain.FacilitiesUsed == 0; tick++)
@@ -501,7 +506,7 @@ public sealed class BotErrandChecks
     {
         var (brain, sim) = Choosing(
             Goal.Visiting,
-            b => b.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X - 60f, Here.Z + 30f, TerminalAsset, 0),
+            b => b.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X - 60f, Here.Z + 30f, TerminalAsset + 1, 0),
             () => new Sim
             {
                 X = Here.X + 7.6f,
@@ -527,7 +532,7 @@ public sealed class BotErrandChecks
     {
         var (brain, sim) = Choosing(
             Goal.Visiting,
-            b => b.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X - 60f, Here.Z, TerminalAsset, 0),
+            b => b.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X - 60f, Here.Z, TerminalAsset + 1, 0),
             () => new Sim
             {
                 X = Here.X + 9.25f,
@@ -546,6 +551,27 @@ public sealed class BotErrandChecks
         Assert.That(brain.FacilitiesUsed, Is.EqualTo(1), "the errand from beside the house never reached the terminal");
     }
 
+    /// <summary>A ticket terminal no walk can reach is searched for once, not on every tick.</summary>
+    /// <remarks>The review's worst finding: a failed plan cleared the leg, which read as "not planned yet", and a whole-grid search ran every tick.</remarks>
+    [Test]
+    public void AnUnreachableTicketTerminalIsNotSearchedEveryTick()
+    {
+        var port = (X: Here.X, Z: Here.Z - 60f);
+        var (brain, sim) = Choosing(
+            b => b.Goal == Goal.Travelling && b.Mode == TravelMode.Shuttle,
+            "a flight",
+            b => b.Facilities.Observe(1, Routing.ShuttleportKind, port.X, port.Z, PortAsset + 1, 0),
+            () => new Sim { Planet = [new SeenStructure(port.X - 2f, port.Z + 25f, 0, BlockAsset, 0, 1)] });
+
+        var before = brain.PathsPlanned;
+        for (var tick = 10L; tick < 50; tick++)
+        {
+            sim.Apply(brain.Decide(sim.View(), tick));
+        }
+
+        Assert.That(brain.PathsPlanned - before, Is.LessThanOrEqualTo(4), "the terminal's walk was searched again and again");
+    }
+
     /// <summary>After an errand the shuttle: the ticket terminal's published path, then the ask — never the ask from across the street.</summary>
     [Test]
     public void AFlightWalksToTheTicketTerminalBeforeAsking()
@@ -554,7 +580,7 @@ public sealed class BotErrandChecks
         var (brain, sim) = Choosing(
             b => b.Goal == Goal.Travelling && b.Mode == TravelMode.Shuttle,
             "a flight",
-            b => b.Facilities.Observe(1, Routing.ShuttleportKind, port.X, port.Z, PortAsset, 0),
+            b => b.Facilities.Observe(1, Routing.ShuttleportKind, port.X, port.Z, PortAsset + 1, 0),
             () => new Sim());
 
         Intent asked = default;
@@ -643,6 +669,48 @@ public sealed class BotPathChecks
             Assert.That(CityPath.LineClear(grid, 0f, -20f, 0f, 20f), Is.False, "the pad's disc was not a wall");
             Assert.That(CityPath.LineClear(grid, 20.4f, -4f, 20.4f, 4f), Is.False, "a 2.3 m leaning strut was walked over like a ramp");
         });
+    }
+
+    /// <summary>The search's reused buffers give the answer a fresh search gives, whatever searched before it on the thread.</summary>
+    [Test]
+    public void ARepeatedSearchFindsTheSamePath()
+    {
+        var wall = OneWall(new PlanBox(-20f, 10f, 20f, 11f, 0f, 2f, false));
+        var open = new BotAssets([new AssetPlan { Id = "nothing" }]);
+        var structures = new List<SeenStructure> { new(0f, 0f, 0, 0, 0, 1) };
+        var walled = CityPath.Walls(structures, wall, -40f, -10f, 40f, 30f);
+        var first = CityPath.Find(walled, 0f, 0f, 0f, 20f);
+
+        // A larger grid, a different answer, in between.
+        var bare = CityPath.Walls(structures, open, -80f, -80f, 80f, 80f);
+        Assert.That(CityPath.Find(bare, -70f, -70f, 70f, 70f), Has.Count.EqualTo(1));
+
+        var again = CityPath.Find(CityPath.Walls(structures, wall, -40f, -10f, 40f, 30f), 0f, 0f, 0f, 20f);
+        Assert.That(again, Is.EqualTo(first));
+    }
+
+    /// <summary>A walk to a walled goal ends on the side it comes from, not on the first open cell in scan order.</summary>
+    [Test]
+    public void AWalledGoalIsReachedFromItsNearSide()
+    {
+        var kiosk = OneWall(new PlanBox(-1f, -1f, 1f, 1f, 0f, 1.6f, false));
+        var grid = CityPath.Walls([new SeenStructure(0f, 0f, 0, 0, 0, 1)], kiosk, -20f, -20f, 20f, 20f);
+        var path = CityPath.Find(grid, -15f, 0f, 0f, 0f);
+        Assert.That(path, Is.Not.Null);
+        Assert.That(path[^1].X, Is.LessThan(-1f), "a walk from the west ended on the kiosk's far side");
+    }
+
+    /// <summary>A walled-off goal gives up within its expansion budget instead of costing the whole grid.</summary>
+    [Test]
+    public void AWalledOffGoalGivesUpWithinItsBudget()
+    {
+        var pen = new BotAssets([new AssetPlan { Id = "pen", Walls =
+        [
+            new PlanBox(-6f, -6f, -5f, 6f, 0f, 2f, false), new PlanBox(5f, -6f, 6f, 6f, 0f, 2f, false),
+            new PlanBox(-6f, -6f, 6f, -5f, 0f, 2f, false), new PlanBox(-6f, 5f, 6f, 6f, 0f, 2f, false),
+        ] }]);
+        var grid = CityPath.Walls([new SeenStructure(0f, 0f, 0, 0, 0, 1)], pen, -100f, -100f, 100f, 100f);
+        Assert.That(CityPath.Find(grid, -90f, -90f, 0f, 0f, maxExpansions: 1000), Is.Null);
     }
 
     /// <summary>A ramp, a step and an overhead beam are walked: only what a body cannot step onto is a wall.</summary>
