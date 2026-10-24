@@ -80,6 +80,7 @@ if (!result.IsValid)
 - Runs once per affected component per reopen, before WAL replay and before any user transaction can start — no caller can ever observe a partially-migrated entity.
 - `OnMigrationProgress` fires on the calling thread in monotonically non-decreasing `MigrationPhase` order, always starting at `Analyzing` and ending at `Complete` — safe to drive a log/progress bar, not a substitute for cross-thread coordination.
 - Crash mid-migration is safe to retry: the database's root metadata repoints to the new segments atomically in the checkpoint cycle's meta flip (SCHEMA-09) — not at the migration flush. Old segments remain authoritative from the start of migration until that flip, so a crash anywhere before it leaves the pre-migration image intact for the next open to re-run.
+- The open waits for that flip before it completes, forcing checkpoints for as long as they make progress; a commit checkpoint that stops making progress fails the open and leaves the pre-migration image.
 - `DatabaseSchema.ValidateEvolution()` mutates nothing — it's read-only analysis against the file, suitable for a pre-deploy CI check.
 - Cost is proportional to entity count and paid once at startup, and it **includes a full index rebuild** — a migration re-clusters the archetype and repopulates every per-archetype B+Tree from cluster data, not only the trees for newly-`[Index]`-attributed fields. Budget O(entities) per archetype plus an index build per indexed field. There is no incremental or amortized migration for very large databases today.
 

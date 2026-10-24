@@ -52,7 +52,8 @@ catch (TransactionExceedsPageCacheException ex)
 }
 catch (PageCacheBackpressureTimeoutException ex)
 {
-    // Pages exist but not enough freed before TimeoutOptions.Current.PageCacheBackpressureTimeout (default 5s).
+    // No page was served for a whole PageCacheBackpressureTimeout (default 5s), or the wait reached
+    // PageCacheOverloadWaitCeiling (default 60s).
     // ex.DirtyPageCount / ex.EpochProtectedCount say which protection is holding pages back.
     // Transient: retry with backoff, reduce concurrency, or enlarge DatabaseCacheSize.
 }
@@ -61,7 +62,7 @@ catch (PageCacheBackpressureTimeoutException ex)
 | Option | Default | Effect |
 |--------|---------|--------|
 | `PagedMMFOptions.DatabaseCacheSize` (or `TyphonOptions.PageCacheSize`) | 256 MiB | Total page-cache budget (bytes); must exceed the largest single commit's PREPARE-phase working set (the publish can give back dirty marks as it goes — see [page-cache](./page-cache.md)). 8 MiB minimum; below a 64 MiB recommended floor logs a warning |
-| `TimeoutOptions.Current.PageCacheBackpressureTimeout` | 5s | How long allocation waits for a page to become evictable before throwing |
+| `TimeoutOptions.Current.PageCacheBackpressureTimeout` | 5s | One period of an allocation's back-pressure wait: a period with no page served throws; one that saw a page served starts another, up to `PageCacheOverloadWaitCeiling` (60s) — see [page-cache](./page-cache.md) |
 
 ## ⚠️ Guarantees & limits
 
