@@ -21,9 +21,10 @@ databases) get visibility into how far along it is instead of an opaque hang.
 
 `RegisterComponentFromAccessor<T>()` performs migration **inline and synchronously** — it does not return until
 every affected entity has been migrated (or an exception is thrown). The engine flushes the migration's own
-`ChangeSet` to disk and repoints the database's root metadata to the new segments *before* WAL replay begins;
-if the process crashes mid-migration, the old segments are still authoritative and the next open re-runs
-migration from scratch (rule: migration completion is all-or-nothing per reopen). While running, the engine
+`ChangeSet` to disk, then stages an atomic catalog commit: the database's root metadata repoints to the new
+segments in the same meta flip that advances `CheckpointLSN` (SCHEMA-09) — the seal checkpoint on a crash
+open, or the next forced checkpoint on a clean open. Until that flip the old segments remain authoritative, so
+a crash anywhere before it leaves the pre-migration image intact and the next open re-runs migration in full. While running, the engine
 raises `DatabaseEngine.OnMigrationProgress` synchronously on the calling thread, once per `MigrationPhase`
 transition, so you can log or display progress without polling. Separately, `DatabaseSchema.ValidateEvolution()`
 runs the same diff/classification logic offline against the database file — no engine instance, no data
@@ -78,7 +79,8 @@ if (!result.IsValid)
 - Fully synchronous and blocking — there is no background or async migration mode; `RegisterComponentFromAccessor<T>()` owns the calling thread until done.
 - Runs once per affected component per reopen, before WAL replay and before any user transaction can start — no caller can ever observe a partially-migrated entity.
 - `OnMigrationProgress` fires on the calling thread in monotonically non-decreasing `MigrationPhase` order, always starting at `Analyzing` and ending at `Complete` — safe to drive a log/progress bar, not a substitute for cross-thread coordination.
-- Crash mid-migration is safe to retry: the database's root metadata only repoints to the new segments after migration's own flush succeeds, so a crash before that leaves the prior (pre-migration) segments authoritative and the next open re-runs migration in full.
+- Crash mid-migration is safe to retry: the database's root metadata repoints to the new segments atomically in the checkpoint cycle's meta flip (SCHEMA-09) — not at the migration flush. Old segments remain authoritative from the start of migration until that flip, so a crash anywhere before it leaves the pre-migration image intact for the next open to re-run.
+- The open waits for that flip before it completes, forcing checkpoints for as long as they make progress; a commit checkpoint that stops making progress fails the open and leaves the pre-migration image.
 - `DatabaseSchema.ValidateEvolution()` mutates nothing — it's read-only analysis against the file, suitable for a pre-deploy CI check.
 - Cost is proportional to entity count and paid once at startup, and it **includes a full index rebuild** — a migration re-clusters the archetype and repopulates every per-archetype B+Tree from cluster data, not only the trees for newly-`[Index]`-attributed fields. Budget O(entities) per archetype plus an index build per indexed field. There is no incremental or amortized migration for very large databases today.
 

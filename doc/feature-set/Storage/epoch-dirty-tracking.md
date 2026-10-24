@@ -33,30 +33,36 @@ tx.Commit();                                      // epoch scope exited; dirty m
                                                    // (the debt stays until a checkpoint writes the page)
 ```
 
-The one place application code interacts with this layer is sizing the cache and handling the failure mode when it's undersized — a single transaction's working set must fit within `DatabaseCacheSize`, since every page it touches is epoch-protected for the scope's whole lifetime:
+The one place application code interacts with this layer is sizing the cache and handling the failure modes when it's undersized — a commit's PREPARE phase working set must fit within `DatabaseCacheSize`; a commit that holds every page itself is refused before its WAL append with `TransactionExceedsPageCacheException` (not transient), while a commit that merely exhausts the cache after a wait surfaces as `PageCacheBackpressureTimeoutException` (transient):
 
 ```csharp
 services.AddScopedManagedPagedMemoryMappedFile(options =>
 {
-    options.DatabaseCacheSize = 64UL * 1024 * 1024;   // 8192 pages @ 8KB; size above the largest expected UoW working set
+    options.DatabaseCacheSize = 64UL * 1024 * 1024;   // 8192 pages @ 8KB; size above the largest expected UoW PREPARE working set
 });
 
 try
 {
     BulkInsertThousandsOfEntities(db);
 }
+catch (TransactionExceedsPageCacheException ex)
+{
+    // The commit held every page itself (ex.HeldPages / ex.CachePages) — no wait can ever serve it.
+    // Not transient: commit in smaller batches, or enlarge DatabaseCacheSize.
+}
 catch (PageCacheBackpressureTimeoutException ex)
 {
-    // No evictable page after waiting TimeoutOptions.Current.PageCacheBackpressureTimeout (default 5s).
+    // No page was served for a whole PageCacheBackpressureTimeout (default 5s), or the wait reached
+    // PageCacheOverloadWaitCeiling (default 60s).
     // ex.DirtyPageCount / ex.EpochProtectedCount say which protection is holding pages back.
-    // Fix: enlarge DatabaseCacheSize, or split the transaction into smaller batches.
+    // Transient: retry with backoff, reduce concurrency, or enlarge DatabaseCacheSize.
 }
 ```
 
 | Option | Default | Effect |
 |--------|---------|--------|
-| `PagedMMFOptions.DatabaseCacheSize` (or `TyphonOptions.PageCacheSize`) | 256 MiB | Total page-cache budget (bytes); must exceed the largest single transaction's unique-page working set. 8 MiB minimum; below a 64 MiB recommended floor logs a warning |
-| `TimeoutOptions.Current.PageCacheBackpressureTimeout` | 5s | How long allocation waits for a page to become evictable before throwing |
+| `PagedMMFOptions.DatabaseCacheSize` (or `TyphonOptions.PageCacheSize`) | 256 MiB | Total page-cache budget (bytes); must exceed the largest single commit's PREPARE-phase working set (the publish can give back dirty marks as it goes — see [page-cache](./page-cache.md)). 8 MiB minimum; below a 64 MiB recommended floor logs a warning |
+| `TimeoutOptions.Current.PageCacheBackpressureTimeout` | 5s | One period of an allocation's back-pressure wait: a period with no page served throws; one that saw a page served starts another, up to `PageCacheOverloadWaitCeiling` (60s) — see [page-cache](./page-cache.md) |
 
 ## ⚠️ Guarantees & limits
 

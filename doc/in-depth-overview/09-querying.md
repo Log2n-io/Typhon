@@ -16,7 +16,7 @@ This doc covers both layers. The query builder ([`EcsQuery<TArchetype>`](https:/
   <img src="assets/typhon-query-overview.svg" width="691" alt="Query engine — component overview">
 </a>
 <br>
-<sub>Query engine components: <code>EcsQuery</code> (fluent API) → <code>ExpressionParser</code> → <code>PlanBuilder</code> → <code>PipelineExecutor</code>, feeding the view layer (<code>ViewBase._entityIds</code>, <code>ViewDelta</code> + <code>DeltaKind</code>, <code>ViewRegistry</code> / <code>IndexMaintainer</code>) and reading from ComponentTable / B+Tree indexes / statistics.</sub>
+<sub>The diagram's <code>PipelineExecutor</code> box predates #629: the scans now run in <code>EcsQuery</code>, and <code>PipelineExecutor</code> keeps two helpers (§4). Query engine components: <code>EcsQuery</code> (fluent API) → <code>ExpressionParser</code> → <code>PlanBuilder</code> → plan execution, feeding the view layer (<code>ViewBase._entityIds</code>, <code>ViewDelta</code> + <code>DeltaKind</code>, <code>ViewRegistry</code> / <code>IndexMaintainer</code>) and reading from ComponentTable / B+Tree indexes / statistics.</sub>
 
 ---
 
@@ -34,7 +34,7 @@ Both go through the same machinery:
 1. **`ExpressionParser`** — `Expression<Func<T, bool>>` lambdas are normalized to Disjunctive Normal Form (OR of ANDs), one `FieldPredicate[]` per OR branch.
 2. **`QueryResolverHelper.ResolveEvaluators`** — `FieldPredicate` (string field name + op + boxed value) becomes `FieldEvaluator` (16 B: field index, key type, op, byte branch index, 8-byte widened threshold). String64 predicates are **rejected here** ([`QueryResolverHelper.cs:93`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/QueryResolverHelper.cs)) — `KeyType.String64` exists for the index/statistics layer only; no scalar comparator for it.
 3. **`PlanBuilder`** — picks the most selective indexed field as the primary scan (via `AdvancedSelectivityEstimator`), narrows its key range, orders the rest of the evaluators by ascending estimated cardinality (most selective first → short-circuit), builds an `ExecutionPlan`.
-4. **`PipelineExecutor`** — iterates the primary B+Tree, walks the MVCC revision chain (or reads SV/Transient component data directly), evaluates non-primary predicates inline, streams matching entity PKs into a caller-provided `HashMap<long>` / `List<long>`.
+4. **`EcsQuery`** — executes the plan per archetype (`ScanAllArchetypes` for unordered, `ExecuteOrderedClustered` for ordered): a range scan of the archetype's B+Tree or a zone-map-pruned pass over its clusters (§3), evaluating the remaining predicates inline, and streams the matching entities into a sink — a `HashSet<EntityId>` for a one-shot query, the view's `HashMap<long>` for a view refresh; an ordered query returns a `List<EntityId>`.
 
 Views layer on top of (4) by registering an `IView` with the per-`ComponentTable` `ViewRegistry`. When the index maintainer commits a mutation that crosses a registered field's boundary, the registry routes a `ViewDeltaEntry` into each affected view's lock-free MPSC `ViewDeltaRingBuffer`. The view's `Refresh(tx)` drains the ring buffer and reconciles its `HashMap<long>` against the new state.
 
@@ -42,7 +42,7 @@ Views layer on top of (4) by registering an `IView` with the per-`ComponentTable
   <img src="assets/typhon-query-pipeline.svg" width="1200" alt="Query execution pipeline">
 </a>
 <br>
-<sub>The pipeline executor's five steps: select the most-selective primary index → stream entity IDs via index scan → check secondary predicates → materialize components → add to the view's entity set (<code>ViewBase._entityIds</code>).</sub>
+<sub>The query execution pipeline's five steps: select the most-selective primary index → stream entity IDs via index scan (in <code>EcsQuery</code>) → check secondary predicates → materialize components → add to the view's entity set (<code>ViewBase._entityIds</code>).</sub>
 
 ---
 
@@ -152,8 +152,8 @@ Singleton (`PlanBuilder.Instance`). Two stages:
 
 | Query shape | Entry point |
 |---|---|
-| Unordered, plan proposes a stream and the primary index's fan-out is high enough (many rows per distinct key) | `ExecuteTargeted` → `ScanPerArchetypeBTreeSelective` — **Path A**: range-scan the archetype's B+Tree, then verify the remaining predicates on the matched slots only |
-| Unordered, otherwise | `ExecuteTargeted` → `ScanPerArchetypeBTree` — **Path B**: zone-map-prune each cluster and evaluate every predicate against the SoA column |
+| Unordered, plan proposes a stream and the primary index's fan-out is high enough (many rows per distinct key) | `ExecuteTargeted` → `ScanPerArchetypeBTreeSelective` — **Path A**: range-scan the archetype's B+Tree, then verify the remaining predicates on the matched slots only; a `Versioned` cluster updated after the reader's snapshot is read whole and verified against a per-transaction snapshot column (`FillSnapshotColumn`, VIS-12) |
+| Unordered, otherwise | `ExecuteTargeted` → `ScanPerArchetypeBTree` — **Path B**: zone-map-prune each cluster and evaluate every predicate against the SoA column; for `Versioned` clusters whose update watermark is above the reader's snapshot, evaluation uses a per-transaction snapshot column instead (`FillSnapshotColumn`, VIS-12) |
 | Ordered, and every archetype in the mask carries per-archetype indexes on the where-component (`HasClusterIndexes`, non-null `IndexSlots`) | `ExecuteOrderedClustered` — K-way merge over the OrderBy field's per-archetype B+Trees |
 | Ordered, and any archetype in the mask lacks them | `ExecuteOrderedViaSortFallback` — scan, then sort |
 | `Count()` | `ExecuteTargeted().Count` — the same scan, then its size |
@@ -187,41 +187,26 @@ public struct FieldEvaluator  // exactly 16 bytes
 
 ---
 
-## 4. Execution — `PipelineExecutor`
+## 4. Execution — `EcsQuery` scans, `PipelineExecutor` helpers
 
 [`Querying/internals/PipelineExecutor.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/PipelineExecutor.cs)
 
-Singleton (`PipelineExecutor.Instance`). Three public methods:
+`PipelineExecutor` is a **static class** (no `Instance`). Its B+Tree scan machinery was removed when the shared per-`ComponentTable` index home was replaced by per-archetype indexes (#629); the scan paths now live in `EcsQuery` (`ScanAllArchetypes`, `ScanPerArchetypeBTree`, `ScanPerArchetypeBTreeSelective`, `ExecuteOrderedClustered`, `ExecuteOrderedViaSortFallback`). Two static helpers remain:
 
-```csharp
-void Execute(ExecutionPlan, FieldEvaluator[], ComponentTable, Transaction, HashMap<long> result);
-void ExecuteOrdered(ExecutionPlan, FieldEvaluator[], ComponentTable, Transaction, List<long> result, int skip, int take);
-int  Count(ExecutionPlan, FieldEvaluator[], ComponentTable, Transaction);
-```
+- **`EvaluateFilters<T>(FieldEvaluator[] evaluators, Transaction tx, long pk)`** — reads component `T` for `pk` at the transaction's snapshot and evaluates every field predicate against it. Used by the navigation path (`EcsNavigationQueryBuilder`); `EcsQuery`'s scans do not call it.
+- **`FindFKIndexOrdinal(ComponentTable ct, int fkFieldOffset)`** — maps a foreign-key field's byte offset to its ordinal in the per-archetype B+Trees' `IndexSlots` array. Used by navigation (`EcsNavigationQueryBuilder`, `NavigationView`) and by cascade delete (`Transaction.ECS.cs`).
 
-The caller owns the `HashMap<long>` / `List<long>` lifecycle. One-shot queries allocate a fresh container; views reuse `ViewBase._entityIds`. There is **no internal buffering** — matching entity PKs are streamed from the B+Tree iterator directly into the caller's container as they pass the filter chain.
+### Iterator shape (in `EcsQuery`)
 
-### Three storage-mode branches
+The B+Tree iteration lives in `EcsQuery`. For an `AllowMultiple = true` index, the tree exposes `EnumerateRangeMultiple(min, max)` / `EnumerateRangeMultipleDescending` — one outer `MoveNextKey` per distinct key, an inner `do { var values = enumerator.CurrentValues; ... } while (NextChunk());` for all chunks of multi-values at that key. For unique indexes it's a plain `foreach (var kv in EnumerateRange(min, max))`.
 
-`ExecuteCoreSecondaryIndex` dispatches on `table.StorageMode`:
+### View full scan — `EcsQuery.ExecuteFullScanAcrossArchetypes`
 
-- **`Versioned`** → `ExecutePKsTypedVersioned`. The index value is the `compRevFirstChunkId` of the entity's revision chain. The pipeline reads `EntityPK` from `CompRevStorageHeader` (one cache line), checks MVCC visibility via `tx.IsEntityVisible(entityPK)`, and only if non-primary filters exist does it walk the revision chain via `RevisionChainReader.WalkChain(tx.TSN)` to resolve the current component content chunk for predicate evaluation. **No EntityMap re-lookup** — the index entry already points at the chain.
-- **`SingleVersion`** → `ExecutePKsTypedSV`. Index values are component chunk IDs. `EntityPK` is read from offset 0 of the chunk's inline overhead. No revision chain; no MVCC — SV reads see the current in-place value.
-- **`Transient`** → `ExecutePKsTypedNonVersioned<TKey, TransientStore>`. Same shape as SV but using `TransientStore` accessors. Transient data lives in `TransientComponentSegment` and never persists.
-
-The SV and Transient paths share the `ExecutePKsTypedNonVersioned<TKey, TStore>` generic — `TStore` is the only thing that differs structurally.
-
-### Iterator shape
-
-For an `AllowMultiple = true` index, the B+Tree exposes `EnumerateRangeMultiple(min, max)` / `EnumerateRangeMultipleDescending` — one outer `MoveNextKey` per distinct key, an inner `do { var values = enumerator.CurrentValues; ... } while (NextChunk());` for all chunks of multi-values at that key. For unique indexes it's a plain `foreach (var kv in EnumerateRange(min, max))`. Either way the executor streams entries through the per-entity check function (`ExecuteOneVersioned` / inline-evaluator-loop for SV/Transient).
-
-### `ExecuteFullScan` (it's not on `PipelineExecutor`)
-
-The wrapper `ExecuteFullScan(plan, evaluators, table, tx, HashMap<long> result)` lives on **[`EcsViewFieldReader`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EcsView.cs)** (`Ecs/public/EcsView.cs:864`), not on `PipelineExecutor`. The typed subclass `EcsViewFieldReader<T>` simply delegates to `PipelineExecutor.Instance.Execute(...)`. It exists as a thin abstraction so `EcsView` can call the executor without knowing the component type — the `EcsView` is parameterized by `TArchetype`, the field reader carries the component `T`. `ExecuteOrderedScan` and `CountScan` follow the same pattern.
+The full-scan entry point for view refreshes is `EcsQuery.ExecuteFullScanAcrossArchetypes`. `EcsView` holds an `EcsViewFieldReader` (an abstract typed wrapper for per-entity secondary predicate checks) and calls: `_query.ExecuteFullScanAcrossArchetypes(CachedPlan, CachedPlan.OrderedEvaluators, _componentTable, _entityIds)` (`Ecs/public/EcsView.cs:852`). `EcsViewFieldReader<T>` is the typed subclass used by the delta-check path for field evaluation via `TryOpen` + `TryRead<T>`.
 
 ### What's not there (audit clarifications)
 
-There is **no** "batch 256 PKs into a stackalloc buffer" mechanism. There is no `Batch` or `BatchSize` constant in `PipelineExecutor`. Streaming is per-entry, directly from the B+Tree enumerator into the caller's container.
+There is **no** "batch 256 PKs into a stackalloc buffer" mechanism. There is no `Batch` or `BatchSize` constant in `PipelineExecutor` or `EcsQuery`. Streaming is per-entry: from the tree enumerator (Path A, ordered) or the cluster pass (Path B) into the caller's container, through a struct sink (`IEntityIdSink`).
 
 ---
 
