@@ -60,16 +60,17 @@ internal static class StructureAssets
         StructureKind.Building,
         StructureKind.PlayerHouse,
         StructureKind.Shuttleport,
+        StructureKind.Bazaar,
         StructureKind.Terminal,
-        StructureKind.Terminal,
-        StructureKind.Terminal,
+        StructureKind.MissionTerminal,
         StructureKind.Interior,
         StructureKind.Interior,
     ];
 
     /// <summary>The asset a structure of this kind is, as an index into <see cref="Table"/>.</summary>
     /// <param name="kind">A <see cref="StructureKind"/>.</param>
-    /// <param name="rng">Draws between equivalent assets; a city's terminals are then not all the same object.</param>
+    /// <param name="rng">Draws between equivalent assets. No kind has several since bazaars and mission terminals became kinds of their own, which they had
+    /// to: a terminal drawn at random from three assets could not be found by what it is.</param>
     /// <returns>An index, or <see cref="NoAsset"/>.</returns>
     /// <remarks>
     /// The footprints line up with <see cref="StructureFootprint.HalfExtentM"/>, which is why this is a table and not a
@@ -81,7 +82,9 @@ internal static class StructureAssets
         StructureKind.Building => 0,
         StructureKind.PlayerHouse => 1,
         StructureKind.Shuttleport => 2,
-        StructureKind.Terminal => 3 + rng.NextInt(0, 3),
+        StructureKind.Bazaar => 3,
+        StructureKind.Terminal => 4,
+        StructureKind.MissionTerminal => 5,
 
         // PoiProp, Factory, Harvester, CampObject: nothing published stands in for them. Interior: the door decides, not the kind.
         _ => NoAsset,

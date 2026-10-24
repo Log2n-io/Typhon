@@ -70,6 +70,8 @@ export function gaitLabel(speedClass: number): string {
       return 'Speeder (fast)';
     case SpeedClass.walk:
       return 'Walk';
+    case SpeedClass.swoop:
+      return 'Swoop';
     default:
       return 'Stopped';
   }

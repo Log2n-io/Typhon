@@ -1107,6 +1107,7 @@ public static partial class TatooineReplication
             BurstMps = SpeedFor(SpeedClasses.Burst),
             SpeederMps = SpeedFor(SpeedClasses.Speeder),
             SpeederFastMps = SpeedFor(SpeedClasses.SpeederFast),
+            SwoopMps = SpeedFor(SpeedClasses.Swoop),
         };
 
         var vitals = new PlayerVitals

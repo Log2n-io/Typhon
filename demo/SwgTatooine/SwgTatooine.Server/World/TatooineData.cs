@@ -165,6 +165,9 @@ public static class TatooineData
     /// </remarks>
     public const float PlayerMountSpeedMps = 12f;
 
+    /// <summary>A player riding a swoop: four times a run (Loïc, 2026-10-24: "we'll adjust if needed"), 20 m/s before the gait scale.</summary>
+    public const float PlayerSwoopSpeedMps = PlayerRunSpeedMps * 4f;
+
     /// <summary>
     /// [CORE3] Burst Run: a run multiplied by 1.822, which is 9.11 m/s.
     /// </summary>

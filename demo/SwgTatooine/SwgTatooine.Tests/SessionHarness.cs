@@ -332,6 +332,14 @@ internal static class ClientSays
         ["changePhase"] = FieldValue.Of(changePhase),
     };
 
+    /// <summary>The field values of a <c>SetMount</c>.</summary>
+    /// <param name="on">Whether to ride.</param>
+    /// <returns>The values.</returns>
+    public static RecordValues SetMount(bool on) => new()
+    {
+        ["on"] = FieldValue.Of((byte)(on ? 1 : 0)),
+    };
+
     /// <summary>The field values of a <c>SetTarget</c>.</summary>
     /// <param name="netId">The target's network identity, or 0 to clear.</param>
     /// <returns>The values.</returns>

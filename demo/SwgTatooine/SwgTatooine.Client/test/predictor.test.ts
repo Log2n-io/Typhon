@@ -13,10 +13,10 @@ const WALK = 2.5;
 const RUN = 5;
 
 /** The whole granted ladder, as a session's owner block carries it. The figures are the server's; these are its. */
-const GRANTED = { walkMps: WALK, runMps: RUN, burstMps: 9.11, speederMps: 12, speederFastMps: 24 };
+const GRANTED = { walkMps: WALK, runMps: RUN, burstMps: 9.11, speederMps: 12, speederFastMps: 24, swoopMps: 20 };
 
 /** Before the owner block arrives, every one of them is NaN. */
-const UNKNOWN = { walkMps: NaN, runMps: NaN, burstMps: NaN, speederMps: NaN, speederFastMps: NaN };
+const UNKNOWN = { walkMps: NaN, runMps: NaN, burstMps: NaN, speederMps: NaN, speederFastMps: NaN, swoopMps: NaN };
 
 /** A frame at 60 Hz. */
 const FRAME_MS = 16;
@@ -164,6 +164,7 @@ describe('speedForClass', () => {
     expect(speedForClass(SpeedClass.burst, GRANTED)).toBe(GRANTED.burstMps);
     expect(speedForClass(SpeedClass.speeder, GRANTED)).toBe(GRANTED.speederMps);
     expect(speedForClass(SpeedClass.speederFast, GRANTED)).toBe(GRANTED.speederFastMps);
+    expect(speedForClass(SpeedClass.swoop, GRANTED)).toBe(GRANTED.swoopMps);
   });
 
   /**

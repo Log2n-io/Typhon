@@ -141,6 +141,15 @@ public sealed class SimConfig
     /// </remarks>
     public bool CollisionAudit;
 
+    /// <summary>
+    /// Bazaars, and separately mission terminals, per square kilometre of a city's disc, on top of the one of each beside its shuttleport's gate. [EST]
+    /// </summary>
+    /// <remarks>
+    /// A city gets <c>1 + round(density × area)</c> of each, spread over the disc. At the default 8, Mos Eisley (456 m) has 6 of each, Bestine (336 m) 4,
+    /// Anchorhead (125 m) and the two smallest towns 1 or 2 — enough that a player in a city of any size finds one within a short walk.
+    /// </remarks>
+    public float FacilityDensityPerKm2 = 8f;
+
     /// <summary>Share of in-city idle decisions that walk into a building instead. [EST]</summary>
     public float InteriorShare = 0.25f;
 

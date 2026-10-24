@@ -1,3 +1,4 @@
+import { SpeedClass } from '../data/source';
 import { gaitDigit, gaitLabel } from '../app/gait';
 import { realmLabel } from '../data/realm-view';
 import { useStats } from '../state/stats-store';
@@ -89,7 +90,7 @@ export function Hud() {
                 dash here means the owner block has not arrived and the predictor is in its no-prediction fallback,
                 which is worth being able to see. */}
             <td>Gait</td>
-            <td>{`${gaitLabel(stats.gait)} (⇧${gaitDigit(stats.gait)}) · ${fmt(stats.gaitMps, 1)} m/s`}</td>
+            <td>{`${gaitLabel(stats.gait)} (${stats.gait === SpeedClass.swoop ? '1' : `⇧${gaitDigit(stats.gait)}`}) · ${fmt(stats.gaitMps, 1)} m/s`}</td>
           </tr>
           <tr>
             {/* The terrain under the camera's target, and where it came from. The world no longer starts before the field

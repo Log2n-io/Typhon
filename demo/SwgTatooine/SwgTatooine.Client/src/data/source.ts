@@ -130,6 +130,9 @@ export const SpeedClass = {
   burst: 3,
   speeder: 4,
   speederFast: 5,
+
+  /** Riding a swoop: granted only while the server has the avatar on one (`SetMount`). */
+  swoop: 6,
 } as const;
 
 export interface DataSource {
@@ -291,6 +294,11 @@ export interface DataSource {
    */
   boardShuttle(destCity: number): void;
   /**
+   * Gets on the swoop, or off it (`SetMount`). The server holds the state — it is what grants {@link SpeedClass.swoop} —
+   * and replicates it as the avatar's `mounted` field; this only asks. Refused off a planet and while queued for a shuttle.
+   */
+  setMount(on: boolean): void;
+  /**
    * Asks for the god camera's view of the planet (`Overview`), or to come back to the player's own, keeping the avatar.
    *
    * <b>Idempotent, so it can be called every frame</b> with the state the UI wants: only a change is sent, and a new
@@ -380,6 +388,7 @@ export class TyphonSource implements DataSource {
   private setViewRadiusCommand: MessagePlan | null = null;
 
   private boardShuttleCommand: MessagePlan | null = null;
+  private setMountCommand: MessagePlan | null = null;
   private overviewCommand: MessagePlan | null = null;
 
   /** The sphere radius last asked for, metres; 0 for none asked. See {@link effectiveRadiusM}. */
@@ -746,6 +755,15 @@ export class TyphonSource implements DataSource {
   /** The sequence of the boarding ask awaiting an answer, or -1; see {@link SourceOptions.onShuttleRefused}. */
   private pendingBoardSeq = -1;
 
+  setMount(on: boolean): void {
+    if (this.setMountCommand === null) {
+      return;
+    }
+
+    this.commands?.enqueue(this.setMountCommand, { on: on ? 1 : 0 });
+    this.sendPending();
+  }
+
   setOverview(on: boolean): void {
     // Absent from a god session's catalog view, whose camera already sees the planet.
     if (this.overviewCommand === null || on === this.overviewAsked || this.ticks === 0) {
@@ -899,6 +917,7 @@ export class TyphonSource implements DataSource {
     this.setTargetCommand = plan.commandByName('SetTarget');
     this.setViewRadiusCommand = plan.commandByName('SetViewRadius');
     this.boardShuttleCommand = plan.commandByName('BoardShuttle');
+    this.setMountCommand = plan.commandByName('SetMount');
     this.overviewCommand = plan.commandByName('Overview');
     this.commands = new CommandQueue({ plan });
     this.region =

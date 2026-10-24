@@ -487,7 +487,7 @@ public struct CreatureMotion
 }
 
 /// <summary>A player's velocity and destination. Speed changes with the activity: 5 m/s on foot, 12 mounted.</summary>
-[Component("Swg.PlayerMotion", 1, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.PlayerMotion", 2, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct PlayerMotion
 {
@@ -536,6 +536,9 @@ public struct PlayerMotion
     /// session and nothing to anyone watching.
     /// </remarks>
     [Field, Owner(CodecKind.F32, Name = "speederFastMps", Group = "move")] public float SpeederFastMps;
+
+    /// <summary>What this player's SWOOP is worth, in metres per second, granted only while <see cref="PlayerState.Mounted"/>. See <see cref="WalkMps"/>.</summary>
+    [Field, Owner(CodecKind.F32, Name = "swoopMps", Group = "move")] public float SwoopMps;
 
     /// <summary>
     /// A one-tick position offset the move phase owes this player, in METRES — the share of a split tick that belonged to the velocity before an intent
@@ -786,7 +789,7 @@ public static class AiMode
 /// A player's behaviour. Players are simulated as an activity MIX rather than one loop, because the load a planet
 /// carries is dominated by what fraction of its players are moving at all.
 /// </summary>
-[Component("Swg.PlayerState", 1, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.PlayerState", 2, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct PlayerState
 {
@@ -815,6 +818,15 @@ public struct PlayerState
     /// (reused rather than a new field: a wider PlayerState would change every run's layout, interiors or not). The room and not the door's row: this is
     /// persisted, and rows are numbered at open in an order nothing keeps across a reopen.</summary>
     [Field] public int ShuttleDest;
+
+    /// <summary>
+    /// Whether the player is riding a swoop: 1, or 0 on foot. Replicated, so everyone watching draws the swoop under the rider.
+    /// </summary>
+    /// <remarks>
+    /// The entitlement <c>TrySpeedFor</c> reads for <see cref="Replication.SpeedClasses.Swoop"/>: a client cannot ride at a swoop's speed without the server
+    /// having put it on one (<c>SetMount</c>). A door or a shuttle puts it back on foot — a swoop does not fit through a 0.8 m door, and nobody flies with one.
+    /// </remarks>
+    [Field, Replicate(CodecKind.U8, Name = "mounted", Saturate = true)] public int Mounted;
 }
 
 /// <summary>
@@ -1173,6 +1185,8 @@ public struct Structure
 public static class StructureKind
 {
     public const int Building = 0;
+
+    /// <summary>A crafting station: the city slots the bazaars and mission terminals used to share at random.</summary>
     public const int Terminal = 1;
     public const int Shuttleport = 2;
     public const int PoiProp = 3;
@@ -1186,6 +1200,12 @@ public static class StructureKind
     /// what a client draws, and its <c>Portal</c> is the way back out.
     /// </summary>
     public const int Interior = 8;
+
+    /// <summary>A bazaar terminal: one beside every shuttleport's gate, and more spread over the city by its area (<see cref="SimConfig.FacilityDensityPerKm2"/>).</summary>
+    public const int Bazaar = 9;
+
+    /// <summary>A mission terminal, placed like a <see cref="Bazaar"/>.</summary>
+    public const int MissionTerminal = 10;
 }
 
 /// <summary>Where one side of a door stands: the published door box, turned and placed. Never moves.</summary>

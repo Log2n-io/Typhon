@@ -176,6 +176,8 @@ export const STRUCTURE_KIND_NAMES: readonly string[] = [
   'Harvester',
   'Camp object',
   'Room',
+  'Bazaar',
+  'Mission terminal',
 ];
 export const StructureKind = {
   Building: 0,
@@ -189,4 +191,10 @@ export const StructureKind = {
 
   /** A building's room: the one structure of an interior realm, at its origin, drawn from its asset like any building. */
   Interior: 8,
+
+  /** A bazaar terminal: one beside every shuttleport's gate, more over the city by its area. */
+  Bazaar: 9,
+
+  /** A mission terminal, placed like a bazaar. */
+  MissionTerminal: 10,
 } as const;

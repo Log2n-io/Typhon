@@ -94,10 +94,14 @@ STRUCTURE_COLORS[StructureKind.Factory] = [0.62, 0.38, 0.26];
 STRUCTURE_COLORS[StructureKind.Harvester] = [0.45, 0.48, 0.5];
 STRUCTURE_COLORS[StructureKind.CampObject] = [0.66, 0.55, 0.4];
 STRUCTURE_COLORS[StructureKind.Interior] = [0.42, 0.36, 0.3];
+STRUCTURE_COLORS[StructureKind.Bazaar] = [0.85, 0.65, 0.25];
+STRUCTURE_COLORS[StructureKind.MissionTerminal] = [0.35, 0.8, 0.45];
 
 const STRUCTURE_SIZES: [number, number, number][] = [];
 STRUCTURE_SIZES[StructureKind.Building] = [18, 9, 18];
 STRUCTURE_SIZES[StructureKind.Terminal] = [1.6, 2.6, 1.6];
+STRUCTURE_SIZES[StructureKind.Bazaar] = [1.2, 1.5, 1.1];
+STRUCTURE_SIZES[StructureKind.MissionTerminal] = [0.63, 1.3, 0.51];
 // 46.2 across, matching the server's reservation and the published asset. The box is only ever seen beyond the range
 // at which the asset itself is placed, so this is the far-field stand-in for it rather than a second opinion.
 STRUCTURE_SIZES[StructureKind.Shuttleport] = [46.2, 5, 46.2];

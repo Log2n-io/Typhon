@@ -89,6 +89,10 @@ public static class StructureFootprint
     {
         StructureKind.Building => 9f,        // 18 x 18
         StructureKind.Terminal => 0.8f,      // 1.6 x 1.6
+        // The published terminal and the stand point in front of it with its 0.3 m body square (blender-models, 2026-10-24): `bazaar_terminal` reaches
+        // 0.65 m forward and is stood at 1.1 m; `mission_terminal` 0.26 m and 0.65 m. Reserved, or a neighbour is planted on the spot a user stands.
+        StructureKind.Bazaar => 1.4f,
+        StructureKind.MissionTerminal => 1.0f,
         // 46.2 x 46.2, the published `tat_shuttleport`'s own footprint (2026-10-22). It was 16 (32 x 32) while the asset
         // was 46 across, so a dome stood over the ground its neighbours were planted on. The asset is what a shuttleport
         // IS, so the reservation follows it rather than the other way round; the cost is ~1 100 m2 more of a city's disc,

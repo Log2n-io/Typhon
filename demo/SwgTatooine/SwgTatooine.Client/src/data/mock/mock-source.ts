@@ -121,6 +121,9 @@ export class MockSource implements DataSource, LatencyControl {
 
   boardShuttle(): void {}
 
+  /** The mock has no swoops. */
+  setMount(): void {}
+
   /** The mock serves its whole world to every camera already. */
   setOverview(): void {}
 

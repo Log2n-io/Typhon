@@ -130,6 +130,40 @@ export class CharacterRig {
     }
   }
 
+  /**
+   * Holds a one-shot clip on its last frame — the seated rider: `SitDown` played to its end and kept there (the swoop's
+   * seat `pose` is `{clip: "SitDown", at: "end"}`). Everything else is stopped at once; {@link apply} fades back out of it.
+   *
+   * @returns Whether the clip exists.
+   */
+  hold(clip: string): boolean {
+    const group = this.groups.get(clip);
+    if (group === undefined) {
+      return false;
+    }
+
+    if (this.target === group) {
+      return true;
+    }
+
+    for (const playing of this.weights.keys()) {
+      if (playing !== group) {
+        playing.stop();
+        playing.weight = 0;
+      }
+    }
+
+    this.weights.clear();
+    group.start(false, 1, group.from, group.to);
+    group.goToFrame(group.to);
+    group.pause();
+    group.weight = 1;
+    this.weights.set(group, 1);
+    this.target = group;
+    this.serial = -2;
+    return true;
+  }
+
   dispose(): void {
     for (const group of this.groups.values()) {
       group.stop();

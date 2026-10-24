@@ -568,6 +568,51 @@ internal sealed class ClientIntentChecks : ServedChecks
     }
 
     /// <summary>
+    /// The swoop's speed is granted only to a player the server put on a swoop, and it is four runs; getting off takes it back.
+    /// </summary>
+    /// <remarks>
+    /// The entitlement is server state (<c>PlayerState.Mounted</c>), so a client that asks for the class without mounting is refused and counted like any
+    /// class it is not granted — a speed hack stays impossible by construction. The replicated <c>swoopMps</c> is what the client predicts with.
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void TheSwoopsSpeedIsGrantedOnlyWhileMounted()
+    {
+        using var world = new Possessed(Config());
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Swoop));
+        SessionHarness.Until(() => TatooineReplication.Intents.RefusedSpeed >= 1, "an unmounted swoop to be refused");
+
+        world.Link.SendCommand(nameof(SetMount), ClientSays.SetMount(true));
+        SessionHarness.Until(() => TatooineReplication.MountAsks.Applied >= 1, "the mount to be applied");
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Swoop));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the swoop to be granted");
+        world.Harness.Ticks(1);
+
+        float swoopMps;
+        int mounted;
+        using (var tx = world.Sim.Dbe.CreateQuickTransaction())
+        {
+            var p = tx.For<Player>().Open(world.Entity);
+            swoopMps = p.Read(Player.Move).SwoopMps;
+            mounted = p.Read(Player.State).Mounted;
+        }
+
+        var granted = MathF.Abs(world.Read().VelX) * TickRateHz;
+        Assert.Multiple(() =>
+        {
+            Assert.That(mounted, Is.EqualTo(1));
+            Assert.That(swoopMps, Is.EqualTo(4f * TatooineReplication.SpeedFor(SpeedClasses.Run)).Within(1e-3f), "four runs, as asked");
+            Assert.That(granted, Is.EqualTo(swoopMps).Within(0.05f), "the stat the client predicts with is not what the server grants");
+        });
+
+        world.Link.SendCommand(nameof(SetMount), ClientSays.SetMount(false));
+        SessionHarness.Until(() => TatooineReplication.MountAsks.Applied >= 2, "the dismount to be applied");
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Swoop));
+        SessionHarness.Until(() => TatooineReplication.Intents.RefusedSpeed >= 2, "the swoop to be refused once off it");
+    }
+
+    /// <summary>
     /// A stopped player is <c>Idle</c>, not <c>Travelling</c> — and the activity is on the wire, so every watching client sees the difference.
     /// </summary>
     /// <remarks>

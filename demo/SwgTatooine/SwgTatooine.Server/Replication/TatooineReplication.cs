@@ -213,8 +213,24 @@ public static class SpeedClasses
     /// <summary>Three times Shift+3, 72 m/s. Shift+4, invented rather than sourced, and what sizes the teleport threshold.</summary>
     public const byte SpeederFast = 5;
 
+    /// <summary>Riding a swoop: four times <see cref="Run"/>. Granted only to a player <c>SetMount</c> put on one (<c>PlayerState.Mounted</c>).</summary>
+    public const byte Swoop = 6;
+
     /// <summary>The first class this server does not grant.</summary>
-    public const byte Count = 6;
+    public const byte Count = 7;
+}
+
+/// <summary>
+/// "Put me on my swoop", or back on foot (the client's 1 key). The swoop is summoned where the player stands, at once: there is nothing to own or call yet.
+/// </summary>
+/// <remarks>
+/// <b>A state the server holds, not a speed the client claims.</b> <c>PlayerState.Mounted</c> is the entitlement <c>TrySpeedFor</c> reads for
+/// <see cref="SpeedClasses.Swoop"/>, and it is replicated so every session draws the rider on the swoop. Refused off a planet: a swoop does not fit a room.
+/// </remarks>
+public struct SetMount
+{
+    /// <summary>1 to ride, 0 to get off.</summary>
+    public byte On;
 }
 
 /// <summary>
@@ -607,6 +623,9 @@ public static partial class TatooineReplication
 
     /// <summary><c>ACKS</c> reason: an <see cref="Overview"/> while <c>--max-spectators</c> is full.</summary>
     public const byte OverviewFull = AckReasons.FirstApplicationReason + 6;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="SetMount"/> from a player that is not on a planet — a room, a dungeon — or is waiting for a shuttle.</summary>
+    public const byte MountNotHere = AckReasons.FirstApplicationReason + 7;
 
     /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
     /// <remarks>
@@ -1508,6 +1527,12 @@ public static partial class TatooineReplication
             .Rate(1, 2)
             .Roles(SessionRole.Player)
             .Field(v => v.DestCity, Codec.VarInt, "destCity"));
+
+        // A toggle a person presses; two a second is more than a hand does, and a refused one is counted.
+        subs.Command<SetMount>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(v => v.On, Codec.U8, "on"));
 
         // SWG-09. Queued, because each utterance matters and their order is the conversation; one a second, which is the
         // rate 04-protocol § 4 gives it and roughly what a person types.
@@ -2693,6 +2718,9 @@ public static partial class TatooineReplication
             state.ActivityTicks = 0;
             state.ShuttleFrom = from;
             state.ShuttleDest = dest;
+
+            // Nobody boards with a swoop: back on foot, and the client draws it so the moment it queues.
+            state.Mounted = 0;
             player.Set(Player.State, state);
 
             var waiting = player.Read(Player.Move);
@@ -2706,6 +2734,39 @@ public static partial class TatooineReplication
             System.Threading.Interlocked.Increment(ref _boardingsQueued);
         }
 
+        foreach (var command in subs.Commands<SetMount>())
+        {
+            if (!TryOpenControlled(subs, accessor, command.Session, out var player))
+            {
+                continue;
+            }
+
+            var state = player.Read(Player.State);
+            var on = command.Value.On != 0 ? 1 : 0;
+            if (on == 1 && (player.Read(Player.Realm).Value >= Planets || state.Activity == PlayerActivity.AwaitingShuttle))
+            {
+                subs.Reject(command, MountNotHere);
+                System.Threading.Interlocked.Increment(ref _mountsRefused);
+                continue;
+            }
+
+            if (state.Mounted != on)
+            {
+                state.Mounted = on;
+                player.Set(Player.State, state);
+                if (on == 0)
+                {
+                    // Off the swoop at its speed: the body keeps the destination it had, at a run, rather than coasting at forty metres a second on foot.
+                    var move = player.Read(Player.Move);
+                    move.SpeedMps = MathF.Min(move.SpeedMps, SpeedFor(SpeedClasses.Run));
+                    player.Set(Player.Move, move);
+                }
+
+                Replicate(in player);
+                System.Threading.Interlocked.Increment(ref _mountsApplied);
+            }
+        }
+
         foreach (var command in subs.Commands<MoveDir>())
         {
             if (!TryOpenControlled(subs, accessor, command.Session, out var player))
@@ -2713,7 +2774,7 @@ public static partial class TatooineReplication
                 continue;
             }
 
-            if (!TrySpeedFor(command.Value.SpeedClass, out var speed))
+            if (!TrySpeedFor(command.Value.SpeedClass, player.Read(Player.State).Mounted != 0, out var speed))
             {
                 System.Threading.Interlocked.Increment(ref _intentsRefusedSpeed);
                 continue;
@@ -2928,13 +2989,14 @@ public static partial class TatooineReplication
     /// <param name="speed">Metres per second.</param>
     /// <returns><see langword="false"/> for a class above what the player is entitled to.</returns>
     /// <remarks>
-    /// There is no mount state in this demo, so every class below <see cref="SpeedClasses.Count"/> is granted to any player and the ladder's top
-    /// (<c>PlayerSpeederFastSpeedMps</c>, 72 m/s) is the ceiling. A class ABOVE it is refused rather than clamped: a clamp would let a client ask for more
-    /// every tick and never learn that it is not getting it, and the refusal is the number that says whether anything is trying.
+    /// Every class below <see cref="SpeedClasses.Count"/> is granted to any player but <see cref="SpeedClasses.Swoop"/>, which needs the player on its swoop
+    /// (<paramref name="mounted"/>), and the ladder's top (<c>PlayerSpeederFastSpeedMps</c>) is the ceiling. A class ABOVE it is refused rather than clamped:
+    /// a clamp would let a client ask for more every tick and never learn that it is not getting it, and the refusal is the number that says whether anything
+    /// is trying.
     /// </remarks>
-    private static bool TrySpeedFor(byte speedClass, out float speed)
+    private static bool TrySpeedFor(byte speedClass, bool mounted, out float speed)
     {
-        if (speedClass >= SpeedClasses.Count)
+        if (speedClass >= SpeedClasses.Count || (speedClass == SpeedClasses.Swoop && !mounted))
         {
             speed = 0f;
             return false;
@@ -2960,8 +3022,16 @@ public static partial class TatooineReplication
         SpeedClasses.Burst => TatooineData.PlayerBurstRunSpeedMps * TatooineData.PlayerGaitScale,
         SpeedClasses.Speeder => TatooineData.PlayerSpeederSpeedMps * TatooineData.PlayerGaitScale,
         SpeedClasses.SpeederFast => TatooineData.PlayerSpeederFastSpeedMps * TatooineData.PlayerGaitScale,
+        SpeedClasses.Swoop => TatooineData.PlayerSwoopSpeedMps * TatooineData.PlayerGaitScale,
         _ => 0f,
     };
+
+    /// <summary>How many <see cref="SetMount"/> asks changed a player's mount, and how many were refused (off a planet, waiting for a shuttle).</summary>
+    public static (long Applied, long Refused) MountAsks =>
+        (System.Threading.Interlocked.Read(ref _mountsApplied), System.Threading.Interlocked.Read(ref _mountsRefused));
+
+    private static long _mountsApplied;
+    private static long _mountsRefused;
 
     /// <summary>How many <see cref="SetViewRadius"/> asks were applied, and how many were refused as out of range.</summary>
     /// <remarks>
@@ -2992,6 +3062,8 @@ public static partial class TatooineReplication
         System.Threading.Interlocked.Exchange(ref _boardingsQueued, 0);
         System.Threading.Interlocked.Exchange(ref _boardingsRefused, 0);
         System.Threading.Interlocked.Exchange(ref _boardingsCancelled, 0);
+        System.Threading.Interlocked.Exchange(ref _mountsApplied, 0);
+        System.Threading.Interlocked.Exchange(ref _mountsRefused, 0);
         BoundPlayer.Clear();
 
         // The holds go with it (A13), for the same reason BoundPlayer does: a fixture that resets only the intent accounting would otherwise inherit a hold

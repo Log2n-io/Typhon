@@ -94,6 +94,17 @@ export interface InteractionDesc {
   readonly rot: Quat;
   readonly forward: string;
   readonly radius: number | null;
+  /** A `mount` interaction: the seat it puts the user in (`seats[].id`). */
+  readonly seat?: string;
+}
+
+/** Where a rider sits on a vehicle (ASSET_FORMAT § 5.8): the root's position, its turn, and the pose it holds. */
+export interface SeatDesc {
+  readonly id: string;
+  readonly pos: Vec3;
+  readonly rot: Quat;
+  readonly forward: string;
+  readonly pose?: { readonly clip: string; readonly at: 'start' | 'end' };
 }
 
 export interface ChildDesc {
@@ -200,6 +211,8 @@ export interface Descriptor {
   readonly portals: readonly PortalDesc[];
   readonly spawns: readonly SpawnDesc[];
   readonly interactions: readonly InteractionDesc[];
+  /** Vehicles: where riders sit (§ 5.8). */
+  readonly seats?: readonly SeatDesc[];
   readonly children: readonly ChildDesc[];
   readonly animations?: { readonly clips: readonly ClipDesc[]; readonly roles: RoleMap };
   readonly foundation_depth?: number;

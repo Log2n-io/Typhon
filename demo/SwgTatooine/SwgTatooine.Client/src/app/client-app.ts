@@ -77,6 +77,7 @@ import { nextRide, NOT_RIDING, rideOwnsTheView, rideSubjectOf, type RideState } 
 import { DEFAULT_GAIT, gaitFor } from './gait';
 import {
   gaitChanged,
+  asRide,
   gaitOf,
   intentChanged,
   movementIntent,
@@ -84,7 +85,7 @@ import {
   stopAfter,
   type MoveIntent,
 } from './player-intent';
-import { Predictor, speedForClass } from './predictor';
+import { Predictor, speedForClass, type GrantedSpeeds } from './predictor';
 import { DEFAULT_THIRD_PERSON_M, MAX_EYE_DISTANCE_M } from '../camera/eye-camera';
 import { bodyOpacityAt, marchEye } from '../camera/eye-clearance';
 import { useStats, type FeetReport, type Inspection } from '../state/stats-store';
@@ -107,6 +108,9 @@ import { nextTravel } from './travel';
 const STATIC_ASSET_RANGE_M = 1280;
 
 const STATS_INTERVAL_MS = 250;
+
+/** How long the client draws its own mount ask before the server's replicated `mounted` decides: a round trip and a few ticks. */
+const MOUNT_ANSWER_MS = 1500;
 const REGION_INTERVAL_MS = 200;
 const PICK_RADIUS_PX = 8;
 const FRAME_SAMPLES = 128;
@@ -601,6 +605,16 @@ export class ClientApp {
       'keydown',
       (e) => {
         if (isTyping(e)) {
+          return;
+        }
+
+        // The swoop: the top-row 1 on its own (Shift+1 is the run gait, and the pad's 1 is not this key).
+        if (e.code === 'Digit1' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+          e.preventDefault();
+          if (!e.repeat) {
+            this.toggleMount(e.timeStamp);
+          }
+
           return;
         }
 
@@ -1553,7 +1567,8 @@ export class ClientApp {
       return null;
     }
 
-    const bottomY = character.rig.lowestY();
+    // A rider's body is lifted onto the seat; the feet the collision rule stands on are the swoop's, under it.
+    const bottomY = character.rig.lowestY() - character.riderLift;
     if (!Number.isFinite(bottomY)) {
       return null;
     }
@@ -1684,8 +1699,64 @@ export class ClientApp {
   /** The netId {@link predictor} is anchored on, so a change of avatar re-anchors instead of integrating from the old one. */
   private predictedSubject = 0;
 
+  /**
+   * The keys' intent, at the swoop's class while riding: a held direction key rides, whatever gait Shift would select —
+   * there is one speed on a swoop, and the server grants it only to a rider.
+   */
+  private keyIntent(): MoveIntent | null {
+    return asRide(
+      movementIntent(this.input.heldKeys, this.eyeCamera.yaw, this.gait),
+      this.ridingNow(performance.now()),
+    );
+  }
+
+  /** What the 1 key last asked for, and when: the client draws it at once and the server's `mounted` decides once it has answered. */
+  private mountAsked = false;
+  private mountAskedAtMs = Number.NEGATIVE_INFINITY;
+
+  /**
+   * Whether this session's avatar is on its swoop: what the 1 key asked for, for long enough to be answered, and the
+   * server's replicated `mounted` after that — so a refused ask (indoors, queued for a shuttle) puts the rider back on foot.
+   */
+  private ridingNow(nowMs: number): boolean {
+    if (nowMs - this.mountAskedAtMs < MOUNT_ANSWER_MS) {
+      return this.mountAsked;
+    }
+
+    return this.selfField('mounted') === 1;
+  }
+
+  /** The 1 key: onto the swoop, or off it. Not in a room — the swoop does not fit through the door — and only for a playing session. */
+  private toggleMount(atMs: number): void {
+    const source = this.source;
+    if (source === null || !source.canPlay || source.selfNetId === 0 || isIndoors(this.profile.kind)) {
+      return;
+    }
+
+    const now = performance.now();
+    const next = !this.ridingNow(now);
+    this.mountAsked = next;
+    this.mountAskedAtMs = now;
+    source.setMount(next);
+
+    // The held keys now mean a different speed: said at once, as a gait change is.
+    this.flushGaitNow(atMs);
+  }
+
+  /** The speeds the server granted this session, for the predictor and the HUD. */
+  private grantedSpeeds(source: DataSource): GrantedSpeeds {
+    return {
+      walkMps: source.selfNumber('walkMps'),
+      runMps: source.selfNumber('runMps'),
+      burstMps: source.selfNumber('burstMps'),
+      speederMps: source.selfNumber('speederMps'),
+      speederFastMps: source.selfNumber('speederFastMps'),
+      swoopMps: source.selfNumber('swoopMps'),
+    };
+  }
+
   private sendMovementIntent(source: DataSource, nowMs: number, steering: boolean): void {
-    const keyed = steering ? movementIntent(this.input.heldKeys, this.eyeCamera.yaw, this.gait) : null;
+    const keyed = steering ? this.keyIntent() : null;
 
     // A walk to or through a door (`walkIn` / `walkOut`) supplies the intent the keys would, so the prediction, the refresh
     // window and the stop at the end are the keyboard's own. Any key takes the body back.
@@ -1724,13 +1795,7 @@ export class ClientApp {
       } else {
         this.predictor.setIntent(
           intent.heading,
-          speedForClass(intent.speedClass, {
-            walkMps: source.selfNumber('walkMps'),
-            runMps: source.selfNumber('runMps'),
-            burstMps: source.selfNumber('burstMps'),
-            speederMps: source.selfNumber('speederMps'),
-            speederFastMps: source.selfNumber('speederFastMps'),
-          }),
+          speedForClass(intent.speedClass, this.grantedSpeeds(source)),
           changedAtMs,
         );
       }
@@ -1780,7 +1845,7 @@ export class ClientApp {
       return;
     }
 
-    const intent = movementIntent(this.input.heldKeys, this.eyeCamera.yaw, this.gait);
+    const intent = this.keyIntent();
     if (!gaitChanged(intent, this.lastIntent)) {
       return;
     }
@@ -2837,18 +2902,24 @@ export class ClientApp {
    * browser, which no unit test of the machine could have caught: the machine was right and its input was empty.
    */
   private selfActivity(): number {
-    const source = this.source;
-    if (source === null || source.selfNetId === 0) {
-      return Number.NaN;
-    }
+    return this.selfField('activity');
+  }
 
-    const location = this.world.locate(source.selfNetId);
+  /** One of the avatar's ordinary replicated fields, from the world store (see {@link selfActivity}), or `NaN`. */
+  private selfField(name: string): number {
+    const source = this.source;
+    return source === null || source.selfNetId === 0 ? Number.NaN : this.fieldOf(source.selfNetId, name);
+  }
+
+  /** A replicated field of any entity in view, or `NaN`. */
+  private fieldOf(netId: number, name: string): number {
+    const location = this.world.locate(netId);
     if (location === NOT_FOUND) {
       return Number.NaN;
     }
 
     const store = this.world.archetypeStore(archetypeOf(location));
-    const field = store.fieldIndex('activity');
+    const field = store.fieldIndex(name);
     return field < 0 ? Number.NaN : store.fieldAt(field)[slotOf(location)];
   }
 
@@ -2959,6 +3030,8 @@ export class ClientApp {
     // Wall time in seconds: what the graph measures is how long a one-shot has been playing, which is a property of the
     // animation and not of the simulation. The render tick is the wrong clock for it — it is an integer, it is the
     // server's, and it stops when the stream does while the clip is still on screen.
+    // On the swoop: this session's own ask at once, anyone else's (a ridden subject) as the server replicates it.
+    character.setRiding(own ? this.ridingNow(performance.now()) : this.fieldOf(subject, 'mounted') === 1);
     character.update(subject, x, y, z, speed, this.avatarHeading, nowMs / 1000, dt);
     this.driveGhost(own, subject, speed, nowMs, dt);
     return subject;
@@ -2987,6 +3060,7 @@ export class ClientApp {
     }
 
     this.ghostHeading = headingFromVelocity(this.evalVx, this.evalVz, this.ghostHeading);
+    ghost.setRiding(this.fieldOf(subject, 'mounted') === 1);
     ghost.update(subject, this.evalX, this.evalY, this.evalZ, speed, this.ghostHeading, nowMs / 1000, dt);
   }
 
@@ -3233,19 +3307,16 @@ export class ClientApp {
       // The ACTIVE camera's, not the map's: in eye view the map camera is still smoothing along at its own altitude,
       // and reporting that read as "you are 1 474 m up" while standing in a street.
       altitude: this.activeAltitude,
-      gait: this.gait,
+      gait: this.ridingNow(performance.now()) ? SpeedClass.swoop : this.gait,
       // What the server says that gait is worth. NaN before the owner block arrives, which the HUD shows as a dash
       // rather than as a figure it made up.
       gaitMps:
         this.source === null
           ? Number.NaN
-          : speedForClass(this.gait, {
-              walkMps: this.source.selfNumber('walkMps'),
-              runMps: this.source.selfNumber('runMps'),
-              burstMps: this.source.selfNumber('burstMps'),
-              speederMps: this.source.selfNumber('speederMps'),
-              speederFastMps: this.source.selfNumber('speederFastMps'),
-            }),
+          : speedForClass(
+              this.ridingNow(performance.now()) ? SpeedClass.swoop : this.gait,
+              this.grantedSpeeds(this.source),
+            ),
       groundM: this.profile.ground.heightAt(this.groundView.centerX, this.groundView.centerZ),
       feet: this.feetReport(),
       terrainBakeMs: this.terrainBakeMs,

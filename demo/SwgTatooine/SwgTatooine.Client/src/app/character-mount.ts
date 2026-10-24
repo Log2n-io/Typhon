@@ -1,7 +1,8 @@
 import { Material } from '@babylonjs/core/Materials/material';
-import type { TransformNode } from '@babylonjs/core/Meshes/transformNode';
+import { Quaternion } from '@babylonjs/core/Maths/math.vector';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode';
 import { axisVector, placement, yawForHeading } from '../assets/asset-frame';
-import type { AssetLibrary } from '../assets/asset-library';
+import type { AssetLibrary, Instance } from '../assets/asset-library';
 import { AnimationGraph, locomotionFrom } from '../character/animation-graph';
 import type { SceneLighting } from '../render/scene-lighting';
 import { turnToward } from '../math/vec';
@@ -32,6 +33,15 @@ import { prepareAsset } from './asset-mount';
  * exactly zero the heading is frozen facing backwards. Bounded, 17 ms of correction is about nine degrees.
  */
 export const MAX_TURN_RATE = Math.PI * 3;
+
+/** The vehicle a rider summons with the 1 key. */
+export const SWOOP_ASSET = 'swoop';
+
+/**
+ * Where the rider's root sits above the swoop's origin, metres, when the descriptor has not been read: `seats[0].pos` of
+ * `swoop-1` (blender-models). With `SitDown`'s end pose that puts the thighs on the 0.836 m cushion (physics, measured).
+ */
+const DEFAULT_SEAT_Y = 0.62;
 
 export interface CharacterMount {
   readonly rig: CharacterRig;
@@ -71,6 +81,15 @@ export interface CharacterMount {
   ): void;
   /** Parks the rig: nothing to stand in for, so nothing drawn. */
   park(): void;
+  /**
+   * Puts the body on its swoop, or back on foot: the swoop drawn under it, the rider on the descriptor's seat, holding
+   * `SitDown` on its last frame. The swoop is loaded on the first ride; until it has arrived the rider still sits.
+   */
+  setRiding(on: boolean): void;
+  /** Whether the body is drawn on its swoop. */
+  readonly riding: boolean;
+  /** How far above its feet the body is drawn: the seat's height while riding, 0 on foot. */
+  readonly riderLift: number;
   /**
    * Fades the body, 0 to 1: the camera pulled in close to it — a wall behind — must not look through the inside of a head.
    *
@@ -162,10 +181,60 @@ export async function mountCharacter(
   let tunedWalk = Number.NaN;
   let tunedRun = Number.NaN;
   let fading = false;
+
+  // The swoop: its own node beside the rider's, posed with it every frame. Loaded on the first ride, never for a body
+  // that does not ride, and not at all for the ghost.
+  let riding = false;
+  let swoop: Instance | null = null;
+  let swoopLoading = false;
+  let seatY = DEFAULT_SEAT_Y;
+  const swoopRoot = new TransformNode('swoop-ride', root.getScene());
+  swoopRoot.parent = root;
+  swoopRoot.rotationQuaternion = new Quaternion();
+  swoopRoot.setEnabled(false);
+  const loadSwoop = (): void => {
+    if (swoopLoading || ghostAlpha !== undefined || library.catalogue.assets[SWOOP_ASSET] === undefined) {
+      return;
+    }
+
+    swoopLoading = true;
+    void library
+      .instantiate(SWOOP_ASSET, placement([0, 0, 0], 0), swoopRoot)
+      .then((placed) => {
+        swoop = placed;
+        lighting.castShadows(placed.meshes);
+        const seat = library.described(SWOOP_ASSET)?.seats?.[0];
+        if (seat !== undefined) {
+          seatY = seat.pos[1];
+        }
+      })
+      .catch((error: unknown) => {
+        console.warn(`assets: ${SWOOP_ASSET} did not mount; riding draws the rider alone`, error);
+      });
+  };
+
   return {
     rig,
     graph,
     height,
+    get riding(): boolean {
+      return riding;
+    },
+    get riderLift(): number {
+      return riding ? seatY : 0;
+    },
+    setRiding(on: boolean): void {
+      if (on === riding) {
+        return;
+      }
+
+      riding = on;
+      if (on) {
+        loadSwoop();
+      }
+
+      swoopRoot.setEnabled(on && subject !== 0);
+    },
     setOpacity(opacity: number): void {
       if (ghostAlpha !== undefined) {
         return;
@@ -180,6 +249,8 @@ export async function mountCharacter(
         }
       }
 
+      // Not the swoop: its meshes are instances (`AssetLibrary.instantiate`), which Babylon cannot fade and warns about
+      // on every call. The camera pulled in behind a rider looks over the swoop's tail, not through it.
       for (const mesh of instance.meshes) {
         mesh.visibility = opacity;
       }
@@ -204,12 +275,24 @@ export async function mountCharacter(
         // A new body is not a body that turned: it arrives facing wherever it faces.
         facing = heading;
         rig.setEnabled(true);
+        swoopRoot.setEnabled(riding);
       }
 
       // A floor under dt, because `turnToward` snaps when the step is not positive — so a frame reporting zero elapsed
       // time would turn the body instantly, which is the flip the clamp exists to prevent.
       facing = turnToward(facing, heading, MAX_TURN_RATE * Math.max(dt, 1e-4));
-      rig.setPose(x, y, z, yawForHeading(facing, forward));
+      const yaw = yawForHeading(facing, forward);
+      if (riding) {
+        // The swoop's origin on the ground and its nose (+Z, as the rider's) along the heading; the rider on the seat,
+        // facing the same way (the seat's 180° turn of -Z is +Z), sitting.
+        swoopRoot.position.set(x, y, z);
+        Quaternion.RotationYawPitchRollToRef(yaw, 0, 0, swoopRoot.rotationQuaternion!);
+        rig.setPose(x, y + seatY, z, yaw);
+        rig.hold('SitDown');
+        return;
+      }
+
+      rig.setPose(x, y, z, yaw);
       // Grounded is true because nothing replicates otherwise: this client has no airborne state, and a jump is an
       // animation event it does not receive yet. Stated here rather than hidden in the call, so the day either arrives
       // there is one place to change.
@@ -219,11 +302,14 @@ export async function mountCharacter(
       if (subject !== 0) {
         subject = 0;
         rig.setEnabled(false);
+        swoopRoot.setEnabled(false);
       }
     },
     dispose(): void {
       rig.dispose();
       instance.dispose();
+      swoop?.dispose();
+      swoopRoot.dispose();
       for (const material of ownMaterials) {
         material.dispose();
       }

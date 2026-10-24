@@ -85,6 +85,8 @@ public static class CommandLine
         c.Planets = r.Int("--planets", c.Planets, "how many planet realms to build", min: 1);
         c.InteriorNpcs = r.Int("--interior-npcs", c.InteriorNpcs, "NPCs per interior", min: 0);
         c.InteriorShare = r.Float("--interior-share", c.InteriorShare, "share of players that go indoors", min: 0f, max: 1f);
+        c.FacilityDensityPerKm2 = r.Float("--facility-density", c.FacilityDensityPerKm2,
+            "bazaars and mission terminals (each) per km2 of a city, beyond the pair at its shuttleport", min: 0f, max: 200f);
         c.InteriorStayS = r.Float("--interior-stay", c.InteriorStayS, "seconds a player stays indoors", min: 0.001f);
         c.InteriorSleepS = r.Float("--interior-sleep", c.InteriorSleepS, "seconds an empty interior waits before going dormant", min: 0f);
         c.InterPlanetShare = r.Float("--interplanet-share", c.InterPlanetShare, "share of shuttle trips that cross planets", min: 0f, max: 1f);

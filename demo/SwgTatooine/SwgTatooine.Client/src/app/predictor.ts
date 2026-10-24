@@ -98,6 +98,7 @@ export interface GrantedSpeeds {
   readonly burstMps: number;
   readonly speederMps: number;
   readonly speederFastMps: number;
+  readonly swoopMps: number;
 }
 
 /**
@@ -143,6 +144,8 @@ function grantedFor(speedClass: number, speeds: GrantedSpeeds): number {
       return speeds.speederMps;
     case SpeedClass.speederFast:
       return speeds.speederFastMps;
+    case SpeedClass.swoop:
+      return speeds.swoopMps;
     default:
       return NaN;
   }

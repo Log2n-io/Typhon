@@ -71,6 +71,22 @@ function any(keys: ReadonlySet<string>, codes: readonly string[]): boolean {
  * straight line. Summing two axis speeds would have made diagonal movement 1.41× faster, which is the oldest bug in this
  * genre.
  */
+/**
+ * The intent at the swoop's class while riding: a held direction key rides, whatever gait Shift would select — there is
+ * one speed on a swoop, and the server grants it only to a rider. A stop stays a stop.
+ *
+ * @param intent The keys' intent.
+ * @param riding Whether the avatar is on its swoop.
+ * @returns The intent to send.
+ */
+export function asRide(intent: MoveIntent | null, riding: boolean): MoveIntent | null {
+  if (intent === null || !riding || intent.speedClass === SpeedClass.stop) {
+    return intent;
+  }
+
+  return { heading: intent.heading, speedClass: SpeedClass.swoop };
+}
+
 export function movementIntent(
   keys: ReadonlySet<string>,
   yaw: number,

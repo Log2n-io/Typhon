@@ -15,6 +15,9 @@ public sealed class WorldCensus
     /// <summary>Player houses, factories and harvesters. Static, but a few of them tick.</summary>
     public int PlayerStructures;
 
+    /// <summary>Structures the site planner could not fit and planted overlapping something anyway: 0 on a map that fits.</summary>
+    public int Crowded;
+
     /// <summary>Creature lairs, including those belonging to mission camps.</summary>
     public int Lairs;
 
@@ -43,6 +46,7 @@ public sealed class WorldCensus
     {
         StaticObjects = StaticObjects + other.StaticObjects,
         PlayerStructures = PlayerStructures + other.PlayerStructures,
+        Crowded = Crowded + other.Crowded,
         Lairs = Lairs + other.Lairs,
         Creatures = Creatures + other.Creatures,
         CityNpcs = CityNpcs + other.CityNpcs,

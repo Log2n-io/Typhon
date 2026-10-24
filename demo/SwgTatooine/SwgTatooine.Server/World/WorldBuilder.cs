@@ -65,6 +65,7 @@ public static class WorldBuilder
         SpawnPlayers(dbe, map, config, census, ref rng, index);
         SpawnMissionLairPool(dbe, map, config, census, ref rng, index);
 
+        census.Crowded = plan.Crowded;
         return census;
     }
 
@@ -130,8 +131,14 @@ public static class WorldBuilder
                     // point -- and collision has to ask exactly that.
                     SpawnStructure(tx, x, z, terrain.GroundAt(x, z), half, kind, ownerRegion: cityIndex + 1, tickPeriod: 0, ref rng, interior);
                     census.StaticObjects++;
+                    if (i == 0)
+                    {
+                        // Before any other building, so the gate's ground is the first claimed: a passenger walks out onto a bazaar and a mission terminal.
+                        SpawnGateFacilities(tx, x, z, cityIndex, terrain, census, plan);
+                    }
                 }
 
+                SpawnFacilities(tx, city, config, cityIndex, terrain, census, plan);
                 tx.Commit();
             }
 
@@ -206,6 +213,129 @@ public static class WorldBuilder
 
             index.Cities.Add((city.X, city.Z, city.Radius, city.PlayerWeight));
             cityIndex++;
+        }
+    }
+
+    /// <summary>
+    /// Where a passenger leaving a shuttleport comes out, relative to its centre: the gate in the ring wall on the asset's +Z side, its outside start
+    /// on open ground (`tat_shuttleport`'s ticket terminal approach starts at z 25.2; the gate spans x -3..3). The shuttleport is never turned and the
+    /// server's mirror is on X only, so the published +Z is the world's.
+    /// </summary>
+    public const float GateOutsideZ = 25.2f;
+
+    /// <summary>The bazaar and the mission terminal beside the gate: either side of its 6 m corridor, a few metres out.</summary>
+    public const float GateFacilityX = 5.5f;
+
+    /// <summary>How far out from the shuttleport's centre the gate's pair stands, north.</summary>
+    public const float GateFacilityZ = GateOutsideZ + 2.3f;
+
+    /// <summary>
+    /// The bazaar and the mission terminal at a shuttleport's gate, and the plaza between them kept clear of buildings.
+    /// </summary>
+    /// <remarks>
+    /// Both face north (yaw 0), so the point a user stands at is on the far side from the gate and the passengers walking out between them. The plaza is a
+    /// reservation in the planner and nothing in the world: it only stops a house from being planted across the gate.
+    /// </remarks>
+    private static void SpawnGateFacilities(Transaction tx, float portX, float portZ, int cityIndex, TerrainField terrain, WorldCensus census,
+        SitePlanner plan)
+    {
+        var none = default(Rng);
+        var z = portZ + GateFacilityZ;
+        var bx = portX - GateFacilityX;
+        var mx = portX + GateFacilityX;
+        plan.PlaceAt(bx, z, StructureFootprint.HalfExtentM(StructureKind.Bazaar));
+        SpawnStructure(tx, bx, z, terrain.GroundAt(bx, z), StructureFootprint.HalfExtentM(StructureKind.Bazaar), StructureKind.Bazaar,
+            ownerRegion: cityIndex + 1, tickPeriod: 0, ref none, faceNorth: true);
+        plan.PlaceAt(mx, z, StructureFootprint.HalfExtentM(StructureKind.MissionTerminal));
+        SpawnStructure(tx, mx, z, terrain.GroundAt(mx, z), StructureFootprint.HalfExtentM(StructureKind.MissionTerminal), StructureKind.MissionTerminal,
+            ownerRegion: cityIndex + 1, tickPeriod: 0, ref none, faceNorth: true);
+        // Beyond the pair rather than between them: the planner keeps a 2 m margin per pair, which a reservation between two terminals 11 m apart cannot
+        // keep. Nothing planted inside the margin of the terminals and the dome can stand in the corridor between them anyway.
+        plan.TryPlaceAt(portX, portZ + GateFacilityZ + 7.5f, 4f);
+        census.StaticObjects += 2;
+    }
+
+    /// <summary>How many of one facility kind a city gets beyond the pair at its shuttleport, from its area and the density.</summary>
+    /// <param name="radiusM">The city's radius.</param>
+    /// <param name="densityPerKm2">See <see cref="SimConfig.FacilityDensityPerKm2"/>.</param>
+    /// <returns>A count, 0 or more.</returns>
+    public static int SpreadFacilities(float radiusM, float densityPerKm2)
+    {
+        var areaKm2 = MathF.PI * radiusM * radiusM / 1_000_000f;
+        return Math.Max(0, (int)MathF.Round(densityPerKm2 * areaKm2));
+    }
+
+    /// <summary>Candidate spots drawn per facility, of which the one furthest from its kind's others is kept.</summary>
+    private const int FacilityCandidates = 16;
+
+    /// <summary>
+    /// The city's other bazaars and mission terminals, spread over its disc.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Spread, not scattered.</b> Each is the best of <see cref="FacilityCandidates"/> free spots drawn uniformly over the disc — the one furthest from
+    /// every facility of its kind already standing, the gate's included (Mitchell's best-candidate sampling). Uniform draws alone put two terminals
+    /// side by side as often as not, and a player's nearest terminal is then far away for no reason.
+    /// </para>
+    /// <para>
+    /// <b>Their own random stream</b>, seeded from the world's and the city, so adding facilities moves nothing else the world draws.
+    /// </para>
+    /// </remarks>
+    private static void SpawnFacilities(Transaction tx, CityDef city, SimConfig config, int cityIndex, TerrainField terrain, WorldCensus census,
+        SitePlanner plan)
+    {
+        var count = SpreadFacilities(city.Radius, config.FacilityDensityPerKm2);
+        if (count == 0)
+        {
+            return;
+        }
+
+        var rng = new Rng(((uint)config.Seed ^ 0xFAC11173u) + ((uint)cityIndex * 0x9E3779B9u) + ((uint)_realm * 0x85EBCA6Bu));
+        var port = (X: city.X, Z: city.Z + GateFacilityZ);
+        Span<int> kinds = [StructureKind.Bazaar, StructureKind.MissionTerminal];
+        Span<(float X, float Z)> placed = stackalloc (float, float)[2 * (count + 1)];
+        foreach (var kind in kinds)
+        {
+            var half = StructureFootprint.HalfExtentM(kind);
+            var n = 0;
+            placed[n++] = (port.X + (kind == StructureKind.Bazaar ? -GateFacilityX : GateFacilityX), port.Z);
+            for (var f = 0; f < count; f++)
+            {
+                var best = (X: 0f, Z: 0f);
+                var bestD = -1f;
+                for (var c = 0; c < FacilityCandidates; c++)
+                {
+                    var (x, z) = rng.PointInDisc(city.X, city.Z, city.Radius - half);
+                    if (!plan.Fits(x, z, half))
+                    {
+                        continue;
+                    }
+
+                    var nearest = float.MaxValue;
+                    for (var k = 0; k < n; k++)
+                    {
+                        var dx = placed[k].X - x;
+                        var dz = placed[k].Z - z;
+                        nearest = MathF.Min(nearest, (dx * dx) + (dz * dz));
+                    }
+
+                    if (nearest > bestD)
+                    {
+                        bestD = nearest;
+                        best = (x, z);
+                    }
+                }
+
+                if (bestD < 0f)
+                {
+                    continue;   // no free spot in the draws: a full city gets fewer, rather than one planted inside a house
+                }
+
+                plan.PlaceAt(best.X, best.Z, half);
+                placed[n++] = best;
+                SpawnStructure(tx, best.X, best.Z, terrain.GroundAt(best.X, best.Z), half, kind, ownerRegion: cityIndex + 1, tickPeriod: 0, ref rng);
+                census.StaticObjects++;
+            }
         }
     }
 
@@ -1078,7 +1208,7 @@ public static class WorldBuilder
     /// buildings and the props inside an interior, and an interior's floor is 0 rather than the planet's relief.
     /// </param>
     private static void SpawnStructure(Transaction tx, float x, float z, float groundY, float halfExtent, int kind, int ownerRegion, int tickPeriod,
-        ref Rng rng, int interiorRealm = 0)
+        ref Rng rng, int interiorRealm = 0, bool faceNorth = false)
     {
         var bounds = default(StructurePlacement);
         bounds.SetAt(x, z, groundY, halfExtent);
@@ -1090,7 +1220,7 @@ public static class WorldBuilder
 
             // A quarter turn, drawn here so it is the world's and not a renderer's guess. The shuttleport keeps 0: it
             // is the one structure whose orientation means something, because its landing pad is where shuttles arrive.
-            Yaw = kind == StructureKind.Shuttleport ? 0 : rng.NextInt(0, 4),
+            Yaw = kind == StructureKind.Shuttleport || faceNorth ? 0 : rng.NextInt(0, 4),
             Asset = StructureAssets.Pick(kind, ref rng),
 
             // Staggered, so the economy does not arrive as a once-a-minute spike that the median tick never sees.
