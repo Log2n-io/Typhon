@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text.Json;
 using NUnit.Framework;
 using SwgTatooine.Bots.Brain;
+using SwgTatooine.Navigation;
 
 namespace SwgTatooine.Tests;
 
@@ -623,6 +624,27 @@ public sealed class BotPathChecks
         }
 
         Assert.That(path.Exists(p => MathF.Abs(p.X) > 20f), Is.True, "the walk did not go round the wall's end");
+    }
+
+    /// <summary>
+    /// A walker standing deep inside a solid block — further in than the usual snap — still gets a walk out of it, from <see cref="CityPath.Route"/>'s wide
+    /// second try.
+    /// </summary>
+    /// <remarks>
+    /// The crowd's clones used to wake on the middle of a shuttleport's pad, ~10 m into a collider the search could not snap out of: 29 of 123 of its
+    /// searches failed, and each failure walked a body straight into the ring wall.
+    /// </remarks>
+    [Test]
+    public void AWalkerDeepInsideABlockStillGetsAWayOut()
+    {
+        var assets = OneWall(new PlanBox(-15f, -15f, 15f, 15f, 0f, 3f, false));
+        var structures = new List<SeenStructure> { new(0f, 0f, 0, 0, 0, 1) };
+        var grid = CityPath.Walls(structures, assets, -60f, -60f, 60f, 60f);
+        Assert.That(CityPath.Find(grid, 0f, 0f, 40f, 0f), Is.Null, "precondition: the usual snap cannot reach out of the block");
+
+        var path = CityPath.Route(structures, assets, (0f, 0f), (40f, 0f), 120_000);
+        Assert.That(path, Is.Not.Null, "the wide second try found no way out");
+        Assert.That(path[^1], Is.EqualTo((40f, 0f)));
     }
 
     /// <summary>From a body pressed against a house, the walk first steps out of the wall's margin, and every leg after that is clear.</summary>

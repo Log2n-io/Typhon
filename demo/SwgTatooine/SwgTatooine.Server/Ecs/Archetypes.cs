@@ -88,7 +88,7 @@ public partial class CreatureLair : Archetype<CreatureLair>
 }
 
 /// <summary>
-/// A hostile or neutral creature: banthas, womp rats, Tusken Raiders, and the defenders of a destroy-mission camp.
+/// A hostile or neutral creature: a lair's beasts, a camp's ninjas and soldiers, and the defenders of a destroy-mission camp.
 /// Moves on the AI cadence, which is slower than the tick, and is the bulk of the moving population.
 /// </summary>
 [Archetype(1, "Creatures and hostile NPCs", ClusterDurability = ClusterDurability.Checkpoint)]
@@ -104,6 +104,9 @@ public partial class Creature : Archetype<Creature>
     /// <summary>Scheduling only — deliberately NOT projected, so a write here reaches no subscriber. See <see cref="CreatureTimers"/>.</summary>
     public static readonly Comp<CreatureTimers> Timers = Register<CreatureTimers>();
     public static readonly Comp<CreatureRealm> Realm = Register<CreatureRealm>();
+
+    /// <summary>The owning lair, behind the foreign key whose cascade destroys a lair's creatures with it. See <see cref="CreatureHome"/>.</summary>
+    public static readonly Comp<CreatureHome> Home = Register<CreatureHome>();
 }
 
 /// <summary>
@@ -172,6 +175,9 @@ public partial class Player : Archetype<Player>
     /// else, never replicated. Appended last so that every existing slot index keeps its number.
     /// </summary>
     public static readonly Comp<PlayerProximity> Proximity = Register<PlayerProximity>();
+
+    /// <summary>A scripted player's way round a city's buildings. Not projected. See <see cref="PlayerRoute"/>.</summary>
+    public static readonly Comp<PlayerRoute> Route = Register<PlayerRoute>();
 }
 
 /// <summary>

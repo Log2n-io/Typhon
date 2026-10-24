@@ -103,7 +103,16 @@ public sealed partial class SimBridge
 
                 // AC-4's first half. A player travelling, idling in a cantina, roaming or waiting for a shuttle does not shoot, and is counted rather than
                 // silently skipped.
-                if (states[idx].Activity != PlayerActivity.Combat)
+                //
+                // <b>A POSSESSED player fights what it targeted, whatever its activity.</b> Its activity is the server's description of a body the person is
+                // steering — a step makes it Travelling, a stop Idle — and `Combat` is only ever set for the scripted crowd (PlayerThink, a mission). Gating a
+                // human on it meant a click on a creature stored a target that no shot was ever fired at. It does not acquire one of its own, either: a
+                // person picks what they fight.
+                // A building or an NPC it selected is a target it holds and never fires at (CombatTargetKind.Unshootable).
+                var possessed = controls[idx].Kind != ControllerKind.Scripted;
+                if (possessed
+                        ? sessions[idx].Target.IsNull || sessions[idx].TargetKind == CombatTargetKind.Unshootable
+                        : states[idx].Activity != PlayerActivity.Combat)
                 {
                     idle++;
                     continue;
@@ -125,7 +134,6 @@ public sealed partial class SimBridge
                 var z = places[idx].Z;
                 var target = sessions[idx].Target;
                 var targetKind = sessions[idx].TargetKind;
-                var possessed = controls[idx].Kind != ControllerKind.Scripted;
 
                 if (!target.IsNull)
                 {
@@ -136,6 +144,10 @@ public sealed partial class SimBridge
                         // player too and the client is free to name another.
                         PlayerSessionsRw(in cluster, ref sessionsRw)[idx].Target = EntityId.Null;
                         target = EntityId.Null;
+                        if (possessed)
+                        {
+                            continue;
+                        }
                     }
                     else if (verdict == TargetVerdict.OutOfRange)
                     {
@@ -252,9 +264,7 @@ public sealed partial class SimBridge
 
             case CombatTargetKind.Lair:
             {
-                // A lair whose mission has ended is back in the pool at full health and belongs to somebody else's mission next; shooting it would damage a
-                // target nobody was sent to destroy.
-                if (entity.Read(CreatureLair.Vitals).Health <= 0 || entity.Read(CreatureLair.Spawner).MissionId == 0)
+                if (!IsStandingLair(entity.Read(CreatureLair.Spawner), entity.Read(CreatureLair.Vitals)))
                 {
                     return TargetVerdict.Gone;
                 }
@@ -265,7 +275,7 @@ public sealed partial class SimBridge
                 break;
             }
 
-            default:
+            case CombatTargetKind.Player:
             {
                 if (entity.Read(Player.Vitals).Health <= 0)
                 {
@@ -277,6 +287,10 @@ public sealed partial class SimBridge
                 tz = p.Z;
                 break;
             }
+
+            default:
+                // Nothing it could damage. Gated out before this for a session's player; Gone rather than a read of components it does not have.
+                return TargetVerdict.Gone;
         }
 
         var dx = tx - x;
@@ -296,10 +310,9 @@ public sealed partial class SimBridge
     /// consumer discard damage to a corpse deadlocks the player: a dead creature stays in the index for its whole respawn
     /// interval, so the nearest hit is the same corpse on the next cycle and the next, and the player never fires at
     /// anything. A few dozen component reads per shot, a couple of shots per tick, is not a cost worth that bug.</para>
-    /// <para><b>Wild lairs are not targets.</b> Only a lair with a live <c>MissionId</c> can be damaged, because only a
-    /// mission lair is ever repaired — <c>MissionTick</c> restores it to full health when its mission completes. Damaging
-    /// a wild lair would take it to zero once and leave it there for the life of the process, which is a leak dressed as a
-    /// feature.</para>
+    /// <para><b>Any standing lair is a target</b> (<see cref="IsStandingLair"/>). A wild one used not to be, because nothing
+    /// repaired it and a lair at zero would have stood broken for the life of the process. Lairs are transient now: one at
+    /// zero is retired by the lair director and replaced elsewhere (<c>SimBridge.Lairs.cs</c>).</para>
     /// </remarks>
     private bool TryAcquireTarget(TickContext ctx, RealmId realm, float x, float z, out EntityId target, out byte kind)
     {
@@ -341,7 +354,7 @@ public sealed partial class SimBridge
             {
                 var hit = lairs.Current;
                 if (hit.DistanceSq >= bestSq || !ctx.Accessor.TryOpen(hit.Entity, out var candidate)
-                    || candidate.Read(CreatureLair.Spawner).MissionId == 0 || candidate.Read(CreatureLair.Vitals).Health <= 0)
+                    || !IsStandingLair(candidate.Read(CreatureLair.Spawner), candidate.Read(CreatureLair.Vitals)))
                 {
                     continue;
                 }
@@ -487,44 +500,6 @@ public sealed partial class SimBridge
         }
     }
 
-    /// <summary>A dead creature's countdown, and its revival at its lair with full health. Called from <see cref="CreatureThinkTick"/>.</summary>
-    private static void Revive(
-        in ClusterRef<Creature> cluster,
-        ReadOnlySpan<CreatureVitals> vitals,
-        ref Span<CreatureVitals> vitalsRw,
-        ref Span<CreatureBrain> brainsRw,
-        ref CreatureTimers t,
-        int idx,
-        ref long revived)
-    {
-        if (--t.ThinkCooldown > 0)
-        {
-            return;
-        }
-
-        // Revive at the lair with full health. The teleport is the point: it is the biggest position jump
-        // this simulation makes, and it forces a cell change plus a cluster-bound recomputation.
-        VitalsRw(in cluster, ref vitalsRw)[idx].Health = vitals[idx].MaxHealth;
-        var rw = BrainsRw(in cluster, ref brainsRw);
-        rw[idx].Mode = AiMode.Wander;
-
-        // A revived creature has no grudge. Left set, it would resume Fighting the player that killed it the moment CreatureThink next looked at it, from
-        // the far side of the planet.
-        rw[idx].Target = EntityId.Null;
-        TatooineReplication.Replicate(in cluster, idx);
-        t.ThinkCooldown = 1;
-
-        // The move system's one and only teleport-home signal (S0-1). It used to read ThinkCooldown == 1 as this, and so teleported every living
-        // wanderer that happened to be one tick from its next decision. See CreatureTimers.JustRevived.
-        t.JustRevived = 1;
-
-        // Cleared, or a creature revived part-way through an old rest keeps standing until a schedule from its previous life runs out. Zero is in the
-        // past for every tick, so the next decision picks a fresh leg.
-        t.MoveUntilTick = 0;
-        t.RestUntilTick = 0;
-        revived++;
-    }
-
     /// <summary>
     /// Every effect this tick produced, applied to the entity it names: <see cref="SimPhases.Resolve"/>, serial, after both producers.
     /// </summary>
@@ -562,7 +537,7 @@ public sealed partial class SimBridge
         Span<CombatEvent> events = pending <= 128 ? stackalloc CombatEvent[128] : new CombatEvent[pending];
         var n = CombatQueue.Drain(events);
         var tx = ctx.Transaction;
-        var respawnTicks = Math.Max(1, (int)(_config.RespawnSeconds * _config.TickRateHz));
+        var corpseTicks = Math.Max(1, (int)(_config.CorpseSeconds * _config.TickRateHz));
         long damageApplied = 0;
         long killed = 0;
         long lairHits = 0;
@@ -614,7 +589,7 @@ public sealed partial class SimBridge
             switch (ev.TargetKind)
             {
                 case CombatTargetKind.Creature:
-                    landed = ApplyToCreature(tx, ref target, in ev, respawnTicks, ref killed, ref damageApplied);
+                    landed = ApplyToCreature(tx, ref target, in ev, corpseTicks, ref killed, ref damageApplied);
                     break;
 
                 case CombatTargetKind.Lair:
@@ -736,7 +711,7 @@ public sealed partial class SimBridge
 
     /// <summary>Damage to a creature: health down, a grudge against the shooter, and loot to whoever landed the last hit.</summary>
     /// <returns>Whether the blow landed; <see langword="false"/> when the creature was already dead this tick.</returns>
-    private bool ApplyToCreature(Transaction tx, ref EntityRefMut target, in CombatEvent ev, int respawnTicks, ref long killed, ref long damageApplied)
+    private bool ApplyToCreature(Transaction tx, ref EntityRefMut target, in CombatEvent ev, int corpseTicks, ref long killed, ref long damageApplied)
     {
         var v = target.Read(Creature.Vitals);
         if (v.Health <= 0)
@@ -779,7 +754,7 @@ public sealed partial class SimBridge
         ai.Target = EntityId.Null;
         target.Set(Creature.Ai, ai);
         var t = target.Read(Creature.Timers);
-        t.ThinkCooldown = respawnTicks;
+        t.ThinkCooldown = corpseTicks;
         t.AttackCooldown = 0;
         target.Set(Creature.Timers, t);
         TatooineReplication.Replicate(in target);
@@ -792,18 +767,16 @@ public sealed partial class SimBridge
         return true;
     }
 
-    /// <summary>Damage to a mission lair. Its completion is <c>MissionTick</c>'s, on the next tick's Spawn phase.</summary>
+    /// <summary>
+    /// Damage to a lair. A mission lair's completion is <c>MissionTick</c>'s, on the next tick's Spawn phase; a wild lair at zero is retired by the lair
+    /// director in this tick's Economy phase.
+    /// </summary>
     private static bool ApplyToLair(ref EntityRefMut target, in CombatEvent ev)
     {
-        if (target.Read(CreatureLair.Spawner).MissionId == 0)
-        {
-            return false;   // the mission ended between the shot and here
-        }
-
         var v = target.Read(CreatureLair.Vitals);
-        if (v.Health <= 0)
+        if (!IsStandingLair(target.Read(CreatureLair.Spawner), v))
         {
-            return false;
+            return false;   // broken already this tick, or a mission that ended between the shot and here
         }
 
         v.Health = Math.Max(0, v.Health - ev.Amount);
@@ -869,7 +842,7 @@ public sealed partial class SimBridge
             return true;
         }
 
-        var city = NearestCity(place.X, place.Z);
+        var city = CloneSpot((ushort)realm, place.X, place.Z, ev.Target.EntityKey);
         var at = default(PlayerPlacement);
         // The realm the player is teleported INTO is the one that owns the ground, and it is the same one the teleport
         // below names. Passing RealmId.Default here was right only because every planet currently shares one field.
@@ -957,15 +930,27 @@ public sealed partial class SimBridge
         player.Set(Player.Inventory, inv);
     }
 
-    /// <summary>The nearest NPC city to a point — where a cloned player wakes up.</summary>
+    /// <summary>
+    /// Whether a lair may be damaged: it has health left and, if it is one of the destroy-mission pool, it is on a mission. A dormant pool lair is at full
+    /// health between missions and belongs to somebody else's next; shooting it would damage a target nobody was sent to destroy.
+    /// </summary>
+    internal static bool IsStandingLair(in Lair lair, in LairVitals vitals)
+        => vitals.Health > 0 && (lair.CreatureTemplate != CreatureTemplates.MissionDefender || lair.MissionId != 0);
+
+    /// <summary>Where a cloned player wakes up: on the lane outside the gate of the nearest city's shuttleport.</summary>
     /// <remarks>
-    /// Linear over the cities, which is nine of them: an index would be a data structure to answer a question asked once per player death.
+    /// <para>
+    /// <b>Not the city's centre, which is where the shuttleport stands.</b> A clone used to be teleported to the city's own coordinates — the middle of
+    /// the port's landing pad — and could not walk out: its route search started inside the pad, deeper than any search snaps, so it walked straight and
+    /// stopped at the ring wall. Most of the crowd stuck "inside the shuttleport" (Loïc, 2026-10-24) had been cloned there. The gate's lane is the free
+    /// ground shuttle arrivals already land on (<see cref="WorldBuilder.OutsideGate"/>), spread across and along it by the body's key.
+    /// </para>
+    /// <para>Linear over the cities, which is nine of them: an index would be a data structure to answer a question asked once per player death.</para>
     /// </remarks>
-    private (float X, float Z) NearestCity(float x, float z)
+    private (float X, float Z) CloneSpot(ushort planet, float x, float z, long key)
     {
         var bestSq = float.MaxValue;
-        var bx = x;
-        var bz = z;
+        var best = -1;
         for (var i = 0; i < _index.Cities.Count; i++)
         {
             var c = _index.Cities[i];
@@ -975,12 +960,18 @@ public sealed partial class SimBridge
             if (d2 < bestSq)
             {
                 bestSq = d2;
-                bx = c.X;
-                bz = c.Z;
+                best = i;
             }
         }
 
-        return (bx, bz);
+        var ports = PortsOf(planet);
+        if (best < 0 || best >= ports.Count)
+        {
+            return best < 0 ? (x, z) : (_index.Cities[best].X, _index.Cities[best].Z);
+        }
+
+        var (portX, portZ) = ports[best];
+        return WorldBuilder.OutsideGate(portX, portZ, Hash01((uint)key ^ 0x3C6EF372u), Hash01((uint)key ^ 0x9E3779B9u));
     }
 
     /// <summary>The cluster's mutable vitals, handed out on the first write of this cluster's walk and not before. See <see cref="CreatureCombatTick"/>.</summary>

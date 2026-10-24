@@ -82,17 +82,17 @@ public readonly struct SpawnRegionDef
     /// <summary>Lairs per square kilometre inside the region.</summary>
     public readonly float LairsPerSqKm;
 
-    /// <summary>Which creature template the region's lairs spawn.</summary>
-    public readonly int CreatureTemplate;
+    /// <summary>The <see cref="CreatureTemplates"/> the region's lairs are drawn from, one per lair.</summary>
+    public readonly int[] Templates;
 
-    public SpawnRegionDef(string name, float x, float z, float radius, float lairsPerSqKm, int creatureTemplate)
+    public SpawnRegionDef(string name, float x, float z, float radius, float lairsPerSqKm, int[] templates)
     {
         Name = name;
         X = x;
         Z = z;
         Radius = radius;
         LairsPerSqKm = lairsPerSqKm;
-        CreatureTemplate = creatureTemplate;
+        Templates = templates;
     }
 }
 
@@ -177,7 +177,7 @@ public sealed class TatooineMap
 
         foreach (var r in TatooineData.SpawnRegions)
         {
-            map.SpawnRegions.Add(new SpawnRegionDef(r.Name, r.X * s, r.Z * s, r.Radius * s, r.LairsPerSqKm / (s * s), r.CreatureTemplate));
+            map.SpawnRegions.Add(new SpawnRegionDef(r.Name, r.X * s, r.Z * s, r.Radius * s, r.LairsPerSqKm / (s * s), r.Templates));
         }
 
         return map;

@@ -29,10 +29,8 @@ internal sealed class CreatureThinkSystem : QuerySystem
         .ChunksPerWorker(2f)
         .Reads<CreaturePlacement>()
 
-        // WRITTEN, not read, since SWG-02 moved the revive here: a dead creature's countdown and its return to full health at its lair are mode transitions on
-        // the AI cadence, and leaving them in the combat phase made this the only writer of CreatureVitals in the phase where the player's side of a fight has
-        // to read them.
-        .Writes<CreatureVitals>()
+        // Read for the aggro gate. It was written while the revive lived here; a dead creature is destroyed now, not restored (SimBridge.Lairs.cs).
+        .Reads<CreatureVitals>()
 
         // The aggro query reads player positions, and the pursuit re-reads its quarry's; declared, so Shuttle's and PlayerMove's writes are ordered around it
         // (rule ED-05).
@@ -67,6 +65,9 @@ internal sealed class PlayerThinkSystem : QuerySystem
         .Reads<PlayerControl>()
         .Writes<PlayerState>()
         .Writes<PlayerMotion>()
+
+        // A scripted player's way round a city (SimBridge.Routes.cs): planned and followed here, read nowhere else.
+        .Writes<PlayerRoute>()
         .Input(() => _bridge.PlayerView);
 
     protected override void Execute(TickContext ctx) => _bridge.PlayerThinkTick(ctx);
@@ -87,12 +88,41 @@ internal sealed class CreatureMoveSystem : QuerySystem
         .Reads<CreatureMotion>()
         .Reads<CreatureBrain>()
         .Writes<CreaturePlacement>()
-
-        // Clears CreatureTimers.JustRevived after the teleport home (S0-1); see CreatureThink for why this was missing.
-        .Writes<CreatureTimers>()
         .Input(() => _bridge.CreatureView);
 
     protected override void Execute(TickContext ctx) => _bridge.CreatureMoveTick(ctx);
+}
+
+/// <summary>
+/// The lair director (<c>SimBridge.Lairs.cs</c>): destroys corpses, retires spent lairs with their creatures, and refills lairs and sites.
+/// </summary>
+/// <remarks>
+/// Serial, in the Economy phase, through its own side transaction — the shape <see cref="DungeonSystem"/> spawns and destroys with. After Think, which hands
+/// it the corpses, and after Apply, which breaks lairs, so both are handled on the tick they happen. The writes are declared for what it SPAWNS: a lair and
+/// every component of the creatures it fills itself with.
+/// </remarks>
+internal sealed class LairLifeSystem : CallbackSystem
+{
+    private readonly SimBridge _bridge;
+
+    public LairLifeSystem(SimBridge bridge) => _bridge = bridge;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("LairLife")
+        .Phase(SimPhases.Economy)
+        .Writes<Lair>()
+        .Writes<LairPlacement>()
+        .Writes<LairVitals>()
+        .Writes<LairRealm>()
+        .Writes<CreaturePlacement>()
+        .Writes<CreatureMotion>()
+        .Writes<CreatureVitals>()
+        .Writes<CreatureBrain>()
+        .Writes<CreatureTimers>()
+        .Writes<CreatureRealm>()
+        .Writes<CreatureHome>();
+
+    protected override void Execute(TickContext ctx) => _bridge.LairLifeTick(ctx);
 }
 
 /// <summary>Player position integration.</summary>

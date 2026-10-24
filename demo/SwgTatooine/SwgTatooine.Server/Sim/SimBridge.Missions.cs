@@ -184,7 +184,6 @@ public sealed partial class SimBridge
                     v.Health = v.MaxHealth;
                     lair.MissionId = difficulty;
                     lair.Owner = owner;
-                    lair.AliveCount = 1;
 
                     // The teleport, done here rather than handed to a placement system: this walk owns CreatureLair, so
                     // it can write the placement directly through the spatial barrier. A lair jumping one to two

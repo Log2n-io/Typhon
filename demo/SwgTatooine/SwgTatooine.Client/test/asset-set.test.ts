@@ -61,6 +61,7 @@ describe('the announced asset set', () => {
       catalogue: 'catalogue-7.json',
       structures: [],
       collision: [],
+      creatures: [],
     });
   });
 

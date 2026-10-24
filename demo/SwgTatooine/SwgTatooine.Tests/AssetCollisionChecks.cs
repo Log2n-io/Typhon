@@ -1,6 +1,7 @@
 ﻿using System;
 using NUnit.Framework;
 using SwgTatooine.Server;
+using SwgTatooine.Navigation;
 
 namespace SwgTatooine.Tests;
 

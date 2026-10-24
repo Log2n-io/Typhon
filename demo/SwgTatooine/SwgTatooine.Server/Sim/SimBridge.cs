@@ -241,6 +241,9 @@ public sealed partial class SimBridge : IShuttleBoarding
         MissionsIssued = Interlocked.Exchange(ref _missionsIssued, 0),
         MissionsCompleted = Interlocked.Exchange(ref _missionsCompleted, 0),
         CreaturesRespawned = Interlocked.Exchange(ref _creaturesRespawned, 0),
+        CorpsesRemoved = Interlocked.Exchange(ref _corpsesRemoved, 0),
+        LairsRetired = Interlocked.Exchange(ref _lairsRetired, 0),
+        LairsSpawned = Interlocked.Exchange(ref _lairsSpawned, 0),
         ShuttleBoardings = Interlocked.Exchange(ref _shuttleBoardings, 0),
         PortalEntries = Interlocked.Exchange(ref _portalEntriesTick, 0),
         PortalExits = Interlocked.Exchange(ref _portalExitsTick, 0),
@@ -326,7 +329,17 @@ public struct TickStats
     public long EconomyTicks;
     public long MissionsIssued;
     public long MissionsCompleted;
+    /// <summary>Creatures a lair spawned to replace one it lost (<c>SimBridge.Lairs.cs</c>).</summary>
     public long CreaturesRespawned;
+
+    /// <summary>Corpses destroyed once they had lain for <c>SimConfig.CorpseSeconds</c>.</summary>
+    public long CorpsesRemoved;
+
+    /// <summary>Wild lairs retired — broken or out of life — each taking its creatures with it through the cascade.</summary>
+    public long LairsRetired;
+
+    /// <summary>Lairs spawned to keep a site at its density.</summary>
+    public long LairsSpawned;
     public long ShuttleBoardings;
     public long PortalEntries;
     public long PortalExits;

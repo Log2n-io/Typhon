@@ -5,6 +5,7 @@ using NUnit.Framework;
 using SwgTatooine.Server;
 using Typhon.Engine;
 using Typhon.Schema.Definition;
+using SwgTatooine.Navigation;
 
 namespace SwgTatooine.Tests;
 

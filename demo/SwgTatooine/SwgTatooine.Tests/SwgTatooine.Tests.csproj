@@ -15,6 +15,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\SwgTatooine.Server\SwgTatooine.Server.csproj" />
+    <ProjectReference Include="..\SwgTatooine.Navigation\SwgTatooine.Navigation.csproj" />
     <!-- The bot fleet. Referenced here rather than in a project of its own so one fixture can stand up a real /auth host AND a
          real provisioner against it: the thing worth testing about B5 is that a DERIVED password is acceptable to the SERVER's
          own rules, which needs both assemblies in one place. Before this, nothing in the repository could reach BotSwarm at all,

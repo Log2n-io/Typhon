@@ -115,9 +115,19 @@ export class AttackLines implements EventSink {
     useChat.getState().say({ tick, speaker: speakerNetId, text, atMs: performance.now() });
   }
 
+  /**
+   * Told of every blow's attacker as it arrives, so the crowd can play the swing (`app/crowd-router.ts`). A line is drawn
+   * from state the packer already evaluated; a swing is an animation the crowd plays, and this is where the event lands.
+   */
+  onStrike: ((attackerNetId: number) => void) | null = null;
+
   onAttack(tick: number, attackerNetId: number, targetNetId: number): void {
     if (attackerNetId === 0 && targetNetId === 0) {
       return;
+    }
+
+    if (attackerNetId !== 0) {
+      this.onStrike?.(attackerNetId);
     }
 
     const at = (this.head + this.count) % CAPACITY;

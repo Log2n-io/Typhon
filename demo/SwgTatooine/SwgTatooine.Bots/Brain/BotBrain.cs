@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using SwgTatooine.Navigation;
 
 namespace SwgTatooine.Bots.Brain;
 
@@ -138,7 +139,7 @@ public sealed class BotBrain
     public const float SearchReachM = 200f;
 
     /// <summary>A search rectangle no wider than this is searched on half-metre cells, metres: 440 × 440 cells at most.</summary>
-    public const float FineSearchM = 220f;
+    public const float FineSearchM = CityPath.FineSearchM;
 
     /// <summary>A search that has expanded this many cells without reaching its goal gives up: a walled-off goal must not cost the whole grid.</summary>
     public const int MaxExpansions = 120_000;
@@ -975,31 +976,9 @@ public sealed class BotBrain
     /// <summary>A searched walk between two points over the structures last copied into <see cref="_seen"/>; null when walled off.</summary>
     private List<(float X, float Z)> Search((float X, float Z) from, (float X, float Z) to)
     {
-        // Room round both ends for a detour round a building — the largest, a shuttleport, is 46 m across — and small enough that the last stretch
-        // of a long walk (150 m) is searched on half-metre cells.
-        const float Margin = 30f;
-        var minX = MathF.Min(from.X, to.X) - Margin;
-        var minZ = MathF.Min(from.Z, to.Z) - Margin;
-        var maxX = MathF.Max(from.X, to.X) + Margin;
-        var maxZ = MathF.Max(from.Z, to.Z) + Margin;
-
-        // Half-metre cells where the search is small enough to afford them — a street, a porch, a terminal's side — and metre cells across a city. A
-        // metre grid laid at an arbitrary origin closes a one-metre passage half the time: the large house's porch is left by one.
-        var cell = MathF.Max(maxX - minX, maxZ - minZ) <= FineSearchM ? CityPath.CellM * 0.5f : CityPath.CellM;
-        var grid = CityPath.Walls(_seen, _assets, minX, minZ, maxX, maxZ, cell: cell);
+        // The window, the cell size and the porch rule are CityPath.Route's, which the server's scripted crowd walks with too.
         PathsPlanned++;
-
-        // Standing up on a porch — a house's foundation, 0.7 m above the street — the porch is a wall to everything on the ground and the floor under
-        // this body: the search snapped its start out past the walls round the porch and the first leg ran into them. Three live bots stood on one for
-        // a whole run. Searched as floor, the walk crosses the porch and steps off its edge.
-        // Only ON the porch: a body on the ground beside one stands in the same walled-off cells, and searched as floor its walk crossed the porch's
-        // corner — which the server, rightly, does not let a body on the ground walk into.
-        if (CityPath.IsBlocked(grid, from.X, from.Z) && CityPath.OnRaisedFloor(_seen, _assets, from.X, from.Z))
-        {
-            grid = CityPath.Walls(_seen, _assets, minX, minZ, maxX, maxZ, floorTopM: CityPath.PorchTopM, cell: cell);
-        }
-
-        return CityPath.Find(grid, from.X, from.Z, to.X, to.Z, MaxExpansions);
+        return CityPath.Route(_seen, _assets, from, to, MaxExpansions);
     }
 
     /// <summary>Follows the leg: the next point, how fast, and whether it has ended.</summary>

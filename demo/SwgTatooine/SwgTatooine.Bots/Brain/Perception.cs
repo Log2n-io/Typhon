@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using Typhon.Client;
 using Typhon.Protocol;
+using SwgTatooine.Navigation;
 
 namespace SwgTatooine.Bots.Brain;
 

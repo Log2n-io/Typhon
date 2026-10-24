@@ -36,3 +36,15 @@ export function assetForStructure(set: AssetSet, assetIndex: number): string | n
 export function structureYaw(quarters: number): number {
   return quarters * (Math.PI / 2);
 }
+
+/**
+ * A lair's quarter turn, from where it stands: stable for as long as it stands, and spread across the four.
+ *
+ * @param x Planet metres, east.
+ * @param z Planet metres, north.
+ * @returns 0 to 3.
+ */
+export function lairQuarter(x: number, z: number): number {
+  const h = Math.imul(Math.floor(x * 4) | 0, 0x9e3779b1) ^ Math.imul(Math.floor(z * 4) | 0, 0x85ebca77);
+  return ((h >>> 13) ^ h) & 3;
+}

@@ -24,6 +24,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\..\src\Typhon.Client\Typhon.Client.csproj" />
+    <ProjectReference Include="..\SwgTatooine.Navigation\SwgTatooine.Navigation.csproj" />
   </ItemGroup>
   <ItemGroup>
     <!-- The server's strict command-line reader, by source: the load generator's flags are what an A/B moves, so they are held to the server's standard

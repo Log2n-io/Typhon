@@ -3,7 +3,7 @@ import type { Scene } from '@babylonjs/core/scene';
 import { placement } from '../assets/asset-frame';
 import type { AssetLibrary } from '../assets/asset-library';
 import type { Descriptor } from '../assets/descriptor';
-import { planClipAtlas, type AtlasPlan } from '../character/clip-atlas';
+import { BAKE_FPS, creatureAtlas, planClipAtlas, type AtlasPlan } from '../character/clip-atlas';
 import { CROWD_ROLES, RIG_OUTFIT, wearableOutfits } from '../character/outfits';
 import { bakeClipAtlas, type BakeSource, type CrowdRig } from '../render/crowd-rig';
 import { CrowdLayer } from '../render/crowd-layer';
@@ -12,7 +12,7 @@ import { buildCrowdOutfit, type CrowdOutfit } from '../render/crowd-mesh';
 import type { SceneLighting } from '../render/scene-lighting';
 
 /**
- * Loads the catalogue's characters and builds the crowd from them.
+ * Loads the catalogue's characters — or one creature species — and builds a crowd from them.
  *
  * <b>Every outfit is loaded once, read, and thrown away.</b> What survives is a merged mesh per detail level and some
  * rows of a texture; the GLB, its skeleton and its seventeen animation groups are all transient. That is the whole
@@ -21,6 +21,10 @@ import type { SceneLighting } from '../render/scene-lighting';
  * The cost is concentrated in the loads, not in the bake: the spike measured its bake at 14–21 ms and the loading and
  * merging of nineteen outfits at about 400 ms. If that ever matters it is the merge to move off the critical path, or
  * to do lazily as an outfit is first worn — not the bake.
+ *
+ * <b>A creature is a crowd of its own.</b> The characters share one armature, so one atlas serves all nineteen outfits;
+ * the rat's 31 joints are not the spider's 39, so each species bakes its own atlas into its own texture and material and
+ * draws as its own layer. Same bake, same merge, same shader — only the rig differs.
  */
 
 export interface CrowdMount {
@@ -35,30 +39,21 @@ export interface CrowdMount {
 }
 
 /**
- * Builds the crowd.
+ * Every descriptor the catalogue publishes, by id.
  *
- * @param scene The live scene.
+ * <b>All at once.</b> Awaiting them one at a time is one serial round trip per asset in the whole catalogue — not just per
+ * character — on the load path, for files of a few KB each. Read once and handed to every crowd mounted after it.
+ *
  * @param library The open asset library.
- * @param lighting The scene's sun, so the crowd casts.
- * @param capacity The most bodies the crowd will draw at once.
- * @returns The mount, or `null` when the catalogue publishes no usable character.
+ * @returns The descriptors that fetched; a descriptor that will not is a deployment fault for that asset alone.
  */
-export async function mountCrowd(
-  scene: Scene,
-  library: AssetLibrary,
-  lighting: SceneLighting,
-  capacity: number,
-): Promise<CrowdMount | null> {
-  // Descriptors first: a few KB each, and enough to plan the whole atlas before a single GLB is fetched.
-  // <b>All at once.</b> Awaiting them one at a time is one serial round trip per asset in the whole catalogue — not
-  // just per character — on the load path, for files of a few KB each.
+export async function describeCatalogue(library: AssetLibrary): Promise<Map<string, Descriptor>> {
   const described = new Map<string, Descriptor>();
   const fetched = await Promise.all(
     library.ids.map(async (id) => {
       try {
         return [id, await library.describe(id)] as const;
       } catch {
-        // A descriptor that will not fetch is a deployment fault for that asset alone; the rest of the crowd stands.
         return null;
       }
     }),
@@ -69,6 +64,28 @@ export async function mountCrowd(
     }
   }
 
+  return described;
+}
+
+/**
+ * Builds the characters' crowd.
+ *
+ * @param scene The live scene.
+ * @param library The open asset library.
+ * @param lighting The scene's sun, so the crowd casts.
+ * @param capacity The most bodies the crowd will draw at once.
+ * @param described Every descriptor, from {@link describeCatalogue}.
+ * @param enemies Outfits only the server's enemies wear; a civilian, dressed by its netId, never draws one.
+ * @returns The mount, or `null` when the catalogue publishes no usable character.
+ */
+export async function mountCrowd(
+  scene: Scene,
+  library: AssetLibrary,
+  lighting: SceneLighting,
+  capacity: number,
+  described: ReadonlyMap<string, Descriptor>,
+  enemies: ReadonlySet<string> = new Set(),
+): Promise<CrowdMount | null> {
   const wearable = wearableOutfits(described);
   if (wearable.length === 0) {
     console.warn('crowd: the catalogue publishes no wearable character');
@@ -81,8 +98,75 @@ export async function mountCrowd(
     return null;
   }
 
-  const plan = planClipAtlas(described, joints);
+  return build(
+    scene,
+    library,
+    lighting,
+    described,
+    planClipAtlas(described, joints),
+    wearable,
+    capacity,
+    'crowd',
+    (id) => !enemies.has(id),
+  );
+}
 
+/**
+ * Builds one creature species' crowd: its own rig, its own atlas, its own layer.
+ *
+ * @param scene The live scene.
+ * @param library The open asset library.
+ * @param lighting The scene's sun.
+ * @param id The creature's catalogue id.
+ * @param capacity The most of this species drawn at once.
+ * @param described Every descriptor, from {@link describeCatalogue}.
+ * @returns The mount, or `null` when the creature is not published or cannot be driven.
+ */
+export async function mountCreatureCrowd(
+  scene: Scene,
+  library: AssetLibrary,
+  lighting: SceneLighting,
+  id: string,
+  capacity: number,
+  described: ReadonlyMap<string, Descriptor>,
+): Promise<CrowdMount | null> {
+  const descriptor = described.get(id);
+  const joints = descriptor?.render.joints ?? 0;
+  if (descriptor === undefined || descriptor.render.skinned !== true || joints <= 0) {
+    console.warn(`crowd: ${id} is not a published skinned creature; it stays the renderer's own shape`);
+    return null;
+  }
+
+  const own = new Map([[id, descriptor]]);
+  return build(
+    scene,
+    library,
+    lighting,
+    own,
+    planClipAtlas(own, joints, BAKE_FPS, creatureAtlas(id)),
+    [id],
+    capacity,
+    `creatures:${id}`,
+    () => true,
+  );
+}
+
+/**
+ * The shared half: checks the plan serves every driven role, bakes it, merges each outfit and makes the layer.
+ *
+ * @param civilian Whether an outfit may be worn by a body nobody dressed, so it can be drawn by netId.
+ */
+async function build(
+  scene: Scene,
+  library: AssetLibrary,
+  lighting: SceneLighting,
+  described: ReadonlyMap<string, Descriptor>,
+  plan: AtlasPlan,
+  wearable: readonly string[],
+  capacity: number,
+  label: string,
+  civilian: (id: string) => boolean,
+): Promise<CrowdMount | null> {
   // <b>Every outfit must resolve every driven role, checked here, once.</b> `plan.slotOf` returning null is the
   // quietest failure this design has: the layer skips `play`, the clip slot stays zero, the shader reads a frame
   // count of zero and every vertex of that body collapses to a point — with the draw calls, the instance counts and
@@ -99,7 +183,7 @@ export async function mountCrowd(
 
   if (unresolved.length > 0) {
     console.warn(
-      `crowd: ${String(unresolved.length)} outfit/role pairs have no atlas row, starting ${unresolved[0]}; the crowd stands down`,
+      `${label}: ${String(unresolved.length)} outfit/role pairs have no atlas row, starting ${unresolved[0]}; the crowd stands down`,
     );
     return null;
   }
@@ -109,7 +193,7 @@ export async function mountCrowd(
   const sourceIds = new Set(plan.bakes.map((b) => b.source));
   for (const id of sourceIds) {
     await library.acquire(id);
-    sources.set(id, { instance: await library.instantiate(id, placement([0, 0, 0], 0), null, `crowd-bake:${id}`) });
+    sources.set(id, { instance: await library.instantiate(id, placement([0, 0, 0], 0), null, `${label}-bake:${id}`) });
   }
 
   const tBake = performance.now();
@@ -138,7 +222,7 @@ export async function mountCrowd(
 
     try {
       await library.acquire(id);
-      const instance = await library.instantiate(id, placement([0, 0, 0], 0), null, `crowd-build:${id}`);
+      const instance = await library.instantiate(id, placement([0, 0, 0], 0), null, `${label}-build:${id}`);
       try {
         // Height from this outfit's own render bounds. A constant would be wrong for every outfit but one, and it
         // drives the projected-size tier, the cull sphere AND the clip rate.
@@ -151,7 +235,7 @@ export async function mountCrowd(
     } catch (error) {
       // One outfit that will not merge — a texture, five influences, a gap in its ladder — must not cost the crowd
       // every other costume. It is loud, because each of those is a publishing fault worth fixing.
-      console.warn(`crowd: ${id} was not built`, error);
+      console.warn(`${label}: ${id} was not built`, error);
     }
   }
 
@@ -159,7 +243,7 @@ export async function mountCrowd(
   if (outfits.length === 0) {
     rig.dispose();
     material.dispose();
-    console.warn('crowd: no outfit could be built');
+    console.warn(`${label}: no outfit could be built`);
     return null;
   }
 
@@ -169,6 +253,9 @@ export async function mountCrowd(
     lighting.castShadows(outfit.lods.map((l) => l.mesh));
   }
 
+  // The outfits a body nobody dressed may wear. All of them when the filter leaves none, so a catalogue of enemies only
+  // still draws its city rather than a city of points.
+  const hashed = outfits.flatMap((outfit, i) => (civilian(outfit.id) ? [i] : []));
   const layer = new CrowdLayer({
     scene,
     plan,
@@ -176,6 +263,7 @@ export async function mountCrowd(
     skin,
     described: outfitDescriptors,
     capacity,
+    ...(hashed.length > 0 ? { hashed } : {}),
   });
 
   // <b>Verified, not assumed.</b> The gate exists because a crowd that builds, classifies and issues draw calls can
@@ -186,7 +274,7 @@ export async function mountCrowd(
   layer.confirmDrawing(true);
 
   console.info(
-    `crowd: ${String(outfits.length)} outfits, ${String(plan.rows)} atlas rows, ` +
+    `${label}: ${String(outfits.length)} outfits, ${String(plan.rows)} atlas rows, ` +
       `${(rig.textureBytes / (1024 * 1024)).toFixed(2)} MB, bake ${bakeMs.toFixed(0)} ms, build ${buildMs.toFixed(0)} ms`,
   );
 

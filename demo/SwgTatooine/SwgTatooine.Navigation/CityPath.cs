@@ -1,7 +1,30 @@
 using System;
 using System.Collections.Generic;
 
-namespace SwgTatooine.Bots.Brain;
+namespace SwgTatooine.Navigation;
+
+/// <summary>One collider of a structure as the server publishes it in <c>demo.json</c>: its plan rectangle and its height band, in the asset's frame.</summary>
+/// <param name="MinX">West edge, already mirrored into the world's convention.</param>
+/// <param name="MinZ">South edge.</param>
+/// <param name="MaxX">East edge.</param>
+/// <param name="MaxZ">North edge.</param>
+/// <param name="MinY">Underside, above the structure's base.</param>
+/// <param name="MaxY">Top, above the structure's base.</param>
+/// <param name="Sloped">Whether its top is tilted: a ramp or a flight of steps — or a leaning strut, which <see cref="CityPath"/> tells apart by
+/// height.</param>
+/// <param name="Radius">The radius of its plan when that plan is a circle about the box's centre (a landing pad, a lamp post); 0 for the rectangle.</param>
+public readonly record struct PlanBox(float MinX, float MinZ, float MaxX, float MaxZ, float MinY, float MaxY, bool Sloped, float Radius = 0f);
+
+/// <summary>Where a structure asset's walls are: the boxes the server collides a body with, by the asset index a structure carries.</summary>
+/// <remarks>
+/// A bot reads them from <c>demo.json</c> (<c>BotAssets</c>); the server has them in hand. One interface so the search cannot tell the two apart.
+/// </remarks>
+public interface IWallPlans
+{
+    /// <summary>The asset's colliders in its own frame, mirrored into the world's convention; null for an index the plans do not know.</summary>
+    /// <param name="asset">The structure's asset index.</param>
+    PlanBox[] WallsOf(int asset);
+}
 
 /// <summary>A structure in a bot's store: where it stands, what it is and which asset draws it.</summary>
 /// <param name="X">Where it stands, east.</param>
@@ -89,17 +112,17 @@ public static class CityPath
     /// Whether a point stands ON a raised floor — inside the plan of a flat collider whose top is above a step and no higher than a porch — and not merely
     /// beside one, in the margin its walls are grown by.
     /// </summary>
-    public static bool OnRaisedFloor(IReadOnlyList<SeenStructure> structures, BotAssets assets, float x, float z)
+    public static bool OnRaisedFloor(IReadOnlyList<SeenStructure> structures, IWallPlans assets, float x, float z)
     {
         for (var i = 0; i < structures.Count; i++)
         {
             var s = structures[i];
-            if (assets.At(s.Asset) is not { } plan)
+            if (assets.WallsOf(s.Asset) is not { } walls)
             {
                 continue;
             }
 
-            foreach (var wall in plan.Walls)
+            foreach (var wall in walls)
             {
                 if (wall.Sloped || wall.MaxY <= StepM || wall.MaxY > PorchTopM)
                 {
@@ -133,7 +156,7 @@ public static class CityPath
     /// </param>
     public static WalkGrid Walls(
         IReadOnlyList<SeenStructure> structures,
-        BotAssets assets,
+        IWallPlans assets,
         float minX,
         float minZ,
         float maxX,
@@ -149,13 +172,13 @@ public static class CityPath
         for (var i = 0; i < structures.Count; i++)
         {
             var s = structures[i];
-            var plan = assets.At(s.Asset);
-            if (plan == null)
+            var walls = assets.WallsOf(s.Asset);
+            if (walls == null)
             {
                 continue;
             }
 
-            foreach (var wall in plan.Walls)
+            foreach (var wall in walls)
             {
                 if ((wall.Sloped && wall.MaxY <= RampTopM) || wall.MaxY <= floorTopM || wall.MinY >= HeadM)
                 {
@@ -207,6 +230,70 @@ public static class CityPath
         }
 
         return grid;
+    }
+
+    /// <summary>How far a blocked start or goal is moved to open ground, metres: a body pressed into a corner, a goal a few metres into a building.</summary>
+    public const float SnapM = 8f;
+
+    /// <summary>
+    /// How far a search that found no way is allowed to move them on its second try, metres: a body cloned onto the middle of a shuttleport's pad, a goal
+    /// in the middle of a large building. A shuttleport's plaza is 21.6 m in radius.
+    /// </summary>
+    public const float WideSnapM = 30f;
+
+    /// <summary>The longest side of a search searched on half-metre cells, metres; a longer one is searched on metre cells.</summary>
+    public const float FineSearchM = 220f;
+
+    /// <summary>Room round both ends of a search for a detour round a building, metres: the largest, a shuttleport, is 46 m across.</summary>
+    public const float SearchMarginM = 30f;
+
+    /// <summary>
+    /// A walk between two points round the structures given: the window, the cell size and the porch rule a walker needs, then <see cref="Find"/>.
+    /// </summary>
+    /// <param name="structures">The structures near the walk.</param>
+    /// <param name="assets">Their walls.</param>
+    /// <param name="from">Where the walker stands.</param>
+    /// <param name="to">Where it is going.</param>
+    /// <param name="maxExpansions">How far the search may go before giving up.</param>
+    /// <returns>The points to walk, or null when the goal is walled off.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Moved here from the bot's brain</b> so the server's scripted crowd walks a city exactly as a bot does (Loïc, 2026-10-24).
+    /// </para>
+    /// <para>
+    /// Half-metre cells where the search is small enough to afford them — a street, a porch, a terminal's side — and metre cells across a city. A metre
+    /// grid laid at an arbitrary origin closes a one-metre passage half the time: the large house's porch is left by one.
+    /// </para>
+    /// <para>
+    /// Standing up on a porch — a house's foundation, 0.7 m above the street — the porch is a wall to everything on the ground and the floor under this
+    /// body: the search snapped its start out past the walls round the porch and the first leg ran into them. Three live bots stood on one for a whole
+    /// run. Searched as floor, the walk crosses the porch and steps off its edge. Only ON the porch: a body on the ground beside one stands in the same
+    /// walled-off cells, and searched as floor its walk crossed the porch's corner — which the server, rightly, does not let a body on the ground walk
+    /// into.
+    /// </para>
+    /// </remarks>
+    public static List<(float X, float Z)> Route(
+        IReadOnlyList<SeenStructure> structures,
+        IWallPlans assets,
+        (float X, float Z) from,
+        (float X, float Z) to,
+        int maxExpansions)
+    {
+        var minX = MathF.Min(from.X, to.X) - SearchMarginM;
+        var minZ = MathF.Min(from.Z, to.Z) - SearchMarginM;
+        var maxX = MathF.Max(from.X, to.X) + SearchMarginM;
+        var maxZ = MathF.Max(from.Z, to.Z) + SearchMarginM;
+        var cell = MathF.Max(maxX - minX, maxZ - minZ) <= FineSearchM ? CellM * 0.5f : CellM;
+        var grid = Walls(structures, assets, minX, minZ, maxX, maxZ, cell: cell);
+        if (IsBlocked(grid, from.X, from.Z) && OnRaisedFloor(structures, assets, from.X, from.Z))
+        {
+            grid = Walls(structures, assets, minX, minZ, maxX, maxZ, floorTopM: PorchTopM, cell: cell);
+        }
+
+        // Once more with a wide snap when the ends were deeper in than the usual one reaches. Measured on the crowd at --pop 5: 29 of 123 searches failed,
+        // every one with an end inside a building — most on the middle of a shuttleport's pad.
+        return Find(grid, from.X, from.Z, to.X, to.Z, maxExpansions)
+            ?? Find(grid, from.X, from.Z, to.X, to.Z, maxExpansions, WideSnapM);
     }
 
     /// <summary>A box turned by quarter turns about the structure's origin — the browser's <c>turn</c> and the server's <c>QuarterTurn</c>.</summary>
@@ -302,11 +389,18 @@ public static class CityPath
 
     /// <summary>A path around the walls as waypoints — the start excluded, the goal last — or null when there is none inside the grid.</summary>
     /// <param name="maxExpansions">Cells it may expand before it gives up; a walled-off goal otherwise costs the whole grid.</param>
-    public static List<(float X, float Z)> Find(WalkGrid grid, float fromX, float fromZ, float toX, float toZ, int maxExpansions = int.MaxValue)
+    public static List<(float X, float Z)> Find(
+        WalkGrid grid,
+        float fromX,
+        float fromZ,
+        float toX,
+        float toZ,
+        int maxExpansions = int.MaxValue,
+        float snapM = SnapM)
     {
         // Eight metres each way: a body pressed into a street corner stands in cells its own width has walled off, and a goal can be a few metres into
         // a building — four cells left a bot wedged in Dry Wells with no search that could start.
-        var reach = (int)MathF.Ceiling(8f / grid.Cell);
+        var reach = (int)MathF.Ceiling(snapM / grid.Cell);
         var start = NearestOpen(grid, CellOf(grid, fromX, fromZ), reach, fromX, fromZ);
         var startOpen = start == CellOf(grid, fromX, fromZ);
         var goal = NearestOpen(grid, CellOf(grid, toX, toZ), reach, fromX, fromZ);

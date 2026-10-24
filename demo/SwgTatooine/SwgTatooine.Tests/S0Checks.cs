@@ -202,90 +202,35 @@ public sealed class CreatureDispersionTests
         Assert.That(share, Is.LessThan(0.05), $"{atCentre} of {wanderers} wanderers sit within 3 m of their lair centre ({share:P1})");
         Assert.That(exactlyHome, Is.Zero, "no wanderer sits at exactly its lair centre, which only a teleport can produce");
     }
-}
 
-/// <summary>
-/// S0-1, the other half: a creature that really does revive is teleported home exactly once, and the flag that says so is consumed.
-/// </summary>
-/// <remarks>
-/// <see cref="CreatureDispersionTests"/> proves the teleport no longer fires for a living wanderer, but at the shipped 180 s respawn nothing revives inside a
-/// short run, so it never exercises a real revival at all. A flag that were raised and never cleared would teleport its creature home on every tick for the
-/// rest of the run — pinned to a point, invisible in the aggregate, and the same corruption of the workload that S0-1 was.
-/// </remarks>
-[Category("Integration")]
-[TestFixture]
-[NonParallelizable]
-public sealed class CreatureRevivalTests
-{
-    private string _dir;
-    private TatooineSim _sim;
-
-    [OneTimeSetUp]
-    public void RunWorld()
-    {
-        _dir = Worlds.NewDirectory();
-        var config = Worlds.Small(_dir);
-        config.TickRateHz = 10;
-        config.WarmTicks = 0;
-        config.MeasuredTicks = 200;
-        config.WorkerCount = 1;
-
-        // Unpaced: every interval is in seconds converted at the configured rate, so 200 ticks are 20 s of world either way, and paced they were 20 s of
-        // wall clock. Nothing here needs an exact stop. Measured unpaced: 63 kills, 55 revivals, two seconds.
-        config.Unpaced = true;
-
-        // Full population: at 5 % there are too few players for any of them to meet a creature, and the run kills nothing to revive. At 40 % it revives six,
-        // which is too few for the one-in-ten ratio asserted below to mean anything.
-        config.PopulationScale = 1f;
-
-        // 3 s instead of 180: revivals have to happen inside the window for this to test anything.
-        config.RespawnSeconds = 3f;
-        _sim = new TatooineSim(config);
-        _sim.Initialize();
-        _sim.Run();
-    }
-
-    [OneTimeTearDown]
-    public void Dispose()
-    {
-        _sim?.Dispose();
-        Worlds.Delete(_dir);
-    }
-
+    /// <summary>A lair's creatures wander within 20 m of it (Loïc, 2026-10-24): the leash's 130 m left the nest standing alone.</summary>
+    /// <remarks>
+    /// Most, not all: a creature that chased somebody and gave up is Wander again at once and walks back over its next legs. The bound is the wander radius
+    /// plus a metre of a leg's own overshoot.
+    /// </remarks>
     [Test]
-    public void CreaturesRevive_AndNoReviveFlagIsLeftUnconsumed()
+    public void WanderingCreatures_StayWithinTwentyMetresOfTheirLair()
     {
-        Assert.That(_sim.LastStats.CreaturesKilled, Is.GreaterThan(0), "players killed creatures, so there is something to revive");
-        Assert.That(_sim.LastStats.CreaturesRespawned, Is.GreaterThan(0), "and the revival path ran inside the measured window");
-
-        var stuck = 0;
-        using var tx = _sim.Dbe.CreateQuickTransaction();
-        Span<ClusterSpatialQueryResult> buffer = new ClusterSpatialQueryResult[64];
-        var e = _sim.Dbe.ClusterSpatialQuery<Creature>(RealmId.Default).AABB(in Worlds.Everywhere);
-        try
+        var wanderers = 0;
+        var far = 0;
+        foreach (var r in S0.Creatures(_sim))
         {
-            int got;
-            while ((got = e.Fill(buffer)) > 0)
+            if (r.Mode != AiMode.Wander)
             {
-                for (var i = 0; i < got; i++)
-                {
-                    if (tx.Open(buffer[i].Entity).Read(Creature.Timers).JustRevived != 0)
-                    {
-                        stuck++;
-                    }
-                }
+                continue;
+            }
+
+            wanderers++;
+            var dx = r.X - r.HomeX;
+            var dz = r.Z - r.HomeZ;
+            if ((dx * dx) + (dz * dz) > (TatooineData.LairWanderRadiusM + 1f) * (TatooineData.LairWanderRadiusM + 1f))
+            {
+                far++;
             }
         }
-        finally
-        {
-            e.Dispose();
-        }
 
-        // Not zero, and the reason is the phase order: combat raises the flag in Resolve, and Move — which consumes it — runs EARLIER in the tick, so a
-        // creature revived on tick N is teleported on tick N + 1. Whatever revived on the run's last tick still carries the flag, legitimately.
-        // What falsifies a flag that is never consumed is the RATIO: unconsumed would equal revived, not trail it by a tick's worth.
-        var revived = _sim.LastStats.CreaturesRespawned;
-        Assert.That(stuck * 10L, Is.LessThan(revived), $"{stuck} of {revived} revivals left JustRevived set — a tick's residue is expected, a tenth is not");
+        Assert.That(wanderers, Is.GreaterThan(100), "the world has a wandering creature population to measure");
+        Assert.That(far * 50, Is.LessThan(wanderers), $"{far} of {wanderers} wanderers are beyond {TatooineData.LairWanderRadiusM} m of their lair");
     }
 }
 

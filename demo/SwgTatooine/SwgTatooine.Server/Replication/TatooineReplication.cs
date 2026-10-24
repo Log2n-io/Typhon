@@ -1431,6 +1431,10 @@ public static partial class TatooineReplication
                 .Of<CityNpc>()
                 .Of<Creature>()
                 .Of<WorldObject>()
+
+                // The lairs, drawn: a creature with no nest beside it reads as a stray. Static, sent once on enter, so its cost is the crescent query the
+                // note above describes, paid by watched riders only.
+                .Of<CreatureLair>()
                 .Groups(CitySet, CityReachM);
 
             // Free here, unlike on the sphere above: a World observer fills once per realm from a cursor and has no crescent to sweep.
@@ -1452,6 +1456,10 @@ public static partial class TatooineReplication
                 .Of<CityNpc>()
                 .Of<Creature>()
                 .Of<WorldObject>()
+
+                // A lair is what a person walks up to and breaks, so a browser has to be able to see one — and target it, which the server refuses for
+                // anything the session was never shown. Bots' PlayerProfile does not carry it: they render nothing and hunt creatures.
+                .Of<CreatureLair>()
 
                 // Parity: a browser is served the same city set a bot is, because every capability a bot has has to be reachable from the client.
                 .Groups(CitySet, CityReachM);
@@ -3209,7 +3217,8 @@ public static partial class TatooineReplication
 
         if (routing == _lairRouting)
         {
-            return tx.For<CreatureLair>().TryOpen(target, out var lair) && lair.Read(CreatureLair.Vitals).Health > 0;
+            return tx.For<CreatureLair>().TryOpen(target, out var lair)
+                && SimBridge.IsStandingLair(lair.Read(CreatureLair.Spawner), lair.Read(CreatureLair.Vitals));
         }
 
         return true;
@@ -3219,7 +3228,7 @@ public static partial class TatooineReplication
     /// <param name="target">The entity a client named.</param>
     /// <returns>
     /// The <c>CombatTargetKind</c> of <paramref name="target"/>. An entity of any other archetype — a city NPC, a building, a starship — answers
-    /// <c>CombatTargetKind.Player</c>, which the combat system then refuses on the first shot because the entity carries no <c>PlayerVitals</c>.
+    /// <c>CombatTargetKind.Unshootable</c>: selected, and never fired at.
     /// </returns>
     /// <remarks>
     /// <b>Refused rather than validated at the command.</b> Rejecting a targetable-but-unshootable entity here would mean the client could not select a
@@ -3234,7 +3243,12 @@ public static partial class TatooineReplication
             return CombatTargetKind.Creature;
         }
 
-        return routing == _lairRouting ? CombatTargetKind.Lair : CombatTargetKind.Player;
+        if (routing == _lairRouting)
+        {
+            return CombatTargetKind.Lair;
+        }
+
+        return routing == _playerRouting ? CombatTargetKind.Player : CombatTargetKind.Unshootable;
     }
 
     /// <summary>

@@ -68,6 +68,9 @@ public static class WorldRebuild
             index.Pois.Add((poi.X, poi.Z, poi.Radius));
         }
 
+        // The lair sites as the build planned them, from the same map and scales: a lair on disk names its site by position in this list.
+        WorldBuilder.PlanSites(map, map.Config, index, realm);
+
         using var tx = dbe.CreateQuickTransaction();
         RebuildStructures(tx, index, census, realm);
         RebuildLairs(tx, index, census, realm);
@@ -166,10 +169,19 @@ public static class WorldRebuild
                 continue;
             }
 
+            var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
             for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
             {
-                index.Lairs.Add(cluster.GetEntityId(BitOperations.TrailingZeroCount(bits)));
+                var slot = BitOperations.TrailingZeroCount(bits);
+                index.Lairs.Add(cluster.GetEntityId(slot));
                 census.Lairs++;
+
+                // What is standing now, which is the recollection half of a site: the director refills each to its target from here.
+                var site = spawners[slot].Site;
+                if (site > 0 && site <= index.Sites.Count)
+                {
+                    index.Sites[site - 1].Live++;
+                }
             }
         }
     }

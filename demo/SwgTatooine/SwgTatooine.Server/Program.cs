@@ -170,8 +170,8 @@ internal static class Program
             + $"({s.HitsPerAwarenessQuery:F1} hits each), {s.AggroQueries / (double)Math.Max(1, result.TicksMeasured):F0} aggro queries, "
             + $"{s.EconomyTicks / (double)Math.Max(1, result.TicksMeasured):F1} economy updates");
         Console.WriteLine($"  combat over {result.TicksMeasured} ticks: {s.PlayerShots} player shots, {s.CreatureAttacks} creature attacks, "
-            + $"{s.DamageApplied} hits applied, {s.CreaturesKilled} creatures killed, {s.CreaturesRespawned} revived, "
-            + $"{s.PlayersIncapacitated} players cloned");
+            + $"{s.DamageApplied} hits applied, {s.CreaturesKilled} creatures killed, {s.CorpsesRemoved} corpses removed, {s.CreaturesRespawned} respawned, "
+            + $"{s.LairsRetired} lairs retired, {s.LairsSpawned} lairs spawned, {s.PlayersIncapacitated} players cloned");
 
         // Every one of these is a refusal, and each is printed because the claim it supports is about what does NOT happen: a player that is not fighting does
         // no damage, a shot beyond weapon range does no damage, a chase past 75 m is abandoned. A silent zero cannot tell those apart from a system that never

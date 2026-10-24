@@ -106,7 +106,20 @@ function layerOf(outfits: readonly CrowdOutfit[], capacity = 64): CrowdLayer {
 
 /** A body at a distance, moving at `speed`. */
 function body(netId: number, z: number, speed = 0, mounted = false): CrowdBody {
-  return { netId, x: 0, y: 0, z, speed, heading: 0, mounted };
+  return {
+    netId,
+    x: 0,
+    y: 0,
+    z,
+    speed,
+    heading: 0,
+    mounted,
+    template: -1,
+    skin: 0,
+    dead: false,
+    outfit: -1,
+    strikes: 0,
+  };
 }
 
 describe('a body keeps its animation when the packer reshuffles the list', () => {

@@ -124,6 +124,11 @@ export class EntityLayer {
     return this.farMesh.isVisible ? this.packer.farCount : 0;
   }
 
+  /** The bodies the crowd drew for this layer; pickable whenever the layer is visible. */
+  get heldCount(): number {
+    return this.visible ? this.packer.heldCount : 0;
+  }
+
   /** Binds the layer to a store: per-slot state starts over. */
   bind(store: ArchetypeStore): void {
     this.packer.bind(store);
@@ -177,6 +182,22 @@ export class EntityLayer {
           p.nearData[b],
           p.nearData[b + 1] + this.style.bounds.pickY[packedStyle(p.nearData[b + 3])],
           p.nearData[b + 2],
+          w,
+          h,
+          this.screen,
+        );
+        return { x: s.x, y: s.y, depth: s.w, band: 'near' };
+      }
+    }
+
+    for (let k = 0; k < this.heldCount; k++) {
+      if (p.heldNetIds[k] === netId) {
+        const b = k * 4;
+        const s = projectToScreen(
+          matrix,
+          p.heldData[b],
+          p.heldData[b + 1] + this.style.bounds.pickY[packedStyle(p.heldData[b + 3])],
+          p.heldData[b + 2],
           w,
           h,
           this.screen,
@@ -245,6 +266,40 @@ export class EntityLayer {
       SELECTED_MESH_SCALE,
       a,
       best,
+      maxT,
+    );
+    // The bodies the crowd drew in this layer's place, tested as the boxes this layer WOULD have drawn: close enough to
+    // the character standing there, and the same hit test whichever renderer drew it.
+    pickShapes(
+      ray,
+      p.heldData,
+      p.heldYaw,
+      p.heldNetIds,
+      this.heldCount,
+      this.style.bounds.sizesFlat,
+      this.style.flattenMode,
+      SELECTED_MESH_SCALE,
+      a,
+      best,
+      maxT,
+    );
+    pickInstances(
+      ray,
+      matrix,
+      p.heldData,
+      p.heldNetIds,
+      this.heldCount,
+      this.style.bounds.pickY,
+      0,
+      SELECTED_MESH_SCALE,
+      w,
+      h,
+      px,
+      py,
+      maxPixels,
+      a,
+      best,
+      s,
       maxT,
     );
     // The near band's silhouette is settled above; 0 leaves this as the near-miss fallback for a mesh only a few pixels

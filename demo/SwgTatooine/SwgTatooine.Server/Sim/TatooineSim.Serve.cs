@@ -142,6 +142,9 @@ public sealed partial class TatooineSim
             AssetShapes = shapes,
         };
 
+        // The cities' buildings, as the crowd's walks round them read them (SimBridge.Routes.cs): once, now the world is built or reopened.
+        _bridge.PlanCityWalks();
+
         _runtime = TyphonRuntime.Create(Dbe, BuildServeSchedule, new RuntimeOptions
         {
             BaseTickRate = _config.TickRateHz,

@@ -199,8 +199,37 @@ public sealed class AssetOrigin
         // from the descriptors — and without needing to know which assets the blocking rule has been checked against.
         var collision = shapes == null ? "[]" : shapes.ToJson();
         var body = FormattableString.Invariant(
-            $"\"base\":\"{RequestPath}/\",\"catalogue\":\"{CatalogueName}\",\"structures\":[{table}],\"collision\":{collision}");
+            $"\"base\":\"{RequestPath}/\",\"catalogue\":\"{CatalogueName}\",\"structures\":[{table}],\"collision\":{collision},\"creatures\":{CreatureJson()}");
         return ",\"assets\":{" + body + "}";
+    }
+
+    /// <summary>
+    /// What each creature template IS, by the <c>template</c> a creature and a lair replicate: its name, the bodies its creatures wear (a creature's
+    /// <c>skin</c> indexes them) and the prop at its lair's centre.
+    /// </summary>
+    /// <remarks>Published for the reason <see cref="StructureAssets.Table"/> is: the server picks what a hideout looks like, and a client keeping its own copy
+    /// of that rule would eventually draw a different camp than the one the world holds.</remarks>
+    internal static string CreatureJson()
+    {
+        var json = new System.Text.StringBuilder("[");
+        for (var t = 0; t < CreatureTemplates.Count; t++)
+        {
+            if (t > 0)
+            {
+                json.Append(',');
+            }
+
+            json.Append("{\"name\":\"").Append(CreatureTemplates.Name(t)).Append("\",\"lair\":\"").Append(CreatureTemplates.LairAsset[t]).Append("\",\"bodies\":[");
+            var bodies = CreatureTemplates.Bodies[t];
+            for (var b = 0; b < bodies.Length; b++)
+            {
+                json.Append(b > 0 ? ",\"" : "\"").Append(bodies[b]).Append('"');
+            }
+
+            json.Append("]}");
+        }
+
+        return json.Append(']').ToString();
     }
 
     /// <summary>

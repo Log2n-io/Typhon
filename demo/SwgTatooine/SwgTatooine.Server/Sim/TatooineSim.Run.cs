@@ -114,6 +114,9 @@ public sealed partial class TatooineSim
             StructureView = _structureView,
         };
 
+        // The cities' buildings, as the crowd's walks round them read them (SimBridge.Routes.cs): once, now the world is built or reopened.
+        _bridge.PlanCityWalks();
+
         // A lambda, not the method group: BuildSchedule takes an optional `replicating` that only the serve path sets.
         _runtime = TyphonRuntime.Create(Dbe, schedule => BuildSchedule(schedule), new RuntimeOptions
         {
@@ -367,6 +370,15 @@ public sealed partial class TatooineSim
 
     /// <summary>Ticks whose crossings committed, each a durable write; see <see cref="SimBridge.CrossingCommits"/>.</summary>
     public long CrossingCommits => _bridge?.CrossingCommits ?? 0;
+
+    /// <summary>Ticks on which the lair director committed a spawn or a destroy, each a durable write; see <see cref="SimBridge.LairCommits"/>.</summary>
+    public long LairCommits => _bridge?.LairCommits ?? 0;
+
+    /// <summary>Routes the scripted crowd planned round a city's buildings, and searches that found no way; see <see cref="SimBridge.RouteTotals"/>.</summary>
+    public (long Planned, long Failed) RouteTotals => _bridge?.RouteTotals ?? (0L, 0L);
+
+    /// <summary>Entities the lair director spawned or destroyed; see <see cref="SimBridge.LairEntities"/>.</summary>
+    public long LairEntities => _bridge?.LairEntities ?? 0;
 
     /// <summary>What the starships did (Realms G1c).</summary>
     public void PrintSpaceReport() => _bridge?.PrintSpaceReport();
@@ -651,6 +663,9 @@ public sealed partial class TatooineSim
         // an EventQueue built outside a scheduler keeps its single-slot default and GetWriter then throws for every worker but zero.
         _bridge.CombatQueue = dag.CreateEventQueue<CombatEvent>("Combat", 1024);
 
+        // The corpses CreatureThink hands to the lair director, which alone may destroy. A few a second at the baseline; sized like the combat queue.
+        _bridge.CorpseQueue = dag.CreateEventQueue<CorpseEvent>("Corpses", 1024);
+
         dag.Add(new MissionSystem(_bridge));
         if (_config.Shuttles)
         {
@@ -715,6 +730,9 @@ public sealed partial class TatooineSim
             .Consumes("CombatResolve", _bridge.CombatQueue);
 
         dag.Add(new EconomySystem(_bridge));
+        dag.Add(new LairLifeSystem(_bridge));
+        dag.Produces("CreatureThink", _bridge.CorpseQueue)
+            .Consumes("LairLife", _bridge.CorpseQueue);
 
         // Only a server has sessions. In the simulation's own DAG rather than one of its own, because an intent writes PlayerMotion and PlayerThink writes it
         // too — see PlayerSessionSystem.

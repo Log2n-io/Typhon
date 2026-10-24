@@ -394,6 +394,12 @@ public sealed partial class SimBridge
         // static input data; the neighbourhood's state is what must not be consulted, and is not.
         var shapes = new StructureShapes(accessor, AssetShapes);
         var e = Dbe.ClusterSpatialQuery<WorldObject>(realm).Radius(in sphere);
+
+        // <b>"Against the face" is a band of float32 ulps, not a value.</b> The push leaves a body exactly on the face, and at Anchorhead's z ≈ −5 346 one ulp is
+        // 0.49 mm: the rounding of that single store put a body 0.19 mm inside a bazaar terminal, and a strict comparison graded 173 steps of it sliding along
+        // the terminal as broken collision. Four ulps of the larger coordinate — 2 mm out there, a few microns near the origin — is still far below anything
+        // a body could be seen to do.
+        var slack = 4f * (MathF.BitIncrement(MathF.Max(MathF.Abs(x), MathF.Abs(z))) - MathF.Max(MathF.Abs(x), MathF.Abs(z)));
         try
         {
             while (e.MoveNext())
@@ -401,7 +407,7 @@ public sealed partial class SimBridge
                 var hit = e.Current;
 
                 // Strictly inside: a body resting exactly against a face is where the push leaves it, and is not a defect.
-                if (x <= hit.MinX - half || x >= hit.MaxX + half || z <= hit.MinY - half || z >= hit.MaxY + half)
+                if (x <= hit.MinX - half + slack || x >= hit.MaxX + half - slack || z <= hit.MinY - half + slack || z >= hit.MaxY + half - slack)
                 {
                     continue;
                 }

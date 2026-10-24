@@ -180,7 +180,17 @@ public static class CommandLine
             _ => AwarenessApi.Batch,
         };
         c.IdleCreatureFraction = r.Dbl("--idle-creatures", c.IdleCreatureFraction, "share of creatures that never think", min: 0d, max: 1d);
-        c.RespawnSeconds = r.Float("--respawn-s", c.RespawnSeconds, "seconds before a lair revives a killed creature", min: 0.001f);
+        c.RespawnSeconds = r.Float("--respawn-s", c.RespawnSeconds, "seconds before a lair replaces a creature it lost", min: 0.001f);
+        c.CorpseSeconds = r.Float("--corpse-s", c.CorpseSeconds, "seconds a dead creature lies before it is destroyed", min: 0.001f);
+        var life = r.Floats("--lair-life-s", [c.LairLifeMinSeconds, c.LairLifeMaxSeconds], "shortest,longest seconds a wild lair stands");
+        if (life.Length != 2 || !(life[0] > 0f) || life[1] < life[0])
+        {
+            throw new ArgumentException("--lair-life-s takes two seconds, min,max, with 0 < min <= max.");
+        }
+
+        c.LairLifeMinSeconds = life[0];
+        c.LairLifeMaxSeconds = life[1];
+        c.LairReplaceSeconds = r.Float("--lair-replace-s", c.LairReplaceSeconds, "seconds before a retired lair's site spawns another", min: 0.001f);
 
         r.Group("persistence and output");
         c.DatabaseDirectory = r.Str("--db-dir", c.DatabaseDirectory, "where the database file is written", "<path>");

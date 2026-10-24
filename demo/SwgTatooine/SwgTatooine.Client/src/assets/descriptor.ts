@@ -27,7 +27,8 @@ export interface Catalogue {
   readonly textures: readonly string[];
 }
 
-export type AssetKind = 'building' | 'interior' | 'interactable' | 'prop' | 'vehicle' | 'character';
+export type AssetKind =
+  'building' | 'interior' | 'interactable' | 'prop' | 'vehicle' | 'character' | 'creature' | 'weapon';
 
 export type ShapeDesc =
   | { readonly type: 'box'; readonly half: Vec3 }

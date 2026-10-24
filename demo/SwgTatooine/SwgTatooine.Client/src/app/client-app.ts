@@ -22,7 +22,10 @@ import { CameraInput, isTyping } from '../camera/camera-input';
 import { EyeCamera } from '../camera/eye-camera';
 import { MapCamera } from '../camera/map-camera';
 import { mountAssets, type AssetMount } from './asset-mount';
-import { mountCrowd, type CrowdMount } from './crowd-mount';
+import { describeCatalogue, mountCreatureCrowd, mountCrowd, type CrowdMount } from './crowd-mount';
+import { CrowdRouter } from './crowd-router';
+import type { AssetLibrary } from '../assets/asset-library';
+import type { Descriptor } from '../assets/descriptor';
 import { SWOOP_ASSET } from './character-mount';
 import { CrowdSwoops } from './crowd-swoops';
 import { StaticAssets, type StructureSample } from './static-assets';
@@ -51,7 +54,7 @@ import { CITIES, PLANET_HALF_EXTENT_M } from '../data/world-data';
 import { AttackLines } from '../render/attack-lines';
 import { GameplayGizmos, type GizmoPlacement } from '../render/gameplay-gizmos';
 import { placement } from '../assets/asset-frame';
-import { assetForStructure, structureYaw } from '../assets/structure-assets';
+import { assetForStructure, lairQuarter, structureYaw } from '../assets/structure-assets';
 import {
   EntityLayer,
   type FrameView,
@@ -60,6 +63,7 @@ import {
   type PredictedOverride,
 } from '../render/entity-layer';
 import { NONE_HIDDEN, type CrowdBody } from '../render/layer-packer';
+import { enemySkins } from '../character/outfits';
 import { FLAT_GROUND, type GroundSampler } from '../terrain/ground-sampler';
 import { GroundView, SKY } from '../render/ground';
 import { SceneLighting } from '../render/scene-lighting';
@@ -322,11 +326,14 @@ const STRUCTURE_ARCHETYPE = 'WorldObject';
 /**
  * The archetypes whose bodies are drawn as rigged characters rather than as boxes.
  *
- * <b>`Creature` is deliberately not one of them.</b> A bantha is a body the server steers exactly as it steers an
- * NPC, and the published catalogue has nineteen humanoids and no animals — dressing a creature in a kimono would be
- * worse than the box it gets today. The moment a creature mesh is published this is the one line that changes.
+ * <b>`Creature` is one of them since the creature pack was published.</b> A creature replicates its template and skin;
+ * the router (`crowd-router.ts`) sends a camp's ninjas and soldiers to the characters' crowd in their outfits and every
+ * beast to its own species' crowd. Before, a creature was a box: the catalogue held nineteen humanoids and no animals.
  */
-const CHARACTER_ARCHETYPES: readonly string[] = ['CityNpc', 'Player'];
+const CHARACTER_ARCHETYPES: readonly string[] = ['CityNpc', 'Player', 'Creature'];
+
+/** The most of one creature species drawn at once. A lair holds four to eight; a view holds a few dozen lairs. */
+const SPECIES_CAPACITY = 512;
 
 /**
  * The most bodies the crowd will draw at once, per outfit.
@@ -543,6 +550,18 @@ export class ClientApp {
 
   /** Reused each frame: the bodies the character layers diverted, handed to the crowd and then cleared. */
   private readonly crowdBodies: CrowdBody[] = [];
+
+  /** Each creature species' own crowd, in the router's layer order after the characters. */
+  private creatureCrowds: CrowdMount[] = [];
+
+  /** Which crowd draws each diverted body, and in what; `null` until the crowds are mounted. */
+  private crowdRouter: CrowdRouter | null = null;
+
+  /** The lairs in range, drawn as their published props: a nest, a hideout, a camp. */
+  private lairAssets: StaticAssets | null = null;
+
+  /** Reused each frame: the lairs in range. */
+  private readonly lairSamples: StructureSample[] = [];
   /** Set by {@link dispose}, read by {@link gone}: what tells an in-flight asset load that there is nothing to mount on. */
   private disposed = false;
   private readonly unsubscribe: () => void;
@@ -764,7 +783,17 @@ export class ClientApp {
       // After the mount, because it reads the same library — and deliberately not inside it: a crowd that will not
       // build must not cost the street its buildings, and a street that will not load must not cost the crowd.
       try {
-        this.crowd = await mountCrowd(this.scene, mount.library, this.lighting, CROWD_CAPACITY);
+        // Read once, for every crowd: the characters and each creature species plan their atlases from these.
+        const described = await describeCatalogue(mount.library);
+        this.crowd = await mountCrowd(
+          this.scene,
+          mount.library,
+          this.lighting,
+          CROWD_CAPACITY,
+          described,
+          enemySkins(set.creatures),
+        );
+        await this.mountCreatureCrowds(mount.library, set, described);
         // Everyone else's riders on their swoops, the seat the avatar's rider uses once the swoop's descriptor says where it is.
         this.crowdSwoops = new CrowdSwoops(this.scene, mount.library, mount.lighting);
         void mount.library
@@ -781,7 +810,21 @@ export class ClientApp {
       }
 
       this.shapeCache = [];
-      this.staticAssets = new StaticAssets(mount.library, mount.root, set, undefined, mount.lighting);
+      this.staticAssets = new StaticAssets(
+        mount.library,
+        mount.root,
+        (asset) => assetForStructure(set, asset),
+        undefined,
+        mount.lighting,
+      );
+      // A lair's prop is its template's, by the server's table: the nest, the hideout or the camp.
+      this.lairAssets = new StaticAssets(
+        mount.library,
+        mount.root,
+        (template) => set.creatures[template]?.lair || null,
+        undefined,
+        mount.lighting,
+      );
       this.shuttleView = new ShuttleView(mount.library, mount.root, mount.lighting);
       // The descriptors the ticket terminal is read from, asked for now so the first port walked up to has them.
       void mount.library.describe(SHUTTLEPORT_ASSET).catch(() => undefined);
@@ -889,10 +932,18 @@ export class ClientApp {
 
     this.staticAssets?.dispose();
     this.staticAssets = null;
+    this.lairAssets?.dispose();
+    this.lairAssets = null;
     this.crowdSwoops?.dispose();
     this.crowdSwoops = null;
     this.crowd?.dispose();
     this.crowd = null;
+    for (const species of this.creatureCrowds) {
+      species.dispose();
+    }
+
+    this.creatureCrowds = [];
+    this.crowdRouter = null;
     this.gizmos?.dispose();
     this.gizmos = null;
     this.assets?.dispose();
@@ -2824,6 +2875,10 @@ export class ClientApp {
       hidden.add(netId);
     }
 
+    for (const netId of this.updateLairAssets(cam.eyeX, cam.eyeZ)) {
+      hidden.add(netId);
+    }
+
     this.updateGizmos(ui);
 
     view.hidden = hidden;
@@ -2838,23 +2893,28 @@ export class ClientApp {
     view.crowdCount = 0;
     view.crowd = crowd === null ? null : bodies;
     view.perSecond = 1000 / this.clock.tickPeriodMs;
-    view.crowdDraws = crowd?.layer.isDrawing ?? false;
+    // Only once the router exists: before it, a diverted creature would be routed nowhere and drawn by nobody.
+    view.crowdDraws = (crowd?.layer.isDrawing ?? false) && this.crowdRouter !== null;
 
     for (const layer of this.layers) {
       layer.update(view);
     }
 
-    if (crowd !== null) {
-      // The gait figures are the SERVER's; before the owner block lands they are NaN and the graph falls back to the
-      // clips' own speeds, which is the same thing the avatar does.
-      crowd.layer.update(
-        bodies,
-        view.crowdCount,
-        view,
-        now / 1000,
-        live?.selfNumber('walkMps') ?? Number.NaN,
-        live?.selfNumber('runMps') ?? Number.NaN,
-      );
+    const router = this.crowdRouter;
+    if (crowd !== null && router !== null) {
+      // Each body to the crowd that draws it: the characters (civilians and the camps' enemies) at layer 0, then each
+      // species. The gait figures are the SERVER's; before the owner block lands they are NaN and the graph falls back to
+      // the clips' own speeds, which is the same thing the avatar does.
+      router.route(bodies, view.crowdCount);
+      const walk = live?.selfNumber('walkMps') ?? Number.NaN;
+      const run = live?.selfNumber('runMps') ?? Number.NaN;
+      const people = router.layers[0];
+      crowd.layer.update(people.bodies, people.count, view, now / 1000, walk, run);
+      for (const [k, species] of this.creatureCrowds.entries()) {
+        const routed = router.layers[k + 1];
+        species.layer.update(routed.bodies, routed.count, view, now / 1000, walk, run);
+      }
+
       this.crowdSwoops?.update(crowd.layer.riders, crowd.layer.riderCount);
     }
 
@@ -3662,6 +3722,94 @@ export class ClientApp {
 
   /** Reused each frame: the structures in range, which is tens of entries and must not allocate. */
   private readonly structureSamples: StructureSample[] = [];
+
+  /**
+   * The lairs within the static-asset range, handed to their layer: a lair's `template` is its sample's asset index, which
+   * the layer resolves to its prop.
+   *
+   * <b>Facing a quarter turn drawn from the position</b>, because a lair replicates no orientation: its creatures are
+   * born on the diagonals (`WorldBuilder.LairRingM`), which every quarter turn keeps on the prop's own spawn markers, and
+   * a position is stable where a netId is renumbered by a `RESET`.
+   */
+  private updateLairAssets(eyeX: number, eyeZ: number): ReadonlySet<number> {
+    const layer = this.lairAssets;
+    if (layer === null) {
+      return NONE_HIDDEN;
+    }
+
+    const archetype = this.archetypes.indexOf('CreatureLair');
+    const store = archetype < 0 ? null : this.world.archetypeStore(archetype);
+    const templateField = store === null ? -1 : store.fieldIndex('template');
+    if (store === null || !store.hasPosition || templateField < 0) {
+      return layer.update(this.lairSamples, 0, this.assetView);
+    }
+
+    const samples = this.lairSamples;
+    const templates = store.fieldAt(templateField);
+    const ground = altitudeField(store);
+    const reach = STATIC_ASSET_RANGE_M * STATIC_ASSET_RANGE_M;
+    let taken = 0;
+    for (let i = 0; i < store.liveCount; i++) {
+      const slot = store.live[i];
+      evaluateSlot(store, slot, this.clock.renderTick, this.clock.renderFrac, this.scratch, 0);
+      const at = this.placement.read(store.dims, this.scratch, 0);
+      const dx = at.x - eyeX;
+      const dz = at.z - eyeZ;
+      if (dx * dx + dz * dz > reach) {
+        continue;
+      }
+
+      if (taken >= samples.length) {
+        samples.push({ netId: 0, x: 0, y: 0, z: 0, kind: 0, yaw: 0, asset: -1 });
+      }
+
+      const sample = samples[taken++];
+      sample.netId = store.netIds[slot];
+      sample.x = at.x;
+      sample.y = altitudeOf(ground, slot, at, this.profile.ground);
+      sample.z = at.z;
+      sample.kind = 0;
+      sample.yaw = lairQuarter(at.x, at.z);
+      sample.asset = templates[slot];
+    }
+
+    return layer.update(samples, taken, this.assetView);
+  }
+
+  /**
+   * Builds each creature species' crowd, and the router that sends bodies to it.
+   *
+   * <b>Only the species the server's table names</b>, each once: a beast is one crowd however many templates wear it.
+   * A species that will not build stays the renderer's own shape — the router simply has no layer for it.
+   */
+  private async mountCreatureCrowds(
+    library: AssetLibrary,
+    set: AssetSet,
+    described: ReadonlyMap<string, Descriptor>,
+  ): Promise<void> {
+    const species: string[] = [];
+    for (const kind of set.creatures) {
+      for (const id of kind.bodies) {
+        if (described.get(id)?.kind === 'creature' && !species.includes(id)) {
+          species.push(id);
+        }
+      }
+    }
+
+    const mounted: CrowdMount[] = [];
+    const ids: string[] = [];
+    for (const id of species) {
+      const crowd = await mountCreatureCrowd(this.scene, library, this.lighting, id, SPECIES_CAPACITY, described);
+      if (crowd !== null) {
+        mounted.push(crowd);
+        ids.push(id);
+      }
+    }
+
+    this.creatureCrowds = mounted;
+    this.crowdRouter = new CrowdRouter(set.creatures, this.crowd?.outfits.map((o) => o.id) ?? null, ids);
+    this.attacks.onStrike = (netId) => this.crowdRouter?.strike(netId);
+  }
 
   /**
    * How many of {@link structureSamples} are this frame's.

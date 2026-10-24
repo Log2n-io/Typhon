@@ -46,6 +46,16 @@ public static class TatooineData
     public const float LeashRadiusM = 192f;
 
     /// <summary>
+    /// How far from its lair a creature WANDERS, metres (Loïc, 2026-10-24: "they should be in a 20 m radius max of the lair"). A chase may still take it
+    /// out to <see cref="LeashRadiusM"/>; the next leg after one brings it back.
+    /// </summary>
+    /// <remarks>
+    /// The leash used to be the wander bound too — legs drawn out to 0.7 × 192 m — which spread a lair's creatures over 130 m and left the nest standing
+    /// alone. A lair reads as a place only if what lives in it stays round it.
+    /// </remarks>
+    public const float LairWanderRadiusM = 20f;
+
+    /// <summary>
     /// [CORE3] AI behaviour tick, in milliseconds: <c>BEHAVIORINTERVALMIN/MID/MAX = 400/700/1000</c>. Creatures do NOT
     /// think every server tick — they think between two and a half and one times a second, staggered.
     /// </summary>
@@ -299,57 +309,81 @@ public static class TatooineData
     /// </remarks>
     public static readonly SpawnRegionDef[] SpawnRegions =
     [
-        //                  name                       x        z     radius  lairs/km²  template
-        new SpawnRegionDef("Northern Dune Sea",     -1200f,   5600f,  2600f,   18f,   CreatureTemplates.Bantha),
-        new SpawnRegionDef("Western Dune Sea",      -6200f,   4200f,  2100f,   15f,   CreatureTemplates.TuskenRaider),
-        new SpawnRegionDef("Jundland Wastes",       -3600f,  -1400f,  2400f,   22f,   CreatureTemplates.Squill),
-        new SpawnRegionDef("Xelric Draw",            5400f,  -1500f,  1900f,   20f,   CreatureTemplates.WompRat),
-        new SpawnRegionDef("Eastern Wastes",         6100f,   3000f,  2200f,   14f,   CreatureTemplates.Ronto),
-        new SpawnRegionDef("Southern Wastes",         800f,  -6800f,  2300f,   17f,   CreatureTemplates.WompRat),
-        new SpawnRegionDef("Mos Espa Approach",     -3400f,    600f,  1500f,   21f,   CreatureTemplates.Squill),
-        new SpawnRegionDef("Arid Flats",             2200f,    400f,  2000f,   13f,   CreatureTemplates.Bantha),
+        //                  name                       x        z     radius  lairs/km²  the lairs it spawns
+        new SpawnRegionDef("Northern Dune Sea",     -1200f,   5600f,  2600f,   18f,   [CreatureTemplates.Frog, CreatureTemplates.Snake, CreatureTemplates.Wasp]),
+        new SpawnRegionDef("Western Dune Sea",      -6200f,   4200f,  2100f,   15f,   [CreatureTemplates.SandNinja, CreatureTemplates.Viper]),
+        new SpawnRegionDef("Jundland Wastes",       -3600f,  -1400f,  2400f,   22f,   [CreatureTemplates.Spider, CreatureTemplates.Viper, CreatureTemplates.Rat]),
+        new SpawnRegionDef("Xelric Draw",            5400f,  -1500f,  1900f,   20f,   [CreatureTemplates.Rat, CreatureTemplates.Wasp]),
+        new SpawnRegionDef("Eastern Wastes",         6100f,   3000f,  2200f,   14f,   [CreatureTemplates.Soldier, CreatureTemplates.Spider]),
+        new SpawnRegionDef("Southern Wastes",         800f,  -6800f,  2300f,   17f,   [CreatureTemplates.Rat, CreatureTemplates.Snake]),
+        new SpawnRegionDef("Mos Espa Approach",     -3400f,    600f,  1500f,   21f,   [CreatureTemplates.Ninja, CreatureTemplates.Frog]),
+        new SpawnRegionDef("Arid Flats",             2200f,    400f,  2000f,   13f,   [CreatureTemplates.Frog, CreatureTemplates.Wasp, CreatureTemplates.Soldier]),
     ];
+
+    /// <summary>
+    /// The lairs a point of interest spawns: humanoid camps, because a landmark is where somebody has settled — Core3 puts the Tuskens at their fort for the
+    /// same reason. Drawn from per lair, as a region's are.
+    /// </summary>
+    public static readonly int[] PoiLairTemplates = [CreatureTemplates.Ninja, CreatureTemplates.SandNinja, CreatureTemplates.Soldier];
 }
 
 /// <summary>
-/// The creature kinds the wilderness spawns. Real Tatooine fauna, with statistics that are [EST] — SWG's creature
-/// tables were per-template and enormous, and reproducing them would add variety without adding load.
+/// The kinds of lair the world spawns, and what lives in each: six beasts from the creature pack and three humanoid camps dressed in the character pack's
+/// enemy outfits. Every statistic is [EST] — placeholders until the mission gameplay is designed (Loïc, 2026-10-24) — and the names are generic fauna, the
+/// IP stance <c>design/gameplay.md</c> § 7 sets for anything a player reads.
 /// </summary>
+/// <remarks>
+/// <para>
+/// <b>Which asset a template wears is the server's, and it is published rather than mirrored</b> (<see cref="Bodies"/>, <see cref="LairAsset"/>; the client
+/// reads them from <c>/typhon/demo.json</c>). It is the same arrangement the structures have: a client holding its own copy of "a ninja hideout is drawn in
+/// these outfits" would eventually disagree with the world about what it is looking at.
+/// </para>
+/// <para>
+/// <b>A template is a lair kind, not a species.</b> A mission title will read "destroy a ninja hideout" or "destroy a lair of rats", so the unit the world
+/// counts is the lair, and the creatures are what it contains.
+/// </para>
+/// </remarks>
 public static class CreatureTemplates
 {
-    public const int WompRat = 0;
-    public const int Squill = 1;
-    public const int Bantha = 2;
-    public const int TuskenRaider = 3;
-    public const int Ronto = 4;
-    public const int MissionDefender = 5;
+    public const int Rat = 0;
+    public const int Frog = 1;
+    public const int Snake = 2;
+    public const int Viper = 3;
+    public const int Spider = 4;
+    public const int Wasp = 5;
+    public const int Ninja = 6;
+    public const int SandNinja = 7;
+    public const int Soldier = 8;
 
-    public const int Count = 6;
+    /// <summary>The destroy-mission pool's defenders (<c>WorldBuilder.SpawnMissionLairPool</c>), left as they were until missions are redesigned.</summary>
+    public const int MissionDefender = 9;
 
-    /// <summary>Creatures a lair of each template keeps alive. [EST], shaped by how SWG lairs actually felt: 4-6 typical.</summary>
-    public static readonly int[] SpawnLimit = [6, 5, 4, 5, 3, 8];
+    public const int Count = 10;
+
+    /// <summary>Creatures a lair of each template keeps alive. [EST], shaped by how SWG lairs felt: 4-6 typical, more for a camp.</summary>
+    public static readonly int[] SpawnLimit = [6, 5, 4, 4, 4, 6, 5, 5, 6, 8];
 
     /// <summary>Hit points. [EST].</summary>
-    public static readonly int[] Health = [180, 260, 900, 640, 1100, 420];
+    public static readonly int[] Health = [180, 120, 220, 300, 520, 160, 640, 700, 760, 420];
 
     /// <summary>Damage per attack. [EST].</summary>
-    public static readonly int[] Damage = [12, 18, 45, 38, 30, 26];
+    public static readonly int[] Damage = [12, 8, 16, 24, 34, 14, 38, 40, 32, 26];
 
     /// <summary>[EST] Credits a kill drops, roughly a quarter of the creature's hit points — big game pays more.</summary>
     /// <remarks>
     /// The value is arbitrary and says so; what is not arbitrary is that a kill writes it into <see cref="Inventory"/> on the tick the creature dies, which
     /// is the first steady-state <c>Versioned</c> write this world has ever made (gap G3).
     /// </remarks>
-    public static readonly int[] LootCredits = [45, 65, 225, 160, 275, 105];
+    public static readonly int[] LootCredits = [45, 30, 55, 75, 130, 40, 160, 175, 190, 105];
 
     /// <summary>Movement speed in metres per second. [EST], below a player's 5 m/s so a player can always disengage.</summary>
-    public static readonly float[] SpeedMps = [3.4f, 3.0f, 2.2f, 4.2f, 2.0f, 3.6f];
+    public static readonly float[] SpeedMps = [3.4f, 2.6f, 2.0f, 2.4f, 3.0f, 4.0f, 4.2f, 4.2f, 3.8f, 3.6f];
 
     /// <summary>
-    /// Whether the template attacks on sight. [EST]. Banthas and rontos are famously passive; womp rats, squills and
-    /// Tuskens are not. A passive creature never runs an aggro query, which is a real difference in cost.
+    /// Whether the template attacks on sight. [EST]. The frog and the snake are passive, the viper is the snake's angry cousin, and every camp attacks. A
+    /// passive creature never runs an aggro query, which is a real difference in cost.
     /// </summary>
-    public static readonly bool[] Aggressive = [true, true, false, true, false, true];
+    public static readonly bool[] Aggressive = [true, false, false, true, true, true, true, true, true, true];
 
     /// <summary>
     /// [CORE3] How far a lair scatters its creatures: the <c>LairSpawn.size</c> field, which every Tatooine template
@@ -361,16 +395,48 @@ public static class CreatureTemplates
     /// exactly the property the cluster layer is being measured on, so the correction matters more here than its size
     /// suggests.
     /// </remarks>
-    public static readonly float[] LairSpawnRadius = [25f, 25f, 25f, 25f, 25f, 25f];
+    public static readonly float[] LairSpawnRadius = [25f, 25f, 25f, 25f, 25f, 25f, 25f, 25f, 25f, 25f];
 
-    /// <summary>The template's name, for a census line. Index order matches the tables above.</summary>
+    /// <summary>
+    /// The published bodies a template's creatures wear, one drawn per creature (<c>CreatureBrain.Skin</c> indexes it). A camp mixes its outfits; a beast is
+    /// one model.
+    /// </summary>
+    public static readonly string[][] Bodies =
+    [
+        ["rat"],
+        ["frog"],
+        ["snake"],
+        ["snake_angry"],
+        ["spider"],
+        ["wasp"],
+        ["ninja_male", "ninja_female", "ninja_male_hair"],
+        ["ninja_sand", "ninja_sand_female"],
+        ["soldier_male", "soldier_female"],
+        ["blue_soldier_male", "blue_soldier_female"],
+    ];
+
+    /// <summary>
+    /// The prop at a lair's centre: the nest for a beast, a hideout for the ninjas and a camp for the soldiers. All three publish the same four
+    /// <c>creature.N</c> spawn markers (ASSET_FORMAT § 5.4).
+    /// </summary>
+    public static readonly string[] LairAsset =
+    [
+        "creature_nest", "creature_nest", "creature_nest", "creature_nest", "creature_nest", "creature_nest",
+        "ninja_hideout", "ninja_hideout", "soldier_camp", "soldier_camp",
+    ];
+
+    /// <summary>The template's name, for a census line and the client's label. Index order matches the tables above.</summary>
     public static string Name(int template) => template switch
     {
-        WompRat => "womp rats",
-        Squill => "squills",
-        Bantha => "banthas",
-        TuskenRaider => "Tusken raiders",
-        Ronto => "rontos",
+        Rat => "rats",
+        Frog => "frogs",
+        Snake => "snakes",
+        Viper => "vipers",
+        Spider => "spiders",
+        Wasp => "wasps",
+        Ninja => "ninja hideout",
+        SandNinja => "sand-ninja hideout",
+        Soldier => "soldier camp",
         MissionDefender => "mission defenders",
         _ => $"template {template}",
     };

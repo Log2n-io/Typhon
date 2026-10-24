@@ -1,4 +1,4 @@
-import type { Descriptor } from '../assets/descriptor';
+import type { Descriptor, RoleMap } from '../assets/descriptor';
 
 /**
  * Which character mesh a body wears, and which rig the crowd's animation is baked from.
@@ -69,8 +69,57 @@ export const DIVERGENT_CLIPS: Readonly<Partial<Record<string, readonly string[]>
   casual_bald: ['idle', 'run'],
 };
 
-/** The roles the crowd actually drives. The graph supports more; the server replicates no events to trigger them. */
+/** The locomotion roles the crowd drives on every body, every frame. */
 export const CROWD_ROLES: readonly string[] = ['idle', 'walk', 'run'];
+
+/**
+ * The one-shots the crowd plays: a blow when the server streams one (`Attack`), and death when a body's mode says so.
+ *
+ * <b>Baked from the rig alone for the characters.</b> {@link DIVERGENT_CLIPS} was measured on locomotion only; nobody has
+ * measured these two across the outfits, and an attack held for 0.7 s is forgiving where a looping idle is not. The day
+ * one looks wrong on a costume, measure it with `skin_diff2.py` and add it to that table.
+ */
+export const CROWD_ACTION_ROLES: readonly string[] = ['attack', 'death'];
+
+/**
+ * A role map with the locomotion every crowd body is driven through filled in: a creature that cannot run walks, and one
+ * that cannot walk hops or idles.
+ *
+ * <b>Why a creature needs it and a character does not.</b> `AnimationGraph` asks for idle, walk and run on every frame and
+ * throws on a missing one — right for the characters, whose pack has all three, and wrong for the creature pack: the snake
+ * and the spider have no run, the frog walks by its jump, and the wasp only flies. Filling the gap here, once, keeps the
+ * graph strict and the creature descriptors as published.
+ *
+ * @param roles The descriptor's own roles.
+ * @returns The same roles, with `walk` and `run` falling back towards `idle`; the input when nothing was missing.
+ */
+export function locomotionRoles(roles: RoleMap): RoleMap {
+  if (roles.walk !== undefined && roles.run !== undefined) {
+    return roles;
+  }
+
+  const walk = roles.walk ?? roles.idle;
+  const run = roles.run ?? walk;
+  return { ...roles, ...(walk === undefined ? {} : { walk }), ...(run === undefined ? {} : { run }) };
+}
+
+/**
+ * The assets the server dresses its enemies in, which a civilian must never wear: a ninja walking the market reads as an
+ * attack about to happen.
+ *
+ * @param kinds The server's creature templates.
+ * @returns Every body id any template names.
+ */
+export function enemySkins(kinds: readonly { readonly bodies: readonly string[] }[]): ReadonlySet<string> {
+  const out = new Set<string>();
+  for (const kind of kinds) {
+    for (const id of kind.bodies) {
+      out.add(id);
+    }
+  }
+
+  return out;
+}
 
 /**
  * The crowd's seated pose on a swoop: not a role any descriptor names, so it is resolved to its clip directly — the clip the

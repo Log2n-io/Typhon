@@ -1148,6 +1148,141 @@ internal sealed class ClientIntentChecks : ServedChecks
         });
     }
 
+    /// <summary>
+    /// A possessed player FIRES at what it targeted: the creature's health goes down and the blow is on the wire.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The gap this closes</b>: the shooter gated on <c>PlayerActivity.Combat</c>, which only the scripted crowd is ever put in, and a session's body spawns
+    /// <c>Idle</c> and becomes <c>Travelling</c> on its first step. So a click on a creature stored a target that no shot was ever fired at — and every other
+    /// case here asserted only that the target was STORED, which it was.
+    /// </para>
+    /// <para>
+    /// A lair of frogs, placed beside the capital before the server ticks (the window <c>WorldBuilder</c> builds in, as the dead-target case does). Frogs are
+    /// passive, so nothing but the avatar starts this fight.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void APossessedPlayerFiresAtTheCreatureItTargeted()
+    {
+        var config = Config();
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+
+        var capital = sim.Map.Cities[0];
+        var terrain = TerrainField.Shared(config.ContentScale);
+        EntityId lair;
+        using (var tx = sim.Dbe.CreateQuickTransaction())
+        {
+            var rng = new Rng(7);
+            lair = WorldBuilder.SpawnLair(tx, ref rng, CreatureTemplates.Frog, capital.X + 12f, capital.Z + 12f, site: 0, expireTick: 0, config, terrain, 0);
+            tx.Commit();
+        }
+
+        sim.Dbe.WriteTickFence(1);
+        var frog = FirstCreatureOf(sim, lair);
+        int before;
+        using (var read = sim.Dbe.CreateQuickTransaction())
+        {
+            before = read.Open(frog).Read(Creature.Vitals).Health;
+        }
+
+        var harness = Harness = new SessionHarness(sim);
+        var link = harness.Connect(TatooineReplication.PlayerKind);
+        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar to be spawned");
+        SessionHarness.Until(() => TatooineReplication.NetIdOf(link.Session, frog) != 0, "the frog to reach the client's view");
+
+        link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(TatooineReplication.NetIdOf(link.Session, frog)));
+        SessionHarness.Until(() => TatooineReplication.Intents.TargetsSet >= 1, "the target to be accepted");
+
+        // A weapon cycles in one to three seconds; four seconds of ticks at the served rate is at least one shot.
+        harness.Ticks(4 * Worlds.ServedHz);
+
+        int after;
+        using (var read = sim.Dbe.CreateQuickTransaction())
+        {
+            after = read.TryOpen(frog, out var body) ? body.Read(Creature.Vitals).Health : 0;
+        }
+
+        Assert.That(after, Is.LessThan(before), $"the frog's health stayed at {before}: a possessed player with a target fired nothing");
+    }
+
+    /// <summary>
+    /// A possessed player that selected a BUILDING holds it as its target and fires nothing — and the world keeps ticking.
+    /// </summary>
+    /// <remarks>
+    /// <b>Found on the served demo, 2026-10-24.</b> A click selects and targets, so a click on a building made it the session's target; the moment a session's
+    /// player could fire, the shooter read <c>PlayerVitals</c> from the building, the read threw, and the strict tick abort stopped the world at tick 9 682.
+    /// </remarks>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void APossessedPlayerThatTargetedABuildingFiresNothingAndTheWorldTicksOn()
+    {
+        var config = Config();
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+        var harness = Harness = new SessionHarness(sim);
+        var link = harness.Connect(TatooineReplication.PlayerKind);
+        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar to be spawned");
+
+        // The first building the client was shown: its own view's, so the server accepts it.
+        var building = EntityId.Null;
+        SessionHarness.Until(
+            () =>
+            {
+                harness.Ticks(1);
+                using var tx = sim.Dbe.CreateQuickTransaction();
+                foreach (var cluster in tx.For<WorldObject>().GetClusterEnumerator())
+                {
+                    for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                    {
+                        var id = cluster.GetEntityId(System.Numerics.BitOperations.TrailingZeroCount(bits));
+                        if (TatooineReplication.NetIdOf(link.Session, id) != 0)
+                        {
+                            building = id;
+                            return true;
+                        }
+                    }
+                }
+
+                return false;
+            },
+            "a building to reach the client's view");
+
+        link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(TatooineReplication.NetIdOf(link.Session, building)));
+        SessionHarness.Until(() => TatooineReplication.Intents.TargetsSet >= 1, "the building to be accepted as a target");
+        harness.Ticks(4 * Worlds.ServedHz);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(sim.TickAbort, Is.Null, $"a tick aborted: {sim.TickAbort?.SystemName} {sim.TickAbort?.Reason}");
+            Assert.That(TargetOf(sim, link.Session), Is.EqualTo(building), "the selection is kept: it is the client's to clear");
+        });
+    }
+
+    /// <summary>The first creature whose foreign key names a lair.</summary>
+    private static EntityId FirstCreatureOf(TatooineSim sim, EntityId lair)
+    {
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+        {
+            var homes = cluster.GetReadOnlySpan(Creature.Home);
+            for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+            {
+                var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                if ((EntityId)homes[slot].Lair == lair)
+                {
+                    return cluster.GetEntityId(slot);
+                }
+            }
+        }
+
+        throw new InvalidOperationException("the lair spawned no creature");
+    }
+
     /// <summary>The entity a session's avatar is currently targeting.</summary>
     /// <param name="sim">The server.</param>
     /// <param name="session">The session.</param>

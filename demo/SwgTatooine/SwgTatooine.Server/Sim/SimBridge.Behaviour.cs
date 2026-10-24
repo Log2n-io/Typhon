@@ -41,7 +41,7 @@ public sealed partial class SimBridge
         long aggroHits = 0;
         long chaseLost = 0;
         long chaseGivenUp = 0;
-        long revived = 0;
+        var corpses = ctx.Writer(CorpseQueue);
 
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<Creature>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
@@ -67,9 +67,8 @@ public sealed partial class SimBridge
             var timers = cluster.GetSpan(Creature.Timers);
             var motions = cluster.GetSpan(Creature.Move);
 
-            // Read-only for the aggro gate, taken mutably only on the tick a creature is actually revived — the same discipline as the brains above.
+            // Read-only: the aggro gate reads the health, and nothing here writes it.
             var vitals = cluster.GetReadOnlySpan(Creature.Vitals);
-            Span<CreatureVitals> vitalsRw = default;
 
             var bits = bits0;
             while (bits != 0)
@@ -82,13 +81,14 @@ public sealed partial class SimBridge
                 ref var t = ref timers[idx];
                 if (ai.Mode == AiMode.Dead)
                 {
-                    // The respawn countdown and the revival, which used to live in the combat system (SWG-02).
-                    //
-                    // Moved here because it is a MODE TRANSITION on the AI cadence, which is this system's whole subject — and because keeping it beside
-                    // combat made this the only writer of CreatureVitals in the Resolve phase, where the player's side of a fight has to read them. The
-                    // deriver is right to refuse that: a plain read facing a same-phase writer is an error, and the only in-phase fix would have ordered the
-                    // shooter after the corpse-counter for no reason anyone could state.
-                    Revive(in cluster, vitals, ref vitalsRw, ref brainsRw, ref t, idx, ref revived);
+                    // The corpse's countdown. When it runs out the creature is handed to the lair director to be DESTROYED (SimBridge.Lairs.cs) — this
+                    // system is parallel and may not destroy — and its countdown is parked so it is handed over once.
+                    if (t.ThinkCooldown > 0 && --t.ThinkCooldown == 0)
+                    {
+                        corpses.Push(new CorpseEvent { Creature = cluster.GetEntityId(idx) });
+                        t.ThinkCooldown = int.MaxValue;
+                    }
+
                     continue;
                 }
 
@@ -132,7 +132,7 @@ public sealed partial class SimBridge
                     if (homeSq < 16f)
                     {
                         SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Wander);
-                        PickWanderDestination(ref move, in ai, tick, key);
+                        PickWanderDestination(ref move, in ai, x, z, tick, key);
                     }
                     else
                     {
@@ -154,7 +154,7 @@ public sealed partial class SimBridge
                     {
                         SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Wander);
                         ClearTarget(in cluster, ref brainsRw, idx);
-                        PickWanderDestination(ref move, in ai, tick, key);
+                        PickWanderDestination(ref move, in ai, x, z, tick, key);
                         Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
                         chaseLost++;
                         continue;
@@ -171,7 +171,7 @@ public sealed partial class SimBridge
                     {
                         SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Wander);
                         ClearTarget(in cluster, ref brainsRw, idx);
-                        PickWanderDestination(ref move, in ai, tick, key);
+                        PickWanderDestination(ref move, in ai, x, z, tick, key);
                         Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
                         chaseGivenUp++;
                         continue;
@@ -234,7 +234,7 @@ public sealed partial class SimBridge
                 }
                 else
                 {
-                    PickWanderDestination(ref move, in ai, tick, key);
+                    PickWanderDestination(ref move, in ai, x, z, tick, key);
                     Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
 
                     var legTicks = 1 + (int)(Hash01(Salt(tick, key, 0x1B873593u)) * _wanderLegTicks);
@@ -307,21 +307,33 @@ public sealed partial class SimBridge
         {
             Interlocked.Add(ref _chaseGivenUp, chaseGivenUp);
         }
-
-        if (revived != 0)
-        {
-            Interlocked.Add(ref _creaturesRespawned, revived);
-        }
     }
 
-    /// <summary>Pick a new wander destination inside the leash radius.</summary>
-    private void PickWanderDestination(ref CreatureMotion move, in CreatureBrain ai, long tick, long key)
+    /// <summary>Pick a new wander destination inside the leash radius, on the creature's own side of its lair.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Never through the lair.</b> A lair is a prop now — a nest, a camp — and its creatures are born round it (<c>WorldBuilder.LairRingM</c>). A leg drawn
+    /// anywhere in the disc sent about a third of them straight across the centre and through the prop, which nothing on the server collides a creature
+    /// against: 7.4 % of a small world's wanderers stood inside the nest at any moment. So a leg keeps within 75° of the creature's own bearing from home
+    /// and ends outside the spawn ring; over several legs a creature still covers its whole side of the disc.
+    /// </para>
+    /// <para>A creature standing on its home point — an older world, a leash return — has no bearing, and draws one.</para>
+    /// </remarks>
+    private void PickWanderDestination(ref CreatureMotion move, in CreatureBrain ai, float x, float z, long tick, long key)
     {
-        var a = Hash01(Salt(tick, key, 0x9E3779B9u)) * MathF.PI * 2f;
-        var r = ai.LeashRadius * 0.7f * MathF.Sqrt(Hash01(Salt(tick, key, 0x85EBCA6Bu)));
+        var dx = x - ai.HomeX;
+        var dz = z - ai.HomeZ;
+        var bearing = (dx * dx) + (dz * dz) > 0.01f ? MathF.Atan2(dz, dx) : Hash01(Salt(tick, key, 0x2545F491u)) * MathF.PI * 2f;
+        var a = bearing + ((Hash01(Salt(tick, key, 0x9E3779B9u)) - 0.5f) * WanderArcRad);
+        // Within LairWanderRadiusM of the lair, or the leash's own 0.7 when a scaled-down world has made that the smaller.
+        var reach = MathF.Max(WorldBuilder.LairRingM + 1f, MathF.Min(ai.LeashRadius * 0.7f, TatooineData.LairWanderRadiusM));
+        var r = WorldBuilder.LairRingM + ((reach - WorldBuilder.LairRingM) * MathF.Sqrt(Hash01(Salt(tick, key, 0x85EBCA6Bu))));
         move.DestX = ai.HomeX + (MathF.Cos(a) * r);
         move.DestZ = ai.HomeZ + (MathF.Sin(a) * r);
     }
+
+    /// <summary>The arc a wander leg is drawn in, centred on the creature's bearing from its lair: ±75°.</summary>
+    private const float WanderArcRad = MathF.PI * 150f / 180f;
 
     /// <summary>Writes a creature's mode, taking the mutable brain span on the first write of this cluster and not before.</summary>
     /// <param name="cluster">The cluster being walked.</param>
@@ -567,6 +579,9 @@ public sealed partial class SimBridge
             var states = cluster.GetSpan(Player.State);
             var motions = cluster.GetSpan(Player.Move);
 
+            // The way round a city's buildings (SimBridge.Routes.cs). Not projected, so a write here reaches no subscriber.
+            var routes = cluster.GetSpan(Player.Route);
+
             // Read-only, so asking who drives these players does not mark the cluster changed. One byte per player, contiguous: a cache line covers 64 of
             // them, which is why possession is its own component rather than three more fields on PlayerState (SWG-01).
             var controls = cluster.GetReadOnlySpan(Player.Control);
@@ -630,7 +645,7 @@ public sealed partial class SimBridge
                     state.ActivityTicks = Math.Max(0, state.ActivityTicks - k);
 
                     // To, through or out of a door: its own waypoints and the crossing test (SimBridge.Portals).
-                    if (ThinkPortal(ref state, ref move, cluster.GetEntityId(idx), x, z, k, places[idx].HalfExtent))
+                    if (ThinkPortal(ref state, ref move, ref routes[idx], realm, cluster.GetEntityId(idx), x, z, k, places[idx].HalfExtent))
                     {
                         pushSlots |= 1UL << idx;
                         continue;
@@ -661,7 +676,8 @@ public sealed partial class SimBridge
                         }
                         else
                         {
-                            Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+                            // Round the buildings of a city it is walking through, straight across the desert.
+                            SteerRouted(ref routes[idx], ref move, realm, x, z, k);
                         }
                     }
 
@@ -836,11 +852,6 @@ public sealed partial class SimBridge
             var places = cluster.GetReadOnlySpan(Creature.Bounds);
             var motions = cluster.GetReadOnlySpan(Creature.Move);
             var brains = cluster.GetReadOnlySpan(Creature.Ai);
-            var timers = cluster.GetReadOnlySpan(Creature.Timers);
-
-            // Taken only when a creature actually revived this tick, which is rare: GetSpan marks the column changed on handout, and a creature that merely
-            // moves must not dirty its timers.
-            var timersRw = Span<CreatureTimers>.Empty;
 
             // Realms G2: a realm at divisor N reaches this system once in N ticks, so its creatures cover N ticks' ground (1 at full rate).
             var k = ctx.Realms.TicksPerVisit(cluster.Realm);
@@ -858,16 +869,7 @@ public sealed partial class SimBridge
                 var h = p.HalfExtent;
                 float x, z;
 
-                if (timers[idx].JustRevived != 0)
-                {
-                    // Just revived: teleport home. The largest position jump the simulation makes, and the one that
-                    // forces both a cell change and a cluster-bound recomputation in the same tick. The flag is the
-                    // revival's own signal (S0-1) — inferring it from ThinkCooldown teleported living wanderers too.
-                    x = ai.HomeX;
-                    z = ai.HomeZ;
-                    TimersRw(in cluster, ref timersRw)[idx].JustRevived = 0;
-                }
-                else if ((move.VelX == 0f && move.VelZ == 0f) || ai.Mode == AiMode.Dead)
+                if ((move.VelX == 0f && move.VelZ == 0f) || ai.Mode == AiMode.Dead)
                 {
                     continue;
                 }
@@ -910,17 +912,6 @@ public sealed partial class SimBridge
                 cluster.MarkDirty(Creature.Bounds);
             }
         }
-    }
-
-    /// <summary>The cluster's mutable timers, handed out on the first write of this cluster's walk and not before. See <see cref="CreatureMoveTick"/>.</summary>
-    private static Span<CreatureTimers> TimersRw(in ClusterRef<Creature> cluster, ref Span<CreatureTimers> rw)
-    {
-        if (rw.IsEmpty)
-        {
-            rw = cluster.GetSpan(Creature.Timers);
-        }
-
-        return rw;
     }
 
     /// <summary>Integrate player positions.</summary>

@@ -5,7 +5,7 @@ import type { Descriptor } from '../assets/descriptor';
 import { AnimationGraph, locomotionFrom, type LocomotionTuning } from '../character/animation-graph';
 import type { AtlasPlan } from '../character/clip-atlas';
 import { CrowdAnimator } from '../character/crowd-anim';
-import { RIDE_ROLE, outfitFor } from '../character/outfits';
+import { RIDE_ROLE, locomotionRoles, outfitFor } from '../character/outfits';
 import type { CrowdSkinPlugin } from './crowd-material';
 import type { CrowdOutfit } from './crowd-mesh';
 import type { CrowdBody } from './layer-packer';
@@ -46,6 +46,16 @@ interface Slot {
   graph: AnimationGraph;
   /** The gait figures this graph was tuned with; see the retune note in `update`. */
   tunedAt: number;
+  /** The body's strike count this slot has answered; a body that strikes again plays its attack. See `CrowdBody.strikes`. */
+  strikes: number;
+  /**
+   * The one-shot serial last handed to the animator, so a held attack or death is played once and not restarted every
+   * frame. `CrowdAnimator.play` restarts a one-shot on every call — two punches in a row are two punches — which is right
+   * for a new blow and wrong for the same one asked for again.
+   */
+  played: number;
+  /** Whether the outfit has the one-shots at all. Every published one does; a body that had none would only walk. */
+  acts: boolean;
 }
 
 export interface CrowdLayerOptions {
@@ -57,6 +67,14 @@ export interface CrowdLayerOptions {
   readonly described: readonly Descriptor[];
   /** The most bodies this layer will ever draw. Buffers are sized once. */
   readonly capacity: number;
+  /**
+   * The outfits a body may be dressed in by its netId, as indices into {@link outfits}; every one when omitted.
+   *
+   * <b>The civilians' wardrobe, and the enemies' is kept out of it.</b> A body the router dresses explicitly
+   * (`CrowdBody.outfit`) may wear any outfit; one it does not is a city NPC or a player and draws from this list, so a
+   * ninja's costume is never seen walking the market.
+   */
+  readonly hashed?: readonly number[];
 }
 
 /** A body drawn seated this frame, in render space: where its swoop goes. */
@@ -86,6 +104,8 @@ export class CrowdLayer {
   private readonly skin: CrowdSkinPlugin;
   private readonly described: readonly Descriptor[];
   private readonly capacity: number;
+  /** See {@link CrowdLayerOptions.hashed}. */
+  private readonly hashed: readonly number[];
   /** How many bodies ONE outfit may draw; see {@link bucketCapacity}. */
   private readonly bucketCapacity: number;
   /** Whether a bucket has ever been full, so the warning is said once rather than per frame. */
@@ -172,6 +192,7 @@ export class CrowdLayer {
     this.skin = options.skin;
     this.described = options.described;
     this.capacity = options.capacity;
+    this.hashed = options.hashed ?? this.outfits.map((_, i) => i);
 
     const share = bucketCapacity(this.capacity, this.outfits.length);
     this.bucketCapacity = share;
@@ -307,7 +328,10 @@ export class CrowdLayer {
     // ---- place every body in its outfit's bucket -----------------------------------------------------------------
     for (let b = 0; b < count; b++) {
       const body = bodies[b];
-      const which = outfitFor(body.netId, outfitCount);
+      const which =
+        body.outfit >= 0 && body.outfit < outfitCount
+          ? body.outfit
+          : (this.hashed[outfitFor(body.netId, this.hashed.length)] ?? 0);
       const bucket = this.buckets[which];
       const outfit = this.outfits[which];
       if (bucket.count >= this.bucketCapacity) {
@@ -344,13 +368,17 @@ export class CrowdLayer {
 
       if (slot === null) {
         const descriptor = this.described[which];
-        const roles = descriptor.animations?.roles ?? {};
+        const roles = locomotionRoles(descriptor.animations?.roles ?? {});
         const clips = descriptor.animations?.clips ?? [];
         slot = {
           netId: body.netId,
           outfit: which,
           graph: new AnimationGraph(roles, clips, bucket.tuning),
           tunedAt: this.tuningSerial,
+          // Answered already: a body coming into view mid-fight is not owed the blows it struck before it was seen.
+          strikes: body.strikes,
+          played: -1,
+          acts: roles.attack !== undefined && roles.death !== undefined,
         };
         bucket.animator.clear(i);
         bucket.tiers[i] = CULLED;
@@ -383,12 +411,33 @@ export class CrowdLayer {
         rider.z = body.z;
         rider.heading = body.heading;
       } else {
+        // The one-shots, from what the server said: death from the body's replicated mode, a blow from the Attack events
+        // the router counts. Death wins over everything and holds until the server destroys the corpse; a blow is
+        // accepted only between others, the graph's own rule.
+        if (slot.acts) {
+          if (body.dead && !slot.graph.dead) {
+            slot.graph.fire('die', clock);
+          }
+
+          if (body.strikes !== slot.strikes) {
+            slot.strikes = body.strikes;
+            if (slot.graph.accepts('attack', clock, true)) {
+              slot.graph.fire('attack', clock);
+            }
+          }
+        }
+
         const out = slot.graph.update(body.speed, true, clock);
         // <b>By ROLE, not by clip name.</b> See `AnimOutput.role`: the atlas is keyed on the role because an
         // outfit may carry its own copy of one, and a clip name finds nothing without saying so.
         const atlas = this.plan.slotOf(outfit.id, out.role);
         if (atlas !== null) {
-          bucket.animator.play(i, atlas, clock, out.rate);
+          if (out.loop) {
+            bucket.animator.play(i, atlas, clock, out.rate);
+          } else if (out.serial !== slot.played) {
+            slot.played = out.serial;
+            bucket.animator.play(i, atlas, clock);
+          }
         }
       }
 

@@ -184,7 +184,8 @@ public sealed partial class SimBridge
     /// and turns it to the next. The coarse "within five metres" every other destination uses would cut the corner of a ramp or a room.
     /// </para>
     /// </remarks>
-    private bool ThinkPortal(ref PlayerState state, ref PlayerMotion move, EntityId id, float x, float z, int k, float halfExtent)
+    private bool ThinkPortal(ref PlayerState state, ref PlayerMotion move, ref PlayerRoute walk, ushort realm, EntityId id, float x, float z, int k,
+        float halfExtent)
     {
         if (state.Activity is not (PlayerActivity.ToPortal or PlayerActivity.EnteringDoor or PlayerActivity.LeavingRoom))
         {
@@ -217,7 +218,16 @@ public sealed partial class SimBridge
         var dz = move.DestZ - z;
         if ((dx * dx) + (dz * dz) > WaypointReachM * WaypointReachM)
         {
-            SteerToWaypoint(ref move, x, z, k);
+            // To the foot of the door's ramp round the town's buildings; the door's own path, from there, is published and walked as it is.
+            if (state.Activity == PlayerActivity.ToPortal)
+            {
+                SteerRouted(ref walk, ref move, realm, x, z, k);
+            }
+            else
+            {
+                SteerToWaypoint(ref move, x, z, k);
+            }
+
             return true;
         }
 

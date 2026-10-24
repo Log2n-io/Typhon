@@ -43,7 +43,11 @@ internal sealed class OverviewChecks : ServedChecks
             },
             what);
 
-    /// <summary>On, the session holds the planet's lairs and stays on its planet with its avatar; off, the lairs are gone again.</summary>
+    /// <summary>On, the session holds the planet's lairs and stays on its planet with its avatar; off, it holds only its sphere's again.</summary>
+    /// <remarks>
+    /// A player's own profile carries lairs since they are drawn (a browser has to see one to break it), so the marker is the COUNT: the sphere holds the few
+    /// around the capital, the god camera the whole planet's.
+    /// </remarks>
     [Test]
     [CancelAfter(60_000)]
     public void TheGodCameraServesAPlayerTheWholePlanetAndGivesItBack()
@@ -52,10 +56,11 @@ internal sealed class OverviewChecks : ServedChecks
         var player = new PlayerProbe(Harness);
         player.UntilSettled();
         var avatar = TatooineReplication.ControlledBy(sim.Dbe, player.Session);
-        Assert.That(player.Holding(nameof(CreatureLair)), Is.Zero, "the premise: a player's own profile serves no lair");
+        var near = player.Holding(nameof(CreatureLair));
 
         player.AskOverview(true);
-        Until(() => player.Holding(nameof(CreatureLair)) > 0, "a lair to arrive once the player is in the god camera");
+        Until(() => player.Holding(nameof(CreatureLair)) > near + 20, "the planet's lairs to arrive once the player is in the god camera");
+        var planet = player.Holding(nameof(CreatureLair));
         Assert.Multiple(() =>
         {
             Assert.That(player.Drain().RealmId, Is.EqualTo(0), "the god camera moved the player off its planet");
@@ -64,7 +69,9 @@ internal sealed class OverviewChecks : ServedChecks
         });
 
         player.AskOverview(false);
-        Until(() => player.Holding(nameof(CreatureLair)) == 0 && player.Holding(nameof(WorldObject)) > 0, "the player's own view to come back");
+        Until(
+            () => player.Holding(nameof(CreatureLair)) < planet / 2 && player.Holding(nameof(WorldObject)) > 0,
+            "the player's own view to come back");
         Assert.Multiple(() =>
         {
             Assert.That(TatooineReplication.OverviewAsks.Live, Is.Zero);
@@ -155,6 +162,8 @@ internal sealed class OverviewChecks : ServedChecks
             var god = Harness.Connect(TatooineReplication.GodKind);
             Until(() => god.Received(Typhon.Protocol.MessageTypes.Welcome), "the god session to take the place");
 
+            // Its own sphere's lairs, which a player's profile carries since they are drawn: the planet's would be many more.
+            var near = player.Holding(nameof(CreatureLair));
             player.AskOverview(true);
             Until(() => TatooineReplication.OverviewAsks.Refused >= 1, "the overview to be refused while the god session holds the place");
             Harness.Ticks(2);
@@ -162,7 +171,7 @@ internal sealed class OverviewChecks : ServedChecks
             {
                 Assert.That(player.Drain().Refusals, Has.Member(TatooineReplication.OverviewFull));
                 Assert.That(TatooineReplication.OverviewAsks.Live, Is.Zero);
-                Assert.That(player.Holding(nameof(CreatureLair)), Is.Zero, "a refused overview served the planet's lairs");
+                Assert.That(player.Holding(nameof(CreatureLair)), Is.LessThanOrEqualTo(near + 5), "a refused overview served the planet's lairs");
             });
         }
     }

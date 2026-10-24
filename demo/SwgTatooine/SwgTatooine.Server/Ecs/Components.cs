@@ -1,4 +1,5 @@
-﻿using System.Runtime.InteropServices;
+﻿using System;
+using System.Runtime.InteropServices;
 using Typhon.Protocol;
 
 namespace SwgTatooine.Server;
@@ -553,6 +554,123 @@ public struct PlayerMotion
     [Field] public long BiasTick;
 }
 
+/// <summary>
+/// The way a scripted player is walking round a city's buildings: up to <see cref="Capacity"/> waypoints to its destination, planned by the bots' own city
+/// search (<c>SwgTatooine.Navigation.CityPath</c>) and followed by <c>PlayerThink</c> (<c>SimBridge.Routes.cs</c>).
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Why the crowd needed it</b> (Loïc, 2026-10-24): it steered in a straight line, and once it was collided (2026-10-22) a straight line through a
+/// building ended at the building — 34 of 35 bodies round one shuttleport stood still, several on exactly the same coordinates, in its corners.
+/// </para>
+/// <para>
+/// <b>Waypoints as mappable words, read through <see cref="Points"/></b>, for the reason <see cref="AccountSecret"/> spells its digest that way: a fixed
+/// buffer or an inline array is refused or skipped by the schema, and a skipped field would not survive a reopen while its count did. Not projected: a
+/// route is the server's own business, and a write to it reaches no subscriber.
+/// </para>
+/// <para>108 bytes, under the 112 a spawned component may carry.</para>
+/// </remarks>
+[Component("Swg.PlayerRoute", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct PlayerRoute
+{
+    /// <summary>How many waypoints a route holds; a longer walk is planned again when these run out.</summary>
+    public const int Capacity = 12;
+
+    /// <summary>The destination this route was planned for; a different one means the body was given a new leg, and the route is planned again.</summary>
+    [Field] public float GoalX;
+
+    /// <summary>See <see cref="GoalX"/>.</summary>
+    [Field] public float GoalZ;
+
+    /// <summary>How many of the waypoints are this route's.</summary>
+    [Field] public byte Count;
+
+    /// <summary>The waypoint being walked to; <see cref="Count"/> when the rest of the way is straight.</summary>
+    [Field] public byte Next;
+
+    /// <summary>
+    /// The city this route was planned through, plus one; 0 for none. A body walking straight plans again the first time it stands in a city other than
+    /// this one — a leg that crosses a town, or ends in one.
+    /// </summary>
+    [Field] public byte City;
+
+    /// <summary>Waypoint 0, east.</summary>
+    [Field] public float X0;
+
+    /// <summary>Waypoint 0, north.</summary>
+    [Field] public float Z0;
+
+    /// <summary>Waypoint 1, east.</summary>
+    [Field] public float X1;
+
+    /// <summary>Waypoint 1, north.</summary>
+    [Field] public float Z1;
+
+    /// <summary>Waypoint 2, east.</summary>
+    [Field] public float X2;
+
+    /// <summary>Waypoint 2, north.</summary>
+    [Field] public float Z2;
+
+    /// <summary>Waypoint 3, east.</summary>
+    [Field] public float X3;
+
+    /// <summary>Waypoint 3, north.</summary>
+    [Field] public float Z3;
+
+    /// <summary>Waypoint 4, east.</summary>
+    [Field] public float X4;
+
+    /// <summary>Waypoint 4, north.</summary>
+    [Field] public float Z4;
+
+    /// <summary>Waypoint 5, east.</summary>
+    [Field] public float X5;
+
+    /// <summary>Waypoint 5, north.</summary>
+    [Field] public float Z5;
+
+    /// <summary>Waypoint 6, east.</summary>
+    [Field] public float X6;
+
+    /// <summary>Waypoint 6, north.</summary>
+    [Field] public float Z6;
+
+    /// <summary>Waypoint 7, east.</summary>
+    [Field] public float X7;
+
+    /// <summary>Waypoint 7, north.</summary>
+    [Field] public float Z7;
+
+    /// <summary>Waypoint 8, east.</summary>
+    [Field] public float X8;
+
+    /// <summary>Waypoint 8, north.</summary>
+    [Field] public float Z8;
+
+    /// <summary>Waypoint 9, east.</summary>
+    [Field] public float X9;
+
+    /// <summary>Waypoint 9, north.</summary>
+    [Field] public float Z9;
+
+    /// <summary>Waypoint 10, east.</summary>
+    [Field] public float X10;
+
+    /// <summary>Waypoint 10, north.</summary>
+    [Field] public float Z10;
+
+    /// <summary>Waypoint 11, east.</summary>
+    [Field] public float X11;
+
+    /// <summary>Waypoint 11, north.</summary>
+    [Field] public float Z11;
+
+    /// <summary>The waypoints as (x, z) pairs, <see cref="Capacity"/> of them; writing through the span writes the component.</summary>
+    public Span<float> Points() => MemoryMarshal.CreateSpan(ref X0, Capacity * 2);
+}
+
 /// <summary>A city NPC's shuffle.</summary>
 [Component("Swg.NpcMotion", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
@@ -613,7 +731,7 @@ public struct LairVitals
 /// A creature's behaviour state — written every time it thinks, and worth nothing after a crash: a restarted server
 /// re-derives every field from the lair and the terrain.
 /// </summary>
-[Component("Swg.CreatureBrain", 1, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.CreatureBrain", 2, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct CreatureBrain
 {
@@ -630,9 +748,6 @@ public struct CreatureBrain
 
     /// <summary>[CORE3] Distance at which a hostile is noticed — <c>DEFAULTAGGRORADIUS = 24</c>. Zero for a passive template.</summary>
     [Field, OnEnter(CodecKind.F16, Name = "aggro")] public float AggroRadius;
-
-    /// <summary>The lair that owns this creature, so a kill can decrement its live count.</summary>
-    [Field] public EntityId Lair;
 
     /// <summary>The player this creature is fighting, or <c>EntityId.Null</c> when it is not fighting anybody (SWG-02).</summary>
     /// <remarks>
@@ -655,19 +770,47 @@ public struct CreatureBrain
     /// </remarks>
     [Field] public EntityLink<Player> Target;
 
-    /// <summary>Which <see cref="CreatureTemplates"/> entry this creature was spawned from — a womp rat, a bantha, a mission defender (S0-5).</summary>
+    /// <summary>Which <see cref="CreatureTemplates"/> entry this creature was spawned from — a rat, a ninja, a mission defender (S0-5).</summary>
     /// <remarks>
     /// <b>A creature that does not carry its template cannot be reasoned about after it is spawned.</b> Its stats were baked from the template at spawn and
     /// the template then thrown away, so nothing downstream — a census, a loot table, a damage model, a client choosing a mesh — can ask what kind of
     /// creature this is. Every one of those had to infer it, and the only inference available was a stat: <c>AggroRadius &gt; 0</c> for "aggressive", which
     /// conflates a passive template with an aggressive one whose radius happens to be scaled to zero.
     /// <para>
-    /// Not replicated yet, deliberately: the wire surface is not changed inside a measurement-hygiene pass. An <c>[OnEnter(CodecKind.U8)]</c> is the
-    /// natural next step, since the value is immutable per entity and the client needs it to style creatures by kind.
+    /// <b>On the wire once, on enter</b>: it is immutable per entity, and it is what the client chooses the creature's body by — with <see cref="Skin"/>,
+    /// through the table the server publishes (<see cref="CreatureTemplates.Bodies"/>).
     /// </para>
-    /// <para>It costs no memory: <see cref="AggroRadius"/> leaves four bytes of padding before the 8-byte-aligned <see cref="Lair"/>.</para>
     /// </remarks>
-    [Field] public byte Template;
+    [Field, OnEnter(CodecKind.U8, Name = "template", Saturate = true)] public byte Template;
+
+    /// <summary>
+    /// Which of its template's <see cref="CreatureTemplates.Bodies"/> this creature wears: a ninja hideout mixes three outfits. Drawn at spawn, never
+    /// changed, on the wire once.
+    /// </summary>
+    /// <remarks>Beside <see cref="Template"/> in the padding <see cref="AggroRadius"/> leaves before the 8-byte-aligned <see cref="Target"/>.</remarks>
+    [Field, OnEnter(CodecKind.U8, Name = "skin", Saturate = true)] public byte Skin;
+}
+
+/// <summary>The lair a creature belongs to: written once, at spawn, and never again.</summary>
+/// <remarks>
+/// <para>
+/// <b>Its own component because it carries an index, and an indexed component may not be written through a span</b> (<c>ClusterRef.GetSpan</c> refuses it,
+/// #1187). <see cref="CreatureBrain"/> is written through spans on every decision; this is written by nobody after the spawn, so the index costs an insert
+/// at birth and a removal at death and nothing in between.
+/// </para>
+/// <para>
+/// <b><c>OnParentDelete = Delete</c> is what makes a lair transient</b> (Loïc, 2026-10-24: "a lair is a transient entity, we spawn one, then it gets
+/// destroyed"). Destroying the lair takes every creature it owns with it — the engine's cascade through this foreign key, in the transaction that destroys
+/// the lair, rather than a list of children the simulation would have to keep and a restart would have to rebuild.
+/// </para>
+/// </remarks>
+[Component("Swg.CreatureHome", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct CreatureHome
+{
+    [Field]
+    [Index(AllowMultiple = true, OnParentDelete = CascadeAction.Delete)]
+    public EntityLink<CreatureLair> Lair;
 }
 
 /// <summary>
@@ -686,11 +829,11 @@ public struct CreatureBrain
 /// and different write rates, and a server that mixes them pays for the mixture on every tick of every entity.
 /// </para>
 /// </remarks>
-[Component("Swg.CreatureTimers", 1, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.CreatureTimers", 2, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct CreatureTimers
 {
-    /// <summary>Ticks until the next decision, and the respawn countdown while dead. Staggered at spawn so a lair does not think on one tick.</summary>
+    /// <summary>Ticks until the next decision, and the corpse's countdown while dead. Staggered at spawn so a lair does not think on one tick.</summary>
     [Field] public int ThinkCooldown;
 
     /// <summary>
@@ -718,19 +861,6 @@ public struct CreatureTimers
     /// <see cref="CreatureVitals"/>: beside the health the projection sends, every decrement read as a change to a replicated component.
     /// </summary>
     [Field] public int AttackCooldown;
-
-    /// <summary>
-    /// Set by the revival in <c>ReadyToTakeFire</c>, consumed and cleared by <c>CreatureMoveTick</c>: this creature is to be teleported to its lair once.
-    /// </summary>
-    /// <remarks>
-    /// <b>An explicit flag because the inference it replaces was wrong (S0-1).</b> Revival used to signal itself by setting
-    /// <see cref="ThinkCooldown"/> to 1, and the move system read <c>Wander &amp;&amp; ThinkCooldown == 1 &amp;&amp; X != HomeX</c> as "just revived". But a
-    /// perfectly alive wandering creature passes through <c>ThinkCooldown == 1</c> on the way down to its next decision, so it was teleported home once per
-    /// AI cycle: 96 % of wanderers sat within 3 m of their lair centre, and the whole world was a set of point clusters rather than spread ones — which is
-    /// precisely the property cell size is measured against. Nothing else in the struct is free to mean two things, so nothing else is inferred.
-    /// <para>It costs no memory: the four fields above leave four bytes of tail padding at an 8-byte alignment.</para>
-    /// </remarks>
-    [Field] public byte JustRevived;
 }
 
 /// <summary>A city NPC's behaviour. Almost always <see cref="AiMode.Idle"/>.</summary>
@@ -774,7 +904,7 @@ public static class AiMode
     /// <summary>Past the leash, returning home and ignoring everything on the way.</summary>
     public const int Leashing = 4;
 
-    /// <summary>Dead, awaiting the lair's respawn timer.</summary>
+    /// <summary>Dead: a corpse for <c>SimConfig.CorpseSeconds</c>, then destroyed. Its lair spawns a replacement.</summary>
     public const int Dead = 5;
 }
 
@@ -1061,7 +1191,7 @@ public static class PlayerActivity
 }
 
 /// <summary>A creature lair: the object that spawns and owns a population, and what a destroy mission sends a player to break.</summary>
-[Component("Swg.Lair", 1, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.Lair", 2, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct Lair
 {
@@ -1074,7 +1204,7 @@ public struct Lair
     /// <summary>How many are alive right now.</summary>
     [Field] public int AliveCount;
 
-    /// <summary>Ticks until the next respawn attempt.</summary>
+    /// <summary>A destroy-mission lair's offer cadence, in ticks (<c>MissionTick</c>). A wild lair's schedule is <see cref="NextSpawnTick"/>.</summary>
     [Field] public int RespawnCooldown;
 
     /// <summary>How far from the lair its creatures spawn and wander.</summary>
@@ -1090,6 +1220,19 @@ public struct Lair
     /// so the branch never ran at all.
     /// </remarks>
     [Field] public EntityLink<Player> Owner;
+
+    /// <summary>
+    /// The wilderness site that spawned this lair, one-based into <c>SimBridge</c>'s site list (regions, then points of interest); 0 for a destroy-mission
+    /// lair, which belongs to no site and is never retired.
+    /// </summary>
+    /// <remarks>What the lair director refills: a retired lair is replaced by another drawn from the same site, so a region keeps its density.</remarks>
+    [Field] public int Site;
+
+    /// <summary>The tick a wild lair is retired at, whether or not anybody destroyed it; 0 for a lair that never expires.</summary>
+    [Field] public long ExpireTick;
+
+    /// <summary>The tick this lair may next replace a creature it lost; 0 when it has lost none.</summary>
+    [Field] public long NextSpawnTick;
 }
 
 /// <summary>

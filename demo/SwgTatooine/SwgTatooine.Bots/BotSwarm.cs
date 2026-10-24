@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using SwgTatooine.Bots.Brain;
 using Typhon.Client;
 using Typhon.Protocol;
+using SwgTatooine.Navigation;
 
 namespace SwgTatooine.Bots;
 

@@ -144,7 +144,8 @@ public sealed class CausalityLoopTests
     {
         var s = _sim.LastStats;
         var crossings = _sim.CrossingCommits;
-        var writes = s.CreaturesKilled + s.MissionRewards + crossings;
+        var lairs = _sim.LairCommits;
+        var writes = s.CreaturesKilled + s.MissionRewards + crossings + lairs;
 
         // Each kill pays loot and each completion pays a reward, and both go through the tick's own transaction — so the WAL's durable LSN moves on the ticks
         // that wrote Inventory and on no others. The two numbers come from different places: one from the simulation's counters, the other from the WAL
@@ -153,6 +154,9 @@ public sealed class CausalityLoopTests
         // <b>A door is an Inventory writer too.</b> A crossing teleports the player, and the player carries its Versioned inventory into the other realm's
         // cluster: one record per tick that crossed, from TeleportTick's own side transaction. The crowd walks through doors since they became stored
         // portals (six crossings in this window); the old path chose doors and never arrived at one, so this run used to make none.
+        //
+        // <b>So is the lair director</b>, on a different ground: a corpse destroyed and a creature or lair spawned are STRUCTURAL changes, which the WAL logs
+        // whatever the archetype's cluster durability. One record per tick it committed one, from its own side transaction (SimBridge.Lairs.cs).
         //
         // It is also the proof that ClusterDurability.Checkpoint does what it declares. Four thousand ticks of creatures, players and NPCs moving produce no WAL
         // record at all; only the Versioned half of Player does.
@@ -168,8 +172,11 @@ public sealed class CausalityLoopTests
             Assert.That(_sim.WalAdvances, Is.GreaterThan(0), "no tick advanced the durable LSN, so nothing was made durable at all");
             Assert.That(_sim.WalAdvances, Is.LessThanOrEqualTo(writes),
                 $"the durable LSN moved on more ticks than wrote Inventory, so something other than loot and rewards is writing — {_sim.WalWriterBreakdown}");
-            // One record per advancing tick, plus at most one more on a tick that both looted and crossed: the crossing is a second transaction.
-            Assert.That(_sim.WalLsnGained, Is.InRange(_sim.WalAdvances, _sim.WalAdvances + crossings),
+            // One record per advancing tick, plus at most one more on a tick that both looted and crossed — the crossing is a second transaction — and the
+            // lair director's, which are counted per ENTITY rather than per commit: a spawn appends a record per component, so one creature respawned
+            // beside one corpse removed was eleven records on one tick (measured; the creature has eight components). Bounded by the sixteen component slots
+            // an archetype can hold, which still fails for a writer that is not the director.
+            Assert.That(_sim.WalLsnGained, Is.InRange(_sim.WalAdvances, _sim.WalAdvances + crossings + (16 * _sim.LairEntities)),
                 $"one WAL record per advancing tick and one per crossing tick: more would mean an unexpected writer — {_sim.WalWriterBreakdown}");
             Assert.That(Causality.TotalCredits(_sim), Is.GreaterThan(_creditsBefore), "credits did not grow, so nothing was actually written");
         });
@@ -596,17 +603,21 @@ public sealed class PlayerCloneTests
     public void APlayerAtZeroHealth_IsClonedAtTheNearestCity_WithFullHealth()
     {
         // Read out first: EntityRef is a ref struct and cannot be captured by Assert.Multiple's lambda (CS8175).
-        float health, distance;
+        float health;
+        bool onLane;
         EntityId target;
         int activity;
         using (var tx = _sim.Dbe.CreateQuickTransaction())
         {
             var player = tx.Open(_player);
             var at = player.Read(Player.Bounds);
-            var nearest = NearestCity(_diedAt.X, _diedAt.Z);
-            var dx = at.X - nearest.X;
-            var dz = at.Z - nearest.Z;
-            distance = MathF.Sqrt((dx * dx) + (dz * dz));
+
+            // On the lane outside the nearest city's shuttleport gate — not the city's centre, which is the middle of the port's landing pad and where every
+            // clone used to be stuck (2026-10-24). The lane is the rectangle OutsideGate spans.
+            var port = _sim.Index.Shuttleports[NearestCityIndex(_diedAt.X, _diedAt.Z)];
+            var (ax, az) = WorldBuilder.OutsideGate(port.X, port.Z, 0f, 0f);
+            var (bx, bz) = WorldBuilder.OutsideGate(port.X, port.Z, 1f, 1f);
+            onLane = at.X >= ax - 0.01f && at.X <= bx + 0.01f && at.Z >= az - 0.01f && at.Z <= bz + 0.01f;
             health = player.Read(Player.Vitals).Health;
             target = player.Read(Player.Session).Target;
             activity = player.Read(Player.State).Activity;
@@ -616,26 +627,27 @@ public sealed class PlayerCloneTests
         {
             Assert.That(_sim.LastStats.PlayersIncapacitated, Is.EqualTo(1), "the player was not brought down at all");
             Assert.That(health, Is.EqualTo(_maxHealth), "a cloned player wakes with full health: no wounds, no insurance");
-            Assert.That(distance, Is.LessThan(1f), "the clone is not at the city nearest where the player went down");
+            Assert.That(onLane, Is.True, "the clone is not on the gate lane of the city nearest where the player went down");
             Assert.That(target, Is.EqualTo(EntityId.Null), "a cloned player keeps a target on the far side of the planet");
             Assert.That(activity, Is.EqualTo(PlayerActivity.Idle), "a cloned player wakes up recovering, not mid-activity");
         });
     }
 
     /// <summary>The city the resolver should have chosen — computed here from the map rather than read back from the code under test.</summary>
-    private (float X, float Z) NearestCity(float x, float z)
+    private int NearestCityIndex(float x, float z)
     {
         var bestSq = float.MaxValue;
-        var best = (X: x, Z: z);
-        foreach (var c in _sim.Index.Cities)
+        var best = -1;
+        for (var i = 0; i < _sim.Index.Cities.Count; i++)
         {
+            var c = _sim.Index.Cities[i];
             var dx = c.X - x;
             var dz = c.Z - z;
             var d2 = (dx * dx) + (dz * dz);
             if (d2 < bestSq)
             {
                 bestSq = d2;
-                best = (c.X, c.Z);
+                best = i;
             }
         }
 

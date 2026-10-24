@@ -2,9 +2,8 @@ import type { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh';
 import type { TransformNode } from '@babylonjs/core/Meshes/transformNode';
 import { placement } from '../assets/asset-frame';
 import type { AssetLibrary, Instance } from '../assets/asset-library';
-import { assetForStructure, structureYaw } from '../assets/structure-assets';
+import { structureYaw } from '../assets/structure-assets';
 import type { LodDesc } from '../assets/descriptor';
-import type { AssetSet } from '../data/server-config';
 import { NO_LEVEL, levelForError, lodLevelOf } from '../render/asset-lod';
 import type { SceneLighting } from '../render/scene-lighting';
 
@@ -209,7 +208,8 @@ export class StaticAssets {
   private readonly library: AssetLibrary;
   /** Marks each placement as a shadow caster, or `null` on a mount without lighting (the tests'). */
   private readonly lighting: SceneLighting | null;
-  private readonly set: AssetSet;
+  /** The asset a sample's replicated index names, or `null` for none: a structure's table, or a lair's template. */
+  private readonly resolve: (asset: number) => string | null;
   private readonly root: TransformNode;
   private readonly budget: number;
   private readonly warmBudget: number;
@@ -242,12 +242,12 @@ export class StaticAssets {
   constructor(
     library: AssetLibrary,
     root: TransformNode,
-    set: AssetSet,
+    resolve: (asset: number) => string | null,
     budgetPerFrame = 2,
     lighting: SceneLighting | null = null,
     warmBudgetPerFrame = WARM_PLACEMENTS_PER_FRAME,
   ) {
-    this.set = set;
+    this.resolve = resolve;
     this.library = library;
     this.root = root;
     this.budget = budgetPerFrame;
@@ -321,7 +321,7 @@ export class StaticAssets {
     this.wantsMoreLast = false;
     for (let n = 0; n < count; n++) {
       const sample = ordered[n];
-      const id = assetForStructure(this.set, sample.asset);
+      const id = this.resolve(sample.asset);
       if (id === null) {
         continue;
       }

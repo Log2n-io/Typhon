@@ -99,4 +99,14 @@ public static class CombatTargetKind
     public const byte Lair = 1;
 
     public const byte Player = 2;
+
+    /// <summary>
+    /// Something a client may select and inspect but nothing can damage: a building, a city NPC. Stored as the session's target and never fired at.
+    /// </summary>
+    /// <remarks>
+    /// <b>Its own kind, because folding it into <see cref="Player"/> was a crash.</b> The shooter read <c>PlayerVitals</c> from whatever it was handed, and
+    /// a building has none: the read threw, the strict tick abort stopped the world (tick 9 682 of a served demo, 2026-10-24). It was latent for as long as
+    /// a session's player never fired; it fired the day it did.
+    /// </remarks>
+    public const byte Unshootable = 3;
 }

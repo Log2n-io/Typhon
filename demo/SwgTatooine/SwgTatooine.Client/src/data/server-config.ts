@@ -64,6 +64,25 @@ export interface AssetSet {
    * collides as its footprint", which is what the server does.
    */
   readonly collision: readonly (readonly PlanBox[])[];
+  /**
+   * What each creature template IS, by the `template` a creature and a lair replicate: its name, the bodies its creatures
+   * wear (a creature's `skin` indexes them) and the prop at its lair's centre.
+   *
+   * <b>The server's, for the reason {@link structures} is.</b> It decides what a ninja hideout looks like; a client with
+   * its own copy would draw a different camp from the one the world holds. Empty from a server that publishes none, which
+   * leaves creatures and lairs drawn as the renderer's own shapes.
+   */
+  readonly creatures: readonly CreatureKind[];
+}
+
+/** One creature template, as the server publishes it. */
+export interface CreatureKind {
+  /** What a person reads: "rats", "ninja hideout". */
+  readonly name: string;
+  /** The asset at a lair's centre. */
+  readonly lair: string;
+  /** The assets its creatures wear, at least one. */
+  readonly bodies: readonly string[];
 }
 
 export interface ServerConfig {
@@ -188,7 +207,7 @@ function readAssets(value: unknown): AssetSet | null {
     return null;
   }
 
-  const { base, catalogue, structures, collision } = value as Record<string, unknown>;
+  const { base, catalogue, structures, collision, creatures } = value as Record<string, unknown>;
   if (typeof base !== 'string' || typeof catalogue !== 'string') {
     return null;
   }
@@ -208,7 +227,40 @@ function readAssets(value: unknown): AssetSet | null {
     return null;
   }
 
-  return { base, catalogue, structures: table, collision: readCollision(collision, table.length) };
+  return {
+    base,
+    catalogue,
+    structures: table,
+    collision: readCollision(collision, table.length),
+    creatures: readCreatureKinds(creatures),
+  };
+}
+
+/**
+ * The published creature templates, in the order the server numbers them.
+ *
+ * <b>Position is identity</b>, so a malformed entry is kept as a nameless kind with no assets rather than dropped: dropping
+ * one would renumber every template after it, and a rat would be drawn in a ninja's clothes.
+ */
+export function readCreatureKinds(value: unknown): readonly CreatureKind[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.map((entry: unknown): CreatureKind => {
+    const { name, lair, bodies } = (typeof entry === 'object' && entry !== null ? entry : {}) as Record<
+      string,
+      unknown
+    >;
+    const ids = Array.isArray(bodies)
+      ? bodies.filter((id): id is string => typeof id === 'string' && id.length > 0)
+      : [];
+    return {
+      name: typeof name === 'string' ? name : '',
+      lair: typeof lair === 'string' ? lair : '',
+      bodies: ids,
+    };
+  });
 }
 
 /**

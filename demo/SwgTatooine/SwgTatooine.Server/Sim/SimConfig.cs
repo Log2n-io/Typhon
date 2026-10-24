@@ -750,6 +750,34 @@ public sealed class SimConfig
     /// </remarks>
     public float RespawnSeconds = 180f;
 
+    /// <summary>Seconds a dead creature lies before it is destroyed (<c>--corpse-s</c>): long enough for its death to be seen played and held.</summary>
+    /// <remarks>
+    /// A creature is not revived any more: it dies, lies, and is DESTROYED, and its lair spawns a new one <see cref="RespawnSeconds"/> later (Loïc,
+    /// 2026-10-24 — lairs and what they hold are transient). The longest death clip published is 1.1 s.
+    /// </remarks>
+    public float CorpseSeconds = 6f;
+
+    /// <summary>
+    /// The shortest and longest a wild lair stands before it is retired, in seconds (<c>--lair-life-s min,max</c>), whether or not anybody destroyed it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>"HP 0 or a lifetime"</b> (Loïc, 2026-10-24): before missions are designed few players break lairs, and a world whose lairs only die when broken
+    /// would have none die at all. A retired lair is replaced elsewhere in its site after <see cref="LairReplaceSeconds"/>, so a region keeps its density.
+    /// </para>
+    /// <para>
+    /// The world is BUILT with each lair part-way through a life — its remaining time is drawn from a quarter of the shortest to the longest — so the first
+    /// retirements are spread over the run rather than arriving as one wave at the shortest lifetime.
+    /// </para>
+    /// </remarks>
+    public float LairLifeMinSeconds = 1200f;
+
+    /// <inheritdoc cref="LairLifeMinSeconds"/>
+    public float LairLifeMaxSeconds = 2400f;
+
+    /// <summary>Seconds before a retired lair's site spawns its replacement (<c>--lair-replace-s</c>).</summary>
+    public float LairReplaceSeconds = 60f;
+
     /// <summary>
     /// Per-system <c>MinChunkSize</c> for the awareness system only. <c>0</c> leaves it on the global floor.
     /// </summary>

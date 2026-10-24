@@ -103,7 +103,7 @@ internal sealed class HumanProfileChecks
     }
 
     /// <summary>
-    /// The human profile carries <c>WorldObject</c> and the measurement profile does not — which is the whole of A7.
+    /// The human profile carries <c>WorldObject</c> and <c>CreatureLair</c>, and the measurement profile does not — which is the whole of A7.
     /// </summary>
     /// <remarks>
     /// <b>The DIFFERENCE is the assertion, not the presence.</b> A case that only checked <c>human</c> carries <c>WorldObject</c>
@@ -128,7 +128,9 @@ internal sealed class HumanProfileChecks
 
             // "player-lite PLUS buildings": the rest of the set has to be the same, or this is a different profile that happens to have buildings.
             Assert.That(human, Is.SupersetOf(lite), "the human profile must be the player's shape plus something, not instead of it");
-            Assert.That(human.Count, Is.EqualTo(lite.Count + 1), "it must be plus exactly ONE archetype — the buildings");
+            Assert.That(human, Does.Contain(typeof(CreatureLair)), "a human who cannot see a lair cannot walk up to one and break it");
+            Assert.That(lite, Does.Not.Contain(typeof(CreatureLair)), "the measurement profile gained CreatureLair — the same incomparability as above");
+            Assert.That(human.Count, Is.EqualTo(lite.Count + 2), "it must be plus exactly TWO archetypes — the buildings and the lairs");
         });
     }
 

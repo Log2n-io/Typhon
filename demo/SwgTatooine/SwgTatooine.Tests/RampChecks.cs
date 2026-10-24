@@ -2,6 +2,7 @@
 using NUnit.Framework;
 using SwgTatooine.Server;
 using Typhon.Engine;
+using SwgTatooine.Navigation;
 
 namespace SwgTatooine.Tests;
 

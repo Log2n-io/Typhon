@@ -59,8 +59,9 @@ public static class WorldBuilder
         var plan = new SitePlanner(StructureFootprint.HalfExtentM(StructureKind.Shuttleport));
 
         SpawnCities(dbe, map, config, census, ref rng, index, plan);
+        PlanSites(map, config, index, realm);
         SpawnPointsOfInterest(dbe, map, config, census, ref rng, index, plan);
-        SpawnWilderness(dbe, map, config, census, ref rng, index);
+        SpawnWilderness(dbe, config, census, ref rng, index);
         SpawnPlayerStructures(dbe, map, config, census, ref rng, plan);
         SpawnPlayers(dbe, map, config, census, ref rng, index, plan);
         SpawnMissionLairPool(dbe, map, config, census, ref rng, index);
@@ -680,9 +681,9 @@ public static class WorldBuilder
                 tx.Commit();
             }
 
-            // A landmark's lairs are the reason players go there, so they get the aggressive templates.
-            var lairs = Scale(poi.Lairs, config.PopulationScale);
-            SpawnLairsIn(dbe, poi.X, poi.Z, poi.Radius, lairs, CreatureTemplates.TuskenRaider, config, census, ref rng, index);
+            // A landmark's lairs are the reason players go there, so they are its camps (TatooineData.PoiLairTemplates). Its site is the POI's own
+            // position in the list PlanSites made, which numbers the points of interest first.
+            SpawnLairsIn(dbe, index, poiIndex - map.Cities.Count, config, census, ref rng);
             index.Pois.Add((poi.X, poi.Z, poi.Radius));
             poiIndex++;
         }
@@ -690,18 +691,48 @@ public static class WorldBuilder
 
     // ── Wilderness ──────────────────────────────────────────────────────────────────────────────────────────────────
 
-    private static void SpawnWilderness(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldCensus census, ref Rng rng, WorldIndex index)
+    private static void SpawnWilderness(DatabaseEngine dbe, SimConfig config, WorldCensus census, ref Rng rng, WorldIndex index)
     {
-        foreach (var region in map.SpawnRegions)
+        // The regions follow the points of interest in the site list (PlanSites).
+        for (var site = index.Pois.Count; site < index.Sites.Count; site++)
         {
-            var areaSqKm = MathF.PI * region.Radius * region.Radius / 1_000_000f;
-            var lairs = Scale((int)MathF.Round(areaSqKm * region.LairsPerSqKm), config.PopulationScale);
-            SpawnLairsIn(dbe, region.X, region.Z, region.Radius, lairs, region.CreatureTemplate, config, census, ref rng, index);
+            SpawnLairsIn(dbe, index, site, config, census, ref rng);
         }
     }
 
     /// <summary>
-    /// Place <paramref name="lairCount"/> lairs inside a disc and fill each with its creatures.
+    /// Plans a planet's lair sites — every point of interest, then every wilderness region — with the number of lairs each keeps standing.
+    /// </summary>
+    /// <remarks>
+    /// <b>From the map and the configuration alone, so a reopened world plans the identical list</b> (<c>WorldRebuild</c>): a lair on disk names its site by
+    /// position in it (<see cref="Lair.Site"/>), and the director refills each site to the target planned here.
+    /// </remarks>
+    /// <param name="map">The planet's geometry.</param>
+    /// <param name="config">The run's scales.</param>
+    /// <param name="index">The index whose <see cref="WorldIndex.Sites"/> is filled. Must hold none yet.</param>
+    /// <param name="realm">The planet.</param>
+    internal static void PlanSites(TatooineMap map, SimConfig config, WorldIndex index, ushort realm)
+    {
+        if (index.Sites.Count != 0)
+        {
+            throw new InvalidOperationException($"PlanSites needs an index with no sites; this one holds {index.Sites.Count}.");
+        }
+
+        foreach (var poi in map.Pois)
+        {
+            index.Sites.Add(new LairSite(realm, poi.X, poi.Z, poi.Radius, TatooineData.PoiLairTemplates, Scale(poi.Lairs, config.PopulationScale)));
+        }
+
+        foreach (var region in map.SpawnRegions)
+        {
+            var areaSqKm = MathF.PI * region.Radius * region.Radius / 1_000_000f;
+            var lairs = Scale((int)MathF.Round(areaSqKm * region.LairsPerSqKm), config.PopulationScale);
+            index.Sites.Add(new LairSite(realm, region.X, region.Z, region.Radius, region.Templates, lairs));
+        }
+    }
+
+    /// <summary>
+    /// Fills one site with its lairs, each with its creatures, in batches.
     /// </summary>
     /// <remarks>
     /// Lair and creatures go in the SAME transaction, so the batch Morton sort sees them together and a lair's creatures
@@ -709,63 +740,107 @@ public static class WorldBuilder
     /// difference between a world whose clusters are tight from birth and one that spends its first hundred ticks
     /// repairing itself into shape.
     /// </remarks>
-    private static void SpawnLairsIn(DatabaseEngine dbe, float cx, float cz, float radius, int lairCount, int template,
-        SimConfig config, WorldCensus census, ref Rng rng, WorldIndex index)
+    private static void SpawnLairsIn(DatabaseEngine dbe, WorldIndex index, int site, SimConfig config, WorldCensus census, ref Rng rng)
     {
         // The planet's ground, baked once per process (see TerrainField). Taken here rather than per entity: the
         // cache lookup is cheap but not free, and this loop runs seventeen thousand times.
         var terrain = TerrainField.Shared(config.ContentScale);
-        if (lairCount <= 0)
+        var at = index.Sites[site];
+        if (at.Target <= 0)
         {
             return;
         }
 
-        var perLair = CreatureTemplates.SpawnLimit[template];
-        var spawnRadius = CreatureTemplates.LairSpawnRadius[template] * config.ContentScale;
-        var lairsPerBatch = Math.Max(1, SpawnBatch / (perLair + 1));
+        // A lair is at most nine entities, so a batch of SpawnBatch / 10 lairs stays inside the transaction size the rest of the build uses.
+        var lairsPerBatch = Math.Max(1, SpawnBatch / 10);
         var done = 0;
 
-        while (done < lairCount)
+        // Part-way through a life already: see SimConfig.LairLifeMinSeconds for why the first retirements are spread rather than arriving as one wave.
+        var lifeMin = (long)(config.LairLifeMinSeconds * 0.25f * config.TickRateHz);
+        var lifeMax = (long)(config.LairLifeMaxSeconds * config.TickRateHz);
+        while (done < at.Target)
         {
-            var n = Math.Min(lairsPerBatch, lairCount - done);
+            var n = Math.Min(lairsPerBatch, at.Target - done);
             using var tx = dbe.CreateQuickTransaction();
             for (var i = 0; i < n; i++)
             {
-                var (lx, lz) = Inside(rng.PointInDisc(cx, cz, radius), config);
-                var lairBounds = default(LairPlacement);
-                lairBounds.SetAt(lx, lz, terrain.GroundAt(lx, lz), 4f);
-                var lair = new Lair
-                {
-                    CreatureTemplate = template,
-                    SpawnLimit = perLair,
-                    AliveCount = perLair,
-                    RespawnCooldown = 0,
-                    SpawnRadius = spawnRadius,
-                    MissionId = 0,
-                };
-                var lairVitals = new LairVitals { Health = 2400, MaxHealth = 2400 };
-                var lairId = tx.Spawn<CreatureLair>(
-                    CreatureLair.Bounds.Set(in lairBounds),
-                    CreatureLair.Spawner.Set(in lair),
-                    CreatureLair.Vitals.Set(in lairVitals),
-                    CreatureLair.Realm.Set(new LairRealm(_realm)));
+                var (lx, lz) = Inside(rng.PointInDisc(at.X, at.Z, at.Radius), config);
+                var template = at.Templates[rng.NextInt(0, at.Templates.Length)];
+                var expire = lifeMin + (long)(rng.NextFloat() * (lifeMax - lifeMin));
+                var lairId = SpawnLair(tx, ref rng, template, lx, lz, site + 1, expire, config, terrain, _realm);
                 census.Lairs++;
+                census.Creatures += CreatureTemplates.SpawnLimit[template];
+                census.CreaturesByTemplate[template] += CreatureTemplates.SpawnLimit[template];
                 index.Lairs.Add(lairId);
-
-                for (var k = 0; k < perLair; k++)
-                {
-                    SpawnCreature(tx, ref rng, lairId, template, lx, lz, spawnRadius, config, terrain);
-                    census.Creatures++;
-                    census.CreaturesByTemplate[template]++;
-                }
             }
 
             tx.Commit();
             done += n;
         }
+
+        at.Live = at.Target;
+    }
+
+    /// <summary>The half-extent of a lair's placement box, metres: the published nest and camps are about 6 m across.</summary>
+    internal const float LairHalfM = 4f;
+
+    /// <summary>
+    /// How far from the lair's centre its creatures are born, metres: the published <c>creature_nest</c>'s four <c>creature.N</c> spawn markers stand
+    /// 3.4 m out, on the diagonals.
+    /// </summary>
+    internal const float LairRingM = 3.4f;
+
+    /// <summary>
+    /// Creates a lair and every creature it keeps alive, in one transaction — the world build's and the lair director's one way to make a lair.
+    /// </summary>
+    /// <param name="tx">The transaction both go in.</param>
+    /// <param name="rng">Draws the creatures' places and outfits.</param>
+    /// <param name="template">The <see cref="CreatureTemplates"/> entry.</param>
+    /// <param name="x">Where, east.</param>
+    /// <param name="z">Where, north.</param>
+    /// <param name="site">The <see cref="Lair.Site"/>: one-based, 0 for a destroy-mission lair.</param>
+    /// <param name="expireTick">The tick the lair is retired at; 0 never.</param>
+    /// <param name="config">The run's scales.</param>
+    /// <param name="terrain">The planet's ground.</param>
+    /// <param name="realm">The planet.</param>
+    /// <returns>The lair.</returns>
+    internal static EntityId SpawnLair(Transaction tx, ref Rng rng, int template, float x, float z, int site, long expireTick, SimConfig config,
+        TerrainField terrain, ushort realm)
+    {
+        var perLair = CreatureTemplates.SpawnLimit[template];
+        var lairBounds = default(LairPlacement);
+        lairBounds.SetAt(x, z, terrain.GroundAt(x, z), LairHalfM);
+        var lair = new Lair
+        {
+            CreatureTemplate = template,
+            SpawnLimit = perLair,
+            AliveCount = perLair,
+            RespawnCooldown = 0,
+            SpawnRadius = CreatureTemplates.LairSpawnRadius[template] * config.ContentScale,
+            MissionId = 0,
+            Site = site,
+            ExpireTick = expireTick,
+        };
+        var lairVitals = new LairVitals { Health = 2400, MaxHealth = 2400 };
+        var lairId = tx.Spawn<CreatureLair>(
+            CreatureLair.Bounds.Set(in lairBounds),
+            CreatureLair.Spawner.Set(in lair),
+            CreatureLair.Vitals.Set(in lairVitals),
+            CreatureLair.Realm.Set(new LairRealm(realm)));
+
+        for (var k = 0; k < perLair; k++)
+        {
+            SpawnCreature(tx, ref rng, lairId, template, x, z, k, config, terrain, realm);
+        }
+
+        return lairId;
     }
 
     /// <summary>Create one creature belonging to a lair.</summary>
+    /// <param name="slot">
+    /// Which place round the lair it is born at: the four spawn markers, then a second ring outside them, each with a little jitter so a lair's creatures
+    /// do not stand on one another.
+    /// </param>
     /// <param name="terrain">
     /// The planet's ground, baked once per process (see <see cref="TerrainField"/>). A <b>parameter</b>, because this
     /// method IS the per-entity call site — it runs once per creature, seventeen thousand times in a small world — and
@@ -773,9 +848,14 @@ public static class WorldBuilder
     /// opposite of what the code did.
     /// </param>
     internal static EntityId SpawnCreature(Transaction tx, ref Rng rng, EntityId lairId, int template,
-        float lairX, float lairZ, float spawnRadius, SimConfig config, TerrainField terrain)
+        float lairX, float lairZ, int slot, SimConfig config, TerrainField terrain, ushort realm)
     {
-        var (x, z) = Inside(rng.PointInDisc(lairX, lairZ, spawnRadius), config);
+        // Jittered along the ring and OUTWARD only: inward would put a body in the nest's own collider (2.15 m) or the camp's tent.
+        var ring = (slot / 4) + 1;
+        var angle = (MathF.PI * 0.25f) + ((slot % 4) * MathF.PI * 0.5f) + ((ring - 1) * MathF.PI * 0.25f) + rng.NextRange(-0.25f, 0.25f);
+        // Not scaled by ContentScale: the ring is the published prop's own geometry, which is the same size in every world.
+        var radius = (LairRingM * ring) + rng.NextRange(0f, 1.2f);
+        var (x, z) = Inside(lairX + (MathF.Cos(angle) * radius), lairZ + (MathF.Sin(angle) * radius), config);
         var bounds = default(CreaturePlacement);
         bounds.SetAt(x, z, terrain.GroundAt(x, z), 1.5f);
 
@@ -797,7 +877,7 @@ public static class WorldBuilder
             LeashRadius = TatooineData.LeashRadiusM * config.ContentScale,
             AggroRadius = CreatureTemplates.Aggressive[template] ? TatooineData.AggroRadiusM * config.ContentScale : 0f,
             Template = (byte)template,
-            Lair = lairId,
+            Skin = (byte)rng.NextInt(0, CreatureTemplates.Bodies[template].Length),
         };
 
         // Staggered so a lair's creatures do not all think on the same tick. Core3's own interval is 400-1000 ms, which at this tick rate is four to ten
@@ -816,7 +896,8 @@ public static class WorldBuilder
             Creature.Timers.Set(in timers),
             Creature.Move.Set(in move),
             Creature.Vitals.Set(in vitals),
-            Creature.Realm.Set(new CreatureRealm(_realm)));
+            Creature.Realm.Set(new CreatureRealm(realm)),
+            Creature.Home.Set(new CreatureHome { Lair = lairId }));
     }
 
     // ── Player structures ───────────────────────────────────────────────────────────────────────────────────────────
@@ -1123,7 +1204,6 @@ public static class WorldBuilder
         }
 
         var template = CreatureTemplates.MissionDefender;
-        var spawnRadius = CreatureTemplates.LairSpawnRadius[template] * config.ContentScale;
         var perLair = CreatureTemplates.SpawnLimit[template];
         var made = 0;
 
@@ -1134,34 +1214,19 @@ public static class WorldBuilder
             for (var i = 0; i < n; i++)
             {
                 var (lx, lz) = Inside(RandomWildernessPoint(map, config, ref rng), config);
-                var bounds = default(LairPlacement);
-                bounds.SetAt(lx, lz, terrain.GroundAt(lx, lz), 4f);
-                var lair = new Lair
-                {
-                    CreatureTemplate = template,
-                    SpawnLimit = perLair,
-                    AliveCount = 0,
-                    RespawnCooldown = rng.NextInt(1, 50),
-                    SpawnRadius = spawnRadius,
-                    MissionId = 0,
-                };
+                var lairId = SpawnLair(tx, ref rng, template, lx, lz, site: 0, expireTick: 0, config, terrain, _realm);
 
-                // [CORE3] difficulty x (900 + random(200)); a mid difficulty until one is assigned.
-                var vitals = new LairVitals { Health = 4500, MaxHealth = 4500 };
-                var lairId = tx.Spawn<CreatureLair>(
-                    CreatureLair.Bounds.Set(in bounds),
-                    CreatureLair.Spawner.Set(in lair),
-                    CreatureLair.Vitals.Set(in vitals),
-                    CreatureLair.Realm.Set(new LairRealm(_realm)));
+                // Dormant: no mission, and an offer cadence staggered so the pool does not seek players on one tick. [CORE3] difficulty x (900 +
+                // random(200)) hit points; a mid difficulty until one is assigned.
+                var pooled = tx.OpenMut(lairId);
+                var lair = pooled.Read(CreatureLair.Spawner);
+                lair.RespawnCooldown = rng.NextInt(1, 50);
+                pooled.Set(CreatureLair.Spawner, lair);
+                pooled.Set(CreatureLair.Vitals, new LairVitals { Health = 4500, MaxHealth = 4500 });
                 census.Lairs++;
+                census.Creatures += perLair;
+                census.CreaturesByTemplate[template] += perLair;
                 index.Lairs.Add(lairId);
-
-                for (var k = 0; k < perLair; k++)
-                {
-                    SpawnCreature(tx, ref rng, lairId, template, lx, lz, spawnRadius, config, terrain);
-                    census.Creatures++;
-                    census.CreaturesByTemplate[template]++;
-                }
             }
 
             tx.Commit();

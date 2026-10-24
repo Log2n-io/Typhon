@@ -1,6 +1,14 @@
 import type { Descriptor } from '../assets/descriptor';
 import { clipsForRole } from '../assets/descriptor';
-import { CROWD_ROLES, RIDE_CLIP, RIDE_ROLE, RIG_OUTFIT, needsOwnClips } from './outfits';
+import {
+  CROWD_ACTION_ROLES,
+  CROWD_ROLES,
+  RIDE_CLIP,
+  RIDE_ROLE,
+  RIG_OUTFIT,
+  locomotionRoles,
+  needsOwnClips,
+} from './outfits';
 
 /**
  * Where every crowd clip lives in the one bone-matrix texture, decided before any of it is baked.
@@ -62,6 +70,51 @@ export interface AtlasPlan {
   slotOf(outfit: string, role: string): ClipSlot | null;
 }
 
+/**
+ * Whose clips an atlas holds: one rig, the members that play from it, and the roles baked.
+ *
+ * <b>Two shapes, one planner.</b> The characters share one armature across nineteen outfits, so one rig serves them all and
+ * only a measured few bake their own copies. A creature is its own rig and its own only member — the rat's 31 joints are
+ * not the spider's 39 — so each species gets an atlas, a texture and a material of its own.
+ */
+export interface AtlasSpec {
+  /** The asset whose clips the shared rows are baked from. */
+  readonly rig: string;
+  /** Which descriptors play from it: by default every character. */
+  readonly members: (id: string, descriptor: Descriptor) => boolean;
+  /** The roles baked, in row order. */
+  readonly roles: readonly string[];
+  /** Whether a member bakes its own copy of a role rather than playing the rig's. */
+  readonly ownClips: (member: string, role: string) => boolean;
+  /** Whether the seated pose is baked (characters ride swoops; creatures do not). */
+  readonly ride: boolean;
+}
+
+/** The characters' atlas: {@link RIG_OUTFIT}, every character, locomotion and the one-shots, and the seat. */
+export const CHARACTER_ATLAS: AtlasSpec = {
+  rig: RIG_OUTFIT,
+  members: (_id, descriptor) => descriptor.kind === 'character',
+  roles: [...CROWD_ROLES, ...CROWD_ACTION_ROLES],
+  ownClips: needsOwnClips,
+  ride: true,
+};
+
+/**
+ * One creature's atlas: it is its own rig and its only member.
+ *
+ * @param id The creature's catalogue id.
+ * @returns The spec.
+ */
+export function creatureAtlas(id: string): AtlasSpec {
+  return {
+    rig: id,
+    members: (member) => member === id,
+    roles: [...CROWD_ROLES, ...CROWD_ACTION_ROLES],
+    ownClips: () => false,
+    ride: false,
+  };
+}
+
 /** How many rows a clip of this length occupies. */
 function framesFor(duration: number, fps: number): number {
   return Math.max(1, Math.round(duration * fps));
@@ -76,7 +129,7 @@ function resolve(descriptor: Descriptor, role: string): { clip: string; duration
 
   let clip: string;
   try {
-    clip = role === RIDE_ROLE ? RIDE_CLIP : clipsForRole(animations.roles, role)[0];
+    clip = role === RIDE_ROLE ? RIDE_CLIP : clipsForRole(locomotionRoles(animations.roles), role)[0];
   } catch {
     return null;
   }
@@ -103,10 +156,17 @@ function resolve(descriptor: Descriptor, role: string): { clip: string; duration
  * @param fps Bake rate.
  * @returns The plan. Nothing is loaded or evaluated here.
  */
-export function planClipAtlas(described: ReadonlyMap<string, Descriptor>, bones: number, fps = BAKE_FPS): AtlasPlan {
+export function planClipAtlas(
+  described: ReadonlyMap<string, Descriptor>,
+  bones: number,
+  fps = BAKE_FPS,
+  spec: AtlasSpec = CHARACTER_ATLAS,
+): AtlasPlan {
   const bakes: BakeStep[] = [];
   const slots = new Map<string, ClipSlot>();
   const key = (outfit: string, role: string): string => `${outfit}\u0000${role}`;
+  /** Clips already baked, by source and name: a creature with no run plays its walk for both roles, from one copy. */
+  const baked = new Map<string, ClipSlot>();
   let rows = 0;
 
   /** Appends a clip's rows once, and returns the slot that addresses them. */
@@ -121,31 +181,37 @@ export function planClipAtlas(described: ReadonlyMap<string, Descriptor>, bones:
       return null;
     }
 
+    const already = baked.get(key(source, resolved.clip));
+    if (already !== undefined) {
+      return already;
+    }
+
     const frames = framesFor(resolved.duration, fps);
     const slot: ClipSlot = { startRow: rows, frames, loop: resolved.loop, source, clip: resolved.clip };
     bakes.push({ source, clip: resolved.clip, startRow: rows, frames });
+    baked.set(key(source, resolved.clip), slot);
     rows += frames;
     return slot;
   };
 
   // The rig first, so its rows are the ones most instances point at and the ones nearest row 0.
   const rigSlots = new Map<string, ClipSlot>();
-  for (const role of CROWD_ROLES) {
-    const slot = append(RIG_OUTFIT, role);
+  for (const role of spec.roles) {
+    const slot = append(spec.rig, role);
     if (slot !== null) {
       rigSlots.set(role, slot);
     }
   }
 
-  const ride = append(RIG_OUTFIT, RIDE_ROLE);
+  const ride = spec.ride ? append(spec.rig, RIDE_ROLE) : null;
 
   for (const [outfit, descriptor] of described) {
-    if (descriptor.kind !== 'character') {
+    if (!spec.members(outfit, descriptor)) {
       continue;
     }
 
-    for (const role of CROWD_ROLES) {
-      if (outfit !== RIG_OUTFIT && needsOwnClips(outfit, role)) {
+    for (const role of spec.roles) {
+      if (outfit !== spec.rig && spec.ownClips(outfit, role)) {
         const own = append(outfit, role);
         if (own !== null) {
           slots.set(key(outfit, role), own);

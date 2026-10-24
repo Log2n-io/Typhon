@@ -6,6 +6,7 @@ using System.Globalization;
 using System.Text;
 using Typhon.Engine;
 using Typhon.Schema.Definition;
+using SwgTatooine.Navigation;
 
 namespace SwgTatooine.Tests;
 

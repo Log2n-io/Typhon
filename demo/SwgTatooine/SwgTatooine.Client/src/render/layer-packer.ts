@@ -2,6 +2,7 @@ import { evaluateSlot, MAX_MOTION_STRIDE, type ArchetypeStore, type FieldArray }
 import { SELECTED_SPRITE_SCALE, type LayerStyle } from './styles';
 import { altitudeField, altitudeOf, Placement } from '../data/placement';
 import { structureYaw } from '../assets/structure-assets';
+import { AiMode } from '../data/swg-schema';
 import { Band, chooseBand, packState, sphereInFrustum } from './view-math';
 import type { GroundSampler } from '../terrain/ground-sampler';
 
@@ -89,6 +90,21 @@ export interface CrowdBody {
   heading: number;
   /** On its swoop: drawn seated, and given a swoop under it. */
   mounted: boolean;
+  /** A creature's replicated `template`, or -1 for a body that is not one (a player, a city NPC). */
+  template: number;
+  /** A creature's replicated `skin`: which of its template's bodies it wears. */
+  skin: number;
+  /** Dead: plays its death once and holds the last frame until the server destroys it. */
+  dead: boolean;
+  /**
+   * The outfit this body wears, as an index into its crowd layer's outfits; -1 lets the layer choose by netId.
+   *
+   * Set by whoever routes bodies between layers (`app/crowd-router.ts`), not by the packer: which layer draws a body, and
+   * in what, is a fact about the published assets, and the packer knows only the store.
+   */
+  outfit: number;
+  /** How many blows this body has struck, as the router counts the server's `Attack` events. A change plays one. */
+  strikes: number;
 }
 
 /**
@@ -100,7 +116,20 @@ export interface CrowdBody {
  */
 export function crowdSlot(bodies: CrowdBody[], n: number): CrowdBody {
   if (n >= bodies.length) {
-    bodies.push({ netId: 0, x: 0, y: 0, z: 0, speed: 0, heading: 0, mounted: false });
+    bodies.push({
+      netId: 0,
+      x: 0,
+      y: 0,
+      z: 0,
+      speed: 0,
+      heading: 0,
+      mounted: false,
+      template: -1,
+      skin: 0,
+      dead: false,
+      outfit: -1,
+      strikes: 0,
+    });
   }
 
   return bodies[n];
@@ -133,9 +162,22 @@ interface FieldReaders {
   readonly yaw: FieldArray | null;
   /** Whether a player rides its swoop (1), for the crowd's seated pose; `null` for an archetype that never rides. */
   readonly mounted: FieldArray | null;
+  /** A creature's outfit among its template's bodies; `null` for every other archetype. */
+  readonly skin: FieldArray | null;
+  /** Whether {@link style} is a creature template, which the crowd draws the body by. */
+  readonly creature: boolean;
 }
 
-const NO_FIELDS: FieldReaders = { style: null, styleIsFlag: false, mode: null, ground: null, yaw: null, mounted: null };
+const NO_FIELDS: FieldReaders = {
+  style: null,
+  styleIsFlag: false,
+  mode: null,
+  ground: null,
+  yaw: null,
+  mounted: null,
+  skin: null,
+  creature: false,
+};
 const INITIAL_CAPACITY = 1024;
 
 /**
@@ -156,6 +198,8 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         ground: altitudeField(store),
         yaw: optional(store, 'yaw'),
         mounted: null,
+        skin: null,
+        creature: false,
       };
     case 'CreatureLair':
       return {
@@ -165,6 +209,8 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         ground: altitudeField(store),
         yaw: null,
         mounted: null,
+        skin: null,
+        creature: false,
       };
     case 'Creature':
       return {
@@ -174,6 +220,8 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         ground: altitudeField(store),
         yaw: null,
         mounted: null,
+        skin: optional(store, 'skin'),
+        creature: true,
       };
     case 'CityNpc':
       return {
@@ -183,6 +231,8 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         ground: altitudeField(store),
         yaw: null,
         mounted: null,
+        skin: null,
+        creature: false,
       };
     case 'Player':
       return {
@@ -192,6 +242,8 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         ground: altitudeField(store),
         yaw: null,
         mounted: optional(store, 'mounted'),
+        skin: null,
+        creature: false,
       };
     default:
       return NO_FIELDS;
@@ -235,6 +287,18 @@ export class LayerPacker {
   farNetIds = new Uint32Array(0);
   nearCount = 0;
   farCount = 0;
+  /**
+   * The near bodies the crowd drew instead of this layer, in the near band's layout: drawn by nobody HERE, and still
+   * picked here.
+   *
+   * <b>A body the crowd drew could not be clicked.</b> Diverting it skipped the arrays the pick reads, so a city NPC or a
+   * player near enough to be a character was unselectable, and the creatures — which a click targets — would have been
+   * too. Kept apart from {@link nearData} so the box mesh's instance count stays the boxes it draws.
+   */
+  heldData = new Float32Array(0);
+  heldYaw = new Float32Array(0);
+  heldNetIds = new Uint32Array(0);
+  heldCount = 0;
   /** Instances each output array holds; bumped with {@link arraysVersion} when the arrays are replaced. */
   capacity = 0;
   arraysVersion = 0;
@@ -324,6 +388,7 @@ export class LayerPacker {
     const frac = view.renderFrac;
     let near = 0;
     let far = 0;
+    let held = 0;
 
     const dims = store.dims;
     const onlyStyle = this.onlyStyle;
@@ -425,12 +490,23 @@ export class LayerPacker {
           body.speed = Math.hypot(at.vx, at.vz) * view.perSecond;
           body.heading = yaws[slot];
           body.mounted = fields.mounted !== null && fields.mounted[slot] === 1;
+          body.template = fields.creature ? raw : -1;
+          body.skin = fields.skin === null ? 0 : fields.skin[slot];
+          body.dead = fields.creature && fields.mode !== null && fields.mode[slot] === AiMode.Dead;
+          body.outfit = -1;
           view.crowdCount++;
           // <b>Only STOP drawing the box once the crowd is known to be drawing a body in its place.</b> Diverting
           // unconditionally is how a bring-up bug became a worse regression than the thing it was replacing: the
           // crowd drew nothing, the boxes were already gone, and the street was empty. The flag is owned by the crowd
           // itself and is false until it has put pixels on screen.
           if (view.crowdDraws) {
+            const h = held * 4;
+            this.heldData[h] = rx;
+            this.heldData[h + 1] = ry;
+            this.heldData[h + 2] = rz;
+            this.heldData[h + 3] = packed;
+            this.heldYaw[held] = yaws[slot];
+            this.heldNetIds[held++] = netId;
             continue;
           }
         }
@@ -457,6 +533,7 @@ export class LayerPacker {
 
     this.nearCount = near;
     this.farCount = far;
+    this.heldCount = held;
   }
 
   private resizeSlotState(store: ArchetypeStore): void {
@@ -493,6 +570,9 @@ export class LayerPacker {
     this.nearYaw = new Float32Array(capacity);
     this.nearNetIds = new Uint32Array(capacity);
     this.farNetIds = new Uint32Array(capacity);
+    this.heldData = new Float32Array(capacity * 4);
+    this.heldYaw = new Float32Array(capacity);
+    this.heldNetIds = new Uint32Array(capacity);
     this.arraysVersion++;
   }
 }

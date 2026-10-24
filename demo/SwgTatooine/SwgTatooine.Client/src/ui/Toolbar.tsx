@@ -359,23 +359,18 @@ export function Toolbar() {
           />
         </label>
         <div className="hint">
-          How far the ground may depart from the real height field, measured in SCREEN PIXELS. A quadtree splits only
-          where a region&rsquo;s own measured error would exceed it, so a flat basin stays coarse while a cliff
-          underfoot does not: currently {terrainNodes ?? 0} nodes down to <code>{terrainFinestM ?? '—'} m</code>, over{' '}
-          {(terrainTriangles ?? 0).toLocaleString()} triangles.
-          {terrainCapped === true
-            ? ' ⚠ The node budget is binding, not the tolerance — finer settings will not add detail.'
-            : ''}
+          currently {terrainNodes ?? 0} nodes down to <code>{terrainFinestM ?? '—'} m</code>, over{' '}
+          {(terrainTriangles ?? 0).toLocaleString()} tri
+          {terrainCapped === true ? ' ⚠ node budget binding — finer settings add no detail' : ''}
         </div>
       </section>
 
-      <section>
-        <h3>Heatmap (far tier)</h3>
-        <div className="row wrap">
-          {heatChannels.length === 0 ? (
-            <div className="hint">This session has no aggregate grid (the server needs `--god-region`).</div>
-          ) : (
-            heatChannels.map((channel) => (
+      {/* Only with a server that serves the far tier (`--god-region`): without one there is nothing to toggle. */}
+      {heatChannels.length > 0 && (
+        <section>
+          <h3>Heatmap (far tier)</h3>
+          <div className="row wrap">
+            {heatChannels.map((channel) => (
               <button
                 key={channel.name}
                 className={(ui.heatmap[channel.name] ?? false) ? 'active' : ''}
@@ -385,10 +380,10 @@ export function Toolbar() {
               >
                 {channel.label}
               </button>
-            ))
-          )}
-        </div>
-      </section>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section>
         <h3>Layers</h3>

@@ -4,20 +4,9 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using SwgTatooine.Navigation;
 
 namespace SwgTatooine.Bots.Brain;
-
-/// <summary>One collider of a structure as the server publishes it in <c>demo.json</c>: its plan rectangle and its height band, in the asset's frame.</summary>
-/// <param name="MinX">West edge, already mirrored into the world's convention.</param>
-/// <param name="MinZ">South edge.</param>
-/// <param name="MaxX">East edge.</param>
-/// <param name="MaxZ">North edge.</param>
-/// <param name="MinY">Underside, above the structure's base.</param>
-/// <param name="MaxY">Top, above the structure's base.</param>
-/// <param name="Sloped">Whether its top is tilted: a ramp or a flight of steps — or a leaning strut, which <see cref="CityPath"/> tells apart by
-/// height.</param>
-/// <param name="Radius">The radius of its plan when that plan is a circle about the box's centre (a landing pad, a lamp post); 0 for the rectangle.</param>
-public readonly record struct PlanBox(float MinX, float MinZ, float MaxX, float MaxZ, float MinY, float MaxY, bool Sloped, float Radius = 0f);
 
 /// <summary>A building's door: the published path that walks a body through it, in the asset's frame (mirrored, unturned).</summary>
 /// <param name="Approach">The points to walk in order; the first is on open ground, the last is past the door's plane, so walking it crosses.</param>
@@ -68,7 +57,7 @@ public sealed class AssetPlan
 /// and every bot would fetch the same bytes.
 /// </para>
 /// </remarks>
-public sealed class BotAssets
+public sealed class BotAssets : IWallPlans
 {
     private readonly AssetPlan[] _byIndex;
     private readonly Dictionary<string, AssetPlan> _byId;
@@ -91,6 +80,9 @@ public sealed class BotAssets
 
     /// <summary>The plan of a replicated <c>asset</c> index, or null for one this content does not know.</summary>
     public AssetPlan At(int index) => (uint)index < (uint)_byIndex.Length ? _byIndex[index] : null;
+
+    /// <inheritdoc/>
+    public PlanBox[] WallsOf(int asset) => At(asset)?.Walls;
 
     /// <summary>The plan of an asset id, or null.</summary>
     public AssetPlan Of(string id) => id != null && _byId.TryGetValue(id, out var plan) ? plan : null;
