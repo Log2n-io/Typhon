@@ -267,8 +267,8 @@ The migration pipeline:
 2. **Allocate segments** — new component segment at the new stride; new revision segment at the standard `CompRevChunkSize`.
 3. **Migrate entities** — walk every occupied chunkId in the old component segment, **reserve the same chunkId** in the new segment (preserves all index references and revision-chain pointers), zero-fill, copy the overhead area, then copy/widen each surviving field via `ApplyWidening` or `Buffer.MemoryCopy`. New fields stay zero from the page init. Removed fields are simply dropped.
 4. **Migrate revision chains — HEAD only** — for each old revision-chain root, locate the most recent revision element, write it as the sole entry in the new chain. Pre-migration history is discarded — a deliberate tradeoff: migration cost stays bounded, and the lost history pre-dates a breaking change so it would be unreadable under the new schema anyway. After migration, MVCC starts a new chain.
-5. **Flush** — `changeSet.SaveChanges()` + `MMF.FlushToDisk()` before touching SPIs.
-6. **Delete old segments** — best-effort cleanup. A crash here leaves orphan pages but no correctness issue: the new SPIs are durable and the old ones are unreferenced.
+5. **Flush** — `changeSet.SaveChanges()` + `MMF.FlushToDisk()`.
+6. **Retain old segments** — the old component and revision segments are held in `MigrationResult.SupersededSegments`, not deleted. The persisted catalog still names them until the schema commit's meta flip (SCHEMA-09). A crash before that flip leaves the pre-migration image authoritative so the next open can re-run migration; the caller frees the old segments once the commit is durable.
 
 For breaking changes, `MigrateWithFunction` runs the user's `MigrationChain` per-entity. Multi-step chains (e.g., R1→R2→R3) use a stackalloc'd double-buffer for small components or ArrayPool buffers for `>1024 B`.
 
