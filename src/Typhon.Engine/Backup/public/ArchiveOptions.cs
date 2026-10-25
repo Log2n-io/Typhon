@@ -35,6 +35,12 @@ public sealed class ArchiveOptions
     /// Bytes of sealed WAL the engine keeps on disk for the archive alone. Past it the checkpoint reclaims as if archiving were off and the archive
     /// records a gap. At least two segments (<see cref="WalWriterOptions.SegmentSize"/>), so one segment waiting for its copy never trips it.
     /// </summary>
+    /// <remarks>
+    /// Each sealed segment counts at its declared size (<see cref="WalWriterOptions.SegmentSize"/>, 64 MiB by default), the disk it occupies. Under a
+    /// trickle of commits — any within each <see cref="MaxSegmentAge"/> — every <see cref="MaxSegmentAge"/> seals one segment however little it holds,
+    /// so a store outage releases the archive after about (<c>BacklogLimitBytes</c> / segment size) × <see cref="MaxSegmentAge"/>: at the minimum, two
+    /// 64 MiB segments with a 5 s age, 10 to 15 seconds; 8 GiB with 30 s, about 64 minutes. An idle database seals no segment and is never released.
+    /// </remarks>
     public required long BacklogLimitBytes { get; init; }
 
     /// <summary>The resolution of restore-to-time: how often the durable LSN is sampled against the clock. Between 1 s and 60 s.</summary>

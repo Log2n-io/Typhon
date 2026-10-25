@@ -46,6 +46,12 @@ services.AddTyphonBackupMetrics();            // the Typhon.Backup meter: health
   recovery point is `MaxSegmentAge`, and you can restore to any LSN or instant the archive covers.
 - **Size the store for the WAL rate** when archiving: a store slower than the WAL falls behind, and past `BacklogLimitBytes` the oldest
   segments are released as a recorded gap (health Degraded, a new point is taken at once). No restore crosses a gap.
+- **Size `BacklogLimitBytes` for the outage you want to ride out, in segments.** The limit counts each sealed segment at its declared size
+  (`Wal.SegmentSize`, 64 MiB by default), because that is what it occupies on disk. Under a trickle of commits (any commit within each
+  `MaxSegmentAge`) every `MaxSegmentAge` seals one such segment however little it holds, so a store outage releases the archive after about
+  (`BacklogLimitBytes` / segment size) × `MaxSegmentAge`: 8 GiB with 30 s, as above, is 128 segments, about 64 minutes; the minimum, two
+  segments with a 5 s age, is 10 to 15 seconds. An idle database seals nothing and is never released; a busy one fills segments and lasts
+  as long as `BacklogLimitBytes` over its WAL rate.
 - Install the tool where you operate: `dotnet tool install --global Typhon.Cli --prerelease`.
 
 ## 2. 📟 Watch it
