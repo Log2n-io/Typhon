@@ -271,6 +271,8 @@ public sealed class BackupJobRegistryTests
         Assert.That(Fails(new RestoreRefusedException(RestoreRefusalReason.TargetExists, "t", "exists")).Category, Is.EqualTo("refused"));
         Assert.That(Fails(new BackupPlanChangedException("s", "a", "b")).Category, Is.EqualTo("plan_changed"));
         Assert.That(Fails(new BackupJobException("refused", "held")), Is.EqualTo(new BackupJobErrorDto("refused", "held")));
+        var broke = new Typhon.Engine.Internals.RetentionBrokeAKeptPointException("s", 4, "gone");
+        Assert.That(Fails(broke), Is.EqualTo(new BackupJobErrorDto("store_damaged", broke.Message)), "the engine's sentence, not a defect's type name");
         var defect = Fails(new ArgumentException("bad"));
         Assert.That((defect.Category, defect.Message), Is.EqualTo(("failed", "ArgumentException: bad")), "a defect names its type");
     }

@@ -130,8 +130,20 @@ internal static class BackupDtoMapper
     public static BackupCompactionResultDto Map(BackupCompactionResult r) =>
         new(Map(r.Point), r.AlreadyBase, r.ChainDepth, r.Pages, r.HolePages, r.BytesRead, r.BytesWritten, r.Duration.TotalMilliseconds);
 
-    public static BackupRetentionResultDto Map(BackupRetentionResult r) =>
-        new(Map(r.Plan), r.Compactions.Select(Map).ToList(), [.. r.Deleted], r.BytesFreed, r.Duration.TotalMilliseconds);
+    public static BackupRetentionResultDto Map(BackupRetentionResult r)
+    {
+        var failed = new List<BackupCompactionFailureDto>(r.FailedCompactions?.Count ?? 0);
+        if (r.FailedCompactions != null)
+        {
+            foreach (var f in r.FailedCompactions)
+            {
+                failed.Add(new BackupCompactionFailureDto(f.BackupId, f.Kind.ToString(), f.Message));
+            }
+        }
+
+        return new BackupRetentionResultDto(Map(r.Plan), r.Compactions.Select(Map).ToList(), [.. r.Deleted], r.BytesFreed, r.Duration.TotalMilliseconds,
+            failed);
+    }
 
     public static BackupVerifyReportDto Map(BackupVerifyReport r)
     {

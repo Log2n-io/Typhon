@@ -5682,6 +5682,36 @@
           }
         }
       },
+      "BackupCompactionFailureDto": {
+        "required": [
+          "backupId",
+          "kind",
+          "message"
+        ],
+        "type": "object",
+        "properties": {
+          "backupId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "message": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
       "BackupCompactionResultDto": {
         "required": [
           "point",
@@ -7607,7 +7637,8 @@
           "compactions",
           "deleted",
           "bytesFreed",
-          "durationMs"
+          "durationMs",
+          "failedCompactions"
         ],
         "type": "object",
         "properties": {
@@ -7647,6 +7678,15 @@
               "string"
             ],
             "format": "double"
+          },
+          "failedCompactions": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupCompactionFailureDto"
+            }
           }
         }
       },

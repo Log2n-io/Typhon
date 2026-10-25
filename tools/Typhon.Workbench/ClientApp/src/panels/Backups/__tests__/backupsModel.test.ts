@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import type { BackupListingDto, BackupPointDto, BackupStatusDto } from '@/api/generated/model';
+import type {
+  BackupListingDto,
+  BackupPointDto,
+  BackupRetentionResultDto,
+  BackupStatusDto,
+} from '@/api/generated/model';
 import {
   buildRibbons,
   cardHealth,
+  compactionFailures,
   coverageOf,
   healthLabel,
   healthTone,
@@ -225,6 +231,70 @@ describe('health', () => {
       reason: 'engine not running; last known state: the newest point is 3 h old',
       source: 'engine',
     });
+
+    // The kept-point reasons (a retention or compaction found a kept point's chain broken or damaged): the engine's sentence, the engine's tone.
+    const damaged = cardHealth(
+      normalizeStatus(
+        wire({
+          ...base,
+          engine: {
+            ...engine,
+            engineLive: true,
+            health: 'Degraded',
+            healthReason: 'KeptPointDamaged',
+            reasonText:
+              "a compaction found a pack of a kept point's chain damaged: that point may not restore (verify --level full)",
+          },
+        }),
+      ),
+    );
+    expect(damaged?.reason).toContain('may not restore');
+    expect(healthTone(damaged?.health ?? '')).toBe('warn');
+    const broken = cardHealth(
+      normalizeStatus(
+        wire({
+          ...base,
+          engine: {
+            ...engine,
+            engineLive: true,
+            health: 'Failing',
+            healthReason: 'KeptPointBroken',
+            reasonText: 'x left y',
+          },
+        }),
+      ),
+    );
+    expect(broken?.reason).toBe('x left y');
+    expect(healthTone(broken?.health ?? '')).toBe('error');
+
+    // A status without its sentence still names its reason: never a blank card.
+    const bare = cardHealth(
+      normalizeStatus(
+        wire({ ...base, engine: { ...engine, engineLive: true, healthReason: 'KeptPointBroken', reasonText: null } }),
+      ),
+    );
+    expect(bare?.reason).toBe('KeptPointBroken');
+  });
+});
+
+describe('retention result', () => {
+  it('tells a damaged kept chain apart from a compaction that merely failed', () => {
+    const failures = compactionFailures({
+      plan: null,
+      compactions: [],
+      deleted: [],
+      bytesFreed: 0,
+      durationMs: 1,
+      failedCompactions: [
+        { backupId: 2, kind: 'StoreDamaged', message: 'page 7 fails its check' },
+        { backupId: 5, kind: 'Failed', message: 'the disk is full' },
+      ],
+    } as unknown as BackupRetentionResultDto);
+    expect(failures).toEqual([
+      { backupId: 2, damaged: true, message: 'page 7 fails its check' },
+      { backupId: 5, damaged: false, message: 'the disk is full' },
+    ]);
+    expect(compactionFailures({ deleted: [] } as unknown as BackupRetentionResultDto)).toEqual([]);
   });
 });
 

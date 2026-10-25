@@ -10,6 +10,7 @@ import type {
   BackupVerifyReportDto,
 } from '@/api/generated/model';
 import {
+  compactionFailures,
   drillTone,
   formatBytes,
   isTerminal,
@@ -270,12 +271,25 @@ function CompactReceipt({ r }: { r: BackupCompactionResultDto }) {
 }
 
 function RetentionReceipt({ r }: { r: BackupRetentionResultDto }) {
+  const failed = compactionFailures(r);
   return (
     <div className="mt-1 text-fs-sm" data-testid="backups-retention-receipt">
       {(r.compactions ?? []).length} compaction(s), {(r.deleted ?? []).length} pack(s) deleted,{' '}
       {formatBytes(num(r.bytesFreed))} freed.
       {(r.deleted ?? []).length > 0 && (
         <div className="font-mono text-fs-xs text-muted-foreground">{(r.deleted ?? []).join(' · ')}</div>
+      )}
+      {failed.map((f) =>
+        f.damaged ? (
+          <div key={f.backupId} className="text-destructive" data-testid={`backups-retention-damaged-${f.backupId}`}>
+            #{f.backupId} was not compacted: a pack of its chain is damaged, so this kept point may not restore — verify
+            full. {f.message}
+          </div>
+        ) : (
+          <div key={f.backupId} className="text-amber-600" data-testid={`backups-retention-failed-${f.backupId}`}>
+            #{f.backupId} was not compacted (nothing published; its chain keeps every pack): {f.message}
+          </div>
+        ),
       )}
     </div>
   );

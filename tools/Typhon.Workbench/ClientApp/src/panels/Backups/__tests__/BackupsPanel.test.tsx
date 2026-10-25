@@ -232,6 +232,37 @@ describe('BackupsPanel', () => {
     expect(api.status.mock.calls.length).toBe(reads);
   });
 
+  it('a retention lists the compactions that failed, a damaged kept chain apart', async () => {
+    useBackupsStore.setState({ storePath: 'D:/store', activeJobId: 'j3' });
+    api.job.mockResolvedValue({
+      data: {
+        jobId: 'j3',
+        kind: 'retention',
+        store: 'D:/store',
+        state: 'done',
+        phase: 'compact',
+        completed: 0,
+        total: 0,
+        startedUtc: '2026-10-21T10:00:00Z',
+        retention: {
+          compactions: [],
+          deleted: [],
+          bytesFreed: 0,
+          durationMs: 3,
+          failedCompactions: [
+            { backupId: 2, kind: 'StoreDamaged', message: 'page 7 fails its check' },
+            { backupId: 5, kind: 'Failed', message: 'the disk is full' },
+          ],
+        },
+      } as unknown as BackupJobDto,
+    });
+    mount();
+    const damaged = await screen.findByTestId('backups-retention-damaged-2');
+    expect(damaged.textContent).toContain('may not restore');
+    expect(damaged.textContent).toContain('page 7 fails its check');
+    expect(screen.getByTestId('backups-retention-failed-5').textContent).toContain('the disk is full');
+  });
+
   it('a cancelled retention says it stopped between deletions, not that nothing was published', async () => {
     useBackupsStore.setState({ storePath: 'D:/store', activeJobId: 'j2' });
     api.job.mockResolvedValue({

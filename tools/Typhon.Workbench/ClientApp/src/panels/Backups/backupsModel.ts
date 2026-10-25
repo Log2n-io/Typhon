@@ -7,6 +7,7 @@ import type {
   BackupPointDto,
   BackupRestorePlanDto,
   BackupRetentionPlanDto,
+  BackupRetentionResultDto,
   BackupStatusDto,
   BackupVerifyReportDto,
 } from '@/api/generated/model';
@@ -394,7 +395,8 @@ export function normalizeStatus(d: BackupStatusDto): Status {
           machine: s(e.machine),
           storePath: s(e.storePath),
           health: s(e.health),
-          reason: s(e.reasonText),
+          // The engine's sentence (BackupHealthEvaluator.Explain, e.g. for KeptPointDamaged); its reason's name if it sent none, never a blank.
+          reason: s(e.reasonText) || s(e.healthReason),
           state: s(e.state),
           phase: s(e.phase),
           progressPages: n(e.progressPages),
@@ -582,6 +584,21 @@ export function lostAfterText(
     `The restored database ends at LSN ${plan.pointLsn.toLocaleString()}. The store knows changes through LSN ` +
     `${plan.newestKnownLsn.toLocaleString()}: ${plan.lostLsns.toLocaleString()} LSNs of committed changes after the restored point are not in it.`
   );
+}
+
+/** A compaction a retention attempted that did not publish: `damaged` when the engine found a kept point's chain damaged, not merely an I/O failure. */
+export interface CompactionFailure {
+  backupId: number;
+  damaged: boolean;
+  message: string;
+}
+
+export function compactionFailures(r: BackupRetentionResultDto): CompactionFailure[] {
+  return (r.failedCompactions ?? []).map((f) => ({
+    backupId: n(f.backupId),
+    damaged: f.kind === 'StoreDamaged',
+    message: s(f.message),
+  }));
 }
 
 export interface RetentionPlan {

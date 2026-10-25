@@ -213,9 +213,19 @@ public sealed record BackupDrillReportDto(BackupPointDto Point, string Outcome, 
 public sealed record BackupCompactionResultDto(BackupPointDto Point, bool AlreadyBase, int ChainDepth, int Pages, int HolePages, long BytesRead,
     long BytesWritten, double DurationMs);
 
+/// <summary>A compaction a retention attempted that did not publish.</summary>
+/// <param name="BackupId">The point being compacted.</param>
+/// <param name="Kind">
+/// The engine's <c>BackupFailureKind</c>: <c>StoreDamaged</c> — a pack of the point's chain is damaged or the chain broken, so a kept point may not restore;
+/// <c>Failed</c> — I/O, or the compacted pack failed its own verify (nothing published).
+/// </param>
+/// <param name="Message">What failed.</param>
+public sealed record BackupCompactionFailureDto(uint BackupId, string Kind, string Message);
+
 /// <summary>A retention's result.</summary>
+/// <param name="FailedCompactions">The compactions it attempted that did not publish (their chains keep every pack this run).</param>
 public sealed record BackupRetentionResultDto(BackupRetentionPlanDto Plan, List<BackupCompactionResultDto> Compactions, List<string> Deleted,
-    long BytesFreed, double DurationMs);
+    long BytesFreed, double DurationMs, List<BackupCompactionFailureDto> FailedCompactions);
 
 /// <summary>What the settle after a restore did: the open (recovery) and close that make the restored bundle ready.</summary>
 /// <param name="Ran">A settle was attempted.</param>
