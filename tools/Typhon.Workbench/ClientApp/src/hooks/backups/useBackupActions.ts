@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation } from '@tanstack/react-query';
 import { FetchError } from '@/api/client';
 import {
   deleteApiBackupsJobsJobId,
@@ -20,45 +20,48 @@ import type {
   BackupRetentionPolicyDto,
 } from '@/api/generated/model';
 import { normalizeRestorePlan, normalizeRetentionPlan } from '@/panels/Backups/backupsModel';
+import { restoreRequestOf, retentionPolicyOf } from '@/panels/Backups/restoreWizardModel';
 import { useBackupsStore, type VerifyLevel } from '@/stores/useBackupsStore';
-import { backupKeys } from './useBackupQueries';
+import { useInvalidateAfterJob } from './useBackupQueries';
 
 /**
  * The Backups view's operator acts (#1417 §4.2) — every one a mutation, never a query: a job starts when its button is pressed, and a plan is computed
  * when the operator asks for one and is then kept in the store until an input changes (Integrity's argument: a plan refetched behind the operator is a
- * plan they did not review). A start the store refuses as busy attaches to the job already running instead of failing.
+ * plan they did not review). A plan answer is kept only while the inputs it was asked for are still the ones on screen.
+ *
+ * A start the server refuses as busy is a refusal, never a start (the wizard does not close as if its restore ran): it fails with the server's
+ * sentence, and the card attaches to the job in the way only when that job is this store's — a drill busy on another store is not this store's job.
  */
 
-/** The running job a 409 `busy` names, if that is what the error is. */
-export function busyJobId(error: unknown): string | null {
+/** The job a 409 `busy` names, and whether it runs on the store the start was for. */
+export function busyOf(error: unknown): { jobId: string; sameStore: boolean } | null {
   if (error instanceof FetchError && error.status === 409 && error.problem.title === 'busy') {
     const id = error.problem.runningJobId;
-    return typeof id === 'string' ? id : null;
+    return typeof id === 'string' ? { jobId: id, sameStore: error.problem.sameStore === true } : null;
   }
   return null;
 }
 
 function useJobStart<TVars>(start: (vars: TVars) => Promise<{ data: BackupJobDto }>) {
   const setActiveJob = useBackupsStore((s) => s.setActiveJob);
-  const queryClient = useQueryClient();
+  const invalidateAfter = useInvalidateAfterJob();
   return useMutation({
-    mutationFn: async (vars: TVars) => {
-      try {
-        return (await start(vars)).data.jobId;
-      } catch (e) {
-        const running = busyJobId(e);
-        if (running) {
-          return running;
-        }
-        throw e;
-      }
-    },
+    mutationFn: async (vars: TVars) => (await start(vars)).data.jobId,
     onSuccess: (jobId) => {
       setActiveJob(jobId);
-      void queryClient.invalidateQueries({ queryKey: backupKeys.all });
+      void invalidateAfter(null);
+    },
+    onError: (e) => {
+      const busy = busyOf(e);
+      if (busy?.sameStore) {
+        setActiveJob(busy.jobId);
+      }
     },
   });
 }
+
+/** Whether an answer to `asked` is still about what the operator has on screen. */
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 export function useBackupActions() {
   const setRestorePlan = useBackupsStore((s) => s.setRestorePlan);
@@ -83,15 +86,27 @@ export function useBackupActions() {
 
   const cancel = useMutation({ mutationFn: async (jobId: string) => deleteApiBackupsJobsJobId(jobId) });
 
+  // A preview answered after its inputs changed is dropped: the store already dropped that plan, and showing it would put an old plan against new fields.
   const planRestore = useMutation({
     mutationFn: async (v: BackupRestoreRequestDto) => normalizeRestorePlan((await postApiBackupsRestorePlan(v)).data),
-    onSuccess: (plan) => setRestorePlan(plan),
+    onSuccess: (plan, asked) => {
+      const s = useBackupsStore.getState();
+      if (s.wizardOpen && same(restoreRequestOf(s.storePath, s.bundlePath, s.restore, null), asked)) {
+        setRestorePlan(plan);
+      }
+    },
   });
 
   const planRetention = useMutation({
     mutationFn: async (v: { store: string; policy: BackupRetentionPolicyDto }) =>
       normalizeRetentionPlan((await postApiBackupsRetentionPlan({ store: v.store, policy: v.policy })).data),
-    onSuccess: (plan) => setRetentionPlan(plan),
+    onSuccess: (plan, asked) => {
+      const s = useBackupsStore.getState();
+      const policy = retentionPolicyOf(s.retention);
+      if (s.retentionOpen && s.storePath === asked.store && 'policy' in policy && same(policy.policy, asked.policy)) {
+        setRetentionPlan(plan);
+      }
+    },
   });
 
   const resolveTime = useMutation({

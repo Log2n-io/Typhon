@@ -41,8 +41,9 @@ public sealed class BackupJobStreamTests
 
     private BackupJob Start(Action<BackupJobContext> body)
     {
-        Assert.That(_jobs.TryStart("verify", _store, null, null, null, body, out var job), Is.True);
-        return job;
+        var start = _jobs.TryStart(new BackupJobSpec(BackupJobKinds.Verify, _store), body);
+        Assert.That(start.Started, Is.True);
+        return start.Job;
     }
 
     private async Task<(HttpResponseMessage Response, StreamReader Reader)> Subscribe(Guid jobId, CancellationToken ct)
@@ -69,7 +70,7 @@ public sealed class BackupJobStreamTests
     [CancelAfter(10_000)]
     public async Task Subscribe_AfterTheJobEnded_ReceivesItsTerminalFrame()
     {
-        var job = Start(ctx => ctx.SetResult(d => d with { Verify = new BackupVerifyReportDto("Quick", "Ok", [], [], [], 1, 0, 0) }));
+        var job = Start(ctx => ctx.SetResult(new BackupJobResult(Verify: new BackupVerifyReportDto("Quick", "Ok", [], [], [], 1, 0, 0))));
         Assert.That(job.Completion.Wait(TimeSpan.FromSeconds(5)), Is.True);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));

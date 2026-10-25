@@ -98,8 +98,8 @@ internal static class BackupDtoMapper
             var segments = new List<BackupArchivedSegmentDto>(t.Segments.Count);
             foreach (var s in t.Segments)
             {
-                segments.Add(new BackupArchivedSegmentDto(s.SegmentId, s.FirstLsn, s.LastLsn, s.SealedUtc is { } su ? Instant(su) : null, Instant(s.ArchivedUtc),
-                    s.Bytes, s.Flags.ToString(), s.SessionStart));
+                segments.Add(new BackupArchivedSegmentDto(s.SegmentId, s.FirstLsn, s.LastLsn, s.SealedUtc is { } su ? Instant(su) : null,
+                    Instant(s.ArchivedUtc), s.Bytes, s.Flags.ToString(), s.SessionStart));
             }
 
             var samples = new List<BackupTimeSampleDto>(t.Samples.Count);

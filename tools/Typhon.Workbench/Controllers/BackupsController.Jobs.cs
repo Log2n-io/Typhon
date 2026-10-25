@@ -25,7 +25,7 @@ public sealed partial class BackupsController
 
         var store = BackupPaths.Full(request.Store);
         var bundle = string.IsNullOrWhiteSpace(request.Bundle) ? null : BackupPaths.Full(request.Bundle);
-        var route = BackupRouting.Decide(bundle, store, _sessions, _ops);
+        var route = BackupRouting.Decide(bundle, store, _sessions, () => _ops.ReadStatus(bundle));
         Action<BackupJobContext> body = route.Kind switch
         {
             BackupRoute.InProcess => CreateInProcess(route.Session.Engine, store, request.Full),
@@ -38,7 +38,7 @@ public sealed partial class BackupsController
                     Cancellation = ctx.Token,
                     Progress = (done, total) => ctx.Report("capture", done, total, "pages"),
                 });
-                ctx.SetResult(d => d with { Create = new BackupCreateResultDto(BackupDtoMapper.Map(point), null) });
+                ctx.SetResult(new BackupJobResult(Create: new BackupCreateResultDto(BackupDtoMapper.Map(point), null)));
             },
             _ => null,
         };
@@ -47,7 +47,7 @@ public sealed partial class BackupsController
             return Problem409("refused", route.Reason);
         }
 
-        return Start("create", store, bundle, null, route.Kind, body);
+        return Start(new BackupJobSpec(BackupJobKinds.Create, store, bundle, Route: route.Kind), body);
     }
 
     private Action<BackupJobContext> CreateInProcess(Sessions.EngineLifecycle lifecycle, string store, bool full) => ctx =>
@@ -57,7 +57,7 @@ public sealed partial class BackupsController
         // published, the database is unaffected (D13).
         ctx.Report("capture", 0, 0, null);
         var point = _ops.CreateOnline(lifecycle.Engine, store, full, ctx.Token).GetAwaiter().GetResult();
-        ctx.SetResult(d => d with { Create = new BackupCreateResultDto(BackupDtoMapper.Map(point), null) });
+        ctx.SetResult(new BackupJobResult(Create: new BackupCreateResultDto(BackupDtoMapper.Map(point), null)));
     };
 
     private Action<BackupJobContext> CreateByRequest(string bundle, bool full) => ctx =>
@@ -82,7 +82,7 @@ public sealed partial class BackupsController
             {
                 if (s.PointsTotal > (before?.PointsTotal ?? 0))
                 {
-                    ctx.SetResult(d => d with { Create = new BackupCreateResultDto(BackupDtoMapper.Map(s.LastPoint), id) });
+                    ctx.SetResult(new BackupJobResult(Create: new BackupCreateResultDto(BackupDtoMapper.Map(s.LastPoint), id)));
                     return;
                 }
 
@@ -90,6 +90,12 @@ public sealed partial class BackupsController
                 {
                     throw new BackupJobException("failed", s.LastFailure?.Message ?? "The engine's backup failed.");
                 }
+
+                // The request's job started (its id is echoed) and ended (the engine runs no job) with neither a point nor a counted failure: the engine
+                // deferred it — its store held by another process, another backup running, or the engine closing (BackupScheduler's Deferred class).
+                throw new BackupJobException("failed",
+                    $"The engine deferred the backup request {id}: no point was taken. Its store was held by another process, another backup was "
+                    + "running, or the engine was closing; try again.");
             }
 
             ctx.Report(echoed ? "capture" : "requested", s.ProgressPages, s.ProgressOfPages, s.ProgressOfPages > 0 ? "pages" : null);
@@ -128,20 +134,20 @@ public sealed partial class BackupsController
         }
 
         var store = BackupPaths.Full(request.Store);
-        return Start("verify", store, null, null, null, ctx =>
+        return Start(new BackupJobSpec(BackupJobKinds.Verify, store), ctx =>
         {
             var report = _ops.Verify(store, point, level, new BackupVerifyOptions
             {
                 Cancellation = ctx.Token,
                 Progress = (phase, done, total) => ctx.Report(phase, done, total, phase == "packs" ? "packs" : phase == "pages" ? "pages" : null),
             });
-            ctx.SetResult(d => d with { Verify = BackupDtoMapper.Map(report) });
+            ctx.SetResult(new BackupJobResult(Verify: BackupDtoMapper.Map(report)));
         });
     }
 
     /// <summary>
     /// Drill a point (WB-13) in a child process, loading the schema assemblies of the session that holds <see cref="BackupDrillRequestDto.Bundle"/>, if
-    /// any. At most one drill at a time in the whole Workbench: each restores a whole image.
+    /// any. At most one drill at a time in the whole Workbench: each restores a whole image (the registry's admission).
     /// </summary>
     [HttpPost("jobs/drill")]
     public ActionResult<BackupJobDto> StartDrill([FromBody] BackupDrillRequestDto request)
@@ -156,20 +162,15 @@ public sealed partial class BackupsController
             return Problem400(error);
         }
 
-        if (_jobs.AnyRunning("drill") is { } drilling)
-        {
-            return Busy(drilling, "A drill is already running in this Workbench; one at a time (each restores a whole image).");
-        }
-
         var store = BackupPaths.Full(request.Store);
         var scratch = BackupPaths.Full(string.IsNullOrWhiteSpace(request.Scratch) ? DefaultScratch() : request.Scratch);
         var schema = SchemaOf(request.Bundle);
         var pointArg = point.IsLatest ? "latest" : point.BackupId.ToString();
-        return Start("drill", store, request.Bundle, null, null, ctx =>
+        return Start(new BackupJobSpec(BackupJobKinds.Drill, store, request.Bundle), ctx =>
         {
             var report = _ops.Drill(store, pointArg, scratch, schema,
                 (stage, done, total) => ctx.Report(stage, done, total, stage == nameof(BackupDrillStage.Restore) ? "pages" : null), ctx.Token);
-            ctx.SetResult(d => d with { Drill = report });
+            ctx.SetResult(new BackupJobResult(Drill: report));
         });
     }
 
@@ -188,14 +189,14 @@ public sealed partial class BackupsController
         }
 
         var store = BackupPaths.Full(request.Store);
-        return Start("compact", store, null, null, null, ctx =>
+        return Start(new BackupJobSpec(BackupJobKinds.Compact, store), ctx =>
         {
             var result = _ops.Compact(store, point, new BackupLifecycleOptions
             {
                 Cancellation = ctx.Token,
                 Progress = (done, total) => ctx.Report("compact", done, total, "bytes"),
             });
-            ctx.SetResult(d => d with { Compact = BackupDtoMapper.Map(result) });
+            ctx.SetResult(new BackupJobResult(Compact: BackupDtoMapper.Map(result)));
         });
     }
 
@@ -218,21 +219,21 @@ public sealed partial class BackupsController
                 "This Workbench no longer knows the reviewed plan (it restarted, or the plan is over an hour old): preview the retention again.");
         }
 
-        return Start("retention", store, null, null, null, ctx =>
+        return Start(new BackupJobSpec(BackupJobKinds.Retention, store), ctx =>
         {
             var result = _ops.ApplyRetention(store, policy, approved, new BackupLifecycleOptions
             {
                 Cancellation = ctx.Token,
                 Progress = (done, total) => ctx.Report("compact", done, total, "bytes"),
             });
-            ctx.SetResult(d => d with { Retention = BackupDtoMapper.Map(result) });
+            ctx.SetResult(new BackupJobResult(Retention: BackupDtoMapper.Map(result)));
         });
     }
 
     /// <summary>
-    /// Restore under the reviewed plan's fingerprint (WB-7), then settle the restored bundle (WB-10) with the schema of the session that holds
-    /// <see cref="BackupRestoreRequestDto.Bundle"/>, if any. Refused before anything is written when the plan refuses or a session of this Workbench holds
-    /// the target (WB-12); while it runs no session may open the target.
+    /// Restore under the reviewed plan's fingerprint (WB-7), then settle the restored bundle (WB-10) in a child process, with the schema of the session that
+    /// holds <see cref="BackupRestoreRequestDto.Bundle"/>, if any. Refused before anything is written when the plan refuses or a session of this Workbench
+    /// holds or is opening the target (WB-12, decided under the registry's lock); while it runs no session may open the target.
     /// </summary>
     [HttpPost("jobs/restore")]
     public ActionResult<BackupJobDto> StartRestore([FromBody] BackupRestoreRequestDto request)
@@ -256,7 +257,8 @@ public sealed partial class BackupsController
         BackupRestorePlanDto plan;
         try
         {
-            plan = Plan(store, point, request);
+            // The binding needs the fingerprint and the refusals, not what is lost after the point (a listing and an archive read).
+            plan = Plan(store, point, request, withLost: false);
         }
         catch (Exception e) when (BackupOperations.Classify(e) != BackupFailureKind.Defect || e is ArgumentException)
         {
@@ -273,11 +275,10 @@ public sealed partial class BackupsController
             return Problem409("plan_changed", "What this restore would do has changed since the preview: review the new plan.");
         }
 
-        var target = plan.ResolvedTarget;
         var schema = SchemaOf(request.Bundle);
-        return Start("restore", store, request.Bundle, target, null, ctx =>
+        return Start(new BackupJobSpec(BackupJobKinds.Restore, store, request.Bundle, plan.ResolvedTarget), ctx =>
         {
-            // A restore cancelled before it began never starts (the stager itself observes the token only between its write batches).
+            // A restore cancelled before it began never starts; once started, the stager honours a cancel up to its publish (#1413).
             ctx.Token.ThrowIfCancellationRequested();
             BackupSettleDto settle = null;
             var result = _ops.Restore(store, point, BackupPaths.Full(request.Target), new BackupRestoreOptions
@@ -288,33 +289,45 @@ public sealed partial class BackupsController
                 ApprovedPlan = request.PlanFingerprint,
                 Cancellation = ctx.Token,
                 Progress = (done, total) => ctx.Report("restore", done, total, "pages"),
-                OpenAndClose = bundle =>
-                {
-                    ctx.Report("settle", 0, 0, null);
-                    var clock = Stopwatch.StartNew();
-                    try
-                    {
-                        var r = _ops.Settle(bundle, schema);
-                        settle = new BackupSettleDto(true, r.CrashRecoveryRan, BackupDtoMapper.Map(r.Recovery), r.Duration.TotalMilliseconds, null, false,
-                            schema.Length > 0);
-                    }
-                    catch (Exception e)
-                    {
-                        settle = new BackupSettleDto(true, false, null, clock.Elapsed.TotalMilliseconds, e.Message, BackupSettle.NeedsSchema(e),
-                            schema.Length > 0);
-                        throw;
-                    }
-                },
+                OpenAndClose = bundle => Settle(ctx, bundle, schema, s => settle = s),
             });
             settle ??= new BackupSettleDto(false, false, null, 0, result.SettleError, false, schema.Length > 0);
 
             // Honoured before the publish only: a cancel that arrives after the swap leaves a published restore, which the result says.
             var note = ctx.Token.IsCancellationRequested ? "Published: the cancel came after the swap." : null;
-            ctx.SetResult(d => d with { Restore = BackupDtoMapper.Map(result, settle) }, note);
+            ctx.SetResult(new BackupJobResult(Restore: BackupDtoMapper.Map(result, settle)), note);
         });
     }
 
-    /// <summary>The store's jobs, newest first: the running one and the finished ones still kept (re-attach).</summary>
+    /// <summary>
+    /// The restore's settle, in a child process; <paramref name="record"/> receives what it did, whether it stands or not. A settle whose open had to
+    /// replay and did not is a failed one (WB-10's guard): the bundle holds the image at <c>C</c>. A failure is rethrown, so the restore reports it as its
+    /// settle error (04 §2).
+    /// </summary>
+    private void Settle(BackupJobContext ctx, string bundle, string[] schema, Action<BackupSettleDto> record)
+    {
+        ctx.Report("settle", 0, 0, null);
+        var clock = Stopwatch.StartNew();
+        BackupSettleReport r;
+        try
+        {
+            r = _ops.Settle(bundle, schema);
+        }
+        catch (Exception e)
+        {
+            record(new BackupSettleDto(true, false, null, clock.Elapsed.TotalMilliseconds, e.Message, BackupSettle.NeedsSchema(e), schema.Length > 0));
+            throw;
+        }
+
+        var guard = BackupSettle.GuardError(r);
+        record(new BackupSettleDto(true, r.CrashRecoveryRan, r.Recovery, r.DurationMs, guard, false, schema.Length > 0));
+        if (guard != null)
+        {
+            throw new BackupJobException("failed", guard);
+        }
+    }
+
+    /// <summary>The store's jobs, newest first, as summaries (no result: GET the job for it): the running one and the finished ones still kept.</summary>
     [HttpGet("jobs")]
     public ActionResult<List<BackupJobDto>> ListJobs([FromQuery] string store)
     {
@@ -323,10 +336,17 @@ public sealed partial class BackupsController
             return Problem400("A store path is required.");
         }
 
-        return Ok(_jobs.List(store).Select(j => j.Snapshot()).ToList());
+        var jobs = _jobs.List(store);
+        var list = new List<BackupJobDto>(jobs.Count);
+        foreach (var j in jobs)
+        {
+            list.Add(j.Summary());
+        }
+
+        return Ok(list);
     }
 
-    /// <summary>A job's snapshot; 404 once it is no longer kept (or the Workbench restarted).</summary>
+    /// <summary>A job's snapshot, with its result; 404 once it is no longer kept (or the Workbench restarted).</summary>
     [HttpGet("jobs/{jobId:guid}")]
     public ActionResult<BackupJobDto> GetJob(Guid jobId) =>
         _jobs.Get(jobId) is { } job ? Ok(job.Snapshot()) : NotFound();
@@ -335,20 +355,41 @@ public sealed partial class BackupsController
     [HttpDelete("jobs/{jobId:guid}")]
     public IActionResult CancelJob(Guid jobId) => _jobs.Cancel(jobId) ? NoContent() : NotFound();
 
-    private ActionResult<BackupJobDto> Start(string kind, string store, string bundle, string target, string route, Action<BackupJobContext> body)
+    private ActionResult<BackupJobDto> Start(BackupJobSpec spec, Action<BackupJobContext> body)
     {
-        if (!_jobs.TryStart(kind, store, bundle, target, route, body, out var job))
+        var start = _jobs.TryStart(spec, body);
+        return start.Admission switch
         {
-            return Busy(job, $"A {job.Kind} job is already running on this store: one at a time.");
-        }
-
-        return Ok(job.Snapshot());
+            BackupJobAdmission.Started => Ok(start.Job.Snapshot()),
+            BackupJobAdmission.StoreBusy => Busy(start.Job, spec.Store, $"A {start.Job.Kind} job is already running on this store: one at a time."),
+            BackupJobAdmission.DrillBusy => Busy(start.Job, spec.Store,
+                $"A drill is already running in this Workbench (on '{start.Job.Store}'); one at a time, each restores a whole image."),
+            BackupJobAdmission.TargetBusy => Problem409("refused",
+                $"'{spec.Target}' is the target of another running restore (backup job {start.Job.Id}); one restore into a bundle at a time."),
+            BackupJobAdmission.TargetOpening => Problem409("refused",
+                $"'{spec.Target}' is being opened in this Workbench. Close that session to restore over it."),
+            _ => TargetHeld(spec.Target, start.HolderSessionId),
+        };
     }
 
-    private ObjectResult Busy(BackupJob running, string detail)
+    private ObjectResult TargetHeld(string target, Guid? session)
+    {
+        var problem = new ProblemDetails
+        {
+            Status = StatusCodes.Status409Conflict,
+            Title = "refused",
+            Detail = $"'{target}' is open in this Workbench. Close that session to restore over it.",
+        };
+        problem.Extensions["heldBySessionId"] = session;
+        return new ObjectResult(problem) { StatusCode = StatusCodes.Status409Conflict };
+    }
+
+    /// <summary>A start refused because a job is in the way: <c>sameStore</c> tells the client whether that job is the one to attach to.</summary>
+    private static ObjectResult Busy(BackupJob running, string store, string detail)
     {
         var problem = new ProblemDetails { Status = StatusCodes.Status409Conflict, Title = "busy", Detail = detail };
         problem.Extensions["runningJobId"] = running.Id;
+        problem.Extensions["sameStore"] = BackupPaths.Same(running.Store, store);
         return new ObjectResult(problem) { StatusCode = StatusCodes.Status409Conflict };
     }
 

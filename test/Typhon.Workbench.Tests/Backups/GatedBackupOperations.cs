@@ -15,6 +15,9 @@ internal sealed class GatedBackupOperations : IBackupOperations
 
     public ManualResetEventSlim Entered { get; } = new();
 
+    /// <summary>When set, <see cref="ListArchive"/> throws it (a store on a share that went away mid-read).</summary>
+    public Exception ArchiveFault { get; set; }
+
     /// <summary>Holds the next gated call until <see cref="Release"/>.</summary>
     public void Close()
     {
@@ -37,7 +40,7 @@ internal sealed class GatedBackupOperations : IBackupOperations
 
     public BackupStoreListing List(string store, bool computeRestorable) => _real.List(store, computeRestorable);
 
-    public BackupArchiveListing ListArchive(string store) => _real.ListArchive(store);
+    public BackupArchiveListing ListArchive(string store) => ArchiveFault is { } fault ? throw fault : _real.ListArchive(store);
 
     public BackupRestorePlan PlanRestore(string store, PointSelector point, string target, BackupRestoreOptions options) =>
         _real.PlanRestore(store, point, target, options);
@@ -85,13 +88,24 @@ internal sealed class GatedBackupOperations : IBackupOperations
     {
         Pass();
 
-        // A cancel that came while the restore was held is observed as one mid-restore is, before the publish. The stager itself observes its token only
-        // after each full write batch, so an image smaller than one batch would publish anyway (reported, #1417 As built).
+        // A cancel that came while the restore was held is observed as one mid-restore is, before the publish (the stager does the same up to its swap,
+        // #1413).
         options.Cancellation.ThrowIfCancellationRequested();
         return _real.Restore(store, point, target, options);
     }
 
-    public BackupSettleResult Settle(string bundle, string[] schemaDllPaths) => _real.Settle(bundle, schemaDllPaths);
+    /// <summary>When set, <see cref="Settle"/> returns what it makes of the real settle's report instead (a settle the engine cannot produce).</summary>
+    public Func<BackupSettleReport, BackupSettleReport> SettleOverride { get; set; }
+
+    /// <summary>The last settle's report, as the parent received it from its child process.</summary>
+    public BackupSettleReport LastSettle { get; private set; }
+
+    public BackupSettleReport Settle(string bundle, string[] schemaDllPaths)
+    {
+        var report = _real.Settle(bundle, schemaDllPaths);
+        LastSettle = report;
+        return SettleOverride == null ? report : SettleOverride(report);
+    }
 
     public BackupDrillReportDto Drill(string store, string point, string scratch, string[] schemaDllPaths, Action<string, long, long> progress,
         CancellationToken ct) =>
