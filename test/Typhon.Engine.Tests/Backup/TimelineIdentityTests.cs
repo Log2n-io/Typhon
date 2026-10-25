@@ -6,7 +6,7 @@ namespace Typhon.Engine.Tests;
 
 /// <summary>
 /// <see cref="DatabaseEngine.TimelineId"/> (<c>BK_TimelineId</c>): minted at creation, stable across reopens and crashes, minted and persisted once for a
-/// database that predates the key, and replaced only by <see cref="DatabaseEngine.AdoptTimeline"/>, durably.
+/// database that predates the key, and replaced only by <see cref="DatabaseEngine.AdoptTimeline(System.Guid, System.Guid, long, TimelineReason, bool)"/>, durably.
 /// </summary>
 class TimelineIdentityTests : TestBase<TimelineIdentityTests>
 {
@@ -77,7 +77,7 @@ class TimelineIdentityTests : TestBase<TimelineIdentityTests>
         using (var scope = ServiceProvider.CreateScope())
         {
             var dbe = Open(scope);
-            dbe.AdoptTimeline(adopted);
+            dbe.AdoptTimeline(adopted, Guid.Empty, 0, TimelineReason.Restore, keepLineage: false);
             Assert.That(dbe.TimelineId, Is.EqualTo(adopted));
             dbe.SimulateHardCrash();
         }
@@ -89,9 +89,9 @@ class TimelineIdentityTests : TestBase<TimelineIdentityTests>
 
             var flips = 0;
             dbe.MMF.DataFileWriteProbe = (first, _) => flips += first <= 1 ? 1 : 0;
-            dbe.AdoptTimeline(adopted);
+            dbe.AdoptTimeline(adopted, Guid.Empty, 0, TimelineReason.Restore, keepLineage: false);
             Assert.That(flips, Is.Zero, "adopting the current timeline writes nothing");
-            Assert.Throws<ArgumentException>(() => dbe.AdoptTimeline(Guid.Empty));
+            Assert.Throws<ArgumentException>(() => dbe.AdoptTimeline(Guid.Empty, Guid.Empty, 0, TimelineReason.Restore, keepLineage: false));
         }
     }
 

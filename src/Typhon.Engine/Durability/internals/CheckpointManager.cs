@@ -72,6 +72,13 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     // W1 (BKP-04): while an online backup copies its WAL tail, step 8 never reclaims a segment whose last LSN is at or above this floor. MaxValue
     // when no backup holds it.
     private long _reclaimFloor = long.MaxValue;
+
+    // W1′ (BKP-10): the WAL archive's floor. Step 8 never reclaims a segment whose last LSN is at or above it, unless the bytes it alone holds exceed
+    // _archiveBacklogLimit: then it is CASed to ArchiveFloorReleased and the cycle reclaims as if archiving were off. MaxValue = archiving off;
+    // 0 = engaged, nothing archived yet (hold everything until the archiver speaks). Only the archiver raises it, and re-engages it after a release.
+    private long _archiveFloor = long.MaxValue;
+    private long _archiveBacklogLimit;
+    private long _archiveReleases;
     private volatile Exception _fatalError;
     private volatile DurabilityHealth _health = DurabilityHealth.Ok;
     // 1 while a force request waits for the loop. Read-and-cleared in one exchange, so a request landing between the loop's wake and its read
@@ -226,6 +233,42 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
 
     /// <summary>The reclaim floor, <see cref="long.MaxValue"/> when none is held.</summary>
     internal long ReclaimFloor => Volatile.Read(ref _reclaimFloor);
+
+    /// <summary>The value of a WAL archive floor the backlog policy released: above every trim, so it holds nothing.</summary>
+    internal const long ArchiveFloorReleased = long.MaxValue - 1;
+
+    /// <summary>
+    /// Engages the WAL archive's floor at 0 (BKP-10): from the first cycle on, no segment is reclaimed before the archiver raises the floor past it,
+    /// unless the bytes held for it exceed <paramref name="backlogLimitBytes"/>. Called by the engine before <see cref="Start"/>, so no cycle ever runs
+    /// without it — the recovery seal's included.
+    /// </summary>
+    internal void EngageArchiveFloor(long backlogLimitBytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(backlogLimitBytes);
+        if (_thread != null)
+        {
+            throw new InvalidOperationException("The WAL archive floor is engaged before the checkpoint starts: a cycle before it could reclaim un-archived WAL.");
+        }
+
+        _archiveBacklogLimit = backlogLimitBytes;
+        Volatile.Write(ref _archiveFloor, 0);
+    }
+
+    /// <summary>
+    /// The archiver, once a segment's archived copy is durable: no segment with a last LSN below <paramref name="floor"/> is held for the archive any more.
+    /// Also re-engages a floor the backlog released. Only ever raised (the archive's end only grows); a cycle that read a lower value deletes less.
+    /// </summary>
+    internal void RaiseArchiveFloor(long floor) => Volatile.Write(ref _archiveFloor, floor);
+
+    /// <summary>The WAL archive's floor: <see cref="long.MaxValue"/> when archiving is off, <see cref="ArchiveFloorReleased"/> when released.</summary>
+    internal long ArchiveFloor => Volatile.Read(ref _archiveFloor);
+
+    /// <summary>How many times the backlog policy released the archive floor: the archiver reports each as a gap and asks for a point.</summary>
+    internal long ArchiveReleases => Interlocked.Read(ref _archiveReleases);
+
+    /// <summary>Test seam: invoked at step 8 between the read of the archive floor and the release's CAS, only when the floor holds something. Null in
+    /// production.</summary>
+    internal Action ArchiveFloorProbe { get; set; }
 
     /// <summary>Whether the checkpoint thread is currently running.</summary>
     public bool IsRunning => _thread != null && _thread.IsAlive;
@@ -1495,6 +1538,27 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                         var tickFenceLsn = _lastTickFenceLsnProvider?.Invoke() ?? 0;
                         var trimLsn = tickFenceLsn > 0 ? Math.Min(barrierLsn, tickFenceLsn) : barrierLsn;
                         trimLsn = Math.Min(trimLsn, Volatile.Read(ref _reclaimFloor));   // W1: an online backup copying its tail (BKP-04)
+
+                        // W1′: the WAL archive (BKP-10). Off: one read. On: what the floor alone holds is capped by the backlog limit, enforced here,
+                        // never by the archiver, which may sit in a store call for minutes (WA-4). A raise racing the CAS makes it fail: the cycle then
+                        // honours the floor it read (lower: it deletes less), and the next cycle sees the raise.
+                        var archiveFloor = Volatile.Read(ref _archiveFloor);
+                        if (archiveFloor < trimLsn)
+                        {
+                            var held = segmentManager.BytesHeldBetween(archiveFloor, trimLsn);
+                            ArchiveFloorProbe?.Invoke();
+                            if (held > _archiveBacklogLimit
+                                && Interlocked.CompareExchange(ref _archiveFloor, ArchiveFloorReleased, archiveFloor) == archiveFloor)
+                            {
+                                Interlocked.Increment(ref _archiveReleases);
+                                WalArchiveLog.FloorReleased(_logger, held, _archiveBacklogLimit, archiveFloor, trimLsn);
+                            }
+                            else
+                            {
+                                trimLsn = archiveFloor;
+                            }
+                        }
+
                         var recycled = segmentManager.MarkReclaimable(trimLsn);
                         recycleScope.RecycledCount = recycled;
                         Interlocked.Add(ref _totalSegmentsRecycled, recycled);

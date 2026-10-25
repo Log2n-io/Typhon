@@ -808,7 +808,9 @@ CK-08 (flush-only cycles) are later increments.
             reader holding the lock sees the old segment as active or as sealed, never as neither (online backup's tail
             snapshot, BKP-04)
   scope: `WalSegmentManager._sealedLock` — guards `RotateSegment` (ActiveSegment assignment + Add), `MarkReclaimable`,
-         `SealedSegmentCount`, `GetAllSegmentPaths`, `WalSegmentManager.SnapshotForTail`, reopen-reconcile Add
+         `SealedSegmentCount`, `GetAllSegmentPaths`, `WalSegmentManager.SnapshotForTail`, reopen-reconcile Add, and the WAL
+         archive's reads: `WalSegmentManager.ArchiveSnapshot` (the archiver's step, a few field copies, no I/O under the lock) and
+         `WalSegmentManager.BytesHeldBetween` (step 8's backlog sum, BKP-10)
   verified: SegmentSnapshotTests.SnapshotDuringARotation_SeesTheSegmentBeingSealed (a rotation paused between creating and
             publishing the new segment; assigning ActiveSegment outside the lock turns it red)
   on_violation: TXW-7 — `List<T>` corruption under concurrent structural mutation → a fatal latch in a background thread
@@ -1409,6 +1411,9 @@ either durability, recoverability, or consistency.
   note the `<` is load-bearing for online backup (BKP-04): a crash with meta = C keeps exactly the segments with
     `lastLSN ≥ C`, recovery resumes the TSN counter above every commit stamp it scans in them (RB-05), and a backup's
     tail copies that same set so a restore is that crash state
+  note the WAL archive's floor (BKP-10, W1′) joins the trim with the same `<`: with archiving configured step 8 and the open's
+    reconcile also keep every segment with `lastLSN ≥ archiveFloor` (= the archive's end + 1), unless the backlog policy released
+    it. A third floor, never a weaker one: the checkpoint frontier is unchanged, the floors combine by `min`
   scope: WalSegmentManager.cs, CheckpointManager.cs
   on_violation: premature recycling → WAL records needed for crash recovery
     are gone; data loss without detection
@@ -3211,8 +3216,9 @@ answer to different constraints — RB must always end with a usable database, I
 ## Module: BKP — Online backup capture
 
 A backup point is a frozen image of the data file plus the WAL tail that makes it consistent (ADR-075; design
-`design/Durability/PitBackup/`, implementation plans `impl/1412-capture-plan.md` and `impl/1413-store-restore-plan.md`). This
-module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BKP-10 and 11 (WAL archiving) land with #1418.
+`design/Durability/PitBackup/`, implementation plans `impl/1412-capture-plan.md`, `impl/1413-store-restore-plan.md`,
+`impl/1415-1416-lifecycle-ops-plan.md` and `impl/1418-wal-archive-plan.md`). This module covers capture (#1412), the store and restore (#1413:
+BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#1416: BKP-15, BKP-16) and WAL archiving (#1418: BKP-10, BKP-11).
 
 ### BKP-01: Every data-file write is tracked and gated `[silent]`
   invariant ∀ engine write w to the data file: w is issued by PagedMMF.IssueDataFileWrite or
@@ -3373,23 +3379,30 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
 ### BKP-06: An incremental only on a trusted map and an unbroken chain `[silent]`
   invariant a point is captured incremental iff the request allows it ∧ BackupLineage.Trusted ∧ lineage.StoreId = the
             store's id ∧ the store's head of lineage.ChainId is lineage.LastBackupId ∧ that head is on the database's current
-            timeline; otherwise full (a new ChainId, minted by the store)
+            timeline or on the timeline it forked from (#1418: a fork for a write the WAL cannot replay keeps the lineage, the map
+            having tracked every write; a restore's new timeline does not); otherwise full (a new ChainId, minted by the store)
   invariant Trusted at open iff the last close was clean ∧ backup-state's nonce = BackupStateNonce ≠ 0 ∧ both CRCs hold ∧
             DatabaseId ∧ TimelineId ∧ DataFilePages = the file's length at open; then its map is ORed into the live one
   invariant backup-state is written only by a Trusted session's clean close, its nonce recorded in the flip that sets the
             clean flag; an untrusted close deletes it and records 0 (C13); every open after a clean close, SetCleanShutdown(false)
             and MarkSweepOwed zero the nonce, so after a crash, a failed open or a sweep-owed close nothing vouches for the file;
             adopting a new timeline makes the lineage untrusted
+  invariant (#1416) a point whose verify after publish finds damage leaves the lineage untrusted: the next point is full, never an incremental over
+            the damaged one (a store that cannot be read back leaves the point unverified, not failed)
   scope: BackupAdmission.Decide, BackupStateFile.TryRead, BackupStateFile.Write, DatabaseEngine.AdoptBackupState,
     DatabaseEngine.WriteBackupState, DurabilityWatermarks.MarkCleanShutdown, DurabilityWatermarks.BeginOpenAfterCleanClose,
-    DurabilityWatermarks.SetCleanShutdown, DatabaseEngine.AdoptTimeline
+    DurabilityWatermarks.SetCleanShutdown, DatabaseEngine.AdoptTimeline, DatabaseEngine.ForkTimeline (keepLineage), OfflineCapture.Create
+    (the image's BK_TimelineParent), BackupCoordinator.VerifyPublished
   on_violation: an incremental over a map that missed writes → the restore serves stale pages, discovered at restore
   verified: BackupAdmissionTests (T6: a clean close → incremental holding exactly the pages a write probe saw between the
             freezes, AC-C2; a crash, an offline repair, a copied bundle behind its chain's head, a wiped store and a new
             timeline → full; the decision matrix + Mutant_ADecisionIgnoringTrust_IsReported), BackupStateFileTests (round
             trip and damage; trusted close → trusted open → nonce cleared; a stale file; a matching nonce with another database,
             timeline or length; an untrusted close deletes the file; a write failure costs a full point; Mutant_AFileTrustedAfterACrash_IsReported;
-            Adoption_IsReportedLoaded_OnlyWhenTheSessionAdopts: tracking off is TrackingOff, never Loaded).
+            Adoption_IsReportedLoaded_OnlyWhenTheSessionAdopts: tracking off is TrackingOff, never Loaded),
+            BackupJobTests.APointFailingItsVerify_MakesTheNextOneFull (+ Mutant_NoRevokeAfterAFailedVerify_IsReported),
+            TimelineForkTests.AFork_KeepsTheLineage_TheNextPointIsIncremental (the parent clause; the decision matrix holds a
+            head on the parent and on another timeline's fork).
             Source mutants seen red: no nonce check, the open not clearing the nonce, Decide ignoring trust, an untrusted close
             writing the file, the adoption reporting Loaded with tracking off
 
@@ -3419,7 +3432,7 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
   spec: rules/tla/BackupCapture.tla (S6) — ChangeMapComplete over the abort's four steps (flag, uninstall request, removal under
     the drained gate, merge of the DETACHED map); mutant -mutant-mergeimageset (merging the image set, null for a full capture)
 
-### BKP-08: A published pack is never modified, and its id names one content for the store's life `[fatal]`
+### BKP-08: A published pack is never modified, and its id names one point for the store's life `[fatal]`
   invariant a pack is visible under {BackupId:D8}-{K}.tpack only complete: written as *.tpack.tmp, fsynced, then moved
             without overwrite by a durable rename (Windows MoveFileExW WRITE_THROUGH; Linux rename + fsync of packs/); an
             existing final name fails the publish; a rename whose directory flush fails is undone, so Complete throws with
@@ -3432,9 +3445,10 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
   invariant every byte of a pack is covered by a CRC that verify --level full checks: HeaderCRC, FooterCRC, IndexCRC,
             TailDirCRC, SuspectCRC, each page's PageCrc after decode, each tail segment's RawCrc after decode, and
             FileCRC over [0, EOF-4); restore checks every one it reads and never returns a byte it read wrong
-  invariant (#1415) a pack is deleted only under store.lock, only when no kept point's chain resolves through it
-  scope: PackWriter.Complete, PackWriter.Abort, BackupStore.Publish, BackupStore.AllocateBackupId,
-    BackupStore.DeleteAbandonedTemps, StoreFileSystem.MoveDurable, PackReader.Open, BackupVerifier.VerifyStore
+  invariant an id names one point: its -F or -I pack and its -C pack (a compaction keeps the id) materialise identically (BKP-13)
+  invariant a pack is deleted only by retention, per BKP-14
+  scope: PackWriter.Complete, PackWriter.Abort, BackupStore.Publish, BackupStore.AllocateBackupId, BackupStore.BeginCompaction,
+    BackupStore.DeleteAbandonedTemps, StoreFileSystem.MoveDurable, PackReader.Open, BackupVerifier.VerifyStore, RetentionExecutor.Apply
   on_violation: a point whose bytes changed after it was verified, a restore of "#12" that returns another point, or a
     visible pack missing its tail bytes — an unrestorable backup, discovered at restore
   verified: StorePublishCrashTests (a crash after every file-system operation of a backup, Windows and Linux directory
@@ -3443,6 +3457,111 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
             BackupIdAllocationTests.Mutant_AStoreThatLostEveryHighWater_ReusesAnId; source mutants seen red: rename before
             flush, no directory flush (Linux model), publish with overwrite, allocation ignoring the high-water, verify
             skipping FileCRC, restore skipping PageCrc
+
+### BKP-10: No WAL segment leaves the database un-archived, unless the backlog policy released it, and every loss is a visible gap `[fatal]`
+  invariant with archiving configured, reclaim — CheckpointManager step 8 and the open's reconcile — deletes a sealed segment s only
+            when s.LastLsn < archiveFloor; archiveFloor = ArchivedThroughLsn + 1, raised by the archiver only after s's .twal is
+            durable (flushed, renamed without replace, its directory flushed); it is engaged at 0 before the first cycle (the
+            recovery seal's included), and the open reclaims nothing below it (WA-3)
+  invariant the floor is released only at step 8, by a CAS, only when the bytes it alone holds (floor ≤ LastLsn < trim) exceed
+            BacklogLimitBytes, each release counted; it is re-engaged only by the archiver's raise after a successful publish; a
+            raise racing the CAS wins and the cycle honours the floor it read. The engine never waits on the archive and holds at
+            most the limit plus one segment for it; archiving off costs step 8 one read
+  invariant the archive holds only durable, valid WAL: s is archived only once s.LastLsn ≤ DurableLsn (WA-15), and only up to the
+            end of its last frame read whole, the rest of that page zeroed (no byte of a torn frame is ever archived); a break in
+            a segment is recorded as a dropped range no restore may cross (CorruptMidSegment)
+  invariant a timeline's archive is ordered by LSN; wherever next.FirstLsn ≠ prev.LastLsn + 1 the next segment's footer records
+            the gap with its cause (BacklogReleased, ArchivingOff, Unknown) and every restore re-derives continuity from the
+            files; a segment starting inside the archive, a local segment whose archived copy under its id has other bytes, or a
+            name holding other bytes stops archiving that timeline (Diverged, WA-14) — the existing file is never replaced
+  invariant an archived segment is immutable, self-describing and wholly CRC-covered (.twal: HeaderCRC, BlockDirCrc, SamplesCrc,
+            RawCrc after decode, FooterCRC, FileCRC); archive-index.bin is a cache, used only intact and for the listing it was
+            written for; a timeline's archive.lock is held for one operation, and a file system that does not enforce it is refused
+  invariant the segment the archiver reads is opened with delete sharing (WA-5): a released cycle that reclaims it deletes it
+            instead of failing under the sealed-list lock
+  invariant a segment the archive floor may keep past a crash open never holds bytes recovery would stop at (WA-9): when the crash
+            open's recovery stopped at a break in the LAST segment holding data, the open writes a PaddingSentinel frame header
+            (RecordCount = CrashSealRecordCount, LastLsn = the highest fence LSN recovery applied from the torn frame) at the
+            first invalid frame and flushes it, after the recovery's seal checkpoint and before the session's first commit; the
+            segment then ends cleanly for recovery, captures and the archiver (archived TornTrimmed, the applied fences a dropped
+            range). The sentinel hides those fences, so it is written only once CheckpointLSN ≥ that fence LSN: a seal cycle that
+            did not get there (its timeout is soft) fails the open, unsealed, and the next open recovers and seals again — hidden
+            earlier, a second recovery replays the window without them and an earlier fence's values overwrite theirs. A break
+            followed by a segment holding data is mid-log corruption (#587): left as it is
+  scope: CheckpointManager.EngageArchiveFloor, CheckpointManager.RaiseArchiveFloor, CheckpointManager.ArchiveFloorReleased
+    (step 8, beside the backup floor W1), WalSegmentManager.Initialize (reclaimFloorAtOpen), WalSegmentManager.BytesHeldBetween,
+    WalSegmentManager.ArchiveSnapshot, IWalFileIO.OpenSegmentForArchive, WalFileIO.OpenSegmentForArchive,
+    WalSegmentReader.OpenSegmentForArchive, WalArchiveScanner.Scan, WalArchiver.Step, WalArchiver.ArchivePending,
+    WalArchiver.ArchiveOne, WalArchiver.CheckCovered, WalArchiveTimeline.Publish, WalArchiveTimeline.TryOpen,
+    ArchivedSegmentWriter.Complete, ArchivedSegmentReader.Decode, ArchiveIndex.TryRead, DatabaseEngine.InitializeWalManager,
+    DatabaseEngine.CreateWalArchiver, WalTornTailSeal.Seal, DatabaseEngine.SealTornTailForArchive
+  on_violation: a segment deleted un-archived with no gap → a restore replays across a hole as if continuous → a state no run
+    produced, found when it is needed; a torn frame in the store → every restore across it stops there for good; un-durable
+    bytes archived → the next session reuses their LSNs and the timeline's archive diverges from the database; a torn segment kept
+    unsealed → the next crash's recovery stops at it and loses every commit of the session after it
+  requires: WP-09, CK-07, WP-06, LOG-03
+  verified: WalArchiveFloorTests (held through checkpoints until the raise; released once, counted, re-engaged only by a raise; a
+            raise beating the release CAS; Mutant_AReclaimIgnoringTheArchiveFloor_IsReported), WalArchiveOpenReclaimTests (AC-A5,
+            Mutant_AnOpenReclaimingBelowTheCheckpointOnly_IsReported), ArchiveShareDeleteTests (Windows, real files;
+            Mutant_AReadHandleWithoutDeleteSharing_FailsTheReclaim), WalArchiveScannerTests, WalArchiverStepTests (the floor is
+            still 1 when the copy becomes durable), WalArchiveBacklogTests (AC-A1), ArchivedSegmentCorruptionTests (T7: every byte
+            outside the data and every 8th inside; Mutant_ADecodeWithoutTheRawCrc_IsReported), ArchiveStoreCrashTests (AC-A4, a
+            crash after every operation of a publish, both directory models), ArchiveIndexTests
+            (Mutant_AnIndexTrustedWithoutItsFingerprint_IsReported), ArchiveDivergenceTests, ArchiveTornTailTests (AC-A10:
+            Mutant_ACrashOpenThatDoesNotSealTheTornTail_IsReported; a mid-log break left unsealed;
+            ATornFence_WhoseRecoveryCheckpointDoesNotComplete_IsNotSealedAndIsReplayedByTheNextOpen), WalArchiveScannerTests
+            (ASealedTornTail_EndsCleanlyAtItsSentinel_NamingTheFenceRecordsRecoveryApplied) — [VerifiesRule("BKP-10")]. Source
+            mutants seen red: the floor raised before the publish, a release not counted, no flush before the rename, no
+            directory flush (Linux model), a seal over a mid-log break, the seal before the recovery's checkpoint
+  spec: rules/tla/WalArchive.tla (S7) — ArchivedOrReleased, FloorHoldsUnarchived, FloorAtArchiveEnd, NoSilentHole (6 254 states; -full
+    180 000); mutants -mutant-raisebeforepublish, -mutant-openreclaim, -mutant-nofloor, -mutant-continuityunchecked, -mutant-releasenocount,
+    -mutant-droppedunchecked. NoSilentHole models the planner's walk (Continues, GapBefore, the dropped range of a torn copy) over the entries'
+    metadata and checks what they hold
+
+### BKP-11: A restore to an LSN or a time yields exactly the committed prefix at its cut, on one timeline, from one history `[fatal]` `[silent]`
+  invariant restore(L) on timeline t: L' = the highest LSN ≤ L that ends a whole frame of t's WAL; state(open(R)) = every
+            transaction whose TxCommit LSN ≤ L' and nothing else — BKP-05 with the tail extended by t's archived segments and cut
+            at L' (the cut segment's bytes past the frame end zeroed to its declared size); L' ≥ the base's P, and L' is what the
+            restore reports (EffectiveLsn)
+  invariant an instant resolves to the highest LSN sampled durable at or before it on t's ancestry (t's samples, then its
+            parent's at or below t's origin); never a frame durable after the instant; none ⇒ BeforeCoverage
+  invariant the base is the newest restorable point of t with P ≤ L whose tail agrees with t's archive: each tail segment that
+            has an archived copy under its id equals it over the bytes both hold, the tail's rest zeros; a disagreeing base is
+            never mixed with the archive (another history, WA-11), an older one is tried; none ⇒ NoBase
+  invariant the restored WAL is continuous from the base's tail to L': every hop next.FirstRecordLsn ≤ prev.End + 1, re-derived
+            from the files, never the index; a recorded drop (BacklogReleased, CorruptMidSegment, TornAtCrash) or a missing
+            range below L refuses with its range (Gap) and the LSNs still restorable; L past the archive ⇒ BeyondArchive
+  invariant a restore never crosses a fork: L ≤ a child's OriginLsn is restored on the parent (ancestry walk), L > it on the
+            child from a child point only; a fork (SchemaChange at registration, BulkLoad before BulkEnd, Restore at adoption)
+            flips BK_TimelineId/Parent/OriginLsn/Reason in one fsynced meta write before any record of the new timeline; a fork is
+            folded into the previous one only at the same origin with no point stamped since it (a point between two schema
+            changes at one origin would otherwise share a timeline with the second one's records)
+  invariant the engine's timelines are one immutable value, published with a release store and read with one acquire load: a
+            point's timeline and parent, the archiver's filing, are of one fork, never a torn id; the meta keeps the ancestors a
+            local segment may still belong to (BK_TimelineAncestry), so a restart files a held segment under its own timeline
+            however many forks ago it was written, and a restored database keeps its restore's origin past a fork
+  invariant a clean base restored with archived WAL opens on the crash path: the marker (v2) carries ForceCrashRecovery, and the
+            open replays the restored WAL whatever the image's clean flag; a v1 marker is still read, a newer one refused
+  invariant a refused or planned restore writes nothing: Preview/PlanRestore report every refusal Run would raise; a Run held to
+            an ApprovedPlan whose fingerprint (point, target, segments and their CRCs, cut) no longer matches refuses
+            (BackupPlanChanged) before the first write
+  requires: BKP-05, BKP-10, BKP-06, BKP-08, LOG-03, LOG-04
+  scope: ArchiveRestorePlanner.Plan, ArchiveRestorePlanner.ResolveTime, ArchiveRestorePlanner.Ancestor, WalArchiveScanner.FindCut,
+    RestoreStager.Run, RestoreStager.Preview, RestoreStager.WriteArchivedWal, RestoreMarker.TryRead,
+    DatabaseEngine.CheckRestoreMarkerAtOpen, DatabaseEngine.ForkTimeline, DatabaseEngine.AdoptTimeline,
+    DatabaseEngine.StampTimelineForPoint, TimelineHistory.For
+  on_violation: a restore that opens without error to a state no run produced — a prefix past the target, a frame cut in half, two
+    histories spliced at a segment, a fork crossed, or a clean base whose archived WAL is silently skipped; found when the data
+    is needed
+  verified: RestoreToLsnOracleTests (T12: every frame end as a target, from either base, oracle state; forced crash recovery),
+            FrameCutTests, ArchiveRestorePlannerTests (every refusal; a disagreeing base never mixed; never across a fork),
+            TimelineForkTests (two schema changes with a point between them fork twice at one origin), RestoreMarkerV2Tests,
+            RestoreCleanBaseTests (Mutant_AMarkerWithoutForceCrashRecovery_IsReported), RestorePlanTests (AC-A11) —
+            [VerifiesRule("BKP-11")]. Source mutants seen red: fork flipped after FlushToDisk, a fork folded by origin alone, the
+            ancestry not persisted
+  spec: rules/tla/WalArchive.tla (S7) — NoSilentHole (a restore the planner's walk accepts replays every LSN up to its target: no hole, no
+    record a torn copy lacks); the cut is a prefix of the log, whose
+    recovery to exactly the committed prefix is S2's (CommitRecovery.tla)
 
 ### BKP-12: The engine never waits on a backup past its budget
   invariant a data-file writer spends at most CbwStallTimeout in BackupCapture.BeforeWrite per write, and per SavePages
@@ -3456,8 +3575,9 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
   invariant a closing engine waits for the backup thread at most BackupCaptureOptions.StopTimeout: every capture wait
             but a store call and the gate attempts observes the close; past it the lineage is revoked and the capture's
             native memory is left to the still-running thread, never freed under it
+  invariant (#1416) the scheduler is stopped before the coordinator, within one tick (BKP-16)
   scope: BackupCapture.BeforeWrite, BackupCapture.Abort, BackupCapture.Uninstall, BackupCoordinator.StopAndJoin,
-         DataFileWriteGate.TryEnterExclusive, DataFileWriteGate.AdmitWaiters, CbwSlotPool
+         DataFileWriteGate.TryEnterExclusive, DataFileWriteGate.AdmitWaiters, CbwSlotPool, BackupScheduler.StopAndJoin
   on_violation: a slow store (or a stuck backup thread) stalls the checkpoint → page-cache back-pressure → transactions stall
   invariant a slot wait returns at its deadline, not on the OS timer tick after it: it blocks until one tick before the
             deadline (16 ms on Windows, 1 ms elsewhere) and polls the rest (a timed semaphore wait returned 9-16 ms late)
@@ -3485,3 +3605,103 @@ module covers capture (#1412), the store and restore (#1413: BKP-05, BKP-08). BK
   spec: rules/tla/BackupCapture.tla (S6) — HookNotRemovedUnderWriter, and under weak fairness without any timeout
     (BackupCapture-liveness.cfg) WritersProgress and GateReopens; mutants -mutant-uninstallnogate, -mutant-noabortrelease,
     -mutant-timeoutkeepsgate
+
+### BKP-13: Compaction preserves its point exactly, and is visible only verified `[silent]`
+  invariant ∀ X, X-C = Compact(X): materialise(X-C) = materialise(X) byte for byte over [0, N_X); X-C's C, P, N, TimelineId, ChainId,
+            FreezeUtc, TailEndUtc and tail segments are X's, its header X's with Kind = Compacted, ParentId = 0, BaseId = X; its suspect
+            set = { p : p suspect in the pack p's newest version came from }
+  invariant X-C holds an entry for every page of [0, N_X), a hole (a page no pack of the chain holds) as a zero entry; each stored frame is
+            its source frame's bytes, decoded once and checked against its PageCrc before it is written, never re-encoded
+  invariant X-C becomes visible only after VerifyPackFile(temp, Full) passed on the sealed, fsynced temp, then by BKP-08's durable rename;
+            a failure deletes the temp and leaves no X-C (resolution prefers -C, so a bad one would break X and every later point)
+  invariant compaction allocates no id, writes no store.hwm, modifies and deletes no pack, and never touches the database; an X that is
+            already a base (full, or an existing X-C) makes it a no-op
+  requires: BKP-08, BKP-02
+  scope: BackupCompactor.Compact, BackupStore.BeginCompaction, BackupStore.Publish, BackupStore.VerifyCompactedTemp,
+         PackWriter.AddStoredPage, PackWriter.AddZeroPage, PackWriter.Complete, PackReader.CopyTailSegment, ChainPageCursor,
+         FrameReader.TryReadFrame, ChainResolver.Resolve (the -C preference)
+  on_violation: every restore of X and of every later point resolves through a pack that is not X — wrong data, discovered at restore
+  verified: CompactionEquivalenceTests (synthetic chains of depth 1 to 50: growth, holes, overlapping rewrites, tails, suspects in several
+            packs; every other point and every pack unchanged; a damaged temp never published), CompactionOfAnEngineChainTests (a chain the
+            engine captured online, compacted, restored, and continued), CompactionCrashTests (a crash after every file-system operation of a
+            compaction, Windows and Linux directory models; an existing -C never replaced) — [VerifiesRule("BKP-13")]; [RuleMutant("BKP-13")]:
+            the oldest version of each page wins, the suspect set not carried, a damaged pack renamed in before its verify
+
+### BKP-14: Retention deletes only what no kept point needs `[fatal]`
+  invariant the kept set S = the restorable points ≥ K, K the last point of the walk newest → oldest that keeps p while rank(p) < MinKeep, or
+            while p is within MaxAge (from its freeze) ∧ rank(p) < MaxCount ∧ the packs ∪ resolve(S ∪ {p}) ≤ MaxTotalBytes (0 = no limit);
+            KeepLastDrilled ⇒ K ≤ the newest restorable drill-passed point. MinKeep counts restorable points only; MinKeep and KeepLastDrilled
+            beat every limit (R2), and a limit they prevent is reported as RetentionBlocked, never met by deleting (R3)
+  invariant before any delete, every chain with a point in S whose oldest kept point resolves below K has that point compacted (BKP-13);
+            a compaction that fails is not substituted: its chain keeps its packs that run, and the result says why (a damaged source pack is
+            store damage, a kept point that may not restore; anything else a failure)
+  invariant a pack q is deleted only under store.lock, only if no s ∈ S resolves through it (the published compactions substituted), and
+            only if q.Id < K or q is an -I whose -C a kept resolution uses; a chain holding a point ≥ K that does not resolve loses nothing,
+            and an unreadable pack ≥ K (of no known chain) keeps every pack below K
+  invariant deletes run in descending BackupId, each made durable (a flush of packs/) before the next: after any crash prefix every point
+            still listed resolves as it did; after the last, every s ∈ S resolves (checked, a failure is a defect); the drill records of the
+            points deleted go with them, best effort (a record left pins nothing, and never stops the steps after it)
+  invariant the WAL archive keeps, per timeline, from the lowest CheckpointLSN of its kept points and of the packs of every chain that loses
+            nothing (a damaged chain may be repaired, and replays from its own C); with an unreadable pack ≥ K or no restorable point it is not
+            pruned at all
+  invariant (#1416) the engine applies its configured policy after every point it takes, on the backup thread, inside the job (BackupInProgress
+            until it ends), with the drill-passed points the store records as KeepLastDrilled's input
+  requires: BKP-08, BKP-13
+  scope: RetentionPlanner.Plan, RetentionExecutor.Apply, BackupOperations.ApplyRetention, BackupOperations.PlanRetention, BackupStore.DeletePack,
+         BackupStore.RefreshView, StoreFileSystem.DeleteFile, DrillRecords.DeleteForPointsNotIn, BackupCoordinator.RunJob (the job's retention
+         step), BackupScheduler.ApplyRetention
+  on_violation: a backup the operator was promised by the policy is gone, or a kept point is unrestorable — found on the day it is needed
+  verified: RetentionPropertyTests (T11: 64 seeded histories at the gate, 640 nightly — two interleaving chains, compactions, drill records,
+            random valid policies, a power cut at a random operation of a retention under both directory models, checked against a model of
+            every image: kept and promised points intact, every listed point resolving after any prefix, MaxTotalBytes held unless blocked, no id
+            reused), RetentionPlannerTests (each limit alone and combined, MinKeep and KeepLastDrilled pinning and reporting, the cutoff's and
+            the head's compactions, short of space, damaged and unreadable chains, a damaged chain's timeline keeping its archive, 2 000 points),
+            InterleavedChainsRetentionTests (two chains alternating ids in one store; a broken point after the cutoff; a failed compaction; a
+            damaged source pack reported as store damage) — [VerifiesRule("BKP-14")];
+            [RuleMutant("BKP-14")]: ascending deletes cut short (a listed point loses its base), the second chain's compaction skipped, "every
+            pack below K" deletion (an interleaved chain loses its base), MinKeep counting unrestorable points; source mutant seen red: the
+            delete order reversed
+
+### BKP-15: Backup health never reports better than the store and the schedule are `[silent]`
+  invariant health ≠ Ok while the engine's timeline has no point, when ConsecutiveFailures ≥ 3, or when Interval > 0 and the newest point of
+            the engine's timeline (or, with none, the scheduler's start) is older than 2 × Interval; health = Failing when the store holds no
+            restorable point once an attempt of the session has ended
+  invariant the worst condition that holds wins: Failing (no restorable point, 3 failures, store failing > Interval, capture refused — a refusal
+            before any job included —, archive diverged or failed, a kept point the last retention broke) over Degraded (stale, an archive gap no
+            later point covers, archive lag, a failed drill with none passed, a kept chain's pack a compaction found damaged) over
+            Warning (no point yet, an allocated suspect page, retention failed or blocked, drill overdue, the newest drill failed)
+  invariant the last success comes from the store, filtered by the engine's timeline (a restart neither doubles nor skips a due point; a restored
+            database's first point is due after the grace); due is decided on a monotonic anchor, so a wall clock set back delays a point by at
+            most one Interval
+  invariant a status file of an engine that is not running is judged again at read time, on the inputs it carries
+  scope: BackupHealthEvaluator.Evaluate, HealthInputs, ScheduleState.IsDue, ScheduleState.Initialize, BackupScheduler.RefreshStoreFacts,
+         BackupScheduler.NewestOnTimeline, BackupScheduler.Publish, BackupScheduler.ApplyRetention, BackupCoordinator.CaptureAsync (a refusal told to
+         the observer), BackupStatusFile.TryRead, BackupOperations.ReadStatus
+  on_violation: monitoring says Ok while nothing restorable is being produced — the failure mode a backup exists to prevent
+  verified: BackupHealthEvaluatorTests (every row of the table alone, the worst winning, a seeded property over random inputs),
+            BackupSchedulerTests (logical clocks: grace then interval, a restart reading the store, a new timeline, a wall clock set back a day; a
+            capture refused before any job; an older snapshot never published after a newer one; the first point restorable before the store is
+            read again; a compaction finding damage, a retention breaking a kept point),
+            ScheduleStateTests, BackupRequestTests.AStoppedEnginesStatus_DegradesByItself, BackupOpsLoopTests (AC-O1: Ok, Degraded, Failing,
+            Ok again, the same in the status, the status file, the gauge and ReadStatus) — [VerifiesRule("BKP-15")]; [RuleMutant("BKP-15")]: an
+            evaluator that forgets a timeline with no point, a wall-clock schedule (the clock set back a day stops it), a last success taken
+            from another timeline (a restored database waits an Interval)
+
+### BKP-16: The ops loop never endangers the engine and writes only to its store
+  invariant no exception leaves the scheduler's tick or a backup job: every failure becomes state and health (BackupOpsState, BackupStatus)
+  invariant neither thread takes an engine lock outside the capture's gate protocol; no job starts before InitializeArchetypes completed (the
+            scheduler starts there; a capture refuses earlier)
+  invariant the tick does no store I/O: the store's facts are read by a refresh off it (the thread pool, one at a time, or the backup thread after a
+            retention), so a store call parked on a dead share never stalls the request poll, the archiver's step or the status; overlapping refreshes
+            publish in the order they started, never after a point published since
+  invariant a closing engine stops the scheduler first, before the coordinator, waiting for its tick at most one tick; a tick left behind (a step
+            parked below it) touches nothing of the engine after the stop returned, nor does a refresh still parked on the store
+  invariant a backup.request selects auto or full and nothing else: the engine writes to BackupOptions.StorePath alone
+  scope: BackupScheduler.Tick, BackupScheduler.RefreshStoreFacts, BackupScheduler.StopAndJoin, BackupScheduler.Start, BackupCoordinator.RunJob,
+         BackupRequestFile.TryPoll, DatabaseEngine.DisposeCore
+  on_violation: a full disk or a dead share crashes or stalls the database; a bundle-directory writer redirects backups anywhere
+  verified: BackupSchedulerSafetyTests (a store throwing IOException, UnauthorizedAccessException or a non-I/O exception at every operation; a
+            request naming a path; an unreadable request; requests refused; a store read parked on a dead share while the tick keeps stepping the archiver
+            and publishing, AStoreReadParkedOnADeadShare_NeverStallsTheTick, source mutant seen red: the refresh run inline; a close with a step parked
+            in the tick) — [VerifiesRule("BKP-16")];
+            [RuleMutant("BKP-16")]: a tick that rethrows

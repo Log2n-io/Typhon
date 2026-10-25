@@ -155,8 +155,12 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
     public BackupPointInfo Run(IBackupPointStore store, BackupKind requested, BackupLineage lineage, CancellationToken ct)
     {
         using var session = store.OpenSession(_engine.DatabaseId, ct);
-        Kind = BackupAdmission.Decide(requested, lineage, session, _engine.TimelineId, out var parent);
-        var plan = new BackupPointPlan(_engine.DatabaseId, _engine.TimelineId, Kind, Kind == BackupKind.Incremental ? lineage.ChainId : Guid.Empty,
+
+        // One read of the published timeline, stamped (a fork after it is never folded into the one before): the point's timeline and its parent are of
+        // one fork, never a 16-byte id torn by one in progress.
+        var timeline = _engine.StampTimelineForPoint();
+        Kind = BackupAdmission.Decide(requested, lineage, session, timeline.TimelineId, timeline.ParentId, out var parent);
+        var plan = new BackupPointPlan(_engine.DatabaseId, timeline.TimelineId, Kind, Kind == BackupKind.Incremental ? lineage.ChainId : Guid.Empty,
             Kind == BackupKind.Incremental ? parent.BackupId : 0, PagedMMF.DatabaseFormatRevision,
             typeof(DatabaseEngine).Assembly.GetName().Version?.ToString() ?? "", false);
         _sink = Sink(() => session.BeginPoint(plan));
@@ -202,7 +206,17 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
         _metaBuffer = _engine.MemoryAllocator.AllocatePinned("Backup.MetaPair", _owner, 2 * PagedMMF.PageSize, false, 4096);
         _reader = _mmf.OpenDataFileReader();
 
-        Freeze(ct);
+        var freezeSpan = TyphonEvent.BeginBackupFreeze();
+        try
+        {
+            Freeze(ct);
+            freezeSpan.ImagePages = _imagePages;
+        }
+        finally
+        {
+            freezeSpan.Dispose();
+        }
+
         Probe?.Invoke(CapturePhase.AfterFreeze, 0);
 
         var meta0 = MetaSlot(0);
@@ -214,21 +228,33 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
 
         // 5. The tail, holding the floor; writers' pre-images are drained between reads (C7).
         WalTailResult tail;
+        var tailSpan = TyphonEvent.BeginBackupTail();
         try
         {
             tail = WalTailInspector.CaptureTail(wal, () => _engine.CheckpointManager.ReclaimFloor, _engine.MemoryAllocator, _owner, CheckpointLsn,
                 PublishedAtFreeze, new SinkGuard(this), () => ServiceCbw(), _options.WalFlushTimeout, ct, BeforePointLsn);
+            tailSpan.PointLsn = tail.PointLsn;
         }
         finally
         {
             ReleaseFloor();
+            tailSpan.Dispose();
         }
 
-        var tailEndUtc = DateTime.UtcNow.Ticks;
+        var tailEndUtc = UtcNow().Ticks;
         Probe?.Invoke(CapturePhase.TailCopied, 0);
 
         // 6. The scan.
-        Scan(ct);
+        var scanSpan = TyphonEvent.BeginBackupScan();
+        try
+        {
+            Scan(ct);
+            scanSpan.Pages = (int)Volatile.Read(ref _added);
+        }
+        finally
+        {
+            scanSpan.Dispose();
+        }
 
         Probe?.Invoke(CapturePhase.BeforeComplete, 0);
         ThrowIfAborted();
@@ -292,7 +318,7 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
                     _engine.CheckpointManager.SetReclaimFloor(ReclaimFloor);
                     _floorSet = true;
                     PublishedAtFreeze = _engine.WalManager.LastPublishedLsn;
-                    FreezeUtcTicks = DateTime.UtcNow.Ticks;
+                    FreezeUtcTicks = UtcNow().Ticks;
                     _mmf.InstallWriteHook(this);
                     _hookInstalled = true;
                 }
@@ -306,7 +332,8 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
 
             if (pages <= sized)
             {
-                _expected = _full ? _imagePages : 2 + CountImagePagesFrom(2);
+                // Published for the scheduler's heartbeat (DL-31): another thread reads the progress.
+                Volatile.Write(ref _expected, _full ? _imagePages : 2 + CountImagePagesFrom(2));
                 return;
             }
 
@@ -494,12 +521,20 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
     /// </summary>
     internal Func<long> CbwClock { get; init; }
 
+    /// <summary>
+    /// Test seam, null in production: the wall clock of the point's freeze and tail-end stamps, so a scheduler on a logical clock judges a point's age
+    /// on the same clock (plan 1416 §8.4).
+    /// </summary>
+    internal Func<DateTime> WallClock { get; init; }
+
     /// <summary>The copy-before-write slots, once allocated (test seam).</summary>
     internal CbwSlotPool Slots => _slots;
 
     private void BeforePointLsn() => Probe?.Invoke(CapturePhase.TailBeforePoint, 0);
 
     private long CbwNow() => CbwClock != null ? CbwClock() : Stopwatch.GetTimestamp();
+
+    private DateTime UtcNow() => WallClock != null ? WallClock() : DateTime.UtcNow;
 
     private void NoteHookElapsed(long deadline)
     {
@@ -719,8 +754,11 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
             throw new BackupAbortedException(BackupAbortReason.SinkFailed, $"the store failed at page {page}.", e);
         }
 
-        _added++;
+        Volatile.Write(ref _added, _added + 1);
     }
+
+    /// <summary>Pages handed to the store so far, and the pages the point will hold (0 until the freeze): read by the scheduler's heartbeat.</summary>
+    internal (long Added, long Expected) Progress => (Volatile.Read(ref _added), Volatile.Read(ref _expected));
 
     private void ThrowIfAborted()
     {

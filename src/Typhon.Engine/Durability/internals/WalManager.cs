@@ -115,7 +115,9 @@ internal sealed class WalManager : ResourceNode
     /// <param name="firstLSN">First LSN for the initial segment.</param>
     /// <param name="checkpointLsn">Checkpoint frontier passed to the segment manager's reopen reconcile — segments with
     /// records below it are reclaimed, segments with records ≥ it are retained for recovery. See WR-01.</param>
-    public void Initialize(long lastSegmentId = 0, long firstLSN = 1, long checkpointLsn = 0)
+    /// <param name="reclaimFloorAtOpen">The WAL archive's floor at open: 0 when archiving is configured (nothing is reclaimed before the archive
+    /// spoke, BKP-10), <see cref="long.MaxValue"/> when off.</param>
+    public void Initialize(long lastSegmentId = 0, long firstLSN = 1, long checkpointLsn = 0, long reclaimFloorAtOpen = long.MaxValue)
     {
         if (_initialized)
         {
@@ -124,7 +126,7 @@ internal sealed class WalManager : ResourceNode
 
         SegmentManager = new WalSegmentManager(_fileIO, _options.WalDirectory, _options.SegmentSize, _options.PreAllocateSegments, _options.UseFUA,
             _options.InitialSegmentSize);
-        SegmentManager.Initialize(lastSegmentId, firstLSN, checkpointLsn);
+        SegmentManager.Initialize(lastSegmentId, firstLSN, checkpointLsn, reclaimFloorAtOpen);
         // Continue the LSN sequence from the active segment's first-record LSN. The commit buffer's counter is constructed at 1; on a reopen (firstLSN > 1) it must be
         // advanced to match, or record LSNs restart at 1 below the segment header AND below a prior session's CheckpointLSN — the latter makes recovery drop the whole
         // post-reopen window (LOG-08). Monotonic + pre-Start, so a fresh writer (firstLSN == 1) is a no-op.

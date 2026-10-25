@@ -84,13 +84,16 @@ internal sealed class WalSegmentManager : IDisposable
     private bool _disposed;
 
     /// <summary>
-    /// Sealed segments awaiting reclamation. Each entry records the segment's file path and last LSN so that <see cref="MarkReclaimable"/> can determine
-    /// if all records have been checkpointed, plus its declared byte size — segments are NOT all <see cref="_segmentSize"/> (the first segment of a
-    /// lifecycle uses <see cref="_initialSegmentSize"/>, and an oversized batch gets a segment sized to hold it), so <see cref="TotalWalBytes"/> must
-    /// sum real sizes rather than multiply a count. <c>WrittenBytes</c> is where the writer stopped writing (the rest of the file is zeros), or the
-    /// declared size for a segment adopted at open, whose written length was not recorded.
+    /// Sealed segments awaiting reclamation, ascending id (= ascending LSN). Each entry records the segment's file path and last LSN so that
+    /// <see cref="MarkReclaimable"/> can determine if all records have been checkpointed, plus its declared byte size — segments are NOT all
+    /// <see cref="_segmentSize"/> (the first segment of a lifecycle uses <see cref="_initialSegmentSize"/>, and an oversized batch gets a segment sized to
+    /// hold it), so <see cref="TotalWalBytes"/> must sum real sizes rather than multiply a count. <c>WrittenBytes</c> is where the writer stopped writing
+    /// (the rest of the file is zeros), or the declared size for a segment adopted at open, whose written length was not recorded.
     /// </summary>
-    private readonly List<(string Path, long Id, long LastLSN, long SizeBytes, long WrittenBytes)> _sealedSegments = new();
+    private readonly List<WalSealedSegment> _sealedSegments = new();
+
+    /// <summary>Bumped by every rotation, under <see cref="_sealedLock"/>: the WAL archiver's cheap "a segment was sealed" check.</summary>
+    private long _sealedGeneration;
 
     /// <summary>
     /// Serializes all <see cref="_sealedSegments"/> access (CK-07 / TXW-7): the WAL writer thread adds on rotation,
@@ -140,7 +143,11 @@ internal sealed class WalSegmentManager : IDisposable
     /// <param name="checkpointLsn">Checkpoint frontier. Adopted segments entirely below this are reclaimed immediately
     /// (their records are already in the data file); segments with records ≥ this are retained for recovery and reclaimed
     /// by the next checkpoint. Records ≥ checkpointLsn are NEVER deleted here.</param>
-    public void Initialize(long lastSegmentId, long firstLSN, long checkpointLsn = 0)
+    /// <param name="reclaimFloorAtOpen">
+    /// The WAL archive's floor at open (BKP-10, WA-3): no adopted segment whose last LSN is at or above it is reclaimed here. 0 when archiving is
+    /// configured — the archive may not hold them yet, and nothing has spoken for it since the last session; <see cref="long.MaxValue"/> when off.
+    /// </param>
+    public void Initialize(long lastSegmentId, long firstLSN, long checkpointLsn = 0, long reclaimFloorAtOpen = long.MaxValue)
     {
         if (!Directory.Exists(_walDirectory))
         {
@@ -171,8 +178,9 @@ internal sealed class WalSegmentManager : IDisposable
 
         // Reclaim adopted segments whose records are all below the checkpoint frontier (data already in the data file).
         // Segments with records ≥ checkpointLsn stay in _sealedSegments and are reclaimed by the next checkpoint cycle —
-        // same gate as steady-state recycling. Reuses MarkReclaimable so the reopen path invents no new frontier.
-        MarkReclaimable(checkpointLsn);
+        // same gate as steady-state recycling. Reuses MarkReclaimable so the reopen path invents no new frontier. With archiving configured the
+        // archive floor joins the gate, as at step 8: a close with the store unreachable must not lose its un-archived segments to the reopen (WA-3).
+        MarkReclaimable(Math.Min(checkpointLsn, reclaimFloorAtOpen));
     }
 
     /// <summary>
@@ -236,7 +244,8 @@ internal sealed class WalSegmentManager : IDisposable
             // Single-threaded open path, but locked for consistency with the concurrent writers (CK-07).
             lock (_sealedLock)
             {
-                _sealedSegments.Add((valid[i].Path, valid[i].Id, lastLsn, valid[i].SizeBytes, valid[i].SizeBytes));
+                _sealedSegments.Add(new WalSealedSegment(valid[i].Path, valid[i].Id, valid[i].FirstLsn, lastLsn, valid[i].SizeBytes, valid[i].SizeBytes, 0,
+                    true));
             }
         }
 
@@ -326,11 +335,15 @@ internal sealed class WalSegmentManager : IDisposable
         RotateProbe?.Invoke();
 
         // The new segment becomes active and the old one sealed in ONE step under the list lock (CK-07): a reader that snapshots both under the lock
-        // (SnapshotForTail) then sees the old segment either as the active one or as sealed, never as neither (BKP-04). Then close its handle.
+        // (SnapshotForTail, ArchiveSnapshot) then sees the old segment either as the active one or as sealed, never as neither (BKP-04). Then close
+        // its handle. The seal time is the archive's: one clock read per rotation.
+        var sealedUtcTicks = DateTime.UtcNow.Ticks;
         lock (_sealedLock)
         {
             ActiveSegment = newSegment;
-            _sealedSegments.Add((oldSegment.Path, oldSegment.SegmentId, oldSegment.LastLSN, oldSegment.SegmentSize, oldSegment.WriteOffset));
+            _sealedSegments.Add(new WalSealedSegment(oldSegment.Path, oldSegment.SegmentId, oldSegment.FirstLSN, oldSegment.LastLSN, oldSegment.SegmentSize,
+                oldSegment.WriteOffset, sealedUtcTicks, false));
+            Volatile.Write(ref _sealedGeneration, _sealedGeneration + 1);
         }
         oldSegment.Dispose();
 
@@ -356,10 +369,10 @@ internal sealed class WalSegmentManager : IDisposable
         {
             for (int i = _sealedSegments.Count - 1; i >= 0; i--)
             {
-                var (path, _, lastLSN, _, _) = _sealedSegments[i];
-                if (lastLSN < checkpointLSN)
+                var segment = _sealedSegments[i];
+                if (segment.LastLsn < checkpointLSN)
                 {
-                    _fileIO.Delete(path);
+                    _fileIO.Delete(segment.Path);
                     _sealedSegments.RemoveAt(i);
                     reclaimed++;
                 }
@@ -367,6 +380,78 @@ internal sealed class WalSegmentManager : IDisposable
         }
 
         return reclaimed;
+    }
+
+    /// <summary>
+    /// The bytes on disk only the WAL archive's floor keeps (BKP-10's backlog): the declared sizes of the sealed segments with
+    /// <paramref name="archiveFloor"/> ≤ last LSN &lt; <paramref name="trimLsn"/> — archived below the floor, reclaimable by the checkpoint below the
+    /// trim. One pass under the list lock, no allocation; the checkpoint calls it at step 8 only when archiving holds something back.
+    /// </summary>
+    internal long BytesHeldBetween(long archiveFloor, long trimLsn)
+    {
+        long held = 0;
+        lock (_sealedLock)
+        {
+            foreach (var segment in _sealedSegments)
+            {
+                if (segment.LastLsn >= archiveFloor && segment.LastLsn < trimLsn)
+                {
+                    held += segment.SizeBytes;
+                }
+            }
+        }
+
+        return held;
+    }
+
+    /// <summary>A copy of the sealed segments, ascending (the archiver's start-up check; allocates).</summary>
+    internal List<WalSealedSegment> SealedSegments()
+    {
+        lock (_sealedLock)
+        {
+            return new List<WalSealedSegment>(_sealedSegments);
+        }
+    }
+
+    /// <summary>Bumped by every rotation: a change tells the WAL archiver a segment was sealed.</summary>
+    internal long SealedGeneration => Volatile.Read(ref _sealedGeneration);
+
+    /// <summary>
+    /// What the WAL archiver needs to know, read in one step under the list lock (CK-07) without allocating: the oldest sealed segment whose last LSN
+    /// is past <paramref name="archivedThroughLsn"/> (the next to archive), how many such segments there are and how many bytes they hold, the bytes
+    /// the archive floor alone keeps, and the active segment.
+    /// </summary>
+    internal WalArchiveSnapshot ArchiveSnapshot(long archivedThroughLsn, long trimLsn)
+    {
+        lock (_sealedLock)
+        {
+            WalSealedSegment next = default;
+            var pending = 0;
+            long pendingBytes = 0;
+            long heldBytes = 0;
+            foreach (var segment in _sealedSegments)
+            {
+                if (segment.LastLsn <= archivedThroughLsn)
+                {
+                    continue;
+                }
+
+                if (pending++ == 0)
+                {
+                    next = segment;
+                }
+
+                pendingBytes += segment.WrittenBytes;
+                if (segment.LastLsn < trimLsn)
+                {
+                    heldBytes += segment.SizeBytes;
+                }
+            }
+
+            var active = ActiveSegment;
+            return new WalArchiveSnapshot(next, pending, pendingBytes, heldBytes, active?.SegmentId ?? 0, active?.FirstLSN ?? 0,
+                active == null ? 0 : active.BatchEndOffset, _sealedGeneration);
+        }
     }
 
     /// <summary>
@@ -544,9 +629,9 @@ internal sealed class WalSegmentManager : IDisposable
         lock (_sealedLock)
         {
             paths = new List<string>(_sealedSegments.Count + 1);
-            foreach (var (path, _, _, _, _) in _sealedSegments)
+            foreach (var segment in _sealedSegments)
             {
-                paths.Add(path);
+                paths.Add(segment.Path);
             }
         }
 
@@ -569,9 +654,9 @@ internal sealed class WalSegmentManager : IDisposable
         lock (_sealedLock)
         {
             var result = new List<WalTailSegment>(_sealedSegments.Count + 1);
-            foreach (var (path, id, lastLsn, size, written) in _sealedSegments)
+            foreach (var segment in _sealedSegments)
             {
-                result.Add(new WalTailSegment(id, path, lastLsn, (uint)size, written, false));
+                result.Add(new WalTailSegment(segment.Id, segment.Path, segment.LastLsn, (uint)segment.SizeBytes, segment.WrittenBytes, false));
             }
 
             var active = ActiveSegment;
@@ -610,3 +695,27 @@ internal sealed class WalSegmentManager : IDisposable
 /// <param name="WrittenBytes">Where the writer stopped writing it; every byte past it is zero.</param>
 /// <param name="IsActive">Whether it is the segment being written.</param>
 internal readonly record struct WalTailSegment(long SegmentId, string Path, long LastLsn, uint DeclaredSize, long WrittenBytes, bool IsActive);
+
+/// <summary>A sealed WAL segment, as <see cref="WalSegmentManager"/> keeps it until the checkpoint reclaims it.</summary>
+/// <param name="Path">The segment file.</param>
+/// <param name="Id">The segment's id, also its file name.</param>
+/// <param name="FirstLsn">Its header's first LSN.</param>
+/// <param name="LastLsn">The last LSN it holds; <c>FirstLsn - 1</c> for a segment holding none.</param>
+/// <param name="SizeBytes">The size its header declares.</param>
+/// <param name="WrittenBytes">Where the writer stopped writing it (a batch end); the declared size for a segment adopted at open.</param>
+/// <param name="SealedUtcTicks">When this session sealed it; 0 for a segment adopted at open (unknown).</param>
+/// <param name="Adopted">Whether the open adopted it from a previous session rather than this session sealing it.</param>
+internal readonly record struct WalSealedSegment(string Path, long Id, long FirstLsn, long LastLsn, long SizeBytes, long WrittenBytes, long SealedUtcTicks,
+    bool Adopted);
+
+/// <summary>What the WAL archiver reads of the segment manager in one step (<see cref="WalSegmentManager.ArchiveSnapshot"/>).</summary>
+/// <param name="Next">The oldest sealed segment not archived yet; meaningful only when <paramref name="PendingCount"/> &gt; 0.</param>
+/// <param name="PendingCount">Sealed segments whose last LSN is past the archive's end.</param>
+/// <param name="PendingWrittenBytes">Their written bytes.</param>
+/// <param name="HeldBytes">The declared bytes of those the checkpoint could reclaim but for the archive.</param>
+/// <param name="ActiveSegmentId">The segment being written.</param>
+/// <param name="ActiveFirstLsn">Its header's first LSN.</param>
+/// <param name="ActiveWrittenBytes">Its written length at a batch end.</param>
+/// <param name="SealedGeneration">The rotation count at the snapshot.</param>
+internal readonly record struct WalArchiveSnapshot(WalSealedSegment Next, int PendingCount, long PendingWrittenBytes, long HeldBytes, long ActiveSegmentId,
+    long ActiveFirstLsn, long ActiveWrittenBytes, long SealedGeneration);

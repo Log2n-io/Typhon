@@ -164,6 +164,10 @@ internal sealed class StoreView
 
                 packs.Add(CatalogPack.From(f.Name, f.Length, reader.Header, reader.Footer));
             }
+            catch (FileNotFoundException)
+            {
+                // Deleted since the listing (retention, under another process's store.lock): no longer a pack of the store, not an unreadable one (DL-11).
+            }
             catch (Exception ex) when (ex is BackupException or IOException or UnauthorizedAccessException)
             {
                 BackupLog.PackUnreadable(log, paths.Root, f.Name, ex.Message);
@@ -282,6 +286,15 @@ internal sealed class FileSystemBackupStore : IBackupPointStore
     /// <summary>The last point a session of this store published, as the store recorded it: what the caller reports without reading the store again.</summary>
     public CatalogPack LastPublished { get; private set; }
 
+    /// <summary>The store's directory.</summary>
+    public string Root => _root;
+
+    /// <summary>The file system the store is written through (the process's own unless a test gave one).</summary>
+    public IStoreFileSystem FileSystem => _fs ?? StoreFileSystem.Instance;
+
+    /// <summary>Where the store logs.</summary>
+    public ILogger Log => _log;
+
     /// <inheritdoc />
     public IBackupStoreSession OpenSession(Guid databaseId, CancellationToken ct)
     {
@@ -308,6 +321,7 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
     private uint _highWater;
     private uint _lastAllocated;
     private PackWriter _open;
+    private CancellationToken _compactionCancellation;
 
     /// <summary>Called with each point once it is durable and visible, before the catalog (a cache) is updated.</summary>
     internal Action<CatalogPack> Published { get; set; }
@@ -330,6 +344,12 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
 
     public string Root => _paths.Root;
 
+    /// <summary>The file system the session writes through.</summary>
+    internal IStoreFileSystem FileSystem => _fs;
+
+    /// <summary>Where the session logs.</summary>
+    internal ILogger Log => _log;
+
     /// <summary>The store as this session sees it (always rebuilt from the packs, then kept up to date by its own publishes).</summary>
     public StoreView View => _view;
 
@@ -338,7 +358,26 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
     /// <see cref="BackupStoreMismatchException"/> when it belongs to another database.
     /// </summary>
     public static BackupStore OpenForWrite(string root, Guid databaseId, bool createIfMissing, IStoreFileSystem fs = null, ILogger log = null,
+        PackWriterOptions writerOptions = null) =>
+        Open(root, databaseId, createIfMissing, PurposeBackup, fs, log, writerOptions);
+
+    /// <summary>
+    /// Opens an existing store for maintenance (compaction, retention): its identity comes from <c>store.json</c>, nothing is created, and the lock
+    /// holder is named <paramref name="purpose"/> in another writer's refusal (DL-10). Throws as <see cref="OpenForWrite"/>.
+    /// </summary>
+    public static BackupStore OpenForMaintenance(string root, string purpose, IStoreFileSystem fs = null, ILogger log = null,
         PackWriterOptions writerOptions = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(purpose);
+        return Open(root, Guid.Empty, createIfMissing: false, purpose, fs, log, writerOptions);
+    }
+
+    /// <summary>The lock holder's purpose for a capture.</summary>
+    public const string PurposeBackup = "backup";
+
+    /// <summary><paramref name="databaseId"/> empty: maintenance, the store's own identity is taken as it is.</summary>
+    private static BackupStore Open(string root, Guid databaseId, bool createIfMissing, string purpose, IStoreFileSystem fs, ILogger log,
+        PackWriterOptions writerOptions)
     {
         fs ??= StoreFileSystem.Instance;
         log ??= NullLogger.Instance;
@@ -363,7 +402,7 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
         {
             var holder = TryReadHolder(fs, paths);
             throw new BackupStoreLockedException(root, holder?.Pid ?? 0, holder?.Machine,
-                holder == null ? DateTimeOffset.MinValue : new DateTimeOffset(holder.StartedUtc, TimeSpan.Zero));
+                holder == null ? DateTimeOffset.MinValue : new DateTimeOffset(holder.StartedUtc, TimeSpan.Zero), holder?.Purpose);
         }
 
         try
@@ -380,8 +419,10 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
                 }
             }
 
-            WriteHolder(fs, paths);
-            var identity = OpenOrCreateIdentity(fs, paths, databaseId, createIfMissing);
+            WriteHolder(fs, paths, purpose);
+            var identity = databaseId == Guid.Empty
+                ? StoreView.ReadIdentity(fs, paths) ?? throw new DirectoryNotFoundException($"'{root}' is not a backup store: it has no store.json.")
+                : OpenOrCreateIdentity(fs, paths, databaseId, createIfMissing);
             var store = new BackupStore(fs, log, writerOptions, paths, identity, storeLock);
             storeLock = null;
             store.Initialize();
@@ -585,6 +626,96 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
     }
 
     /// <summary>
+    /// Starts the compacted pack of <paramref name="source"/>, an incremental point of this store (05 §2, DL-10): <c>{X}-C.tpack.tmp</c> under X's
+    /// own id (none is allocated, <c>store.hwm</c> is not written), its header X's with <c>Kind = Compacted</c>, <c>ParentId = 0</c> and
+    /// <c>BaseId = X</c>. The caller writes X's image and tail into it, as <see cref="BackupCompactor"/> does. Its publish verifies the sealed temp in
+    /// full first and makes it visible only if that passes (BKP-13): resolution prefers a <c>-C</c>, so a bad one would break every later point.
+    /// </summary>
+    public PackWriter BeginCompaction(CatalogPack source, CancellationToken ct = default)
+    {
+        ObjectDisposedException.ThrowIf(_lock == null, this);
+        ArgumentNullException.ThrowIfNull(source);
+        if (_open is { IsOpen: true })
+        {
+            throw new InvalidOperationException("A point is already being written in this session.");
+        }
+
+        if (source.Kind != BackupKind.Incremental)
+        {
+            throw new InvalidOperationException($"Point #{source.BackupId} is a {source.Kind} pack: only an incremental point is compacted.");
+        }
+
+        if (source.StoreId != _identity.StoreId || source.DatabaseId != _identity.DatabaseId)
+        {
+            throw new BackupStoreMismatchException(_paths.Root, _identity.DatabaseId, source.DatabaseId, $"Point #{source.BackupId} is not this store's.");
+        }
+
+        if (_view.Find(source.BackupId).Compacted != null)
+        {
+            throw new InvalidOperationException($"Point #{source.BackupId} is already compacted.");
+        }
+
+        var identity = new PackIdentity(source.DatabaseId, source.StoreId, source.ChainId, source.BackupId, 0, source.BackupId, BackupKind.Compacted,
+            source.TimelineId, source.FormatRevision, source.EngineVersion, source.Offline);
+        var temp = _paths.PackPath(PackFormat.FileName(source.BackupId, BackupKind.Compacted) + PackFormat.TempSuffix);
+        _compactionCancellation = ct;
+        _open = new PackWriter(_fs, _fs.OpenCreateNew(temp), identity, this, _writerOptions, _log);
+        return _open;
+    }
+
+    /// <summary>
+    /// Deletes a published pack, durably: the delete, then a flush of <c>packs/</c>, before the caller's next delete (BKP-14: a crash keeps a prefix of a
+    /// descending sequence). Retention's only way to remove a pack, under this session's lock. The view is stale until <see cref="RefreshView"/>.
+    /// </summary>
+    public void DeletePack(string file)
+    {
+        ObjectDisposedException.ThrowIf(_lock == null, this);
+        if (!StoreCatalog.IsPublishedPack(file))
+        {
+            throw new ArgumentException($"'{file}' is not a published pack name.", nameof(file));
+        }
+
+        _fs.DeleteFile(_paths.PackPath(file));
+        _fs.FlushDirectory(_paths.Packs);
+    }
+
+    /// <summary>
+    /// The view after deletes: the catalog keeps the packs still listed (a pack never changes under the lock, BKP-08, so no header is read again), and
+    /// is written back.
+    /// </summary>
+    public void RefreshView()
+    {
+        ObjectDisposedException.ThrowIf(_lock == null, this);
+        var listing = _fs.EnumerateFiles(_paths.Packs);
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var f in listing)
+        {
+            names.Add(f.Name);
+        }
+
+        var packs = new List<CatalogPack>();
+        foreach (var p in _view.Catalog.Packs)
+        {
+            if (names.Contains(p.File))
+            {
+                packs.Add(p);
+            }
+        }
+
+        var unreadable = new List<CatalogUnreadable>();
+        foreach (var u in _view.Catalog.Unreadable)
+        {
+            if (names.Contains(u.File))
+            {
+                unreadable.Add(u);
+            }
+        }
+
+        _view.Catalog = StoreCatalog.Build(_identity, StoreCatalog.Fingerprint(listing), _highWater, packs, unreadable);
+        WriteCatalogIfChanged();
+    }
+
+    /// <summary>
     /// <c>max(store.hwm, every pack id, every temp id, every id this session allocated) + 1</c>, made durable in <c>store.hwm</c> before the
     /// caller creates its temp: an id is never reused, even after its pack is deleted (BKP-08, DC-6).
     /// </summary>
@@ -615,6 +746,12 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
     public string Publish(PackWriter writer)
     {
         var final = writer.TempPath[..^PackFormat.TempSuffix.Length];
+        if (writer.Header.Kind == BackupKind.Compacted)
+        {
+            // DL-3: verified sealed and fsynced, BEFORE the rename. A failure leaves the temp to the writer's abort: nothing was ever visible.
+            VerifyCompactedTemp(writer);
+        }
+
         try
         {
             StoreFileSystem.MoveDurable(_fs, writer.TempPath, final, replace: false);
@@ -658,6 +795,22 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
         return final;
     }
 
+    private void VerifyCompactedTemp(PackWriter writer)
+    {
+        var file = Path.GetFileName(writer.TempPath);
+        var result = BackupVerifier.VerifyPackFile(_fs, _view, file, VerifyLevel.Full,
+            new VerifyOptions { Cancellation = _compactionCancellation, Logger = _log });
+        if (result.Status == PackVerifyStatus.Ok)
+        {
+            return;
+        }
+
+        var first = result.Findings.Find(f => f.Severity == VerifySeverity.Damage);
+        BackupLog.CompactionRejected(_log, writer.BackupId, first.Code, first.Message);
+        throw new BackupPackCorruptException(writer.TempPath, "Compaction", first.PageId,
+            $"the compacted pack failed its full verify before publish ({first.Code}: {first.Message}); nothing was published");
+    }
+
     private void WriteCatalogIfChanged()
     {
         try
@@ -690,7 +843,7 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
         }
     }
 
-    private static void WriteHolder(IStoreFileSystem fs, in StorePaths paths)
+    private static void WriteHolder(IStoreFileSystem fs, in StorePaths paths, string purpose)
     {
         try
         {
@@ -699,7 +852,7 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
                 Pid = Environment.ProcessId,
                 Machine = Environment.MachineName,
                 StartedUtc = DateTime.UtcNow,
-                Purpose = "backup",
+                Purpose = purpose,
             }, BackupJsonContext.Default.StoreLockHolder);
             fs.DeleteFile(paths.LockHolder);
             using var file = fs.OpenCreateNew(paths.LockHolder);

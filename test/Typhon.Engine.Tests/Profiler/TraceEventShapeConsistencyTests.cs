@@ -62,6 +62,26 @@ internal sealed class TraceEventShapeConsistencyTests
     }
 
     /// <summary>
+    /// The backup spans (#1416, kinds 44-49) and the archive span (#1418, kind 74, right after the 65-73 instant carve-out) are spans to every reader.
+    /// </summary>
+    [Test]
+    public void TheBackupKinds_AreSpans()
+    {
+        foreach (var kind in new[]
+                 {
+                     TraceEventKind.BackupCapture, TraceEventKind.BackupFreeze, TraceEventKind.BackupTail, TraceEventKind.BackupScan,
+                     TraceEventKind.BackupVerify, TraceEventKind.BackupLifecycle, TraceEventKind.BackupArchiveSegment,
+                 })
+        {
+            Assert.That(kind.IsSpan(), Is.True, kind.ToString());
+        }
+
+        Assert.That((byte)TraceEventKind.BackupCapture, Is.EqualTo(44));
+        Assert.That((byte)TraceEventKind.BackupLifecycle, Is.EqualTo(49));
+        Assert.That((byte)TraceEventKind.BackupArchiveSegment, Is.EqualTo(74));
+    }
+
+    /// <summary>
     /// Guards the specific regression: kind 36 is an instant, and readers must know it.
     /// </summary>
     [Test]

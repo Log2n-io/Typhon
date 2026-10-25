@@ -104,11 +104,39 @@ internal interface IStoreFileSystem
     /// <summary>The files directly inside <paramref name="directory"/>, ordered by name (ordinal). A missing directory has none.</summary>
     IReadOnlyList<StoreFileEntry> EnumerateFiles(string directory);
 
+    /// <summary>The names of the directories directly inside <paramref name="directory"/>, ordered (ordinal). A missing directory has none.</summary>
+    IReadOnlyList<string> EnumerateDirectories(string directory)
+    {
+        if (!Directory.Exists(directory))
+        {
+            return [];
+        }
+
+        var names = new List<string>();
+        foreach (var d in Directory.EnumerateDirectories(directory))
+        {
+            names.Add(System.IO.Path.GetFileName(d));
+        }
+
+        names.Sort(StringComparer.Ordinal);
+        return names;
+    }
+
     /// <summary>Whether a database bundle's advisory lock names a live process (<see cref="DatabaseLockFile.IsHeldByLiveProcess"/>).</summary>
     bool IsBundleHeldByLiveProcess(string bundleDirectory);
 
     /// <summary>The absolute form of <paramref name="path"/>, so no caller ever derives an empty parent from a bare relative name.</summary>
     string GetFullPath(string path) => System.IO.Path.GetFullPath(path);
+
+    /// <summary>
+    /// The bytes free for this process on <paramref name="directory"/>'s volume; <c>false</c> when the volume does not say (a share, a file system
+    /// without the call). A compaction checks it before writing a full image beside the packs it reads (DL-12).
+    /// </summary>
+    bool TryGetAvailableFreeSpace(string directory, out long bytes)
+    {
+        bytes = 0;
+        return false;
+    }
 
     /// <summary>
     /// Like <see cref="TryLockExclusive"/>, for a lock file that exists only while it is held, where the platform allows it. Windows: releasing it
@@ -359,6 +387,23 @@ internal sealed partial class StoreFileSystem : IStoreFileSystem
 
         // Every Unix: Linux, and macOS and the BSDs, which open and fsync a directory the same way (it used to be skipped there, silently).
         FlushDirectoryPosix(directory);
+    }
+
+    /// <inheritdoc />
+    public bool TryGetAvailableFreeSpace(string directory, out long bytes)
+    {
+        try
+        {
+            // Windows: the drive of the path (a UNC share is refused by DriveInfo, and reported unknown). Unix: statvfs of the path itself.
+            var full = System.IO.Path.GetFullPath(directory);
+            bytes = new DriveInfo(OperatingSystem.IsWindows() ? System.IO.Path.GetPathRoot(full) : full).AvailableFreeSpace;
+            return true;
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            bytes = 0;
+            return false;
+        }
     }
 
     /// <inheritdoc />

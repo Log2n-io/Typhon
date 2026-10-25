@@ -133,7 +133,8 @@ public enum TyphonErrorCode
     /// </summary>
     RecoveryArchetypeNotRegistered  = 7012,
 
-    // 71xx — Backup (7101-7106: the store and restore, #1413; 7107-7108: online capture, #1412)
+    // 71xx — Backup (7101-7106: the store and restore, #1413; 7107-7108: online capture, #1412; 7109: lifecycle, #1415; 7110: ops, #1416;
+    // 7111-7112: WAL archiving, #1418)
 
     /// <summary>Another writer holds the backup store's lock (see <see cref="BackupStoreLockedException"/>). Transient.</summary>
     BackupStoreLocked               = 7101,
@@ -161,6 +162,27 @@ public enum TyphonErrorCode
 
     /// <summary>A backup was requested while another one was running on the same engine.</summary>
     BackupInProgress                = 7108,
+
+    /// <summary>
+    /// An operation was approved on a plan that no longer holds: what it would do now differs from what was reviewed (see
+    /// <see cref="BackupPlanChangedException"/>). Nothing was written.
+    /// </summary>
+    BackupPlanChanged               = 7109,
+
+    /// <summary>
+    /// The engine's backups are not configured the way the call needs: no <see cref="BackupOptions"/> for a point into the configured store, a store other
+    /// than the configured one, or a <c>backup.request</c> to an engine that is not running, has backup off, or refuses requests.
+    /// </summary>
+    BackupNotConfigured             = 7110,
+
+    /// <summary>
+    /// A restore to an LSN or a time cannot reach its target: no base point, a gap in the archived WAL, a target past or before the archive (see
+    /// <see cref="RestoreTargetUnreachableException"/>). Nothing was written.
+    /// </summary>
+    RestoreTargetUnreachable        = 7111,
+
+    /// <summary>The WAL archive of a timeline holds another history than this database's (see <see cref="BackupArchiveDivergedException"/>).</summary>
+    BackupArchiveDiverged           = 7112,
 
     // 8xxx — Runtime / Scheduler
 

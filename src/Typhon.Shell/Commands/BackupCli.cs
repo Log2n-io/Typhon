@@ -2,6 +2,7 @@ using Spectre.Console;
 using Spectre.Console.Cli;
 using System;
 using System.ComponentModel;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -91,6 +92,85 @@ internal static class BackupCli
     }
 
     /// <summary>
+    /// Parses a restore's target: <c>--point</c>, <c>--lsn</c> or <c>--time</c> (one at most; none is the latest point), and <c>--timeline</c>, which
+    /// only an LSN or a time takes.
+    /// </summary>
+    internal static bool TryParseTarget(string point, string lsn, string time, string timeline, out PointSelector target, out string error)
+    {
+        target = PointSelector.Latest;
+        var given = (string.IsNullOrWhiteSpace(point) ? 0 : 1) + (string.IsNullOrWhiteSpace(lsn) ? 0 : 1) + (string.IsNullOrWhiteSpace(time) ? 0 : 1);
+        if (given > 1)
+        {
+            error = "--point, --lsn and --time are mutually exclusive.";
+            return false;
+        }
+
+        Guid? timelineId = null;
+        if (!string.IsNullOrWhiteSpace(timeline))
+        {
+            if (!Guid.TryParse(timeline.Trim(), out var parsed))
+            {
+                error = $"Unknown timeline '{timeline}'. Expected a timeline id.";
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(lsn) && string.IsNullOrWhiteSpace(time))
+            {
+                error = "--timeline goes with --lsn or --time.";
+                return false;
+            }
+
+            timelineId = parsed;
+        }
+
+        if (!string.IsNullOrWhiteSpace(lsn))
+        {
+            if (!long.TryParse(lsn.Trim(), out var l) || l <= 0)
+            {
+                error = $"Unknown LSN '{lsn}'. Expected a positive integer.";
+                return false;
+            }
+
+            target = PointSelector.AtLsn(l, timelineId);
+            error = null;
+            return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(time))
+        {
+            if (!TryParseUtc(time, "--time", out var utc, out error))
+            {
+                return false;
+            }
+
+            target = PointSelector.AtTime(utc, timelineId);
+            return true;
+        }
+
+        return TryParsePoint(point, out target, out error);
+    }
+
+    /// <summary>
+    /// Parses an instant written with its offset (<c>Z</c> or <c>±hh:mm</c>), to UTC. An instant without one is refused: the machine's time zone would
+    /// silently decide which commits a restore keeps.
+    /// </summary>
+    internal static bool TryParseUtc(string value, string option, out DateTime utc, out string error)
+    {
+        utc = default;
+        var text = value.Trim();
+        var hasOffset = text.EndsWith('Z') || text.EndsWith('z') || (text.Length > 6 && text[^6] is '+' or '-' && text[^3] == ':');
+        if (!hasOffset || !DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed))
+        {
+            error = $"{option} '{value}' needs an ISO 8601 instant with its offset, e.g. 2026-10-21T14:03:00Z or 2026-10-21T16:03:00+02:00.";
+            return false;
+        }
+
+        utc = parsed.UtcDateTime;
+        error = null;
+        return true;
+    }
+
+    /// <summary>
     /// The exit code for what an operation threw, or <c>-1</c> for an exception that is not an outcome but a defect. Verbs catch what maps
     /// (<c>catch … when (ExitCodeFor(ex) &gt;= 0 || AsJson)</c>): in text a defect reaches the shell's handler with its stack and whole chain; in JSON
     /// it is still a JSON error, exit 2, because the reader is a program.
@@ -100,12 +180,11 @@ internal static class BackupCli
     /// lock (a refusal: the store will not run where it cannot exclude another writer); <see cref="InvalidOperationException"/> when it has no
     /// backup id left (and its misuse checks).
     /// </remarks>
-    internal static int ExitCodeFor(Exception ex) => ex switch
+    internal static int ExitCodeFor(Exception ex) => BackupOperations.Classify(ex) switch
     {
-        RestoreRefusedException or DatabaseLockedException or BackupStoreMismatchException or BackupStoreLockedException
-            or BackupFormatUnsupportedException or NotSupportedException => ExitRefused,
-        BackupChainBrokenException or BackupPackCorruptException => ExitStoreDamaged,
-        OperationCanceledException or IOException or UnauthorizedAccessException or TyphonException or InvalidOperationException => ExitFailed,
+        BackupFailureKind.Refused or BackupFailureKind.PlanChanged => ExitRefused,
+        BackupFailureKind.StoreDamaged => ExitStoreDamaged,
+        BackupFailureKind.Failed => ExitFailed,
         _ => -1,
     };
 
@@ -125,6 +204,82 @@ internal static class BackupCli
         return new BackupOutput(AnsiConsole.Console, System.Console.Out, CheckCommand.ResolveFormat(settings.Format, null))
             .Error(ExitUsage, $"Unknown option or argument: {string.Join(", ", leftovers)}.");
     }
+
+    /// <summary>A duration: a whole number with a unit, <c>30d</c>, <c>12h</c>, <c>90m</c>, <c>45s</c>. One past what a duration holds is refused.</summary>
+    internal static bool TryParseDuration(string value, out TimeSpan duration, out string error)
+    {
+        duration = TimeSpan.Zero;
+        error = null;
+        var v = value?.Trim() ?? "";
+        if (v.Length >= 2 && long.TryParse(v.AsSpan(0, v.Length - 1), NumberStyles.None, CultureInfo.InvariantCulture, out var n))
+        {
+            var unit = char.ToLowerInvariant(v[^1]) switch
+            {
+                'd' => TimeSpan.TicksPerDay,
+                'h' => TimeSpan.TicksPerHour,
+                'm' => TimeSpan.TicksPerMinute,
+                's' => TimeSpan.TicksPerSecond,
+                _ => 0,
+            };
+            if (unit > 0 && n <= TimeSpan.MaxValue.Ticks / unit)
+            {
+                duration = TimeSpan.FromTicks(n * unit);
+                return true;
+            }
+        }
+
+        error = $"Unknown duration '{value}'. Expected a whole number and a unit: 30d, 12h, 90m, 45s.";
+        return false;
+    }
+
+    /// <summary>A size: bytes, or a number with KB/MB/GB/TB (powers of 1000) or KiB/MiB/GiB/TiB (powers of 1024).</summary>
+    internal static bool TryParseBytes(string value, out long bytes, out string error)
+    {
+        bytes = 0;
+        error = null;
+        var v = value?.Trim() ?? "";
+        var split = v.Length;
+        while (split > 0 && char.IsAsciiLetter(v[split - 1]))
+        {
+            split--;
+        }
+
+        var unit = v[split..].ToUpperInvariant();
+        long scale = unit switch
+        {
+            "" or "B" => 1,
+            "KB" => 1000L,
+            "MB" => 1000L * 1000,
+            "GB" => 1000L * 1000 * 1000,
+            "TB" => 1000L * 1000 * 1000 * 1000,
+            "KIB" => 1L << 10,
+            "MIB" => 1L << 20,
+            "GIB" => 1L << 30,
+            "TIB" => 1L << 40,
+            _ => 0,
+        };
+        // n ≤ long.MaxValue / scale first: the product of two decimals overflows past 7.9e28 (a size refused, not an exception).
+        if (scale > 0 && decimal.TryParse(v.AsSpan(0, split), NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var n) && n >= 0
+            && n <= long.MaxValue / (decimal)scale && n * scale <= long.MaxValue)
+        {
+            bytes = (long)(n * scale);
+            return true;
+        }
+
+        error = $"Unknown size '{value}'. Expected bytes, or a number with KB, MB, GB, TB, KiB, MiB, GiB or TiB: 500GiB, 2TB.";
+        return false;
+    }
+
+    /// <summary>
+    /// <c>status</c>'s exit code (DL-22 e): Ok 0; Warning and Degraded 1 (every point is still restorable, the reason says what is reduced); Failing,
+    /// Off and anything unknown 3 (a monitored database with no backup is not healthy). 2 stays the code of a command that itself failed.
+    /// </summary>
+    internal static int ExitCodeOf(BackupHealth health) => health switch
+    {
+        BackupHealth.Ok => ExitOk,
+        BackupHealth.Warning or BackupHealth.Degraded => ExitWarning,
+        _ => ExitStoreDamaged,
+    };
 
     /// <summary>A byte count for a person.</summary>
     internal static string Bytes(long bytes) => bytes switch

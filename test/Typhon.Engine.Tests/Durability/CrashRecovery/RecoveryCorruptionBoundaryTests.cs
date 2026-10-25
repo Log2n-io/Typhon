@@ -286,6 +286,80 @@ internal sealed class RecoveryCorruptionBoundaryTests
             "a record written AFTER the corruption boundary has no CRC-chain guarantee and must not be replayed (REC-01)");
     }
 
+    /// <summary>
+    /// A crash tears the active segment's last block (a sector-torn O_DIRECT write: header landed, body did not). The reopen recovers up to the tear and keeps
+    /// going in a new segment; a second crash must not lose what that session committed. Recovery reads every segment on disk and stops for good at a tear
+    /// (REC-01), so this holds only while no torn segment outlives the crash open: today that open's checkpoint reclaims it before the open returns. Any
+    /// floor that retains it (#1418's archive floor) would lose the next session's commits (impl/1418 WA-9).
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void TornActiveSegment_ThenASecondCrash_KeepsTheNextSessionsCommits()
+    {
+        EntityId first, second;
+
+        using (var scope = _serviceProvider.CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<CompA>();
+            dbe.InitializeArchetypes();
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                var c = new CompA(1, 1, 1);
+                first = tx.Spawn<CompAArch>(CompAArch.A.Set(in c));
+                tx.Commit();
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        // The torn block: the next 4 KiB block after the last durable one, its first bytes landed and the rest did not.
+        var torn = WalFiles().Last(SegmentHasData);
+        var extent = WrittenExtent(torn);
+        var tornAt = WalSegmentHeader.SizeInBytes + (extent - WalSegmentHeader.SizeInBytes + 4095) / 4096 * 4096;
+        using (var fs = new FileStream(torn, FileMode.Open, FileAccess.ReadWrite))
+        {
+            Assert.That(tornAt + 4096, Is.LessThanOrEqualTo(fs.Length), "premise: the torn block lies inside the pre-allocated segment");
+            fs.Seek(tornAt, SeekOrigin.Begin);
+            fs.Write(Enumerable.Repeat((byte)0xA5, 64).ToArray(), 0, 64);
+            fs.Flush(true);
+        }
+
+        using (var scope = _serviceProvider.CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<CompA>();
+            dbe.InitializeArchetypes();
+            Assert.That(dbe.LastWalV2RecoveryResult.StoppedAtCorruption, Is.True, "premise: the reopen met the tear");
+            using (var t = dbe.CreateQuickTransaction())
+            {
+                Assert.That(t.IsAlive(first), Is.True, "premise: the record before the tear was recovered");
+            }
+
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                var c = new CompA(2, 2, 2);
+                second = tx.Spawn<CompAArch>(CompAArch.A.Set(in c));
+                tx.Commit();
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        using var scope3 = _serviceProvider.CreateScope();
+        using var dbe3 = scope3.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe3.RegisterComponentFromAccessor<CompA>();
+        dbe3.InitializeArchetypes();
+        var result = dbe3.LastWalV2RecoveryResult;
+        using var readTx = dbe3.CreateQuickTransaction();
+        Assert.Multiple(() =>
+        {
+            Assert.That(readTx.IsAlive(first), Is.True, "the first session's commit");
+            Assert.That(readTx.IsAlive(second), Is.True,
+                $"the second session's commit was lost: recovery scanned {result.SegmentsScanned} segment(s), stopped at corruption = {result.StoppedAtCorruption}");
+        });
+    }
+
     /// <summary>Control: an undamaged multi-segment log must scan every segment and never report a boundary stop.</summary>
     [Test]
     [CancelAfter(60_000)]

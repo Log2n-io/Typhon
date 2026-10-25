@@ -47,6 +47,7 @@ import { toggleViewCallTree, toggleViewCriticalPath, toggleViewProfiler, toggleV
 import { toggleViewQueryConsole } from './commands/openQueryConsole';
 import { toggleViewRealms } from './commands/openRealms';
 import { openIntegrity } from './commands/openIntegrity';
+import { openBackups } from './commands/openBackups';
 import { registerOpenConnect } from './commands/baseCommands';
 import { ANY_ZONE_D_VIEW_ACTIVE, isViewVisible } from './viewRegistry';
 import { logError, logInfo } from '@/stores/useLogStore';
@@ -126,6 +127,9 @@ export default function MenuBar() {
      cannot be opened at all. Filing it under View would put the recovery tool behind the very thing
      that is broken. */}
  <MenubarItem onClick={() => openIntegrity()}>Check Database Integrity…</MenubarItem>
+ {/* #1417 — beside Integrity, for the same reason: it acts on a store and a bundle, needs no session, and a restore is most needed when the
+     database cannot be opened. */}
+ <MenubarItem onClick={() => openBackups()}>Backups…</MenubarItem>
  </MenubarContent>
  </MenubarMenu>
 

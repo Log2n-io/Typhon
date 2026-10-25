@@ -228,7 +228,7 @@ class BackupStateFileTests : BackupTestBase<BackupStateFileTests>
         {
             var dbe = Open(scope);
             Capture(dbe, store);
-            dbe.AdoptTimeline(Guid.NewGuid());   // a new timeline: the lineage stops being trusted
+            dbe.AdoptTimeline(Guid.NewGuid(), Guid.Empty, 0, TimelineReason.Restore, keepLineage: false);   // a new timeline: the lineage stops being trusted
             path = BackupStateFile.PathIn(dbe.MMF.BundleDirectory);
         }
 

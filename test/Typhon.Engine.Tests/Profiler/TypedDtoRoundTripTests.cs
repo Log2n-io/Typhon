@@ -182,6 +182,63 @@ public sealed class TypedDtoRoundTripTests
     }
 
     [Test]
+    public void BackupArchiveSegment_RoundTrip_OptionalsPresent()
+    {
+        var ev = new BackupArchiveSegmentEvent
+        {
+            Header = new TraceSpanHeader { ThreadSlot = ThreadSlot, StartTimestamp = StartTs, SpanId = SpanId, ParentSpanId = ParentSpanId },
+            SegmentId = 0x7_0000_0001L,
+            Bytes = 64L << 20,
+            Outcome = (byte)BackupArchiveSegmentOutcome.Failed,
+        };
+
+        var size = ev.ComputeSize();
+        Span<byte> buf = stackalloc byte[size];
+        ev.EncodeTo(buf, EndTs, out _);
+        var dto = BackupArchiveSegmentEventDto.Decode(buf, CurrentTick, TicksPerUs);
+
+        Assert.That((dto.SegmentId, dto.Bytes, dto.Outcome), Is.EqualTo((0x7_0000_0001L, (long?)(64L << 20), (byte?)BackupArchiveSegmentOutcome.Failed)));
+        Assert.That(dto.DurationUs, Is.EqualTo((EndTs - StartTs) / (double)TicksPerUs), "the duration is the span's");
+    }
+
+    [Test]
+    public void BackupArchiveSegment_RoundTrip_OptionalsAbsent()
+    {
+        var ev = new BackupArchiveSegmentEvent
+        {
+            Header = new TraceSpanHeader { ThreadSlot = ThreadSlot, StartTimestamp = StartTs, SpanId = SpanId, ParentSpanId = ParentSpanId },
+            SegmentId = 12,
+        };
+
+        var size = ev.ComputeSize();
+        Span<byte> buf = stackalloc byte[size];
+        ev.EncodeTo(buf, EndTs, out _);
+        var dto = BackupArchiveSegmentEventDto.Decode(buf, CurrentTick, TicksPerUs);
+
+        Assert.That((dto.SegmentId, dto.Bytes, dto.Outcome), Is.EqualTo((12L, (long?)null, (byte?)null)));
+    }
+
+    [Test]
+    public void BackupCapture_RoundTrip_OptionalsPresent()
+    {
+        var ev = new BackupCaptureEvent
+        {
+            Header = new TraceSpanHeader { ThreadSlot = ThreadSlot, StartTimestamp = StartTs, SpanId = SpanId, ParentSpanId = ParentSpanId },
+            RequestedKind = 2,
+            BackupId = 17,
+            Pages = 4096,
+            CbwCopies = 3,
+        };
+
+        var size = ev.ComputeSize();
+        Span<byte> buf = stackalloc byte[size];
+        ev.EncodeTo(buf, EndTs, out _);
+        var dto = BackupCaptureEventDto.Decode(buf, CurrentTick, TicksPerUs);
+
+        Assert.That((dto.RequestedKind, dto.BackupId, dto.Pages, dto.CbwCopies), Is.EqualTo(((byte)2, (uint?)17, (int?)4096, (int?)3)));
+    }
+
+    [Test]
     public void CheckpointCycle_RoundTrip_OptionalsAbsent()
     {
         // Optional NOT set — DirtyPageCount stays absent (mask bit 0). DTO surfaces null.

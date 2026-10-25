@@ -103,6 +103,42 @@ internal sealed class ChainResolutionTests
         Assert.That(ex.Message, Does.Contain("FooterCRC mismatch"));
     }
 
+    /// <summary>
+    /// DL-9: a chain's <c>Depth</c> counts points (an id with an <c>-I</c> and a <c>-C</c> once) and its <c>HeadDepth</c> is what a restore of the
+    /// head reads, the compacted base preferred. A head that does not resolve has none.
+    /// </summary>
+    [Test]
+    [CancelAfter(5_000)]
+    public void TheCatalog_CountsPointsOnce_AndItsHeadDepthIsWhatARestoreOfTheHeadReads()
+    {
+        var packs = TwoChains();
+        packs.Add(Pack(3, BackupKind.Compacted, 0, 3, ChainA));
+        var identity = new StoreIdentityFile { FormatVersion = 1, StoreId = Store, DatabaseId = Db };
+        var catalog = StoreCatalog.Build(identity, "f", 6, packs, []);
+
+        var a = catalog.Chains.Single(c => c.ChainId == ChainA);
+        var b = catalog.Chains.Single(c => c.ChainId == ChainB);
+        Assert.That((a.Depth, a.HeadDepth, a.HeadBackupId), Is.EqualTo((4, 2, 4u)), "4 points; #4 reads 3-C and 4-I");
+        Assert.That((b.Depth, b.HeadDepth), Is.EqualTo((2, 2)));
+        Assert.That(ChainResolver.Resolve(View(packs.ToArray()), 4).Depth, Is.EqualTo(a.HeadDepth), "the catalog agrees with the resolver");
+
+        var broken = TwoChains().Where(p => p.BackupId != 2).ToList();
+        var brokenCatalog = StoreCatalog.Build(identity, "f", 6, broken, []);
+        Assert.That(brokenCatalog.Chains.Single(c => c.ChainId == ChainA).HeadDepth, Is.Zero, "a head that does not resolve has no depth");
+        Assert.That(brokenCatalog.FormatVersion, Is.EqualTo(2));
+    }
+
+    [Test]
+    [CancelAfter(5_000)]
+    public void AVersion1Catalog_IsRebuilt()
+    {
+        var identity = new StoreIdentityFile { FormatVersion = 1, StoreId = Store, DatabaseId = Db };
+        var catalog = StoreCatalog.Build(identity, "f", 6, TwoChains(), []);
+        catalog.FormatVersion = 1;
+
+        Assert.That(StoreCatalog.TryDeserialize(StoreCatalog.Serialize(catalog)), Is.Null, "v1 counted packs as depth: never trusted");
+    }
+
     private static readonly object[] BadLinks =
     [
         new object[] { "another chain", (Action<List<CatalogPack>>)(l => l[2].ChainId = ChainB), 3u },

@@ -16,7 +16,7 @@ namespace Typhon.Engine;
 /// (BKP-05).
 /// </remarks>
 [PublicAPI]
-public static class BackupOperations
+public static partial class BackupOperations
 {
     /// <summary>
     /// Backs up a closed database into a store (created when absent): a full point, or an incremental one when the database's last clean close kept a
@@ -40,6 +40,7 @@ public static class BackupOperations
             Full = options.Full,
             WalDirectory = options.WalDirectory,
             Cancellation = options.Cancellation,
+            Progress = options.Progress,
             Logger = options.Logger,
         });
         var view = StoreView.Open(store, log: options.Logger, trustCatalog: false);
@@ -48,16 +49,20 @@ public static class BackupOperations
 
     /// <summary>
     /// Restores a point into a bundle: <paramref name="target"/> is a <c>{name}.typhon</c> path carrying the database's own name, or a directory to put
-    /// it in. Nothing is written before every refusal is checked; an existing bundle is moved aside, never deleted.
+    /// it in. Nothing is written before every refusal is checked; an existing bundle is moved aside, never deleted. For <see cref="PointSelector.AtLsn"/>
+    /// or <see cref="PointSelector.AtTime"/>, the newest point of the timeline at or below the target is restored with the archived WAL replayed up to the
+    /// last transaction ending at or below it (BKP-11).
     /// </summary>
     /// <param name="store">The store directory.</param>
-    /// <param name="point">Which point.</param>
+    /// <param name="point">Which point, or an LSN or a time of an archived timeline.</param>
     /// <param name="target">The bundle path or its parent directory.</param>
     /// <param name="options">Replace, format mismatch, forensics, settle, progress.</param>
     /// <returns>What was restored, and where.</returns>
     /// <exception cref="RestoreRefusedException">The target exists, is live, is misnamed, or the image is of another format revision.</exception>
     /// <exception cref="BackupChainBrokenException">A pack of the point's chain is missing or inconsistent; the message names what is restorable.</exception>
     /// <exception cref="BackupPackCorruptException">A byte the restore needs failed its check.</exception>
+    /// <exception cref="RestoreTargetUnreachableException">An LSN or a time cannot be reached; the message names what can.</exception>
+    /// <exception cref="BackupPlanChangedException">An approved plan no longer holds.</exception>
     public static BackupRestoreResult Restore(string store, PointSelector point, string target, BackupRestoreOptions options = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(store);
@@ -72,12 +77,14 @@ public static class BackupOperations
             Cancellation = options.Cancellation,
             Progress = options.Progress,
             Logger = options.Logger,
+            ApprovedPlan = options.ApprovedPlan,
         });
         var view = StoreView.Open(store, trustCatalog: false);
         return new BackupRestoreResult(Summarize(Standing(view, outcome.PointId)), outcome.Target, outcome.DisplacedBundle, outcome.ChainDepth,
             outcome.PagesWritten, outcome.ZeroPages, outcome.TailSegments, outcome.BytesRead, outcome.BytesWritten, outcome.Duration, outcome.SuspectPages,
             outcome.DamagedPages.Select(d => new PackPageDamage(d.PageId, d.PackFile, d.Reason)).ToList(), outcome.NewTimelineId,
-            outcome.SettleFailure?.Message);
+            outcome.SettleFailure?.Message, outcome.TargetLsn, outcome.EffectiveLsn, outcome.TimelineId, outcome.ArchivedSegments,
+            outcome.ForcedCrashRecovery);
     }
 
     /// <summary>Verifies the whole store. Never throws for damage: it reports it.</summary>
@@ -85,15 +92,55 @@ public static class BackupOperations
     /// <param name="level">Quick or full.</param>
     /// <exception cref="System.IO.DirectoryNotFoundException">The directory is not a store.</exception>
     /// <exception cref="BackupFormatUnsupportedException">The store was written by a newer format.</exception>
-    public static BackupVerifyReport Verify(string store, BackupVerifyLevel level) =>
-        Convert(BackupVerifier.VerifyStore(store, (VerifyLevel)level));
+    public static BackupVerifyReport Verify(string store, BackupVerifyLevel level) => Verify(store, level, null);
+
+    /// <summary>Verifies the whole store, cancellable and with progress. Never throws for damage: it reports it.</summary>
+    /// <param name="store">The store directory.</param>
+    /// <param name="level">Quick, full or deep.</param>
+    /// <param name="options">Cancellation, progress, logging; <c>null</c> = none.</param>
+    /// <exception cref="System.IO.DirectoryNotFoundException">The directory is not a store.</exception>
+    /// <exception cref="BackupFormatUnsupportedException">The store was written by a newer format.</exception>
+    /// <exception cref="OperationCanceledException">Cancelled through <see cref="BackupVerifyOptions.Cancellation"/>.</exception>
+    public static BackupVerifyReport Verify(string store, BackupVerifyLevel level, BackupVerifyOptions options) =>
+        Convert(BackupVerifier.VerifyStore(store, (VerifyLevel)level, Internal(options)));
 
     /// <summary>Verifies one point: the packs of its chain, and whether it is restorable. Never throws for damage.</summary>
     /// <param name="store">The store directory.</param>
     /// <param name="point">Which point.</param>
     /// <param name="level">Quick or full.</param>
-    public static BackupVerifyReport Verify(string store, PointSelector point, BackupVerifyLevel level) =>
-        Convert(BackupVerifier.VerifyPoint(store, point, (VerifyLevel)level));
+    public static BackupVerifyReport Verify(string store, PointSelector point, BackupVerifyLevel level) => Verify(store, point, level, null);
+
+    /// <summary>Verifies one point, cancellable and with progress. Never throws for damage.</summary>
+    /// <param name="store">The store directory.</param>
+    /// <param name="point">Which point.</param>
+    /// <param name="level">Quick, full or deep.</param>
+    /// <param name="options">Cancellation, progress, logging; <c>null</c> = none.</param>
+    /// <exception cref="OperationCanceledException">Cancelled through <see cref="BackupVerifyOptions.Cancellation"/>.</exception>
+    public static BackupVerifyReport Verify(string store, PointSelector point, BackupVerifyLevel level, BackupVerifyOptions options) =>
+        Convert(BackupVerifier.VerifyPoint(store, point, (VerifyLevel)level, Internal(options)));
+
+    private static VerifyOptions Internal(BackupVerifyOptions options) =>
+        options == null ? null : new VerifyOptions { Cancellation = options.Cancellation, Progress = options.Progress, Logger = options.Logger };
+
+    /// <summary>
+    /// What an exception a backup operation threw means to its caller: <c>typhon backup</c> maps it to its exit code, the Workbench to its error category,
+    /// so the same failure is reported the same way by both. By exception type, never by message.
+    /// </summary>
+    /// <param name="exception">What the operation threw.</param>
+    /// <returns><see cref="BackupFailureKind.Defect"/> for an exception that is not an outcome of the operation.</returns>
+    public static BackupFailureKind Classify(Exception exception) => exception switch
+    {
+        BackupPlanChangedException => BackupFailureKind.PlanChanged,
+        RestoreTargetUnreachableException or BackupChainBrokenException or BackupPackCorruptException => BackupFailureKind.StoreDamaged,
+        // R1 failed (DL-7): a kept point is unrestorable, health Failing. A defect, but the store's state is what the caller must act on.
+        RetentionBrokeAKeptPointException => BackupFailureKind.StoreDamaged,
+        RestoreRefusedException or DatabaseLockedException or BackupStoreMismatchException or BackupStoreLockedException
+            or BackupFormatUnsupportedException or NotSupportedException => BackupFailureKind.Refused,
+        TyphonException { ErrorCode: TyphonErrorCode.BackupNotConfigured } => BackupFailureKind.Refused,
+        OperationCanceledException or System.IO.IOException or UnauthorizedAccessException or TyphonException or InvalidOperationException
+            => BackupFailureKind.Failed,
+        _ => BackupFailureKind.Defect,
+    };
 
     /// <summary>What the store holds, from its catalog (rebuilt in memory when stale).</summary>
     /// <param name="store">The store directory.</param>
@@ -102,7 +149,7 @@ public static class BackupOperations
     {
         var view = StoreView.Open(store);
         var points = view.Catalog.Packs.OrderBy(p => p.BackupId).ThenBy(p => p.Kind).Select(Summarize).ToList();
-        var chains = view.Catalog.Chains.Select(c => new BackupChainSummary(c.ChainId, c.BaseId, c.HeadBackupId, c.Depth)).ToList();
+        var chains = view.Catalog.Chains.Select(c => new BackupChainSummary(c.ChainId, c.BaseId, c.HeadBackupId, c.Depth, c.HeadDepth)).ToList();
         var unreadable = view.Catalog.Unreadable.Select(u => new KeyValuePair<string, string>(u.File, u.Reason)).ToList();
         var temps = view.Temps.Select(t => t.Name).ToList();
         IReadOnlyList<uint> restorable = null;
@@ -111,7 +158,8 @@ public static class BackupOperations
             restorable = BackupVerifier.VerifyStore(store, VerifyLevel.Quick).Points.Where(p => p.Restorable).Select(p => p.Id).ToList();
         }
 
-        return new BackupStoreListing(view.Identity.StoreId, view.Identity.DatabaseId, points, chains, unreadable, temps, restorable);
+        var drills = DrillRecords.ReadNewestPerPoint(StoreFileSystem.Instance, view.Paths.Root).PerPoint;
+        return new BackupStoreListing(view.Identity.StoreId, view.Identity.DatabaseId, points, chains, unreadable, temps, restorable, drills);
     }
 
     /// <summary>
@@ -128,10 +176,11 @@ public static class BackupOperations
         var restorable = restorableId == 0 ? null : Summarize(Standing(view, restorableId));
         var count = view.Catalog.Packs.Select(p => p.BackupId).Concat(view.Catalog.Unreadable
             .Select(u => PackFormat.TryParseFileName(u.File, out var id, out _, out _) ? id : 0u).Where(id => id != 0)).Distinct().Count();
+        var archive = WalArchiveReport.Coverage(StoreFileSystem.Instance, view);
         if (restorable == null)
         {
             return new BackupStoreStatus(BackupHealth.Failing, count == 0 ? "the store holds no point" : "no point of the store can be restored", count,
-                latestPack == null ? null : Summarize(latestPack), null);
+                latestPack == null ? null : Summarize(latestPack), null, archive);
         }
 
         string warning = null;
@@ -147,9 +196,184 @@ public static class BackupOperations
         {
             warning = $"{view.Temps.Count} temporary file(s) of an interrupted backup are left; the next backup deletes them";
         }
+        else if (archive.Find(static c => c.UncoveredGaps.Count > 0) is { } gapped)
+        {
+            var g = gapped.UncoveredGaps[0];
+            warning = $"the WAL archive of timeline {gapped.TimelineId} misses LSN {g.FromLsn}..{g.ToLsn} ({g.Reason}) and no point lies past it: "
+                      + "nothing after it can be restored to an LSN until the next point";
+        }
 
         return new BackupStoreStatus(warning == null ? BackupHealth.Ok : BackupHealth.Warning, warning ?? "the newest point is restorable", count,
-            latestPack == null ? null : Summarize(latestPack), restorable);
+            latestPack == null ? null : Summarize(latestPack), restorable, archive);
+    }
+
+    /// <summary>
+    /// Turns a point into a base without touching the database (05 §2): <c>{id}-C.tpack</c> holds every page of its image and its tail, so the points
+    /// after it rest on it and the packs before it can go. Published only once a full verify of it passed; nothing is deleted.
+    /// </summary>
+    /// <param name="store">The store directory.</param>
+    /// <param name="point">Which point; a full or already compacted one is a no-op.</param>
+    /// <param name="options">Read budget, cancellation, progress, logging.</param>
+    /// <exception cref="BackupStoreLockedException">Another writer holds the store.</exception>
+    /// <exception cref="BackupChainBrokenException">The point does not resolve.</exception>
+    /// <exception cref="BackupPackCorruptException">A page of its chain, or the compacted pack, failed a check: nothing was published.</exception>
+    /// <exception cref="System.IO.IOException">The volume is short of the space a whole image needs, or another I/O failure.</exception>
+    public static BackupCompactionResult Compact(string store, PointSelector point, BackupLifecycleOptions options = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(store);
+        options ??= new BackupLifecycleOptions();
+        using var session = BackupStore.OpenForMaintenance(store, "compact", log: options.Logger);
+        return BackupCompactor.Compact(session, ChainResolver.Select(session.View, point), options);
+    }
+
+    /// <summary>
+    /// What a retention would do now, without doing it (05 §3, the mandatory preview): the points it keeps, compacts and removes, and the packs it
+    /// deletes. Reads the packs' headers only; takes no lock, so a writer may change the store before the plan is applied (see
+    /// <see cref="ApplyRetention"/>'s <c>approved</c>).
+    /// </summary>
+    /// <param name="store">The store directory.</param>
+    /// <param name="policy">The policy (validated).</param>
+    /// <exception cref="ArgumentException">The policy is invalid.</exception>
+    public static BackupRetentionPlan PlanRetention(string store, BackupRetentionPolicy policy)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(store);
+        Validate(policy);
+        var fs = StoreFileSystem.Instance;
+        var view = StoreView.Open(store, fs, trustCatalog: false);
+        long? free = ((IStoreFileSystem)fs).TryGetAvailableFreeSpace(view.Paths.Packs, out var bytes) ? bytes : null;
+        return RetentionPlanner.Plan(view, policy, DrillRecords.ReadNewestPerPoint(fs, view.Paths.Root).Passed, DateTime.UtcNow, free).Plan;
+    }
+
+    /// <summary>
+    /// Applies a retention under the store's lock (05 §3, BKP-14): compacts the oldest kept point of each chain that needs it, then deletes, newest first,
+    /// every pack no kept point resolves through; a kept point is never lost, and a limit <see cref="BackupRetentionPolicy.MinKeep"/> or
+    /// <see cref="BackupRetentionPolicy.KeepLastDrilled"/> prevents is reported, not met.
+    /// </summary>
+    /// <param name="store">The store directory.</param>
+    /// <param name="policy">The policy (validated).</param>
+    /// <param name="approved">
+    /// A plan from <see cref="PlanRetention"/> the operator approved: refused with <see cref="BackupPlanChangedException"/> when the store would now
+    /// delete a pack it did not list. <c>null</c> applies the policy as it stands.
+    /// </param>
+    /// <param name="options">Read budget, cancellation, progress, logging.</param>
+    /// <exception cref="ArgumentException">The policy is invalid.</exception>
+    /// <exception cref="BackupStoreLockedException">Another writer holds the store.</exception>
+    /// <exception cref="BackupPlanChangedException">The plan changed since <paramref name="approved"/>.</exception>
+    public static BackupRetentionResult ApplyRetention(string store, BackupRetentionPolicy policy, BackupRetentionPlan approved = null,
+        BackupLifecycleOptions options = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(store);
+        Validate(policy);
+        options ??= new BackupLifecycleOptions();
+        using var session = BackupStore.OpenForMaintenance(store, "prune", log: options.Logger);
+        var drillPassed = DrillRecords.ReadNewestPerPoint(session.FileSystem, session.Root).Passed;
+        return RetentionExecutor.Apply(session, policy, approved, drillPassed, DateTime.UtcNow, Guid.Empty, options);
+    }
+
+    private static void Validate(BackupRetentionPolicy policy)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        if (!policy.Validate(out var error))
+        {
+            throw new ArgumentException(error, nameof(policy));
+        }
+    }
+
+    /// <summary>
+    /// The backup status of a bundle (from its engine's <c>backup.status.json</c> and its store) or of a store (from its packs): <c>typhon backup status</c>'s
+    /// answer. A stopped engine's time rules are judged again now (DL-23), so its status degrades by itself; a bundle with no status file is
+    /// <see cref="BackupHealth.Off"/>.
+    /// </summary>
+    /// <param name="bundleOrStore">A <c>{name}.typhon</c> bundle directory, or a store directory.</param>
+    public static BackupStatusReport ReadStatus(string bundleOrStore) => ReadStatus(bundleOrStore, DateTime.UtcNow);
+
+    internal static BackupStatusReport ReadStatus(string bundleOrStore, DateTime utcNow)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(bundleOrStore);
+        if (System.IO.File.Exists(System.IO.Path.Combine(bundleOrStore, "store.json")))
+        {
+            var store = Status(bundleOrStore);
+            return new BackupStatusReport(false, 0, null, bundleOrStore, false, null, store, store.Health, store.Reason);
+        }
+
+        var file = BackupStatusFile.TryRead(bundleOrStore);
+        if (file == null)
+        {
+            return new BackupStatusReport(false, 0, null, null, false, null, null, BackupHealth.Off,
+                "no backup status: backup is off for this database, or its engine never ran with it");
+        }
+
+        var live = BackupStatusFile.IsLive(file);
+        var (health, reason) = BackupHealthEvaluator.Evaluate(file.Inputs, utcNow);
+        var text = BackupHealthEvaluator.Explain(file.Inputs, reason, utcNow);
+        var status = file.Status with
+        {
+            Health = health,
+            Reason = reason,
+            ReasonText = text,
+            State = live ? file.Status.State : BackupRunState.Stopped,
+        };
+        BackupStoreStatus storeStatus = null;
+        try
+        {
+            storeStatus = Status(file.StorePath);
+        }
+        catch (Exception e) when (e is System.IO.IOException or UnauthorizedAccessException or BackupException)
+        {
+            // The status still answers; the store's own view is missing.
+        }
+
+        return new BackupStatusReport(live, file.Pid, file.MachineName, file.StorePath, live && file.AcceptRequests, status, storeStatus, health,
+            live ? text : $"engine not running; last known state: {text}");
+    }
+
+    /// <summary>
+    /// Asks the engine running on <paramref name="bundle"/> for a point (07 §3, DL-24): writes <c>backup.request</c> whole. Only when a live engine's status
+    /// file says it accepts requests; the engine writes to its own configured store, never to a path the request could name.
+    /// </summary>
+    /// <param name="bundle">The bundle directory.</param>
+    /// <param name="kind">Auto or full.</param>
+    /// <param name="requestedBy">Who asks, for the record.</param>
+    /// <returns>The request's id, which the engine's status echoes once its job starts.</returns>
+    /// <exception cref="TyphonException">
+    /// <see cref="TyphonErrorCode.BackupNotConfigured"/>: no live engine, backup off, or requests refused. <see cref="TyphonErrorCode.BackupInProgress"/>:
+    /// another request is still pending after a short wait.
+    /// </exception>
+    public static Guid RequestBackup(string bundle, BackupRequestKind kind, string requestedBy)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(bundle);
+        var file = BackupStatusFile.TryRead(bundle);
+        var refusal = file == null ? "it has no backup status: backup is off, or no engine runs on it with backup configured"
+            : !BackupStatusFile.IsLive(file) ? $"its engine (PID {file.Pid} on {file.MachineName}) is not running"
+            : !file.AcceptRequests ? "its engine refuses backup requests (BackupOptions.AcceptRequests is off)"
+            : null;
+        if (refusal != null)
+        {
+            throw new TyphonException(TyphonErrorCode.BackupNotConfigured, $"Cannot ask '{bundle}' for a backup: {refusal}.");
+        }
+
+        var id = Guid.NewGuid();
+        var content = new BackupRequestContent
+        {
+            FormatVersion = BackupRequestContent.CurrentFormatVersion,
+            RequestId = id,
+            Kind = kind == BackupRequestKind.Full ? "full" : "auto",
+            RequestedBy = requestedBy,
+            RequestedUtc = DateTime.UtcNow,
+        };
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (!BackupRequestFile.Write(bundle, content))
+        {
+            // A second requester waits until the engine has retired the first request (it does within a tick, when its job starts).
+            if (DateTime.UtcNow >= deadline)
+            {
+                throw new TyphonException(TyphonErrorCode.BackupInProgress, $"Another backup request to '{bundle}' is still pending.");
+            }
+
+            System.Threading.Thread.Sleep(50);
+        }
+
+        return id;
     }
 
     /// <summary>The pack that stands for a point: its compacted one when present.</summary>
@@ -171,6 +395,6 @@ public static class BackupOperations
         return new BackupVerifyReport((BackupVerifyLevel)r.Level, (BackupVerifyVerdict)r.Verdict,
             r.Packs.Select(p => new BackupPackVerification(p.File, p.BackupId, (BackupPackStatus)p.Status, p.Findings.Select(F).ToList())).ToList(),
             r.Points.Select(p => new BackupPointVerification(p.Id, p.Restorable, p.BrokenBy)).ToList(),
-            r.StoreFindings.Select(F).ToList(), r.Duration, r.BytesRead);
+            r.StoreFindings.Select(F).ToList(), r.Duration, r.BytesRead, r.RemovedPoints);
     }
 }

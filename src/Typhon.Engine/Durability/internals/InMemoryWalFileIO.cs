@@ -3,6 +3,7 @@ using Microsoft.Win32.SafeHandles;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Threading;
 
 namespace Typhon.Engine.Internals;
@@ -57,6 +58,22 @@ internal sealed class InMemoryWalFileIO : IWalFileIO
 
     /// <inheritdoc />
     public SafeFileHandle OpenSegmentForRead(string path) => OpenSegment(path, false);
+
+    /// <inheritdoc />
+    /// <remarks>Models delete sharing: the handle is bound to the segment's content, so a <see cref="Delete"/> while it is open removes the name only and
+    /// the handle keeps reading, as a delete-pending file does.</remarks>
+    public SafeFileHandle OpenSegmentForArchive(string path)
+    {
+        var handle = OpenSegment(path, false);
+        _archiveHandles.AddOrUpdate(handle, Segments[NormalizePath(path)]);
+        return handle;
+    }
+
+    /// <summary>
+    /// The content each archive handle is bound to, keyed by the handle object: an entry goes with its handle (a synthetic handle has no close to hook), so
+    /// an archiver opening a segment per publish does not grow it for the life of the fixture.
+    /// </summary>
+    private readonly ConditionalWeakTable<SafeFileHandle, MemorySegment> _archiveHandles = new();
 
     /// <inheritdoc />
     public void WriteAligned(SafeFileHandle handle, long offset, ReadOnlySpan<byte> data)
@@ -178,11 +195,17 @@ internal sealed class InMemoryWalFileIO : IWalFileIO
     public void Dispose()
     {
         _handleToPath.Clear();
+        _archiveHandles.Clear();
         Segments.Clear();
     }
 
     private MemorySegment FindSegment(SafeFileHandle handle)
     {
+        if (_archiveHandles.TryGetValue(handle, out var bound))
+        {
+            return bound;
+        }
+
         if (_handleToPath.TryGetValue(handle.DangerousGetHandle(), out var path))
         {
             if (Segments.TryGetValue(path, out var seg))

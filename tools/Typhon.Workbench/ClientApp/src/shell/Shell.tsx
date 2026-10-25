@@ -5,6 +5,8 @@ import { useSessionStore } from '@/stores/useSessionStore';
 import { useDensityStore } from '@/stores/useDensityStore';
 import { useIntegrityStore } from '@/stores/useIntegrityStore';
 import IntegrityStandalone from '@/panels/Integrity/IntegrityStandalone';
+import { useBackupsStore } from '@/stores/useBackupsStore';
+import BackupsStandalone from '@/panels/Backups/BackupsStandalone';
 import ContextBar from './ContextBar';
 import DevFixtureModal from './dialogs/DevFixtureModal';
 import DockHost from './DockHost';
@@ -19,6 +21,8 @@ export default function Shell() {
   // The Integrity view's no-session home. It replaces the Welcome screen rather than overlaying it, because
   // it is a full working surface — scan, plan, consent, repair — not a dialog interrupting one.
   const integrityStandalone = useIntegrityStore((s) => s.standaloneOpen);
+  // The Backups view's no-session home (#1417), the same shape. At most one of the two is open: each `openX` closes the other's flag.
+  const backupsStandalone = useBackupsStore((s) => s.standaloneOpen);
 
   useKeyboardShortcuts();
   useSelectionBootstrap();
@@ -34,7 +38,7 @@ export default function Shell() {
       {kind !== 'none' && <ContextBar />}
       <main className="min-h-0 flex-1">
         {kind === 'none' ? (
-          integrityStandalone ? <IntegrityStandalone /> : <WelcomeScreen />
+          integrityStandalone ? <IntegrityStandalone /> : backupsStandalone ? <BackupsStandalone /> : <WelcomeScreen />
         ) : (
           <DockHost key={sessionId ?? 'none'} />
         )}

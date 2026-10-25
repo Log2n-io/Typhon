@@ -395,7 +395,19 @@ internal sealed class PackReader : IDisposable
     /// </summary>
     public uint DecodeTailSegment(TailDirectory directory, int index, Span<byte> destination) => ReadTailSegment(directory, index, null, destination);
 
-    private uint ReadTailSegment(TailDirectory directory, int index, IStoreFile target, Span<byte> destination)
+    /// <summary>
+    /// Re-feeds tail segment <paramref name="index"/> into <paramref name="sink"/> as capture did (begin, the copied bytes block by block, end), every
+    /// block, the WAL header and the <c>RawCrc</c> checked as a restore checks them; a check that fails throws before the segment ends. A compaction
+    /// copies its point's tail this way (05 §2), never holding a segment whole.
+    /// </summary>
+    public void CopyTailSegment(TailDirectory directory, int index, IBackupPointSink sink)
+    {
+        ArgumentNullException.ThrowIfNull(sink);
+        ReadTailSegment(directory, index, null, [], sink);
+        sink.EndTailSegment();
+    }
+
+    private uint ReadTailSegment(TailDirectory directory, int index, IStoreFile target, Span<byte> destination, IBackupPointSink sink = null)
     {
         var segment = directory.Segments[index];
         var stored = ArrayPool<byte>.Shared.Rent(PackFormat.FramePrefixSize + PackFormat.TailBlockSize);
@@ -420,13 +432,8 @@ internal sealed class PackReader : IDisposable
                     PackFormat.ThrowCorrupt(Path, "Tail", -1, $"segment {segment.SegmentId}: block {b} length prefix disagrees with the TAILDIR");
                 }
 
-                var payload = frame[PackFormat.FramePrefixSize..];
                 var bytes = raw.AsSpan(0, block.RawLength);
-                if (block.StoredLength == block.RawLength)
-                {
-                    payload.CopyTo(bytes);
-                }
-                else if (DecodeLz4(payload, bytes) != block.RawLength)
+                if (!TailBlockCodec.Decode(frame[PackFormat.FramePrefixSize..], bytes))
                 {
                     PackFormat.ThrowCorrupt(Path, "Tail", -1, $"segment {segment.SegmentId}: block {b} does not decode");
                 }
@@ -434,10 +441,12 @@ internal sealed class PackReader : IDisposable
                 if (b == segment.FirstBlock)
                 {
                     declared = CheckSegmentHeader(segment, bytes);
+                    sink?.BeginTailSegment(segment.SegmentId, segment.FirstLsn, declared);
                 }
 
                 crc = Crc32CUtil.Append(crc, bytes);
                 target?.Write(bytes, offset);
+                sink?.AppendTail(bytes);
                 if (!destination.IsEmpty)
                 {
                     bytes.CopyTo(destination[(int)offset..]);
@@ -538,7 +547,8 @@ internal sealed class PackReader : IDisposable
 internal sealed class PackIndexStream : IDisposable
 {
     private readonly PackReader _pack;
-    private readonly PackPageEntry[] _buffer;
+    private readonly int _capacity;
+    private PackPageEntry[] _buffer;
     private long _read;
     private int _pos;
     private int _filled;
@@ -549,7 +559,9 @@ internal sealed class PackIndexStream : IDisposable
     public PackIndexStream(PackReader pack, int bufferBytes)
     {
         _pack = pack;
-        _buffer = new PackPageEntry[Math.Max(1, Math.Min(bufferBytes / PackFormat.PageEntrySize, pack.Footer.PageCount))];
+        // Pooled: up to 1 MiB per stream, opened per pack of every restore, verify and compaction, would be garbage proportional to the pack's pages.
+        _capacity = Math.Max(1, Math.Min(bufferBytes / PackFormat.PageEntrySize, pack.Footer.PageCount));
+        _buffer = ArrayPool<PackPageEntry>.Shared.Rent(_capacity);
     }
 
     /// <summary>Entries returned so far.</summary>
@@ -580,7 +592,7 @@ internal sealed class PackIndexStream : IDisposable
                 return false;
             }
 
-            var n = (int)Math.Min(_buffer.Length, remaining);
+            var n = (int)Math.Min(_capacity, remaining);
             var bytes = MemoryMarshal.AsBytes(_buffer.AsSpan(0, n));
             if (!_pack.ReadAt(bytes, _pack.Footer.IndexOffset + (_read * PackFormat.PageEntrySize)))
             {
@@ -636,5 +648,10 @@ internal sealed class PackIndexStream : IDisposable
 
     public void Dispose()
     {
+        if (_buffer != null)
+        {
+            ArrayPool<PackPageEntry>.Shared.Return(_buffer);
+            _buffer = null;
+        }
     }
 }

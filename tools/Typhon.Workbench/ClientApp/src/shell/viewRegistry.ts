@@ -28,6 +28,9 @@ export const ZONE_D_VIEW_ACTIVE: Readonly<Record<string, boolean>> = {
   // is also reachable with no session at all (Shell renders it full-bleed over the Welcome screen), so this
   // flag gates only its *docked* form.
   Integrity: true,
+  // #1417: Backups — a store's health, points and archive; back up, verify, drill, compact, retention, restore. Like Integrity it is also
+  // reachable with no session (full-bleed over the Welcome screen), so this flag gates only its docked form.
+  Backups: true,
   // Profile (P-B) — profiler deep views.
   // Stage 3 Phase 1: the Profiler timeline (the global time-scope owner) + Top Spans are reintroduced onto the
   // finished shell. Selection already mirrors to the unified bus (Stage 1); flipping these on mounts them into
@@ -148,6 +151,8 @@ const VIEW_SESSION_SCOPE: Readonly<Record<string, ViewSessionScope>> = {
   // Integrity reads the bundle off disk rather than through an engine, so it is not merely session-independent —
   // it is most useful with *no* session, on a database that cannot be opened at all.
   Integrity: 'any',
+  // Backups reads a store off disk; with a session it also backs that session's database up — but it never needs one (#1417).
+  Backups: 'any',
 };
 
 /** The session-kind scope of a view (or view-bound command). Unlisted / undefined ids are `any`. */

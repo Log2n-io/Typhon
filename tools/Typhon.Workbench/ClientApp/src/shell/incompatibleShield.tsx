@@ -45,6 +45,8 @@ export const PANELS_USABLE_WHEN_INCOMPATIBLE: ReadonlySet<string> = new Set([
   'Logs',
   // Generates a NEW database. Nothing it shows comes from the broken one.
   'DevFixture',
+  // Reads a backup store, never the session's engine; restoring is how a database whose schema no longer opens it comes back (#1417).
+  'Backups',
 ]);
 
 /** Whether a panel is covered while the session is `Incompatible`. */

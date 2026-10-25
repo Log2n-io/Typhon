@@ -35,7 +35,7 @@ afterEach(cleanup);
 
 describe('which panels the shield covers', () => {
   it('exempts exactly the panels that show no database data', () => {
-    expect([...PANELS_USABLE_WHEN_INCOMPATIBLE].sort()).toEqual(['DevFixture', 'Integrity', 'Logs', 'Options']);
+    expect([...PANELS_USABLE_WHEN_INCOMPATIBLE].sort()).toEqual(['Backups', 'DevFixture', 'Integrity', 'Logs', 'Options']);
   });
 
   /**

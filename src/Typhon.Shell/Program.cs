@@ -37,6 +37,12 @@ internal static class Program
 
     private static int Main(string[] args)
     {
+        // `typhon ui` hosts the Workbench in this process, so its Backups view starts its drill child from this executable (#1417 WB-13).
+        if (Typhon.Workbench.Backups.BackupDrillChild.TryRun(args) is { } drill)
+        {
+            return drill;
+        }
+
         try
         {
             return BuildApp(args).Run(args);
@@ -127,21 +133,34 @@ internal static class Program
                 .WithExample(["repair", "game.typhon", "--plan"])
                 .WithExample(["repair", "game.typhon", "--apply"]);
 
-            // `typhon backup …` (#1414, design 07 §4) works on a closed database and on a backup store, with no engine: the exit code carries the
+            // `typhon backup …` (#1414, #1415, design 07 §4) works on a closed database and on a backup store, with no engine: the exit code carries the
             // outcome (0 ok · 1 warning · 2 failed · 3 store damaged · 4 refused · 64 usage), cron and CI ready like `check`.
             config.AddBranch("backup", backup =>
             {
-                backup.SetDescription("Back up a closed database, and list, verify, restore and watch a backup store.");
-                backup.AddCommand<BackupCreateCommand>("create").WithDescription("Back up a closed database into a store.")
-                    .WithExample(["backup", "create", "game.typhon", "--store", "/backups/game"]);
+                backup.SetDescription("Back up a closed database, and list, verify, restore, compact, prune and watch a backup store.");
+                backup.AddCommand<BackupCreateCommand>("create")
+                    .WithDescription("Back up a database: ask its running engine, or capture it closed into a store.")
+                    .WithExample(["backup", "create", "game.typhon", "--store", "/backups/game"])
+                    .WithExample(["backup", "create", "game.typhon", "--wait"]);
                 backup.AddCommand<BackupListCommand>("list").WithDescription("List a store's points and chains.")
                     .WithExample(["backup", "list", "--store", "/backups/game", "--restorable"]);
                 backup.AddCommand<BackupVerifyCommand>("verify").WithDescription("Verify a store's packs and chains; the verdict is the exit code.")
                     .WithExample(["backup", "verify", "--store", "/backups/game", "--level", "full"]);
-                backup.AddCommand<BackupRestoreCommand>("restore").WithDescription("Restore a point into a new bundle.")
-                    .WithExample(["backup", "restore", "--store", "/backups/game", "--point", "latest", "--to", "/data/restored"]);
-                backup.AddCommand<BackupStatusCommand>("status").WithDescription("A store's health per chain; the health is the exit code.")
-                    .WithExample(["backup", "status", "--store", "/backups/game"]);
+                backup.AddCommand<BackupRestoreCommand>("restore").WithDescription("Restore a point, an LSN or an instant into a new bundle.")
+                    .WithExample(["backup", "restore", "--store", "/backups/game", "--point", "latest", "--to", "/data/restored"])
+                    .WithExample(["backup", "restore", "--store", "/backups/game", "--time", "2026-10-21T14:03:00Z", "--to", "/data/restored", "--dry-run"]);
+                backup.AddCommand<BackupLogCommand>("log").WithDescription("The WAL archive: timelines, segments, gaps; a range's frames with --commits.")
+                    .WithExample(["backup", "log", "--store", "/backups/game"])
+                    .WithExample(["backup", "log", "--store", "/backups/game", "--lsn-from", "1000", "--lsn-to", "2000", "--commits"]);
+                backup.AddCommand<BackupStatusCommand>("status").WithDescription("A database's or a store's backup health; the health is the exit code.")
+                    .WithExample(["backup", "status", "game.typhon"])
+                    .WithExample(["backup", "status", "--store", "/backups/game", "--stale-after", "1d"]);
+                backup.AddCommand<BackupCompactCommand>("compact").WithDescription("Turn a point into a base inside the store; nothing is deleted.")
+                    .WithExample(["backup", "compact", "--store", "/backups/game", "--point", "latest"]);
+                backup.AddCommand<BackupDrillCommand>("drill").WithDescription("Prove a point restores: restore into scratch, open, check deep, record.")
+                    .WithExample(["backup", "drill", "--store", "/backups/game", "--scratch", "/scratch"]);
+                backup.AddCommand<BackupPruneCommand>("prune").WithDescription("Apply a retention policy: keep what it promises, delete what nothing needs.")
+                    .WithExample(["backup", "prune", "--store", "/backups/game", "--min-keep", "3", "--max-age", "7d", "--dry-run"]);
             });
 
             // `typhon telemetry …` authors typhon.telemetry.json in the working directory (#522). Scriptable

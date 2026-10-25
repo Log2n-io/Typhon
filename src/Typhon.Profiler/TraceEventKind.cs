@@ -133,6 +133,34 @@ public enum TraceEventKind : byte
     /// <summary>B+Tree node merge. No payload.</summary>
     BTreeNodeMerge = 43,
 
+    // ── Backup (span, #1416) ──
+
+    /// <summary>
+    /// An online backup capture, freeze to publish. Required: <c>kind: u8</c> (requested: 1 full, 2 auto). Optional: <c>backupId: u32</c>,
+    /// <c>pages: i32</c> (the pages the point holds), <c>cbwCopies: i32</c> (copy-before-write copies writers made during it).
+    /// </summary>
+    BackupCapture = 44,
+
+    /// <summary>
+    /// The capture's freeze: the write gate held exclusive while the change map is swapped and the meta pair copied. Optional: <c>imagePages: i32</c>.
+    /// </summary>
+    BackupFreeze = 45,
+
+    /// <summary>The capture's WAL tail copy, under the reclaim floor. Optional: <c>pointLsn: i64</c>.</summary>
+    BackupTail = 46,
+
+    /// <summary>The capture's scan of the image's pages into the store. Optional: <c>pages: i32</c>.</summary>
+    BackupScan = 47,
+
+    /// <summary>A pack verified after its publish. Required: <c>backupId: u32</c>, <c>level: u8</c> (0 quick, 1 full).</summary>
+    BackupVerify = 48,
+
+    /// <summary>
+    /// A chain lifecycle operation. Required: <c>op: u8</c> (1 compaction, 2 retention). Optional: <c>packs: i32</c> (read or deleted), <c>bytes: i64</c>
+    /// (written or freed).
+    /// </summary>
+    BackupLifecycle = 49,
+
     // ── Page cache (span) ──
 
     /// <summary>Page cache fetch. Required: <c>filePageIndex: i32</c>.</summary>
@@ -454,6 +482,14 @@ public enum TraceEventKind : byte
     /// <para>Gated on <c>SubscriptionsSessionChangesActive</c>.</para>
     /// </remarks>
     SubscriptionsSessionChanged = 73,
+
+    // ── Backup WAL archiving (span, #1418) ──
+
+    /// <summary>
+    /// One WAL segment copied into the backup store's archive, open to its durable publish. Required: <c>segmentId: i64</c>. Optional:
+    /// <c>bytes: i64</c> (stored), <c>outcome: u8</c> (<see cref="BackupArchiveSegmentOutcome"/>). The duration is the span's.
+    /// </summary>
+    BackupArchiveSegment = 74,
 
     // ── .NET runtime GC suspension (span) ──
 

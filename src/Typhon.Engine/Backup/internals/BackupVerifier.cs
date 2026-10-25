@@ -17,6 +17,11 @@ internal enum VerifyLevel : byte
 
     /// <summary>Quick, plus every byte's FileCRC, every page decoded against its PageCrc, and the point's meta pair against its header.</summary>
     Full,
+
+    /// <summary>
+    /// Full, plus the integrity scan of a point's image read through its chain (DL-27): of the point verified, or of the store's newest restorable point.
+    /// </summary>
+    Deep,
 }
 
 internal enum VerifySeverity : byte
@@ -86,6 +91,9 @@ internal sealed class VerifyReport
 
     public long BytesRead { get; init; }
 
+    /// <summary>Points whose packs a concurrent retention deleted while verify ran: left out of the report, not reported damaged (DL-11).</summary>
+    public int RemovedPoints { get; init; }
+
     public IEnumerable<VerifyFinding> AllFindings => StoreFindings.Concat(Packs.SelectMany(p => p.Findings));
 }
 
@@ -104,6 +112,9 @@ internal sealed class VerifyOptions
 
     public CancellationToken Cancellation { get; init; }
 
+    /// <summary><c>(phase, done, total)</c>: <c>"packs"</c> verified of the scope's, then a deep verify's integrity scan phases.</summary>
+    public Action<string, long, long> Progress { get; init; }
+
     public ILogger Logger { get; init; }
 }
 
@@ -121,8 +132,11 @@ internal static class BackupVerifier
 
     /// <summary>The packs of one point's chain, and that point.</summary>
     public static VerifyReport VerifyPoint(string storePath, PointSelector point, VerifyLevel level, VerifyOptions options = null,
-        IStoreFileSystem fs = null) =>
-        Run(storePath, point, level, options, fs);
+        IStoreFileSystem fs = null)
+    {
+        point.RequirePoint("Verify");
+        return Run(storePath, point, level, options, fs);
+    }
 
     private static VerifyReport Run(string storePath, PointSelector? point, VerifyLevel level, VerifyOptions options, IStoreFileSystem fs)
     {
@@ -185,11 +199,16 @@ internal static class BackupVerifier
 
         var packs = new Dictionary<string, PackVerification>(StringComparer.Ordinal);
         long bytesRead = 0;
+        var verified = 0;
+        options.Progress?.Invoke("packs", 0, files.Count);
         foreach (var file in files)
         {
             options.Cancellation.ThrowIfCancellationRequested();
             packs[file] = VerifyPack(fs, view, file, level, options, ref bytesRead);
+            options.Progress?.Invoke("packs", ++verified, files.Count);
         }
+
+        view = WithoutDeletedPacks(fs, view, packs, pointIds, out var removed);
 
         // Points: restorable iff the chain resolves and every pack of it verified without damage (BKP-VER-06/07 for the links).
         var points = new List<PointVerification>();
@@ -219,6 +238,17 @@ internal static class BackupVerifier
             points.Add(new PointVerification { Id = id, Restorable = broken.Count == 0, BrokenBy = [.. broken] });
         }
 
+        // BKP-VER-15…18: the WAL archive, with the store (a point's verify reads its chain only).
+        if (point == null)
+        {
+            WalArchiveReport.Verify(fs, view, level, storeFindings, ref bytesRead);
+        }
+
+        if (level == VerifyLevel.Deep)
+        {
+            ScanDeep(fs, view, points, storeFindings, options);
+        }
+
         var packList = packs.Values.ToList();
         var anyDamage = packList.Any(p => p.Status != PackVerifyStatus.Ok) || storeFindings.Any(f => f.Severity == VerifySeverity.Damage)
                         || points.Any(p => !p.Restorable);
@@ -237,7 +267,76 @@ internal static class BackupVerifier
             StoreFindings = storeFindings,
             Duration = clock.Elapsed,
             BytesRead = bytesRead,
+            RemovedPoints = removed,
         };
+    }
+
+    /// <summary>
+    /// DL-11: readers take no lock, so a retention can delete packs between verify's listing, its catalog rebuild and its opens. A pack of the view
+    /// that is no longer in <c>packs/</c> once the packs are checked is no pack of the store: it leaves the report, the points are resolved again
+    /// without it, and a point left with no pack is dropped (counted, not damaged). One still listed but unopenable stays what it is: damage.
+    /// </summary>
+    private static StoreView WithoutDeletedPacks(IStoreFileSystem fs, StoreView view, Dictionary<string, PackVerification> packs,
+        SortedSet<uint> pointIds, out int removed)
+    {
+        removed = 0;
+        var listed = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var f in fs.EnumerateFiles(view.Paths.Packs))
+        {
+            listed.Add(f.Name);
+        }
+
+        var kept = new List<CatalogPack>(view.Catalog.Packs.Count);
+        foreach (var p in view.Catalog.Packs)
+        {
+            if (listed.Contains(p.File))
+            {
+                kept.Add(p);
+            }
+            else
+            {
+                packs.Remove(p.File);
+            }
+        }
+
+        if (kept.Count == view.Catalog.Packs.Count)
+        {
+            return view;
+        }
+
+        var filtered = new StoreView
+        {
+            Paths = view.Paths,
+            Identity = view.Identity,
+            Catalog = StoreCatalog.Build(view.Identity, view.Catalog.Fingerprint, view.Catalog.HighWaterBackupId, kept,
+                new List<CatalogUnreadable>(view.Catalog.Unreadable)),
+            Temps = view.Temps,
+            CatalogFromFile = false,
+        };
+        foreach (var id in new List<uint>(pointIds))
+        {
+            var (compacted, original) = filtered.Find(id);
+            if (compacted == null && original == null && !IsUnreadable(filtered, id))
+            {
+                pointIds.Remove(id);
+                removed++;
+            }
+        }
+
+        return filtered;
+    }
+
+    private static bool IsUnreadable(StoreView view, uint id)
+    {
+        foreach (var u in view.Catalog.Unreadable)
+        {
+            if (PackFormat.TryParseFileName(u.File, out var uid, out _, out _) && uid == id)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -422,7 +521,7 @@ internal static class BackupVerifier
                     $"the live database had {suspects.Length} damaged page(s) at capture, faithfully kept: {List(suspects)}"));
             }
 
-            if (level == VerifyLevel.Full)
+            if (level >= VerifyLevel.Full)
             {
                 VerifyFull(reader, result, indexOk, tailDirOk, tail, imageMeta, options);
             }
@@ -432,6 +531,61 @@ internal static class BackupVerifier
 
         result.Status = result.Findings.Any(f => f.Severity == VerifySeverity.Damage) ? PackVerifyStatus.Damaged : PackVerifyStatus.Ok;
         return result;
+    }
+
+    /// <summary>
+    /// BKP-VER-19/20 (DL-27): the integrity scan of the newest restorable point in scope, its image read through its chain (the page catalogue: no WAL
+    /// check, which BKP-VER-09/12 already make of the tail). An image the scan cannot traverse is not restorable (BKP-VER-19); damage or leaks the image
+    /// holds are the live database's, faithfully kept: advisories (BKP-VER-20). The image is the one at C, before its tail replays.
+    /// </summary>
+    private static void ScanDeep(IStoreFileSystem fs, StoreView view, List<PointVerification> points, List<VerifyFinding> storeFindings,
+        VerifyOptions options)
+    {
+        var at = points.FindLastIndex(p => p.Restorable);
+        if (at < 0)
+        {
+            return;
+        }
+
+        var id = points[at].Id;
+        var chain = ChainResolver.Resolve(view, id);
+        var file = chain.Packs[^1].File;
+        IntegrityReport report;
+        try
+        {
+            using var source = PackChainPageSource.Open(fs, view, chain);
+            report = IntegrityScanner.Scan(source, new IntegrityOptions
+            {
+                Depth = ScanDepth.Deep,
+                Cancellation = options.Cancellation,
+                Progress = options.Progress,
+            });
+        }
+        catch (Exception e) when (e is BackupException or IOException)
+        {
+            storeFindings.Add(new VerifyFinding("BKP-VER-19", VerifySeverity.Damage, file, -1, $"point #{id}: its image could not be scanned: {e.Message}"));
+            points[at] = new PointVerification { Id = id, Restorable = false, BrokenBy = [id] };
+            return;
+        }
+
+        options.Cancellation.ThrowIfCancellationRequested();
+        var first = report.Findings.Count == 0 ? "" : $"; first: {report.Findings[0].Code} {report.Findings[0].Summary}";
+        switch (report.Verdict)
+        {
+            case IntegrityVerdict.Unopenable:
+                storeFindings.Add(new VerifyFinding("BKP-VER-19", VerifySeverity.Damage, file, -1,
+                    $"point #{id}: its image cannot be traversed ({report.Findings.Count} finding(s){first})"));
+                points[at] = new PointVerification { Id = id, Restorable = false, BrokenBy = [id] };
+                break;
+            case IntegrityVerdict.DataLoss or IntegrityVerdict.Divergent:
+                storeFindings.Add(new VerifyFinding("BKP-VER-20", VerifySeverity.Advisory, file, -1,
+                    $"point #{id}: the image carries damage the live database had: {report.Verdict} ({report.Findings.Count} finding(s){first})"));
+                break;
+            case IntegrityVerdict.SoundWithLeaks:
+                storeFindings.Add(new VerifyFinding("BKP-VER-20", VerifySeverity.Advisory, file, -1,
+                    $"point #{id}: the image holds leaked space ({report.Totals.BytesLeaked} bytes), as the live database did"));
+                break;
+        }
     }
 
     /// <summary>BKP-VER-10..13: every byte, every page, the tail's P, the meta pair against the header.</summary>

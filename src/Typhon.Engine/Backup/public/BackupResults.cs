@@ -57,8 +57,51 @@ public sealed class BackupCreateOptions
     /// <summary>Stops the capture; nothing is published.</summary>
     public CancellationToken Cancellation { get; init; }
 
+    /// <summary>Called with the image's pages read so far and its total (an incremental reads only its changed pages, so it jumps).</summary>
+    public Action<long, long> Progress { get; init; }
+
     /// <summary>Where the store logs.</summary>
     public ILogger Logger { get; init; }
+}
+
+/// <summary>Options of <see cref="BackupOperations.Verify(string, BackupVerifyLevel, BackupVerifyOptions)"/>.</summary>
+[PublicAPI]
+public sealed class BackupVerifyOptions
+{
+    /// <summary>Stops the verify between packs and during a deep verify's scan: it throws <see cref="OperationCanceledException"/>, reporting nothing.</summary>
+    public CancellationToken Cancellation { get; init; }
+
+    /// <summary>
+    /// <c>(phase, done, total)</c>: <c>"packs"</c> verified of the scope's packs, then, for <see cref="BackupVerifyLevel.Deep"/>, the integrity scan's own
+    /// phases over the point's image.
+    /// </summary>
+    public Action<string, long, long> Progress { get; init; }
+
+    /// <summary>Where the store logs.</summary>
+    public ILogger Logger { get; init; }
+}
+
+/// <summary>
+/// What a backup operation's exception means to its caller (<see cref="BackupOperations.Classify"/>): the one mapping <c>typhon backup</c>'s exit codes
+/// and the Workbench's error categories share, so the same failure reads the same in both.
+/// </summary>
+[PublicAPI]
+public enum BackupFailureKind
+{
+    /// <summary>Not an outcome of the operation but a defect: let it surface with its stack.</summary>
+    Defect = 0,
+
+    /// <summary>The operation failed (I/O, cancelled, an aborted capture, another backup running); a retry may succeed.</summary>
+    Failed,
+
+    /// <summary>The store cannot serve the request: a chain is broken, a pack is corrupt, a target LSN or time cannot be reached.</summary>
+    StoreDamaged,
+
+    /// <summary>Refused before anything was written: a live or existing target, a locked or foreign store, a format mismatch, backup not configured.</summary>
+    Refused,
+
+    /// <summary>A reviewed plan no longer holds (<see cref="BackupPlanChangedException"/>): nothing was written; plan again.</summary>
+    PlanChanged,
 }
 
 /// <summary>Options of <see cref="BackupOperations.Restore"/>.</summary>
@@ -88,6 +131,12 @@ public sealed class BackupRestoreOptions
 
     /// <summary>Where the restore logs.</summary>
     public ILogger Logger { get; init; }
+
+    /// <summary>
+    /// The <see cref="BackupRestorePlan.Fingerprint"/> of a reviewed plan (<see cref="BackupOperations.PlanRestore"/>): the restore re-plans under its lock
+    /// and throws <see cref="BackupPlanChangedException"/>, writing nothing, when what it would restore now differs. Null: no plan to hold to.
+    /// </summary>
+    public string ApprovedPlan { get; init; }
 }
 
 /// <summary>What a restore did.</summary>
@@ -108,10 +157,15 @@ public sealed class BackupRestoreOptions
 /// What <see cref="BackupRestoreOptions.OpenAndClose"/> threw, or <c>null</c>. The restore is published either way: the target and the displaced
 /// bundle are where this result says.
 /// </param>
+/// <param name="TargetLsn">The LSN a restore to an LSN or a time aimed at; 0 for a point.</param>
+/// <param name="EffectiveLsn">The restored database's last LSN: the last transaction ending at or below the target, or the point's <c>P</c>.</param>
+/// <param name="TimelineId">The timeline restored from.</param>
+/// <param name="ArchivedSegments">Archived WAL segments restored.</param>
+/// <param name="ForcedCrashRecovery">The restored bundle opens on the crash path although its image is clean (its archived WAL is replayed).</param>
 [PublicAPI]
 public sealed record BackupRestoreResult(BackupPointSummary Point, string Target, string DisplacedBundle, int ChainDepth, int PagesWritten, int ZeroPages,
     int TailSegments, long BytesRead, long BytesWritten, TimeSpan Duration, IReadOnlyList<uint> SuspectPages, IReadOnlyList<PackPageDamage> DamagedPages,
-    Guid NewTimelineId, string SettleError);
+    Guid NewTimelineId, string SettleError, long TargetLsn, long EffectiveLsn, Guid TimelineId, int ArchivedSegments, bool ForcedCrashRecovery);
 
 /// <summary>How deep a verify reads.</summary>
 [PublicAPI]
@@ -122,6 +176,12 @@ public enum BackupVerifyLevel
 
     /// <summary>Quick, plus every byte's file CRC, every page decoded and checked, and each point's meta pair against its header.</summary>
     Full,
+
+    /// <summary>
+    /// Full, plus the integrity scan of a point's image (of the point verified, or of the store's newest restorable one): an image the scan cannot
+    /// traverse is not restorable; damage the image holds (the live database's) is a warning. The drill is what proves the point opens.
+    /// </summary>
+    Deep,
 }
 
 /// <summary>A verify's overall answer; <c>typhon backup verify</c> maps it to exit 0, 1, 2, 3.</summary>
@@ -198,17 +258,20 @@ public sealed record BackupPointVerification(uint BackupId, bool Restorable, IRe
 /// <param name="StoreFindings">Findings about the store or about chain links.</param>
 /// <param name="Duration">Wall time.</param>
 /// <param name="BytesRead">Bytes read from the store.</param>
+/// <param name="RemovedPoints">Points a concurrent retention deleted while the verify ran: left out, not damage.</param>
 [PublicAPI]
 public sealed record BackupVerifyReport(BackupVerifyLevel Level, BackupVerifyVerdict Verdict, IReadOnlyList<BackupPackVerification> Packs,
-    IReadOnlyList<BackupPointVerification> Points, IReadOnlyList<BackupVerifyFinding> StoreFindings, TimeSpan Duration, long BytesRead);
+    IReadOnlyList<BackupPointVerification> Points, IReadOnlyList<BackupVerifyFinding> StoreFindings, TimeSpan Duration, long BytesRead,
+    int RemovedPoints);
 
 /// <summary>A chain's head in a store.</summary>
 /// <param name="ChainId">The chain.</param>
 /// <param name="BaseId">Its base point (0 when the base pack is gone).</param>
 /// <param name="HeadBackupId">Its newest point.</param>
-/// <param name="Depth">Its points in the store.</param>
+/// <param name="Depth">Its points in the store (a compacted point counts once).</param>
+/// <param name="HeadDepth">The packs a restore of its head reads, a compacted base preferred; 0 when the head does not resolve.</param>
 [PublicAPI]
-public sealed record BackupChainSummary(Guid ChainId, uint BaseId, uint HeadBackupId, int Depth);
+public sealed record BackupChainSummary(Guid ChainId, uint BaseId, uint HeadBackupId, int Depth, int HeadDepth);
 
 /// <summary>What a store holds.</summary>
 /// <param name="StoreId">The store's identity.</param>
@@ -218,21 +281,37 @@ public sealed record BackupChainSummary(Guid ChainId, uint BaseId, uint HeadBack
 /// <param name="UnreadablePacks">Pack files whose header or footer cannot be read, with why.</param>
 /// <param name="TemporaryFiles">In-progress or abandoned temps.</param>
 /// <param name="RestorablePoints">The restorable points by a quick verify, or <c>null</c> when not asked for.</param>
+/// <param name="Drills">Each drilled point's newest drill (a drill that could not run is not one), by point id.</param>
 [PublicAPI]
 public sealed record BackupStoreListing(Guid StoreId, Guid DatabaseId, IReadOnlyList<BackupPointSummary> Points, IReadOnlyList<BackupChainSummary> Chains,
-    IReadOnlyList<KeyValuePair<string, string>> UnreadablePacks, IReadOnlyList<string> TemporaryFiles, IReadOnlyList<uint> RestorablePoints);
+    IReadOnlyList<KeyValuePair<string, string>> UnreadablePacks, IReadOnlyList<string> TemporaryFiles, IReadOnlyList<uint> RestorablePoints,
+    IReadOnlyDictionary<uint, BackupDrillSummary> Drills);
 
-/// <summary>A store's health, from its packs alone (the engine's status file and scheduler health come with #1416).</summary>
+/// <summary>
+/// Backup health, one verdict (07 §6): a store's from its packs (<see cref="BackupOperations.Status"/>), an engine's from its schedule, its store and its
+/// drills (<see cref="BackupStatus.Health"/>). <c>typhon backup status</c> maps it to its exit code: Ok 0, Warning 1, Degraded 1, Failing 3, Off 3.
+/// </summary>
 [PublicAPI]
 public enum BackupHealth
 {
+    /// <summary>Backup is not configured.</summary>
+    Off = 0,
+
     /// <summary>The newest point is restorable and nothing needs attention.</summary>
     Ok,
 
-    /// <summary>Restorable, but something needs attention: the newest point is suspect or not restorable while an older one is, or temps are left.</summary>
+    /// <summary>
+    /// Restorable, but something needs attention: a suspect newest point, a newest point that is not restorable while an older one is, temps left, retention
+    /// blocked, a drill overdue.
+    /// </summary>
     Warning,
 
-    /// <summary>No point can be restored.</summary>
+    /// <summary>
+    /// Every point is still restorable, with reduced coverage or assurance: the backups are stale, the archive lags or has a gap, a drill failed.
+    /// </summary>
+    Degraded,
+
+    /// <summary>No point can be restored, or backups keep failing.</summary>
     Failing,
 }
 
@@ -242,5 +321,7 @@ public enum BackupHealth
 /// <param name="Points">Points in the store.</param>
 /// <param name="Latest">The newest point, or <c>null</c>.</param>
 /// <param name="LatestRestorable">The newest point whose chain resolves (from the packs' headers and footers), or <c>null</c>.</param>
+/// <param name="Archive">What each timeline's WAL archive makes restorable; empty when the store holds no archive.</param>
 [PublicAPI]
-public sealed record BackupStoreStatus(BackupHealth Health, string Reason, int Points, BackupPointSummary Latest, BackupPointSummary LatestRestorable);
+public sealed record BackupStoreStatus(BackupHealth Health, string Reason, int Points, BackupPointSummary Latest, BackupPointSummary LatestRestorable,
+    IReadOnlyList<BackupArchiveCoverage> Archive);

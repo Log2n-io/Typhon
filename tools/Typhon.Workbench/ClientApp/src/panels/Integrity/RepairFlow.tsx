@@ -11,6 +11,7 @@ import type { Limits, RepairOutcome, RepairPlan } from './integrityModel';
 import LimitsBlock from './LimitsBlock';
 import LossManifest from './LossManifest';
 import RepairReceipt from './RepairReceipt';
+import { openBackups } from '@/shell/commands/openBackups';
 
 /**
  * Plan review → consent → apply, in the panel rather than a modal.
@@ -205,6 +206,18 @@ export default function RepairFlow({ limits }: { limits: Limits }) {
               I have read the {plan.loss.length.toLocaleString()}-entry list above and accept losing what it names.
             </span>
           </label>
+        )}
+
+        {/* #1417 (Integrity PR-4: restore is from backup) — a repair that loses data is the moment to ask whether a backup holds it. */}
+        {plan.requiresLossyConsent && (
+          <Button
+            variant="outline"
+            onClick={() => openBackups(path)}
+            data-testid="integrity-restore-instead"
+            className="mb-2 h-7 self-start px-2 text-fs-base"
+          >
+            Restore from a backup instead…
+          </Button>
         )}
 
         <div className="flex flex-wrap items-center gap-2">

@@ -82,6 +82,15 @@ internal interface IWalFileIO : IDisposable
     SafeFileHandle OpenSegmentForRead(string path);
 
     /// <summary>
+    /// Opens a sealed WAL segment for the WAL archiver (BKP-10, WA-5): read-only, and sharing delete as well as read/write, so a checkpoint whose
+    /// backlog release reclaims the segment mid-read deletes it rather than failing the cycle on a sharing violation; the handle keeps reading the
+    /// file (Windows delete-pending, POSIX unlink).
+    /// </summary>
+    /// <param name="path">File path for the segment.</param>
+    /// <returns>A read-only handle; by default the one <see cref="OpenSegmentForRead"/> returns.</returns>
+    SafeFileHandle OpenSegmentForArchive(string path) => OpenSegmentForRead(path);
+
+    /// <summary>
     /// Checks whether a segment file exists at the given path.
     /// </summary>
     /// <param name="path">File path to check.</param>

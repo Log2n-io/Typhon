@@ -381,6 +381,22 @@ internal class InMemorySparseFileSystem : IStoreFileSystem
         return list;
     }
 
+    public IReadOnlyList<string> EnumerateDirectories(string directory)
+    {
+        var d = Normalize(directory);
+        var list = new List<string>();
+        foreach (var dir in Directories)
+        {
+            if (ParentOf(dir) == d && dir.Length > d.Length + 1)
+            {
+                list.Add(dir[(d.Length + 1)..]);
+            }
+        }
+
+        list.Sort(StringComparer.Ordinal);
+        return list;
+    }
+
     public bool IsBundleHeldByLiveProcess(string bundleDirectory) => _heldBundles.Contains(Normalize(bundleDirectory));
 
     /// <summary>Rooted paths ("/r/…") are already full; a relative one is rooted under <c>/cwd</c>, as the OS roots it under the current directory.</summary>

@@ -112,6 +112,18 @@ public sealed class TyphonOptions
     }
 
     /// <summary>
+    /// The engine's own backups (#1416): <see cref="DatabaseEngineOptions.Backup"/>. An instance rather than a delegate, so its required members (the store,
+    /// the interval, the retention policy) are stated where it is built.
+    /// </summary>
+    /// <param name="options">The backup configuration.</param>
+    public TyphonOptions Backup(BackupOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        _engine.Add(o => o.Backup = options);
+        return this;
+    }
+
+    /// <summary>
     /// Configures the engine-wide spatial grid — required when a registered archetype has a <c>[SpatialIndex]</c> field.
     /// The one-line setup applies this in the narrow window after archetypes are touched and before
     /// <see cref="DatabaseEngine.InitializeArchetypes"/> (which <see cref="ServiceCollectionExtensions.AddTyphon"/> /

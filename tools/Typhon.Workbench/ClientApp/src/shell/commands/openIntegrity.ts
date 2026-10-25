@@ -1,4 +1,5 @@
 import { useIntegrityStore } from '@/stores/useIntegrityStore';
+import { useBackupsStore } from '@/stores/useBackupsStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { ensureDockPanel } from './openSchemaBrowser';
 
@@ -21,6 +22,8 @@ export function openIntegrity(path?: string): void {
   }
 
   if (useSessionStore.getState().kind === 'none') {
+    // The no-session shell shows one full-bleed view at a time (#1417).
+    useBackupsStore.getState().closeStandalone();
     store.openStandalone(path);
     return;
   }

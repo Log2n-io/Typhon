@@ -21,6 +21,7 @@ import QueryConsolePanel from '@/panels/QueryConsole/QueryConsolePanel';
 import EngineLiveHealthPanel from '@/panels/EngineLiveHealth/EngineLiveHealthPanel';
 import DevFixturePanel from '@/panels/DevFixture/DevFixturePanel';
 import IntegrityPanel from '@/panels/Integrity/IntegrityPanel';
+import BackupsPanel from '@/panels/Backups/BackupsPanel';
 import SpatialMaintenancePanel from '@/panels/SpatialMaintenance/SpatialMaintenancePanel';
 import SubscriptionsPanel from '@/panels/Subscriptions/SubscriptionsPanel';
 import RealmsPanel from '@/panels/Realms/RealmsPanel';
@@ -83,6 +84,8 @@ const VIEWS: { id: string; label: string; render: () => React.JSX.Element }[] = 
   // is a sentence explaining what the view does and that reading is safe, which is the PC-2 shape. Enrolled
   // in its *docked* form; the full-bleed no-session form wraps this same component, so it inherits both.
   { id: 'Integrity', label: 'Integrity', render: () => <IntegrityPanel /> },
+  // #1417 Backups: pure DOM. Its cold state — no store named — is the sentence saying what to name and what the view then does (PC-2).
+  { id: 'Backups', label: 'Backups', render: () => <BackupsPanel /> },
   // #911 O3 Spatial Maintenance: pure DOM (header + stat groups). The conformance fixture is an OPEN session, so this
   // renders its attach-only cold state — which is the branch D + E need, and is a sentence explaining why the view is
   // empty rather than an empty panel.

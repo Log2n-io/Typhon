@@ -131,7 +131,11 @@ internal sealed class CatalogChain
 
     public uint HeadBackupId { get; set; }
 
+    /// <summary>The chain's distinct points (an id with both an <c>-I</c> and a <c>-C</c> pack counts once).</summary>
     public int Depth { get; set; }
+
+    /// <summary>The packs a restore of the head reads (its resolution, <c>-C</c> preferred); 0 when the head does not resolve (DL-9).</summary>
+    public int HeadDepth { get; set; }
 
     public Guid TimelineId { get; set; }
 }
@@ -142,7 +146,8 @@ internal sealed class CatalogChain
 /// </summary>
 internal sealed class StoreCatalogFile
 {
-    public const int CurrentFormatVersion = 1;
+    /// <summary>2: <see cref="CatalogChain.Depth"/> counts points, not packs, and <see cref="CatalogChain.HeadDepth"/> exists. A v1 file is rebuilt.</summary>
+    public const int CurrentFormatVersion = 2;
 
     public int FormatVersion { get; set; }
 
@@ -197,6 +202,8 @@ internal static class StoreCatalog
         packs.Sort(static (a, b) => string.CompareOrdinal(a.File, b.File));
         unreadable.Sort(static (a, b) => string.CompareOrdinal(a.File, b.File));
         var heads = new Dictionary<Guid, CatalogChain>();
+        var points = new HashSet<(Guid, uint)>();
+        var standing = new Dictionary<uint, CatalogPack>(packs.Count);
         foreach (var p in packs)
         {
             if (!heads.TryGetValue(p.ChainId, out var chain))
@@ -205,7 +212,16 @@ internal static class StoreCatalog
                 heads[p.ChainId] = chain;
             }
 
-            chain.Depth++;
+            if (points.Add((p.ChainId, p.BackupId)))
+            {
+                chain.Depth++;
+            }
+
+            if (p.Kind == BackupKind.Compacted || !standing.ContainsKey(p.BackupId))
+            {
+                standing[p.BackupId] = p;
+            }
+
             if (p.IsBase && p.BackupId < chain.BaseId)
             {
                 chain.BaseId = p.BackupId;
@@ -226,6 +242,8 @@ internal static class StoreCatalog
             {
                 c.BaseId = 0;
             }
+
+            c.HeadDepth = ResolutionDepth(standing, c.ChainId, c.HeadBackupId);
         }
 
         chains.Sort(static (a, b) => a.BaseId != b.BaseId ? a.BaseId.CompareTo(b.BaseId) : a.ChainId.CompareTo(b.ChainId));
@@ -240,6 +258,34 @@ internal static class StoreCatalog
             Unreadable = unreadable,
             Chains = chains,
         };
+    }
+
+    /// <summary>
+    /// The packs a restore of <paramref name="pointId"/> reads, following <c>ParentId</c> with the compacted pack of an id preferred, as
+    /// <see cref="ChainResolver"/> walks it; 0 when the walk leaves the chain or misses a pack (the head is then not restorable). Headers only: the
+    /// link checks are the resolver's.
+    /// </summary>
+    private static int ResolutionDepth(Dictionary<uint, CatalogPack> standing, Guid chainId, uint pointId)
+    {
+        var depth = 0;
+        var id = pointId;
+        while (standing.TryGetValue(id, out var pack) && pack.ChainId == chainId && depth < ChainResolver.MaxDepth)
+        {
+            depth++;
+            if (pack.IsBase)
+            {
+                return depth;
+            }
+
+            if (pack.ParentId >= id)
+            {
+                break;
+            }
+
+            id = pack.ParentId;
+        }
+
+        return 0;
     }
 
     public static byte[] Serialize(StoreCatalogFile catalog) => JsonSerializer.SerializeToUtf8Bytes(catalog, BackupJsonContext.Default.StoreCatalogFile);
@@ -266,4 +312,7 @@ internal static class StoreCatalog
 [JsonSerializable(typeof(StoreIdentityFile))]
 [JsonSerializable(typeof(StoreLockHolder))]
 [JsonSerializable(typeof(StoreCatalogFile))]
+[JsonSerializable(typeof(DrillRecordFile))]
+[JsonSerializable(typeof(BackupRequestContent))]
+[JsonSerializable(typeof(BackupStatusFileContent))]
 internal sealed partial class BackupJsonContext : JsonSerializerContext;

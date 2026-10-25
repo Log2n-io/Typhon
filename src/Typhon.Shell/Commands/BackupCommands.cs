@@ -1,6 +1,7 @@
 using Spectre.Console;
 using Spectre.Console.Cli;
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
@@ -9,9 +10,10 @@ using System.Threading;
 namespace Typhon.Shell.Commands;
 
 /// <summary>
-/// <c>typhon backup create &lt;bundle&gt; --store S</c> — backs up a closed database (an offline capture, 02 §8). A database a live engine holds is
-/// refused (exit 4), pointing at <c>engine.Backup</c>: the CLI reaches a running engine only through <c>backup.request</c>, which arrives with #1416.
-/// A holder that advertises it will yield (the Workbench, #621) is asked to release the database first.
+/// <c>typhon backup create &lt;bundle&gt; [--store S] [--full] [--wait [--timeout T]]</c> — a point of a database. A running engine whose backup is
+/// configured and accepts requests is asked through <c>backup.request</c> (07 §3, DL-24): it takes the point into its own store (a <c>--store</c> naming
+/// another is refused, exit 4), and <c>--wait</c> follows its status until the point is published or failed. Otherwise the database is backed up offline (02 §8) into
+/// <c>--store</c>; a holder that advertises it will yield (the Workbench, #621) is asked to release it first, any other is refused (exit 4).
 /// </summary>
 // ReSharper disable once ClassNeverInstantiated.Global
 internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings>
@@ -32,8 +34,19 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
         [Description("The database's WAL directory, when its engine was configured with one other than {bundle}/wal.")]
         public string WalDir { get; set; }
 
+        [CommandOption("--wait")]
+        [Description("With a running engine: wait until the point is published (or failed); the exit code is its outcome.")]
+        public bool Wait { get; set; }
+
+        [CommandOption("--timeout")]
+        [Description("With --wait: how long to wait (30d, 12h, 90m, 45s). Default 10m.")]
+        public string Timeout { get; set; }
+
         /// <summary>How long a yieldable holder gets to release the database: the engine's own handoff wait by default. Not on the command line.</summary>
         public TimeSpan HandoffTimeout { get; set; } = new PagedMMFOptions().LockHandoffTimeout;
+
+        /// <summary>How often <c>--wait</c> reads the engine's status. Not on the command line.</summary>
+        public TimeSpan PollInterval { get; set; } = TimeSpan.FromMilliseconds(200);
         // ReSharper restore UnusedAutoPropertyAccessor.Global
     }
 
@@ -48,6 +61,40 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
         }
 
         var output = new BackupOutput(console, json, asJson);
+        var timeout = TimeSpan.FromMinutes(10);
+        if (settings.Timeout != null && !BackupCli.TryParseDuration(settings.Timeout, out timeout, out var timeoutError))
+        {
+            return output.Error(BackupCli.ExitUsage, timeoutError);
+        }
+
+        // A running engine that takes requests backs itself up (DL-24).
+        string live;
+        try
+        {
+            live = OfflineBundlePageSource.ResolveBundleDirectory(settings.Bundle);
+        }
+        catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0 || output.AsJson)
+        {
+            return output.Error(ex);
+        }
+
+        if (BackupOperations.ReadStatus(live) is { AcceptsRequests: true } running)
+        {
+            // The engine writes only to its own store (BKP-16): a point asked for elsewhere would silently land there.
+            if (!string.IsNullOrWhiteSpace(settings.Store) && !SamePath(settings.Store, running.StorePath))
+            {
+                return output.Error(BackupCli.ExitRefused, $"Database '{live}' is open in a running engine that backs up into '{running.StorePath}' only, not "
+                                                           + $"'{settings.Store}'. Drop --store (or name its store) to ask it for a point.");
+            }
+
+            return Request(live, running, settings, timeout, output, ct);
+        }
+
+        if (settings.Wait)
+        {
+            return output.Error(BackupCli.ExitUsage, "--wait follows a running engine's backup; this database has none that accepts requests.");
+        }
+
         if (string.IsNullOrWhiteSpace(settings.Store))
         {
             return output.Error(BackupCli.ExitUsage, "--store is required: the store to back the database up into.");
@@ -110,14 +157,98 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
         return exit;
     }
 
+    /// <summary>Whether two paths name one directory: full paths, trailing separators ignored, the platform's case rule.</summary>
+    private static bool SamePath(string a, string b) =>
+        string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(a)), Path.TrimEndingDirectorySeparator(Path.GetFullPath(b)),
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+
     /// <summary>What the command line asks of the capture. Offline, <c>--full</c> matters only to a database an engine has backed up before.</summary>
     internal static BackupCreateOptions OptionsFor(Settings settings, CancellationToken ct) =>
         new() { Full = settings.Full, WalDirectory = settings.WalDir, Cancellation = ct };
 
     private static string OnlineRefusal(string bundle, DatabaseLockedException ex) =>
-        $"Database '{bundle}' is open in process {ex.OwnerPid} on {ex.OwnerMachine}. Back it up from inside the application with "
-        + "engine.Backup.CreateAsync(store); the CLI will reach a running database through backup.request (#1416). Or stop the process and run this "
-        + "again.";
+        $"Database '{bundle}' is open in process {ex.OwnerPid} on {ex.OwnerMachine}, and its engine takes no backup requests (no BackupOptions, or "
+        + "AcceptRequests off). Configure its backup (DatabaseEngineOptions.Backup) to ask it from here, back it up from inside the application with "
+        + "engine.Backup.CreateAsync(), or stop the process and run this again.";
+
+    /// <summary>
+    /// The request path: <c>backup.request</c> written (the one writer, <see cref="BackupOperations.RequestBackup"/>); with <c>--wait</c>, the engine's
+    /// status followed until its job for this request ended: 0 published (1 when suspect), 2 failed, deferred or timed out.
+    /// </summary>
+    private static int Request(string bundle, BackupStatusReport before, Settings settings, TimeSpan timeout, BackupOutput output, CancellationToken ct)
+    {
+        Guid id;
+        try
+        {
+            id = BackupOperations.RequestBackup(bundle, settings.Full ? BackupRequestKind.Full : BackupRequestKind.Auto,
+                $"typhon backup create (PID {Environment.ProcessId})");
+        }
+        catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0 || output.AsJson)
+        {
+            return output.Error(ex);
+        }
+
+        if (!settings.Wait)
+        {
+            if (output.AsJson)
+            {
+                output.Json(new { exitCode = BackupCli.ExitOk, requestId = id, store = before.StorePath });
+            }
+            else
+            {
+                output.Console.MarkupLine($"[green]Requested[/] a point of {Markup.Escape(bundle)} from its running engine (request {id}); it goes into "
+                                          + $"{Markup.Escape(before.StorePath)}. Follow it with `typhon backup status {Markup.Escape(bundle)}`.");
+            }
+
+            return BackupCli.ExitOk;
+        }
+
+        var points = before.Status.PointsTotal;
+        var failures = before.Status.FailuresTotal;
+        var deadline = DateTime.UtcNow + timeout;
+        while (true)
+        {
+            if (ct.WaitHandle.WaitOne(settings.PollInterval))
+            {
+                return output.Error(BackupCli.ExitFailed, $"Cancelled while waiting for request {id}; the engine may still take the point.");
+            }
+
+            var report = BackupOperations.ReadStatus(bundle);
+            var status = report.Status;
+            if (status != null && status.LastRequestId == id && status.State == BackupRunState.Idle)
+            {
+                if (status.PointsTotal > points && status.LastPoint != null)
+                {
+                    var exit = status.LastPoint.Suspect ? BackupCli.ExitWarning : BackupCli.ExitOk;
+                    if (output.AsJson)
+                    {
+                        output.Json(new { exitCode = exit, requestId = id, point = status.LastPoint });
+                    }
+                    else
+                    {
+                        output.Console.MarkupLine($"[green]Backed up[/] {Markup.Escape(bundle)} as point [bold]#{status.LastPoint.BackupId}[/] "
+                                                  + $"({status.LastPoint.Kind}, P={status.LastPoint.PointLsn}) by its running engine.");
+                    }
+
+                    return exit;
+                }
+
+                var why = status.FailuresTotal > failures ? status.LastFailure?.Message ?? "it failed"
+                    : "the engine could not take it now (its store was held by another writer, or it was closing); ask again";
+                return output.Error(BackupCli.ExitFailed, $"Request {id} did not produce a point: {why}");
+            }
+
+            if (!report.EngineLive)
+            {
+                return output.Error(BackupCli.ExitFailed, $"The engine stopped before request {id} was served.");
+            }
+
+            if (DateTime.UtcNow >= deadline)
+            {
+                return output.Error(BackupCli.ExitFailed, $"Request {id} was not served within {timeout}; the engine may still take the point.");
+            }
+        }
+    }
 
     /// <summary>
     /// A live holder that advertised it will yield (#621) is asked to, the way a second engine's open asks: the request file, then a bounded wait for
@@ -213,7 +344,7 @@ internal sealed class BackupListCommand : Command<BackupListCommand.Settings>
 
         console.MarkupLine($"[grey]Store {listing.StoreId} of database {listing.DatabaseId}: {listing.Points.Count} point(s), "
                            + $"{BackupCli.Bytes(listing.Points.Sum(p => p.PackBytes))}.[/]");
-        var table = new Table().AddColumns("Id", "Kind", "Chain", "Parent", "P", "Frozen (UTC)", "Pages", "Size", "Notes");
+        var table = new Table().AddColumns("Id", "Kind", "Chain", "Parent", "P", "Frozen (UTC)", "Pages", "Size", "Drill", "Notes");
         if (settings.Verbose)
         {
             table.AddColumns("C", "Image pages", "WAL segs", "Timeline", "Pack");
@@ -230,7 +361,7 @@ internal sealed class BackupListCommand : Command<BackupListCommand.Settings>
             var row = new[]
             {
                 p.BackupId.ToString(), p.Kind.ToString(), p.ChainId.ToString()[..8], p.ParentId == 0 ? "-" : p.ParentId.ToString(), p.PointLsn.ToString(),
-                p.FreezeUtc.ToString("yyyy-MM-dd HH:mm:ss"), p.PageCount.ToString(), BackupCli.Bytes(p.PackBytes), notes,
+                p.FreezeUtc.ToString("yyyy-MM-dd HH:mm:ss"), p.PageCount.ToString(), BackupCli.Bytes(p.PackBytes), Drill(listing, p.BackupId), notes,
             }.AsEnumerable();
             if (settings.Verbose)
             {
@@ -248,7 +379,8 @@ internal sealed class BackupListCommand : Command<BackupListCommand.Settings>
         console.Write(table);
         foreach (var c in listing.Chains)
         {
-            console.MarkupLine($"Chain {c.ChainId.ToString()[..8]}: base #{c.BaseId}, head #{c.HeadBackupId}, {c.Depth} point(s).");
+            console.MarkupLine($"Chain {c.ChainId.ToString()[..8]}: base #{c.BaseId}, head #{c.HeadBackupId}, {c.Depth} point(s), restore of the head reads "
+                               + $"{c.HeadDepth} pack(s).");
         }
 
         foreach (var u in listing.UnreadablePacks)
@@ -263,11 +395,18 @@ internal sealed class BackupListCommand : Command<BackupListCommand.Settings>
 
         return BackupCli.ExitOk;
     }
+
+    /// <summary>The point's newest drill: <c>passed</c> or <c>failed</c> and its date; <c>-</c> when never drilled.</summary>
+    private static string Drill(BackupStoreListing listing, uint id) => listing.Drills.TryGetValue(id, out var d)
+        ? (d.Outcome == BackupDrillOutcome.Failed ? "[red]failed[/] " : d.Outcome == BackupDrillOutcome.PassedWithWarnings ? "passed (warnings) " : "passed ")
+          + d.Utc.ToString("yyyy-MM-dd")
+        : "-";
 }
 
 /// <summary>
-/// <c>typhon backup verify --store S [--point X] [--level quick|full]</c> — checks packs and chains without restoring anything (04 §4). The verdict is the
-/// exit code: 0 ok, 1 advisories, 2 damage with a restorable point left, 3 nothing restorable.
+/// <c>typhon backup verify --store S [--point X] [--level quick|full|deep]</c> — checks packs and chains without restoring anything (04 §4); deep also
+/// scans the image of the point (or of the newest restorable one). The verdict is the exit code: 0 ok, 1 advisories, 2 damage with a restorable point
+/// left, 3 nothing restorable.
 /// </summary>
 // ReSharper disable once ClassNeverInstantiated.Global
 internal sealed class BackupVerifyCommand : Command<BackupVerifyCommand.Settings>
@@ -281,7 +420,7 @@ internal sealed class BackupVerifyCommand : Command<BackupVerifyCommand.Settings
         public string Point { get; set; }
 
         [CommandOption("-l|--level")]
-        [Description("quick | full. Default: quick.")]
+        [Description("quick | full | deep (full, plus the integrity scan of the point's image). Default: quick.")]
         public string Level { get; set; }
         // ReSharper restore UnusedAutoPropertyAccessor.Global
     }
@@ -334,6 +473,11 @@ internal sealed class BackupVerifyCommand : Command<BackupVerifyCommand.Settings
         console.MarkupLine($"[{colour}]{report.Verdict}[/] — {report.Level} verify of {report.Packs.Count} pack(s), "
                            + $"{report.Points.Count(p => p.Restorable)} of {report.Points.Count} point(s) restorable, {BackupCli.Bytes(report.BytesRead)} read "
                            + $"in {report.Duration.TotalMilliseconds:0} ms.");
+        if (report.RemovedPoints > 0)
+        {
+            console.MarkupLine($"[grey]{report.RemovedPoints} point(s) were deleted by a retention while the verify ran; they are left out.[/]");
+        }
+
         foreach (var f in report.StoreFindings.Concat(report.Packs.SelectMany(p => p.Findings)))
         {
             var page = f.PageId >= 0 ? $" page {f.PageId}" : "";
@@ -369,10 +513,10 @@ internal sealed class BackupVerifyCommand : Command<BackupVerifyCommand.Settings
                 level = BackupVerifyLevel.Full;
                 return true;
             case "deep":
-                error = "--level deep (restore into scratch and run the integrity scan) arrives with the drill (#1416). Use quick or full.";
-                return false;
+                level = BackupVerifyLevel.Deep;
+                return true;
             default:
-                error = $"Unknown level '{value}'. Expected quick or full.";
+                error = $"Unknown level '{value}'. Expected quick, full or deep.";
                 return false;
         }
     }
@@ -392,6 +536,22 @@ internal sealed class BackupRestoreCommand : Command<BackupRestoreCommand.Settin
         [CommandOption("-p|--point")]
         [Description("latest (default) or a backup id.")]
         public string Point { get; set; }
+
+        [CommandOption("--lsn")]
+        [Description("Restore to this LSN: the newest point at or below it, then the archived WAL up to the last transaction ending at or below it.")]
+        public string Lsn { get; set; }
+
+        [CommandOption("--time")]
+        [Description("Restore to this instant (ISO 8601 with its offset, e.g. 2026-10-21T14:03:00Z): the last LSN durable at or before it.")]
+        public string Time { get; set; }
+
+        [CommandOption("--timeline")]
+        [Description("With --lsn or --time: the timeline (default: the newest, then its ancestry).")]
+        public string Timeline { get; set; }
+
+        [CommandOption("--dry-run")]
+        [Description("Report what the restore would do, and every refusal it would raise, writing nothing.")]
+        public bool DryRun { get; set; }
 
         [CommandOption("-t|--to")]
         [Description("The bundle to create ({name}.typhon, the database's own name) or the directory to create it in.")]
@@ -427,9 +587,14 @@ internal sealed class BackupRestoreCommand : Command<BackupRestoreCommand.Settin
             return output.Error(BackupCli.ExitUsage, "--store and --to are required.");
         }
 
-        if (!BackupCli.TryParsePoint(settings.Point, out var point, out var pointError))
+        if (!BackupCli.TryParseTarget(settings.Point, settings.Lsn, settings.Time, settings.Timeline, out var point, out var pointError))
         {
             return output.Error(BackupCli.ExitUsage, pointError);
+        }
+
+        if (settings.DryRun)
+        {
+            return DryRun(settings, point, output);
         }
 
         BackupRestoreResult result;
@@ -461,6 +626,11 @@ internal sealed class BackupRestoreCommand : Command<BackupRestoreCommand.Settin
         console.MarkupLine($"[green]Restored[/] point [bold]#{result.Point.BackupId}[/] ({result.Point.Kind}, P={result.Point.PointLsn}) to "
                            + $"{Markup.Escape(result.Target)}: {result.PagesWritten} page(s), {result.TailSegments} WAL segment(s), "
                            + $"{BackupCli.Bytes(result.BytesWritten)} in {result.Duration.TotalMilliseconds:0} ms.");
+        if (point.IsArchiveTarget)
+        {
+            console.MarkupLine($"Then the archived WAL of timeline {result.TimelineId}: {result.ArchivedSegments} segment(s), up to LSN "
+                               + $"[bold]{result.EffectiveLsn}[/] (asked {result.TargetLsn}).");
+        }
         if (result.DisplacedBundle != null)
         {
             console.MarkupLine($"The bundle that was there is now {Markup.Escape(result.DisplacedBundle)}.");
@@ -485,20 +655,129 @@ internal sealed class BackupRestoreCommand : Command<BackupRestoreCommand.Settin
         console.MarkupLine("[grey]Its first open replays the WAL to the point and starts a new timeline.[/]");
         return exit;
     }
+
+    /// <summary><c>--dry-run</c>: the plan, every refusal reported rather than thrown; the exit code is the one the restore would have.</summary>
+    private static int DryRun(Settings settings, PointSelector point, BackupOutput output)
+    {
+        BackupRestorePlan plan;
+        try
+        {
+            plan = BackupOperations.PlanRestore(settings.Store, point, settings.To, new BackupRestoreOptions
+            {
+                Replace = settings.Replace, AllowFormatMismatch = settings.AllowFormatMismatch,
+            });
+        }
+        catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0 || output.AsJson)
+        {
+            return output.Error(ex);
+        }
+
+        var exit = plan.Unreachable != null ? BackupCli.ExitStoreDamaged : plan.Refusal != null ? BackupCli.ExitRefused : BackupCli.ExitOk;
+        if (output.AsJson)
+        {
+            output.Json(new { exitCode = exit, plan });
+            return exit;
+        }
+
+        var console = output.Console;
+        if (plan.Unreachable != null)
+        {
+            console.MarkupLine($"[red]Unreachable ({plan.Unreachable}):[/] {Markup.Escape(plan.RefusalMessage ?? "")}");
+            return exit;
+        }
+
+        console.MarkupLine($"Would restore point [bold]#{plan.BaseBackupId}[/] (chain {string.Join(" > ", plan.Chain.Select(id => $"#{id}"))}, "
+                           + $"{BackupCli.Bytes(plan.BytesToRead)} to read) to {Markup.Escape(plan.ResolvedTarget ?? "-")}.");
+        if (point.IsArchiveTarget)
+        {
+            console.MarkupLine($"Then {plan.ArchivedSegments} archived WAL segment(s) of timeline {plan.TimelineId} up to LSN [bold]{plan.PointLsn}[/] "
+                               + $"(asked {plan.TargetLsn}" + (plan.SampleUtc.HasValue ? $", sampled at {plan.SampleUtc:O})." : ")."));
+        }
+
+        if (plan.DisplacedBundle != null)
+        {
+            console.MarkupLine($"The bundle there would move to {Markup.Escape(plan.DisplacedBundle)}.");
+        }
+
+        if (plan.Refusal != null)
+        {
+            console.MarkupLine($"[red]Refused ({plan.Refusal}):[/] {Markup.Escape(plan.RefusalMessage ?? "")}");
+        }
+
+        console.MarkupLine($"[grey]Plan {plan.Fingerprint}. Nothing was written.[/]");
+        return exit;
+    }
 }
 
 /// <summary>
-/// <c>typhon backup status --store S</c> — the store's health from its packs' headers and footers and the chains they form, per chain, with the
-/// newest point's age: cheap enough to poll. The exit code is the health (0 ok, 1 warning, 3 nothing restorable), for monitoring; <c>verify</c>
-/// reads the rest. The engine's status file and its health thresholds arrive with #1416.
+/// <c>typhon backup status &lt;bundle&gt; | --store S [--stale-after T]</c> — backup health, cheap enough to poll; the exit code is the health for
+/// monitoring (DL-22 e): Ok 0, Warning and Degraded 1, Failing, Off and unknown 3. A bundle's comes from its engine's <c>backup.status.json</c> (a
+/// stopped engine's time rules judged again now, DL-23) and its store; a store's from its packs' headers and footers per chain, with
+/// <c>--stale-after</c> for the stores of databases backed up offline (DL-33).
 /// </summary>
 // ReSharper disable once ClassNeverInstantiated.Global
-internal sealed class BackupStatusCommand : Command<BackupSettings>
+internal sealed class BackupStatusCommand : Command<BackupStatusCommand.Settings>
 {
-    protected override int Execute(CommandContext context, BackupSettings settings, CancellationToken cancellationToken)
+    // ReSharper disable once ClassNeverInstantiated.Global
+    public sealed class Settings : BackupSettings
+    {
+        // ReSharper disable UnusedAutoPropertyAccessor.Global
+        [CommandArgument(0, "[bundle]")]
+        [Description("A .typhon bundle: its running (or last) engine's backup status. Or give --store.")]
+        public string Bundle { get; set; }
+
+        [CommandOption("--stale-after")]
+        [Description("With --store: Degraded when the newest restorable point is older than this (30d, 12h, 90m, 45s).")]
+        public string StaleAfter { get; set; }
+        // ReSharper restore UnusedAutoPropertyAccessor.Global
+    }
+
+    protected override int Execute(CommandContext context, Settings settings, CancellationToken cancellationToken)
         => BackupCli.RejectLeftovers(context, settings) is var usage and >= 0 ? usage : Run(settings, AnsiConsole.Console, Console.Out, DateTime.UtcNow);
 
-    internal static int Run(BackupSettings settings, IAnsiConsole console, TextWriter json, DateTime utcNow)
+    /// <summary>A bundle's status: its engine's status file (judged again now) and its store.</summary>
+    private static int BundleStatus(string bundle, BackupOutput output, DateTime utcNow)
+    {
+        BackupStatusReport report;
+        try
+        {
+            report = BackupOperations.ReadStatus(OfflineBundlePageSource.ResolveBundleDirectory(bundle), utcNow);
+        }
+        catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0 || output.AsJson)
+        {
+            return output.Error(ex);
+        }
+
+        var exit = BackupCli.ExitCodeOf(report.Health);
+        if (output.AsJson)
+        {
+            output.Json(new { exitCode = exit, report });
+            return exit;
+        }
+
+        var colour = exit switch { BackupCli.ExitOk => "green", BackupCli.ExitWarning => "yellow", _ => "red" };
+        output.Console.MarkupLine($"[{colour}]{report.Health}[/] — {Markup.Escape(report.Reason)}.");
+        var s = report.Status;
+        if (s != null)
+        {
+            output.Console.MarkupLine(report.EngineLive
+                ? $"Engine PID {report.Pid} on {Markup.Escape(report.Machine)}, {s.State}{(s.State == BackupRunState.Running ? " (" + s.Phase + ")" : "")}, "
+                  + $"store {Markup.Escape(report.StorePath)}{(report.AcceptsRequests ? ", takes requests" : "")}."
+                : $"No engine runs on it (last: PID {report.Pid} on {Markup.Escape(report.Machine)}); store {Markup.Escape(report.StorePath)}.");
+            output.Console.MarkupLine(s.LastPoint == null
+                ? "No point of this database's timeline yet."
+                : $"Newest point #{s.LastPoint.BackupId} ({s.LastPoint.Kind}), {BackupCli.Age(utcNow - s.LastSuccessUtc)} old; "
+                  + $"{s.RestorablePoints} restorable point(s), {BackupCli.Bytes(s.StoreBytes)}; {s.ConsecutiveFailures} failure(s) in a row.");
+            if (s.LastFailure != null)
+            {
+                output.Console.MarkupLine($"[grey]Last failure {s.LastFailure.Utc:u}: {Markup.Escape(s.LastFailure.Message)}[/]");
+            }
+        }
+
+        return exit;
+    }
+
+    internal static int Run(Settings settings, IAnsiConsole console, TextWriter json, DateTime utcNow)
     {
         if (!BackupCli.TryResolveFormat(settings.Format, out var asJson, out var formatError))
         {
@@ -506,9 +785,22 @@ internal sealed class BackupStatusCommand : Command<BackupSettings>
         }
 
         var output = new BackupOutput(console, json, asJson);
+        if (!string.IsNullOrWhiteSpace(settings.Bundle))
+        {
+            return string.IsNullOrWhiteSpace(settings.Store) && settings.StaleAfter == null
+                ? BundleStatus(settings.Bundle, output, utcNow)
+                : output.Error(BackupCli.ExitUsage, "Give a bundle or --store, not both (--stale-after goes with --store).");
+        }
+
         if (string.IsNullOrWhiteSpace(settings.Store))
         {
-            return output.Error(BackupCli.ExitUsage, "--store is required (status of a bundle, from its engine's status file, arrives with #1416).");
+            return output.Error(BackupCli.ExitUsage, "Give a bundle (its engine's backup status) or --store (a store's).");
+        }
+
+        var staleAfter = TimeSpan.Zero;
+        if (settings.StaleAfter != null && !BackupCli.TryParseDuration(settings.StaleAfter, out staleAfter, out var staleError))
+        {
+            return output.Error(BackupCli.ExitUsage, staleError);
         }
 
         BackupStoreStatus status;
@@ -523,19 +815,25 @@ internal sealed class BackupStatusCommand : Command<BackupSettings>
             return output.Error(ex);
         }
 
-        var exit = status.Health switch
+        // DL-33: a store of an offline-backed database has no engine to judge staleness; --stale-after does.
+        if (staleAfter > TimeSpan.Zero && status.Health is BackupHealth.Ok or BackupHealth.Warning && status.LatestRestorable != null
+            && utcNow - status.LatestRestorable.TailEndUtc > staleAfter)
         {
-            BackupHealth.Ok => BackupCli.ExitOk,
-            BackupHealth.Warning => BackupCli.ExitWarning,
-            _ => BackupCli.ExitStoreDamaged,
-        };
+            status = status with
+            {
+                Health = BackupHealth.Degraded,
+                Reason = $"the newest restorable point #{status.LatestRestorable.BackupId} is older than {BackupCli.Age(staleAfter)}",
+            };
+        }
+
+        var exit = BackupCli.ExitCodeOf(status.Health);
         var storeBytes = listing.Points.Sum(p => p.PackBytes);
         var chains = listing.Chains.Select(c =>
         {
             var head = listing.Points.LastOrDefault(p => p.BackupId == c.HeadBackupId);
             return new
             {
-                c.ChainId, c.BaseId, c.HeadBackupId, c.Depth,
+                c.ChainId, c.BaseId, c.HeadBackupId, c.Depth, c.HeadDepth,
                 HeadPointLsn = head?.PointLsn, HeadAgeSeconds = head == null ? (double?)null : Math.Round((utcNow - head.TailEndUtc).TotalSeconds),
             };
         }).ToList();
@@ -547,7 +845,7 @@ internal sealed class BackupStatusCommand : Command<BackupSettings>
             {
                 exitCode = exit, status.Health, status.Reason, status.Points, storeBytes, latest = status.Latest,
                 latestAgeSeconds = latestAge.HasValue ? Math.Round(latestAge.Value.TotalSeconds) : (double?)null, latestRestorable = status.LatestRestorable,
-                chains,
+                chains, archive = status.Archive,
             });
             return exit;
         }
@@ -563,16 +861,269 @@ internal sealed class BackupStatusCommand : Command<BackupSettings>
 
         if (chains.Count > 0)
         {
-            var table = new Table().AddColumns("Chain", "Base", "Head", "Depth", "Head P", "Head age");
+            var table = new Table().AddColumns("Chain", "Base", "Head", "Points", "Head depth", "Head P", "Head age");
             foreach (var c in chains)
             {
-                table.AddRow(c.ChainId.ToString()[..8], $"#{c.BaseId}", $"#{c.HeadBackupId}", c.Depth.ToString(), c.HeadPointLsn?.ToString() ?? "-",
+                table.AddRow(c.ChainId.ToString()[..8], $"#{c.BaseId}", $"#{c.HeadBackupId}", c.Depth.ToString(), c.HeadDepth.ToString(),
+                    c.HeadPointLsn?.ToString() ?? "-",
                     c.HeadAgeSeconds.HasValue ? BackupCli.Age(TimeSpan.FromSeconds(c.HeadAgeSeconds.Value)) : "-");
             }
 
             console.Write(table);
         }
 
+        if (status.Archive.Count > 0)
+        {
+            var table = new Table().AddColumns("Timeline", "Restorable from", "Archived through", "Last archived", "Uncovered gaps");
+            foreach (var a in status.Archive)
+            {
+                table.AddRow(a.TimelineId.ToString()[..8], a.FromLsn == 0 ? "[red]no point[/]" : a.FromLsn.ToString(), a.ThroughLsn.ToString(),
+                    a.LastArchivedUtc.HasValue ? BackupCli.Age(utcNow - a.LastArchivedUtc.Value) + " ago" : "-",
+                    a.UncoveredGaps.Count == 0 ? "none" : $"[yellow]{string.Join(", ", a.UncoveredGaps.Select(g => $"{g.FromLsn}..{g.ToLsn}"))}[/]");
+            }
+
+            console.Write(table);
+        }
+
         return exit;
+    }
+}
+
+/// <summary>
+/// <c>typhon backup log --store S</c> — the store's WAL archive (06 §7): its timelines as a tree, their segments, the session starts, and every gap
+/// with whether a later point covers it. With a range (<c>--from/--to</c> instants or <c>--lsn-from/--lsn-to</c>) it reads that part of one timeline;
+/// with <c>--commits</c>, every frame of it, timed by interpolation between the archive's samples. Exit: 0, 1 a gap no later point covers, 3 the
+/// archive cannot be read, 64 usage.
+/// </summary>
+// ReSharper disable once ClassNeverInstantiated.Global
+internal sealed class BackupLogCommand : Command<BackupLogCommand.Settings>
+{
+    // ReSharper disable once ClassNeverInstantiated.Global
+    public sealed class Settings : BackupSettings
+    {
+        // ReSharper disable UnusedAutoPropertyAccessor.Global
+        [CommandOption("--timeline")]
+        [Description("The timeline (default: every timeline; with a range, the newest).")]
+        public string Timeline { get; set; }
+
+        [CommandOption("--from")]
+        [Description("Range start, an ISO 8601 instant with its offset.")]
+        public string From { get; set; }
+
+        [CommandOption("--to")]
+        [Description("Range end, an ISO 8601 instant with its offset.")]
+        public string To { get; set; }
+
+        [CommandOption("--lsn-from")]
+        [Description("Range start, an LSN.")]
+        public long? LsnFrom { get; set; }
+
+        [CommandOption("--lsn-to")]
+        [Description("Range end, an LSN.")]
+        public long? LsnTo { get; set; }
+
+        [CommandOption("--commits")]
+        [Description("List every frame of the range: LSNs, TSN, kind, records, commit stamp, approximate time. Needs a bound.")]
+        public bool Commits { get; set; }
+
+        [CommandOption("--limit")]
+        [Description("The most frames listed (default 1000).")]
+        public int? Limit { get; set; }
+        // ReSharper restore UnusedAutoPropertyAccessor.Global
+    }
+
+    protected override int Execute(CommandContext context, Settings settings, CancellationToken cancellationToken)
+        => BackupCli.RejectLeftovers(context, settings) is var usage and >= 0 ? usage : Run(settings, AnsiConsole.Console, Console.Out);
+
+    internal static int Run(Settings settings, IAnsiConsole console, TextWriter json)
+    {
+        if (!BackupCli.TryResolveFormat(settings.Format, out var asJson, out var formatError))
+        {
+            return new BackupOutput(console, json, false).Error(BackupCli.ExitUsage, formatError);
+        }
+
+        var output = new BackupOutput(console, json, asJson);
+        if (string.IsNullOrWhiteSpace(settings.Store))
+        {
+            return output.Error(BackupCli.ExitUsage, "--store is required.");
+        }
+
+        var timeline = Guid.Empty;
+        if (!string.IsNullOrWhiteSpace(settings.Timeline) && !Guid.TryParse(settings.Timeline.Trim(), out timeline))
+        {
+            return output.Error(BackupCli.ExitUsage, $"Unknown timeline '{settings.Timeline}'. Expected a timeline id.");
+        }
+
+        var byTime = !string.IsNullOrWhiteSpace(settings.From) || !string.IsNullOrWhiteSpace(settings.To);
+        var byLsn = settings.LsnFrom.HasValue || settings.LsnTo.HasValue;
+        if (byTime && byLsn)
+        {
+            return output.Error(BackupCli.ExitUsage, "A range is either --from/--to or --lsn-from/--lsn-to, not both.");
+        }
+
+        if (settings.Commits && !byTime && !byLsn)
+        {
+            return output.Error(BackupCli.ExitUsage, "--commits needs a range: --from/--to or --lsn-from/--lsn-to.");
+        }
+
+        var limit = settings.Limit ?? 1000;
+        if (limit <= 0)
+        {
+            return output.Error(BackupCli.ExitUsage, "--limit must be positive.");
+        }
+
+        var from = DateTime.MinValue.ToUniversalTime();
+        var to = DateTime.MaxValue.ToUniversalTime();
+        if (!string.IsNullOrWhiteSpace(settings.From) && !BackupCli.TryParseUtc(settings.From, "--from", out from, out var fromError))
+        {
+            return output.Error(BackupCli.ExitUsage, fromError);
+        }
+
+        if (!string.IsNullOrWhiteSpace(settings.To) && !BackupCli.TryParseUtc(settings.To, "--to", out to, out var toError))
+        {
+            return output.Error(BackupCli.ExitUsage, toError);
+        }
+
+        try
+        {
+            if (!byTime && !byLsn)
+            {
+                return Listing(BackupOperations.ListArchive(settings.Store), timeline, output);
+            }
+
+            var log = byTime
+                ? BackupOperations.ReadLog(settings.Store, timeline, DateTime.SpecifyKind(from, DateTimeKind.Utc), DateTime.SpecifyKind(to, DateTimeKind.Utc),
+                    settings.Commits, limit)
+                : BackupOperations.ReadLog(settings.Store, timeline, settings.LsnFrom ?? 1, settings.LsnTo ?? long.MaxValue, settings.Commits, limit);
+            return Range(log, output);
+        }
+        catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0 || output.AsJson)
+        {
+            return output.Error(ex);
+        }
+    }
+
+    private static int Listing(BackupArchiveListing listing, Guid only, BackupOutput output)
+    {
+        var timelines = only == Guid.Empty ? listing.Timelines : listing.Timelines.Where(t => t.TimelineId == only).ToList();
+        var exit = timelines.Count == 0 || timelines.Any(t => t.Unreadable.Count > 0) ? BackupCli.ExitStoreDamaged
+            : timelines.Any(t => t.Gaps.Any(g => !g.Covered)) ? BackupCli.ExitWarning
+            : BackupCli.ExitOk;
+        if (output.AsJson)
+        {
+            output.Json(new { exitCode = exit, listing = listing with { Timelines = timelines } });
+            return exit;
+        }
+
+        var console = output.Console;
+        if (timelines.Count == 0)
+        {
+            console.MarkupLine(only == Guid.Empty ? "[red]The store holds no WAL archive.[/]" : $"[red]The store holds no archive of timeline {only}.[/]");
+            return exit;
+        }
+
+        var depth = new Dictionary<Guid, int>();
+        foreach (var t in timelines)
+        {
+            var d = t.ParentTimelineId is { } p && depth.TryGetValue(p, out var pd) ? pd + 1 : 0;
+            depth[t.TimelineId] = d;
+            var indent = new string(' ', 2 * d);
+            var origin = t.ParentTimelineId is { } parent ? $", from {parent.ToString()[..8]} at LSN {t.OriginLsn}" : "";
+            console.MarkupLine($"{indent}[bold]timeline {t.TimelineId}[/] ({t.Reason}{origin}): archived through LSN {t.ArchivedThroughLsn}, "
+                               + $"{t.Segments.Count} segment(s), {BackupCli.Bytes(t.Segments.Sum(s => s.Bytes))}.");
+            if (t.Segments.Count > 0)
+            {
+                var table = new Table().AddColumns("Segment", "LSNs", "Sealed (UTC)", "Archived (UTC)", "Size", "Notes");
+                foreach (var s in t.Segments)
+                {
+                    table.AddRow(s.SegmentId.ToString(), $"{s.FirstLsn}..{s.LastLsn}", s.SealedUtc?.ToString("u") ?? "-", s.ArchivedUtc.ToString("u"),
+                        BackupCli.Bytes(s.Bytes), Notes(s));
+                }
+
+                console.Write(table);
+            }
+
+            Gaps(console, indent, t.Gaps);
+            foreach (var (file, reason) in t.Unreadable)
+            {
+                console.MarkupLine($"{indent}[red]unreadable {Markup.Escape(file)}: {Markup.Escape(reason)}[/]");
+            }
+        }
+
+        return exit;
+    }
+
+    private static int Range(BackupArchiveLog log, BackupOutput output)
+    {
+        var exit = log.Gaps.Any(g => !g.Covered) ? BackupCli.ExitWarning : BackupCli.ExitOk;
+        if (output.AsJson)
+        {
+            output.Json(new { exitCode = exit, log });
+            return exit;
+        }
+
+        var console = output.Console;
+        var to = log.ToLsn == long.MaxValue ? "end" : log.ToLsn.ToString();
+        console.MarkupLine($"[bold]timeline {log.TimelineId}[/], LSN {log.FromLsn}..{to}: {log.Segments.Count} segment(s), {log.Samples.Count} time "
+                           + "sample(s).");
+        foreach (var s in log.Segments)
+        {
+            console.MarkupLine($"  segment {s.SegmentId}: LSN {s.FirstLsn}..{s.LastLsn}, archived {s.ArchivedUtc:u}{(Notes(s) is { Length: > 0 } n ? ", " + n : "")}");
+        }
+
+        Gaps(console, "", log.Gaps);
+        if (log.Frames.Count > 0)
+        {
+            var table = new Table().AddColumns("LSNs", "Kind", "TSN", "Records", "Commit stamp", "≈ Time (UTC)", "Segment");
+            foreach (var f in log.Frames)
+            {
+                table.AddRow($"{f.FirstLsn}..{f.LastLsn}", f.Kind.ToString(), f.Tsn == 0 ? "-" : f.Tsn.ToString(), f.Records.ToString(),
+                    f.CommitStamp == 0 ? "-" : f.CommitStamp.ToString(), f.ApproxUtc.HasValue ? "≈ " + f.ApproxUtc.Value.ToString("yyyy-MM-dd HH:mm:ss.fff") : "-",
+                    f.SegmentId.ToString());
+            }
+
+            console.Write(table);
+            if (log.Truncated)
+            {
+                console.MarkupLine($"[yellow]Stopped at {log.Frames.Count} frame(s) (--limit).[/]");
+            }
+        }
+
+        return exit;
+    }
+
+    private static void Gaps(IAnsiConsole console, string indent, IReadOnlyList<BackupArchiveGap> gaps)
+    {
+        foreach (var g in gaps)
+        {
+            var covered = g.Covered ? "a later point covers it" : "[yellow]no later point covers it[/]";
+            console.MarkupLine($"{indent}[yellow]gap[/] LSN {g.FromLsn}..{g.ToLsn} ({g.Reason}), recorded {g.RecordedUtc:u}: no restore crosses it; {covered}.");
+        }
+    }
+
+    private static string Notes(BackupArchivedSegment s)
+    {
+        var notes = new List<string>();
+        if (s.SessionStart)
+        {
+            notes.Add("session start");
+        }
+
+        if (s.Flags.HasFlag(BackupArchivedSegmentFlags.Adopted))
+        {
+            notes.Add("adopted");
+        }
+
+        if (s.Flags.HasFlag(BackupArchivedSegmentFlags.SealedAtCrash))
+        {
+            notes.Add("sealed at a crash");
+        }
+
+        if (s.Flags.HasFlag(BackupArchivedSegmentFlags.Corrupt))
+        {
+            notes.Add("[red]broken[/]");
+        }
+
+        return string.Join(", ", notes);
     }
 }

@@ -40,6 +40,8 @@ const ZONE_D_ACTIVE = [
   'Subscriptions',
   // #1083 — the Realms navigator. Capability-scoped rather than kind-scoped, like the Schema Explorer.
   'Realms',
+  // #1417 — Backups: like Integrity, also reachable with no session; the flag gates its docked form.
+  'Backups',
 ] as const;
 
 // The full registry key set = gated-off ∪ active. Used to assert the registry covers exactly the documented set.

@@ -20,6 +20,9 @@ internal sealed class CreateOptions
 
     public CancellationToken Cancellation { get; init; }
 
+    /// <summary>The image's pages read so far, and its total (an incremental reads only its changed pages, so it jumps).</summary>
+    public Action<long, long> Progress { get; init; }
+
     public ILogger Logger { get; init; }
 
     /// <summary>Test seam: the store's file system. Null in production.</summary>
@@ -110,6 +113,7 @@ internal static class OfflineCapture
         var (c, clean) = view.ReadWatermarks();
         var databaseId = view.TryGet(DatabaseEngine.BK_DatabaseId, out var id) ? BackupImageMeta.UnpackGuid(id) : Guid.Empty;
         var timelineId = view.TryGet(DatabaseEngine.BK_TimelineId, out var tl) ? BackupImageMeta.UnpackGuid(tl) : Guid.Empty;
+        var timelineParent = view.TryGet(DatabaseEngine.BK_TimelineParent, out var tp) ? BackupImageMeta.UnpackGuid(tp) : Guid.Empty;
         var nonce = view.TryGet(DurabilityWatermarks.BackupStateNonceKey, out var nv) ? (ulong)nv.AsLong : 0UL;
         if (databaseId == Guid.Empty)
         {
@@ -149,7 +153,8 @@ internal static class OfflineCapture
         }
 
         using var session = BackupStore.OpenForWrite(storePath, databaseId, createIfMissing: true, options.StoreFileSystem, log);
-        var kind = BackupAdmission.Decide(options.Full ? BackupKind.Full : BackupKind.Incremental, lineage, session, timelineId, out var parent);
+        var kind = BackupAdmission.Decide(options.Full ? BackupKind.Full : BackupKind.Incremental, lineage, session, timelineId, timelineParent,
+            out var parent);
         var plan = new BackupPointPlan(databaseId, timelineId, kind, kind == BackupKind.Incremental ? lineage.ChainId : Guid.Empty,
             kind == BackupKind.Incremental ? parent.BackupId : 0, view.FormatRevision, $"Typhon {typeof(OfflineCapture).Assembly.GetName().Version}",
             Offline: true);
@@ -160,7 +165,7 @@ internal static class OfflineCapture
         try
         {
             sink.SetImage(n, c, DateTime.UtcNow.Ticks);
-            AddPages(sink, data, n, kind == BackupKind.Incremental ? state.Map : null, options.Cancellation);
+            AddPages(sink, data, n, kind == BackupKind.Incremental ? state.Map : null, options.Progress, options.Cancellation);
             using var registry = new ResourceRegistry(new ResourceRegistryOptions { Name = "OfflineCapture" });
             using var allocator = new MemoryAllocator(registry, new MemoryAllocatorOptions { Name = "OfflineCapture" });
             var tail = WalTailInspector.CaptureTailOffline(walIo, walDir, c, allocator, registry.Allocation, sink, options.Cancellation);
@@ -183,8 +188,9 @@ internal static class OfflineCapture
     }
 
     /// <summary>Reads pages in runs of up to 32 and hands each to the sink; <paramref name="map"/> null means every page.</summary>
-    private static void AddPages(IBackupPointSink sink, SafeFileHandle data, int n, ulong[] map, CancellationToken ct)
+    private static void AddPages(IBackupPointSink sink, SafeFileHandle data, int n, ulong[] map, Action<long, long> progress, CancellationToken ct)
     {
+        progress?.Invoke(0, n);
         var buffer = new byte[RunPages * PackFormat.PageSize];
         var p = 0;
         while (p < n)
@@ -212,7 +218,10 @@ internal static class OfflineCapture
             }
 
             p += run;
+            progress?.Invoke(p, n);
         }
+
+        progress?.Invoke(n, n);
     }
 
     private static bool IsSet(ulong[] map, int page) => (page >> 6) < map.Length && (map[page >> 6] & (1UL << (page & 63))) != 0;

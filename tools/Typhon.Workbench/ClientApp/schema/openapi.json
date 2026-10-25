@@ -167,6 +167,703 @@
         ]
       }
     },
+    "/api/backups/jobs/{jobId}/stream": {
+      "get": {
+        "tags": [
+          "Backups"
+        ],
+        "parameters": [
+          {
+            "name": "jobId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/backups/status": {
+      "post": {
+        "tags": [
+          "Backups"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupStatusRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupStatusRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupStatusRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupStatusDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/backups/list": {
+      "post": {
+        "tags": [
+          "Backups"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupListRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupListRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupListRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupListingDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/backups/archive": {
+      "post": {
+        "tags": [
+          "Backups"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupStoreRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupStoreRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupStoreRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupArchiveDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/backups/restore/plan": {
+      "post": {
+        "tags": [
+          "Backups"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupRestoreRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupRestoreRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupRestoreRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupRestorePlanDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/backups/retention/plan": {
+      "post": {
+        "tags": [
+          "Backups"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupRetentionPlanRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupRetentionPlanRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupRetentionPlanRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupRetentionPlanDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/backups/archive/resolve-time": {
+      "post": {
+        "tags": [
+          "Backups"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupResolveTimeRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupResolveTimeRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupResolveTimeRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupTimeResolutionDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/backups/archive/log": {
+      "post": {
+        "tags": [
+          "Backups"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupLogRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupLogRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupLogRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupLogDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/backups/jobs/create": {
+      "post": {
+        "tags": [
+          "Backups"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupCreateRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupCreateRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupCreateRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupJobDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/backups/jobs/verify": {
+      "post": {
+        "tags": [
+          "Backups"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupVerifyRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupVerifyRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupVerifyRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupJobDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/backups/jobs/drill": {
+      "post": {
+        "tags": [
+          "Backups"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupDrillRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupDrillRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupDrillRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupJobDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/backups/jobs/compact": {
+      "post": {
+        "tags": [
+          "Backups"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupCompactRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupCompactRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupCompactRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupJobDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/backups/jobs/retention": {
+      "post": {
+        "tags": [
+          "Backups"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupRetentionApplyRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupRetentionApplyRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupRetentionApplyRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupJobDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/backups/jobs/restore": {
+      "post": {
+        "tags": [
+          "Backups"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupRestoreRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupRestoreRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupRestoreRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupJobDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/backups/jobs": {
+      "get": {
+        "tags": [
+          "Backups"
+        ],
+        "parameters": [
+          {
+            "name": "store",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BackupJobDto"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/backups/jobs/{jobId}": {
+      "get": {
+        "tags": [
+          "Backups"
+        ],
+        "parameters": [
+          {
+            "name": "jobId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupJobDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Backups"
+        ],
+        "parameters": [
+          {
+            "name": "jobId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
     "/api/databases": {
       "get": {
         "tags": [
@@ -4557,6 +5254,2866 @@
               "string"
             ],
             "default": ""
+          }
+        }
+      },
+      "BackupArchiveCoverageDto": {
+        "required": [
+          "timelineId",
+          "fromLsn",
+          "throughLsn",
+          "lastArchivedUtc",
+          "uncoveredGaps"
+        ],
+        "type": "object",
+        "properties": {
+          "timelineId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "fromLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "throughLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "lastArchivedUtc": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "uncoveredGaps": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupArchiveGapDto"
+            }
+          }
+        }
+      },
+      "BackupArchivedSegmentDto": {
+        "required": [
+          "segmentId",
+          "firstLsn",
+          "lastLsn",
+          "sealedUtc",
+          "archivedUtc",
+          "bytes",
+          "flags",
+          "sessionStart"
+        ],
+        "type": "object",
+        "properties": {
+          "segmentId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "firstLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "lastLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "sealedUtc": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "archivedUtc": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "bytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "flags": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "sessionStart": {
+            "type": "boolean"
+          }
+        }
+      },
+      "BackupArchiveDto": {
+        "required": [
+          "timelines"
+        ],
+        "type": "object",
+        "properties": {
+          "timelines": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupArchiveTimelineDto"
+            }
+          }
+        }
+      },
+      "BackupArchiveGapDto": {
+        "required": [
+          "fromLsn",
+          "toLsn",
+          "recordedUtc",
+          "reason",
+          "covered"
+        ],
+        "type": "object",
+        "properties": {
+          "fromLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "toLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "recordedUtc": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "reason": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "covered": {
+            "type": "boolean"
+          }
+        }
+      },
+      "BackupArchiveStatusDto": {
+        "required": [
+          "state",
+          "timelineId",
+          "archivedThroughLsn",
+          "lagBytes",
+          "backlogBytes",
+          "lagSeconds",
+          "gapsTotal",
+          "lastGapFromLsn",
+          "lastGapToLsn",
+          "lastArchivedSealUtc",
+          "consecutiveFailures",
+          "lastError"
+        ],
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "timelineId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "archivedThroughLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "lagBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "backlogBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "lagSeconds": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "gapsTotal": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "lastGapFromLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "lastGapToLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "lastArchivedSealUtc": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "consecutiveFailures": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "lastError": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "BackupArchiveTimelineDto": {
+        "required": [
+          "timelineId",
+          "parentTimelineId",
+          "originLsn",
+          "reason",
+          "archivedThroughLsn",
+          "segments",
+          "gaps",
+          "samples",
+          "unreadable"
+        ],
+        "type": "object",
+        "properties": {
+          "timelineId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "parentTimelineId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "originLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "reason": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "archivedThroughLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "segments": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupArchivedSegmentDto"
+            }
+          },
+          "gaps": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupArchiveGapDto"
+            }
+          },
+          "samples": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupTimeSampleDto"
+            }
+          },
+          "unreadable": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupUnreadablePackDto"
+            }
+          }
+        }
+      },
+      "BackupChainDto": {
+        "required": [
+          "chainId",
+          "baseId",
+          "headBackupId",
+          "depth",
+          "headDepth"
+        ],
+        "type": "object",
+        "properties": {
+          "chainId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "baseId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "headBackupId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "depth": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "headDepth": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "BackupCompactionFailureDto": {
+        "required": [
+          "backupId",
+          "kind",
+          "message"
+        ],
+        "type": "object",
+        "properties": {
+          "backupId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "message": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "BackupCompactionResultDto": {
+        "required": [
+          "point",
+          "alreadyBase",
+          "chainDepth",
+          "pages",
+          "holePages",
+          "bytesRead",
+          "bytesWritten",
+          "durationMs"
+        ],
+        "type": "object",
+        "properties": {
+          "point": {
+            "$ref": "#/components/schemas/BackupPointDto"
+          },
+          "alreadyBase": {
+            "type": "boolean"
+          },
+          "chainDepth": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "pages": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "holePages": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "bytesRead": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "bytesWritten": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "durationMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          }
+        }
+      },
+      "BackupCompactRequestDto": {
+        "required": [
+          "store",
+          "point"
+        ],
+        "type": "object",
+        "properties": {
+          "store": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "point": {
+            "$ref": "#/components/schemas/BackupPointRefDto"
+          }
+        }
+      },
+      "BackupCreateRequestDto": {
+        "required": [
+          "store",
+          "bundle",
+          "full"
+        ],
+        "type": "object",
+        "properties": {
+          "store": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "bundle": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "full": {
+            "type": "boolean"
+          }
+        }
+      },
+      "BackupCreateResultDto": {
+        "required": [
+          "point",
+          "requestId"
+        ],
+        "type": "object",
+        "properties": {
+          "point": {
+            "$ref": "#/components/schemas/BackupPointDto"
+          },
+          "requestId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
+      "BackupDamagedPageDto": {
+        "required": [
+          "pageId",
+          "packFile",
+          "reason"
+        ],
+        "type": "object",
+        "properties": {
+          "pageId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "packFile": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "reason": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "BackupDrillReportDto": {
+        "required": [
+          "point",
+          "outcome",
+          "failedStage",
+          "error",
+          "restoreMs",
+          "openMs",
+          "checkMs",
+          "recovery",
+          "verdict",
+          "findings",
+          "suspectPages",
+          "recordFile",
+          "needsSchema"
+        ],
+        "type": "object",
+        "properties": {
+          "point": {
+            "$ref": "#/components/schemas/BackupPointDto"
+          },
+          "outcome": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "failedStage": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "error": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "restoreMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "openMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "checkMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "recovery": {
+            "$ref": "#/components/schemas/BackupRecoveryDto"
+          },
+          "verdict": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "findings": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "suspectPages": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "recordFile": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "needsSchema": {
+            "type": "boolean"
+          }
+        }
+      },
+      "BackupDrillRequestDto": {
+        "required": [
+          "store",
+          "point",
+          "scratch",
+          "bundle"
+        ],
+        "type": "object",
+        "properties": {
+          "store": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "point": {
+            "$ref": "#/components/schemas/BackupPointRefDto"
+          },
+          "scratch": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "bundle": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "BackupDrillSummaryDto": {
+        "required": [
+          "backupId",
+          "utc",
+          "outcome",
+          "error"
+        ],
+        "type": "object",
+        "properties": {
+          "backupId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "utc": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "outcome": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "error": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "BackupEngineStatusDto": {
+        "required": [
+          "source",
+          "engineLive",
+          "pid",
+          "machine",
+          "storePath",
+          "acceptsRequests",
+          "health",
+          "healthReason",
+          "reasonText",
+          "state",
+          "phase",
+          "progressPages",
+          "progressOfPages",
+          "progressBytes",
+          "lastPoint",
+          "lastSuccessUtc",
+          "nextDueUtc",
+          "consecutiveFailures",
+          "lastFailure",
+          "chainDepth",
+          "storeBytes",
+          "restorablePoints",
+          "lastDrill",
+          "lastPassedDrill",
+          "retentionBlocked",
+          "archive",
+          "lastRequestId",
+          "updatedUtc"
+        ],
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "engineLive": {
+            "type": "boolean"
+          },
+          "pid": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "machine": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "storePath": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "acceptsRequests": {
+            "type": "boolean"
+          },
+          "health": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "healthReason": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "reasonText": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "state": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "phase": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "progressPages": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "progressOfPages": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "progressBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "lastPoint": {
+            "$ref": "#/components/schemas/BackupPointDto"
+          },
+          "lastSuccessUtc": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "nextDueUtc": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "consecutiveFailures": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "lastFailure": {
+            "$ref": "#/components/schemas/BackupFailureDto"
+          },
+          "chainDepth": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "storeBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "restorablePoints": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "lastDrill": {
+            "$ref": "#/components/schemas/BackupDrillSummaryDto"
+          },
+          "lastPassedDrill": {
+            "$ref": "#/components/schemas/BackupDrillSummaryDto"
+          },
+          "retentionBlocked": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "archive": {
+            "$ref": "#/components/schemas/BackupArchiveStatusDto"
+          },
+          "lastRequestId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "updatedUtc": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "BackupFailureDto": {
+        "required": [
+          "utc",
+          "kind",
+          "message"
+        ],
+        "type": "object",
+        "properties": {
+          "utc": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "message": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "BackupJobDto": {
+        "required": [
+          "jobId",
+          "kind",
+          "store",
+          "bundle",
+          "state",
+          "phase",
+          "completed",
+          "total",
+          "unit",
+          "startedUtc",
+          "endedUtc",
+          "route",
+          "note",
+          "error",
+          "create",
+          "verify",
+          "drill",
+          "compact",
+          "retention",
+          "restore"
+        ],
+        "type": "object",
+        "properties": {
+          "jobId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "store": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "bundle": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "state": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "phase": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "completed": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "total": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "unit": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "startedUtc": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "endedUtc": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "route": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "note": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "error": {
+            "$ref": "#/components/schemas/BackupJobErrorDto"
+          },
+          "create": {
+            "$ref": "#/components/schemas/BackupCreateResultDto"
+          },
+          "verify": {
+            "$ref": "#/components/schemas/BackupVerifyReportDto"
+          },
+          "drill": {
+            "$ref": "#/components/schemas/BackupDrillReportDto"
+          },
+          "compact": {
+            "$ref": "#/components/schemas/BackupCompactionResultDto"
+          },
+          "retention": {
+            "$ref": "#/components/schemas/BackupRetentionResultDto"
+          },
+          "restore": {
+            "$ref": "#/components/schemas/BackupRestoreResultDto"
+          }
+        }
+      },
+      "BackupJobErrorDto": {
+        "required": [
+          "category",
+          "message"
+        ],
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "message": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "BackupListingDto": {
+        "required": [
+          "storeId",
+          "databaseId",
+          "points",
+          "chains",
+          "unreadablePacks",
+          "temporaryFiles",
+          "restorablePoints",
+          "drills"
+        ],
+        "type": "object",
+        "properties": {
+          "storeId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "databaseId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "points": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupPointDto"
+            }
+          },
+          "chains": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupChainDto"
+            }
+          },
+          "unreadablePacks": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupUnreadablePackDto"
+            }
+          },
+          "temporaryFiles": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "restorablePoints": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "uint32"
+            }
+          },
+          "drills": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupDrillSummaryDto"
+            }
+          }
+        }
+      },
+      "BackupListRequestDto": {
+        "required": [
+          "store",
+          "restorable"
+        ],
+        "type": "object",
+        "properties": {
+          "store": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "restorable": {
+            "type": "boolean"
+          }
+        }
+      },
+      "BackupLogDto": {
+        "required": [
+          "timelineId",
+          "fromLsn",
+          "toLsn",
+          "frames",
+          "truncated"
+        ],
+        "type": "object",
+        "properties": {
+          "timelineId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "fromLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "toLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "frames": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupLogFrameDto"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "BackupLogFrameDto": {
+        "required": [
+          "firstLsn",
+          "lastLsn",
+          "tsn",
+          "kind",
+          "records",
+          "approxUtc",
+          "segmentId"
+        ],
+        "type": "object",
+        "properties": {
+          "firstLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "lastLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "tsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "records": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "approxUtc": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "segmentId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "BackupLogRequestDto": {
+        "required": [
+          "store",
+          "timelineId",
+          "fromUtc",
+          "toUtc",
+          "max"
+        ],
+        "type": "object",
+        "properties": {
+          "store": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "timelineId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "fromUtc": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "toUtc": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "max": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "BackupPackVerificationDto": {
+        "required": [
+          "file",
+          "backupId",
+          "status",
+          "findings"
+        ],
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "backupId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "status": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "findings": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupVerifyFindingDto"
+            }
+          }
+        }
+      },
+      "BackupPointDto": {
+        "required": [
+          "backupId",
+          "kind",
+          "chainId",
+          "parentId",
+          "baseId",
+          "checkpointLsn",
+          "pointLsn",
+          "imagePages",
+          "pageCount",
+          "tailSegments",
+          "suspect",
+          "offline",
+          "freezeUtc",
+          "tailEndUtc",
+          "timelineId",
+          "formatRevision",
+          "packFile",
+          "packBytes"
+        ],
+        "type": "object",
+        "properties": {
+          "backupId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "chainId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "parentId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "baseId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "checkpointLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "pointLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "imagePages": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "pageCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "tailSegments": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "suspect": {
+            "type": "boolean"
+          },
+          "offline": {
+            "type": "boolean"
+          },
+          "freezeUtc": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "tailEndUtc": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "timelineId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "formatRevision": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "packFile": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "packBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "BackupPointRefDto": {
+        "required": [
+          "kind",
+          "id",
+          "lsn",
+          "timeUtc",
+          "timelineId"
+        ],
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "lsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "timeUtc": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "timelineId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "BackupPointVerificationDto": {
+        "required": [
+          "backupId",
+          "restorable",
+          "brokenBy"
+        ],
+        "type": "object",
+        "properties": {
+          "backupId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "restorable": {
+            "type": "boolean"
+          },
+          "brokenBy": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "uint32"
+            }
+          }
+        }
+      },
+      "BackupRecoveryDto": {
+        "required": [
+          "recordsReplayed",
+          "uowsPromoted",
+          "uowsVoided"
+        ],
+        "type": "object",
+        "properties": {
+          "recordsReplayed": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "uowsPromoted": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "uowsVoided": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "BackupResolveTimeRequestDto": {
+        "required": [
+          "store",
+          "timeUtc",
+          "timelineId"
+        ],
+        "type": "object",
+        "properties": {
+          "store": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "timeUtc": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "timelineId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "BackupRestorePlanDto": {
+        "required": [
+          "canRestore",
+          "fingerprint",
+          "resolvedTarget",
+          "displacedBundle",
+          "chain",
+          "bytesToRead",
+          "baseBackupId",
+          "checkpointLsn",
+          "pointLsn",
+          "targetLsn",
+          "timelineId",
+          "archivedSegments",
+          "archivedBytes",
+          "sampleLsn",
+          "sampleUtc",
+          "refusal",
+          "unreachable",
+          "refusalMessage",
+          "nearestRestorable",
+          "heldBySessionId",
+          "newestKnownLsn",
+          "lostLsns"
+        ],
+        "type": "object",
+        "properties": {
+          "canRestore": {
+            "type": "boolean"
+          },
+          "fingerprint": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "resolvedTarget": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "displacedBundle": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "chain": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "uint32"
+            }
+          },
+          "bytesToRead": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "baseBackupId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "checkpointLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "pointLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "targetLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "timelineId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "archivedSegments": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "archivedBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "sampleLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "sampleUtc": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "refusal": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "unreachable": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "refusalMessage": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "nearestRestorable": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int64"
+            }
+          },
+          "heldBySessionId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "newestKnownLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "lostLsns": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "BackupRestoreRequestDto": {
+        "required": [
+          "store",
+          "point",
+          "target",
+          "replace",
+          "allowDamaged",
+          "allowFormatMismatch",
+          "bundle",
+          "planFingerprint"
+        ],
+        "type": "object",
+        "properties": {
+          "store": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "point": {
+            "$ref": "#/components/schemas/BackupPointRefDto"
+          },
+          "target": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "replace": {
+            "type": "boolean"
+          },
+          "allowDamaged": {
+            "type": "boolean"
+          },
+          "allowFormatMismatch": {
+            "type": "boolean"
+          },
+          "bundle": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "planFingerprint": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "BackupRestoreResultDto": {
+        "required": [
+          "point",
+          "target",
+          "displacedBundle",
+          "chainDepth",
+          "pagesWritten",
+          "zeroPages",
+          "tailSegments",
+          "bytesRead",
+          "bytesWritten",
+          "durationMs",
+          "suspectPages",
+          "damagedPages",
+          "newTimelineId",
+          "targetLsn",
+          "effectiveLsn",
+          "timelineId",
+          "archivedSegments",
+          "forcedCrashRecovery",
+          "settle"
+        ],
+        "type": "object",
+        "properties": {
+          "point": {
+            "$ref": "#/components/schemas/BackupPointDto"
+          },
+          "target": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "displacedBundle": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "chainDepth": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "pagesWritten": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "zeroPages": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "tailSegments": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "bytesRead": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "bytesWritten": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "durationMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "suspectPages": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "uint32"
+            }
+          },
+          "damagedPages": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupDamagedPageDto"
+            }
+          },
+          "newTimelineId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "targetLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "effectiveLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "timelineId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "archivedSegments": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "forcedCrashRecovery": {
+            "type": "boolean"
+          },
+          "settle": {
+            "$ref": "#/components/schemas/BackupSettleDto"
+          }
+        }
+      },
+      "BackupRetentionApplyRequestDto": {
+        "required": [
+          "store",
+          "approvedFingerprint"
+        ],
+        "type": "object",
+        "properties": {
+          "store": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "approvedFingerprint": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "BackupRetentionPlanDto": {
+        "required": [
+          "kept",
+          "removed",
+          "compactions",
+          "packDeletions",
+          "cutoffId",
+          "bytesBefore",
+          "bytesAfterAtMost",
+          "blocked",
+          "blockedReason",
+          "fingerprint"
+        ],
+        "type": "object",
+        "properties": {
+          "kept": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "uint32"
+            }
+          },
+          "removed": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "uint32"
+            }
+          },
+          "compactions": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "uint32"
+            }
+          },
+          "packDeletions": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "cutoffId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "bytesBefore": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "bytesAfterAtMost": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "blocked": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "blockedReason": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "fingerprint": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "BackupRetentionPlanRequestDto": {
+        "required": [
+          "store",
+          "policy"
+        ],
+        "type": "object",
+        "properties": {
+          "store": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "policy": {
+            "$ref": "#/components/schemas/BackupRetentionPolicyDto"
+          }
+        }
+      },
+      "BackupRetentionPolicyDto": {
+        "required": [
+          "maxAgeSeconds",
+          "maxCount",
+          "maxTotalBytes",
+          "minKeep",
+          "compactThreshold",
+          "keepLastDrilled"
+        ],
+        "type": "object",
+        "properties": {
+          "maxAgeSeconds": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "maxCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "maxTotalBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "minKeep": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "compactThreshold": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "keepLastDrilled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "BackupRetentionResultDto": {
+        "required": [
+          "plan",
+          "compactions",
+          "deleted",
+          "bytesFreed",
+          "durationMs",
+          "failedCompactions"
+        ],
+        "type": "object",
+        "properties": {
+          "plan": {
+            "$ref": "#/components/schemas/BackupRetentionPlanDto"
+          },
+          "compactions": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupCompactionResultDto"
+            }
+          },
+          "deleted": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "bytesFreed": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "durationMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "failedCompactions": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupCompactionFailureDto"
+            }
+          }
+        }
+      },
+      "BackupRouteDto": {
+        "required": [
+          "kind",
+          "reason",
+          "sessionId"
+        ],
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "reason": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
+      "BackupSettleDto": {
+        "required": [
+          "ran",
+          "crashRecoveryRan",
+          "recovery",
+          "durationMs",
+          "error",
+          "needsSchema",
+          "withSchema"
+        ],
+        "type": "object",
+        "properties": {
+          "ran": {
+            "type": "boolean"
+          },
+          "crashRecoveryRan": {
+            "type": "boolean"
+          },
+          "recovery": {
+            "$ref": "#/components/schemas/BackupRecoveryDto"
+          },
+          "durationMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "error": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "needsSchema": {
+            "type": "boolean"
+          },
+          "withSchema": {
+            "type": "boolean"
+          }
+        }
+      },
+      "BackupStatusDto": {
+        "required": [
+          "store",
+          "bundle",
+          "storeStatus",
+          "storeError",
+          "engine",
+          "route",
+          "runningJobId",
+          "defaultScratch"
+        ],
+        "type": "object",
+        "properties": {
+          "store": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "bundle": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "storeStatus": {
+            "$ref": "#/components/schemas/BackupStoreStatusDto"
+          },
+          "storeError": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "engine": {
+            "$ref": "#/components/schemas/BackupEngineStatusDto"
+          },
+          "route": {
+            "$ref": "#/components/schemas/BackupRouteDto"
+          },
+          "runningJobId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "defaultScratch": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "BackupStatusRequestDto": {
+        "required": [
+          "store",
+          "bundle"
+        ],
+        "type": "object",
+        "properties": {
+          "store": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "bundle": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "BackupStoreRequestDto": {
+        "required": [
+          "store"
+        ],
+        "type": "object",
+        "properties": {
+          "store": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "BackupStoreStatusDto": {
+        "required": [
+          "health",
+          "reason",
+          "points",
+          "latest",
+          "latestRestorable",
+          "archive"
+        ],
+        "type": "object",
+        "properties": {
+          "health": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "reason": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "points": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "latest": {
+            "$ref": "#/components/schemas/BackupPointDto"
+          },
+          "latestRestorable": {
+            "$ref": "#/components/schemas/BackupPointDto"
+          },
+          "archive": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupArchiveCoverageDto"
+            }
+          }
+        }
+      },
+      "BackupTimeResolutionDto": {
+        "required": [
+          "lsn",
+          "sampleUtc",
+          "timelineId"
+        ],
+        "type": "object",
+        "properties": {
+          "lsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "sampleUtc": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "timelineId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "BackupTimeSampleDto": {
+        "required": [
+          "lsn",
+          "utc"
+        ],
+        "type": "object",
+        "properties": {
+          "lsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "utc": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "BackupUnreadablePackDto": {
+        "required": [
+          "file",
+          "reason"
+        ],
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "reason": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "BackupVerifyFindingDto": {
+        "required": [
+          "code",
+          "severity",
+          "file",
+          "pageId",
+          "message"
+        ],
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "severity": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "file": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "pageId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "message": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "BackupVerifyReportDto": {
+        "required": [
+          "level",
+          "verdict",
+          "packs",
+          "points",
+          "storeFindings",
+          "durationMs",
+          "bytesRead",
+          "removedPoints"
+        ],
+        "type": "object",
+        "properties": {
+          "level": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "verdict": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "packs": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupPackVerificationDto"
+            }
+          },
+          "points": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupPointVerificationDto"
+            }
+          },
+          "storeFindings": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupVerifyFindingDto"
+            }
+          },
+          "durationMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "bytesRead": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "removedPoints": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "BackupVerifyRequestDto": {
+        "required": [
+          "store",
+          "point",
+          "level"
+        ],
+        "type": "object",
+        "properties": {
+          "store": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "point": {
+            "$ref": "#/components/schemas/BackupPointRefDto"
+          },
+          "level": {
+            "type": [
+              "null",
+              "string"
+            ]
           }
         }
       },
@@ -11747,6 +15304,27 @@
             "$ref": "#/components/schemas/TraceEventDtoBTreeNodeSplitEventDto"
           },
           {
+            "$ref": "#/components/schemas/TraceEventDtoBackupArchiveSegmentEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoBackupCaptureEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoBackupFreezeEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoBackupLifecycleEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoBackupScanEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoBackupTailEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoBackupVerifyEventDto"
+          },
+          {
             "$ref": "#/components/schemas/TraceEventDtoCheckpointCollectEventDto"
           },
           {
@@ -12230,6 +15808,9 @@
             "$ref": "#/components/schemas/TraceEventDtoSpatialRTreeRemoveEventDto"
           },
           {
+            "$ref": "#/components/schemas/TraceEventDtoSpatialRealmRatesEventDto"
+          },
+          {
             "$ref": "#/components/schemas/TraceEventDtoSpatialRealmTelemetryEventDto"
           },
           {
@@ -12281,7 +15862,16 @@
             "$ref": "#/components/schemas/TraceEventDtoStorageSegmentLoadEventDto"
           },
           {
+            "$ref": "#/components/schemas/TraceEventDtoSubscriptionsFrameProducedEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoSubscriptionsFrameSkippedEventDto"
+          },
+          {
             "$ref": "#/components/schemas/TraceEventDtoSubscriptionsServerTelemetryEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoSubscriptionsSessionChangedEventDto"
           },
           {
             "$ref": "#/components/schemas/TraceEventDtoSubscriptionsSessionTelemetryEventDto"
@@ -12349,6 +15939,13 @@
             "bTreeInsert": "#/components/schemas/TraceEventDtoBTreeInsertEventDto",
             "bTreeNodeMerge": "#/components/schemas/TraceEventDtoBTreeNodeMergeEventDto",
             "bTreeNodeSplit": "#/components/schemas/TraceEventDtoBTreeNodeSplitEventDto",
+            "backupArchiveSegment": "#/components/schemas/TraceEventDtoBackupArchiveSegmentEventDto",
+            "backupCapture": "#/components/schemas/TraceEventDtoBackupCaptureEventDto",
+            "backupFreeze": "#/components/schemas/TraceEventDtoBackupFreezeEventDto",
+            "backupLifecycle": "#/components/schemas/TraceEventDtoBackupLifecycleEventDto",
+            "backupScan": "#/components/schemas/TraceEventDtoBackupScanEventDto",
+            "backupTail": "#/components/schemas/TraceEventDtoBackupTailEventDto",
+            "backupVerify": "#/components/schemas/TraceEventDtoBackupVerifyEventDto",
             "checkpointCollect": "#/components/schemas/TraceEventDtoCheckpointCollectEventDto",
             "checkpointCycle": "#/components/schemas/TraceEventDtoCheckpointCycleEventDto",
             "checkpointFsync": "#/components/schemas/TraceEventDtoCheckpointFsyncEventDto",
@@ -12510,6 +16107,7 @@
             "spatialRTreeInsert": "#/components/schemas/TraceEventDtoSpatialRTreeInsertEventDto",
             "spatialRTreeNodeSplit": "#/components/schemas/TraceEventDtoSpatialRTreeNodeSplitEventDto",
             "spatialRTreeRemove": "#/components/schemas/TraceEventDtoSpatialRTreeRemoveEventDto",
+            "spatialRealmRates": "#/components/schemas/TraceEventDtoSpatialRealmRatesEventDto",
             "spatialRealmTelemetry": "#/components/schemas/TraceEventDtoSpatialRealmTelemetryEventDto",
             "spatialRelocationOutcome": "#/components/schemas/TraceEventDtoSpatialRelocationOutcomeEventDto",
             "spatialRepairUnit": "#/components/schemas/TraceEventDtoSpatialRepairUnitEventDto",
@@ -12527,7 +16125,10 @@
             "storageSegmentCreate": "#/components/schemas/TraceEventDtoStorageSegmentCreateEventDto",
             "storageSegmentGrow": "#/components/schemas/TraceEventDtoStorageSegmentGrowEventDto",
             "storageSegmentLoad": "#/components/schemas/TraceEventDtoStorageSegmentLoadEventDto",
+            "subscriptionsFrameProduced": "#/components/schemas/TraceEventDtoSubscriptionsFrameProducedEventDto",
+            "subscriptionsFrameSkipped": "#/components/schemas/TraceEventDtoSubscriptionsFrameSkippedEventDto",
             "subscriptionsServerTelemetry": "#/components/schemas/TraceEventDtoSubscriptionsServerTelemetryEventDto",
+            "subscriptionsSessionChanged": "#/components/schemas/TraceEventDtoSubscriptionsSessionChangedEventDto",
             "subscriptionsSessionTelemetry": "#/components/schemas/TraceEventDtoSubscriptionsSessionTelemetryEventDto",
             "systemReady": "#/components/schemas/TraceEventDtoSystemReadyEventDto",
             "systemSkipped": "#/components/schemas/TraceEventDtoSystemSkippedEventDto",
@@ -12548,6 +16149,795 @@
             "writeTickFenceTable": "#/components/schemas/TraceEventDtoWriteTickFenceTableEventDto"
           }
         }
+      },
+      "TraceEventDtoBackupArchiveSegmentEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "backupArchiveSegment"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "segmentId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`BackupArchiveSegment` event payload — segment id.",
+            "format": "int64"
+          },
+          "bytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "description": "Optional `BackupArchiveSegment` event payload — bytes. `null` when the wire record omits it.",
+            "format": "int64"
+          },
+          "outcome": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "description": "Optional `BackupArchiveSegment` event payload — outcome. `null` when the wire record omits it.",
+            "format": "uint8"
+          },
+          "durationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
+            "format": "double"
+          },
+          "spanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
+          },
+          "parentSpanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
+          },
+          "traceIdHi": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "traceIdLo": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "Generated DTO for `BackupArchiveSegment` trace events. Wire format mirrors the encoder partial."
+      },
+      "TraceEventDtoBackupCaptureEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "backupCapture"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "requestedKind": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`BackupCapture` event payload — requested kind.",
+            "format": "uint8"
+          },
+          "backupId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "description": "Optional `BackupCapture` event payload — backup id. `null` when the wire record omits it.",
+            "format": "uint32"
+          },
+          "pages": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "description": "Optional `BackupCapture` event payload — pages. `null` when the wire record omits it.",
+            "format": "int32"
+          },
+          "cbwCopies": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "description": "Optional `BackupCapture` event payload — cbw copies. `null` when the wire record omits it.",
+            "format": "int32"
+          },
+          "durationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
+            "format": "double"
+          },
+          "spanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
+          },
+          "parentSpanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
+          },
+          "traceIdHi": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "traceIdLo": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "Generated DTO for `BackupCapture` trace events. Wire format mirrors the encoder partial."
+      },
+      "TraceEventDtoBackupFreezeEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "backupFreeze"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "imagePages": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "description": "Optional `BackupFreeze` event payload — image pages. `null` when the wire record omits it.",
+            "format": "int32"
+          },
+          "durationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
+            "format": "double"
+          },
+          "spanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
+          },
+          "parentSpanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
+          },
+          "traceIdHi": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "traceIdLo": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "Generated DTO for `BackupFreeze` trace events. Wire format mirrors the encoder partial."
+      },
+      "TraceEventDtoBackupLifecycleEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "backupLifecycle"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "op": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`BackupLifecycle` event payload — op.",
+            "format": "uint8"
+          },
+          "packs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "description": "Optional `BackupLifecycle` event payload — packs. `null` when the wire record omits it.",
+            "format": "int32"
+          },
+          "bytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "description": "Optional `BackupLifecycle` event payload — bytes. `null` when the wire record omits it.",
+            "format": "int64"
+          },
+          "durationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
+            "format": "double"
+          },
+          "spanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
+          },
+          "parentSpanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
+          },
+          "traceIdHi": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "traceIdLo": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "Generated DTO for `BackupLifecycle` trace events. Wire format mirrors the encoder partial."
+      },
+      "TraceEventDtoBackupScanEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "backupScan"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "pages": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "description": "Optional `BackupScan` event payload — pages. `null` when the wire record omits it.",
+            "format": "int32"
+          },
+          "durationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
+            "format": "double"
+          },
+          "spanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
+          },
+          "parentSpanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
+          },
+          "traceIdHi": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "traceIdLo": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "Generated DTO for `BackupScan` trace events. Wire format mirrors the encoder partial."
+      },
+      "TraceEventDtoBackupTailEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "backupTail"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "pointLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "description": "Optional `BackupTail` event payload — point lsn. `null` when the wire record omits it.",
+            "format": "int64"
+          },
+          "durationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
+            "format": "double"
+          },
+          "spanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
+          },
+          "parentSpanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
+          },
+          "traceIdHi": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "traceIdLo": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "Generated DTO for `BackupTail` trace events. Wire format mirrors the encoder partial."
+      },
+      "TraceEventDtoBackupVerifyEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "backupVerify"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "backupId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`BackupVerify` event payload — backup id.",
+            "format": "uint32"
+          },
+          "level": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`BackupVerify` event payload — level.",
+            "format": "uint8"
+          },
+          "durationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
+            "format": "double"
+          },
+          "spanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
+          },
+          "parentSpanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
+          },
+          "traceIdHi": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "traceIdLo": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "Generated DTO for `BackupVerify` trace events. Wire format mirrors the encoder partial."
       },
       "TraceEventDtoBTreeDeleteEventDto": {
         "properties": {
@@ -26509,6 +30899,24 @@
             "description": "`SpatialArchetypeTelemetry` event payload — runnable realms.",
             "format": "int32"
           },
+          "ratesRealmsTouched": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — rates realms touched.",
+            "format": "int32"
+          },
+          "ratesRealmsEmitted": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — rates realms emitted.",
+            "format": "int32"
+          },
           "threadSlot": {
             "pattern": "^-?(?:0|[1-9]\\d*)$",
             "type": [
@@ -28514,6 +32922,376 @@
           }
         },
         "description": "Generated DTO for `SpatialQueryRay` trace events. Wire format mirrors the encoder partial."
+      },
+      "TraceEventDtoSpatialRealmRatesEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "spatialRealmRates"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "realmId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — realm id.",
+            "format": "uint16"
+          },
+          "archetypeId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — archetype id.",
+            "format": "uint16"
+          },
+          "tightnessExtentSum": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — tightness extent sum.",
+            "format": "double"
+          },
+          "tightnessBoundSum": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — tightness bound sum.",
+            "format": "double"
+          },
+          "relocationSpendNs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — relocation spend ns.",
+            "format": "double"
+          },
+          "clustersScanned": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — clusters scanned.",
+            "format": "int32"
+          },
+          "slotsScanned": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — slots scanned.",
+            "format": "int32"
+          },
+          "driftersDetected": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — drifters detected.",
+            "format": "int32"
+          },
+          "driftAbsorbed": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — drift absorbed.",
+            "format": "int32"
+          },
+          "driftersUnplaced": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — drifters unplaced.",
+            "format": "int32"
+          },
+          "driftGatedClusters": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — drift gated clusters.",
+            "format": "int32"
+          },
+          "driftSuppressedByDensity": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — drift suppressed by density.",
+            "format": "int32"
+          },
+          "driftersUnplacedNoCandidate": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — drifters unplaced no candidate.",
+            "format": "int32"
+          },
+          "driftersSpilled": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — drifters spilled.",
+            "format": "int32"
+          },
+          "tightnessSamples": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — tightness samples.",
+            "format": "int32"
+          },
+          "migrationCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — migration count.",
+            "format": "int32"
+          },
+          "crossingsExecuted": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — crossings executed.",
+            "format": "int32"
+          },
+          "relocationsExecuted": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — relocations executed.",
+            "format": "int32"
+          },
+          "repairsExecuted": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — repairs executed.",
+            "format": "int32"
+          },
+          "jumpCrossings": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — jump crossings.",
+            "format": "int32"
+          },
+          "clampedDestinations": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — clamped destinations.",
+            "format": "int32"
+          },
+          "staleFlagsDropped": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — stale flags dropped.",
+            "format": "int32"
+          },
+          "relocationsThrottled": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — relocations throttled.",
+            "format": "int32"
+          },
+          "relocationsSuperseded": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — relocations superseded.",
+            "format": "int32"
+          },
+          "relocationsAdmitted": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — relocations admitted.",
+            "format": "int32"
+          },
+          "crossingsQueued": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — crossings queued.",
+            "format": "int32"
+          },
+          "pinsRejected": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — pins rejected.",
+            "format": "int32"
+          },
+          "repairedEntityCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — repaired entity count.",
+            "format": "int32"
+          },
+          "repairUnitCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — repair unit count.",
+            "format": "int32"
+          },
+          "repairUnitsRefused": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — repair units refused.",
+            "format": "int32"
+          },
+          "repairValveFires": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — repair valve fires.",
+            "format": "int32"
+          },
+          "arrivalCellsTouched": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — arrival cells touched.",
+            "format": "int32"
+          },
+          "largestArrivalRun": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — largest arrival run.",
+            "format": "int32"
+          },
+          "cellTreePromotions": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — cell tree promotions.",
+            "format": "int32"
+          },
+          "cellTreeDemotions": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmRates` event payload — cell tree demotions.",
+            "format": "int32"
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "Generated instant-event DTO for `SpatialRealmRates`. 12-byte header + payload; no span fields."
       },
       "TraceEventDtoSpatialRealmTelemetryEventDto": {
         "properties": {
@@ -30771,6 +35549,197 @@
         },
         "description": "Generated instant-event DTO for `StorageSegmentLoad`. 12-byte header + payload; no span fields."
       },
+      "TraceEventDtoSubscriptionsFrameProducedEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "subscriptionsFrameProduced"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "sessionId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsFrameProduced` event payload — session id.",
+            "format": "uint64"
+          },
+          "sequence": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsFrameProduced` event payload — sequence.",
+            "format": "int64"
+          },
+          "bytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsFrameProduced` event payload — bytes.",
+            "format": "int32"
+          },
+          "reset": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsFrameProduced` event payload — reset.",
+            "format": "uint8"
+          },
+          "degradeLevel": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsFrameProduced` event payload — degrade level.",
+            "format": "uint8"
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "Generated instant-event DTO for `SubscriptionsFrameProduced`. 12-byte header + payload; no span fields."
+      },
+      "TraceEventDtoSubscriptionsFrameSkippedEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "subscriptionsFrameSkipped"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "sessionId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsFrameSkipped` event payload — session id.",
+            "format": "uint64"
+          },
+          "cause": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsFrameSkipped` event payload — cause.",
+            "format": "uint8"
+          },
+          "degradeLevel": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsFrameSkipped` event payload — degrade level.",
+            "format": "uint8"
+          },
+          "skipRun": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsFrameSkipped` event payload — skip run.",
+            "format": "int32"
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "Generated instant-event DTO for `SubscriptionsFrameSkipped`. 12-byte header + payload; no span fields."
+      },
       "TraceEventDtoSubscriptionsServerTelemetryEventDto": {
         "properties": {
           "kind": {
@@ -30906,6 +35875,106 @@
           }
         },
         "description": "Generated instant-event DTO for `SubscriptionsServerTelemetry`. 12-byte header + payload; no span fields."
+      },
+      "TraceEventDtoSubscriptionsSessionChangedEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "subscriptionsSessionChanged"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "sessionId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsSessionChanged` event payload — session id.",
+            "format": "uint64"
+          },
+          "change": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsSessionChanged` event payload — change.",
+            "format": "uint8"
+          },
+          "degradeLevel": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsSessionChanged` event payload — degrade level.",
+            "format": "uint8"
+          },
+          "closeReason": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsSessionChanged` event payload — close reason.",
+            "format": "uint8"
+          },
+          "closeCode": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsSessionChanged` event payload — close code.",
+            "format": "uint16"
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "Generated instant-event DTO for `SubscriptionsSessionChanged`. 12-byte header + payload; no span fields."
       },
       "TraceEventDtoSubscriptionsSessionTelemetryEventDto": {
         "properties": {
@@ -33078,6 +38147,9 @@
     },
     {
       "name": "Options"
+    },
+    {
+      "name": "Backups"
     },
     {
       "name": "Databases"

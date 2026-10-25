@@ -84,6 +84,9 @@ internal sealed class SyntheticChain
 
     public int ExpectedPageCount(int index) => _imagePages[index];
 
+    /// <summary>Whether some point up to <paramref name="index"/> wrote <paramref name="pageId"/>; a page none wrote is a hole (zeros).</summary>
+    public bool Holds(int index, int pageId) => _states[index].ContainsKey(pageId);
+
     public StoreView View() => StoreView.Open(Root, Fs);
 
     /// <summary>The point's packs, opened, base first.</summary>

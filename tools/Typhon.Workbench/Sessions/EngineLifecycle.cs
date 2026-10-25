@@ -28,6 +28,19 @@ public sealed class EngineLifecycle : IDisposable
     /// <summary>Provenance of the resolved schema: "user-specified" | "registered" | "bundled" | "legacy-adjacent" | "schemaless".</summary>
     public string SchemaStatus { get; }
 
+    /// <summary>
+    /// The open took the crash path with no schema archetypes registered, so <c>InitializeArchetypes</c> was not called (#1417 WB-5): the session shows the
+    /// image as the last checkpoint left it, before any WAL replay, and the engine refuses an online backup. Open it with its application schema to
+    /// recover it.
+    /// </summary>
+    public bool OpenedOnCrashPathWithoutSchema { get; private init; }
+
+    /// <summary>What <c>InitializeArchetypes</c> threw, or null (also surfaced as an <c>archetype_init_failed</c> diagnostic).</summary>
+    public Exception InitializeArchetypesFailure { get; private init; }
+
+    /// <summary>The open's <c>InitializeArchetypes</c> call; zero when it was not called.</summary>
+    public TimeSpan InitializeArchetypesDuration { get; private init; }
+
     private EngineLifecycle(
         ServiceProvider services,
         WorkbenchAssemblyLoadContext alc,
@@ -53,11 +66,20 @@ public sealed class EngineLifecycle : IDisposable
     }
 
     /// <summary>
+    /// A session's page cache: 131072 pages × 8KB = 1 GiB. Sized for multi-million-entity databases: at that scale the EntityMap (paged hash) +
+    /// component clusters + BTree index pages alone need thousands of pages resident or eviction back-pressure dominates on Commit. 1 GiB gives
+    /// comfortable headroom on a dev workstation; matches the fixture-generation engine (FixtureDatabase.cs:570) so opening a freshly-generated fixture
+    /// behaves identically.
+    /// </summary>
+    public const ulong SessionPageCacheBytes = 131072UL * 8192;
+
+    /// <summary>
     /// Opens (or auto-creates) a database at the given path, optionally loading schema DLLs into a
     /// per-session collectible ALC and registering their component types. On breaking-schema or
     /// downgrade, the engine stays open but non-<see cref="SchemaCompatibility.State.Ready"/> —
     /// the caller surfaces a banner.
     /// </summary>
+    /// <param name="pageCacheBytes">The page cache: a session's <see cref="SessionPageCacheBytes"/> by default; 0 = the engine's default (a settle).</param>
     /// <exception cref="WorkbenchException">
     /// 409 file_locked — file held by another process/session.
     /// 400 engine_open_failed — any other engine open failure.
@@ -67,7 +89,8 @@ public sealed class EngineLifecycle : IDisposable
         string filePath,
         string[] schemaDllPaths = null,
         string[] registeredSchemaDirs = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        ulong pageCacheBytes = SessionPageCacheBytes)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
         schemaDllPaths ??= [];
@@ -92,7 +115,7 @@ public sealed class EngineLifecycle : IDisposable
         {
             try
             {
-                return TryOpenOnce(fullPath, directory, databaseName, schemaDllPaths, registeredSchemaDirs);
+                return TryOpenOnce(fullPath, directory, databaseName, schemaDllPaths, registeredSchemaDirs, pageCacheBytes);
             }
             catch (WorkbenchException wb) when (wb.ErrorCode == "file_locked" && attempt < maxAttempts)
             {
@@ -106,7 +129,8 @@ public sealed class EngineLifecycle : IDisposable
         string directory,
         string databaseName,
         string[] schemaDllPaths,
-        string[] registeredSchemaDirs)
+        string[] registeredSchemaDirs,
+        ulong pageCacheBytes)
     {
         ServiceProvider sp = null;
         WorkbenchAssemblyLoadContext alc = null;
@@ -144,12 +168,11 @@ public sealed class EngineLifecycle : IDisposable
                     // and disposes this engine when one appears. Advertising without honouring requests would merely
                     // turn an instant failure into a short wait followed by the same failure.
                     opts.YieldableLock = true;
-                    // 131072 pages × 8KB = 1 GiB page cache. Sized for multi-million-entity databases: at that
-                    // scale the EntityMap (paged hash) + component clusters + BTree index pages alone need
-                    // thousands of pages resident or eviction back-pressure dominates on Commit. 1 GiB gives
-                    // comfortable headroom on a dev workstation; matches the fixture-generation engine
-                    // (FixtureDatabase.cs:570) so opening a freshly-generated fixture behaves identically.
-                    opts.DatabaseCacheSize = 131072UL * 8192;
+                    // A session's 1 GiB (SessionPageCacheBytes), or the engine's default when the caller asks for 0.
+                    if (pageCacheBytes != 0)
+                    {
+                        opts.DatabaseCacheSize = pageCacheBytes;
+                    }
                 })
                 .AddDatabaseEngine(engineOpts =>
                 {
@@ -192,6 +215,8 @@ public sealed class EngineLifecycle : IDisposable
             SchemaCompatibility.State state = SchemaCompatibility.State.Ready;
             SchemaCompatibility.Diagnostic[] diagnostics = [];
             int loaded = 0;
+            var initializeArchetypes = false;
+            Exception initFailure = null;
 
             if (resolvedSchemaPaths.Length > 0)
             {
@@ -204,12 +229,13 @@ public sealed class EngineLifecycle : IDisposable
                 loaded = result.RegisteredCount;
 
                 // Discover + register archetype types (feature #514 §5.2). Each loaded schema assembly carries a generated `[ModuleInitializer]` barrier
-                // (`__TyphonRegistry_<Assembly>`); RunModuleConstructor fires it, and the CLR runs a module initializer exactly once, before any type in the module.
-                // So a single call per assembly registers ALL of that assembly's components + archetypes — GeneratedSchemaRegistry specs, component-collection
-                // factories, and ArchetypeRegistry finalization — replacing the old per-archetype RunClassConstructor + EnsureFinalized dance (which only ran the
-                // barrier implicitly, off the first archetype's class ctor, then re-finalized each type redundantly). Cross-ALC same-name collisions are tolerated
-                // inside the barrier (EnsureFinalized fromBarrier). Per-assembly try/catch keeps one poisoned module from aborting the others.
-                // Then InitializeArchetypes wires per-engine archetype storage (EntityMap pages) so counts are recovered from the MMF-backed state.
+                // (`__TyphonRegistry_<Assembly>`); RunModuleConstructor fires it, and the CLR runs a module initializer exactly once, before any type in the
+                // module. So a single call per assembly registers ALL of that assembly's components + archetypes — GeneratedSchemaRegistry specs,
+                // component-collection factories, and ArchetypeRegistry finalization — replacing the old per-archetype RunClassConstructor + EnsureFinalized
+                // dance (which only ran the barrier implicitly, off the first archetype's class ctor, then re-finalized each type redundantly). Cross-ALC
+                // same-name collisions are tolerated inside the barrier (EnsureFinalized fromBarrier). Per-assembly try/catch keeps one poisoned module from
+                // aborting the others. Then InitializeArchetypes wires per-engine archetype storage (EntityMap pages) so counts are recovered from the
+                // MMF-backed state.
                 if (result.RegisteredCount > 0 && loadedSchema.ArchetypeTypes.Length > 0)
                 {
                     foreach (var asm in loadedSchema.Assemblies)
@@ -220,8 +246,8 @@ public sealed class EngineLifecycle : IDisposable
                         }
                         catch (Exception modEx)
                         {
-                            // A poisoned module initializer (a genuine authoring error in one of the assembly's archetypes) shouldn't block the other assemblies.
-                            // Surface it as a diagnostic so the Schema Inspector has a breadcrumb instead of silently showing wrong counts.
+                            // A poisoned module initializer (a genuine authoring error in one of the assembly's archetypes) shouldn't block the other
+                            // assemblies. Surface it as a diagnostic so the Schema Inspector has a breadcrumb instead of silently showing wrong counts.
                             diagnostics = [.. diagnostics, new SchemaCompatibility.Diagnostic(
                                 ComponentName: asm.GetName().Name ?? asm.FullName ?? "(schema assembly)",
                                 Kind: "archetype_finalize_failed",
@@ -232,22 +258,33 @@ public sealed class EngineLifecycle : IDisposable
                     // registry entries on session dispose, so the next session's RunModuleConstructor barrier repopulates the slot map with THIS ALC's Types —
                     // no manual RefreshSlotTypes pass needed (retired, #529).
                     schemaDllTicks = System.Diagnostics.Stopwatch.GetTimestamp() - schemaStart;
-                    try
+                    initializeArchetypes = true;
+                }
+            }
+
+            // #1417 WB-5: a session without schema archetypes completes its open too, so its engine can take an online backup (the engine refuses one
+            // until InitializeArchetypes has run) — as DerivedStructureRegeneration's schemaless call does. Except on the crash path: there it is where the
+            // WAL replays, and a process that does not register the application's archetypes cannot replay their records (7012, #1309), so the call
+            // would fail the open. Such a session keeps the pre-replay image and cannot back up (OpenedOnCrashPathWithoutSchema says why).
+            var crashPathWithoutSchema = !initializeArchetypes && engine.CrashRecoveryAtOpen;
+            if (!crashPathWithoutSchema)
+            {
+                try
+                {
+                    var initStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                    engine.InitializeArchetypes();
+                    initArchetypesTicks = System.Diagnostics.Stopwatch.GetTimestamp() - initStart;
+                }
+                catch (Exception initEx)
+                {
+                    initFailure = initEx;
+                    diagnostics = [.. diagnostics, new SchemaCompatibility.Diagnostic(
+                        ComponentName: "(InitializeArchetypes)",
+                        Kind: "archetype_init_failed",
+                        Detail: initEx.ToString())];
+                    if (state == SchemaCompatibility.State.Ready)
                     {
-                        var initStart = System.Diagnostics.Stopwatch.GetTimestamp();
-                        engine.InitializeArchetypes();
-                        initArchetypesTicks = System.Diagnostics.Stopwatch.GetTimestamp() - initStart;
-                    }
-                    catch (Exception initEx)
-                    {
-                        diagnostics = [.. diagnostics, new SchemaCompatibility.Diagnostic(
-                            ComponentName: "(InitializeArchetypes)",
-                            Kind: "archetype_init_failed",
-                            Detail: initEx.ToString())];
-                        if (state == SchemaCompatibility.State.Ready)
-                        {
-                            state = SchemaCompatibility.State.MigrationRequired;
-                        }
+                        state = SchemaCompatibility.State.MigrationRequired;
                     }
                 }
             }
@@ -279,7 +316,12 @@ public sealed class EngineLifecycle : IDisposable
                 schemaDllTicks * toMs,
                 initArchetypesTicks * toMs);
 
-            return new EngineLifecycle(sp, alc, engine, registry, fullPath, state, loaded, diagnostics, schemaStatus, resolvedSchemaPaths);
+            return new EngineLifecycle(sp, alc, engine, registry, fullPath, state, loaded, diagnostics, schemaStatus, resolvedSchemaPaths)
+            {
+                OpenedOnCrashPathWithoutSchema = crashPathWithoutSchema,
+                InitializeArchetypesFailure = initFailure,
+                InitializeArchetypesDuration = TimeSpan.FromMilliseconds(initArchetypesTicks * toMs),
+            };
         }
         catch (WorkbenchException)
         {

@@ -36,10 +36,11 @@
     <ItemGroup>
         <!-- The fixture database generator is internal so it never becomes part of the public API
              surface for user schema DLLs. The Workbench (DEBUG-only Dev Fixture tab) and the engine
-             test project are the only intended callers. -->
+             test project are the only intended callers; the Shell's tests build the database `typhon backup drill` drills (#1416, T13). -->
         <InternalsVisibleTo Include="Typhon.Workbench" />
         <InternalsVisibleTo Include="Typhon.Engine.Tests" />
         <InternalsVisibleTo Include="Typhon.Workbench.Tests" />
+        <InternalsVisibleTo Include="Typhon.Shell.Tests" />
     </ItemGroup>
 
 </Project>

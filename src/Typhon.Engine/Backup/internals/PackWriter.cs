@@ -91,6 +91,7 @@ internal sealed class PackWriter : IBackupPointSink, IDisposable
     private uint _fileCrc = Crc32CUtil.Start;
 
     // Pages.
+    private static readonly byte[] ZeroPage = new byte[PackFormat.PageSize];
     private ulong[] _seen;
     private int _pagesAdded;
     private readonly byte[] _metaPages = new byte[2 * PackFormat.PageSize];
@@ -212,6 +213,70 @@ internal sealed class PackWriter : IBackupPointSink, IDisposable
             Fail($"page {pageId} image is {image.Length} bytes, not {PackFormat.PageSize}");
         }
 
+        Accept(pageId, image, suspect);
+        var crc = Crc32CUtil.Compute(image);
+        if (image.IndexOfAnyExcept((byte)0) < 0)
+        {
+            _index.Add(new PackPageEntry((uint)pageId, 0, 0, crc));
+            return;
+        }
+
+        var frame = Reserve(PackFormat.FramePrefixSize + PackFormat.MaxCompressedPage);
+        var payload = frame[PackFormat.FramePrefixSize..];
+        var stored = LZ4Codec.Encode(image, payload);
+        if (stored <= 0 || stored >= PackFormat.PageSize)
+        {
+            image.CopyTo(payload);
+            stored = PackFormat.PageSize;
+        }
+
+        BinaryPrimitives.WriteUInt32LittleEndian(frame, (uint)stored);
+        var payloadOffset = Position + PackFormat.FramePrefixSize;
+        _fill += PackFormat.FramePrefixSize + stored;
+        _index.Add(new PackPageEntry((uint)pageId, (uint)stored, payloadOffset, crc));
+    }
+
+    /// <summary>
+    /// Adds a page as another pack stores it, frame copied verbatim (05 §2, DL-2): <paramref name="storedPayload"/> is the frame's payload (LZ4, or
+    /// the raw page when it is 8 KiB long), <paramref name="pageCrc"/> the <c>PageCrc</c> of its decoded bytes, which the caller checked when it
+    /// decoded them into <paramref name="decoded"/>. Nothing is encoded or hashed here; <paramref name="decoded"/> is read only for the meta pair.
+    /// </summary>
+    public void AddStoredPage(int pageId, ReadOnlySpan<byte> decoded, ReadOnlySpan<byte> storedPayload, uint pageCrc, bool suspect)
+    {
+        Require(State.Imaging, nameof(AddStoredPage));
+        if (storedPayload.Length is < 1 or > PackFormat.PageSize)
+        {
+            Fail($"page {pageId}'s stored frame is {storedPayload.Length} bytes, not 1 to {PackFormat.PageSize}");
+        }
+
+        if (decoded.Length != PackFormat.PageSize)
+        {
+            Fail($"page {pageId} image is {decoded.Length} bytes, not {PackFormat.PageSize}");
+        }
+
+        Accept(pageId, decoded, suspect);
+        var frame = Reserve(PackFormat.FramePrefixSize + storedPayload.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(frame, (uint)storedPayload.Length);
+        storedPayload.CopyTo(frame[PackFormat.FramePrefixSize..]);
+        var payloadOffset = Position + PackFormat.FramePrefixSize;
+        _fill += PackFormat.FramePrefixSize + storedPayload.Length;
+        _index.Add(new PackPageEntry((uint)pageId, (uint)storedPayload.Length, payloadOffset, pageCrc));
+    }
+
+    /// <summary>
+    /// Adds an all-zero page: an entry with no frame and the zero page's CRC, as <see cref="AddPage"/> stores one. A compaction writes a page no pack
+    /// of its chain holds (a hole) this way, so its base holds every page of the image (DL-1).
+    /// </summary>
+    public void AddZeroPage(int pageId, bool suspect)
+    {
+        Require(State.Imaging, nameof(AddZeroPage));
+        Accept(pageId, ZeroPage, suspect);
+        _index.Add(new PackPageEntry((uint)pageId, 0, 0, PackFormat.ZeroPageCrc));
+    }
+
+    /// <summary>A page's bookkeeping, whatever its storage: range, once only, the meta pair kept, the suspect list.</summary>
+    private void Accept(int pageId, ReadOnlySpan<byte> image, bool suspect)
+    {
         if ((uint)pageId >= (uint)_header.ImagePages)
         {
             Fail($"page {pageId} is outside the image's {_header.ImagePages} pages");
@@ -235,27 +300,6 @@ internal sealed class PackWriter : IBackupPointSink, IDisposable
         {
             _suspects.Add((uint)pageId);
         }
-
-        var crc = Crc32CUtil.Compute(image);
-        if (image.IndexOfAnyExcept((byte)0) < 0)
-        {
-            _index.Add(new PackPageEntry((uint)pageId, 0, 0, crc));
-            return;
-        }
-
-        var frame = Reserve(PackFormat.FramePrefixSize + PackFormat.MaxCompressedPage);
-        var payload = frame[PackFormat.FramePrefixSize..];
-        var stored = LZ4Codec.Encode(image, payload);
-        if (stored <= 0 || stored >= PackFormat.PageSize)
-        {
-            image.CopyTo(payload);
-            stored = PackFormat.PageSize;
-        }
-
-        BinaryPrimitives.WriteUInt32LittleEndian(frame, (uint)stored);
-        var payloadOffset = Position + PackFormat.FramePrefixSize;
-        _fill += PackFormat.FramePrefixSize + stored;
-        _index.Add(new PackPageEntry((uint)pageId, (uint)stored, payloadOffset, crc));
     }
 
     /// <inheritdoc />
@@ -607,15 +651,8 @@ internal sealed class PackWriter : IBackupPointSink, IDisposable
     private void EmitTailBlock()
     {
         var raw = _tailBlock.Span[.._tailFill];
-        var frame = Reserve(PackFormat.FramePrefixSize + LZ4Codec.MaximumOutputSize(raw.Length));
-        var payload = frame[PackFormat.FramePrefixSize..];
-        var stored = LZ4Codec.Encode(raw, payload);
-        if (stored <= 0 || stored >= raw.Length)
-        {
-            raw.CopyTo(payload);
-            stored = raw.Length;
-        }
-
+        var frame = Reserve(PackFormat.FramePrefixSize + TailBlockCodec.MaxStoredLength(raw.Length));
+        var stored = TailBlockCodec.Encode(raw, frame[PackFormat.FramePrefixSize..]);
         BinaryPrimitives.WriteUInt32LittleEndian(frame, (uint)stored);
         _blocks.Add(new TailBlockEntry { DataOffset = Position + PackFormat.FramePrefixSize, RawLength = raw.Length, StoredLength = stored });
         _fill += PackFormat.FramePrefixSize + stored;

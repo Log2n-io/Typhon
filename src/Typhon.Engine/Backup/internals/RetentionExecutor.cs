@@ -1,0 +1,220 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+
+namespace Typhon.Engine.Internals;
+
+/// <summary>
+/// Retention's step 5 (05 §3, DL-13): deletes the archived WAL no kept point can replay from — per timeline the segments wholly below
+/// <c>KeepFromLsn</c> (the CheckpointLSN of its oldest kept point), and every timeline absent from <paramref name="floors"/> except
+/// <paramref name="liveTimeline"/>. Called under <c>store.lock</c>, after the pack deletes. The archive is #1418's (impl/1418 §4.6).
+/// </summary>
+internal delegate void ArchivePruner(BackupStore session, IReadOnlyList<(Guid TimelineId, long KeepFromLsn)> floors, Guid liveTimeline);
+
+/// <summary>R1 failed (DL-7): a kept point no longer resolves after the deletes. A defect, never an outcome; health Failing.</summary>
+internal sealed class RetentionBrokeAKeptPointException(string store, uint pointId, string why)
+    : InvalidOperationException($"Retention of '{store}' left kept point #{pointId} unrestorable ({why}). This is a defect: report it.")
+{
+    public uint PointId { get; } = pointId;
+}
+
+/// <summary>
+/// Applies a retention under <c>store.lock</c> (05 §3 as corrected, BKP-14): plan, refuse a plan that changed since the one approved, compact, re-plan on
+/// what the compactions actually published, delete newest first with each delete made durable, prune the WAL archive, then prove every kept point
+/// still resolves.
+/// </summary>
+/// <remarks>
+/// Runs on whichever thread holds the session: the engine's backup thread after a point (#1416), or <c>typhon backup prune</c>. A compaction that fails
+/// is logged, reported in the result (<see cref="BackupRetentionResult.FailedCompactions"/>: a damaged source is a kept point that may not restore) and
+/// its chain keeps every pack this run; anything else that fails stops the retention where it is, which every prefix of a descending delete sequence
+/// allows (each listed point keeps its whole chain).
+/// </remarks>
+internal static class RetentionExecutor
+{
+    /// <param name="session">The store, its lock held.</param>
+    /// <param name="policy">A validated policy.</param>
+    /// <param name="approved">The plan an operator approved, or <c>null</c>: then whatever the policy says now is applied.</param>
+    /// <param name="drillPassed">The points whose newest drill passed (#1416's drill records); empty without them.</param>
+    /// <param name="utcNow">Now, for <c>MaxAge</c>.</param>
+    /// <param name="liveTimeline">The timeline a live engine is writing, whose archive is never pruned whole; empty from the CLI.</param>
+    /// <param name="options">Read budget, cancellation, progress, logging.</param>
+    /// <param name="pruneArchive">Step 5; <c>null</c> is <see cref="DefaultArchivePruner"/>.</param>
+    public static BackupRetentionResult Apply(BackupStore session, BackupRetentionPolicy policy, BackupRetentionPlan approved, IReadOnlyCollection<uint> drillPassed,
+        DateTime utcNow, Guid liveTimeline, BackupLifecycleOptions options, ArchivePruner pruneArchive = null)
+    {
+        options ??= new BackupLifecycleOptions();
+        var clock = Stopwatch.StartNew();
+        var fs = session.FileSystem;
+        var log = session.Log;
+        var root = session.Root;
+        long? free = fs.TryGetAvailableFreeSpace(session.View.Paths.Packs, out var bytes) ? bytes : null;
+        var first = RetentionPlanner.Plan(session.View, policy, drillPassed, utcNow, free);
+        if (approved != null && !IsSubset(first.Plan.PackDeletions, approved.PackDeletions))
+        {
+            throw new BackupPlanChangedException(root, approved.Fingerprint, first.Plan.Fingerprint);
+        }
+
+        // Compactions before any delete: a point stops needing the packs below it only once its -C is published and verified.
+        var compactions = new List<BackupCompactionResult>();
+        var failedCompactions = new List<BackupCompactionFailure>();
+        foreach (var id in first.Compactions)
+        {
+            options.Cancellation.ThrowIfCancellationRequested();
+            try
+            {
+                var result = BackupCompactor.Compact(session, id, options);
+                if (!result.AlreadyBase)
+                {
+                    compactions.Add(result);
+                }
+            }
+            catch (Exception ex) when (ex is BackupException or IOException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                BackupLog.RetentionCompactionFailed(log, root, id, ex.Message);
+                failedCompactions.Add(new BackupCompactionFailure(id, CompactionFailureKind(ex), ex.Message));
+            }
+        }
+
+        // Re-planned on what is there now: a failed compaction is not substituted, so its chain keeps its packs. Its own compaction it does not
+        // re-attempt: the second plan's list is ignored.
+        var decision = first.Compactions.Count == 0
+            ? first
+            : RetentionPlanner.Plan(session.View, policy, drillPassed, utcNow, null, compact: false);
+        if (!IsSubset(decision.Plan.PackDeletions, first.Plan.PackDeletions))
+        {
+            throw new InvalidOperationException(
+                $"Retention of '{root}': the plan after its compactions deletes a pack the first did not list. This is a defect: nothing was deleted.");
+        }
+
+        var deleted = new List<string>();
+        long bytesFreed = 0;
+        var span = TyphonEvent.BeginBackupLifecycle(2);
+        try
+        {
+            foreach (var d in decision.Deletions)
+            {
+                options.Cancellation.ThrowIfCancellationRequested();
+                session.DeletePack(d.Name);
+                deleted.Add(d.Name);
+                bytesFreed += d.Length;
+            }
+        }
+        finally
+        {
+            span.Packs = deleted.Count;
+            span.Bytes = bytesFreed;
+            span.Dispose();
+            session.RefreshView();
+        }
+
+        // DL-14: a deleted point's drill records go with it (they would pin nothing, and name a point the store no longer has).
+        if (deleted.Count > 0)
+        {
+            var listed = new HashSet<uint>();
+            foreach (var p in session.View.Catalog.Packs)
+            {
+                listed.Add(p.BackupId);
+            }
+
+            DrillRecords.DeleteForPointsNotIn(fs, root, listed, log);
+        }
+
+        // DL-13 (05 §3 step 5): the archived WAL no kept point can replay from. A store a damaged chain may still need (DL-4: it may be repaired) keeps its
+        // archive whole when the chain's timeline is unknown (an unreadable pack) or nothing resolves.
+        if (!decision.KeepArchive)
+        {
+            (pruneArchive ?? DefaultArchivePruner)(session, decision.ArchiveFloors, liveTimeline);
+        }
+
+        // R1 (DL-7): every kept point resolves on the store as it now is. Deletion cannot change a kept pack (BKP-08), only remove a link.
+        foreach (var id in decision.Kept)
+        {
+            if (!ChainResolver.TryResolve(session.View, id, out _, out _, out var why))
+            {
+                BackupLog.RetentionBrokeAKeptPoint(log, root, id, why);
+                throw new RetentionBrokeAKeptPointException(root, id, why);
+            }
+        }
+
+        foreach (var c in compactions)
+        {
+            bytesFreed -= c.BytesWritten;
+        }
+
+        // The plan applied: the first one's compactions (the result lists those that published), the deletions re-planned after them.
+        var plan = decision.Plan with
+        {
+            Compactions = first.Plan.Compactions,
+            Fingerprint = RetentionPlanner.Fingerprint(first.Plan.Compactions, decision.Plan.PackDeletions),
+        };
+        if (plan.Blocked != BackupRetentionBlock.None)
+        {
+            BackupLog.RetentionBlocked(log, root, plan.Blocked, plan.BlockedReason);
+        }
+
+        BackupLog.RetentionApplied(log, root, plan.Kept.Count, plan.CutoffId, compactions.Count, deleted.Count, bytesFreed, clock.ElapsedMilliseconds);
+        return new BackupRetentionResult(plan, compactions, deleted, bytesFreed, clock.Elapsed, failedCompactions);
+    }
+
+    /// <summary>
+    /// Why a compaction did not publish: its own pack failing its pre-publish verify is the compaction's failure (nothing was published, the sources are
+    /// sound as far as it read); a damaged source pack or a broken chain is the store's.
+    /// </summary>
+    internal static BackupFailureKind CompactionFailureKind(Exception ex) =>
+        ex is BackupPackCorruptException { Section: "Compaction" } ? BackupFailureKind.Failed
+        : BackupOperations.Classify(ex) is BackupFailureKind.StoreDamaged ? BackupFailureKind.StoreDamaged
+        : BackupFailureKind.Failed;
+
+    /// <summary>
+    /// The archive prune every retention runs: <see cref="WalArchiveStore.PruneArchive"/>, which takes each <c>wal/&lt;t&gt;/archive.lock</c> per operation.
+    /// A caller that does not know the database's live timeline (<see cref="Guid.Empty"/>: <c>typhon backup prune</c> and the facade, which see a store,
+    /// not an engine) deletes no timeline whole: each one without a kept point is kept from LSN 0, since it may be the live one — a restored engine
+    /// archives its new timeline before its first point. The engine's own retention passes its timeline, and the other ones go.
+    /// </summary>
+    internal static readonly ArchivePruner DefaultArchivePruner = static (session, floors, liveTimeline) =>
+    {
+        if (liveTimeline == Guid.Empty)
+        {
+            var all = new List<(Guid TimelineId, long KeepFromLsn)>(floors);
+            foreach (var t in WalArchiveStore.ListTimelines(session.FileSystem, session.Root))
+            {
+                if (!Contains(floors, t))
+                {
+                    all.Add((t, 0));
+                }
+            }
+
+            floors = all;
+        }
+
+        WalArchiveStore.PruneArchive(session, floors, liveTimeline);
+    };
+
+    private static bool Contains(IReadOnlyList<(Guid TimelineId, long KeepFromLsn)> floors, Guid timeline)
+    {
+        foreach (var (t, _) in floors)
+        {
+            if (t == timeline)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsSubset(IReadOnlyList<string> subset, IReadOnlyList<string> of)
+    {
+        var set = new HashSet<string>(of, StringComparer.Ordinal);
+        foreach (var s in subset)
+        {
+            if (!set.Contains(s))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+}

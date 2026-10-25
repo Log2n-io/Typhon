@@ -135,4 +135,15 @@ public static class ObservabilityBridgeExtensions
         services.TryAddSingleton(sp => new EcsMetricsExporter(sp.GetRequiredService<DatabaseEngine>()));
         return services;
     }
+
+    /// <summary>
+    /// Registers <see cref="BackupMetricsExporter"/> (meter <c>Typhon.Backup</c>): the engine's backup health, ages, depths and archive lag as gauges, its
+    /// totals as counters. Like <see cref="AddTyphonEcsMetrics"/>, resolve it once after the provider is built so its meter exists before the first scrape.
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    public static IServiceCollection AddTyphonBackupMetrics(this IServiceCollection services)
+    {
+        services.TryAddSingleton(sp => new BackupMetricsExporter(sp.GetRequiredService<DatabaseEngine>()));
+        return services;
+    }
 }

@@ -106,6 +106,11 @@ internal sealed class DatabaseEngineOptionsValidator : IValidateOptions<Database
             }
         }
 
+        if (options.Backup != null && !options.Backup.Validate(options.Wal, out var backupError))
+        {
+            failures.Add(backupError);
+        }
+
         return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);
     }
 }
