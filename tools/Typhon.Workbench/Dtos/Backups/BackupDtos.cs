@@ -50,7 +50,10 @@ public sealed record BackupCreateRequestDto(string Store, string Bundle, bool Fu
 /// <summary>Verify the store (<see cref="Point"/> null) or one point, at <c>quick</c>, <c>full</c> or <c>deep</c>.</summary>
 public sealed record BackupVerifyRequestDto(string Store, BackupPointRefDto Point, string Level);
 
-/// <summary>Drill a point into <see cref="Scratch"/> (blank: the Workbench's default); <see cref="Bundle"/> names the database whose open session's schema the drill loads, if any.</summary>
+/// <summary>
+/// Drill a point into <see cref="Scratch"/> (blank: the Workbench's default); <see cref="Bundle"/> names the database whose open session's schema the
+/// drill loads, if any.
+/// </summary>
 public sealed record BackupDrillRequestDto(string Store, BackupPointRefDto Point, string Scratch, string Bundle);
 
 /// <summary>Compact a point into a base.</summary>
@@ -164,12 +167,15 @@ public sealed record BackupLogDto(string TimelineId, long FromLsn, long ToLsn, L
 /// <param name="Unreachable">An LSN or time target's <c>RestoreUnreachableReason</c>; null when reachable.</param>
 /// <param name="RefusalMessage">The refusal in words.</param>
 /// <param name="HeldBySessionId">The Workbench session that holds the target (WB-12), to offer its close.</param>
-/// <param name="NewestKnownLsn">The newest LSN the store knows on the restored timeline (its newest point's <c>P</c>, or the archive's end).</param>
-/// <param name="LostLsns">Of those, how many LSNs lie after the restored one: what the restored database will not hold.</param>
+/// <param name="NewestKnownLsn">
+/// The newest LSN the store knows on the restored timeline (its newest point's <c>P</c>, or the archive's end); null when the store could not be read
+/// for it (what is lost is then unknown, never "nothing").
+/// </param>
+/// <param name="LostLsns">Of those, how many LSNs lie after the restored one: what the restored database will not hold; null when unknown.</param>
 public sealed record BackupRestorePlanDto(bool CanRestore, string Fingerprint, string ResolvedTarget, string DisplacedBundle, List<uint> Chain,
     long BytesToRead, uint BaseBackupId, long CheckpointLsn, long PointLsn, long TargetLsn, string TimelineId, int ArchivedSegments, long ArchivedBytes,
     long SampleLsn, DateTime? SampleUtc, string Refusal, string Unreachable, string RefusalMessage, List<long> NearestRestorable,
-    Guid? HeldBySessionId, long NewestKnownLsn, long LostLsns);
+    Guid? HeldBySessionId, long? NewestKnownLsn, long? LostLsns);
 
 /// <summary>A retention's preview; the apply runs only with its <see cref="Fingerprint"/>.</summary>
 public sealed record BackupRetentionPlanDto(List<uint> Kept, List<uint> Removed, List<uint> Compactions, List<string> PackDeletions, uint CutoffId,
@@ -232,7 +238,8 @@ public sealed record BackupDamagedPageDto(long PageId, string PackFile, string R
 
 /// <summary>
 /// A backup job: queued → running(phase, completed, total) → done(result) | error(category, message) | cancelled. <see cref="Total"/> 0 means
-/// indeterminate: no percentage is shown. One result slot per kind.
+/// indeterminate: no percentage is shown. One result slot per kind, filled in a job's snapshot (<c>GET jobs/{id}</c>, the stream) and null in the store's
+/// job list (<c>GET jobs</c>: summaries).
 /// </summary>
 public sealed record BackupJobDto(Guid JobId, string Kind, string Store, string Bundle, string State, string Phase, long Completed, long Total,
     string Unit, DateTime StartedUtc, DateTime? EndedUtc, string Route, string Note, BackupJobErrorDto Error, BackupCreateResultDto Create,

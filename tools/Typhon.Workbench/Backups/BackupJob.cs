@@ -14,13 +14,39 @@ public static class BackupJobStates
     public static bool IsTerminal(string state) => state is Done or Error or Cancelled;
 }
 
+/// <summary>The kinds of a <see cref="BackupJob"/>, as the wire names them.</summary>
+public static class BackupJobKinds
+{
+    public const string Create = "create";
+    public const string Verify = "verify";
+    public const string Drill = "drill";
+    public const string Compact = "compact";
+    public const string Retention = "retention";
+    public const string Restore = "restore";
+}
+
 /// <summary>
-/// One backup job (#1417 §3.5): queued → running(phase, completed, total) → done(result) | error(category, message) | cancelled. Every transition is made by
-/// the job's own body thread, so <see cref="Changed"/> fires in order; a cancel only trips the token and the body reports how it ended.
+/// A finished job's result: one slot per kind, mapped to its DTO once, when the body ends. The engine's own report is not kept: a store keeps up to 20
+/// finished jobs for an hour, and a verify report's findings or a restore's page lists are paid for once, not on every snapshot.
+/// </summary>
+public sealed record BackupJobResult(
+    BackupCreateResultDto Create = null,
+    BackupVerifyReportDto Verify = null,
+    BackupDrillReportDto Drill = null,
+    BackupCompactionResultDto Compact = null,
+    BackupRetentionResultDto Retention = null,
+    BackupRestoreResultDto Restore = null);
+
+/// <summary>
+/// One backup job (#1417 §3.5): queued → running(phase, completed, total) → done(result) | error(category, message) | cancelled. A cancel only trips the
+/// token; the body reports how it ended.
 /// </summary>
 /// <remarks>
-/// Progress is throttled at the source: a restore reports per page, so the counters are updated in place and <see cref="Changed"/> fires at most every
-/// <see cref="ProgressInterval"/> (or on a phase change). <see cref="Snapshot"/> builds the DTO on demand.
+/// <para>Progress may come from any thread — a drill's arrives on the child process's stdout reader — and the terminal transition from the body's thread.
+/// Notifications are serialized, each with the snapshot taken under that serialization, and none follows the terminal one: a progress report that loses
+/// the race to the terminal transition notifies nothing. So <see cref="Changed"/> sees states in order whichever thread reports them.</para>
+/// <para>Progress is throttled at the source: a restore reports per page, so the counters are updated in place and <see cref="Changed"/> fires at most every
+/// <see cref="ProgressInterval"/> (or on a phase change). <see cref="Snapshot"/> builds the DTO on demand.</para>
 /// </remarks>
 public sealed class BackupJob : IDisposable
 {
@@ -28,6 +54,7 @@ public sealed class BackupJob : IDisposable
     public static readonly TimeSpan ProgressInterval = TimeSpan.FromMilliseconds(100);
 
     private readonly object _lock = new();
+    private readonly object _notify = new();
     private readonly CancellationTokenSource _cts = new();
     private readonly Func<DateTime> _clock;
     private string _state = BackupJobStates.Queued;
@@ -38,7 +65,7 @@ public sealed class BackupJob : IDisposable
     private DateTime? _endedUtc;
     private string _note;
     private BackupJobErrorDto _error;
-    private Func<BackupJobDto, BackupJobDto> _result;
+    private BackupJobResult _result;
     private long _lastNotifyTicks;
 
     internal BackupJob(Guid id, string kind, string store, string bundle, string target, string route, Func<DateTime> clock)
@@ -49,6 +76,7 @@ public sealed class BackupJob : IDisposable
         StoreKey = BackupPaths.Key(store);
         Bundle = bundle;
         Target = target;
+        TargetKey = target == null ? null : BackupPaths.Key(target);
         Route = route;
         _clock = clock;
         StartedUtc = clock();
@@ -56,7 +84,7 @@ public sealed class BackupJob : IDisposable
 
     public Guid Id { get; }
 
-    /// <summary>create | verify | drill | compact | retention | restore.</summary>
+    /// <summary>One of <see cref="BackupJobKinds"/>.</summary>
     public string Kind { get; }
 
     public string Store { get; }
@@ -67,6 +95,8 @@ public sealed class BackupJob : IDisposable
 
     /// <summary>A restore's resolved target bundle (WB-12: no session may open it while the job runs); null otherwise.</summary>
     public string Target { get; }
+
+    internal string TargetKey { get; }
 
     /// <summary>A create's route (WB-4).</summary>
     public string Route { get; }
@@ -79,7 +109,7 @@ public sealed class BackupJob : IDisposable
     /// <summary>The body's task; completed when the job is terminal.</summary>
     internal Task Completion { get; set; } = Task.CompletedTask;
 
-    /// <summary>Raised on the body's thread after a transition, outside the lock: progress (throttled) and the terminal one.</summary>
+    /// <summary>Raised after a transition, outside the state lock, serialized (see the remarks): progress (throttled) and the terminal one.</summary>
     public event Action<BackupJobDto> Changed;
 
     public bool IsTerminal
@@ -104,13 +134,19 @@ public sealed class BackupJob : IDisposable
         }
     }
 
-    public BackupJobDto Snapshot()
+    /// <summary>The job with its result (the snapshot GET and the stream).</summary>
+    public BackupJobDto Snapshot() => Build(withResult: true);
+
+    /// <summary>The job without its result slots (the store's job list: what re-attaching needs, not 20 results per refresh).</summary>
+    public BackupJobDto Summary() => Build(withResult: false);
+
+    private BackupJobDto Build(bool withResult)
     {
         lock (_lock)
         {
-            var dto = new BackupJobDto(Id, Kind, Store, Bundle, _state, _phase, _completed, _total, _unit, StartedUtc, _endedUtc, Route, _note, _error,
-                null, null, null, null, null, null);
-            return _result == null ? dto : _result(dto);
+            var r = withResult ? _result : null;
+            return new BackupJobDto(Id, Kind, Store, Bundle, _state, _phase, _completed, _total, _unit, StartedUtc, _endedUtc, Route, _note, _error,
+                r?.Create, r?.Verify, r?.Drill, r?.Compact, r?.Retention, r?.Restore);
         }
     }
 
@@ -141,10 +177,9 @@ public sealed class BackupJob : IDisposable
     {
         _state = BackupJobStates.Running;
         _phase = phase ?? "";
-        return true;
     });
 
-    /// <summary>Progress: <paramref name="total"/> 0 means indeterminate. Throttled; a phase change always notifies.</summary>
+    /// <summary>Progress: <paramref name="total"/> 0 means indeterminate. Throttled; a phase change always notifies. Any thread.</summary>
     internal void Report(string phase, long completed, long total, string unit)
     {
         bool notify;
@@ -169,14 +204,25 @@ public sealed class BackupJob : IDisposable
             }
         }
 
-        if (notify)
+        if (!notify)
         {
-            Changed?.Invoke(Snapshot());
+            return;
+        }
+
+        lock (_notify)
+        {
+            var dto = Snapshot();
+
+            // Lost the race to the terminal transition, which has notified (or is about to, behind this lock) with the newer state.
+            if (!BackupJobStates.IsTerminal(dto.State))
+            {
+                Changed?.Invoke(dto);
+            }
         }
     }
 
     /// <summary>Done; <paramref name="result"/> fills the kind's result slot of every snapshot from now on.</summary>
-    internal void SetDone(Func<BackupJobDto, BackupJobDto> result, string note = null) => Transition(() =>
+    internal void SetDone(BackupJobResult result, string note = null) => Transition(() =>
     {
         _state = BackupJobStates.Done;
         _result = result;
@@ -187,7 +233,6 @@ public sealed class BackupJob : IDisposable
         }
 
         _endedUtc = _clock();
-        return true;
     });
 
     internal void SetError(string category, string message) => Transition(() =>
@@ -195,7 +240,6 @@ public sealed class BackupJob : IDisposable
         _state = BackupJobStates.Error;
         _error = new BackupJobErrorDto(category, message);
         _endedUtc = _clock();
-        return true;
     });
 
     internal void SetCancelled(string note) => Transition(() =>
@@ -203,22 +247,25 @@ public sealed class BackupJob : IDisposable
         _state = BackupJobStates.Cancelled;
         _note = note;
         _endedUtc = _clock();
-        return true;
     });
 
-    private void Transition(Func<bool> apply)
+    private void Transition(Action apply)
     {
-        lock (_lock)
+        lock (_notify)
         {
-            if (BackupJobStates.IsTerminal(_state) || !apply())
+            lock (_lock)
             {
-                return;
+                if (BackupJobStates.IsTerminal(_state))
+                {
+                    return;
+                }
+
+                apply();
+                _lastNotifyTicks = Environment.TickCount64;
             }
 
-            _lastNotifyTicks = Environment.TickCount64;
+            Changed?.Invoke(Snapshot());
         }
-
-        Changed?.Invoke(Snapshot());
     }
 
     public void Dispose() => _cts.Dispose();

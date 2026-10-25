@@ -39,9 +39,9 @@ internal static class BackupRouting
     /// <summary>
     /// The route for <paramref name="bundle"/> into <paramref name="store"/>: <c>inProcess</c> when a live session of this Workbench holds it,
     /// <c>request</c> when another live engine does and accepts requests into this store, <c>offline</c> when nobody does; otherwise <c>unavailable</c>,
-    /// with the reason.
+    /// with the reason. <paramref name="readStatus"/> reads the bundle's engine status, only when another process holds it (the caller may have it read).
     /// </summary>
-    public static BackupRoute Decide(string bundle, string store, SessionManager sessions, IBackupOperations ops)
+    public static BackupRoute Decide(string bundle, string store, SessionManager sessions, Func<BackupStatusReport> readStatus)
     {
         if (string.IsNullOrWhiteSpace(bundle))
         {
@@ -74,7 +74,7 @@ internal static class BackupRouting
             BackupStatusReport report;
             try
             {
-                report = ops.ReadStatus(bundle);
+                report = readStatus();
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {

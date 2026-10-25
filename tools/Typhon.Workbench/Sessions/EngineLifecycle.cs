@@ -66,11 +66,20 @@ public sealed class EngineLifecycle : IDisposable
     }
 
     /// <summary>
+    /// A session's page cache: 131072 pages × 8KB = 1 GiB. Sized for multi-million-entity databases: at that scale the EntityMap (paged hash) +
+    /// component clusters + BTree index pages alone need thousands of pages resident or eviction back-pressure dominates on Commit. 1 GiB gives
+    /// comfortable headroom on a dev workstation; matches the fixture-generation engine (FixtureDatabase.cs:570) so opening a freshly-generated fixture
+    /// behaves identically.
+    /// </summary>
+    public const ulong SessionPageCacheBytes = 131072UL * 8192;
+
+    /// <summary>
     /// Opens (or auto-creates) a database at the given path, optionally loading schema DLLs into a
     /// per-session collectible ALC and registering their component types. On breaking-schema or
     /// downgrade, the engine stays open but non-<see cref="SchemaCompatibility.State.Ready"/> —
     /// the caller surfaces a banner.
     /// </summary>
+    /// <param name="pageCacheBytes">The page cache: a session's <see cref="SessionPageCacheBytes"/> by default; 0 = the engine's default (a settle).</param>
     /// <exception cref="WorkbenchException">
     /// 409 file_locked — file held by another process/session.
     /// 400 engine_open_failed — any other engine open failure.
@@ -80,7 +89,8 @@ public sealed class EngineLifecycle : IDisposable
         string filePath,
         string[] schemaDllPaths = null,
         string[] registeredSchemaDirs = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        ulong pageCacheBytes = SessionPageCacheBytes)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
         schemaDllPaths ??= [];
@@ -105,7 +115,7 @@ public sealed class EngineLifecycle : IDisposable
         {
             try
             {
-                return TryOpenOnce(fullPath, directory, databaseName, schemaDllPaths, registeredSchemaDirs);
+                return TryOpenOnce(fullPath, directory, databaseName, schemaDllPaths, registeredSchemaDirs, pageCacheBytes);
             }
             catch (WorkbenchException wb) when (wb.ErrorCode == "file_locked" && attempt < maxAttempts)
             {
@@ -119,7 +129,8 @@ public sealed class EngineLifecycle : IDisposable
         string directory,
         string databaseName,
         string[] schemaDllPaths,
-        string[] registeredSchemaDirs)
+        string[] registeredSchemaDirs,
+        ulong pageCacheBytes)
     {
         ServiceProvider sp = null;
         WorkbenchAssemblyLoadContext alc = null;
@@ -157,12 +168,11 @@ public sealed class EngineLifecycle : IDisposable
                     // and disposes this engine when one appears. Advertising without honouring requests would merely
                     // turn an instant failure into a short wait followed by the same failure.
                     opts.YieldableLock = true;
-                    // 131072 pages × 8KB = 1 GiB page cache. Sized for multi-million-entity databases: at that
-                    // scale the EntityMap (paged hash) + component clusters + BTree index pages alone need
-                    // thousands of pages resident or eviction back-pressure dominates on Commit. 1 GiB gives
-                    // comfortable headroom on a dev workstation; matches the fixture-generation engine
-                    // (FixtureDatabase.cs:570) so opening a freshly-generated fixture behaves identically.
-                    opts.DatabaseCacheSize = 131072UL * 8192;
+                    // A session's 1 GiB (SessionPageCacheBytes), or the engine's default when the caller asks for 0.
+                    if (pageCacheBytes != 0)
+                    {
+                        opts.DatabaseCacheSize = pageCacheBytes;
+                    }
                 })
                 .AddDatabaseEngine(engineOpts =>
                 {

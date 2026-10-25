@@ -42,11 +42,8 @@ public sealed partial class SessionsController : ControllerBase
     {
         // #1417 WB-12: a bundle a running restore is writing is nobody's to open until the restore (and its settle) has ended. Ahead of the path's
         // resolution, which refuses a missing bundle: a restore's target does not exist until its publish, and must not be created by an open either.
-        if (!string.IsNullOrWhiteSpace(request.FilePath) && _backupJobs.ActiveRestoreInto(Path.GetFullPath(request.FilePath)) is { } restoring)
-        {
-            throw new WorkbenchException(409, "restore_in_progress",
-                $"'{Path.GetFullPath(request.FilePath)}' is the target of a running restore (backup job {restoring.Id}); open it once the restore has ended.");
-        }
+        // The claim is held until the session is in the manager (or the open failed): a restore admitted meanwhile would race the open.
+        using var claim = string.IsNullOrWhiteSpace(request.FilePath) ? null : ClaimAgainstRestores(Path.GetFullPath(request.FilePath));
 
         // Resolve the file path. The bundled "demo" stem still goes through DemoDataProvider for
         // Phase 3 compat; any other path is used verbatim (Phase 4's real file picker).
@@ -126,6 +123,11 @@ public sealed partial class SessionsController : ControllerBase
         LogSessionCreated(session.Id, "file");
         return CreatedAtAction(nameof(GetSession), new { id = session.Id }, ToDto(session));
     }
+
+    private IDisposable ClaimAgainstRestores(string bundle) =>
+        _backupJobs.ClaimOpen(bundle, out var restoring)
+        ?? throw new WorkbenchException(409, "restore_in_progress",
+            $"'{bundle}' is the target of a running restore (backup job {restoring.Id}); open it once the restore has ended.");
 
     [HttpPost("attach")]
     public async Task<ActionResult<SessionDto>> CreateAttachSession([FromBody] CreateAttachSessionRequest request, CancellationToken ct)
