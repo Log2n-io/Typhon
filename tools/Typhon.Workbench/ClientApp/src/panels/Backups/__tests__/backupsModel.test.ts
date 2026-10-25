@@ -253,6 +253,12 @@ describe('what is lost after the restored LSN', () => {
     );
     expect(lostAfterText({ canRestore: false, pointLsn: 0, newestKnownLsn: 0, lostLsns: 0 })).toBe('');
   });
+
+  it('a store that could not be read for it says what is lost is unknown, never that nothing is', () => {
+    const text = lostAfterText({ canRestore: true, pointLsn: 150, newestKnownLsn: null, lostLsns: null });
+    expect(text).toContain('unknown');
+    expect(text).not.toContain('no committed change');
+  });
 });
 
 describe('verify findings', () => {

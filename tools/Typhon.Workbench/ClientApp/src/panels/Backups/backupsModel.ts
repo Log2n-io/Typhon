@@ -530,8 +530,9 @@ export interface RestorePlan {
   refusalMessage: string | null;
   nearestRestorable: number[];
   heldBySessionId: string | null;
-  newestKnownLsn: number;
-  lostLsns: number;
+  /** Null when the store could not be read for it: what is lost is then unknown, never "nothing". */
+  newestKnownLsn: number | null;
+  lostLsns: number | null;
 }
 
 export function normalizeRestorePlan(p: BackupRestorePlanDto): RestorePlan {
@@ -553,17 +554,26 @@ export function normalizeRestorePlan(p: BackupRestorePlanDto): RestorePlan {
     refusalMessage: p.refusalMessage ?? null,
     nearestRestorable: (p.nearestRestorable ?? []).map(n),
     heldBySessionId: p.heldBySessionId ?? null,
-    newestKnownLsn: n(p.newestKnownLsn),
-    lostLsns: n(p.lostLsns),
+    newestKnownLsn: p.newestKnownLsn == null ? null : n(p.newestKnownLsn),
+    lostLsns: p.lostLsns == null ? null : n(p.lostLsns),
   };
 }
 
-/** "What is lost after" the restored LSN, in words (07 §5): the commits the store knows past it, or that nothing it knows is lost. */
+/**
+ * "What is lost after" the restored LSN, in words (07 §5): the commits the store knows past it, that nothing it knows is lost, or — when the store
+ * could not be read for it — that this is unknown.
+ */
 export function lostAfterText(
   plan: Pick<RestorePlan, 'canRestore' | 'pointLsn' | 'newestKnownLsn' | 'lostLsns'>,
 ): string {
   if (!plan.canRestore) {
     return '';
+  }
+  if (plan.lostLsns == null || plan.newestKnownLsn == null) {
+    return (
+      `The restored database ends at LSN ${plan.pointLsn.toLocaleString()}. What is lost after it is unknown: the store's points and archive ` +
+      `could not be read for it.`
+    );
   }
   if (plan.lostLsns <= 0) {
     return `Nothing the store knows of lies after LSN ${plan.pointLsn.toLocaleString()}: no committed change it holds is lost.`;
