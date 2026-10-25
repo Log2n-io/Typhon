@@ -7,7 +7,7 @@ description: 'Online, forward-incremental page backups; each point is a frozen d
 # Point-in-Time Incremental Backup
 > Online, forward-incremental page backups; each point is a frozen data-file image plus a short WAL tail, restored through crash recovery.
 
-**Status:** 🚧 Partial · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Durability](./README.md)
+**Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Durability](./README.md)
 **Assumes:** [Crash Recovery (RecoveryDriver)](crash-recovery/README.md)
 
 ## 🎯 What it solves
@@ -74,7 +74,6 @@ typhon backup prune   --store S --min-keep 3 --max-age 7d [--dry-run]
 
 ## ⚠️ Guarantees & limits
 
-- **Not yet built:** the Workbench backup panel.
 - **Zero transaction-path cost.** The only steady-state cost is one atomic bit-set per data-file page write; a backup's
   copy-before-write runs on the checkpoint's write path, never on a commit.
 - **I/O proportional to change.** An incremental copies only the pages written since the previous point; a full or
@@ -101,6 +100,8 @@ typhon backup prune   --store S --min-keep 3 --max-age 7d [--dry-run]
   (entity-level) export are out of scope for now.
 
 ## 🔗 Related
+
+- Guide: [Backup & restore in production](../../guide/backup-and-restore.md): set-up, monitoring, drills, an off-site mirror and the incident procedures
 
 - Sibling: [Checkpoint v2 (SnapshotStore pipeline)](checkpoint-v2/README.md): a backup forces a checkpoint and shares its data-file write path
 - Sibling: [Pluggable WAL I/O Backend (IWalFileIO seam)](../Hosting/wal-io-injection-seam.md): the seam the tail copy and the archiver read through

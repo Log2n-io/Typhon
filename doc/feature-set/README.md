@@ -75,7 +75,7 @@ Every Public feature, one line each — the application-facing surface, complete
 | Page Checksums & Seqlock Snapshots | CRC32C torn-page detection on every page, paired with a lock-free seqlock so checkpoints snapshot live pages without blocking writers. | ✅ Implemented | 🟣 Advanced | [→](Durability/page-checksums-seqlock.md) |
 | BulkLoad Write Path | An opt-in, exclusive, throughput-first session API that skips per-row WAL and brackets the whole bulk with a BulkBegin/BulkEnd manifest pair plus a synchronous checkpoint barrier. | 🚧 Partial | 🟣 Advanced | [→](Durability/bulk-load.md) |
 | Durability Health & Introspection | DurabilityHealth (Ok/Degraded/Fatal) and checkpoint/WAL-writer cycle counters via the Resource Graph let an operator observe the subsystem without reaching into internals. | ✅ Implemented | 🟣 Advanced | [→](Durability/durability-introspection.md) |
-| Point-in-Time Incremental Backup | Forward-incremental .pack backups scoped to changed pages; restore reassembles a base and heals it through crash recovery's RecoveryDriver. | 📋 Planned | 🟣 Advanced | [→](Durability/pit-backup.md) |
+| Point-in-Time Incremental Backup | Online, forward-incremental page backups: a frozen data-file image plus a short WAL tail per point, restored through crash recovery; optional WAL archiving restores to any LSN or instant. | ✅ Implemented | 🟣 Advanced | [→](Durability/pit-backup.md) |
 
 ### Schema
 
