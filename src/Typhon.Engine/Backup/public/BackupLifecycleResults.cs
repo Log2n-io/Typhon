@@ -81,12 +81,24 @@ public sealed record BackupRetentionPlan(IReadOnlyList<uint> Kept, IReadOnlyList
     IReadOnlyList<string> PackDeletions, uint CutoffId, long BytesBefore, long BytesAfterAtMost, BackupRetentionBlock Blocked, string BlockedReason,
     string Fingerprint);
 
+/// <summary>A compaction a retention attempted that did not publish: its chain keeps every pack this run.</summary>
+/// <param name="BackupId">The point being compacted.</param>
+/// <param name="Kind">
+/// <see cref="BackupFailureKind.StoreDamaged"/>: a pack of the point's chain is damaged or the chain broken — compaction is the one routine full read of a
+/// kept chain, so this is a kept point that may not restore. <see cref="BackupFailureKind.Failed"/>: I/O, or the compacted pack failed its own verify
+/// (nothing was published).
+/// </param>
+/// <param name="Message">What failed.</param>
+[PublicAPI]
+public sealed record BackupCompactionFailure(uint BackupId, BackupFailureKind Kind, string Message);
+
 /// <summary>What a retention did.</summary>
 /// <param name="Plan">The plan it applied: the compactions it attempted, then the deletions re-planned on what they published.</param>
 /// <param name="Compactions">The compactions it ran, failed ones excluded (their chains keep every pack this run).</param>
 /// <param name="Deleted">The pack files deleted, in order.</param>
 /// <param name="BytesFreed">Their bytes, minus the compacted packs written.</param>
 /// <param name="Duration">Wall time.</param>
+/// <param name="FailedCompactions">The compactions attempted that did not publish, and why.</param>
 [PublicAPI]
 public sealed record BackupRetentionResult(BackupRetentionPlan Plan, IReadOnlyList<BackupCompactionResult> Compactions, IReadOnlyList<string> Deleted,
-    long BytesFreed, TimeSpan Duration);
+    long BytesFreed, TimeSpan Duration, IReadOnlyList<BackupCompactionFailure> FailedCompactions);

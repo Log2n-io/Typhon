@@ -1,6 +1,7 @@
 using Spectre.Console;
 using Spectre.Console.Cli;
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
 using System.IO;
@@ -86,7 +87,8 @@ internal sealed class BackupCompactCommand : Command<BackupCompactCommand.Settin
 /// <c>typhon backup prune --store S --min-keep N [--max-age D] [--max-count N] [--max-bytes B] [--compact-at D] [--keep-drilled] [--dry-run]</c> —
 /// applies a retention policy (05 §3): every point it promises stays restorable; what no kept point needs goes, newest first. The plan is shown, then
 /// applied only if the store still plans exactly that. Exit 0 applied (or nothing to do), 1 a limit could not be met without breaking MinKeep or
-/// KeepLastDrilled, 2 failed, 3 a chain is damaged (it keeps everything), 4 the store is locked or the plan changed under it, 64 usage.
+/// KeepLastDrilled, 2 failed (a compaction's I/O or its own verify included), 3 a chain is damaged (it keeps everything, or a compaction found a pack of
+/// a kept chain damaged), 4 the store is locked or the plan changed under it, 64 usage. The worst code wins.
 /// </summary>
 // ReSharper disable once ClassNeverInstantiated.Global
 internal sealed class BackupPruneCommand : Command<BackupPruneCommand.Settings>
@@ -163,7 +165,7 @@ internal sealed class BackupPruneCommand : Command<BackupPruneCommand.Settings>
             return output.Error(ex);
         }
 
-        var exit = ExitCodeOf(plan.Blocked);
+        var exit = ExitCodeOf(plan.Blocked, result?.FailedCompactions);
         if (output.AsJson)
         {
             output.Json(new { exitCode = exit, dryRun = settings.DryRun, plan, result });
@@ -186,7 +188,13 @@ internal sealed class BackupPruneCommand : Command<BackupPruneCommand.Settings>
               + (result == null ? "." : $"; {BackupCli.Bytes(Math.Max(0, result.BytesFreed))} freed in {result.Duration.TotalMilliseconds:0} ms."));
         if (plan.Blocked != BackupRetentionBlock.None)
         {
-            console.MarkupLine($"[{(exit == BackupCli.ExitStoreDamaged ? "red" : "yellow")}]{plan.Blocked}: {Markup.Escape(plan.BlockedReason)}.[/]");
+            console.MarkupLine($"[{(plan.Blocked == BackupRetentionBlock.DamagedChain ? "red" : "yellow")}]{plan.Blocked}: {Markup.Escape(plan.BlockedReason)}.[/]");
+        }
+
+        foreach (var f in result?.FailedCompactions ?? [])
+        {
+            var what = f.Kind == BackupFailureKind.StoreDamaged ? "found its chain damaged: that point may not restore" : "failed";
+            console.MarkupLine($"[red]The compaction of #{f.BackupId} {what} ({Markup.Escape(f.Message)}); its chain keeps every pack.[/]");
         }
 
         return exit;
@@ -198,6 +206,21 @@ internal sealed class BackupPruneCommand : Command<BackupPruneCommand.Settings>
         BackupRetentionBlock.DamagedChain => BackupCli.ExitStoreDamaged,
         _ => BackupCli.ExitWarning,
     };
+
+    /// <summary>
+    /// The plan's block, then each compaction that did not publish: a damaged source 3 (a kept point may not restore), any other failure 2. The worst wins
+    /// (3 over 2 over 1).
+    /// </summary>
+    internal static int ExitCodeOf(BackupRetentionBlock blocked, IReadOnlyList<BackupCompactionFailure> failedCompactions)
+    {
+        var exit = ExitCodeOf(blocked);
+        foreach (var f in failedCompactions ?? [])
+        {
+            exit = Math.Max(exit, f.Kind == BackupFailureKind.StoreDamaged ? BackupCli.ExitStoreDamaged : BackupCli.ExitFailed);
+        }
+
+        return exit;
+    }
 
     /// <summary>The policy the options describe. Every limit is the operator's: none has a default (0 = no limit), and at least one is set.</summary>
     internal static bool TryPolicy(Settings settings, out BackupRetentionPolicy policy, out string error)

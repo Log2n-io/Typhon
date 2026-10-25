@@ -64,6 +64,10 @@ internal static partial class BackupLog
         Message = "Backup store '{Store}': compaction of point #{BackupId} failed ({Reason}); its chain keeps every pack this run")]
     public static partial void RetentionCompactionFailed(ILogger logger, string store, uint backupId, string reason);
 
+    [LoggerMessage(Level = LogLevel.Warning,
+        Message = "Backup store drill records '{Directory}': '{Record}' of a deleted point was left ({Reason}); it names a point the store no longer has")]
+    public static partial void DrillRecordsLeft(ILogger logger, string directory, string record, string reason);
+
     [LoggerMessage(Level = LogLevel.Error,
         Message = "Backup store '{Store}': after retention, kept point #{BackupId} does not resolve ({Reason}). This is a defect: report it")]
     public static partial void RetentionBrokeAKeptPoint(ILogger logger, string store, uint backupId, string reason);

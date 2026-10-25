@@ -61,6 +61,12 @@ internal sealed class BackupOpsState
     public BackupRetentionBlock RetentionBlocked;
     public bool RetentionFailed;
 
+    /// <summary>The last retention's R1 check failed (DL-7).</summary>
+    public bool KeptPointBroken;
+
+    /// <summary>A compaction of the last retention found a kept chain's source pack damaged.</summary>
+    public bool KeptPointDamaged;
+
     public StoreFacts Facts = StoreFacts.Unknown;
 
     public BackupRunState State = BackupRunState.Idle;

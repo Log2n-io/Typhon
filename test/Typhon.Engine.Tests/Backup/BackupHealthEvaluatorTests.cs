@@ -41,6 +41,7 @@ internal sealed class BackupHealthEvaluatorTests
         Row("store down > interval", i => i with { StoreFailingSinceUtc = Now.AddHours(-2) }, BackupHealth.Failing, BackupHealthReason.StoreUnreachable),
         Row("capture refused", i => i with { CaptureRefused = true }, BackupHealth.Failing, BackupHealthReason.CaptureRefused),
         Row("archive diverged", i => i with { ArchiveCondition = WalArchiveCondition.Diverged }, BackupHealth.Failing, BackupHealthReason.ArchiveFailed),
+        Row("retention broke a kept point", i => i with { KeptPointBroken = true }, BackupHealth.Failing, BackupHealthReason.KeptPointBroken),
         Row("stale", i => i with { LastSuccessUtc = Now.AddHours(-2.1) }, BackupHealth.Degraded, BackupHealthReason.Stale),
         Row("archive released", i => i with { ArchiveCondition = WalArchiveCondition.Released }, BackupHealth.Degraded, BackupHealthReason.ArchiveGap),
         Row("uncovered gap", i => i with { ArchiveCondition = WalArchiveCondition.Archiving, ArchiveLastGapToLsn = 1000 },
@@ -50,6 +51,7 @@ internal sealed class BackupHealthEvaluatorTests
             i => i with { ArchiveCondition = WalArchiveCondition.Archiving, ArchiveMaxSegmentAge = TimeSpan.FromSeconds(30), ArchiveLagSeconds = 61 },
             BackupHealth.Degraded, BackupHealthReason.ArchiveLag),
         Row("drill failed, none passed", i => i with { LastDrillFailed = true, AnyDrillPassed = false }, BackupHealth.Degraded, BackupHealthReason.DrillFailed),
+        Row("a kept chain's pack damaged", i => i with { KeptPointDamaged = true }, BackupHealth.Degraded, BackupHealthReason.KeptPointDamaged),
         Row("no point on this timeline", i => i with { LastSuccessUtc = DateTime.MinValue, StartedUtc = Now.AddMinutes(-1) },
             BackupHealth.Warning, BackupHealthReason.FirstPointPending),
         Row("suspect allocated", i => i with { LastPointSuspectAllocated = true }, BackupHealth.Warning, BackupHealthReason.LastPointSuspect),
@@ -139,6 +141,8 @@ internal sealed class BackupHealthEvaluatorTests
                 LastDrillUtc = random.Next(3) == 0 ? DateTime.MinValue : Now.AddHours(-random.Next(0, 100)),
                 LastDrillFailed = random.Next(4) == 0,
                 AnyDrillPassed = random.Next(2) == 0,
+                KeptPointBroken = random.Next(8) == 0,
+                KeptPointDamaged = random.Next(8) == 0,
             };
             var (health, _) = evaluate(i, Now);
             var must = new List<(string, BackupHealth)>();
@@ -155,6 +159,16 @@ internal sealed class BackupHealthEvaluatorTests
             if (i.LastSuccessUtc == DateTime.MinValue)
             {
                 must.Add(("no point on this timeline", BackupHealth.Warning));
+            }
+
+            if (i.KeptPointBroken)
+            {
+                must.Add(("a kept point broken by retention", BackupHealth.Failing));
+            }
+
+            if (i.KeptPointDamaged)
+            {
+                must.Add(("a kept chain's pack damaged", BackupHealth.Degraded));
             }
 
             if (i.Interval > TimeSpan.Zero && i.LastSuccessUtc != DateTime.MinValue && Now - i.LastSuccessUtc > i.Interval * 2)

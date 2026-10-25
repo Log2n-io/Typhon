@@ -400,6 +400,104 @@ class BackupSchedulerTests : SchedulerTestBase<BackupSchedulerTests>
     }
 
     /// <summary>
+    /// A compaction of the engine's retention that finds a source pack of a kept chain damaged is health (Degraded: a kept point may not restore), not a
+    /// log line under an Ok status.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    [VerifiesRule("BKP-15")]
+    public void ARetentionCompactionFindingDamage_IsDegraded()
+    {
+        Retention = KeepTwo;
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = OpenOnClock(scope);
+        Spawn(dbe, 20);
+        TakePoint(dbe, BackupRequestKind.Auto);
+        Spawn(dbe, 5);
+        TakePoint(dbe, BackupRequestKind.Auto);
+        DamageAPageOnlyIn(Path.Combine(Store, "packs", "00000001-F.tpack"), Path.Combine(Store, "packs", "00000002-I.tpack"));
+        Spawn(dbe, 5);
+        TakePoint(dbe, BackupRequestKind.Auto);
+
+        Assert.That((dbe.Backup.Status.Health, dbe.Backup.Status.Reason), Is.EqualTo((BackupHealth.Degraded, BackupHealthReason.KeptPointDamaged)));
+        Assert.That(File.Exists(Path.Combine(Store, "packs", "00000001-F.tpack")), Is.True, "the damaged chain keeps its packs");
+    }
+
+    /// <summary>
+    /// DL-7: a retention whose kept-point check fails (R1) is Failing, not a Warning. Staged: deleting the pack below the cutoff also removes the newest
+    /// kept one.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    [VerifiesRule("BKP-15")]
+    public void ARetentionThatBreaksAKeptPoint_IsFailing()
+    {
+        Retention = KeepTwo;
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = OpenOnClock(scope);
+        Spawn(dbe, 20);
+        TakePoint(dbe, BackupRequestKind.Full);
+        TakePoint(dbe, BackupRequestKind.Full);
+        StoreFs.BeforeAny = (op, path) =>
+        {
+            if (op == nameof(IStoreFileSystem.DeleteFile) && path.EndsWith("00000001-F.tpack", StringComparison.Ordinal))
+            {
+                StoreFs.Inner.DeleteFile(Path.Combine(Store, "packs", "00000003-I.tpack"));
+            }
+        };
+        TakePoint(dbe, BackupRequestKind.Auto);
+        StoreFs.BeforeAny = null;
+
+        Assert.That((dbe.Backup.Status.Health, dbe.Backup.Status.Reason), Is.EqualTo((BackupHealth.Failing, BackupHealthReason.KeptPointBroken)));
+    }
+
+    private static readonly BackupRetentionPolicy KeepTwo = new()
+    {
+        MaxAge = TimeSpan.Zero, MaxCount = 2, MaxTotalBytes = 0, MinKeep = 1, CompactThreshold = 0, KeepLastDrilled = false,
+    };
+
+    /// <summary>An API point, waited for until its job (retention included) ended.</summary>
+    private static void TakePoint(DatabaseEngine dbe, BackupRequestKind kind)
+    {
+        Task<BackupPointSummary> point = null;
+        AwaitJobEnd(dbe, () => point = dbe.Backup.CreateAsync(kind));
+        Assert.That(point.Wait(Budget), Is.True);
+    }
+
+    /// <summary>Flips a byte of the frame of a page <paramref name="pack"/> holds and <paramref name="newer"/> does not.</summary>
+    private static void DamageAPageOnlyIn(string pack, string newer)
+    {
+        var shadowed = new System.Collections.Generic.HashSet<uint>();
+        using (var reader = PackReader.Open(StoreFileSystem.Instance, newer))
+        {
+            foreach (var e in reader.LoadIndex())
+            {
+                shadowed.Add(e.PageId);
+            }
+        }
+
+        long at = -1;
+        using (var reader = PackReader.Open(StoreFileSystem.Instance, pack))
+        {
+            foreach (var e in reader.LoadIndex())
+            {
+                if (e.StoredLength is > 0 and <= 8192 && !shadowed.Contains(e.PageId))
+                {
+                    at = e.DataOffset + 1;
+                    break;
+                }
+            }
+        }
+
+        Assert.That(at, Is.GreaterThan(0), "premise: a page only the older pack holds");
+        using var file = new FileStream(pack, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
+        file.Position = at;
+        var b = file.ReadByte();
+        file.Position = at;
+        file.WriteByte((byte)(b ^ 0x5A));
+    }
+
+    /// <summary>
     /// While a point is overdue (here the engine is busy past the grace), its due instant is the one it became due at, not now: the status is not
     /// republished, nor its file rewritten, every tick.
     /// </summary>

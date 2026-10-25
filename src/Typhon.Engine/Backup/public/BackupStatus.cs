@@ -57,6 +57,18 @@ public enum BackupHealthReason
 
     /// <summary>The newest drill failed, but an older one passed.</summary>
     DrillFailedOlderOk,
+
+    /// <summary>
+    /// The last retention left a point it keeps unrestorable (its kept-point check failed after the deletes, 05 §3 R1): a defect, reported as
+    /// <see cref="BackupHealth.Failing"/>.
+    /// </summary>
+    KeptPointBroken,
+
+    /// <summary>
+    /// A compaction of the last retention found a pack of a kept point's chain damaged (compaction is the one routine full read of a kept chain): that
+    /// point may not restore. Run <c>typhon backup verify --level full</c>.
+    /// </summary>
+    KeptPointDamaged,
 }
 
 /// <summary>Whether the engine's backup thread is working.</summary>

@@ -315,10 +315,21 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
             using var session = BackupStore.OpenForMaintenance(store.Root, "retention", store.FileSystem, _logger);
             var result = RetentionExecutor.Apply(session, policy, null, drillPassed, UtcNow(), _timeline,
                 new BackupLifecycleOptions { Cancellation = ct, Logger = _logger, Progress = (done, _) => Volatile.Write(ref _progressBytes, done) });
+            var damaged = false;
+            var failed = false;
+            foreach (var f in result.FailedCompactions)
+            {
+                damaged |= f.Kind == BackupFailureKind.StoreDamaged;
+                failed |= f.Kind != BackupFailureKind.StoreDamaged;
+            }
+
             lock (_lock)
             {
                 _state.RetentionBlocked = result.Plan.Blocked;
-                _state.RetentionFailed = false;
+                // A compaction that did not publish is not a retention that did (BKP-15): damage is a kept point that may not restore, the rest a failure.
+                _state.RetentionFailed = failed;
+                _state.KeptPointDamaged = damaged;
+                _state.KeptPointBroken = false;
                 _state.CompactionsTotal += result.Compactions.Count;
                 _state.PacksDeletedTotal += result.Deleted.Count;
                 _state.Version++;
@@ -337,6 +348,7 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
             lock (_lock)
             {
                 _state.RetentionFailed = true;
+                _state.KeptPointBroken |= e is RetentionBrokeAKeptPointException;
                 _state.Version++;
             }
         }
@@ -588,6 +600,8 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
             LastPointSuspectAllocated = facts.AllocatedSuspects > 0,
             RetentionBlocked = _state.RetentionBlocked,
             RetentionFailed = _state.RetentionFailed,
+            KeptPointBroken = _state.KeptPointBroken,
+            KeptPointDamaged = _state.KeptPointDamaged,
         };
     }
 

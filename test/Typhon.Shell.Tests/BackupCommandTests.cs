@@ -454,6 +454,57 @@ public sealed class BackupCommandTests
         Assert.That(blocked.Text, Does.Contain("MinKeep").And.Contain("Nothing to delete"));
     }
 
+    /// <summary>
+    /// A compaction is the one routine full read of a kept chain: one that finds a source pack damaged exits 3 (a kept point may not restore), not 0; one
+    /// that fails otherwise exits 2; the worst code wins.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void APruneWhoseCompactionFindsDamage_Exits3_AndAFailedOneExits2()
+    {
+        OnlineChain(points: 3);
+        var packs = Path.Combine(_store, "packs");
+        DamageAPageOnlyIn(Path.Combine(packs, "00000001-F.tpack"), Path.Combine(packs, "00000002-I.tpack"), Path.Combine(packs, "00000003-I.tpack"));
+
+        var damaged = Prune(new BackupPruneCommand.Settings { MinKeep = 1, MaxCount = 1 });
+        Assert.That(damaged.Code, Is.EqualTo(BackupCli.ExitStoreDamaged), damaged.Text);
+        Assert.That(damaged.Text, Does.Contain("compaction of #3 found its chain damaged"));
+        Assert.That(File.Exists(Path.Combine(packs, "00000001-F.tpack")), Is.True, "its chain keeps every pack");
+
+        static BackupCompactionFailure F(BackupFailureKind kind) => new(1, kind, "x");
+        Assert.That(BackupPruneCommand.ExitCodeOf(BackupRetentionBlock.None, [F(BackupFailureKind.Failed)]), Is.EqualTo(BackupCli.ExitFailed));
+        Assert.That(BackupPruneCommand.ExitCodeOf(BackupRetentionBlock.MinKeep, [F(BackupFailureKind.Failed), F(BackupFailureKind.StoreDamaged)]),
+            Is.EqualTo(BackupCli.ExitStoreDamaged));
+        Assert.That(BackupPruneCommand.ExitCodeOf(BackupRetentionBlock.DamagedChain, [F(BackupFailureKind.Failed)]), Is.EqualTo(BackupCli.ExitStoreDamaged));
+        Assert.That(BackupPruneCommand.ExitCodeOf(BackupRetentionBlock.MinKeep, null), Is.EqualTo(BackupCli.ExitWarning));
+    }
+
+    /// <summary>Flips a byte of the frame of a page <paramref name="pack"/> holds and none of <paramref name="newer"/> does.</summary>
+    private static void DamageAPageOnlyIn(string pack, params string[] newer)
+    {
+        var shadowed = new System.Collections.Generic.HashSet<uint>();
+        foreach (var n in newer)
+        {
+            using var reader = Typhon.Engine.Internals.PackReader.Open(Typhon.Engine.Internals.StoreFileSystem.Instance, n);
+            foreach (var e in reader.LoadIndex())
+            {
+                shadowed.Add(e.PageId);
+            }
+        }
+
+        long at;
+        using (var reader = Typhon.Engine.Internals.PackReader.Open(Typhon.Engine.Internals.StoreFileSystem.Instance, pack))
+        {
+            at = reader.LoadIndex().First(e => e.StoredLength is > 0 and <= 8192 && !shadowed.Contains(e.PageId)).DataOffset + 1;
+        }
+
+        using var file = new FileStream(pack, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
+        file.Position = at;
+        var b = file.ReadByte();
+        file.Position = at;
+        file.WriteByte((byte)(b ^ 0x5A));
+    }
+
     [Test]
     public void PruneUsageErrors_Exit64_AndAChangedPlanIsARefusal()
     {

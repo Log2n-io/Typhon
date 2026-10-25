@@ -82,6 +82,7 @@ internal sealed class HookedFileSystem(IStoreFileSystem inner) : IStoreFileSyste
 
     public void DeleteFile(string path)
     {
+        Check(nameof(DeleteFile), path);
         BeforeDelete?.Invoke(path);
         Inner.DeleteFile(path);
     }
