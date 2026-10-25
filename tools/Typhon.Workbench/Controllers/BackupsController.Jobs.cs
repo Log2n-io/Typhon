@@ -278,7 +278,7 @@ public sealed partial class BackupsController
         var schema = SchemaOf(request.Bundle);
         return Start(new BackupJobSpec(BackupJobKinds.Restore, store, request.Bundle, plan.ResolvedTarget), ctx =>
         {
-            // A restore cancelled before it began never starts (the stager itself observes the token only between its write batches).
+            // A restore cancelled before it began never starts; once started, the stager honours a cancel up to its publish (#1413).
             ctx.Token.ThrowIfCancellationRequested();
             BackupSettleDto settle = null;
             var result = _ops.Restore(store, point, BackupPaths.Full(request.Target), new BackupRestoreOptions

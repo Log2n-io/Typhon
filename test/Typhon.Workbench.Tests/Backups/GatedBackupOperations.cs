@@ -88,8 +88,8 @@ internal sealed class GatedBackupOperations : IBackupOperations
     {
         Pass();
 
-        // A cancel that came while the restore was held is observed as one mid-restore is, before the publish. The stager itself observes its token only
-        // after each full write batch, so an image smaller than one batch would publish anyway (reported, #1417 As built).
+        // A cancel that came while the restore was held is observed as one mid-restore is, before the publish (the stager does the same up to its swap,
+        // #1413).
         options.Cancellation.ThrowIfCancellationRequested();
         return _real.Restore(store, point, target, options);
     }

@@ -229,12 +229,13 @@ public sealed class EngineLifecycle : IDisposable
                 loaded = result.RegisteredCount;
 
                 // Discover + register archetype types (feature #514 §5.2). Each loaded schema assembly carries a generated `[ModuleInitializer]` barrier
-                // (`__TyphonRegistry_<Assembly>`); RunModuleConstructor fires it, and the CLR runs a module initializer exactly once, before any type in the module.
-                // So a single call per assembly registers ALL of that assembly's components + archetypes — GeneratedSchemaRegistry specs, component-collection
-                // factories, and ArchetypeRegistry finalization — replacing the old per-archetype RunClassConstructor + EnsureFinalized dance (which only ran the
-                // barrier implicitly, off the first archetype's class ctor, then re-finalized each type redundantly). Cross-ALC same-name collisions are tolerated
-                // inside the barrier (EnsureFinalized fromBarrier). Per-assembly try/catch keeps one poisoned module from aborting the others.
-                // Then InitializeArchetypes wires per-engine archetype storage (EntityMap pages) so counts are recovered from the MMF-backed state.
+                // (`__TyphonRegistry_<Assembly>`); RunModuleConstructor fires it, and the CLR runs a module initializer exactly once, before any type in the
+                // module. So a single call per assembly registers ALL of that assembly's components + archetypes — GeneratedSchemaRegistry specs,
+                // component-collection factories, and ArchetypeRegistry finalization — replacing the old per-archetype RunClassConstructor + EnsureFinalized
+                // dance (which only ran the barrier implicitly, off the first archetype's class ctor, then re-finalized each type redundantly). Cross-ALC
+                // same-name collisions are tolerated inside the barrier (EnsureFinalized fromBarrier). Per-assembly try/catch keeps one poisoned module from
+                // aborting the others. Then InitializeArchetypes wires per-engine archetype storage (EntityMap pages) so counts are recovered from the
+                // MMF-backed state.
                 if (result.RegisteredCount > 0 && loadedSchema.ArchetypeTypes.Length > 0)
                 {
                     foreach (var asm in loadedSchema.Assemblies)
@@ -245,8 +246,8 @@ public sealed class EngineLifecycle : IDisposable
                         }
                         catch (Exception modEx)
                         {
-                            // A poisoned module initializer (a genuine authoring error in one of the assembly's archetypes) shouldn't block the other assemblies.
-                            // Surface it as a diagnostic so the Schema Inspector has a breadcrumb instead of silently showing wrong counts.
+                            // A poisoned module initializer (a genuine authoring error in one of the assembly's archetypes) shouldn't block the other
+                            // assemblies. Surface it as a diagnostic so the Schema Inspector has a breadcrumb instead of silently showing wrong counts.
                             diagnostics = [.. diagnostics, new SchemaCompatibility.Diagnostic(
                                 ComponentName: asm.GetName().Name ?? asm.FullName ?? "(schema assembly)",
                                 Kind: "archetype_finalize_failed",

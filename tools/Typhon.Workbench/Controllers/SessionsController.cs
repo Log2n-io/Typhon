@@ -286,7 +286,8 @@ public sealed partial class SessionsController : ControllerBase
                     IsPaused: true,
                     SchemaCompatibility: schemaCompatibility,
                     Reason: os.PausedBy is { } holder
-                        ? $"Database released to {holder.Describe()}. Captures remain available; the Workbench reopens it automatically when that process exits."
+                        ? $"Database released to {holder.Describe()}. Captures remain available; the Workbench reopens it automatically when that process "
+                          + "exits."
                         : "Database released. The Workbench reopens it automatically when it becomes available.");
             }
 
