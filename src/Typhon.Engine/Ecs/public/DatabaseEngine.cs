@@ -2215,6 +2215,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             {
                 ClaimPersistedPagesAtCrashOpen();
                 RegisterComponentFromAccessor<ArchetypeR1>();
+                ApplyCommittedSchemaIntentToArchetypes();
                 _persistedArchetypes ??= new Dictionary<string, (int, ArchetypeR1)>();
                 LoadPersistedArchetypes();
                 ClaimPersistedPagesAtCrashOpen();
@@ -3388,7 +3389,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private void PersistSchemaChanges(int chunkId, DBComponentDefinition definition, MigrationResult? migrationResult = null)
     {
         var cs = MMF.CreateChangeSet();
+        var comp = BuildPersistedComponentRow(chunkId, definition, migrationResult, cs);
+        SystemCrud.Update(_componentsTable, chunkId, ref comp, EpochManager, cs);
+        cs.SaveChanges();
+    }
 
+    /// <summary>
+    /// Builds the <see cref="ComponentR1"/> row <paramref name="chunkId"/> takes for <paramref name="definition"/>, without writing it. Its Fields collection
+    /// is a NEW buffer, written through <paramref name="cs"/>: the row in place still names the old one, so the catalog reads unchanged until the row itself is
+    /// written — which a migration defers to its commit (SCHEMA-09).
+    /// </summary>
+    private ComponentR1 BuildPersistedComponentRow(int chunkId, DBComponentDefinition definition, MigrationResult? migrationResult, ChangeSet cs)
+    {
         SystemCrud.Read(_componentsTable, chunkId, out ComponentR1 comp, EpochManager);
 
         // Reset the Fields collection — we rebuild it entirely with the resolved definitions.
@@ -3443,8 +3455,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
         }
 
-        SystemCrud.Update(_componentsTable, chunkId, ref comp, EpochManager, cs);
-        cs.SaveChanges();
+        return comp;
     }
 
     /// <summary>
@@ -3692,6 +3703,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 PoolLoadedCollectionSegment(collectionStride, MMF.LoadChunkBasedSegment(collectionSPI, collectionStride));
             }
         }
+
+        // A migration an earlier session committed but did not finish writing: its component rows, before they are read (SCHEMA-09).
+        ApplyCommittedSchemaIntentToComponents();
 
         // Read all ComponentR1 entries by scanning ComponentSegment allocated chunks
         _persistedComponents = new Dictionary<string, (int, ComponentR1)>();
@@ -3967,7 +3981,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     }
 
     /// <summary>The archetypes whose persisted state is stale, updated through <paramref name="cs"/>; true when any was.</summary>
-    private bool PersistArchetypeStateInto(ComponentTable archetypesTable, ChangeSet cs)
+    /// <param name="archetypesTable">The ArchetypeR1 table.</param>
+    /// <param name="cs">The change set the updates go through.</param>
+    /// <param name="commitRows">
+    /// When set, a stale row is not written in place but added here, for a schema commit to write once its flip is durable (SCHEMA-09). Null otherwise.
+    /// </param>
+    private bool PersistArchetypeStateInto(ComponentTable archetypesTable, ChangeSet cs, List<CatalogPatch> commitRows = null)
     {
         var anyUpdated = false;
 
@@ -4023,7 +4042,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // Issue #230 Phase 3 Option B: nothing about the per-cell cluster index is persisted. All cell-level state is transient per Phase 1 Q2/Q6 and
             // rebuilt from cluster data at startup by RebuildCellState + RebuildClusterAabbs.
 
-            SystemCrud.Update(archetypesTable, persisted.ChunkId, ref arch, EpochManager, cs);
+            if (commitRows != null)
+            {
+                commitRows.Add(CatalogPatch.ForRow(archetypesTable, persisted.ChunkId, in arch));
+            }
+            else
+            {
+                SystemCrud.Update(archetypesTable, persisted.ChunkId, ref arch, EpochManager, cs);
+            }
             // refresh the cache so the next checkpoint's skip-check sees the persisted values (keyed by the durable name — after a rename PersistNewArchetypes
             // has already re-keyed this entry from PreviousName to meta.Name, so this hits the same slot)
             _persistedArchetypes[meta.Name] = (persisted.ChunkId, arch);
@@ -4055,6 +4081,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             return;
         }
 
+        var entry = BuildSchemaHistoryEntry(componentName, diff, migrationResult, fromRevision, toRevision);
+        var cs = MMF.CreateChangeSet();
+        SystemCrud.Create(_schemaHistoryTable, ref entry, EpochManager, cs);
+        cs.SaveChanges();
+    }
+
+    /// <summary>The <see cref="SchemaHistoryR1"/> row a schema change journals, built without writing it.</summary>
+    private static SchemaHistoryR1 BuildSchemaHistoryEntry(string componentName, SchemaDiff diff, MigrationResult? migrationResult, int fromRevision,
+        int toRevision)
+    {
         var added = 0;
         var removed = 0;
         var typeChanged = 0;
@@ -4095,9 +4131,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             Kind = kind,
         };
 
-        var cs = MMF.CreateChangeSet();
-        SystemCrud.Create(_schemaHistoryTable, ref entry, EpochManager, cs);
-        cs.SaveChanges();
+        return entry;
     }
 
     /// <summary>
@@ -4345,8 +4379,24 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         "Breaking schema change for '{Name}': {Summary}. Migration chain registered ({StepCount} step(s))",
                         schemaName, diff.Summary, chain.Value.StepCount);
 
-                    migrationResult = SchemaEvolutionEngine.MigrateWithFunction(
-                        MMF, EpochManager, diff, persistedFields, persisted.Comp, definition, chain.Value, Logger, RaiseMigrationProgress);
+                    // The chain's functions read and write raw component bytes: types whose sizes are not the stored and the declared layout's would run off
+                    // the end of a slot, or of the replay's scratch, with no error.
+                    ThrowIfMigrationChainDoesNotFit(schemaName, chain.Value, persisted.Comp.CompSize, definition.ComponentStorageSize);
+                    ThrowIfMigrationChangesStorageMode(schemaName, (StorageMode)persisted.Comp.StorageMode, definition.StorageMode);
+
+                    // A SingleVersion component's bytes live only in its archetype's cluster slots: its ComponentTable segments are empty and it has no
+                    // revision segment to load, so there is nothing for the segment migration to move. The cluster pass runs the chain over every slot
+                    // instead (CopyPreMigrationSlot), exactly as it replays a field map for a compatible change (#671).
+                    migrationResult = definition.StorageMode == StorageMode.SingleVersion
+                        ? new MigrationResult
+                        {
+                            NewComponentSPI = persisted.Comp.ComponentSPI,
+                            NewVersionSPI = persisted.Comp.VersionSPI,
+                            Chain = chain.Value,
+                            OldCompSize = persisted.Comp.CompSize,
+                        }
+                        : SchemaEvolutionEngine.MigrateWithFunction(
+                            MMF, EpochManager, diff, persistedFields, persisted.Comp, definition, chain.Value, Logger, RaiseMigrationProgress);
                 }
 
                 // A stride change that no field-level diff can see. `SchemaDiff` compares names, types, offsets and sizes; the per-instance STRIDE is none of
@@ -4391,6 +4441,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
                         if (SchemaEvolutionEngine.NeedsMigration(diff, oldStride, newStride))
                         {
+                            ThrowIfMigrationChangesStorageMode(schemaName, (StorageMode)persisted.Comp.StorageMode, definition.StorageMode);
+
                             // A SingleVersion component keeps its bytes ONLY in its archetype's cluster slot — its ComponentSegment is never populated, and
                             // every archetype is cluster-backed since #629. Running the ComponentTable migration would load that empty segment at the old
                             // stride and fail with a storage error that says nothing about the real problem. There is nothing for it to move, so skip it and
@@ -4489,13 +4541,19 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // Persist schema changes if the resolver detected changes, migration ran, or an index was added or changed kind. The last is what an index-only
             // change is: no field moved, so neither of the first two fires, and the catalog kept the old flags — every later open saw the change again and
             // rebuilt the trees again, and the integrity check read the kind the trees no longer had (IX-09).
-            if ((resolver != null && resolver.HasChanges) || migrationResult.HasValue || newIndexFieldIds != null)
+            if (migrationResult.HasValue)
             {
-                PersistSchemaChanges(persisted.ChunkId, definition, migrationResult);
+                // A layout change commits with the rest of the migration, in one meta flip (SCHEMA-09): until then the catalog must still describe the
+                // pre-migration image, which is what the WAL window and the old segments are in.
+                StageMigratedComponentRow(persisted.ChunkId, schemaName, definition, migrationResult.Value, diff, persisted.Comp.SchemaRevision);
+            }
+            else if ((resolver != null && resolver.HasChanges) || newIndexFieldIds != null)
+            {
+                PersistSchemaChanges(persisted.ChunkId, definition);
                 IncrementUserSchemaVersion();
 
                 // Record in schema history audit trail
-                RecordSchemaHistory(schemaName, diff, migrationResult, persisted.Comp.SchemaRevision, definition.Revision);
+                RecordSchemaHistory(schemaName, diff, null, persisted.Comp.SchemaRevision, definition.Revision);
             }
 
             // Carry the rename forward (#514 D4): the row was matched under the previous name — re-stamp ComponentR1.Name to the current name on disk and
@@ -4600,6 +4658,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// Returns null if the type ID is unknown.
     /// </summary>
     internal ComponentTable GetComponentTableByWalTypeId(ushort id) => _componentTableByWalTypeId.GetValueOrDefault(id);
+
+    /// <summary>
+    /// Converts a WAL value of <paramref name="table"/>'s component from the layout this open migrated from to the table's (#1469). The WAL window is in the
+    /// committed catalog's revision (SCHEMA-09), and the catalog changes only at the migration's commit, so "migrated this open" is exactly "the window holds
+    /// the old layout".
+    /// </summary>
+    internal byte[] MigrateWalPayload(ComponentTable table, byte[] payload)
+        => _migratedComponents != null && _migratedComponents.TryGetValue(table.Definition.Name, out var migration)
+            ? SchemaEvolutionEngine.MigrateWalPayload(migration, payload, table.Definition.ComponentStorageSize, table.Definition.Name)
+            : payload;
+
+    /// <summary>Whether this open migrated <paramref name="table"/>'s component, i.e. its WAL values are in the pre-migration layout.</summary>
+    internal bool IsMigratedThisOpen(ComponentTable table)
+        => table != null && _migratedComponents != null && _migratedComponents.ContainsKey(table.Definition.Name);
+
+    internal bool HasComponentMigrations => _migratedComponents is { Count: > 0 };
 
     /// <summary>
     /// Find a ComponentTable by the component's schema name (from [Component] attribute).
@@ -4791,6 +4865,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             RegisterComponentFromAccessor<ArchetypeR1>();
         }
+
+        // The archetype rows of a committed migration an earlier session did not finish writing (SCHEMA-09), before anything reads them.
+        ApplyCommittedSchemaIntentToArchetypes();
 
         // Load persisted archetype schemas for validation (keyed by name — reopen re-match is by name)
         _persistedArchetypes ??= new Dictionary<string, (int, ArchetypeR1)>();
@@ -5467,8 +5544,17 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         versionedHeadTicks += DrainDeferredVersionedHeadRebuilds();
 
         // Give back the pages of every segment a schema migration replaced. Last legal moment: the rebuild above is the only reader of a pre-migration cluster
-        // (review M9).
-        ReleaseAbandonedMigrationSegments();
+        // (review M9). Not while a migration is uncommitted: the persisted catalog still names these segments, and an open that fails before the commit must
+        // find them intact (SCHEMA-09) — the commit frees them.
+        if (_pendingSchemaCommit == null)
+        {
+            ReleaseAbandonedMigrationSegments();
+        }
+        else
+        {
+            _preMigrationClusters = null;
+            _preMigrationEnabledBits = null;
+        }
 
         // Persist any new archetypes not yet in the database
         PersistNewArchetypes();
@@ -5548,6 +5634,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // here every steady-state checkpoint records the per-archetype segment SPIs so a consolidated cluster/EntityMap base is reachable on reopen after a
         // hard crash. The crash path arms it earlier, before its seal, because the seal advances CheckpointLSN and reclaims the WAL and so must persist the
         // SPIs in the same cycle (#715); this assignment is then a no-op for it.
+        //
+        // A clean open's migration commits first (SCHEMA-09): its archetype rows ride the commit, and the hook would write them in place ahead of the flip. A
+        // crash open's has already committed, at its seal.
+        if (_pendingSchemaCommit != null)
+        {
+            CommitPendingSchemaAtCleanOpen();
+        }
+
         _archetypeSpiPersistArmed = true;
     }
 
@@ -5631,7 +5725,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // moment a database is most likely to crash again — immediately after recovering from a crash.
         //
         // Safe here: the seal runs after apply, scrub, index rebuild and suspect resolution, so the segments are final when the hook fires at cycle start.
-        _archetypeSpiPersistArmed = true;
+        //
+        // Not when this open migrated (SCHEMA-09): the archetype rows then ride the migration's commit, which the seal's flip carries, and are written only
+        // once it is durable. Written in place by the hook, they would reach the file ahead of the flip and name the new segments over the old catalog.
+        _archetypeSpiPersistArmed = _pendingSchemaCommit == null;
 
         // Phase 4 — SCRUB (03-recovery.md §6, D1): now that the WAL window is applied, collapse every Versioned revision chain
         // to its HEAD so the consolidated base carries no pre-crash MVCC history. Runs before the seal so its mutations are
@@ -5665,7 +5762,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // primary chunk is unhealable torn data → fail the open loudly. Before the seal so a loud failure aborts before the data file is rewritten.
         ResolveSuspectPrimaryPages();
 
+        // A migration commits in the seal's flip (SCHEMA-09): the window it consumes is in the pre-migration layout, so the catalog may change only in the same
+        // instant CheckpointLSN moves past it.
+        if (_pendingSchemaCommit != null)
+        {
+            PrepareSchemaCommit();
+        }
+
         SealRecovery(result.MaxLsn, checkpointLsn);
+
+        if (_pendingSchemaCommit != null)
+        {
+            // The seal's own wait is soft and fixed; the commit's is neither — it waits for as long as the checkpoint progresses, then fails the open.
+            WaitForSchemaCommit();
+            CompleteSchemaCommit();
+            _archetypeSpiPersistArmed = true;
+        }
 
         // Phase 6b — OCCUPANCY RE-DERIVE (03-recovery.md §7, rule CK-09): the occupancy bitmap is a DERIVED structure — post-crash it is never trusted but rebuilt
         // wholesale from the authoritative page ownership. Replaces FPI repair of a torn checkpointed occupancy page and reclaims pages a torn checkpoint leaked. Runs
@@ -5946,10 +6058,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Every pass has run: the seal's cycle is the recovery's one full cycle (CK-08).
         CheckpointManager.RecoveryInProgress = false;
 
+        // A migration's commit rides this cycle and waits on with its own step (SCHEMA-09); 30 s in production either way.
+        var sealWait = _pendingSchemaCommit != null ? SchemaCommitWaitStepForTest : TimeSpan.FromSeconds(30);
+
         if (frontierLsn <= checkpointLsn)
         {
-            // Nothing replayed, but the scrub and the sweep may have freed: held (CK-17) until a checkpoint writes the pages that stopped naming them.
-            if (MMF.QuarantinedBytes > 0 && CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(30)))
+            // Nothing replayed, but the scrub and the sweep may have freed: held (CK-17) until a checkpoint writes the pages that stopped naming them. A
+            // migration's commit needs the cycle too, whatever was replayed (SCHEMA-09).
+            if ((MMF.QuarantinedBytes > 0 || _pendingSchemaCommit != null) && CheckpointManager.ForceCheckpointAndWait(sealWait))
             {
                 MMF.DrainReleases();
 
@@ -5970,7 +6086,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // A timeout here is non-fatal: the recovered state is already correct in the page cache for this session's reads — it just
         // isn't consolidated to the data file yet, so it falls back to being re-replayed on the next open (soft recovery).
         // Recovery's frees, sealed by this cycle, freed once it covered: the open hands the transactions an allocator that reuses them (CK-17).
-        if (CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(30)))
+        if (CheckpointManager.ForceCheckpointAndWait(sealWait))
         {
             MMF.DrainReleases();
         }
@@ -6160,7 +6276,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 var src = oldChunkBase + oldLayout.ComponentOffset(slot) + oldPos.SlotIndex * oldLayout.ComponentSize(slot);
                 var dst = newClusterBase + newLayout.ComponentOffset(slot) + newSlotIndex * newLayout.ComponentSize(slot);
 
-                if (_migratedComponents == null || !_migratedComponents.TryGetValue(table.Definition.Name, out var mr) || mr.FieldMap == null)
+                if (_migratedComponents == null || !_migratedComponents.TryGetValue(table.Definition.Name, out var mr))
                 {
                     // Untouched by this migration: same layout on both sides, so the bytes move verbatim. The sizes can still differ if a DIFFERENT component
                     // resized the cluster, but this component's own size did not change — copy the smaller of the two to stay in bounds either way.
@@ -6169,20 +6285,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     continue;
                 }
 
-                for (var f = 0; f < mr.FieldMap.Length; f++)
-                {
-                    ref var entry = ref mr.FieldMap[f];
-                    var srcField = src + entry.OldOffset;
-                    var dstField = dst + entry.NewOffset;
-                    if (entry.NeedsWidening)
-                    {
-                        SchemaEvolutionEngine.ApplyWidening(srcField, dstField, entry.OldType, entry.NewType, entry.OldSize, entry.NewSize);
-                    }
-                    else
-                    {
-                        Buffer.MemoryCopy(srcField, dstField, entry.NewSize, entry.OldSize);
-                    }
-                }
+                // A user migration chain carries no field map: its functions do the remap, here exactly as in the segment migration.
+                SchemaEvolutionEngine.ConvertValue(in mr, src, oldLayout.ComponentSize(slot), dst, newLayout.ComponentSize(slot));
             }
         }
     }
@@ -7789,6 +7893,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             {
                 NoteNamedBuffer(named, fieldListSegment, comp.Fields._bufferId);
             }
+
+            // A migration's new rows are named by no durable row until its commit, which comes after this sweep (SCHEMA-09): swept, their field lists
+            // would be freed under a row the commit is about to publish.
+            NotePendingSchemaCommitBuffers(named, fieldListSegment);
 
             var componentNamesSegment = GetComponentCollectionSegment<String64>();
             swept.Add(componentNamesSegment);

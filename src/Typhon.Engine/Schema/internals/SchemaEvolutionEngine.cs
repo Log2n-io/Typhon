@@ -2,7 +2,9 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
 using Typhon.Schema.Definition;
 
@@ -30,6 +32,18 @@ internal readonly struct MigrationResult
 
     /// <inheritdoc cref="FieldMap"/>
     public int OldCompSize { get; init; }
+
+    /// <summary>
+    /// The user migration chain this migration ran, kept so the open's WAL replay converts an old-layout value through the same functions (#1469). Null for a
+    /// field-map migration.
+    /// </summary>
+    public MigrationChain? Chain { get; init; }
+
+    /// <summary>
+    /// The segments this migration replaced. Freed only once the migration has committed (SCHEMA-09): until then the persisted catalog still names them, and
+    /// an open that fails before the commit must find the pre-migration image intact. Null when the migration replaced none (SingleVersion).
+    /// </summary>
+    public ChunkBasedSegment<PersistentStore>[] SupersededSegments { get; init; }
 }
 
 /// <summary>
@@ -102,6 +116,115 @@ internal static class SchemaEvolutionEngine
         }
 
         return entries.ToArray();
+    }
+
+    /// <summary>
+    /// Copies — widening where the type grew — every surviving field of one component value from its old layout at <paramref name="src"/> to its new one at
+    /// <paramref name="dst"/>. A field the map does not name keeps what <paramref name="dst"/> holds: zero, for a fresh value. The one remap shared by the
+    /// segment migration, the cluster migration (#671) and the replay of an old-layout WAL value (#1469).
+    /// </summary>
+    internal static unsafe void CopySurvivingFields(byte* src, byte* dst, FieldMapEntry[] fieldMap)
+    {
+        for (var i = 0; i < fieldMap.Length; i++)
+        {
+            ref readonly var entry = ref fieldMap[i];
+            if (entry.NeedsWidening)
+            {
+                ApplyWidening(src + entry.OldOffset, dst + entry.NewOffset, entry.OldType, entry.NewType, entry.OldSize, entry.NewSize);
+            }
+            else
+            {
+                Buffer.MemoryCopy(src + entry.OldOffset, dst + entry.NewOffset, entry.NewSize, entry.OldSize);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Converts one component value from <paramref name="migration"/>'s old layout at <paramref name="src"/> to its new layout at <paramref name="dst"/> (which
+    /// the caller has zeroed): through the user migration chain when the migration ran one, through the field map otherwise.
+    /// </summary>
+    internal static unsafe void ConvertValue(in MigrationResult migration, byte* src, int oldSize, byte* dst, int newSize)
+    {
+        if (migration.Chain is { } chain)
+        {
+            var oldValue = new ReadOnlySpan<byte>(src, oldSize);
+            if (chain.MaxIntermediateSize <= 1024)
+            {
+                ExecuteChainStackalloc(chain, oldValue, dst, newSize, chain.MaxIntermediateSize);
+                return;
+            }
+
+            var bufA = ArrayPool<byte>.Shared.Rent(chain.MaxIntermediateSize);
+            var bufB = ArrayPool<byte>.Shared.Rent(chain.MaxIntermediateSize);
+            try
+            {
+                ExecuteChainPooled(chain, oldValue, dst, newSize, bufA, bufB);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(bufA);
+                ArrayPool<byte>.Shared.Return(bufB);
+            }
+            return;
+        }
+
+        if (migration.FieldMap == null)
+        {
+            throw new InvalidOperationException("A schema migration carries neither a field map nor a migration chain.");
+        }
+
+        CopySurvivingFields(src, dst, migration.FieldMap);
+    }
+
+    /// <summary>
+    /// Converts one WAL value written under the layout this open migrated FROM to the layout it migrated TO (#1469): the same field map or user migration
+    /// chain the table's migration ran, so a replayed value lands exactly as a migrated one would.
+    /// </summary>
+    /// <remarks>
+    /// The WAL window above CheckpointLSN is always in the revision of the committed catalog (SCHEMA-09), so a value of the wrong size is not a value this
+    /// migration knows how to read: it is refused, never reinterpreted.
+    /// </remarks>
+    internal static unsafe byte[] MigrateWalPayload(in MigrationResult migration, ReadOnlySpan<byte> payload, int newSize, string componentName)
+    {
+        if (payload.Length != migration.OldCompSize)
+        {
+            throw new InvalidDataException(
+                $"A WAL value of component '{componentName}' is {payload.Length} bytes, but this open migrates the component from a "
+                + $"{migration.OldCompSize}-byte layout. The value was not written under the revision being migrated from, so it cannot be converted.");
+        }
+
+        // Scratch on the stack or in native memory, never a pointer into the managed payload or result (pointers address engine-owned memory only).
+        var scratchSize = payload.Length + newSize;
+        byte* native = null;
+        byte* scratch;
+        if (scratchSize <= 2048)
+        {
+            var stack = stackalloc byte[scratchSize];
+            scratch = stack;
+        }
+        else
+        {
+            // native-alloc: per-value scratch of a crash-open replay, freed before this returns; parenting it in the resource tree per value would churn it
+            native = (byte*)NativeMemory.Alloc((nuint)scratchSize);
+            scratch = native;
+        }
+
+        try
+        {
+            var src = scratch;
+            var dst = scratch + payload.Length;
+            payload.CopyTo(new Span<byte>(src, payload.Length));
+            new Span<byte>(dst, newSize).Clear();
+            ConvertValue(in migration, src, payload.Length, dst, newSize);
+            return new ReadOnlySpan<byte>(dst, newSize).ToArray();
+        }
+        finally
+        {
+            if (native != null)
+            {
+                NativeMemory.Free(native);
+            }
+        }
     }
 
     /// <summary>
@@ -224,22 +347,7 @@ internal static class SchemaEvolutionEngine
                     Buffer.MemoryCopy(oldPtr, newPtr, overheadCopySize, overheadCopySize);
                 }
 
-                // Copy/widen each surviving field
-                for (int i = 0; i < fieldMap.Length; i++)
-                {
-                    ref readonly var entry = ref fieldMap[i];
-                    var srcField = oldPtr + oldOverhead + entry.OldOffset;
-                    var dstField = newPtr + newOverhead + entry.NewOffset;
-
-                    if (entry.NeedsWidening)
-                    {
-                        ApplyWidening(srcField, dstField, entry.OldType, entry.NewType, entry.OldSize, entry.NewSize);
-                    }
-                    else
-                    {
-                        Buffer.MemoryCopy(srcField, dstField, entry.OldSize, entry.OldSize);
-                    }
-                }
+                CopySurvivingFields(oldPtr + oldOverhead, newPtr + newOverhead, fieldMap);
 
                 entitiesMigrated++;
             }
@@ -433,9 +541,7 @@ internal static class SchemaEvolutionEngine
         changeSet.SaveChanges();
         mmf.FlushToDisk();
 
-        // Delete old segments (best-effort cleanup — orphaned pages if crash here are harmless)
-        mmf.DeleteSegment(oldCompSeg);
-        mmf.DeleteSegment(oldRevSeg);
+        // The old segments are NOT deleted here: the persisted catalog names them until the migration commits (SCHEMA-09), and the caller frees them then.
 
         sw.Stop();
 
@@ -458,6 +564,7 @@ internal static class SchemaEvolutionEngine
             ElapsedMs = sw.ElapsedMilliseconds,
             FieldMap = fieldMap,
             OldCompSize = persistedComp.CompSize,
+            SupersededSegments = [oldCompSeg, oldRevSeg],
         };
     }
 
@@ -548,9 +655,7 @@ internal static class SchemaEvolutionEngine
         changeSet.SaveChanges();
         mmf.FlushToDisk();
 
-        // Delete old segments (best-effort cleanup)
-        mmf.DeleteSegment(oldCompSeg);
-        mmf.DeleteSegment(oldRevSeg);
+        // The old segments are NOT deleted here: the persisted catalog names them until the migration commits (SCHEMA-09), and the caller frees them then.
 
         sw.Stop();
 
@@ -577,6 +682,8 @@ internal static class SchemaEvolutionEngine
             // entity PKs read as 0, no positions are collected, and the SingleVersion components sitting NEXT TO the migrated one come back zeroed with no
             // error. This value is about the archetype's geometry, not about this component's own migration strategy.
             OldCompSize = persistedComp.CompSize,
+            Chain = chain,
+            SupersededSegments = [oldCompSeg, oldRevSeg],
         };
     }
 

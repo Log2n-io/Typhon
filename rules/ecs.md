@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-10-06 |
+| Last Updated | 2026-10-23 |
 | Domain | Component schema identity, archetype registry, component-type identity, tick-fence dirty bitmaps, spawn payload staging, entity handles, view lifetime, indexed queries between a write and its fence |
 
 > Type-location: `Ecs/internals/ArchetypeRegistry.cs`, `Ecs/internals/ArchetypeMetadata.cs` (+ `ArchetypeEngineState`), `Ecs/public/DatabaseEngine.cs`
@@ -137,6 +137,60 @@ discipline (MVCC revision chains vs in-place SV vs heap-backed Transient), so re
              `GeneratedSchemaRegistry`, so a component built with the generator is unaffected and the refusal lands only on assemblies built without Typhon's
              tooling, where "rebuild it with the generator" is the remedy (#819).
   verified: ReflectedOffsetProvenanceTests [VerifiesRule]
+
+### SCHEMA-08: A component field is in the schema at its true width, or the component is refused `[silent]`
+  invariant ∀ non-static field F of a component, F not a fixed buffer: `FromType(F.type) ≠ None` — F gets a field id — or registration throws, naming the
+            component, the field and the type
+  invariant ∀ CLR type T with `FromType(T) = K`, K not a handle kind (`Collection`, `Component`): `FieldSizeInComp(K) == sizeof(T)`
+            — one known violation, outside this rule's founding issue: `VarString` is a 1-byte marker that the table sizes as its 32-byte inline
+            handle, stored nowhere yet; `FieldTypeMappingTests.KnownMissized` lists it until it gets a real layout or loses its mapping
+  invariant ∀ storage FieldType K (not `None`, not a flag bit, not a handle kind): some CLR type T has `FromType(T) = K`
+  scope: DatabaseSchemaExtensions.FromType, DatabaseSchemaExtensions.FieldSizeInComp, DatabaseDefinitions.ReflectComponentSpec,
+         DatabaseDefinitions.BuildFromSpec
+  on_violation: a field the mapping skips keeps its bytes in the struct and stays readable from C#, because component values are copied whole, so nothing
+                looks wrong — but it has no field id: no Workbench column, no index, no foreign key, no replicated field. A field mapped at the wrong width
+                is worse: every field-addressed consumer (index keys and their change guard, WAL field decode, the Workbench raw read) reads a different number
+                of bytes than the struct holds — at width 0, an empty field.
+  rationale: the two engine tables are written by hand, side by side, and drift one entry at a time. `EntityId` was missing from the first (#1099), and
+             `FieldType.Variant` from both at once (#1449): it existed as an enum value that no CLR type produced, sized 0. The tests enumerate every type
+             the schema assembly exports instead of one type per bug. A third copy of the mapping, the CLI's `AssemblySchemaLoader.MapDotNetTypeToFieldType`,
+             is outside this rule's scope and already drifts (no AABB / BSphere, `VarString`, `EntityId` or `EntityLink<T>`); it is tracked separately.
+  verified: FieldTypeMappingTests [VerifiesRule] [RuleMutant], UnmappableFieldTypeTests [VerifiesRule]
+
+### SCHEMA-09: A schema migration becomes durable in one meta flip, the one that advances CheckpointLSN `[fatal][silent]`
+  invariant ∀ component C, at every durable state of the file: the revision `ComponentR1` records for C is the revision of every WAL record of C above
+            CheckpointLSN, and the segments `ComponentR1` and `ArchetypeR1` name hold C in that revision's layout
+  invariant a migration's durable effects — the new catalog rows of the migrated components and of every archetype re-pointed at new segments, and the
+            `UserSchemaVersion` bump — become durable at ONE instant: the meta flip that carries `BK_SchemaCommit`, which is the same flip that advances
+            CheckpointLSN (the recovery seal on a crash open, a forced checkpoint on a clean one)
+  never the layout change of a migration reaches a catalog row before that flip: the rows go to a durable intent segment, and are written only after
+        it. (A rename that comes with it is still re-stamped in place at registration, SCHEMA-04: it moves no byte of the layout.)
+  never a segment a migration replaced or abandoned is freed before that flip: until then the catalog names it
+  never a buffer the pending rows name is freed before that flip: the crash open's collection sweep counts them as named
+  never a cycle that took a staged commit and cannot flip it — the stager withdrew it — advances CheckpointLSN or recycles the WAL: the window it would
+        consume was replayed into segments the catalog does not name. A withdrawn commit leaves the session flush-only
+  enforce `BK_SchemaCommit` set ⟹ the open writes the intent's rows before it reads the catalog, then clears the key (component rows in
+          `LoadSystemSchemaR1`, archetype rows as the `ArchetypeR1` table loads)
+  enforce a migrating open whose commit checkpoint stops making progress fails, leaving the pre-migration image: catalog, segments and WAL window
+  enforce the open's WAL replay converts a migrated component's values from the layout it migrated from, through the same field map or user migration
+          chain as the table, and refuses a value whose size is not that layout's; a chain whose types are not the stored and declared sizes, and a
+          migration that would also change the storage mode, are refused at registration
+  scope: DatabaseEngine.StageMigratedComponentRow, DatabaseEngine.PrepareSchemaCommit, DatabaseEngine.WaitForSchemaCommit,
+         DatabaseEngine.CompleteSchemaCommit, DatabaseEngine.NotePendingSchemaCommitBuffers, DatabaseEngine.ApplyCommittedSchemaIntentToComponents,
+         DatabaseEngine.ApplyCommittedSchemaIntentToArchetypes, DatabaseEngine.ThrowIfMigrationChainDoesNotFit,
+         DatabaseEngine.ThrowIfMigrationChangesStorageMode, CheckpointManager.StageMetaCommit, CheckpointManager.UnstageMetaCommit, StagedMetaCommit,
+         DurabilityWatermarks.UpdateCheckpointLsn, SchemaEvolutionEngine.MigrateWalPayload, RecoveryApplier.MigrateSlots
+  requires CK-05 — the meta flip is the only multi-field atomic write the file has; catalog rows are ordinary pages, written by `SavePages` with no WAL
+  on_violation: two failures, both measured. A migrating crash-open that persisted the new catalog before replaying its window, then failed before the
+                seal, left a new-revision catalog over an old-layout window, and the next open — no migration left to run — copied the window's values in
+                raw: an `int` read back as the float `1.557E-42` (#1469). A migrating clean open that crashed before its first checkpoint left
+                `ComponentR1` naming the new segments while `ArchetypeR1` still named the old EntityMap and cluster the migration had freed: the entity was
+                gone at the next open (#1473). Neither raised an error.
+  rationale: the catalog spans several pages and several tables, so it cannot itself be written atomically; the meta pair can. Redo through an intent keeps
+             the catalog's format unchanged and leaves every reader of `ComponentR1` / `ArchetypeR1` as it is: they only ever see one image. A migration
+             is therefore committed when its open completes — `InitializeArchetypes` — never at registration, which is also when its archetype clusters are
+             migrated: committing the component rows any earlier would publish a catalog whose clusters are still in the old layout.
+  verified: SchemaMigrationAtomicityTests [VerifiesRule] [RuleMutant], SchemaMigrationRecoveryTests [VerifiesRule]
 
 ---
 

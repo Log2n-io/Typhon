@@ -15,7 +15,7 @@ Every persistent structure in Typhon — components, indexes, revision chains, s
 
 ## ⚙️ How it works (in brief)
 
-The cache holds a fixed number of 8192-byte slots in pinned native memory the engine allocates itself — the file is read and written with explicit I/O, never memory-mapped. Each slot moves through a 4-state lifecycle — `Free` → `Allocating` (loading from disk) → `Idle` (resident, readable) → `Exclusive` (single-writer latch) → back to `Idle`. When a slot is needed and none is free, clock-sweep eviction scans slots in circular order: each slot carries a 0–5 "second-chance" counter, bumped on access and decremented as the sweep passes over it, so a slot is only taken once its counter has decayed to 0 *and* it's otherwise unprotected (not dirty, not actively read). Allocating the next file page adjacent to the previous one is tried first, so sequential access lands in contiguous cache memory and several small I/Os batch into one. Reads and writes use async `RandomAccess` I/O instead of blocking the calling thread. If every slot is pinned when a new one is needed, the allocator blocks and waits (triggering a flush) rather than failing outright — up to a configurable timeout.
+The cache holds a fixed number of 8192-byte slots in pinned native memory the engine allocates itself — the file is read and written with explicit I/O, never memory-mapped. Each slot moves through a 4-state lifecycle — `Free` → `Allocating` (loading from disk) → `Idle` (resident, readable) → `Exclusive` (single-writer latch) → back to `Idle`. When a slot is needed and none is free, clock-sweep eviction scans slots in circular order: each slot carries a 0–5 "second-chance" counter, bumped on access and decremented as the sweep passes over it, so a slot is only taken once its counter has decayed to 0 *and* it's otherwise unprotected (not dirty, not actively read). Allocating the next file page adjacent to the previous one is tried first, so sequential access lands in contiguous cache memory and several small I/Os batch into one. Reads and writes use async `RandomAccess` I/O instead of blocking the calling thread. If every slot is pinned when a new one is needed, the allocator blocks and waits (triggering a flush) rather than failing outright — for as long as the cache keeps serving pages, up to a configurable ceiling.
 
 ## 💻 Usage
 
@@ -35,7 +35,8 @@ try
 }
 catch (PageCacheBackpressureTimeoutException ex)
 {
-    // every page was dirty or actively in use; the working set didn't fit the cache
+    // no page was served for a whole PageCacheBackpressureTimeout, or the wait reached PageCacheOverloadWaitCeiling:
+    // every page stayed dirty or in use. Transient. A commit too large for the cache is TransactionExceedsPageCacheException instead.
     log.LogWarning(ex, "page cache backpressure: {Dirty} dirty, {Pinned} pinned",
         ex.DirtyPageCount, ex.EpochProtectedCount);
 }
@@ -44,7 +45,9 @@ catch (PageCacheBackpressureTimeoutException ex)
 | Option | Default | Effect |
 |---|---|---|
 | `PagedMMFOptions.DatabaseCacheSize` (via `AddManagedPagedMMF`, or the fluent `TyphonOptions.PageCacheSize`) | **256 MiB** default | Total cache capacity; must be a multiple of 8 KiB and at least 8 MiB; no ceiling beyond 2³¹ − 1 pages (about 16 TiB): past what the host grants, the allocation is refused at startup with a `StorageException` (`PageCacheAllocationFailed`). Below the 64 MiB recommended floor logs a warning (unless the internal `TestMode` is set) |
-| `TimeoutOptions.PageCacheBackpressureTimeout` | 5 s | How long to wait for a page to free up before `PageCacheBackpressureTimeoutException`. Honoured at the end of a sweep lap, so a page that stays evictable is always found first: above 4 GiB of cache, the wait can exceed it by up to one lap |
+| `TimeoutOptions.PageCacheBackpressureTimeout` | 5 s | One period of a back-pressure wait. If a page was served during it, the engine is slow, not stuck: a fresh period starts instead of throwing, up to `PageCacheOverloadWaitCeiling` in total. A period with no page served throws `PageCacheBackpressureTimeoutException`. Honoured at the end of a sweep lap, so a page that stays evictable is always found first: above 4 GiB of cache, one period can overrun by up to one lap |
+| `TimeoutOptions.PageCacheOverloadWaitCeiling` | 60 s | Ceiling for a back-pressure wait, all its periods combined. Once reached, `PageCacheBackpressureTimeoutException` propagates even if the cache is still serving pages |
+| `TimeoutOptions.CommitPublishBackpressureTimeout` | 60 s | Bound of a commit's publish (after its WAL append), which cannot roll back: it waits on period after period up to this, then stops the engine |
 | `TimeoutOptions.PageCacheLockTimeout` | 5 s | Max wait on a page state-transition lock |
 
 ## ⚠️ Guarantees & limits
