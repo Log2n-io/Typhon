@@ -463,7 +463,7 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
         try
         {
             var condition = (WalArchiveCondition)Volatile.Read(ref _condition);
-            if (condition is WalArchiveCondition.Diverged or WalArchiveCondition.Failed || (!_started && !TryStart()))
+            if (condition is WalArchiveCondition.Diverged or WalArchiveCondition.Failed || (!_started && !TryStart(ct)))
             {
                 return;
             }
@@ -525,10 +525,17 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
 
     /// <summary>
     /// Opens the store side: the store's identity (created when absent), the timeline's lock and file, the archive's end; then raises the floor to it.
-    /// A store of another database or a lock that is not enforced is a refusal (<see cref="WalArchiveCondition.Failed"/>); a busy lock is a retry.
+    /// A store of another database or a lock that is not enforced is a refusal (<see cref="WalArchiveCondition.Failed"/>); a busy lock is a retry. A Stop
+    /// before or during it ends it at the next step: a worker an as-crash Stop did not wait for starts no store operation after it, and never builds its
+    /// buffers from an engine that is gone.
     /// </summary>
-    private bool TryStart()
+    private bool TryStart(CancellationToken ct)
     {
+        if (ct.IsCancellationRequested)
+        {
+            return false;
+        }
+
         var paths = new StorePaths(_storePath);
         var identity = StoreView.ReadIdentity(_fs, paths);
         if (identity == null)
@@ -547,6 +554,11 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
             identity = StoreView.ReadIdentity(_fs, paths);
         }
 
+        if (ct.IsCancellationRequested)
+        {
+            return false;
+        }
+
         if (identity.DatabaseId != _engine.DatabaseId)
         {
             Refuse($"the store '{_storePath}' belongs to database {identity.DatabaseId}, not {_engine.DatabaseId}");
@@ -554,8 +566,16 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
         }
 
         _storeId = identity.StoreId;
-        _reader ??= new WalSegmentReader(_wal.FileIO);
-        _writer ??= new ArchivedSegmentWriter(new BufferOwner(_engine.MemoryAllocator, this));
+        lock (_engineAccess)
+        {
+            if (_stopped)
+            {
+                return false;
+            }
+
+            _reader ??= new WalSegmentReader(_wal.FileIO);
+            _writer ??= new ArchivedSegmentWriter(new BufferOwner(_engine.MemoryAllocator, this));
+        }
 
         // The archive's end: the current timeline's; for a fork, its parent's when that is further (segments of the parent may still wait here, held by
         // the floor); for a restored database, at least its origin — the segments below it are the parent's history, restored, never re-archived.
