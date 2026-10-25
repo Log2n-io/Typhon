@@ -199,6 +199,9 @@ class QueryStackPoolTests
     /// one inside the tree enumerator. #906 removed both, from <c>1 608</c> bytes (#914 had added fields since) to <c>368</c>: the cluster segment's
     /// accessor is a per-thread warm window rented from <see cref="SpatialQueryAccessorCache"/>, and the tree enumerator left with its accessor — a promoted
     /// half's hits are collected in a frame of their own. The ceiling now sits just above 368, so putting either accessor back fails here.</para>
+    /// <para><b>Raised once, on purpose (#1482):</b> 400 → 432 for the <c>OwnDestroyFilter</c> a query made through a transaction carries
+    /// (<c>tx.ClusterSpatialQuery</c>, CLUSTERWALK-04) — an accessor reference, the archetype metadata, the located-slots table and a count. 32 bytes, not
+    /// an accessor: a 448-byte <c>ChunkAccessor</c> put back still fails here.</para>
     /// <para><see cref="Unsafe.SizeOf{T}"/> accepts a <c>ref struct</c> on .NET 10 (the <c>allows ref struct</c> anti-constraint), which is what makes this a
     /// real assertion rather than a comment.</para>
     /// </remarks>
@@ -206,7 +209,7 @@ class QueryStackPoolTests
     public void EnumeratorSizeIsRecorded()
     {
         const int SizeBefore916 = 2_624;
-        const int Ceiling = 400;
+        const int Ceiling = 432;
 
         var size = Unsafe.SizeOf<AabbClusterEnumerator>();
         TestContext.Out.WriteLine($"AabbClusterEnumerator = {size} bytes (was {SizeBefore916} before #916)");

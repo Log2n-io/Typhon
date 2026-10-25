@@ -65,7 +65,7 @@ internal sealed class RegionOccupantState
 /// mutation-version cache — populate an occupant bitmap indexed by component chunk id, and XOR it against the previous tick's. Every part of that
 /// disappeared with the tree it read: the bitmap, the dense chunk-id-to-entity lookup, the static cache and its invalidation hooks, and the
 /// <c>TargetTreeMode</c> selector that chose between the two trees. A cell's static and dynamic halves are both visited by
-/// <see cref="ArchetypeClusterState.QueryAabb(SpatialGrid, double, double, double, double, double, double, uint)"/>, so there is nothing left for a caller to
+/// <see cref="ArchetypeClusterState.QueryAabb"/>, so there is nothing left for a caller to
 /// select between.</para>
 /// </remarks>
 internal sealed class SpatialTriggerSystem

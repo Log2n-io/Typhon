@@ -260,6 +260,19 @@ public unsafe partial class Transaction
     /// <summary>Pending entity destroys. Flushed at commit (DiedTSN set). HashSet for O(1) Contains.</summary>
     private HashSet<EntityId> _pendingDestroys;
 
+    /// <summary>
+    /// <see cref="_pendingDestroys"/> in the order they were made, so an <see cref="OwnDestroyedSlots"/> table locates only the destroys made since it last
+    /// looked (CLUSTERWALK-04). <see cref="EntityAccessor.OwnDestroyCount"/> is its count, read by every cluster walk through this transaction once per
+    /// cluster.
+    /// </summary>
+    private List<EntityId> _pendingDestroyOrder;
+
+    /// <summary>
+    /// One <see cref="OwnDestroyedSlots"/> per archetype a walk asked about; the first <see cref="_ownDestroyedUsed"/> are live. Kept across leases.
+    /// </summary>
+    private List<OwnDestroyedSlots> _ownDestroyed;
+    private int _ownDestroyedUsed;
+
     /// <summary>Archetype membership channels this commit structurally changed; their epochs are bumped once each, after every append (#790).</summary>
     private List<ArchetypeMembershipRegistry> _membershipTouched;
 
@@ -1131,10 +1144,76 @@ public unsafe partial class Transaction
             scope.Dispose();
             return;
         }
-        _pendingDestroys ??= [];
-        _pendingDestroys.Add(id);
+        AddPendingDestroy(id);
 
         scope.Dispose();
+    }
+
+    /// <summary>Record <paramref name="id"/> as destroyed by this transaction; the caller checked it is not already.</summary>
+    private void AddPendingDestroy(EntityId id)
+    {
+        _pendingDestroys ??= [];
+        _pendingDestroys.Add(id);
+        (_pendingDestroyOrder ??= []).Add(id);
+        OwnDestroyCount++;
+    }
+
+    /// <summary>
+    /// The slots this transaction's own pending destroys hold in <paramref name="meta"/>'s clusters, for a cluster walk to subtract (CLUSTERWALK-04); null
+    /// when there are none. Locates only the destroys made since the last call for this archetype — one EntityMap lookup each — unless a fence migration
+    /// moved entities since (<see cref="ArchetypeClusterState.SlotMoveEpoch"/>), which locates them all again.
+    /// </summary>
+    internal override OwnDestroyedSlots OwnDestroyedSlotsFor(ArchetypeMetadata meta, ArchetypeClusterState state)
+    {
+        if (OwnDestroyCount == 0)
+        {
+            return null;
+        }
+        AssertThreadAffinity();
+
+        var routing = _dbe.RoutingIdOf(meta);
+        var epoch = Volatile.Read(ref state.SlotMoveEpoch);   // before any lookup: a move after it is caught by the next call
+        _ownDestroyed ??= [];
+        OwnDestroyedSlots table = null;
+        for (var i = 0; i < _ownDestroyedUsed; i++)
+        {
+            if (_ownDestroyed[i].RoutingId == routing)
+            {
+                table = _ownDestroyed[i];
+                break;
+            }
+        }
+
+        if (table == null)
+        {
+            if (_ownDestroyedUsed == _ownDestroyed.Count)
+            {
+                _ownDestroyed.Add(new OwnDestroyedSlots());
+            }
+            table = _ownDestroyed[_ownDestroyedUsed++];
+            table.Reset(routing, state, epoch, _pendingDestroys);
+        }
+        else if (table.State != state || table.MoveEpoch != epoch)
+        {
+            table.Reset(routing, state, epoch, _pendingDestroys);
+        }
+
+        if (table.Scanned < OwnDestroyCount)
+        {
+            var es = _dbe._archetypeStates[meta.ArchetypeId];
+            var order = CollectionsMarshal.AsSpan(_pendingDestroyOrder);
+            for (var i = table.Scanned; i < order.Length; i++)
+            {
+                var id = order[i];
+                if (id.ArchetypeId == routing && TryLocateCommitted(id, meta, es, out var chunkId, out var slot))
+                {
+                    table.Add(chunkId, slot);
+                }
+            }
+            table.Scanned = order.Length;
+        }
+
+        return table.IsEmpty ? null : table;
     }
 
     /// <summary>Maximum cascade depth. DAG validation prevents cycles, but this guards against bugs.</summary>
@@ -1171,8 +1250,7 @@ public unsafe partial class Transaction
             return;
         }
 
-        _pendingDestroys ??= [];
-        _pendingDestroys.Add(id);
+        AddPendingDestroy(id);
         cascadeCount++;
 
         // Guard against runaway cascades (exponential fan-out from misconfigured FK relationships)
@@ -5501,6 +5579,9 @@ public unsafe partial class Transaction
         _spawnedEntityIndex?.Clear();
         _spawnedEntityIndexedCount = 0;
         _pendingDestroys?.Clear();
+        _pendingDestroyOrder?.Clear();
+        OwnDestroyCount = 0;
+        _ownDestroyedUsed = 0;   // the tables are reset when reused
         _pendingDeathClusters?.Clear();
         _pendingEnableDisable?.Clear();
         _firstSupplies?.Clear();

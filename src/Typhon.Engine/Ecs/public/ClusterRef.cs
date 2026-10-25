@@ -37,6 +37,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     private readonly int _chunkId;
     private readonly ArchetypeClusterState _state; // null only on synthetic test refs; carries spatial bookkeeping + grid
     private readonly EntityAccessor _owner;         // the transaction or system accessor that enumerates; null for an engine-internal walk
+    private readonly ulong _occupancy;              // the word MoveNext took: raw occupancy minus the walking transaction's own destroys (CLUSTERWALK-04)
 
     // ── Lifetime check (#1199): valid until its enumerator's next MoveNext ──────────────────────────────────────────
     //
@@ -65,9 +66,10 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     private double _cachedOriginZ;
 
     internal ClusterRef(byte* basePtr, byte* transientBasePtr, ArchetypeClusterInfo layout, ArchetypeMetadata meta, int chunkId, ArchetypeClusterState state,
-        ClusterStep stepSource = null, int step = 0, EntityAccessor owner = null)
+        ulong occupancy, ClusterStep stepSource = null, int step = 0, EntityAccessor owner = null)
     {
         _owner = owner;
+        _occupancy = occupancy;
         _stepSource = stepSource;
         _step = step;
         _base = basePtr;
@@ -95,15 +97,29 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         }
     }
 
-    /// <summary>Bitmask of occupied slots. Bit i = 1 means slot i contains a live entity.</summary>
+    /// <summary>
+    /// Bitmask of occupied slots. Bit i = 1 means slot i contains a live entity. Taken once per cluster by the enumerator's <c>MoveNext</c>: the committed
+    /// occupancy minus the entities the walking transaction destroyed and has not committed (CLUSTERWALK-04). Entities it spawned and has not committed are
+    /// not in it — they have no slot data until PUBLISH.
+    /// </summary>
     public readonly ulong OccupancyBits
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get
         {
             CheckStep();
-            return *(ulong*)_base;
+            return _occupancy;
         }
+    }
+
+    /// <summary>
+    /// The cluster's occupancy word as it is now, own destroys included. For the engine's bookkeeping only: a write into an own-destroyed slot whose destroy
+    /// is rolled back must still reach the dirty bitmap and the index (IX-07).
+    /// </summary>
+    private readonly ulong RawOccupancy
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => *(ulong*)_base;
     }
 
     /// <summary>Bitmask of entities with component at <paramref name="slot"/> enabled.</summary>
@@ -278,7 +294,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     {
         CheckStep();
         var componentSlot = _meta.GetSlot(comp._componentTypeId);
-        var bits = OccupancyBits;
+        var bits = RawOccupancy;
         while (bits != 0)
         {
             var slot = BitOperations.TrailingZeroCount(bits);
@@ -349,7 +365,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
             ThrowSetRefused(slot);
         }
 
-        if ((uint)slotIndex >= (uint)_layout.ClusterSize || (OccupancyBits & (1UL << slotIndex)) == 0)
+        if ((uint)slotIndex >= (uint)_layout.ClusterSize || (OccupancyBits & RawOccupancy & (1UL << slotIndex)) == 0)
         {
             ThrowHelper.ThrowArgument($"ClusterRef.Set: slot {slotIndex} of cluster {_chunkId} holds no entity.");
         }
@@ -407,9 +423,9 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
             ThrowSetRefused(slot);
         }
 
-        if ((slots & ~OccupancyBits) != 0)
+        if ((slots & ~(OccupancyBits & RawOccupancy)) != 0)
         {
-            ThrowHelper.ThrowArgument($"ClusterRef.Set: slots {slots & ~OccupancyBits:X} of cluster {_chunkId} hold no entity.");
+            ThrowHelper.ThrowArgument($"ClusterRef.Set: slots {slots & ~(OccupancyBits & RawOccupancy):X} of cluster {_chunkId} hold no entity.");
         }
 
         if (slots == 0)
@@ -565,7 +581,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     /// </summary>
     private readonly bool SpatialWriteChangesKeys<T>(byte slot, int slotIndex, in T newValue) where T : unmanaged
     {
-        if ((OccupancyBits & (1UL << slotIndex)) == 0)
+        if ((RawOccupancy & (1UL << slotIndex)) == 0)
         {
             return false;
         }
@@ -1613,6 +1629,12 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
 /// in <c>ActiveClusterIds</c> during the fence's deferred-drain window — between Migrate (last slot released) and Finalize (chunk freed) — but
 /// <see cref="MoveNext"/> filters them out so callers never observe a drained cluster.
 /// </para>
+/// <para>
+/// <b>Own pending work (CLUSTERWALK-04):</b> an enumerator created through a <see cref="Transaction"/> never yields an entity that transaction destroyed
+/// and has not committed — <see cref="MoveNext"/> takes each cluster's occupancy minus those slots, and skips a cluster it leaves empty — exactly as the
+/// transaction's point access and queries treat it. A destroy made mid-walk applies from the next cluster. Another transaction's uncommitted destroy hides
+/// nothing. Entities the transaction spawned and has not committed are NOT yielded: they hold no slot data until PUBLISH (point access and queries see them).
+/// </para>
 /// <para>Usage:</para>
 /// <code>
 /// foreach (var cluster in ants.GetClusterEnumerator())
@@ -1644,6 +1666,10 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     private int _endIndex;
     private ClusterStep _stepCounter;   // strict mode only (#1199): bumped by MoveNext and Dispose; null otherwise
     private EntityAccessor _owner;      // handed to each ClusterRef: its writes need the discipline (#1187)
+    // CLUSTERWALK-04: the walking transaction's own pending destroys (a no-op for a system accessor or an engine walk), and the occupancy MoveNext took
+    // for the current cluster.
+    private OwnDestroyFilter _ownDestroys;
+    private ulong _occupancy;
 
     [AllowCopy]
     internal static ClusterEnumerator<TArch> Create(ArchetypeClusterState state, ArchetypeMetadata meta,
@@ -1651,7 +1677,8 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     {
         var result = new ClusterEnumerator<TArch>
         {
-            _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null, _owner = owner
+            _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null, _owner = owner,
+            _ownDestroys = new OwnDestroyFilter(owner, meta)
         };
         if (segment != null)
         {
@@ -1683,7 +1710,8 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     {
         var result = new ClusterEnumerator<TArch>
         {
-            _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null, _owner = owner
+            _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null, _owner = owner,
+            _ownDestroys = new OwnDestroyFilter(owner, meta)
         };
         if (segment != null)
         {
@@ -1716,7 +1744,8 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         ArgumentNullException.ThrowIfNull(clusterIds);
         var result = new ClusterEnumerator<TArch>
         {
-            _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null, _owner = owner
+            _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null, _owner = owner,
+            _ownDestroys = new OwnDestroyFilter(owner, meta)
         };
         if (segment != null)
         {
@@ -1784,7 +1813,8 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
 
     /// <summary>
     /// Advance to the next active cluster in the range, skipping drained clusters (<see cref="ClusterRef{TArch}.OccupancyBits"/> == 0) left in
-    /// <c>ActiveClusterIds</c> by the fence's deferred-drain window. Guarantees <c>Current.OccupancyBits != 0</c> when returning true.
+    /// <c>ActiveClusterIds</c> by the fence's deferred-drain window, and clusters holding only the walking transaction's own pending destroys
+    /// (CLUSTERWALK-04). Guarantees <c>Current.OccupancyBits != 0</c> when returning true.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool MoveNext()
@@ -1798,8 +1828,11 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         {
             var chunkId = _clusterIds[_index];
             var basePtr = _hasPersistentAccessor ? _accessor.GetChunkAddress(chunkId) : _transientAccessor.GetChunkAddress(chunkId);
-            if (*(ulong*)basePtr != 0)
+            // CLUSTERWALK-04. Per cluster, not once per walk: a destroy made mid-walk hides its entity from every later cluster.
+            var occupancy = _ownDestroys.Apply(chunkId, *(ulong*)basePtr, basePtr, _state);
+            if (occupancy != 0)
             {
+                _occupancy = occupancy;
                 return true;
             }
         }
@@ -1817,7 +1850,8 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
             var basePtr = _hasPersistentAccessor ? _accessor.GetChunkAddress(chunkId) : _transientAccessor.GetChunkAddress(chunkId);
             // TransientStore base for mixed archetypes (null for pure-SV/V and pure-Transient)
             var transientPtr = (_hasTransientAccessor && _hasPersistentAccessor) ? _transientAccessor.GetChunkAddress(chunkId) : null;
-            return new ClusterRef<TArch>(basePtr, transientPtr, _state.Layout, _meta, chunkId, _state, _stepCounter, _stepCounter?.Value ?? 0, _owner);
+            return new ClusterRef<TArch>(basePtr, transientPtr, _state.Layout, _meta, chunkId, _state, _occupancy, _stepCounter, _stepCounter?.Value ?? 0,
+                _owner);
         }
     }
 

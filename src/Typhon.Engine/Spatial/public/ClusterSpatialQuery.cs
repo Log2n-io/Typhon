@@ -247,7 +247,11 @@ public readonly ref struct ClusterSpatialQuery<TArch> where TArch : Archetype<TA
     /// <exception cref="ArgumentException">More than 64 members, a member that is not finite, or <paramref name="counts"/> shorter than
     /// <paramref name="members"/>. Checked before anything is written: <paramref name="counts"/> is then left as it was.</exception>
     /// <exception cref="InvalidOperationException">The archetype has no spatial index, or is not 2D f32.</exception>
-    public void CountRadius(ReadOnlySpan<BSphere2F> members, Span<int> counts, uint categoryMask = uint.MaxValue)
+    public void CountRadius(ReadOnlySpan<BSphere2F> members, Span<int> counts, uint categoryMask = uint.MaxValue) =>
+        CountRadiusFiltered(members, counts, categoryMask, default);
+
+    /// <summary><see cref="CountRadius(ReadOnlySpan{BSphere2F}, Span{int}, uint)"/>, minus a transaction's own pending destroys (CLUSTERWALK-04).</summary>
+    internal void CountRadiusFiltered(ReadOnlySpan<BSphere2F> members, Span<int> counts, uint categoryMask, OwnDestroyFilter ownDestroys)
     {
         CheckRadiusBatch(members);
         if (counts.Length < members.Length)
@@ -257,7 +261,7 @@ public readonly ref struct ClusterSpatialQuery<TArch> where TArch : Archetype<TA
 
         counts[..members.Length].Clear();
         var drain = new ClusterRadiusBatch.CountDrain(counts);
-        ClusterRadiusBatch.Run(_state, _grid, members, categoryMask, ref drain);
+        ClusterRadiusBatch.Run(_state, _grid, members, categoryMask, ref drain, ownDestroys);
     }
 
     /// <summary>
@@ -281,13 +285,18 @@ public readonly ref struct ClusterSpatialQuery<TArch> where TArch : Archetype<TA
     /// <exception cref="ArgumentException">More than 64 members, or a member that is not finite; checked before any hit is delivered.</exception>
     /// <exception cref="InvalidOperationException">The archetype has no spatial index, or is not 2D f32.</exception>
     public void ForEachInRadius<TSink>(ReadOnlySpan<BSphere2F> members, ref TSink sink, uint categoryMask = uint.MaxValue)
+        where TSink : struct, IRadiusBatchSink, allows ref struct => ForEachInRadiusFiltered(members, ref sink, categoryMask, default);
+
+    /// <summary><see cref="ForEachInRadius{TSink}(ReadOnlySpan{BSphere2F}, ref TSink, uint)"/>, minus a transaction's own pending destroys
+    /// (CLUSTERWALK-04).</summary>
+    internal void ForEachInRadiusFiltered<TSink>(ReadOnlySpan<BSphere2F> members, ref TSink sink, uint categoryMask, OwnDestroyFilter ownDestroys)
         where TSink : struct, IRadiusBatchSink, allows ref struct
     {
         CheckRadiusBatch(members);
         var drain = new ClusterRadiusBatch.SinkDrain<TSink>(sink);
         try
         {
-            ClusterRadiusBatch.Run(_state, _grid, members, categoryMask, ref drain);
+            ClusterRadiusBatch.Run(_state, _grid, members, categoryMask, ref drain, ownDestroys);
         }
         finally
         {
@@ -336,6 +345,75 @@ public readonly ref struct ClusterSpatialQuery<TArch> where TArch : Archetype<TA
             $"ClusterSpatialQuery<{typeof(TArch).Name}>: archetype has no spatial index. " +
             "Ensure the archetype has a SpatialIndex field and that ConfigureSpatialGrid was called " +
             "on the engine before InitializeArchetypes.");
+}
+
+/// <summary>
+/// <see cref="ClusterSpatialQuery{TArch}"/> made through a transaction (<c>tx.ClusterSpatialQuery{TArch}()</c>): the same queries, minus every entity that
+/// transaction destroyed and has not committed (CLUSTERWALK-04). A destroy made while a query runs applies from the next cluster it opens.
+/// </summary>
+/// <remarks>
+/// A wrapper rather than a field on <see cref="ClusterSpatialQuery{TArch}"/>, on purpose: the engine form's <c>AABB</c> is inlined on an IL budget the
+/// JIT counts before it folds the tier branches, and threading the filter through it cost every engine query ~25 ns (measured, #1482). Here the filter is
+/// attached to the enumerator after the engine form built it, so only this path pays: one more copy of the returned enumerator.
+/// </remarks>
+public readonly ref struct TransactionClusterSpatialQuery<TArch> where TArch : Archetype<TArch>, new()
+{
+    private readonly ClusterSpatialQuery<TArch> _query;
+    private readonly OwnDestroyFilter _ownDestroys;
+
+    internal TransactionClusterSpatialQuery(ClusterSpatialQuery<TArch> query, OwnDestroyFilter ownDestroys)
+    {
+        _query = query;
+        _ownDestroys = ownDestroys;
+    }
+
+    /// <inheritdoc cref="ClusterSpatialQuery{TArch}.AABB{TBox}"/>
+    public AabbClusterEnumerator AABB<TBox>(in TBox box, uint categoryMask = uint.MaxValue) where TBox : struct, ISpatialBox
+    {
+        var e = _query.AABB(in box, categoryMask);
+        e.FilterOwnDestroys(_ownDestroys);
+        return e;
+    }
+
+    /// <inheritdoc cref="ClusterSpatialQuery{TArch}.Radius(in BSphere2F, uint)"/>
+    public AabbClusterEnumerator Radius(in BSphere2F sphere, uint categoryMask = uint.MaxValue)
+    {
+        var e = _query.Radius(in sphere, categoryMask);
+        e.FilterOwnDestroys(_ownDestroys);
+        return e;
+    }
+
+    /// <inheritdoc cref="ClusterSpatialQuery{TArch}.Radius(in BSphere3F, uint)"/>
+    public AabbClusterEnumerator Radius(in BSphere3F sphere, uint categoryMask = uint.MaxValue)
+    {
+        var e = _query.Radius(in sphere, categoryMask);
+        e.FilterOwnDestroys(_ownDestroys);
+        return e;
+    }
+
+    /// <inheritdoc cref="ClusterSpatialQuery{TArch}.Radius(in BSphere2D, uint)"/>
+    public AabbClusterEnumerator Radius(in BSphere2D sphere, uint categoryMask = uint.MaxValue)
+    {
+        var e = _query.Radius(in sphere, categoryMask);
+        e.FilterOwnDestroys(_ownDestroys);
+        return e;
+    }
+
+    /// <inheritdoc cref="ClusterSpatialQuery{TArch}.Radius(in BSphere3D, uint)"/>
+    public AabbClusterEnumerator Radius(in BSphere3D sphere, uint categoryMask = uint.MaxValue)
+    {
+        var e = _query.Radius(in sphere, categoryMask);
+        e.FilterOwnDestroys(_ownDestroys);
+        return e;
+    }
+
+    /// <inheritdoc cref="ClusterSpatialQuery{TArch}.CountRadius(ReadOnlySpan{BSphere2F}, Span{int}, uint)"/>
+    public void CountRadius(ReadOnlySpan<BSphere2F> members, Span<int> counts, uint categoryMask = uint.MaxValue) =>
+        _query.CountRadiusFiltered(members, counts, categoryMask, _ownDestroys);
+
+    /// <inheritdoc cref="ClusterSpatialQuery{TArch}.ForEachInRadius{TSink}(ReadOnlySpan{BSphere2F}, ref TSink, uint)"/>
+    public void ForEachInRadius<TSink>(ReadOnlySpan<BSphere2F> members, ref TSink sink, uint categoryMask = uint.MaxValue)
+        where TSink : struct, IRadiusBatchSink, allows ref struct => _query.ForEachInRadiusFiltered(members, ref sink, categoryMask, _ownDestroys);
 }
 
 /// <summary>
@@ -414,13 +492,29 @@ public readonly struct ClusterSpatialQueryResult
 }
 
 /// <summary>
-/// Construction helpers for <see cref="T:Typhon.Engine.ClusterSpatialQuery`1"/>. Exposed on <see cref="DatabaseEngine"/> so callers can write
-/// <c>dbe.ClusterSpatialQuery{TArch}().AABB(...)</c>.
+/// Construction helpers for <see cref="T:Typhon.Engine.ClusterSpatialQuery`1"/>. Exposed on <see cref="DatabaseEngine"/> —
+/// <c>dbe.ClusterSpatialQuery{TArch}().AABB(...)</c> — and on <see cref="Transaction"/> — <c>tx.ClusterSpatialQuery{TArch}().AABB(...)</c>.
 /// </summary>
+/// <remarks>
+/// <para>
+/// <b>Engine or transaction.</b> Both run the same zero-allocation query over the committed spatial state. The transaction form also drops every entity
+/// that transaction destroyed and has not committed (CLUSTERWALK-04), as its point access (<c>IsAlive</c>, <c>Open</c>, <c>OpenMut</c>) already treats
+/// it. With no pending destroy in the transaction it costs one null test and one count compare per cluster opened.
+/// </para>
+/// <para>
+/// <b>The engine form sees no transaction's pending work.</b> Called from a system that destroys entities, it hands back those entities until the
+/// destroy commits; an <c>OpenMut</c> on such a hit throws ("not found or not visible") and aborts the tick, a <c>TryOpen</c> silently skips it, and an
+/// in-place write acts on an entity about to be released. Use the transaction form in any body that destroys, or validate each hit with
+/// <c>tx.IsAlive</c>. Neither form shows the transaction's own pending spawns: they hold no spatial slot until the commit publishes them. Both can
+/// still return an entity another transaction destroyed and committed earlier in the tick while the spatial index lags until the fence — validate before
+/// acting on a hit you did not just read.
+/// </para>
+/// </remarks>
 public static class ClusterSpatialQueryExtensions
 {
     /// <summary>
-    /// Create a per-cell cluster AABB query for the given archetype.
+    /// Create a per-cell cluster AABB query for the given archetype. Sees no transaction's pending work: from a body that destroys entities, prefer
+    /// <see cref="ClusterSpatialQuery{TArch}(Transaction)"/> (see the class remarks for the risk).
     /// </summary>
     /// <typeparam name="TArch">The archetype type.</typeparam>
     /// <param name="engine">The database engine.</param>
@@ -433,7 +527,8 @@ public static class ClusterSpatialQueryExtensions
 
     /// <summary>
     /// Create a per-cell cluster query for the given archetype in realm <paramref name="realm"/>: it sees only that realm's entities, however their
-    /// coordinates compare with another realm's.
+    /// coordinates compare with another realm's. Sees no transaction's pending work: from a body that destroys entities, prefer
+    /// <see cref="ClusterSpatialQuery{TArch}(Transaction, RealmId)"/> (see the class remarks for the risk).
     /// </summary>
     /// <typeparam name="TArch">The archetype type.</typeparam>
     /// <param name="engine">The database engine.</param>
@@ -443,7 +538,9 @@ public static class ClusterSpatialQueryExtensions
     /// Thrown when the archetype is not cluster-eligible, has no spatial component, or the realm is not registered.
     /// </exception>
     public static ClusterSpatialQuery<TArch> ClusterSpatialQuery<TArch>(this DatabaseEngine engine, RealmId realm)
-        where TArch : Archetype<TArch>, new()
+        where TArch : Archetype<TArch>, new() => new(StateOf<TArch>(engine), engine.RealmGridForQuery(realm));
+
+    private static ArchetypeClusterState StateOf<TArch>(DatabaseEngine engine) where TArch : Archetype<TArch>, new()
     {
         var meta = Archetype<TArch>.Metadata;
         if (!meta.IsClusterEligible)
@@ -457,6 +554,34 @@ public static class ClusterSpatialQueryExtensions
             throw new InvalidOperationException(
                 $"ClusterSpatialQuery<{typeof(TArch).Name}>: archetype has no cluster state.");
         }
-        return new ClusterSpatialQuery<TArch>(state, engine.RealmGridForQuery(realm));
+        return state;
+    }
+
+    /// <summary>
+    /// <see cref="ClusterSpatialQuery{TArch}(DatabaseEngine)"/> through <paramref name="transaction"/>: never returns an entity that transaction destroyed
+    /// and has not committed (CLUSTERWALK-04). A destroy made while the query runs — from a radius batch's sink, say — applies from the next cluster opened.
+    /// </summary>
+    /// <typeparam name="TArch">The archetype type.</typeparam>
+    /// <param name="transaction">The transaction whose own pending destroys the query drops. Used on its own thread only, like the transaction.</param>
+    /// <returns>A zero-allocation query handle, valid while the transaction is.</returns>
+    /// <exception cref="InvalidOperationException">As <see cref="ClusterSpatialQuery{TArch}(DatabaseEngine)"/>.</exception>
+    public static TransactionClusterSpatialQuery<TArch> ClusterSpatialQuery<TArch>(this Transaction transaction)
+        where TArch : Archetype<TArch>, new() => ClusterSpatialQuery<TArch>(transaction, RealmId.Default);
+
+    /// <summary>
+    /// <see cref="ClusterSpatialQuery{TArch}(DatabaseEngine, RealmId)"/> through <paramref name="transaction"/>: never returns an entity that transaction
+    /// destroyed and has not committed (CLUSTERWALK-04).
+    /// </summary>
+    /// <typeparam name="TArch">The archetype type.</typeparam>
+    /// <param name="transaction">The transaction whose own pending destroys the query drops.</param>
+    /// <param name="realm">The realm to query. Must be registered.</param>
+    /// <returns>A zero-allocation query handle, valid while the transaction is.</returns>
+    /// <exception cref="InvalidOperationException">As <see cref="ClusterSpatialQuery{TArch}(DatabaseEngine, RealmId)"/>.</exception>
+    public static TransactionClusterSpatialQuery<TArch> ClusterSpatialQuery<TArch>(this Transaction transaction, RealmId realm)
+        where TArch : Archetype<TArch>, new()
+    {
+        ArgumentNullException.ThrowIfNull(transaction);
+        return new TransactionClusterSpatialQuery<TArch>(ClusterSpatialQuery<TArch>(transaction.DBE, realm),
+            new OwnDestroyFilter(transaction, Archetype<TArch>.Metadata));
     }
 }

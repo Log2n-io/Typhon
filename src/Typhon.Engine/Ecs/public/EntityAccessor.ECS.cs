@@ -332,6 +332,37 @@ public unsafe partial class EntityAccessor
         return found && EntityVisibility.IsVisible(readBuf, TSN, CommitCards, es.EntityMap, id.EntityKey, ref _entityMapCacheAccessor, _epochManager);
     }
 
+    /// <summary>
+    /// The cluster slot <paramref name="id"/>'s committed EntityMap record names, with no visibility test — the caller confirms the slot by the id it holds.
+    /// The same cached, hinted lookup as <see cref="IsCommittedAlive"/>; the caller holds an epoch scope. False for an id not in the map (an own spawn).
+    /// </summary>
+    private protected bool TryLocateCommitted(EntityId id, ArchetypeMetadata meta, ArchetypeEngineState es, out int clusterChunkId, out byte slotIndex)
+    {
+        byte* readBuf = stackalloc byte[meta._entityRecordSize];
+        if (!_hasEntityMapCache || _entityMapCacheArchId != id.ArchetypeId)
+        {
+            if (_hasEntityMapCache)
+            {
+                _entityMapCacheAccessor.Dispose();
+            }
+
+            _entityMapCacheAccessor = es.EntityMap.Segment.CreateChunkAccessor();
+            _entityMapCacheArchId = id.ArchetypeId;
+            _hasEntityMapCache = true;
+        }
+
+        if (!es.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref _entityMapCacheAccessor))
+        {
+            clusterChunkId = 0;
+            slotIndex = 0;
+            return false;
+        }
+
+        clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(readBuf);
+        slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(readBuf);
+        return true;
+    }
+
     /// <summary>Check whether an entity link target is alive.</summary>
     public bool IsAlive<T>(EntityLink<T> link) where T : class => IsAlive(link.Id);
 

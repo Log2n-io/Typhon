@@ -1523,6 +1523,8 @@ public partial class DatabaseEngine
         // LayoutKind.Auto and groups fields by alignment — an 8-byte long and a 4-byte int declared adjacently are not laid out adjacently, and declaration
         // order buys nothing. If the Migrate phase ever shows up as contended here, MD-03's remedy is an explicit padded struct, not a field reorder.
         Interlocked.Add(ref clusterState.TotalMigrationCount, count);
+        // CLUSTERWALK-04: live entities changed slots; a transaction's located own destroys are stale from here on.
+        Interlocked.Increment(ref clusterState.SlotMoveEpoch);
         // Time accumulation as double via CAS-loop (no Interlocked.Add(double) in .NET).
         SpinWait sw = default;
         while (true)
