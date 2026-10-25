@@ -208,19 +208,40 @@ internal static class WalArchiveStore
         return result;
     }
 
-    /// <summary>CRC32C of the sorted (name, length) listing: what the index must have been written for (DC-10's pattern).</summary>
-    public static uint Fingerprint(IReadOnlyList<StoreFileEntry> listing)
+    /// <summary>
+    /// CRC32C of the (name, length) listing in ordinal name order: what the index must have been written for (DC-10's pattern). The order is the names',
+    /// not the file system's (alphabetical on NTFS, hashed on ext4), so the archiver can extend it one published segment at a time
+    /// (<see cref="FingerprintAppend"/>): segment ids, and so names, ascend.
+    /// </summary>
+    public static uint Fingerprint(IReadOnlyList<StoreFileEntry> listing) => Crc32CUtil.Finish(FingerprintState(listing, out _));
+
+    /// <summary>The unfinished CRC of <paramref name="listing"/> in name order, and its last name (null when empty).</summary>
+    public static uint FingerprintState(IReadOnlyList<StoreFileEntry> listing, out string lastName)
     {
-        var crc = Crc32CUtil.Start;
-        Span<byte> length = stackalloc byte[8];
-        foreach (var f in listing)
+        var sorted = new StoreFileEntry[listing.Count];
+        for (var i = 0; i < sorted.Length; i++)
         {
-            crc = Crc32CUtil.Append(crc, Encoding.UTF8.GetBytes(f.Name));
-            BinaryPrimitives.WriteInt64LittleEndian(length, f.Length);
-            crc = Crc32CUtil.Append(crc, length);
+            sorted[i] = listing[i];
         }
 
-        return Crc32CUtil.Finish(crc);
+        Array.Sort(sorted, static (a, b) => string.CompareOrdinal(a.Name, b.Name));
+        var crc = Crc32CUtil.Start;
+        foreach (var f in sorted)
+        {
+            crc = FingerprintAppend(crc, f.Name, f.Length);
+        }
+
+        lastName = sorted.Length > 0 ? sorted[^1].Name : null;
+        return crc;
+    }
+
+    /// <summary>Extends an unfinished fingerprint CRC by one entry; allocates nothing for a segment's name.</summary>
+    public static uint FingerprintAppend(uint crc, string name, long length)
+    {
+        Span<byte> bytes = stackalloc byte[256];
+        crc = name.Length <= 64 ? Crc32CUtil.Append(crc, bytes[..Encoding.UTF8.GetBytes(name, bytes)]) : Crc32CUtil.Append(crc, Encoding.UTF8.GetBytes(name));
+        BinaryPrimitives.WriteInt64LittleEndian(bytes, length);
+        return Crc32CUtil.Append(crc, bytes[..8]);
     }
 
     /// <summary>
@@ -327,7 +348,14 @@ internal sealed class WalArchiveTimeline : IDisposable
     private readonly ILogger _log;
     private readonly WalArchivePaths _paths;
     private readonly string _lockPath;
+    private readonly string _indexPath;
     private IDisposable _lock;
+
+    // The listing's fingerprint as the archiver extends it publish by publish (unfinished CRC, last name), so an index rewrite does not enumerate the
+    // directory; unknown until a load, or after a publish out of name order.
+    private bool _listingKnown;
+    private uint _listingCrc;
+    private string _listingLast;
 
     private WalArchiveTimeline(IStoreFileSystem fs, ILogger log, WalArchivePaths paths, Guid timelineId, string directory, string lockPath, IDisposable held)
     {
@@ -337,6 +365,7 @@ internal sealed class WalArchiveTimeline : IDisposable
         TimelineId = timelineId;
         Directory = directory;
         _lockPath = lockPath;
+        _indexPath = paths.Index(timelineId);
         _lock = held;
     }
 
@@ -515,6 +544,16 @@ internal sealed class WalArchiveTimeline : IDisposable
         }
 
         _fs.FlushDirectory(Directory);
+        if (_listingKnown && string.CompareOrdinal(name, _listingLast) > 0)
+        {
+            _listingCrc = WalArchiveStore.FingerprintAppend(_listingCrc, name, written.FileLength);
+            _listingLast = name;
+        }
+        else
+        {
+            _listingKnown = false;
+        }
+
         var segment = new ArchivedSegmentInfo
         {
             File = name,
@@ -548,6 +587,8 @@ internal sealed class WalArchiveTimeline : IDisposable
     public ArchivedTimeline LoadAndRefreshIndex()
     {
         var loaded = WalArchiveStore.Load(_fs, _paths.Root, TimelineId);
+        _listingCrc = WalArchiveStore.FingerprintState(WalArchiveStore.SegmentListing(_fs, Directory), out _listingLast);
+        _listingKnown = true;
         if (!loaded.FromIndex)
         {
             WriteIndex(loaded.Segments);
@@ -556,21 +597,28 @@ internal sealed class WalArchiveTimeline : IDisposable
         return loaded;
     }
 
-    /// <summary>Rewrites the index cache for <paramref name="segments"/> (a cache: written without a flush, through a temp so it is never torn).</summary>
+    /// <summary>
+    /// Rewrites the index cache for <paramref name="segments"/> (a cache: written without a flush, through a temp so it is never torn). Streamed, with the
+    /// listing's fingerprint as the publishes extended it: a rewrite costs the archiver no allocation in proportion to the archive.
+    /// </summary>
     public void WriteIndex(IReadOnlyList<ArchivedSegmentInfo> segments)
     {
         try
         {
-            var fingerprint = WalArchiveStore.Fingerprint(WalArchiveStore.SegmentListing(_fs, Directory));
-            var path = _paths.Index(TimelineId);
-            var temp = path + ArchiveFormat.TempSuffix;
+            if (!_listingKnown)
+            {
+                _listingCrc = WalArchiveStore.FingerprintState(WalArchiveStore.SegmentListing(_fs, Directory), out _listingLast);
+                _listingKnown = true;
+            }
+
+            var temp = _indexPath + ArchiveFormat.TempSuffix;
             _fs.DeleteFile(temp);
             using (var f = _fs.OpenCreateNew(temp))
             {
-                f.Write(ArchiveIndex.Serialize(TimelineId, fingerprint, segments), 0);
+                ArchiveIndex.Write(f, TimelineId, Crc32CUtil.Finish(_listingCrc), segments);
             }
 
-            _fs.Rename(temp, path, replace: true);
+            _fs.Rename(temp, _indexPath, replace: true);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -593,32 +641,49 @@ internal static class ArchiveIndex
     private const ushort Version = 1;
     private static ReadOnlySpan<byte> Magic => "TYWALIDX"u8;
 
-    public static byte[] Serialize(Guid timelineId, uint fingerprint, IReadOnlyList<ArchivedSegmentInfo> segments)
+    /// <summary>
+    /// Writes the index of <paramref name="segments"/> to <paramref name="file"/> from offset 0, a few entries at a time: no array in proportion to the
+    /// archive (the archiver rewrites the index as the archive grows).
+    /// </summary>
+    public static void Write(IStoreFile file, Guid timelineId, uint fingerprint, IReadOnlyList<ArchivedSegmentInfo> segments)
     {
-        var bytes = new byte[HeaderSize + segments.Count * EntrySize];
-        var span = bytes.AsSpan();
-        Magic.CopyTo(span);
-        BinaryPrimitives.WriteUInt16LittleEndian(span[8..], Version);
-        BinaryPrimitives.WriteInt32LittleEndian(span[12..], segments.Count);
-        timelineId.TryWriteBytes(span[16..]);
-        BinaryPrimitives.WriteUInt32LittleEndian(span[32..], fingerprint);
-        BinaryPrimitives.WriteUInt32LittleEndian(span[60..], Crc32CUtil.Compute(span[..60]));
-        for (var i = 0; i < segments.Count; i++)
+        const int perChunk = 8;
+        Span<byte> chunk = stackalloc byte[perChunk * EntrySize];
+        var header = chunk[..HeaderSize];
+        header.Clear();
+        Magic.CopyTo(header);
+        BinaryPrimitives.WriteUInt16LittleEndian(header[8..], Version);
+        BinaryPrimitives.WriteInt32LittleEndian(header[12..], segments.Count);
+        timelineId.TryWriteBytes(header[16..]);
+        BinaryPrimitives.WriteUInt32LittleEndian(header[32..], fingerprint);
+        BinaryPrimitives.WriteUInt32LittleEndian(header[60..], Crc32CUtil.Compute(header[..60]));
+        file.Write(header, 0);
+        long offset = HeaderSize;
+        for (var i = 0; i < segments.Count; i += perChunk)
         {
-            var s = segments[i];
-            var e = span.Slice(HeaderSize + i * EntrySize, EntrySize);
-            s.Header.WriteTo(e);
-            s.Footer.WriteTo(e[ArchiveFormat.HeaderSize..]);
-            var tail = e[(ArchiveFormat.HeaderSize + ArchiveFormat.FooterSize)..];
-            BinaryPrimitives.WriteInt64LittleEndian(tail, s.FileLength);
-            BinaryPrimitives.WriteInt64LittleEndian(tail[8..], s.FirstSampleLsn);
-            BinaryPrimitives.WriteInt64LittleEndian(tail[16..], s.FirstSampleUtcTicks);
-            BinaryPrimitives.WriteInt64LittleEndian(tail[24..], s.LastSampleLsn);
-            BinaryPrimitives.WriteInt64LittleEndian(tail[32..], s.LastSampleUtcTicks);
-            BinaryPrimitives.WriteUInt32LittleEndian(tail[44..], Crc32CUtil.Compute(e[..(EntrySize - 4)]));
-        }
+            var n = Math.Min(perChunk, segments.Count - i);
+            for (var j = 0; j < n; j++)
+            {
+                WriteEntry(segments[i + j], chunk.Slice(j * EntrySize, EntrySize));
+            }
 
-        return bytes;
+            file.Write(chunk[..(n * EntrySize)], offset);
+            offset += n * EntrySize;
+        }
+    }
+
+    private static void WriteEntry(ArchivedSegmentInfo s, Span<byte> e)
+    {
+        e.Clear();
+        s.Header.WriteTo(e);
+        s.Footer.WriteTo(e[ArchiveFormat.HeaderSize..]);
+        var tail = e[(ArchiveFormat.HeaderSize + ArchiveFormat.FooterSize)..];
+        BinaryPrimitives.WriteInt64LittleEndian(tail, s.FileLength);
+        BinaryPrimitives.WriteInt64LittleEndian(tail[8..], s.FirstSampleLsn);
+        BinaryPrimitives.WriteInt64LittleEndian(tail[16..], s.FirstSampleUtcTicks);
+        BinaryPrimitives.WriteInt64LittleEndian(tail[24..], s.LastSampleLsn);
+        BinaryPrimitives.WriteInt64LittleEndian(tail[32..], s.LastSampleUtcTicks);
+        BinaryPrimitives.WriteUInt32LittleEndian(tail[44..], Crc32CUtil.Compute(e[..(EntrySize - 4)]));
     }
 
     /// <summary>The cached segments when the index is intact and was written for <paramref name="fingerprint"/>; false otherwise.</summary>
