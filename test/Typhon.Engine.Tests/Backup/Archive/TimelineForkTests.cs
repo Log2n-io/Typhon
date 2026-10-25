@@ -200,6 +200,50 @@ class TimelineForkTests : ArchiveTestBase<TimelineForkTests>
     }
 
     /// <summary>
+    /// A component registered after the open completed (at runtime) is a schema change: one fork, its table written and its row persisted at once. An
+    /// archetype it completes gets its routing id only at the next InitializeArchetypes — the next open's — which is a schema change of its own (a new
+    /// routing id, Q4): one more fork there. Every reopen after that is on the same timeline: a fork per reopen would chop the history and force a full
+    /// point and a new timeline at each open.
+    /// </summary>
+    [Test]
+    [CancelAfter(20_000)]
+    public void AComponentRegisteredAtRuntime_ForksForItsArchetypesAtTheNextOpen_AndNeverAgain()
+    {
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            Register(scope, _ => { });
+        }
+
+        Guid forked;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Register(scope, _ => { });
+            var before = dbe.TimelineId;
+            dbe.RegisterComponentFromAccessor<CompB>();
+            forked = dbe.TimelineId;
+            Assert.That(forked, Is.Not.EqualTo(before), "premise: a component new to the database forks");
+        }
+
+        var timeline = Guid.Empty;
+        for (var reopen = 1; reopen <= 4; reopen++)
+        {
+            using var scope = ServiceProvider.CreateScope();
+            var forks = 0;
+            scope.ServiceProvider.GetRequiredService<DatabaseEngine>().AfterTimelineForkProbe = _ => forks++;
+            var dbe = Register(scope, d => d.RegisterComponentFromAccessor<CompB>());
+            if (reopen == 1)
+            {
+                Assert.That(forks, Is.LessThanOrEqualTo(1), "the first reopen forks once at most: the archetypes the component completes get their ids");
+                Assert.That(dbe.TimelineParentId, Is.EqualTo(forks == 1 ? forked : dbe.TimelineParentId));
+                timeline = dbe.TimelineId;
+                continue;
+            }
+
+            Assert.That((dbe.TimelineId, forks), Is.EqualTo((timeline, 0)), $"reopen {reopen} forked again");
+        }
+    }
+
+    /// <summary>
     /// The timelines are one published value (D4): a fork publishes a new one and leaves the one a reader holds as it was, so a reader's id, parent and
     /// origin are always of one fork. (A torn 16-byte id is not reproducible on demand; the shape that excludes it is what this holds.)
     /// </summary>
