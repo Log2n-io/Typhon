@@ -55,12 +55,17 @@ services.AddTyphonBackupMetrics();            // the Typhon.Backup meter: health
 | Exit | Health | Meaning |
 |---|---|---|
 | 0 | Ok | Points are recent, the store is reachable, the last drill passed |
-| 1 | Warning or Degraded | Still restorable, with less margin: a stale point, a failure, a suspect page, an archive gap or lag, no recent drill |
-| 3 | Failing or Off | No restorable recent point, the store is unreachable, failures in a row, or backup is not configured |
+| 1 | Warning or Degraded | Still restorable, with less margin: a stale point, a failure, a suspect page, an archive gap or lag, no recent drill, a kept point a compaction found damaged |
+| 3 | Failing or Off | No restorable recent point, the store is unreachable, failures in a row, the engine refuses to capture, a kept point retention broke, or backup is not configured |
 | 2 | — | The command itself failed (bad path, unreadable status file) |
 
 The text output, or `--format json`, gives the reason. A stopped engine's last status degrades by itself as time passes, so a dead process
 does not look healthy.
+
+**Off is not the same answer everywhere, on purpose.** `BackupHealthCheck`, the `ITyphonHealthCheck` an application exposes on its own health
+endpoint, maps Off to **Healthy**: an engine with no backup configured is not a failing service. `typhon backup status` exits **3** for Off: a
+database you monitor *for backups* that has none is not healthy. Alert on the one that asks your question. Every other health maps the same
+way in both (Ok healthy; Warning and Degraded degraded, exit 1; Failing unhealthy, exit 3).
 
 ```bash
 # Linux (cron): every 5 minutes, alert on anything but 0
@@ -149,7 +154,12 @@ captured after the damage holds it faithfully: its deep verify reports it as a w
 ### Health is Degraded or Failing
 
 `typhon backup status /data/world.typhon` names the reason. Fix the store (space, mount, permissions), then confirm it returns to `Ok`. If
-the reason is a broken chain, take a full point now: `typhon backup create /data/world.typhon --full --wait` asks the running engine.
+the reason is a broken chain, take a full point now: `typhon backup create /data/world.typhon --full --wait` asks the running engine (it
+refuses a `--store` that is not the engine's own: the engine writes only to its store).
+
+`KeptPointDamaged` means a compaction, the one routine full read of a kept chain, found one of its packs damaged: `verify --level full` the
+store, drill the points of that chain, and take a full point. `typhon backup prune` reports the same case with exit 3. `KeptPointBroken`
+(Failing) means a retention left a point it promised to keep unrestorable: a defect, file a bug with the log.
 
 ### A drill failed
 
