@@ -113,8 +113,12 @@ internal sealed class ScheduleState
         _retryAt = monoNow + Math.Max(delay, 1);
     }
 
-    /// <summary>The wall-clock estimate of <see cref="DueAt"/>, for display; <see cref="DateTime.MinValue"/> with no schedule.</summary>
-    public DateTime NextDueUtc(DateTime utcNow, long monoNow)
+    /// <summary>
+    /// The wall-clock estimate of <see cref="DueAt"/> (not before <paramref name="notBefore"/>, the scheduler's grace), for display; <see cref="DateTime.MinValue"/>
+    /// with no schedule. Overdue, it is the instant the point became due, in the past: it does not move with every call, so a busy or refused engine's status
+    /// is not rewritten every tick. Due at once with no anchor and no <paramref name="notBefore"/>: now.
+    /// </summary>
+    public DateTime NextDueUtc(DateTime utcNow, long monoNow, long notBefore = long.MinValue)
     {
         var due = DueAt();
         if (due == long.MaxValue)
@@ -122,7 +126,8 @@ internal sealed class ScheduleState
             return DateTime.MinValue;
         }
 
-        return due <= monoNow ? utcNow : utcNow + TimeSpan.FromSeconds((double)(due - monoNow) / _frequency);
+        due = Math.Max(due, notBefore);
+        return due == long.MinValue ? utcNow : utcNow + TimeSpan.FromSeconds((double)(due - monoNow) / _frequency);
     }
 
     private long Ticks(TimeSpan span) => (long)(span.TotalSeconds * _frequency);

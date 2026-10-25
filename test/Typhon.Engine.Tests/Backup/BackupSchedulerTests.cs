@@ -374,6 +374,39 @@ class BackupSchedulerTests : SchedulerTestBase<BackupSchedulerTests>
         TickIdle(dbe, "taken once");
     }
 
+    /// <summary>
+    /// While a point is overdue (here the engine is busy past the grace), its due instant is the one it became due at, not now: the status is not
+    /// republished, nor its file rewritten, every tick.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void AnOverduePoint_DoesNotRepublishTheStatusEveryTick()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = OpenOnClock(scope);
+        Spawn(dbe, 20);
+        using var hold = new ManualResetEventSlim();
+        dbe.BackupCoordinator.BeforeTakingRequest = () => hold.Wait(Budget);
+        var api = dbe.Backup.CreateAsync();
+        Clock.Advance(TimeSpan.FromSeconds(31));
+        TickIdle(dbe, "a job is pending: the due point waits");
+        var overdue = dbe.Backup.Status;
+        Assert.That(overdue.NextDueUtc, Is.LessThanOrEqualTo(Clock.Utc), "premise: overdue");
+        for (var i = 0; i < 3; i++)
+        {
+            Clock.Advance(TimeSpan.FromSeconds(1));
+            TickIdle(dbe, "still busy");
+        }
+
+        Assert.That(dbe.Backup.Status, Is.SameAs(overdue), "nothing changed: nothing republished");
+        AwaitJobEnd(dbe, () =>
+        {
+            dbe.BackupCoordinator.BeforeTakingRequest = null;
+            hold.Set();
+        });
+        Assert.That(api.Wait(Budget), Is.True);
+    }
+
     /// <summary>Runs <paramref name="release"/> and waits until the job it lets go has ended, retention included.</summary>
     private static void AwaitJobEnd(DatabaseEngine dbe, Action release)
     {

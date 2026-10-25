@@ -3667,12 +3667,17 @@ BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#141
   invariant no exception leaves the scheduler's tick or a backup job: every failure becomes state and health (BackupOpsState, BackupStatus)
   invariant neither thread takes an engine lock outside the capture's gate protocol; no job starts before InitializeArchetypes completed (the
             scheduler starts there; a capture refuses earlier)
-  invariant a closing engine stops the scheduler first, before the coordinator, waiting for its tick at most one tick; a tick left behind (a store
-            call parked on a dead share) touches nothing of the engine after the stop returned
+  invariant the tick does no store I/O: the store's facts are read by a refresh off it (the thread pool, one at a time, or the backup thread after a
+            retention), so a store call parked on a dead share never stalls the request poll, the archiver's step or the status; overlapping refreshes
+            publish in the order they started, never after a point published since
+  invariant a closing engine stops the scheduler first, before the coordinator, waiting for its tick at most one tick; a tick left behind (a step
+            parked below it) touches nothing of the engine after the stop returned, nor does a refresh still parked on the store
   invariant a backup.request selects auto or full and nothing else: the engine writes to BackupOptions.StorePath alone
-  scope: BackupScheduler.Tick, BackupScheduler.StopAndJoin, BackupScheduler.Start, BackupCoordinator.RunJob, BackupRequestFile.TryPoll,
-         DatabaseEngine.DisposeCore
+  scope: BackupScheduler.Tick, BackupScheduler.RefreshStoreFacts, BackupScheduler.StopAndJoin, BackupScheduler.Start, BackupCoordinator.RunJob,
+         BackupRequestFile.TryPoll, DatabaseEngine.DisposeCore
   on_violation: a full disk or a dead share crashes or stalls the database; a bundle-directory writer redirects backups anywhere
   verified: BackupSchedulerSafetyTests (a store throwing IOException, UnauthorizedAccessException or a non-I/O exception at every operation; a
-            request naming a path; an unreadable request; requests refused; a close with a store call parked) — [VerifiesRule("BKP-16")];
+            request naming a path; an unreadable request; requests refused; a store read parked on a dead share while the tick keeps stepping the archiver
+            and publishing, AStoreReadParkedOnADeadShare_NeverStallsTheTick, source mutant seen red: the refresh run inline; a close with a step parked
+            in the tick) — [VerifiesRule("BKP-16")];
             [RuleMutant("BKP-16")]: a tick that rethrows

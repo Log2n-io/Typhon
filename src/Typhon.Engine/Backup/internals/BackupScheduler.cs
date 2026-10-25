@@ -200,8 +200,10 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
                 _state.LastPages = point.PageCount;
                 if (summary != null && summary.TimelineId == _timeline)
                 {
-                    // The store will say so too at the refresh; until then the point just published is this timeline's newest.
+                    // The store will say so too at the refresh; until then the point just published is this timeline's newest. A refresh that began
+                    // before it read the store without it: its facts are dropped.
                     _state.Facts = WithLastPoint(_state.Facts, summary);
+                    _factsPublished = ++_factsTicket;
                 }
             }
             else
@@ -255,7 +257,7 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
         catch (Exception e)
         {
             // BKP-16: nothing leaves the job.
-            LogUnexpected("after point", e.Message);
+            LogUnexpected("after point", e);
         }
     }
 
@@ -350,39 +352,81 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
     /// Reads what the scheduler needs of the store (DL-19): the newest restorable point of the engine's timeline, the restorable count, the bytes, the depth
     /// of the newest point's chain, its suspects by occupancy, the drills. The only step that reads the store and allocates; a failure marks the store failing.
     /// </summary>
+    /// <remarks>
+    /// Never on the tick (BKP-16): on the thread pool, started by the tick (one at a time), or on the backup thread after a retention. Two may overlap, so
+    /// each takes a ticket when it starts and publishes only if no refresh that started later, and no point published since, already did: the facts never
+    /// go back in time. The first one's facts anchor the schedule. Never throws.
+    /// </remarks>
     internal void RefreshStoreFacts()
     {
+        long ticket;
+        lock (_lock)
+        {
+            ticket = ++_factsTicket;
+        }
+
         StoreFacts facts = null;
         Exception failure = null;
+        var unexpected = false;
         try
         {
             facts = ReadStoreFacts(StoreFileSystem ?? Internals.StoreFileSystem.Instance);
         }
-        catch (Exception e) when (e is BackupException or IOException or UnauthorizedAccessException)
+        catch (Exception e)
         {
             failure = e;
+            unexpected = e is not (BackupException or IOException or UnauthorizedAccessException);
         }
 
-        lock (_lock)
+        try
         {
-            if (failure == null)
+            var now = UtcNow();
+            var mono = MonoNow();
+            lock (_lock)
             {
-                _state.Facts = facts;
-                _state.StoreFailingSinceUtc = DateTime.MinValue;
-            }
-            else if (_state.StoreFailingSinceUtc == DateTime.MinValue)
-            {
-                _state.StoreFailingSinceUtc = UtcNow();
+                if (ticket > _factsPublished)
+                {
+                    _factsPublished = ticket;
+                    if (failure == null)
+                    {
+                        _state.Facts = facts;
+                        _state.StoreFailingSinceUtc = DateTime.MinValue;
+                    }
+                    else if (!unexpected && _state.StoreFailingSinceUtc == DateTime.MinValue)
+                    {
+                        _state.StoreFailingSinceUtc = now;
+                    }
+                }
+
+                AnchorScheduleOnce(now, mono);
+                _state.Version++;
             }
 
-            _state.Version++;
+            if (unexpected)
+            {
+                LogUnexpected("store refresh", failure);
+            }
+            else if (failure != null)
+            {
+                LogStoreUnreadable(failure.Message);
+            }
+
+            Publish();
         }
-
-        if (failure != null)
+        catch (Exception e)
         {
-            LogStoreUnreadable(failure.Message);
+            // BKP-16: nothing leaves the refresh.
+            LogUnexpected("store refresh", e);
         }
     }
+
+    /// <summary>Under <c>_lock</c>: the last ticket a refresh took, and the newest whose facts are the state's.</summary>
+    private long _factsTicket;
+
+    private long _factsPublished;
+
+    /// <summary>Packs are immutable (BKP-08): the newest point's suspects are classified once per pack, not at every refresh.</summary>
+    private readonly SuspectClassifier.Memo _suspects = new();
 
     private StoreFacts ReadStoreFacts(IStoreFileSystem fs)
     {
@@ -403,7 +447,7 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
             bytes += p.Size;
         }
 
-        var (allocated, free) = newest is { Point.Suspect: true } ? SuspectClassifier.Classify(fs, view, newest.Point.BackupId) : (0, 0);
+        var (allocated, free) = newest is { Point.Suspect: true } ? _suspects.Classify(fs, view, newest.Point) : (0, 0);
         var drills = DrillRecords.ReadNewestPerPoint(fs, view.Paths.Root);
         return new StoreFacts
         {
@@ -626,6 +670,6 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
     [LoggerMessage(LogLevel.Warning, "Backup store unreadable: {Message}")]
     private partial void LogStoreUnreadable(string message);
 
-    [LoggerMessage(LogLevel.Error, "Backup scheduler: unexpected failure in {Step}: {Message}")]
-    private partial void LogUnexpected(string step, string message);
+    [LoggerMessage(LogLevel.Error, "Backup scheduler: unexpected failure in {Step}")]
+    private partial void LogUnexpected(string step, Exception exception);
 }

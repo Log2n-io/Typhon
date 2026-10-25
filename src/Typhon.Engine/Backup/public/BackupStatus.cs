@@ -220,7 +220,9 @@ public sealed record BackupStatusReport(bool EngineLive, int Pid, string Machine
 /// <param name="ProgressBytes">Bytes the running compaction has read.</param>
 /// <param name="LastPoint">The newest point this engine knows of on its timeline, or <c>null</c>.</param>
 /// <param name="LastSuccessUtc">When that point's tail copy ended.</param>
-/// <param name="NextDueUtc">When the schedule next takes a point (an estimate: the schedule runs on a monotonic clock).</param>
+/// <param name="NextDueUtc">
+/// When the schedule next takes a point (an estimate: the schedule runs on a monotonic clock); in the past while overdue (the instant it became due).
+/// </param>
 /// <param name="ConsecutiveFailures">Failed backups in a row (refusals that only defer are not counted).</param>
 /// <param name="LastFailure">The last failure, or <c>null</c>.</param>
 /// <param name="PointsTotal">Points this session published.</param>

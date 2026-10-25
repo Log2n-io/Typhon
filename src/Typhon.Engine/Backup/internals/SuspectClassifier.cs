@@ -1,3 +1,5 @@
+using System.Threading;
+
 namespace Typhon.Engine.Internals;
 
 /// <summary>
@@ -43,6 +45,42 @@ internal static class SuspectClassifier
         }
 
         return (allocated, suspects.Length - allocated);
+    }
+
+    /// <summary>
+    /// The last pack classified and its answer. A pack never changes once published (BKP-08), so neither do its suspects nor its image's occupancy: a store
+    /// refresh classifies the newest point once, not every minute (opening its chain streams every index of it: ~315 MB for a 100 GiB base). Thread-safe;
+    /// two refreshes that overlap may both classify a new pack once.
+    /// </summary>
+    internal sealed class Memo
+    {
+        private readonly Lock _lock = new();
+        private string _file;
+        private (int Allocated, int Free) _result;
+
+        /// <summary>Pack files classified since this memo was made (a test counter).</summary>
+        public int Classified { get; private set; }
+
+        /// <summary><see cref="SuspectClassifier.Classify"/> of <paramref name="point"/>, read once per pack file.</summary>
+        public (int Allocated, int Free) Classify(IStoreFileSystem fs, StoreView view, CatalogPack point)
+        {
+            lock (_lock)
+            {
+                if (string.Equals(_file, point.File, System.StringComparison.Ordinal))
+                {
+                    return _result;
+                }
+            }
+
+            var result = SuspectClassifier.Classify(fs, view, point.BackupId);
+            lock (_lock)
+            {
+                (_file, _result) = (point.File, result);
+                Classified++;
+            }
+
+            return result;
+        }
     }
 
     /// <summary>The image's occupancy bitmap, found through the bootstrap's pointer to its segment; <c>null</c> when it cannot be found.</summary>
