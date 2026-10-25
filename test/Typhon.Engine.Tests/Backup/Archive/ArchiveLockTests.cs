@@ -42,7 +42,11 @@ internal sealed class ArchiveLockTests
         Assert.That(ex.Message, Does.Contain("not enforced"));
     }
 
-    /// <summary>Another PROCESS holding a timeline's archive.lock keeps the archiver out of that timeline (Windows share mode, Linux flock).</summary>
+    /// <summary>
+    /// Another PROCESS holding a timeline's archive.lock keeps the archiver out of that timeline (Windows share mode, Linux flock). The child says whether
+    /// it holds the lock: Windows PowerShell 5 (.NET Framework) cannot open a path past MAX_PATH, which a long TMP makes this one, and its failed open
+    /// used to be followed by "locked" anyway — the probe then found the lock free and the test failed for the child's sake. PowerShell 7 is preferred.
+    /// </summary>
     [Test]
     [CancelAfter(30_000)]
     public void AnotherProcessHoldingTheArchiveLock_KeepsTheArchiverOut()
@@ -54,9 +58,9 @@ internal sealed class ArchiveLockTests
         ProcessStartInfo psi;
         if (OperatingSystem.IsWindows())
         {
-            psi = new ProcessStartInfo("powershell", "-NoProfile -NonInteractive -Command \"$f=[IO.File]::Open('" + lockPath
-                + "','OpenOrCreate','ReadWrite','None'); [Console]::Out.WriteLine('locked'); [Console]::Out.Flush(); "
-                + "[void][Console]::In.ReadLine(); $f.Close()\"");
+            psi = new ProcessStartInfo(OnPath("pwsh.exe") ? "pwsh" : "powershell", "-NoProfile -NonInteractive -Command \"try { $f=[IO.File]::Open('"
+                + lockPath + "','OpenOrCreate','ReadWrite','None') } catch { [Console]::Out.WriteLine('failed: ' + $_.Exception.InnerException.Message); "
+                + "exit 1 }; [Console]::Out.WriteLine('locked'); [Console]::Out.Flush(); [void][Console]::In.ReadLine(); $f.Close()\"");
         }
         else
         {
@@ -81,7 +85,12 @@ internal sealed class ArchiveLockTests
         {
             try
             {
-                Assert.That(child.StandardOutput.ReadLine(), Is.EqualTo("locked"), "the child must hold the lock before the probe");
+                var said = child.StandardOutput.ReadLine();
+                if (said != "locked")
+                {
+                    Assert.Inconclusive($"'{psi.FileName}' could not hold the lock from another process ({said}): {lockPath.Length} characters");
+                }
+
                 Assert.That(WalArchiveTimeline.TryOpen(null, root, ArchiveTestKit.Timeline), Is.Null);
             }
             finally
@@ -97,6 +106,19 @@ internal sealed class ArchiveLockTests
         }
 
         Directory.Delete(root, true);
+    }
+
+    private static bool OnPath(string exe)
+    {
+        foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (File.Exists(Path.Combine(dir, exe)))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>A file system whose exclusive opens all succeed, as with DOTNET_SYSTEM_IO_DISABLEFILELOCKING set.</summary>
