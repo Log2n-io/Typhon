@@ -140,11 +140,6 @@ new timeline.
 
 A restore never crosses a schema change or a bulk load: each starts a new timeline, and an LSN before it restores from the parent timeline.
 
-> ⚠️ **Open a restored bundle with the application version that wrote it.** An application whose next open migrates a component replays the
-> restored WAL tail into the migrated layout and silently corrupts the replayed entities
-> ([#1469](https://github.com/Log2n-io/Typhon/issues/1469), the same as after any crash). Until it is fixed: open the restored bundle with the
-> old version, close it cleanly, then upgrade.
-
 ### `typhon check` reports data loss
 
 Repair works from within; data that is gone comes back from a backup. Verify the candidates first:
