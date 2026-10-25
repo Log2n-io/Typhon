@@ -556,6 +556,50 @@ public sealed class BackupCommandTests
     [TestCase("1.5h")]
     public void ABadDuration_IsRefused(string value) => Assert.That(BackupCli.TryParseDuration(value, out _, out _), Is.False);
 
+    /// <summary>A value past what a duration or a size can hold is a usage error (64), not an exception out of the parser.</summary>
+    [TestCase("99999999999d")]
+    [TestCase("9223372036854775807h")]
+    [TestCase("9223372036854775807s")]
+    public void AnOverflowingDuration_IsRefused(string value)
+    {
+        Assert.That(BackupCli.TryParseDuration(value, out _, out var error), Is.False);
+        Assert.That(error, Does.Contain("Unknown duration"));
+    }
+
+    [TestCase("79228162514264337593543950335TiB")]
+    [TestCase("9300000000000000000")]
+    public void AnOverflowingSize_IsRefused(string value)
+    {
+        Assert.That(BackupCli.TryParseBytes(value, out _, out var error), Is.False);
+        Assert.That(error, Does.Contain("Unknown size"));
+    }
+
+    /// <summary>
+    /// <c>create &lt;bundle&gt; --store X</c> against a running engine whose store is not X is refused (4): the engine writes only to its own store, so going
+    /// on would silently put the point elsewhere than asked. Its own store is accepted.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void CreateWithAnotherStore_AgainstARunningEngine_IsRefused()
+    {
+        var backup = new BackupOptions { StorePath = _store, Interval = TimeSpan.FromHours(1), Retention = null };
+        using var provider = Provider(Path.GetDirectoryName(_bundle), yieldable: false, backup);
+        using var scope = provider.CreateScope();
+        scope.ServiceProvider.GetRequiredService<DatabaseEngine>().InitializeArchetypes();
+        WaitForStatusFile();
+
+        var elsewhere = Path.Combine(_root, "elsewhere");
+        var refused = Run((c, j) => BackupCreateCommand.Run(new BackupCreateCommand.Settings { Bundle = _bundle, Store = elsewhere, Format = "text" }, c, j,
+            CancellationToken.None));
+        Assert.That(refused.Code, Is.EqualTo(BackupCli.ExitRefused), refused.Text);
+        Assert.That(refused.Text, Does.Contain(_store));
+        Assert.That(File.Exists(Path.Combine(_bundle, "backup.request")), Is.False, "nothing was asked");
+
+        var own = Run((c, j) => BackupCreateCommand.Run(new BackupCreateCommand.Settings { Bundle = _bundle, Store = _store + Path.DirectorySeparatorChar,
+            Format = "text" }, c, j, CancellationToken.None));
+        Assert.That(own.Code, Is.EqualTo(BackupCli.ExitOk), own.Text);
+    }
+
     /// <summary>
     /// #1416 (DL-24, AC-O2): with a running engine whose backup takes requests, <c>create --wait</c> asks it through <c>backup.request</c> and reports the
     /// point it took; <c>status &lt;bundle&gt;</c> is its health (Ok 0; Degraded 1 once stale, judged at read time; a stopped engine still answers).

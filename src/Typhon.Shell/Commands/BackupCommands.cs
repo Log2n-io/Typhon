@@ -11,8 +11,8 @@ namespace Typhon.Shell.Commands;
 
 /// <summary>
 /// <c>typhon backup create &lt;bundle&gt; [--store S] [--full] [--wait [--timeout T]]</c> — a point of a database. A running engine whose backup is
-/// configured and accepts requests is asked through <c>backup.request</c> (07 §3, DL-24): it takes the point into its own store (<c>--store</c> is
-/// ignored), and <c>--wait</c> follows its status until the point is published or failed. Otherwise the database is backed up offline (02 §8) into
+/// configured and accepts requests is asked through <c>backup.request</c> (07 §3, DL-24): it takes the point into its own store (a <c>--store</c> naming
+/// another is refused, exit 4), and <c>--wait</c> follows its status until the point is published or failed. Otherwise the database is backed up offline (02 §8) into
 /// <c>--store</c>; a holder that advertises it will yield (the Workbench, #621) is asked to release it first, any other is refused (exit 4).
 /// </summary>
 // ReSharper disable once ClassNeverInstantiated.Global
@@ -80,6 +80,13 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
 
         if (BackupOperations.ReadStatus(live) is { AcceptsRequests: true } running)
         {
+            // The engine writes only to its own store (BKP-16): a point asked for elsewhere would silently land there.
+            if (!string.IsNullOrWhiteSpace(settings.Store) && !SamePath(settings.Store, running.StorePath))
+            {
+                return output.Error(BackupCli.ExitRefused, $"Database '{live}' is open in a running engine that backs up into '{running.StorePath}' only, not "
+                                                           + $"'{settings.Store}'. Drop --store (or name its store) to ask it for a point.");
+            }
+
             return Request(live, running, settings, timeout, output, ct);
         }
 
@@ -149,6 +156,11 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
 
         return exit;
     }
+
+    /// <summary>Whether two paths name one directory: full paths, trailing separators ignored, the platform's case rule.</summary>
+    private static bool SamePath(string a, string b) =>
+        string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(a)), Path.TrimEndingDirectorySeparator(Path.GetFullPath(b)),
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
     /// <summary>What the command line asks of the capture. Offline, <c>--full</c> matters only to a database an engine has backed up before.</summary>
     internal static BackupCreateOptions OptionsFor(Settings settings, CancellationToken ct) =>
