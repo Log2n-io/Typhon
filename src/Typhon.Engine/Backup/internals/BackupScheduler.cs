@@ -498,14 +498,16 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
         };
     }
 
-    /// <summary>Builds and publishes the snapshot (allocates: called on a change, and every tick while a job runs).</summary>
+    /// <summary>
+    /// Builds and publishes the snapshot (allocates: called on a change, and every tick while a job runs). Stored under the lock it is built under: the tick
+    /// and the backup thread both publish, and an older snapshot stored after a newer one would stick, its version already the published one.
+    /// </summary>
     internal void Publish()
     {
         var now = UtcNow();
         // A tick left behind by a close (BKP-16) touches nothing of the engine: no progress to read.
         var running = Stopped ? null : _engine.BackupCoordinator?.Running;
         var (added, expected) = running?.Progress ?? (0, 0);
-        BackupStatus status;
         lock (_lock)
         {
             var inputs = Inputs();
@@ -514,16 +516,19 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
             _publishedInputs = inputs;
             _publishedVersion = _state.Version;
             var facts = _state.Facts;
-            status = new BackupStatus(health, reason, BackupHealthEvaluator.Explain(inputs, reason, now), _state.State, _state.Phase, added, expected,
+            var status = new BackupStatus(health, reason, BackupHealthEvaluator.Explain(inputs, reason, now), _state.State, _state.Phase, added, expected,
                 Volatile.Read(ref _progressBytes), facts.LastPoint, facts.LastPoint?.TailEndUtc ?? DateTime.MinValue, _state.NextDueUtc,
                 _state.ConsecutiveFailures, _state.LastFailure, _state.PointsTotal, _state.FailuresTotal, _state.CbwCopiesTotal, _state.CbwAbortsTotal,
                 _state.SuspectPagesTotal, facts.ChainDepth, facts.StoreBytes, facts.RestorablePoints, facts.FreeSuspects, facts.LastDrill,
                 facts.LastPassedDrill,
                 _state.RetentionBlocked, ArchiveStatus(_state.Archive), _state.LastRequestId, now);
+            PublishProbe?.Invoke();
+            Volatile.Write(ref _status, status);
         }
-
-        Volatile.Write(ref _status, status);
     }
+
+    /// <summary>Test hook, null in production: called in <see cref="Publish"/> between building the snapshot and storing it.</summary>
+    internal Action PublishProbe { get; set; }
 
     private (BackupHealth, BackupHealthReason) _publishedHealth;
     private long _publishedVersion = -1;

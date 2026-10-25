@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Engine.Tests.Backup;
@@ -272,6 +273,46 @@ class BackupSchedulerTests : SchedulerTestBase<BackupSchedulerTests>
         Clock.Utc -= TimeSpan.FromDays(1);
         Clock.AdvanceMono(Interval);
         Assert.That(Tick(dbe), Is.Not.Null, "an interval of monotonic time later, the point is due whatever the wall clock says");
+    }
+
+    /// <summary>
+    /// The tick and the backup thread both publish: a snapshot is stored under the lock it was built under, so an older one can never land after a newer one
+    /// (the newer state's version already published, nothing would republish it). Staged: the first publish parks between building and storing its snapshot
+    /// while the backup thread publishes a newer state.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    [VerifiesRule("BKP-15")]
+    public void AnOlderSnapshot_NeverLandsAfterANewerOne()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = OpenOnClock(scope);
+        var scheduler = dbe.BackupScheduler;
+        TickIdle(dbe, "within the grace");
+        using var built = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var first = 0;
+        scheduler.PublishProbe = () =>
+        {
+            if (Interlocked.Exchange(ref first, 1) == 0)
+            {
+                built.Set();
+                release.Wait(Budget);
+            }
+        };
+
+        var older = Task.Run(scheduler.Publish);
+        Assert.That(built.Wait(Budget), Is.True, "premise: the first publish built its snapshot and parked");
+        var newer = Task.Run(() => ((IBackupJobObserver)scheduler).PhaseChanged(BackupRunPhase.Verify));
+        // With the store under the lock the newer publish waits for the older one; with it outside, it completes now and the older one lands after it.
+        newer.Wait(TimeSpan.FromMilliseconds(250));
+        release.Set();
+        Assert.That(Task.WaitAll([older, newer], Budget), Is.True);
+        scheduler.PublishProbe = null;
+
+        Assert.That(scheduler.Status.Phase, Is.EqualTo(BackupRunPhase.Verify), "the newer state is the published one");
+        TickIdle(dbe, "");
+        Assert.That(scheduler.Status.Phase, Is.EqualTo(BackupRunPhase.Verify), "and stays so: its version is the published one");
     }
 
     /// <summary>
