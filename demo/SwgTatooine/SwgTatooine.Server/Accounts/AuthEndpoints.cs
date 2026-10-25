@@ -11,6 +11,8 @@ namespace SwgTatooine.Server.Accounts;
 /// <summary>The body a client posts to <c>/auth/signup</c> and <c>/auth/login</c>.</summary>
 /// <param name="Name">The account name.</param>
 /// <param name="Password">The plaintext password. Never logged, never echoed, never put in a URL.</param>
+/// <param name="Outfit">Sign-up only: the outfit chosen, one-based into the <c>assets.players</c> table <c>/typhon/demo.json</c> publishes; absent or
+/// 0 for none, which the server picks. A login ignores it.</param>
 /// <remarks>
 /// <b>A POST body and not a query string</b>, which is the whole reason this is a record rather than two route parameters: a
 /// query string is written to every access log, every proxy's history and the browser's own, and a password in one is a
@@ -18,7 +20,8 @@ namespace SwgTatooine.Server.Accounts;
 /// </remarks>
 public sealed record AuthRequest(
     [property: JsonPropertyName("name")] string Name,
-    [property: JsonPropertyName("password")] string Password);
+    [property: JsonPropertyName("password")] string Password,
+    [property: JsonPropertyName("outfit")] int Outfit = 0);
 
 /// <summary>What a successful <c>/auth</c> call returns.</summary>
 /// <param name="Token">The bearer token to present on the WebSocket <c>HELLO</c>.</param>
@@ -135,7 +138,7 @@ public static class AuthEndpoints
             return TooMany();
         }
 
-        switch (AccountStore.TrySignup(dbe, request.Name, request.Password, out var account))
+        switch (AccountStore.TrySignup(dbe, request.Name, request.Password, out var account, request.Outfit))
         {
             case AccountStore.SignupOutcome.Created:
                 return Results.Ok(Minted(account, request.Name));
@@ -146,6 +149,9 @@ public static class AuthEndpoints
 
             case AccountStore.SignupOutcome.BadName:
                 return Results.BadRequest(new AuthError(AccountName.Rule));
+
+            case AccountStore.SignupOutcome.BadOutfit:
+                return Results.BadRequest(new AuthError($"an outfit is one of the {TatooineData.PlayerOutfits.Length} the server publishes"));
 
             default:
                 return Results.BadRequest(new AuthError(

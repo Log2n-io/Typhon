@@ -1,3 +1,4 @@
+using System;
 using Typhon.Protocol;
 
 namespace SwgTatooine.Server;
@@ -104,4 +105,59 @@ public static class ChatLines
 
     /// <summary>Every line, for a check that wants to assert what the world can say.</summary>
     public static int Count => Idle.Length + Travelling.Length + Fighting.Length + Waiting.Length + Townsfolk.Length;
+
+    /// <summary>The most lines a player's utterance keeps: what a speech bubble over a head can hold and still be a bubble.</summary>
+    public const int MaxLines = 4;
+
+    /// <summary>
+    /// What a player said, made fit to show: control characters as spaces, runs of new lines as one, and no more than
+    /// <see cref="MaxLines"/> lines — the breaks past that become spaces.
+    /// </summary>
+    /// <param name="text">The text as the client sent it.</param>
+    /// <returns>The text every listener is sent.</returns>
+    /// <remarks>
+    /// <b>The server's, not the client's form's.</b> The form does the same, but a client is anything that speaks the protocol: 256 new
+    /// lines were a bubble taller than the screen over the speaker's head, re-sent once a second to everyone within 50 m. Byte-wise and
+    /// allocation-free — a UTF-8 continuation byte is never under 0x80, so replacing ASCII control bytes cannot split a character.
+    /// </remarks>
+    public static Utf8Text256 Normalize(in Utf8Text256 text)
+    {
+        var source = text.Utf8;
+        Span<byte> buffer = stackalloc byte[Utf8Text256.Capacity];
+        var n = 0;
+        var lines = 1;
+        var lastBreak = true;  // so a break at the start is dropped as a leading blank line
+        foreach (var b in source)
+        {
+            if (b == (byte)'\n')
+            {
+                if (lastBreak)
+                {
+                    continue;
+                }
+
+                if (lines == MaxLines)
+                {
+                    buffer[n++] = (byte)' ';
+                    continue;
+                }
+
+                lines++;
+                lastBreak = true;
+                buffer[n++] = b;
+                continue;
+            }
+
+            lastBreak = false;
+            buffer[n++] = b < 0x20 || b == 0x7F ? (byte)' ' : b;
+        }
+
+        // A trailing break would be an empty last line.
+        if (n > 0 && buffer[n - 1] == (byte)'\n')
+        {
+            n--;
+        }
+
+        return Utf8Text256.FromUtf8(buffer[..n]);
+    }
 }

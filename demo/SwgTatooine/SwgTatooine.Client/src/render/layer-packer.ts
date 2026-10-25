@@ -128,6 +128,11 @@ export interface CrowdBody {
   hits: number;
   /** A player's replicated `down` (the server's `Downed`: 0 up, 1 knocked out, 2 dead): it lies, and falls the matching way. */
   down: number;
+  /**
+   * A player's replicated `outfit`: one plus an index into the server's player outfits (`AssetSet.players`), or 0 for a
+   * body the server dressed in nothing — every non-player, and the scripted crowd — which its layer dresses by netId.
+   */
+  look: number;
 }
 
 /**
@@ -155,6 +160,7 @@ export function crowdSlot(bodies: CrowdBody[], n: number): CrowdBody {
       stance: 0,
       hits: 0,
       down: 0,
+      look: 0,
     });
   }
 
@@ -196,6 +202,8 @@ interface FieldReaders {
   readonly target: FieldArray | null;
   /** Whether a player is down, and how; `null` for every other archetype. */
   readonly down: FieldArray | null;
+  /** A player's replicated `outfit` (one plus an index into the server's player outfits, 0 none); `null` for every other archetype. */
+  readonly look: FieldArray | null;
   /** Whether {@link style} is a creature template, which the crowd draws the body by. */
   readonly creature: boolean;
 }
@@ -210,6 +218,7 @@ const NO_FIELDS: FieldReaders = {
   skin: null,
   stance: null,
   down: null,
+  look: null,
   target: null,
   creature: false,
 };
@@ -236,6 +245,7 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         skin: null,
         stance: null,
         down: null,
+        look: null,
         target: null,
         creature: false,
       };
@@ -250,6 +260,7 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         skin: null,
         stance: null,
         down: null,
+        look: null,
         target: null,
         creature: false,
       };
@@ -264,6 +275,7 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         skin: optional(store, 'skin'),
         stance: null,
         down: null,
+        look: null,
         target: optional(store, 'target'),
         creature: true,
       };
@@ -278,6 +290,7 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         skin: null,
         stance: null,
         down: null,
+        look: null,
         target: null,
         creature: false,
       };
@@ -292,6 +305,7 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         skin: null,
         stance: optional(store, 'stance'),
         down: optional(store, 'down'),
+        look: optional(store, 'outfit'),
         target: null,
         creature: false,
       };
@@ -571,6 +585,7 @@ export class LayerPacker {
           body.dead = fields.creature && fields.mode !== null && fields.mode[slot] === AiMode.Dead;
           body.stance = fields.stance === null ? 0 : fields.stance[slot];
           body.down = fields.down === null ? 0 : fields.down[slot];
+          body.look = fields.look === null ? 0 : fields.look[slot];
           body.outfit = -1;
           view.crowdCount++;
           // <b>Only STOP drawing the box once the crowd is known to be drawing a body in its place.</b> Diverting

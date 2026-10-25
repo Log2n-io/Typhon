@@ -511,7 +511,9 @@ public static class TatooineHost
             // The last figure is how wide a body is, which the client needs to predict the same push-out this server
             // applies. Told for the reason every speed is told: a figure mirrored in a client is one this server can
             // never correct.
-            var radiusM = Json(TatooineReplication.PlayerRadiusM);
+            // The floor the ENGINE holds a session to — its profile's own radius — and not the bots' 192 m: a slider offered less asked for a radius
+            // SetRadius throws on, and the throw stopped the world.
+            var radiusM = Json(TatooineReplication.PlayerMinAskRadiusM);
             var maxRadiusM = Json(TatooineReplication.PlayerMaxRadiusM);
             // The DEFAULT as well as the two ends, because they are three different numbers: the floor is what a session
             // may narrow itself to, the ceiling is what the grid's window allows, and the default is what this profile
@@ -556,6 +558,9 @@ public static class TatooineHost
         {
             app.MapGet("/typhon/realms.json", () => Results.Text(realmInventory(), "application/json"));
         }
+
+        // The names behind a player's replicated `nameId` (A12): asked once per id a client meets, cached by it for the session.
+        app.MapGet("/typhon/names", (string ids) => Results.Text(PlayerNames.Json(ids), "application/json"));
 
         // A double as JSON, or 0 for one JSON cannot express. See the note at its call site.
         static string Json(double value) =>

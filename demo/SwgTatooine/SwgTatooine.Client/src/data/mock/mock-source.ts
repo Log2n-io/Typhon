@@ -126,6 +126,11 @@ export class MockSource implements DataSource, LatencyControl {
 
   setStance(): void {}
 
+  /** Nobody in the mock is listening. */
+  say(): boolean {
+    return false;
+  }
+
   /** The mock serves its whole world to every camera already. */
   setOverview(): void {}
 

@@ -1140,6 +1140,38 @@ public struct PlayerControl
 }
 
 /// <summary>
+/// What a player looks like: the outfit its character wears, as everyone watching draws it (Loïc, 2026-10-25: "each machine display its own character with
+/// the casual2_male skin, but I dont see this skin on the character of my other session").
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>The character's, copied onto the body at spawn</b> (<see cref="Character.Outfit"/>): a look is something a person keeps across sessions, so it is
+/// persisted with the character and the body only carries it for the wire. Before it, a client drew its own avatar as one constant and every other player as
+/// whatever its netId hashed to — so two sessions never agreed on what either of them looked like.
+/// </para>
+/// <para>
+/// <b>A component of its own, for the reason <see cref="PlayerControl"/> is one.</b> It is written once, at spawn, and never again; next to state that changes
+/// it would ride every change of that state's cluster for nothing, and it would widen a column every system walks.
+/// </para>
+/// <para>Zero is "no look": the pooled crowd's scripted players are spawned without one and are dressed by netId, as before.</para>
+/// <para>
+/// <b>Also the name, as an id</b> (A12): what others read on the player, resolved by a client over <c>/typhon/names</c>
+/// (<see cref="PlayerNames"/>). The text itself on the body — a <c>String64</c> — took the archetype's clusters from 25 players to 10; this
+/// 8-byte component keeps them at 24. It is the place for the customisation that will follow the outfit, for the same reason.
+/// </para>
+/// </remarks>
+[Component("Swg.PlayerLook", 2, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct PlayerLook
+{
+    /// <summary>One plus an index into <see cref="TatooineData.PlayerOutfits"/>, or 0 for none. On the wire once, on enter: it never changes.</summary>
+    [Field, OnEnter(CodecKind.U8, Name = "outfit", Saturate = true)] public byte Outfit;
+
+    /// <summary>The character's name as a <see cref="PlayerNames"/> id, 0 for none (the scripted crowd). On the wire once, on enter.</summary>
+    [Field, OnEnter(CodecKind.U32, Name = "nameId")] public uint NameId;
+}
+
+/// <summary>
 /// Which session drives this player and what it is aiming at. Read only where an intent is applied, never on the per-tick guard.
 /// </summary>
 /// <remarks>

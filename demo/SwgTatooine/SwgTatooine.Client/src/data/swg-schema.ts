@@ -178,6 +178,7 @@ export const STRUCTURE_KIND_NAMES: readonly string[] = [
   'Room',
   'Bazaar',
   'Mission terminal',
+  'Town hall',
 ];
 export const StructureKind = {
   Building: 0,

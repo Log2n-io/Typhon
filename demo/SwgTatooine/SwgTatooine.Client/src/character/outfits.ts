@@ -213,6 +213,20 @@ export function wearableOutfits(described: ReadonlyMap<string, Descriptor>): str
 }
 
 /**
+ * What a person reads for an outfit's asset id: `casual2_male` is "Casual 2 (male)", `casual_bald` "Casual (bald)",
+ * `kimono_female` "Kimono (female)". The id is the publisher's; this only spells it for a form.
+ */
+export function outfitLabel(id: string): string {
+  const parts = id.split('_').filter((p) => p.length > 0);
+  const last = parts.length > 1 ? parts[parts.length - 1] : '';
+  const qualifier = last === 'male' || last === 'female' || last === 'bald' || last === 'hair' ? last : '';
+  const words = (qualifier === '' ? parts : parts.slice(0, -1)).map((p) =>
+    p.replace(/^([a-z]+)(\d+)$/, '$1 $2').replace(/^./, (c) => c.toUpperCase()),
+  );
+  return qualifier === '' ? words.join(' ') : `${words.join(' ')} (${qualifier})`;
+}
+
+/**
  * Which outfit a body wears, stable for as long as it is the same body.
  *
  * <b>Derived from the netId, not drawn at random and not stored.</b> A body that changed clothes between frames would

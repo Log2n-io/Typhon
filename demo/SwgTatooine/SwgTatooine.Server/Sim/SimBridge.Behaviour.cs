@@ -512,22 +512,22 @@ public sealed partial class SimBridge
     /// How often a simulated player says something, in seconds of simulated time (SWG-09).
     /// </summary>
     /// <remarks>
-    /// A minute is a compromise between a town that feels alive and a wire that is mostly chatter. It is a demo figure
-    /// and not an engine one: what it sets is how much work the 50 m fan-out is given to do, which is the thing worth
-    /// watching. Players are slower than the townsfolk below because there are far fewer of them per square metre.
+    /// A demo figure and not an engine one: what it sets is how much work the 50 m fan-out is given to do, which is the thing
+    /// worth watching. It was a minute; two since speech is drawn as a bubble over the speaker (2026-10-25), because a town
+    /// square of scripted players talking once a minute each is a wall of text. See <see cref="NpcChatEverySeconds"/>.
     /// </remarks>
-    private const float ChatEverySeconds = 60f;
+    private const float ChatEverySeconds = 120f;
 
     /// <summary>
     /// How often a city NPC says something, in seconds of simulated time (SWG-09).
     /// </summary>
     /// <remarks>
-    /// <b>Set by the geometry, not by taste.</b> A listener hears what is within 50 m of ITS OWN viewpoint — for a map
-    /// client, the centre of its region — and a town at these populations puts only about two NPCs in that disc. A
-    /// leisurely cadence there is a line every half minute at the point the camera is aimed at, which reads as broken,
-    /// so this is deliberately brisk.
+    /// <b>Set by what the screen shows, now that speech is a bubble over the speaker</b> (Loïc, 2026-10-25: "it's too much
+    /// right now, makes it too crowdy on screen"). It was 8 s, chosen when speech was only a line in the chat panel and a
+    /// silent panel read as broken; drawn over heads, the same rate put ten bubbles at once over a town square. Five times
+    /// slower keeps a town audibly alive and leaves the bubbles readable — and a player's own line stands out.
     /// </remarks>
-    private const float NpcChatEverySeconds = 8f;
+    private const float NpcChatEverySeconds = 40f;
 
     /// <summary>
     /// Player behaviour: an activity mix rather than one loop.

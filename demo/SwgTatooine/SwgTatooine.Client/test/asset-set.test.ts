@@ -62,7 +62,18 @@ describe('the announced asset set', () => {
       structures: [],
       collision: [],
       creatures: [],
+      players: [],
     });
+  });
+
+  it("reads the players' outfits in order, keeping a malformed entry's place", async () => {
+    // A player replicates one plus an INDEX into this: dropping a bad entry would re-dress every player after it.
+    globalThis.fetch = answering({
+      ...DEMO,
+      assets: { ...DEMO.assets, players: ['casual2_male', 7, 'kimono_female'] },
+    });
+    const config = await fetchServerConfig();
+    expect(config?.assets?.players).toEqual(['casual2_male', '', 'kimono_female']);
   });
 
   it('is absent from a server that serves none, which is a working run', async () => {

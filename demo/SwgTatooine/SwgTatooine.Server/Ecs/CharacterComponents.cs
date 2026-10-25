@@ -24,9 +24,10 @@ namespace SwgTatooine.Server;
 /// of walking rather than a session. Reading it for anything other than deciding where to spawn is a bug waiting to happen.
 /// </para>
 /// </remarks>
-// Pack = 4 on the analyzer's advice: 8 + 64 + 8 + 12 + 2 + 8 is 102 bytes of field, which the longs would otherwise round to 112
-// — and 104 packed. Both fit the inline spawn payload (TYPHON013), with room for the fields A5 and G will add.
-[Component("Swg.Character", 1, StorageMode = StorageMode.Versioned)]
+// Pack = 4 on the analyzer's advice: 8 + 64 + 8 + 12 + 2 + 1 + 8 is 103 bytes of field, which the longs would otherwise round to 112
+// — and 104 packed: the outfit sits in what was the padding after the realm. Both fit the inline spawn payload (TYPHON013), with room
+// for the fields G will add.
+[Component("Swg.Character", 2, StorageMode = StorageMode.Versioned)]
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public struct Character
 {
@@ -87,6 +88,17 @@ public struct Character
     /// </remarks>
     [Field]
     public ushort LastRealm;
+
+    /// <summary>
+    /// The outfit this character wears, as one plus an index into <see cref="TatooineData.PlayerOutfits"/>; 0 for none, which a client draws by netId.
+    /// </summary>
+    /// <remarks>
+    /// Chosen once, when the character is created (<see cref="TatooineData.OutfitFor"/>), and copied onto every body it spawns (<see cref="PlayerLook"/>):
+    /// what a person looks like is theirs to keep across sessions, and every client watching must agree on it. Choosing one is a character-creation screen
+    /// away; until then the server picks.
+    /// </remarks>
+    [Field]
+    public byte Outfit;
 
     /// <summary>When <see cref="LastPosition"/> and <see cref="LastRealm"/> were written, UTC ticks.</summary>
     /// <remarks>

@@ -140,6 +140,16 @@ export interface FrameStats {
   readonly terrainFinestM: number;
   /** True when the node budget, not the tolerance, decided the detail. */
   readonly terrainCapped: boolean;
+  /**
+   * The tolerance the terrain governor holds above the Detail slider, rendered pixels, because the frame rate is under 60
+   * at the slider's — `null` while it holds the slider's own (`app/terrain-detail.ts`).
+   */
+  readonly terrainAutoPx: number | null;
+  /**
+   * The frame rate the governor found the machine capped at — coarser terrain did not raise it: a browser's battery saver,
+   * a 30 or 50 Hz display — or `null`. While set, the terrain is held at the slider's own detail.
+   */
+  readonly terrainCappedFps: number | null;
   readonly nearRadius: number;
   /** The realm the session is in, or `null` in none — what the scene on screen is supposed to be. */
   readonly realm: RealmView | null;

@@ -158,6 +158,57 @@ public static class TatooineData
     public const float PlayerBodyHalfM = 0.3f;
 
     /// <summary>
+    /// The outfits a player character may wear, by the published asset id; <see cref="Character.Outfit"/> is one plus an index into this. Published to the
+    /// client (<c>AssetOrigin.DemoJson</c>, <c>players</c>) for the reason <see cref="CreatureTemplates.Bodies"/> is: the server says what a body wears.
+    /// </summary>
+    /// <remarks>
+    /// The pack's civilian characters. Not its enemies' — a ninja or a soldier walking a town would read as a camp's — and not <c>base_character</c>, which is
+    /// the rig's reference body rather than a person. <b>Append only</b>: a character stores an index, so reordering this re-dresses every saved character.
+    /// </remarks>
+    public static readonly string[] PlayerOutfits =
+    [
+        "casual2_male",
+        "casual2_female",
+        "casual3_male",
+        "casual3_female",
+        "casual_male",
+        "casual_female",
+        "casual_bald",
+        "kimono_male",
+        "kimono_female",
+    ];
+
+    /// <summary>
+    /// The outfit a new character is given: one plus an index into <see cref="PlayerOutfits"/>, mixed from the account so it is stable for an account and spread
+    /// across accounts created in a run.
+    /// </summary>
+    /// <param name="account">The account the character is created for.</param>
+    /// <returns>A <see cref="Character.Outfit"/> value, never 0.</returns>
+    /// <remarks>
+    /// <b>Mixed, not taken modulo</b>: an entity id is a packed value whose low bits are the engine's to lay out, so <c>raw % count</c> would tie a look to
+    /// how ids happen to be allocated. The MurmurHash3 finaliser makes it depend on the whole id, as the client's <c>outfitFor</c> does for a netId.
+    /// </remarks>
+    public static byte OutfitFor(EntityId account, byte chosen)
+        => IsOutfit(chosen) ? chosen : OutfitFor(account);
+
+    /// <summary>Whether <paramref name="outfit"/> names one of <see cref="PlayerOutfits"/>, one-based. 0 does not: it is "none".</summary>
+    public static bool IsOutfit(int outfit) => outfit >= 1 && outfit <= PlayerOutfits.Length;
+
+    /// <summary>The outfit a new character is given when its account chose none; see <see cref="OutfitFor(EntityId)"/>.</summary>
+    /// <param name="account">The account the character is created for.</param>
+    /// <returns>A <see cref="Character.Outfit"/> value, never 0.</returns>
+    public static byte OutfitFor(EntityId account)
+    {
+        var h = account.RawValue;
+        h ^= h >> 33;
+        h *= 0xff51afd7ed558ccdUL;
+        h ^= h >> 33;
+        h *= 0xc4ceb9fe1a85ec53UL;
+        h ^= h >> 33;
+        return (byte)(1 + (int)(h % (ulong)PlayerOutfits.Length));
+    }
+
+    /// <summary>
     /// How high a step the body climbs without being stopped by it, in metres.
     /// </summary>
     /// <remarks>

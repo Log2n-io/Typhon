@@ -62,6 +62,40 @@ export class CharacterRig {
     return Number.isFinite(low) ? low : Number.NaN;
   }
 
+  /**
+   * The top centre of the drawn body, render space, from the same bounding boxes as {@link lowestY}: what a speech bubble
+   * stands on. False when nothing is drawn.
+   */
+  topCentre(out: { x: number; y: number; z: number }): boolean {
+    let top = Number.NEGATIVE_INFINITY;
+    let minX = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let minZ = Number.POSITIVE_INFINITY;
+    let maxZ = Number.NEGATIVE_INFINITY;
+    for (const mesh of this.instance.meshes) {
+      if (!mesh.isEnabled() || mesh.getTotalVertices() === 0) {
+        continue;
+      }
+
+      mesh.computeWorldMatrix(true);
+      const box = mesh.getBoundingInfo().boundingBox;
+      top = Math.max(top, box.maximumWorld.y);
+      minX = Math.min(minX, box.minimumWorld.x);
+      maxX = Math.max(maxX, box.maximumWorld.x);
+      minZ = Math.min(minZ, box.minimumWorld.z);
+      maxZ = Math.max(maxZ, box.maximumWorld.z);
+    }
+
+    if (!Number.isFinite(top)) {
+      return false;
+    }
+
+    out.x = (minX + maxX) * 0.5;
+    out.y = top;
+    out.z = (minZ + maxZ) * 0.5;
+    return true;
+  }
+
   get clips(): readonly string[] {
     return [...this.groups.keys()];
   }

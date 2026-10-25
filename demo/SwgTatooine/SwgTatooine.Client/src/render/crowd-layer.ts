@@ -196,6 +196,16 @@ export class CrowdLayer {
    */
   isDrawing = false;
 
+  /**
+   * The outfit a body this layer dresses by netId wears, by asset id: what the rigged avatar must wear to look like the
+   * body the crowd would have drawn in its place. `null` when the layer has no outfit to choose from.
+   *
+   * @param netId The body's replicated id.
+   */
+  civilianOutfitOf(netId: number): string | null {
+    return this.hashed.length === 0 ? null : this.outfits[this.hashed[outfitFor(netId, this.hashed.length)]].id;
+  }
+
   constructor(options: CrowdLayerOptions) {
     this.outfits = options.outfits;
     this.plan = options.plan;

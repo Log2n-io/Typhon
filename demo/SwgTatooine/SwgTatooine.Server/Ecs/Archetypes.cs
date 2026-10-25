@@ -178,6 +178,9 @@ public partial class Player : Archetype<Player>
 
     /// <summary>A scripted player's way round a city's buildings. Not projected. See <see cref="PlayerRoute"/>.</summary>
     public static readonly Comp<PlayerRoute> Route = Register<PlayerRoute>();
+
+    /// <summary>The outfit everyone draws this player in and the id of the name they read on it, from its character; 0 for the scripted crowd. See <see cref="PlayerLook"/>.</summary>
+    public static readonly Comp<PlayerLook> Look = Register<PlayerLook>();
 }
 
 /// <summary>

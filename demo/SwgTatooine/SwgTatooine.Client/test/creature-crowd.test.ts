@@ -76,7 +76,7 @@ const KINDS: CreatureKind[] = [
   { name: 'unbuilt', lair: 'creature_nest', bodies: ['dragon'], mission: false },
 ];
 
-function record(netId: number, template = -1, skin = 0): CrowdBody {
+function record(netId: number, template = -1, skin = 0, look = 0): CrowdBody {
   return {
     netId,
     x: 0,
@@ -93,6 +93,7 @@ function record(netId: number, template = -1, skin = 0): CrowdBody {
     stance: 0,
     hits: 0,
     down: 0,
+    look,
   };
 }
 
@@ -108,6 +109,34 @@ describe('the crowd router', () => {
     expect(r.layers[0].bodies[1].outfit).toBe(2);
     expect(r.layers[1].count).toBe(1);
     expect(r.layers[1].bodies[0].netId).toBe(3);
+  });
+
+  it("dresses a player in its character's outfit, the same on every client, and the scripted crowd by netId", () => {
+    // `look` is one plus an index into the server's table: 1 is casual2_male, third in this crowd; 2 casual_male, first.
+    const r = new CrowdRouter(
+      KINDS,
+      ['casual_male', 'ninja_male', 'casual2_male'],
+      ['rat'],
+      ['casual2_male', 'casual_male'],
+    );
+    const bodies = [record(1, -1, 0, 1), record(2, -1, 0, 2), record(3), record(4, -1, 0, 9)];
+    r.route(bodies, 4);
+    expect(r.layers[0].count).toBe(4);
+    expect(bodies[0].outfit).toBe(2);
+    expect(bodies[1].outfit).toBe(0);
+    // No look: the netId decides, as before.
+    expect(bodies[2].outfit).toBe(-1);
+    // A look past the table is a newer server's outfit: drawn as a civilian rather than not at all.
+    expect(bodies[3].outfit).toBe(-1);
+  });
+
+  it('draws a player whose outfit this crowd could not build as a civilian, not as nobody', () => {
+    const r = new CrowdRouter(KINDS, ['casual_male'], ['rat'], ['kimono_female']);
+    const bodies = [record(1, -1, 0, 1)];
+    r.route(bodies, 1);
+    expect(r.unrouted).toBe(0);
+    expect(r.layers[0].count).toBe(1);
+    expect(bodies[0].outfit).toBe(-1);
   });
 
   it('drops a creature whose asset no crowd built, and a template the table does not name, and counts both', () => {

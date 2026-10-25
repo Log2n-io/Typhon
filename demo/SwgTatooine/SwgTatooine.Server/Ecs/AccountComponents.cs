@@ -41,7 +41,7 @@ namespace SwgTatooine.Server;
 /// and an operator can delete an account but never read a password.
 /// </para>
 /// </remarks>
-[Component("Swg.Account", 1, StorageMode = StorageMode.Versioned)]
+[Component("Swg.Account", 2, StorageMode = StorageMode.Versioned)]
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public struct Account
 {
@@ -61,6 +61,18 @@ public struct Account
     /// </remarks>
     [Field]
     public long LastSeenUtcTicks;
+
+    /// <summary>
+    /// The outfit chosen at sign-up, as one plus an index into <see cref="TatooineData.PlayerOutfits"/>; 0 when none was chosen.
+    /// </summary>
+    /// <remarks>
+    /// <b>On the account and not on the character, because the character does not exist yet.</b> Sign-up is an HTTP call off the tick;
+    /// the character is created in the tick, at the first login (<c>BindOneAvatar</c>), and takes its <see cref="Character.Outfit"/> from
+    /// here — or <see cref="TatooineData.OutfitFor"/> when nothing was chosen: a bot's account, an older one, a client that did not ask.
+    /// Changing it afterwards is the economy's to sell (Loïc, 2026-10-25: "a comestic/economy driven thing, you buy it from the bazaar").
+    /// </remarks>
+    [Field]
+    public byte Outfit;
 }
 
 /// <summary>

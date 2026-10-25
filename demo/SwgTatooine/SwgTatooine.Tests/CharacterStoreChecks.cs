@@ -78,6 +78,23 @@ internal sealed class CharacterStoreChecks
         return account;
     }
 
+    /// <summary>
+    /// The off-tick path dresses a new character in the outfit its account chose at sign-up, as the login path does: two ways of making a
+    /// character must not make two different ones.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void ANewCharacterWearsTheOutfitItsAccountChose()
+    {
+        Assert.That(AccountStore.TrySignup(Dbe, "Mon_Mothma", GoodPassword, out var account, 0), Is.EqualTo(AccountStore.SignupOutcome.Created));
+        var chosen = (byte)((TatooineData.OutfitFor(account) % TatooineData.PlayerOutfits.Length) + 1);
+        Assert.That(AccountStore.TrySignup(Dbe, "Bail_Organa", GoodPassword, out var second, chosen), Is.EqualTo(AccountStore.SignupOutcome.Created));
+        Assume.That(TatooineData.OutfitFor(second), Is.Not.EqualTo(chosen), "the account's own pick happens to be the chosen one");
+
+        CharacterStore.ReadOrCreate(Dbe, second, "Bail", in Somewhere, 0, out _, out var profile);
+        Assert.That(profile.Outfit, Is.EqualTo(chosen));
+    }
+
     /// <summary>First login creates the character; the next finds it.</summary>
     [Test]
     [CancelAfter(30_000)]

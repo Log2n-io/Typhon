@@ -150,6 +150,7 @@ function body(netId: number, z: number, speed = 0, mounted = false): CrowdBody {
     stance: 0,
     hits: 0,
     down: 0,
+    look: 0,
   };
 }
 

@@ -695,13 +695,17 @@ public static partial class TatooineReplication
         // and a change that makes binding parallel, or that allows one account two sessions, breaks it.
         if (!TryFindCharacter(tx, account, out var character, out var profile))
         {
+            // The account's own name and the outfit it chose at sign-up (Account.Outfit), else the server's pick. An account gone since
+            // its token was minted reads as none of either.
+            var identity = AccountOf(tx, account);
             profile = new Character
             {
                 Account = account,
-                Name = (String64)DisplayNameFor(account),
+                Name = identity.Name == default(String64) ? (String64)DisplayNameFor(account) : identity.Name,
                 Credits = CharacterStore.StartingCredits,
                 LastPosition = SpawnFor(account),
                 LastRealm = DefaultSpawnRealm,
+                Outfit = TatooineData.OutfitFor(account, identity.Outfit),
                 LastSavedUtcTicks = DateTime.UtcNow.Ticks,
             };
 
@@ -1124,6 +1128,9 @@ public static partial class TatooineReplication
         owner.Controller = session.Value;
         owner.Target = EntityId.Null;
 
+        // What everyone draws this body in, and the name they read on it: the character's own, so every client — this one included — agrees.
+        var look = new PlayerLook { Outfit = profile.Outfit, NameId = PlayerNames.IdFor(profile.Name.AsString) };
+
         return tx.Spawn<Player>(
             Player.Bounds.Set(in bounds),
             Player.Move.Set(in move),
@@ -1132,6 +1139,7 @@ public static partial class TatooineReplication
             Player.Inventory.Set(in inventory),
             Player.Control.Set(in control),
             Player.Session.Set(in owner),
+            Player.Look.Set(in look),
             Player.Realm.Set(new PlayerRealm(profile.LastRealm)));
     }
 
@@ -1141,16 +1149,25 @@ public static partial class TatooineReplication
     /// <summary>An avatar's attack damage, matching the pooled crowd's.</summary>
     private const int AvatarAttackDamage = 95;
 
+    /// <summary>The account's identity — its name and the outfit chosen at sign-up — or a default one for an account gone since its token was minted.</summary>
+    /// <param name="tx">The tick's transaction.</param>
+    /// <param name="account">The account.</param>
+    /// <returns>A copy of its <see cref="Account"/> component.</returns>
+    /// <remarks>An open by entity id, not an index read: the id is what the token carried.</remarks>
+    private static Account AccountOf(Transaction tx, EntityId account)
+    {
+        using var accounts = tx.For<AccountArch>();
+        return accounts.TryOpen(account, out var entity) ? entity.Read(AccountArch.Identity) : default;
+    }
+
     /// <summary>
-    /// The display name a brand-new character gets.
+    /// The display name of a brand-new character whose account cannot be read — the placeholder, now that a character takes its account's name (A12).
     /// </summary>
     /// <param name="account">The account it belongs to.</param>
     /// <returns>A name.</returns>
     /// <remarks>
-    /// <b>Derived from the account id rather than read from the account, and that is a stated shortcut.</b> Reading
-    /// <c>Account.Name</c> would mean a second index read per first login for a string the client cannot be shown anyway — the
-    /// projection compiler refuses <c>Str</c>, so a name reaches a client as an interned <c>u32</c> through A12's catalog, which is
-    /// not built. Until it is, the name is a placeholder nobody renders; A8's login screen is where a person gets to choose one.
+    /// It was every character's name until text became projectable (PR #1096): the name could not reach a client, so reading the account for it
+    /// bought nothing. It now does — <see cref="PlayerLook.NameId"/> carries it — and the account's own name is what others see.
     /// </remarks>
     private static string DisplayNameFor(EntityId account) => "player_" + account.RawValue.ToString("x", System.Globalization.CultureInfo.InvariantCulture);
 

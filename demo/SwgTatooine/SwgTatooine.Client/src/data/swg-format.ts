@@ -1,4 +1,4 @@
-import type { ArchetypeStore } from '@typhondb/client';
+import { isNumericKind, type ArchetypeStore } from '@typhondb/client';
 import { AI_MODE_NAMES, CONTROLLER_NAMES, PLAYER_ACTIVITY_NAMES, STRUCTURE_KIND_NAMES } from './swg-schema';
 import { CREATURE_TEMPLATE_NAMES } from './world-data';
 
@@ -8,11 +8,20 @@ import { CREATURE_TEMPLATE_NAMES } from './world-data';
  * Every field the STORE declares, in its order, formatted. Which fields exist is the catalog's to say: the live catalog
  * gives a creature `aggro`, `mode` and `hp` and no `template`, where the mock gave it a template. Nothing here assumes a
  * field is present, and an archetype is identified by its name.
+ *
+ * <b>Nor that a field is a number.</b> `fieldAt` THROWS for any other kind, and this runs inside the frame (the stats
+ * publish inspects the selection): the day a player gained its text `name` (A12), selecting a player threw on every frame
+ * and froze the HUD — health bar included — on the machine that had one selected (2026-10-25, a MacBook Air).
  */
 export function describeFields(store: ArchetypeStore, slot: number): { name: string; value: string }[] {
   return store.schema.fields.map((field, index) => ({
     name: field.name,
-    value: formatField(store.schema.name, field.name, store.fieldAt(index)[slot]),
+    value:
+      field.kind === 'text'
+        ? store.textAt(index)[slot] || '—'
+        : isNumericKind(field.kind)
+          ? formatField(store.schema.name, field.name, store.fieldAt(index)[slot])
+          : `(${field.kind})`,
   }));
 }
 

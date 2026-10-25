@@ -8,7 +8,9 @@ import type { CrowdBody } from '../render/layer-packer';
  * <b>The server says what a creature IS; this says which mesh that is.</b> A creature replicates its `template` and its
  * `skin`; the server's published table (`CreatureKind`) turns the pair into an asset id; and the id is either one of the
  * characters' outfits — a camp's ninjas and soldiers are dressed from the character pack — or a creature with a crowd of
- * its own. A body nobody dresses (template -1) is a civilian, and its crowd picks a civilian outfit by netId.
+ * its own. A player the server dressed (its `outfit`, from its character) wears that outfit in the characters' crowd, so
+ * every client draws a person the same way. A body nobody dresses (template -1, no outfit) is a civilian, and its crowd
+ * picks a civilian outfit by netId.
  *
  * <b>Strikes are counted here, not in the crowd</b>, because a blow is an EVENT and the crowd is drawn from state. Each
  * `Attack` the server streams adds one to its attacker's count; a crowd body whose count changed plays its attack once.
@@ -42,6 +44,8 @@ export class CrowdRouter {
   private readonly routes: Route[][];
   /** Where a civilian goes: the characters' crowd, dressed by netId; nowhere when there is none. */
   private readonly civilian: Route;
+  /** Per player outfit (`look` - 1): where a player wearing it goes; the civilian route for one the crowd cannot draw. */
+  private readonly looks: Route[];
   private readonly strikesByNetId = new Map<number, number>();
   private readonly hitsByNetId = new Map<number, number>();
 
@@ -49,11 +53,23 @@ export class CrowdRouter {
    * @param kinds The server's creature templates.
    * @param characterOutfits The characters' crowd's outfit ids, in its layer's order; `null` when it is not mounted.
    * @param species Each creature crowd's id, in layer order after the characters.
+   * @param playerOutfits The server's player outfits, which a player's `look` indexes from 1.
    */
-  constructor(kinds: readonly CreatureKind[], characterOutfits: readonly string[] | null, species: readonly string[]) {
+  constructor(
+    kinds: readonly CreatureKind[],
+    characterOutfits: readonly string[] | null,
+    species: readonly string[],
+    playerOutfits: readonly string[] = [],
+  ) {
     const characters = characterOutfits === null ? -1 : 0;
     const first = characters + 1;
     this.civilian = characters < 0 ? NOWHERE : { layer: characters, outfit: -1 };
+    // An outfit the crowd could not build — absent from this catalogue, or refused at the merge — draws the player as a
+    // civilian rather than not at all: a person in the wrong clothes beats a person missing.
+    this.looks = playerOutfits.map((id): Route => {
+      const outfit = characterOutfits?.indexOf(id) ?? -1;
+      return outfit >= 0 ? { layer: characters, outfit } : this.civilian;
+    });
     this.layers = [];
     for (let i = 0; i < first + species.length; i++) {
       this.layers.push({ bodies: [], count: 0 });
@@ -119,7 +135,7 @@ export class CrowdRouter {
       body.hits = this.hitsByNetId.get(body.netId) ?? 0;
       let route: Route;
       if (body.template < 0) {
-        route = this.civilian;
+        route = body.look > 0 && body.look <= this.looks.length ? this.looks[body.look - 1] : this.civilian;
       } else if (body.template < this.routes.length && this.routes[body.template].length > 0) {
         // A template the table does not name, or one with no bodies, goes nowhere rather than reading past the table.
         const skins = this.routes[body.template];

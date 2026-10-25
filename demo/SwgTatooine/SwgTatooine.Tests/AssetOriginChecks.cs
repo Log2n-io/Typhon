@@ -111,6 +111,8 @@ public sealed class AssetOriginChecks
                 // an asset id — the mapping the server owns because it collides against what it names.
                 Assert.That(origin.DemoJson(), Does.StartWith(",\"assets\":{\"base\":\"/assets/\",\"catalogue\":\"catalogue-7.json\","));
                 Assert.That(origin.DemoJson(), Does.Contain("\"structures\":[\"tat_house_large\",\"tat_house_small\""));
+                // What a player's `outfit` names, one-based, in the order a character stores it.
+                Assert.That(origin.DemoJson(), Does.Contain($"\"players\":[\"{string.Join("\",\"", TatooineData.PlayerOutfits)}\"]"));
                 Assert.That(origin.DemoJson(), Does.EndWith("]}"));
             });
         }

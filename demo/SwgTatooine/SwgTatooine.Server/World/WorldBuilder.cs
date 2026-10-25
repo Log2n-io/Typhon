@@ -987,7 +987,7 @@ public static class WorldBuilder
         // where a capacity would have to guess the mix of houses, factories and harvesters a knot happens to draw. It is the CALLER's state because the
         // planner is the planet's, so one full knot must not stop another from being searched.
         //
-        // Held per knot as a SIZE rather than a flag: a knot with no room for a 22 m factory usually still has room for a 6 m harvester, and a flag would
+        // Held per knot as a SIZE rather than a flag: a knot with no room for a 14 m house usually still has room for a 6 m factory, and a flag would
         // send both out to the desert. What the knot has proved is that nothing this big fits, so that is what is remembered.
         var fullAt = new float[sites.Count];
         Array.Fill(fullAt, float.MaxValue);

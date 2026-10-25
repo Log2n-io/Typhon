@@ -266,6 +266,9 @@ public sealed partial class TatooineSim : IDisposable
         // Possession and targeting, split out of PlayerState so a write to it reaches no subscriber (SWG-01). See PlayerControl.
         Dbe.RegisterComponentFromAccessor<PlayerControl>();
         Dbe.RegisterComponentFromAccessor<PlayerSession>();
+
+        // What everyone draws a player in, from its character; written once, at spawn. See PlayerLook.
+        Dbe.RegisterComponentFromAccessor<PlayerLook>();
         Dbe.RegisterComponentFromAccessor<Lair>();
         Dbe.RegisterComponentFromAccessor<Structure>();
         Dbe.RegisterComponentFromAccessor<StructureRegion>();

@@ -23,11 +23,13 @@ import { SCENE_GROUP } from '../render/render-groups';
  */
 
 /**
- * The character the ridden avatar is drawn as.
+ * The character the avatar is drawn as until it knows whom it stands in for.
  *
- * One asset, chosen here rather than replicated: what a body looks like is not yet on the wire, and a constant is the
- * honest placeholder for a field that does not exist. `casual2_male` is the testbench's own demo character, so the two
- * show the same person.
+ * <b>Only the first outfit, no longer the only one.</b> What a player looks like is on the wire (`outfit`, from its
+ * character) and the app re-dresses the avatar to it through {@link AssetMount.wear} — until 2026-10-25 this constant was
+ * what EVERY client drew its own avatar as, while it drew everyone else by netId, so no two sessions agreed on what either
+ * of them looked like. `casual2_male` is the testbench's own demo character, and loading it at boot keeps the avatar's
+ * first frame a person rather than a capsule.
  */
 const AVATAR_ASSET = 'casual2_male';
 
@@ -58,13 +60,24 @@ export interface AssetMount {
   /** The node every placement hangs off, which carries the render origin; see {@link AssetMount.rebase}. */
   readonly root: TransformNode;
   readonly lighting: SceneLighting;
-  /** The rigged avatar, or `null` when the catalogue publishes no character to be one. */
+  /** The rigged avatar, or `null` when the catalogue publishes no character to be one. Replaced by {@link wear}. */
   readonly character: CharacterMount | null;
   /**
    * The same character at {@link GHOST_ALPHA}, drawn where the SERVER says the avatar is while "Server pos" is on, beside
    * the predicted one; `null` when there is no avatar.
    */
   readonly ghost: CharacterMount | null;
+  /** The asset the avatar is drawn as now, or the one it is being re-dressed in; `null` with no avatar. */
+  readonly wearing: string | null;
+  /**
+   * Re-dresses the avatar and its ghost in another character asset. The old rigs keep drawing until the new ones have
+   * loaded, then are disposed; the caller re-applies everything per-frame (subject, riding, weapon, opacity) on the next
+   * frame, as it does every frame. A request for what is already worn, or being put on, does nothing; one that fails
+   * keeps the old outfit and is not retried.
+   *
+   * @param assetId A `kind: "character"` asset with animations.
+   */
+  wear(assetId: string): void;
   /**
    * Moves the arrangement to follow the render origin. Called every frame; cheap, because it moves one node.
    *
@@ -141,16 +154,74 @@ export async function mountAssets(
       (character === null ? ', no avatar' : `, avatar ${AVATAR_ASSET} ${character.height.toFixed(2)} m`),
   );
 
+  // `wearing` is what was last asked for, `drawn` what the rigs are: they differ while a new outfit loads.
+  let wearing: string | null = character === null ? null : AVATAR_ASSET;
+  let drawn = wearing;
+  const refused = new Set<string>();
+  let disposed = false;
   return {
     library,
     root,
     lighting,
-    character,
-    ghost,
+    get character() {
+      return character;
+    },
+    get ghost() {
+      return ghost;
+    },
+    get wearing() {
+      return wearing;
+    },
+    wear(assetId: string): void {
+      // No avatar at all is a catalogue without characters; re-dressing cannot create one.
+      if (character === null || assetId === wearing || refused.has(assetId)) {
+        return;
+      }
+
+      if (library.catalogue.assets[assetId] === undefined) {
+        refused.add(assetId);
+        console.warn(`assets: ${assetId} is not in ${library.version}; the avatar keeps ${String(wearing)}`);
+        return;
+      }
+
+      const asked = assetId;
+      wearing = asked;
+      void (async () => {
+        let next: CharacterMount | null = null;
+        let nextGhost: CharacterMount;
+        try {
+          next = await mountCharacter(library, asked, root, lighting);
+          nextGhost = await mountCharacter(library, asked, root, lighting, GHOST_ALPHA);
+        } catch (error) {
+          next?.dispose();
+          refused.add(asked);
+          console.warn(`assets: ${asked} did not mount; the avatar keeps its outfit`, error);
+          if (wearing === asked) {
+            wearing = drawn;
+          }
+
+          return;
+        }
+
+        // Superseded while loading — a later wear, or the whole mount gone: this one is nobody's.
+        if (disposed || wearing !== asked) {
+          next.dispose();
+          nextGhost.dispose();
+          return;
+        }
+
+        character.dispose();
+        ghost?.dispose();
+        character = next;
+        ghost = nextGhost;
+        drawn = asked;
+      })();
+    },
     rebase(originX: number, originZ: number): void {
       root.position.set(-originX, 0, -originZ);
     },
     dispose(): void {
+      disposed = true;
       character?.dispose();
       ghost?.dispose();
       root.dispose();

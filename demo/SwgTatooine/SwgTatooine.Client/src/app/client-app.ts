@@ -49,11 +49,19 @@ import { altitudeField, altitudeOf, Placement } from '../data/placement';
 import type { HealthBar } from '../render/labels';
 import { DamageText, type Anchor } from '../render/damage-text';
 import type { AnimationGraph } from '../character/animation-graph';
+import { PlayerNameDirectory } from '../data/player-names';
 import { replicationStatsOf } from '../data/replication-stats';
 import type { AssetSet } from '../data/server-config';
 import { SpeedClass, type DataSource, type EventSink } from '../data/source';
 import { describeFields } from '../data/swg-format';
-import { AGG_GRID, FASTEST_TICK_PERIOD_MS, StructureKind, SWG_SCHEMA, TICK_PERIOD_MS } from '../data/swg-schema';
+import {
+  AGG_GRID,
+  FASTEST_TICK_PERIOD_MS,
+  STRUCTURE_KIND_NAMES,
+  StructureKind,
+  SWG_SCHEMA,
+  TICK_PERIOD_MS,
+} from '../data/swg-schema';
 import { CITIES, PLANET_HALF_EXTENT_M } from '../data/world-data';
 import { AttackLines } from '../render/attack-lines';
 import { CombatFx } from '../render/combat-fx';
@@ -80,6 +88,7 @@ import type { SceneProfile } from '../render/scene-profile';
 import { Heightfield } from '../terrain/heightfield';
 import type { TerrainBaked } from '../terrain/terrain.worker';
 import { Labels } from '../render/labels';
+import { SpeechBubbles, type BubbleAnchor } from '../render/speech-bubbles';
 import { SHUTTLEPORT_STYLE, styleFor } from '../render/styles';
 import {
   RenderOrigin,
@@ -130,6 +139,7 @@ import { useUi, type NavRow, type ShuttleportPrompt, type UiState } from '../sta
 import { NAV_KINDS, navLabel, nearestFacilities, relativeBearing, type NavTarget } from './nav-finder';
 import { nearestShuttleport } from './shuttle';
 import { nextTravel } from './travel';
+import { TerrainDetailGovernor } from './terrain-detail';
 import { CURSORS, cursorFor, selectionTone, type CursorSubject } from './game-cursor';
 import {
   bodyBox,
@@ -413,6 +423,8 @@ export class ClientApp {
   private readonly scene: Scene;
   private readonly camera: FreeCamera;
   private readonly instrumentation: SceneInstrumentation;
+  /** The terrain's tolerance under 60 fps (`terrain-detail.ts`). */
+  private readonly terrainDetail = new TerrainDetailGovernor();
   private readonly mapCamera = new MapCamera();
   private readonly eyeCamera = new EyeCamera();
   private readonly input: CameraInput;
@@ -451,6 +463,9 @@ export class ClientApp {
   /** The event sink the source is handed: the debug lines and the effects, each told of every blow. */
   private readonly events: EventSink;
   private readonly labels: Labels;
+  /** What is said, over the speaker's head (2026-10-25, Loïc). */
+  private readonly bubbles: SpeechBubbles;
+  private readonly unsubscribeChat: () => void;
   /** The hover and selection frames (2026-10-25, Loïc): the corners of the rectangle a body covers on screen. */
   private readonly frames: SelectionFrames;
   /** The long press's ring and disc (`press-ring.ts`). */
@@ -590,6 +605,10 @@ export class ClientApp {
   /** The netId and archetype {@link selectionText} was built for: netIds are reused, by another archetype too. */
   private selectionTextNetId = 0;
   private selectionTextArchetype = -1;
+  /** The {@link names} version the selection's text was built against: a name arriving later rebuilds it. */
+  private selectionTextNames = -1;
+  /** The names behind players' replicated `nameId`s (A12), asked for once per id. */
+  private readonly names = new PlayerNameDirectory();
   /**
    * The published assets, once mounted, or `null` on a run whose server announced none.
    *
@@ -717,10 +736,22 @@ export class ClientApp {
         this.fx.push(tick, attacker, target, damage);
       },
       onChat: (tick, speaker, text) => {
-        this.attacks.onChat(tick, speaker, text);
+        const own = speaker !== 0 && speaker === (this.source?.selfNetId ?? 0);
+        this.attacks.onChat(tick, speaker, text, own);
+        this.bubbles.say(speaker, text, performance.now());
       },
     };
     this.labels = new Labels(overlay);
+    this.bubbles = new SpeechBubbles(overlay);
+    // The chat box speaks through whatever source is live; a session that cannot speak answers false and keeps the line.
+    useChat.getState().setSpeak((text) => this.source?.say(text) ?? false);
+    // A chat cleared is a room left — a reconnect, a realm crossed — and the netIds the bubbles are keyed by are the old
+    // room's: a bubble kept would float over whichever body was given the number next.
+    this.unsubscribeChat = useChat.subscribe((state, previous) => {
+      if (state.lines.length === 0 && previous.lines.length !== 0) {
+        this.bubbles.clear();
+      }
+    });
     this.frames = new SelectionFrames(overlay);
     this.pressRing = new PressRing(overlay);
 
@@ -1091,6 +1122,9 @@ export class ClientApp {
     this.source?.dispose();
     this.source = null;
     this.labels.dispose();
+    this.unsubscribeChat();
+    useChat.getState().setSpeak(() => false);
+    this.bubbles.dispose();
     this.frames.dispose();
     this.pressRing.dispose();
     this.attacks.dispose();
@@ -1172,6 +1206,7 @@ export class ClientApp {
 
     // What the last session was told is not this one's to show: a reconnect or a source change starts the room empty.
     useChat.getState().clear();
+    this.names.clear();
     this.clock = new Clock(CLOCK_OPTIONS);
 
     // The world the context offers is the one a source that does not own its own fills — the mock. A live connection can
@@ -3163,7 +3198,9 @@ export class ClientApp {
     // slider asked for on every HiDPI display. Sprites, labels, lines and the pick are deliberately CSS-pixel
     // quantities — a 12 px dot is 12 px to the viewer whatever the backing store does — so only this one is scaled.
     g.pixelsPerMetre = view.pixelsPerMetre * this.renderScale;
-    g.pixelTolerance = ui.terrainPixelError;
+    // The Detail slider is the floor; under 60 fps the governor coarsens above it, and back as the frame rate holds
+    // (`terrain-detail.ts`).
+    g.pixelTolerance = this.terrainDetail.update(now, this.engine.getDeltaTime(), ui.terrainPixelError);
     this.frameSun(ui.shadows, cam.targetX, cam.targetZ, view.originX, view.originZ);
     g.nearRadius = nearRadius;
     g.heatMask = this.heatMask;
@@ -3217,6 +3254,10 @@ export class ClientApp {
         this.labels.hideSelection();
       }
     }
+
+    // Speech over its speakers, labels shown or not: what is said is the game's, not a debugging overlay.
+    this.bubbleMatrix = matrix;
+    this.bubbles.update(this.cssSize.width, this.cssSize.height, now, this.speakerAnchor);
 
     this.frameJs[this.frameJsNext] = performance.now() - now;
     this.frameJsNext = (this.frameJsNext + 1) % FRAME_SAMPLES;
@@ -3578,10 +3619,26 @@ export class ClientApp {
     // renderer's own meshes do: `headingOf`'s fallback, not a snap to north.
     this.selectedY = this.evalY;
     this.selectedHeading = headingOf(this.evalVx, this.evalVz, this.selectedHeading);
-    if (this.selectionTextNetId !== netId || this.selectionTextArchetype !== this.evalArchetype) {
+    if (
+      this.selectionTextNetId !== netId ||
+      this.selectionTextArchetype !== this.evalArchetype ||
+      this.selectionTextNames !== this.names.version
+    ) {
       this.selectionTextNetId = netId;
       this.selectionTextArchetype = this.evalArchetype;
-      this.selectionText = `${this.archetypes.label(this.evalArchetype)} #${netId}`;
+      this.selectionTextNames = this.names.version;
+      // A structure is named for what it is — "Mission terminal", "Bazaar" (2026-10-25, Loïc) — and no number: there is
+      // one thing of that name where the viewer is looking. A real player by its account's name (A12: the replicated
+      // `nameId`, resolved over HTTP, same day); the scripted crowd carries none. Everything else keeps its archetype and
+      // netId — and a player whose name has not arrived yet keeps it until it does.
+      const archetype = this.archetypes.name(this.evalArchetype);
+      const kindName =
+        archetype === STRUCTURE_ARCHETYPE
+          ? STRUCTURE_KIND_NAMES[this.fieldOf(netId, 'kind')]
+          : archetype === 'Player'
+            ? (this.names.nameOf(this.fieldOf(netId, 'nameId')) ?? undefined)
+            : undefined;
+      this.selectionText = kindName ?? `${this.archetypes.label(this.evalArchetype)} #${netId}`;
     }
 
     return true;
@@ -3944,6 +4001,29 @@ export class ClientApp {
     }
   }
 
+  /**
+   * The character asset the rigged avatar wears while it stands in for `netId`: a player's replicated `outfit` through the
+   * server's table, or — for a body the server dressed in nothing, a scripted player or a townsperson — the outfit the
+   * crowd dresses it in by netId. `null` keeps whatever is worn: a creature, or no crowd to ask.
+   *
+   * <b>The crowd's rule, not a second one.</b> The avatar replaces the crowd body for the subject (`drawnElsewhere`), so
+   * any other answer is a body that changes clothes as it is ridden and released.
+   */
+  private avatarOutfitOf(netId: number): string | null {
+    const name = this.archetypeName(netId);
+    if (name !== 'Player' && name !== 'CityNpc') {
+      return null;
+    }
+
+    const look = this.fieldOf(netId, 'outfit');
+    const players = this.assetSet?.players ?? [];
+    if (look > 0 && look <= players.length && players[look - 1] !== '') {
+      return players[look - 1];
+    }
+
+    return this.crowd?.layer.civilianOutfitOf(netId) ?? null;
+  }
+
   /** The name of the archetype an entity in view belongs to, or `null`. */
   private archetypeName(netId: number): string | null {
     const location = this.world.locate(netId);
@@ -3969,6 +4049,45 @@ export class ClientApp {
     out.x = this.evalX;
     out.y = this.evalY + this.heightOf(netId) + 0.25;
     out.z = this.evalZ;
+    return true;
+  };
+
+  /** This frame's view-projection, for {@link speakerAnchor}: set just before the bubbles are placed. */
+  private bubbleMatrix: ArrayLike<number> = [];
+  private readonly bubbleTop = { x: 0, y: 0, z: 0 };
+
+  /**
+   * Where a speaker's bubble stands: the top centre of what it was DRAWN as this frame. This session's own body is the
+   * rigged avatar, measured from its meshes' bounds (the predicted position, on its swoop's seat while riding); anyone
+   * else is the top edge of the box its layer drew — the rectangle the selection frame and tag use. Bound once.
+   */
+  private readonly speakerAnchor = (netId: number, out: BubbleAnchor): boolean => {
+    const matrix = this.bubbleMatrix;
+    const width = this.cssSize.width;
+    const height = this.cssSize.height;
+    const character = this.assets?.character ?? null;
+    if (character !== null && character.subjectNetId === netId) {
+      const top = this.bubbleTop;
+      if (!character.rig.topCentre(top)) {
+        return false;
+      }
+
+      const s = projectToScreen(matrix, top.x, top.y, top.z, width, height, this.frameScreen);
+      out.x = s.x;
+      out.y = s.y;
+      out.depth = s.w;
+      return Number.isFinite(s.x);
+    }
+
+    if (!this.frameOf(matrix, netId, width, height)) {
+      return false;
+    }
+
+    const r = this.frameRect;
+    const d = this.drawn;
+    out.x = (r.left + r.right) * 0.5;
+    out.y = r.top;
+    out.depth = projectToScreen(matrix, d.x, d.y, d.z, width, height, this.frameScreen).w;
     return true;
   };
 
@@ -4370,6 +4489,13 @@ export class ClientApp {
       return 0;
     }
 
+    // Dressed as the crowd would have drawn this body, so the one a person steers looks to them as it looks to everyone
+    // else. Cheap when it is already worn; the swap itself lands on a later frame.
+    const outfit = this.avatarOutfitOf(subject);
+    if (outfit !== null) {
+      this.assets?.wear(outfit);
+    }
+
     // What the server says this session's gaits are worth. NaN until the owner block arrives, which the tuning reads as
     // "no figures yet" and answers with the clips' own speeds rather than with a gait it invented.
     if (live !== null) {
@@ -4674,7 +4800,7 @@ export class ClientApp {
     }
 
     this.creatureCrowds = mounted;
-    this.crowdRouter = new CrowdRouter(set.creatures, this.crowd?.outfits.map((o) => o.id) ?? null, ids);
+    this.crowdRouter = new CrowdRouter(set.creatures, this.crowd?.outfits.map((o) => o.id) ?? null, ids, set.players);
   }
 
   /**
@@ -4860,6 +4986,8 @@ export class ClientApp {
       terrainNodes: this.profile.stats.nodes,
       terrainFinestM: this.profile.stats.finestM,
       terrainCapped: this.profile.stats.capped,
+      terrainAutoPx: this.terrainDetail.coarsened ? this.terrainDetail.tolerance : null,
+      terrainCappedFps: this.terrainDetail.cappedFps,
       nearRadius,
       source,
       realm: this.source?.realm ?? null,

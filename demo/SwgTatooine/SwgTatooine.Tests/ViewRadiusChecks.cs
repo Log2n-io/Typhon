@@ -184,12 +184,19 @@ internal sealed class ViewRadiusChecks : ServedChecks
 
         player.AskRadius(16);
         SessionHarness.Until(() => TatooineReplication.ViewRadiusAsks.Refused >= 2, "the undersized radius to be refused");
+
+        // Above the bots' 192 m and under the human profile's own 1 024 m: the band the check used to let through to the engine's SetRadius, which threw
+        // on the tick and stopped the world (2026-10-25, 600 m from a browser). Refused, and the world still ticks after it.
+        var tick = sim.Runtime.CurrentTickNumber;
+        player.AskRadius((uint)((TatooineReplication.PlayerRadiusM + TatooineReplication.PlayerMinAskRadiusM) / 2d));
+        SessionHarness.Until(() => TatooineReplication.ViewRadiusAsks.Refused >= 3, "the radius under the profile's own to be refused");
         Harness.Ticks(5);
 
         var sink = player.Drain();
         Assert.Multiple(() =>
         {
-            Assert.That(TatooineReplication.ViewRadiusAsks.Refused, Is.EqualTo(2), "the refusal count is the only number that says anything is trying");
+            Assert.That(TatooineReplication.ViewRadiusAsks.Refused, Is.EqualTo(3), "the refusal count is the only number that says anything is trying");
+            Assert.That(sim.Runtime.CurrentTickNumber, Is.GreaterThan(tick + 4), "the world stopped ticking after the ask");
             Assert.That(TatooineReplication.ViewRadiusAsks.Applied, Is.Zero, "a refused radius was counted as applied");
             Assert.That(sink.Refusals, Has.Member(TatooineReplication.ViewRadiusRefused), "the client was not told why its radius was refused");
             Assert.That(player.Holding(nameof(WorldObject)), Is.EqualTo(before), "a refused radius changed what the session holds");

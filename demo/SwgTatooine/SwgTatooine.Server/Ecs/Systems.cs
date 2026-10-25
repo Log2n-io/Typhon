@@ -690,9 +690,12 @@ internal sealed class PlayerSessionSystem : CallbackSystem
         .Writes<PlayerSession>()
         .Writes<PlayerRealm>()
         .Writes<Inventory>()
+        .Writes<PlayerLook>()
 
-        // A6 saves the avatar's position onto its character, and a first login creates the character, both on this tick.
-        .Writes<Character>();
+        // A6 saves the avatar's position onto its character, and a first login creates the character, both on this tick — dressed in the outfit its
+        // account chose at sign-up.
+        .Writes<Character>()
+        .Reads<Account>();
 
     protected override void Execute(TickContext ctx) => TatooineReplication.SessionTick(ctx);
 }

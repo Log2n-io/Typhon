@@ -41,6 +41,9 @@ public static class AccountStore
 
         /// <summary>The password does not pass <see cref="PasswordHash"/>'s length rules.</summary>
         BadPassword,
+
+        /// <summary>The outfit names none of <see cref="TatooineData.PlayerOutfits"/>.</summary>
+        BadOutfit,
     }
 
     /// <summary>What a login attempt did.</summary>
@@ -66,8 +69,10 @@ public static class AccountStore
     /// <param name="offeredName">The name as typed; normalised here.</param>
     /// <param name="password">The plaintext, which nothing retains, logs or echoes.</param>
     /// <param name="account">The new account's entity, or <c>default</c> on any refusal.</param>
+    /// <param name="outfit">The outfit chosen, one-based into <see cref="TatooineData.PlayerOutfits"/>; 0 for none, which leaves it to
+    /// <see cref="TatooineData.OutfitFor(EntityId)"/> when the character is created.</param>
     /// <returns>What happened.</returns>
-    public static SignupOutcome TrySignup(DatabaseEngine dbe, string offeredName, string password, out EntityId account)
+    public static SignupOutcome TrySignup(DatabaseEngine dbe, string offeredName, string password, out EntityId account, int outfit = 0)
     {
         ArgumentNullException.ThrowIfNull(dbe);
         account = default;
@@ -82,11 +87,17 @@ public static class AccountStore
             return SignupOutcome.BadPassword;
         }
 
+        if (outfit != 0 && !TatooineData.IsOutfit(outfit))
+        {
+            return SignupOutcome.BadOutfit;
+        }
+
         var identity = new Account
         {
             Name = (String64)name,
             CreatedUtcTicks = DateTime.UtcNow.Ticks,
             LastSeenUtcTicks = 0,
+            Outfit = (byte)outfit,
         };
 
         var secret = default(AccountSecret);

@@ -13,6 +13,7 @@ using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using SwgTatooine.Server;
 using SwgTatooine.Server.Accounts;
+using Typhon.Engine;
 using AuthJson = SwgTatooine.Server.Accounts.AuthJson;
 
 namespace SwgTatooine.Tests;
@@ -191,6 +192,44 @@ internal sealed class AuthEndpointChecks
             Assert.That((await badName.Content.ReadFromJsonAsync(AuthJson.Default.AuthError))?.Error, Is.EqualTo(AccountName.Rule));
             Assert.That(badPassword.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
             Assert.That((await badPassword.Content.ReadFromJsonAsync(AuthJson.Default.AuthError))?.Error, Does.Contain("password"));
+        });
+    }
+
+    /// <summary>
+    /// The outfit chosen on the sign-up form is kept on the account; one the server does not publish is a 400 with the rule, and a body without
+    /// one — every client before the form had the list — still signs up.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    [Category("Integration")]
+    public async Task AnOutfitIsKeptAtSignupAndAnUnknownOneIs400()
+    {
+        var chosen = await _client.PostAsJsonAsync("/auth/signup", new AuthRequest("Rey", GoodPassword, 3), AuthJson.Default.AuthRequest);
+        var unknown = await _client.PostAsJsonAsync(
+            "/auth/signup",
+            new AuthRequest("Finn", GoodPassword, TatooineData.PlayerOutfits.Length + 1),
+            AuthJson.Default.AuthRequest);
+        var none = await _client.PostAsync(
+            "/auth/signup",
+            new StringContent($"{{\"name\":\"Poe\",\"password\":\"{GoodPassword}\"}}", System.Text.Encoding.UTF8, "application/json"));
+
+        Assert.That(chosen.StatusCode, Is.EqualTo(HttpStatusCode.OK), await chosen.Content.ReadAsStringAsync());
+        var token = (await chosen.Content.ReadFromJsonAsync(AuthJson.Default.AuthResponse))?.Token;
+        Assert.That(AuthToken.TryValidate(token, out var account), Is.True);
+
+        byte stored;
+        using (var tx = _sim.Dbe.CreateQuickTransaction())
+        {
+            using var accounts = tx.For<AccountArch>();
+            stored = accounts.Open(account).Read(AccountArch.Identity).Outfit;
+        }
+
+        Assert.Multiple(async () =>
+        {
+            Assert.That(stored, Is.EqualTo(3));
+            Assert.That(unknown.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
+            Assert.That((await unknown.Content.ReadFromJsonAsync(AuthJson.Default.AuthError))?.Error, Does.Contain("outfit"));
+            Assert.That(none.StatusCode, Is.EqualTo(HttpStatusCode.OK), "a sign-up with no outfit is a sign-up the server dresses");
         });
     }
 

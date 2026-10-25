@@ -85,6 +85,18 @@ public static class CharacterStore
             return false;
         }
 
+        // The outfit its account chose at sign-up, as the login path does (TatooineReplication.BindOneAvatar): the two ways a character is
+        // made must not dress it differently.
+        byte chosen = 0;
+        using (var read = dbe.CreateQuickTransaction())
+        {
+            using var accounts = read.For<AccountArch>();
+            if (accounts.TryOpen(account, out var entity))
+            {
+                chosen = entity.Read(AccountArch.Identity).Outfit;
+            }
+        }
+
         var fresh = new Character
         {
             Account = account,
@@ -92,6 +104,7 @@ public static class CharacterStore
             Credits = StartingCredits,
             LastPosition = spawn,
             LastRealm = realm,
+            Outfit = TatooineData.OutfitFor(account, chosen),
             LastSavedUtcTicks = DateTime.UtcNow.Ticks,
         };
 

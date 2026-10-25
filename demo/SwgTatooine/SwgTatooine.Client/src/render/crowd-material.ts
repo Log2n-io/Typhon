@@ -9,6 +9,12 @@ import type { Scene } from '@babylonjs/core/scene';
 
 import type { CrowdRig } from './crowd-rig';
 
+/** The crowd's two uniforms as plain declarations, for an engine without uniform buffers (`CrowdSkinPlugin.getUniforms`). */
+export const CROWD_UNIFORMS_DECLARATION = `#ifdef CROWDSKIN
+uniform float crowdTime;
+uniform float crowdFps;
+#endif`;
+
 /**
  * The crowd's skinning, as a plugin on a PBR material: each vertex blends four bone matrices read from the baked
  * atlas, for the body's clip A and — while a crossfade runs — clip B, weighted by the fade.
@@ -51,12 +57,21 @@ export class CrowdSkinPlugin extends MaterialPluginBase {
     samplers.push('crowdVat');
   }
 
-  override getUniforms(): { ubo: { name: string; size: number; type: string }[] } {
+  /**
+   * The two floats, for both of Babylon's declaration paths. **`ubo` alone declares them only in a uniform buffer**: where
+   * the engine has none — `supportsUniformBuffers` false, which some GPUs and drivers give a WebGL2 context — the PBR
+   * shader declares plain uniforms from the `vertex` string instead (`ADDITIONAL_VERTEX_DECLARATION`, present only in the
+   * non-buffer declaration include), and without it every crowd shader failed to compile with `crowdTime` undeclared,
+   * fallback after fallback (reported from a LAN machine, 2026-10-25). The string is harmless with a uniform buffer: that
+   * path never includes it.
+   */
+  override getUniforms(): { ubo: { name: string; size: number; type: string }[]; vertex: string } {
     return {
       ubo: [
         { name: 'crowdTime', size: 1, type: 'float' },
         { name: 'crowdFps', size: 1, type: 'float' },
       ],
+      vertex: CROWD_UNIFORMS_DECLARATION,
     };
   }
 

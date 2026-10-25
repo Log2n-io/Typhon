@@ -1,3 +1,4 @@
+import { TERRAIN_MAX_PX, TERRAIN_TARGET_FPS } from '../app/terrain-detail';
 import { DEFAULT_ARCHETYPE_INFOS } from '../data/archetypes';
 import { RealmPanel } from './RealmPanel';
 import { CITIES, POIS } from '../data/world-data';
@@ -92,6 +93,8 @@ export function Toolbar() {
   const terrainNodes = useStats((s) => s.stats?.terrainNodes);
   const terrainTriangles = useStats((s) => s.stats?.terrainTriangles);
   const terrainCapped = useStats((s) => s.stats?.terrainCapped);
+  const terrainAutoPx = useStats((s) => s.stats?.terrainAutoPx ?? null);
+  const terrainCappedFps = useStats((s) => s.stats?.terrainCappedFps ?? null);
   const archetypes = layers === undefined ? DEFAULT_ARCHETYPE_INFOS : layers.map((l) => l.archetype);
   return (
     <div className="panel toolbar">
@@ -346,13 +349,20 @@ export function Toolbar() {
       <section>
         <h3>Terrain</h3>
         <label className="slider">
-          Detail {ui.terrainPixelError.toFixed(1)} px error
+          {/* The slider shows the tolerance the terrain is drawn at — the governor's when it has coarsened above the
+              viewer's setting — and dragging it sets the viewer's setting, which resets the governor to it. */}
+          Detail {(terrainAutoPx ?? ui.terrainPixelError).toFixed(1)} px error
+          {terrainAutoPx !== null
+            ? ` (auto: under ${String(TERRAIN_TARGET_FPS)} fps; your setting ${ui.terrainPixelError.toFixed(1)})`
+            : terrainCappedFps !== null
+              ? ` (kept: the frame rate is capped at ${terrainCappedFps.toFixed(0)} fps, which coarser ground does not raise)`
+              : ''}
           <input
             type="range"
             min={0.25}
-            max={16}
+            max={TERRAIN_MAX_PX}
             step={0.25}
-            value={ui.terrainPixelError}
+            value={terrainAutoPx ?? ui.terrainPixelError}
             onChange={(e) => {
               ui.setTerrainPixelError(Number(e.target.value));
             }}

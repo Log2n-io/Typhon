@@ -143,6 +143,29 @@ describe('signUp', () => {
   });
 });
 
+describe('signUp with an outfit', () => {
+  const bodyOf = (fetching: unknown): Record<string, unknown> => {
+    const [, init] = (fetching as { mock: { calls: [string, RequestInit][] } }).mock.calls[0];
+    return JSON.parse(init.body as string) as Record<string, unknown>;
+  };
+
+  it('sends the outfit chosen on the form', async () => {
+    const fetching = answers(200, goodGrant);
+    vi.stubGlobal('fetch', fetching);
+
+    await signUp('rey', 'secret', 3);
+    expect(bodyOf(fetching).outfit).toBe(3);
+  });
+
+  it('sends none when nothing was chosen, which the server answers with its own pick', async () => {
+    const fetching = answers(200, goodGrant);
+    vi.stubGlobal('fetch', fetching);
+
+    await signUp('rey', 'secret');
+    expect(bodyOf(fetching)).not.toHaveProperty('outfit');
+  });
+});
+
 describe('storedGrant', () => {
   it('is null when nothing was stored', () => {
     expect(storedGrant()).toBeNull();

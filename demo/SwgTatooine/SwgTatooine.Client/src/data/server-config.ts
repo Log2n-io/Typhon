@@ -73,6 +73,15 @@ export interface AssetSet {
    * leaves creatures and lairs drawn as the renderer's own shapes.
    */
   readonly creatures: readonly CreatureKind[];
+  /**
+   * The outfits a player character wears, by the `outfit` a player replicates — one plus an index into this, 0 for a body
+   * the server dressed in nothing, which is drawn by netId.
+   *
+   * <b>The server's, for the reason {@link creatures} is</b>: what a person looks like is part of their character, and two
+   * clients each choosing their own drew each other differently. Position is identity; an entry that is not a string is
+   * kept as `''`, which names no outfit, rather than dropped, which would re-dress everyone after it.
+   */
+  readonly players: readonly string[];
 }
 
 /** One creature template, as the server publishes it. */
@@ -209,7 +218,7 @@ function readAssets(value: unknown): AssetSet | null {
     return null;
   }
 
-  const { base, catalogue, structures, collision, creatures } = value as Record<string, unknown>;
+  const { base, catalogue, structures, collision, creatures, players } = value as Record<string, unknown>;
   if (typeof base !== 'string' || typeof catalogue !== 'string') {
     return null;
   }
@@ -235,6 +244,7 @@ function readAssets(value: unknown): AssetSet | null {
     structures: table,
     collision: readCollision(collision, table.length),
     creatures: readCreatureKinds(creatures),
+    players: Array.isArray(players) ? players.map((id: unknown) => (typeof id === 'string' ? id : '')) : [],
   };
 }
 

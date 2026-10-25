@@ -63,13 +63,14 @@ interface StoredGrant {
  * <b>Every failure shape is turned into a refusal rather than thrown</b>, including a network error. A login form has
  * one place to put a sentence and a caller that had to catch as well as check would eventually do only one of them.
  */
-async function post(path: string, name: string, password: string): Promise<AuthResult> {
+async function post(path: string, name: string, password: string, outfit = 0): Promise<AuthResult> {
   let response: Response;
   try {
     response = await fetch(path, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name, password }),
+      // The outfit only when one was chosen: 0 is "none", which the server answers with its own pick.
+      body: JSON.stringify(outfit > 0 ? { name, password, outfit } : { name, password }),
     });
   } catch {
     // Offline, DNS, a refused connection: the one case where the server said nothing at all.
@@ -140,8 +141,14 @@ function asGrant(body: unknown): AuthGrant | null {
   return { token: candidate.token, name: candidate.name, expiresInSeconds: candidate.expiresInSeconds };
 }
 
-/** Creates an account and logs into it, so a signup does not need a second round trip. */
-export const signUp = (name: string, password: string): Promise<AuthResult> => post('/auth/signup', name, password);
+/**
+ * Creates an account and logs into it, so a signup does not need a second round trip.
+ *
+ * @param outfit The outfit its character will wear: one plus an index into the server's `assets.players`; 0 for the
+ *   server's pick. Chosen once, here — changing it later is the economy's (Loïc, 2026-10-25).
+ */
+export const signUp = (name: string, password: string, outfit = 0): Promise<AuthResult> =>
+  post('/auth/signup', name, password, outfit);
 
 /** Logs into an existing account. */
 export const logIn = (name: string, password: string): Promise<AuthResult> => post('/auth/login', name, password);

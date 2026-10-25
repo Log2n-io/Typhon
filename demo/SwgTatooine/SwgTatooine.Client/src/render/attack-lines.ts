@@ -107,12 +107,12 @@ export class AttackLines implements EventSink {
    * Something said within earshot (SWG-09). It is not drawn as a line — it goes to the chat panel — but this is the
    * object the app hands the source as its `EventSink`, so the routing of both events lands here.
    */
-  onChat(tick: number, speakerNetId: number, text: string): void {
+  onChat(tick: number, speakerNetId: number, text: string, own = false): void {
     if (text.length === 0) {
       return;
     }
 
-    useChat.getState().say({ tick, speaker: speakerNetId, text, atMs: performance.now() });
+    useChat.getState().say({ tick, speaker: speakerNetId, text, atMs: performance.now(), own });
   }
 
   onAttack(tick: number, attackerNetId: number, targetNetId: number): void {

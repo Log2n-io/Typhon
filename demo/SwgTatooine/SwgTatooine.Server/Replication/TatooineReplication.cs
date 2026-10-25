@@ -618,6 +618,25 @@ public static partial class TatooineReplication
     public static double PlayerMaxRadiusM => ReplicationCellM * 5d;
 
     /// <summary>
+    /// The narrowest radius a player session may ask for (<c>SetViewRadius</c>): its profile's own, because the engine will not go below it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The profile's floor, not <see cref="PlayerRadiusM"/>, and the difference crashed the server.</b> A session's sphere ranges over
+    /// <c>[own, max]</c> of its profile, and <see cref="HumanProfile"/> and <see cref="SpectateProfile"/> are declared at <see cref="HumanRadiusM"/>: the
+    /// engine's <c>SetRadius</c> THROWS for anything under 1 024 m, on the tick, and the abort stops the world. The check here and the floor published in
+    /// <c>/typhon/demo.json</c> both said 192 m, so a slider dragged anywhere between 192 and 1 023 m took the server down (2026-10-25, found asking 600 m
+    /// from a browser).
+    /// </para>
+    /// <para>
+    /// <b>No range at all for a measurement run.</b> There every player session is on <see cref="PlayerProfile"/>, which declares no maximum — its range is its
+    /// own radius alone — while a rider is moved to <see cref="SpectateProfile"/>, whose floor is another number again; a bot has no slider, so anything but 0
+    /// is refused there rather than checked against the wrong one.
+    /// </para>
+    /// </remarks>
+    public static double PlayerMinAskRadiusM => HumanRadiusM;
+
+    /// <summary>
     /// <c>ACKS</c> reason: a possessed player's session asked to look at another realm.
     /// </summary>
     /// <remarks>
@@ -1496,7 +1515,8 @@ public static partial class TatooineReplication
                 .Of<WorldObject>()
 
                 // A lair is what a person walks up to and breaks, so a browser has to be able to see one — and target it, which the server refuses for
-                // anything the session was never shown. Bots' PlayerProfile does not carry it: they render nothing and hunt creatures.
+                // anything the session was never shown. Bots are served this profile too (PlayerProfileName); only a measurement run's PlayerProfile
+                // leaves lairs out.
                 .Of<CreatureLair>()
 
                 // Parity: a browser is served the same city set a bot is, because every capability a bot has has to be reachable from the client.
@@ -1965,8 +1985,10 @@ public static partial class TatooineReplication
             var asked = (double)command.Value.RadiusM;
 
             // 0 is "back to the profile's own", which the engine spells the same way. Anything else must land inside the declared range; the client is told
-            // both ends in /typhon/demo.json, so an ask outside it is a client and a server that disagree about which server this is.
-            if (asked != 0d && (asked < PlayerRadiusM || asked > PlayerMaxRadiusM))
+            // both ends in /typhon/demo.json, so an ask outside it is a client and a server that disagree about which server this is. <b>The engine's range,
+            // exactly</b>: SetRadius throws outside it, on the tick — see PlayerMinAskRadiusM.
+            if (asked != 0d
+                && (PlayerProfileName != HumanProfile || asked < PlayerMinAskRadiusM || asked > PlayerMaxRadiusM))
             {
                 subs.Reject(command, ViewRadiusRefused);
                 System.Threading.Interlocked.Increment(ref _radiusRefused);
@@ -2977,7 +2999,8 @@ public static partial class TatooineReplication
             }
 
             var place = player.Read(Player.Bounds);
-            Speak(tick, BoundPlayer[command.Session.Value], command.Value.Text, place.X, place.Z, player.Realm.Value);
+            // Normalised before anyone hears it: no control characters, no more than ChatLines.MaxLines lines.
+            Speak(tick, BoundPlayer[command.Session.Value], ChatLines.Normalize(command.Value.Text), place.X, place.Z, player.Realm.Value);
         }
     }
 

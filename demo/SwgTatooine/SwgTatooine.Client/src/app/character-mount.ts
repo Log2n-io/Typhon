@@ -7,6 +7,7 @@ import type { AssetLibrary, Instance } from '../assets/asset-library';
 import { AnimationGraph, locomotionFrom } from '../character/animation-graph';
 import type { SceneLighting } from '../render/scene-lighting';
 import { turnToward } from '../math/vec';
+import { lodLevelOf } from '../render/asset-lod';
 import { CharacterRig } from '../render/character-rig';
 import { prepareAsset } from './asset-mount';
 
@@ -160,6 +161,17 @@ export async function mountCharacter(
   // the AO factor are the container's either way.
   prepareAsset(asset, lighting);
   const instance = await library.instantiate(assetId, placement([0, 0, 0], 0), root);
+  // <b>The finest level only.</b> Every published character carries `Body_LOD1` and `Body_LOD2` in the same file, bound to
+  // the same skin, and they arrive ENABLED (`descriptor.ts`, `lods`: `KHR_node_visibility` hides nothing here). The rig
+  // drew all three at once — three times the triangles, the coarse levels z-fighting inside the fine one — since the
+  // avatar first stood up (measured 2026-10-25: 17 primitives enabled on one avatar). A rigged body is one per session and
+  // always near the camera, so it has no use for the coarse levels at all.
+  for (const mesh of instance.meshes) {
+    if (lodLevelOf(mesh.name) > 0) {
+      mesh.setEnabled(false);
+    }
+  }
+
   const ownMaterials: Material[] = [];
   if (ghostAlpha === undefined) {
     // <b>The avatar casts too, and it is marked here rather than with the structures.</b> A skinned mesh cannot be

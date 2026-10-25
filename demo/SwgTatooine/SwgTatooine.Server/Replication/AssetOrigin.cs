@@ -198,8 +198,16 @@ public sealed class AssetOrigin
         // The geometry the server collides against, so the client predicts the same push-out without re-deriving it
         // from the descriptors — and without needing to know which assets the blocking rule has been checked against.
         var collision = shapes == null ? "[]" : shapes.ToJson();
+
+        // What a player's replicated `outfit` names (one plus an index into this), for the reason the creatures' bodies are published.
+        var players = new System.Text.StringBuilder();
+        foreach (var id in TatooineData.PlayerOutfits)
+        {
+            players.Append(players.Length > 0 ? ",\"" : "\"").Append(id).Append('"');
+        }
+
         var body = FormattableString.Invariant(
-            $"\"base\":\"{RequestPath}/\",\"catalogue\":\"{CatalogueName}\",\"structures\":[{table}],\"collision\":{collision},\"creatures\":{CreatureJson()}");
+            $"\"base\":\"{RequestPath}/\",\"catalogue\":\"{CatalogueName}\",\"structures\":[{table}],\"collision\":{collision},\"creatures\":{CreatureJson()},\"players\":[{players}]");
         return ",\"assets\":{" + body + "}";
     }
 

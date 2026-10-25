@@ -300,6 +300,15 @@ export interface DataSource {
   /** Puts the avatar in a combat stance (`SetStance`, the server's `Stances`: 0 none, 1 unarmed, 2 one-handed, 3 pistol). */
   setStance(stance: number): void;
   /**
+   * Says something out loud (`Say`, SWG-09): heard by every session within 50 m of the avatar in its realm — this one
+   * included, which is how the speaker's own line and bubble arrive, as the server's `Chat` rather than a local echo.
+   *
+   * @param text What to say, already clipped to the wire's 256 UTF-8 bytes (`clipUtf8`).
+   * @returns Whether it was sent: `false` from a session that may not speak, and when the command's rate (one a second,
+   *   a burst of two) is spent — in which case nothing was sent and the caller still holds the text.
+   */
+  say(text: string): boolean;
+  /**
    * Asks for the god camera's view of the planet (`Overview`), or to come back to the player's own, keeping the avatar.
    *
    * <b>Idempotent, so it can be called every frame</b> with the state the UI wants: only a change is sent, and a new
@@ -391,6 +400,7 @@ export class TyphonSource implements DataSource {
   private boardShuttleCommand: MessagePlan | null = null;
   private setMountCommand: MessagePlan | null = null;
   private setStanceCommand: MessagePlan | null = null;
+  private sayCommand: MessagePlan | null = null;
   private overviewCommand: MessagePlan | null = null;
 
   /** The sphere radius last asked for, metres; 0 for none asked. See {@link effectiveRadiusM}. */
@@ -775,6 +785,20 @@ export class TyphonSource implements DataSource {
     this.sendPending();
   }
 
+  say(text: string): boolean {
+    if (this.sayCommand === null || text.length === 0 || this.ticks === 0) {
+      return false;
+    }
+
+    const seq = this.commands?.enqueue(this.sayCommand, { text }) ?? CommandRefused.RateLimited;
+    if (seq < 0) {
+      return false;
+    }
+
+    this.sendPending();
+    return true;
+  }
+
   setOverview(on: boolean): void {
     // Absent from a god session's catalog view, whose camera already sees the planet.
     if (this.overviewCommand === null || on === this.overviewAsked || this.ticks === 0) {
@@ -930,6 +954,7 @@ export class TyphonSource implements DataSource {
     this.boardShuttleCommand = plan.commandByName('BoardShuttle');
     this.setMountCommand = plan.commandByName('SetMount');
     this.setStanceCommand = plan.commandByName('SetStance');
+    this.sayCommand = plan.commandByName('Say');
     this.overviewCommand = plan.commandByName('Overview');
     this.commands = new CommandQueue({ plan });
     this.region =

@@ -7,6 +7,7 @@ import {
   RIG_OUTFIT,
   needsOwnClips,
   outfitFor,
+  outfitLabel,
   wearableOutfits,
 } from '../src/character/outfits';
 
@@ -185,5 +186,15 @@ describe('which outfit a given body wears', () => {
   it('survives a count of zero rather than returning NaN into a buffer', () => {
     // A catalogue that publishes no character is a working run, as a catalogue that publishes no assets already is.
     expect(outfitFor(1234, 0)).toBe(0);
+  });
+});
+
+describe('an outfit on the sign-up form', () => {
+  it('reads as words, its sex or its one difference in brackets', () => {
+    expect(outfitLabel('casual2_male')).toBe('Casual 2 (male)');
+    expect(outfitLabel('casual_bald')).toBe('Casual (bald)');
+    expect(outfitLabel('kimono_female')).toBe('Kimono (female)');
+    expect(outfitLabel('casual_male')).toBe('Casual (male)');
+    expect(outfitLabel('base_character')).toBe('Base Character');
   });
 });

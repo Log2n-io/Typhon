@@ -85,6 +85,21 @@ internal sealed class AvatarLoginChecks : ServedChecks
         return (place.X, place.Y, place.Z, body.Read(Player.Realm).Value);
     }
 
+    /// <summary>The outfit a body is drawn in, as it goes on the wire.</summary>
+    private static byte LookOf(TatooineSim sim, EntityId avatar)
+    {
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        return tx.For<Player>().Open(avatar).Read(Player.Look).Outfit;
+    }
+
+    /// <summary>The name a body is shown by: its replicated <c>nameId</c>, resolved as <c>/typhon/names</c> resolves it.</summary>
+    private static string NameOf(TatooineSim sim, EntityId avatar)
+    {
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        var id = tx.For<Player>().Open(avatar).Read(Player.Look).NameId;
+        return PlayerNames.TryGet(id, out var name) ? name : null;
+    }
+
     /// <summary>How many players exist, and how many of those a session drives.</summary>
     /// <param name="sim">The server.</param>
     /// <returns>The two counts.</returns>
@@ -320,6 +335,85 @@ internal sealed class AvatarLoginChecks : ServedChecks
             Assert.That(CharacterCount(sim), Is.EqualTo(1));
             Assert.That(TatooineReplication.LocationsSaved, Is.GreaterThanOrEqualTo(1));
         });
+    }
+
+    /// <summary>
+    /// A character keeps its look: the outfit chosen when it was created is on every body it spawns, so every client — its own
+    /// included — draws the same person (Loïc, 2026-10-25: each session saw itself in one outfit and the other in another).
+    /// </summary>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void ACharacterWearsTheSameOutfitOnEveryBodyItSpawns()
+    {
+        using var sim = Start(Config());
+        var account = AnAccount(0x5003);
+
+        var (first, avatar) = LogIn(sim, account);
+        var look = LookOf(sim, avatar);
+
+        first.Close(CloseCodes.Normal, "logging out");
+        SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed >= 1, "the avatar to be saved and destroyed");
+        Harness.Ticks(2);
+
+        var (_, second) = LogIn(sim, account, expectedBindings: 2);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(look, Is.EqualTo(TatooineData.OutfitFor(account)), "the body wears what its character was given");
+            Assert.That(look, Is.InRange(1, TatooineData.PlayerOutfits.Length), "0 is 'no look', which a client dresses by netId");
+            Assert.That(LookOf(sim, second), Is.EqualTo(look), "a new body for the same character must wear the same outfit");
+        });
+    }
+
+    /// <summary>
+    /// The outfit an account chose at sign-up is the one its character is created in (Loïc, 2026-10-25: "a combo list during the account register
+    /// time"), rather than the server's own pick.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [Category("Integration")]
+    public void ACharacterIsCreatedInTheOutfitItsAccountChose()
+    {
+        using var sim = Start(Config());
+        Assert.That(
+            SwgTatooine.Server.Accounts.AccountStore.TrySignup(sim.Dbe, "Rey", "a-good-password", out var account, 0),
+            Is.EqualTo(SwgTatooine.Server.Accounts.AccountStore.SignupOutcome.Created));
+
+        // Any outfit but the one the server would have picked, or the case could pass with the choice ignored.
+        var picked = TatooineData.OutfitFor(account);
+        var chosen = (byte)((picked % TatooineData.PlayerOutfits.Length) + 1);
+        Assert.That(
+            SwgTatooine.Server.Accounts.AccountStore.TrySignup(sim.Dbe, "Finn", "a-good-password", out var second, chosen),
+            Is.EqualTo(SwgTatooine.Server.Accounts.AccountStore.SignupOutcome.Created));
+        Assume.That(TatooineData.OutfitFor(second), Is.Not.EqualTo(chosen), "the second account's own pick happens to be the chosen one");
+
+        var (_, avatar) = LogIn(sim, second);
+        Assert.Multiple(() =>
+        {
+            Assert.That(LookOf(sim, avatar), Is.EqualTo(chosen));
+
+            // A12: the account's own name, as normalised at sign-up, and not a placeholder derived from its id.
+            Assert.That(NameOf(sim, avatar), Is.EqualTo("finn"), "the body must carry its account's name for others to read");
+        });
+    }
+
+    /// <summary>
+    /// New characters are spread over the whole wardrobe, and none is left undressed: 0 is "no look", which every client would dress
+    /// differently by netId — the defect this field exists to end.
+    /// </summary>
+    [Test]
+    public void NewCharactersAreSpreadOverEveryOutfit()
+    {
+        var worn = new HashSet<byte>();
+        for (ulong key = 1; key <= 200; key++)
+        {
+            var outfit = TatooineData.OutfitFor(AnAccount(key));
+            Assert.That(outfit, Is.InRange(1, TatooineData.PlayerOutfits.Length), $"account {key}");
+            worn.Add(outfit);
+        }
+
+        Assert.That(worn, Has.Count.EqualTo(TatooineData.PlayerOutfits.Length), "200 accounts must reach every outfit");
     }
 
     /// <summary>

@@ -31,10 +31,12 @@ export interface SessionState {
   // detached (`useSessionStore((s) => s.logOut)`), which is exactly the shape `@typescript-eslint/unbound-method`
   // forbids for a method — rightly, since a method's `this` would be lost. None of these uses `this`; they close over
   // `set`. Property syntax says so in the type.
-  readonly signUp: (name: string, password: string) => Promise<boolean>;
+  readonly signUp: (name: string, password: string, outfit?: number) => Promise<boolean>;
   readonly logIn: (name: string, password: string) => Promise<boolean>;
   /** Drops the token and the stored copy. The socket is closed by the app noticing there is no grant. */
   readonly logOut: () => void;
+  /** Forgets the last refusal: the login screen switching between its two forms, where one's refusal is not the other's. */
+  readonly clearError: () => void;
   /** Records why the server closed the session, and drops the grant when it is a credential problem. */
   readonly noteClosed: (code: number, reason: string) => void;
 }
@@ -65,9 +67,9 @@ export const useSessionStore = create<SessionState>((set) => ({
   error: null,
   kicked: null,
 
-  signUp: async (name, password) => {
+  signUp: async (name, password, outfit = 0) => {
     set({ busy: true, error: null, kicked: null });
-    const result = await signUp(name, password);
+    const result = await signUp(name, password, outfit);
     set(result.ok ? { grant: result.grant, busy: false } : { busy: false, error: result.refusal.error });
     return result.ok;
   },
@@ -82,6 +84,10 @@ export const useSessionStore = create<SessionState>((set) => ({
   logOut: () => {
     forget();
     set({ grant: null, error: null, kicked: null });
+  },
+
+  clearError: () => {
+    set({ error: null });
   },
 
   noteClosed: (code, reason) => {

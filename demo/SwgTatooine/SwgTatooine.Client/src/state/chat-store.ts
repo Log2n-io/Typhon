@@ -17,6 +17,8 @@ export interface ChatLine {
   readonly text: string;
   /** Local time it arrived, for fading it out. */
   readonly atMs: number;
+  /** Said by this session's own avatar. */
+  readonly own?: boolean;
 }
 
 /** How many lines are kept. Older ones fall off the top. */
@@ -27,11 +29,23 @@ interface ChatState {
   readonly heard: number;
   readonly say: (line: ChatLine) => void;
   readonly clear: () => void;
+  /**
+   * Sends a line as this session's avatar (`DataSource.say`), already composed by `composeSay`. Installed by the app,
+   * which owns the source; the default speaks for nobody.
+   *
+   * @returns Whether it went: `false` when the session cannot speak or the one-a-second rate is spent.
+   */
+  readonly speak: (text: string) => boolean;
+  readonly setSpeak: (speak: (text: string) => boolean) => void;
 }
 
 export const useChat = create<ChatState>()((set) => ({
   lines: [],
   heard: 0,
+  speak: () => false,
+  setSpeak: (speak) => {
+    set({ speak });
+  },
   say: (line) => {
     set((s) => ({
       lines: s.lines.length < CHAT_HISTORY ? [...s.lines, line] : [...s.lines.slice(1), line],
