@@ -169,6 +169,72 @@ class WalArchiverStepTests : ArchiveTestBase<WalArchiverStepTests>
         Assert.That(archiver.State.LagBytes, Is.Zero);
     }
 
+    /// <summary>
+    /// A sealed segment whose header no longer validates is still listed: read as "reclaimed meanwhile", the worker would take it again at once, a hot loop
+    /// on the archiver's thread for as long as the floor holds it. It is a failure instead: Stalled, retried with backoff.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void ASealedSegmentWhoseHeaderRotted_StallsTheArchiver_RatherThanSpinningOnIt()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var archiver = NewArchiver(dbe);
+        Tick(archiver, 0);
+        var rotted = SpawnAndSeal(dbe, 5);
+        using (var fs = new FileStream(rotted.Path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete))
+        {
+            fs.Write(Enumerable.Repeat((byte)0xA5, 64).ToArray(), 0, 64);
+            fs.Flush(true);
+        }
+
+        archiver.Step(Utc(1), Mono(1), default);
+        using var cts = new System.Threading.CancellationTokenSource();
+        var pass = System.Threading.Tasks.Task.Run(() => archiver.ArchivePending(cts.Token));
+        var returned = pass.Wait(Budget);
+        cts.Cancel();
+        pass.Wait(Budget);
+        Assert.That(returned, Is.True, "the worker's pass spun on the unreadable segment");
+        archiver.Step(Utc(2), Mono(2), default);
+        Assert.That(archiver.State.Condition, Is.EqualTo(WalArchiveCondition.Stalled));
+        Assert.That(archiver.State.LastError, Does.Contain($"segment {rotted.Id}"));
+        Assert.That(archiver.ArchivedThroughLsn, Is.LessThan(rotted.LastLsn), "nothing archived past it");
+    }
+
+    /// <summary>
+    /// The archive stalled (nothing archived, so no sample is ever dropped by a publish): the samples kept in memory stay within the limit, thinned evenly,
+    /// the oldest and the newest kept and ascending.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void WhileNothingIsArchived_TheSamplesKeptStayWithinTheirLimit()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var archiver = NewArchiver(dbe);
+        archiver.SampleRingLimit = 32;
+        long firstSampled = 0;
+        for (var i = 0; i < 100; i++)
+        {
+            Spawn(dbe, 1, i);
+            archiver.Step(Utc(i), Mono(i), default);   // never ArchivePending: the archive is stalled
+            if (i == 1)
+            {
+                firstSampled = archiver.PendingSamples()[0].Lsn;
+            }
+        }
+
+        archiver.Step(Utc(100), Mono(100), default);
+        var samples = archiver.PendingSamples();
+        Assert.That(samples.Length, Is.InRange(16, 32), "bounded, and thinned rather than emptied");
+        Assert.That(samples[0].Lsn, Is.EqualTo(firstSampled), "the oldest sample is kept");
+        Assert.That(samples[^1].Lsn, Is.EqualTo(dbe.WalManager.DurableLsn), "the newest sample is kept");
+        for (var i = 1; i < samples.Length; i++)
+        {
+            Assert.That(samples[i].Lsn > samples[i - 1].Lsn && samples[i].UtcTicks > samples[i - 1].UtcTicks, Is.True, "ascending");
+        }
+    }
+
     private static void WaitServed(WalManager wal, long ticket)
     {
         var clock = System.Diagnostics.Stopwatch.StartNew();

@@ -32,6 +32,10 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
     /// <summary>The index cache is rewritten every this many publishes (and at the close): it is a cache, rebuilt from the files when stale.</summary>
     private const int IndexWriteEvery = 16;
 
+    private const int WorkerRunning = 0;
+    private const int WorkerExited = 1;
+    private const int WorkerDetached = 2;
+
     private readonly DatabaseEngine _engine;
     private readonly WalManager _wal;
     private readonly ArchiveOptions _options;
@@ -49,6 +53,7 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
     private volatile bool _exit;
     private bool _stopped;
     private volatile bool _detached;
+    private int _workerHandoff;   // WorkerRunning, then WorkerExited (Dispose frees the buffers) or WorkerDetached (the worker frees them at its exit)
     private WalSegmentReader _reader;
     private ArchivedSegmentWriter _writer;
     private bool _started;
@@ -58,6 +63,8 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
     private bool _archivedThisSession;
     private ArchiveTimeSample[] _segmentSamples = new ArchiveTimeSample[64];
     private int _consecutiveFailures;
+    private long _passesStarted;
+    private long _lastFailedPass;
     private long _archivedThroughLsn;
     private int _condition = (int)WalArchiveCondition.Starting;
     private string _lastError;
@@ -134,6 +141,12 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
 
     /// <summary>Waits for a detached worker to end (tests: once its store call returned).</summary>
     internal bool JoinWorker(TimeSpan timeout) => _thread == null || _thread.Join(timeout);
+
+    /// <summary>
+    /// The most samples kept in memory (24 B each, 1.5 MiB at the default): past it, while the archive is stalled or released, every other one is dropped.
+    /// Settable for tests.
+    /// </summary>
+    internal int SampleRingLimit { get; set; } = 1 << 16;
 
     /// <summary>Test seam: the clock used for archive times (footers). Null in production: <see cref="DateTime.UtcNow"/>.</summary>
     internal Func<DateTime> UtcClock { get; set; }
@@ -300,10 +313,10 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
 
         lock (_ringLock)
         {
-            if (_ringCount == _ring.Length)
+            if (_ringCount == _ring.Length && _ring.Length < SampleRingLimit)
             {
-                // A segment held past twice the max age (a stalled store): grow, never drop a sample the archive will need.
-                var grown = new (long, long, long)[_ring.Length * 2];
+                // A segment held past twice the max age (a stalled store): grow, up to the limit.
+                var grown = new (long, long, long)[Math.Min(_ring.Length * 2, SampleRingLimit)];
                 for (var i = 0; i < _ringCount; i++)
                 {
                     grown[i] = _ring[(_ringStart + i) % _ring.Length];
@@ -311,6 +324,18 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
 
                 _ring = grown;
                 _ringStart = 0;
+            }
+            else if (_ringCount == _ring.Length)
+            {
+                // Past the limit (stalled, or released: the samples of a reclaimed segment are never archived): every other sample goes. The index loses
+                // resolution, never correctness — an instant still resolves to an LSN durable at or before it, only an earlier one.
+                var kept = 0;
+                for (var i = 0; i < _ringCount; i += 2)
+                {
+                    _ring[(_ringStart + kept++) % _ring.Length] = _ring[(_ringStart + i) % _ring.Length];
+                }
+
+                _ringCount = kept;
             }
 
             _ring[(_ringStart + _ringCount) % _ring.Length] = (durable, utcTicks, monoNow);
@@ -401,19 +426,30 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
 
     private void WorkerLoop()
     {
-        while (!_exit)
+        try
         {
-            var backoff = _consecutiveFailures == 0
-                ? Timeout.InfiniteTimeSpan
-                : TimeSpan.FromSeconds(Math.Min(Math.Pow(2, Math.Min(_consecutiveFailures - 1, 16)), _options.MaxSegmentAge.TotalSeconds));
-            _wake.Wait(backoff);
-            _wake.Reset();
-            if (_exit)
+            while (!_exit)
             {
-                break;
-            }
+                var backoff = _consecutiveFailures == 0
+                    ? Timeout.InfiniteTimeSpan
+                    : TimeSpan.FromSeconds(Math.Min(Math.Pow(2, Math.Min(_consecutiveFailures - 1, 16)), _options.MaxSegmentAge.TotalSeconds));
+                _wake.Wait(backoff);
+                _wake.Reset();
+                if (_exit)
+                {
+                    break;
+                }
 
-            ArchivePending(_stopping.Token);
+                ArchivePending(_stopping.Token);
+            }
+        }
+        finally
+        {
+            // A Stop that could not join left the buffers to this thread (an as-crash Stop never waits): it frees them now, as it no longer uses them.
+            if (Interlocked.CompareExchange(ref _workerHandoff, WorkerExited, WorkerRunning) == WorkerDetached)
+            {
+                FreeWorkerResources();
+            }
         }
     }
 
@@ -423,6 +459,7 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
     /// </summary>
     internal void ArchivePending(CancellationToken ct)
     {
+        var pass = Interlocked.Increment(ref _passesStarted);
         try
         {
             var condition = (WalArchiveCondition)Volatile.Read(ref _condition);
@@ -482,6 +519,7 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
         catch (Exception e) when (e is not OutOfMemoryException)
         {
             Fail(e);
+            Volatile.Write(ref _lastFailedPass, pass);
         }
     }
 
@@ -761,7 +799,14 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
             durable = _wal.DurableLsn;
             if (!_reader.OpenSegmentForArchive(s.Path, s.WrittenBytes))
             {
-                // Reclaimed by a released cycle (or no valid header): gone from the list too; the next segment's continuity records the gap.
+                if (_wal.FileIO.Exists(s.Path))
+                {
+                    // Still there, still listed: its header no longer validates. Taken as reclaimed, the next pass would find it again at once (a hot
+                    // loop for as long as the floor holds it); a failure backs off, and the backlog policy's release ends it (a recorded gap).
+                    throw new InvalidDataException($"WAL segment {s.Id} ({s.Path}) has no valid header: it cannot be archived.");
+                }
+
+                // Reclaimed by a released cycle: gone from the list too; the next segment's continuity records the gap.
                 span.Outcome = (byte)BackupArchiveSegmentOutcome.Abandoned;
                 return true;
             }
@@ -983,10 +1028,13 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
                 Thread.Yield();
             }
 
+            // Stalled from an earlier failure says nothing of the store now: the woken worker retries at once, and only a pass started after this wake
+            // that fails again ends the wait (the next open archives the rest).
+            var passesBefore = Volatile.Read(ref _passesStarted);
             _wake.Set();
             while (clock.Elapsed < budget && HasPendingWork())
             {
-                if ((WalArchiveCondition)Volatile.Read(ref _condition) == WalArchiveCondition.Stalled)
+                if (Volatile.Read(ref _lastFailedPass) > passesBefore)
                 {
                     break;   // the store is failing: the next open archives the rest
                 }
@@ -1010,9 +1058,11 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
         _stopping.Cancel();
         _wake.Set();
         var remaining = budget - clock.Elapsed;
-        if (_thread != null && !_thread.Join(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero))
+        if (_thread != null && !_thread.Join(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero)
+                            && Interlocked.CompareExchange(ref _workerHandoff, WorkerDetached, WorkerRunning) == WorkerRunning)
         {
-            // A store call that does not return: the worker keeps its buffers (leaked, never freed under it).
+            // Still running (an as-crash Stop does not wait; a store call that does not return): the worker keeps its buffers and frees them at its exit,
+            // never under it.
             _detached = true;
         }
         else if (_started)
@@ -1068,22 +1118,34 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
             Stop(TimeSpan.Zero);
             if (_detached)
             {
-                // The worker still runs and owns the reader and the writer's blocks, parented here: disposing this node would free them under it.
+                // The worker still runs and owns the reader, the writer's blocks (parented here) and the store handles; it frees them at its exit.
                 Parent?.RemoveChild(this);
                 return;
             }
 
-            _reader?.Dispose();
-            _writer?.Dispose();
-            foreach (var archive in _timelines.Values)
-            {
-                archive.Handle.Dispose();
-            }
-
+            FreeWorkerResources();
             _wake.Dispose();
             _stopping.Dispose();
         }
 
         base.Dispose(disposing);
     }
+
+    /// <summary>The worker's reader, writer and store handles, freed once: by the dispose when the worker ended, else by the worker at its exit.</summary>
+    private void FreeWorkerResources()
+    {
+        _reader?.Dispose();
+        _writer?.Dispose();
+        foreach (var archive in _timelines.Values)
+        {
+            archive.Handle.Dispose();
+        }
+
+        Volatile.Write(ref _workerResourcesFreed, true);
+    }
+
+    private bool _workerResourcesFreed;
+
+    /// <summary>Whether the worker's native buffers and store handles were freed (tests: a detached worker frees them at its exit).</summary>
+    internal bool WorkerResourcesFreed => Volatile.Read(ref _workerResourcesFreed);
 }
