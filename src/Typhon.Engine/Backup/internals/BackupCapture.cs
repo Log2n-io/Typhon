@@ -155,8 +155,12 @@ internal sealed partial class BackupCapture : IDataFileWriteHook, IDisposable
     public BackupPointInfo Run(IBackupPointStore store, BackupKind requested, BackupLineage lineage, CancellationToken ct)
     {
         using var session = store.OpenSession(_engine.DatabaseId, ct);
-        Kind = BackupAdmission.Decide(requested, lineage, session, _engine.TimelineId, _engine.TimelineParentId, out var parent);
-        var plan = new BackupPointPlan(_engine.DatabaseId, _engine.TimelineId, Kind, Kind == BackupKind.Incremental ? lineage.ChainId : Guid.Empty,
+
+        // One read of the published timeline, stamped (a fork after it is never folded into the one before): the point's timeline and its parent are of
+        // one fork, never a 16-byte id torn by one in progress.
+        var timeline = _engine.StampTimelineForPoint();
+        Kind = BackupAdmission.Decide(requested, lineage, session, timeline.TimelineId, timeline.ParentId, out var parent);
+        var plan = new BackupPointPlan(_engine.DatabaseId, timeline.TimelineId, Kind, Kind == BackupKind.Incremental ? lineage.ChainId : Guid.Empty,
             Kind == BackupKind.Incremental ? parent.BackupId : 0, PagedMMF.DatabaseFormatRevision,
             typeof(DatabaseEngine).Assembly.GetName().Version?.ToString() ?? "", false);
         _sink = Sink(() => session.BeginPoint(plan));

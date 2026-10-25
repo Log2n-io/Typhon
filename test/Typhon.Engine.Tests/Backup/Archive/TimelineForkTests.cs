@@ -117,6 +117,43 @@ class TimelineForkTests : ArchiveTestBase<TimelineForkTests>
         }
     }
 
+    /// <summary>
+    /// Two schema changes at runtime with a point between them, the active segment empty throughout (the point's switch skips an empty segment): both
+    /// forks compute the same origin. Folded into the first, the second would leave the point and the records written after the change on one timeline,
+    /// and a restore past it would replay new-layout records onto the point's old-layout image. A point stamped since a fork makes the next one fork.
+    /// </summary>
+    [Test]
+    [CancelAfter(20_000)]
+    [VerifiesRule("BKP-11")]
+    public void TwoSchemaChanges_WithAPointBetweenThem_ForkTwice_EvenAtTheSameOrigin()
+    {
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            Register(scope, _ => { });
+        }
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Register(scope, _ => { });
+            var origins = new List<long>();
+            dbe.AfterTimelineForkProbe = _ => origins.Add(dbe.TimelineOriginLsn);
+
+            dbe.RegisterComponentFromAccessor<EvoDiskWalV1>();
+            Assert.That(origins, Has.Count.EqualTo(1), "premise: a component new to the database forks");
+            var first = dbe.TimelineId;
+
+            CapturePoint(dbe, BackupKind.Full);
+            var points = StoreView.Open(StorePath, StoreFileSystem.Instance, null).Catalog.Packs;
+            Assert.That(points.Any(p => p.TimelineId == first), Is.True, "premise: the point is on the first fork's timeline");
+
+            dbe.RegisterComponentFromAccessor<CompB>();
+            Assert.That(origins, Has.Count.EqualTo(2), $"{Marker}: the second schema change was folded into the first fork, past a point on it");
+            Assert.That(origins[1], Is.EqualTo(origins[0]), "premise: both forks are at the same origin (the active segment never changed)");
+            Assert.That(dbe.TimelineId, Is.Not.EqualTo(first));
+            Assert.That(dbe.TimelineParentId, Is.EqualTo(first));
+        }
+    }
+
     [Test]
     [CancelAfter(20_000)]
     [VerifiesRule("BKP-11")]
@@ -160,6 +197,126 @@ class TimelineForkTests : ArchiveTestBase<TimelineForkTests>
         Spawn(dbe, 3, 10);
         var point = Capture(dbe, store);
         Assert.That(point.Kind, Is.EqualTo(BackupKind.Incremental), "BKP-06 accepts a head on the timeline the database forked from");
+    }
+
+    /// <summary>
+    /// The timelines are one published value (D4): a fork publishes a new one and leaves the one a reader holds as it was, so a reader's id, parent and
+    /// origin are always of one fork. (A torn 16-byte id is not reproducible on demand; the shape that excludes it is what this holds.)
+    /// </summary>
+    [Test]
+    [CancelAfter(20_000)]
+    public void AFork_PublishesANewTimelineValue_AndLeavesTheOneAReaderHolds()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var before = dbe.Timelines;
+        var held = before.Current;
+        dbe.ForkTimeline(TimelineReason.SchemaChange, switchSegment: true);
+        var after = dbe.Timelines;
+        Assert.That(after, Is.Not.SameAs(before), "a fork publishes a new value");
+        Assert.That(before.Current, Is.EqualTo(held), "the value a reader holds never changes");
+        Assert.That((after.Current.ParentId, after.Ancestors[^1]), Is.EqualTo((held.TimelineId, held)), "the new value names the old one as its parent");
+        Assert.That(dbe.StampTimelineForPoint(), Is.EqualTo(after.Current));
+    }
+
+    /// <summary>
+    /// WA-22 two forks deep: a segment written before both, held by the archive floor across a restart, belongs to the oldest timeline. The meta keeps
+    /// the ancestors a local segment may belong to, so the restarted engine files it there, not under the parent of the timeline it reopened on.
+    /// </summary>
+    [Test]
+    [CancelAfter(20_000)]
+    [VerifiesRule("BKP-11")]
+    public void ASegmentHeldAcrossTwoForksAndARestart_IsFiledUnderItsOwnTimeline()
+    {
+        Guid genesis, first, second;
+        WalSealedSegment held;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Register(scope, _ => { });
+            genesis = dbe.TimelineId;
+            held = SpawnAndSeal(dbe, 3);
+        }
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Register(scope, d => d.RegisterComponentFromAccessor<EvoDiskWalV1>());
+            first = dbe.TimelineId;
+            SpawnAndSeal(dbe, 3, 10);
+        }
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Register(scope, d =>
+            {
+                d.RegisterComponentFromAccessor<EvoDiskWalV1>();
+                d.RegisterComponentFromAccessor<CompB>();
+            });
+            second = dbe.TimelineId;
+            Assert.That(new[] { genesis, first, second }.Distinct().Count(), Is.EqualTo(3), "premise: two forks");
+        }
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Register(scope, d =>
+            {
+                d.RegisterComponentFromAccessor<EvoDiskWalV1>();
+                d.RegisterComponentFromAccessor<CompB>();
+            });
+            Assert.That(dbe.TimelineId, Is.EqualTo(second), "premise: no schema change at this open");
+            Assert.That(Sealed(dbe).Any(s => s.Id == held.Id), Is.True, "premise: the archive floor kept the first session's segment");
+            Assert.That(dbe.TimelineFor(held.LastLsn).TimelineId, Is.EqualTo(genesis), "the segment belongs to the timeline it was written on");
+
+            var archiver = NewArchiver(dbe);
+            Tick(archiver, 0);
+            Tick(archiver, 1);
+            Assert.That(WalArchiveStore.Load(StoreFileSystem.Instance, StorePath, genesis, trustIndex: false).Segments.Any(s => s.SegmentId == held.Id),
+                Is.True, "archived under its own timeline");
+            var firstFile = WalArchiveStore.ReadTimelineFile(StoreFileSystem.Instance, StorePath, first);
+            Assert.That(firstFile?.ParentTimelineId, Is.EqualTo(genesis), "the middle timeline's file names its parent");
+        }
+    }
+
+    /// <summary>
+    /// A restored database's WAL starts with the restored copy of its parent's history, never archived again (its restore's origin). A fork and a reopen
+    /// later, the timeline it reopens on is the fork's: the restore is one of its ancestors, still known, and so is where the restored history ends.
+    /// </summary>
+    [Test]
+    [CancelAfter(20_000)]
+    public void ARestoredDatabase_ForkedThenReopened_StillKnowsWhereItsRestoredHistoryEnds()
+    {
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Register(scope, _ => { });
+            Spawn(dbe, 3);
+            CapturePoint(dbe, BackupKind.Full);
+        }
+
+        var dir = System.IO.Path.Combine(TestStorage.Root, nameof(TimelineForkTests), CurrentDatabaseName + ".restored");
+        if (System.IO.Directory.Exists(dir))
+        {
+            System.IO.Directory.Delete(dir, true);
+        }
+
+        BackupOperations.Restore(StorePath, PointSelector.Latest, dir);
+        using var provider = ProviderFor(dir);
+        long origin;
+        using (var scope = provider.CreateScope())
+        {
+            origin = Register(scope, _ => { }).RestoreOriginLsn;
+            Assert.That(origin, Is.GreaterThan(0), "premise: the restored WAL holds the parent's history up to the point");
+        }
+
+        using (var scope = provider.CreateScope())
+        {
+            var dbe = Register(scope, d => d.RegisterComponentFromAccessor<EvoDiskWalV1>());
+            Assert.That(dbe.TimelineFor(long.MaxValue).Reason, Is.EqualTo(TimelineReason.SchemaChange), "premise: the restored database forked");
+        }
+
+        using (var scope = provider.CreateScope())
+        {
+            var dbe = Register(scope, d => d.RegisterComponentFromAccessor<EvoDiskWalV1>());
+            Assert.That(dbe.RestoreOriginLsn, Is.EqualTo(origin), "the restore is an ancestor of the timeline it reopened on");
+        }
     }
 }
 

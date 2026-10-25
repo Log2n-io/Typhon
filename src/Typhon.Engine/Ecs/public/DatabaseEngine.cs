@@ -501,9 +501,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>
     /// Identity of this database's WAL history: LSNs are unique within a timeline. Minted with <see cref="DatabaseId"/> at creation and kept across
     /// reopens and crashes; a database restored from a backup point starts a new one (<see cref="AdoptTimeline"/>), because its WAL reuses LSNs the
-    /// original already wrote. Persisted as <see cref="BK_TimelineId"/>, in the same packed shape as <see cref="DatabaseId"/>.
+    /// original already wrote. Persisted as <see cref="BK_TimelineId"/>, in the same packed shape as <see cref="DatabaseId"/>. Read from the published
+    /// <see cref="Timelines"/>: a fork changes it at runtime, and a 16-byte field read while it is written could tear.
     /// </summary>
-    internal Guid TimelineId { get; private set; }
+    internal Guid TimelineId => Timelines.Current.TimelineId;
 
     /// <summary>
     /// The next transaction number this database will hand out — its position in a globally monotonic, restart-durable sequence.
@@ -3233,7 +3234,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Durable database identity (D-2) — minted here, at creation, and never rewritten. This is the only place a *new* id is born on the create path.
         DatabaseId = Guid.NewGuid();
         bootstrap.Set(BK_DatabaseId, PackDatabaseId(DatabaseId));
-        TimelineId = Guid.NewGuid();
+        PublishOpenedTimeline(Guid.NewGuid());
         bootstrap.Set(BK_TimelineId, PackDatabaseId(TimelineId));
 
         MMF.UnlatchPageExclusive(memPageIdx);
@@ -3507,11 +3508,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         if (bootstrap.TryGet(BK_TimelineId, out var timeline))
         {
-            TimelineId = UnpackDatabaseId(timeline);
+            PublishOpenedTimeline(UnpackDatabaseId(timeline));
         }
         else
         {
-            TimelineId = Guid.NewGuid();
+            PublishOpenedTimeline(Guid.NewGuid());
             minted = true;
         }
 

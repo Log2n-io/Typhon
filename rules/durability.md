@@ -3531,7 +3531,13 @@ BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#141
             range below L refuses with its range (Gap) and the LSNs still restorable; L past the archive ⇒ BeyondArchive
   invariant a restore never crosses a fork: L ≤ a child's OriginLsn is restored on the parent (ancestry walk), L > it on the
             child from a child point only; a fork (SchemaChange at registration, BulkLoad before BulkEnd, Restore at adoption)
-            flips BK_TimelineId/Parent/OriginLsn/Reason in one fsynced meta write before any record of the new timeline
+            flips BK_TimelineId/Parent/OriginLsn/Reason in one fsynced meta write before any record of the new timeline; a fork is
+            folded into the previous one only at the same origin with no point stamped since it (a point between two schema
+            changes at one origin would otherwise share a timeline with the second one's records)
+  invariant the engine's timelines are one immutable value, published with a release store and read with one acquire load: a
+            point's timeline and parent, the archiver's filing, are of one fork, never a torn id; the meta keeps the ancestors a
+            local segment may still belong to (BK_TimelineAncestry), so a restart files a held segment under its own timeline
+            however many forks ago it was written, and a restored database keeps its restore's origin past a fork
   invariant a clean base restored with archived WAL opens on the crash path: the marker (v2) carries ForceCrashRecovery, and the
             open replays the restored WAL whatever the image's clean flag; a v1 marker is still read, a newer one refused
   invariant a refused or planned restore writes nothing: Preview/PlanRestore report every refusal Run would raise; a Run held to
@@ -3540,15 +3546,17 @@ BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#141
   requires: BKP-05, BKP-10, BKP-06, BKP-08, LOG-03, LOG-04
   scope: ArchiveRestorePlanner.Plan, ArchiveRestorePlanner.ResolveTime, ArchiveRestorePlanner.Ancestor, WalArchiveScanner.FindCut,
     RestoreStager.Run, RestoreStager.Preview, RestoreStager.WriteArchivedWal, RestoreMarker.TryRead,
-    DatabaseEngine.CheckRestoreMarkerAtOpen, DatabaseEngine.ForkTimeline, DatabaseEngine.AdoptTimeline
+    DatabaseEngine.CheckRestoreMarkerAtOpen, DatabaseEngine.ForkTimeline, DatabaseEngine.AdoptTimeline,
+    DatabaseEngine.StampTimelineForPoint, TimelineHistory.For
   on_violation: a restore that opens without error to a state no run produced — a prefix past the target, a frame cut in half, two
     histories spliced at a segment, a fork crossed, or a clean base whose archived WAL is silently skipped; found when the data
     is needed
   verified: RestoreToLsnOracleTests (T12: every frame end as a target, from either base, oracle state; forced crash recovery),
             FrameCutTests, ArchiveRestorePlannerTests (every refusal; a disagreeing base never mixed; never across a fork),
-            TimelineForkTests, RestoreMarkerV2Tests, RestoreCleanBaseTests
-            (Mutant_AMarkerWithoutForceCrashRecovery_IsReported), RestorePlanTests (AC-A11) — [VerifiesRule("BKP-11")]. Source
-            mutants seen red: fork flipped after FlushToDisk
+            TimelineForkTests (two schema changes with a point between them fork twice at one origin), RestoreMarkerV2Tests,
+            RestoreCleanBaseTests (Mutant_AMarkerWithoutForceCrashRecovery_IsReported), RestorePlanTests (AC-A11) —
+            [VerifiesRule("BKP-11")]. Source mutants seen red: fork flipped after FlushToDisk, a fork folded by origin alone, the
+            ancestry not persisted
   spec: rules/tla/WalArchive.tla (S7) — NoSilentHole (a restore never accepts a target past a hole); the cut is a prefix of the log, whose
     recovery to exactly the committed prefix is S2's (CommitRecovery.tla)
 
