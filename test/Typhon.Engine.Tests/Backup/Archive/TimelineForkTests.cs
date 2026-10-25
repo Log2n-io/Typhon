@@ -244,6 +244,92 @@ class TimelineForkTests : ArchiveTestBase<TimelineForkTests>
     }
 
     /// <summary>
+    /// A point captured between a runtime schema change's fork flip and the change's first write (staged in the fork's probe: the registering thread waits
+    /// while another captures). The point is stamped on the new timeline with an image that has no table for the new component. A restore from it past
+    /// the change is still the run's state: no record can name the component until an archetype carries it, and an archetype gets its routing id only at an
+    /// InitializeArchetypes, which forks again and refuses captures while it runs.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("BKP-11")]
+    public void APointFrozenBetweenARuntimeForkAndItsFirstWrite_RestoresTheRunsState()
+    {
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            Register(scope, _ => { });
+        }
+
+        Dictionary<EntityId, int> expected;
+        uint between = 0;
+        Guid forkedTo = Guid.Empty;
+        long end;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Register(scope, _ => { });
+            var archiver = NewArchiver(dbe);
+            Tick(archiver, 0);
+            var ids = Spawn(dbe, 3, 1);
+            dbe.AfterTimelineForkProbe = child =>
+            {
+                forkedTo = child;
+                between = System.Threading.Tasks.Task.Run(() => CapturePoint(dbe, BackupKind.Full)).Result;
+            };
+            dbe.RegisterComponentFromAccessor<CompB>();
+            dbe.AfterTimelineForkProbe = null;
+            Assert.That(between, Is.Not.Zero, "premise: a point was captured between the flip and the write");
+
+            ids.AddRange(Spawn(dbe, 3, 100));
+            Update(dbe, ids.Take(2), 7_777);
+            Switch(dbe);
+            Tick(archiver, 1);
+            Tick(archiver, 2);
+            end = archiver.ArchivedThroughLsn;
+            using var t = dbe.CreateQuickTransaction();
+            expected = ids.ToDictionary(id => id, id => t.Open(id).Read(CompAArch.A).A);
+        }
+
+        var point = StoreView.Open(StorePath, trustCatalog: false).Catalog.Packs.Single(p => p.BackupId == between);
+        Assert.That(point.TimelineId, Is.EqualTo(forkedTo), "premise: the point is stamped on the timeline the fork started");
+
+        var (result, versioned, _, _) = RestoreAndRead(PointSelector.AtLsn(end, forkedTo), "between-flip-and-write");
+        Assert.That((result.Point.BackupId, result.EffectiveLsn), Is.EqualTo((between, end)), "restored from that point, to the archive's end");
+        Assert.That(versioned, Is.EqualTo(expected), "the run's state");
+    }
+
+    /// <summary>
+    /// The other runtime schema change: InitializeArchetypes called again, assigning routing ids to the archetypes a runtime component completed. Its fork
+    /// flips before the ids are written; a capture then would freeze an image without them while records name them. It is refused: the engine is
+    /// opening again until InitializeArchetypes returns (BackupRefusal, checked right before the freeze).
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void ACaptureBetweenARuntimeArchetypeForkAndItsIds_IsRefused()
+    {
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            Register(scope, _ => { });
+        }
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Register(scope, _ => { });
+            dbe.RegisterComponentFromAccessor<CompB>();
+            CapturePoint(dbe, BackupKind.Full);   // a point since that fork: the archetypes' change forks again (D3), rather than folding into it
+            Exception refused = null;
+            var forks = 0;
+            dbe.AfterTimelineForkProbe = _ =>
+            {
+                forks++;
+                refused = Assert.Catch(() => System.Threading.Tasks.Task.Run(() => CapturePoint(dbe, BackupKind.Full)).GetAwaiter().GetResult());
+            };
+            dbe.InitializeArchetypes();
+            dbe.AfterTimelineForkProbe = null;
+            Assert.That(forks, Is.EqualTo(1), "premise: the archetypes the runtime component completes fork at InitializeArchetypes");
+            Assert.That(refused, Is.Not.Null.And.Message.Contains("open has not completed"), "a capture inside InitializeArchetypes is refused");
+        }
+    }
+
+    /// <summary>
     /// The timelines are one published value (D4): a fork publishes a new one and leaves the one a reader holds as it was, so a reader's id, parent and
     /// origin are always of one fork. (A torn 16-byte id is not reproducible on demand; the shape that excludes it is what this holds.)
     /// </summary>

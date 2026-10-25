@@ -257,6 +257,7 @@ public partial class DatabaseEngine
             }
         }
 
+        Guid child;
         lock (_timelineLock)
         {
             var origin = WalManager.SegmentManager.ArchiveSnapshot(0, 0).ActiveFirstLsn - 1;
@@ -266,13 +267,15 @@ public partial class DatabaseEngine
             }
 
             var parent = _timelines.Current.TimelineId;
-            var child = Guid.NewGuid();
+            child = Guid.NewGuid();
             AdoptTimeline(child, parent, origin, reason, keepLineage: true);
             _lastForkOrigin = origin;
             _pointStampsAtLastFork = _pointStamps;
             LogTimelineForked(parent, child, origin, reason);
-            AfterTimelineForkProbe?.Invoke(child);
         }
+
+        // Outside the lock: the probe stands for whatever runs between the flip and the change's first write (a point's capture, in a test).
+        AfterTimelineForkProbe?.Invoke(child);
     }
 
     /// <summary>
