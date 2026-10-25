@@ -2159,6 +2159,13 @@ internal sealed unsafe partial class ArchetypeClusterState
     public long TotalMigrationCount;
 
     /// <summary>
+    /// Bumped once per migration slice by <c>DatabaseEngine.ExecuteMigrations</c>, the only path that moves a live entity between slots. A transaction's
+    /// <see cref="OwnDestroyedSlots"/> records where its pending destroys sat at a given epoch; a different epoch means they may have moved, and it locates
+    /// them again (CLUSTERWALK-04). Load-bearing, unlike the telemetry <see cref="TotalMigrationCount"/> beside it.
+    /// </summary>
+    internal long SlotMoveEpoch;
+
+    /// <summary>
     /// Telemetry counter: boundary crossings absorbed by the hysteresis margin since this cluster state was created. Cumulative counterpart to
     /// <see cref="LastTickHysteresisAbsorbedCount"/>; see <see cref="TotalMigrationCount"/> for why the cumulative form is the one a scrape can use, and for
     /// the repeat-<c>InitializeArchetypes</c> caveat that applies here too.

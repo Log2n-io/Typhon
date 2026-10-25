@@ -91,6 +91,16 @@ public partial class EntityAccessor : IDisposable
     /// Reused across multiple calls targeting the same archetype. Disposed in ResetCore().
     /// </summary>
     private protected ushort _entityMapCacheArchId;
+
+    /// <summary>
+    /// How many entities this accessor destroyed and has not committed (CLUSTERWALK-04). Always 0 except on a <see cref="Transaction"/>, the only accessor
+    /// that destroys; here on the base so a cluster walk reads it once per cluster with no type test.
+    /// </summary>
+    internal int OwnDestroyCount;
+
+    /// <summary>The slots this accessor's own pending destroys hold in an archetype's clusters (CLUSTERWALK-04); null — none — except on a
+    /// <see cref="Transaction"/>. Reached only when <see cref="OwnDestroyCount"/> moved.</summary>
+    internal virtual OwnDestroyedSlots OwnDestroyedSlotsFor(ArchetypeMetadata meta, ArchetypeClusterState state) => null;
     private protected ChunkAccessor<PersistentStore> _entityMapCacheAccessor;
     private protected bool _hasEntityMapCache;
 
