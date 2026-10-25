@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-10-23 |
+| Last Updated | 2026-10-25 |
 | Domain | Component schema identity, archetype registry, component-type identity, tick-fence dirty bitmaps, spawn payload staging, entity handles, view lifetime, indexed queries between a write and its fence |
 
 > Type-location: `Ecs/internals/ArchetypeRegistry.cs`, `Ecs/internals/ArchetypeMetadata.cs` (+ `ArchetypeEngineState`), `Ecs/public/DatabaseEngine.cs`
@@ -336,7 +336,7 @@ structural mutation.
   invariant between two fences, no release removes a cluster from `ActiveClusterIds[0 .. ActiveClusterCount)` or frees its chunk: a release that empties a
             cluster records it (`ArchetypeClusterState.RecordClusterDrain`) for the next fence's reclamation (CLUSTERWALK-03). A walker holding a range of
             the list therefore meets every cluster of it exactly once, and a cluster emptied under it reads as empty and is skipped
-            (`ClusterEnumerator.MoveNext` tests its occupancy word)
+            (`ClusterEnumerator.MoveNext` tests its occupancy word — minus the walking transaction's own destroys, CLUSTERWALK-04)
   never `RemoveFromActiveList`, a `FreeChunk` of a cluster chunk, or a cluster detach from its cell, reached from a commit, an abort or a cleanup — only
         from the reclamation
   scope: ArchetypeClusterState.ReleaseSlot, ArchetypeClusterState.FinishVacatedSlot, ArchetypeClusterState.RecordClusterDrain,
@@ -460,6 +460,56 @@ structural mutation.
             or by `Array.Resize`'s plain `ref` assignment. The clause is upheld by the enforce text and by review, not by a
             test, because x64 gives the same answer either way and the quadrant it protects needs a weak model to observe.
             Reverting the hand-written grow to `Array.Resize` would leave all four cases green.
+
+### CLUSTERWALK-04: A transaction's cluster walk never yields an entity that transaction has destroyed `[fatal][silent]`
+  invariant ∀ transaction t, ∀ e ∈ t's pending destroys (Destroy, DestroyBatch, DestroyBulk, a cascade), ∀ enumerator E created through t
+            (ArchetypeAccessor.GetClusterEnumerator, EntityAccessor.GetClusterEnumerator — every overload, TickContext ranges and realms included),
+            ∀ cluster c that E.MoveNext reaches after the destroy while e holds slot s of c:
+              s ∉ c.OccupancyBits ∧ s ∉ c.ActiveBits(k) ∀k ∧ c.LiveCount = popcount(c.OccupancyBits) ∧ c.IsFull tests the same word,
+              and MoveNext yields no cluster whose occupancy minus t's own destroys is 0 (the non-empty guarantee holds on that word)
+            in every storage mode — SingleVersion, Transient, Versioned, mixed — as t's point access (IsAlive / Open / OpenMut / TryOpen) and its
+            EcsQuery paths (QENABLE-01) already treat e. ClusterRef.Set refuses s, as OpenMut does
+  invariant the same holds for a spatial cluster query made through t (`t.ClusterSpatialQuery<T>()`: AABB, Radius, CountRadius, ForEachInRadius): no hit,
+            no count for e. The engine form (`dbe.ClusterSpatialQuery<T>()`) is bound to no transaction and sees none's pending work — it returns e
+            until the destroy commits, by design, and its documentation names that risk and the transaction form as the alternative
+  invariant scope is t's OWN pending destroys: through any other transaction or accessor an uncommitted destroy hides nothing (VIS-09). A walk through t
+            yields no entity t spawned and has not published: the raw walk is committed HEAD minus own destroys, not read-your-own-writes (point
+            access and EcsQuery see own spawns)
+  invariant the word is taken per cluster at MoveNext: a ClusterRef's OccupancyBits / ActiveBits / LiveCount / IsFull read the value MoveNext computed. A
+            destroy t makes while a cluster is current applies from the next MoveNext of the same walk (the enumerator re-reads t's destroy count per
+            cluster — OwnDestroyFilter.Apply, the one check every walker above shares)
+  invariant a hidden slot is the slot e holds NOW: every candidate is confirmed by the EntityId the slot holds being one of t's pending destroys (a slot
+            another transaction's committed destroy released and a spawn reused is not hidden), and t's located slots are keyed by
+            ArchetypeClusterState.SlotMoveEpoch, which DatabaseEngine.ExecuteMigrations — the only path moving a live entity between slots — bumps per
+            slice, so a destroy whose entity moved is located again
+  enforce cost: t with no pending destroy — a null test and a count compare per cluster, no lookup, nothing per entity; a walk through a non-transaction
+          accessor — one null test per cluster. Otherwise one bit test per cluster (OwnDestroyedSlots' per-cluster filter), a small open-addressed
+          table probe only in a cluster holding an own destroy, one HashSet probe per candidate slot — never per yielded entity. Slots are located lazily,
+          one EntityMap lookup per destroy per (transaction, archetype, move epoch); Destroy itself adds one list append
+  never the engine's in-place bookkeeping reads the masked word: ClusterRef.MarkDirty, ClusterRef.SpatialWriteChangesKeys and
+        ClusterEnumerator.MarkCurrentDirty read the raw occupancy — a span write into an own-destroyed slot whose destroy is rolled back must still reach
+        the dirty bitmap and the index (IX-07)
+  scope: OwnDestroyFilter.Apply, EntityAccessor.OwnDestroyCount, EntityAccessor.OwnDestroyedSlotsFor, AabbClusterEnumerator.OpenOccupancy,
+         ClusterSpatialQueryExtensions.ClusterSpatialQuery, ClusterEnumerator.MoveNext, ClusterEnumerator.Current, ClusterEnumerator.Create, ClusterEnumerator.CreateScoped,
+         ClusterRef.OccupancyBits, ClusterRef.ActiveBits, ClusterRef.LiveCount, ClusterRef.IsFull, ClusterRef.Set, ClusterRef.MarkDirty,
+         ClusterRef.SpatialWriteChangesKeys, ClusterEnumerator.MarkCurrentDirty, ArchetypeAccessor.GetClusterEnumerator,
+         EntityAccessor.GetClusterEnumerator, Transaction.Destroy, Transaction.DestroyBatch, Transaction.DestroyBulk, Transaction.DestroyInternal,
+         Transaction.AddPendingDestroy, Transaction.OwnDestroyedSlotsFor, Transaction.CleanupEcsState, OwnDestroyedSlots.Unhidden,
+         ArchetypeClusterState.SlotMoveEpoch, DatabaseEngine.ExecuteMigrations
+  on_violation: one transaction gives two answers about one entity. OpenMut on what the walk chose throws and aborts the tick (SWG LairLife, tick 137 260,
+                #1482); a TryOpen or an in-place ClusterRef write acts silently on a dead entity — a write into a slot about to be released, children
+                spawned for a dead parent, a double count
+  rationale: VIS-09 clears the bit at PUBLISH, so the raw word cannot carry an uncommitted destroy; the transaction subtracts its own. A per-entity filter
+             (EcsQuery's HashSet probe) would put a lookup on every entity of the hottest loop in the engine; a mask maintained at Destroy would add a lookup
+             to DestroyBulk and go stale on a fence move or a slot reuse
+  requires VIS-09, CLUSTERWALK-01
+  verified: ClusterWalkOwnDestroyTests [VerifiesRule] — SingleVersion / Transient / Versioned / mixed: own destroy absent (OccupancyBits, ActiveBits,
+            LiveCount), an emptied cluster skipped, DestroyBatch, cascade, a destroy made mid-walk, all 8 entry points, a system's side transaction (the
+            crash shape), a destroy moved by the fence before the walk, ClusterRef.Set refused on the slot, MarkDirty still marking it, the transaction's
+            spatial query (AABB, Radius, ForEachInRadius, CountRadius, a destroy made mid-query) against the engine's; scope: another
+            transaction's walk still yields, commit, rollback, own spawn not yielded, a slot reused after another transaction's destroy still yielded.
+            Mutant_AWalkThatIgnoresTheOwnDestroy_IsRejected [RuleMutant]
+  NOT covered: a fence migration DURING a walk (outside the contract: a walk during the fence window is excluded, CLUSTERWALK-01 note)
 
 ## Module: CLUSTERVIS — The per-cluster MVCC visibility summary (H1)
 
@@ -1136,7 +1186,7 @@ both fast and exact inside the window; this rule fixes what it does promise.
             for `Disabled<T>()` on a Versioned T, and at the snapshot — a chain with a revision the reader sees, as a point read decides it
             (`EnabledGate.IsPresentAtSnapshot`): the record's root is current state, and a first supply committed after the snapshot made
             the component present to an older reader, matching `Disabled<T>()` on bytes it never had
-  invariant a transaction's own changes, as its point reads see them: an entity it destroyed is gone from its field queries, uncounted by
+  invariant a transaction's own changes, as its point reads see them: an entity it destroyed is gone from its field queries — and from its raw cluster walks (CLUSTERWALK-04) — uncounted by
             Skip / Take (`EcsQuery.ExecuteTargeted`, `EcsQuery.CollectMergedResults`, `EcsQuery.ExecuteSpatial`); a component it supplied to
             an entity that had none is absent to them until it commits (`Transaction.FirstSuppliedHere`; the spatial field verifier, a point
             read, refuses it too) — the scans read the committed slot, and its own enabled bit alone tested bytes the entity never had; its

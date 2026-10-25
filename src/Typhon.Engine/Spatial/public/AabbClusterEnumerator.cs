@@ -61,6 +61,9 @@ public unsafe ref struct AabbClusterEnumerator
     private float _cellQueryMaxY;
     private float _cellQueryMaxZ;
     private readonly uint _categoryMask;
+    // CLUSTERWALK-04, for a query made through a transaction (TransactionClusterSpatialQuery attaches it): its own pending destroys, subtracted per
+    // cluster. Default — an engine query — leaves the occupancy untouched.
+    private OwnDestroyFilter _ownDestroys;
 
     // Cell range the query AABB covers, inclusive. Clamped to the grid extent by SpatialGrid. A 2D archetype's query passes ±Infinity on Z, which
     // WorldToCellRange saturates to the full depth range — one cell for a flat world, so the Z loop below runs exactly once and costs nothing.
@@ -170,6 +173,10 @@ public unsafe ref struct AabbClusterEnumerator
     private int _tallyClusters;
     private int _tallyCandidates;
     private int _tallyHits;
+
+    /// <summary>Subtract a transaction's own pending destroys from every cluster this query opens (CLUSTERWALK-04). Before the first
+    /// <see cref="MoveNext"/>.</summary>
+    internal void FilterOwnDestroys(OwnDestroyFilter ownDestroys) => _ownDestroys = ownDestroys;
 
     internal AabbClusterEnumerator(ArchetypeClusterState state, SpatialGrid grid, double minX, double minY, double minZ, double maxX, double maxY,
         double maxZ, uint categoryMask, double radiusSq = 0d, double radiusCenterX = 0d, double radiusCenterY = 0d, double radiusCenterZ = 0d)
@@ -1060,6 +1067,7 @@ public unsafe ref struct AabbClusterEnumerator
                 _rs.Realm.Value);
         }
 
+        occupancy = _ownDestroys.Apply(_currentClusterChunkId, occupancy, _currentClusterBase, _state);
         _currentOccupancyBits = occupancy;
         _blocksDecided = false;
         _decidedHits = 0UL;

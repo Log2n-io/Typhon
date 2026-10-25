@@ -141,7 +141,8 @@ internal static unsafe class ClusterRadiusBatch
     }
 
     /// <summary>Run the batch for a 2D archetype (<c>Tier2F</c>): the caller has checked the tier and the member count.</summary>
-    internal static void Run<TDrain>(ArchetypeClusterState state, SpatialGrid grid, ReadOnlySpan<BSphere2F> members, uint categoryMask, ref TDrain drain)
+    internal static void Run<TDrain>(ArchetypeClusterState state, SpatialGrid grid, ReadOnlySpan<BSphere2F> members, uint categoryMask, ref TDrain drain,
+        OwnDestroyFilter ownDestroys = default)
         where TDrain : struct, IMemberDrain, allows ref struct
     {
         if (members.IsEmpty)
@@ -149,7 +150,7 @@ internal static unsafe class ClusterRadiusBatch
             return;
         }
 
-        var walk = new Walk(state, grid, members, categoryMask);
+        var walk = new Walk(state, grid, members, categoryMask, ownDestroys);
         try
         {
             walk.Cells(ref drain);
@@ -195,6 +196,8 @@ internal static unsafe class ClusterRadiusBatch
         private readonly uint _categoryMask;
         private readonly EscapedClusterSet _escaped;
         private readonly int _z;
+        // CLUSTERWALK-04, as the single query applies it: a batch through a transaction subtracts its own pending destroys per cluster.
+        private OwnDestroyFilter _ownDestroys;
 
         // Per member j: its query (world f64); its cell range at [4j..4j+3] (x0, y0, x1, y1, the single query's); and its box in the current cell's frame at
         // [4j..4j+3] (minX, minY, maxX, maxY) — what SetCellQueryFrame computes for its own query.
@@ -218,8 +221,9 @@ internal static unsafe class ClusterRadiusBatch
         private int _tallyClusters;
         private int _tallyCandidates;
 
-        public Walk(ArchetypeClusterState state, SpatialGrid grid, ReadOnlySpan<BSphere2F> members, uint categoryMask)
+        public Walk(ArchetypeClusterState state, SpatialGrid grid, ReadOnlySpan<BSphere2F> members, uint categoryMask, OwnDestroyFilter ownDestroys)
         {
+            _ownDestroys = ownDestroys;
             // Left unzeroed: every read of a member's slot is gated by a mask of members that have been written, so zeroing ~7 KB per batch buys nothing.
             Unsafe.SkipInit(out _queries);
             Unsafe.SkipInit(out _ranges);
@@ -594,6 +598,8 @@ internal static unsafe class ClusterRadiusBatch
                 // RM-04, as the single query's cluster open applies it.
                 occupancy = ArchetypeClusterState.SlotsInRealm(clusterBase, occupancy, _layout.RealmKeyColumn, _layout.RealmKeyStride, _rs.Realm.Value);
             }
+
+            occupancy = _ownDestroys.Apply(chunkId, occupancy, clusterBase, _state);
 
             // Opened once, counted once per member, with all its occupied slots: each member's own query would have opened it (SO-02).
             if (occupancy == 0UL)

@@ -61,6 +61,9 @@ public struct TickContext
     /// <item><description>QuerySystem/PipelineSystem with changeFilter: dirty entities ∪ Added (only entities whose filtered components were written since last tick)</description></item>
     /// </list>
     /// The backing array is pooled — do not hold references beyond the system's Execute scope.
+    /// <para>Built before the system runs and bound to no transaction: an entity the system destroys during this execution stays in it. Test
+    /// <c>IsAlive</c> before acting on one after a destroy. A cluster walk through <see cref="Transaction"/> does skip its own destroys (CLUSTERWALK-04); with
+    /// per-chunk transactions, a destroy made by another chunk's transaction stays visible until it commits.</para>
     /// </summary>
     public IReadOnlyCollection<EntityId> Entities { get; init; }
 

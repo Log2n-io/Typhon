@@ -258,6 +258,8 @@ below names the invariant that proves it.
        before the tree removal has no staged test — no hook sits inside one commit's publish. A row the merge's tree read found
        and a destroy hid before the merge consumed it is decided by its record, which only spares the merge its second answer: the
        destroy moved the stamp, and the revalidation answers right without it (mutant dropping such rows: survives, by design)
+  note the occupancy bit is cleared at PUBLISH; until then the destroying transaction's own cluster walks subtract it (CLUSTERWALK-04) — no other
+       reader's
   spec: tla/CommitStampFamilies.tla — DestroyRead (destroyatpublish, releaseatpublish)
   on_violation: a reader begun after the destroy's stamp still sees the entity alive while it holds the commit's other
                 effects; an older reader's scan loses an entity its snapshot holds
