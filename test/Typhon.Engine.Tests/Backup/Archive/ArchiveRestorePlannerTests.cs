@@ -67,6 +67,41 @@ class ArchiveRestorePlannerTests : ArchiveTestBase<ArchiveRestorePlannerTests>
         Assert.That(Plan(PointSelector.AtLsn(end)).Chain.Point.BackupId, Is.EqualTo(p2.BackupId), "past the second point, the gap is behind its base");
     }
 
+    /// <summary>
+    /// A restore to an LSN needs every archived segment's header and footer, never its time samples: a segment whose samples section is damaged is still
+    /// replayed (its WAL bytes are checked when decoded), and a time target is resolved from the segments the instant lies in.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void ARestoreToAnLsn_DoesNotReadTheTimeSamples()
+    {
+        var run = RunArchivedWorkload(TestSeed.For("bkp-archive-planner-samples"), stepsPerPhase: 4);
+        var withBounds = WalArchiveStore.Load(StoreFileSystem.Instance, StorePath, run.Timeline, trustIndex: false).Segments;
+        var target = StoreView.Open(StorePath, trustCatalog: false).Find(run.Points[1]).Original.PointLsn - 1;   // from the first point: the longest replay
+        var plan = Plan(PointSelector.AtLsn(target));
+        var victim = withBounds.FirstOrDefault(s => s.FirstSampleLsn > 0 && s != withBounds[^1] && plan.Segments.Any(p => p.Archived?.SegmentId == s.SegmentId));
+        Assert.That(victim, Is.Not.Null, "premise: the plan replays an archived segment with samples, not the newest");
+
+        using (var f = new FileStream(SegmentFile(run.Timeline, victim.SegmentId), FileMode.Open, FileAccess.ReadWrite))
+        {
+            f.Seek(victim.Footer.SamplesOffset + ArchiveFormat.SectionPrefixSize, SeekOrigin.Begin);
+            var b = f.ReadByte();
+            f.Seek(-1, SeekOrigin.Current);
+            f.WriteByte((byte)(b ^ 0x5A));
+        }
+
+        Assert.Throws<BackupPackCorruptException>(() =>
+        {
+            using var r = ArchivedSegmentReader.Open(StoreFileSystem.Instance, SegmentFile(run.Timeline, victim.SegmentId));
+            r.ReadSamples();
+        }, "premise: the samples section is damaged");
+        var again = Plan(PointSelector.AtLsn(target));
+        Assert.That(again.Segments.Select(s => s.SegmentId), Is.EqualTo(plan.Segments.Select(s => s.SegmentId)), "the same WAL, samples unread");
+        var newest = withBounds[^1];
+        var atTime = Plan(PointSelector.AtTime(new DateTime(newest.LastSampleUtcTicks, DateTimeKind.Utc)));
+        Assert.That(atTime.TargetLsn, Is.EqualTo(newest.LastSampleLsn), "an instant resolves from the newest segment's samples");
+    }
+
     [Test]
     [CancelAfter(60_000)]
     [VerifiesRule("BKP-11")]

@@ -128,9 +128,10 @@ internal static class WalArchiveStore
 
     /// <summary>
     /// A timeline's archived segments, from the index when it matches the listing (and <paramref name="trustIndex"/>), else from every file's header and
-    /// footer. Reads only: no lock, nothing written.
+    /// footer — and its samples' bounds, read and checked, unless <paramref name="sampleBounds"/> is false (continuity needs only the header and the
+    /// footer; the restore reads a segment's samples when it resolves an instant). Reads only: no lock, nothing written.
     /// </summary>
-    public static ArchivedTimeline Load(IStoreFileSystem fs, string storeRoot, Guid timelineId, bool trustIndex = true)
+    public static ArchivedTimeline Load(IStoreFileSystem fs, string storeRoot, Guid timelineId, bool trustIndex = true, bool sampleBounds = true)
     {
         var paths = new WalArchivePaths(storeRoot);
         var dir = paths.Timeline(timelineId);
@@ -157,7 +158,7 @@ internal static class WalArchiveStore
                     PackFormat.ThrowCorrupt(f.Name, "Header", -1, $"names segment {reader.Header.SegmentId} of timeline {reader.Header.TimelineId}");
                 }
 
-                segments.Add(Describe(f.Name, reader));
+                segments.Add(Describe(f.Name, reader, sampleBounds));
             }
             catch (Exception ex) when (ex is BackupException or IOException or UnauthorizedAccessException)
             {
@@ -172,10 +173,13 @@ internal static class WalArchiveStore
         };
     }
 
-    /// <summary>What a reader says about its segment: header, footer and its samples' bounds (the samples are read and checked).</summary>
-    public static ArchivedSegmentInfo Describe(string fileName, ArchivedSegmentReader reader)
+    /// <summary>
+    /// What a reader says about its segment: header, footer and, with <paramref name="sampleBounds"/>, its samples' bounds (the samples are read and
+    /// checked); without, the bounds are 0.
+    /// </summary>
+    public static ArchivedSegmentInfo Describe(string fileName, ArchivedSegmentReader reader, bool sampleBounds = true)
     {
-        var samples = reader.ReadSamples();
+        var samples = sampleBounds ? reader.ReadSamples() : [];
         return new ArchivedSegmentInfo
         {
             File = fileName,
@@ -221,9 +225,9 @@ internal static class WalArchiveStore
 
     /// <summary>
     /// Retention of the archive (#1415, 05 §3 step 5), engine-free, under <c>store.lock</c>: per timeline, archived segments whose last LSN is below its
-    /// floor are deleted oldest first, each followed by a directory flush (a crash leaves the coverage starting later, never a hole); a timeline absent from
-    /// <paramref name="floors"/> is deleted whole, except <paramref name="liveTimeline"/>, kept whole. A timeline whose <c>archive.lock</c> is busy is
-    /// skipped and reported.
+    /// floor are deleted oldest first, then the directory flushed once (a crash persists any subset of them: every one lies below every kept point's floor,
+    /// so none decides a restore, and a hole among them is covered); a timeline absent from <paramref name="floors"/> is deleted whole, except
+    /// <paramref name="liveTimeline"/>, kept whole. A timeline whose <c>archive.lock</c> is busy is skipped and reported.
     /// </summary>
     /// <param name="session">The store, opened for writing (its lock held).</param>
     /// <param name="floors">Per kept timeline, the lowest LSN a kept point may replay from (<c>C</c> of its oldest kept point).</param>
@@ -268,7 +272,8 @@ internal static class WalArchiveStore
 
             using (held)
             {
-                var loaded = Load(fs, storeRoot, timeline, trustIndex: false);
+                var loaded = Load(fs, storeRoot, timeline, trustIndex: false, sampleBounds: false);
+                var deletedHere = 0;
                 foreach (var s in loaded.Segments)
                 {
                     if (kept && s.LastLsn >= keepFrom)
@@ -277,8 +282,13 @@ internal static class WalArchiveStore
                     }
 
                     fs.DeleteFile(Path.Combine(dir, s.File));
-                    fs.FlushDirectory(dir);
                     deleted.Add((timeline, s.File));
+                    deletedHere++;
+                }
+
+                if (deletedHere > 0)
+                {
+                    fs.FlushDirectory(dir);
                 }
 
                 fs.DeleteFile(paths.Index(timeline));

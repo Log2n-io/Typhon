@@ -1,7 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 
@@ -320,46 +319,36 @@ internal static class ArchiveRestorePlanner
     /// Whether the tail's copy and the archived copy are one history (WA-11): equal over the bytes both hold, and nothing in the tail past the archived
     /// bytes but zeros (an offline point copies a segment whole, at its declared size; the archive keeps it to its last frame).
     /// </summary>
+    /// <remarks>
+    /// The segment-sized buffers (64 MiB by default) are native and freed on return: rented from the shared array pool, they stayed in it for the life of
+    /// a long-lived host (the Workbench), two per tail segment per candidate base.
+    /// </remarks>
     internal static bool TailAgrees(IStoreFileSystem fs, StoreView view, PackReader reader, TailDirectory tail, int index, ArchivedSegmentInfo copy)
     {
         var raw = tail.Segments[index].RawLength;
         var archivedLength = (int)copy.Footer.ArchiveLength;
-        var tailBytes = ArrayPool<byte>.Shared.Rent(raw);
-        var archived = ArrayPool<byte>.Shared.Rent(archivedLength);
-        try
+        using var tailBuffer = NativeBuffer.Allocate(Math.Max(raw, 1), null, null);   // the planner runs with no engine
+        using var archivedBuffer = NativeBuffer.Allocate(Math.Max(archivedLength, 1), null, null);
+        var tailBytes = tailBuffer.Span;
+        var archived = archivedBuffer.Span;
+        reader.DecodeTailSegment(tail, index, tailBytes);
+        using (var r = ArchivedSegmentReader.Open(fs, SegmentPath(view, copy)))
         {
-            reader.DecodeTailSegment(tail, index, tailBytes);
-            using (var r = ArchivedSegmentReader.Open(fs, SegmentPath(view, copy)))
-            {
-                r.Decode(archived);
-            }
+            r.Decode(archived);
+        }
 
-            var common = Math.Min(raw, archivedLength);
-            return tailBytes.AsSpan(0, common).SequenceEqual(archived.AsSpan(0, common))
-                   && (raw <= archivedLength || tailBytes.AsSpan(archivedLength, raw - archivedLength).IndexOfAnyExcept((byte)0) < 0);
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(tailBytes);
-            ArrayPool<byte>.Shared.Return(archived);
-        }
+        var common = Math.Min(raw, archivedLength);
+        return tailBytes[..common].SequenceEqual(archived[..common]) && (raw <= archivedLength || tailBytes[archivedLength..raw].IndexOfAnyExcept((byte)0) < 0);
     }
 
     private static bool TailSegmentEmpty(PackReader reader, TailDirectory tail, int index)
     {
         var raw = tail.Segments[index].RawLength;
-        var bytes = ArrayPool<byte>.Shared.Rent(raw);
-        try
-        {
-            reader.DecodeTailSegment(tail, index, bytes);
-            var path = Path.Combine("tail", tail.Segments[index].SegmentId.ToString("D16") + ".wal");
-            using var walReader = new WalSegmentReader(WalTailView.OverPrefixes(new Dictionary<string, ReadOnlyMemory<byte>> { [path] = bytes.AsMemory(0, raw) }));
-            return walReader.OpenSegment(path) && !walReader.TryReadNext(out _, out _) && !walReader.WasTruncated;
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(bytes);
-        }
+        using var buffer = NativeBuffer.Allocate(Math.Max(raw, 1), null, null);
+        reader.DecodeTailSegment(tail, index, buffer.Span);
+        var path = Path.Combine("tail", tail.Segments[index].SegmentId.ToString("D16") + ".wal");
+        using var walReader = new WalSegmentReader(WalTailView.OverPrefixes(new Dictionary<string, ReadOnlyMemory<byte>> { [path] = buffer.Memory[..raw] }));
+        return walReader.OpenSegment(path) && !walReader.TryReadNext(out _, out _) && !walReader.WasTruncated;
     }
 
     internal static string SegmentPath(StoreView view, ArchivedSegmentInfo segment) =>
@@ -383,13 +372,16 @@ internal static class ArchiveRestorePlanner
         return null;
     }
 
-    /// <summary>Every timeline of the store's archive, read from its files (restore re-derives continuity from them, never from the index).</summary>
+    /// <summary>
+    /// Every timeline of the store's archive, read from its files (restore re-derives continuity from them, never from the index): each file's header
+    /// and footer only — its samples are read by <see cref="ResolveTime"/>, for the segments it visits.
+    /// </summary>
     internal static Dictionary<Guid, ArchivedTimeline> LoadTimelines(IStoreFileSystem fs, string root)
     {
         var result = new Dictionary<Guid, ArchivedTimeline>();
         foreach (var t in WalArchiveStore.ListTimelines(fs, root))
         {
-            result[t] = WalArchiveStore.Load(fs, root, t, trustIndex: false);
+            result[t] = WalArchiveStore.Load(fs, root, t, trustIndex: false, sampleBounds: false);
         }
 
         return result;
@@ -442,7 +434,8 @@ internal static class ArchiveRestorePlanner
 
     /// <summary>
     /// <c>L</c> for an instant (06 §3, BKP-11): the highest LSN sampled durable at or before <paramref name="utc"/> on <paramref name="t"/>'s ancestry —
-    /// a timeline's own samples first, then its parent's at or below its origin. Never a frame durable after the instant.
+    /// a timeline's own samples first, then its parent's at or below its origin. Never a frame durable after the instant. Samples are read newest segment
+    /// first, and only until the instant is found; a segment whose samples cannot be read is passed over, as an unreadable one is.
     /// </summary>
     internal static (long Lsn, ArchiveTimeSample Sample, Guid Timeline) ResolveTime(IStoreFileSystem fs, string root,
         Dictionary<Guid, ArchivedTimeline> timelines, Guid t, DateTime utc)
@@ -454,14 +447,24 @@ internal static class ArchiveRestorePlanner
             for (var i = archive.Segments.Count - 1; i >= 0; i--)
             {
                 var s = archive.Segments[i];
-                if (s.FirstSampleLsn == 0 || s.FirstSampleUtcTicks > ticks || s.FirstSampleLsn > upper)
+                if (s.Header.FirstLsn - 1 > upper)
+                {
+                    continue;   // wholly past the child's origin: none of its samples may be used
+                }
+
+                ArchiveTimeSample[] samples;
+                try
+                {
+                    using var reader = ArchivedSegmentReader.Open(fs, Path.Combine(new WalArchivePaths(root).Timeline(t), s.File));
+                    samples = reader.ReadSamples();
+                }
+                catch (Exception e) when (e is BackupException or IOException or UnauthorizedAccessException)
                 {
                     continue;
                 }
 
-                using var reader = ArchivedSegmentReader.Open(fs, Path.Combine(new WalArchivePaths(root).Timeline(t), s.File));
                 ArchiveTimeSample? best = null;
-                foreach (var sample in reader.ReadSamples())
+                foreach (var sample in samples)
                 {
                     if (sample.UtcTicks <= ticks && sample.Lsn <= upper)
                     {
@@ -535,37 +538,30 @@ internal static class ArchiveRestorePlanner
         public (WalCut Cut, uint Declared) Cut(PlannedWalSegment segment, long target)
         {
             var length = segment.KeepBytes;
-            var bytes = ArrayPool<byte>.Shared.Rent(length);
-            try
+            using var buffer = NativeBuffer.Allocate(Math.Max(length, 1), null, null);   // native, freed on return (see TailAgrees)
+            uint declared;
+            if (segment.Archived != null)
             {
-                uint declared;
-                if (segment.Archived != null)
-                {
-                    using var r = ArchivedSegmentReader.Open(fs, SegmentPath(view, segment.Archived));
-                    r.Decode(bytes);
-                    declared = segment.Archived.Header.DeclaredSize;
-                }
-                else
-                {
-                    _pack ??= PackReader.Open(fs, view.Paths.PackPath(point.File));
-                    _tail ??= _pack.LoadTailDirectory();
-                    declared = _pack.DecodeTailSegment(_tail, segment.TailIndex, bytes);
-                }
-
-                var path = Path.Combine("restore", segment.SegmentId.ToString("D16") + ".wal");
-                var walView = WalTailView.OverPrefixes(new Dictionary<string, ReadOnlyMemory<byte>> { [path] = bytes.AsMemory(0, length) });
-                using var reader = new WalSegmentReader(walView);
-                if (!reader.OpenSegment(path))
-                {
-                    PackFormat.ThrowCorrupt(path, "Tail", -1, $"WAL segment {segment.SegmentId} has no valid header");
-                }
-
-                return (WalArchiveScanner.FindCut(reader, target), declared);
+                using var r = ArchivedSegmentReader.Open(fs, SegmentPath(view, segment.Archived));
+                r.Decode(buffer.Span);
+                declared = segment.Archived.Header.DeclaredSize;
             }
-            finally
+            else
             {
-                ArrayPool<byte>.Shared.Return(bytes);
+                _pack ??= PackReader.Open(fs, view.Paths.PackPath(point.File));
+                _tail ??= _pack.LoadTailDirectory();
+                declared = _pack.DecodeTailSegment(_tail, segment.TailIndex, buffer.Span);
             }
+
+            var path = Path.Combine("restore", segment.SegmentId.ToString("D16") + ".wal");
+            var walView = WalTailView.OverPrefixes(new Dictionary<string, ReadOnlyMemory<byte>> { [path] = buffer.Memory[..length] });
+            using var reader = new WalSegmentReader(walView);
+            if (!reader.OpenSegment(path))
+            {
+                PackFormat.ThrowCorrupt(path, "Tail", -1, $"WAL segment {segment.SegmentId} has no valid header");
+            }
+
+            return (WalArchiveScanner.FindCut(reader, target), declared);
         }
 
         public void Dispose() => _pack?.Dispose();

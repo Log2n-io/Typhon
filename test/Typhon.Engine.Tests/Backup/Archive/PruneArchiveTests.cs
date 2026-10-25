@@ -5,8 +5,8 @@ using System.Linq;
 namespace Typhon.Engine.Tests.Backup;
 
 /// <summary>
-/// Archive retention (#1415's seam, 05 §3 step 5, WA-16): below a kept timeline's floor, segments go oldest first, each delete flushed, so a crash
-/// leaves the coverage starting later, never a hole; a timeline no kept point needs goes whole, the live one never; a busy timeline is skipped and said.
+/// Archive retention (#1415's seam, 05 §3 step 5, WA-16): below a kept timeline's floor, segments go oldest first, the directory flushed once for them
+/// all, so a crash leaves the coverage starting later; a timeline no kept point needs goes whole, the live one never; a busy timeline is skipped and said.
 /// </summary>
 [TestFixture]
 internal sealed class PruneArchiveTests
@@ -55,6 +55,33 @@ internal sealed class PruneArchiveTests
         Assert.That(fs.DirectoryExists(new WalArchivePaths(Root).Timeline(Gone)), Is.False);
         Assert.That(Ids(fs, Live), Is.EqualTo(new long[] { 1, 2 }), "the live timeline with no kept point is kept whole");
         Assert.That(result.Skipped, Is.Empty);
+    }
+
+    /// <summary>
+    /// The deletes below a floor are flushed with one directory flush per timeline, not one each: every deleted segment lies below every kept point's
+    /// floor, so the order a crash persists them in decides no restore.
+    /// </summary>
+    [Test]
+    [CancelAfter(10_000)]
+    public void ThePrunedSegmentsOfATimeline_AreFlushedOnce()
+    {
+        var fs = Seed(new FlushCounting());
+        fs.Flushed.Clear();
+        using (var session = BackupStore.OpenForWrite(Root, ArchiveTestKit.Database, false, fs))
+        {
+            WalArchiveStore.PruneArchive(session, [(Kept, 400)], Live);
+        }
+
+        Assert.That(Ids(fs, Kept), Is.EqualTo(new long[] { 4, 5 }), "premise: three segments pruned");
+        var dir = new WalArchivePaths(Root).Timeline(Kept).Replace('\\', '/');
+        Assert.That(fs.Flushed.Count(d => d.Replace('\\', '/') == dir), Is.EqualTo(1));
+    }
+
+    private sealed class FlushCounting : InMemorySparseFileSystem
+    {
+        public readonly System.Collections.Generic.List<string> Flushed = [];
+
+        protected override void OnFlushDirectory(string directory) => Flushed.Add(directory);
     }
 
     /// <summary>

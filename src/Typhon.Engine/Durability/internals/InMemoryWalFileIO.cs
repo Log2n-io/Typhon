@@ -3,6 +3,7 @@ using Microsoft.Win32.SafeHandles;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Threading;
 
 namespace Typhon.Engine.Internals;
@@ -64,11 +65,15 @@ internal sealed class InMemoryWalFileIO : IWalFileIO
     public SafeFileHandle OpenSegmentForArchive(string path)
     {
         var handle = OpenSegment(path, false);
-        _archiveHandles[handle.DangerousGetHandle()] = Segments[NormalizePath(path)];
+        _archiveHandles.AddOrUpdate(handle, Segments[NormalizePath(path)]);
         return handle;
     }
 
-    private readonly ConcurrentDictionary<nint, MemorySegment> _archiveHandles = new();
+    /// <summary>
+    /// The content each archive handle is bound to, keyed by the handle object: an entry goes with its handle (a synthetic handle has no close to hook), so
+    /// an archiver opening a segment per publish does not grow it for the life of the fixture.
+    /// </summary>
+    private readonly ConditionalWeakTable<SafeFileHandle, MemorySegment> _archiveHandles = new();
 
     /// <inheritdoc />
     public void WriteAligned(SafeFileHandle handle, long offset, ReadOnlySpan<byte> data)
@@ -196,7 +201,7 @@ internal sealed class InMemoryWalFileIO : IWalFileIO
 
     private MemorySegment FindSegment(SafeFileHandle handle)
     {
-        if (_archiveHandles.TryGetValue(handle.DangerousGetHandle(), out var bound))
+        if (_archiveHandles.TryGetValue(handle, out var bound))
         {
             return bound;
         }
