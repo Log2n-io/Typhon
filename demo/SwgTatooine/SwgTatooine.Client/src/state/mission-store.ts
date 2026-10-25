@@ -1,5 +1,13 @@
 import { create } from 'zustand';
-import { missionRefusal, missionTitle, type HeldMission, type MissionOffer, type OfferSort } from '../data/missions';
+import {
+  MISSION_ANSWER_MS,
+  missionRefusal,
+  missionTitle,
+  type CompletedMission,
+  type HeldMission,
+  type MissionOffer,
+  type OfferSort,
+} from '../data/missions';
 
 /**
  * Missions on screen (missions.md § 5): the terminal list that is open, how it is sorted, what the server last refused, and
@@ -27,14 +35,16 @@ export interface MissionState {
   readonly descending: boolean;
   /** The last thing worth saying about a take or a cancel — a refusal, usually — or `null`. */
   readonly notice: string | null;
-  /** The serial of the offer last asked for, while no answer has come: its row says so. */
+  /** The serial of the offer last asked for, while no answer has come — for {@link MISSION_ANSWER_MS} at most: its row says so. */
   readonly asking: number | null;
+  /** The held missions whose cancel is in flight: their rows' buttons are off, so a second click sends no second cancel. */
+  readonly cancelling: readonly string[];
   readonly journalOpen: boolean;
   /** The missions this character holds (`GET /swg/missions`). */
   readonly journal: readonly HeldMission[];
   /**
-   * The last mission completed — it left the journal without this player cancelling it, which only breaking its lair does —
-   * and when, for the toast that says so; `null` for none.
+   * The last missions completed — gone from the journal, and stated completed by the server — and when, for the toast that
+   * says so; `null` for none.
    */
   readonly completed: { readonly text: string; readonly atMs: number } | null;
   /** The lair kinds' names, by kind, from the server's creature list: what an offer is called. */
@@ -48,10 +58,10 @@ export interface MissionState {
   readonly sortBy: (by: OfferSort) => void;
   readonly take: (offer: MissionOffer) => void;
   readonly cancel: (id: string) => void;
-  /** The server refused the last take or cancel. */
-  readonly refused: (reason: number) => void;
-  /** A new read of the journal; a mission gone from it that was not cancelled here is announced as completed. */
-  readonly setJournal: (journal: readonly HeldMission[]) => void;
+  /** The server refused a take, or the cancel of mission `cancelled`. */
+  readonly refused: (reason: number, cancelled?: string | null) => void;
+  /** A new read of the journal; a mission gone from it that the server states completed is announced. */
+  readonly setJournal: (journal: readonly HeldMission[], completed: readonly CompletedMission[]) => void;
   /** Forgets the journal without announcing anything: a new session. */
   readonly resetJournal: () => void;
   readonly openJournal: () => void;
@@ -64,9 +74,6 @@ export interface MissionState {
 /** How long the word that a mission was completed stays up, milliseconds. */
 export const MISSION_TOAST_MS = 6000;
 
-/** The missions this player asked to cancel, so their leaving the journal is not announced as a completion. */
-const cancelled = new Set<string>();
-
 export const useMissions = create<MissionState>((set, get) => ({
   terminal: null,
   offers: [],
@@ -74,6 +81,7 @@ export const useMissions = create<MissionState>((set, get) => ({
   descending: true,
   notice: null,
   asking: null,
+  cancelling: [],
   journalOpen: false,
   journal: [],
   completed: null,
@@ -102,50 +110,78 @@ export const useMissions = create<MissionState>((set, get) => ({
   },
   take: (offer) => {
     const sent = get().actions?.take(offer.netId, offer.serial) ?? false;
-    set(sent ? { asking: offer.serial, notice: null } : { notice: 'Not sent — wait a moment and try again' });
+    if (!sent) {
+      set({ notice: 'Not sent — wait a moment and try again' });
+      return;
+    }
+
+    // Accepted, the offer leaves the list; refused, the reason comes back. Lost — a link dropped with it queued — neither
+    // happens, and every Take button would stay off until the panel was reopened.
+    set({ asking: offer.serial, notice: null });
+    setTimeout(() => {
+      if (get().asking === offer.serial) {
+        set({ asking: null });
+      }
+    }, MISSION_ANSWER_MS);
   },
   cancel: (id) => {
+    if (get().cancelling.includes(id)) {
+      return;
+    }
+
     const sent = get().actions?.cancel(id) ?? false;
-    if (sent) {
-      cancelled.add(id);
+    if (!sent) {
+      set({ notice: 'Not sent — wait a moment and try again' });
+      return;
     }
 
-    set({ notice: sent ? null : 'Not sent — wait a moment and try again' });
+    set({ notice: null, cancelling: [...get().cancelling, id] });
+    setTimeout(() => {
+      if (get().cancelling.includes(id)) {
+        set({ cancelling: get().cancelling.filter((c) => c !== id) });
+      }
+    }, MISSION_ANSWER_MS);
   },
-  refused: (reason) => {
-    set({ notice: missionRefusal(reason), asking: null });
+  refused: (reason, cancelledId = null) => {
+    const cancelling = cancelledId === null ? get().cancelling : get().cancelling.filter((c) => c !== cancelledId);
+    set({ notice: missionRefusal(reason), asking: cancelledId === null ? null : get().asking, cancelling });
   },
-  setJournal: (journal) => {
-    // A person's mission ends two ways: its lair broken (paid where it fell) or cancelled. One that left without a cancel
-    // from here was completed — the only news of the payout a client gets, since credits are not replicated.
-    let completed = get().completed;
+  setJournal: (journal, done) => {
+    // Announced only on the server's word (`completed`): a mission leaves the journal when it is cancelled too, or for reasons
+    // a client cannot see, and inferring a completion from its absence once announced a payout nobody was paid. Only one
+    // this client saw held, so the last few completions a fresh session is told of are not news.
+    const lines: string[] = [];
+    let total = 0;
     for (const before of get().journal) {
-      if (journal.some((m) => m.id === before.id)) {
-        continue;
-      }
-
-      if (!cancelled.delete(before.id)) {
-        completed = { text: `Mission complete: ${missionTitle(before.name)} · +${before.reward} cr`, atMs: Date.now() };
-        const shown = completed;
-        setTimeout(() => {
-          if (get().completed === shown) {
-            set({ completed: null });
-          }
-        }, MISSION_TOAST_MS);
+      if (!journal.some((m) => m.id === before.id) && done.some((d) => d.id === before.id)) {
+        lines.push(missionTitle(before.name));
+        total += before.reward;
       }
     }
 
-    set({ journal, completed });
+    let completed = get().completed;
+    if (lines.length > 0) {
+      const what = lines.length === 1 ? 'Mission complete' : `${lines.length} missions complete`;
+      completed = { text: `${what}: ${lines.join(', ')} · +${total} cr`, atMs: Date.now() };
+      const shown = completed;
+      setTimeout(() => {
+        if (get().completed === shown) {
+          set({ completed: null });
+        }
+      }, MISSION_TOAST_MS);
+    }
+
+    const cancelling = get().cancelling.filter((id) => journal.some((m) => m.id === id));
+    set({ journal, completed, cancelling });
   },
   resetJournal: () => {
-    cancelled.clear();
-    set({ journal: [], completed: null });
+    set({ journal: [], completed: null, cancelling: [], asking: null });
   },
   openJournal: () => {
-    set({ journalOpen: true });
+    set({ journalOpen: true, notice: null });
   },
   closeJournal: () => {
-    set({ journalOpen: false });
+    set({ journalOpen: false, notice: null });
   },
   toggleJournal: () => {
     set({ journalOpen: !get().journalOpen });

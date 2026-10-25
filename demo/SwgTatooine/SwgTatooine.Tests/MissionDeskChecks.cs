@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.HttpResults;
 using NUnit.Framework;
 using SwgTatooine.Server;
 using SwgTatooine.Server.Accounts;
@@ -59,22 +61,29 @@ internal sealed class MissionDeskChecks : ServedChecks
     }
 
     /// <summary>The offers listed at a terminal, in no particular order.</summary>
+    /// <remarks>
+    /// <b>Read on the tick, not beside it.</b> An offer is SingleVersion: read from the test thread while the desk's commit published, a cluster walk yielded
+    /// the offer just taken — its occupancy bit not yet cleared — while point access already said it was gone, and the case took a taken offer (5 runs in
+    /// 10). Between ticks the two agree.
+    /// </remarks>
     private static List<(EntityId Id, MissionOfferInfo Info)> Offers(TatooineSim sim, MissionTerminalRef terminal)
     {
         var rows = new List<(EntityId, MissionOfferInfo)>();
-        using var tx = sim.Dbe.CreateQuickTransaction();
-        foreach (var cluster in tx.For<MissionOffer>().GetClusterEnumerator())
+        sim.WriteInTick(tx =>
         {
-            var infos = cluster.GetReadOnlySpan(MissionOffer.Info);
-            for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+            foreach (var cluster in tx.For<MissionOffer>().GetClusterEnumerator())
             {
-                var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                if (infos[slot].Terminal == terminal.Id)
+                var infos = cluster.GetReadOnlySpan(MissionOffer.Info);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
                 {
-                    rows.Add((cluster.GetEntityId(slot), infos[slot]));
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    if (infos[slot].Terminal == terminal.Id)
+                    {
+                        rows.Add((cluster.GetEntityId(slot), infos[slot]));
+                    }
                 }
             }
-        }
+        });
 
         return rows;
     }
@@ -113,7 +122,16 @@ internal sealed class MissionDeskChecks : ServedChecks
     {
         var before = Held(sim, character).Count;
         Take(link, offer.Id, offer.Info.Serial);
-        SessionHarness.Until(() => Held(sim, character).Count > before, "the mission to be held");
+        try
+        {
+            SessionHarness.Until(() => Held(sim, character).Count > before, "the mission to be held");
+        }
+        catch (AssertionException)
+        {
+            throw new AssertionException(
+                $"the mission was not held; refusals sent: [{string.Join(", ", Refusals(link))}]; held {Held(sim, character).Count} (before {before}); "
+                + $"offer exists {Exists(sim, offer.Id)}, netId now {TatooineReplication.NetIdOf(link.Session, offer.Id)}, refused {sim.Bridge.MissionTakesRefused}");
+        }
         var held = Held(sim, character).Find(h => h.Mission.Kind == offer.Info.Kind && h.Mission.AnchorX == offer.Info.AnchorX);
         Assert.That(held.Id.IsNull, Is.False, "the mission held is not the offer taken");
         SessionHarness.Until(() => !Held(sim, character).Find(h => h.Id == held.Id).Mission.Lair.IsNull, "the mission's lair to be drawn");
@@ -331,7 +349,7 @@ internal sealed class MissionDeskChecks : ServedChecks
             Assert.That(BodyOf(sim, link.Session).JournalRev, Is.GreaterThan(revBefore), "the journal's revision did not move");
             Assert.That(journal, Does.Contain($"\"id\":\"{held.Id.RawValue}\""));
             Assert.That(journal, Does.Contain($"\"x\":{held.Mission.LairX.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)}"));
-            Assert.That(MissionJournal.Json(sim.Dbe, CharacterOf(sim, AnAccount(0x6004))), Does.StartWith("[{"));
+            Assert.That(journal, Does.StartWith("{\"missions\":[{").And.EndWith("\"completed\":[]}"));
         });
     }
 
@@ -340,7 +358,9 @@ internal sealed class MissionDeskChecks : ServedChecks
     /// <summary>
     /// M-5: the holder shoots its lair down, occupants already gone: paid the reward once, the mission and its lair gone, the journal moved.
     /// </summary>
-    /// <remarks>Staged at the lair: the body parked beside it, its occupants taken away and its health one blow, so the case is the desk and not a fight.</remarks>
+    /// <remarks>
+    /// Staged at the lair: the body parked beside it, its occupants taken away and its health one blow, so the case is the desk and not a fight.
+    /// </remarks>
     [Test]
     [CancelAfter(120_000)]
     public void TheHolderBreaksItsLair_PaidOnce_TheMissionEnds()
@@ -359,16 +379,21 @@ internal sealed class MissionDeskChecks : ServedChecks
         link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(TatooineReplication.NetIdOf(link.Session, lair)));
         link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         SessionHarness.Until(() => Held(sim, character).Count == 0, "the mission to end");
-        Harness.Ticks(3);
+
+        // Past the next pass, or a second payment by it would go unseen.
+        Harness.Ticks((Worlds.ServedHz / SimBridge.MissionPassHz) + 2);
 
         var after = BodyOf(sim, link.Session);
+        var journal = MissionJournal.Json(sim.Dbe, character);
         Assert.Multiple(() =>
         {
             Assert.That(after.Credits - before.Credits, Is.EqualTo(held.Mission.Reward), "paid other than the reward, or more than once");
             Assert.That(Exists(sim, lair), Is.False, "the broken lair still stands");
             Assert.That(Exists(sim, held.Id), Is.False, "the mission is still held");
             Assert.That(after.JournalRev, Is.GreaterThan(before.JournalRev), "the journal did not move");
-            Assert.That(MissionJournal.Json(sim.Dbe, character), Is.EqualTo("[]"));
+            Assert.That(journal, Does.StartWith("{\"missions\":[]"), "a completed mission is still in the journal");
+            Assert.That(journal, Does.Contain($"\"completed\":[{{\"id\":\"{held.Id.RawValue}\""), "the journal does not say it was completed");
+            Assert.That(journal, Does.Contain($"\"reward\":{held.Mission.Reward}}}"));
         });
     }
 
@@ -477,16 +502,24 @@ internal sealed class MissionDeskChecks : ServedChecks
 
     // ── M-8: cancelling ─────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>M-8: a cancel destroys the mission and its lair; a cancel naming no mission of the caller's is refused.</summary>
+    /// <summary>
+    /// M-8: a cancel destroys the mission and its lair, and is not stated as a completion; a cancel of somebody else's real mission, or of none, is refused.
+    /// </summary>
     [Test]
     [CancelAfter(120_000)]
     public void ACancelEndsTheMissionAndItsLair_AndAStrangersIsRefused()
     {
         using var sim = Start();
         var terminal = FirstTerminal(sim);
-        var link = LogInAt(sim, AnAccount(0x6009), terminal);
+        var link = LogInAt(sim, AnAccount(0x6009), terminal, bindings: 1);
+        var stranger = LogInAt(sim, AnAccount(0x600A), terminal, bindings: 2);
         var character = CharacterOf(sim, AnAccount(0x6009));
         var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
+
+        // The stranger names the real mission: the holder check, not the lookup, must refuse it.
+        stranger.SendCommand(nameof(AbandonMission), new RecordValues { ["mission"] = FieldValue.OfUInt64(held.Id.RawValue) });
+        SessionHarness.Until(() => Array.IndexOf(Refusals(stranger), TatooineReplication.MissionUnknown) >= 0, "the stranger's cancel to be refused");
+        Assert.That(Held(sim, character), Has.Count.EqualTo(1), "a stranger cancelled somebody else's mission");
 
         link.SendCommand(nameof(AbandonMission), new RecordValues { ["mission"] = FieldValue.OfUInt64(held.Id.RawValue + 1_000_000UL) });
         link.SendCommand(nameof(AbandonMission), new RecordValues { ["mission"] = FieldValue.OfUInt64(held.Id.RawValue) });
@@ -497,6 +530,277 @@ internal sealed class MissionDeskChecks : ServedChecks
             Assert.That(Exists(sim, held.Mission.Lair), Is.False, "a cancelled mission's lair still stands");
             Assert.That(Refusals(link), Contains.Item(TatooineReplication.MissionUnknown), "a cancel of nobody's mission was not refused");
             Assert.That(Offers(sim, terminal), Has.Count.EqualTo(TatooineData.MissionOffersPerTerminal), "a cancel put nothing back, and took nothing");
+            Assert.That(MissionJournal.Json(sim.Dbe, character), Is.EqualTo(MissionJournal.Empty), "a cancel was stated as a completion");
+        });
+    }
+
+    /// <summary>
+    /// A cancel and a take sent together by a character at the cap swap one mission: the cancel goes first (missions.md § 2, one session's order).
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void ACancelAndATakeSentTogetherAtTheCap_SwapOneMission()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x600B), terminal);
+        var character = CharacterOf(sim, AnAccount(0x600B));
+        (EntityId Id, HeldMission Mission) first = default;
+        for (var i = 0; i < TatooineData.MaxConcurrentMissions; i++)
+        {
+            var offer = Offers(sim, terminal)[0];
+            SessionHarness.Until(() => TatooineReplication.NetIdOf(link.Session, offer.Id) != 0, "the next offer to reach the view");
+            var held = TakeAndHold(sim, link, character, offer);
+            first = i == 0 ? held : first;
+        }
+
+        var fourth = Offers(sim, terminal)[0];
+        SessionHarness.Until(() => TatooineReplication.NetIdOf(link.Session, fourth.Id) != 0, "the fourth offer to reach the view");
+        Harness.Ticks(Worlds.ServedHz);   // the take's bucket (2 a second, a burst of 4), as in M-3
+
+        // Take sent BEFORE the cancel: arriving in one tick, the desk must still run the cancel first.
+        Take(link, fourth.Id, fourth.Info.Serial);
+        link.SendCommand(nameof(AbandonMission), new RecordValues { ["mission"] = FieldValue.OfUInt64(first.Id.RawValue) });
+        SessionHarness.Until(() => !Exists(sim, first.Id), "the cancel to land");
+        Harness.Ticks(3);
+        Assert.Multiple(() =>
+        {
+            Assert.That(Refusals(link), Does.Not.Contain(TatooineReplication.MissionCap), "the take was judged before the cancel");
+            Assert.That(Exists(sim, fourth.Id), Is.False, "the fourth offer was not taken");
+            Assert.That(Held(sim, character), Has.Count.EqualTo(TatooineData.MaxConcurrentMissions));
+        });
+    }
+
+    /// <summary>A take whose serial is not the offer's — the netId reused, or a list gone stale — is refused as taken, and the offer stays listed.</summary>
+    [Test]
+    [CancelAfter(90_000)]
+    public void ATakeWithTheWrongSerial_IsRefusedTaken()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x600C), terminal);
+        var character = CharacterOf(sim, AnAccount(0x600C));
+        var offer = Offers(sim, terminal)[0];
+
+        Take(link, offer.Id, offer.Info.Serial + 1_000u);
+        SessionHarness.Until(() => sim.Bridge.MissionTakesRefused >= 1, "the take to be refused");
+        Harness.Ticks(3);
+        Assert.Multiple(() =>
+        {
+            Assert.That(Refusals(link), Contains.Item(TatooineReplication.MissionTaken));
+            Assert.That(Held(sim, character), Is.Empty);
+            Assert.That(Exists(sim, offer.Id), Is.True, "a refused take took the offer off the list");
+        });
+    }
+
+    // ── Offline, broken, dropped ────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A holder who breaks the lair and logs out before the desk's next pass is paid at the next login: the broken lair waits, it is not taken down and
+    /// drawn again unpaid.
+    /// </summary>
+    /// <remarks>
+    /// The world is paused (the desk is gated, the sessions are not) so that the lair is broken and the body gone before the desk looks — the order a fast
+    /// logout gives, staged rather than raced for.
+    /// </remarks>
+    [Test]
+    [CancelAfter(180_000)]
+    public void BrokenThenLoggedOutBeforeThePass_PaidAtTheNextLogin()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var account = AnAccount(0x600D);
+        var link = LogInAt(sim, account, terminal);
+        var character = CharacterOf(sim, account);
+        var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
+        var credits = BodyOf(sim, link.Session).Credits;
+
+        var god = Harness.Connect(TatooineReplication.GodKind);
+        SessionHarness.Until(() => god.Received(MessageTypes.Welcome), "WELCOME");
+        god.SendCommand("SetPaused", new RecordValues { ["paused"] = FieldValue.Of(1) });
+        SessionHarness.Until(() => TatooineReplication.SimulationPaused, "the pause");
+        sim.WriteInTick(tx =>
+        {
+            var l = tx.OpenMut(held.Mission.Lair);
+            var s = l.Read(CreatureLair.Spawner);
+            s.OwnerHit = 1;
+            l.Set(CreatureLair.Spawner, s);
+            var v = l.Read(CreatureLair.Vitals);
+            v.Health = 0;
+            l.Set(CreatureLair.Vitals, v);
+        });
+        var destroyed = TatooineReplication.AvatarsDestroyed;
+        link.Close(CloseCodes.Normal, "logging out");
+        SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed > destroyed, "the avatar to be destroyed");
+        god.SendCommand("SetPaused", new RecordValues { ["paused"] = FieldValue.Of(0) });
+        SessionHarness.Until(() => !TatooineReplication.SimulationPaused, "the resume");
+
+        Harness.Ticks(2 * (Worlds.ServedHz / SimBridge.MissionPassHz));
+        Assert.Multiple(() =>
+        {
+            Assert.That(Held(sim, character), Has.Count.EqualTo(1), "the mission ended with nobody to pay");
+            Assert.That(Exists(sim, held.Mission.Lair), Is.True, "the broken lair was taken down while its holder was away");
+        });
+
+        var back = Harness.Connect(TatooineReplication.PlayerKind, account);
+        SessionHarness.Until(() => Held(sim, character).Count == 0, "the mission to complete at the login");
+        Harness.Ticks(3);
+        Assert.Multiple(() =>
+        {
+            Assert.That(BodyOf(sim, back.Session).Credits - credits, Is.EqualTo(held.Mission.Reward), "not paid at the login");
+            Assert.That(Exists(sim, held.Mission.Lair), Is.False);
+            Assert.That(MissionJournal.Json(sim.Dbe, character), Does.Contain($"\"completed\":[{{\"id\":\"{held.Id.RawValue}\""));
+        });
+    }
+
+    /// <summary>
+    /// A link that drops is not a logout (missions.md, Q6): the body is held for its resume, and the mission's lair stands through it, damage and all.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void ADroppedLink_KeepsTheLairStanding()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x600E), terminal);
+        var character = CharacterOf(sim, AnAccount(0x600E));
+        var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
+
+        var holds = TatooineReplication.ResumesHeld;
+        link.Close(CloseCodes.GoingAway, "the link died");
+        SessionHarness.Until(() => TatooineReplication.ResumesHeld > holds, "the body to be held for a resume");
+        Harness.Ticks(2 * (Worlds.ServedHz / SimBridge.MissionPassHz));
+        Assert.Multiple(() =>
+        {
+            Assert.That(Held(sim, character)[0].Mission.Lair, Is.EqualTo(held.Mission.Lair), "the lair was taken down, or moved, for a dropped link");
+            Assert.That(Exists(sim, held.Mission.Lair), Is.True);
+        });
+    }
+
+    /// <summary>
+    /// A reopened world's tick count starts again at 0, so stored expiries are clamped to their longest life from the reopen: an offer listed late in a long
+    /// run does not stand for that run's length again. And a mission lair no held mission names is destroyed, not left standing for ever.
+    /// </summary>
+    [Test]
+    [CancelAfter(180_000)]
+    public void AReopenedWorld_ClampsTheExpiriesItStored()
+    {
+        var account = AnAccount(0x600F);
+        EntityId offerId;
+        EntityId mission;
+        var orphan = EntityId.Null;
+        const long FarFuture = 1L << 40;
+        using (var first = Start(persist: true))
+        {
+            var terminal = FirstTerminal(first);
+            var link = LogInAt(first, account, terminal);
+            var character = CharacterOf(first, account);
+            var held = TakeAndHold(first, link, character, Offers(first, terminal)[0]);
+            mission = held.Id;
+            offerId = Offers(first, terminal)[0].Id;
+            first.WriteInTick(tx =>
+            {
+                var o = tx.OpenMut(offerId);
+                var info = o.Read(MissionOffer.Info);
+                info.ExpireTick = FarFuture;
+                o.Set(MissionOffer.Info, info);
+                var m = tx.OpenMut(mission);
+                var hm = m.Read(HeldMissionArch.Mission);
+                hm.ExpireTick = FarFuture;
+                m.Set(HeldMissionArch.Mission, hm);
+
+                // A wild lair made to look like a mission's whose mission is gone: what LoadDesk's sweep is for.
+                foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
+                {
+                    var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
+                    for (var bits = cluster.OccupancyBits; bits != 0 && orphan.IsNull; bits &= bits - 1)
+                    {
+                        var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                        if (spawners[slot].Site != 0)
+                        {
+                            orphan = cluster.GetEntityId(slot);
+                        }
+                    }
+                }
+
+                var o2 = tx.OpenMut(orphan);
+                var sp = o2.Read(CreatureLair.Spawner);
+                sp.Mission = offerId;
+                o2.Set(CreatureLair.Spawner, sp);
+            });
+            Harness.Release();
+        }
+
+        TatooineReplication.ResetSessionAccounting();
+        TatooineReplication.ResetIntentAccounting();
+
+        using var second = Start(persist: true);
+        Assert.That(second.Reopened, Is.True, "the second run must reopen the first's database, or this proves nothing");
+        Harness.Ticks(3);
+        var hz = Worlds.ServedHz;
+        var offerLife = (long)((TatooineData.MissionOfferLifeMinSeconds + TatooineData.MissionOfferLifeSpanSeconds) * hz);
+        var crowdLife = (long)SimBridge.MissionWalkSeconds * hz;
+        var now = second.Runtime.CurrentTickNumber;
+        using var tx2 = second.Dbe.CreateQuickTransaction();
+        Assert.Multiple(() =>
+        {
+            Assert.That(orphan.IsNull, Is.False, "the premise: a wild lair to orphan");
+            Assert.That(tx2.TryOpen(orphan, out _), Is.False, "a mission lair no mission names still stands");
+            Assert.That(second.Bridge.MissionLairsOrphaned, Is.EqualTo(1));
+            Assert.That(tx2.Open(offerId).Read(MissionOffer.Info).ExpireTick, Is.LessThanOrEqualTo(now + offerLife), "the offer's expiry was not clamped");
+            Assert.That(
+                tx2.Open(mission).Read(HeldMissionArch.Mission).ExpireTick,
+                Is.LessThanOrEqualTo(now + crowdLife),
+                "the mission's expiry was not clamped");
+        });
+    }
+
+    // ── The journal over HTTP ───────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// <c>GET /swg/missions</c>: no token, a bad one, or an expired one from an account not playing is a 401; a good one answers its own character's journal
+    /// — the bearer names the account, nothing in the request names a character — and an expired one is still good while its account plays.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void TheJournalEndpoint_AnswersItsBearersOwn()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var owner = AnAccount(0x6010);
+        var link = LogInAt(sim, owner, terminal);
+        var held = TakeAndHold(sim, link, CharacterOf(sim, owner), Offers(sim, terminal)[0]);
+
+        (int Status, string Body) Get(string authorization)
+        {
+            var context = new DefaultHttpContext();
+            if (authorization != null)
+            {
+                context.Request.Headers.Authorization = authorization;
+            }
+
+            return MissionJournal.GetForChecks(sim.Dbe, context) switch
+            {
+                ContentHttpResult c => (c.StatusCode ?? 200, c.ResponseContent),
+                IStatusCodeHttpResult s => (s.StatusCode ?? 0, null),
+                var other => throw new AssertionException($"unexpected result {other}"),
+            };
+        }
+
+        var good = Get("Bearer " + AuthToken.Mint(owner));
+        var lower = Get("bearer " + AuthToken.Mint(owner));
+        var expiredPlaying = Get("Bearer " + AuthToken.Mint(owner, TimeSpan.FromSeconds(-10)));
+        var idle = AnAccount(0x6011);
+        Assert.Multiple(() =>
+        {
+            Assert.That(Get(null).Status, Is.EqualTo(401), "no token");
+            Assert.That(Get("Bearer not-a-token").Status, Is.EqualTo(401), "a bad token");
+            Assert.That(Get("Bearer " + AuthToken.Mint(idle, TimeSpan.FromSeconds(-10))).Status, Is.EqualTo(401), "an expired token, its account away");
+            Assert.That(Get("Bearer " + AuthToken.Mint(idle)).Body, Is.EqualTo(MissionJournal.Empty), "an account with no character");
+            Assert.That(good.Status, Is.EqualTo(200));
+            Assert.That(good.Body, Does.Contain($"\"id\":\"{held.Id.RawValue}\""), "the bearer's own mission is missing");
+            Assert.That(lower.Body, Is.EqualTo(good.Body), "the scheme is case-insensitive");
+            Assert.That(expiredPlaying.Status, Is.EqualTo(200), "an expired token refused while its account plays");
         });
     }
 

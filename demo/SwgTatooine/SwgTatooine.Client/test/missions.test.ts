@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Descriptor } from '../src/assets/descriptor';
 import { missionMenuItems, missionTerminalOf } from '../src/app/ticket-terminal';
 import {
   JOURNAL_RETRY_MS,
+  MISSION_ANSWER_MS,
   MissionJournal,
   missionRefusal,
   missionTitle,
@@ -45,6 +46,7 @@ describe('a mission', () => {
     expect(missionRefusal(140)).toBe('Too far from the terminal');
     expect(missionRefusal(141)).toContain('not yours');
     expect(missionRefusal(137)).toContain('down');
+    expect(missionRefusal(142)).toContain('not in the world');
     expect(missionRefusal(200)).toBe('Refused (200)');
   });
 });
@@ -117,12 +119,15 @@ describe('the journal', () => {
     lair: { x: 10, z: 20 },
   });
 
-  const harness = (answers: unknown[]) => {
+  /** The server's answer: the held missions, and the completions it states. */
+  const answerOf = (missions: HeldMission[], completed: unknown[] = []) => ({ missions, completed });
+
+  const harness = (answers: unknown[], token: () => string | null = () => 'tok') => {
     let clock = 0;
     const urls: { url: string; auth: string | undefined }[] = [];
     let resolveNext: (() => void) | null = null;
     const journal = new MissionJournal(
-      () => 'tok',
+      token,
       (url, init) => {
         urls.push({ url, auth: init.headers['Authorization'] });
         const answer = answers.shift();
@@ -130,8 +135,10 @@ describe('the journal', () => {
           resolveNext = () => {
             resolve(
               answer === 'fail'
-                ? { ok: false, json: () => Promise.resolve(null) }
-                : { ok: true, json: () => Promise.resolve(answer) },
+                ? { ok: false, status: 500, json: () => Promise.resolve(null) }
+                : answer === 401
+                  ? { ok: false, status: 401, json: () => Promise.resolve(null) }
+                  : { ok: true, status: 200, json: () => Promise.resolve(answer) },
             );
           };
         });
@@ -150,7 +157,7 @@ describe('the journal', () => {
   };
 
   it('is read when the revision moves, with the bearer token, and not again until it moves again', async () => {
-    const h = harness([[held('7')], [held('7'), held('8')]]);
+    const h = harness([answerOf([held('7')]), answerOf([held('7'), held('8')])]);
     h.journal.update(Number.NaN);
     expect(h.urls).toHaveLength(0);
     h.journal.update(1);
@@ -166,7 +173,7 @@ describe('the journal', () => {
   });
 
   it('is read again at once when the revision moved during a read', async () => {
-    const h = harness([[], [held('9')]]);
+    const h = harness([answerOf([]), answerOf([held('9')])]);
     h.journal.update(1);
     h.journal.update(2);
     await h.settle();
@@ -176,7 +183,7 @@ describe('the journal', () => {
   });
 
   it('waits before trying a failed read again', async () => {
-    const h = harness(['fail', [held('3')]]);
+    const h = harness(['fail', answerOf([held('3')])]);
     h.journal.update(1);
     await h.settle();
     h.journal.update(1);
@@ -186,11 +193,48 @@ describe('the journal', () => {
     await h.settle();
     expect(h.journal.missions.map((m) => m.id)).toEqual(['3']);
   });
+
+  it('carries the completions the server states', async () => {
+    const h = harness([answerOf([], [{ id: '5', kind: 0, name: 'rats', reward: 150 }, { bad: true }])]);
+    h.journal.update(1);
+    await h.settle();
+    expect(h.journal.completed).toEqual([{ id: '5', kind: 0, name: 'rats', reward: 150 }]);
+  });
+
+  it("drops an answer that lands after a clear: it is another session's", async () => {
+    const h = harness([answerOf([held('1')]), answerOf([held('2')])]);
+    h.journal.update(1);
+    h.journal.clear();
+    await h.settle();
+    expect(h.journal.missions, "the old session's answer was applied").toEqual([]);
+    h.journal.update(1);
+    await h.settle();
+    expect(h.journal.missions.map((m) => m.id)).toEqual(['2']);
+  });
+
+  it('does not ask again with a token the server refused, until the token changes; nor ask at all without one', async () => {
+    let token: string | null = null;
+    const h = harness([401, answerOf([held('4')])], () => token);
+    h.journal.update(1);
+    expect(h.urls, 'asked without a token').toHaveLength(0);
+    token = 'old';
+    h.journal.update(1);
+    await h.settle();
+    h.advance(JOURNAL_RETRY_MS * 10);
+    h.journal.update(1);
+    expect(h.urls, 'a refused token was tried again').toHaveLength(1);
+    token = 'new';
+    h.journal.update(1);
+    await h.settle();
+    expect(h.journal.missions.map((m) => m.id)).toEqual(['4']);
+  });
 });
 
 describe('the mission panels', () => {
   afterEach(() => {
+    vi.useRealTimers();
     useMissions.setState({ terminal: null, offers: [], notice: null, asking: null, actions: null, journalOpen: false });
+    useMissions.getState().resetJournal();
   });
 
   it('send a take through the app, and say so when nothing left the client', () => {
@@ -207,6 +251,27 @@ describe('the mission panels', () => {
     expect(useMissions.getState().asking).toBe(5);
     useMissions.getState().take(offer(6));
     expect(useMissions.getState().notice).toContain('Not sent');
+  });
+
+  it('stop waiting for a take that is never answered', () => {
+    vi.useFakeTimers();
+    useMissions.getState().setActions({ take: () => true, cancel: () => true });
+    useMissions.getState().take(offer(5));
+    expect(useMissions.getState().asking).toBe(5);
+    vi.advanceTimersByTime(MISSION_ANSWER_MS);
+    expect(useMissions.getState().asking, 'every Take button stays off').toBeNull();
+  });
+
+  it('send one cancel per mission while it is in flight, and take it back on a refusal', () => {
+    let sent = 0;
+    useMissions.getState().setActions({ take: () => true, cancel: () => ++sent > 0 });
+    useMissions.getState().cancel('9');
+    useMissions.getState().cancel('9');
+    expect(sent, 'a double click sent two cancels').toBe(1);
+    expect(useMissions.getState().cancelling).toEqual(['9']);
+    useMissions.getState().refused(141, '9');
+    expect(useMissions.getState().cancelling).toEqual([]);
+    expect(useMissions.getState().notice).toContain('not yours');
   });
 
   it("show the server's refusal, and stop waiting for the row once it leaves the list", () => {
@@ -227,29 +292,40 @@ describe('the mission panels', () => {
     expect(useMissions.getState()).toMatchObject({ sort: 'reward', descending: true });
   });
 
-  it('announce a mission that left the journal uncancelled as completed, and not one this player cancelled', () => {
-    const mission = (id: string, reward: number): HeldMission => ({
+  it("announce a mission completed only on the server's word, and every one that completed together", () => {
+    const mission = (id: string, reward: number, name = 'rats'): HeldMission => ({
       id,
       kind: 0,
-      name: 'rats',
+      name,
       difficulty: 1,
       reward,
       octant: 0,
       distanceM: 900,
       lair: null,
     });
+    const done = (id: string) => ({ id, name: 'rats', reward: 0 });
     const store = useMissions.getState();
     store.resetJournal();
-    store.setActions({ take: () => true, cancel: () => true });
-    useMissions.getState().setJournal([mission('1', 150), mission('2', 300)]);
-    expect(useMissions.getState().completed).toBeNull();
+    useMissions
+      .getState()
+      .setJournal([mission('1', 150), mission('2', 300), mission('3', 100, 'ninja hideout')], [done('0')]);
+    expect(useMissions.getState().completed, 'an old completion, of a mission this client never saw held').toBeNull();
 
-    useMissions.getState().cancel('1');
-    useMissions.getState().setJournal([mission('2', 300)]);
-    expect(useMissions.getState().completed, 'a cancel is not a completion').toBeNull();
+    useMissions.getState().setJournal([mission('2', 300), mission('3', 100, 'ninja hideout')], [done('0')]);
+    expect(useMissions.getState().completed, 'gone, but not stated completed: a cancel, or anything else').toBeNull();
 
-    useMissions.getState().setJournal([]);
+    useMissions.getState().setJournal([mission('3', 100, 'ninja hideout')], [done('0'), done('2')]);
     expect(useMissions.getState().completed?.text).toBe('Mission complete: Clear out the rats · +300 cr');
+
+    useMissions.getState().setJournal([mission('4', 50)], [done('3')]);
+    useMissions.getState().setJournal([], [done('3'), done('4')]);
+    expect(useMissions.getState().completed?.text).toBe('Mission complete: Clear out the rats · +50 cr');
+
+    useMissions.getState().setJournal([mission('5', 10), mission('6', 20)], []);
+    useMissions.getState().setJournal([], [done('5'), done('6')]);
+    expect(useMissions.getState().completed?.text).toBe(
+      '2 missions complete: Clear out the rats, Clear out the rats · +30 cr',
+    );
 
     useMissions.getState().resetJournal();
     expect(useMissions.getState().completed, 'a new session announces nothing').toBeNull();

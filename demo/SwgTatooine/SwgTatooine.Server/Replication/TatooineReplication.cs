@@ -281,7 +281,9 @@ public struct TakeMission
     /// <summary>The offer, as the session was shown it.</summary>
     public uint Offer;
 
-    /// <summary>The offer's <c>serial</c>: a netId is reused once its entity has left every view, and a late take must not take whatever holds it now.</summary>
+    /// <summary>
+    /// The offer's <c>serial</c>: a netId is reused once its entity has left every view, and a late take must not take whatever holds it now.
+    /// </summary>
     public uint Serial;
 }
 
@@ -730,11 +732,16 @@ public static partial class TatooineReplication
     /// <summary><c>ACKS</c> reason: a <see cref="TakeMission"/> from a character already holding <see cref="TatooineData.MaxConcurrentMissions"/>.</summary>
     public const byte MissionCap = AckReasons.FirstApplicationReason + 11;
 
-    /// <summary><c>ACKS</c> reason: a <see cref="TakeMission"/> from a body not standing at the offer's terminal (<see cref="TatooineData.MissionTerminalReachM"/>).</summary>
+    /// <summary>
+    /// <c>ACKS</c> reason: a <see cref="TakeMission"/> from a body not standing at the offer's terminal (<see cref="TatooineData.MissionTerminalReachM"/>).
+    /// </summary>
     public const byte MissionTooFar = AckReasons.FirstApplicationReason + 12;
 
     /// <summary><c>ACKS</c> reason: an <see cref="AbandonMission"/> naming no mission this session's character holds.</summary>
     public const byte MissionUnknown = AckReasons.FirstApplicationReason + 13;
+
+    /// <summary><c>ACKS</c> reason: a mission command from a session with no body in the world — a spectator, or one whose avatar is not bound yet.</summary>
+    public const byte NotInWorld = AckReasons.FirstApplicationReason + 14;
 
     /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
     /// <remarks>

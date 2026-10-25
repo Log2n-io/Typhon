@@ -4,6 +4,7 @@ import { DoorWalker, RIDDEN_REACH_M } from '../src/app/door-walk';
 import {
   ACCEL_S,
   BRAKE_S,
+  AUTOPILOT_AT_REST_SHARE,
   AUTOPILOT_DEADBAND_RAD,
   AUTOPILOT_THROTTLE_RAD,
   autopilotInput,
@@ -222,13 +223,16 @@ describe('autopilotInput', () => {
     let z = 0;
     let top = 0;
     let t = 0;
-    for (; t < 60 && walker.active; t += 1 / 60) {
-      const walk = walker.intent(x, z, 0, t * 1000);
+    // As `ClientApp.stepDrive` drives it: the walk's hands while it runs, aimed the reach short of the end; then the brake
+    // until the bike is at rest.
+    let released = Number.NaN;
+    for (; t < 60 && (walker.active || drive.speed > 40 * AUTOPILOT_AT_REST_SHARE); t += 1 / 60) {
+      const walk = walker.active ? walker.intent(x, z, 0, t * 1000) : null;
       const end = walker.end;
       const hands = autopilotInput(
         drive.yaw,
         walk !== null && walk.speedClass !== 0 ? walk.heading : null,
-        end === null ? 0 : Math.hypot(end[0] - x, end[1] - z),
+        end === null ? 0 : Math.max(0, Math.hypot(end[0] - x, end[1] - z) - walker.reachM),
         drive.speed,
         40,
       );
@@ -236,10 +240,15 @@ describe('autopilotInput', () => {
       x += drive.vx / 60;
       z += drive.vz / 60;
       top = Math.max(top, drive.speed);
+      if (!walker.active && Number.isNaN(released)) {
+        released = drive.speed;
+      }
     }
 
     expect(walker.active, 'the walk gave up or never ended').toBe(false);
-    expect(Math.hypot(x + 300, z + 400), 'ended away from its end').toBeLessThan(RIDDEN_REACH_M + 1);
+    expect(drive.speed, 'still rolling').toBeLessThanOrEqual(40 * AUTOPILOT_AT_REST_SHARE);
+    expect(Math.hypot(x + 300, z + 400), 'came to rest away from its end').toBeLessThan(RIDDEN_REACH_M + 1);
+    expect(released, 'let go of the walk fast, so it overshot').toBeLessThan(40 * 0.1);
     expect(top, 'never got up to speed').toBeGreaterThan(30);
     expect(t, 'took the long way').toBeLessThan(25);
   });

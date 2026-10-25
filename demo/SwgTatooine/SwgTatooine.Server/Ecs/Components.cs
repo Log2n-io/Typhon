@@ -952,7 +952,9 @@ public struct PlayerState
     /// <summary>Ticks until this player re-evaluates what it is doing.</summary>
     [Field] public int ActivityTicks;
 
-    /// <summary>Where the current mission camp is, cached so a travel leg does not re-resolve an entity every tick. The scripted crowd's; not replicated.</summary>
+    /// <summary>
+    /// Where the current mission camp is, cached so a travel leg does not re-resolve an entity every tick. The scripted crowd's; not replicated.
+    /// </summary>
     [Field] public float MissionX;
 
     [Field] public float MissionZ;
@@ -961,8 +963,9 @@ public struct PlayerState
     /// Bumped whenever the missions this body's character holds change — taken, cancelled, completed, or a lair drawn somewhere new (missions.md § 4).
     /// </summary>
     /// <remarks>
-    /// <b>A revision, not the journal.</b> The client re-reads <c>GET /swg/missions</c> when it moves. Three journal slots on the body were 48 bytes, which took
-    /// a <c>Player</c> page from 24 bodies to 21 for 1 600 scripted bodies that never hold one; four bytes keep 24 (<c>SelectClusterSize</c>, 2026-10-25).
+    /// <b>A revision, not the journal.</b> The client re-reads <c>GET /swg/missions</c> when it moves. Three journal slots on the body were 48 bytes,
+    /// which took a <c>Player</c> page from 24 bodies to 21 for 1 600 scripted bodies that never hold one; four bytes keep 24 (<c>SelectClusterSize</c>,
+    /// 2026-10-25).
     /// </remarks>
     [Field, Owner(CodecKind.Varu, Name = "journal", Group = "mission", Saturate = true)] public int JournalRev;
 

@@ -179,7 +179,9 @@ internal static class Program
         Console.WriteLine($"  combat refusals: {s.ShotsSkippedNotFighting} player-ticks not fighting, {s.ShotsRefusedRange} shots out of range, "
             + $"{s.ShotsWithoutTarget} with nothing in range, {s.CreaturesLostTarget} chases dropped, {s.ChaseGivenUp} chases given up past "
             + $"{TatooineData.MaxChaseRangeM * config.ContentScale:F0} m, {s.EventsStale} stale events");
-        Console.WriteLine($"  missions: {s.MissionsIssued} issued, {s.MissionsAssigned} assigned, {s.MissionsCompleted} completed, {s.MissionsAbandoned} abandoned, {s.MissionRewards} paid; {s.LairHits} lair hits");
+        Console.WriteLine(
+            $"  missions: {s.MissionsIssued} issued, {s.MissionsAssigned} assigned, {s.MissionsCompleted} completed, {s.MissionsAbandoned} abandoned, "
+            + $"{s.MissionRewards} paid; {s.LairHits} lair hits");
         Console.WriteLine($"  durability wait: {result.DurabilityMedianMs:F3} ms median, {result.DurabilityP99Ms:F3} p99, {result.DurabilityMaxMs:F3} max; "
             + $"{result.TicksWithDurabilityWait} of {result.TicksMeasured} ticks over {RunResult.DurabilityWaitFloorMs:F1} ms "
             + $"({result.DurabilityShareOfMedianPct:F1} % of the median tick)");

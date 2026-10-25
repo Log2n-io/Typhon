@@ -14,6 +14,7 @@ export function MissionJournalPanel() {
   const journal = useMissions((s) => s.journal);
   const notice = useMissions((s) => s.notice);
   const cancel = useMissions((s) => s.cancel);
+  const cancelling = useMissions((s) => s.cancelling);
   const close = useMissions((s) => s.closeJournal);
   if (!open) {
     return null;
@@ -46,12 +47,13 @@ export function MissionJournalPanel() {
             </div>
             <button
               type="button"
+              disabled={cancelling.includes(m.id)}
               onClick={() => {
                 cancel(m.id);
               }}
               title="Give this mission up: it and its lair are gone"
             >
-              Cancel
+              {cancelling.includes(m.id) ? 'Cancelling…' : 'Cancel'}
             </button>
           </div>
         ))

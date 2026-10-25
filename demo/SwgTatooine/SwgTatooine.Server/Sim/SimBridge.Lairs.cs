@@ -265,7 +265,7 @@ public sealed partial class SimBridge
         for (var attempt = 0; attempt < LairPlacementTries; attempt++)
         {
             (x, z) = WorldBuilder.Inside(rng.PointInDisc(at.X, at.Z, at.Radius), _config);
-            if (!InsideCity(x, z))
+            if (!InsideCity(at.Realm, x, z))
             {
                 return true;
             }

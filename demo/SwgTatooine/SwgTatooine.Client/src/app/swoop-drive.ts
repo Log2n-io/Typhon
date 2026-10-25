@@ -92,6 +92,12 @@ export const AUTOPILOT_TURN_SHARE = 0.1;
 /** The share it may always creep at, however near the point — without it, a point under a metre away allowed no speed. */
 export const AUTOPILOT_CRAWL_SHARE = 0.075;
 
+/** The share over the speed it wants that the autopilot lets go before it brakes — half a metre a second of 40: not a brake a frame. */
+export const AUTOPILOT_SLACK_SHARE = 0.0125;
+
+/** Under this share of the swoop's speed a bike the autopilot brought to a walk's end counts as stopped, and the brake is let go. */
+export const AUTOPILOT_AT_REST_SHARE = 0.005;
+
 /**
  * The hands a walk outside the cities rides the swoop with (a waypoint clicked while mounted, out in the open): steer the nose
  * onto the way, throttle along it, slow to turn, and brake to a stop at its end. The bike's own handling does the rest, so the
@@ -101,8 +107,9 @@ export const AUTOPILOT_CRAWL_SHARE = 0.075;
  * (`ClientApp.walkTo`, Loïc 2026-10-25): a bike does not take a street's corners, and teaching it to was a rabbit hole.
  *
  * @param yaw Where the nose points, radians from +X towards +Z.
- * @param heading The way ahead, the same frame; `null` when the walk has arrived or given up.
- * @param distanceM How far the walk's end is.
+ * @param heading The way ahead, the same frame; `null` when the walk has arrived or given up — or is over and the bike is
+ *   still rolling: the brake, until it is at rest ({@link AUTOPILOT_AT_REST_SHARE}).
+ * @param distanceM How far it is to stop: the walk's end less the reach that ends it.
  * @param speedMps How fast the bike is going.
  * @param maxMps What the server grants a swoop now.
  */
@@ -130,7 +137,7 @@ export function autopilotInput(
     maxMps * AUTOPILOT_CRAWL_SHARE,
     Math.min(turning ? maxMps * AUTOPILOT_TURN_SHARE : maxMps, Math.sqrt(2 * decel * Math.max(0, distanceM))),
   );
-  if (speedMps > wanted * 1.05 + 0.5) {
+  if (speedMps > wanted * 1.05 + maxMps * AUTOPILOT_SLACK_SHARE) {
     return { throttle: false, brake: true, steer };
   }
 

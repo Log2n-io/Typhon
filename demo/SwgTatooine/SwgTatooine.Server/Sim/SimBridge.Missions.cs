@@ -62,6 +62,12 @@ public sealed partial class SimBridge
     // Per pass: every character with a body online, and that body.
     private readonly Dictionary<EntityId, EntityId> _bodies = [];
 
+    // The mission each scripted body holds — the crowd holds one at a time — so an ask from a body already on one sends it back to its lair.
+    private readonly Dictionary<EntityId, EntityId> _crowdMission = [];
+
+    // The crowd's asks past the stack's 64, kept: a burst (the first ticks of a world) is not worth an allocation each time.
+    private MissionAsk[] _askSpill = [];
+
     private long _missionLairsDrawn;
     private long _missionCommits;
     private long _missionEntities;
@@ -69,6 +75,7 @@ public sealed partial class SimBridge
     private long _missionLairsRedrawn;
     private long _missionTakesRefused;
     private long _missionOffersListed;
+    private long _missionLairsOrphaned;
 
     /// <summary>
     /// Ticks on which the desk committed anything: each one a durable write — offers and lairs are structural, a held mission Versioned — like the lair
@@ -87,6 +94,9 @@ public sealed partial class SimBridge
 
     /// <summary>Lairs replaced because they expired, or were broken by somebody other than their mission's holder (missions.md, R6 and Q3).</summary>
     public long MissionLairsRedrawn => Interlocked.Read(ref _missionLairsRedrawn);
+
+    /// <summary>Mission lairs found at load with no held mission naming them, and destroyed.</summary>
+    public long MissionLairsOrphaned => Interlocked.Read(ref _missionLairsOrphaned);
 
     /// <summary>Takes refused: taken already, at the cap, too far, down.</summary>
     public long MissionTakesRefused => Interlocked.Read(ref _missionTakesRefused);
@@ -133,11 +143,12 @@ public sealed partial class SimBridge
         var tick0 = ctx.Transaction;
         if (!_deskLoaded)
         {
-            LoadDesk(tx);
+            LoadDesk(tx, tick);
             _deskLoaded = true;
         }
 
-        // The pass first, while nothing in this transaction has been destroyed yet: a cluster walk later in it could still yield an entity it destroyed (#1482).
+        // The pass first, while nothing in this transaction has been destroyed yet: a cluster walk later in it could still yield an entity it destroyed
+        // (#1482).
         if (pass)
         {
             TatooineReplication.FillCharacterBodies(_bodies);
@@ -147,20 +158,27 @@ public sealed partial class SimBridge
 
         if (subs != null)
         {
-            foreach (var command in takes)
-            {
-                TakeFromCommand(tx, tick0, subs, in command, tick);
-            }
-
+            // Cancels first: a cancel and a take sent together at the cap mean "swap", and a take first would be refused MissionCap. A cancel cannot name a
+            // mission taken this tick — its id is only in a journal read after it — so nothing is lost the other way.
             foreach (var command in abandons)
             {
                 AbandonFromCommand(tx, tick0, subs, in command);
+            }
+
+            foreach (var command in takes)
+            {
+                TakeFromCommand(tx, tick0, subs, in command, tick);
             }
         }
 
         if (asks > 0)
         {
-            Span<MissionAsk> batch = asks <= 64 ? stackalloc MissionAsk[64] : new MissionAsk[asks];
+            if (asks > 64 && _askSpill.Length < asks)
+            {
+                _askSpill = new MissionAsk[Math.Max(asks, _askSpill.Length * 2)];
+            }
+
+            Span<MissionAsk> batch = asks <= 64 ? stackalloc MissionAsk[64] : _askSpill;
             var n = MissionAskQueue.Drain(batch);
             for (var i = 0; i < n; i++)
             {
@@ -180,8 +198,17 @@ public sealed partial class SimBridge
     // ── Loading ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>The terminals from the world's indexes; the offers and held missions from the database, which a reopened world already has.</summary>
-    private void LoadDesk(Transaction tx)
+    /// <remarks>
+    /// <b>Every stored expiry is clamped to its longest life from now.</b> They are absolute ticks, and a reopened world's tick count starts again at 0: an
+    /// offer listed late in a long run would otherwise stand for as long as that run lasted, its terminal's list frozen, and a crowd body's mission would never
+    /// be given up. Clamping gives each a full life again, which is all a restart can promise.
+    /// </remarks>
+    private void LoadDesk(Transaction tx, long tick)
     {
+        MissionJournal.ResetCompletions();
+        var offerLife = (long)((TatooineData.MissionOfferLifeMinSeconds + TatooineData.MissionOfferLifeSpanSeconds) * _config.TickRateHz);
+        var crowdLife = (long)MissionWalkSeconds * _config.TickRateHz;
+        var lairLife = (long)(TatooineData.MissionLairLifeSeconds * _config.TickRateHz);
         var terminals = new List<MissionTerminalRef>();
         foreach (var index in PlanetIndexes)
         {
@@ -198,6 +225,7 @@ public sealed partial class SimBridge
             _terminalOf[_terminals[t].Id] = t;
         }
 
+        var clamped = new List<EntityId>();
         foreach (var cluster in tx.For<MissionOffer>().GetClusterEnumerator())
         {
             var infos = cluster.GetReadOnlySpan(MissionOffer.Info);
@@ -208,7 +236,11 @@ public sealed partial class SimBridge
                 _offerSerial = Math.Max(_offerSerial, info.Serial);
                 if (_terminalOf.TryGetValue(info.Terminal, out var t))
                 {
-                    _offers[t].Add((cluster.GetEntityId(slot), info.ExpireTick));
+                    _offers[t].Add((cluster.GetEntityId(slot), Math.Min(info.ExpireTick, tick + offerLife)));
+                    if (info.ExpireTick > tick + offerLife)
+                    {
+                        clamped.Add(cluster.GetEntityId(slot));
+                    }
                 }
                 else
                 {
@@ -219,19 +251,87 @@ public sealed partial class SimBridge
             }
         }
 
+        // Written back, so the database says what the desk does: a second restart, or a check, reads the clamp.
+        foreach (var id in clamped)
+        {
+            var offer = tx.OpenMut(id);
+            var info = offer.Read(MissionOffer.Info);
+            info.ExpireTick = tick + offerLife;
+            offer.Set(MissionOffer.Info, info);
+            _deskWrites++;
+        }
+
         _held.Clear();
         _heldBy.Clear();
+        _crowdMission.Clear();
+        var heldLairs = new HashSet<EntityId>();
         foreach (var cluster in tx.For<HeldMissionArch>().GetClusterEnumerator())
         {
             for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
             {
-                var id = cluster.GetEntityId(System.Numerics.BitOperations.TrailingZeroCount(bits));
-                if (tx.TryOpen(id, out var e))
+                _held.Add(cluster.GetEntityId(System.Numerics.BitOperations.TrailingZeroCount(bits)));
+            }
+        }
+
+        // Opened after the walk, not in it: the clamps below write, and a walk must not see its own transaction's writes (#1482). TryOpen, and the
+        // entry dropped, for one the walk yielded that is not there: a tick-path call must not throw.
+        for (var i = _held.Count - 1; i >= 0; i--)
+        {
+            var id = _held[i];
+            if (!tx.TryOpen(id, out var heldEntity))
+            {
+                _held.RemoveAt(i);
+                continue;
+            }
+
+            var m = heldEntity.Read(HeldMissionArch.Mission);
+            CountHolder(m.Holder, +1);
+            if (m.HolderKind == MissionHolderKind.Scripted)
+            {
+                _crowdMission[m.Holder] = id;
+            }
+
+            if (m.ExpireTick > tick + crowdLife)
+            {
+                m.ExpireTick = tick + crowdLife;
+                tx.OpenMut(id).Set(HeldMissionArch.Mission, m);
+                _deskWrites++;
+            }
+
+            if (!m.Lair.IsNull && tx.TryOpen(m.Lair, out var lairEntity))
+            {
+                heldLairs.Add(m.Lair);
+                var spawner = lairEntity.Read(CreatureLair.Spawner);
+                if (spawner.ExpireTick > tick + lairLife)
                 {
-                    _held.Add(id);
-                    CountHolder(e.Read(HeldMissionArch.Mission).Holder, +1);
+                    spawner.ExpireTick = tick + lairLife;
+                    tx.OpenMut(m.Lair).Set(CreatureLair.Spawner, spawner);
+                    _deskWrites++;
                 }
             }
+        }
+
+        // A mission lair no held mission names — what Lair.Mission is for: nothing ends a mission without its lair in the same transaction, so this is a
+        // world from before a fix, or one a tool wrote. Left, it would stand for ever: the lair director retires only the sites' lairs.
+        var orphans = new List<(EntityId Id, ushort Realm)>();
+        foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
+        {
+            var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
+            for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+            {
+                var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                var lairId = cluster.GetEntityId(slot);
+                if (!spawners[slot].Mission.IsNull && !heldLairs.Contains(lairId))
+                {
+                    orphans.Add((lairId, cluster.Realm.Value));
+                }
+            }
+        }
+
+        foreach (var (lairId, _) in orphans)
+        {
+            DestroyLair(tx, lairId);
+            _missionLairsOrphaned++;
         }
     }
 
@@ -261,7 +361,8 @@ public sealed partial class SimBridge
                     continue;
                 }
 
-                if (!m.Lair.IsNull)
+                // Except one its holder broke: that mission is done, and is paid at the login — the reward goes into a body, and there is none now.
+                if (!m.Lair.IsNull && !BrokenByHolder(tx, m.Lair))
                 {
                     DestroyLair(tx, m.Lair);
                     m.Lair = EntityId.Null;
@@ -296,11 +397,12 @@ public sealed partial class SimBridge
             var vitals = lairEntity.Read(CreatureLair.Vitals);
             if (vitals.Health <= 0 && lair.OwnerHit != 0)
             {
-                // Done, and paid where it was broken (R5): no going back to the terminal.
+                // Done, and paid where it was broken (R5): no going back to the terminal. The journal is told it was completed, not just that it left.
                 Reward(tick0, body, m.Reward);
                 EndMission(tx, i, in m, completed: true);
                 if (m.HolderKind == MissionHolderKind.Character)
                 {
+                    MissionJournal.NoteCompleted(m.Holder, id, m.Kind, m.Reward);
                     BumpJournal(tick0, body);
                 }
 
@@ -312,8 +414,11 @@ public sealed partial class SimBridge
                 // Broken by somebody else alone (Q3), or its life ran out (R6): another lair round the same anchor, the mission still held.
                 DestroyLair(tx, m.Lair);
                 m.Lair = EntityId.Null;
-                Interlocked.Increment(ref _missionLairsRedrawn);
-                TryDrawLair(tx, id, ref m, body, tick);
+                if (TryDrawLair(tx, id, ref m, body, tick))
+                {
+                    Interlocked.Increment(ref _missionLairsRedrawn);
+                }
+
                 tx.OpenMut(id).Set(HeldMissionArch.Mission, m);
                 _deskWrites++;
                 NoteLairMoved(tick0, in m, body);
@@ -389,7 +494,7 @@ public sealed partial class SimBridge
             var dz = MathF.Cos(ang) * dist;
             var ax = terminal.X + dx;
             var az = terminal.Z + dz;
-            if (ax < -reach || ax > reach || az < -reach || az > reach || InsideCity(ax, az))
+            if (ax < -reach || ax > reach || az < -reach || az > reach || InsideCity(terminal.Realm, ax, az))
             {
                 continue;
             }
@@ -435,7 +540,9 @@ public sealed partial class SimBridge
     {
         if (!TatooineReplication.TryBodyOfSession(command.Session, out var body, out var character) || !tick0.TryOpen(body, out var player))
         {
-            return;   // no avatar bound yet: nothing to refuse it to
+            // No avatar bound yet, or a spectator: refused rather than dropped, so the client's pending take is answered.
+            Refuse(subs, in command, TatooineReplication.NotInWorld);
+            return;
         }
 
         if (player.Read(Player.Vitals).Down != Downed.Up)
@@ -446,9 +553,9 @@ public sealed partial class SimBridge
 
         // TryResolveAny, and the checks below are why that is still SUB-26's rule. TryResolve answers against the session's COMMITTED geometry, which a
         // re-anchor empties until the next frame is published — a door, a shuttle, a park: an offer the client was looking at a tick ago resolved to
-        // nothing, and the take was refused "taken" (found by MissionDeskChecks, a take sent the tick after a park). What SUB-26 protects is a client naming
-        // something outside its view; a body within MissionTerminalReachM of the offer, in its realm, and the offer's own serial, are a narrower test than
-        // the view. Gone — taken by somebody first, or aged out — is "taken".
+        // nothing, and the take was refused "taken" (found by MissionDeskChecks, a take sent the tick after a park; the engine gap is #1494).
+        // What SUB-26 protects is a client naming something outside its view; a body within MissionTerminalReachM of the offer, in its realm, and the offer's
+        // own serial, are a narrower test than the view. Gone — taken by somebody first, or aged out — is "taken".
         if (!subs.TryResolveAny(command.Session, command.Value.Offer, out var offerId)
             || offerId.ArchetypeId != _offerRouting
             || !tx.TryOpen(offerId, out var offer)
@@ -474,15 +581,25 @@ public sealed partial class SimBridge
             return;
         }
 
-        Take(tx, tick0, offerId, character, MissionHolderKind.Character, body, expireTick: 0, tick);
+        _ = Take(tx, tick0, offerId, character, MissionHolderKind.Character, body, expireTick: 0, tick);
     }
 
     /// <summary>A scripted body's ask: the nearest terminal within reach, and its first offer.</summary>
     private void ServeCrowd(Transaction tx, Transaction tick0, in MissionAsk ask, long tick)
     {
-        if (HeldCount(ask.Player) > 0)
+        if (_crowdMission.TryGetValue(ask.Player, out var holding))
         {
-            return;   // one at a time for the crowd
+            // One at a time for the crowd. PlayerThink has just sent the body to a point of interest: send it back to its lair, or it walks away from it.
+            if (tx.TryOpen(holding, out var held))
+            {
+                var m = held.Read(HeldMissionArch.Mission);
+                if (!m.Lair.IsNull)
+                {
+                    SendOnMission(tick0, ask.Player, m.LairX, m.LairZ);
+                }
+            }
+
+            return;
         }
 
         var reach = TatooineData.MissionCrowdReachM * _config.ContentScale;
@@ -505,15 +622,25 @@ public sealed partial class SimBridge
         }
 
         var expire = tick + ((long)MissionWalkSeconds * _config.TickRateHz);
-        Take(tx, tick0, _offers[best][0].Id, ask.Player, MissionHolderKind.Scripted, ask.Player, expire, tick);
+        var list = _offers[best];
+        while (list.Count > 0 && !Take(tx, tick0, list[0].Id, ask.Player, MissionHolderKind.Scripted, ask.Player, expire, tick))
+        {
+            // The list named an offer that is gone. Nothing else destroys an offer, so this is a desk bug — but a throw here would stop the server.
+            list.RemoveAt(0);
+        }
     }
 
     /// <summary>
     /// Takes an offer: it leaves its terminal, a replacement is listed there, the held mission is created and its lair drawn — one transaction.
     /// </summary>
-    private void Take(Transaction tx, Transaction tick0, EntityId offerId, EntityId holder, byte holderKind, EntityId body, long expireTick, long tick)
+    /// <returns><see langword="false"/> when the offer is not there to take.</returns>
+    private bool Take(Transaction tx, Transaction tick0, EntityId offerId, EntityId holder, byte holderKind, EntityId body, long expireTick, long tick)
     {
-        var offer = tx.Open(offerId);
+        if (!tx.TryOpen(offerId, out var offer))
+        {
+            return false;
+        }
+
         var info = offer.Read(MissionOffer.Info);
         var realm = offer.Read(MissionOffer.Realm).Value;
         tx.Destroy(offerId);
@@ -551,6 +678,11 @@ public sealed partial class SimBridge
         _deskWrites++;
         _held.Add(id);
         CountHolder(holder, +1);
+        if (holderKind == MissionHolderKind.Scripted)
+        {
+            _crowdMission[holder] = id;
+        }
+
         Interlocked.Increment(ref _missionsIssued);
 
         // The lair now, while its holder is here. One that cannot be placed this tick is drawn by the next pass.
@@ -561,6 +693,7 @@ public sealed partial class SimBridge
         }
 
         NoteLairMoved(tick0, in m, body);
+        return true;
     }
 
     // ── Cancelling and ending ───────────────────────────────────────────────────────────────────────────────────────
@@ -570,6 +703,7 @@ public sealed partial class SimBridge
     {
         if (!TatooineReplication.TryBodyOfSession(command.Session, out var body, out var character))
         {
+            subs.Reject(command, TatooineReplication.NotInWorld);
             return;
         }
 
@@ -599,6 +733,11 @@ public sealed partial class SimBridge
         _deskWrites++;
         _held.RemoveAt(at);
         CountHolder(m.Holder, -1);
+        if (m.HolderKind == MissionHolderKind.Scripted)
+        {
+            _crowdMission.Remove(m.Holder);
+        }
+
         if (completed)
         {
             Interlocked.Increment(ref _missionsCompleted);
@@ -622,14 +761,14 @@ public sealed partial class SimBridge
         for (var attempt = 0; attempt < MissionPlacementTries; attempt++)
         {
             var (x, z) = WorldBuilder.Inside(rng.PointInDisc(m.AnchorX, m.AnchorZ, scatter), _config);
-            if (InsideCity(x, z))
+            if (InsideCity(m.Realm, x, z))
             {
                 continue;
             }
 
             var life = (long)(TatooineData.MissionLairLifeSeconds * _config.TickRateHz);
-            var lairId = WorldBuilder.SpawnLair(tx, ref rng, m.Kind, x, z, site: 0, expireTick: tick + life, _config, TerrainField.Shared(_config.ContentScale),
-                m.Realm);
+            var terrain = TerrainField.Shared(_config.ContentScale);
+            var lairId = WorldBuilder.SpawnLair(tx, ref rng, m.Kind, x, z, site: 0, expireTick: tick + life, _config, terrain, m.Realm);
             var lair = tx.OpenMut(lairId);
             var spawner = lair.Read(CreatureLair.Spawner);
             spawner.Mission = mission;
@@ -646,6 +785,10 @@ public sealed partial class SimBridge
 
         return false;
     }
+
+    /// <summary>Whether a mission's lair is standing broken after its holder hit it: the mission done, its pay waiting for a body.</summary>
+    private static bool BrokenByHolder(Transaction tx, EntityId lairId)
+        => tx.TryOpen(lairId, out var lair) && lair.Read(CreatureLair.Vitals).Health <= 0 && lair.Read(CreatureLair.Spawner).OwnerHit != 0;
 
     /// <summary>Destroys a mission's lair, its creatures with it through <see cref="CreatureHome"/>'s cascade.</summary>
     private void DestroyLair(Transaction tx, EntityId lairId)
@@ -732,12 +875,13 @@ public sealed partial class SimBridge
     /// <summary>The offer archetype's routing id, so a resolved netId can be told to be an offer before it is opened as one.</summary>
     private ushort _offerRouting;
 
-    /// <summary>Is a point inside one of the NPC cities? [CORE3] a destroy mission may not place its target in one.</summary>
-    private bool InsideCity(float x, float z)
+    /// <summary>Is a point inside one of the NPC cities of a planet? [CORE3] a destroy mission may not place its target in one.</summary>
+    private bool InsideCity(ushort realm, float x, float z)
     {
-        for (var i = 0; i < _index.Cities.Count; i++)
+        var cities = PlanetIndexes[realm].Cities;
+        for (var i = 0; i < cities.Count; i++)
         {
-            var c = _index.Cities[i];
+            var c = cities[i];
             var dx = c.X - x;
             var dz = c.Z - z;
             if ((dx * dx) + (dz * dz) < c.Radius * c.Radius)

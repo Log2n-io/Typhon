@@ -136,9 +136,9 @@ function factoryFor(
         // panel would show an ask in flight until the session ended.
         useUi.getState().shuttleRefused(reason);
       },
-      onMissionRefused: (reason) => {
+      onMissionRefused: (reason, cancelled) => {
         // "Already taken", "three held", "too far": an accepted take is never answered, so the panel hears only this.
-        useMissions.getState().refused(reason);
+        useMissions.getState().refused(reason, cancelled);
       },
       onSpectateRefused: () => {
         // A refused ride leaves nothing behind on its own: no frame arrives, so nothing takes the camera out of the

@@ -105,10 +105,10 @@ public struct MissionOfferRealm
 public static class MissionHolderKind
 {
     /// <summary><see cref="HeldMission.Holder"/> is a <see cref="CharacterArch"/> entity; its body is whichever avatar that character has online.</summary>
-    public const byte Character = 0;
+    public const byte Character = 1;
 
     /// <summary><see cref="HeldMission.Holder"/> is a scripted <see cref="Player"/>: the body itself, which never logs out.</summary>
-    public const byte Scripted = 1;
+    public const byte Scripted = 2;
 }
 
 /// <summary>

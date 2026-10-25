@@ -998,8 +998,9 @@ public sealed partial class SimBridge
     /// <remarks>
     /// <para><b>The crowd's only.</b> A person is told over the wire — the journal and its waypoint — and walks there or not, which is what a mission is; a
     /// destination written onto a possessed body would overwrite the one its client sent, the two-deciders bug SWG-01 exists to prevent.</para>
-    /// <para><b>The timer is sized for the walk, not for the fight.</b> A lair 0.5-2 km out at the mounted speed is one to three minutes away, and the 120 s the
-    /// activity mix hands a fighter would expire mid-desert and re-roll the activity — which is how a mission that was taken would still never be reached.</para>
+    /// <para><b>The timer is sized for the walk, not for the fight.</b> A lair 0.5-2 km out at the mounted speed is one to three minutes away, and the
+    /// 120 s the activity mix hands a fighter would expire mid-desert and re-roll the activity — which is how a mission that was taken would still never
+    /// be reached.</para>
     /// </remarks>
     private void SendOnMission(Transaction tx, EntityId body, float x, float z)
     {
@@ -1026,7 +1027,7 @@ public sealed partial class SimBridge
     }
 
     /// <summary>[EST] Seconds a scripted body is given to walk to its mission and fight there; past it the crowd gives the mission up.</summary>
-    private const int MissionWalkSeconds = 300;
+    internal const int MissionWalkSeconds = 300;
 
     /// <summary>A completed mission's payout, into its holder's <see cref="Inventory"/> — a Versioned write in the tick's unit of work.</summary>
     private void Reward(Transaction tx, EntityId body, int credits)

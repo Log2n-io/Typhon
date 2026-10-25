@@ -630,12 +630,26 @@ button.active {
   overflow-y: auto;
 }
 
+/* Left of the bottom-right column: 270 px of content plus the panels' padding and border is 292 px wide with the inspector
+   in it (content-box), so 290 px sat on its edge. */
 .journal {
-  right: 290px;
+  right: 312px;
   bottom: 10px;
   width: 360px;
   max-height: 50%;
   overflow-y: auto;
+}
+
+/* Under about 1240 px its left edge reaches the action bar's: centred near the top instead, like a terminal's list. */
+@media (max-width: 1240px) {
+  .journal {
+    top: 70px;
+    bottom: auto;
+    right: auto;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: calc(100% - 20px);
+  }
 }
 
 .missions-head {

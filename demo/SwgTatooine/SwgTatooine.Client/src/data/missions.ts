@@ -44,6 +44,13 @@ export interface HeldMission {
   readonly lair: { readonly x: number; readonly z: number } | null;
 }
 
+/** A mission the server says this character completed, as `GET /swg/missions` states it beside the held ones. */
+export interface CompletedMission {
+  readonly id: string;
+  readonly name: string;
+  readonly reward: number;
+}
+
 /** What a mission sends you to do, from its lair kind's name: "Destroy the ninja hideout", "Clear out the rats". */
 export function missionTitle(name: string): string {
   if (name.length === 0) {
@@ -92,7 +99,15 @@ export const MISSION_REASONS: Readonly<Record<number, string>> = {
   139: `You already hold ${MAX_MISSIONS} missions`,
   140: 'Too far from the terminal',
   141: 'That mission is not yours',
+  142: 'You are not in the world',
 };
+
+/**
+ * How long a take or a cancel waits for its answer, milliseconds. An accepted one is never answered — the journal moves
+ * instead — and a refusal comes in the frame that carries it, so past this the ask is forgotten: lost with a dropped link,
+ * or accepted.
+ */
+export const MISSION_ANSWER_MS = 5000;
 
 /** What a refusal reason reads as; a reason this table does not know still says something. */
 export function missionRefusal(reason: number): string {
@@ -102,23 +117,31 @@ export function missionRefusal(reason: number): string {
 /** How long a failed journal read waits before it is tried again, milliseconds. */
 export const JOURNAL_RETRY_MS = 3000;
 
+/** How long a journal read may take before it is abandoned and retried, milliseconds: a hung one held every later read off. */
+export const JOURNAL_TIMEOUT_MS = 10_000;
+
 type Fetch = (
   url: string,
-  init: { headers: Record<string, string> },
-) => Promise<{ ok: boolean; json(): Promise<unknown> }>;
+  init: { headers: Record<string, string>; signal?: AbortSignal },
+) => Promise<{ ok: boolean; status?: number; json(): Promise<unknown> }>;
 
 /**
  * The character's held missions, re-read whenever the body's `journal` revision moves.
  *
  * <b>The revision is the trigger, not a clock.</b> A take, a cancel, a completion and a lair drawn somewhere new each move
  * it; nothing else changes the journal, so polling would only re-read the same answer. A read that fails is retried after
- * {@link JOURNAL_RETRY_MS}; one whose revision moved again meanwhile is superseded and its answer dropped.
+ * {@link JOURNAL_RETRY_MS}, one that hangs is abandoned after {@link JOURNAL_TIMEOUT_MS}; one whose revision moved again
+ * meanwhile is applied, and read again at once. A 401 or 403 is not retried until the token changes: it will not get better.
+ * An answer that lands after {@link clear} is dropped.
  */
 export class MissionJournal {
   /** Bumped whenever a new list arrives, so a pane built from it knows to be rebuilt. */
   version = 0;
 
   private list: readonly HeldMission[] = [];
+  private done: readonly CompletedMission[] = [];
+  private generation = 0;
+  private refusedToken: string | null = null;
   private wantedRev = -1;
   private readRev = -1;
   private inFlight = false;
@@ -148,6 +171,11 @@ export class MissionJournal {
     return this.list;
   }
 
+  /** The character's last few completed missions, as the server states them. */
+  get completed(): readonly CompletedMission[] {
+    return this.done;
+  }
+
   /**
    * Called every frame with the body's `journal` owner field; reads the journal when it moved since the last read.
    *
@@ -163,42 +191,58 @@ export class MissionJournal {
       return;
     }
 
-    void this.read(rev);
+    const token = this.token();
+    if (token === null || token === this.refusedToken) {
+      return;
+    }
+
+    void this.read(rev, token);
   }
 
   /** Forgets everything: a new session may be another character on another server. */
   clear(): void {
+    this.generation++;
+    this.inFlight = false;
+    this.refusedToken = null;
     this.list = [];
+    this.done = [];
     this.wantedRev = -1;
     this.readRev = -1;
     this.retryAtMs = 0;
     this.version++;
   }
 
-  private async read(rev: number): Promise<void> {
-    const token = this.token();
-    if (token === null) {
-      return;
-    }
-
+  private async read(rev: number, token: string): Promise<void> {
+    const generation = this.generation;
     this.inFlight = true;
     let answer: unknown;
+    let refused = false;
     try {
-      const response = await this.fetcher('swg/missions', { headers: { Authorization: `Bearer ${token}` } });
+      const response = await this.fetcher('swg/missions', {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(JOURNAL_TIMEOUT_MS),
+      });
+      refused = response.status === 401 || response.status === 403;
       answer = response.ok ? await response.json() : null;
     } catch {
       answer = null;
-    } finally {
-      this.inFlight = false;
     }
 
-    if (!Array.isArray(answer)) {
+    if (generation !== this.generation) {
+      return; // cleared meanwhile: another session's answer
+    }
+
+    this.inFlight = false;
+    const journal = answer as { missions?: unknown; completed?: unknown } | null;
+    if (journal === null || typeof journal !== 'object' || !Array.isArray(journal.missions)) {
       this.retryAtMs = this.now() + JOURNAL_RETRY_MS;
+      this.refusedToken = refused ? token : null;
       return;
     }
 
     this.readRev = rev;
-    this.list = answer.filter(isHeldMission);
+    this.list = journal.missions.filter(isHeldMission);
+    this.done = Array.isArray(journal.completed) ? journal.completed.filter(isCompletedMission) : [];
     this.version++;
 
     // Moved again while this one was in flight: read it again now rather than on the next frame's tick of the revision.
@@ -206,6 +250,15 @@ export class MissionJournal {
       this.update(this.wantedRev);
     }
   }
+}
+
+function isCompletedMission(value: unknown): value is CompletedMission {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+
+  const m = value as Record<string, unknown>;
+  return typeof m.id === 'string' && typeof m.name === 'string' && typeof m.reward === 'number';
 }
 
 function isHeldMission(value: unknown): value is HeldMission {

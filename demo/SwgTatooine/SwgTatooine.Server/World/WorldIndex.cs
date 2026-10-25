@@ -39,7 +39,9 @@ public sealed class WorldIndex
     /// </remarks>
     public List<LairSite> Sites { get; } = [];
 
-    /// <summary>Every mission terminal on the planet: the entity, where it stands, and its city's group key (region + 1) — what the mission desk lists at.</summary>
+    /// <summary>
+    /// Every mission terminal on the planet: the entity, where it stands, and its city's group key (region + 1) — what the mission desk lists at.
+    /// </summary>
     public List<MissionTerminalRef> Terminals { get; } = [];
 
     /// <summary>

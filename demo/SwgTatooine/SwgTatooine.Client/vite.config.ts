@@ -27,6 +27,8 @@ export default defineConfig({
       // Sign-up and log-in. Without this the dev page can only be a spectator: the POST reaches Vite, which has no such
       // route and answers 404, and the session never gets the token that `/ws` needs to give it an avatar.
       '/auth': { target: 'http://127.0.0.1:5080' },
+      // The demo's own reads (the mission journal). Without it the SPA fallback answers `index.html`, and the journal never loads.
+      '/swg': { target: 'http://127.0.0.1:5080' },
     },
   },
   preview: { port: 5191, strictPort: true },

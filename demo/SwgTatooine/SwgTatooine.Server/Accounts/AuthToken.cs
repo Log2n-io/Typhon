@@ -119,9 +119,20 @@ public static class AuthToken
     /// <b>One boolean for every kind of failure, on purpose.</b> Telling a caller "the signature was wrong" rather than "that
     /// expired" is a free hint to somebody probing the format. The server's own log can be specific; the wire cannot.
     /// </remarks>
-    public static bool TryValidate(string token, out EntityId account)
+    public static bool TryValidate(string token, out EntityId account) => TryRead(token, out account, out var expired) && !expired;
+
+    /// <summary>
+    /// Reads a correctly signed token whether or not it has expired, and says which. For a caller that holds a stronger proof of its own for an expired one —
+    /// the mission journal accepts it while its account is playing (<c>MissionJournal</c>), since the socket checked the token only once, at <c>HELLO</c>.
+    /// </summary>
+    /// <param name="token">What the client presented. Anything at all, including <see langword="null"/> and rubbish.</param>
+    /// <param name="account">The account on success; <c>default</c> otherwise.</param>
+    /// <param name="expired">Whether the token's lifetime has run out; meaningful only on success.</param>
+    /// <returns><see langword="true"/> when the token is well-formed and correctly signed.</returns>
+    public static bool TryRead(string token, out EntityId account, out bool expired)
     {
         account = default;
+        expired = false;
         if (string.IsNullOrEmpty(token))
         {
             return false;
@@ -164,11 +175,7 @@ public static class AuthToken
         // Expiry is checked AFTER the MAC, which is the order that matters: reading an unauthenticated expiry and acting on it would be trusting a field an
         // attacker writes.
         var expiry = BinaryPrimitives.ReadInt64LittleEndian(decoded[9..]);
-        if (expiry <= DateTimeOffset.UtcNow.ToUnixTimeSeconds())
-        {
-            return false;
-        }
-
+        expired = expiry <= DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var raw = BinaryPrimitives.ReadUInt64LittleEndian(decoded[1..]);
         if (raw == 0)
         {

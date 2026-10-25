@@ -138,6 +138,16 @@ public static partial class TatooineReplication
     /// </remarks>
     private static readonly Dictionary<ulong, uint> SessionOfAccount = [];
 
+    /// <summary>The accounts <see cref="SessionOfAccount"/> holds, mirrored for a reader off the tick: the mission journal, on an HTTP thread.</summary>
+    /// <remarks>
+    /// A mirror rather than making the tick's own dictionary concurrent: the tick walks <see cref="SessionOfAccount"/> on every <see cref="DropAccountHolds"/>,
+    /// and a concurrent dictionary's walk allocates. Written only where the dictionary is, on login, resume and release — a handful a minute.
+    /// </remarks>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, byte> PlayingAccounts = new();
+
+    /// <summary>Whether an account is in the world now — bound, or held for a resume. Safe from any thread.</summary>
+    internal static bool IsPlaying(EntityId account) => PlayingAccounts.ContainsKey(account.RawValue);
+
     /// <summary>
     /// The avatar of every session whose link died and whose client may still come back: the old session's value to the body it left standing (A13).
     /// </summary>
@@ -457,6 +467,7 @@ public static partial class TatooineReplication
         if (hold.AccountRaw != 0 && SessionOfAccount.TryGetValue(hold.AccountRaw, out var holder) && holder == sessionValue)
         {
             SessionOfAccount.Remove(hold.AccountRaw);
+            PlayingAccounts.TryRemove(hold.AccountRaw, out _);
         }
     }
 
@@ -551,6 +562,7 @@ public static partial class TatooineReplication
         if (hold.AccountRaw != 0)
         {
             SessionOfAccount[hold.AccountRaw] = session.Value;
+            PlayingAccounts[hold.AccountRaw] = 0;
         }
 
         subs.Session(session).Control(hold.Avatar);
@@ -722,6 +734,7 @@ public static partial class TatooineReplication
         BoundPlayer[session.Value] = avatar;
         CharacterOfSession[session.Value] = character;
         SessionOfAccount[account.RawValue] = session.Value;
+        PlayingAccounts[account.RawValue] = 0;
         AccountOfSession.Remove(session.Value);
 
         System.Threading.Interlocked.Increment(ref _avatarsSpawned);
@@ -994,6 +1007,7 @@ public static partial class TatooineReplication
         for (var i = 0; i < AccountsToDrop.Count; i++)
         {
             SessionOfAccount.Remove(AccountsToDrop[i]);
+            PlayingAccounts.TryRemove(AccountsToDrop[i], out _);
         }
     }
 
@@ -1253,9 +1267,12 @@ public static partial class TatooineReplication
         return BoundPlayer.TryGetValue(session.Value, out body) && CharacterOfSession.TryGetValue(session.Value, out character);
     }
 
-    /// <summary>Fills <paramref name="bodies"/> with every character that has a body bound now, and that body.</summary>
+    /// <summary>Fills <paramref name="bodies"/> with every character that has a body in the world now, and that body.</summary>
     /// <param name="bodies">Cleared first.</param>
-    /// <remarks>A character resuming after a dropped connection has no session bound while it waits, and so no body here: a mission's lair waits too.</remarks>
+    /// <remarks>
+    /// <b>A body held for a resume counts</b> (A13): it is standing where its player's link dropped, and <see cref="CharacterOfSession"/> still names its
+    /// character under the old session. A blip is not a logout (missions.md, Q6), so the mission's lair stands through it, its damage kept.
+    /// </remarks>
     internal static void FillCharacterBodies(Dictionary<EntityId, EntityId> bodies)
     {
         bodies.Clear();
@@ -1264,6 +1281,10 @@ public static partial class TatooineReplication
             if (BoundPlayer.TryGetValue(session, out var body))
             {
                 bodies[character] = body;
+            }
+            else if (ResumingPlayer.TryGetValue(session, out var hold))
+            {
+                bodies[character] = hold.Avatar;
             }
         }
     }
@@ -1274,6 +1295,7 @@ public static partial class TatooineReplication
         AccountOfSession.Clear();
         CharacterOfSession.Clear();
         SessionOfAccount.Clear();
+        PlayingAccounts.Clear();
         AccountsToDrop.Clear();
         ResumingPlayer.Clear();
         ResumesToRetire.Clear();

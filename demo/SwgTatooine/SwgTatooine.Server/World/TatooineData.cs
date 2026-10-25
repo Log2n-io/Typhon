@@ -314,7 +314,9 @@ public static class TatooineData
     /// <summary>How long a mission's lair stands before it moves somewhere else round its anchor, seconds (missions.md, R6).</summary>
     public const float MissionLairLifeSeconds = 1200f;
 
-    /// <summary>How close to a mission terminal's centre a body must stand to take one of its missions, metres. The client's own gate is the tighter one.</summary>
+    /// <summary>
+    /// How close to a mission terminal's centre a body must stand to take one of its missions, metres. The client's own gate is the tighter one.
+    /// </summary>
     public const float MissionTerminalReachM = 6f;
 
     /// <summary>How far from a terminal the scripted crowd may ask it for a mission, metres: a body anywhere in a town.</summary>

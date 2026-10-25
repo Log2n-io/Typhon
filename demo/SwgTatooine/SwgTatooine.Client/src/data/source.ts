@@ -28,6 +28,7 @@ import {
 import { hullInRadiusM } from './replication-stats';
 import { realmViewOf, type RealmView } from './realm-view';
 import { REASON_NOT_SENT } from '../app/travel';
+import { MISSION_ANSWER_MS } from './missions';
 
 /**
  * Where the client's world comes from. The renderer and the UI only ever see the SDK's store, clock and aggregate grid;
@@ -359,8 +360,11 @@ export interface TyphonSourceOptions {
    * @param reason The `ACKS` reason, or `travel.REASON_NOT_SENT` when nothing left the client.
    */
   readonly onShuttleRefused?: (reason: number) => void;
-  /** A take or a cancel of a mission the server refused, with its `ACKS` reason (`data/missions.ts` names them). */
-  readonly onMissionRefused?: (reason: number) => void;
+  /**
+   * A take or a cancel of a mission the server refused, with its `ACKS` reason (`data/missions.ts` names them) and, for a
+   * cancel, the mission it named — `null` for a take.
+   */
+  readonly onMissionRefused?: (reason: number, cancelled: string | null) => void;
   /** The server refused the god camera, or the local rate limit did. The session is still served the player's own view. */
   readonly onOverviewRefused?: () => void;
   /** The server's WebSocket URL, which must speak `typhon.3`. */
@@ -427,8 +431,13 @@ export class TyphonSource implements DataSource {
   private abandonMissionCommand: MessagePlan | null = null;
   private overviewCommand: MessagePlan | null = null;
 
-  /** The takes and cancels sent and not refused yet. An accepted one is never acked, so an entry outlives its answer; a set of a few seqs. */
-  private readonly pendingMissionSeqs = new Set<number>();
+  /**
+   * The takes and cancels sent and not refused yet, by seq: the mission a cancel named (`null` for a take) and when it went.
+   * An accepted one is never acked, so an entry is dropped {@link MISSION_ANSWER_MS} after it was sent — kept, a seq the
+   * queue reused (a reconnect restarts it at 1, a wrap after half an hour of driving) read a later command's refusal as a
+   * mission's.
+   */
+  private readonly pendingMissionSeqs = new Map<number, { readonly cancelled: string | null; readonly atMs: number }>();
 
   /** The sphere radius last asked for, metres; 0 for none asked. See {@link effectiveRadiusM}. */
   private askedViewRadiusM = 0;
@@ -813,7 +822,7 @@ export class TyphonSource implements DataSource {
   }
 
   takeMission(offerNetId: number, serial: number): boolean {
-    return this.sendMission(this.takeMissionCommand, { offer: offerNetId, serial });
+    return this.sendMission(this.takeMissionCommand, { offer: offerNetId, serial }, null);
   }
 
   abandonMission(id: string): boolean {
@@ -825,10 +834,10 @@ export class TyphonSource implements DataSource {
       return false;
     }
 
-    return this.sendMission(this.abandonMissionCommand, { mission });
+    return this.sendMission(this.abandonMissionCommand, { mission }, id);
   }
 
-  private sendMission(command: MessagePlan | null, values: FieldValues): boolean {
+  private sendMission(command: MessagePlan | null, values: FieldValues, cancelled: string | null): boolean {
     if (command === null || this.ticks === 0) {
       return false;
     }
@@ -838,17 +847,19 @@ export class TyphonSource implements DataSource {
       return false;
     }
 
-    // Kept small: a seq the ring reuses would match a later, unrelated ack. Oldest first out.
-    if (this.pendingMissionSeqs.size >= 16) {
-      const oldest = this.pendingMissionSeqs.values().next().value;
-      if (oldest !== undefined) {
-        this.pendingMissionSeqs.delete(oldest);
-      }
-    }
-
-    this.pendingMissionSeqs.add(seq);
+    this.prunePendingMissions(performance.now());
+    this.pendingMissionSeqs.set(seq, { cancelled, atMs: performance.now() });
     this.sendPending();
     return true;
+  }
+
+  /** Forgets the takes and cancels past {@link MISSION_ANSWER_MS}: accepted, since a refusal would have come by now. */
+  private prunePendingMissions(nowMs: number): void {
+    for (const [seq, ask] of this.pendingMissionSeqs) {
+      if (nowMs - ask.atMs > MISSION_ANSWER_MS) {
+        this.pendingMissionSeqs.delete(seq);
+      }
+    }
   }
 
   say(text: string): boolean {
@@ -1092,6 +1103,7 @@ export class TyphonSource implements DataSource {
     this.spectating = 0;
     this.pendingSpectateSeq = -1;
     this.pendingRealmSeq = -1;
+    this.pendingMissionSeqs.clear();
     // The store stays: a resume refills it with a RESET frame, and the renderer keeps drawing meanwhile.
     // So does the realm, for the same reason and more strongly — a resumed session's first frame is a
     // `RESET|REALM` of the realm its token recorded (12-realms § 1.6), so clearing it here would tear the scene
@@ -1146,8 +1158,10 @@ export class TyphonSource implements DataSource {
       }
 
       // A refused take or cancel: the only thing that will say so, since an accepted one is not answered at all.
-      if (this.pendingMissionSeqs.delete(seq)) {
-        this.options.onMissionRefused?.(applier.acks.reason[i]);
+      const mission = this.pendingMissionSeqs.get(seq);
+      if (mission !== undefined) {
+        this.pendingMissionSeqs.delete(seq);
+        this.options.onMissionRefused?.(applier.acks.reason[i], mission.cancelled);
       }
 
       // A refused god camera: the session is still served the player's own view, so the belief goes back to off.

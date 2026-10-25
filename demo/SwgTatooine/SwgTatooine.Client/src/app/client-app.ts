@@ -125,7 +125,14 @@ import { resetForRealm, resetForSession, type RealmSwitchTargets } from './realm
 import { nextRide, NOT_RIDING, rideOwnsTheView, rideSubjectOf, type RideState } from './ride';
 import { boostFor, DEFAULT_BOOST } from './gait';
 import { ACTION_ICON_SIZE, ACTION_SLOTS, NO_STANCE, serverStance, slotForKey, weaponOf } from './action-bar';
-import { autopilotInput, driveInputOf, handsOn, SwoopDrive, type DriveInput } from './swoop-drive';
+import {
+  AUTOPILOT_AT_REST_SHARE,
+  autopilotInput,
+  driveInputOf,
+  handsOn,
+  SwoopDrive,
+  type DriveInput,
+} from './swoop-drive';
 import { SwoopHover } from './swoop-hover';
 import {
   gaitChanged,
@@ -810,7 +817,7 @@ export class ClientApp {
           const netId = this.pickAt(x, y);
           const part = this.pickedPart;
           if (part !== null) {
-            useUi.getState().selectPart({ owner: part.owner, kind: 'ticket' });
+            useUi.getState().selectPart({ owner: part.owner, kind: part.kind });
           } else {
             useUi.getState().select(netId);
           }
@@ -2266,12 +2273,25 @@ export class ClientApp {
       this.driveYaw = this.drive.yaw;
     }
 
-    const hands = steering && useUi.getState().contextMenu === null ? driveInputOf(this.input.heldKeys) : PARKED_HANDS;
+    const free = steering && useUi.getState().contextMenu === null;
+    const hands = free ? driveInputOf(this.input.heldKeys) : PARKED_HANDS;
 
     // A waypoint clicked on the swoop out in the open rides there: the walk steers the bike, until a key takes it back. It used
     // to stop dead instead — a mounted body ignored the walk's intents, so a mission's waypoint a kilometre or two out did
-    // nothing. In a city `walkTo` puts the rider on foot first.
-    const input = !handsOn(hands) && this.doorWalk.active ? this.autopilotHands(performance.now(), max) : hands;
+    // nothing. In a city `walkTo` puts the rider on foot first. Only while the intent is being sent (`free`, as for the keys):
+    // in the map camera or under a menu nothing is, and the bike would build a speed the server hears of only later.
+    // Past the walk's end the brake stays on until the bike is at rest: let go, it coasted thirty metres on (review).
+    let input = hands;
+    if (handsOn(hands) || !free) {
+      this.autopilotStopping = false;
+    } else if (this.doorWalk.active) {
+      this.autopilotStopping = true;
+      input = this.autopilotHands(performance.now(), max);
+    } else if (this.autopilotStopping) {
+      input = autopilotInput(this.drive.yaw, null, 0, this.drive.speed, max);
+      this.autopilotStopping = !(this.drive.speed <= max * AUTOPILOT_AT_REST_SHARE);
+    }
+
     if (max > 0) {
       this.drive.step(dtS, input, max);
     }
@@ -2294,11 +2314,15 @@ export class ClientApp {
     return autopilotInput(
       this.drive.yaw,
       walk !== null && walk.speedClass !== SpeedClass.stop ? walk.heading : null,
-      end === null ? 0 : Math.hypot(end[0] - x, end[1] - z),
+      // To where it stops, which is the reach short of the end: aimed at the end, it was still at 11 m/s when the walk let go.
+      end === null ? 0 : Math.max(0, Math.hypot(end[0] - x, end[1] - z) - this.doorWalk.reachM),
       this.drive.speed,
       maxMps,
     );
   }
+
+  /** Whether a walk the autopilot rode has ended with the bike still rolling: braked until it is at rest. */
+  private autopilotStopping = false;
 
   /** The swoop's handling while this session rides it; see `swoop-drive.ts`. */
   private readonly drive = new SwoopDrive();
@@ -2837,13 +2861,6 @@ export class ClientApp {
 
     const fromX = this.predictor.x;
     const fromZ = this.predictor.z;
-
-    // In a city on foot, round the buildings; out in the open on the swoop, if the rider is on it (Loïc, 2026-10-25). A bike
-    // does not take a street's corners.
-    if (this.ridingNow(performance.now()) && insideCity(fromX, fromZ)) {
-      this.toggleMount(performance.now());
-    }
-
     const far = Math.hypot(x - fromX, z - fromZ);
     const reach = Math.min(1, WALK_SEARCH_M / Math.max(far, 1e-6));
     const toX = fromX + (x - fromX) * reach;
@@ -2864,6 +2881,16 @@ export class ClientApp {
     this.lastPathMs = performance.now() - started;
     if (path === null) {
       return 'no way round the buildings';
+    }
+
+    // In a city on foot, round the buildings; out in the open on the swoop, if the rider is on it (Loïc, 2026-10-25). A bike
+    // does not take a street's corners. After the path is found, so a walk that cannot start leaves the rider mounted; and
+    // checked, since the server may refuse the dismount (a ticket held) and the streets must not be ridden.
+    if (this.ridingNow(performance.now()) && insideCity(fromX, fromZ)) {
+      this.toggleMount(performance.now());
+      if (this.ridingNow(performance.now())) {
+        return 'cannot get off the swoop now';
+      }
     }
 
     if (reach < 1) {
@@ -3565,24 +3592,30 @@ export class ClientApp {
    * The terminals this frame's structures hold — shuttleports' ticket terminals and mission terminals, the parts the pick
    * and the long press know — rebuilt when the structures are.
    *
-   * <b>Not cached until every descriptor is in hand.</b> They are asked for when the assets mount and arrive in their own
-   * time; a list built before one arrived was kept until the structures next changed, so the first terminal walked up to
-   * after a quick login could not be used.
+   * <b>Rebuilt when a descriptor arrives, too.</b> They are asked for when the assets mount and arrive in their own time; a
+   * list built before one arrived was kept until the structures next changed, so the first terminal walked up to after a quick
+   * login could not be used. Keyed on the three descriptors themselves rather than waiting for all three: one that never comes
+   * (a failed fetch) made every call — the hover pick, the label, the press — rebuild the list (review).
    */
   private terminalsInView(): readonly TerminalPart[] {
-    if (this.partsEpoch === this.structureEpoch && this.partsSet === this.assetSet) {
-      return this.terminalParts;
-    }
-
-    this.terminalParts = [];
     const library = this.assets?.library ?? null;
     const port = library?.described(SHUTTLEPORT_ASSET) ?? null;
     const ticket = library?.described(TICKET_TERMINAL_ASSET) ?? null;
     const mission = library?.described(MISSION_TERMINAL_ASSET) ?? null;
-    if (port !== null && ticket !== null && mission !== null) {
-      this.partsEpoch = this.structureEpoch;
-      this.partsSet = this.assetSet;
+    if (
+      this.partsEpoch === this.structureEpoch &&
+      this.partsSet === this.assetSet &&
+      this.partsFrom[0] === port &&
+      this.partsFrom[1] === ticket &&
+      this.partsFrom[2] === mission
+    ) {
+      return this.terminalParts;
     }
+
+    this.terminalParts = [];
+    this.partsEpoch = this.structureEpoch;
+    this.partsSet = this.assetSet;
+    this.partsFrom = [port, ticket, mission];
 
     const children = ticket === null ? null : new Map([[TICKET_TERMINAL_ASSET, ticket]]);
     for (let i = 0; i < this.structureCount; i++) {
@@ -3620,6 +3653,8 @@ export class ClientApp {
   private journalVersion = -1;
   private kindNamesSet: AssetSet | null = null;
   private offersAtMs = Number.NEGATIVE_INFINITY;
+  /** The mission terminal whose context menu is open, for closing it when the body walks away. */
+  private missionMenuOwner = 0;
   private offersFor = 0;
   private offersKey = '';
 
@@ -3640,7 +3675,16 @@ export class ClientApp {
       this.journal.update(source.selfNumber('journal'));
       if (this.journal.version !== this.journalVersion) {
         this.journalVersion = this.journal.version;
-        missions.setJournal(this.journal.missions);
+        missions.setJournal(this.journal.missions, this.journal.completed);
+      }
+    }
+
+    // The terminal's menu closes when the body walks away from it, as the ticket terminal's does.
+    const ui = useUi.getState();
+    if (ui.contextMenu?.source === 'mission') {
+      const menuPart = this.terminalPart(this.missionMenuOwner);
+      if (menuPart === null || !this.canUse(menuPart)) {
+        ui.closeContextMenu();
       }
     }
 
@@ -3737,6 +3781,7 @@ export class ClientApp {
   private terminalParts: TerminalPart[] = [];
   private partsEpoch = -1;
   private partsSet: AssetSet | null = null;
+  private partsFrom: readonly (Descriptor | null)[] = [];
 
   /** The ticket terminal of shuttleport `owner` in view, or `null`. */
   private terminalPart(owner: number): TerminalPart | null {
@@ -3806,6 +3851,7 @@ export class ClientApp {
     this.pressRing.hide();
     const ui = useUi.getState();
     ui.selectPart({ owner: part.owner, kind: part.kind });
+    this.missionMenuOwner = part.kind === 'mission' ? part.owner : 0;
     ui.openContextMenu(
       part.kind === 'mission'
         ? {
