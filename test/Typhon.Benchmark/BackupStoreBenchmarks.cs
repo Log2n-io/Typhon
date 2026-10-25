@@ -339,6 +339,9 @@ internal static class BackupBenchmarkCorpus
         using (var scope = provider.CreateScope())
         {
             var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            // A close vouches for its image (the clean-shutdown flag) only once the open has completed: without it the meta pair is unclean, and a point
+            // of it needs a WAL tail the benchmark has none of.
+            dbe.InitializeArchetypes();
             DatabaseId = dbe.DatabaseId;
             bundle = dbe.MMF.BundleDirectory;
         }
@@ -372,9 +375,21 @@ internal sealed class BackupBenchmarkFileSystem(bool keepBytes) : IStoreFileSyst
 
     public IStoreFile OpenRead(string path) => _files.TryGetValue(N(path), out var f) ? f : throw new FileNotFoundException(path);
 
-    public IDisposable TryLockExclusive(string path) => new MemoryFile(N(path), false);
+    // Held locks are tracked, so the store's check that a second exclusive open fails (R3) sees the locking it requires.
+    private readonly HashSet<string> _locks = new(StringComparer.Ordinal);
 
-    public bool ProbeExclusive(string path) => true;
+    public IDisposable TryLockExclusive(string path)
+    {
+        var key = N(path);
+        return _locks.Add(key) ? new HeldLock(this, key) : null;
+    }
+
+    public bool ProbeExclusive(string path) => !_locks.Contains(N(path));
+
+    private sealed class HeldLock(BackupBenchmarkFileSystem fs, string key) : IDisposable
+    {
+        public void Dispose() => fs._locks.Remove(key);
+    }
 
     public void Rename(string source, string destination, bool replace)
     {
