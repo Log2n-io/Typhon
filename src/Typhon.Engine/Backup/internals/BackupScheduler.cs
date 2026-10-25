@@ -124,6 +124,44 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
             _state.Version++;
         }
 
+        if (source == BackupJobSource.Request)
+        {
+            // DL-24: retired when its job starts, not when it is submitted, so a refused submit never loses it.
+            _requests?.Delete();
+        }
+
+        Publish();
+    }
+
+    void IBackupJobObserver.JobRefused(BackupJobSource source, Guid requestId, Exception refusal)
+    {
+        var failureClass = Classify(refusal);
+        if (failureClass == FailureClass.Deferred)
+        {
+            // A job runs (its outcome is what counts) or the engine is closing: nothing to record.
+            return;
+        }
+
+        var mono = MonoNow();
+        lock (_lock)
+        {
+            RecordFailure(refusal, failureClass, UtcNow());
+            if (requestId != Guid.Empty)
+            {
+                // Answered: create --wait sees its request refused instead of waiting for a job that never starts.
+                _state.LastRequestId = requestId;
+            }
+
+            _state.Version++;
+        }
+
+        LogJobFailed(source, failureClass, refusal.Message);
+        if (source != BackupJobSource.Api)
+        {
+            // The scheduler's own attempt backs off; an application's refused call does not move the schedule.
+            OnJobOutcome(failureClass, mono);
+        }
+
         Publish();
     }
 
@@ -162,8 +200,10 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
                 _state.LastPages = point.PageCount;
                 if (summary != null && summary.TimelineId == _timeline)
                 {
-                    // The store will say so too at the refresh; until then the point just published is this timeline's newest.
-                    _state.Facts = WithLastPoint(_state.Facts, summary);
+                    // The store will say so too at the refresh; until then the point just published is this timeline's newest. A refresh that began
+                    // before it read the store without it: its facts are dropped.
+                    _state.Facts = WithLastPoint(_state.Facts, summary, point.SuspectCount);
+                    _factsPublished = ++_factsTicket;
                 }
             }
             else
@@ -175,15 +215,7 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
 
                 if (failureClass != FailureClass.Deferred)
                 {
-                    _state.AttemptEnded = true;
-                    _state.FailuresTotal++;
-                    _state.ConsecutiveFailures++;
-                    _state.LastFailure = new BackupFailure(now, KindOf(failure), failure.Message);
-                    _state.CaptureRefused |= failureClass == FailureClass.Permanent;
-                    if (IsStoreFailure(failure) && _state.StoreFailingSinceUtc == DateTime.MinValue)
-                    {
-                        _state.StoreFailingSinceUtc = now;
-                    }
+                    RecordFailure(failure, failureClass, now);
                 }
             }
 
@@ -199,6 +231,20 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
         Publish();
     }
 
+    /// <summary>A failure that counts (DL-20), a refused capture's or a failed job's (under <c>_lock</c>).</summary>
+    private void RecordFailure(Exception failure, FailureClass failureClass, DateTime now)
+    {
+        _state.AttemptEnded = true;
+        _state.FailuresTotal++;
+        _state.ConsecutiveFailures++;
+        _state.LastFailure = new BackupFailure(now, KindOf(failure), failure.Message);
+        _state.CaptureRefused |= failureClass == FailureClass.Permanent;
+        if (IsStoreFailure(failure) && _state.StoreFailingSinceUtc == DateTime.MinValue)
+        {
+            _state.StoreFailingSinceUtc = now;
+        }
+    }
+
     bool IBackupJobObserver.HasWorkAfterPoint => _options.Retention != null;
 
     void IBackupJobObserver.AfterPoint(FileSystemBackupStore store, in BackupPointInfo point, CancellationToken ct)
@@ -211,7 +257,7 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
         catch (Exception e)
         {
             // BKP-16: nothing leaves the job.
-            LogUnexpected("after point", e.Message);
+            LogUnexpected("after point", e);
         }
     }
 
@@ -269,10 +315,21 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
             using var session = BackupStore.OpenForMaintenance(store.Root, "retention", store.FileSystem, _logger);
             var result = RetentionExecutor.Apply(session, policy, null, drillPassed, UtcNow(), _timeline,
                 new BackupLifecycleOptions { Cancellation = ct, Logger = _logger, Progress = (done, _) => Volatile.Write(ref _progressBytes, done) });
+            var damaged = false;
+            var failed = false;
+            foreach (var f in result.FailedCompactions)
+            {
+                damaged |= f.Kind == BackupFailureKind.StoreDamaged;
+                failed |= f.Kind != BackupFailureKind.StoreDamaged;
+            }
+
             lock (_lock)
             {
                 _state.RetentionBlocked = result.Plan.Blocked;
-                _state.RetentionFailed = false;
+                // A compaction that did not publish is not a retention that did (BKP-15): damage is a kept point that may not restore, the rest a failure.
+                _state.RetentionFailed = failed;
+                _state.KeptPointDamaged = damaged;
+                _state.KeptPointBroken = false;
                 _state.CompactionsTotal += result.Compactions.Count;
                 _state.PacksDeletedTotal += result.Deleted.Count;
                 _state.Version++;
@@ -291,6 +348,7 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
             lock (_lock)
             {
                 _state.RetentionFailed = true;
+                _state.KeptPointBroken |= e is RetentionBrokeAKeptPointException;
                 _state.Version++;
             }
         }
@@ -306,39 +364,81 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
     /// Reads what the scheduler needs of the store (DL-19): the newest restorable point of the engine's timeline, the restorable count, the bytes, the depth
     /// of the newest point's chain, its suspects by occupancy, the drills. The only step that reads the store and allocates; a failure marks the store failing.
     /// </summary>
+    /// <remarks>
+    /// Never on the tick (BKP-16): on the thread pool, started by the tick (one at a time), or on the backup thread after a retention. Two may overlap, so
+    /// each takes a ticket when it starts and publishes only if no refresh that started later, and no point published since, already did: the facts never
+    /// go back in time. The first one's facts anchor the schedule. Never throws.
+    /// </remarks>
     internal void RefreshStoreFacts()
     {
+        long ticket;
+        lock (_lock)
+        {
+            ticket = ++_factsTicket;
+        }
+
         StoreFacts facts = null;
         Exception failure = null;
+        var unexpected = false;
         try
         {
             facts = ReadStoreFacts(StoreFileSystem ?? Internals.StoreFileSystem.Instance);
         }
-        catch (Exception e) when (e is BackupException or IOException or UnauthorizedAccessException)
+        catch (Exception e)
         {
             failure = e;
+            unexpected = e is not (BackupException or IOException or UnauthorizedAccessException);
         }
 
-        lock (_lock)
+        try
         {
-            if (failure == null)
+            var now = UtcNow();
+            var mono = MonoNow();
+            lock (_lock)
             {
-                _state.Facts = facts;
-                _state.StoreFailingSinceUtc = DateTime.MinValue;
-            }
-            else if (_state.StoreFailingSinceUtc == DateTime.MinValue)
-            {
-                _state.StoreFailingSinceUtc = UtcNow();
+                if (ticket > _factsPublished)
+                {
+                    _factsPublished = ticket;
+                    if (failure == null)
+                    {
+                        _state.Facts = facts;
+                        _state.StoreFailingSinceUtc = DateTime.MinValue;
+                    }
+                    else if (!unexpected && _state.StoreFailingSinceUtc == DateTime.MinValue)
+                    {
+                        _state.StoreFailingSinceUtc = now;
+                    }
+                }
+
+                AnchorScheduleOnce(now, mono);
+                _state.Version++;
             }
 
-            _state.Version++;
+            if (unexpected)
+            {
+                LogUnexpected("store refresh", failure);
+            }
+            else if (failure != null)
+            {
+                LogStoreUnreadable(failure.Message);
+            }
+
+            Publish();
         }
-
-        if (failure != null)
+        catch (Exception e)
         {
-            LogStoreUnreadable(failure.Message);
+            // BKP-16: nothing leaves the refresh.
+            LogUnexpected("store refresh", e);
         }
     }
+
+    /// <summary>Under <c>_lock</c>: the last ticket a refresh took, and the newest whose facts are the state's.</summary>
+    private long _factsTicket;
+
+    private long _factsPublished;
+
+    /// <summary>Packs are immutable (BKP-08): the newest point's suspects are classified once per pack, not at every refresh.</summary>
+    private readonly SuspectClassifier.Memo _suspects = new();
 
     private StoreFacts ReadStoreFacts(IStoreFileSystem fs)
     {
@@ -359,7 +459,7 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
             bytes += p.Size;
         }
 
-        var (allocated, free) = newest is { Point.Suspect: true } ? SuspectClassifier.Classify(fs, view, newest.Point.BackupId) : (0, 0);
+        var (allocated, free) = newest is { Point.Suspect: true } ? _suspects.Classify(fs, view, newest.Point) : (0, 0);
         var drills = DrillRecords.ReadNewestPerPoint(fs, view.Paths.Root);
         return new StoreFacts
         {
@@ -406,15 +506,20 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
         }
     }
 
-    private static StoreFacts WithLastPoint(StoreFacts facts, BackupPointSummary point) => new()
+    /// <summary>
+    /// The facts once <paramref name="point"/>, published and verified, is this timeline's newest, until the store is read again (after the job's retention):
+    /// one more restorable point and its pack's bytes. Its suspects are not classified yet: all counted on allocated pages, the answer never better than the
+    /// store's.
+    /// </summary>
+    private static StoreFacts WithLastPoint(StoreFacts facts, BackupPointSummary point, int suspects) => new()
     {
         Known = facts.Known,
-        RestorablePoints = facts.RestorablePoints,
-        StoreBytes = facts.StoreBytes,
+        RestorablePoints = facts.RestorablePoints + 1,
+        StoreBytes = facts.StoreBytes + point.PackBytes,
         LastPoint = point,
         ChainDepth = facts.ChainDepth,
-        AllocatedSuspects = facts.AllocatedSuspects,
-        FreeSuspects = facts.FreeSuspects,
+        AllocatedSuspects = suspects,
+        FreeSuspects = 0,
         LastDrill = facts.LastDrill,
         LastPassedDrill = facts.LastPassedDrill,
         DrillPassed = facts.DrillPassed,
@@ -495,17 +600,21 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
             LastPointSuspectAllocated = facts.AllocatedSuspects > 0,
             RetentionBlocked = _state.RetentionBlocked,
             RetentionFailed = _state.RetentionFailed,
+            KeptPointBroken = _state.KeptPointBroken,
+            KeptPointDamaged = _state.KeptPointDamaged,
         };
     }
 
-    /// <summary>Builds and publishes the snapshot (allocates: called on a change, and every tick while a job runs).</summary>
+    /// <summary>
+    /// Builds and publishes the snapshot (allocates: called on a change, and every tick while a job runs). Stored under the lock it is built under: the tick
+    /// and the backup thread both publish, and an older snapshot stored after a newer one would stick, its version already the published one.
+    /// </summary>
     internal void Publish()
     {
         var now = UtcNow();
         // A tick left behind by a close (BKP-16) touches nothing of the engine: no progress to read.
         var running = Stopped ? null : _engine.BackupCoordinator?.Running;
         var (added, expected) = running?.Progress ?? (0, 0);
-        BackupStatus status;
         lock (_lock)
         {
             var inputs = Inputs();
@@ -514,16 +623,19 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
             _publishedInputs = inputs;
             _publishedVersion = _state.Version;
             var facts = _state.Facts;
-            status = new BackupStatus(health, reason, BackupHealthEvaluator.Explain(inputs, reason, now), _state.State, _state.Phase, added, expected,
+            var status = new BackupStatus(health, reason, BackupHealthEvaluator.Explain(inputs, reason, now), _state.State, _state.Phase, added, expected,
                 Volatile.Read(ref _progressBytes), facts.LastPoint, facts.LastPoint?.TailEndUtc ?? DateTime.MinValue, _state.NextDueUtc,
                 _state.ConsecutiveFailures, _state.LastFailure, _state.PointsTotal, _state.FailuresTotal, _state.CbwCopiesTotal, _state.CbwAbortsTotal,
                 _state.SuspectPagesTotal, facts.ChainDepth, facts.StoreBytes, facts.RestorablePoints, facts.FreeSuspects, facts.LastDrill,
                 facts.LastPassedDrill,
                 _state.RetentionBlocked, ArchiveStatus(_state.Archive), _state.LastRequestId, now);
+            PublishProbe?.Invoke();
+            Volatile.Write(ref _status, status);
         }
-
-        Volatile.Write(ref _status, status);
     }
+
+    /// <summary>Test hook, null in production: called in <see cref="Publish"/> between building the snapshot and storing it.</summary>
+    internal Action PublishProbe { get; set; }
 
     private (BackupHealth, BackupHealthReason) _publishedHealth;
     private long _publishedVersion = -1;
@@ -577,6 +689,6 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
     [LoggerMessage(LogLevel.Warning, "Backup store unreadable: {Message}")]
     private partial void LogStoreUnreadable(string message);
 
-    [LoggerMessage(LogLevel.Error, "Backup scheduler: unexpected failure in {Step}: {Message}")]
-    private partial void LogUnexpected(string step, string message);
+    [LoggerMessage(LogLevel.Error, "Backup scheduler: unexpected failure in {Step}")]
+    private partial void LogUnexpected(string step, Exception exception);
 }

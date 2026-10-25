@@ -84,7 +84,9 @@ export default function BackupsPanel(props: BackupsPanelProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paramPath, sessionPath, kind]);
 
-  // A bundle change can bring back its remembered store.
+  // The fields follow the store's paths, whoever set them: a bundle change can bring back its remembered store, and openBackups(path) (the Integrity
+  // handoff) sets the bundle of a panel already docked. A field left showing the old path would commit it back on its next blur.
+  useEffect(() => setBundleDraft(bundle), [bundle]);
   useEffect(() => setStoreDraft(store), [store]);
 
   const { job, lost } = useBackupJob(activeJobId);
@@ -112,16 +114,19 @@ export default function BackupsPanel(props: BackupsPanelProps) {
   }, [jobs.data, activeJobId, setActiveJob]);
 
   const busy = jobRunning || !!status.data?.runningJobId;
+  // A changed path changes the queries' keys, which read it; an unchanged one re-reads nothing (the Refresh button does).
   const commitPaths = () => {
     const b = unquote(bundleDraft);
     const s = unquote(storeDraft);
+    // The store field counts only if the operator edited it. A new bundle brings back its remembered store (PC-1): the field's text, still the old
+    // store, must not revert it — nor overwrite the new bundle's memory with it.
+    const storeEdited = s !== store;
     if (b !== bundle) {
       setBundle(b);
     }
-    if (s && s !== useBackupsStore.getState().storePath) {
+    if (s && storeEdited && s !== useBackupsStore.getState().storePath) {
       setStore(s);
     }
-    void invalidate();
   };
 
   const selected =

@@ -1,6 +1,7 @@
 using NUnit.Framework;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 
 namespace Typhon.Engine.Tests.Backup;
@@ -111,7 +112,100 @@ internal sealed class InterleavedChainsRetentionTests
         Assert.That(result.Plan.Compactions, Is.EqualTo(new uint[] { 5, 6 }), "both were attempted");
         Assert.That(result.Compactions.Select(c => c.Point.BackupId), Is.EqualTo(new uint[] { 5 }), "#6's failed and was not published");
         Assert.That(result.Deleted, Is.EqualTo(new[] { "00000005-I.tpack", "00000003-I.tpack", "00000001-F.tpack" }), "chain B keeps its packs");
+        Assert.That(result.FailedCompactions.Select(f => (f.BackupId, f.Kind)), Is.EqualTo(new[] { (6u, BackupFailureKind.Failed) }),
+            "reported: its own pack failed its verify, the store is as it was");
         AssertKeptPointsIntact(inner, images, result.Plan.Kept);
+    }
+
+    /// <summary>
+    /// A compaction is the one routine full read of a kept chain: a damaged page in one of its source packs is reported as store damage (a kept point that
+    /// may not restore), not swallowed; the chain keeps its packs, the other chain is pruned.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("BKP-14")]
+    public void ADamagedSourcePack_IsReportedAsStoreDamage_AndItsChainKeepsItsPacks()
+    {
+        var fs = TwoChains(out _);
+        DamageAPageOnlyIn(fs, "00000001-F.tpack", "00000003-I.tpack", "00000005-I.tpack");
+
+        var result = Apply(fs, KeepFour);
+
+        Assert.That(result.Compactions.Select(c => c.Point.BackupId), Is.EqualTo(new uint[] { 6 }));
+        Assert.That(result.FailedCompactions.Select(f => (f.BackupId, f.Kind)), Is.EqualTo(new[] { (5u, BackupFailureKind.StoreDamaged) }));
+        Assert.That(result.Deleted, Is.EqualTo(new[] { "00000006-I.tpack", "00000004-I.tpack", "00000002-F.tpack" }), "chain A keeps its packs");
+    }
+
+    /// <summary>
+    /// R1 (DL-7): a kept point that no longer resolves after the deletes is a defect, thrown as its own type (health Failing in the engine). Staged: the
+    /// archive step, which runs between the deletes and the check, removes a kept pack.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void AKeptPointBrokenByTheDeletes_IsThrownAsTheRetentionsDefect()
+    {
+        var fs = TwoChains(out _);
+        using var session = BackupStore.OpenForMaintenance(Root, "prune", fs);
+
+        var e = Assert.Throws<RetentionBrokeAKeptPointException>(() => RetentionExecutor.Apply(session, KeepFour, null, [], DateTime.UtcNow, Guid.Empty,
+            null, (s, _, _) =>
+            {
+                s.FileSystem.DeleteFile(Root + "/packs/00000008-I.tpack");
+                s.RefreshView();
+            }));
+        Assert.That(e.PointId, Is.EqualTo(8u));
+        Assert.That(BackupOperations.Classify(e), Is.EqualTo(BackupFailureKind.StoreDamaged), "a kept point is unrestorable: prune exits 3, as Failing does");
+    }
+
+    /// <summary>
+    /// Deleting a gone point's drill records is best effort (DL-14): a records directory that cannot be listed or deleted from does not stop the retention
+    /// before its archive prune and its kept-point check.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void DrillRecordsThatCannotBeDeleted_DoNotStopTheRetention()
+    {
+        var inner = TwoChains(out var images);
+        var fs = new HookedFileSystem(inner)
+        {
+            Fault = (op, path) => op == nameof(IStoreFileSystem.EnumerateFiles) && path.EndsWith(DrillRecords.Directory, StringComparison.Ordinal)
+                ? new IOException("the drills directory is unreadable")
+                : null,
+        };
+        var pruned = false;
+        BackupRetentionResult result;
+        using (var session = BackupStore.OpenForMaintenance(Root, "prune", fs))
+        {
+            result = RetentionExecutor.Apply(session, KeepFour, null, [], DateTime.UtcNow, Guid.Empty, null, (_, _, _) => pruned = true);
+        }
+
+        Assert.That(result.Deleted, Is.Not.Empty, "premise: points were deleted, so their records were to go");
+        Assert.That(pruned, Is.True, "the archive is still pruned");
+        AssertKeptPointsIntact(inner, images, result.Plan.Kept);
+    }
+
+    /// <summary>Flips a byte of the frame of a page <paramref name="pack"/> holds and none of <paramref name="newer"/> does.</summary>
+    private static void DamageAPageOnlyIn(InMemorySparseFileSystem fs, string pack, params string[] newer)
+    {
+        var shadowed = new HashSet<uint>();
+        foreach (var n in newer)
+        {
+            using var reader = PackReader.Open(fs, Root + "/packs/" + n);
+            foreach (var e in reader.LoadIndex())
+            {
+                shadowed.Add(e.PageId);
+            }
+        }
+
+        var path = Root + "/packs/" + pack;
+        PackPageEntry victim;
+        using (var reader = PackReader.Open(fs, path))
+        {
+            victim = reader.LoadIndex().First(e => e.StoredLength is > 0 and <= 8192 && !shadowed.Contains(e.PageId));
+        }
+
+        var at = victim.DataOffset + 1;
+        fs.Poke(path, at, [(byte)(fs.ReadAll(path)[at] ^ 0x5A)]);
     }
 
     /// <summary>DL-13: after the deletes, under the lock, the archive is pruned to the oldest kept point of each timeline, the live one named.</summary>

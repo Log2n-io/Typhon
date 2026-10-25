@@ -10,6 +10,7 @@ import type {
   BackupVerifyReportDto,
 } from '@/api/generated/model';
 import {
+  compactionFailures,
   drillTone,
   formatBytes,
   isTerminal,
@@ -33,6 +34,17 @@ const ROUTE_LABEL: Readonly<Record<string, string>> = {
   inProcess: 'online, through this Workbench’s session',
   request: 'by request to the engine holding the database',
   offline: 'offline, from the closed bundle',
+};
+
+/** What a cancel left, per kind: each is honoured at a different point (07 §5, §3.5). */
+const CANCELLED: Readonly<Record<string, string>> = {
+  create: 'Cancelled: no point was published.',
+  verify: 'Cancelled: the verify stopped before its verdict; it changes nothing.',
+  drill: 'Cancelled: the drill stopped and its scratch was removed; no drill is recorded.',
+  compact: 'Cancelled: no base was published; the chain is as it was.',
+  retention:
+    'Cancelled between deletions: the packs deleted before it stay deleted, and every point kept is whole (newest first).',
+  restore: 'Cancelled before the publish: nothing was put at the target.',
 };
 
 const num = (v: number | string | null | undefined) => (v == null ? 0 : Number(v));
@@ -134,7 +146,9 @@ export default function JobCard({ job, lost, onCancel, onDismiss, onOpenRestored
         </div>
       )}
       {job.state === 'cancelled' && (
-        <div className="mt-1 text-fs-sm text-muted-foreground">Cancelled: nothing was published.</div>
+        <div className="mt-1 text-fs-sm text-muted-foreground" data-testid="backups-job-cancelled">
+          {CANCELLED[job.kind] ?? 'Cancelled.'}
+        </div>
       )}
       {job.note && <div className="mt-1 text-fs-sm text-amber-600">{job.note}</div>}
 
@@ -257,12 +271,25 @@ function CompactReceipt({ r }: { r: BackupCompactionResultDto }) {
 }
 
 function RetentionReceipt({ r }: { r: BackupRetentionResultDto }) {
+  const failed = compactionFailures(r);
   return (
     <div className="mt-1 text-fs-sm" data-testid="backups-retention-receipt">
       {(r.compactions ?? []).length} compaction(s), {(r.deleted ?? []).length} pack(s) deleted,{' '}
       {formatBytes(num(r.bytesFreed))} freed.
       {(r.deleted ?? []).length > 0 && (
         <div className="font-mono text-fs-xs text-muted-foreground">{(r.deleted ?? []).join(' · ')}</div>
+      )}
+      {failed.map((f) =>
+        f.damaged ? (
+          <div key={f.backupId} className="text-destructive" data-testid={`backups-retention-damaged-${f.backupId}`}>
+            #{f.backupId} was not compacted: a pack of its chain is damaged, so this kept point may not restore — verify
+            full. {f.message}
+          </div>
+        ) : (
+          <div key={f.backupId} className="text-amber-600" data-testid={`backups-retention-failed-${f.backupId}`}>
+            #{f.backupId} was not compacted (nothing published; its chain keeps every pack): {f.message}
+          </div>
+        ),
       )}
     </div>
   );

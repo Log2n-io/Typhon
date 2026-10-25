@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
@@ -128,14 +129,17 @@ class BackupSchedulerSafetyTests : SchedulerTestBase<BackupSchedulerSafetyTests>
         Assert.That(File.Exists(Path.Combine(dbe.MMF.BundleDirectory, "backup.request")), Is.True, "left for whoever wrote it");
     }
 
-    /// <summary>A store call parked on a dead share: the close waits one tick for the scheduler, then leaves it behind, detached.</summary>
+    /// <summary>
+    /// The tick does no store I/O: the store's facts are read off it. A refresh parked on a dead share leaves the archiver's step and the status
+    /// heartbeat running, and the close does not wait for it.
+    /// </summary>
     [Test]
     [CancelAfter(30_000)]
     [VerifiesRule("BKP-16")]
-    public void AClose_WaitsAtMostOneTickForAParkedScheduler()
+    public void AStoreReadParkedOnADeadShare_NeverStallsTheTick()
     {
-        _manualTicks = false;
-        Interval = TimeSpan.Zero;
+        var archiver = new StepArchiver();
+        BeforeStart = s => s.ArchiverFactory = () => archiver;
         using var parked = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
         StoreFs.BeforeAny = (op, path) =>
@@ -147,6 +151,56 @@ class BackupSchedulerSafetyTests : SchedulerTestBase<BackupSchedulerSafetyTests>
             }
         };
 
+        try
+        {
+            using var scope = ServiceProvider.CreateScope();
+            var dbe = OpenOnClock(scope);
+            var scheduler = dbe.BackupScheduler;
+            TickWithin(scheduler);
+            Assert.That(parked.Wait(Budget), Is.True, "premise: the first tick's refresh reads the store and parks");
+            foreach (var condition in new[] { WalArchiveCondition.Stalled, WalArchiveCondition.Released })
+            {
+                archiver.State = archiver.State with { Condition = condition };
+                Clock.Advance(BackupScheduler.TickPeriod);
+                TickWithin(scheduler);
+                Assert.That(dbe.Backup.Status.Archive.State, Is.EqualTo((BackupArchiveState)condition), "the heartbeat follows the archiver");
+            }
+
+            Assert.That(archiver.Steps, Is.EqualTo(3), "the archiver is stepped every tick");
+        }
+        finally
+        {
+            release.Set();
+        }
+    }
+
+    /// <summary>One tick, which must return while a store read is parked.</summary>
+    private static void TickWithin(BackupScheduler scheduler)
+    {
+        var tick = Task.Run(() => scheduler.TickForTest(awaitRefresh: false));
+        Assert.That(tick.Wait(Budget), Is.True, "the tick stalled behind the store");
+    }
+
+    /// <summary>A step parked inside the tick (a defect below it): the close waits one tick for the scheduler, then leaves it behind, detached.</summary>
+    [Test]
+    [CancelAfter(30_000)]
+    [VerifiesRule("BKP-16")]
+    public void AClose_WaitsAtMostOneTickForAParkedScheduler()
+    {
+        _manualTicks = false;
+        Interval = TimeSpan.Zero;
+        using var parked = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var archiver = new StepArchiver
+        {
+            OnStep = () =>
+            {
+                parked.Set();
+                release.Wait(TimeSpan.FromSeconds(20));
+            },
+        };
+        BeforeStart = s => s.ArchiverFactory = () => archiver;
+
         BackupScheduler scheduler;
         var close = Stopwatch.StartNew();
         try
@@ -155,7 +209,7 @@ class BackupSchedulerSafetyTests : SchedulerTestBase<BackupSchedulerSafetyTests>
             {
                 var dbe = OpenOnClock(scope);
                 scheduler = dbe.BackupScheduler;
-                Assert.That(parked.Wait(Budget), Is.True, "premise: the first tick reads the store and parks");
+                Assert.That(parked.Wait(Budget), Is.True, "premise: the first tick parks in the archiver's step");
                 close.Restart();
             }
 
@@ -184,4 +238,31 @@ class BackupSchedulerSafetyTests : SchedulerTestBase<BackupSchedulerSafetyTests>
 
     private static void WriteRequest(DatabaseEngine dbe, string json) =>
         File.WriteAllText(Path.Combine(dbe.MMF.BundleDirectory, "backup.request"), json, Encoding.UTF8);
+
+    /// <summary>An archiver whose step a test can park, and whose state it sets.</summary>
+    private sealed class StepArchiver : IWalArchiver
+    {
+        public int Steps;
+
+        public Action OnStep { get; init; }
+
+        public WalArchiveState State { get; set; } = new(WalArchiveCondition.Archiving, Guid.Empty, 0, 0, 0, 0, 0, 0, 0, ArchiveGapReason.None,
+            DateTime.MinValue, null);
+
+        public void Step(DateTime utcNow, long monoNow, CancellationToken ct)
+        {
+            Steps++;
+            OnStep?.Invoke();
+        }
+
+        public bool ConsumeImmediatePointRequest() => false;
+
+        public void Stop(TimeSpan budget)
+        {
+        }
+
+        public void Dispose()
+        {
+        }
+    }
 }

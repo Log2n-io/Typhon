@@ -22,8 +22,17 @@ internal sealed class RetentionDecision
     /// <summary>The packs to delete, in delete order: descending id, so a crash part-way leaves every listed point resolvable.</summary>
     public List<StoreFileEntry> Deletions { get; init; }
 
-    /// <summary>Per timeline, the CheckpointLSN of its oldest kept point: what the WAL archive must keep from (DL-13).</summary>
+    /// <summary>
+    /// Per timeline, the lowest CheckpointLSN of its kept points and of the packs of a damaged chain that loses nothing (DL-4: it may be repaired, and a
+    /// repaired point replays from its own C): what the WAL archive must keep from (DL-13).
+    /// </summary>
     public List<(Guid TimelineId, long KeepFromLsn)> ArchiveFloors { get; init; }
+
+    /// <summary>
+    /// The archive is not pruned at all: an unreadable pack at or after the cutoff (its timeline unknown) or no restorable point protects every chain, so
+    /// every timeline's archive may still be needed.
+    /// </summary>
+    public bool KeepArchive { get; init; }
 }
 
 /// <summary>
@@ -63,7 +72,7 @@ internal static class RetentionPlanner
         {
             var any = view.Catalog.Packs.Count > 0 || view.Catalog.Unreadable.Count > 0;
             return Decision(view, [], 0, [], [], [], any ? BackupRetentionBlock.DamagedChain : BackupRetentionBlock.None,
-                any ? "no point of the store is restorable: nothing is deleted" : null);
+                any ? "no point of the store is restorable: nothing is deleted" : null, keepArchive: any);
         }
 
         // The DL-5 walk.
@@ -205,8 +214,13 @@ internal static class RetentionPlanner
 
         if (compactions.Count > 0 && freeBytes is { } free && free < needBytes)
         {
-            block = BackupRetentionBlock.InsufficientSpace;
-            reason = $"the compactions need up to {needBytes} bytes on the store's volume and {free} are free: none runs, and their chains keep their packs";
+            // The worst block is the one reported: a damaged chain (exit 3) is not hidden behind the free space (exit 1).
+            if (block != BackupRetentionBlock.DamagedChain)
+            {
+                block = BackupRetentionBlock.InsufficientSpace;
+                reason = $"the compactions need up to {needBytes} bytes on the store's volume and {free} are free: none runs, and their chains keep their packs";
+            }
+
             compactions.Clear();
         }
 
@@ -243,7 +257,7 @@ internal static class RetentionPlanner
             return ia != ib ? ib.CompareTo(ia) : ((byte)kb).CompareTo((byte)ka);
         });
 
-        return Decision(view, kept, cutoff, [.. compactions], deletions, Floors(view, kept), block, reason);
+        return Decision(view, kept, cutoff, [.. compactions], deletions, Floors(view, kept, protectedChains), block, reason, keepArchive: protectAll);
     }
 
     /// <summary>The packs a restore of a kept point reads, a planned compaction standing for its whole chain.</summary>
@@ -285,13 +299,22 @@ internal static class RetentionPlanner
         return depth;
     }
 
-    private static List<(Guid, long)> Floors(StoreView view, List<uint> kept)
+    private static List<(Guid, long)> Floors(StoreView view, List<uint> kept, HashSet<Guid> protectedChains)
     {
         var floors = new Dictionary<Guid, long>();
         foreach (var id in kept)
         {
             var point = ChainResolver.Resolve(view, id).Point;
-            floors.TryAdd(point.TimelineId, point.CheckpointLsn);
+            Lower(floors, point.TimelineId, point.CheckpointLsn);
+        }
+
+        // A damaged chain keeps every pack (DL-4): once repaired, each of its points replays the archive from its own C.
+        foreach (var p in view.Catalog.Packs)
+        {
+            if (protectedChains.Contains(p.ChainId))
+            {
+                Lower(floors, p.TimelineId, p.CheckpointLsn);
+            }
         }
 
         var list = new List<(Guid, long)>(floors.Count);
@@ -302,6 +325,14 @@ internal static class RetentionPlanner
 
         list.Sort(static (a, b) => a.Item1.CompareTo(b.Item1));
         return list;
+    }
+
+    private static void Lower(Dictionary<Guid, long> floors, Guid timeline, long lsn)
+    {
+        if (!floors.TryGetValue(timeline, out var floor) || lsn < floor)
+        {
+            floors[timeline] = lsn;
+        }
     }
 
     /// <summary>The CRC of a plan's compactions and deletions, in order: what an approval names.</summary>
@@ -324,7 +355,7 @@ internal static class RetentionPlanner
     private static string Limit(bool withinAge, bool withinCount) => !withinAge ? "MaxAge" : !withinCount ? "MaxCount" : "MaxTotalBytes";
 
     private static RetentionDecision Decision(StoreView view, List<uint> kept, uint cutoff, List<uint> compactions, List<StoreFileEntry> deletions,
-        List<(Guid, long)> floors, BackupRetentionBlock block, string reason)
+        List<(Guid, long)> floors, BackupRetentionBlock block, string reason, bool keepArchive = false)
     {
         long before = 0;
         foreach (var p in view.Catalog.Packs)
@@ -406,6 +437,7 @@ internal static class RetentionPlanner
             Compactions = compactions,
             Deletions = deletions,
             ArchiveFloors = floors,
+            KeepArchive = keepArchive,
         };
     }
 }

@@ -68,6 +68,12 @@ internal readonly record struct HealthInputs
     public BackupRetentionBlock RetentionBlocked { get; init; }
 
     public bool RetentionFailed { get; init; }
+
+    /// <summary>The last retention's kept-point check failed (R1): a kept point no longer resolves.</summary>
+    public bool KeptPointBroken { get; init; }
+
+    /// <summary>A compaction of the last retention found a source pack of a kept chain damaged.</summary>
+    public bool KeptPointDamaged { get; init; }
 }
 
 /// <summary>
@@ -118,6 +124,12 @@ internal static class BackupHealthEvaluator
             return (BackupHealth.Failing, BackupHealthReason.ArchiveFailed);
         }
 
+        // DL-7: a retention that broke a point it promised to keep is a defect.
+        if (i.KeptPointBroken)
+        {
+            return (BackupHealth.Failing, BackupHealthReason.KeptPointBroken);
+        }
+
         // Degraded: every point still restorable, with reduced coverage or assurance.
         if (scheduled)
         {
@@ -143,6 +155,11 @@ internal static class BackupHealthEvaluator
         if (i.LastDrillFailed && !i.AnyDrillPassed)
         {
             return (BackupHealth.Degraded, BackupHealthReason.DrillFailed);
+        }
+
+        if (i.KeptPointDamaged)
+        {
+            return (BackupHealth.Degraded, BackupHealthReason.KeptPointDamaged);
         }
 
         // Warning: restorable, something needs attention. Never Ok while this timeline has no point (BKP-15), attempted or not.
@@ -207,6 +224,8 @@ internal static class BackupHealthEvaluator
             ? "no drill has run"
             : $"the newest drill is from {i.LastDrillUtc:u}, older than the drill window",
         BackupHealthReason.DrillFailedOlderOk => "the newest drill failed; an older one passed",
+        BackupHealthReason.KeptPointBroken => "the last retention left a point it keeps unrestorable: a defect, report it",
+        BackupHealthReason.KeptPointDamaged => "a compaction found a pack of a kept point's chain damaged: that point may not restore (verify --level full)",
         _ => reason.ToString(),
     };
 

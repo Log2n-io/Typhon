@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { FetchError } from '@/api/client';
 import type { BackupJobDto, BackupListingDto, BackupStatusDto } from '@/api/generated/model';
@@ -188,5 +188,98 @@ describe('BackupsPanel', () => {
     mount();
     expect((await screen.findByTestId('backups-settle-needs-schema')).textContent).toContain('not damage');
     expect(screen.queryByTestId('backups-open-restored')).toBeNull();
+  });
+  it('a typed bundle brings back its remembered store, and the memory keeps it (PC-1)', async () => {
+    useBackupsStore.setState({
+      bundlePath: 'C:/db/a.typhon',
+      storePath: 'D:/store-a',
+      storeByBundle: { 'c:/db/a.typhon': 'D:/store-a', 'c:/db/b.typhon': 'D:/store-b' },
+    });
+    mount();
+    const input = (await screen.findByTestId('backups-bundle')) as HTMLInputElement;
+
+    fireEvent.change(input, { target: { value: 'C:/db/b.typhon' } });
+    fireEvent.blur(input);
+
+    const s = useBackupsStore.getState();
+    expect(s.bundlePath).toBe('C:/db/b.typhon');
+    expect(s.storePath).toBe('D:/store-b');
+    expect(s.storeByBundle['c:/db/b.typhon']).toBe('D:/store-b');
+    expect(s.storeByBundle['c:/db/a.typhon']).toBe('D:/store-a');
+  });
+
+  it('a bundle set from elsewhere (the Integrity handoff) shows in the field, and a blur does not put the old one back', async () => {
+    useBackupsStore.setState({ bundlePath: 'C:/db/a.typhon', storePath: 'D:/store' });
+    mount();
+    const input = (await screen.findByTestId('backups-bundle')) as HTMLInputElement;
+
+    act(() => useBackupsStore.getState().setBundle('C:/db/b.typhon'));
+    expect(input.value).toBe('C:/db/b.typhon');
+    fireEvent.blur(input);
+    expect(useBackupsStore.getState().bundlePath).toBe('C:/db/b.typhon');
+  });
+
+  it('a path field losing focus with nothing changed re-reads nothing', async () => {
+    useBackupsStore.setState({ bundlePath: 'C:/db/world.typhon', storePath: 'D:/store' });
+    mount();
+    const input = await screen.findByTestId('backups-store');
+    await screen.findByTestId('backups-health-reason');
+    const reads = api.status.mock.calls.length;
+
+    fireEvent.blur(input);
+    fireEvent.blur(screen.getByTestId('backups-bundle'));
+
+    expect(api.status.mock.calls.length).toBe(reads);
+  });
+
+  it('a retention lists the compactions that failed, a damaged kept chain apart', async () => {
+    useBackupsStore.setState({ storePath: 'D:/store', activeJobId: 'j3' });
+    api.job.mockResolvedValue({
+      data: {
+        jobId: 'j3',
+        kind: 'retention',
+        store: 'D:/store',
+        state: 'done',
+        phase: 'compact',
+        completed: 0,
+        total: 0,
+        startedUtc: '2026-10-21T10:00:00Z',
+        retention: {
+          compactions: [],
+          deleted: [],
+          bytesFreed: 0,
+          durationMs: 3,
+          failedCompactions: [
+            { backupId: 2, kind: 'StoreDamaged', message: 'page 7 fails its check' },
+            { backupId: 5, kind: 'Failed', message: 'the disk is full' },
+          ],
+        },
+      } as unknown as BackupJobDto,
+    });
+    mount();
+    const damaged = await screen.findByTestId('backups-retention-damaged-2');
+    expect(damaged.textContent).toContain('may not restore');
+    expect(damaged.textContent).toContain('page 7 fails its check');
+    expect(screen.getByTestId('backups-retention-failed-5').textContent).toContain('the disk is full');
+  });
+
+  it('a cancelled retention says it stopped between deletions, not that nothing was published', async () => {
+    useBackupsStore.setState({ storePath: 'D:/store', activeJobId: 'j2' });
+    api.job.mockResolvedValue({
+      data: {
+        jobId: 'j2',
+        kind: 'retention',
+        store: 'D:/store',
+        state: 'cancelled',
+        phase: 'compact',
+        completed: 0,
+        total: 0,
+        startedUtc: '2026-10-21T10:00:00Z',
+      } as unknown as BackupJobDto,
+    });
+    mount();
+    const card = await screen.findByTestId('backups-job-cancelled');
+    expect(card.textContent).not.toContain('nothing was published');
+    expect(card.textContent).toContain('between');
   });
 });

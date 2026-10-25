@@ -205,7 +205,7 @@ internal static class BackupCli
             .Error(ExitUsage, $"Unknown option or argument: {string.Join(", ", leftovers)}.");
     }
 
-    /// <summary>A duration: a whole number with a unit, <c>30d</c>, <c>12h</c>, <c>90m</c>, <c>45s</c>.</summary>
+    /// <summary>A duration: a whole number with a unit, <c>30d</c>, <c>12h</c>, <c>90m</c>, <c>45s</c>. One past what a duration holds is refused.</summary>
     internal static bool TryParseDuration(string value, out TimeSpan duration, out string error)
     {
         duration = TimeSpan.Zero;
@@ -213,20 +213,18 @@ internal static class BackupCli
         var v = value?.Trim() ?? "";
         if (v.Length >= 2 && long.TryParse(v.AsSpan(0, v.Length - 1), NumberStyles.None, CultureInfo.InvariantCulture, out var n))
         {
-            switch (char.ToLowerInvariant(v[^1]))
+            var unit = char.ToLowerInvariant(v[^1]) switch
             {
-                case 'd':
-                    duration = TimeSpan.FromDays(n);
-                    return true;
-                case 'h':
-                    duration = TimeSpan.FromHours(n);
-                    return true;
-                case 'm':
-                    duration = TimeSpan.FromMinutes(n);
-                    return true;
-                case 's':
-                    duration = TimeSpan.FromSeconds(n);
-                    return true;
+                'd' => TimeSpan.TicksPerDay,
+                'h' => TimeSpan.TicksPerHour,
+                'm' => TimeSpan.TicksPerMinute,
+                's' => TimeSpan.TicksPerSecond,
+                _ => 0,
+            };
+            if (unit > 0 && n <= TimeSpan.MaxValue.Ticks / unit)
+            {
+                duration = TimeSpan.FromTicks(n * unit);
+                return true;
             }
         }
 
@@ -260,8 +258,9 @@ internal static class BackupCli
             "TIB" => 1L << 40,
             _ => 0,
         };
+        // n ≤ long.MaxValue / scale first: the product of two decimals overflows past 7.9e28 (a size refused, not an exception).
         if (scale > 0 && decimal.TryParse(v.AsSpan(0, split), NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var n) && n >= 0
-            && n * scale <= long.MaxValue)
+            && n <= long.MaxValue / (decimal)scale && n * scale <= long.MaxValue)
         {
             bytes = (long)(n * scale);
             return true;

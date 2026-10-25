@@ -77,7 +77,7 @@ internal static class BackupDrillRunner
         {
             if (!options.KeepScratch)
             {
-                DeleteScratch(log, work);
+                DeleteScratch(fs, log, work);
             }
         }
     }
@@ -326,14 +326,12 @@ internal static class BackupDrillRunner
                                        && (p[d.Length] == Path.DirectorySeparatorChar || p[d.Length] == Path.AltDirectorySeparatorChar));
     }
 
-    private static void DeleteScratch(ILogger log, string work)
+    /// <summary>The drill's scratch, deleted through the store's file system (a missing one is no error). Best effort: one left behind is logged.</summary>
+    private static void DeleteScratch(IStoreFileSystem fs, ILogger log, string work)
     {
         try
         {
-            if (Directory.Exists(work))
-            {
-                Directory.Delete(work, recursive: true);
-            }
+            fs.DeleteDirectory(work);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {

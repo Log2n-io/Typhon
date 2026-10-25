@@ -12,6 +12,13 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 internal delegate void ArchivePruner(BackupStore session, IReadOnlyList<(Guid TimelineId, long KeepFromLsn)> floors, Guid liveTimeline);
 
+/// <summary>R1 failed (DL-7): a kept point no longer resolves after the deletes. A defect, never an outcome; health Failing.</summary>
+internal sealed class RetentionBrokeAKeptPointException(string store, uint pointId, string why)
+    : InvalidOperationException($"Retention of '{store}' left kept point #{pointId} unrestorable ({why}). This is a defect: report it.")
+{
+    public uint PointId { get; } = pointId;
+}
+
 /// <summary>
 /// Applies a retention under <c>store.lock</c> (05 §3 as corrected, BKP-14): plan, refuse a plan that changed since the one approved, compact, re-plan on
 /// what the compactions actually published, delete newest first with each delete made durable, prune the WAL archive, then prove every kept point
@@ -19,8 +26,9 @@ internal delegate void ArchivePruner(BackupStore session, IReadOnlyList<(Guid Ti
 /// </summary>
 /// <remarks>
 /// Runs on whichever thread holds the session: the engine's backup thread after a point (#1416), or <c>typhon backup prune</c>. A compaction that fails
-/// is logged and its chain keeps every pack this run; anything else that fails stops the retention where it is, which every prefix of a descending
-/// delete sequence allows (each listed point keeps its whole chain).
+/// is logged, reported in the result (<see cref="BackupRetentionResult.FailedCompactions"/>: a damaged source is a kept point that may not restore) and
+/// its chain keeps every pack this run; anything else that fails stops the retention where it is, which every prefix of a descending delete sequence
+/// allows (each listed point keeps its whole chain).
 /// </remarks>
 internal static class RetentionExecutor
 {
@@ -49,6 +57,7 @@ internal static class RetentionExecutor
 
         // Compactions before any delete: a point stops needing the packs below it only once its -C is published and verified.
         var compactions = new List<BackupCompactionResult>();
+        var failedCompactions = new List<BackupCompactionFailure>();
         foreach (var id in first.Compactions)
         {
             options.Cancellation.ThrowIfCancellationRequested();
@@ -63,6 +72,7 @@ internal static class RetentionExecutor
             catch (Exception ex) when (ex is BackupException or IOException or UnauthorizedAccessException or InvalidOperationException)
             {
                 BackupLog.RetentionCompactionFailed(log, root, id, ex.Message);
+                failedCompactions.Add(new BackupCompactionFailure(id, CompactionFailureKind(ex), ex.Message));
             }
         }
 
@@ -107,11 +117,15 @@ internal static class RetentionExecutor
                 listed.Add(p.BackupId);
             }
 
-            DrillRecords.DeleteForPointsNotIn(fs, root, listed);
+            DrillRecords.DeleteForPointsNotIn(fs, root, listed, log);
         }
 
-        // DL-13 (05 §3 step 5): the archived WAL no kept point can replay from.
-        (pruneArchive ?? DefaultArchivePruner)(session, decision.ArchiveFloors, liveTimeline);
+        // DL-13 (05 §3 step 5): the archived WAL no kept point can replay from. A store a damaged chain may still need (DL-4: it may be repaired) keeps its
+        // archive whole when the chain's timeline is unknown (an unreadable pack) or nothing resolves.
+        if (!decision.KeepArchive)
+        {
+            (pruneArchive ?? DefaultArchivePruner)(session, decision.ArchiveFloors, liveTimeline);
+        }
 
         // R1 (DL-7): every kept point resolves on the store as it now is. Deletion cannot change a kept pack (BKP-08), only remove a link.
         foreach (var id in decision.Kept)
@@ -119,7 +133,7 @@ internal static class RetentionExecutor
             if (!ChainResolver.TryResolve(session.View, id, out _, out _, out var why))
             {
                 BackupLog.RetentionBrokeAKeptPoint(log, root, id, why);
-                throw new InvalidOperationException($"Retention of '{root}' left kept point #{id} unrestorable ({why}). This is a defect: report it.");
+                throw new RetentionBrokeAKeptPointException(root, id, why);
             }
         }
 
@@ -140,8 +154,17 @@ internal static class RetentionExecutor
         }
 
         BackupLog.RetentionApplied(log, root, plan.Kept.Count, plan.CutoffId, compactions.Count, deleted.Count, bytesFreed, clock.ElapsedMilliseconds);
-        return new BackupRetentionResult(plan, compactions, deleted, bytesFreed, clock.Elapsed);
+        return new BackupRetentionResult(plan, compactions, deleted, bytesFreed, clock.Elapsed, failedCompactions);
     }
+
+    /// <summary>
+    /// Why a compaction did not publish: its own pack failing its pre-publish verify is the compaction's failure (nothing was published, the sources are
+    /// sound as far as it read); a damaged source pack or a broken chain is the store's.
+    /// </summary>
+    internal static BackupFailureKind CompactionFailureKind(Exception ex) =>
+        ex is BackupPackCorruptException { Section: "Compaction" } ? BackupFailureKind.Failed
+        : BackupOperations.Classify(ex) is BackupFailureKind.StoreDamaged ? BackupFailureKind.StoreDamaged
+        : BackupFailureKind.Failed;
 
     /// <summary>
     /// The archive prune every retention runs: <see cref="WalArchiveStore.PruneArchive"/>, which takes each <c>wal/&lt;t&gt;/archive.lock</c> per operation.

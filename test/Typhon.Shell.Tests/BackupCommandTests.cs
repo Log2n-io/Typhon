@@ -454,6 +454,61 @@ public sealed class BackupCommandTests
         Assert.That(blocked.Text, Does.Contain("MinKeep").And.Contain("Nothing to delete"));
     }
 
+    /// <summary>
+    /// A compaction is the one routine full read of a kept chain: one that finds a source pack damaged exits 3 (a kept point may not restore), not 0; one
+    /// that fails otherwise exits 2; the worst code wins.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void APruneWhoseCompactionFindsDamage_Exits3_AndAFailedOneExits2()
+    {
+        OnlineChain(points: 3);
+        var packs = Path.Combine(_store, "packs");
+        DamageAPageOnlyIn(Path.Combine(packs, "00000001-F.tpack"), Path.Combine(packs, "00000002-I.tpack"), Path.Combine(packs, "00000003-I.tpack"));
+
+        var damaged = Prune(new BackupPruneCommand.Settings { MinKeep = 1, MaxCount = 1 });
+        Assert.That(damaged.Code, Is.EqualTo(BackupCli.ExitStoreDamaged), damaged.Text);
+        Assert.That(damaged.Text, Does.Contain("compaction of #3 found its chain damaged"));
+        Assert.That(File.Exists(Path.Combine(packs, "00000001-F.tpack")), Is.True, "its chain keeps every pack");
+
+        static BackupCompactionFailure F(BackupFailureKind kind) => new(1, kind, "x");
+        Assert.That(BackupPruneCommand.ExitCodeOf(BackupRetentionBlock.None, [F(BackupFailureKind.Failed)]), Is.EqualTo(BackupCli.ExitFailed));
+        Assert.That(BackupPruneCommand.ExitCodeOf(BackupRetentionBlock.MinKeep, [F(BackupFailureKind.Failed), F(BackupFailureKind.StoreDamaged)]),
+            Is.EqualTo(BackupCli.ExitStoreDamaged));
+        Assert.That(BackupPruneCommand.ExitCodeOf(BackupRetentionBlock.DamagedChain, [F(BackupFailureKind.Failed)]), Is.EqualTo(BackupCli.ExitStoreDamaged));
+        Assert.That(BackupPruneCommand.ExitCodeOf(BackupRetentionBlock.MinKeep, null), Is.EqualTo(BackupCli.ExitWarning));
+
+        // A retention whose kept-point check fails (R1) left a promised point unrestorable: Failing in the engine, 3 here, the code prune's catch maps.
+        Assert.That(BackupCli.ExitCodeFor(new Typhon.Engine.Internals.RetentionBrokeAKeptPointException("/s", 8, "its pack is gone")),
+            Is.EqualTo(BackupCli.ExitStoreDamaged));
+    }
+
+    /// <summary>Flips a byte of the frame of a page <paramref name="pack"/> holds and none of <paramref name="newer"/> does.</summary>
+    private static void DamageAPageOnlyIn(string pack, params string[] newer)
+    {
+        var shadowed = new System.Collections.Generic.HashSet<uint>();
+        foreach (var n in newer)
+        {
+            using var reader = Typhon.Engine.Internals.PackReader.Open(Typhon.Engine.Internals.StoreFileSystem.Instance, n);
+            foreach (var e in reader.LoadIndex())
+            {
+                shadowed.Add(e.PageId);
+            }
+        }
+
+        long at;
+        using (var reader = Typhon.Engine.Internals.PackReader.Open(Typhon.Engine.Internals.StoreFileSystem.Instance, pack))
+        {
+            at = reader.LoadIndex().First(e => e.StoredLength is > 0 and <= 8192 && !shadowed.Contains(e.PageId)).DataOffset + 1;
+        }
+
+        using var file = new FileStream(pack, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
+        file.Position = at;
+        var b = file.ReadByte();
+        file.Position = at;
+        file.WriteByte((byte)(b ^ 0x5A));
+    }
+
     [Test]
     public void PruneUsageErrors_Exit64_AndAChangedPlanIsARefusal()
     {
@@ -504,6 +559,50 @@ public sealed class BackupCommandTests
     [TestCase("-3h")]
     [TestCase("1.5h")]
     public void ABadDuration_IsRefused(string value) => Assert.That(BackupCli.TryParseDuration(value, out _, out _), Is.False);
+
+    /// <summary>A value past what a duration or a size can hold is a usage error (64), not an exception out of the parser.</summary>
+    [TestCase("99999999999d")]
+    [TestCase("9223372036854775807h")]
+    [TestCase("9223372036854775807s")]
+    public void AnOverflowingDuration_IsRefused(string value)
+    {
+        Assert.That(BackupCli.TryParseDuration(value, out _, out var error), Is.False);
+        Assert.That(error, Does.Contain("Unknown duration"));
+    }
+
+    [TestCase("79228162514264337593543950335TiB")]
+    [TestCase("9300000000000000000")]
+    public void AnOverflowingSize_IsRefused(string value)
+    {
+        Assert.That(BackupCli.TryParseBytes(value, out _, out var error), Is.False);
+        Assert.That(error, Does.Contain("Unknown size"));
+    }
+
+    /// <summary>
+    /// <c>create &lt;bundle&gt; --store X</c> against a running engine whose store is not X is refused (4): the engine writes only to its own store, so going
+    /// on would silently put the point elsewhere than asked. Its own store is accepted.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void CreateWithAnotherStore_AgainstARunningEngine_IsRefused()
+    {
+        var backup = new BackupOptions { StorePath = _store, Interval = TimeSpan.FromHours(1), Retention = null };
+        using var provider = Provider(Path.GetDirectoryName(_bundle), yieldable: false, backup);
+        using var scope = provider.CreateScope();
+        scope.ServiceProvider.GetRequiredService<DatabaseEngine>().InitializeArchetypes();
+        WaitForStatusFile();
+
+        var elsewhere = Path.Combine(_root, "elsewhere");
+        var refused = Run((c, j) => BackupCreateCommand.Run(new BackupCreateCommand.Settings { Bundle = _bundle, Store = elsewhere, Format = "text" }, c, j,
+            CancellationToken.None));
+        Assert.That(refused.Code, Is.EqualTo(BackupCli.ExitRefused), refused.Text);
+        Assert.That(refused.Text, Does.Contain(_store));
+        Assert.That(File.Exists(Path.Combine(_bundle, "backup.request")), Is.False, "nothing was asked");
+
+        var own = Run((c, j) => BackupCreateCommand.Run(new BackupCreateCommand.Settings { Bundle = _bundle, Store = _store + Path.DirectorySeparatorChar,
+            Format = "text" }, c, j, CancellationToken.None));
+        Assert.That(own.Code, Is.EqualTo(BackupCli.ExitOk), own.Text);
+    }
 
     /// <summary>
     /// #1416 (DL-24, AC-O2): with a running engine whose backup takes requests, <c>create --wait</c> asks it through <c>backup.request</c> and reports the

@@ -35,9 +35,20 @@ internal sealed class BackupRequestFile
 
     private readonly string _path;
 
-    public BackupRequestFile(string bundleDirectory) => _path = PathIn(bundleDirectory);
+    /// <remarks>
+    /// The poll's path is resolved once, and on Windows in its extended-length form (<c>\\?\</c>): past MAX_PATH, <c>File.Exists</c> builds that form of
+    /// the path on every call, an allocation per tick for a long bundle path (plan 1416 R4). A path already extended is used as it is.
+    /// </remarks>
+    public BackupRequestFile(string bundleDirectory) => _path = Probe(PathIn(bundleDirectory));
 
     public static string PathIn(string bundleDirectory) => Path.GetFullPath(Path.Combine(bundleDirectory, FileName));
+
+    /// <summary>The form of a full path the poll uses: extended-length on Windows (a UNC path as <c>\\?\UNC\…</c>), as it is elsewhere.</summary>
+    internal static string Probe(string fullPath) =>
+        !OperatingSystem.IsWindows() || fullPath.StartsWith(@"\\?\", StringComparison.Ordinal) || fullPath.StartsWith(@"\\.\", StringComparison.Ordinal)
+            ? fullPath
+            : fullPath.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + fullPath[2..]
+            : @"\\?\" + fullPath;
 
     /// <summary>
     /// The request present now, if any. A file that cannot be read or parsed is still a request — an Auto one with no id (the <c>db.lock.request</c> rule:

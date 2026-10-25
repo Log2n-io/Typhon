@@ -22,7 +22,7 @@ internal sealed class RetentionPlannerTests
     private const long IncrSize = 100;
 
     /// <summary>Point <paramref name="id"/>, frozen <paramref name="id"/> hours after a day ago; a full pack 1000 B, an incremental 100 B.</summary>
-    private static CatalogPack Pack(uint id, BackupKind kind, uint parent, uint baseId, Guid chain, long size = 0) => new()
+    private static CatalogPack Pack(uint id, BackupKind kind, uint parent, uint baseId, Guid chain, long size = 0, Guid timeline = default) => new()
     {
         File = PackFormat.FileName(id, kind),
         Size = size != 0 ? size : kind == BackupKind.Incremental ? IncrSize : FullSize,
@@ -33,7 +33,7 @@ internal sealed class RetentionPlannerTests
         ChainId = chain,
         DatabaseId = Db,
         StoreId = Store,
-        TimelineId = Timeline,
+        TimelineId = timeline == default ? Timeline : timeline,
         ImagePages = 100,
         CheckpointLsn = id * 10,
         PointLsn = (id * 10) + 5,
@@ -250,6 +250,63 @@ internal sealed class RetentionPlannerTests
         Assert.That(plan.PackDeletions, Is.EqualTo(new[] { "00000005-I.tpack", "00000003-I.tpack", "00000001-F.tpack" }),
             "chain A below the cutoff goes; chain B keeps everything: its #6 may be repaired");
         Assert.That(plan.Compactions, Is.EqualTo(new uint[] { 5 }));
+    }
+
+    /// <summary>
+    /// The worst block is the one reported: a damaged chain (the CLI's exit 3) is not overwritten by a compaction's shortage of space (exit 1).
+    /// </summary>
+    [Test]
+    [CancelAfter(5_000)]
+    public void ADamagedChain_IsTheBlockReported_WhenSpaceIsShortToo()
+    {
+        var packs = DamagedChainB();
+        var plan = Plan(View(packs), Policy(maxCount: 1), free: 1).Plan;
+
+        Assert.That(plan.Compactions, Is.Empty, "premise: the space is short for the compaction of #5");
+        Assert.That(plan.Blocked, Is.EqualTo(BackupRetentionBlock.DamagedChain));
+    }
+
+    /// <summary>
+    /// DL-4: a damaged chain loses nothing because it may be repaired, and a repaired point replays the WAL archive from its own C: its timeline keeps the
+    /// archive from its oldest pack, though no kept point is on it.
+    /// </summary>
+    [Test]
+    [CancelAfter(5_000)]
+    [VerifiesRule("BKP-14")]
+    public void ADamagedChainsTimeline_KeepsItsArchive_FromItsOldestPack()
+    {
+        var other = Guid.Parse("71e71e00-0000-0000-0000-000000000002");
+        var packs = DamagedChainB(other);
+        var decision = Plan(View(packs), Policy(maxCount: 1));
+
+        Assert.That(decision.Plan.Kept, Is.EqualTo(new uint[] { 5 }), "premise: chain B has no kept point");
+        Assert.That(decision.ArchiveFloors, Is.EquivalentTo(new[] { (Timeline, 50L), (other, 20L) }));
+        Assert.That(decision.KeepArchive, Is.False);
+    }
+
+    /// <summary>An unreadable pack at or after the cutoff (its timeline unknown), or a store with nothing restorable, keeps the whole archive.</summary>
+    [Test]
+    [CancelAfter(5_000)]
+    public void AChainOfUnknownTimeline_OrNothingRestorable_KeepsTheWholeArchive()
+    {
+        var unreadable = Plan(View(Chain(6), [new CatalogUnreadable { File = "00000007-F.tpack", Size = 10, Reason = "torn" }]), Policy(maxCount: 2));
+        Assert.That(unreadable.KeepArchive, Is.True);
+        var nothing = Plan(View(Chain(4).Where(p => p.BackupId != 1)), Policy(maxCount: 1));
+        Assert.That(nothing.KeepArchive, Is.True);
+        Assert.That(Plan(View(Chain(6)), Policy(maxCount: 2)).KeepArchive, Is.False, "a sound store prunes it");
+    }
+
+    /// <summary>Chain A: F1 I3 I5. Chain B (on <paramref name="timeline"/>): F2, I4 broken (its pack names parent 99), so I6 does not resolve either.</summary>
+    private static List<CatalogPack> DamagedChainB(Guid timeline = default)
+    {
+        var packs = new List<CatalogPack>
+        {
+            Pack(1, BackupKind.Full, 0, 1, ChainA), Pack(2, BackupKind.Full, 0, 2, ChainB, timeline: timeline), Pack(3, BackupKind.Incremental, 1, 1, ChainA),
+            Pack(4, BackupKind.Incremental, 2, 2, ChainB, timeline: timeline), Pack(5, BackupKind.Incremental, 3, 1, ChainA),
+            Pack(6, BackupKind.Incremental, 4, 2, ChainB, timeline: timeline),
+        };
+        packs[3].ParentId = 99;
+        return packs;
     }
 
     [Test]

@@ -57,6 +57,18 @@ public enum BackupHealthReason
 
     /// <summary>The newest drill failed, but an older one passed.</summary>
     DrillFailedOlderOk,
+
+    /// <summary>
+    /// The last retention left a point it keeps unrestorable (its kept-point check failed after the deletes, 05 §3 R1): a defect, reported as
+    /// <see cref="BackupHealth.Failing"/>.
+    /// </summary>
+    KeptPointBroken,
+
+    /// <summary>
+    /// A compaction of the last retention found a pack of a kept point's chain damaged (compaction is the one routine full read of a kept chain): that
+    /// point may not restore. Run <c>typhon backup verify --level full</c>.
+    /// </summary>
+    KeptPointDamaged,
 }
 
 /// <summary>Whether the engine's backup thread is working.</summary>
@@ -220,7 +232,9 @@ public sealed record BackupStatusReport(bool EngineLive, int Pid, string Machine
 /// <param name="ProgressBytes">Bytes the running compaction has read.</param>
 /// <param name="LastPoint">The newest point this engine knows of on its timeline, or <c>null</c>.</param>
 /// <param name="LastSuccessUtc">When that point's tail copy ended.</param>
-/// <param name="NextDueUtc">When the schedule next takes a point (an estimate: the schedule runs on a monotonic clock).</param>
+/// <param name="NextDueUtc">
+/// When the schedule next takes a point (an estimate: the schedule runs on a monotonic clock); in the past while overdue (the instant it became due).
+/// </param>
 /// <param name="ConsecutiveFailures">Failed backups in a row (refusals that only defer are not counted).</param>
 /// <param name="LastFailure">The last failure, or <c>null</c>.</param>
 /// <param name="PointsTotal">Points this session published.</param>

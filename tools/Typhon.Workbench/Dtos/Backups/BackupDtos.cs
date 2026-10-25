@@ -50,7 +50,10 @@ public sealed record BackupCreateRequestDto(string Store, string Bundle, bool Fu
 /// <summary>Verify the store (<see cref="Point"/> null) or one point, at <c>quick</c>, <c>full</c> or <c>deep</c>.</summary>
 public sealed record BackupVerifyRequestDto(string Store, BackupPointRefDto Point, string Level);
 
-/// <summary>Drill a point into <see cref="Scratch"/> (blank: the Workbench's default); <see cref="Bundle"/> names the database whose open session's schema the drill loads, if any.</summary>
+/// <summary>
+/// Drill a point into <see cref="Scratch"/> (blank: the Workbench's default); <see cref="Bundle"/> names the database whose open session's schema the
+/// drill loads, if any.
+/// </summary>
 public sealed record BackupDrillRequestDto(string Store, BackupPointRefDto Point, string Scratch, string Bundle);
 
 /// <summary>Compact a point into a base.</summary>
@@ -164,12 +167,15 @@ public sealed record BackupLogDto(string TimelineId, long FromLsn, long ToLsn, L
 /// <param name="Unreachable">An LSN or time target's <c>RestoreUnreachableReason</c>; null when reachable.</param>
 /// <param name="RefusalMessage">The refusal in words.</param>
 /// <param name="HeldBySessionId">The Workbench session that holds the target (WB-12), to offer its close.</param>
-/// <param name="NewestKnownLsn">The newest LSN the store knows on the restored timeline (its newest point's <c>P</c>, or the archive's end).</param>
-/// <param name="LostLsns">Of those, how many LSNs lie after the restored one: what the restored database will not hold.</param>
+/// <param name="NewestKnownLsn">
+/// The newest LSN the store knows on the restored timeline (its newest point's <c>P</c>, or the archive's end); null when the store could not be read
+/// for it (what is lost is then unknown, never "nothing").
+/// </param>
+/// <param name="LostLsns">Of those, how many LSNs lie after the restored one: what the restored database will not hold; null when unknown.</param>
 public sealed record BackupRestorePlanDto(bool CanRestore, string Fingerprint, string ResolvedTarget, string DisplacedBundle, List<uint> Chain,
     long BytesToRead, uint BaseBackupId, long CheckpointLsn, long PointLsn, long TargetLsn, string TimelineId, int ArchivedSegments, long ArchivedBytes,
     long SampleLsn, DateTime? SampleUtc, string Refusal, string Unreachable, string RefusalMessage, List<long> NearestRestorable,
-    Guid? HeldBySessionId, long NewestKnownLsn, long LostLsns);
+    Guid? HeldBySessionId, long? NewestKnownLsn, long? LostLsns);
 
 /// <summary>A retention's preview; the apply runs only with its <see cref="Fingerprint"/>.</summary>
 public sealed record BackupRetentionPlanDto(List<uint> Kept, List<uint> Removed, List<uint> Compactions, List<string> PackDeletions, uint CutoffId,
@@ -207,9 +213,19 @@ public sealed record BackupDrillReportDto(BackupPointDto Point, string Outcome, 
 public sealed record BackupCompactionResultDto(BackupPointDto Point, bool AlreadyBase, int ChainDepth, int Pages, int HolePages, long BytesRead,
     long BytesWritten, double DurationMs);
 
+/// <summary>A compaction a retention attempted that did not publish.</summary>
+/// <param name="BackupId">The point being compacted.</param>
+/// <param name="Kind">
+/// The engine's <c>BackupFailureKind</c>: <c>StoreDamaged</c> — a pack of the point's chain is damaged or the chain broken, so a kept point may not restore;
+/// <c>Failed</c> — I/O, or the compacted pack failed its own verify (nothing published).
+/// </param>
+/// <param name="Message">What failed.</param>
+public sealed record BackupCompactionFailureDto(uint BackupId, string Kind, string Message);
+
 /// <summary>A retention's result.</summary>
+/// <param name="FailedCompactions">The compactions it attempted that did not publish (their chains keep every pack this run).</param>
 public sealed record BackupRetentionResultDto(BackupRetentionPlanDto Plan, List<BackupCompactionResultDto> Compactions, List<string> Deleted,
-    long BytesFreed, double DurationMs);
+    long BytesFreed, double DurationMs, List<BackupCompactionFailureDto> FailedCompactions);
 
 /// <summary>What the settle after a restore did: the open (recovery) and close that make the restored bundle ready.</summary>
 /// <param name="Ran">A settle was attempted.</param>
@@ -232,7 +248,8 @@ public sealed record BackupDamagedPageDto(long PageId, string PackFile, string R
 
 /// <summary>
 /// A backup job: queued → running(phase, completed, total) → done(result) | error(category, message) | cancelled. <see cref="Total"/> 0 means
-/// indeterminate: no percentage is shown. One result slot per kind.
+/// indeterminate: no percentage is shown. One result slot per kind, filled in a job's snapshot (<c>GET jobs/{id}</c>, the stream) and null in the store's
+/// job list (<c>GET jobs</c>: summaries).
 /// </summary>
 public sealed record BackupJobDto(Guid JobId, string Kind, string Store, string Bundle, string State, string Phase, long Completed, long Total,
     string Unit, DateTime StartedUtc, DateTime? EndedUtc, string Route, string Note, BackupJobErrorDto Error, BackupCreateResultDto Create,

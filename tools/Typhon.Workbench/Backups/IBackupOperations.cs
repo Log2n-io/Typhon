@@ -38,15 +38,15 @@ public interface IBackupOperations
 
     BackupRestoreResult Restore(string store, PointSelector point, string target, BackupRestoreOptions options);
 
-    /// <summary>Opens and closes a restored bundle (<see cref="BackupSettle"/>).</summary>
-    BackupSettleResult Settle(string bundle, string[] schemaDllPaths);
+    /// <summary>Opens and closes a restored bundle in a child process (<see cref="BackupChildProcess.Settle"/>).</summary>
+    BackupSettleReport Settle(string bundle, string[] schemaDllPaths);
 
-    /// <summary>A drill in a child process (<see cref="BackupDrillProcess"/>).</summary>
+    /// <summary>A drill in a child process (<see cref="BackupChildProcess.Drill"/>).</summary>
     BackupDrillReportDto Drill(string store, string point, string scratch, string[] schemaDllPaths, Action<string, long, long> progress,
         CancellationToken ct);
 }
 
-/// <summary>The production <see cref="IBackupOperations"/>: the engine's facade, the engine's online service, the drill child.</summary>
+/// <summary>The production <see cref="IBackupOperations"/>: the engine's facade, the engine's online service, the child process (drill, settle).</summary>
 public sealed class BackupOperationsAdapter : IBackupOperations
 {
     public BackupStoreStatus Status(string store) => BackupOperations.Status(store);
@@ -88,9 +88,9 @@ public sealed class BackupOperationsAdapter : IBackupOperations
     public BackupRestoreResult Restore(string store, PointSelector point, string target, BackupRestoreOptions options) =>
         BackupOperations.Restore(store, point, target, options);
 
-    public BackupSettleResult Settle(string bundle, string[] schemaDllPaths) => BackupSettle.OpenAndClose(bundle, schemaDllPaths);
+    public BackupSettleReport Settle(string bundle, string[] schemaDllPaths) => BackupChildProcess.Settle(bundle, schemaDllPaths);
 
     public BackupDrillReportDto Drill(string store, string point, string scratch, string[] schemaDllPaths, Action<string, long, long> progress,
         CancellationToken ct) =>
-        BackupDrillProcess.Run(store, point, scratch, schemaDllPaths, progress, ct);
+        BackupChildProcess.Drill(store, point, scratch, schemaDllPaths, progress, ct);
 }

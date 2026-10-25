@@ -31,16 +31,22 @@ public sealed class BackupJobRegistryTests
         _registry.Dispose();
     }
 
-    private static BackupJobDto WithCreate(BackupJobDto dto) => dto with { Create = new BackupCreateResultDto(null, Guid.Empty) };
+    private static readonly BackupJobResult WithCreate = new(Create: new BackupCreateResultDto(null, Guid.Empty));
+
+    private BackupJob Started(string kind, string store, Action<BackupJobContext> body)
+    {
+        var start = _registry.TryStart(new BackupJobSpec(kind, store), body);
+        Assert.That(start.Admission, Is.EqualTo(BackupJobAdmission.Started));
+        return start.Job;
+    }
 
     private BackupJob StartGated(string store, ManualResetEventSlim gate, Action<BackupJobContext> after = null)
     {
-        Assert.That(_registry.TryStart("create", store, null, null, null, ctx =>
+        return Started(BackupJobKinds.Create, store, ctx =>
         {
             gate.Wait(ctx.Token);
             after?.Invoke(ctx);
-        }, out var job), Is.True);
-        return job;
+        });
     }
 
     private static void Ended(BackupJob job) => Assert.That(job.Completion.Wait(TimeSpan.FromSeconds(10)), Is.True, "the body ended");
@@ -81,8 +87,9 @@ public sealed class BackupJobRegistryTests
         var first = StartGated(_store, gate);
 
         var spelled = OperatingSystem.IsWindows() ? _store.ToUpperInvariant() + Path.DirectorySeparatorChar : _store + Path.DirectorySeparatorChar;
-        Assert.That(_registry.TryStart("verify", spelled, null, null, null, _ => { }, out var running), Is.False);
-        Assert.That(running, Is.SameAs(first), "the caller attaches to the running job");
+        var busy = _registry.TryStart(new BackupJobSpec(BackupJobKinds.Verify, spelled), _ => { });
+        Assert.That(busy.Admission, Is.EqualTo(BackupJobAdmission.StoreBusy));
+        Assert.That(busy.Job, Is.SameAs(first), "the caller attaches to the running job");
         Assert.That(_registry.Running(_store), Is.SameAs(first));
 
         var other = StartGated(_store + "-other", gate);
@@ -90,8 +97,101 @@ public sealed class BackupJobRegistryTests
         Ended(first);
         Ended(other);
         Assert.That(_registry.Running(_store), Is.Null);
-        Assert.That(_registry.TryStart("verify", _store, null, null, null, _ => { }, out var next), Is.True, "a finished job no longer holds the store");
-        Ended(next);
+        Ended(Started(BackupJobKinds.Verify, _store, _ => { }));   // a finished job no longer holds the store
+    }
+
+    [Test]
+    [CancelAfter(10_000)]
+    public void OneDrillPerWorkbench_WhateverTheStore()
+    {
+        using var gate = new ManualResetEventSlim();
+        var drill = Started(BackupJobKinds.Drill, _store, ctx => gate.Wait(ctx.Token));
+
+        var second = _registry.TryStart(new BackupJobSpec(BackupJobKinds.Drill, _store + "-other"), _ => { });
+        Assert.That((second.Admission, second.Job), Is.EqualTo((BackupJobAdmission.DrillBusy, drill)), "checked under the registry's lock, with the start");
+        var verify = Started(BackupJobKinds.Verify, _store + "-other", _ => { });
+        gate.Set();
+        Ended(drill);
+        Ended(verify);
+        Ended(Started(BackupJobKinds.Drill, _store + "-other", _ => { }));
+    }
+
+    // ── WB-12: one claim set for restores and session opens ───────────────────────────────────────────────────────────────────────────────────────
+
+    private string Target => Path.Combine(Path.GetDirectoryName(_store)!, "restored", "world.typhon");
+
+    private BackupJobStart StartRestore(string store, Action<BackupJobContext> body = null) =>
+        _registry.TryStart(new BackupJobSpec(BackupJobKinds.Restore, store, Target: Target), body ?? (_ => { }));
+
+    [Test]
+    [CancelAfter(10_000)]
+    public void AnOpenInProgress_HoldsOffARestoreIntoItsBundle_UntilItsClaimIsReleased()
+    {
+        var claim = _registry.ClaimOpen(Target + Path.DirectorySeparatorChar, out var restoring);
+        Assert.That(claim, Is.Not.Null);
+        Assert.That(restoring, Is.Null);
+
+        Assert.That(StartRestore(_store).Admission, Is.EqualTo(BackupJobAdmission.TargetOpening), "the open's claim is seen by the restore's admission");
+
+        claim.Dispose();
+        claim.Dispose();
+        var start = StartRestore(_store);
+        Assert.That(start.Admission, Is.EqualTo(BackupJobAdmission.Started), "released (once, however often disposed)");
+        Ended(start.Job);
+    }
+
+    [Test]
+    [CancelAfter(10_000)]
+    public void ARunningRestore_RefusesAnOpenOfItsTarget_AndAnotherRestoreIntoIt()
+    {
+        using var gate = new ManualResetEventSlim();
+        var restore = StartRestore(_store, ctx => gate.Wait(ctx.Token));
+        Assert.That(restore.Started, Is.True);
+
+        Assert.That(_registry.ClaimOpen(Target, out var restoring), Is.Null);
+        Assert.That(restoring, Is.SameAs(restore.Job));
+        Assert.That(StartRestore(_store + "-other").Admission, Is.EqualTo(BackupJobAdmission.TargetBusy));
+
+        gate.Set();
+        Ended(restore.Job);
+        using var claim = _registry.ClaimOpen(Target, out _);
+        Assert.That(claim, Is.Not.Null, "an ended restore claims nothing");
+    }
+
+    [Test]
+    [CancelAfter(10_000)]
+    public void ARestoreIntoABundleASessionHolds_IsRefused_WithTheSession()
+    {
+        var holder = Guid.NewGuid();
+        using var registry = new BackupJobRegistry(NullLogger<BackupJobRegistry>.Instance, () => _now, Timeout.InfiniteTimeSpan,
+            bundle => BackupPaths.Same(bundle, Target) ? holder : null);
+
+        var start = registry.TryStart(new BackupJobSpec(BackupJobKinds.Restore, _store, Target: Target), _ => { });
+
+        Assert.That((start.Admission, start.HolderSessionId), Is.EqualTo((BackupJobAdmission.TargetHeld, (Guid?)holder)));
+        Assert.That(registry.Running(_store), Is.Null, "nothing started");
+    }
+
+    [Test]
+    [CancelAfter(10_000)]
+    public void AProgressReport_AfterTheTerminalTransition_FromAnotherThread_NotifiesNothing()
+    {
+        var job = Started(BackupJobKinds.Drill, _store, ctx => ctx.Report("Restore", 1, 10, "pages"));
+        Ended(job);
+        var states = new List<string>();
+        job.Changed += dto => { lock (states) { states.Add(dto.State); } };
+
+        // A drill's progress arrives on the child's stdout reader: one that loses the race to the end must not be the stream's last frame.
+        var late = new Thread(() => job.Report("Open", 0, 0, null));
+        late.Start();
+        late.Join();
+
+        lock (states)
+        {
+            Assert.That(states, Is.Empty);
+        }
+
+        Assert.That(job.Snapshot().State, Is.EqualTo(BackupJobStates.Done));
     }
 
     [Test]
@@ -100,8 +200,7 @@ public sealed class BackupJobRegistryTests
     {
         for (var i = 0; i < BackupJobRegistry.KeepPerStore + 3; i++)
         {
-            Assert.That(_registry.TryStart("verify", _store, null, null, null, _ => { }, out var job), Is.True);
-            Ended(job);
+            Ended(Started(BackupJobKinds.Verify, _store, _ => { }));
         }
 
         _registry.Evict();
@@ -162,7 +261,7 @@ public sealed class BackupJobRegistryTests
     {
         BackupJobErrorDto Fails(Exception e)
         {
-            Assert.That(_registry.TryStart("verify", _store, null, null, null, _ => throw e, out var job), Is.True);
+            var job = Started(BackupJobKinds.Verify, _store, _ => throw e);
             Ended(job);
             Assert.That(job.Snapshot().State, Is.EqualTo(BackupJobStates.Error));
             return job.Snapshot().Error;
@@ -172,6 +271,8 @@ public sealed class BackupJobRegistryTests
         Assert.That(Fails(new RestoreRefusedException(RestoreRefusalReason.TargetExists, "t", "exists")).Category, Is.EqualTo("refused"));
         Assert.That(Fails(new BackupPlanChangedException("s", "a", "b")).Category, Is.EqualTo("plan_changed"));
         Assert.That(Fails(new BackupJobException("refused", "held")), Is.EqualTo(new BackupJobErrorDto("refused", "held")));
+        var broke = new Typhon.Engine.Internals.RetentionBrokeAKeptPointException("s", 4, "gone");
+        Assert.That(Fails(broke), Is.EqualTo(new BackupJobErrorDto("store_damaged", broke.Message)), "the engine's sentence, not a defect's type name");
         var defect = Fails(new ArgumentException("bad"));
         Assert.That((defect.Category, defect.Message), Is.EqualTo(("failed", "ArgumentException: bad")), "a defect names its type");
     }

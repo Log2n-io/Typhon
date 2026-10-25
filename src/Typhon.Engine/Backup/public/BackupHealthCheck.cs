@@ -8,6 +8,10 @@ namespace Typhon.Engine;
 /// The engine's backup health (<see cref="IBackupService.Status"/>) as an <see cref="ITyphonHealthCheck"/>: Off and Ok are Healthy, Warning and Degraded
 /// are Degraded, Failing is Unhealthy. The description is the status's reason. Reads the published snapshot: nothing is computed or locked.
 /// </summary>
+/// <remarks>
+/// Off is Healthy here and exit 3 for <c>typhon backup status</c>, deliberately: this check answers "is the service healthy" (an engine with no backup
+/// configured is not failing), the CLI "does this database have a backup I can trust" (one with none does not).
+/// </remarks>
 [PublicAPI]
 public sealed class BackupHealthCheck : ITyphonHealthCheck
 {

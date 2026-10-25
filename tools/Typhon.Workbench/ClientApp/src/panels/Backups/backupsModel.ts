@@ -7,6 +7,7 @@ import type {
   BackupPointDto,
   BackupRestorePlanDto,
   BackupRetentionPlanDto,
+  BackupRetentionResultDto,
   BackupStatusDto,
   BackupVerifyReportDto,
 } from '@/api/generated/model';
@@ -394,7 +395,8 @@ export function normalizeStatus(d: BackupStatusDto): Status {
           machine: s(e.machine),
           storePath: s(e.storePath),
           health: s(e.health),
-          reason: s(e.reasonText),
+          // The engine's sentence (BackupHealthEvaluator.Explain, e.g. for KeptPointDamaged); its reason's name if it sent none, never a blank.
+          reason: s(e.reasonText) || s(e.healthReason),
           state: s(e.state),
           phase: s(e.phase),
           progressPages: n(e.progressPages),
@@ -530,8 +532,9 @@ export interface RestorePlan {
   refusalMessage: string | null;
   nearestRestorable: number[];
   heldBySessionId: string | null;
-  newestKnownLsn: number;
-  lostLsns: number;
+  /** Null when the store could not be read for it: what is lost is then unknown, never "nothing". */
+  newestKnownLsn: number | null;
+  lostLsns: number | null;
 }
 
 export function normalizeRestorePlan(p: BackupRestorePlanDto): RestorePlan {
@@ -553,17 +556,26 @@ export function normalizeRestorePlan(p: BackupRestorePlanDto): RestorePlan {
     refusalMessage: p.refusalMessage ?? null,
     nearestRestorable: (p.nearestRestorable ?? []).map(n),
     heldBySessionId: p.heldBySessionId ?? null,
-    newestKnownLsn: n(p.newestKnownLsn),
-    lostLsns: n(p.lostLsns),
+    newestKnownLsn: p.newestKnownLsn == null ? null : n(p.newestKnownLsn),
+    lostLsns: p.lostLsns == null ? null : n(p.lostLsns),
   };
 }
 
-/** "What is lost after" the restored LSN, in words (07 §5): the commits the store knows past it, or that nothing it knows is lost. */
+/**
+ * "What is lost after" the restored LSN, in words (07 §5): the commits the store knows past it, that nothing it knows is lost, or — when the store
+ * could not be read for it — that this is unknown.
+ */
 export function lostAfterText(
   plan: Pick<RestorePlan, 'canRestore' | 'pointLsn' | 'newestKnownLsn' | 'lostLsns'>,
 ): string {
   if (!plan.canRestore) {
     return '';
+  }
+  if (plan.lostLsns == null || plan.newestKnownLsn == null) {
+    return (
+      `The restored database ends at LSN ${plan.pointLsn.toLocaleString()}. What is lost after it is unknown: the store's points and archive ` +
+      `could not be read for it.`
+    );
   }
   if (plan.lostLsns <= 0) {
     return `Nothing the store knows of lies after LSN ${plan.pointLsn.toLocaleString()}: no committed change it holds is lost.`;
@@ -572,6 +584,21 @@ export function lostAfterText(
     `The restored database ends at LSN ${plan.pointLsn.toLocaleString()}. The store knows changes through LSN ` +
     `${plan.newestKnownLsn.toLocaleString()}: ${plan.lostLsns.toLocaleString()} LSNs of committed changes after the restored point are not in it.`
   );
+}
+
+/** A compaction a retention attempted that did not publish: `damaged` when the engine found a kept point's chain damaged, not merely an I/O failure. */
+export interface CompactionFailure {
+  backupId: number;
+  damaged: boolean;
+  message: string;
+}
+
+export function compactionFailures(r: BackupRetentionResultDto): CompactionFailure[] {
+  return (r.failedCompactions ?? []).map((f) => ({
+    backupId: n(f.backupId),
+    damaged: f.kind === 'StoreDamaged',
+    message: s(f.message),
+  }));
 }
 
 export interface RetentionPlan {

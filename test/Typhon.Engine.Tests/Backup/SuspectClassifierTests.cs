@@ -45,5 +45,16 @@ internal sealed class SuspectClassifierTests
         var view = StoreView.Open(Root, fs);
         Assert.That(SuspectClassifier.Classify(fs, view, 1), Is.EqualTo((1, 1)));
         Assert.That(SuspectClassifier.Classify(fs, view, 2), Is.EqualTo((0, 0)), "a point is judged by its own pack's suspects");
+
+        // Packs never change (BKP-08): the scheduler's refresh classifies a pack once, not every minute.
+        var reads = 0;
+        var counted = new HookedFileSystem(fs) { BeforeOpenRead = _ => reads++ };
+        var memo = new SuspectClassifier.Memo();
+        var point = view.Find(1).Original;
+        Assert.That(memo.Classify(counted, view, point), Is.EqualTo((1, 1)));
+        Assert.That(reads, Is.GreaterThan(0), "premise: the first classification reads the chain");
+        reads = 0;
+        Assert.That(memo.Classify(counted, view, point), Is.EqualTo((1, 1)));
+        Assert.That((reads, memo.Classified), Is.EqualTo((0, 1)), "the same pack is not read again");
     }
 }

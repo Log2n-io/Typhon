@@ -3633,13 +3633,17 @@ BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#141
             KeepLastDrilled ⇒ K ≤ the newest restorable drill-passed point. MinKeep counts restorable points only; MinKeep and KeepLastDrilled
             beat every limit (R2), and a limit they prevent is reported as RetentionBlocked, never met by deleting (R3)
   invariant before any delete, every chain with a point in S whose oldest kept point resolves below K has that point compacted (BKP-13);
-            a compaction that fails is not substituted: its chain keeps its packs that run
+            a compaction that fails is not substituted: its chain keeps its packs that run, and the result says why (a damaged source pack is
+            store damage, a kept point that may not restore; anything else a failure)
   invariant a pack q is deleted only under store.lock, only if no s ∈ S resolves through it (the published compactions substituted), and
             only if q.Id < K or q is an -I whose -C a kept resolution uses; a chain holding a point ≥ K that does not resolve loses nothing,
             and an unreadable pack ≥ K (of no known chain) keeps every pack below K
   invariant deletes run in descending BackupId, each made durable (a flush of packs/) before the next: after any crash prefix every point
             still listed resolves as it did; after the last, every s ∈ S resolves (checked, a failure is a defect); the drill records of the
-            points deleted go with them
+            points deleted go with them, best effort (a record left pins nothing, and never stops the steps after it)
+  invariant the WAL archive keeps, per timeline, from the lowest CheckpointLSN of its kept points and of the packs of every chain that loses
+            nothing (a damaged chain may be repaired, and replays from its own C); with an unreadable pack ≥ K or no restorable point it is not
+            pruned at all
   invariant (#1416) the engine applies its configured policy after every point it takes, on the backup thread, inside the job (BackupInProgress
             until it ends), with the drill-passed points the store records as KeepLastDrilled's input
   requires: BKP-08, BKP-13
@@ -3651,8 +3655,9 @@ BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#141
             random valid policies, a power cut at a random operation of a retention under both directory models, checked against a model of
             every image: kept and promised points intact, every listed point resolving after any prefix, MaxTotalBytes held unless blocked, no id
             reused), RetentionPlannerTests (each limit alone and combined, MinKeep and KeepLastDrilled pinning and reporting, the cutoff's and
-            the head's compactions, short of space, damaged and unreadable chains, 2 000 points), InterleavedChainsRetentionTests (two chains
-            alternating ids in one store; a broken point after the cutoff; a failed compaction) — [VerifiesRule("BKP-14")];
+            the head's compactions, short of space, damaged and unreadable chains, a damaged chain's timeline keeping its archive, 2 000 points),
+            InterleavedChainsRetentionTests (two chains alternating ids in one store; a broken point after the cutoff; a failed compaction; a
+            damaged source pack reported as store damage) — [VerifiesRule("BKP-14")];
             [RuleMutant("BKP-14")]: ascending deletes cut short (a listed point loses its base), the second chain's compaction skipped, "every
             pack below K" deletion (an interleaved chain loses its base), MinKeep counting unrestorable points; source mutant seen red: the
             delete order reversed
@@ -3661,18 +3666,22 @@ BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#141
   invariant health ≠ Ok while the engine's timeline has no point, when ConsecutiveFailures ≥ 3, or when Interval > 0 and the newest point of
             the engine's timeline (or, with none, the scheduler's start) is older than 2 × Interval; health = Failing when the store holds no
             restorable point once an attempt of the session has ended
-  invariant the worst condition that holds wins: Failing (no restorable point, 3 failures, store failing > Interval, capture refused, archive
-            diverged or failed) over Degraded (stale, an archive gap no later point covers, archive lag, a failed drill with none passed) over
+  invariant the worst condition that holds wins: Failing (no restorable point, 3 failures, store failing > Interval, capture refused — a refusal
+            before any job included —, archive diverged or failed, a kept point the last retention broke) over Degraded (stale, an archive gap no
+            later point covers, archive lag, a failed drill with none passed, a kept chain's pack a compaction found damaged) over
             Warning (no point yet, an allocated suspect page, retention failed or blocked, drill overdue, the newest drill failed)
   invariant the last success comes from the store, filtered by the engine's timeline (a restart neither doubles nor skips a due point; a restored
             database's first point is due after the grace); due is decided on a monotonic anchor, so a wall clock set back delays a point by at
             most one Interval
   invariant a status file of an engine that is not running is judged again at read time, on the inputs it carries
   scope: BackupHealthEvaluator.Evaluate, HealthInputs, ScheduleState.IsDue, ScheduleState.Initialize, BackupScheduler.RefreshStoreFacts,
-         BackupScheduler.NewestOnTimeline, BackupStatusFile.TryRead, BackupOperations.ReadStatus
+         BackupScheduler.NewestOnTimeline, BackupScheduler.Publish, BackupScheduler.ApplyRetention, BackupCoordinator.CaptureAsync (a refusal told to
+         the observer), BackupStatusFile.TryRead, BackupOperations.ReadStatus
   on_violation: monitoring says Ok while nothing restorable is being produced — the failure mode a backup exists to prevent
   verified: BackupHealthEvaluatorTests (every row of the table alone, the worst winning, a seeded property over random inputs),
-            BackupSchedulerTests (logical clocks: grace then interval, a restart reading the store, a new timeline, a wall clock set back a day),
+            BackupSchedulerTests (logical clocks: grace then interval, a restart reading the store, a new timeline, a wall clock set back a day; a
+            capture refused before any job; an older snapshot never published after a newer one; the first point restorable before the store is
+            read again; a compaction finding damage, a retention breaking a kept point),
             ScheduleStateTests, BackupRequestTests.AStoppedEnginesStatus_DegradesByItself, BackupOpsLoopTests (AC-O1: Ok, Degraded, Failing,
             Ok again, the same in the status, the status file, the gauge and ReadStatus) — [VerifiesRule("BKP-15")]; [RuleMutant("BKP-15")]: an
             evaluator that forgets a timeline with no point, a wall-clock schedule (the clock set back a day stops it), a last success taken
@@ -3682,12 +3691,17 @@ BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#141
   invariant no exception leaves the scheduler's tick or a backup job: every failure becomes state and health (BackupOpsState, BackupStatus)
   invariant neither thread takes an engine lock outside the capture's gate protocol; no job starts before InitializeArchetypes completed (the
             scheduler starts there; a capture refuses earlier)
-  invariant a closing engine stops the scheduler first, before the coordinator, waiting for its tick at most one tick; a tick left behind (a store
-            call parked on a dead share) touches nothing of the engine after the stop returned
+  invariant the tick does no store I/O: the store's facts are read by a refresh off it (the thread pool, one at a time, or the backup thread after a
+            retention), so a store call parked on a dead share never stalls the request poll, the archiver's step or the status; overlapping refreshes
+            publish in the order they started, never after a point published since
+  invariant a closing engine stops the scheduler first, before the coordinator, waiting for its tick at most one tick; a tick left behind (a step
+            parked below it) touches nothing of the engine after the stop returned, nor does a refresh still parked on the store
   invariant a backup.request selects auto or full and nothing else: the engine writes to BackupOptions.StorePath alone
-  scope: BackupScheduler.Tick, BackupScheduler.StopAndJoin, BackupScheduler.Start, BackupCoordinator.RunJob, BackupRequestFile.TryPoll,
-         DatabaseEngine.DisposeCore
+  scope: BackupScheduler.Tick, BackupScheduler.RefreshStoreFacts, BackupScheduler.StopAndJoin, BackupScheduler.Start, BackupCoordinator.RunJob,
+         BackupRequestFile.TryPoll, DatabaseEngine.DisposeCore
   on_violation: a full disk or a dead share crashes or stalls the database; a bundle-directory writer redirects backups anywhere
   verified: BackupSchedulerSafetyTests (a store throwing IOException, UnauthorizedAccessException or a non-I/O exception at every operation; a
-            request naming a path; an unreadable request; requests refused; a close with a store call parked) — [VerifiesRule("BKP-16")];
+            request naming a path; an unreadable request; requests refused; a store read parked on a dead share while the tick keeps stepping the archiver
+            and publishing, AStoreReadParkedOnADeadShare_NeverStallsTheTick, source mutant seen red: the refresh run inline; a close with a step parked
+            in the tick) — [VerifiesRule("BKP-16")];
             [RuleMutant("BKP-16")]: a tick that rethrows

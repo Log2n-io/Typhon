@@ -63,12 +63,15 @@ public sealed partial class BackupsController : ControllerBase
             storeError = Directory.Exists(store) ? e.Message : $"'{store}' is not a store yet: the first backup into it creates it.";
         }
 
+        // The bundle's status file, read once: the health card shows it, the route decides on it.
         BackupEngineStatusDto engine = null;
+        BackupStatusReport report = null;
+        Exception readError = null;
         if (bundle != null)
         {
             try
             {
-                var report = _ops.ReadStatus(bundle);
+                report = _ops.ReadStatus(bundle);
                 if (report.Status != null)
                 {
                     engine = BackupDtoMapper.Map(report.Status, "statusFile", report.EngineLive, report.Pid, report.Machine, report.StorePath,
@@ -78,10 +81,11 @@ public sealed partial class BackupsController : ControllerBase
             catch (Exception e) when (IsStoreReadFailure(e))
             {
                 // No status to show: the card falls back to the store's own verdict.
+                readError = e;
             }
         }
 
-        var route = BackupRouting.Decide(bundle, store, _sessions, _ops);
+        var route = BackupRouting.Decide(bundle, store, _sessions, () => readError == null ? report : throw readError);
         return Ok(new BackupStatusDto(store, bundle, storeStatus, storeError, engine, new BackupRouteDto(route.Kind, route.Reason, route.Session?.Id),
             _jobs.Running(store)?.Id, DefaultScratch()));
     }
@@ -127,7 +131,7 @@ public sealed partial class BackupsController : ControllerBase
             return Problem400(error);
         }
 
-        return Guarded(() => Plan(BackupPaths.Full(request.Store), point, request));
+        return Guarded(() => Plan(BackupPaths.Full(request.Store), point, request, withLost: true));
     }
 
     /// <summary>A retention's preview, mandatory before its apply: kept, compacted and removed points, the packs deleted, and the plan's fingerprint.</summary>
@@ -203,10 +207,14 @@ public sealed partial class BackupsController : ControllerBase
         return Guarded(() => BackupDtoMapper.Map(_ops.ReadLog(BackupPaths.Full(request.Store), timeline ?? Guid.Empty, from, to, max)));
     }
 
-    private BackupRestorePlanDto Plan(string store, PointSelector point, BackupRestoreRequestDto request)
+    /// <summary>
+    /// The engine's plan plus WB-12's guard; with <paramref name="withLost"/>, also what is lost after the restored LSN (a listing and an archive read).
+    /// </summary>
+    private BackupRestorePlanDto Plan(string store, PointSelector point, BackupRestoreRequestDto request, bool withLost)
     {
         var target = string.IsNullOrWhiteSpace(request.Target) ? null : BackupPaths.Full(request.Target);
-        var plan = _ops.PlanRestore(store, point, target, new BackupRestoreOptions { Replace = request.Replace, AllowFormatMismatch = request.AllowFormatMismatch });
+        var plan = _ops.PlanRestore(store, point, target,
+            new BackupRestoreOptions { Replace = request.Replace, AllowFormatMismatch = request.AllowFormatMismatch });
 
         // WB-12: a target held by a session of this Workbench, open or paused — a paused one's watcher would reopen it mid-restore.
         string refusal = plan.Refusal?.ToString();
@@ -220,15 +228,17 @@ public sealed partial class BackupsController : ControllerBase
         }
 
         // What is lost after the restored LSN: commits up to the newest LSN the store knows on that timeline (its newest point's P, or the archive's end).
-        var newest = NewestKnownLsn(store, plan.TimelineId);
-        var lost = plan.CanRestore && newest > plan.PointLsn ? newest - plan.PointLsn : 0;
+        // Unknown (null) when the store could not be read for it: never "nothing is lost" by default.
+        var newest = withLost ? NewestKnownLsn(store, plan.TimelineId) : null;
+        long? lost = newest is { } n ? (plan.CanRestore && n > plan.PointLsn ? n - plan.PointLsn : 0) : null;
         return new BackupRestorePlanDto(plan.CanRestore && heldBy == null, plan.Fingerprint, plan.ResolvedTarget, plan.DisplacedBundle, [.. plan.Chain],
             plan.BytesToRead, plan.BaseBackupId, plan.CheckpointLsn, plan.PointLsn, plan.TargetLsn, BackupDtoMapper.Id(plan.TimelineId),
             plan.ArchivedSegments, plan.ArchivedBytes, plan.SampleLsn, plan.SampleUtc is { } s ? DateTime.SpecifyKind(s, DateTimeKind.Utc) : null, refusal,
             plan.Unreachable?.ToString(), message, [.. plan.NearestRestorable], heldBy, newest, lost);
     }
 
-    private long NewestKnownLsn(string store, Guid timeline)
+    /// <summary>The newest LSN the store knows on <paramref name="timeline"/>; null when it cannot be read.</summary>
+    private long? NewestKnownLsn(string store, Guid timeline)
     {
         long newest = 0;
         try
@@ -251,7 +261,8 @@ public sealed partial class BackupsController : ControllerBase
         }
         catch (Exception e) when (IsStoreReadFailure(e))
         {
-            // The plan stands; only the "lost after" figure is missing.
+            // The plan stands; only the "lost after" figure is unknown.
+            return null;
         }
 
         return newest;

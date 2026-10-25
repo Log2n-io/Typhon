@@ -64,9 +64,10 @@ public sealed class BackupsJobEndpointTests
     private Task<BackupJobDto> Start(string kind, object body) => Post<BackupJobDto>(_client, $"/api/backups/jobs/{kind}", body);
 
     /// <summary>Follows the job's stream to its terminal frame, calling <paramref name="onProgress"/> for each progress frame.</summary>
-    private async Task<BackupJobDto> Terminal(Guid jobId, Action<BackupJobDto> onProgress = null)
+    private async Task<BackupJobDto> Terminal(Guid jobId, Action<BackupJobDto> onProgress = null, CancellationToken deadline = default)
     {
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(deadline);
+        cts.CancelAfter(TimeSpan.FromSeconds(60));
         using var response = await _client.SendAsync(new HttpRequestMessage(HttpMethod.Get, $"/api/backups/jobs/{jobId}/stream"),
             HttpCompletionOption.ResponseHeadersRead, cts.Token);
         using var reader = new StreamReader(await response.Content.ReadAsStreamAsync(cts.Token));
@@ -174,6 +175,44 @@ public sealed class BackupsJobEndpointTests
         Assert.That(job.Create.RequestId, Is.Not.Null);
         Assert.That(BackupOperations.ReadStatus(_bundle).Status.LastRequestId, Is.EqualTo(job.Create.RequestId), "the engine echoed this request");
         Assert.That(job.Create.Point.Offline, Is.False);
+    }
+
+    [Test]
+    [CancelAfter(60_000)]
+    public async Task BackUpNow_ByRequest_WhoseJobTheEngineDefers_EndsAsDeferred_WithoutWaitingOutTheTimeout()
+    {
+        await MakeBundleWithTwoPoints(_bundle, _store);
+        using var engine = DatabaseEngine.Open(_bundle, o => o.Backup(new BackupOptions
+        {
+            StorePath = _store, Interval = TimeSpan.Zero, Retention = null, ManualTickForTest = true,
+        }));
+        var scheduler = engine.BackupScheduler;
+        scheduler.TickForTest();
+
+        // Another process holds the store: the engine's capture is deferred (BackupStoreLocked), which moves neither its point nor its failure count.
+        using var holder = Typhon.Engine.Internals.BackupStore.OpenForMaintenance(_store, "test holds the store");
+        var started = await Start("create", new BackupCreateRequestDto(_store, _bundle, true));
+        Assert.That(started.Route, Is.EqualTo("request"));
+        var served = false;
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var job = await Terminal(started.JobId, dto =>
+        {
+            if (served || dto.Phase != "requested")
+            {
+                return;
+            }
+
+            served = true;
+            using var ended = new SemaphoreSlim(0);
+            scheduler.JobEndedProbe = () => ended.Release();
+            scheduler.TickForTest();
+            Assert.That(ended.Wait(TimeSpan.FromSeconds(30)), Is.True, "the engine's backup job ended");
+            scheduler.JobEndedProbe = null;
+            scheduler.TickForTest();
+        }, cts.Token);
+
+        Assert.That(job.State, Is.EqualTo(BackupJobStates.Error));
+        Assert.That(job.Error.Message, Does.Contain("deferred"));
     }
 
     [Test]
@@ -307,6 +346,87 @@ public sealed class BackupsJobEndpointTests
     }
 
     [Test]
+    [CancelAfter(120_000)]
+    public async Task ASchemadRestore_SettlesInAChildProcess_WithTheSessionsSchema()
+    {
+        // A bundle of the application's schema (the SWG sample's), backed up closed, then opened in this Workbench: its session loads the schema.
+        var fixture = Typhon.Workbench.Fixtures.FixtureDatabase.CreateOrReuse(Path.Combine(_factory.DemoDirectory, "fixture"), force: true,
+            Typhon.Workbench.Fixtures.FixtureConfig.Default with
+            {
+                ResourceTypeCount = 6, GuildCount = 3, RecipeCount = 5, PlayerCount = 20, DepositCount = 10, HarvesterCount = 5, FactoryCount = 5,
+                ItemCount = 20,
+            });
+        BackupOperations.Create(fixture.TyphonFilePath, _store);
+        var session = await OpenSession(_client, fixture.TyphonFilePath);
+        Assert.That(session.SchemaDllPaths, Is.Not.Empty, "premise: the session loaded the application's schema");
+
+        var target = Path.Combine(_factory.DemoDirectory, "restored");
+        var request = new BackupRestoreRequestDto(_store, Latest, target, false, false, false, fixture.TyphonFilePath, null);
+        var plan = await Post<BackupRestorePlanDto>(_client, "/api/backups/restore/plan", request);
+        var job = await Terminal((await Start("restore", request with { PlanFingerprint = plan.Fingerprint })).JobId);
+
+        Done(job);
+        Assert.That((job.Restore.Settle.Ran, job.Restore.Settle.Error, job.Restore.Settle.WithSchema), Is.EqualTo((true, (string)null, true)));
+        Assert.That(_ops.LastSettle, Is.Not.Null);
+        Assert.That(_ops.LastSettle.ProcessId, Is.Not.EqualTo(Environment.ProcessId),
+            "WB-13: the schema'd settle opens its engine in a child process, never beside the live session");
+    }
+
+    [Test]
+    [CancelAfter(60_000)]
+    public async Task ASettleThatRanNoRecovery_OnAnImageThatNeedsOne_IsAFailedSettle()
+    {
+        await MakeBundleWithTwoPoints(_bundle, _store);
+        var target = Path.Combine(_factory.DemoDirectory, "restored");
+        var plan = await PlanRestore(target);
+
+        // What no engine open produces today, and WB-10 still guards against: an open that had to take the crash path and did not.
+        _ops.SettleOverride = r => r with { RecoveryRequired = true, CrashRecoveryRan = false };
+        var job = await Terminal((await Start("restore", Restore(target, plan.Fingerprint))).JobId);
+
+        Done(job);
+        Assert.That(job.Restore.Settle.Ran, Is.True);
+        Assert.That(job.Restore.Settle.CrashRecoveryRan, Is.False);
+        Assert.That(job.Restore.Settle.Error, Does.Contain("no crash recovery"), "not a settle: the bundle holds the image as captured");
+        Assert.That(job.Restore.Settle.NeedsSchema, Is.False);
+    }
+
+    [Test]
+    [CancelAfter(60_000)]
+    public async Task ADrillOnAnotherStore_WhileOneRuns_IsBusy_AndNotTheStoresOwnJob()
+    {
+        await MakeBundleWithTwoPoints(_bundle, _store);
+        var registry = _host.Services.GetRequiredService<BackupJobRegistry>();
+        using var gate = new ManualResetEventSlim();
+        var drilling = registry.TryStart(new BackupJobSpec(BackupJobKinds.Drill, _store), ctx => gate.Wait(ctx.Token));
+        Assert.That(drilling.Started, Is.True);
+
+        var other = Path.Combine(_factory.DemoDirectory, "other-store");
+        var response = await _client.PostAsJsonAsync("/api/backups/jobs/drill", new BackupDrillRequestDto(other, Latest, null, null));
+        gate.Set();
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Conflict));
+        var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        Assert.That(problem.GetProperty("title").GetString(), Is.EqualTo("busy"));
+        Assert.That(problem.GetProperty("runningJobId").GetGuid(), Is.EqualTo(drilling.Job.Id));
+        Assert.That(problem.GetProperty("sameStore").GetBoolean(), Is.False, "the client must not attach this store's card to another store's drill");
+    }
+
+    [Test]
+    [CancelAfter(60_000)]
+    public async Task APreview_WhoseStoreCannotSayWhatIsLost_SaysUnknown_NotNothing()
+    {
+        await MakeBundleWithTwoPoints(_bundle, _store);
+        _ops.ArchiveFault = new IOException("the share went away");
+
+        var plan = await PlanRestore(Path.Combine(_factory.DemoDirectory, "restored"));
+
+        Assert.That(plan.CanRestore, Is.True, "the plan stands; only what is lost after it is unknown");
+        Assert.That((object)plan.NewestKnownLsn, Is.Null);
+        Assert.That((object)plan.LostLsns, Is.Null);
+    }
+
+    [Test]
     [CancelAfter(60_000)]
     public async Task ARestore_UnderAStaleFingerprint_IsPlanChanged_AndWritesNothing()
     {
@@ -371,6 +491,9 @@ public sealed class BackupsJobEndpointTests
 
         _ops.Release();
         await Terminal(started.JobId);
+        var listed = await other.GetFromJsonAsync<List<BackupJobDto>>($"/api/backups/jobs?store={Uri.EscapeDataString(_store)}", Json);
+        Assert.That((listed.Single().State, listed.Single().Verify), Is.EqualTo((BackupJobStates.Done, (BackupVerifyReportDto)null)),
+            "the list carries summaries; the result is the job's own GET");
         var after = await other.GetFromJsonAsync<BackupJobDto>($"/api/backups/jobs/{started.JobId}", Json);
         Done(after);
         Assert.That(after.Verify.Verdict, Is.EqualTo("Ok"), "the result is kept for whoever comes back");

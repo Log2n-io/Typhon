@@ -132,6 +132,8 @@ public static partial class BackupOperations
     {
         BackupPlanChangedException => BackupFailureKind.PlanChanged,
         RestoreTargetUnreachableException or BackupChainBrokenException or BackupPackCorruptException => BackupFailureKind.StoreDamaged,
+        // R1 failed (DL-7): a kept point is unrestorable, health Failing. A defect, but the store's state is what the caller must act on.
+        RetentionBrokeAKeptPointException => BackupFailureKind.StoreDamaged,
         RestoreRefusedException or DatabaseLockedException or BackupStoreMismatchException or BackupStoreLockedException
             or BackupFormatUnsupportedException or NotSupportedException => BackupFailureKind.Refused,
         TyphonException { ErrorCode: TyphonErrorCode.BackupNotConfigured } => BackupFailureKind.Refused,

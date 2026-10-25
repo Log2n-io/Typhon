@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 
 namespace Typhon.Engine.Internals;
 
@@ -169,25 +170,42 @@ internal static class DrillRecords
     }
 
     /// <summary>
-    /// Deletes the records of points no longer in the store (retention, under <c>store.lock</c>). Best effort: a record left names a gone point.
+    /// Deletes the records of points no longer in the store (retention, under <c>store.lock</c>). Best effort, never throws on I/O: a record left names a gone
+    /// point and pins nothing, and the retention's archive prune and kept-point check must still run after it.
     /// </summary>
-    public static int DeleteForPointsNotIn(IStoreFileSystem fs, string storeRoot, HashSet<uint> listed)
+    public static int DeleteForPointsNotIn(IStoreFileSystem fs, string storeRoot, HashSet<uint> listed, ILogger log)
     {
         var deleted = 0;
         var directory = DirectoryOf(storeRoot);
-        foreach (var f in fs.EnumerateFiles(directory))
+        try
         {
-            var id = PointOf(f.Name);
-            if (id != 0 && !listed.Contains(id))
+            foreach (var f in fs.EnumerateFiles(directory))
             {
-                fs.DeleteFile(Path.Combine(directory, f.Name));
-                deleted++;
+                var id = PointOf(f.Name);
+                if (id == 0 || listed.Contains(id))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    fs.DeleteFile(Path.Combine(directory, f.Name));
+                    deleted++;
+                }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                {
+                    BackupLog.DrillRecordsLeft(log, directory, f.Name, e.Message);
+                }
+            }
+
+            if (deleted > 0)
+            {
+                fs.FlushDirectory(directory);
             }
         }
-
-        if (deleted > 0)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            fs.FlushDirectory(directory);
+            BackupLog.DrillRecordsLeft(log, directory, "*", e.Message);
         }
 
         return deleted;

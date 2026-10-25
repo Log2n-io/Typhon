@@ -20,7 +20,8 @@ import {
 /**
  * The Backups view's reads (#1417 §4.2): status, listing, archive and the store's jobs, as TanStack queries keyed on the store (and bundle). They read
  * headers and footers only, so they are cheap — but never refetched on focus (a store on a slow share would stall every tab switch); they poll every
- * 10 s only while something runs, and are invalidated when a job ends.
+ * 10 s only while something runs. A job's start and end re-read the status and the job list; the listing (a quick verify of the store) and the archive
+ * are re-read only after a job that can have changed the store, or on an explicit refresh.
  */
 
 const POLL_MS = 10_000;
@@ -43,7 +44,7 @@ export function useBackupStatus(store: string, bundle: string, running: boolean)
   });
 }
 
-/** The listing with the restorable set (a quick verify of the store): an explicit refresh re-runs it, nothing else does. */
+/** The listing with the restorable set (a quick verify of the store): re-run by an explicit refresh, or after a job that wrote the store. */
 export function useBackupListing(store: string, enabled: boolean) {
   return useQuery<Listing>({
     queryKey: backupKeys.listing(store),
@@ -74,8 +75,35 @@ export function useBackupJobs(store: string) {
   });
 }
 
-/** Re-reads everything a job can change: status, listing, archive and the job list of the store. */
+/** The Refresh button: re-reads everything — status, listing, archive and the job list. */
 export function useInvalidateBackups() {
   const queryClient = useQueryClient();
   return useCallback(() => queryClient.invalidateQueries({ queryKey: backupKeys.all }), [queryClient]);
+}
+
+/** The jobs that write the store: a new pack, a compacted base, deleted packs, a drill record (its ✓/✗ on the timeline). Verify and restore only read it. */
+const STORE_WRITING_KINDS: ReadonlySet<string> = new Set(['create', 'compact', 'retention', 'drill']);
+
+/**
+ * What a job's start or end can have changed (`kind` null: a start). Always the status (its running job, the engine's state) and the job list; the
+ * listing and the archive only after a job that wrote the store.
+ */
+export function useInvalidateAfterJob() {
+  const queryClient = useQueryClient();
+  return useCallback(
+    async (kind: string | null) => {
+      const reads = [
+        queryClient.invalidateQueries({ queryKey: ['backups', 'status'] }),
+        queryClient.invalidateQueries({ queryKey: ['backups', 'jobs'] }),
+      ];
+      if (kind != null && STORE_WRITING_KINDS.has(kind)) {
+        reads.push(
+          queryClient.invalidateQueries({ queryKey: ['backups', 'list'] }),
+          queryClient.invalidateQueries({ queryKey: ['backups', 'archive'] }),
+        );
+      }
+      await Promise.all(reads);
+    },
+    [queryClient],
+  );
 }

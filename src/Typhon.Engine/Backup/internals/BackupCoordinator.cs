@@ -30,6 +30,12 @@ internal interface IBackupJobObserver
 {
     void JobStarted(BackupJobSource source, Guid requestId);
 
+    /// <summary>
+    /// The capture was refused before any job started (the engine closing, a job running, write tracking off, an engine fault): called on the caller's
+    /// thread, outside the coordinator's lock, before the caller's task fails. Never throws.
+    /// </summary>
+    void JobRefused(BackupJobSource source, Guid requestId, Exception refusal);
+
     void PhaseChanged(BackupRunPhase phase);
 
     /// <summary>The capture and its verify ended: <paramref name="failure"/> null when the point is published and verified.</summary>
@@ -134,42 +140,33 @@ internal sealed partial class BackupCoordinator : ResourceNode
     {
         ArgumentNullException.ThrowIfNull(store);
         var completion = new TaskCompletionSource<BackupPointInfo>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Exception refused;
         lock (_lock)
         {
-            if (_stopped)
+            refused = _stopped ? new BackupAbortedException(BackupAbortReason.EngineStopping, "the engine is closing.")
+                : _pending != null || _jobRunning ? new TyphonException(TyphonErrorCode.BackupInProgress, "A backup is already running on this engine.")
+                : !DataFileWriteTracking.GateEnabled ? new BackupAbortedException(BackupAbortReason.TrackingDisabled,
+                    "TYPHON_DATAFILE_GATE=0: data-file writes bypass the write gate, so no consistent image can be frozen.")
+                : _engine.BackupRefusal() is { } refusal ? new BackupAbortedException(BackupAbortReason.EngineFault, refusal)
+                : null;
+            if (refused == null)
             {
-                completion.SetException(new BackupAbortedException(BackupAbortReason.EngineStopping, "the engine is closing."));
-                return completion.Task;
-            }
+                _pending = new Request(store, kind, ct, completion, source, requestId);
+                if (_thread == null)
+                {
+                    _thread = new Thread(ThreadLoop) { Name = "Typhon-Backup", IsBackground = true, Priority = ThreadPriority.BelowNormal };
+                    _thread.Start();
+                }
 
-            if (_pending != null || _jobRunning)
-            {
-                completion.SetException(new TyphonException(TyphonErrorCode.BackupInProgress, "A backup is already running on this engine."));
-                return completion.Task;
+                _wake.Set();
             }
+        }
 
-            if (!DataFileWriteTracking.GateEnabled)
-            {
-                completion.SetException(new BackupAbortedException(BackupAbortReason.TrackingDisabled,
-                    "TYPHON_DATAFILE_GATE=0: data-file writes bypass the write gate, so no consistent image can be frozen."));
-                return completion.Task;
-            }
-
-            var refusal = _engine.BackupRefusal();
-            if (refusal != null)
-            {
-                completion.SetException(new BackupAbortedException(BackupAbortReason.EngineFault, refusal));
-                return completion.Task;
-            }
-
-            _pending = new Request(store, kind, ct, completion, source, requestId);
-            if (_thread == null)
-            {
-                _thread = new Thread(ThreadLoop) { Name = "Typhon-Backup", IsBackground = true, Priority = ThreadPriority.BelowNormal };
-                _thread.Start();
-            }
-
-            _wake.Set();
+        if (refused != null)
+        {
+            // An outcome like a failed job's (BKP-15): the observer classifies it before the caller sees the failed task.
+            Observer?.JobRefused(source, requestId, refused);
+            completion.SetException(refused);
         }
 
         return completion.Task;
