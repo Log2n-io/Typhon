@@ -12,6 +12,13 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 internal delegate void ArchivePruner(BackupStore session, IReadOnlyList<(Guid TimelineId, long KeepFromLsn)> floors, Guid liveTimeline);
 
+/// <summary>R1 failed (DL-7): a kept point no longer resolves after the deletes. A defect, never an outcome; health Failing.</summary>
+internal sealed class RetentionBrokeAKeptPointException(string store, uint pointId, string why)
+    : InvalidOperationException($"Retention of '{store}' left kept point #{pointId} unrestorable ({why}). This is a defect: report it.")
+{
+    public uint PointId { get; } = pointId;
+}
+
 /// <summary>
 /// Applies a retention under <c>store.lock</c> (05 §3 as corrected, BKP-14): plan, refuse a plan that changed since the one approved, compact, re-plan on
 /// what the compactions actually published, delete newest first with each delete made durable, prune the WAL archive, then prove every kept point
@@ -23,13 +30,6 @@ internal delegate void ArchivePruner(BackupStore session, IReadOnlyList<(Guid Ti
 /// its chain keeps every pack this run; anything else that fails stops the retention where it is, which every prefix of a descending delete sequence
 /// allows (each listed point keeps its whole chain).
 /// </remarks>
-/// <summary>R1 failed (DL-7): a kept point no longer resolves after the deletes. A defect, never an outcome; health Failing.</summary>
-internal sealed class RetentionBrokeAKeptPointException(string store, uint pointId, string why)
-    : InvalidOperationException($"Retention of '{store}' left kept point #{pointId} unrestorable ({why}). This is a defect: report it.")
-{
-    public uint PointId { get; } = pointId;
-}
-
 internal static class RetentionExecutor
 {
     /// <param name="session">The store, its lock held.</param>
