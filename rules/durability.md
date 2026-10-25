@@ -3513,8 +3513,10 @@ BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#141
             (ASealedTornTail_EndsCleanlyAtItsSentinel_NamingTheFenceRecordsRecoveryApplied) — [VerifiesRule("BKP-10")]. Source
             mutants seen red: the floor raised before the publish, a release not counted, no flush before the rename, no
             directory flush (Linux model), a seal over a mid-log break, the seal before the recovery's checkpoint
-  spec: rules/tla/WalArchive.tla (S7) — ArchivedOrReleased, FloorHoldsUnarchived, FloorAtArchiveEnd, NoSilentHole (2 792 states; -full
-    28 776); mutants -mutant-raisebeforepublish, -mutant-openreclaim, -mutant-nofloor, -mutant-continuityunchecked, -mutant-releasenocount
+  spec: rules/tla/WalArchive.tla (S7) — ArchivedOrReleased, FloorHoldsUnarchived, FloorAtArchiveEnd, NoSilentHole (6 254 states; -full
+    180 000); mutants -mutant-raisebeforepublish, -mutant-openreclaim, -mutant-nofloor, -mutant-continuityunchecked, -mutant-releasenocount,
+    -mutant-droppedunchecked. NoSilentHole models the planner's walk (Continues, GapBefore, the dropped range of a torn copy) over the entries'
+    metadata and checks what they hold
 
 ### BKP-11: A restore to an LSN or a time yields exactly the committed prefix at its cut, on one timeline, from one history `[fatal]` `[silent]`
   invariant restore(L) on timeline t: L' = the highest LSN ≤ L that ends a whole frame of t's WAL; state(open(R)) = every
@@ -3557,7 +3559,8 @@ BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#141
             RestoreCleanBaseTests (Mutant_AMarkerWithoutForceCrashRecovery_IsReported), RestorePlanTests (AC-A11) —
             [VerifiesRule("BKP-11")]. Source mutants seen red: fork flipped after FlushToDisk, a fork folded by origin alone, the
             ancestry not persisted
-  spec: rules/tla/WalArchive.tla (S7) — NoSilentHole (a restore never accepts a target past a hole); the cut is a prefix of the log, whose
+  spec: rules/tla/WalArchive.tla (S7) — NoSilentHole (a restore the planner's walk accepts replays every LSN up to its target: no hole, no
+    record a torn copy lacks); the cut is a prefix of the log, whose
     recovery to exactly the committed prefix is S2's (CommitRecovery.tla)
 
 ### BKP-12: The engine never waits on a backup past its budget
