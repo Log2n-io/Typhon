@@ -9,7 +9,7 @@ import { createShapeMesh } from './meshes';
 import { PrefixUploader } from './prefix-upload';
 import { SCENE_GROUP } from './render-groups';
 import { ENTITY_FRAGMENT, ENTITY_VERTEX, SPRITE_FRAGMENT, SPRITE_VERTEX } from './shaders';
-import { SELECTED_MESH_SCALE, SELECTED_SPRITE_SCALE, type LayerStyle } from './styles';
+import type { LayerStyle } from './styles';
 import { SUN_DIRECTION } from './sun';
 import {
   packedStyle,
@@ -25,6 +25,21 @@ export type { FrameView, PredictedOverride } from './layer-packer';
 export type { PickHit, PickRay } from './view-math';
 
 const SUN = SUN_DIRECTION;
+
+/** Where an entity was drawn this frame, and as what box: see {@link EntityLayer.instanceOf}. */
+export interface DrawnInstance {
+  /** Render space: planet metres less the render origin. */
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  /** The style's box, metres — or, for a sprite, its diameter in CSS pixels in `width` and `height`. */
+  width: number;
+  height: number;
+  length: number;
+  /** Drawn as the far band's fixed-size sprite. */
+  far: boolean;
+}
 
 /**
  * One archetype on screen: the {@link LayerPacker} evaluates, culls, bands and packs every live entity on the CPU; this uploads
@@ -160,6 +175,68 @@ export class EntityLayer {
     this.setCounts(packer.nearCount, packer.farCount);
   }
 
+  /**
+   * Where one entity was drawn this frame and as what: its render-space position and yaw, and its style's box — what the
+   * pick tests it as. The far band is a sprite with no yaw; `far` says so, and its frame is the sprite's square.
+   *
+   * @returns False when this layer packed no such netId this frame.
+   */
+  instanceOf(netId: number, out: DrawnInstance): boolean {
+    const p = this.packer;
+    if (
+      this.findMesh(p.nearData, p.nearYaw, p.nearNetIds, this.nearCount, netId, out) ||
+      this.findMesh(p.heldData, p.heldYaw, p.heldNetIds, this.heldCount, netId, out)
+    ) {
+      return true;
+    }
+
+    for (let k = 0; k < this.farCount; k++) {
+      if (p.farNetIds[k] === netId) {
+        const b = k * 4;
+        out.x = p.farData[b];
+        out.y = p.farData[b + 1] + this.style.spriteLift;
+        out.z = p.farData[b + 2];
+        out.yaw = 0;
+        out.width = this.style.spritePixels;
+        out.height = this.style.spritePixels;
+        out.length = 0;
+        out.far = true;
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /** {@link instanceOf} over one band drawn as meshes: the near band, or the bodies the crowd drew in its place. */
+  private findMesh(
+    data: Float32Array,
+    yaws: Float32Array,
+    netIds: Uint32Array,
+    count: number,
+    netId: number,
+    out: DrawnInstance,
+  ): boolean {
+    const sizes = this.style.bounds.sizesFlat;
+    for (let k = 0; k < count; k++) {
+      if (netIds[k] === netId) {
+        const b = k * 4;
+        const style = packedStyle(data[b + 3]);
+        out.x = data[b];
+        out.y = data[b + 1];
+        out.z = data[b + 2];
+        out.yaw = yaws[k];
+        out.width = sizes[style * 3];
+        out.height = sizes[style * 3 + 1];
+        out.length = sizes[style * 3 + 2];
+        out.far = false;
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   /** Nearest drawn entity within `maxPixels` of a viewport point (CSS pixels); updates `best` when closer than it. */
   /**
    * Where one packed entity is on screen, by the same projection {@link pick} uses. For diagnosis: a click that misses is
@@ -263,7 +340,6 @@ export class EntityLayer {
       this.nearCount,
       this.style.bounds.sizesFlat,
       this.style.flattenMode,
-      SELECTED_MESH_SCALE,
       a,
       best,
       maxT,
@@ -278,7 +354,6 @@ export class EntityLayer {
       this.heldCount,
       this.style.bounds.sizesFlat,
       this.style.flattenMode,
-      SELECTED_MESH_SCALE,
       a,
       best,
       maxT,
@@ -291,7 +366,6 @@ export class EntityLayer {
       this.heldCount,
       this.style.bounds.pickY,
       0,
-      SELECTED_MESH_SCALE,
       w,
       h,
       px,
@@ -312,7 +386,6 @@ export class EntityLayer {
       this.nearCount,
       this.style.bounds.pickY,
       0,
-      SELECTED_MESH_SCALE,
       w,
       h,
       px,
@@ -331,7 +404,6 @@ export class EntityLayer {
       this.farCount,
       this.style.spriteLift,
       this.style.spritePixels * 0.5,
-      SELECTED_SPRITE_SCALE,
       w,
       h,
       px,

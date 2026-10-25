@@ -84,11 +84,15 @@ public sealed class AssetColliders
     /// it — a house's deck and walls, higher; the room's walls 0 to 2 m, its furniture 0.45 to 1.6 m, and a stage 0.3 m up with its step, whose seats,
     /// table and lectern stand on it.
     /// </para>
+    /// <para>
+    /// <b>The factory and the resource extractor</b> (catalogue 11): a pad 0.25 and 0.3 m up, stepped onto, and every wall and machine 0.25 or 0.3 to
+    /// 2.3 m on it; the factory's console 0.25 to 1.17 m, in front of its stand point.
+    /// </para>
     /// </remarks>
     private static readonly string[] Verified =
     [
         "tat_house_small", "tat_house_large", "tat_shuttleport", "tat_house_large_interior", "tat_house_small_interior", "tat_townhall",
-        "tat_townhall_interior",
+        "tat_townhall_interior", "factory", "resource_extractor",
     ];
 
     /// <summary>One primitive as this simulation sees it: an axis-aligned box in the asset's own plan.</summary>

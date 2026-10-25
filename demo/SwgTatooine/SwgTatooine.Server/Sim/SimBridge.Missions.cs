@@ -58,6 +58,7 @@ public sealed partial class SimBridge
         var half = _config.WorldEdgeM * 0.5f;
         long issued = 0;
         long completed = 0;
+        long expired = 0;
         var writer = ctx.Writer(CombatQueue);
         var moves = ctx.Writer(MissionMoveQueue);
 
@@ -116,8 +117,20 @@ public sealed partial class SimBridge
 
                         lair.MissionId = 0;
                         lair.Owner = EntityId.Null;
+                        lair.ExpireTick = 0;
                         v.Health = v.MaxHealth;
                         completed++;
+                    }
+                    else if (lair.ExpireTick != 0 && tick >= lair.ExpireTick)
+                    {
+                        // Run out, the lair standing: back in the pool, unpaid. Nothing ended a mission but its lair's death, so one whose owner stopped
+                        // coming — the crowd gives a mission MissionWalkSeconds and then does something else, and a lair at difficulty 9 holds 9 000 hit
+                        // points — held its lair for good, and a small pool ran dry: four lairs, three missions, none issued again (measured, 2026-10-25).
+                        lair.MissionId = 0;
+                        lair.Owner = EntityId.Null;
+                        lair.ExpireTick = 0;
+                        v.Health = v.MaxHealth;
+                        expired++;
                     }
 
                     continue;
@@ -186,6 +199,9 @@ public sealed partial class SimBridge
                     lair.MissionId = difficulty;
                     lair.Owner = owner;
 
+                    // As long as the crowd gives itself to walk there and fight (SendOnMission), and a human has the same.
+                    lair.ExpireTick = tick + ((long)MissionWalkSeconds * _config.TickRateHz);
+
                     // The teleport, done here rather than handed to a placement system: this walk owns CreatureLair, so
                     // it can write the placement directly through the spatial barrier. A lair jumping one to two
                     // kilometres is the most violent thing in this simulation from the index's point of view — a cell
@@ -223,6 +239,11 @@ public sealed partial class SimBridge
         if (completed != 0)
         {
             Interlocked.Add(ref _missionsCompleted, completed);
+        }
+
+        if (expired != 0)
+        {
+            Interlocked.Add(ref _missionsExpired, expired);
         }
     }
 

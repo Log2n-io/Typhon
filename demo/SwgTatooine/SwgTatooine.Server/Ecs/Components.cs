@@ -1275,7 +1275,10 @@ public struct Lair
     /// <remarks>What the lair director refills: a retired lair is replaced by another drawn from the same site, so a region keeps its density.</remarks>
     [Field] public int Site;
 
-    /// <summary>The tick a wild lair is retired at, whether or not anybody destroyed it; 0 for a lair that never expires.</summary>
+    /// <summary>
+    /// The tick a wild lair is retired at, whether or not anybody destroyed it; for a destroy-mission lair, the tick its current mission ends undone and it
+    /// goes back to the pool. 0 for neither.
+    /// </summary>
     [Field] public long ExpireTick;
 
     /// <summary>The tick this lair may next replace a creature it lost; 0 when it has lost none.</summary>

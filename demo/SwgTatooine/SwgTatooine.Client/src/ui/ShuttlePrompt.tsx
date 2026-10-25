@@ -4,18 +4,15 @@ import { CITIES } from '../data/world-data';
 import { useUi } from '../state/ui-store';
 
 /**
- * The shuttleport: where to buy a ticket, the ticket terminal's destination menu, and the journey once one is bought.
+ * The shuttleport: where to buy a ticket, and the journey once one is bought.
  *
- * <b>A ticket is bought at the terminal, as in the testbench</b> (`ui/destination-menu.ts`): standing at the port's
- * ticket terminal, T (or the prompt's button) opens a list of destinations; a pick queues for the next shuttle
- * (`BoardShuttle`), which is drawn
- * flying in and landing on the pad on the server's schedule. Movement keys are ignored while the menu is open.
+ * <b>A ticket is bought at the terminal</b>: standing at the port's ticket terminal, a long press on it opens its context
+ * menu, the destinations (`ContextMenu.tsx`, opened by `ClientApp`); a pick queues for the next shuttle (`BoardShuttle`),
+ * which is drawn flying in and landing on the pad on the server's schedule. This panel only says how.
  */
 export function ShuttlePrompt() {
   const shuttleport = useUi((s) => s.shuttleport);
   const travel = useUi((s) => s.travel);
-  const menu = useUi((s) => s.ticketMenu);
-  const setTicketMenu = useUi((s) => s.setTicketMenu);
 
   if (shuttleport === null && travel.phase === 'idle') {
     return null;
@@ -30,76 +27,13 @@ export function ShuttlePrompt() {
         <TravelLine travel={travel} />
         {shuttleport !== null && !underway ? (
           <div className="hint">
-            {shuttleport.atTerminal ? (
-              <>
-                Ticket terminal — press T or{' '}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTicketMenu(true);
-                  }}
-                >
-                  use it
-                </button>{' '}
-                to choose a destination.
-              </>
-            ) : (
-              'Buy a ticket at the terminal inside the gate, then wait for the shuttle to land.'
-            )}
+            {shuttleport.atTerminal
+              ? 'Ticket terminal — hold-click it to choose a destination.'
+              : 'Get closer to the terminal to buy a ticket...'}
           </div>
         ) : null}
       </div>
-      {menu && shuttleport !== null && !underway ? <DestinationMenu from={shuttleport.city} /> : null}
     </>
-  );
-}
-
-/** The ticket terminal's list: every other city, Cancel, and Escape. */
-function DestinationMenu({ from }: { readonly from: number }) {
-  const boardShuttle = useUi((s) => s.boardShuttle);
-  const setTicketMenu = useUi((s) => s.setTicketMenu);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.code === 'Escape') {
-        setTicketMenu(false);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-    };
-  }, [setTicketMenu]);
-
-  return (
-    <div className="panel ticket-menu" role="dialog" aria-label="Shuttle destinations">
-      <div className="hud-title">Shuttle destinations</div>
-      <div className="shuttle-destinations">
-        {CITIES.map((city, index) =>
-          index === from ? null : (
-            <button
-              key={city.name}
-              type="button"
-              onClick={() => {
-                boardShuttle(index);
-                setTicketMenu(false);
-              }}
-              title={`Queue for the next shuttle to ${city.name}`}
-            >
-              {city.name}
-            </button>
-          ),
-        )}
-      </div>
-      <button
-        type="button"
-        className="ticket-cancel"
-        onClick={() => {
-          setTicketMenu(false);
-        }}
-      >
-        Cancel
-      </button>
-    </div>
   );
 }
 

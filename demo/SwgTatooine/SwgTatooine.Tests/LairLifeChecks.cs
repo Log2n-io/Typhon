@@ -71,6 +71,7 @@ public sealed class LairLifeChecks
         var lairs = new Dictionary<EntityId, (float X, float Z)>();
         var near = 0;
         var far = 0;
+        var endless = 0;
         using (var tx = _sim.Dbe.CreateQuickTransaction())
         {
             foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
@@ -83,6 +84,7 @@ public sealed class LairLifeChecks
                     if (spawners[slot].MissionId != 0)
                     {
                         lairs[cluster.GetEntityId(slot)] = (places[slot].X, places[slot].Z);
+                        endless += spawners[slot].ExpireTick == 0 ? 1 : 0;
                     }
                 }
             }
@@ -116,6 +118,7 @@ public sealed class LairLifeChecks
             Assert.That(lairs.Count, Is.GreaterThan(0), "precondition: a mission is live at the end of the run");
             Assert.That(near, Is.GreaterThan(0), "a live mission lair has no defender");
             Assert.That(far, Is.LessThanOrEqualTo(near / 10), $"{far} defenders stand far from their live mission lair, {near} near it");
+            Assert.That(endless, Is.Zero, "a live mission has no end: the replacement lair did not carry it over");
         });
     }
 
@@ -244,5 +247,180 @@ public sealed class LairLifeChecks
         }
 
         return (orphans, creatures, lairs);
+    }
+}
+
+/// <summary>
+/// A destroy mission runs out: its lair goes back to the pool unpaid when the time its owner was given has passed, and keeps it until then (2026-10-25).
+/// </summary>
+/// <remarks>
+/// Nothing but a lair's death used to end a mission, so a mission its owner stopped pursuing held its lair for good, and a small pool ran dry. Staged rather
+/// than waited for: two pool lairs put on a mission, one already past its end, and held off the pool's next offer, which would replace the lair read back.
+/// </remarks>
+[Category("Integration")]
+[TestFixture]
+[NonParallelizable]
+public sealed class MissionExpiryChecks
+{
+    [Test]
+    public void AMissionPastItsEnd_GoesBackToThePoolUnpaid_AndOneBeforeItsEndStands()
+    {
+        var dir = Worlds.NewDirectory();
+        try
+        {
+            var config = Worlds.Small(dir);
+            config.WorkerCount = 1;
+            config.WarmTicks = 0;
+            config.MeasuredTicks = 5;
+            using var sim = new TatooineSim(config);
+            sim.Initialize();
+            var owner = sim.Index.Players[0];
+            var pool = new List<EntityId>();
+            using (var tx = sim.Dbe.CreateQuickTransaction())
+            {
+                foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
+                {
+                    var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
+                    for (var bits = cluster.OccupancyBits; bits != 0 && pool.Count < 2; bits &= bits - 1)
+                    {
+                        var slot = BitOperations.TrailingZeroCount(bits);
+                        if (spawners[slot].CreatureTemplate == CreatureTemplates.MissionDefender && spawners[slot].MissionId == 0)
+                        {
+                            pool.Add(cluster.GetEntityId(slot));
+                        }
+                    }
+                }
+
+                Assert.That(pool, Has.Count.EqualTo(2), "the premise: two dormant pool lairs");
+                for (var i = 0; i < pool.Count; i++)
+                {
+                    var lair = tx.OpenMut(pool[i]);
+                    var spawner = lair.Read(CreatureLair.Spawner);
+                    spawner.MissionId = 5;
+                    spawner.Owner = owner;
+                    spawner.ExpireTick = i == 0 ? 1 : 1_000_000;
+
+                    // Not offered again inside the window: an offer replaces the lair (SimBridge.Rehouse), and this one is to be read back.
+                    spawner.RespawnCooldown = 1_000;
+                    lair.Set(CreatureLair.Spawner, spawner);
+                    var vitals = lair.Read(CreatureLair.Vitals);
+                    vitals.Health = vitals.MaxHealth / 2;
+                    lair.Set(CreatureLair.Vitals, vitals);
+                }
+
+                Assert.That(tx.Commit(), Is.True);
+            }
+
+            sim.Run();
+
+            using var read = sim.Dbe.CreateQuickTransaction();
+            var ran = read.Open(pool[0]);
+            var stands = read.Open(pool[1]);
+            var ranOut = ran.Read(CreatureLair.Spawner);
+            var ranVitals = ran.Read(CreatureLair.Vitals);
+            var standing = stands.Read(CreatureLair.Spawner);
+            var s = sim.LastStats;
+            Assert.Multiple(() =>
+            {
+                Assert.That(ranOut.MissionId, Is.Zero, "a mission past its end still holds its lair");
+                Assert.That(ranOut.Owner.IsNull, Is.True);
+                Assert.That(ranOut.ExpireTick, Is.Zero);
+                Assert.That(ranVitals.Health, Is.EqualTo(ranVitals.MaxHealth), "back in the pool unhealed");
+                Assert.That(s.MissionsExpired, Is.EqualTo(1));
+                Assert.That(s.MissionsCompleted, Is.Zero, "an expiry was counted as a completion");
+                Assert.That(s.MissionRewards, Is.Zero, "an expired mission paid its owner");
+                Assert.That(standing.MissionId, Is.EqualTo(5), "a mission before its end was ended");
+                Assert.That((EntityId)standing.Owner, Is.EqualTo(owner));
+            });
+        }
+        finally
+        {
+            Worlds.Delete(dir);
+        }
+    }
+}
+
+/// <summary>
+/// A mission lair moved on a pass tick, while it owed a defender: <c>Rehouse</c> destroys it, the pass's walk still yields it (#1482), and its refill
+/// opened a lair the transaction had destroyed — the tick aborted and the server stopped (2026-10-25, twice).
+/// </summary>
+[TestFixture]
+public sealed class MovedLairRefillChecks
+{
+    [Test]
+    public void AMissionLairMovedOnAPassTick_WhileOwedADefender_IsNotRefilled_AndTheTickStands()
+    {
+        var dir = Worlds.NewDirectory();
+        try
+        {
+            var config = Worlds.Small(dir);
+            config.WorkerCount = 1;
+            config.WarmTicks = 0;
+            config.MeasuredTicks = 12;
+            using var sim = new TatooineSim(config);
+            sim.Initialize();
+            var staged = 0;
+            using (var tx = sim.Dbe.CreateQuickTransaction())
+            {
+                var owner = EntityId.Null;
+                foreach (var p in sim.Index.Players)
+                {
+                    if (tx.Open(p).Read(Player.Realm).Value == RealmId.Default.Value)
+                    {
+                        owner = p;
+                        break;
+                    }
+                }
+
+                Assert.That(owner.IsNull, Is.False, "the premise: a player outdoors");
+                var at = tx.Open(owner).Read(Player.Bounds);
+                var pool = new List<EntityId>();
+                foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
+                {
+                    var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
+                    for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                    {
+                        var slot = BitOperations.TrailingZeroCount(bits);
+                        if (spawners[slot].CreatureTemplate == CreatureTemplates.MissionDefender && spawners[slot].MissionId == 0)
+                        {
+                            pool.Add(cluster.GetEntityId(slot));
+                        }
+                    }
+                }
+
+                // The four dormant lairs at the player, offered on four consecutive ticks round the first pass tick. A lair is offered on the tick its
+                // cooldown runs out (cooldown c: tick c - 1, ticks numbered from 0), and LairLife runs only on a tick with an event in its queues — the
+                // move is that event — so the pass runs on the tick its lair is moved. Each owes a defender already due: the walk picks it for a refill.
+                var passTick = Math.Max(1, config.TickRateHz / SimBridge.LairPassHz);
+                for (var i = 0; i < pool.Count && staged < 4; i++)
+                {
+                    var lair = tx.OpenMut(pool[i]);
+                    var place = lair.Read(CreatureLair.Bounds);
+                    place.SetAt(at.X, at.Z, at.Y, place.HalfExtent);
+                    lair.Set(CreatureLair.Bounds, place);
+                    var spawner = lair.Read(CreatureLair.Spawner);
+                    spawner.RespawnCooldown = passTick + staged;
+                    spawner.AliveCount = Math.Max(0, spawner.SpawnLimit - 1);
+                    spawner.NextSpawnTick = 1;
+                    lair.Set(CreatureLair.Spawner, spawner);
+                    staged++;
+                }
+
+                Assert.That(tx.Commit(), Is.True);
+            }
+
+            Assert.That(staged, Is.EqualTo(4), "the premise: the small world's four dormant pool lairs");
+            sim.Run();
+            Assert.Multiple(() =>
+            {
+                Assert.That(sim.TickAbort, Is.Null, $"a tick aborted: {sim.TickAbort?.SystemName} {sim.TickAbort?.Reason}");
+                Assert.That(sim.MissionLairsRehoused, Is.GreaterThanOrEqualTo(4), "the premise: each staged lair was offered and moved");
+                Assert.That(sim.RefillsOfGoneLairs, Is.GreaterThan(0), "the premise: a moved lair was picked for a refill on its pass tick");
+            });
+        }
+        finally
+        {
+            Worlds.Delete(dir);
+        }
     }
 }

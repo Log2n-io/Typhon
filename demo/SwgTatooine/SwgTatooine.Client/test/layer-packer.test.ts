@@ -4,10 +4,10 @@ import { describe, expect, it } from 'vitest';
 import { Archetype, SWG_SCHEMA } from '../src/data/swg-schema';
 import { LayerPacker, type FrameView } from '../src/render/layer-packer';
 import { styleFor } from '../src/render/styles';
-import { extractFrustumPlanes, packedStyle, SELECTED_BIT } from '../src/render/view-math';
+import { extractFrustumPlanes, packedStyle } from '../src/render/view-math';
 
 /** Eye at the render origin looking down +Z, 90° vertical field of view, 800 × 800 CSS px: 400 px per metre at 1 m. */
-function view(selectedNetId = 0): FrameView {
+function view(): FrameView {
   const m = new Float32Array(16);
   m[0] = 1;
   m[5] = 1;
@@ -28,10 +28,10 @@ function view(selectedNetId = 0): FrameView {
     pixelsPerMetre: 400,
     viewportWidth: 800,
     viewportHeight: 800,
-    selectedNetId,
     ground: FLAT_GROUND,
     predicted: null,
     hidden: new Set<number>(),
+    drawnElsewhere: new Set<number>(),
     crowd: null,
     crowdDraws: false,
     crowdCount: 0,
@@ -118,13 +118,20 @@ describe('LayerPacker', () => {
     expect(packer.nearCount).toBe(2);
   });
 
-  it('marks the selected entity', () => {
+  it('holds a body its asset draws: drawn by nobody here, still there for the pick', () => {
+    // A camp standing as its asset. Hidden, it was out of the arrays the pick reads, and its lair could not be targeted.
     const { packer, place } = setup();
-    place(31, 0, 100);
-    packer.pack(view(31));
-    expect(packer.nearData[3] >= SELECTED_BIT).toBe(true);
-    packer.pack(view(0));
-    expect(packer.nearData[3] >= SELECTED_BIT).toBe(false);
+    place(61, 0, 100);
+    place(62, 10, 100);
+
+    packer.pack({ ...view(), drawnElsewhere: new Set([61]) });
+    expect(packer.nearCount).toBe(1);
+    expect(packer.nearNetIds[0]).toBe(62);
+    expect(packer.heldCount).toBe(1);
+    expect(packer.heldNetIds[0]).toBe(61);
+
+    packer.pack({ ...view(), hidden: new Set([61]) });
+    expect(packer.heldCount, 'a hidden body is not picked: the rigged avatar, a dormant lair').toBe(0);
   });
 
   it('keeps a band with hysteresis, and starts over when a slot is reused by another entity', () => {

@@ -330,8 +330,8 @@ public sealed class AssetCollisionChecks
         byIndex[0] = [new AssetColliders.PlanBox(-9.4f, -9.1f, 9.4f, 9.1f)];
         var colliders = AssetColliders.FromBoxesForTest(byIndex);
 
-        // A factory reserves 11 m and nothing published stands on it.
-        Assert.That(colliders.OverhangFor(StructureFootprint.HalfExtentM(StructureKind.Factory)),
+        // A point of interest's prop reserves 2.5 m and nothing published stands on it.
+        Assert.That(colliders.OverhangFor(StructureFootprint.HalfExtentM(StructureKind.PoiProp)),
             Is.EqualTo(colliders.MaxOverhangM).Within(1e-6f));
     }
 

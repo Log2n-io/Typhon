@@ -124,6 +124,7 @@ public sealed partial class SimBridge : IShuttleBoarding
     private long _economyTicks;
     private long _missionsIssued;
     private long _missionsCompleted;
+    private long _missionsExpired;
     private long _creaturesRespawned;
 
     public SimBridge(SimConfig config, TatooineMap map, WorldIndex index)
@@ -244,6 +245,7 @@ public sealed partial class SimBridge : IShuttleBoarding
         EconomyTicks = Interlocked.Exchange(ref _economyTicks, 0),
         MissionsIssued = Interlocked.Exchange(ref _missionsIssued, 0),
         MissionsCompleted = Interlocked.Exchange(ref _missionsCompleted, 0),
+        MissionsExpired = Interlocked.Exchange(ref _missionsExpired, 0),
         CreaturesRespawned = Interlocked.Exchange(ref _creaturesRespawned, 0),
         CorpsesRemoved = Interlocked.Exchange(ref _corpsesRemoved, 0),
         LairsRetired = Interlocked.Exchange(ref _lairsRetired, 0),
@@ -339,6 +341,9 @@ public struct TickStats
     public long EconomyTicks;
     public long MissionsIssued;
     public long MissionsCompleted;
+
+    /// <summary>Missions that ran out with their lair standing, which went back to the pool unpaid.</summary>
+    public long MissionsExpired;
     /// <summary>Creatures a lair spawned to replace one it lost (<c>SimBridge.Lairs.cs</c>).</summary>
     public long CreaturesRespawned;
 

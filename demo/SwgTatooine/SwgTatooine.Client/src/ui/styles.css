@@ -154,6 +154,74 @@ body,
   border-radius: 3px;
 }
 
+/* The hover and selection frames: four corners of the rectangle a body covers (render/selection-frame.ts). */
+.sel-frames {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.sel-frame {
+  position: absolute;
+  left: 0;
+  top: 0;
+  --corner: 10px;
+  --arm: 1.5px;
+  --tone: rgba(214, 214, 210, 0.85);
+  will-change: transform;
+}
+
+.sel-frame.tone-hover {
+  --tone: rgba(214, 214, 210, 0.85);
+}
+
+/* A selection is the more visible of the two: its own colour, and heavier arms. */
+.sel-frame.tone-passive {
+  --tone: #45e07a;
+  --arm: 2.5px;
+}
+
+.sel-frame.tone-hostile {
+  --tone: #ff3b30;
+  --arm: 2.5px;
+}
+
+.sel-corner {
+  position: absolute;
+  width: var(--corner);
+  height: var(--corner);
+  border: 0 solid var(--tone);
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.85));
+}
+
+.sel-corner.tl {
+  left: 0;
+  top: 0;
+  border-left-width: var(--arm);
+  border-top-width: var(--arm);
+}
+
+.sel-corner.tr {
+  right: 0;
+  top: 0;
+  border-right-width: var(--arm);
+  border-top-width: var(--arm);
+}
+
+.sel-corner.bl {
+  left: 0;
+  bottom: 0;
+  border-left-width: var(--arm);
+  border-bottom-width: var(--arm);
+}
+
+.sel-corner.br {
+  right: 0;
+  bottom: 0;
+  border-right-width: var(--arm);
+  border-bottom-width: var(--arm);
+}
+
 .panel {
   position: absolute;
   background: var(--panel-bg);
@@ -851,18 +919,44 @@ button.active {
   }
 }
 
-/* The ticket terminal's destination menu (ShuttlePrompt): centred over the view, like the testbench's modal. */
-.ticket-menu {
-  left: 50%;
-  top: 30%;
-  transform: translateX(-50%);
-  width: 300px;
+/* The context menu (ContextMenu.tsx): opened at the pointer by a long press; its left, top and width come from the component. */
+.context-menu {
   z-index: 4;
   text-align: center;
 }
 
-.ticket-cancel {
+.context-items {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.context-cancel {
   margin-top: 8px;
+}
+
+/* The long press (render/press-ring.ts): a ring at the pointer, and the disc growing to meet it in half a second. */
+.press-ring {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 28px;
+  height: 28px;
+  margin: -14px 0 0 -14px;
+  border: 2px solid rgba(244, 239, 228, 0.95);
+  border-radius: 50%;
+  box-sizing: border-box;
+  pointer-events: none;
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.9));
+  will-change: transform;
+}
+
+.press-ring-fill {
+  position: absolute;
+  inset: 2px;
+  border-radius: 50%;
+  background: rgba(244, 239, 228, 0.9);
+  transform: scale(0);
 }
 
 /*

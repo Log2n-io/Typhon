@@ -57,7 +57,7 @@ import { AGG_GRID, FASTEST_TICK_PERIOD_MS, StructureKind, SWG_SCHEMA, TICK_PERIO
 import { CITIES, PLANET_HALF_EXTENT_M } from '../data/world-data';
 import { AttackLines } from '../render/attack-lines';
 import { CombatFx } from '../render/combat-fx';
-import { clipRole, GET_UP_CLIP } from '../character/outfits';
+import { clipRole, GET_UP_CLIP, RIG_OUTFIT } from '../character/outfits';
 import { GameplayGizmos, type GizmoPlacement } from '../render/gameplay-gizmos';
 import { placement } from '../assets/asset-frame';
 import { assetForStructure, lairQuarter, structureYaw } from '../assets/structure-assets';
@@ -81,7 +81,14 @@ import { Heightfield } from '../terrain/heightfield';
 import type { TerrainBaked } from '../terrain/terrain.worker';
 import { Labels } from '../render/labels';
 import { SHUTTLEPORT_STYLE, styleFor } from '../render/styles';
-import { RenderOrigin, extractFrustumPlanes, invertMatrix4, rayGroundT, unprojectRay } from '../render/view-math';
+import {
+  RenderOrigin,
+  extractFrustumPlanes,
+  invertMatrix4,
+  projectToScreen,
+  rayGroundT,
+  unprojectRay,
+} from '../render/view-math';
 import { useChat } from '../state/chat-store';
 import { crossingKindOf, isIndoors, sameRealm, type RealmView, type SceneKind } from '../data/realm-view';
 import { advance, arrived, askedFor, blackout, opacityAt } from './realm-transition';
@@ -94,7 +101,9 @@ import {
   type Writable,
 } from './shuttle-flight';
 import { ShuttleView } from './shuttle-view';
-import { ticketTerminalOf } from './ticket-terminal';
+import { ticketMenuItems, ticketTerminalOf, type TicketTerminal } from './ticket-terminal';
+import { rayOnShapes, rayOnSlabs, type ShapeHit } from './world-pick';
+import { pressProgress, PressRing } from '../render/press-ring';
 import { resetForRealm, resetForSession, type RealmSwitchTargets } from './realm-switch';
 import { nextRide, NOT_RIDING, rideOwnsTheView, rideSubjectOf, type RideState } from './ride';
 import { boostFor, DEFAULT_BOOST } from './gait';
@@ -121,6 +130,17 @@ import { useUi, type NavRow, type ShuttleportPrompt, type UiState } from '../sta
 import { NAV_KINDS, navLabel, nearestFacilities, relativeBearing, type NavTarget } from './nav-finder';
 import { nearestShuttleport } from './shuttle';
 import { nextTravel } from './travel';
+import { CURSORS, cursorFor, selectionTone, type CursorSubject } from './game-cursor';
+import {
+  bodyBox,
+  projectBox,
+  projectCorners,
+  SelectionFrames,
+  styleBox,
+  type BodyBox,
+  type ScreenRect,
+} from '../render/selection-frame';
+import type { DrawnInstance } from '../render/entity-layer';
 
 /**
  * How far from the camera a structure is drawn as its published asset, in metres.
@@ -250,10 +270,10 @@ class MutableFrameView implements FrameView {
   pixelsPerMetre = 1;
   viewportWidth = 1;
   viewportHeight = 1;
-  selectedNetId = 0;
   ground: GroundSampler = FLAT_GROUND;
   predicted: PredictedOverride | null = null;
   hidden: ReadonlySet<number> = NONE_HIDDEN;
+  drawnElsewhere: ReadonlySet<number> = NONE_HIDDEN;
   crowd: CrowdBody[] | null = null;
   crowdDraws = false;
   crowdCount = 0;
@@ -330,6 +350,22 @@ const SHUTTLE_SEARCH_FRAMES = 8;
  * Two things ask for it - the shuttleport prompt's field scan and the dome layer - and both must mean the same one.
  */
 const STRUCTURE_ARCHETYPE = 'WorldObject';
+
+/** How far behind a structure's surface a body still counts as picked, metres: one standing against a wall, or at a terminal. */
+const PICK_SURFACE_SLACK_M = 0.6;
+
+/** What the ticket terminal is called on its tag. */
+const TICKET_TERMINAL_LABEL = 'Ticket terminal';
+
+/** A shuttleport's ticket terminal, as a part the viewer can hover, select and long-press: its port and its box. */
+interface TerminalPart {
+  /** The shuttleport's netId. */
+  readonly owner: number;
+  readonly use: TicketTerminal;
+  /** The terminal's world box, planet coordinates: what the pick's ray is tested against. */
+  readonly min: readonly number[];
+  readonly max: readonly number[];
+}
 
 /**
  * The archetypes whose bodies are drawn as rigged characters rather than as boxes.
@@ -415,6 +451,10 @@ export class ClientApp {
   /** The event sink the source is handed: the debug lines and the effects, each told of every blow. */
   private readonly events: EventSink;
   private readonly labels: Labels;
+  /** The hover and selection frames (2026-10-25, Loïc): the corners of the rectangle a body covers on screen. */
+  private readonly frames: SelectionFrames;
+  /** The long press's ring and disc (`press-ring.ts`). */
+  private readonly pressRing: PressRing;
   private readonly resizeObserver: ResizeObserver;
 
   private world: WorldStore;
@@ -681,6 +721,8 @@ export class ClientApp {
       },
     };
     this.labels = new Labels(overlay);
+    this.frames = new SelectionFrames(overlay);
+    this.pressRing = new PressRing(overlay);
 
     this.world = new WorldStore(SWG_SCHEMA);
     this.grid = new AggregateGrid(AGG_GRID);
@@ -698,8 +740,19 @@ export class ClientApp {
       this.cssSize,
       {
         onClick: (x, y) => {
+          // The click a long press ended in: its menu is what the press did.
+          if (this.swallowClick) {
+            this.swallowClick = false;
+            return;
+          }
+
           const netId = this.pickAt(x, y);
-          useUi.getState().select(netId);
+          const part = this.pickedPart;
+          if (part !== null) {
+            useUi.getState().selectPart({ owner: part.owner, kind: 'ticket' });
+          } else {
+            useUi.getState().select(netId);
+          }
 
           // A9: clicking something is also how a player attacks it. The selection and the target move together on
           // purpose — the inspector shows what you clicked and the avatar shoots at it, which is one gesture and one
@@ -714,6 +767,20 @@ export class ClientApp {
           if (useUi.getState().follow) {
             useUi.getState().setFollow(false);
           }
+        },
+        onPress: (x, y) => {
+          this.startPress(x, y);
+        },
+        onRelease: () => {
+          // Released after the menu opened: the click this release makes is the press's, and is swallowed.
+          if (this.press !== null && this.press.fired) {
+            this.swallowClick = true;
+          }
+
+          this.endPress();
+        },
+        onDragStart: () => {
+          this.endPress();
         },
       },
       this.eyeCamera,
@@ -730,14 +797,6 @@ export class ClientApp {
       'keydown',
       (e) => {
         if (isTyping(e)) {
-          return;
-        }
-
-        // The ticket terminal: T opens the destination menu where the avatar stands at one. Not E, the testbench's habit:
-        // Q, E, R and F turn and pitch this client's camera.
-        if (e.code === 'KeyT' && !e.repeat && useUi.getState().shuttleport?.atTerminal === true) {
-          e.preventDefault();
-          useUi.getState().setTicketMenu(true);
           return;
         }
 
@@ -766,6 +825,25 @@ export class ClientApp {
         }
 
         this.flushGaitNow(e.timeStamp);
+      },
+      { signal: this.gaitKeys.signal },
+    );
+
+    // Where the mouse is over the world, for the hover: picked once a frame at the last position rather than per event, so
+    // a fast mouse costs one pick a frame and a still one keeps re-picking a world that moves under it.
+    canvas.addEventListener(
+      'pointermove',
+      (e) => {
+        this.pointerX = e.offsetX;
+        this.pointerY = e.offsetY;
+        this.pointerInside = true;
+      },
+      { signal: this.gaitKeys.signal },
+    );
+    canvas.addEventListener(
+      'pointerleave',
+      () => {
+        this.pointerInside = false;
       },
       { signal: this.gaitKeys.signal },
     );
@@ -867,6 +945,13 @@ export class ClientApp {
         this.templateHeights = set.creatures.map(
           (kind) => described.get(kind.bodies[0] ?? '')?.bounds.render[1][1] ?? 1.5,
         );
+        this.templateBoxes = set.creatures.map((kind) => {
+          const body = described.get(kind.bodies[0] ?? '');
+          return body === undefined ? null : bodyBox(body.kind, body.bounds.render, body.bounds.collision);
+        });
+        const character = described.get(RIG_OUTFIT);
+        this.characterBox =
+          character === undefined ? null : bodyBox(character.kind, character.bounds.render, character.bounds.collision);
         this.crowd = await mountCrowd(
           this.scene,
           mount.library,
@@ -1006,6 +1091,8 @@ export class ClientApp {
     this.source?.dispose();
     this.source = null;
     this.labels.dispose();
+    this.frames.dispose();
+    this.pressRing.dispose();
     this.attacks.dispose();
     this.fx.dispose();
     this.damage.dispose();
@@ -1933,6 +2020,7 @@ export class ClientApp {
     }
 
     const pool = this.placedShapes;
+    this.shapedNetIds.clear();
     let count = 0;
     for (let i = 0; i < this.structureCount; i++) {
       const sample = this.structureSamples[i];
@@ -1941,6 +2029,8 @@ export class ClientApp {
         continue;
       }
 
+      this.placedNetIds[count] = sample.netId;
+      this.shapedNetIds.add(sample.netId);
       if (count === pool.length) {
         pool.push({ shape, x: sample.x, z: sample.z, quarters: sample.yaw, y: sample.y });
       } else {
@@ -1987,6 +2077,10 @@ export class ClientApp {
 
   /** Reused each frame: the structures the predicted body may be inside, pooled. */
   private readonly placedShapes: PlacedShape[] = [];
+  /** The netId of each of {@link placedShapes}' structures, by the same index: what the pick selects when it meets one. */
+  private readonly placedNetIds: number[] = [];
+  /** The structures {@link placedShapes} holds geometry for: picked by it, never as their style's box. */
+  private readonly shapedNetIds = new Set<number>();
 
   /** Reused: the predicted position being pushed out. */
   private readonly predictedAt = { x: 0, z: 0 };
@@ -2018,9 +2112,9 @@ export class ClientApp {
    * ({@link driveIntent}).
    */
   private keyIntent(): MoveIntent | null {
-    // The destination menu holds the keys, on every path that reads them — the frame loop's and the keydown flush's: an arrow key in it is not a
-    // step away from the terminal, and a flush that skipped this sent one (review).
-    if (useUi.getState().ticketMenu) {
+    // An open context menu holds the keys, on every path that reads them — the frame loop's and the keydown flush's: an arrow key in the
+    // terminal's destinations is not a step away from the terminal, and a flush that skipped this sent one (review).
+    if (useUi.getState().contextMenu !== null) {
       return null;
     }
 
@@ -2084,7 +2178,7 @@ export class ClientApp {
       this.driveYaw = this.drive.yaw;
     }
 
-    const input = steering && !useUi.getState().ticketMenu ? driveInputOf(this.input.heldKeys) : PARKED_HANDS;
+    const input = steering && useUi.getState().contextMenu === null ? driveInputOf(this.input.heldKeys) : PARKED_HANDS;
     if (max > 0) {
       this.drive.step(dtS, input, max);
     }
@@ -2949,7 +3043,6 @@ export class ClientApp {
     view.viewportWidth = this.cssSize.width;
     view.viewportHeight = this.cssSize.height;
     view.pixelsPerMetre = this.cssSize.height / (2 * Math.tan(cam.fov / 2));
-    view.selectedNetId = ui.selectedNetId;
     if (this.predictor.active && live !== null) {
       this.predictedOverride.netId = live.selfNetId;
       this.predictedOverride.x = this.predictor.x;
@@ -2975,9 +3068,12 @@ export class ClientApp {
     const matrix = this.scene.getTransformMatrix().m;
     extractFrustumPlanes(matrix, view.planes);
 
-    // What something other than the packer is drawing: the rigged avatar, and every structure standing as an asset.
+    // What something other than the packer is drawing: the rigged avatar, hidden from the pick as well; every structure
+    // and camp standing as its asset, which the pick still finds (FrameView.drawnElsewhere).
     const hidden = this.hidden;
     hidden.clear();
+    const elsewhere = this.elsewhere;
+    elsewhere.clear();
     const avatar = this.driveAvatar(live, now, dt);
     if (avatar !== 0) {
       hidden.add(avatar);
@@ -2988,16 +3084,21 @@ export class ClientApp {
     this.assetView.eyeZ = cam.eyeZ;
     this.assetView.pixelsPerMetre = view.pixelsPerMetre;
     for (const netId of this.updateStaticAssets(cam.eyeX, cam.eyeZ)) {
-      hidden.add(netId);
+      elsewhere.add(netId);
     }
 
     for (const netId of this.updateLairAssets(cam.eyeX, cam.eyeZ)) {
+      elsewhere.add(netId);
+    }
+
+    for (const netId of this.dormantLairs) {
       hidden.add(netId);
     }
 
     this.updateGizmos(ui);
 
     view.hidden = hidden;
+    view.drawnElsewhere = elsewhere;
 
     // <b>The crowd collects as the layers pack, not in a pass of its own.</b> Everything a body needs — its place in
     // render space, its heading, its ground speed — is computed by the packer anyway, so a character layer diverts its
@@ -3073,6 +3174,8 @@ export class ClientApp {
     g.selectionZ = this.selectedZ;
     this.profile.update(g, this.grid, this.source?.debug ?? null);
 
+    const framedTag = this.updateSelectionFeedback(matrix, hasSelection ? ui.selectedNetId : 0, playing);
+
     if (!ui.showLabels) {
       this.labels.hideAll();
     } else {
@@ -3093,7 +3196,12 @@ export class ClientApp {
 
       this.updateEnemyBars(matrix, view);
 
-      if (hasSelection) {
+      if (framedTag !== null) {
+        // On the frame's top edge: over what is drawn, at every distance. A lift in metres above the feet put the tag a
+        // metre and a half over a person's head, and a fixed pixel offset on top of it.
+        const r = this.frameRect;
+        this.labels.placeSelection((r.left + r.right) * 0.5, r.top, framedTag);
+      } else if (hasSelection) {
         this.labels.updateSelection(
           matrix,
           view.originX,
@@ -3103,7 +3211,7 @@ export class ClientApp {
           this.selectedX,
           this.selectedZ,
           this.selectionText,
-          this.selectedY,
+          this.selectedY + this.heightOf(ui.selectedNetId),
         );
       } else {
         this.labels.hideSelection();
@@ -3258,7 +3366,19 @@ export class ClientApp {
     planet.dy = this.pickRay.dy;
     planet.dz = this.pickRay.dz;
     const groundT = rayGroundT(planet, this.field, PICK_MAX_DISTANCE_M);
+    this.pickedPart = null;
 
+    // <b>The structures' real geometry first</b> (`world-pick.ts`): where the ray meets a wall, a pad or a terminal. Nothing
+    // behind that is pickable, as nothing behind the ground is; a body standing against it still is, by the slack.
+    const shapes = this.gatherStructureShapes();
+    const wall = this.pickWall;
+    const walled = rayOnShapes(this.placedShapes, shapes, planet, groundT, wall);
+    const maxT = walled ? Math.min(groundT, wall.t + PICK_SURFACE_SLACK_M) : groundT;
+
+    // <b>Bodies before places</b>: every layer but the structures', and the structures' parts. A structure drawn as its
+    // asset is picked by its walls below, not as its style's box — the shuttleport's is 46 m square, and everyone on its
+    // open plaza was behind that box's face.
+    const structures = this.archetypes.indexOf(STRUCTURE_ARCHETYPE);
     const best = this.pickBest;
     best.archetype = -1;
     best.netId = 0;
@@ -3266,10 +3386,184 @@ export class ClientApp {
     best.depth = Infinity;
     best.inside = false;
     for (const layer of this.layers) {
-      layer.pick(this.pickRay, matrix, this.view, x, y, PICK_RADIUS_PX, best, groundT);
+      if (layer.archetype !== structures) {
+        layer.pick(this.pickRay, matrix, this.view, x, y, PICK_RADIUS_PX, best, maxT);
+      }
+    }
+
+    for (const part of this.terminalsInView()) {
+      const t = rayOnSlabs(planet, part.min[0], part.min[1], part.min[2], part.max[0], part.max[1], part.max[2]);
+      if (t <= maxT && (!best.inside || t < best.depth)) {
+        best.archetype = -1;
+        best.netId = 0;
+        best.pixels = 0;
+        best.depth = t;
+        best.inside = true;
+        this.pickedPart = part;
+      }
+    }
+
+    if (best.inside) {
+      return best.netId;
+    }
+
+    // The structure the ray met, by its walls.
+    if (walled) {
+      this.pickedPart = null;
+      return this.placedNetIds[wall.index];
+    }
+
+    // A structure with no published geometry, drawn as its style's box, and the near-miss fallback for a body only a few
+    // pixels across. A structure that HAS geometry and was missed by it is not taken as its box: that is the open plaza.
+    const bodyNetId = best.netId;
+    const bodyArchetype = best.archetype;
+    const bodyPixels = best.pixels;
+    const layer = this.layers.find((l) => l.archetype === structures);
+    layer?.pick(this.pickRay, matrix, this.view, x, y, PICK_RADIUS_PX, best, maxT);
+    if (best.netId !== bodyNetId && this.shapedNetIds.has(best.netId)) {
+      best.netId = bodyNetId;
+      best.archetype = bodyArchetype;
+      best.pixels = bodyPixels;
     }
 
     return best.netId;
+  }
+
+  /** The ticket terminal part {@link pickAt} found, or `null` when it found an entity or nothing. */
+  private pickedPart: TerminalPart | null = null;
+
+  /** Reused by {@link pickAt}: where the ray met the structures' geometry. */
+  private readonly pickWall: ShapeHit = { t: 0, index: -1 };
+
+  /**
+   * The ticket terminals of the shuttleports this frame's structures hold — the parts the pick and the long press know —
+   * rebuilt when the structures are.
+   */
+  private terminalsInView(): readonly TerminalPart[] {
+    if (this.partsEpoch === this.structureEpoch && this.partsSet === this.assetSet) {
+      return this.terminalParts;
+    }
+
+    this.partsEpoch = this.structureEpoch;
+    this.partsSet = this.assetSet;
+    this.terminalParts = [];
+    const library = this.assets?.library ?? null;
+    const port = library?.described(SHUTTLEPORT_ASSET) ?? null;
+    const terminal = library?.described(TICKET_TERMINAL_ASSET) ?? null;
+    if (port === null || terminal === null) {
+      return this.terminalParts;
+    }
+
+    const children = new Map([[TICKET_TERMINAL_ASSET, terminal]]);
+    for (let i = 0; i < this.structureCount; i++) {
+      const s = this.structureSamples[i];
+      if (s.kind !== StructureKind.Shuttleport) {
+        continue;
+      }
+
+      const use = ticketTerminalOf(port, children, s.x, s.y, s.z, s.yaw);
+      if (use === null || use.corners === null) {
+        continue;
+      }
+
+      const min = [Infinity, Infinity, Infinity];
+      const max = [-Infinity, -Infinity, -Infinity];
+      for (let c = 0; c < 8; c++) {
+        for (let axis = 0; axis < 3; axis++) {
+          min[axis] = Math.min(min[axis], use.corners[c * 3 + axis]);
+          max[axis] = Math.max(max[axis], use.corners[c * 3 + axis]);
+        }
+      }
+
+      this.terminalParts.push({ owner: s.netId, use, min, max });
+    }
+
+    return this.terminalParts;
+  }
+
+  private terminalParts: TerminalPart[] = [];
+  private partsEpoch = -1;
+  private partsSet: AssetSet | null = null;
+
+  /** The ticket terminal of shuttleport `owner` in view, or `null`. */
+  private terminalPart(owner: number): TerminalPart | null {
+    return this.terminalsInView().find((p) => p.owner === owner) ?? null;
+  }
+
+  /** Whether this session's body stands where `part` can be used: within its published radius of its stand point. */
+  private canUse(part: TerminalPart): boolean {
+    const live = this.source;
+    if (live === null || !live.canPlay || live.selfNetId === 0) {
+      return false;
+    }
+
+    const x = this.predictor.active ? this.predictor.x : this.eyeX;
+    const z = this.predictor.active ? this.predictor.z : this.eyeZ;
+    return Math.hypot(part.use.x - x, part.use.z - z) <= part.use.radiusM;
+  }
+
+  /**
+   * A left press began: a long press when what is under it offers a menu now — the ticket terminal, with the body at it
+   * — and an ordinary click otherwise, which shows no ring.
+   */
+  private startPress(x: number, y: number): void {
+    // A press with a menu open has already closed it: the menu hears every press first, in the capture phase.
+    this.swallowClick = false;
+    this.endPress();
+    this.pickAt(x, y);
+    const part = this.pickedPart;
+    if (part !== null && this.canUse(part)) {
+      this.press = { x, y, startMs: performance.now(), owner: part.owner, fired: false };
+    }
+  }
+
+  /** Ends the press, opened or not: the ring goes, and the cursor is rewritten next frame. */
+  private endPress(): void {
+    this.press = null;
+    this.pressRing.hide();
+    this.cursorCss = '';
+  }
+
+  /** The long press under way, or `null`. `fired` once its menu has opened. */
+  private press: { x: number; y: number; startMs: number; owner: number; fired: boolean } | null = null;
+
+  /** Whether the next click is the one a long press ended in. */
+  private swallowClick = false;
+
+  /** Advances the press: draws its ring, and opens the menu when it is full. Abandoned if the body walked out of range. */
+  private advancePress(nowMs: number): boolean {
+    const press = this.press;
+    if (press === null || press.fired) {
+      return false;
+    }
+
+    const part = this.terminalPart(press.owner);
+    if (part === null || !this.canUse(part)) {
+      this.endPress();
+      return false;
+    }
+
+    const progress = pressProgress(press.startMs, nowMs);
+    if (progress < 1) {
+      this.pressRing.show(press.x, press.y, progress);
+      return true;
+    }
+
+    press.fired = true;
+    this.pressRing.hide();
+    const ui = useUi.getState();
+    ui.selectPart({ owner: part.owner, kind: 'ticket' });
+    ui.openContextMenu({
+      x: press.x,
+      y: press.y,
+      title: 'Shuttle destinations',
+      source: 'ticket',
+      items: ticketMenuItems(
+        ui.shuttleport?.city ?? -1,
+        CITIES.map((c) => c.name),
+      ),
+    });
+    return false;
   }
 
   /** Evaluates the selection's position into {@link selectedX}/{@link selectedZ}; false when it has none. */
@@ -3388,8 +3682,8 @@ export class ClientApp {
           next.atTerminal !== held.atTerminal
     ) {
       ui.setShuttleport(next);
-      if (next === null || !next.atTerminal) {
-        ui.setTicketMenu(false);
+      if ((next === null || !next.atTerminal) && ui.contextMenu?.source === 'ticket') {
+        ui.closeContextMenu();
       }
     }
   }
@@ -3712,6 +4006,169 @@ export class ClientApp {
 
   /** How tall each creature template's body is, metres, from its first body's descriptor: where its health bar sits. */
   private templateHeights: readonly number[] = [];
+
+  /** Each creature template's body box, from the same descriptor: what its selection frame is drawn round. */
+  private templateBoxes: readonly (BodyBox | null)[] = [];
+
+  /** A person's body box — a player's or a city NPC's — from the rig's own outfit; null until the catalogue is read. */
+  private characterBox: BodyBox | null = null;
+
+  /** The mouse over the canvas, CSS pixels, and whether it is over it at all. */
+  private pointerX = 0;
+  private pointerY = 0;
+  private pointerInside = false;
+
+  /** The cursor last written to the canvas: a style is written only when it changes. */
+  private cursorCss = '';
+
+  /** Reused each frame by {@link frameOf}. */
+  private readonly drawn: DrawnInstance = { x: 0, y: 0, z: 0, yaw: 0, width: 0, height: 0, length: 0, far: false };
+  private readonly frameRect: ScreenRect = { left: 0, top: 0, right: 0, bottom: 0 };
+  private readonly frameScreen = { x: 0, y: 0, w: 0 };
+
+  /**
+   * The hover and selection feedback (2026-10-25, Loïc): the body under the mouse is framed grey, the selection green, or
+   * red in a fight; the cursor is a crosshair where a click would attack.
+   *
+   * After the layers packed, because a frame is drawn round what was DRAWN this frame, and the pick reads the same packing.
+   *
+   * @returns Whether the selection was framed, its rectangle then in {@link frameRect} — where its tag is placed.
+   */
+  private updateSelectionFeedback(matrix: ArrayLike<number>, selected: number, playing: boolean): string | null {
+    const width = this.cssSize.width;
+    const height = this.cssSize.height;
+    const self = this.source?.selfNetId ?? 0;
+    const ui = useUi.getState();
+    const armed = ui.stance !== NO_STANCE;
+
+    // A long press hides the cursor while its ring fills: the ring is where the cursor is.
+    const pressing = this.advancePress(performance.now());
+    const hovered = this.pointerInside ? this.pickAt(this.pointerX, this.pointerY) : 0;
+    const hoveredPart = this.pickedPart;
+    const css = pressing
+      ? 'none'
+      : CURSORS[hoveredPart !== null ? 'select' : cursorFor(this.cursorSubject(hovered, self), playing, armed)];
+    if (css !== this.cursorCss) {
+      this.cursorCss = css;
+      this.canvas.style.cursor = css;
+    }
+
+    // A selected part whose port left the view goes, as an entity's selection does.
+    const selectedPart = ui.selectedPart === null ? null : this.terminalPart(ui.selectedPart.owner);
+    if (ui.selectedPart !== null && selectedPart === null) {
+      ui.selectPart(null);
+    }
+
+    const hoverIsSelected = hoveredPart !== null ? hoveredPart === selectedPart : hovered === selected;
+    if (
+      !hoverIsSelected &&
+      (hoveredPart !== null
+        ? this.partFrame(matrix, hoveredPart, width, height)
+        : hovered !== 0 && this.frameOf(matrix, hovered, width, height))
+    ) {
+      this.frames.show(0, this.frameRect, 'hover');
+    } else {
+      this.frames.hide(0);
+    }
+
+    if (selectedPart !== null) {
+      if (!this.partFrame(matrix, selectedPart, width, height)) {
+        this.frames.hide(1);
+        return null;
+      }
+
+      this.frames.show(1, this.frameRect, 'passive');
+      return TICKET_TERMINAL_LABEL;
+    }
+
+    if (selected === 0 || !this.frameOf(matrix, selected, width, height)) {
+      this.frames.hide(1);
+      return null;
+    }
+
+    const targetsViewer = self !== 0 && this.fieldOf(selected, 'target') === self;
+    this.frames.show(
+      1,
+      this.frameRect,
+      selectionTone(this.cursorSubject(selected, self), playing, armed, targetsViewer),
+    );
+    return this.selectionText;
+  }
+
+  /** The screen rectangle round a part, into {@link frameRect}; false when it is behind the camera or off screen. */
+  private partFrame(matrix: ArrayLike<number>, part: TerminalPart, width: number, height: number): boolean {
+    const corners = part.use.corners;
+    return (
+      corners !== null &&
+      projectCorners(
+        matrix,
+        corners,
+        this.view.originX,
+        this.view.originZ,
+        width,
+        height,
+        this.frameScreen,
+        this.frameRect,
+      )
+    );
+  }
+
+  /** What a click on `netId` would be aimed at, for the cursor and the frame's colour. */
+  private cursorSubject(netId: number, self: number): CursorSubject {
+    return {
+      archetype: netId === 0 ? null : this.archetypeName(netId),
+      hp: netId === 0 ? Number.NaN : this.fieldOf(netId, 'hp'),
+      self: netId !== 0 && netId === self,
+    };
+  }
+
+  /**
+   * The screen rectangle round what `netId` was drawn as this frame, into {@link frameRect}: its body's box where the
+   * catalogue says what body it wears, its style's box otherwise, and the sprite's square in the far band.
+   *
+   * @returns False when no layer drew it this frame, or its box is behind the camera or off screen.
+   */
+  private frameOf(matrix: ArrayLike<number>, netId: number, width: number, height: number): boolean {
+    const location = this.world.locate(netId);
+    if (location === NOT_FOUND) {
+      return false;
+    }
+
+    const archetype = archetypeOf(location);
+    const layer = this.layers.find((l) => l.archetype === archetype);
+    const d = this.drawn;
+    if (layer === undefined || !layer.instanceOf(netId, d)) {
+      return false;
+    }
+
+    if (d.far) {
+      const p = projectToScreen(matrix, d.x, d.y, d.z, width, height, this.frameScreen);
+      if (!(p.w > 0) || !Number.isFinite(p.x)) {
+        return false;
+      }
+
+      const r = this.frameRect;
+      r.left = p.x - d.width * 0.5;
+      r.right = p.x + d.width * 0.5;
+      r.top = p.y - d.height * 0.5;
+      r.bottom = p.y + d.height * 0.5;
+      return true;
+    }
+
+    const box = this.bodyBoxOf(netId, archetype) ?? styleBox(d.width, d.height, d.length);
+    return projectBox(matrix, d.x, d.y, d.z, d.yaw, box, width, height, this.frameScreen, this.frameRect);
+  }
+
+  /** The box of the body an entity wears, when the catalogue says which: a creature's by its template, a person's. */
+  private bodyBoxOf(netId: number, archetype: number): BodyBox | null {
+    const name = this.archetypes.infos[archetype]?.name;
+    if (name === 'Creature') {
+      const template = this.fieldOf(netId, 'template');
+      return this.templateBoxes[Number.isFinite(template) ? template : -1] ?? null;
+    }
+
+    return name === 'Player' || name === 'CityNpc' ? this.characterBox : null;
+  }
 
   /**
    * A health bar over every living creature fighting this session's avatar: its replicated `target` — an entity reference,
@@ -4133,6 +4590,7 @@ export class ClientApp {
    */
   private updateLairAssets(eyeX: number, eyeZ: number): ReadonlySet<number> {
     const layer = this.lairAssets;
+    this.dormantLairs.clear();
     if (layer === null) {
       return NONE_HIDDEN;
     }
@@ -4149,7 +4607,6 @@ export class ClientApp {
     const ground = altitudeField(store);
     const reach = STATIC_ASSET_RANGE_M * STATIC_ASSET_RANGE_M;
     let taken = 0;
-    this.dormantLairs.clear();
     for (let i = 0; i < store.liveCount; i++) {
       const slot = store.live[i];
       // The mission pool's waiting lairs are not places: drawn neither as their camp nor as the renderer's own shape.
@@ -4180,26 +4637,11 @@ export class ClientApp {
       sample.asset = templates[slot];
     }
 
-    const drawn = layer.update(samples, taken, this.assetView);
-    if (this.dormantLairs.size === 0) {
-      return drawn;
-    }
-
-    this.lairHidden.clear();
-    for (const id of drawn) {
-      this.lairHidden.add(id);
-    }
-
-    for (const id of this.dormantLairs) {
-      this.lairHidden.add(id);
-    }
-
-    return this.lairHidden;
+    return layer.update(samples, taken, this.assetView);
   }
 
-  /** The mission pool's dormant lairs this frame, and what the lair layer must not draw: those and the ones drawn as props. */
+  /** The mission pool's dormant lairs this frame: drawn as nothing, by the lair layer or as a prop. */
   private readonly dormantLairs = new Set<number>();
-  private readonly lairHidden = new Set<number>();
 
   /**
    * Builds each creature species' crowd, and the router that sends bodies to it.
@@ -4319,6 +4761,8 @@ export class ClientApp {
 
   /** The netIds the packer must skip this frame, rewritten in place. */
   private readonly hidden = new Set<number>();
+  /** Reused each frame: what the assets draw and the layers still pick (`FrameView.drawnElsewhere`). */
+  private readonly elsewhere = new Set<number>();
 
   /** The structures-as-assets layer, once the asset set is mounted. */
   private staticAssets: StaticAssets | null = null;

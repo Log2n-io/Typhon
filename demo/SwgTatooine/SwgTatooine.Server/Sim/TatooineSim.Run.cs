@@ -377,6 +377,9 @@ public sealed partial class TatooineSim
     /// <summary>Mission lairs replaced at their mission's point with their defenders; see <see cref="SimBridge.MissionLairsRehoused"/>.</summary>
     public long MissionLairsRehoused => _bridge?.MissionLairsRehoused ?? 0;
 
+    /// <summary>Refills skipped because their lair was replaced earlier in the tick; see <see cref="SimBridge.RefillsOfGoneLairs"/>.</summary>
+    public long RefillsOfGoneLairs => _bridge?.RefillsOfGoneLairs ?? 0;
+
     /// <summary>Routes the scripted crowd planned round a city's buildings, and searches that found no way; see <see cref="SimBridge.RouteTotals"/>.</summary>
     public (long Planned, long Failed) RouteTotals => _bridge?.RouteTotals ?? (0L, 0L);
 

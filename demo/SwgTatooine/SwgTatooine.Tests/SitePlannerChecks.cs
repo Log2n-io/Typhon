@@ -187,7 +187,8 @@ public sealed class SitePlannerChecks
             // 46.2 x 46.2 since 2026-10-22: the reservation follows the published `tat_shuttleport`, which is what a
             // shuttleport IS, rather than the 32 m square it used to be planted in and stand over.
             Assert.That(StructureFootprint.HalfExtentM(StructureKind.Shuttleport), Is.EqualTo(23.1f), "STRUCTURE_SIZES says the dome is 46.2 x 46.2");
-            Assert.That(StructureFootprint.HalfExtentM(StructureKind.Factory), Is.EqualTo(11f), "STRUCTURE_SIZES says a factory is 22 x 22");
+            Assert.That(StructureFootprint.HalfExtentM(StructureKind.Factory), Is.EqualTo(3f), "STRUCTURE_SIZES says a factory is 6 x 6");
+            Assert.That(StructureFootprint.HalfExtentM(StructureKind.Harvester), Is.EqualTo(3.4f), "STRUCTURE_SIZES says a harvester is 6.8 x 6.8");
             Assert.That(StructureFootprint.HalfExtentM(StructureKind.TownHall), Is.EqualTo(17.8f), "STRUCTURE_SIZES says a town hall is 35.6 x 35.6");
             Assert.That(StructureFootprint.HalfExtentM(StructureKind.Interior), Is.EqualTo(14f), "STRUCTURE_SIZES says a room's floor is 28 x 28");
 

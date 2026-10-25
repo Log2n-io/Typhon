@@ -106,11 +106,17 @@ public sealed class CausalityLoopTests
     private RunResult _result;
     private long _creditsBefore;
 
+    /// <remarks>
+    /// <b>12 000 ticks, 20 minutes at 10 Hz</b>: long enough for the mission loop to complete several missions, not only to issue one. A mission runs out
+    /// with its lair standing after SimBridge.MissionWalkSeconds, and a lair at difficulty 9 outlasts what one fighter brings in that time, so a completion in
+    /// the window is a matter of which difficulties are drawn: 4 000 ticks held one only on some world draws (none on the draw that showed it), 8 000 two,
+    /// 12 000 six (measured, 2026-10-25). The world's build is most of the fixture's cost, and the extra ticks about 8 s.
+    /// </remarks>
     [OneTimeSetUp]
     public void RunWorld()
     {
         _dir = Worlds.NewDirectory();
-        _sim = new TatooineSim(Causality.LongEnough(_dir, 4000));
+        _sim = new TatooineSim(Causality.LongEnough(_dir, 12_000));
         _sim.Initialize();
         _creditsBefore = Causality.TotalCredits(_sim);
         _result = _sim.Run();

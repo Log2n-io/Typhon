@@ -7,6 +7,15 @@ export interface CameraInputHandlers {
   onClick(x: number, y: number): void;
   /** The user moved the camera by hand: following stops. */
   onManualMove(): void;
+  /**
+   * The left button went down, in CSS pixels relative to the canvas: what may become a long press (`press-ring.ts`). It
+   * ends in {@link onRelease} — before the {@link onClick} it may still turn out to be — or in {@link onDragStart}.
+   */
+  onPress?(x: number, y: number): void;
+  /** The pressed button came up, or the press was taken from the canvas. Before {@link onClick}. */
+  onRelease?(): void;
+  /** The press moved past the drag threshold: it is a drag of the camera now, not a press. */
+  onDragStart?(): void;
 }
 
 /** The canvas size in CSS pixels, kept current by its owner: reading layout on every pointer event would force reflows. */
@@ -83,9 +92,11 @@ export class CameraInput {
     });
     on(canvas, 'pointercancel', (e) => {
       this.drag.cancel(e.pointerId);
+      this.handlers.onRelease?.();
     });
     on(canvas, 'lostpointercapture', (e) => {
       this.drag.cancel(e.pointerId);
+      this.handlers.onRelease?.();
     });
     on(
       canvas,
@@ -227,6 +238,10 @@ export class CameraInput {
       return;
     }
 
+    if (e.button === 0) {
+      this.handlers.onPress?.(e.offsetX, e.offsetY);
+    }
+
     try {
       this.canvas.setPointerCapture(e.pointerId);
     } catch {
@@ -241,8 +256,13 @@ export class CameraInput {
 
     const x = e.offsetX;
     const y = e.offsetY;
+    const wasMoved = this.drag.moved;
     if (!this.drag.move(e.pointerId, e.buttons, x, y)) {
       return;
+    }
+
+    if (!wasMoved) {
+      this.handlers.onDragStart?.();
     }
 
     const dYaw = (x - this.drag.lastX) * 0.005;
@@ -267,7 +287,9 @@ export class CameraInput {
     // The PRESS position, not the release. A click may wander up to the slop and still count, and reporting where the
     // finger ended would then aim the pick a few pixels off what the user pressed on — which is a miss at a small sprite.
     const { startX, startY } = this.drag;
-    if (this.drag.up(e.pointerId, e.buttons)) {
+    const click = this.drag.up(e.pointerId, e.buttons);
+    this.handlers.onRelease?.();
+    if (click) {
       this.handlers.onClick(startX, startY);
     }
   }

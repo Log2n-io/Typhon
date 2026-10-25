@@ -23,16 +23,18 @@ export function chooseBand(previous: number, pixels: number): number {
 }
 
 /**
- * The per-instance integer the shaders unpack: bits 0–3 style index, 4–6 mode, 7 selected. A style index outside
+ * The per-instance integer the shaders unpack: bits 0–3 style index, 4–6 mode. A style index outside
  * [0, {@link STYLE_LIMIT}) draws as style 0 rather than reading past the shaders' arrays.
+ *
+ * There is no selected bit (2026-10-25): the selection is shown by its frame (`selection-frame.ts`), not by a tint and a
+ * grown mesh, which a body the crowd draws never showed.
  */
 export const STYLE_LIMIT = 16;
 export const MODE_LIMIT = 8;
-export const SELECTED_BIT = STYLE_LIMIT * MODE_LIMIT;
 
-export function packState(style: number, mode: number, selected: boolean): number {
+export function packState(style: number, mode: number): number {
   const s = style >= 0 && style < STYLE_LIMIT ? style | 0 : 0;
-  return s + ((mode | 0) & (MODE_LIMIT - 1)) * STYLE_LIMIT + (selected ? SELECTED_BIT : 0);
+  return s + ((mode | 0) & (MODE_LIMIT - 1)) * STYLE_LIMIT;
 }
 
 /** Style index of a packed instance. */
@@ -42,7 +44,7 @@ export function packedStyle(packed: number): number {
 
 /** Mode index of a packed instance. */
 export function packedMode(packed: number): number {
-  return Math.floor((packed % SELECTED_BIT) / STYLE_LIMIT);
+  return Math.floor(packed / STYLE_LIMIT) % MODE_LIMIT;
 }
 
 /** Six frustum planes `(a, b, c, d)` from a view-projection matrix, normalised so `a·x + b·y + c·z + d` is a distance. */
@@ -380,7 +382,6 @@ export function pickShapes(
   count: number,
   sizes: Float64Array,
   flattenMode: number,
-  selectedScale: number,
   archetype: number,
   best: PickHit,
   maxT = Infinity,
@@ -389,10 +390,9 @@ export function pickShapes(
     const b = k * 4;
     const packed = data[b + 3];
     const style = packedStyle(packed);
-    const grow = packed >= SELECTED_BIT ? selectedScale : 1;
-    const hx = sizes[style * 3] * grow * 0.5;
-    const sy = sizes[style * 3 + 1] * grow * (packedMode(packed) === flattenMode ? 0.25 : 1);
-    const hz = sizes[style * 3 + 2] * grow * 0.5;
+    const hx = sizes[style * 3] * 0.5;
+    const sy = sizes[style * 3 + 1] * (packedMode(packed) === flattenMode ? 0.25 : 1);
+    const hz = sizes[style * 3 + 2] * 0.5;
 
     // Into the instance's own frame: translate, then undo the shader's yaw. It computes
     // `turned = (lx·c + lz·s, ly, −lx·s + lz·c)`, whose inverse is `lx = dx·c − dz·s`, `lz = dx·s + dz·c`.
@@ -513,7 +513,6 @@ export function pickInstances(
   count: number,
   liftByStyle: Float64Array | number,
   insideRadius: number,
-  selectedScale: number,
   width: number,
   height: number,
   px: number,
@@ -540,7 +539,7 @@ export function pickInstances(
     const s = projectToScreen(matrix, data[b], data[b + 1] + lift, data[b + 2], width, height, screen);
     // A point behind the camera projects to NaN, which is never within reach of either test below.
     const d = Math.hypot(s.x - px, s.y - py);
-    const radius = insideRadius * (packed >= SELECTED_BIT ? selectedScale : 1);
+    const radius = insideRadius;
     if (radius > 0 && d <= radius) {
       if (!best.inside || along < best.depth) {
         best.archetype = archetype;

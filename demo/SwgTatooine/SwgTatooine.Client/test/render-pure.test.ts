@@ -10,7 +10,7 @@ import { PrefixUploader } from '../src/render/prefix-upload';
 import { buildShape, type ShapeKind } from '../src/render/shapes';
 import * as shaders from '../src/render/shaders';
 import { KNOWN_ARCHETYPES } from '../src/data/archetypes';
-import { SELECTED_MESH_SCALE, STYLE_COUNT, styleFor, TINT_COUNT, type LayerStyle } from '../src/render/styles';
+import { STYLE_COUNT, styleFor, TINT_COUNT, type LayerStyle } from '../src/render/styles';
 import {
   invertMatrix4,
   packState,
@@ -92,17 +92,15 @@ describe('shapes', () => {
 });
 
 describe('style bounds', () => {
-  it('holds every corner of every style, grown by the selection scale, whatever the yaw', () => {
+  it('holds every corner of every style, whatever the yaw', () => {
     for (const style of KNOWN_ARCHETYPES.map((name): LayerStyle => styleFor(name))) {
       style.sizes.forEach(([w, h, l]: readonly [number, number, number], i: number) => {
         const r = style.bounds.radius[i];
         const cy = style.bounds.centerY[i];
-        for (const s of [1, SELECTED_MESH_SCALE]) {
-          for (const y of [0, h * s]) {
-            // The farthest point in xz of a yawed [w, l] box is its half-diagonal.
-            const d = Math.hypot(Math.hypot(w * s, l * s) / 2, y - cy);
-            expect(d).toBeLessThanOrEqual(r + 1e-9);
-          }
+        for (const y of [0, h]) {
+          // The farthest point in xz of a yawed [w, l] box is its half-diagonal.
+          const d = Math.hypot(Math.hypot(w, l) / 2, y - cy);
+          expect(d).toBeLessThanOrEqual(r + 1e-9);
         }
 
         expect(style.bounds.extent[i]).toBe(Math.max(w, h, l));
@@ -249,7 +247,7 @@ describe('pickInstances', () => {
     for (let k = 0; k < xz.length / 2; k++) {
       data[k * 4] = xz[k * 2];
       data[k * 4 + 2] = xz[k * 2 + 1];
-      data[k * 4 + 3] = packState(0, 0, false);
+      data[k * 4 + 3] = packState(0, 0);
     }
 
     return data;
@@ -269,7 +267,7 @@ describe('pickInstances', () => {
     const data = pack(0, 100, 0, 50, 30, 100);
     const netIds = new Uint32Array([11, 22, 33]);
     const best = fresh();
-    pickInstances(rayAt(400, 400), m, data, netIds, 3, 0, 0, 1, 800, 800, 400, 400, 8, 4, best, screen);
+    pickInstances(rayAt(400, 400), m, data, netIds, 3, 0, 0, 800, 800, 400, 400, 8, 4, best, screen);
     expect(best.netId).toBe(22);
     expect(best.archetype).toBe(4);
   });
@@ -277,51 +275,17 @@ describe('pickInstances', () => {
   it('keeps what it holds when nothing is within reach; a point behind the camera projects to NaN, never within reach', () => {
     const best = fresh();
     const data = pack(0, -50, 30, 100);
-    pickInstances(
-      rayAt(400, 400),
-      m,
-      data,
-      new Uint32Array([1, 2]),
-      2,
-      0,
-      0,
-      1,
-      800,
-      800,
-      400,
-      400,
-      8,
-      0,
-      best,
-      screen,
-    );
+    pickInstances(rayAt(400, 400), m, data, new Uint32Array([1, 2]), 2, 0, 0, 800, 800, 400, 400, 8, 0, best, screen);
     expect(best.netId).toBe(0);
   });
 
   it('lifts each instance by its style', () => {
     const data = pack(0, 100);
-    data[3] = packState(1, 0, false);
+    data[3] = packState(1, 0);
     const lift = new Float64Array(16);
     lift[1] = 10; // 10 m up at 100 m: 40 px above the centre on an 800 px viewport
     const best = fresh();
-    pickInstances(
-      rayAt(400, 360),
-      m,
-      data,
-      new Uint32Array([5]),
-      1,
-      lift,
-      0,
-      1,
-      800,
-      800,
-      400,
-      360,
-      2,
-      0,
-      best,
-      screen,
-    );
+    pickInstances(rayAt(400, 360), m, data, new Uint32Array([5]), 1, lift, 0, 800, 800, 400, 360, 2, 0, best, screen);
     expect(best.netId).toBe(5);
   });
 
@@ -330,28 +294,11 @@ describe('pickInstances', () => {
     const data = pack(0, 100);
     data[1] = 10;
     const atGround = fresh();
-    pickInstances(
-      rayAt(400, 400),
-      m,
-      data,
-      new Uint32Array([7]),
-      1,
-      0,
-      0,
-      1,
-      800,
-      800,
-      400,
-      400,
-      2,
-      0,
-      atGround,
-      screen,
-    );
+    pickInstances(rayAt(400, 400), m, data, new Uint32Array([7]), 1, 0, 0, 800, 800, 400, 400, 2, 0, atGround, screen);
     expect(atGround.netId, 'the cursor on the ground point must not pick a thing 10 m above it').toBe(0);
 
     const aloft = fresh();
-    pickInstances(rayAt(400, 360), m, data, new Uint32Array([7]), 1, 0, 0, 1, 800, 800, 400, 360, 2, 0, aloft, screen);
+    pickInstances(rayAt(400, 360), m, data, new Uint32Array([7]), 1, 0, 0, 800, 800, 400, 360, 2, 0, aloft, screen);
     expect(aloft.netId, 'the cursor on the entity itself must pick it').toBe(7);
   });
 
@@ -381,14 +328,14 @@ describe('pickInstances', () => {
       [450, 350, 'a top corner'],
     ] as const) {
       const best = fresh();
-      pickShapes(rayAt(px, py), data, yaws, netIds, 1, sizes, -1, 1.4, 3, best);
+      pickShapes(rayAt(px, py), data, yaws, netIds, 1, sizes, -1, 3, best);
       expect(best.netId, `clicking ${where}`).toBe(42);
       expect(best.inside, `clicking ${where}`).toBe(true);
     }
 
     // And it still refuses the sky beside it, which is the other half of picking working.
     const miss = fresh();
-    pickShapes(rayAt(700, 400), data, yaws, netIds, 1, sizes, -1, 1.4, 3, miss);
+    pickShapes(rayAt(700, 400), data, yaws, netIds, 1, sizes, -1, 3, miss);
     expect(miss.netId).toBe(0);
   });
 
@@ -405,11 +352,11 @@ describe('pickInstances', () => {
     const aside = rayAt(440, 399);
 
     const along = fresh();
-    pickShapes(aside, data, new Float32Array([0]), netIds, 1, sizes, -1, 1.4, 0, along);
+    pickShapes(aside, data, new Float32Array([0]), netIds, 1, sizes, -1, 0, along);
     expect(along.netId, 'facing +Z, 10 m to the side is outside the 4 m width').toBe(0);
 
     const across = fresh();
-    pickShapes(aside, data, new Float32Array([Math.PI / 2]), netIds, 1, sizes, -1, 1.4, 0, across);
+    pickShapes(aside, data, new Float32Array([Math.PI / 2]), netIds, 1, sizes, -1, 0, across);
     expect(across.netId, 'turned a quarter turn, the same point is inside the 40 m length').toBe(9);
   });
 
@@ -425,25 +372,19 @@ describe('pickInstances', () => {
 
     const plain = pack(0, 100);
     const unselected = fresh();
-    pickShapes(edge, plain, yaws, netIds, 1, sizes, -1, 1.4, 0, unselected);
+    pickShapes(edge, plain, yaws, netIds, 1, sizes, -1, 0, unselected);
     expect(unselected.netId).toBe(0);
-
-    const chosen = pack(0, 100);
-    chosen[3] = packState(0, 0, true);
-    const selected = fresh();
-    pickShapes(edge, chosen, yaws, netIds, 1, sizes, -1, 1.4, 0, selected);
-    expect(selected.netId, 'a selected shape is drawn 1.4× bigger, so it is that much bigger to click').toBe(3);
 
     // A corpse is a quarter of its height: 10 m becomes 2.5 m, which at 100 m is 10 px above the ground point.
     const corpse = pack(0, 100);
-    corpse[3] = packState(0, 2, false);
+    corpse[3] = packState(0, 2);
     const high = rayAt(400, 385);
     const standing = fresh();
-    pickShapes(high, corpse, yaws, netIds, 1, sizes, -1, 1.4, 0, standing);
+    pickShapes(high, corpse, yaws, netIds, 1, sizes, -1, 0, standing);
     expect(standing.netId, 'without the flatten it still reaches 15 px up').toBe(3);
 
     const flattened = fresh();
-    pickShapes(high, corpse, yaws, netIds, 1, sizes, 2, 1.4, 0, flattened);
+    pickShapes(high, corpse, yaws, netIds, 1, sizes, 2, 0, flattened);
     expect(flattened.netId, 'flattened to 2.5 m it does not reach 15 px up').toBe(0);
   });
 
@@ -454,7 +395,7 @@ describe('pickInstances', () => {
     const sizes = buildingSizes();
     const building = pack(0, 60);
     const best = fresh();
-    pickShapes(rayAt(420, 380), building, new Float32Array([0]), new Uint32Array([100]), 1, sizes, -1, 1.4, 1, best);
+    pickShapes(rayAt(420, 380), building, new Float32Array([0]), new Uint32Array([100]), 1, sizes, -1, 1, best);
     expect(best.netId).toBe(100);
     expect(best.inside).toBe(true);
 
@@ -462,24 +403,7 @@ describe('pickInstances', () => {
     const creature = pack(0, 30);
     creature[0] = (420 - 400) / (400 / 30);
     creature[1] = (400 - 380) / (400 / 30);
-    pickInstances(
-      rayAt(420, 380),
-      m,
-      creature,
-      new Uint32Array([7]),
-      1,
-      0,
-      3,
-      2.5,
-      800,
-      800,
-      420,
-      380,
-      8,
-      2,
-      best,
-      screen,
-    );
+    pickInstances(rayAt(420, 380), m, creature, new Uint32Array([7]), 1, 0, 3, 800, 800, 420, 380, 8, 2, best, screen);
     expect(best.netId, 'the nearer thing the cursor is also on must win').toBe(7);
     expect(best.depth).toBeLessThan(60);
   });
@@ -487,30 +411,13 @@ describe('pickInstances', () => {
   it('lets nothing that is merely near a centre displace something the cursor is on', () => {
     const sizes = buildingSizes();
     const best = fresh();
-    pickShapes(rayAt(400, 400), pack(0, 60), new Float32Array([0]), new Uint32Array([100]), 1, sizes, -1, 1.4, 1, best);
+    pickShapes(rayAt(400, 400), pack(0, 60), new Float32Array([0]), new Uint32Array([100]), 1, sizes, -1, 1, best);
     expect(best.netId).toBe(100);
 
     // A point entity 200 m away whose centre is a pixel from the cursor: nearer in SCREEN terms, and not what was
     // clicked. Before the shape test existed this is what a click in a town always found.
     const distant = pack(0, 200);
-    pickInstances(
-      rayAt(400, 400),
-      m,
-      distant,
-      new Uint32Array([55]),
-      1,
-      0,
-      0,
-      1,
-      800,
-      800,
-      400,
-      400,
-      8,
-      2,
-      best,
-      screen,
-    );
+    pickInstances(rayAt(400, 400), m, distant, new Uint32Array([55]), 1, 0, 0, 800, 800, 400, 400, 8, 2, best, screen);
     expect(best.netId).toBe(100);
   });
 });
@@ -632,24 +539,24 @@ describe('the ground stands between the cursor and what is behind it', () => {
     const groundT = rayGroundT(ray, field, 32000);
 
     // Two boxes on the ray: one this side of the wall, one behind it.
-    const data = new Float32Array([-200, 100, 0, packState(0, 0, false), 200, 100, 0, packState(0, 0, false)]);
+    const data = new Float32Array([-200, 100, 0, packState(0, 0), 200, 100, 0, packState(0, 0)]);
     const yaws = new Float32Array([0, 0]);
     const netIds = new Uint32Array([7, 9]);
     const sizes = new Float64Array([40, 40, 40]);
 
     const behindOnly = new Float32Array(data.subarray(4));
     const hidden: PickHit = { archetype: -1, netId: 0, pixels: Infinity, depth: Infinity, inside: false };
-    pickShapes(ray, behindOnly, new Float32Array([0]), new Uint32Array([9]), 1, sizes, -1, 1, 3, hidden, groundT);
+    pickShapes(ray, behindOnly, new Float32Array([0]), new Uint32Array([9]), 1, sizes, -1, 3, hidden, groundT);
     expect(hidden.netId).toBe(0);
 
     // Unbounded — the behaviour before this fix — it is picked, which is what makes the assertion above meaningful.
     const unbounded: PickHit = { archetype: -1, netId: 0, pixels: Infinity, depth: Infinity, inside: false };
-    pickShapes(ray, behindOnly, new Float32Array([0]), new Uint32Array([9]), 1, sizes, -1, 1, 3, unbounded);
+    pickShapes(ray, behindOnly, new Float32Array([0]), new Uint32Array([9]), 1, sizes, -1, 3, unbounded);
     expect(unbounded.netId).toBe(9);
 
     // And the near one is unaffected.
     const visible: PickHit = { archetype: -1, netId: 0, pixels: Infinity, depth: Infinity, inside: false };
-    pickShapes(ray, data, yaws, netIds, 2, sizes, -1, 1, 3, visible, groundT);
+    pickShapes(ray, data, yaws, netIds, 2, sizes, -1, 3, visible, groundT);
     expect(visible.netId).toBe(7);
   });
 });

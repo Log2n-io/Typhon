@@ -100,8 +100,11 @@ public static class StructureFootprint
         StructureKind.Shuttleport => 23.1f,
         StructureKind.PoiProp => 2.5f,       // 5 x 5
         StructureKind.PlayerHouse => 7f,     // 14 x 14
-        StructureKind.Factory => 11f,        // 22 x 22
-        StructureKind.Harvester => 3f,       // 6 x 6
+        // 6 x 6 round the published `factory` (catalogue 11): 5.7 m wide and 4.7 m deep, and the stand point at its console 2.1 m in front with its
+        // 0.3 m body reaches 2.4. It was a 22 m box while nothing was published for it.
+        StructureKind.Factory => 3f,
+        // 6.8 x 6.8, the published `resource_extractor`'s 6.7 x 5.6 m pad. It was 6 x 6.
+        StructureKind.Harvester => 3.4f,
         StructureKind.CampObject => 2f,      // 4 x 4
         // 28 x 28, around a room drawn at its realm's origin: the town hall's reaches 14 m from it, the large house's 9.84 m, the small one's 5.6. It was 20 x
         // 20 before the town hall, and one size for every room keeps a room's broad-phase box what it always was: everything in the realm.

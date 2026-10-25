@@ -13,8 +13,8 @@ interface Label {
   py: number;
 }
 
-/** Selection tag offset above its anchor, CSS pixels. */
-const SELECTION_OFFSET_PX = 18;
+/** Selection tag gap above its anchor — the top of the body's frame — CSS pixels. */
+const SELECTION_OFFSET_PX = 4;
 
 /** A health bar over a body: where its top is, in planet metres, and how much health it has left, 0–1. */
 export interface HealthBar {
@@ -62,7 +62,8 @@ export class Labels {
       this.places.push(this.create(poi.name, 'label label-poi', poi.x, poi.z, 25));
     }
 
-    this.selection = this.create('', 'label label-selection', 0, 0, 3);
+    // Over the head: `updateSelection` is handed the body's top, so the lift is only the air between them.
+    this.selection = this.create('', 'label label-selection', 0, 0, 0.25);
   }
 
   /** Places every label for a view-projection matrix and a CSS viewport. */
@@ -86,8 +87,10 @@ export class Labels {
   /**
    * The selected entity's tag at a planet position; `text` is written only when it differs from what is shown.
    *
-   * `baseY` is the entity's OWN altitude — which already includes the ground under it — not a height re-derived from the
-   * terrain here. Re-deriving it agrees for anything standing on the ground and puts the tag on the ground beneath
+   * The fallback for a selection no layer drew this frame; one that was drawn is tagged by {@link placeSelection}.
+   *
+   * `baseY` is the top of the entity's body: its OWN altitude — which already includes the ground under it — plus its
+   * height, not a height re-derived from the terrain here. Re-deriving it agrees for anything standing on the ground and puts the tag on the ground beneath
    * anything that is not, which is exactly the case `pickInstances` was corrected for: an entity picked where it is drawn
    * and labelled somewhere else.
    */
@@ -112,6 +115,19 @@ export class Labels {
     }
 
     this.place(label, shown, s.x, s.y - SELECTION_OFFSET_PX);
+  }
+
+  /**
+   * The selection's tag, its bottom centre at a point on screen: over the top edge of the body's frame, which is where
+   * the body is drawn whatever its height and distance.
+   */
+  placeSelection(x: number, y: number, text: string): void {
+    const label = this.selection;
+    if (label.element.textContent !== text) {
+      label.element.textContent = text;
+    }
+
+    this.place(label, true, x, y - SELECTION_OFFSET_PX);
   }
 
   hideSelection(): void {

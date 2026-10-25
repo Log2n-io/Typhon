@@ -13,9 +13,6 @@ export type HeadingSource = 'velocity' | 'grid';
 /** Style indices per archetype and tints per mode: the sizes of the shaders' uniform arrays, fixed by the packing. */
 export const STYLE_COUNT = STYLE_LIMIT;
 export const TINT_COUNT = MODE_LIMIT;
-/** A selected entity's mesh grows by this factor, its sprite by {@link SELECTED_SPRITE_SCALE}. */
-export const SELECTED_MESH_SCALE = 1.4;
-export const SELECTED_SPRITE_SCALE = 2.5;
 
 /** Bounds per style index, derived from the sizes: what culling, LOD and picking use. */
 export interface StyleBounds {
@@ -67,10 +64,9 @@ function withBounds(style: StyleInput): LayerStyle {
     sizesFlat[i * 3] = w;
     sizesFlat[i * 3 + 1] = h;
     sizesFlat[i * 3 + 2] = l;
-    // Every shape spans x and z in [−½, ½] and y in [0, 1] before scaling (`meshes.ts`), whatever its yaw. The sphere
-    // around the grown shape also holds the plain one: its centre moves up by 0.2 h ≤ 0.4 r.
-    radius[i] = SELECTED_MESH_SCALE * 0.5 * Math.hypot(w, h, l);
-    centerY[i] = SELECTED_MESH_SCALE * 0.5 * h;
+    // Every shape spans x and z in [−½, ½] and y in [0, 1] before scaling (`meshes.ts`), whatever its yaw.
+    radius[i] = 0.5 * Math.hypot(w, h, l);
+    centerY[i] = 0.5 * h;
     extent[i] = Math.max(w, h, l);
     pickY[i] = 0.5 * h;
   }
@@ -108,8 +104,9 @@ STRUCTURE_SIZES[StructureKind.MissionTerminal] = [0.63, 1.3, 0.51];
 STRUCTURE_SIZES[StructureKind.Shuttleport] = [46.2, 5, 46.2];
 STRUCTURE_SIZES[StructureKind.PoiProp] = [5, 4, 5];
 STRUCTURE_SIZES[StructureKind.PlayerHouse] = [14, 7, 14];
-STRUCTURE_SIZES[StructureKind.Factory] = [22, 11, 22];
-STRUCTURE_SIZES[StructureKind.Harvester] = [6, 14, 6];
+// The server's reservations round the published `factory` and `resource_extractor` (catalogue 11), as tall as they are.
+STRUCTURE_SIZES[StructureKind.Factory] = [6, 5.7, 6];
+STRUCTURE_SIZES[StructureKind.Harvester] = [6.8, 7.2, 6.8];
 STRUCTURE_SIZES[StructureKind.CampObject] = [4, 3, 4];
 // The server's 35.6 m reservation round the hall's origin, which is not its middle: the far-field stand-in is that square.
 STRUCTURE_SIZES[StructureKind.TownHall] = [35.6, 14, 35.6];
@@ -185,13 +182,16 @@ const STYLE_INPUTS: Readonly<Record<string, StyleInput>> = {
       STYLE_COUNT,
       [0.4, 0.3, 0.2],
     ),
+    // The camp a lair is drawn as — a nest, a hideout or a soldiers' camp, about 6 m across and under 3 m tall — because
+    // this box is also what the pick and the selection frame test it as. At 10 × 3 × 10 and 14 × 5 × 14 a click on a
+    // defender standing round the camp landed on the lair.
     sizes: fill(
       [
-        [10, 3, 10],
-        [14, 5, 14],
+        [6, 2.8, 6],
+        [6.2, 2.8, 6.2],
       ],
       STYLE_COUNT,
-      [10, 3, 10],
+      [6, 2.8, 6],
     ),
     tints: fill([], TINT_COUNT, NO_TINT),
     flattenMode: -1,

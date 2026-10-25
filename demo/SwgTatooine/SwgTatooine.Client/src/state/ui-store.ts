@@ -79,8 +79,41 @@ export interface ShuttleportPrompt {
   readonly city: number;
   /** How far the avatar is from it, in metres, rounded — the prompt shows it and a jitter of centimetres is noise. */
   readonly distanceM: number;
-  /** Whether the avatar stands at the port's ticket terminal, where the destination menu is opened (T). */
+  /** Whether the avatar stands at the port's ticket terminal, where a long press on it opens its menu. */
   readonly atTerminal: boolean;
+}
+
+/**
+ * A part of a structure that is a thing in its own right without being an entity: the ticket terminal of the shuttleport
+ * whose netId is `owner`. Hovered, selected and pressed like an entity; the server never hears of it.
+ */
+export interface PartRef {
+  readonly owner: number;
+  readonly kind: 'ticket';
+}
+
+/** What a context menu entry does: plain data, carried out by the store. */
+export type ContextAction = { readonly kind: 'board'; readonly city: number };
+
+export interface ContextMenuItem {
+  readonly label: string;
+  /** The entry's tooltip. */
+  readonly hint: string;
+  readonly action: ContextAction;
+}
+
+/**
+ * The context menu (2026-10-25, Loïc: the general rule of interaction): held left on something that offers actions opens
+ * them at the pointer. `source` says which thing, so the menu can close when that thing stops offering them — the avatar
+ * walked away from the terminal.
+ */
+export interface ContextMenuState {
+  /** Where it opens, CSS pixels over the canvas: where the press was held. */
+  readonly x: number;
+  readonly y: number;
+  readonly title: string;
+  readonly source: 'ticket';
+  readonly items: readonly ContextMenuItem[];
 }
 
 /** A set of archetype names held as a map, so a missing name reads as its default rather than as `false`. */
@@ -174,6 +207,8 @@ export interface UiState {
   readonly jitterMs: number;
   /** netId of the selected entity, 0 for none. */
   readonly selectedNetId: number;
+  /** The selected part of a structure, or `null`; never set together with {@link selectedNetId}. */
+  readonly selectedPart: PartRef | null;
   readonly follow: boolean;
   readonly cameraRequest: CameraRequest | null;
   /**
@@ -256,9 +291,12 @@ export interface UiState {
   readonly walkDoor: (netId: number) => void;
   /** Publishes the port the avatar is standing at, or `null`. Called by the frame loop on change only. */
   readonly setShuttleport: (shuttleport: ShuttleportPrompt | null) => void;
-  /** Whether the ticket terminal's destination menu is open; movement keys are ignored while it is. */
-  readonly ticketMenu: boolean;
-  readonly setTicketMenu: (open: boolean) => void;
+  /** The open context menu, or `null`; movement keys are ignored while one is open. */
+  readonly contextMenu: ContextMenuState | null;
+  readonly openContextMenu: (menu: ContextMenuState) => void;
+  readonly closeContextMenu: () => void;
+  /** Carries out a context menu entry and closes the menu. */
+  readonly runContextAction: (action: ContextAction) => void;
 
   /** The action bar's icon URLs by asset id, once the catalogue is read; empty without one, and the slots show their digit alone. */
   readonly actionIcons: Readonly<Partial<Record<string, string>>>;
@@ -294,6 +332,8 @@ export interface UiState {
   readonly setPaused: (paused: boolean) => void;
   readonly setLatency: (latencyMs: number, jitterMs: number) => void;
   readonly select: (netId: number) => void;
+  /** Selects a part of a structure — and no entity — or clears it with `null`. */
+  readonly selectPart: (part: PartRef | null) => void;
   readonly setFollow: (follow: boolean) => void;
   readonly flyTo: (x: number, z: number, distance: number) => void;
   /** Asks the server to put this session in a realm. An ask: the server may refuse it. */
@@ -331,6 +371,7 @@ export const useUi = create<UiState>()((set, get) => ({
   latencyMs: 40,
   jitterMs: 25,
   selectedNetId: 0,
+  selectedPart: null,
   follow: false,
   cameraRequest: null,
   realmRequest: null,
@@ -459,8 +500,18 @@ export const useUi = create<UiState>()((set, get) => ({
     // thrown out of third person for doing it.
     set((s) => ({
       selectedNetId,
+      selectedPart: null,
       follow: selectedNetId === 0 ? false : s.follow,
       cameraMode: selectedNetId === 0 && !s.playing ? 'god' : s.cameraMode,
+    }));
+  },
+  selectPart: (selectedPart) => {
+    // Like `select(0)` for the camera: a part is nothing to follow or ride.
+    set((s) => ({
+      selectedNetId: 0,
+      selectedPart,
+      follow: false,
+      cameraMode: s.playing ? s.cameraMode : 'god',
     }));
   },
   setFollow: (follow) => {
@@ -509,7 +560,7 @@ export const useUi = create<UiState>()((set, get) => ({
   walkDoor: (netId) => {
     set((s) => ({ doorWalkRequest: { netId, seq: (s.doorWalkRequest?.seq ?? 0) + 1 } }));
   },
-  ticketMenu: false,
+  contextMenu: null,
   actionIcons: {},
   setActionIcons: (actionIcons) => {
     set({ actionIcons });
@@ -534,8 +585,18 @@ export const useUi = create<UiState>()((set, get) => ({
       ...(slot.kind === 'mount' && !fromKey ? { mountRequest: { seq: (s.mountRequest?.seq ?? 0) + 1 } } : {}),
     }));
   },
-  setTicketMenu: (ticketMenu) => {
-    set({ ticketMenu });
+  openContextMenu: (contextMenu) => {
+    set({ contextMenu });
+  },
+  closeContextMenu: () => {
+    if (get().contextMenu !== null) {
+      set({ contextMenu: null });
+    }
+  },
+  runContextAction: (action) => {
+    set({ contextMenu: null });
+    // One kind of action so far: a ticket. The next kind makes this a switch over `action.kind`.
+    get().boardShuttle(action.city);
   },
   setShuttleport: (shuttleport) => {
     set({ shuttleport });

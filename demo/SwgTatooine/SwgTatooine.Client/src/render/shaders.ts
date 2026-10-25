@@ -1,6 +1,6 @@
 import { CITIES, PLANET_HALF_EXTENT_M, POIS } from '../data/world-data';
-import { SELECTED_MESH_SCALE, SELECTED_SPRITE_SCALE, STYLE_COUNT, TINT_COUNT } from './styles';
-import { SELECTED_BIT, STYLE_LIMIT } from './view-math';
+import { STYLE_COUNT, TINT_COUNT } from './styles';
+import { MODE_LIMIT, STYLE_LIMIT } from './view-math';
 
 /**
  * GLSL for the four materials. Babylon's WebGL2 engine converts this WebGL1-style source (attribute / varying /
@@ -18,11 +18,8 @@ const f = (v: number): string => (Number.isInteger(v) ? `${v}.0` : `${v}`);
 const UNPACK = `
   float packed = instData.w;
   float styleIndex = mod(packed, ${f(STYLE_LIMIT)});
-  float mode = mod(floor(packed / ${f(STYLE_LIMIT)}), ${f(SELECTED_BIT / STYLE_LIMIT)});
-  float selected = mod(floor(packed / ${f(SELECTED_BIT)}), 2.0);
+  float mode = mod(floor(packed / ${f(STYLE_LIMIT)}), ${f(MODE_LIMIT)});
 `;
-
-const SELECTED_COLOR = 'vec3(1.0, 0.95, 0.6)';
 
 export const ENTITY_VERTEX = `
 precision highp float;
@@ -41,7 +38,7 @@ varying float vHeight;
 
 void main(void) {
   ${UNPACK}
-  vec3 size = uSizes[int(styleIndex)] * (1.0 + selected * ${f(SELECTED_MESH_SCALE - 1)});
+  vec3 size = uSizes[int(styleIndex)];
   if (mode == uFlattenMode) {
     size.y *= 0.25;
   }
@@ -58,7 +55,7 @@ void main(void) {
   vNormal = vec3(n.x * c + n.z * s, n.y, -n.x * s + n.z * c);
   vec4 tint = uTints[int(mode)];
   vec3 color = mix(uColors[int(styleIndex)], tint.rgb, tint.a);
-  vColor = mix(color, ${SELECTED_COLOR}, selected * 0.55);
+  vColor = color;
   vHeight = position.y;
 }
 `;
@@ -99,12 +96,11 @@ void main(void) {
   ${UNPACK}
   // The lift is above the ENTITY, not above the ground: at altitude the dot follows it up.
   vec4 clip = viewProjection * vec4(instData.x, instData.y + uLift, instData.z, 1.0);
-  float pixels = uPixels * (1.0 + selected * ${f(SELECTED_SPRITE_SCALE - 1)});
-  clip.xy += position.xy * (pixels / uViewport) * clip.w;
+  clip.xy += position.xy * (uPixels / uViewport) * clip.w;
   gl_Position = clip;
   vec4 tint = uTints[int(mode)];
   vec3 color = mix(uColors[int(styleIndex)], tint.rgb, tint.a);
-  vColor = mix(color, ${SELECTED_COLOR}, selected * 0.55);
+  vColor = color;
   vCorner = position.xy;
 }
 `;

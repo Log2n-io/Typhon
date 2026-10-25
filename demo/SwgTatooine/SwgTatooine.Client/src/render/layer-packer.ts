@@ -1,5 +1,5 @@
 import { evaluateSlot, MAX_MOTION_STRIDE, type ArchetypeStore, type FieldArray } from '@typhondb/client';
-import { SELECTED_SPRITE_SCALE, type LayerStyle } from './styles';
+import type { LayerStyle } from './styles';
 import { altitudeField, altitudeOf, Placement } from '../data/placement';
 import { structureYaw } from '../assets/structure-assets';
 import { AiMode } from '../data/swg-schema';
@@ -23,7 +23,6 @@ export interface FrameView {
   /** Viewport size in CSS pixels: LOD thresholds, sprite and line sizes and picking all count CSS pixels. */
   readonly viewportWidth: number;
   readonly viewportHeight: number;
-  readonly selectedNetId: number;
   /** The planet's ground, for standing entities on it. Flat until the bake lands (`terrain/heightfield.ts`). */
   readonly ground: GroundSampler;
   /**
@@ -36,16 +35,23 @@ export interface FrameView {
    */
   readonly predicted: PredictedOverride | null;
   /**
-   * The entities this loop must NOT draw: bodies something else is drawing in their place.
-   *
-   * The rigged avatar is one of them, and every structure standing as a published asset is another. Both drawn would be
-   * the renderer's own shape inside the model — and the cheap half would be the visible one at any distance where its
-   * sprite is the larger.
+   * The entities this loop must neither draw nor pick: the rigged avatar, which something else draws in its place and the
+   * viewer does not click, and the mission pool's dormant lairs, which are drawn as nothing at all.
    *
    * <b>Skipped before the band is chosen, and that is deliberate</b>: a hidden entity leaves no band state behind, so
    * the frame it stops being hidden it re-enters at whatever band its size then deserves rather than at a stale one.
    */
   readonly hidden: ReadonlySet<number>;
+  /**
+   * The entities something else DRAWS and this layer still PICKS: a structure or a camp standing as its published asset.
+   * Both drawn would be the renderer's own shape inside the model, so they go to the held arrays as the crowd's bodies
+   * do — drawn by nobody here, tested by the pick as the box this layer would have drawn.
+   *
+   * <b>They used to be {@link hidden}</b>, which the pick never sees: a camp drawn as its asset could not be clicked, so
+   * its lair could not be targeted once its occupants were dead (2026-10-25), and a building as its asset could not be
+   * selected either.
+   */
+  readonly drawnElsewhere: ReadonlySet<number>;
   /**
    * Where a character layer puts its near band instead of packing it as a box.
    *
@@ -418,7 +424,7 @@ export class LayerPacker {
     const spriteLift = style.spriteLift;
     const byVelocity = style.heading === 'velocity';
     // A sprite's world radius at distance d: its CSS pixel radius (the selected size, the largest) × d / pixels-per-metre.
-    const spriteMetresPerMetre = (style.spritePixels * SELECTED_SPRITE_SCALE * 0.5) / view.pixelsPerMetre;
+    const spriteMetresPerMetre = (style.spritePixels * 0.5) / view.pixelsPerMetre;
     const motion = this.motion;
     const live = store.live;
     const netIds = store.netIds;
@@ -444,6 +450,7 @@ export class LayerPacker {
     const predicted = view.predicted;
     const predictedNetId = predicted === null ? 0 : predicted.netId;
     const hidden = view.hidden;
+    const elsewhere = view.drawnElsewhere;
     // Null for every layer that is not characters, so nothing else pays for the branch below.
     const crowd = this.drawsCharacters ? view.crowd : null;
     for (let i = 0; i < count; i++) {
@@ -506,10 +513,23 @@ export class LayerPacker {
             : structureYaw(fields.yaw[slot]);
       }
 
+      // Drawn as its asset: picked here, drawn by nobody here, at whatever distance — the asset is what decides whether it
+      // is drawn. Held before the band, so it leaves no band state behind, as a hidden entity does not.
+      if (elsewhere.size !== 0 && elsewhere.has(netId)) {
+        const h = held * 4;
+        this.heldData[h] = rx;
+        this.heldData[h + 1] = ry;
+        this.heldData[h + 2] = rz;
+        this.heldData[h + 3] = packState(styleIndex, fields.mode === null ? 0 : fields.mode[slot]);
+        this.heldYaw[held] = yaws[slot];
+        this.heldNetIds[held++] = netId;
+        continue;
+      }
+
       const pixels = (bounds.extent[bound] * view.pixelsPerMetre) / distance;
       const band = chooseBand(bands[slot], pixels);
       bands[slot] = band;
-      const packed = packState(styleIndex, fields.mode === null ? 0 : fields.mode[slot], netId === view.selectedNetId);
+      const packed = packState(styleIndex, fields.mode === null ? 0 : fields.mode[slot]);
 
       if (band === Band.Near) {
         // Heading only matters to a mesh, and it comes from the GROUND velocity: a ship climbing keeps its heading.

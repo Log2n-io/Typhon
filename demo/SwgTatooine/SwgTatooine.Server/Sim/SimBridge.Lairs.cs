@@ -55,7 +55,7 @@ internal struct CorpseEvent
 public sealed partial class SimBridge
 {
     /// <summary>How often the director walks the lairs, per second. Expiry and respawn are measured in minutes; half a second of lag costs nothing.</summary>
-    private const int LairPassHz = 2;
+    internal const int LairPassHz = 2;
 
     /// <summary>Tries at a point inside a site and outside every city before a replacement waits for the next pass.</summary>
     private const int LairPlacementTries = 8;
@@ -70,6 +70,13 @@ public sealed partial class SimBridge
 
     /// <summary>Mission lairs replaced at their mission's point, defenders and all.</summary>
     public long MissionLairsRehoused => _missionLairsRehoused;
+
+    private long _refillsOfGoneLairs;
+
+    /// <summary>
+    /// Refills the pass chose for a lair this tick's transaction had already destroyed — a mission lair <see cref="Rehouse"/> replaced — and so skipped.
+    /// </summary>
+    public long RefillsOfGoneLairs => _refillsOfGoneLairs;
 
     // Per-pass work lists. Serial system, so one set suffices; kept across ticks so a pass allocates nothing once warm.
     private readonly List<(EntityId Lair, ushort Realm, int Site)> _retiring = [];
@@ -173,6 +180,7 @@ public sealed partial class SimBridge
         carried.MissionId = spawner.MissionId;
         carried.Owner = spawner.Owner;
         carried.RespawnCooldown = spawner.RespawnCooldown;
+        carried.ExpireTick = spawner.ExpireTick;
         lair.Set(CreatureLair.Spawner, carried);
         lair.Set(CreatureLair.Vitals, vitals);
         _lairEntities += 1 + carried.AliveCount;
@@ -259,7 +267,14 @@ public sealed partial class SimBridge
         var terrain = TerrainField.Shared(_config.ContentScale);
         foreach (var id in _refilling)
         {
-            var lair = tx.OpenMut(id);
+            // The walk still yields a lair this transaction destroyed — Rehouse, earlier in this tick — while a point read already finds it gone (#1482).
+            // Refilling it threw, aborting the tick and stopping the server; it has no creature owed now, its replacement does.
+            if (!tx.TryOpenMut(id, out var lair))
+            {
+                _refillsOfGoneLairs++;
+                continue;
+            }
+
             var spawner = lair.Read(CreatureLair.Spawner);
             var place = lair.Read(CreatureLair.Bounds);
             var realm = lair.Read(CreatureLair.Realm).Value;

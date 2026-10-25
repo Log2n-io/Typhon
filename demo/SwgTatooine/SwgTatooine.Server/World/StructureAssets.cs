@@ -45,6 +45,10 @@ internal static class StructureAssets
         // A city's town hall and its room (2026-10-25).
         "tat_townhall",
         "tat_townhall_interior",
+
+        // A player's factory and harvester (catalogue 11), which were footprint boxes until then.
+        "factory",
+        "resource_extractor",
     ];
 
     /// <summary>
@@ -71,6 +75,8 @@ internal static class StructureAssets
         StructureKind.Interior,
         StructureKind.TownHall,
         StructureKind.Interior,
+        StructureKind.Factory,
+        StructureKind.Harvester,
     ];
 
     /// <summary>The asset a structure of this kind is, as an index into <see cref="Table"/>.</summary>
@@ -92,8 +98,10 @@ internal static class StructureAssets
         StructureKind.CraftingStation => PickCraftingStation(ref rng),
         StructureKind.MissionTerminal => 5,
         StructureKind.TownHall => 8,
+        StructureKind.Factory => 10,
+        StructureKind.Harvester => 11,
 
-        // PoiProp, Factory, Harvester, CampObject: nothing published stands in for them. Interior: the door decides, not the kind.
+        // PoiProp, CampObject: nothing published stands in for them. Interior: the door decides, not the kind.
         _ => NoAsset,
     };
 
