@@ -61,6 +61,60 @@ class ArchiveTornTailTests : ArchiveTestBase<ArchiveTornTailTests>
         RuleMutants.AssertDetects("BKP-10", Marker, () => AssertBothCommits(dbe, first, second));
     }
 
+    /// <summary>
+    /// A tear inside the last frame, mid-page: the crash open's sentinel lands mid-page, and the torn bytes after it stay on disk while the archived copy
+    /// holds zeros there. Archived, then a crash before any cycle reclaims it: the next archiver's start compares the local segment with its copy over
+    /// the bytes the archive keeps, and goes on archiving — not "another history".
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void ASealedTornTail_ArchivedThenACrashBeforeItsReclaim_IsStillTheArchivedSegment()
+    {
+        string walDir;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Open(scope);
+            walDir = WalDirectoryOf(dbe);
+            CapturePoint(dbe, BackupKind.Full);
+
+            // Deferred commits share the writer's next flush: their frames pack into one page run, so the later ones start mid-page.
+            for (var i = 0; i < 4; i++)
+            {
+                using var t = dbe.CreateQuickTransaction(i < 3 ? DurabilityMode.Deferred : DurabilityMode.Immediate);
+                t.Spawn<CompAArch>(CompAArch.A.Set(new CompA(10 + i)));
+                t.Commit();
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        var torn = DataSegments(walDir)[^1];
+        var frames = WalFrames.Read(File.ReadAllBytes(torn), out _);
+        var last = frames.LastOrDefault(f => f.Start % 4096 != 0);
+        Assert.That(last, Is.Not.Null, "premise: a frame starts mid-page");
+        Tear(torn, last.Start + WalFrameHeader.SizeInBytes + 8);
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Open(scope);
+            Assert.That((dbe.LastTornTailSeal.Sealed, dbe.LastTornTailSeal.Offset), Is.EqualTo((true, last.Start)), "premise: sealed mid-page");
+            var archiver = NewArchiver(dbe);
+            Tick(archiver, 0);
+            Assert.That(Archived(dbe).Segments.Any(s => s.SegmentId == SegmentId(torn)), Is.True, "premise: the sealed segment is archived");
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Open(scope);
+            Assert.That(File.Exists(torn), Is.True, "premise: no cycle reclaimed the sealed segment before the crash");
+            var archiver = NewArchiver(dbe);
+            Tick(archiver, 0);
+            Tick(archiver, 1);
+            Assert.That(archiver.State.Condition, Is.EqualTo(WalArchiveCondition.Archiving), archiver.State.LastError);
+        }
+    }
+
     [Test]
     [CancelAfter(60_000)]
     public void AMidLogBreak_IsLeftUnsealed()

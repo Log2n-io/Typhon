@@ -674,6 +674,10 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
                     continue;   // reclaimed meanwhile: nothing to compare
                 }
 
+                // The bytes the archive keeps, as the publish took them: the scan zeroes past the last complete frame, so a crash-sealed or damaged
+                // segment's sentinel and torn bytes, still on disk, are not compared against the zeros its archived copy holds there.
+                scan = WalArchiveScanner.Scan(_reader);
+                crc = 0;
                 if (archived != null)
                 {
                     var length = (int)archived.Footer.ArchiveLength - WalSegmentHeader.SizeInBytes;
@@ -684,12 +688,6 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
                     }
 
                     crc = Crc32CUtil.Finish(Crc32CUtil.Append(Crc32CUtil.Append(Crc32CUtil.Start, _reader.HeaderBytes), _reader.LoadedData[..length]));
-                    scan = default;
-                }
-                else
-                {
-                    crc = 0;
-                    scan = WalArchiveScanner.Scan(_reader);
                 }
             }
 
