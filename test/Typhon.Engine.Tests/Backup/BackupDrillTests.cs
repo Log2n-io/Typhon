@@ -158,6 +158,28 @@ class BackupDrillTests : BackupTestBase<BackupDrillTests>
         Assert.That(Directory.EnumerateFileSystemEntries(_scratch), Is.Empty);
     }
 
+    /// <summary>
+    /// The scratch bundle is deleted through the store's file system seam, best effort: a deletion that fails leaves it behind and changes no outcome.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void TheScratchIsDeletedThroughTheFileSystemSeam_AndAFailedDeleteChangesNoOutcome()
+    {
+        Backup(out _);
+        var fs = new Typhon.Engine.Tests.Backup.HookedFileSystem(StoreFileSystem.Instance)
+        {
+            Fault = (op, path) => op == nameof(IStoreFileSystem.DeleteDirectory)
+                                  && string.Equals(Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(path)), _scratch, StringComparison.OrdinalIgnoreCase)
+                ? new IOException("the scratch volume is gone")
+                : null,
+        };
+
+        var report = BackupDrillRunner.Run(_store, PointSelector.Latest, Options(opener: _ => throw new InvalidOperationException("no open today")), fs);
+
+        Assert.That((report.Outcome, report.FailedStage), Is.EqualTo((BackupDrillOutcome.Failed, BackupDrillStage.Open)), "the outcome is the drill's");
+        Assert.That(Directory.EnumerateDirectories(_scratch), Is.Not.Empty, "the scratch the seam could not delete is left");
+    }
+
     /// <summary>§8.3: the open's failure is staged with a throwing opener; the classification (stage, outcome) is what is under test.</summary>
     [Test]
     [CancelAfter(30_000)]
