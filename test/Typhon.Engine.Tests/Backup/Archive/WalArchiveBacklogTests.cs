@@ -18,6 +18,61 @@ class WalArchiveBacklogTests : ArchiveTestBase<WalArchiveBacklogTests>
 
     protected override long BacklogLimit => 2L * SegmentSize;
 
+    /// <summary>
+    /// The timed switch seals only a segment holding a durable record (WalArchiver.Step's activeHolds; the writer's ServeSwitchRequest rotates only a
+    /// segment written past its header): an idle database, its store down for many MaxSegmentAge, seals nothing, holds nothing, releases nothing.
+    /// </summary>
+    [Test]
+    [CancelAfter(20_000)]
+    public void AnIdleDatabase_WithItsStoreDown_SealsNoSegment_AndIsNeverReleased()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var fs = new SwitchableStoreFileSystem();
+        var archiver = NewArchiver(dbe, fs);
+        Tick(archiver, 0);
+
+        // Premise: a segment holding a record is switched at its age and archived.
+        Spawn(dbe, 1, 1);
+        Tick(archiver, 1);
+        var servedBefore = dbe.WalManager.SwitchesServed;
+        Tick(archiver, 7);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (dbe.WalManager.SwitchesServed == servedBefore)
+        {
+            Assert.That(clock.Elapsed, Is.LessThan(Budget), "premise: the timed switch of a segment holding a record");
+            System.Threading.Thread.Yield();
+        }
+
+        Tick(archiver, 8);
+        Tick(archiver, 9);
+        Assert.That(archiver.ArchivedThroughLsn, Is.EqualTo(dbe.WalManager.DurableLsn), "premise: the switched segment is archived");
+
+        // Idle, the store down, twelve MaxSegmentAge (5 s) on the archiver's clock, checkpoints cycling, a tick fence per second as an idle runtime
+        // writes one (nothing dirty: it logs nothing).
+        fs.Failing = true;
+        var served = dbe.WalManager.SwitchesServed;
+        var generation = dbe.WalManager.SegmentManager.SealedGeneration;
+        var durable = dbe.WalManager.DurableLsn;
+        for (var t = 10; t <= 70; t++)
+        {
+            dbe.WriteTickFence(t);
+            Tick(archiver, t);
+            if (t % 5 == 0)
+            {
+                ForceCheckpoint(dbe);
+            }
+        }
+
+        Assert.That(dbe.WalManager.DurableLsn, Is.EqualTo(durable), "premise: an idle tick fence logs nothing");
+        Assert.That(dbe.WalManager.SwitchesServed, Is.EqualTo(served), "no switch of an unchanged segment");
+        Assert.That(dbe.WalManager.SegmentManager.SealedGeneration, Is.EqualTo(generation), "no segment sealed");
+        Assert.That(dbe.CheckpointManager.ArchiveReleases, Is.Zero, "nothing held, nothing released");
+        var state = archiver.State;
+        Assert.That((state.GapsTotal, state.LagBytes, state.Condition), Is.EqualTo((0L, 0L, WalArchiveCondition.Archiving)),
+            "no gap, nothing at risk, and the store never asked");
+    }
+
     [Test]
     [CancelAfter(20_000)]
     [VerifiesRule("BKP-10")]
