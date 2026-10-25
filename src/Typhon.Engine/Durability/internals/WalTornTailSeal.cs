@@ -9,7 +9,10 @@ namespace Typhon.Engine.Internals;
 /// <param name="Offset">File offset of the first invalid frame, where the sentinel was written; 0 when nothing was sealed.</param>
 /// <param name="FenceLsn">The highest fence LSN of the torn frame's valid chunks, which recovery applied and the sentinel records; 0 = none.</param>
 /// <param name="Sealed">Whether the sentinel was written: the break lay in the last segment holding data.</param>
-internal readonly record struct WalTornTailSealResult(long SegmentId, int Offset, long FenceLsn, bool Sealed);
+/// <param name="Unconsolidated">
+/// Not written because the torn frame's valid fence chunks lie past the consolidated CheckpointLSN: hidden, a second recovery would replay without them.
+/// </param>
+internal readonly record struct WalTornTailSealResult(long SegmentId, int Offset, long FenceLsn, bool Sealed, bool Unconsolidated = false);
 
 /// <summary>
 /// BKP-10's torn-tail seal (impl/1418 WA-9). Recovery reads every segment on disk and stops for good at the first break (REC-01). A crash open used to
@@ -17,14 +20,17 @@ internal readonly record struct WalTornTailSealResult(long SegmentId, int Offset
 /// its tear into a break in the middle of the log the next time, dropping every later segment. So once recovery has read it, the crash open writes a
 /// <see cref="WalFrameHeader.PaddingSentinel"/> over the first invalid frame of a torn LAST data-bearing segment and flushes it, before the session's first
 /// append: the segment then ends cleanly for recovery, captures and the archiver. A break followed by a segment holding data is mid-log corruption (#587)
-/// and is left as it is.
+/// and is left as it is. The sentinel hides the torn frame's valid fence chunks, so it is written only once CheckpointLSN covers them.
 /// </summary>
 internal static class WalTornTailSeal
 {
     private const int PageSize = 4096;
 
-    /// <summary>Seals the torn tail of the WAL in <paramref name="walDir"/>, if its break lies in the last segment holding data.</summary>
-    internal static unsafe WalTornTailSealResult Seal(IWalFileIO io, string walDir)
+    /// <summary>
+    /// Seals the torn tail of the WAL in <paramref name="walDir"/>, if its break lies in the last segment holding data and the fence records recovery
+    /// applied from the torn frame are at or below <paramref name="checkpointLsn"/> (in the data file, never replayed again).
+    /// </summary>
+    internal static unsafe WalTornTailSealResult Seal(IWalFileIO io, string walDir, long checkpointLsn)
     {
         ArgumentNullException.ThrowIfNull(io);
         string tornPath = null;
@@ -60,6 +66,11 @@ internal static class WalTornTailSeal
         if (tornPath == null)
         {
             return default;
+        }
+
+        if (torn.DroppedToLsn > checkpointLsn)
+        {
+            return new WalTornTailSealResult(torn.SegmentId, 0, torn.DroppedToLsn, false, Unconsolidated: true);
         }
 
         // The sentinel may straddle a page: read, patch and write back the page(s) it lands in, then flush before anything else is appended.

@@ -136,9 +136,15 @@ class WalArchiveScannerTests : ArchiveTestBase<WalArchiveScannerTests>
             File.WriteAllBytes(path, damaged);
             using (var io = new WalFileIO())
             {
-                var seal = WalTornTailSeal.Seal(io, dir);
+                // Hidden while CheckpointLSN is below them, the applied fence chunks would be lost to a second recovery: refused, nothing written.
+                var refused = WalTornTailSeal.Seal(io, dir, torn.DroppedToLsn - 1);
+                Assert.That(refused, Is.EqualTo(new WalTornTailSealResult(torn.SegmentId, 0, torn.DroppedToLsn, false, Unconsolidated: true)));
+                Assert.That(File.ReadAllBytes(path), Is.EqualTo(damaged), "an unconsolidated tail is not sealed");
+
+                var seal = WalTornTailSeal.Seal(io, dir, torn.DroppedToLsn);
                 Assert.That(seal, Is.EqualTo(new WalTornTailSealResult(torn.SegmentId, frame.Start, torn.DroppedToLsn, true)));
-                Assert.That(WalTornTailSeal.Seal(io, dir).SegmentId, Is.Zero, "sealed, the segment no longer breaks: a second open seals nothing");
+                Assert.That(WalTornTailSeal.Seal(io, dir, torn.DroppedToLsn).SegmentId, Is.Zero,
+                    "sealed, the segment no longer breaks: a second open seals nothing");
             }
 
             var sealedBytes = File.ReadAllBytes(path);

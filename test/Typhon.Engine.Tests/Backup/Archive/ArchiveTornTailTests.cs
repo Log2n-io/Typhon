@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 
@@ -77,10 +78,10 @@ class ArchiveTornTailTests : ArchiveTestBase<ArchiveTornTailTests>
             walDir = WalDirectoryOf(dbe);
             CapturePoint(dbe, BackupKind.Full);
 
-            // Deferred commits share the writer's next flush: their frames pack into one page run, so the later ones start mid-page.
-            for (var i = 0; i < 4; i++)
+            // Deferred commits made faster than the writer flushes share a write: their frames pack into one page run, the later ones mid-page.
+            for (var i = 0; i < 200; i++)
             {
-                using var t = dbe.CreateQuickTransaction(i < 3 ? DurabilityMode.Deferred : DurabilityMode.Immediate);
+                using var t = dbe.CreateQuickTransaction(i < 199 ? DurabilityMode.Deferred : DurabilityMode.Immediate);
                 t.Spawn<CompAArch>(CompAArch.A.Set(new CompA(10 + i)));
                 t.Commit();
             }
@@ -113,6 +114,115 @@ class ArchiveTornTailTests : ArchiveTestBase<ArchiveTornTailTests>
             Tick(archiver, 1);
             Assert.That(archiver.State.Condition, Is.EqualTo(WalArchiveCondition.Archiving), archiver.State.LastError);
         }
+    }
+
+    /// <summary>
+    /// A tick fence torn inside its frame: recovery applies the valid chunks' fence records (a fence applies without a commit). If the seal's checkpoint
+    /// does not complete, CheckpointLSN stays below them, and a sentinel over the frame would hide them from the next recovery, which replays the window
+    /// without them: the earlier fence's values overwrite theirs. So that open fails, nothing sealed, and the next one replays them, consolidates and seals.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("BKP-10")]
+    public void ATornFence_WhoseRecoveryCheckpointDoesNotComplete_IsNotSealedAndIsReplayedByTheNextOpen()
+    {
+        string walDir;
+        var fenced = new List<EntityId>();
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Open(scope);
+            walDir = WalDirectoryOf(dbe);
+            CapturePoint(dbe, BackupKind.Full);
+
+            // No cycle after the point: the fence reaches the data file only through a recovery's checkpoint.
+            dbe.CheckpointManager.CycleFaultInjector = () => throw new WalBackPressureTimeoutException(0, TimeSpan.Zero);
+            using (var t = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                for (var i = 0; i < 4000; i++)
+                {
+                    fenced.Add(t.Spawn<SvTestArchetype>(SvTestArchetype.SvComp.Set(new CompSmSingleVersion(i))));
+                }
+
+                t.Commit();
+            }
+
+            // A SingleVersion update reaches the WAL only through a tick fence: two of them, each a multi-chunk fence frame. Replayed without the
+            // second, the first one's values overwrite what the second one applied.
+            for (var round = 1; round <= 2; round++)
+            {
+                using (var t = dbe.CreateQuickTransaction())
+                {
+                    foreach (var id in fenced)
+                    {
+                        t.OpenMut(id).Set(SvTestArchetype.SvComp, new CompSmSingleVersion(round == 1 ? 5 : -1));
+                    }
+
+                    t.Commit();
+                }
+
+                dbe.WriteTickFence(round);
+            }
+
+            var wal = dbe.WalManager;
+            wal.RequestFlush();
+            var ctx = WaitContext.FromTimeout(Budget);
+            wal.WaitForDurable(wal.LastPublishedLsn, ref ctx);
+            dbe.SimulateHardCrash();
+        }
+
+        var torn = DataSegments(walDir)[^1];
+        var fence = WalFrames.Read(File.ReadAllBytes(torn), out _).LastOrDefault(f => f.Chunks >= 2 && f.Records.All(r => r.IsFence));
+        Assert.That(fence, Is.Not.Null, "premise: the last segment holds a multi-chunk fence frame");
+        Tear(torn, fence.End - 128);   // inside its last chunk: the chunks before it stay valid
+        var tornBytes = File.ReadAllBytes(torn);
+
+        // The crash open, its recovery's checkpoint failing every cycle: the seal's wait times out.
+        var opened = false;
+        var appliedByTheFirstRecovery = -1;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.CheckpointManager.CycleFaultInjector = () => throw new WalBackPressureTimeoutException(0, TimeSpan.Zero);
+            dbe.RecoverySealWaitForTest = TimeSpan.FromMilliseconds(200);
+            dbe.RegisterComponentFromAccessor<CompA>();
+            dbe.RegisterComponentFromAccessor<CompSmSingleVersion>();
+            try
+            {
+                dbe.InitializeArchetypes();
+                opened = true;
+                appliedByTheFirstRecovery = CountUpdated(dbe, fenced);
+                dbe.SimulateHardCrash();
+            }
+            catch (InvalidOperationException e)
+            {
+                Assert.That(e.Message, Does.Contain("cannot be sealed"));
+            }
+
+            Assert.That(dbe.LastWalV2RecoveryResult.StoppedAtCorruption, Is.True, "premise: the recovery met the tear");
+            Assert.That(dbe.LastWalV2RecoveryCheckpointLsn, Is.LessThan(fence.Records.Min(r => r.Lsn)), "premise: the fence lies in the recovery window");
+        }
+
+        if (!opened)
+        {
+            Assert.That(File.ReadAllBytes(torn), Is.EqualTo(tornBytes), "the failed open sealed nothing");
+        }
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Open(scope);
+            var updated = CountUpdated(dbe, fenced);
+            Assert.That(updated, Is.GreaterThan(0), "the torn frame's valid fence chunks, applied by the first recovery, are applied by this one");
+            Assert.That(updated, Is.EqualTo(opened ? appliedByTheFirstRecovery : updated), "the second recovery applies what the first one did");
+            Assert.That(dbe.LastTornTailSeal.Sealed, Is.True, $"an open whose checkpoint completed seals the tail ({dbe.LastTornTailSeal})");
+        }
+
+        Assert.That(opened, Is.False, "an open whose checkpoint did not cover the fence fails rather than seal");
+    }
+
+    private static int CountUpdated(DatabaseEngine dbe, List<EntityId> ids)
+    {
+        using var t = dbe.CreateQuickTransaction();
+        return ids.Count(id => t.Open(id).Read(SvTestArchetype.SvComp).Value == -1);
     }
 
     [Test]

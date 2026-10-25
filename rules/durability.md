@@ -3482,9 +3482,12 @@ BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#141
   invariant a segment the archive floor may keep past a crash open never holds bytes recovery would stop at (WA-9): when the crash
             open's recovery stopped at a break in the LAST segment holding data, the open writes a PaddingSentinel frame header
             (RecordCount = CrashSealRecordCount, LastLsn = the highest fence LSN recovery applied from the torn frame) at the
-            first invalid frame and flushes it, after recovery read the WAL and before the session's first append; the segment
-            then ends cleanly for recovery, captures and the archiver (archived TornTrimmed, the applied fences a dropped range).
-            A break followed by a segment holding data is mid-log corruption (#587): left as it is
+            first invalid frame and flushes it, after the recovery's seal checkpoint and before the session's first commit; the
+            segment then ends cleanly for recovery, captures and the archiver (archived TornTrimmed, the applied fences a dropped
+            range). The sentinel hides those fences, so it is written only once CheckpointLSN ≥ that fence LSN: a seal cycle that
+            did not get there (its timeout is soft) fails the open, unsealed, and the next open recovers and seals again — hidden
+            earlier, a second recovery replays the window without them and an earlier fence's values overwrite theirs. A break
+            followed by a segment holding data is mid-log corruption (#587): left as it is
   scope: CheckpointManager.EngageArchiveFloor, CheckpointManager.RaiseArchiveFloor, CheckpointManager.ArchiveFloorReleased
     (step 8, beside the backup floor W1), WalSegmentManager.Initialize (reclaimFloorAtOpen), WalSegmentManager.BytesHeldBetween,
     WalSegmentManager.ArchiveSnapshot, IWalFileIO.OpenSegmentForArchive, WalFileIO.OpenSegmentForArchive,
@@ -3505,10 +3508,11 @@ BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#141
             outside the data and every 8th inside; Mutant_ADecodeWithoutTheRawCrc_IsReported), ArchiveStoreCrashTests (AC-A4, a
             crash after every operation of a publish, both directory models), ArchiveIndexTests
             (Mutant_AnIndexTrustedWithoutItsFingerprint_IsReported), ArchiveDivergenceTests, ArchiveTornTailTests (AC-A10:
-            Mutant_ACrashOpenThatDoesNotSealTheTornTail_IsReported; a mid-log break left unsealed), WalArchiveScannerTests
+            Mutant_ACrashOpenThatDoesNotSealTheTornTail_IsReported; a mid-log break left unsealed;
+            ATornFence_WhoseRecoveryCheckpointDoesNotComplete_IsNotSealedAndIsReplayedByTheNextOpen), WalArchiveScannerTests
             (ASealedTornTail_EndsCleanlyAtItsSentinel_NamingTheFenceRecordsRecoveryApplied) — [VerifiesRule("BKP-10")]. Source
             mutants seen red: the floor raised before the publish, a release not counted, no flush before the rename, no
-            directory flush (Linux model), a seal over a mid-log break
+            directory flush (Linux model), a seal over a mid-log break, the seal before the recovery's checkpoint
   spec: rules/tla/WalArchive.tla (S7) — ArchivedOrReleased, FloorHoldsUnarchived, FloorAtArchiveEnd, NoSilentHole (2 792 states; -full
     28 776); mutants -mutant-raisebeforepublish, -mutant-openreclaim, -mutant-nofloor, -mutant-continuityunchecked, -mutant-releasenocount
 

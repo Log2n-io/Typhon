@@ -95,11 +95,21 @@ public partial class DatabaseEngine
     /// <summary>Test seam: the crash open skips the torn-tail seal (BKP-10's mutant). False in production.</summary>
     internal bool TornTailSealDisabledForTest { get; set; }
 
+    /// <summary>Test seam: how long the crash open's seal waits for its checkpoint (a soft timeout). 30 s in production.</summary>
+    internal TimeSpan RecoverySealWaitForTest { get; set; } = TimeSpan.FromSeconds(30);
+
     /// <summary>
-    /// BKP-10's torn-tail seal (WA-9), on a crash open whose recovery stopped at a break, right after the recovery read the WAL and before anything of the
-    /// session is appended: with archiving configured the archive floor keeps the torn segment past this open, so its tear must not stop the next recovery
-    /// before the segments this session writes. Archiving off, the seal's checkpoint reclaims the torn segment as it always did.
+    /// BKP-10's torn-tail seal (WA-9), on a crash open whose recovery stopped at a break, after the recovery's seal and before the session's first commit:
+    /// with archiving configured the archive floor keeps the torn segment past this open, so its tear must not stop the next recovery before the segments
+    /// this session writes. Archiving off, the seal's checkpoint reclaims the torn segment as it always did.
     /// </summary>
+    /// <remarks>
+    /// The sentinel hides the torn frame's valid fence chunks, which this recovery applied (fences apply without a commit) and a flush-only cycle may
+    /// already have written to the data file. Hidden while CheckpointLSN is below them, a second recovery would replay the window without them: the fence
+    /// half in the file. So the seal waits for the seal's cycle (soft, its timeout leaning on re-replay); when that cycle did not reach them, the open fails
+    /// rather than seal, and the next open recovers, and seals, again.
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">The recovery's checkpoint did not consolidate the fence records the sentinel would hide.</exception>
     private void SealTornTailForArchive(string walDir)
     {
         if (ArchiveConfiguration == null || TornTailSealDisabledForTest)
@@ -107,14 +117,27 @@ public partial class DatabaseEngine
             return;
         }
 
+        long consolidated;
+        using (EpochGuard.Enter(EpochManager))
+        {
+            consolidated = DurabilityWatermarks.ReadCheckpointLsn(MMF);
+        }
+
         var walIO = _injectedWalIo ?? new WalFileIO();
         try
         {
-            var seal = WalTornTailSeal.Seal(walIO, walDir);
+            var seal = WalTornTailSeal.Seal(walIO, walDir, consolidated);
             LastTornTailSeal = seal;
             if (seal.Sealed)
             {
                 WalArchiveLog.TornTailSealed(Logger, seal.SegmentId, seal.Offset, seal.FenceLsn);
+            }
+            else if (seal.Unconsolidated)
+            {
+                throw new InvalidOperationException(
+                    $"The crash open's checkpoint did not complete: WAL segment {seal.SegmentId} ends torn after fence records through LSN {seal.FenceLsn} "
+                    + $"that recovery applied and CheckpointLSN ({consolidated}) does not cover, so its tear cannot be sealed. Nothing is lost: the next open "
+                    + "recovers, and seals it, again.");
             }
             else if (seal.SegmentId != 0)
             {

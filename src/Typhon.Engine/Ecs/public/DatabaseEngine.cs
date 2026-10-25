@@ -5706,7 +5706,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         if (result.StoppedAtCorruption)
         {
             LogWalRecoveryStoppedAtCorruption(result.SegmentsScanned, result.MaxLsn);
-            SealTornTailForArchive(walDir);
         }
 
         // LOG-08 across a RECOVERY, not only across a clean reopen (#712). InitializeWalManager has to choose the LSN floor in the constructor, where the
@@ -5777,6 +5776,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             WaitForSchemaCommit();
             CompleteSchemaCommit();
             _archetypeSpiPersistArmed = true;
+        }
+
+        // BKP-10's torn-tail seal, once the seal's cycle consolidated what this recovery applied and before the session's first commit: the sentinel hides
+        // the torn frame's valid fence chunks, which only a CheckpointLSN past them makes safe to hide (the seal's timeout is soft and leans on re-replay).
+        if (result.StoppedAtCorruption)
+        {
+            SealTornTailForArchive(walDir);
         }
 
         // Phase 6b — OCCUPANCY RE-DERIVE (03-recovery.md §7, rule CK-09): the occupancy bitmap is a DERIVED structure — post-crash it is never trusted but rebuilt
@@ -6059,7 +6065,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         CheckpointManager.RecoveryInProgress = false;
 
         // A migration's commit rides this cycle and waits on with its own step (SCHEMA-09); 30 s in production either way.
-        var sealWait = _pendingSchemaCommit != null ? SchemaCommitWaitStepForTest : TimeSpan.FromSeconds(30);
+        var sealWait = _pendingSchemaCommit != null ? SchemaCommitWaitStepForTest : RecoverySealWaitForTest;
 
         if (frontierLsn <= checkpointLsn)
         {
