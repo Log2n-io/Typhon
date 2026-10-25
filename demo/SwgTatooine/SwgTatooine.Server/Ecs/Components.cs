@@ -942,7 +942,7 @@ public static class AiMode
 /// A player's behaviour. Players are simulated as an activity MIX rather than one loop, because the load a planet
 /// carries is dominated by what fraction of its players are moving at all.
 /// </summary>
-[Component("Swg.PlayerState", 3, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.PlayerState", 4, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct PlayerState
 {
@@ -952,10 +952,19 @@ public struct PlayerState
     /// <summary>Ticks until this player re-evaluates what it is doing.</summary>
     [Field] public int ActivityTicks;
 
-    /// <summary>Where the current mission camp is, cached so a travel leg does not re-resolve an entity every tick.</summary>
-    [Field, Owner(CodecKind.F32, Name = "missionX", Group = "mission")] public float MissionX;
+    /// <summary>Where the current mission camp is, cached so a travel leg does not re-resolve an entity every tick. The scripted crowd's; not replicated.</summary>
+    [Field] public float MissionX;
 
-    [Field, Owner(CodecKind.F32, Name = "missionZ", Group = "mission")] public float MissionZ;
+    [Field] public float MissionZ;
+
+    /// <summary>
+    /// Bumped whenever the missions this body's character holds change — taken, cancelled, completed, or a lair drawn somewhere new (missions.md § 4).
+    /// </summary>
+    /// <remarks>
+    /// <b>A revision, not the journal.</b> The client re-reads <c>GET /swg/missions</c> when it moves. Three journal slots on the body were 48 bytes, which took
+    /// a <c>Player</c> page from 24 bodies to 21 for 1 600 scripted bodies that never hold one; four bytes keep 24 (<c>SelectClusterSize</c>, 2026-10-25).
+    /// </remarks>
+    [Field, Owner(CodecKind.Varu, Name = "journal", Group = "mission", Saturate = true)] public int JournalRev;
 
     /// <summary>Missions completed — here only to prove the mission loop closes.</summary>
     [Field] public int MissionsCompleted;
@@ -1264,7 +1273,11 @@ public static class PlayerActivity
 }
 
 /// <summary>A creature lair: the object that spawns and owns a population, and what a destroy mission sends a player to break.</summary>
-[Component("Swg.Lair", 3, StorageMode = StorageMode.SingleVersion)]
+/// <remarks>
+/// <b>A mission's lair is a lair of its kind</b> (missions.md § 3): spawned when the mission is taken, shielded by its occupants and refilled like any other,
+/// and its life is the mission desk's rather than the lair director's — <see cref="Site"/> is 0, so the director never retires it.
+/// </remarks>
+[Component("Swg.Lair", 4, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct Lair
 {
@@ -1283,33 +1296,31 @@ public struct Lair
     /// </summary>
     [Field, Replicate(CodecKind.U8, Name = "guards", Saturate = true)] public int Guards;
 
-    /// <summary>A destroy-mission lair's offer cadence, in ticks (<c>MissionTick</c>). A wild lair's schedule is <see cref="NextSpawnTick"/>.</summary>
-    [Field] public int RespawnCooldown;
+    /// <summary>
+    /// 1 once a blow from <see cref="Owner"/> has landed on this mission lair, 0 otherwise. Breaking it completes the mission only then (missions.md, Q3): a
+    /// lair broken by somebody else alone is drawn again, so a passer-by cannot end a mission, and a fight shared with friends still pays.
+    /// </summary>
+    [Field] public int OwnerHit;
 
     /// <summary>How far from the lair its creatures spawn and wander.</summary>
     [Field] public float SpawnRadius;
 
-    /// <summary>Non-zero if this lair belongs to a destroy mission and dies with it.</summary>
-    [Field, Replicate(CodecKind.U8, Name = "missionId", Saturate = true)] public int MissionId;
-
-    /// <summary>The player this destroy mission was built around, and the one its completion pays (SWG-02); <c>EntityId.Null</c> on a wild lair.</summary>
-    /// <remarks>
-    /// The seek query already found a player — it just threw the identity away and kept the position, which is why nothing could be rewarded when a mission
-    /// finished. Recording it is also what makes the completion branch mean something: before SWG-02 nothing wrote <see cref="LairVitals.Health"/> downward,
-    /// so the branch never ran at all.
-    /// </remarks>
-    [Field] public EntityLink<Player> Owner;
-
     /// <summary>
-    /// The wilderness site that spawned this lair, one-based into <c>SimBridge</c>'s site list (regions, then points of interest); 0 for a destroy-mission
-    /// lair, which belongs to no site and is never retired.
+    /// The wilderness site that spawned this lair, one-based into <c>SimBridge</c>'s site list (regions, then points of interest); 0 for a mission's lair,
+    /// which belongs to no site: the mission desk retires it, not the lair director.
     /// </summary>
     /// <remarks>What the lair director refills: a retired lair is replaced by another drawn from the same site, so a region keeps its density.</remarks>
     [Field] public int Site;
 
+    /// <summary>The held mission this lair was drawn for (<see cref="HeldMissionArch"/>); <c>EntityId.Null</c> on a wild lair.</summary>
+    [Field] public EntityId Mission;
+
+    /// <summary>The body of the mission's holder, while it is online — whose blows set <see cref="OwnerHit"/>; <c>EntityId.Null</c> on a wild lair.</summary>
+    [Field] public EntityLink<Player> Owner;
+
     /// <summary>
-    /// The tick a wild lair is retired at, whether or not anybody destroyed it; for a destroy-mission lair, the tick its current mission ends undone and it
-    /// goes back to the pool. 0 for neither.
+    /// The tick this lair is retired at, whether or not anybody destroyed it: a wild lair by the lair director, a mission's by the desk, which draws its
+    /// mission a new one. 0 for never.
     /// </summary>
     [Field] public long ExpireTick;
 

@@ -32,6 +32,12 @@ export const STALL_MS = 3000;
 /** How close counts as arrived at the end of a walk that stops there (`start(..., stopAtEnd)`), metres. */
 export const ARRIVED_M = 0.5;
 
+/**
+ * How close counts as at a waypoint for a body on the swoop, metres: a bike cannot turn on a quarter metre, so at the tight
+ * reach it orbited each corner until the walk stalled. Set as {@link DoorWalker.reachM} while riding.
+ */
+export const RIDDEN_REACH_M = 2.5;
+
 /** An axis-aligned rectangle in the ground plane, world metres. */
 export interface Rect {
   readonly minX: number;
@@ -335,6 +341,12 @@ export class DoorWalker {
   private bestAtMs = 0;
   private stopAtEnd = false;
 
+  /**
+   * How close counts as at a waypoint, and as arrived at the end of a walk that stops there: {@link WAYPOINT_REACH_M} on
+   * foot, {@link RIDDEN_REACH_M} on the swoop. The owner sets it each frame, since a rider may mount or dismount mid-walk.
+   */
+  reachM = WAYPOINT_REACH_M;
+
   /** Whether a walk is under way. */
   get active(): boolean {
     return this.next < this.points.length;
@@ -343,6 +355,11 @@ export class DoorWalker {
   /** Where it is going next, for an overlay; `null` when idle. */
   get target(): Waypoint | null {
     return this.active ? this.points[this.next] : null;
+  }
+
+  /** The walk's last point, or `null` when none is under way: where a ridden walk brakes to stop. */
+  get end(): Waypoint | null {
+    return this.active ? this.points[this.points.length - 1] : null;
   }
 
   /**
@@ -397,7 +414,7 @@ export class DoorWalker {
     const last = this.points.length - 1;
     let [tx, tz] = this.points[this.next];
     let d = Math.hypot(tx - x, tz - z);
-    while (d < WAYPOINT_REACH_M && this.next < last) {
+    while (d < this.reachM && this.next < last) {
       this.next++;
       this.bestDistance = Infinity;
       this.bestAtMs = nowMs;
@@ -414,13 +431,13 @@ export class DoorWalker {
     }
 
     // Running across open ground, walking the path itself: it climbs a ramp and steps through a doorway.
-    if (this.stopAtEnd && this.next === last && d < ARRIVED_M) {
+    if (this.stopAtEnd && this.next === last && d < Math.max(ARRIVED_M, this.reachM)) {
       this.cancel();
       return { heading: Math.atan2(tz - z, tx - x), speedClass: SpeedClass.stop };
     }
 
     const speedClass = this.next < this.pathStart ? SpeedClass.run : SpeedClass.walk;
-    if (this.next === last && last > 0 && d < WAYPOINT_REACH_M) {
+    if (this.next === last && last > 0 && d < this.reachM) {
       const [px, pz] = this.points[last - 1];
       return { heading: Math.atan2(tz - pz, tx - px), speedClass };
     }

@@ -574,19 +574,153 @@ button.active {
 }
 
 /* Above the navigation pane, which owns the corner: it is always there while playing, the inspector only with a pick. */
-.inspector {
+/* The bottom-right column (App.tsx): the inspector, the waypoint pane and the toolbar, stacked rather than offset. */
+.right-stack {
+  position: absolute;
   right: 10px;
-  bottom: 128px;
+  bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.right-stack > .panel {
+  position: static;
+  pointer-events: auto;
+}
+
+.inspector {
   width: 270px;
 }
 
-/* The nearest shuttleport, bazaar and mission terminal (NavPane): bottom right, rows of name, distance and an arrow the
-   frame loop turns with the camera. */
+/* The nearest shuttleport, bazaar and mission terminal, and the lairs of the missions held (NavPane): bottom right, above
+   the toolbar, rows of name, distance and an arrow the frame loop turns with the camera. */
 .nav {
-  right: 10px;
-  bottom: 10px;
   width: 270px;
   padding: 6px 8px;
+}
+
+/* The bottom-right toolbar (missions.md § 5): the journal's button, under the waypoint pane. */
+.bottombar {
+  display: flex;
+  gap: 6px;
+  padding: 4px 6px;
+}
+
+.mission-toast {
+  color: #b9f5a6;
+  border-color: rgba(150, 230, 130, 0.6);
+}
+
+.bottombar button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* A mission terminal's list, and the journal: the terminal's at the top of the screen, the journal beside the waypoints. */
+.missions {
+  top: 70px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 600px;
+  max-width: calc(100% - 20px);
+  max-height: 60%;
+  overflow-y: auto;
+}
+
+.journal {
+  right: 290px;
+  bottom: 10px;
+  width: 360px;
+  max-height: 50%;
+  overflow-y: auto;
+}
+
+.missions-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.missions-head .hud-title {
+  flex: 1;
+}
+
+.missions-held {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.missions-close {
+  padding: 0 6px;
+}
+
+.missions-notice {
+  margin-bottom: 6px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: rgba(255, 120, 90, 0.15);
+  color: #ffb39a;
+}
+
+.missions-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.missions-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  padding: 2px 4px;
+}
+
+.missions-table th button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.missions-table th button.sorted {
+  color: var(--accent);
+}
+
+.missions-table td {
+  padding: 3px 4px;
+  border-bottom: 1px solid rgba(110, 170, 220, 0.12);
+}
+
+.missions-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.journal-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(110, 170, 220, 0.18);
+}
+
+.journal-main {
+  flex: 1;
+}
+
+.journal-title {
+  color: #9fd2ff;
+}
+
+.journal-meta {
+  font-size: 11px;
+  color: var(--muted);
 }
 
 .nav-row {

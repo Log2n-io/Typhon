@@ -1241,6 +1241,33 @@ public static partial class TatooineReplication
     public static (int Identities, int Bound, int Characters, int AccountHolds) SessionAccounting
         => (AccountOfSession.Count, BoundPlayer.Count, CharacterOfSession.Count, SessionOfAccount.Count);
 
+    /// <summary>The body a session drives and the character it belongs to, for a command that names a character's state (the mission desk's).</summary>
+    /// <returns><see langword="false"/> for a session with no avatar bound yet, or none at all.</returns>
+    /// <remarks>
+    /// Read by the mission desk in the Economy phase; written by this file in the Input phase. The phases run one after the other on the tick, so the
+    /// dictionaries are never read and written at once — the same reason <see cref="SessionAccounting"/> reads them without a lock.
+    /// </remarks>
+    internal static bool TryBodyOfSession(SessionId session, out EntityId body, out EntityId character)
+    {
+        character = EntityId.Null;
+        return BoundPlayer.TryGetValue(session.Value, out body) && CharacterOfSession.TryGetValue(session.Value, out character);
+    }
+
+    /// <summary>Fills <paramref name="bodies"/> with every character that has a body bound now, and that body.</summary>
+    /// <param name="bodies">Cleared first.</param>
+    /// <remarks>A character resuming after a dropped connection has no session bound while it waits, and so no body here: a mission's lair waits too.</remarks>
+    internal static void FillCharacterBodies(Dictionary<EntityId, EntityId> bodies)
+    {
+        bodies.Clear();
+        foreach (var (session, character) in CharacterOfSession)
+        {
+            if (BoundPlayer.TryGetValue(session, out var body))
+            {
+                bodies[character] = body;
+            }
+        }
+    }
+
     /// <summary>Forgets every avatar binding. Called from <see cref="ResetSessionAccounting"/>.</summary>
     private static void ResetAvatarAccounting()
     {

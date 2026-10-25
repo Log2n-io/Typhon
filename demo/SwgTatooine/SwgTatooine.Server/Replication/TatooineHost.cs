@@ -467,6 +467,9 @@ public static class TatooineHost
 
         app.MapAuth(runtime.Engine, limiter);
 
+        // The missions a character holds (missions.md § 4): its own, by its bearer token, read off the tick.
+        app.MapMissionJournal(runtime.Engine);
+
         app.MapTyphonSubscriptions("/ws");
         app.MapTyphonCatalog("/typhon/catalog.json");
         // 08-hosting.md § 7's stats page, now that the engine can answer it (#ENG-07). The same numbers the STATS block sends to game clients, plus the

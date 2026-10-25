@@ -567,6 +567,9 @@ public sealed partial class SimBridge
         // Bodies a door or a shuttle put somewhere else this tick (Teleport, in Spawn, before this phase): see the possessed branch below.
         var landed = LandedThisTick;
 
+        // A fighter's ask for a mission, to the mission desk (Economy phase, this tick).
+        var asks = ctx.Writer(MissionAskQueue);
+
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<Player>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
             : ctx.Accessor.GetClusterEnumerator<Player>(ctx.StartClusterIndex, ctx.EndClusterIndex);
@@ -758,7 +761,13 @@ public sealed partial class SimBridge
                 }
                 else if (roll < 0.82f)
                 {
-                    // Go and fight. The destination is a point of interest, which is where the lairs are.
+                    // Go and fight: at a point of interest, where the lairs are — and ask the desk for a mission, which sends the body to its lair instead when
+                    // a terminal is near enough (missions.md § 6). Asked every time; the desk ignores a body already holding one.
+                    if (_config.CrowdTakesMissions)
+                    {
+                        asks.Push(new MissionAsk { Player = cluster.GetEntityId(idx), X = x, Z = z, Realm = realm });
+                    }
+
                     var poi = PickPoi(Salt(tick, key, 0x85EBCA77u));
                     var ang = Hash01(Salt(tick, key, 0x1B873593u)) * MathF.PI * 2f;
                     var r = poi.Radius * MathF.Sqrt(Hash01(Salt(tick, key, 0xCC9E2D51u)));

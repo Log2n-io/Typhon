@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
+import { DoorWalker, RIDDEN_REACH_M } from '../src/app/door-walk';
 
 import {
   ACCEL_S,
   BRAKE_S,
+  AUTOPILOT_DEADBAND_RAD,
+  AUTOPILOT_THROTTLE_RAD,
+  autopilotInput,
   driveInputOf,
+  handsOn,
   MAX_ROLL_RAD,
   SwoopDrive,
   TURN_RATE_RAD_S,
@@ -162,5 +167,80 @@ describe('the keys', () => {
     expect(driveInputOf(new Set(['KeyW', 'KeyD']))).toEqual({ throttle: true, brake: false, steer: 1 });
     expect(driveInputOf(new Set(['ArrowDown', 'ArrowLeft']))).toEqual({ throttle: false, brake: true, steer: -1 });
     expect(driveInputOf(new Set(['KeyA', 'KeyD']))).toEqual({ throttle: false, brake: false, steer: 0 });
+  });
+});
+
+/**
+ * A waypoint clicked on the swoop out in the open: the walk rides the bike there through its own handling. In a city the
+ * rider is put on foot instead (`ClientApp.walkTo`), so there are no corners to take here.
+ */
+describe('autopilotInput', () => {
+  it('brakes once the walk is over, and holds a straight line inside its dead band', () => {
+    expect(autopilotInput(0, null, 100, 10, 40)).toEqual({ throttle: false, brake: true, steer: 0 });
+    expect(autopilotInput(1, 1 + AUTOPILOT_DEADBAND_RAD / 2, 500, 10, 40)).toEqual({
+      throttle: true,
+      brake: false,
+      steer: 0,
+    });
+    expect(handsOn(autopilotInput(1, 1, 500, 10, 40))).toBe(true);
+    expect(handsOn({ throttle: false, brake: false, steer: 0 })).toBe(false);
+  });
+
+  it('turns before it throttles, and slows to turn', () => {
+    expect(autopilotInput(0, Math.PI / 2, 500, 0, 40).throttle).toBe(false);
+    expect(autopilotInput(0, AUTOPILOT_THROTTLE_RAD / 2, 500, 0, 40).throttle).toBe(true);
+    expect(autopilotInput(0, Math.PI / 2, 500, 30, 40).brake, 'too fast to come round').toBe(true);
+  });
+
+  it('is no faster than it can stop by the end, and creeps onto one under a metre away', () => {
+    expect(autopilotInput(0, 0, 5, 30, 40).brake).toBe(true);
+    expect(autopilotInput(0, 0, 200, 30, 40)).toEqual({ throttle: true, brake: false, steer: 0 });
+    expect(autopilotInput(0, 0, 0.5, 0, 40).throttle).toBe(true);
+  });
+
+  it('brings the bike round onto the way, either side, and up to speed along it', () => {
+    for (const target of [Math.PI / 2, -Math.PI / 2, 3]) {
+      const drive = new SwoopDrive();
+      drive.reset(0);
+      for (let t = 0; t < 8; t += 1 / 60) {
+        drive.step(1 / 60, autopilotInput(drive.yaw, target, 1000, drive.speed, 40), 40);
+      }
+
+      const off = Math.atan2(Math.sin(target - drive.yaw), Math.cos(target - drive.yaw));
+      expect(Math.abs(off), `target ${target}`).toBeLessThan(0.1);
+      expect(drive.speed, `target ${target}`).toBeGreaterThan(20);
+    }
+  });
+
+  it('rides a walk across open ground to its end, behind it to start with, and stops there', () => {
+    const walker = new DoorWalker();
+    walker.reachM = RIDDEN_REACH_M;
+    walker.start([[-300, -400]], 0, 0, 0, true);
+    const drive = new SwoopDrive();
+    drive.reset(Math.PI / 2);
+    let x = 0;
+    let z = 0;
+    let top = 0;
+    let t = 0;
+    for (; t < 60 && walker.active; t += 1 / 60) {
+      const walk = walker.intent(x, z, 0, t * 1000);
+      const end = walker.end;
+      const hands = autopilotInput(
+        drive.yaw,
+        walk !== null && walk.speedClass !== 0 ? walk.heading : null,
+        end === null ? 0 : Math.hypot(end[0] - x, end[1] - z),
+        drive.speed,
+        40,
+      );
+      drive.step(1 / 60, hands, 40);
+      x += drive.vx / 60;
+      z += drive.vz / 60;
+      top = Math.max(top, drive.speed);
+    }
+
+    expect(walker.active, 'the walk gave up or never ended').toBe(false);
+    expect(Math.hypot(x + 300, z + 400), 'ended away from its end').toBeLessThan(RIDDEN_REACH_M + 1);
+    expect(top, 'never got up to speed').toBeGreaterThan(30);
+    expect(t, 'took the long way').toBeLessThan(25);
   });
 });

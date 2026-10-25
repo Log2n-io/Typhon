@@ -77,7 +77,7 @@ public sealed class ReviewFixChecks
             new() { Kind = CombatEventKind.Damage, Target = cloned, Amount = 900 },
             new() { Kind = CombatEventKind.Damage, Target = cloned, Amount = 900 },
             new() { Kind = CombatEventKind.Damage, Target = other, Amount = 50 },
-            new() { Kind = CombatEventKind.MissionReward, Target = cloned, Amount = 5 },
+            new() { Kind = CombatEventKind.Revive, Target = cloned },
         ];
 
         long withdrawn = SimBridge.WithdrawAfterClone(events, from: 1, n: 4, cloned);
@@ -92,7 +92,7 @@ public sealed class ReviewFixChecks
             Assert.That(withdrawnIsNull, Is.True, "withdrawn: the drain counts it stale rather than applying it");
             Assert.That(first, Is.EqualTo(cloned), "the event that DID the cloning is behind `from` and untouched");
             Assert.That(third, Is.EqualTo(other), "another player's blow is not collateral");
-            Assert.That(fourth, Is.EqualTo(cloned), "a reward is not damage: a cloned player still gets paid");
+            Assert.That(fourth, Is.EqualTo(cloned), "a revival is not damage: only blows are withdrawn");
         });
     }
 

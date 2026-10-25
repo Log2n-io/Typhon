@@ -72,6 +72,71 @@ export function driveInputOf(keys: ReadonlySet<string>): DriveInput {
   return { throttle, brake, steer: (right ? 1 : 0) - (left ? 1 : 0) };
 }
 
+/** Whether a rider's hands are doing anything: a key held, which takes the bike back from a walk under way. */
+export function handsOn(input: DriveInput): boolean {
+  return input.throttle || input.brake || input.steer !== 0;
+}
+
+/** How far off the nose the way ahead may be before the autopilot steers: a wobble round the line is not worth a correction. */
+export const AUTOPILOT_DEADBAND_RAD = 0.05;
+
+/** How far off the nose the way ahead has to be for the autopilot to steer at full lock; less, and it steers in proportion. */
+export const AUTOPILOT_FULL_LOCK_RAD = 0.3;
+
+/** How far off the nose the way ahead may be and the autopilot still throttle: past it, it is turning, and slows to turn. */
+export const AUTOPILOT_THROTTLE_RAD = 0.3;
+
+/** The share of the swoop's speed the autopilot turns onto the way at — 4 of 40 m/s: faster, the slide carries it wide. */
+export const AUTOPILOT_TURN_SHARE = 0.1;
+
+/** The share it may always creep at, however near the point — without it, a point under a metre away allowed no speed. */
+export const AUTOPILOT_CRAWL_SHARE = 0.075;
+
+/**
+ * The hands a walk outside the cities rides the swoop with (a waypoint clicked while mounted, out in the open): steer the nose
+ * onto the way, throttle along it, slow to turn, and brake to a stop at its end. The bike's own handling does the rest, so the
+ * prediction and the server see exactly what a rider's keys would give them.
+ *
+ * <b>Open ground only.</b> Inside a city the rider is put on foot and walks the path round the buildings
+ * (`ClientApp.walkTo`, Loïc 2026-10-25): a bike does not take a street's corners, and teaching it to was a rabbit hole.
+ *
+ * @param yaw Where the nose points, radians from +X towards +Z.
+ * @param heading The way ahead, the same frame; `null` when the walk has arrived or given up.
+ * @param distanceM How far the walk's end is.
+ * @param speedMps How fast the bike is going.
+ * @param maxMps What the server grants a swoop now.
+ */
+export function autopilotInput(
+  yaw: number,
+  heading: number | null,
+  distanceM: number,
+  speedMps: number,
+  maxMps: number,
+): DriveInput {
+  if (heading === null) {
+    return { throttle: false, brake: true, steer: 0 };
+  }
+
+  const off = Math.atan2(Math.sin(heading - yaw), Math.cos(heading - yaw));
+  // Right (+1) turns the nose towards -heading (see `step`), so a way ahead at a larger angle is a turn left. In proportion:
+  // all-or-nothing steering snaked the bike either side of a straight line.
+  const steer = Math.abs(off) < AUTOPILOT_DEADBAND_RAD ? 0 : Math.max(-1, Math.min(1, -off / AUTOPILOT_FULL_LOCK_RAD));
+
+  // No faster than it can still stop from by the end, under the brake (`step`: maxMps per BRAKE_S, taken at half for the
+  // slide), nor than it turns at while it is coming round.
+  const decel = (0.5 * maxMps) / BRAKE_S;
+  const turning = Math.abs(off) >= AUTOPILOT_THROTTLE_RAD;
+  const wanted = Math.max(
+    maxMps * AUTOPILOT_CRAWL_SHARE,
+    Math.min(turning ? maxMps * AUTOPILOT_TURN_SHARE : maxMps, Math.sqrt(2 * decel * Math.max(0, distanceM))),
+  );
+  if (speedMps > wanted * 1.05 + 0.5) {
+    return { throttle: false, brake: true, steer };
+  }
+
+  return { throttle: speedMps < wanted && !turning, brake: false, steer };
+}
+
 export class SwoopDrive {
   /** Where the nose points, radians from +X towards +Z. */
   yaw = 0;

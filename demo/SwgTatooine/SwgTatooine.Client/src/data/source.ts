@@ -20,6 +20,7 @@ import {
   type Clock,
   type Connection,
   type EventRecord,
+  type FieldValues,
   type MessagePlan,
   type SessionInfo,
   type WorldStore,
@@ -309,6 +310,25 @@ export interface DataSource {
    */
   say(text: string): boolean;
   /**
+   * Takes a mission listed at the terminal the avatar stands at (`TakeMission`, missions.md § 3).
+   *
+   * <b>Accepted silently, refused out loud.</b> An accepted take sends no answer: the offer leaves the list and the body's
+   * `journal` revision moves. A refusal — somebody took it first, three held already, too far from the terminal — comes
+   * back as an `ACKS` reason through {@link TyphonSourceOptions.onMissionRefused}.
+   *
+   * @param offerNetId The offer, as this session holds it.
+   * @param serial The offer's `serial`, which names it however its netId is reused.
+   * @returns Whether it was sent.
+   */
+  takeMission(offerNetId: number, serial: number): boolean;
+  /**
+   * Cancels a mission this character holds (`AbandonMission`): it and its lair are destroyed.
+   *
+   * @param id The held mission's id, as the journal gave it.
+   * @returns Whether it was sent.
+   */
+  abandonMission(id: string): boolean;
+  /**
    * Asks for the god camera's view of the planet (`Overview`), or to come back to the player's own, keeping the avatar.
    *
    * <b>Idempotent, so it can be called every frame</b> with the state the UI wants: only a change is sent, and a new
@@ -339,6 +359,8 @@ export interface TyphonSourceOptions {
    * @param reason The `ACKS` reason, or `travel.REASON_NOT_SENT` when nothing left the client.
    */
   readonly onShuttleRefused?: (reason: number) => void;
+  /** A take or a cancel of a mission the server refused, with its `ACKS` reason (`data/missions.ts` names them). */
+  readonly onMissionRefused?: (reason: number) => void;
   /** The server refused the god camera, or the local rate limit did. The session is still served the player's own view. */
   readonly onOverviewRefused?: () => void;
   /** The server's WebSocket URL, which must speak `typhon.3`. */
@@ -401,7 +423,12 @@ export class TyphonSource implements DataSource {
   private setMountCommand: MessagePlan | null = null;
   private setStanceCommand: MessagePlan | null = null;
   private sayCommand: MessagePlan | null = null;
+  private takeMissionCommand: MessagePlan | null = null;
+  private abandonMissionCommand: MessagePlan | null = null;
   private overviewCommand: MessagePlan | null = null;
+
+  /** The takes and cancels sent and not refused yet. An accepted one is never acked, so an entry outlives its answer; a set of a few seqs. */
+  private readonly pendingMissionSeqs = new Set<number>();
 
   /** The sphere radius last asked for, metres; 0 for none asked. See {@link effectiveRadiusM}. */
   private askedViewRadiusM = 0;
@@ -785,6 +812,45 @@ export class TyphonSource implements DataSource {
     this.sendPending();
   }
 
+  takeMission(offerNetId: number, serial: number): boolean {
+    return this.sendMission(this.takeMissionCommand, { offer: offerNetId, serial });
+  }
+
+  abandonMission(id: string): boolean {
+    // A 64-bit entity id: the journal carries it as decimal text, and only a bigint holds it exactly.
+    let mission: bigint;
+    try {
+      mission = BigInt(id);
+    } catch {
+      return false;
+    }
+
+    return this.sendMission(this.abandonMissionCommand, { mission });
+  }
+
+  private sendMission(command: MessagePlan | null, values: FieldValues): boolean {
+    if (command === null || this.ticks === 0) {
+      return false;
+    }
+
+    const seq = this.commands?.enqueue(command, values) ?? CommandRefused.RateLimited;
+    if (seq < 0) {
+      return false;
+    }
+
+    // Kept small: a seq the ring reuses would match a later, unrelated ack. Oldest first out.
+    if (this.pendingMissionSeqs.size >= 16) {
+      const oldest = this.pendingMissionSeqs.values().next().value;
+      if (oldest !== undefined) {
+        this.pendingMissionSeqs.delete(oldest);
+      }
+    }
+
+    this.pendingMissionSeqs.add(seq);
+    this.sendPending();
+    return true;
+  }
+
   say(text: string): boolean {
     if (this.sayCommand === null || text.length === 0 || this.ticks === 0) {
       return false;
@@ -955,6 +1021,8 @@ export class TyphonSource implements DataSource {
     this.setMountCommand = plan.commandByName('SetMount');
     this.setStanceCommand = plan.commandByName('SetStance');
     this.sayCommand = plan.commandByName('Say');
+    this.takeMissionCommand = plan.commandByName('TakeMission');
+    this.abandonMissionCommand = plan.commandByName('AbandonMission');
     this.overviewCommand = plan.commandByName('Overview');
     this.commands = new CommandQueue({ plan });
     this.region =
@@ -1075,6 +1143,11 @@ export class TyphonSource implements DataSource {
       if (seq === this.pendingBoardSeq) {
         this.pendingBoardSeq = -1;
         this.options.onShuttleRefused?.(applier.acks.reason[i]);
+      }
+
+      // A refused take or cancel: the only thing that will say so, since an accepted one is not answered at all.
+      if (this.pendingMissionSeqs.delete(seq)) {
+        this.options.onMissionRefused?.(applier.acks.reason[i]);
       }
 
       // A refused god camera: the session is still served the player's own view, so the belief goes back to off.

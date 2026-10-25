@@ -71,9 +71,9 @@ describe('a creature atlas', () => {
 });
 
 const KINDS: CreatureKind[] = [
-  { name: 'rats', lair: 'creature_nest', bodies: ['rat'], mission: false },
-  { name: 'ninja hideout', lair: 'ninja_hideout', bodies: ['ninja_male', 'ninja_female'], mission: false },
-  { name: 'unbuilt', lair: 'creature_nest', bodies: ['dragon'], mission: false },
+  { name: 'rats', lair: 'creature_nest', bodies: ['rat'] },
+  { name: 'ninja hideout', lair: 'ninja_hideout', bodies: ['ninja_male', 'ninja_female'] },
+  { name: 'unbuilt', lair: 'creature_nest', bodies: ['dragon'] },
 ];
 
 function record(netId: number, template = -1, skin = 0, look = 0): CrowdBody {
@@ -175,16 +175,6 @@ describe('the published creature table', () => {
 
   it('is empty from a server that publishes none', () => {
     expect(readCreatureKinds(undefined)).toEqual([]);
-  });
-
-  /** The mission pool's kind is named so its dormant lairs — defenderless, waiting — are not drawn as empty camps. */
-  it("marks the mission pool's kind, and only it", () => {
-    const kinds = readCreatureKinds([
-      { name: 'rats', lair: 'creature_nest', bodies: ['rat'] },
-      { name: 'mission camp', lair: 'soldier_camp', bodies: ['blue_soldier_male'], mission: true },
-      { name: 'odd', lair: 'soldier_camp', bodies: ['blue_soldier_male'], mission: 'yes' },
-    ]);
-    expect(kinds.map((k) => k.mission)).toEqual([false, true, false]);
   });
 });
 

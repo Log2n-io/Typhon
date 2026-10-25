@@ -16,6 +16,9 @@ import type { ContextMenuItem } from '../state/ui-store';
 /** The interaction's kind on the published ticket terminal. */
 export const TICKET_INTERACTION = 'shuttle_ticket';
 
+/** The interaction's kind on the published mission terminal (missions.md § 5). */
+export const MISSION_INTERACTION = 'mission';
+
 /** How far beyond its published radius the terminal still counts as in reach: the radius is a disc on the stand point. */
 export const TICKET_SLACK_M = 0.5;
 
@@ -68,6 +71,41 @@ export function ticketTerminalOf(
   }
 
   return null;
+}
+
+/**
+ * A placed mission terminal's stand point and box, or `null` when its asset publishes no `mission` interaction. The terminal
+ * is a structure of its own, not a child: its pose is its placement.
+ *
+ * @param terminal The mission terminal's descriptor.
+ * @param x Where it stands, east.
+ * @param y Its altitude.
+ * @param z Where it stands, north.
+ * @param quarters Its replicated quarter turn.
+ */
+export function missionTerminalOf(
+  terminal: Descriptor,
+  x: number,
+  y: number,
+  z: number,
+  quarters: number,
+): TicketTerminal | null {
+  const use = terminal.interactions.find((i) => i.kind === MISSION_INTERACTION);
+  if (use === undefined) {
+    return null;
+  }
+
+  const pose = placement([x, y, z], structureYaw(quarters));
+  const at = pointToWorld(pose, use.pos);
+  return { x: at[0], z: at[2], radiusM: (use.radius ?? 1) + TICKET_SLACK_M, corners: cornersOf(pose, terminal) };
+}
+
+/** The mission terminal's context menu entries: its list of missions, and the journal of the ones held. */
+export function missionMenuItems(terminal: number): ContextMenuItem[] {
+  return [
+    { label: 'Browse missions', hint: 'The missions this terminal lists', action: { kind: 'missions', terminal } },
+    { label: 'Mission journal', hint: 'The missions you hold', action: { kind: 'journal' } },
+  ];
 }
 
 /** The eight corners of a child's render box in the world, through its pose, or `null` without bounds. */

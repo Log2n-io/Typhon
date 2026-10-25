@@ -300,6 +300,13 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.RegisterComponentFromAccessor<AccountSecret>();
         Dbe.RegisterComponentFromAccessor<Character>();
 
+        // Missions (missions.md): offers listed at the terminals, and the held missions — Versioned and non-spatial like Character, for the same reasons.
+        Dbe.RegisterComponentFromAccessor<MissionOfferPlacement>();
+        Dbe.RegisterComponentFromAccessor<MissionOfferInfo>();
+        Dbe.RegisterComponentFromAccessor<MissionOfferRegion>();
+        Dbe.RegisterComponentFromAccessor<MissionOfferRealm>();
+        Dbe.RegisterComponentFromAccessor<HeldMission>();
+
         // SWG's coordinates are centred on the planet: -8192..+8192 on each axis at the real size. Keeping the origin in
         // the middle rather than at a corner is not cosmetic — every authentic coordinate in the map data is expressed
         // that way, and shifting them would put a transcription error between the source and the world.
@@ -442,6 +449,7 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.SetSpatialBarrierOnly<WorldObject>();
         Dbe.SetSpatialBarrierOnly<CreatureLair>();
         Dbe.SetSpatialBarrierOnly<Portal>();
+        Dbe.SetSpatialBarrierOnly<MissionOffer>();
 
         // Creatures, players and NPCs move, but every one of those writes goes through cluster.WriteSpatial, which flags
         // migration and AABB growth inline. That is what makes the barrier-only opt-in correct for them as well as for

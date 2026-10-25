@@ -3,7 +3,7 @@
 namespace SwgTatooine.Server;
 
 /// <summary>
-/// One thing that happened to somebody else's entity: damage landed, or a mission paid out. The demo's only
+/// One thing that happened to somebody else's entity: damage landed, or a downed player's time was up. The demo's only
 /// <c>EventQueue</c> payload (SWG-02).
 /// </summary>
 /// <remarks>
@@ -21,9 +21,9 @@ namespace SwgTatooine.Server;
 /// stays parallel where the entities are.
 /// </para>
 /// <para>
-/// <b>One queue, not four.</b> Damage to a creature, to a lair and to a player, and a mission's payout, differ only in
-/// which archetype the target lives in and what the amount means. Splitting them would give the consumer four drains and
-/// four <c>Span</c>s to size, and the DAG four edges that all say the same thing. <see cref="TargetKind"/> carries the
+/// <b>One queue, not three.</b> Damage to a creature, to a lair and to a player differ only in
+/// which archetype the target lives in. Splitting them would give the consumer three drains and
+/// three <c>Span</c>s to size, and the DAG three edges that all say the same thing. <see cref="TargetKind"/> carries the
 /// discrimination in one byte, and the consumer needs it anyway: an <see cref="EntityId"/> does not say which components
 /// to write.
 /// </para>
@@ -36,7 +36,7 @@ internal struct CombatEvent
 
     /// <summary>
     /// Who caused it: the player that fired, or the creature that attacked. <c>EntityId.Null</c> when nobody did — a
-    /// mission payout has no attacker.
+    /// revival has no attacker.
     /// </summary>
     /// <remarks>
     /// Carried because the consumer needs it for two separate reasons: a damaged creature turns on its attacker (which is
@@ -45,14 +45,8 @@ internal struct CombatEvent
     /// </remarks>
     public EntityId Attacker;
 
-    /// <summary>Hit points for <see cref="CombatEventKind.Damage"/>, credits for <see cref="CombatEventKind.MissionReward"/>, unused otherwise.</summary>
+    /// <summary>Hit points, for <see cref="CombatEventKind.Damage"/>.</summary>
     public int Amount;
-
-    /// <summary>Where <see cref="CombatEventKind.MissionAssigned"/> sends the player; unused by the other kinds.</summary>
-    public float X;
-
-    /// <summary>See <see cref="X"/>.</summary>
-    public float Z;
 
     /// <summary>See <see cref="CombatEventKind"/>.</summary>
     public byte Kind;
@@ -67,25 +61,11 @@ internal static class CombatEventKind
     /// <summary>Hit points to subtract from the target's vitals.</summary>
     public const byte Damage = 0;
 
-    /// <summary>Credits a completed destroy mission pays its owner. Written to <c>Inventory</c>, so the tick carries a WAL record.</summary>
-    public const byte MissionReward = 1;
-
-    /// <summary>
-    /// A destroy mission has just been built for this player, at <see cref="CombatEvent.X"/>, <see cref="CombatEvent.Z"/>: go there and break it.
-    /// </summary>
-    /// <remarks>
-    /// <b>The half of the mission loop that never existed.</b> A mission lair teleported to a point one to two kilometres from a player and then nothing told
-    /// the player, so a player in <c>PlayerActivity.Combat</c> walked to a random point inside a point-of-interest disc instead — kilometres across, against a
-    /// 75 m weapon. Measured before this event existed: 2 121 weapon cycles with nothing in range and not one shot fired in a 120-tick run. Without it
-    /// AC-1 cannot be met by the simulation at all, only by a test that places a player by hand.
-    /// </remarks>
-    public const byte MissionAssigned = 2;
-
     /// <summary>
     /// A downed player's time is up (<see cref="PlayerVitals.UpTick"/>): a knocked-out one gets up with a fifth of its health, a dead one wakes whole as a clone
     /// outside the nearest city's shuttleport. Pushed by the player's own combat pass, applied in the drain, which owns the teleport.
     /// </summary>
-    public const byte Revive = 3;
+    public const byte Revive = 1;
 }
 
 /// <summary>Which archetype a <see cref="CombatEvent.Target"/> lives in, so the consumer knows what to write.</summary>

@@ -273,6 +273,26 @@ public struct SetStance
 }
 
 /// <summary>
+/// "I take this mission" (missions.md § 3): an offer listed at the mission terminal the player stands at. One taker: the first wins, a later one is refused
+/// <see cref="TatooineReplication.MissionTaken"/>.
+/// </summary>
+public struct TakeMission
+{
+    /// <summary>The offer, as the session was shown it.</summary>
+    public uint Offer;
+
+    /// <summary>The offer's <c>serial</c>: a netId is reused once its entity has left every view, and a late take must not take whatever holds it now.</summary>
+    public uint Serial;
+}
+
+/// <summary>"Cancel this mission" — one the session's character holds, named by the id the journal (<c>GET /swg/missions</c>) gave it.</summary>
+public struct AbandonMission
+{
+    /// <summary>The held mission's entity id, raw.</summary>
+    public ulong Mission;
+}
+
+/// <summary>
 /// "Put me on my swoop", or back on foot (the client's 1 key). The swoop is summoned where the player stands, at once: there is nothing to own or call yet.
 /// </summary>
 /// <remarks>
@@ -703,6 +723,18 @@ public static partial class TatooineReplication
 
     /// <summary><c>ACKS</c> reason: a move, a mount or a boarding from a player that is down — knocked out or dead — and cannot.</summary>
     public const byte PlayerDown = AckReasons.FirstApplicationReason + 9;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="TakeMission"/> naming an offer somebody else took first — or one that is no longer listed at all.</summary>
+    public const byte MissionTaken = AckReasons.FirstApplicationReason + 10;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="TakeMission"/> from a character already holding <see cref="TatooineData.MaxConcurrentMissions"/>.</summary>
+    public const byte MissionCap = AckReasons.FirstApplicationReason + 11;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="TakeMission"/> from a body not standing at the offer's terminal (<see cref="TatooineData.MissionTerminalReachM"/>).</summary>
+    public const byte MissionTooFar = AckReasons.FirstApplicationReason + 12;
+
+    /// <summary><c>ACKS</c> reason: an <see cref="AbandonMission"/> naming no mission this session's character holds.</summary>
+    public const byte MissionUnknown = AckReasons.FirstApplicationReason + 13;
 
     /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
     /// <remarks>
@@ -1352,6 +1384,10 @@ public static partial class TatooineReplication
         subs.Groups(CitySet, g => g
             .Region<CityRegion>(r => r.Key(CityRegion.Area, a => a.Key).Extent(CityRegion.Area, a => a.Circle))
             .Member<WorldObject>(m => m.Key(WorldObject.Region, s => s.Value))
+
+            // A mission terminal's offers (missions.md § 4): a session in the city holds every offer of every terminal in it, live and the same for everyone,
+            // without a crescent query — an offer taken leaves and its replacement enters in the next frame.
+            .Member<MissionOffer>(m => m.Key(MissionOffer.Region, r => r.Value))
             .Leave(CityLeaveM));
 
         // The admission hook. Without one the engine accepts every connection as a Spectator, so the demo had no role distinction, no cap, and no refusal
@@ -1370,6 +1406,7 @@ public static partial class TatooineReplication
         subs.Archetype<Player>();
         subs.Archetype<CreatureLair>();
         subs.Archetype<WorldObject>();
+        subs.Archetype<MissionOffer>();
 
         // The god camera through a World observer, the players through a disc with no band: the anchor's slack is its hysteresis for observer motion
         // (push-model.md § 4.5).
@@ -1629,6 +1666,18 @@ public static partial class TatooineReplication
             .Rate(4, 8)
             .Roles(SessionRole.Player)
             .Field(v => v.Stance, Codec.U8, "stance"));
+
+        // Missions (missions.md § 3). Queued, because each is a decision and two takes are two different offers; two a second with a burst of four, which a
+        // person clicking down a list does not reach. Handled by the mission desk, not here: the race between two takers is settled in its arrival order.
+        subs.Command<TakeMission>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(t => t.Offer, Codec.VarUInt, "offer")
+            .Field(t => t.Serial, Codec.VarUInt, "serial"));
+        subs.Command<AbandonMission>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(a => a.Mission, Codec.U64, "mission"));
 
         // SWG-09. Queued, because each utterance matters and their order is the conversation; one a second, which is the
         // rate 04-protocol § 4 gives it and roughly what a person types.

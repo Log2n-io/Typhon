@@ -124,7 +124,7 @@ public sealed partial class SimBridge : IShuttleBoarding
     private long _economyTicks;
     private long _missionsIssued;
     private long _missionsCompleted;
-    private long _missionsExpired;
+    private long _missionsAbandoned;
     private long _creaturesRespawned;
 
     public SimBridge(SimConfig config, TatooineMap map, WorldIndex index)
@@ -245,7 +245,7 @@ public sealed partial class SimBridge : IShuttleBoarding
         EconomyTicks = Interlocked.Exchange(ref _economyTicks, 0),
         MissionsIssued = Interlocked.Exchange(ref _missionsIssued, 0),
         MissionsCompleted = Interlocked.Exchange(ref _missionsCompleted, 0),
-        MissionsExpired = Interlocked.Exchange(ref _missionsExpired, 0),
+        MissionsAbandoned = Interlocked.Exchange(ref _missionsAbandoned, 0),
         CreaturesRespawned = Interlocked.Exchange(ref _creaturesRespawned, 0),
         CorpsesRemoved = Interlocked.Exchange(ref _corpsesRemoved, 0),
         LairsRetired = Interlocked.Exchange(ref _lairsRetired, 0),
@@ -330,20 +330,24 @@ public struct TickStats
     /// <summary>Downed players back on their feet: knocked out and up again, or dead and cloned.</summary>
     public long PlayersRevived;
 
-    /// <summary>Destroy missions that paid their owner, each one a <c>Versioned</c> write in the tick's unit of work.</summary>
+    /// <summary>Missions that paid their holder, each one a <c>Versioned</c> write in the tick's unit of work.</summary>
     public long MissionRewards;
 
-    /// <summary>Missions whose owner was actually sent to the lair. Below <c>MissionsIssued</c> by however many were offered to a possessed player.</summary>
+    /// <summary>Scripted bodies sent to their mission's lair: at the take, and each time the lair was drawn somewhere new.</summary>
     public long MissionsAssigned;
 
     /// <summary>Events whose target had gone by the time the resolver opened it. Expected to be zero; a non-zero value means an assumption has stopped holding.</summary>
     public long EventsStale;
     public long EconomyTicks;
+    /// <summary>Missions taken from a terminal, by people and the crowd (missions.md).</summary>
     public long MissionsIssued;
+
+    /// <summary>Missions whose lair their holder broke.</summary>
     public long MissionsCompleted;
 
-    /// <summary>Missions that ran out with their lair standing, which went back to the pool unpaid.</summary>
-    public long MissionsExpired;
+    /// <summary>Missions cancelled by their holder, given up by the crowd, or whose holder is gone.</summary>
+    public long MissionsAbandoned;
+
     /// <summary>Creatures a lair spawned to replace one it lost (<c>SimBridge.Lairs.cs</c>).</summary>
     public long CreaturesRespawned;
 

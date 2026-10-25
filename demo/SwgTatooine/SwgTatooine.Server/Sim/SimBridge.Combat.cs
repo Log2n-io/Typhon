@@ -181,7 +181,7 @@ public sealed partial class SimBridge
                         : CheckTarget(ctx, target, targetKind, x, z, rangeSq, -1f);
                     if (verdict == TargetVerdict.Gone)
                     {
-                        // Dead, destroyed, or a mission lair returned to the pool. Nobody's choice survives that, so the target is dropped for a possessed
+                        // Dead or destroyed — a broken lair, a mission ended. Nobody's choice survives that, so the target is dropped for a possessed
                         // player too and the client is free to name another.
                         PlayerSessionsRw(in cluster, ref sessionsRw)[idx].Target = EntityId.Null;
                         target = EntityId.Null;
@@ -293,7 +293,7 @@ public sealed partial class SimBridge
         /// <summary>Alive but too far away.</summary>
         OutOfRange,
 
-        /// <summary>Destroyed, dead, or no longer a mission lair — not a target any more, whoever chose it.</summary>
+        /// <summary>Destroyed or dead — not a target any more, whoever chose it.</summary>
         Gone,
 
         /// <summary>A lair whose occupants still stand: there, and in reach or not, but nothing hits it until they are dead.</summary>
@@ -392,11 +392,11 @@ public sealed partial class SimBridge
     }
 
     /// <summary>
-    /// The nearest LIVING creature within weapon range, or failing that a live mission lair — what a player in
+    /// The nearest LIVING creature within weapon range, or failing that a standing lair — what a player in
     /// <see cref="PlayerActivity.Combat"/> shoots at when it has nobody.
     /// </summary>
     /// <remarks>
-    /// <para><b>Creatures before the lair, which is Core3's order by accident rather than by design.</b> A destroy-mission
+    /// <para><b>Creatures before the lair, which is Core3's order by accident rather than by design.</b> A mission's
     /// lair arrives with defenders around it, so a player that prefers whatever is closest clears the defenders and then
     /// breaks the lair — which is what the mission felt like — without anything having to sequence it.</para>
     /// <para><b>The aliveness test is per candidate and it is not optional.</b> Taking the nearest hit and letting the
@@ -637,27 +637,11 @@ public sealed partial class SimBridge
         long lairHits = 0;
         long incapacitated = 0;
         long revived = 0;
-        long rewards = 0;
-        long assigned = 0;
         long stale = 0;
 
         for (var i = 0; i < n; i++)
         {
             ref readonly var ev = ref events[i];
-            if (ev.Kind == CombatEventKind.MissionReward)
-            {
-                if (Reward(tx, in ev))
-                {
-                    rewards++;
-                }
-                else
-                {
-                    stale++;
-                }
-
-                continue;
-            }
-
             if (ev.Kind == CombatEventKind.Revive)
             {
                 if (tx.TryOpenMut(ev.Target, out var downed) && Revive(tx, ref downed, ev.Target, out var moved))
@@ -670,20 +654,6 @@ public sealed partial class SimBridge
                     {
                         stale += WithdrawAfterClone(events, i + 1, n, ev.Target);
                     }
-                }
-                else
-                {
-                    stale++;
-                }
-
-                continue;
-            }
-
-            if (ev.Kind == CombatEventKind.MissionAssigned)
-            {
-                if (SendOnMission(tx, in ev))
-                {
-                    assigned++;
                 }
                 else
                 {
@@ -776,16 +746,6 @@ public sealed partial class SimBridge
         if (revived != 0)
         {
             Interlocked.Add(ref _playersRevived, revived);
-        }
-
-        if (rewards != 0)
-        {
-            Interlocked.Add(ref _missionRewards, rewards);
-        }
-
-        if (assigned != 0)
-        {
-            Interlocked.Add(ref _missionsAssigned, assigned);
         }
 
         if (stale != 0)
@@ -891,8 +851,8 @@ public sealed partial class SimBridge
     }
 
     /// <summary>
-    /// Damage to a lair. A mission lair's completion is <c>MissionTick</c>'s, on the next tick's Spawn phase; a wild lair at zero is retired by the lair
-    /// director in this tick's Economy phase.
+    /// Damage to a lair. A wild lair at zero is retired by the lair director in this tick's Economy phase; a mission's is the mission desk's, after it in the
+    /// same phase — completed if its holder's blow is among those that broke it (<see cref="Lair.OwnerHit"/>), drawn again if not.
     /// </summary>
     private static bool ApplyToLair(ref EntityRefMut target, in CombatEvent ev)
     {
@@ -900,11 +860,17 @@ public sealed partial class SimBridge
         var spawner = target.Read(CreatureLair.Spawner);
         if (!IsStandingLair(spawner, v) || IsShielded(in spawner))
         {
-            return false;   // broken already this tick, a mission that ended between the shot and here, or an occupant stood up again
+            return false;   // broken already this tick, or an occupant stood up again
         }
 
         v.Health = Math.Max(0, v.Health - ev.Amount);
         target.Set(CreatureLair.Vitals, v);
+        if (spawner.OwnerHit == 0 && !spawner.Owner.IsNull && spawner.Owner.Id == ev.Attacker)
+        {
+            spawner.OwnerHit = 1;
+            target.Set(CreatureLair.Spawner, spawner);
+        }
+
         TatooineReplication.Replicate(in target);
         return true;
     }
@@ -1028,60 +994,56 @@ public sealed partial class SimBridge
         return true;
     }
 
-    /// <summary>Points a player at the destroy mission just built for it, and sets it walking.</summary>
+    /// <summary>Points a scripted body at its mission's lair, and sets it walking (the mission desk, at the take and whenever the lair moves).</summary>
     /// <remarks>
-    /// <para><b>A possessed player is never sent anywhere.</b> Two deciders on one entity is the bug SWG-01 exists to
-    /// prevent, and a mission offer is exactly that if the server applies it: the destination a client sent would be
-    /// overwritten by a lair that happened to pick that player. A human gets the waypoint over the wire and walks there or
-    /// not, which is what a mission offer is.</para>
-    /// <para><b>The timer is sized for the walk, not for the fight.</b> Core3 places a destroy mission one to two
-    /// kilometres away; at the mounted speed the demo gives a travelling player that is two to three minutes, and the 120 s
-    /// the activity mix hands a fighter would expire mid-desert and re-roll the activity — which is how a mission that was
-    /// assigned would still never be reached.</para>
+    /// <para><b>The crowd's only.</b> A person is told over the wire — the journal and its waypoint — and walks there or not, which is what a mission is; a
+    /// destination written onto a possessed body would overwrite the one its client sent, the two-deciders bug SWG-01 exists to prevent.</para>
+    /// <para><b>The timer is sized for the walk, not for the fight.</b> A lair 0.5-2 km out at the mounted speed is one to three minutes away, and the 120 s the
+    /// activity mix hands a fighter would expire mid-desert and re-roll the activity — which is how a mission that was taken would still never be reached.</para>
     /// </remarks>
-    private bool SendOnMission(Transaction tx, in CombatEvent ev)
+    private void SendOnMission(Transaction tx, EntityId body, float x, float z)
     {
-        if (!tx.TryOpenMut(ev.Target, out var player) || player.Read(Player.Control).Kind != ControllerKind.Scripted)
+        if (!tx.TryOpenMut(body, out var player) || player.Read(Player.Control).Kind != ControllerKind.Scripted)
         {
-            return false;
+            return;
         }
 
         var state = player.Read(Player.State);
         state.Activity = PlayerActivity.Combat;
         state.ActivityTicks = MissionWalkSeconds * _config.TickRateHz;
-        state.MissionX = ev.X;
-        state.MissionZ = ev.Z;
+        state.MissionX = x;
+        state.MissionZ = z;
         player.Set(Player.State, state);
         var move = player.Read(Player.Move);
-        move.DestX = ev.X;
-        move.DestZ = ev.Z;
+        move.DestX = x;
+        move.DestZ = z;
         move.SpeedMps = TatooineData.PlayerMountSpeedMps;
         var place = player.Read(Player.Bounds);
-        Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, MetresPerTick, place.X, place.Z, ev.X, ev.Z);
+        Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, MetresPerTick, place.X, place.Z, x, z);
         player.Set(Player.Move, move);
         TatooineReplication.Replicate(in player);
-        return true;
+        Interlocked.Increment(ref _missionsAssigned);
     }
 
-    /// <summary>[EST] Seconds a player is given to walk to its mission and fight there: the walk alone is 1-2 km at 12 m/s.</summary>
+    /// <summary>[EST] Seconds a scripted body is given to walk to its mission and fight there; past it the crowd gives the mission up.</summary>
     private const int MissionWalkSeconds = 300;
 
-    /// <summary>A completed destroy mission's payout, into the owner's <see cref="Inventory"/>.</summary>
-    private static bool Reward(Transaction tx, in CombatEvent ev)
+    /// <summary>A completed mission's payout, into its holder's <see cref="Inventory"/> — a Versioned write in the tick's unit of work.</summary>
+    private void Reward(Transaction tx, EntityId body, int credits)
     {
-        if (!tx.TryOpenMut(ev.Target, out var player))
+        if (!tx.TryOpenMut(body, out var player))
         {
-            return false;
+            return;
         }
 
         var inv = player.Read(Player.Inventory);
-        inv.Credits += ev.Amount;
+        inv.Credits += credits;
         player.Set(Player.Inventory, inv);
         var state = player.Read(Player.State);
         state.MissionsCompleted++;
         player.Set(Player.State, state);
         TatooineReplication.Replicate(in player);
-        return true;
+        Interlocked.Increment(ref _missionRewards);
     }
 
     /// <summary>What a kill drops, into the shooter's <see cref="Inventory"/>.</summary>
@@ -1105,20 +1067,16 @@ public sealed partial class SimBridge
     }
 
     /// <summary>
-    /// Whether a lair may be damaged: it has health left and, if it is one of the destroy-mission pool, it is on a mission. A dormant pool lair is at full
-    /// health between missions and belongs to somebody else's next; shooting it would damage a target nobody was sent to destroy.
-    /// </summary>
-    /// <summary>
     /// Whether a lair's occupants still stand between it and whoever attacks it: nothing damages it until they are dead (Loïc, 2026-10-24).
     /// </summary>
     /// <remarks>
-    /// <b>Wild lairs only.</b> A destroy-mission lair teleports to its player and leaves its defenders where they stood, so shielding it by them would make
-    /// it indestructible; the pool keeps its own rules until missions are redesigned around the wild camps.
+    /// <b>Every lair, a mission's included.</b> The destroy-mission pool's were exempt, because the pool teleported a lair and left its defenders where they
+    /// stood; a mission's lair is drawn with its occupants round it now (missions.md § 3).
     /// </remarks>
-    internal static bool IsShielded(in Lair lair) => lair.Site != 0 && lair.Guards > 0;
+    internal static bool IsShielded(in Lair lair) => lair.Guards > 0;
 
-    internal static bool IsStandingLair(in Lair lair, in LairVitals vitals)
-        => vitals.Health > 0 && (lair.CreatureTemplate != CreatureTemplates.MissionDefender || lair.MissionId != 0);
+    /// <summary>Whether a lair can still be damaged at all: it has health left.</summary>
+    internal static bool IsStandingLair(in Lair lair, in LairVitals vitals) => vitals.Health > 0;
 
     /// <summary>Where a cloned player wakes up: on the lane outside the gate of the nearest city's shuttleport.</summary>
     /// <remarks>

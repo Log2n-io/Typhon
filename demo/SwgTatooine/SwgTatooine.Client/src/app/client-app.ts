@@ -7,7 +7,6 @@ import { Scene } from '@babylonjs/core/scene';
 import {
   AggregateGrid,
   archetypeOf,
-  type ArchetypeStore,
   type GridSchema,
   Clock,
   epochAt,
@@ -30,7 +29,7 @@ import type { Descriptor } from '../assets/descriptor';
 import { SWOOP_ASSET } from './character-mount';
 import { CrowdSwoops } from './crowd-swoops';
 import { StaticAssets, type StructureSample } from './static-assets';
-import { DoorWalker, pathIn, pathOut } from './door-walk';
+import { DoorWalker, pathIn, pathOut, RIDDEN_REACH_M, WAYPOINT_REACH_M } from './door-walk';
 import { findPath, wallGrid } from './city-path';
 import { beginArrival, carryThrough, stepArrival, type DoorArrival, type DoorCarry } from './door-arrival';
 import { crossedDoor, doorPlanes, spawnNear, type DoorPlane, type SpawnNear } from './door-crossing';
@@ -44,12 +43,15 @@ import {
 } from './structure-collision';
 import { meanAndP95, overviewPolicy, regionDue } from './frame-policy';
 import { headingFromVelocity } from '../math/vec';
-import { resolveArchetypes, type ArchetypeInfo, type ArchetypeView } from '../data/archetypes';
+import { DATA_ARCHETYPES, resolveArchetypes, type ArchetypeInfo, type ArchetypeView } from '../data/archetypes';
 import { altitudeField, altitudeOf, Placement } from '../data/placement';
 import type { HealthBar } from '../render/labels';
 import { DamageText, type Anchor } from '../render/damage-text';
 import type { AnimationGraph } from '../character/animation-graph';
 import { PlayerNameDirectory } from '../data/player-names';
+import { MissionJournal, missionTitle, type MissionOffer } from '../data/missions';
+import { useMissions } from '../state/mission-store';
+import { useSessionStore } from '../state/session-store';
 import { replicationStatsOf } from '../data/replication-stats';
 import type { AssetSet } from '../data/server-config';
 import { SpeedClass, type DataSource, type EventSink } from '../data/source';
@@ -110,14 +112,20 @@ import {
   type Writable,
 } from './shuttle-flight';
 import { ShuttleView } from './shuttle-view';
-import { ticketMenuItems, ticketTerminalOf, type TicketTerminal } from './ticket-terminal';
+import {
+  missionMenuItems,
+  missionTerminalOf,
+  ticketMenuItems,
+  ticketTerminalOf,
+  type TicketTerminal,
+} from './ticket-terminal';
 import { rayOnShapes, rayOnSlabs, type ShapeHit } from './world-pick';
 import { pressProgress, PressRing } from '../render/press-ring';
 import { resetForRealm, resetForSession, type RealmSwitchTargets } from './realm-switch';
 import { nextRide, NOT_RIDING, rideOwnsTheView, rideSubjectOf, type RideState } from './ride';
 import { boostFor, DEFAULT_BOOST } from './gait';
 import { ACTION_ICON_SIZE, ACTION_SLOTS, NO_STANCE, serverStance, slotForKey, weaponOf } from './action-bar';
-import { driveInputOf, SwoopDrive } from './swoop-drive';
+import { autopilotInput, driveInputOf, handsOn, SwoopDrive, type DriveInput } from './swoop-drive';
 import { SwoopHover } from './swoop-hover';
 import {
   gaitChanged,
@@ -136,7 +144,7 @@ import { DEFAULT_THIRD_PERSON_M, MAX_EYE_DISTANCE_M } from '../camera/eye-camera
 import { bodyOpacityAt, marchEye } from '../camera/eye-clearance';
 import { useStats, type DownNotice, type FeetReport, type Inspection, type PlayerVitals } from '../state/stats-store';
 import { useUi, type NavRow, type ShuttleportPrompt, type UiState } from '../state/ui-store';
-import { NAV_KINDS, navLabel, nearestFacilities, relativeBearing, type NavTarget } from './nav-finder';
+import { insideCity, NAV_KINDS, navLabel, nearestFacilities, relativeBearing, type NavTarget } from './nav-finder';
 import { nearestShuttleport } from './shuttle';
 import { nextTravel } from './travel';
 import { TerrainDetailGovernor } from './terrain-detail';
@@ -367,9 +375,26 @@ const PICK_SURFACE_SLACK_M = 0.6;
 /** What the ticket terminal is called on its tag. */
 const TICKET_TERMINAL_LABEL = 'Ticket terminal';
 
+/** The mission terminal's asset: its `mission` interaction is where the terminal is used from (missions.md § 5). */
+const MISSION_TERMINAL_ASSET = 'mission_terminal';
+
+/** What a selected mission terminal is tagged. */
+const MISSION_TERMINAL_LABEL = 'Mission terminal';
+
+/** How often an open terminal's list is gathered from the replicated offers, milliseconds: offers change a few times a minute. */
+const OFFER_SCAN_MS = 250;
+
+/** How far from its terminal's centre an offer may stand and be its: offers are placed AT the centre, so this is quantisation. */
+const OFFER_AT_TERMINAL_M = 1.5;
+
+/** The navigation pane's kinds for held missions, past every `StructureKind`: one per held mission, in the journal's order. */
+const MISSION_NAV_KIND = 1000;
+
 /** A shuttleport's ticket terminal, as a part the viewer can hover, select and long-press: its port and its box. */
 interface TerminalPart {
-  /** The shuttleport's netId. */
+  /** A shuttleport's ticket terminal, or a mission terminal (missions.md § 5). */
+  readonly kind: 'ticket' | 'mission';
+  /** The shuttleport's netId, or the mission terminal's own. */
   readonly owner: number;
   readonly use: TicketTerminal;
   /** The terminal's world box, planet coordinates: what the pick's ray is tested against. */
@@ -745,6 +770,11 @@ export class ClientApp {
     this.bubbles = new SpeechBubbles(overlay);
     // The chat box speaks through whatever source is live; a session that cannot speak answers false and keeps the line.
     useChat.getState().setSpeak((text) => this.source?.say(text) ?? false);
+    // The mission panels take and cancel through whatever source is live, the same way.
+    useMissions.getState().setActions({
+      take: (offer, serial) => this.source?.takeMission(offer, serial) ?? false,
+      cancel: (id) => this.source?.abandonMission(id) ?? false,
+    });
     // A chat cleared is a room left — a reconnect, a realm crossed — and the netIds the bubbles are keyed by are the old
     // room's: a bubble kept would float over whichever body was given the number next.
     this.unsubscribeChat = useChat.subscribe((state, previous) => {
@@ -1027,6 +1057,7 @@ export class ClientApp {
       // The descriptors the ticket terminal is read from, asked for now so the first port walked up to has them.
       void mount.library.describe(SHUTTLEPORT_ASSET).catch(() => undefined);
       void mount.library.describe(TICKET_TERMINAL_ASSET).catch(() => undefined);
+      void mount.library.describe(MISSION_TERMINAL_ASSET).catch(() => undefined);
     } catch (error) {
       console.error('assets: not mounted', error);
     }
@@ -1124,6 +1155,8 @@ export class ClientApp {
     this.labels.dispose();
     this.unsubscribeChat();
     useChat.getState().setSpeak(() => false);
+    useMissions.getState().setActions(null);
+    useMissions.getState().closeTerminal();
     this.bubbles.dispose();
     this.frames.dispose();
     this.pressRing.dispose();
@@ -1207,6 +1240,10 @@ export class ClientApp {
     // What the last session was told is not this one's to show: a reconnect or a source change starts the room empty.
     useChat.getState().clear();
     this.names.clear();
+    this.journal.clear();
+    this.journalVersion = -1;
+    useMissions.getState().resetJournal();
+    useMissions.getState().closeTerminal();
     this.clock = new Clock(CLOCK_OPTIONS);
 
     // The world the context offers is the one a source that does not own its own fills — the mock. A live connection can
@@ -1596,6 +1633,20 @@ export class ClientApp {
     nearestFacilities(this.structureSamples, this.structureCount, this.navFromX, this.navFromZ, this.navTargets);
     const scanMs = performance.now() - started;
 
+    // The held missions, after the facilities: one row each, its arrow on its lair — or no distance while it has none.
+    this.navTargets.length = NAV_KINDS.length;
+    const held = useMissions.getState();
+    held.journal.forEach((m, i) => {
+      const lair = m.lair;
+      this.navTargets.push({
+        kind: MISSION_NAV_KIND + i,
+        x: lair?.x ?? 0,
+        z: lair?.z ?? 0,
+        distance: lair === null ? Infinity : Math.hypot(lair.x - this.navFromX, lair.z - this.navFromZ),
+        held: lair !== null,
+      });
+    });
+
     // Republished only when what it shows changed: a metre of distance or a different target. Five store writes a second
     // would re-render the pane five times a second for nothing.
     let key = '';
@@ -1609,9 +1660,11 @@ export class ClientApp {
       const rows: NavRow[] = this.navTargets.map((t) => {
         // A click walks to where the thing is used from: a shuttleport's ticket terminal, not its pad.
         const at = t.kind === StructureKind.Shuttleport ? this.ticketStandPoint(t.x, t.z) : null;
+        const mission = t.kind >= MISSION_NAV_KIND ? held.journal[t.kind - MISSION_NAV_KIND] : undefined;
+        const name = mission === undefined ? '' : missionTitle(mission.name);
         return {
           kind: t.kind,
-          label: navLabel(t),
+          label: mission === undefined ? navLabel(t) : mission.lair === null ? `${name} (lair moving)` : name,
           distanceM: Number.isFinite(t.distance) ? Math.round(t.distance) : Infinity,
           x: at?.x ?? t.x,
           z: at?.z ?? t.z,
@@ -1627,7 +1680,7 @@ export class ClientApp {
       return;
     }
 
-    for (let k = 0; k < NAV_KINDS.length && k < this.navTargets.length; k++) {
+    for (let k = 0; k < this.navTargets.length; k++) {
       const target = this.navTargets[k];
       let arrow = this.navArrows.get(target.kind) ?? null;
       if (arrow === null || !arrow.isConnected) {
@@ -2213,7 +2266,12 @@ export class ClientApp {
       this.driveYaw = this.drive.yaw;
     }
 
-    const input = steering && useUi.getState().contextMenu === null ? driveInputOf(this.input.heldKeys) : PARKED_HANDS;
+    const hands = steering && useUi.getState().contextMenu === null ? driveInputOf(this.input.heldKeys) : PARKED_HANDS;
+
+    // A waypoint clicked on the swoop out in the open rides there: the walk steers the bike, until a key takes it back. It used
+    // to stop dead instead — a mounted body ignored the walk's intents, so a mission's waypoint a kilometre or two out did
+    // nothing. In a city `walkTo` puts the rider on foot first.
+    const input = !handsOn(hands) && this.doorWalk.active ? this.autopilotHands(performance.now(), max) : hands;
     if (max > 0) {
       this.drive.step(dtS, input, max);
     }
@@ -2224,6 +2282,22 @@ export class ClientApp {
     if (steering && turned !== 0) {
       this.eyeCamera.rotateBy(-turned, 0);
     }
+  }
+
+  /** The swoop's hands for the walk under way: towards its next point, braking once it is over. See `autopilotInput`. */
+  private autopilotHands(nowMs: number, maxMps: number): DriveInput {
+    this.doorWalk.reachM = RIDDEN_REACH_M;
+    const walk = this.walkIntent(nowMs);
+    const end = this.doorWalk.end;
+    const x = this.predictor.active ? this.predictor.x : this.eyeX;
+    const z = this.predictor.active ? this.predictor.z : this.eyeZ;
+    return autopilotInput(
+      this.drive.yaw,
+      walk !== null && walk.speedClass !== SpeedClass.stop ? walk.heading : null,
+      end === null ? 0 : Math.hypot(end[0] - x, end[1] - z),
+      this.drive.speed,
+      maxMps,
+    );
   }
 
   /** The swoop's handling while this session rides it; see `swoop-drive.ts`. */
@@ -2304,7 +2378,8 @@ export class ClientApp {
 
     // A walk to or through a door (`walkIn` / `walkOut`) supplies the intent the keys would, so the prediction, the refresh
     // window and the stop at the end are the keyboard's own. Any key takes the body back.
-    if (keyed !== null) {
+    // On the swoop the intent is the bike's motion, not the keys — the autopilot of a walk is one — so only a key held counts.
+    if (keyed !== null && (!this.driving || handsOn(driveInputOf(this.input.heldKeys)))) {
       this.doorWalk.cancel();
     }
 
@@ -2734,6 +2809,11 @@ export class ClientApp {
       return null;
     }
 
+    // On foot the walk's own tight reach; the swoop's autopilot sets the bike's before it asks (`autopilotHands`).
+    if (!this.driving) {
+      this.doorWalk.reachM = WAYPOINT_REACH_M;
+    }
+
     const x = this.predictor.active ? this.predictor.x : this.eyeX;
     const z = this.predictor.active ? this.predictor.z : this.eyeZ;
     return this.doorWalk.intent(x, z, this.realm?.realmId ?? -1, nowMs);
@@ -2757,6 +2837,13 @@ export class ClientApp {
 
     const fromX = this.predictor.x;
     const fromZ = this.predictor.z;
+
+    // In a city on foot, round the buildings; out in the open on the swoop, if the rider is on it (Loïc, 2026-10-25). A bike
+    // does not take a street's corners.
+    if (this.ridingNow(performance.now()) && insideCity(fromX, fromZ)) {
+      this.toggleMount(performance.now());
+    }
+
     const far = Math.hypot(x - fromX, z - fromZ);
     const reach = Math.min(1, WALK_SEARCH_M / Math.max(far, 1e-6));
     const toX = fromX + (x - fromX) * reach;
@@ -2844,7 +2931,8 @@ export class ClientApp {
     // on the layer's own archetype rather than its position, because the shuttleport's layer shares one with the
     // structures and follows that toggle.
     for (const layer of this.layers) {
-      layer.visible = state.layers[this.archetypes.name(layer.archetype)] ?? true;
+      const name = this.archetypes.name(layer.archetype);
+      layer.visible = !DATA_ARCHETYPES.has(name) && (state.layers[name] ?? true);
     }
     for (let i = 0; i < this.heatChannels.length; i++) {
       this.heatMask[i] = state.heatmap[this.heatChannels[i].name] ?? false;
@@ -3061,6 +3149,7 @@ export class ClientApp {
     this.mapCamera.update(dt);
     const cam = inEye ? this.eyeCamera : this.mapCamera;
     this.activeAltitude = cam.altitude;
+    this.updateMissions(now);
     this.updateNav(now);
     this.paintNav(cam.yaw);
     this.origin.follow(cam.targetX, cam.targetZ);
@@ -3124,10 +3213,6 @@ export class ClientApp {
 
     for (const netId of this.updateLairAssets(cam.eyeX, cam.eyeZ)) {
       elsewhere.add(netId);
-    }
-
-    for (const netId of this.dormantLairs) {
-      hidden.add(netId);
     }
 
     this.updateGizmos(ui);
@@ -3477,32 +3562,37 @@ export class ClientApp {
   private readonly pickWall: ShapeHit = { t: 0, index: -1 };
 
   /**
-   * The ticket terminals of the shuttleports this frame's structures hold — the parts the pick and the long press know —
-   * rebuilt when the structures are.
+   * The terminals this frame's structures hold — shuttleports' ticket terminals and mission terminals, the parts the pick
+   * and the long press know — rebuilt when the structures are.
+   *
+   * <b>Not cached until every descriptor is in hand.</b> They are asked for when the assets mount and arrive in their own
+   * time; a list built before one arrived was kept until the structures next changed, so the first terminal walked up to
+   * after a quick login could not be used.
    */
   private terminalsInView(): readonly TerminalPart[] {
     if (this.partsEpoch === this.structureEpoch && this.partsSet === this.assetSet) {
       return this.terminalParts;
     }
 
-    this.partsEpoch = this.structureEpoch;
-    this.partsSet = this.assetSet;
     this.terminalParts = [];
     const library = this.assets?.library ?? null;
     const port = library?.described(SHUTTLEPORT_ASSET) ?? null;
-    const terminal = library?.described(TICKET_TERMINAL_ASSET) ?? null;
-    if (port === null || terminal === null) {
-      return this.terminalParts;
+    const ticket = library?.described(TICKET_TERMINAL_ASSET) ?? null;
+    const mission = library?.described(MISSION_TERMINAL_ASSET) ?? null;
+    if (port !== null && ticket !== null && mission !== null) {
+      this.partsEpoch = this.structureEpoch;
+      this.partsSet = this.assetSet;
     }
 
-    const children = new Map([[TICKET_TERMINAL_ASSET, terminal]]);
+    const children = ticket === null ? null : new Map([[TICKET_TERMINAL_ASSET, ticket]]);
     for (let i = 0; i < this.structureCount; i++) {
       const s = this.structureSamples[i];
-      if (s.kind !== StructureKind.Shuttleport) {
-        continue;
-      }
-
-      const use = ticketTerminalOf(port, children, s.x, s.y, s.z, s.yaw);
+      const use =
+        s.kind === StructureKind.Shuttleport && port !== null && children !== null
+          ? ticketTerminalOf(port, children, s.x, s.y, s.z, s.yaw)
+          : s.kind === StructureKind.MissionTerminal && mission !== null
+            ? missionTerminalOf(mission, s.x, s.y, s.z, s.yaw)
+            : null;
       if (use === null || use.corners === null) {
         continue;
       }
@@ -3516,10 +3606,132 @@ export class ClientApp {
         }
       }
 
-      this.terminalParts.push({ owner: s.netId, use, min, max });
+      const kind = s.kind === StructureKind.Shuttleport ? 'ticket' : 'mission';
+      this.terminalParts.push({ kind, owner: s.netId, use, min, max });
     }
 
     return this.terminalParts;
+  }
+
+  // ── Missions (missions.md § 5) ────────────────────────────────────────────────────────────────────────────────────
+
+  /** The journal: the character's held missions, re-read whenever the body's `journal` revision moves. */
+  private readonly journal = new MissionJournal(() => useSessionStore.getState().grant?.token ?? null);
+  private journalVersion = -1;
+  private kindNamesSet: AssetSet | null = null;
+  private offersAtMs = Number.NEGATIVE_INFINITY;
+  private offersFor = 0;
+  private offersKey = '';
+
+  /**
+   * The journal and the open terminal's list, every frame: the journal read when its revision moved, the list gathered
+   * every {@link OFFER_SCAN_MS} — and closed when the body walks away from its terminal, as the ticket menu is.
+   */
+  private updateMissions(nowMs: number): void {
+    const missions = useMissions.getState();
+    const set = this.assetSet;
+    if (set !== null && set !== this.kindNamesSet) {
+      this.kindNamesSet = set;
+      missions.setKindNames(set.creatures.map((c) => c.name));
+    }
+
+    const source = this.source;
+    if (source !== null && source.canPlay) {
+      this.journal.update(source.selfNumber('journal'));
+      if (this.journal.version !== this.journalVersion) {
+        this.journalVersion = this.journal.version;
+        missions.setJournal(this.journal.missions);
+      }
+    }
+
+    const open = missions.terminal;
+    if (open === null) {
+      this.offersFor = 0;
+      return;
+    }
+
+    const part = this.terminalPart(open);
+    if (part === null || part.kind !== 'mission' || !this.canUse(part)) {
+      missions.closeTerminal();
+      return;
+    }
+
+    if (open === this.offersFor && nowMs - this.offersAtMs < OFFER_SCAN_MS) {
+      return;
+    }
+
+    if (open !== this.offersFor) {
+      this.offersFor = open;
+      this.offersKey = '';
+    }
+
+    this.offersAtMs = nowMs;
+    const offers = this.offersAt(open);
+    let key = '';
+    for (const o of offers) {
+      key += `${o.serial},`;
+    }
+
+    if (key !== this.offersKey) {
+      this.offersKey = key;
+      missions.setOffers(offers);
+    }
+  }
+
+  /** The offers listed at a mission terminal: the `MissionOffer` entities standing at its centre. */
+  private offersAt(terminal: number): MissionOffer[] {
+    const offers: MissionOffer[] = [];
+    let tx = Number.NaN;
+    let tz = Number.NaN;
+    for (let i = 0; i < this.structureCount; i++) {
+      if (this.structureSamples[i].netId === terminal) {
+        tx = this.structureSamples[i].x;
+        tz = this.structureSamples[i].z;
+        break;
+      }
+    }
+
+    const archetype = this.archetypes.indexOf('MissionOffer');
+    if (archetype < 0 || !Number.isFinite(tx)) {
+      return offers;
+    }
+
+    const store = this.world.archetypeStore(archetype);
+    const field = (name: string): ArrayLike<number> | null => {
+      const index = store.fieldIndex(name);
+      return index < 0 ? null : store.fieldAt(index);
+    };
+    const serial = field('serial');
+    const kind = field('kind');
+    const difficulty = field('difficulty');
+    const reward = field('reward');
+    const octant = field('octant');
+    const distanceM = field('distanceM');
+    if (!store.hasPosition || serial === null || kind === null || reward === null) {
+      return offers;
+    }
+
+    const near = OFFER_AT_TERMINAL_M * OFFER_AT_TERMINAL_M;
+    for (let i = 0; i < store.liveCount; i++) {
+      const slot = store.live[i];
+      evaluateSlot(store, slot, this.clock.renderTick, this.clock.renderFrac, this.scratch, 0);
+      const at = this.placement.read(store.dims, this.scratch, 0);
+      if ((at.x - tx) * (at.x - tx) + (at.z - tz) * (at.z - tz) > near) {
+        continue;
+      }
+
+      offers.push({
+        netId: store.netIds[slot],
+        serial: serial[slot],
+        kind: kind[slot],
+        difficulty: difficulty?.[slot] ?? 1,
+        reward: reward[slot],
+        octant: octant?.[slot] ?? 0,
+        distanceM: distanceM?.[slot] ?? 0,
+      });
+    }
+
+    return offers;
   }
 
   private terminalParts: TerminalPart[] = [];
@@ -3593,17 +3805,27 @@ export class ClientApp {
     press.fired = true;
     this.pressRing.hide();
     const ui = useUi.getState();
-    ui.selectPart({ owner: part.owner, kind: 'ticket' });
-    ui.openContextMenu({
-      x: press.x,
-      y: press.y,
-      title: 'Shuttle destinations',
-      source: 'ticket',
-      items: ticketMenuItems(
-        ui.shuttleport?.city ?? -1,
-        CITIES.map((c) => c.name),
-      ),
-    });
+    ui.selectPart({ owner: part.owner, kind: part.kind });
+    ui.openContextMenu(
+      part.kind === 'mission'
+        ? {
+            x: press.x,
+            y: press.y,
+            title: MISSION_TERMINAL_LABEL,
+            source: 'mission',
+            items: missionMenuItems(part.owner),
+          }
+        : {
+            x: press.x,
+            y: press.y,
+            title: 'Shuttle destinations',
+            source: 'ticket',
+            items: ticketMenuItems(
+              ui.shuttleport?.city ?? -1,
+              CITIES.map((c) => c.name),
+            ),
+          },
+    );
     return false;
   }
 
@@ -4197,7 +4419,7 @@ export class ClientApp {
       }
 
       this.frames.show(1, this.frameRect, 'passive');
-      return TICKET_TERMINAL_LABEL;
+      return selectedPart.kind === 'mission' ? MISSION_TERMINAL_LABEL : TICKET_TERMINAL_LABEL;
     }
 
     if (selected === 0 || !this.frameOf(matrix, selected, width, height)) {
@@ -4340,8 +4562,8 @@ export class ClientApp {
   }
 
   /**
-   * A health bar over every lair and camp near the camera (within {@link LAIR_BAR_RANGE_M}), the dormant mission pool's
-   * aside: steel while its occupants still guard it, red once it can be broken. Appended to {@link enemyBars} after `n`.
+   * A health bar over every lair and camp near the camera (within {@link LAIR_BAR_RANGE_M}): steel while its occupants
+   * still guard it, red once it can be broken — a mission's lair as any other. Appended to {@link enemyBars} after `n`.
    */
   private lairBars(view: FrameView, n: number): number {
     const archetype = this.archetypes.indexOf('CreatureLair');
@@ -4358,13 +4580,11 @@ export class ClientApp {
     const hps = store.fieldAt(hpField);
     const guardField = store.fieldIndex('guards');
     const guards = guardField < 0 ? null : store.fieldAt(guardField);
-    const missionField = store.fieldIndex('missionId');
-    const missions = missionField < 0 ? null : store.fieldAt(missionField);
     const ground = altitudeField(store);
     const reach = LAIR_BAR_RANGE_M * LAIR_BAR_RANGE_M;
     for (let i = 0; i < store.liveCount; i++) {
       const slot = store.live[i];
-      if (this.dormantLair(store, slot) || !(hps[slot] > 0)) {
+      if (!(hps[slot] > 0)) {
         continue;
       }
 
@@ -4387,23 +4607,11 @@ export class ClientApp {
       bar.y = y + LAIR_BAR_HEIGHT_M;
       bar.z = at.z;
       bar.fraction = hps[slot];
-      // A wild lair guarded by its occupants: one on a mission is not shielded (its defenders do not follow its teleport).
-      bar.shielded = (guards?.[slot] ?? 0) > 0 && (missions?.[slot] ?? 0) === 0;
+      // Guarded by its occupants: nothing breaks it while one stands (the server's IsShielded, every lair).
+      bar.shielded = (guards?.[slot] ?? 0) > 0;
     }
 
     return n;
-  }
-
-  /** Whether a lair is the mission pool's and has no mission: it waits, defenderless, wherever its last mission left it. */
-  private dormantLair(store: ArchetypeStore, slot: number): boolean {
-    const templateField = store.fieldIndex('template');
-    const missionField = store.fieldIndex('missionId');
-    if (templateField < 0 || missionField < 0) {
-      return false;
-    }
-
-    const kind = this.assetSet?.creatures[store.fieldAt(templateField)[slot]];
-    return kind?.mission === true && store.fieldAt(missionField)[slot] === 0;
   }
 
   /** Where the enemy {@link locateEnemy} found last stands. */
@@ -4716,7 +4924,6 @@ export class ClientApp {
    */
   private updateLairAssets(eyeX: number, eyeZ: number): ReadonlySet<number> {
     const layer = this.lairAssets;
-    this.dormantLairs.clear();
     if (layer === null) {
       return NONE_HIDDEN;
     }
@@ -4735,12 +4942,6 @@ export class ClientApp {
     let taken = 0;
     for (let i = 0; i < store.liveCount; i++) {
       const slot = store.live[i];
-      // The mission pool's waiting lairs are not places: drawn neither as their camp nor as the renderer's own shape.
-      if (this.dormantLair(store, slot)) {
-        this.dormantLairs.add(store.netIds[slot]);
-        continue;
-      }
-
       evaluateSlot(store, slot, this.clock.renderTick, this.clock.renderFrac, this.scratch, 0);
       const at = this.placement.read(store.dims, this.scratch, 0);
       const dx = at.x - eyeX;
@@ -4765,9 +4966,6 @@ export class ClientApp {
 
     return layer.update(samples, taken, this.assetView);
   }
-
-  /** The mission pool's dormant lairs this frame: drawn as nothing, by the lair layer or as a prop. */
-  private readonly dormantLairs = new Set<number>();
 
   /**
    * Builds each creature species' crowd, and the router that sends bodies to it.

@@ -44,6 +44,7 @@ public static class WorldBuilder
         index ??= new WorldIndex();
         _realm = realm;
         _nextInterior = firstInteriorRealm;
+        _index = index;
 
         if (map.ClampedSites > 0 && realm == 0)
         {
@@ -64,7 +65,6 @@ public static class WorldBuilder
         SpawnWilderness(dbe, config, census, ref rng, index);
         SpawnPlayerStructures(dbe, map, config, census, ref rng, plan);
         SpawnPlayers(dbe, map, config, census, ref rng, index, plan);
-        SpawnMissionLairPool(dbe, map, config, census, ref rng, index);
 
         census.Crowded = plan.Crowded;
         return census;
@@ -76,6 +76,9 @@ public static class WorldBuilder
 
     // The room the next enterable building leads to, or 0 when this build makes none enterable. Serial for the same reason as _realm.
     private static int _nextInterior;
+
+    // The planet's index being filled: SpawnStructure files each mission terminal in it. Serial for the same reason as _realm.
+    private static WorldIndex _index;
 
     // ── Cities ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -863,9 +866,7 @@ public static class WorldBuilder
             SpawnLimit = perLair,
             AliveCount = perLair,
             Guards = perLair,
-            RespawnCooldown = 0,
             SpawnRadius = CreatureTemplates.LairSpawnRadius[template] * config.ContentScale,
-            MissionId = 0,
             Site = site,
             ExpireTick = expireTick,
         };
@@ -1228,61 +1229,6 @@ public static class WorldBuilder
         }
     }
 
-    // ── Destroy-mission lair pool ───────────────────────────────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// A pool of dormant destroy-mission lairs, recycled by <c>SimBridge.MissionTick</c>.
-    /// </summary>
-    /// <remarks>
-    /// <para>A pool rather than spawning one per mission, because structural spawns during a tick are unavailable
-    /// (#907). A dormant lair sits where it was born until it finds a player, then teleports 1-2 km from them and goes
-    /// live; when destroyed it goes dormant again where it stands. The population is therefore constant and the churn is
-    /// all migration, which is the half of the cost this workload can measure honestly.</para>
-    /// <para>The size is <see cref="BaselinePlayers"/> / 4 — SWG let a player hold two missions at a time, and a
-    /// fraction of the population is on one at any moment. It scales with population because mission demand does.</para>
-    /// </remarks>
-    private static void SpawnMissionLairPool(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldCensus census, ref Rng rng, WorldIndex index)
-    {
-        // The planet's ground, baked once per process (see TerrainField). Taken here rather than per entity: the
-        // cache lookup is cheap but not free, and this loop runs seventeen thousand times.
-        var terrain = TerrainField.Shared(config.ContentScale);
-        var count = Scale(BaselinePlayers / 4, config.PopulationScale);
-        if (count <= 0)
-        {
-            return;
-        }
-
-        var template = CreatureTemplates.MissionDefender;
-        var perLair = CreatureTemplates.SpawnLimit[template];
-        var made = 0;
-
-        while (made < count)
-        {
-            var n = Math.Min(Math.Max(1, SpawnBatch / (perLair + 1)), count - made);
-            using var tx = dbe.CreateQuickTransaction();
-            for (var i = 0; i < n; i++)
-            {
-                var (lx, lz) = Inside(RandomWildernessPoint(map, config, ref rng), config);
-                var lairId = SpawnLair(tx, ref rng, template, lx, lz, site: 0, expireTick: 0, config, terrain, _realm);
-
-                // Dormant: no mission, and an offer cadence staggered so the pool does not seek players on one tick. [CORE3] difficulty x (900 +
-                // random(200)) hit points; a mid difficulty until one is assigned.
-                var pooled = tx.OpenMut(lairId);
-                var lair = pooled.Read(CreatureLair.Spawner);
-                lair.RespawnCooldown = rng.NextInt(1, 50);
-                pooled.Set(CreatureLair.Spawner, lair);
-                pooled.Set(CreatureLair.Vitals, new LairVitals { Health = 4500, MaxHealth = 4500 });
-                census.Lairs++;
-                census.Creatures += perLair;
-                census.CreaturesByTemplate[template] += perLair;
-                index.Lairs.Add(lairId);
-            }
-
-            tx.Commit();
-            made += n;
-        }
-    }
-
     // ── Helpers ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -1384,11 +1330,17 @@ public static class WorldBuilder
             // Staggered, so the economy does not arrive as a once-a-minute spike that the median tick never sees.
             TickCountdown = tickPeriod == 0 ? 0 : rng.NextInt(1, tickPeriod),
         };
-        tx.Spawn<WorldObject>(
+        var id = tx.Spawn<WorldObject>(
             WorldObject.Bounds.Set(in bounds),
             WorldObject.Struct.Set(in s),
             WorldObject.Region.Set(new StructureRegion(ownerRegion)),
             WorldObject.Realm.Set(new StructureRealm(_realm)));
+
+        // The mission desk lists at every terminal (missions.md); recording one the build just placed draws nothing, so the world is unchanged.
+        if (kind == StructureKind.MissionTerminal)
+        {
+            _index?.Terminals.Add(new MissionTerminalRef(id, x, z, ownerRegion, _realm));
+        }
     }
 
     /// <summary>A point on the planet that is not inside an NPC city.</summary>

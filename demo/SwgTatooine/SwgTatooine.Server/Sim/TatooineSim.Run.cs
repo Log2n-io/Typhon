@@ -374,17 +374,17 @@ public sealed partial class TatooineSim
     /// <summary>Ticks on which the lair director committed a spawn or a destroy, each a durable write; see <see cref="SimBridge.LairCommits"/>.</summary>
     public long LairCommits => _bridge?.LairCommits ?? 0;
 
-    /// <summary>Mission lairs replaced at their mission's point with their defenders; see <see cref="SimBridge.MissionLairsRehoused"/>.</summary>
-    public long MissionLairsRehoused => _bridge?.MissionLairsRehoused ?? 0;
-
-    /// <summary>Refills skipped because their lair was replaced earlier in the tick; see <see cref="SimBridge.RefillsOfGoneLairs"/>.</summary>
-    public long RefillsOfGoneLairs => _bridge?.RefillsOfGoneLairs ?? 0;
-
     /// <summary>Routes the scripted crowd planned round a city's buildings, and searches that found no way; see <see cref="SimBridge.RouteTotals"/>.</summary>
     public (long Planned, long Failed) RouteTotals => _bridge?.RouteTotals ?? (0L, 0L);
 
     /// <summary>Entities the lair director spawned or destroyed; see <see cref="SimBridge.LairEntities"/>.</summary>
     public long LairEntities => _bridge?.LairEntities ?? 0;
+
+    /// <summary>Ticks on which the mission desk committed anything, each a durable write; see <see cref="SimBridge.MissionCommits"/>.</summary>
+    public long MissionCommits => _bridge?.MissionCommits ?? 0;
+
+    /// <summary>Entities the mission desk spawned, wrote or destroyed; see <see cref="SimBridge.MissionEntities"/>.</summary>
+    public long MissionEntities => _bridge?.MissionEntities ?? 0;
 
     /// <summary>What the starships did (Realms G1c).</summary>
     public void PrintSpaceReport() => _bridge?.PrintSpaceReport();
@@ -672,10 +672,9 @@ public sealed partial class TatooineSim
         // The corpses CreatureThink hands to the lair director, which alone may destroy. A few a second at the baseline; sized like the combat queue.
         _bridge.CorpseQueue = dag.CreateEventQueue<CorpseEvent>("Corpses", 1024);
 
-        // The mission lairs MissionTick sends to a player, which the lair director replaces there with their defenders. A handful a minute.
-        _bridge.MissionMoveQueue = dag.CreateEventQueue<MissionMoveEvent>("MissionMoves", 256);
+        // The crowd's asks for a mission, from PlayerThink to the mission desk. A few a second at --pop 5.
+        _bridge.MissionAskQueue = dag.CreateEventQueue<MissionAsk>("MissionAsks", 1024);
 
-        dag.Add(new MissionSystem(_bridge));
         if (_config.Shuttles)
         {
             dag.Add(new ShuttleSystem(_bridge));
@@ -735,15 +734,17 @@ public sealed partial class TatooineSim
         // four phases, which the deriver handles the same way — a producer in an earlier phase, a consumer in a later one.
         dag.Produces("PlayerCombat", _bridge.CombatQueue)
             .Produces("CreatureCombat", _bridge.CombatQueue)
-            .Produces("Missions", _bridge.CombatQueue)
             .Consumes("CombatResolve", _bridge.CombatQueue);
 
         dag.Add(new EconomySystem(_bridge));
         dag.Add(new LairLifeSystem(_bridge));
-        dag.Produces("CreatureThink", _bridge.CorpseQueue)
-            .Consumes("LairLife", _bridge.CorpseQueue);
-        dag.Produces("Missions", _bridge.MissionMoveQueue)
-            .Consumes("LairLife", _bridge.MissionMoveQueue);
+        dag.Add(new MissionDeskSystem(_bridge));
+        // Produced, and read by a system that does NOT declare `Consumes`: the runtime skips a declared consumer on every tick its queues are empty
+        // (TyphonRuntime's ReactiveSkip), and both of these have work of their own on such ticks — the lair director's pass, the desk's takes and its
+        // pass. So the lair director ran its 2 Hz pass only on a pass tick that also brought a corpse, and the desk never ran at all with the crowd off
+        // (found 2026-10-25). The phases order the producers first (Think before Economy); ReadsEvents states the edge on each consumer.
+        dag.Produces("CreatureThink", _bridge.CorpseQueue);
+        dag.Produces("PlayerThink", _bridge.MissionAskQueue);
 
         // Only a server has sessions. In the simulation's own DAG rather than one of its own, because an intent writes PlayerMotion and PlayerThink writes it
         // too — see PlayerSessionSystem.

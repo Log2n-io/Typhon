@@ -131,6 +131,15 @@ export class MockSource implements DataSource, LatencyControl {
     return false;
   }
 
+  /** The mock lists no missions. */
+  takeMission(): boolean {
+    return false;
+  }
+
+  abandonMission(): boolean {
+    return false;
+  }
+
   /** The mock serves its whole world to every camera already. */
   setOverview(): void {}
 

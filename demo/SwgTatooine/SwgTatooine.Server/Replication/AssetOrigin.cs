@@ -234,15 +234,7 @@ public sealed class AssetOrigin
                 json.Append(b > 0 ? ",\"" : "\"").Append(bodies[b]).Append('"');
             }
 
-            json.Append(']');
-
-            // The destroy-mission pool's: a dormant one (no mission) sits wherever its last mission left it, without its defenders, and is not shown.
-            if (t == CreatureTemplates.MissionDefender)
-            {
-                json.Append(",\"mission\":true");
-            }
-
-            json.Append('}');
+            json.Append(']').Append('}');
         }
 
         return json.Append(']').ToString();

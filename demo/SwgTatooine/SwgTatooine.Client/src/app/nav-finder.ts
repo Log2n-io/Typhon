@@ -105,6 +105,11 @@ export function relativeBearing(fromX: number, fromZ: number, toX: number, toZ: 
 }
 
 /** The city a point is in or nearest to, by the client's names. */
+/** Whether a point is inside one of the cities' discs, from the client's own map. */
+export function insideCity(x: number, z: number): boolean {
+  return CITIES.some((c) => Math.hypot(c.x - x, c.z - z) < c.radius);
+}
+
 export function cityNear(x: number, z: number): string {
   let best = CITIES[0].name;
   let bestD = Infinity;

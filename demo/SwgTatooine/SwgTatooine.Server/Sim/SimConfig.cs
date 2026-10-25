@@ -157,6 +157,12 @@ public sealed class SimConfig
     /// </remarks>
     public float FacilityDensityPerKm2 = 8f;
 
+    /// <summary>
+    /// Whether the scripted crowd takes missions from the terminals (missions.md § 6): on, so people race the crowd for offers and the workload keeps its
+    /// mission traffic. Off holds a terminal's list still for a check that takes a particular offer, and is the other arm of an A/B on that traffic.
+    /// </summary>
+    public bool CrowdTakesMissions = true;
+
     /// <summary>Share of in-city idle decisions that walk into a building instead. [EST]</summary>
     public float InteriorShare = 0.25f;
 

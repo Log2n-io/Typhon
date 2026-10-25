@@ -1396,11 +1396,19 @@ internal sealed class ClientIntentChecks : ServedChecks
             var lair = plan.ArchetypeByName("CreatureLair");
             Assert.That(Array.Find(lair.Fields, f => f.Name == "hp"), Is.Not.Null, "a lair's health is not replicated, so no client can draw its bar");
             Assert.That(Array.Find(lair.Fields, f => f.Name == "guards")?.Kind, Is.EqualTo(CodecKind.U8), "a lair's standing guards are not replicated");
-            Assert.That(Array.Find(lair.Fields, f => f.Name == "missionId")?.Kind, Is.EqualTo(CodecKind.U8), "a lair's mission is not replicated");
+            var offer = plan.ArchetypeByName("MissionOffer");
+            Assert.That(offer, Is.Not.Null, "mission offers are not replicated, so no terminal can list one");
+            Assert.That(Array.Find(offer.Fields, f => f.Name == "serial"), Is.Not.Null, "an offer carries no serial, so a take cannot name it safely");
+            Assert.That(plan.CommandByName(nameof(TakeMission)), Is.Not.Null, "no TakeMission command");
+            Assert.That(plan.CommandByName(nameof(AbandonMission)), Is.Not.Null, "no AbandonMission command");
         });
     }
 
     /// <summary>A lair of frogs <paramref name="gapM"/> from the avatar's edge to its own, its frogs taken away, in the client's view.</summary>
+    /// <param name="site">
+    /// 0: nobody guards it either — its occupants' count goes with them, so it can be damaged at once. A site's lair keeps counting them standing, which is
+    /// what a case about the shield stages.
+    /// </param>
     private static EntityId StageLair(Possessed world, float gapM, int site = 0, bool keepOccupants = false)
     {
         var at = world.Read();
@@ -1421,12 +1429,21 @@ internal sealed class ClientIntentChecks : ServedChecks
         });
         SessionHarness.Until(() => !lair.IsNull, "the lair to be spawned");
 
-        // Its frogs away: a frog nudging the avatar would move the gap the case measures. Taken away, not killed: a wild lair still counts them standing.
+        // Its frogs away: a frog nudging the avatar would move the gap the case measures. Taken away, not killed: a wild lair still counts them standing —
+        // unless the case wants it open (site 0).
         world.Sim.WriteInTick((tx, _) =>
         {
             if (keepOccupants)
             {
                 return;
+            }
+
+            if (site == 0)
+            {
+                var open = tx.OpenMut(lair);
+                var spawner = open.Read(CreatureLair.Spawner);
+                spawner.Guards = 0;
+                open.Set(CreatureLair.Spawner, spawner);
             }
 
             foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())

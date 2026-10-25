@@ -54,7 +54,7 @@ internal static class Causality
         return total;
     }
 
-    /// <summary>Every live destroy mission's lair and the player it was built for.</summary>
+    /// <summary>Every standing mission lair and the body of the mission's holder.</summary>
     public static List<(EntityId Lair, EntityId Owner, int Health)> LiveMissions(TatooineSim sim)
     {
         var rows = new List<(EntityId, EntityId, int)>();
@@ -63,7 +63,7 @@ internal static class Causality
         {
             var entity = tx.Open(id);
             var lair = entity.Read(CreatureLair.Spawner);
-            if (lair.MissionId != 0)
+            if (!lair.Mission.IsNull)
             {
                 rows.Add((id, lair.Owner, entity.Read(CreatureLair.Vitals).Health));
             }
@@ -107,10 +107,10 @@ public sealed class CausalityLoopTests
     private long _creditsBefore;
 
     /// <remarks>
-    /// <b>12 000 ticks, 20 minutes at 10 Hz</b>: long enough for the mission loop to complete several missions, not only to issue one. A mission runs out
-    /// with its lair standing after SimBridge.MissionWalkSeconds, and a lair at difficulty 9 outlasts what one fighter brings in that time, so a completion in
-    /// the window is a matter of which difficulties are drawn: 4 000 ticks held one only on some world draws (none on the draw that showed it), 8 000 two,
-    /// 12 000 six (measured, 2026-10-25). The world's build is most of the fixture's cost, and the extra ticks about 8 s.
+    /// <b>12 000 ticks, 20 minutes at 10 Hz</b>: long enough for the mission loop to complete several missions, not only to issue one. The crowd gives a
+    /// mission up after SimBridge.MissionWalkSeconds, and a lair stands behind its occupants until they are dead, so a completion in the window depends on
+    /// what is drawn: the pool this replaced held one in 4 000 ticks only on some draws, six in 12 000 (measured, 2026-10-25). The world's build is most of
+    /// the fixture's cost, and the extra ticks about 8 s.
     /// </remarks>
     [OneTimeSetUp]
     public void RunWorld()
@@ -134,12 +134,13 @@ public sealed class CausalityLoopTests
     {
         var s = _sim.LastStats;
 
-        // The chain, each link asserted separately so a break says which link broke: a lair is built for a player, the player is told where it is, the player's
-        // fire lands on it, and MissionTick's completion branch — unreachable before SWG-02, because nothing wrote LairVitals.Health downward — fires.
+        // The chain, each link asserted separately so a break says which link broke: the crowd takes a mission at a terminal, its body is sent to the lair
+        // drawn for it, its fire lands on the lair, and the desk's completion fires (missions.md § 3).
         Assert.Multiple(() =>
         {
-            Assert.That(s.MissionsIssued, Is.GreaterThan(0), "no mission was issued: the pool or the seek query is broken, not the combat loop");
-            Assert.That(s.MissionsAssigned, Is.EqualTo(s.MissionsIssued), "every mission built for a simulated player must reach it");
+            Assert.That(s.MissionsIssued, Is.GreaterThan(0), "no mission was taken: the terminals list nothing, or the crowd never asks, not the combat loop");
+            Assert.That(s.MissionsAssigned, Is.GreaterThanOrEqualTo(s.MissionsIssued),
+                "a mission the crowd took never sent its body to a lair (once at the take, again whenever the lair moved)");
             Assert.That(s.LairHits, Is.GreaterThan(0), "no player fire reached a lair");
             Assert.That(s.MissionsCompleted, Is.GreaterThan(0), "lairs were hit but no mission completed");
         });
@@ -151,7 +152,8 @@ public sealed class CausalityLoopTests
         var s = _sim.LastStats;
         var crossings = _sim.CrossingCommits;
         var lairs = _sim.LairCommits;
-        var writes = s.CreaturesKilled + s.MissionRewards + crossings + lairs;
+        var missions = _sim.MissionCommits;
+        var writes = s.CreaturesKilled + s.MissionRewards + crossings + lairs + missions;
 
         // Each kill pays loot and each completion pays a reward, and both go through the tick's own transaction — so the WAL's durable LSN moves on the ticks
         // that wrote Inventory and on no others. The two numbers come from different places: one from the simulation's counters, the other from the WAL
@@ -162,7 +164,8 @@ public sealed class CausalityLoopTests
         // portals (six crossings in this window); the old path chose doors and never arrived at one, so this run used to make none.
         //
         // <b>So is the lair director</b>, on a different ground: a corpse destroyed and a creature or lair spawned are STRUCTURAL changes, which the WAL logs
-        // whatever the archetype's cluster durability. One record per tick it committed one, from its own side transaction (SimBridge.Lairs.cs).
+        // whatever the archetype's cluster durability. One record per tick it committed one, from its own side transaction (SimBridge.Lairs.cs). <b>And the
+        // mission desk</b>, for both reasons: offers and lairs are structural, a held mission is Versioned (SimBridge.Missions.cs).
         //
         // It is also the proof that ClusterDurability.Checkpoint does what it declares. Four thousand ticks of creatures, players and NPCs moving produce no WAL
         // record at all; only the Versioned half of Player does.
@@ -182,7 +185,7 @@ public sealed class CausalityLoopTests
             // lair director's, which are counted per ENTITY rather than per commit: a spawn appends a record per component, so one creature respawned
             // beside one corpse removed was eleven records on one tick (measured; the creature has eight components). Bounded by the sixteen component slots
             // an archetype can hold, which still fails for a writer that is not the director.
-            Assert.That(_sim.WalLsnGained, Is.InRange(_sim.WalAdvances, _sim.WalAdvances + crossings + (16 * _sim.LairEntities)),
+            Assert.That(_sim.WalLsnGained, Is.InRange(_sim.WalAdvances, _sim.WalAdvances + crossings + (16 * (_sim.LairEntities + _sim.MissionEntities))),
                 $"one WAL record per advancing tick and one per crossing tick: more would mean an unexpected writer — {_sim.WalWriterBreakdown}");
             Assert.That(Causality.TotalCredits(_sim), Is.GreaterThan(_creditsBefore), "credits did not grow, so nothing was actually written");
         });
@@ -213,8 +216,8 @@ public sealed class CausalityLoopTests
             Assert.That(s.ShotsSkippedNotFighting, Is.GreaterThan(s.PlayerShots), "most player-ticks are not fighting; a zero means the gate is gone");
             Assert.That(s.PlayerShots, Is.GreaterThan(0), "nobody fired at all");
 
-            // Every shot pushed an event, and every event was applied — or named a target the lair director destroyed in between: a mission lair replaced
-            // at its player's side takes its old defenders with it, mid-fight or not (SimBridge.Lairs.cs). Lost is what neither accounts for.
+            // Every shot pushed an event, and every event was applied — or named a target destroyed in between: a mission's lair moved or ended takes its
+            // occupants with it, mid-fight or not (SimBridge.Missions.cs). Lost is what neither accounts for.
             Assert.That(s.DamageApplied + s.EventsStale, Is.EqualTo(s.PlayerShots + s.CreatureAttacks), "an effect was produced and neither applied nor counted");
             Assert.That(s.EventsStale, Is.LessThanOrEqualTo((s.PlayerShots + s.CreatureAttacks) / 50), "more than a blow in fifty named a target that had gone");
             Assert.That(_sim.CombatQueueOverflow, Is.Zero, "the queue dropped an effect: raise its per-tick budget");

@@ -143,6 +143,12 @@ public static class WorldRebuild
                     ports[portRegion] = (x, z);
                     portsSeen[portRegion] = true;
                 }
+
+                // The mission desk's terminals. Their offers are on disk too; the desk counts them on its first pass.
+                if (st.Kind == StructureKind.MissionTerminal)
+                {
+                    index.Terminals.Add(new MissionTerminalRef(cluster.GetEntityId(slot), x, z, owner, realm));
+                }
             }
         }
 

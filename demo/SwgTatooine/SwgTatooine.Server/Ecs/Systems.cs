@@ -116,6 +116,9 @@ internal sealed class LairLifeSystem : CallbackSystem
     protected override void Configure(SystemBuilder b) => b
         .Name("LairLife")
         .Phase(SimPhases.Economy)
+
+        // Read, not consumed: a consumer is skipped on a tick with no corpse, and the pass must run on those too (TatooineSim.BuildSchedule).
+        .ReadsEvents(_bridge.CorpseQueue)
         .Writes<Lair>()
         .Writes<LairPlacement>()
         .Writes<LairVitals>()
@@ -430,43 +433,68 @@ internal sealed class CombatResolveSystem : CallbackSystem
 }
 
 /// <summary>
-/// Destroy missions: dormant lairs find a player and teleport to a fresh target point; destroyed ones return to the pool.
+/// The mission desk (<c>SimBridge.Missions.cs</c>; missions.md § 3): terminals' offers, takes and cancels, held missions and the lairs drawn for them.
 /// </summary>
 /// <remarks>
-/// Runs over <see cref="CreatureLair"/> because the whole loop — the seek query, the placement rejection and the
-/// teleport — is a write to the lair's own archetype. Core3's algorithm, with its own constants; see
-/// <c>SimBridge.Missions.cs</c>.
+/// <para><b>Serial</b>, because the race between two takers is settled by its order, and because it spawns and destroys — offers, held missions, lairs and
+/// their creatures — through a side transaction, as the lair director does. <b>After the lair director</b>, in the same phase: both write lairs, and a
+/// mission's lair broken this tick (<c>CombatResolve</c>, Apply) is then seen by the desk the same tick.</para>
+/// <para><b>Its writes to a body go through the tick's transaction</b>: the reward into the Versioned <see cref="Inventory"/> that <c>CombatResolve</c> has
+/// already written this tick, the journal's revision, and a scripted body sent to its lair.</para>
 /// </remarks>
-internal sealed class MissionSystem : QuerySystem
+internal sealed class MissionDeskSystem : CallbackSystem
 {
     private readonly SimBridge _bridge;
 
-    public MissionSystem(SimBridge bridge) => _bridge = bridge;
+    public MissionDeskSystem(SimBridge bridge) => _bridge = bridge;
 
     protected override void Configure(SystemBuilder b) => b
         .Name("Missions")
-        .Phase(SimPhases.Spawn)
-        .Parallel()
-        .ChunksPerWorker(2f)
+        .Phase(SimPhases.Economy)
+        .After("LairLife")
+
+        // Read, not consumed, for the lair director's reason: the takes and the pass run on a tick the crowd asked for nothing.
+        .ReadsEvents(_bridge.MissionAskQueue)
+        .Writes<MissionOfferPlacement>()
+        .Writes<MissionOfferInfo>()
+        .Writes<MissionOfferRegion>()
+        .Writes<MissionOfferRealm>()
+        .Writes<HeldMission>()
+
+        // A mission's lair and its occupants, spawned and destroyed like the lair director's.
         .Writes<Lair>()
-        .Writes<LairVitals>()
         .Writes<LairPlacement>()
+        .Writes<LairVitals>()
+        .Writes<LairRealm>()
+        .Writes<CreaturePlacement>()
+        .Writes<CreatureMotion>()
+        .Writes<CreatureVitals>()
+        .Writes<CreatureBrain>()
+        .Writes<CreatureTimers>()
+        .Writes<CreatureRealm>()
+        .Writes<CreatureHome>()
 
-        // The seek query reads player positions, which Shuttle writes in this same phase: Fresh orders it after Shuttle, so it never reads a position
-        // mid-write (a plain Reads with a same-phase writer is a Build error, and Snapshot needs a Versioned component). A cell-walking query still finds
-        // an arrival in its new cell only after this tick's fence.
-        .ReadsFresh<PlayerPlacement>()
-        .Input(() => _bridge.LairView);
+        // The body: whether it is down, where it stands, who drives it; its reward, its journal, and the crowd's walk to its lair.
+        .Reads<PlayerPlacement>()
+        .Reads<PlayerVitals>()
+        .Reads<PlayerRealm>()
+        .Reads<PlayerControl>()
+        .Writes<PlayerState>()
+        .Writes<PlayerMotion>()
+        .Writes<Inventory>()
 
-    protected override void Execute(TickContext ctx) => _bridge.MissionTick(ctx);
+        // Whether an offline holder's character still exists.
+        .Reads<Character>();
+
+    protected override void Execute(TickContext ctx) => _bridge.MissionDeskTick(ctx);
 }
 
 /// <summary>
 /// Shuttle travel (#910's workload): boards queued players while their port's shuttle is down and transports them to the destination port.
 /// </summary>
 /// <remarks>
-/// In the Spawn phase, ahead of everything that reads <see cref="PlayerPlacement"/> — Think's queries, and <see cref="MissionSystem"/>, which reads it
-/// fresh and so runs after it — and of Move, which writes it. A cell-walking query still finds an arrival in its new cell only after this tick's fence.
+/// In the Spawn phase, ahead of everything that reads <see cref="PlayerPlacement"/> — Think's queries — and of Move, which writes it. A cell-walking query
+/// still finds an arrival in its new cell only after this tick's fence.
 /// </remarks>
 internal sealed class ShuttleSystem : QuerySystem
 {

@@ -1,4 +1,6 @@
-﻿namespace SwgTatooine.Server;
+﻿using System;
+
+namespace SwgTatooine.Server;
 
 /// <summary>
 /// Tatooine as Star Wars Galaxies had it, in the game's own coordinates.
@@ -274,39 +276,63 @@ public static class TatooineData
 
     public const float MaxAttackDelaySec = 3f;
 
-    /// <summary>[WIKI] A mission terminal lets a player hold two missions at a time.</summary>
-    public const int MaxConcurrentMissions = 2;
+    // ── Missions (claude/design/SwgTatooine/design/missions.md § 2.2) ──────────────────────────────────────────────────
+    //
+    // Every number here is [EST] and tunable: missions.md lists the reasons, and none of them is a measurement.
+
+    /// <summary>How many missions a character holds at once (Loïc, 2026-10-25). The wiki's SWG allowed two; this demo three.</summary>
+    public const int MaxConcurrentMissions = 3;
+
+    /// <summary>How many offers each mission terminal lists, always: one taken is replaced in the same tick (missions.md, R1 and R8).</summary>
+    public const int MissionOffersPerTerminal = 20;
 
     /// <summary>
-    /// [EST] Credits a destroy mission pays per difficulty level, so a level-9 lair is worth 4 500 and a level-1 lair 500.
+    /// How far an offer's anchor lies from its terminal, metres.
     /// </summary>
     /// <remarks>
-    /// Core3 computes the reward from the same difficulty term the lair's hit points come from, so scaling it linearly with the difficulty this world already
-    /// draws is the shape of the real rule even though the coefficient is an estimate. The number matters to nothing in the engine — what matters is that a
-    /// completion writes <see cref="Inventory"/>, which is the only <c>Versioned</c> component in the world, inside the tick's unit of work.
+    /// [CORE3] places a destroy mission 1-2 km from the PLAYER (<c>randomizeGenericDestroyMission</c>: base 1 000, random 1 000, both difficulty terms zero
+    /// in the shipped configuration), twenty tries, outside every city. Here the origin is the terminal, which stands inside a city of up to 456 m radius, so
+    /// the near bound is the city's edge rather than a kilometre.
     /// </remarks>
-    public const int MissionRewardPerDifficulty = 500;
+    public const float MissionMinDistanceM = 500f;
+
+    public const float MissionMaxDistanceM = 2000f;
+
+    /// <summary>How far round its anchor a mission's lair is drawn, metres: "about there" (missions.md, R2).</summary>
+    public const float MissionScatterM = 150f;
+
+    /// <summary>Credits per difficulty level, plus as many again per kilometre: 150-300 at difficulty 1 (missions.md § 2.2).</summary>
+    public const int MissionRewardBase = 100;
+
+    public const int MissionRewardPerKm = 100;
+
+    /// <summary>How long an untaken offer stays listed, seconds, before it is replaced: the shortest, and the spread above it.</summary>
+    public const float MissionOfferLifeMinSeconds = 300f;
+
+    public const float MissionOfferLifeSpanSeconds = 600f;
+
+    /// <summary>How long a mission's lair stands before it moves somewhere else round its anchor, seconds (missions.md, R6).</summary>
+    public const float MissionLairLifeSeconds = 1200f;
+
+    /// <summary>How close to a mission terminal's centre a body must stand to take one of its missions, metres. The client's own gate is the tighter one.</summary>
+    public const float MissionTerminalReachM = 6f;
+
+    /// <summary>How far from a terminal the scripted crowd may ask it for a mission, metres: a body anywhere in a town.</summary>
+    public const float MissionCrowdReachM = 1000f;
 
     /// <summary>
-    /// [CORE3] Minimum and maximum distance from the player at which a destroy mission places its target.
+    /// The credits a mission pays: <see cref="MissionRewardBase"/> plus <see cref="MissionRewardPerKm"/> per kilometre, per difficulty level, to the nearest 5.
     /// </summary>
-    /// <remarks>
-    /// <para><c>MissionManagerImplementation::randomizeGenericDestroyMission</c> computes
-    /// <c>base + difficultyFactor * level + random(randomDistance) + random(difficultyRandomDistance * level)</c>, and the
-    /// shipped configuration (<c>mission_manager.lua</c>) sets <c>base = 1000</c>, <c>randomDistance = 1000</c> and BOTH
-    /// difficulty terms to zero — so in practice it is a uniform 1 000-2 000 m at a random bearing, and mission
-    /// difficulty does not move the target further away. Twenty tries; the point must be in bounds, on dry land, and
-    /// outside every city region, or the mission is simply not offered.</para>
-    /// <para><b>A destroy-mission target is ONE object, not a camp.</b> The waypoint first shows a 128 m
-    /// <c>MissionSpawnActiveArea</c>; on approach the real position is jittered +/-256 m from it and rejection-tested up
-    /// to 256 times. What spawns there is a single <c>LairObject</c> with
-    /// <c>difficulty * (900 + random(200))</c> hit points, and its defenders arrive as mobiles clustered around it in
-    /// three waves gated on the lair's damage: one at spawn, one at first damage, one at half health. Once killed they
-    /// do not come back — <c>checkRespawn</c> short-circuits for a destroy-mission lair.</para>
-    /// </remarks>
-    public const float DestroyMissionMinDistanceM = 1000f;
+    public static int MissionReward(int difficulty, float distanceM)
+        => (int)(MathF.Round(difficulty * (MissionRewardBase + (MissionRewardPerKm * distanceM / 1000f)) / 5f) * 5f);
 
-    public const float DestroyMissionMaxDistanceM = 2000f;
+    /// <summary>Which of the eight directions a point lies in from another: 0 north (+Z), then clockwise — 2 east (+X), 4 south, 6 west.</summary>
+    public static byte OctantOf(float dx, float dz)
+    {
+        var bearing = MathF.Atan2(dx, dz);   // 0 north, +π/2 east
+        var eighths = (int)MathF.Round(bearing / (MathF.PI / 4f));
+        return (byte)(((eighths % 8) + 8) % 8);
+    }
 
     // ── Player city tiers ───────────────────────────────────────────────────────────────────────────────────────────
 
@@ -449,8 +475,8 @@ public static class CreatureTemplates
     public const int SandNinja = 7;
     public const int Soldier = 8;
 
-    /// <summary>The destroy-mission pool's defenders (<c>WorldBuilder.SpawnMissionLairPool</c>), left as they were until missions are redesigned.</summary>
-    public const int MissionDefender = 9;
+    /// <summary>A camp of blue soldiers: a mission's kind only, which no wild site draws (missions.md). It was the destroy-mission pool's defenders.</summary>
+    public const int BlueSoldier = 9;
 
     public const int Count = 10;
 
@@ -461,7 +487,7 @@ public static class CreatureTemplates
     public static readonly int[] Health = [180, 120, 220, 300, 520, 160, 640, 700, 760, 420];
 
     /// <summary>Whether a template is a camp of foes — people — rather than a beasts' lair.</summary>
-    public static bool IsCamp(int template) => template is Ninja or SandNinja or Soldier;
+    public static bool IsCamp(int template) => template is Ninja or SandNinja or Soldier or BlueSoldier;
 
     /// <summary>
     /// A lair's hit points: four of its own occupants', and never under 1 500 — harder to destroy than any foe it holds (Loïc, 2026-10-24), and only once
@@ -565,7 +591,7 @@ public static class CreatureTemplates
         Ninja => "ninja hideout",
         SandNinja => "sand-ninja hideout",
         Soldier => "soldier camp",
-        MissionDefender => "mission defenders",
+        BlueSoldier => "blue-soldier camp",
         _ => $"template {template}",
     };
 }

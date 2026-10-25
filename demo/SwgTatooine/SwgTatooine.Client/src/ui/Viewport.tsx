@@ -8,6 +8,7 @@ import { RealmFade } from './RealmFade';
 import { TerrainLoading } from './TerrainLoading';
 import { refused } from '../app/realm-transition';
 import { TyphonSource } from '../data/source';
+import { useMissions } from '../state/mission-store';
 import { useRealms } from '../state/realm-store';
 import { useSessionStore } from '../state/session-store';
 import { useTerrain } from '../state/terrain-store';
@@ -134,6 +135,10 @@ function factoryFor(
         // activity and the flight in its position, but a refusal produces no frame of any kind, so without this the
         // panel would show an ask in flight until the session ended.
         useUi.getState().shuttleRefused(reason);
+      },
+      onMissionRefused: (reason) => {
+        // "Already taken", "three held", "too far": an accepted take is never answered, so the panel hears only this.
+        useMissions.getState().refused(reason);
       },
       onSpectateRefused: () => {
         // A refused ride leaves nothing behind on its own: no frame arrives, so nothing takes the camera out of the

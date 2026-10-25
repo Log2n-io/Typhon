@@ -15,12 +15,20 @@ export const KNOWN_ARCHETYPES = ['WorldObject', 'CreatureLair', 'Creature', 'Cit
 
 export type KnownArchetype = (typeof KNOWN_ARCHETYPES)[number];
 
+/**
+ * Archetypes that are data, not bodies: replicated for what they say, never drawn, picked or offered as a layer. A mission
+ * offer stands at its terminal's centre so the city set delivers it (missions.md § 4); twenty boxes on every terminal would
+ * be drawing a list.
+ */
+export const DATA_ARCHETYPES: ReadonlySet<string> = new Set(['MissionOffer']);
+
 const LABELS: Readonly<Record<string, string>> = {
   WorldObject: 'Structure',
   CreatureLair: 'Lair',
   Creature: 'Creature',
   CityNpc: 'City NPC',
   Player: 'Player',
+  MissionOffer: 'Mission offer',
 };
 
 /** An archetype as the UI names it: the catalog's name, and what to print. */

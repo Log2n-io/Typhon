@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { cityNear, nearestFacilities, navLabel, relativeBearing, type NavTarget } from '../src/app/nav-finder';
+import {
+  cityNear,
+  insideCity,
+  nearestFacilities,
+  navLabel,
+  relativeBearing,
+  type NavTarget,
+} from '../src/app/nav-finder';
 import { CITIES } from '../src/data/world-data';
 import { StructureKind } from '../src/data/swg-schema';
 import { formatDistance } from '../src/ui/NavPane';
@@ -59,5 +66,14 @@ describe('the pane text', () => {
     expect(cityNear(CITIES[0].x + 10, CITIES[0].z)).toBe(CITIES[0].name);
     expect(formatDistance(67.4)).toBe('67m');
     expect(formatDistance(1530)).toBe('1.5km');
+  });
+});
+
+describe('insideCity', () => {
+  it("is the cities' discs, from the client's own map: a ridden walk is put on foot inside one", () => {
+    const port = CITIES[0];
+    expect(insideCity(port.x, port.z)).toBe(true);
+    expect(insideCity(port.x + port.radius - 1, port.z)).toBe(true);
+    expect(insideCity(port.x + port.radius + 1, port.z)).toBe(false);
   });
 });

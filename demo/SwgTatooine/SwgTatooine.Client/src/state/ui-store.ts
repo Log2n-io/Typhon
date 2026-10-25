@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { useMissions } from './mission-store';
 
 /** One row of the navigation pane. */
 export interface NavRow {
@@ -89,11 +90,14 @@ export interface ShuttleportPrompt {
  */
 export interface PartRef {
   readonly owner: number;
-  readonly kind: 'ticket';
+  readonly kind: 'ticket' | 'mission';
 }
 
 /** What a context menu entry does: plain data, carried out by the store. */
-export type ContextAction = { readonly kind: 'board'; readonly city: number };
+export type ContextAction =
+  | { readonly kind: 'board'; readonly city: number }
+  | { readonly kind: 'missions'; readonly terminal: number }
+  | { readonly kind: 'journal' };
 
 export interface ContextMenuItem {
   readonly label: string;
@@ -112,7 +116,7 @@ export interface ContextMenuState {
   readonly x: number;
   readonly y: number;
   readonly title: string;
-  readonly source: 'ticket';
+  readonly source: 'ticket' | 'mission';
   readonly items: readonly ContextMenuItem[];
 }
 
@@ -595,8 +599,17 @@ export const useUi = create<UiState>()((set, get) => ({
   },
   runContextAction: (action) => {
     set({ contextMenu: null });
-    // One kind of action so far: a ticket. The next kind makes this a switch over `action.kind`.
-    get().boardShuttle(action.city);
+    switch (action.kind) {
+      case 'board':
+        get().boardShuttle(action.city);
+        break;
+      case 'missions':
+        useMissions.getState().openTerminal(action.terminal);
+        break;
+      case 'journal':
+        useMissions.getState().openJournal();
+        break;
+    }
   },
   setShuttleport: (shuttleport) => {
     set({ shuttleport });

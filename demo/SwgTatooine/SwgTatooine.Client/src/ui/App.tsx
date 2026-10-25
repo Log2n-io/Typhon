@@ -1,4 +1,5 @@
 import { ActionBar, HamBar } from './ActionBar';
+import { BottomBar } from './BottomBar';
 import { DownNotice } from './DownNotice';
 import { Chat } from './Chat';
 import { Hud } from './Hud';
@@ -6,6 +7,8 @@ import { Inspector } from './Inspector';
 import { NavPane } from './NavPane';
 import { Kicked } from './Kicked';
 import { Login } from './Login';
+import { MissionJournalPanel } from './MissionJournal';
+import { MissionTerminal } from './MissionTerminal';
 import { Toolbar } from './Toolbar';
 import { ShuttlePrompt } from './ShuttlePrompt';
 import { ContextMenu } from './ContextMenu';
@@ -49,8 +52,15 @@ export function App() {
       <DownNotice />
       <ShuttlePrompt />
       <ContextMenu />
-      <NavPane />
-      <Inspector />
+      {/* One column at the bottom right, top to bottom: each sits above the next whatever its height — the waypoint pane grows
+          by a row per mission held, and fixed offsets let the inspector cover it. */}
+      <div className="right-stack">
+        <Inspector />
+        <NavPane />
+        <BottomBar />
+      </div>
+      <MissionTerminal />
+      <MissionJournalPanel />
       <Kicked />
     </div>
   );

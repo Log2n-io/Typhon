@@ -39,6 +39,9 @@ public sealed class WorldIndex
     /// </remarks>
     public List<LairSite> Sites { get; } = [];
 
+    /// <summary>Every mission terminal on the planet: the entity, where it stands, and its city's group key (region + 1) — what the mission desk lists at.</summary>
+    public List<MissionTerminalRef> Terminals { get; } = [];
+
     /// <summary>
     /// Sine and cosine of a placement quarter turn, in the sense the RENDERER turns the building.
     /// </summary>
@@ -59,6 +62,14 @@ public sealed class WorldIndex
         _ => (0f, 1f),
     };
 }
+
+/// <summary>A mission terminal as the mission desk lists at it (<see cref="WorldIndex.Terminals"/>).</summary>
+/// <param name="Id">The terminal's entity.</param>
+/// <param name="X">Where it stands.</param>
+/// <param name="Z">Where it stands.</param>
+/// <param name="Region">Its city's group key, region + 1 — what its offers carry so the city set delivers them.</param>
+/// <param name="Realm">Its planet.</param>
+public readonly record struct MissionTerminalRef(EntityId Id, float X, float Z, int Region, ushort Realm);
 
 /// <summary>A disc of the wilderness that keeps a number of lairs standing: a point of interest or a spawn region (<see cref="WorldIndex.Sites"/>).</summary>
 /// <remarks>

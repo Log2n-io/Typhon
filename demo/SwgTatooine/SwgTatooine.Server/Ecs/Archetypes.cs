@@ -88,7 +88,34 @@ public partial class CreatureLair : Archetype<CreatureLair>
 }
 
 /// <summary>
-/// A hostile or neutral creature: a lair's beasts, a camp's ninjas and soldiers, and the defenders of a destroy-mission camp.
+/// A mission listed at a terminal (missions.md): positioned at the terminal, replicated as a member of the city set, and destroyed when it is taken or
+/// ages out. Static on the wire — an offer never changes.
+/// </summary>
+[Archetype(1, "Mission offers", ClusterDurability = ClusterDurability.Checkpoint)]
+[Replicated(Static = true)]
+public partial class MissionOffer : Archetype<MissionOffer>
+{
+    [Position]
+    public static readonly Comp<MissionOfferPlacement> Bounds = Register<MissionOfferPlacement>();
+    public static readonly Comp<MissionOfferInfo> Info = Register<MissionOfferInfo>();
+
+    /// <summary>The city set's key, which is what delivers a terminal's list to every session in its city.</summary>
+    public static readonly Comp<MissionOfferRegion> Region = Register<MissionOfferRegion>();
+    public static readonly Comp<MissionOfferRealm> Realm = Register<MissionOfferRealm>();
+}
+
+/// <summary>
+/// A mission somebody holds (missions.md § 2). Non-spatial and Versioned, like <see cref="CharacterArch"/>: it persists with its character, and the journal
+/// reads it off the tick.
+/// </summary>
+[Archetype(1, "Held missions")]
+public partial class HeldMissionArch : Archetype<HeldMissionArch>
+{
+    public static readonly Comp<HeldMission> Mission = Register<HeldMission>();
+}
+
+/// <summary>
+/// A hostile or neutral creature: a lair's beasts, a camp's ninjas and soldiers, and the defenders of a mission's camp.
 /// Moves on the AI cadence, which is slower than the tick, and is the bulk of the moving population.
 /// </summary>
 [Archetype(1, "Creatures and hostile NPCs", ClusterDurability = ClusterDurability.Checkpoint)]

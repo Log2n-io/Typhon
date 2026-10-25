@@ -1,5 +1,5 @@
 import { TERRAIN_MAX_PX, TERRAIN_TARGET_FPS } from '../app/terrain-detail';
-import { DEFAULT_ARCHETYPE_INFOS } from '../data/archetypes';
+import { DATA_ARCHETYPES, DEFAULT_ARCHETYPE_INFOS } from '../data/archetypes';
 import { RealmPanel } from './RealmPanel';
 import { CITIES, POIS } from '../data/world-data';
 import { useSessionStore } from '../state/session-store';
@@ -95,7 +95,9 @@ export function Toolbar() {
   const terrainCapped = useStats((s) => s.stats?.terrainCapped);
   const terrainAutoPx = useStats((s) => s.stats?.terrainAutoPx ?? null);
   const terrainCappedFps = useStats((s) => s.stats?.terrainCappedFps ?? null);
-  const archetypes = layers === undefined ? DEFAULT_ARCHETYPE_INFOS : layers.map((l) => l.archetype);
+  const archetypes = (layers === undefined ? DEFAULT_ARCHETYPE_INFOS : layers.map((l) => l.archetype)).filter(
+    (info) => !DATA_ARCHETYPES.has(info.name),
+  );
   return (
     <div className="panel toolbar">
       <div className="toolbar-title">Typhon · Live World</div>

@@ -1,8 +1,9 @@
 import { useUi } from '../state/ui-store';
 
 /**
- * The nearest shuttleport, bazaar and mission terminal: name, distance and an arrow — up is straight ahead, down behind,
- * left and right as the camera sees them (SWG's waypoint list, after Loïc's reference).
+ * The nearest shuttleport, bazaar and mission terminal, and a row for each mission held, on its lair: name, distance and
+ * an arrow — up is straight ahead, down behind, left and right as the camera sees them (SWG's waypoint list, after Loïc's
+ * reference). A mission's lair can move (missions.md, R6); its row follows it.
  *
  * <b>The arrows are turned by the frame loop</b> (`ClientApp.paintNav`), not by React: they follow the camera every
  * frame, and a React render per frame for three rotations would be the wrong tool. React lays the rows out when the
