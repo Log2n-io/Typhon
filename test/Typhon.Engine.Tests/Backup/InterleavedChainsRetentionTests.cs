@@ -154,7 +154,7 @@ internal sealed class InterleavedChainsRetentionTests
                 s.RefreshView();
             }));
         Assert.That(e.PointId, Is.EqualTo(8u));
-        Assert.That(BackupOperations.Classify(e), Is.EqualTo(BackupFailureKind.Failed), "the CLI still reports a failed command");
+        Assert.That(BackupOperations.Classify(e), Is.EqualTo(BackupFailureKind.StoreDamaged), "a kept point is unrestorable: prune exits 3, as Failing does");
     }
 
     /// <summary>

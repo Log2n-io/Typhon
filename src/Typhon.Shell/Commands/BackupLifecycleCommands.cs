@@ -87,8 +87,8 @@ internal sealed class BackupCompactCommand : Command<BackupCompactCommand.Settin
 /// <c>typhon backup prune --store S --min-keep N [--max-age D] [--max-count N] [--max-bytes B] [--compact-at D] [--keep-drilled] [--dry-run]</c> —
 /// applies a retention policy (05 §3): every point it promises stays restorable; what no kept point needs goes, newest first. The plan is shown, then
 /// applied only if the store still plans exactly that. Exit 0 applied (or nothing to do), 1 a limit could not be met without breaking MinKeep or
-/// KeepLastDrilled, 2 failed (a compaction's I/O or its own verify included), 3 a chain is damaged (it keeps everything, or a compaction found a pack of
-/// a kept chain damaged), 4 the store is locked or the plan changed under it, 64 usage. The worst code wins.
+/// KeepLastDrilled, 2 failed (a compaction's I/O or its own verify included), 3 a chain is damaged (it keeps everything, a compaction found a pack of a
+/// kept chain damaged, or the deletes left a kept point unrestorable), 4 the store is locked or the plan changed under it, 64 usage. The worst code wins.
 /// </summary>
 // ReSharper disable once ClassNeverInstantiated.Global
 internal sealed class BackupPruneCommand : Command<BackupPruneCommand.Settings>

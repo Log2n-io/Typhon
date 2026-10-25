@@ -477,6 +477,10 @@ public sealed class BackupCommandTests
             Is.EqualTo(BackupCli.ExitStoreDamaged));
         Assert.That(BackupPruneCommand.ExitCodeOf(BackupRetentionBlock.DamagedChain, [F(BackupFailureKind.Failed)]), Is.EqualTo(BackupCli.ExitStoreDamaged));
         Assert.That(BackupPruneCommand.ExitCodeOf(BackupRetentionBlock.MinKeep, null), Is.EqualTo(BackupCli.ExitWarning));
+
+        // A retention whose kept-point check fails (R1) left a promised point unrestorable: Failing in the engine, 3 here, the code prune's catch maps.
+        Assert.That(BackupCli.ExitCodeFor(new Typhon.Engine.Internals.RetentionBrokeAKeptPointException("/s", 8, "its pack is gone")),
+            Is.EqualTo(BackupCli.ExitStoreDamaged));
     }
 
     /// <summary>Flips a byte of the frame of a page <paramref name="pack"/> holds and none of <paramref name="newer"/> does.</summary>
