@@ -28,6 +28,7 @@ internal sealed partial class BackupScheduler
     private bool _started;
     private bool _initialized;
     private bool _refreshDue;
+    private bool _immediatePending;
     private long _startMono;
     private long _nextRefreshMono;
     private Task<BackupPointInfo> _lastJob;
@@ -43,6 +44,9 @@ internal sealed partial class BackupScheduler
 
     /// <summary>Test seam: start no thread; the test calls <see cref="TickForTest"/>.</summary>
     internal bool ManualTicks { get; set; }
+
+    /// <summary>Test hook, null in production: called by the tick between its busy check and its submit.</summary>
+    internal Action BeforeSubmitProbe { get; set; }
 
     /// <summary>The last job the tick started, for tests to wait on.</summary>
     internal Task<BackupPointInfo> LastJob => Volatile.Read(ref _lastJob);
@@ -127,11 +131,11 @@ internal sealed partial class BackupScheduler
             BackupRequest request = default;
             var requested = _requests != null && _requests.TryPoll(out request);
             var archiver = _archiver;
-            var immediate = false;
             if (archiver != null)
             {
                 archiver.Step(utc, mono, _stopping.Token);
-                immediate = archiver.ConsumeImmediatePointRequest();
+                // Latched until a job takes it: one asked while a job runs is not dropped.
+                _immediatePending |= archiver.ConsumeImmediatePointRequest();
                 var archive = archiver.State;
                 lock (_lock)
                 {
@@ -149,16 +153,25 @@ internal sealed partial class BackupScheduler
                 scheduled = mono - _startMono >= Ticks(Grace) && _schedule.IsDue(mono);
             }
 
+            var immediate = _immediatePending;
             if ((requested || immediate || scheduled) && !Stopped && !_engine.BackupCoordinator.Busy)
             {
+                BeforeSubmitProbe?.Invoke();
                 var source = requested ? BackupJobSource.Request : immediate ? BackupJobSource.Archive : BackupJobSource.Schedule;
                 var kind = requested && request.Kind == BackupRequestKind.Full ? BackupKind.Full : BackupKind.Incremental;
-                if (requested)
-                {
-                    _requests.Delete();
-                }
+                var job = _engine.BackupCoordinator.CaptureAsync(CreateStore(), kind, _stopping.Token, source, request.RequestId);
+                Volatile.Write(ref _lastJob, job);
 
-                Volatile.Write(ref _lastJob, _engine.BackupCoordinator.CaptureAsync(CreateStore(), kind, _stopping.Token, source, request.RequestId));
+                // A refused submit fails before it returns, its outcome already recorded (JobRefused). A deferred one (another job took the slot) leaves the
+                // request and the archiver's ask for a later tick; any other answers them. An accepted one retires the request when its job starts.
+                if (!job.IsFaulted || Classify(job.Exception.InnerException) != FailureClass.Deferred)
+                {
+                    _immediatePending = false;
+                    if (requested && job.IsFaulted)
+                    {
+                        _requests.Delete();
+                    }
+                }
             }
 
             if (_refreshDue || mono >= _nextRefreshMono)

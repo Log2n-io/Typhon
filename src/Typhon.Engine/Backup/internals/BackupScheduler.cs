@@ -124,6 +124,44 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
             _state.Version++;
         }
 
+        if (source == BackupJobSource.Request)
+        {
+            // DL-24: retired when its job starts, not when it is submitted, so a refused submit never loses it.
+            _requests?.Delete();
+        }
+
+        Publish();
+    }
+
+    void IBackupJobObserver.JobRefused(BackupJobSource source, Guid requestId, Exception refusal)
+    {
+        var failureClass = Classify(refusal);
+        if (failureClass == FailureClass.Deferred)
+        {
+            // A job runs (its outcome is what counts) or the engine is closing: nothing to record.
+            return;
+        }
+
+        var mono = MonoNow();
+        lock (_lock)
+        {
+            RecordFailure(refusal, failureClass, UtcNow());
+            if (requestId != Guid.Empty)
+            {
+                // Answered: create --wait sees its request refused instead of waiting for a job that never starts.
+                _state.LastRequestId = requestId;
+            }
+
+            _state.Version++;
+        }
+
+        LogJobFailed(source, failureClass, refusal.Message);
+        if (source != BackupJobSource.Api)
+        {
+            // The scheduler's own attempt backs off; an application's refused call does not move the schedule.
+            OnJobOutcome(failureClass, mono);
+        }
+
         Publish();
     }
 
@@ -175,15 +213,7 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
 
                 if (failureClass != FailureClass.Deferred)
                 {
-                    _state.AttemptEnded = true;
-                    _state.FailuresTotal++;
-                    _state.ConsecutiveFailures++;
-                    _state.LastFailure = new BackupFailure(now, KindOf(failure), failure.Message);
-                    _state.CaptureRefused |= failureClass == FailureClass.Permanent;
-                    if (IsStoreFailure(failure) && _state.StoreFailingSinceUtc == DateTime.MinValue)
-                    {
-                        _state.StoreFailingSinceUtc = now;
-                    }
+                    RecordFailure(failure, failureClass, now);
                 }
             }
 
@@ -197,6 +227,20 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
 
         OnJobOutcome(failureClass, mono);
         Publish();
+    }
+
+    /// <summary>A failure that counts (DL-20), a refused capture's or a failed job's (under <c>_lock</c>).</summary>
+    private void RecordFailure(Exception failure, FailureClass failureClass, DateTime now)
+    {
+        _state.AttemptEnded = true;
+        _state.FailuresTotal++;
+        _state.ConsecutiveFailures++;
+        _state.LastFailure = new BackupFailure(now, KindOf(failure), failure.Message);
+        _state.CaptureRefused |= failureClass == FailureClass.Permanent;
+        if (IsStoreFailure(failure) && _state.StoreFailingSinceUtc == DateTime.MinValue)
+        {
+            _state.StoreFailingSinceUtc = now;
+        }
     }
 
     bool IBackupJobObserver.HasWorkAfterPoint => _options.Retention != null;

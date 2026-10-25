@@ -276,6 +276,121 @@ class BackupSchedulerTests : SchedulerTestBase<BackupSchedulerTests>
     }
 
     /// <summary>
+    /// A capture the coordinator refuses before any job runs (here an engine fault) is an outcome like a failed job: health Failing (CaptureRefused, a
+    /// permanent refusal), and the schedule waits its backoff (a quarter of the interval) instead of resubmitting every tick.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    [VerifiesRule("BKP-15")]
+    public void ARefusedCapture_IsFailing_AndIsNotResubmittedEveryTick()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = OpenOnClock(scope);
+        Spawn(dbe, 20);
+        Clock.Advance(TimeSpan.FromSeconds(31));
+        Assert.That(Tick(dbe), Is.Not.Null, "premise: a restorable point, so the refusal is what health reports");
+        dbe.LatchCommitPipelineFailure(0, new InvalidOperationException("staged: the commit pipeline stopped"));
+
+        Clock.Advance(Interval);
+        dbe.BackupScheduler.TickForTest();
+        Assert.That(dbe.BackupScheduler.LastJob?.IsFaulted, Is.True, "premise: the capture was refused");
+        Assert.That((dbe.Backup.Status.Health, dbe.Backup.Status.Reason), Is.EqualTo((BackupHealth.Failing, BackupHealthReason.CaptureRefused)));
+        Assert.That(dbe.Backup.Status.FailuresTotal, Is.EqualTo(1));
+
+        Clock.Advance(TimeSpan.FromSeconds(1));
+        TickIdle(dbe, "a permanent refusal waits its backoff");
+        Clock.Advance(Interval / 4);
+        dbe.BackupScheduler.TickForTest();
+        Assert.That(dbe.Backup.Status.FailuresTotal, Is.EqualTo(2), "retried at the backoff");
+    }
+
+    /// <summary>
+    /// DL-24: a request is retired when its job starts, not when it is submitted. Staged: an API capture takes the job slot between the tick's busy check
+    /// and its submit, so the request's capture is refused (deferred); the request stays, and is served once that job ended.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void ARequestRefusedBecauseAJobTookTheSlot_IsServedOnceItEnds()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = OpenOnClock(scope);
+        Spawn(dbe, 20);
+        var scheduler = dbe.BackupScheduler;
+        var id = Guid.NewGuid();
+        var request = Path.Combine(dbe.MMF.BundleDirectory, "backup.request");
+        File.WriteAllText(request, $$"""{"formatVersion":1,"requestId":"{{id}}","kind":"full","requestedBy":"test"}""");
+
+        using var hold = new ManualResetEventSlim();
+        Task<BackupPointSummary> api = null;
+        dbe.BackupCoordinator.BeforeTakingRequest = () => hold.Wait(Budget);
+        scheduler.BeforeSubmitProbe = () => api ??= dbe.Backup.CreateAsync();
+        scheduler.TickForTest();
+        scheduler.BeforeSubmitProbe = null;
+
+        Assert.That(api, Is.Not.Null, "premise: the API capture took the slot");
+        Assert.That(scheduler.LastJob?.Exception?.InnerException, Is.TypeOf<TyphonException>(), "premise: the request's capture was refused");
+        Assert.That(File.Exists(request), Is.True, "the request is not retired by a refused submit");
+        Assert.That((dbe.Backup.Status.FailuresTotal, dbe.Backup.Status.ConsecutiveFailures), Is.EqualTo((0L, 0)), "a busy engine defers, it does not fail");
+
+        AwaitJobEnd(dbe, () =>
+        {
+            dbe.BackupCoordinator.BeforeTakingRequest = null;
+            hold.Set();
+        });
+        Assert.That(api.Wait(Budget), Is.True);
+        Assert.That(Tick(dbe)?.Kind, Is.EqualTo(BackupKind.Full), "served once the API job ended: the request's kind");
+        Assert.That(dbe.Backup.Status.LastRequestId, Is.EqualTo(id));
+        Assert.That(File.Exists(request), Is.False, "retired when its job started");
+    }
+
+    /// <summary>
+    /// The archiver's request for a point (a gap, a release, a fork) is latched until a job takes it: one made while a job runs is not dropped (with
+    /// <c>Interval = 0</c> nothing else would ever cover the gap).
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void AnArchiverRequestDuringAJob_IsTakenOnceTheJobEnds()
+    {
+        var archiver = new FakeArchiver();
+        BeforeStart = s => s.ArchiverFactory = () => archiver;
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = OpenOnClock(scope);
+        Spawn(dbe, 20);
+
+        using var hold = new ManualResetEventSlim();
+        dbe.BackupCoordinator.BeforeTakingRequest = () => hold.Wait(Budget);
+        var api = dbe.Backup.CreateAsync();
+        archiver.Immediate = true;
+        TickIdle(dbe, "a job is pending");
+        Assert.That(archiver.Immediate, Is.False, "premise: the archiver's request was consumed while busy");
+
+        AwaitJobEnd(dbe, () =>
+        {
+            dbe.BackupCoordinator.BeforeTakingRequest = null;
+            hold.Set();
+        });
+        Assert.That(api.Wait(Budget), Is.True);
+        Assert.That(Tick(dbe), Is.Not.Null, "the latched request takes a point once the job ended (within the grace: nothing else would)");
+        TickIdle(dbe, "taken once");
+    }
+
+    /// <summary>Runs <paramref name="release"/> and waits until the job it lets go has ended, retention included.</summary>
+    private static void AwaitJobEnd(DatabaseEngine dbe, Action release)
+    {
+        using var ended = new SemaphoreSlim(0);
+        dbe.BackupScheduler.JobEndedProbe = () => ended.Release();
+        try
+        {
+            release();
+            Assert.That(ended.Wait(Budget), Is.True, "the job did not end");
+        }
+        finally
+        {
+            dbe.BackupScheduler.JobEndedProbe = null;
+        }
+    }
+
+    /// <summary>
     /// The tick and the backup thread both publish: a snapshot is stored under the lock it was built under, so an older one can never land after a newer one
     /// (the newer state's version already published, nothing would republish it). Staged: the first publish parks between building and storing its snapshot
     /// while the backup thread publishes a newer state.
