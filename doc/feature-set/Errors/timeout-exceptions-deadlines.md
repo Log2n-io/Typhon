@@ -66,7 +66,8 @@ catch (TyphonTimeoutException ex)
 | `TransactionChainLockTimeout` | 10s | Transaction chain create/remove/walk |
 | `RevisionChainLockTimeout` | 5s | MVCC revision read/add/cleanup |
 | `SegmentAllocationLockTimeout` | 10s | Chained-block allocator / segment growth |
-| `PageCacheBackpressureTimeout` | 5s | Waiting for dirty pages to flush so allocation can proceed |
+| `PageCacheBackpressureTimeout` | 5s | One period of a back-pressure wait: a period with no page served throws `PageCacheBackpressureTimeoutException`; one that served a page starts a fresh period, up to `PageCacheOverloadWaitCeiling` in total |
+| `PageCacheOverloadWaitCeiling` | 60s | Ceiling for a back-pressure wait, all periods combined; throws even if the cache is still serving pages once reached |
 | `WalBackPressureTimeout` | 5s | Waiting for the WAL ring buffer to drain |
 | `DefaultCommitTimeout` / `DefaultUowTimeout` | 30s | Outer bound when `Transaction.Commit()` / a UoW is created without an explicit timeout |
 | `BulkLoadOptions.CheckpointTimeout` | 5 min | `BulkLoadSession.CompleteBulkLoad`'s forced synchronous checkpoint |

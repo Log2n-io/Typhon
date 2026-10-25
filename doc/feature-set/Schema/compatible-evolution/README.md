@@ -89,9 +89,10 @@ using (var dbe = host.Services.GetRequiredService<DatabaseEngine>())
   applied in one pass.
 - MVCC revision history is discarded — only the HEAD revision survives migration. There is no way to query
   pre-migration revisions afterward.
-- Migration is crash-safe to retry: it flushes its own segments before WAL replay begins, and only repoints the
-  database's root metadata to the new segments on success. A crash mid-migration leaves the old segments
-  authoritative; the next open re-runs migration from scratch.
+- Migration is crash-safe to retry: old segments remain authoritative until the checkpoint cycle's meta flip
+  (SCHEMA-09) commits the new catalog. A crash before that flip leaves the pre-migration image intact; the next
+  open re-runs migration in full. See [Migration Execution Strategy](./migration-execution-strategy.md) for the
+  timing detail.
 - The component's `[Component(..., Revision)]` number does **not** need to change for a compatible evolution —
   revision bumps are reserved for breaking changes that require a registered migration function.
 
