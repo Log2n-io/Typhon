@@ -375,6 +375,31 @@ class BackupSchedulerTests : SchedulerTestBase<BackupSchedulerTests>
     }
 
     /// <summary>
+    /// The point a job just published counts before the store is read again (after its retention, which can take minutes with a compaction): the first point
+    /// into an empty store is restorable at once, not a Failing "no restorable point" meanwhile. Read at the retention's start.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    [VerifiesRule("BKP-15")]
+    public void TheFirstPointIntoAnEmptyStore_IsRestorableBeforeTheStoreIsReadAgain()
+    {
+        Retention = new BackupRetentionPolicy
+        {
+            MaxAge = TimeSpan.Zero, MaxCount = 10, MaxTotalBytes = 0, MinKeep = 1, CompactThreshold = 0, KeepLastDrilled = false,
+        };
+        BackupStatus beforeRetention = null;
+        BeforeStart = s => s.BeforeRetentionProbe = () => beforeRetention = s.Status;
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = OpenOnClock(scope);
+        Spawn(dbe, 20);
+        Clock.Advance(TimeSpan.FromSeconds(31));
+        Assert.That(Tick(dbe), Is.Not.Null);
+
+        Assert.That(beforeRetention?.PointsTotal, Is.EqualTo(1), "premise: read after the point's publish, before the store was read again");
+        Assert.That((beforeRetention.Health, beforeRetention.RestorablePoints), Is.EqualTo((BackupHealth.Ok, 1)));
+    }
+
+    /// <summary>
     /// While a point is overdue (here the engine is busy past the grace), its due instant is the one it became due at, not now: the status is not
     /// republished, nor its file rewritten, every tick.
     /// </summary>

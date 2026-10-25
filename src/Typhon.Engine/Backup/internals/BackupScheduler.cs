@@ -202,7 +202,7 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
                 {
                     // The store will say so too at the refresh; until then the point just published is this timeline's newest. A refresh that began
                     // before it read the store without it: its facts are dropped.
-                    _state.Facts = WithLastPoint(_state.Facts, summary);
+                    _state.Facts = WithLastPoint(_state.Facts, summary, point.SuspectCount);
                     _factsPublished = ++_factsTicket;
                 }
             }
@@ -494,15 +494,20 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
         }
     }
 
-    private static StoreFacts WithLastPoint(StoreFacts facts, BackupPointSummary point) => new()
+    /// <summary>
+    /// The facts once <paramref name="point"/>, published and verified, is this timeline's newest, until the store is read again (after the job's retention):
+    /// one more restorable point and its pack's bytes. Its suspects are not classified yet: all counted on allocated pages, the answer never better than the
+    /// store's.
+    /// </summary>
+    private static StoreFacts WithLastPoint(StoreFacts facts, BackupPointSummary point, int suspects) => new()
     {
         Known = facts.Known,
-        RestorablePoints = facts.RestorablePoints,
-        StoreBytes = facts.StoreBytes,
+        RestorablePoints = facts.RestorablePoints + 1,
+        StoreBytes = facts.StoreBytes + point.PackBytes,
         LastPoint = point,
         ChainDepth = facts.ChainDepth,
-        AllocatedSuspects = facts.AllocatedSuspects,
-        FreeSuspects = facts.FreeSuspects,
+        AllocatedSuspects = suspects,
+        FreeSuspects = 0,
         LastDrill = facts.LastDrill,
         LastPassedDrill = facts.LastPassedDrill,
         DrillPassed = facts.DrillPassed,
