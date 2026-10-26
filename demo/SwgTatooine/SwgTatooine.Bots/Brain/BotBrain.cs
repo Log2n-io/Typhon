@@ -221,6 +221,25 @@ public sealed class BotBrain
     /// <summary>What it is doing.</summary>
     public Goal Goal { get; private set; } = Goal.Choosing;
 
+    /// <summary>How far above its own combat level a bot hunts (content-levels.md § 7): a creature past it is left alone, and an offer past it is taken only
+    /// when no other is listed.</summary>
+    public const int LevelReach = 3;
+
+    /// <summary>
+    /// The bot's own combat level: 1 — where a new character belongs, the city fringes — until the character's CL is replicated and set here
+    /// (character-level.md).
+    /// </summary>
+    public int CombatLevel { get; set; } = 1;
+
+    /// <summary>The highest level this bot hunts, and prefers an offer at: its <see cref="CombatLevel"/> plus <see cref="LevelReach"/>.</summary>
+    public int MaxLevel => CombatLevel + LevelReach;
+
+    /// <summary>
+    /// Whether the nearest creature is one to HUNT: at or below <see cref="MaxLevel"/>, or of no stated level. A level-45 viper in view does not pull a
+    /// CL-1 bot into a fight it cannot win. A mission's defenders are not asked: they are fought at any level, since the lair cannot be broken past them.
+    /// </summary>
+    private bool Huntable(in Perceived world) => world.NearestCreatureLevel <= MaxLevel;
+
     /// <summary>The REGION it is going to — a city plus one — or 0 when it is not travelling.</summary>
     /// <remarks>
     /// A region rather than a city index, so that "no destination" is 0; see <see cref="Perceived.PortRegion"/> for why
@@ -434,7 +453,7 @@ public sealed class BotBrain
             _questSince = -1;
         }
 
-        if (world.NearestCreature != 0 && world.NearestCreatureM <= NoticeM && world.NearestCreature != _givenUpOn)
+        if (world.NearestCreature != 0 && world.NearestCreatureM <= NoticeM && world.NearestCreature != _givenUpOn && Huntable(in world))
         {
             Goal = Goal.Hunting;
             _huntUntil = tick + Ticks(HuntSeconds);
@@ -550,9 +569,9 @@ public sealed class BotBrain
             return Choose(in world, tick);
         }
 
-        if (world.NearestCreature == 0 || world.NearestCreature == _givenUpOn)
+        if (world.NearestCreature == 0 || world.NearestCreature == _givenUpOn || !Huntable(in world))
         {
-            // Killed, or it wandered out of view. Nothing to hunt, so decide again.
+            // Killed, or it wandered out of view, or what is nearest now is past this bot's level. Nothing to hunt, so decide again.
             Goal = Goal.Choosing;
             return Choose(in world, tick);
         }
