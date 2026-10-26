@@ -1,6 +1,6 @@
 import { WorldStore, type WorldSchema } from '@typhondb/client';
 import { describe, expect, it } from 'vitest';
-import { describeFields } from '../src/data/swg-format';
+import { describeFields, formatField } from '../src/data/swg-format';
 
 /**
  * The inspector's field list over a store holding a non-numeric field. The day a player gained its text `name` (A12),
@@ -43,5 +43,11 @@ describe('describeFields', () => {
     world.beginFrame(1);
     const slot = world.enter(0, 4);
     expect(describeFields(world.archetypeStore(0), slot)[0]).toEqual({ name: 'name', value: '—' });
+  });
+});
+
+describe('formatField', () => {
+  it('reads a level as its number', () => {
+    expect(formatField('Creature', 'level', 23)).toBe('23');
   });
 });

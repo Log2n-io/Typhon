@@ -427,6 +427,11 @@ internal sealed class CombatResolveSystem : CallbackSystem
         .Writes<LairVitals>()
         .Writes<Lair>()
         .Reads<CreatureHome>()
+        // A death's KillEvent carries where and in which realm it happened (character-level.md § 2).
+        .Reads<CreaturePlacement>()
+        .Reads<CreatureRealm>()
+        .Reads<LairPlacement>()
+        .Reads<LairRealm>()
 
         // A death's KillEvent: where it fell, in which realm (character-level.md § 2).
         .Reads<CreaturePlacement>()
@@ -520,8 +525,8 @@ internal sealed class MissionDeskSystem : CallbackSystem
 /// <remarks>
 /// <para><b>Serial, in <see cref="SimPhases.Report"/></b>, after the whole Economy phase: the lair director reads <see cref="PlayerLook"/> there, and a writer of
 /// it in that phase would have to run before it; here the order is the phases'. The XP goes through a side transaction, the bodies through the tick's.</para>
-/// <para><b>Reads the kill queue rather than consuming it</b>, as the lair director reads its corpses: a declared consumer is skipped on a tick its queue is
-/// empty, and this one has work on such a tick — the bodies of the holders the mission desk paid XP to, which it refreshes for the desk.</para>
+/// <para><b>A consumer of two queues</b> (<c>TatooineSim.BuildSchedule</c>): the kills, and the bodies the mission desk paid XP to, which it refreshes for
+/// the desk. Skipped on a tick both are empty (ReactiveSkip): it has no other work.</para>
 /// </remarks>
 internal sealed class ProgressionSystem : CallbackSystem
 {
@@ -532,7 +537,6 @@ internal sealed class ProgressionSystem : CallbackSystem
     protected override void Configure(SystemBuilder b) => b
         .Name("Progression")
         .Phase(SimPhases.Report)
-        .ReadsEvents(_bridge.KillXpQueue)
         .Writes<CharacterProgress>()
         .Reads<Character>()
         .Writes<PlayerLook>()

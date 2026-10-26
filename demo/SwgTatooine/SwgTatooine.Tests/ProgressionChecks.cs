@@ -636,7 +636,7 @@ internal sealed class ProgressionChecks : ServedChecks
         sim.WriteInTick((tx, _) =>
         {
             var rng = new Rng(7);
-            lair = WorldBuilder.SpawnLair(tx, ref rng, template, me.X + me.HalfExtent + WorldBuilder.LairHalfM + gapM, me.Z + alongM, 1, expireTick: 0, config,
+            lair = WorldBuilder.SpawnLair(tx, ref rng, template, level, me.X + me.HalfExtent + WorldBuilder.LairHalfM + gapM, me.Z + alongM, 1, expireTick: 0, config,
                 terrain, 0);
         });
         SessionHarness.Until(() => !lair.IsNull, "the lair to be spawned");

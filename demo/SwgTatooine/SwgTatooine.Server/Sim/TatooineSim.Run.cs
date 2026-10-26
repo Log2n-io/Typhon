@@ -683,6 +683,9 @@ public sealed partial class TatooineSim
         _bridge.KillXpQueue = dag.CreateEventQueue<KillEvent>("KillsXp", 256);
         _bridge.KillLootQueue = dag.CreateEventQueue<KillEvent>("KillsLoot", 256);
 
+        // The bodies of the holders the mission desk paid XP to, for Progression to bring up to it (character-level.md § 5): a few a minute.
+        _bridge.ProgressQueue = dag.CreateEventQueue<ProgressRefresh>("Progress", 64);
+
         if (_config.Shuttles)
         {
             dag.Add(new ShuttleSystem(_bridge));
@@ -751,6 +754,12 @@ public sealed partial class TatooineSim
         dag.Add(new MissionDeskSystem(_bridge));
         dag.Add(new LedgerSystem(_bridge));
         dag.Add(new ProgressionSystem(_bridge));
+
+        // Progression has no work but these two, so it consumes both and is skipped on a tick with neither (character-level.md § 2, § 5). In the Report phase,
+        // after the whole Economy phase: the lair director reads PlayerLook there, before the desk, so a writer of it in that phase would have to run first.
+        dag.Consumes("Progression", _bridge.KillXpQueue)
+            .Produces("Missions", _bridge.ProgressQueue)
+            .Consumes("Progression", _bridge.ProgressQueue);
         // Produced, and read by a system that does NOT declare `Consumes`: the runtime skips a declared consumer on every tick its queues are empty
         // (TyphonRuntime's ReactiveSkip), and both of these have work of their own on such ticks — the lair director's pass, the desk's takes and its
         // pass. So the lair director ran its 2 Hz pass only on a pass tick that also brought a corpse, and the desk never ran at all with the crowd off

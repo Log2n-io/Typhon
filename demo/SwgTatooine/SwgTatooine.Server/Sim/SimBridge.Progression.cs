@@ -33,8 +33,11 @@ public sealed partial class SimBridge
     /// <summary>The desk's mission XP of its pass: (body, the character's progress), noted in its transaction.</summary>
     private readonly List<(EntityId Body, CharacterProgress Progress)> _deskProgress = [];
 
-    /// <summary>The bodies the desk's committed mission XP is still to reach, refreshed by <see cref="ProgressionTick"/> later in the same tick.</summary>
-    private readonly List<(EntityId Body, CharacterProgress Progress)> _deskRefresh = [];
+    /// <summary>
+    /// The bodies the desk's committed mission XP is to reach: pushed by the desk after its commit, drained by <see cref="ProgressionTick"/> later in the
+    /// same tick. Created on the schedule.
+    /// </summary>
+    internal EventQueue<ProgressRefresh> ProgressQueue { get; set; }
 
     private long _xpGrantedKills;
     private long _xpGrantedMissions;
@@ -94,14 +97,15 @@ public sealed partial class SimBridge
         }
 
         // The mission desk's XP of this tick, committed with its rewards: its holders' bodies, brought up to it (§ 5).
-        if (_deskRefresh.Count != 0)
+        var refreshes = ProgressQueue.Count;
+        if (refreshes != 0)
         {
-            foreach (var (body, progress) in _deskRefresh)
+            Span<ProgressRefresh> bodies = refreshes <= 16 ? stackalloc ProgressRefresh[16] : new ProgressRefresh[refreshes];
+            var m = ProgressQueue.Drain(bodies);
+            for (var i = 0; i < m; i++)
             {
-                RefreshBody(ctx.Transaction, body, in progress);
+                RefreshBody(ctx.Transaction, bodies[i].Body, in bodies[i].Progress);
             }
-
-            _deskRefresh.Clear();
         }
 
         var pending = KillXpQueue.Count;
@@ -242,13 +246,21 @@ public sealed partial class SimBridge
     }
 
     /// <summary>After the desk's commit: the XP counted, the holders' bodies handed to Progression, the level-ups logged. Nothing when it did not commit.</summary>
-    private void RefreshDeskProgress(Transaction tick0, bool committed)
+    private void RefreshDeskProgress(TickContext ctx, bool committed)
     {
         if (committed)
         {
             Interlocked.Add(ref _xpGrantedMissions, _pendingMissionXp);
-            _deskRefresh.AddRange(_deskProgress);
-            LogLevelUps(tick0);
+            if (_deskProgress.Count != 0)
+            {
+                var writer = ctx.Writer(ProgressQueue);
+                foreach (var (body, progress) in _deskProgress)
+                {
+                    writer.Push(new ProgressRefresh { Body = body, Progress = progress });
+                }
+            }
+
+            LogLevelUps(ctx.Transaction);
         }
 
         _deskProgress.Clear();

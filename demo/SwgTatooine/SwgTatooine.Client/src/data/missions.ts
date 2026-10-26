@@ -23,6 +23,8 @@ export interface MissionOffer {
   /** The lair kind, which is also the name: an index into the server's creature list (`demo.json`). */
   readonly kind: number;
   readonly difficulty: number;
+  /** The level of the lair it sends you to, 1-50 (content-levels.md § 4). */
+  readonly level: number;
   readonly reward: number;
   /** 0 north, clockwise to 7 — see {@link OCTANT_NAMES}. */
   readonly octant: number;
@@ -37,6 +39,8 @@ export interface HeldMission {
   /** The lair kind's name, the server's: "ninja hideout", "rats". */
   readonly name: string;
   readonly difficulty: number;
+  /** Its lair's level, 1-50: every lair it draws is spawned at it. */
+  readonly level: number;
   readonly reward: number;
   readonly octant: number;
   readonly distanceM: number;
@@ -67,7 +71,7 @@ export function formatMissionDistance(m: number): string {
 }
 
 /** How a terminal's list can be ordered. */
-export type OfferSort = 'difficulty' | 'direction' | 'distance' | 'reward';
+export type OfferSort = 'level' | 'direction' | 'distance' | 'reward';
 
 /**
  * The offers in an order: by the key asked for, then by reward and the serial so two equal rows never swap places between
@@ -78,8 +82,8 @@ export function sortOffers(offers: readonly MissionOffer[], by: OfferSort, desce
   const sign = descending ? -1 : 1;
   const primary = (a: MissionOffer, b: MissionOffer): number => {
     switch (by) {
-      case 'difficulty':
-        return a.difficulty - b.difficulty;
+      case 'level':
+        return a.level - b.level;
       case 'direction':
         return a.octant - b.octant || a.distanceM - b.distanceM;
       case 'distance':
@@ -268,5 +272,10 @@ function isHeldMission(value: unknown): value is HeldMission {
   }
 
   const m = value as Record<string, unknown>;
-  return typeof m.id === 'string' && typeof m.kind === 'number' && typeof m.reward === 'number';
+  return (
+    typeof m.id === 'string' &&
+    typeof m.kind === 'number' &&
+    typeof m.level === 'number' &&
+    typeof m.reward === 'number'
+  );
 }

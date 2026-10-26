@@ -39,6 +39,8 @@ public sealed class Perception
     private int _offers = -1;
     private int _serialField = -1;
     private int _distanceField = -1;
+    private int _offerLevelField = -1;
+    private int _creatureLevelField = -1;
     private int _kindField = -1;
     private int _regionField = -1;
     private int _assetField = -1;
@@ -47,8 +49,19 @@ public sealed class Perception
     private int _mountedField = -1;
     private int _stanceField = -1;
     private int _levelField = -1;
-    private int _creatureLevelField = -1;
     private readonly StoreStructures _view = new();
+
+    /// <summary>How far above its own combat level a bot fights (content-levels.md § 7): a creature or an offer past it is left alone.</summary>
+    public const int LevelReach = 3;
+
+    /// <summary>
+    /// The bot's own combat level, which bounds what it hunts and which offer it prefers: 1 — where a new character belongs, the city fringes — until the
+    /// character's CL is replicated and read here (character-level.md).
+    /// </summary>
+    public int CombatLevel { get; set; } = 1;
+
+    /// <summary>The highest level this bot takes on: its <see cref="CombatLevel"/> plus <see cref="LevelReach"/>.</summary>
+    public int MaxLevel => CombatLevel + LevelReach;
 
     /// <summary>Reads what this bot can see, and teaches its map any facility in view.</summary>
     /// <param name="store">The bot's store, or null before a catalog has arrived.</param>
@@ -89,6 +102,10 @@ public sealed class Perception
         }
 
         var mounted = _mountedField >= 0 && store.Archetypes[ownArchetype].Numbers[_mountedField] is { } m && m[ownSlot] == 1;
+
+        // The body's combat level (character-level.md § 9), for the caller to bound the hunt with (CombatLevel).
+        var level = _levelField >= 0 && store.Archetypes[ownArchetype].Numbers[_levelField] is { } lv ? (int)lv[ownSlot] : 0;
+
         _view.Bind(store, _structures, _kindField, _regionField, _assetField, _yawField);
         var world = new Perceived
         {
@@ -99,11 +116,11 @@ public sealed class Perception
             BoardRefused = BoardRefusedIn(store),
             Mounted = mounted,
             Stance = _stanceField >= 0 && store.Archetypes[ownArchetype].Numbers[_stanceField] is { } st ? (int)st[ownSlot] : 0,
-            Level = _levelField >= 0 && store.Archetypes[ownArchetype].Numbers[_levelField] is { } lv ? (int)lv[ownSlot] : 0,
+            Level = level,
             Structures = _view,
         };
 
-        world = NearestCreature(store, _creatures, _creatureLevelField, x, z, world);
+        world = NearestCreature(store, _creatures, x, z, world);
         return Facilities(store, x, z, world, facilities);
     }
 
@@ -202,7 +219,8 @@ public sealed class Perception
 
     /// <summary>
     /// The offer to take at the terminal the bot stands at (lair-objectives.md B-1): of those listed within <paramref name="reachM"/>, the one whose lair
-    /// is nearest the terminal — the shortest ride out.
+    /// is nearest the terminal — the shortest ride out — among those within <see cref="MaxLevel"/> (content-levels.md § 7), and the nearest of all when
+    /// none is.
     /// </summary>
     /// <returns>Its netId, or 0 when none is listed within reach.</returns>
     public uint BestOffer(WorldStore store, float x, float z, float reachM, out uint serial)
@@ -222,13 +240,17 @@ public sealed class Perception
         var set = store.Archetypes[_offers];
         var serials = set.Numbers[_serialField];
         var distances = _distanceField >= 0 ? set.Numbers[_distanceField] : null;
+        var levels = _offerLevelField >= 0 ? set.Numbers[_offerLevelField] : null;
         if (serials == null)
         {
             return 0;
         }
 
         var nearest = double.MaxValue;
+        var nearestInReach = double.MaxValue;
         var found = 0u;
+        var foundInReach = 0u;
+        var serialInReach = 0u;
         for (var i = 0; i < set.LiveCount; i++)
         {
             var slot = set.Live[i];
@@ -245,26 +267,42 @@ public sealed class Perception
                 found = set.NetIds[slot];
                 serial = (uint)serials[slot];
             }
+
+            if (ride < nearestInReach && (levels == null || levels[slot] <= MaxLevel))
+            {
+                nearestInReach = ride;
+                foundInReach = set.NetIds[slot];
+                serialInReach = (uint)serials[slot];
+            }
+        }
+
+        if (foundInReach != 0)
+        {
+            serial = serialInReach;
+            return foundInReach;
         }
 
         return found;
     }
 
-    /// <summary>The nearest creature the bot could fight, with its position and distance.</summary>
+    /// <summary>The nearest creature, with its position and distance.</summary>
     /// <param name="store">The store.</param>
     /// <param name="archetype">Which archetype to scan, or -1.</param>
-    /// <param name="levelField">The creatures' <c>level</c> field, or -1 when the catalog has none.</param>
     /// <param name="x">The bot, east.</param>
     /// <param name="z">The bot, north.</param>
     /// <param name="world">What has been read so far.</param>
     /// <returns>The updated perception.</returns>
     /// <remarks>
+    /// <para>
     /// <b>Lairs are deliberately not scanned</b>: only the god profiles observe them, so a player session's store never
     /// holds one and a scan would walk an always-empty archetype. See <see cref="Perceived.NearestCreature"/>.
-    /// <para><b>A creature <see cref="RedLevels"/> or more above the bot's level is skipped</b> (character-level.md § 9, B5's "red"), when both levels
-    /// are known: a bot does not walk into a fight it cannot win.</para>
+    /// </para>
+    /// <para>
+    /// <b>Nor a creature above <see cref="MaxLevel"/></b> (content-levels.md § 7): a level-45 viper in view no longer pulls a CL-1 bot into a fight it
+    /// cannot win.
+    /// </para>
     /// </remarks>
-    private static Perceived NearestCreature(WorldStore store, int archetype, int levelField, float x, float z, Perceived world)
+    private Perceived NearestCreature(WorldStore store, int archetype, float x, float z, Perceived world)
     {
         if (archetype < 0)
         {
@@ -272,15 +310,17 @@ public sealed class Perception
         }
 
         var set = store.Archetypes[archetype];
-        var levels = levelField >= 0 && world.Level > 0 ? set.Numbers[levelField] : null;
+        var levels = _creatureLevelField >= 0 ? set.Numbers[_creatureLevelField] : null;
         var best = double.MaxValue;
         var bestNetId = 0u;
         var bestX = 0f;
         var bestZ = 0f;
+        var bestLevel = 0;
         for (var i = 0; i < set.LiveCount; i++)
         {
             var slot = set.Live[i];
-            if (levels != null && IsRed((int)levels[slot], world.Level))
+            var level = levels != null ? (int)levels[slot] : 0;
+            if (level > MaxLevel)
             {
                 continue;
             }
@@ -295,6 +335,7 @@ public sealed class Perception
                 bestNetId = set.NetIds[slot];
                 bestX = px;
                 bestZ = pz;
+                bestLevel = level;
             }
         }
 
@@ -303,14 +344,15 @@ public sealed class Perception
             return world;
         }
 
-        return world with { NearestCreature = bestNetId, NearestCreatureX = bestX, NearestCreatureZ = bestZ, NearestCreatureM = (float)best };
+        return world with
+        {
+            NearestCreature = bestNetId,
+            NearestCreatureX = bestX,
+            NearestCreatureZ = bestZ,
+            NearestCreatureM = (float)best,
+            NearestCreatureLevel = bestLevel,
+        };
     }
-
-    /// <summary>How many levels above the bot a creature is "red", and skipped: B5's band.</summary>
-    public const int RedLevels = 6;
-
-    /// <summary>Whether a creature of <paramref name="creatureLevel"/> is red to a bot of <paramref name="botLevel"/>; never when either is unknown (0).</summary>
-    public static bool IsRed(int creatureLevel, int botLevel) => creatureLevel > 0 && botLevel > 0 && creatureLevel >= botLevel + RedLevels;
 
     /// <summary>Teaches the map every shuttleport, bazaar and mission terminal in view, and notices a port close enough to board at.</summary>
     /// <param name="store">The store.</param>
@@ -433,7 +475,6 @@ public sealed class Perception
         _bound = store;
         _structures = IndexOf(store, WorldObject);
         _creatures = IndexOf(store, Creature);
-        _creatureLevelField = FieldOf(store, _creatures, "level");
         _players = IndexOf(store, Player);
         _nameIdField = FieldOf(store, _players, "nameId");
         _lairs = IndexOf(store, Lair);
@@ -441,6 +482,8 @@ public sealed class Perception
         _offers = IndexOf(store, Offer);
         _serialField = FieldOf(store, _offers, "serial");
         _distanceField = FieldOf(store, _offers, "distanceM");
+        _offerLevelField = FieldOf(store, _offers, "level");
+        _creatureLevelField = FieldOf(store, _creatures, "level");
 
         // Both fields are resolved against the archetype they are read from, which is the bug this line replaced: the
         // first version resolved a field index against `Player` and then indexed it into whatever archetype held the

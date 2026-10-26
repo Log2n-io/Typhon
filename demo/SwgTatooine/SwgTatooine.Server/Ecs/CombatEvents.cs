@@ -148,6 +148,17 @@ internal struct KillEvent
     public byte Species;
 }
 
+/// <summary>A body to bring up to its character's progress: what the mission desk hands <c>Progression</c> after paying a mission's XP (character-level.md § 5).</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct ProgressRefresh
+{
+    /// <summary>The holder's body.</summary>
+    public EntityId Body;
+
+    /// <summary>Its character's progress, as the desk committed it.</summary>
+    public CharacterProgress Progress;
+}
+
 /// <summary>What a <see cref="KillEvent"/> killed.</summary>
 internal static class KillVictimKind
 {

@@ -1,3 +1,4 @@
+using System;
 using System.Globalization;
 using System.Text;
 
@@ -32,6 +33,21 @@ public sealed class WorldCensus
     /// </remarks>
     public int[] CreaturesByTemplate = new int[CreatureTemplates.Count];
 
+    /// <summary>Lairs per band, I to V (content-levels.md): every band populated is what makes "every band a short ride from every city" true.</summary>
+    public int[] LairsByBand = new int[5];
+
+    /// <summary>Creatures per band, I to V.</summary>
+    public int[] CreaturesByBand = new int[5];
+
+    /// <summary>Lairs in the cities' fringes.</summary>
+    public int FringeLairs;
+
+    /// <summary>Lairs in the frontier patches.</summary>
+    public int FrontierLairs;
+
+    /// <summary>Frontier patches with no valid bearing (<see cref="WorldIndex.FrontiersDisplaced"/>): 0 on a map that fits.</summary>
+    public int FrontiersDisplaced;
+
     /// <summary>City NPCs.</summary>
     public int CityNpcs;
 
@@ -53,7 +69,36 @@ public sealed class WorldCensus
         Players = Players + other.Players,
         Starships = Starships + other.Starships,
         CreaturesByTemplate = Sum(CreaturesByTemplate, other.CreaturesByTemplate),
+        LairsByBand = Sum(LairsByBand, other.LairsByBand),
+        CreaturesByBand = Sum(CreaturesByBand, other.CreaturesByBand),
+        FringeLairs = FringeLairs + other.FringeLairs,
+        FrontierLairs = FrontierLairs + other.FrontierLairs,
+        FrontiersDisplaced = FrontiersDisplaced + other.FrontiersDisplaced,
     };
+
+    /// <summary>Counts one lair, its creatures, its band and its site's kind — the build's and the rebuild's one bookkeeping.</summary>
+    /// <param name="template">Its kind.</param>
+    /// <param name="level">Its level.</param>
+    /// <param name="site">What planned its site; <see cref="LairSiteKind.Region"/> for a mission's lair, which has none.</param>
+    public void CountLair(int template, int level, LairSiteKind site)
+    {
+        Lairs++;
+        var creatures = CreatureTemplates.SpawnLimit[template];
+        Creatures += creatures;
+        CreaturesByTemplate[template] += creatures;
+        var band = ContentLevels.Band(level) - 1;
+        LairsByBand[band]++;
+        CreaturesByBand[band] += creatures;
+        FringeLairs += site == LairSiteKind.Fringe ? 1 : 0;
+        FrontierLairs += site == LairSiteKind.Frontier ? 1 : 0;
+    }
+
+    /// <summary>The content levels' census line: lairs and creatures by band, the fringes and frontiers, and any patch the map squeezed.</summary>
+    public string Levels()
+        => FormattableString.Invariant($"content levels: lairs by band {LairsByBand[0]}/{LairsByBand[1]}/{LairsByBand[2]}/{LairsByBand[3]}/{LairsByBand[4]}")
+            + FormattableString.Invariant(
+                $", creatures by band {CreaturesByBand[0]}/{CreaturesByBand[1]}/{CreaturesByBand[2]}/{CreaturesByBand[3]}/{CreaturesByBand[4]}")
+            + FormattableString.Invariant($"; {FringeLairs} fringe and {FrontierLairs} frontier lairs; frontiers displaced {FrontiersDisplaced}");
 
     /// <summary>Elementwise sum, for <see cref="Plus"/>.</summary>
     private static int[] Sum(int[] a, int[] b)

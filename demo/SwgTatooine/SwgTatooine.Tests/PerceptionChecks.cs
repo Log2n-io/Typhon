@@ -104,49 +104,36 @@ internal sealed class PerceptionChecks : ServedChecks
         });
     }
 
-    /// <summary>A possessed player session, settled enough that the binding is visible to a transaction.</summary>
-    /// <returns>Its link.</returns>
-    /// <remarks>
-    /// The two ticks after the counter are not padding: the possession counter moves INSIDE the tick that claims the
-    /// body and the binding lands with that tick's commit, so a transaction opened the instant the counter moves finds
-    /// no player and the case fails on its own premise.
-    /// </remarks>
     /// <summary>
-    /// character-level.md § 9: a bot reads its own combat level off the wire, and the nearest creature it would fight skips any six or more levels above
-    /// it — a level 7 frog is red to a CL 1 bot, a level 6 one is not, however much nearer the red one stands.
+    /// CL-13: a bot does not hunt a creature far above its level. Snakes of level 45 stand 15 m from a CL-1 bot: its eyes pass them over, and the same
+    /// frames read by a CL-45 bot's eyes find them — so they were in view, and their level was read off the wire.
     /// </summary>
-    /// <remarks>
-    /// A creature's <c>level</c> is on the wire once, on enter, and it is set at spawn — content-levels' spawn code, not this branch's — so the frogs' levels
-    /// are written into the bot's store, in the column the wire fills, after the real frames have been applied. The store, the catalog and the scan are real.
-    /// </remarks>
     [Test]
     [CancelAfter(90_000)]
     [Category("Integration")]
-    public void APerceivedBot_ReadsItsLevel_AndSkipsCreaturesSixLevelsAbove()
+    public void ABot_LeavesACreatureFarAboveItsLevel()
     {
-        var config = Worlds.Served(Dir);
-        config.SpawnSpread = 0;
-        using var sim = new TatooineSim(config);
+        using var sim = new TatooineSim(Worlds.Served(Dir));
         sim.Initialize();
         Harness = new SessionHarness(sim);
         var link = Connect();
-        var body = TatooineReplication.ControlledBy(sim.Dbe, link.Session);
-        PlayerPlacement at = default;
-        sim.WriteInTick(tx => at = tx.Open(body).Read(Player.Bounds));
 
-        var terrain = TerrainField.Shared(config.ContentScale);
-        var red = EntityId.Null;
-        var plain = EntityId.Null;
-        sim.WriteInTick((tx, _) =>
+        var port = sim.Index.Shuttleports[0];
+        Worlds.Park(sim, link.Session, port.X + 40f, port.Z, out var parked);
+        var lair = EntityId.Null;
+        var config = sim.Config;
+        sim.WriteInTick(tx =>
         {
-            var rng = new Rng(11);
-            red = WorldBuilder.SpawnLair(tx, ref rng, CreatureTemplates.Frog, at.X + 15f, at.Z, 1, expireTick: 0, config, terrain, 0);
-            plain = WorldBuilder.SpawnLair(tx, ref rng, CreatureTemplates.Frog, at.X - 45f, at.Z, 1, expireTick: 0, config, terrain, 0);
+            var rng = new Rng(3);
+            lair = WorldBuilder.SpawnLair(tx, ref rng, CreatureTemplates.Snake, 45, port.X + 55f, port.Z, site: 0, expireTick: 0, config,
+                SwgTatooine.Server.Terrain.TerrainField.Shared(config.ContentScale), 0);
         });
+        SessionHarness.Until(() => !lair.IsNull, "the lair to be spawned");
+        SessionHarness.UntilNamed(link.Session, lair, "the lair's view to reach the session", parked);
+        Harness.Ticks(6);
 
-        var redFrogs = new System.Collections.Generic.List<EntityId>();
-        var plainFrogs = new System.Collections.Generic.List<EntityId>();
-        sim.WriteInTick((tx, _) =>
+        var snakes = new System.Collections.Generic.HashSet<uint>();
+        using (var tx = sim.Dbe.CreateQuickTransaction())
         {
             foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
             {
@@ -154,59 +141,89 @@ internal sealed class PerceptionChecks : ServedChecks
                 for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
                 {
                     var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    var home = (EntityId)homes[slot].Lair;
-                    if (home == red)
+                    EntityId home = homes[slot].Lair;
+                    if (home == lair)
                     {
-                        redFrogs.Add(cluster.GetEntityId(slot));
-                    }
-                    else if (home == plain)
-                    {
-                        plainFrogs.Add(cluster.GetEntityId(slot));
+                        snakes.Add(SessionHarness.NetIdOf(link.Session, cluster.GetEntityId(slot)));
                     }
                 }
             }
-        });
-
-        Harness.Ticks(6);
-        foreach (var frog in redFrogs)
-        {
-            SessionHarness.UntilNamed(link.Session, frog, "the red frogs to reach the bot's view");
         }
 
-        var redNetIds = redFrogs.ConvertAll(f => SessionHarness.NetIdOf(link.Session, f));
-        var plainNetIds = plainFrogs.ConvertAll(f => SessionHarness.NetIdOf(link.Session, f));
-        var store = new WorldStore(link.Plan);
-        var eyes = new Perception();
-        var facilities = new FacilityMap();
-        var before = Replay(link, store, eyes, facilities);
-
-        // The levels content-levels' spawn puts on the wire: 7 on the near lair's frogs, 6 on the far one's.
-        var creatures = System.Array.FindIndex(store.Archetypes, a => a.Plan.Name == "Creature");
-        var column = System.Array.FindIndex(store.Archetypes[creatures].Plan.Fields, f => f.Name == "level");
-        Assert.That(column, Is.GreaterThanOrEqualTo(0), "the creature catalog carries no level");
-        var set = store.Archetypes[creatures];
-        for (var i = 0; i < set.LiveCount; i++)
-        {
-            var slot = set.Live[i];
-            var netId = set.NetIds[slot];
-            set.Numbers[column][slot] = redNetIds.Contains(netId) ? 7 : plainNetIds.Contains(netId) ? 6 : 0;
-        }
-
-        var world = eyes.Read(store, facilities);
+        var low = Replay(link, new WorldStore(link.Plan), new Perception { CombatLevel = 1 }, new FacilityMap());
+        var high = Replay(link, new WorldStore(link.Plan), new Perception { CombatLevel = 45 }, new FacilityMap());
         Assert.Multiple(() =>
         {
-            Assert.That(world.Level, Is.EqualTo(1), "the bot did not read its own level");
-            Assert.That(redNetIds, Is.Not.Empty, "the premise: the red lair has frogs");
-            Assert.That(redNetIds, Has.None.Zero, "the premise: the red frogs are in the bot's view");
-            Assert.That(redNetIds, Does.Contain(before.NearestCreature), "the premise: unlevelled, a red frog is the nearest");
-            Assert.That(world.NearestCreature, Is.Not.Zero, "the level 6 frogs, in view, were skipped too");
-            Assert.That(redNetIds, Does.Not.Contain(world.NearestCreature), "the bot picked a creature six levels above it");
-            Assert.That(Perception.IsRed(7, 1), Is.True);
-            Assert.That(Perception.IsRed(6, 1), Is.False);
-            Assert.That(Perception.IsRed(50, 0), Is.False, "an unknown level is never red");
+            Assert.That(snakes, Is.Not.Empty.And.Not.Contains(0u), "the snakes are not in the session's view");
+            Assert.That(high.NearestCreature, Is.AnyOf([.. snakes]), "a CL-45 bot does not see the level-45 snakes 15 m away: the premise failed");
+            Assert.That(high.NearestCreatureLevel, Is.EqualTo(45), "the level read off the wire is not the snakes'");
+            Assert.That(snakes, Does.Not.Contain(low.NearestCreature), "a CL-1 bot was offered a level-45 snake to hunt");
+            Assert.That(low.NearestCreatureLevel, Is.LessThanOrEqualTo(1 + Perception.LevelReach), "a CL-1 bot saw a creature past its reach");
         });
     }
 
+    /// <summary>
+    /// character-level.md § 9: a bot reads its own combat level off the wire, and, given it, hunts what is within it — a CL 12 character's bot takes on a
+    /// level 15 creature that a CL 1 bot leaves alone.
+    /// </summary>
+    /// <remarks>The character is given CL 12 between two logins, so the body that carries it is spawned with it, as any login's is.</remarks>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void APerceivedBot_ReadsItsLevel_AndHuntsWithinIt()
+    {
+        var config = Worlds.Served(Dir);
+        config.SpawnSpread = 0;
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+        Harness = new SessionHarness(sim);
+        var account = EntityId.FromRawValue(0x8301);
+        var first = Harness.Connect(TatooineReplication.PlayerKind, account);
+        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the first body to be spawned");
+        Harness.Ticks(2);
+        Assert.That(SwgTatooine.Server.Accounts.CharacterStore.TryFind(sim.Dbe, account, out var character, out _), Is.True, "no character");
+        sim.WriteInTick(tx => tx.OpenMut(character).Set(CharacterArch.Progress, new CharacterProgress { Level = 12, Xp = Progression.XpAt(12) }));
+        var destroyed = TatooineReplication.AvatarsDestroyed;
+        first.Close(CloseCodes.Normal, "logging out");
+        SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed > destroyed, "the first body to be destroyed");
+
+        var link = Harness.Connect(TatooineReplication.PlayerKind, account);
+        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 2, "the second body to be spawned");
+        Harness.Ticks(2);
+        var body = TatooineReplication.ControlledBy(sim.Dbe, link.Session);
+        PlayerPlacement at = default;
+        sim.WriteInTick(tx => at = tx.Open(body).Read(Player.Bounds));
+
+        var lair = EntityId.Null;
+        sim.WriteInTick(tx =>
+        {
+            var rng = new Rng(11);
+            lair = WorldBuilder.SpawnLair(tx, ref rng, CreatureTemplates.Frog, 15, at.X + 15f, at.Z, site: 0, expireTick: 0, config,
+                TerrainField.Shared(config.ContentScale), 0);
+        });
+        SessionHarness.UntilNamed(link.Session, lair, "the lair to reach the bot's view");
+        Harness.Ticks(6);
+
+        // As BotSwarm does: the level read becomes the bound of the next read.
+        var eyes = new Perception();
+        var low = Replay(link, new WorldStore(link.Plan), eyes, new FacilityMap());
+        eyes.CombatLevel = low.Level;
+        var world = Replay(link, new WorldStore(link.Plan), eyes, new FacilityMap());
+        Assert.Multiple(() =>
+        {
+            Assert.That(low.Level, Is.EqualTo(12), "the bot did not read its own level off the wire");
+            Assert.That(low.NearestCreatureLevel, Is.Not.EqualTo(15), "the premise: a CL 1 bound leaves the level 15 frogs alone");
+            Assert.That(world.NearestCreatureLevel, Is.EqualTo(15), "a CL 12 bot left a level 15 creature, within its reach, alone");
+        });
+    }
+
+    /// <summary>A possessed player session, settled enough that the binding is visible to a transaction.</summary>
+    /// <returns>Its link.</returns>
+    /// <remarks>
+    /// The two ticks after the counter are not padding: the possession counter moves INSIDE the tick that claims the
+    /// body and the binding lands with that tick's commit, so a transaction opened the instant the counter moves finds
+    /// no player and the case fails on its own premise.
+    /// </remarks>
     private FakeLink Connect()
     {
         var link = Harness.Connect(TatooineReplication.PlayerKind);

@@ -38,7 +38,7 @@ public struct MissionOfferPlacement
 /// <b>Immutable.</b> An offer is listed, then taken or aged out — both destroy it — so every field is sent on enter and the archetype is static.
 /// </para>
 /// </remarks>
-[Component("Swg.MissionOfferInfo", 1, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.MissionOfferInfo", 2, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct MissionOfferInfo
 {
@@ -56,6 +56,9 @@ public struct MissionOfferInfo
 
     /// <summary>1 for now (missions.md, R7).</summary>
     [Field, OnEnter(CodecKind.U8, Name = "difficulty", Saturate = true)] public byte Difficulty;
+
+    /// <summary>The level of the lair it sends the taker to: for now the content level at its anchor (content-levels.md § 4), until B5 picks it.</summary>
+    [Field, OnEnter(CodecKind.U8, Name = "level", Saturate = true)] public byte Level;
 
     /// <summary>Which way the anchor lies from the terminal: 0 north, then clockwise to 7, north-west.</summary>
     [Field, OnEnter(CodecKind.U8, Name = "octant", Saturate = true)] public byte Octant;

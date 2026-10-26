@@ -55,6 +55,9 @@ public readonly struct Perceived
     /// <summary>How far that creature is, metres.</summary>
     public float NearestCreatureM { get; init; }
 
+    /// <summary>That creature's level, 1-50 (content-levels.md); 0 from a server that does not send one.</summary>
+    public int NearestCreatureLevel { get; init; }
+
     /// <summary>Whether a <c>BoardShuttle</c> this bot sent was refused in the frame just applied.</summary>
     /// <remarks>
     /// <b>The server's answer, read rather than guessed at.</b> A boarding is the one decision here the server can
@@ -85,7 +88,7 @@ public readonly struct Perceived
     /// </summary>
     public int Stance { get; init; }
 
-    /// <summary>The body's combat level (<c>level</c>), 1-50; 0 before it arrives. Creatures six levels above it are not fought (character-level.md § 9).</summary>
+    /// <summary>The body's combat level (<c>level</c>), 1-50; 0 before it arrives. What it hunts is bounded by it (<c>Perception.CombatLevel</c>, character-level.md § 9).</summary>
     public int Level { get; init; }
 
     /// <summary>Missions its character holds, as the journal (<c>GET /swg/missions</c>) last said; 0 for none.</summary>
