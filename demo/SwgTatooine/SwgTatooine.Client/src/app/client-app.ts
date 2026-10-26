@@ -3923,6 +3923,7 @@ export class ClientApp {
     const serial = field('serial');
     const kind = field('kind');
     const difficulty = field('difficulty');
+    const level = field('level');
     const reward = field('reward');
     const octant = field('octant');
     const distanceM = field('distanceM');
@@ -3944,6 +3945,7 @@ export class ClientApp {
         serial: serial[slot],
         kind: kind[slot],
         difficulty: difficulty?.[slot] ?? 1,
+        level: level?.[slot] ?? 0,
         reward: reward[slot],
         octant: octant?.[slot] ?? 0,
         distanceM: distanceM?.[slot] ?? 0,

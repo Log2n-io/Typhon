@@ -68,6 +68,7 @@ export const SWG_SCHEMA: WorldSchema = {
       groups: GROUPS,
       fields: [
         { name: 'template', kind: 'u8' },
+        { name: 'level', kind: 'u8' },
         { name: 'missionId', kind: 'u8', group: Group.State },
         { name: 'hp', kind: 'f32', group: Group.Vitals },
       ],
@@ -79,6 +80,7 @@ export const SWG_SCHEMA: WorldSchema = {
       groups: GROUPS,
       fields: [
         { name: 'template', kind: 'u8' },
+        { name: 'level', kind: 'u8' },
         { name: 'mode', kind: 'u8', group: Group.State },
         { name: 'target', kind: 'u32', group: Group.State },
         { name: 'hp', kind: 'f32', group: Group.Vitals },

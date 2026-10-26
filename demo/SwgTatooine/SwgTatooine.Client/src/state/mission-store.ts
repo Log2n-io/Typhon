@@ -103,10 +103,8 @@ export const useMissions = create<MissionState>((set, get) => ({
   },
   sortBy: (by) => {
     const s = get();
-    // Reward and difficulty read best first; distance and direction nearest and north first.
-    set(
-      s.sort === by ? { descending: !s.descending } : { sort: by, descending: by === 'reward' || by === 'difficulty' },
-    );
+    // Reward and level read highest first; distance and direction nearest and north first.
+    set(s.sort === by ? { descending: !s.descending } : { sort: by, descending: by === 'reward' || by === 'level' });
   },
   take: (offer) => {
     const sent = get().actions?.take(offer.netId, offer.serial) ?? false;
