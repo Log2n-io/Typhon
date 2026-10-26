@@ -548,6 +548,7 @@ public static class TatooineHost
         app.MapEconomy(runtime.Engine);
         app.MapItems(runtime.Engine);
         app.MapProgress(runtime.Engine);
+        app.MapFacilities();
 
         app.MapTyphonSubscriptions("/ws");
         app.MapTyphonCatalog("/typhon/catalog.json");
