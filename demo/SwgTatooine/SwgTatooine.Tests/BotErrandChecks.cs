@@ -139,6 +139,12 @@ public sealed class BotErrandChecks
         /// <summary>Whether the server holds the body where it is, whatever it is asked: a crowd it cannot push through.</summary>
         public bool Held;
 
+        /// <summary>How many asks to get on the swoop the server refuses before it grants one: a body downed, or queued for a shuttle.</summary>
+        public int RefuseMounts;
+
+        /// <summary>A creature in view, which never moves.</summary>
+        public (uint Id, float X, float Z)? Creature;
+
         /// <summary>A plan rectangle no step may cross — a house, grown by nothing: the walls the brain must go round. Checked along each step's segment.</summary>
         public (float MinX, float MinZ, float MaxX, float MaxZ)? Forbidden;
 
@@ -169,6 +175,10 @@ public sealed class BotErrandChecks
             HasMissionLair = Lair.HasValue,
             MissionLairX = Lair?.X ?? 0f,
             MissionLairZ = Lair?.Z ?? 0f,
+            NearestCreature = Creature?.Id ?? 0u,
+            NearestCreatureX = Creature?.X ?? 0f,
+            NearestCreatureZ = Creature?.Z ?? 0f,
+            NearestCreatureM = Creature is { } c ? (float)Routing.Distance(X, Z, c.X, c.Z) : 0f,
             Structures = new ListStructures(Realm == 0 ? Planet : Room),
         };
 
@@ -223,6 +233,9 @@ public sealed class BotErrandChecks
                     var step = intent.SpeedClass == Routing.SwoopClass ? 10f : intent.SpeedClass == 0 ? 0f : 2.5f;
                     X += MathF.Cos(intent.Heading) * step;
                     Z += MathF.Sin(intent.Heading) * step;
+                    break;
+                case IntentKind.Mount when intent.On && RefuseMounts > 0:
+                    RefuseMounts--;
                     break;
                 case IntentKind.Mount:
                     GotOffAt = Mounted && !intent.On ? (X, Z) : GotOffAt;
@@ -299,9 +312,12 @@ public sealed class BotErrandChecks
         });
     }
 
-    /// <summary>The swoop's class is never asked for before the server says the body is mounted: a refused mount runs instead.</summary>
+    /// <summary>
+    /// The swoop's class is never asked for before the server says the body is mounted: a refused mount runs instead, and is asked for again only now
+    /// and then — three quick asks, then one every <see cref="BotBrain.MountRetrySeconds"/> — never for good, and never without end.
+    /// </summary>
     [Test]
-    public void ARefusedMountRunsAndStopsAsking()
+    public void ARefusedMountRuns_AndIsAskedAgainOnlyNowAndThen()
     {
         var brain = new BotBrain(BotMap.Cities, 7u, 4d);
         var world = new Perceived { HasBody = true };
@@ -313,7 +329,8 @@ public sealed class BotErrandChecks
             Assert.That(intent.SpeedClass, Is.Not.EqualTo(Routing.SwoopClass), "the swoop's class was asked for while not mounted");
         }
 
-        Assert.That(mounts, Is.InRange(1, 3), "a refused mount was asked for without end, or never");
+        // Fifty seconds: three quick asks, then one each ten seconds.
+        Assert.That(mounts, Is.InRange(5, 3 + (int)(200 / 4 / BotBrain.MountRetrySeconds) + 1), "a refused mount was given up on, or asked for without end");
     }
 
     /// <summary>A bot in a city walks round a house to its door, walks the door's published path, and the crossing takes it in.</summary>
@@ -1130,6 +1147,130 @@ public sealed class BotErrandChecks
             Assert.That(brain.FacilitiesUsed, Is.EqualTo(used), $"held at ({sim.X - Here.X - 40f:F1}, {sim.Z - Here.Z:F1}) from the terminal");
             Assert.That(brain.Goal, Is.EqualTo(used == 1 ? Goal.Visiting : Goal.Idling), "the errand did not end as it should");
             Assert.That(sim.Sent.FindAll(i => i.Kind == IntentKind.TakeMission), Has.Count.EqualTo(used));
+        });
+    }
+
+    /// <summary>
+    /// The day's loop: a bot holding no mission, in a city whose nearest terminal lists one it can take, goes to that terminal — before the creature in
+    /// view — takes the offer, and sets out on the quest. It never travels, and never hunts first.
+    /// </summary>
+    [Test]
+    public void AMissionlessBot_GoesToTheTerminal_Takes_AndQuests_WithoutTravelling()
+    {
+        var brain = new BotBrain(BotMap.Cities, 7u, 4d, Content());
+        brain.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X - 200f, Here.Z, TerminalAsset + 1, 0);
+        brain.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X + 40f, Here.Z, TerminalAsset + 1, 0);
+        var sim = new Sim
+        {
+            Planet = [new SeenStructure(Here.X + 40f, Here.Z, 10, TerminalAsset, 0, 1)],
+            Creature = (42u, Here.X - 30f, Here.Z + 30f),
+        };
+
+        var goals = new List<Goal>();
+        for (var tick = 1L; tick < 400 && brain.Goal != Goal.Questing; tick++)
+        {
+            var intent = brain.Decide(sim.View(), tick);
+            if (goals.Count == 0 || goals[^1] != brain.Goal)
+            {
+                goals.Add(brain.Goal);
+            }
+
+            sim.Apply(intent);
+            if (intent.Kind == IntentKind.TakeMission)
+            {
+                // The server's half: the take listed in the journal, its lair drawn a ride out of town.
+                sim.MissionsHeld = 1;
+                sim.Lair = (Here.X + Here.Radius + 600f, Here.Z);
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(goals, Is.EqualTo(new[] { Goal.Visiting, Goal.Questing }), "not terminal, then the quest");
+            Assert.That(brain.FacilitiesUsed, Is.EqualTo(1));
+            Assert.That(Routing.Distance(sim.X, sim.Z, Here.X + 40f, Here.Z), Is.LessThanOrEqualTo(BotBrain.TerminalUseFromM), "not the nearest terminal");
+            Assert.That(sim.Sent.FindAll(i => i.Kind == IntentKind.TakeMission), Has.Count.EqualTo(1));
+            Assert.That(brain.Counters.Why[(int)GoalWhy.DeskChosen], Is.EqualTo(1));
+        });
+    }
+
+    /// <summary>
+    /// Two of its city's terminals in a row with nothing for it — the second a different one — and a roaming bot leaves for another city, saying why;
+    /// not before.
+    /// </summary>
+    [Test]
+    public void TwoEmptyTerminalsInARow_AndARoamingBotLeavesTheCity()
+    {
+        var brain = new BotBrain(BotMap.Cities, 7u, 4d, Content());
+        brain.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X + 40f, Here.Z, TerminalAsset + 1, 0);
+        brain.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X - 60f, Here.Z, TerminalAsset + 1, 0);
+        var sim = new Sim
+        {
+            Planet = [new SeenStructure(Here.X + 40f, Here.Z, 10, TerminalAsset, 0, 1), new SeenStructure(Here.X - 60f, Here.Z, 10, TerminalAsset, 0, 1)],
+        };
+
+        var usedAt = new List<(float X, float Z)>();
+        for (var tick = 1L; tick < 600 && brain.Goal != Goal.Travelling; tick++)
+        {
+            var used = brain.FacilitiesUsed;
+            sim.Apply(brain.Decide(sim.View(), tick));
+            if (brain.FacilitiesUsed > used)
+            {
+                usedAt.Add((sim.X - Here.X, sim.Z - Here.Z));
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(usedAt, Has.Count.EqualTo(BotBrain.EmptyDesksToLeave), "it left before trying two terminals, or tried more");
+            Assert.That(usedAt.Count == 2 && usedAt[0].X > 0f && usedAt[1].X < 0f, Is.True, $"not the nearest, then the other: {string.Join(" ", usedAt)}");
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Travelling), "two empty terminals, and it stayed");
+            Assert.That(brain.Counters.Why[(int)GoalWhy.DeskEmpty], Is.EqualTo(1), "the travel does not say the desk was empty");
+        });
+    }
+
+    /// <summary>
+    /// Between cities a bot rides: refused three times (downed, queued), it runs only until an ask is granted, and knocked off its swoop half way it is
+    /// back on within a couple of seconds — never thirty seconds on foot in the desert, the swoop's own rule.
+    /// </summary>
+    /// <remarks>Loïc, 2026-10-27: three bots followed for twenty minutes, some of them running between cities.</remarks>
+    [Test]
+    public void BetweenCities_ItRides_AndGetsBackOnAfterARefusalOrAForcedDismount()
+    {
+        var brain = new BotBrain(BotMap.Cities, 7u, 4d);
+        var sim = new Sim { X = 0f, Z = 0f, RefuseMounts = 3 };
+        var onFoot = 0;
+        var longestOnFoot = 0;
+        var knockedOffAt = -1L;
+        var backOnAfter = -1L;
+        var ridden = 0;
+        for (var tick = 1L; tick < 1200; tick++)
+        {
+            var travelling = brain.Goal == Goal.Travelling && brain.Mode == TravelMode.Swoop;
+            if (travelling && brain.RegionAt(sim.X, sim.Z) == 0)
+            {
+                onFoot = sim.Mounted ? 0 : onFoot + 1;
+                longestOnFoot = Math.Max(longestOnFoot, onFoot);
+                ridden += sim.Mounted ? 1 : 0;
+            }
+
+            // Half way, knocked off: a fight, a stance drawn.
+            if (knockedOffAt < 0 && ridden == 40)
+            {
+                sim.Mounted = false;
+                knockedOffAt = tick;
+            }
+
+            backOnAfter = backOnAfter < 0 && knockedOffAt > 0 && sim.Mounted ? tick - knockedOffAt : backOnAfter;
+            sim.Apply(brain.Decide(sim.View(), tick));
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(ridden, Is.GreaterThan(40), "the premise: a trip between cities, ridden");
+            Assert.That(knockedOffAt, Is.GreaterThan(0), "the premise: knocked off its swoop");
+            Assert.That(backOnAfter, Is.InRange(1, 12), "not back on its swoop within three seconds");
+            Assert.That(longestOnFoot / 4d, Is.LessThan(Routing.RideOverSeconds), "thirty seconds on foot in the desert");
         });
     }
 

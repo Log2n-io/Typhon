@@ -53,6 +53,28 @@ public enum Goal
 /// scripted bot does badly.
 /// </para>
 /// <para>
+/// <b>Missions are the day's loop (Loïc, 2026-10-27)</b>, in this order:
+/// </para>
+/// <list type="number">
+/// <item>Holding a mission whose lair is known: the quest — out to the lair, its defenders, the lair.</item>
+/// <item>
+/// Holding none: the nearest mission terminal that exists (<see cref="FacilityMap"/>), within <see cref="ErrandReachM"/>, before anything else — a hunt
+/// included. At it, the take: the offer nearest its lair at or below <see cref="MaxLevel"/>, which the swarm names. A terminal that had nothing (the bot
+/// still holds none when it is done there) is not tried next: the nearest OTHER terminal is.
+/// </item>
+/// <item>
+/// <see cref="EmptyDesksToLeave"/> empty terminals in a row in one city close its desk to this bot for <see cref="DeskRetrySeconds"/>. Then a creature
+/// in view is hunted, and otherwise a roaming bot leaves for another city (<c>GoalWhy.DeskEmpty</c>); a bot with a home keeps to its town's errands,
+/// doors and idling until the desk opens again.
+/// </item>
+/// <item>No terminal known within reach, or no content to walk to one: the mix this brain always had — a hunt, an errand, a door, idling, travel.</item>
+/// </list>
+/// <para>
+/// So travel between cities is the exception: a roaming bot leaves a city only after two of its terminals in a row had nothing for it — or, with no
+/// terminal in reach at all, by the old roll. Every city has terminals and the desk lists most offers within a bot's band, so a fleet spends its day on
+/// missions and the rides out to them, which is the load this demo exists to produce.
+/// </para>
+/// <para>
 /// <b>Inside a city it walks the way a person clicking would</b> — round the buildings, on the browser's own grid search (<see cref="CityPath"/>) —
 /// and through a door on the path the building publishes for it. Both need the public content (<see cref="BotAssets"/>); a brain built without it
 /// keeps the behaviour it always had: straight lines, and no doors.
@@ -174,6 +196,18 @@ public sealed partial class BotBrain
 
     /// <summary>A facility further than this is not an errand, it is a journey, metres.</summary>
     public const float ErrandReachM = 1500f;
+
+    /// <summary>How many mission terminals in a row, in one city, may have nothing for a bot before it stops trying them there for a while.</summary>
+    public const int EmptyDesksToLeave = 2;
+
+    /// <summary>How long a city's desk stays closed to a bot its terminals had nothing for, in seconds: offers are drawn again as they are taken.</summary>
+    public const double DeskRetrySeconds = 90d;
+
+    /// <summary>
+    /// After its quick asks, how long a refused or undone mount waits before it is asked for again, in seconds: a wish that outlives a refusal is asked
+    /// for again, now and then, for as long as it lasts.
+    /// </summary>
+    public const double MountRetrySeconds = 10d;
 
     /// <summary>A mission not done this long after the bot set out on it is cancelled (lair-objectives.md B-4).</summary>
     public const double QuestSeconds = 600d;
@@ -372,6 +406,13 @@ public sealed partial class BotBrain
 
     private (float X, float Z) _visitAt;
 
+    /// <summary>Mission terminals in a row that had nothing for it, the city they were in, the last of them, and when that city's desk opens again.</summary>
+    private int _emptyDesks;
+
+    private int _emptyDeskRegion;
+    private (float X, float Z)? _emptyDeskAt;
+    private long _deskRetryAt;
+
     /// <summary>When it set out on the mission it holds, or -1 while it holds none it has set out on.</summary>
     private long _questSince = -1;
 
@@ -502,6 +543,16 @@ public sealed partial class BotBrain
             _questSince = -1;
         }
 
+        var here = RegionAt(world.X, world.Z);
+        var deskClosed = _emptyDesks >= EmptyDesksToLeave && here == _emptyDeskRegion && tick < _deskRetryAt;
+
+        // Holding none: the nearest terminal for one, before anything else (the day's loop, in the remarks).
+        if (world.MissionsHeld == 0 && _assets != null && !deskClosed
+            && StartVisit(in world, tick, Routing.MissionTerminalKind, GoalWhy.DeskChosen, here == _emptyDeskRegion ? _emptyDeskAt : null))
+        {
+            return Visit(in world, tick);
+        }
+
         if (world.NearestCreature != 0 && world.NearestCreatureM <= NoticeM && world.NearestCreature != _givenUpOn && Huntable(in world))
         {
             Become(Goal.Hunting, GoalWhy.CreatureNoticed, tick, world.NearestCreature, world.NearestCreatureM);
@@ -509,7 +560,12 @@ public sealed partial class BotBrain
             return Hunt(in world, tick);
         }
 
-        var here = RegionAt(world.X, world.Z);
+        // Its city's desk had nothing for it, twice: a roaming bot goes elsewhere.
+        if (deskClosed && HomeRegion == 0 && here != 0)
+        {
+            _flyNext = false;
+            return GoTo(in world, tick, OtherCity(here), here, GoalWhy.DeskEmpty);
+        }
 
         // A bot with a home that is not there — it was spawned elsewhere, or a hunt or a mission took it out — goes back.
         if (HomeRegion != 0 && here != HomeRegion)
@@ -522,7 +578,7 @@ public sealed partial class BotBrain
         {
             _flyNext = false;
             var pick = Next() % 100u;
-            if (_assets != null && pick < 45u && StartVisit(in world, tick))
+            if (_assets != null && pick < 45u && StartVisit(in world, tick, deskClosed ? Routing.BazaarKind : 0, GoalWhy.ErrandStarted))
             {
                 return Visit(in world, tick);
             }
@@ -544,7 +600,7 @@ public sealed partial class BotBrain
             var errand = Next() % 100u;
             if (_flyNext || errand < 25u)
             {
-                if (!_flyNext && StartVisit(in world, tick))
+                if (!_flyNext && StartVisit(in world, tick, deskClosed ? Routing.BazaarKind : 0, GoalWhy.ErrandStarted))
                 {
                     return Visit(in world, tick);
                 }
@@ -576,7 +632,7 @@ public sealed partial class BotBrain
     }
 
     /// <summary>Sets off for a city — by the mode its route chose — and takes the first step.</summary>
-    private Intent GoTo(in Perceived world, long tick, int destination, int here)
+    private Intent GoTo(in Perceived world, long tick, int destination, int here, GoalWhy because = GoalWhy.None)
     {
         TargetRegion = destination + 1;
         var city = _cities[destination];
@@ -587,7 +643,7 @@ public sealed partial class BotBrain
         _asked = false;
         _travelBest = double.MaxValue;
         _travelBestAt = tick;
-        var why = TargetRegion == HomeRegion ? GoalWhy.GoingHome : GoalWhy.TravelChosen;
+        var why = because != GoalWhy.None ? because : TargetRegion == HomeRegion ? GoalWhy.GoingHome : GoalWhy.TravelChosen;
         Become(Goal.Travelling, why, tick, (uint)TargetRegion, (float)Routing.Distance(world.X, world.Z, city.X, city.Z));
         return Travel(in world, tick);
     }
@@ -996,11 +1052,16 @@ public sealed partial class BotBrain
     }
 
     /// <summary>Starts an errand to the nearest mission terminal or bazaar it knows, if there is one within reach.</summary>
-    private bool StartVisit(in Perceived world, long tick)
+    /// <param name="world">What the bot was sent.</param>
+    /// <param name="tick">The fleet's tick.</param>
+    /// <param name="kind">The kind to go to, or 0 to roll it: a mission terminal 60 times in 100, a bazaar otherwise.</param>
+    /// <param name="why">What the goal is told it began for.</param>
+    /// <param name="except">A terminal not to go to: the one that just had nothing.</param>
+    private bool StartVisit(in Perceived world, long tick, int kind, GoalWhy why, (float X, float Z)? except = null)
     {
-        var kind = Next() % 100u < 60u ? Routing.MissionTerminalKind : Routing.BazaarKind;
+        kind = kind != 0 ? kind : Next() % 100u < 60u ? Routing.MissionTerminalKind : Routing.BazaarKind;
         _visitKind = kind;
-        if (!Facilities.TryNearest(kind, world.X, world.Z, out var found, out _)
+        if (!Facilities.TryNearest(kind, world.X, world.Z, out var found, out _, except)
             || Routing.Distance(world.X, world.Z, found.X, found.Z) > ErrandReachM
             || _assets.At(found.Asset) is not { } plan)
         {
@@ -1016,7 +1077,7 @@ public sealed partial class BotBrain
         _leg.FinalReach = UseReachM;
         _visitAt = (found.X, found.Z);
 
-        Become(Goal.Visiting, GoalWhy.ErrandStarted, tick, (uint)kind, (float)Routing.Distance(world.X, world.Z, found.X, found.Z));
+        Become(Goal.Visiting, why, tick, (uint)kind, (float)Routing.Distance(world.X, world.Z, found.X, found.Z));
         _using = false;
         return true;
     }
@@ -1026,13 +1087,24 @@ public sealed partial class BotBrain
     {
         if (_using)
         {
-            if (tick < _until)
+            var desk = _visitKind == Routing.MissionTerminalKind;
+            if (tick < _until && !(desk && world.MissionsHeld > 0 && world.HasMissionLair))
             {
-                return Intent.None;   // at the terminal: what using one looks like on the wire
+                return Intent.None;   // at the terminal: what using one looks like on the wire — until the take comes back as a mission held
             }
 
-            // Loïc's errand: a mission terminal, then the shuttleport to go somewhere else. Most of the time, not every time.
-            _flyNext = Next() % 100u < 60u;
+            if (desk)
+            {
+                // Still holding none: this terminal had nothing for it. Two in a row in one city close the city's desk to it for a while.
+                var here = RegionAt(world.X, world.Z);
+                _emptyDesks = world.MissionsHeld > 0 ? 0 : here == _emptyDeskRegion ? _emptyDesks + 1 : 1;
+                _emptyDeskRegion = here;
+                _emptyDeskAt = world.MissionsHeld > 0 ? null : _visitAt;
+                _deskRetryAt = _emptyDesks >= EmptyDesksToLeave ? tick + Ticks(DeskRetrySeconds) : _deskRetryAt;
+            }
+
+            // An errand to a bazaar: then, most of the time, the shuttleport to go somewhere else. A mission terminal's next step is the mission.
+            _flyNext = !desk && Next() % 100u < 60u;
             Become(Goal.Choosing, GoalWhy.VisitDone, tick);
             return Choose(in world, tick);
         }
@@ -1627,10 +1699,16 @@ public sealed partial class BotBrain
         return Follow(in world, tick, out end);
     }
 
-    /// <summary>Gets on or off the swoop when the goal's wish and the server's state disagree — a few asks, then it stops asking.</summary>
+    /// <summary>Gets on or off the swoop when the goal's wish and the server's state disagree — a few asks, then one now and then.</summary>
     /// <remarks>
-    /// <b>Bounded, because the server may refuse</b> (in a room, waiting for a shuttle): three asks two seconds apart, and the goal moves at a run
-    /// meanwhile. The count resets when the wish changes.
+    /// <para>
+    /// <b>Bounded, because the server may refuse</b> (in a room, waiting for a shuttle, downed): three asks two seconds apart, then one every
+    /// <see cref="MountRetrySeconds"/>, and the goal moves at a run meanwhile. The count resets when the wish and the state agree.
+    /// </para>
+    /// <para>
+    /// <b>Never given up for good.</b> It stopped after three: a bot refused while downed, or knocked off by a fight, ran the rest of its trip — kilometres
+    /// of desert on foot between cities (Loïc, 2026-10-27, following three bots for twenty minutes).
+    /// </para>
     /// </remarks>
     private Intent? MountIntent(in Perceived world, long tick)
     {
@@ -1647,7 +1725,7 @@ public sealed partial class BotBrain
             return null;
         }
 
-        if (_mountAsks >= 3 || tick - _mountAskedAt < Ticks(2))
+        if (tick - _mountAskedAt < (_mountAsks < 3 ? Ticks(2) : Ticks(MountRetrySeconds)))
         {
             return null;
         }

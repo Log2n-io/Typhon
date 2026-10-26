@@ -187,8 +187,9 @@ public sealed class FacilityMap
     /// <param name="z">From, north.</param>
     /// <param name="found">The facility.</param>
     /// <param name="region">The region it belongs to.</param>
+    /// <param name="except">One facility not to answer, by where it stands: the terminal that just had nothing.</param>
     /// <returns>Whether any is known.</returns>
-    public bool TryNearest(int kind, float x, float z, out Facility found, out int region)
+    public bool TryNearest(int kind, float x, float z, out Facility found, out int region, (float X, float Z)? except = null)
     {
         found = default;
         region = 0;
@@ -202,6 +203,11 @@ public sealed class FacilityMap
 
             foreach (var f in list)
             {
+                if (except is { } skip && Routing.Distance(skip.X, skip.Z, f.X, f.Z) < SameM)
+                {
+                    continue;
+                }
+
                 var d = Routing.Distance(x, z, f.X, f.Z);
                 if (d < best)
                 {
