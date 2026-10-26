@@ -1035,13 +1035,6 @@ public sealed class BotSwarm : IAsyncDisposable
         return sent;
     }
 
-    /// <summary>What the brains decided, which is the only evidence a thinking run produces that a wandering one does not.</summary>
-    /// <returns>Shuttle boardings asked for, and hunts begun.</returns>
-    /// <remarks>
-    /// <b>Counted for the reason the movement intents are: the absence was invisible.</b> A fleet whose brains never chose to travel
-    /// or never reached a port looks exactly like a healthy fleet of walkers, and the first version of this sent two intents per
-    /// session in 45 seconds while every number in the report said the run was fine.
-    /// </remarks>
     /// <summary>The highest content level a creature has (content-levels.md): the server's <c>ContentLevels.MaxLevel</c>.</summary>
     public const int MaxCreatureLevel = 50;
 
@@ -1078,6 +1071,13 @@ public sealed class BotSwarm : IAsyncDisposable
         return 0;
     }
 
+    /// <summary>What the brains decided, which is the only evidence a thinking run produces that a wandering one does not.</summary>
+    /// <returns>Shuttle boardings asked for, and hunts begun.</returns>
+    /// <remarks>
+    /// <b>Counted for the reason the movement intents are: the absence was invisible.</b> A fleet whose brains never chose to travel
+    /// or never reached a port looks exactly like a healthy fleet of walkers, and the first version of this sent two intents per
+    /// session in 45 seconds while every number in the report said the run was fine.
+    /// </remarks>
     public (long Boardings, long Hunts, int PortsKnownMax, int BotsThatCanFly, int Creatures) Decisions()
     {
         long boardings = 0;
@@ -2799,7 +2799,7 @@ public sealed class BotSwarm : IAsyncDisposable
 
                 case IntentKind.TakeMission when _takesMissions && Client.Plan.CommandByName(TakeMissionCommand) != null:
                     // The offer whose lair is nearest, of those listed at the terminal it stands at: what a person picks from the sorted list.
-                    var offer = _eyes.BestOffer(Client.Store, world.X, world.Z, OfferReachM, out var serial);
+                    var offer = _eyes.BestOffer(Client.Store, world.X, world.Z, OfferReachM, out var serial, _brain.MaxLevel);
                     if (offer != 0)
                     {
                         await Client.SendCommandAsync(

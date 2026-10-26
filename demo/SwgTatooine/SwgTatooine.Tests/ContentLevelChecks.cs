@@ -84,7 +84,7 @@ public sealed class ContentLevelChecks
 
     /// <summary>
     /// CL-2: for every city and every band II-V a frontier patch of that band whose disc lies 1.0-2.0 km from the city's edge, inside the world, and outside
-    /// every other city's ramp — for twenty seeds, at the planet's scale and at a world half its size.
+    /// every other city's ramp — for twenty planets' plans (the plan is seed-independent; the realm varies it), at the planet's scale and at half of it.
     /// </summary>
     [Test]
     public void EveryBand_IsAShortRideFromEveryCity()
@@ -95,10 +95,10 @@ public sealed class ContentLevelChecks
             var s = config.ContentScale;
             var map = TatooineMap.Build(config);
             var half = config.WorldEdgeM * 0.5f * WorldBuilder.InsideEdge;
-            for (var seed = 1; seed <= 20; seed++)
+            for (var planet = 0; planet < 20; planet++)
             {
-                var index = Plan(seed, km);
-                Assert.That(index.FrontiersDisplaced, Is.Zero, $"seed {seed} at {km} km: {string.Join(", ", index.DisplacedFrontiers)}");
+                var index = Plan(1, km, (ushort)planet);
+                Assert.That(index.FrontiersDisplaced, Is.Zero, $"planet {planet} at {km} km: {string.Join(", ", index.DisplacedFrontiers)}");
                 for (var c = 0; c < map.Cities.Count; c++)
                 {
                     var city = map.Cities[c];
@@ -124,7 +124,7 @@ public sealed class ContentLevelChecks
                             found |= ok;
                         }
 
-                        Assert.That(found, Is.True, $"seed {seed} at {km} km: {city.Name} has no valid band {band} patch");
+                        Assert.That(found, Is.True, $"planet {planet} at {km} km: {city.Name} has no valid band {band} patch");
                     }
                 }
             }
@@ -173,13 +173,14 @@ public sealed class ContentLevelChecks
         }
     }
 
-    /// <summary>CL-3: two plans with one seed are equal site for site; another seed moves at least one patch.</summary>
+    /// <summary>CL-3: two plans of one planet are equal site for site, whatever the seed; another planet moves at least one patch.</summary>
     [Test]
     public void TheLevelMap_IsDeterministicFromTheSeed()
     {
+        // The seed does not enter it (review 1: a reopen under another --seed must not re-plan the map); the realm does.
         var a = Plan(7);
-        var b = Plan(7);
-        var other = Plan(8);
+        var b = Plan(8);
+        var other = Plan(7, realm: 1);
         Assert.That(a.Sites, Has.Count.EqualTo(b.Sites.Count));
         var moved = false;
         for (var i = 0; i < a.Sites.Count; i++)
@@ -192,19 +193,19 @@ public sealed class ContentLevelChecks
             moved |= other.Sites[i].X != x.X || other.Sites[i].Z != x.Z;
         }
 
-        Assert.That(moved, Is.True, "another seed planned the same sites");
+        Assert.That(moved, Is.True, "another planet planned the same sites");
         Assert.That(a.Levels.Anchors, Is.EqualTo(b.Levels.Anchors), "the anchors differ");
         Assert.That(a.Sites.Count, Is.EqualTo(TatooineData.Pois.Length + TatooineData.SpawnRegions.Length + (5 * TatooineData.Cities.Length)),
             "landmarks, regions, a fringe and four patches per city");
     }
 
-    /// <summary>CL-4: beyond the ramp the 8 regions draw one band each from II-V, each band twice; every landmark one band from III-V.</summary>
+    /// <summary>CL-4: beyond the ramp the 8 regions draw one band each from II-V, each band twice; every landmark one band from III-V — on twenty planets.</summary>
     [Test]
     public void ASiteBeyondTheRamp_DrawsOneBand()
     {
-        for (var seed = 1; seed <= 20; seed++)
+        for (var seed = 0; seed < 20; seed++)
         {
-            var index = Plan(seed);
+            var index = Plan(realm: (ushort)seed);
             var perBand = new int[6];
             foreach (var site in index.Sites)
             {
@@ -214,15 +215,15 @@ public sealed class ContentLevelChecks
                 }
                 else if (site.Kind == LairSiteKind.Landmark)
                 {
-                    Assert.That(site.Band, Is.InRange(3, 5), $"seed {seed}: a landmark of band {site.Band}");
+                    Assert.That(site.Band, Is.InRange(3, 5), $"planet {seed}: a landmark of band {site.Band}");
                 }
                 else if (site.Kind == LairSiteKind.Fringe)
                 {
-                    Assert.That(site.Band, Is.Zero, $"seed {seed}: a fringe with a band");
+                    Assert.That(site.Band, Is.Zero, $"planet {seed}: a fringe with a band");
                 }
             }
 
-            Assert.That(perBand, Is.EqualTo(new[] { 0, 0, 2, 2, 2, 2 }), $"seed {seed}: the regions' bands");
+            Assert.That(perBand, Is.EqualTo(new[] { 0, 0, 2, 2, 2, 2 }), $"planet {seed}: the regions' bands");
         }
     }
 
@@ -393,6 +394,66 @@ public sealed class ContentLevelChecks
         {
             Worlds.Delete(dir);
         }
+    }
+
+    /// <summary>
+    /// CL-3 (review 1): a world built under one seed and reopened under another plans the same sites and bands, so every lair on disk still names its site,
+    /// and every one still agrees with the level map where it stands.
+    /// </summary>
+    [Test]
+    [Category("Integration")]
+    public void AReopenUnderAnotherSeed_PlansTheSameSitesAndBands()
+    {
+        var dir = Worlds.NewDirectory();
+        try
+        {
+            var config = Worlds.Small(dir);
+            config.Shuttles = false;
+            config.Persist = true;
+            config.Seed = 11;
+            List<(float, float, float, float, int, int, LairSiteKind)> built;
+            using (var sim = new TatooineSim(config))
+            {
+                sim.Initialize();
+                built = Snapshot(sim.Index);
+            }
+
+            config.Seed = 12345;
+            using var reopened = new TatooineSim(config);
+            reopened.Initialize();
+            var levels = reopened.Index.Levels;
+            var disagree = 0;
+            using (var tx = reopened.Dbe.CreateQuickTransaction())
+            {
+                foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
+                {
+                    var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
+                    var bounds = cluster.GetReadOnlySpan(CreatureLair.Bounds);
+                    for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                    {
+                        var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                        if (cluster.Realm.Value == 0 && spawners[slot].Site != 0 && !levels.Agrees(bounds[slot].X, bounds[slot].Z, spawners[slot].Level))
+                        {
+                            disagree++;
+                        }
+                    }
+                }
+            }
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(reopened.Reopened, Is.True, "the second run did not reopen");
+                Assert.That(Snapshot(reopened.Index), Is.EqualTo(built), "a reopen under another seed planned other sites or bands");
+                Assert.That(disagree, Is.Zero, "lairs on disk disagree with the reopened level map");
+            });
+        }
+        finally
+        {
+            Worlds.Delete(dir);
+        }
+
+        static List<(float, float, float, float, int, int, LairSiteKind)> Snapshot(WorldIndex index)
+            => index.Sites.ConvertAll(s => (s.X, s.Z, s.Radius, s.InnerRadius, s.Band, s.Target, s.Kind));
     }
 
     private static float Sq(float v) => v * v;

@@ -51,18 +51,6 @@ public sealed class Perception
     private int _levelField = -1;
     private readonly StoreStructures _view = new();
 
-    /// <summary>How far above its own combat level a bot fights (content-levels.md § 7): a creature or an offer past it is left alone.</summary>
-    public const int LevelReach = 3;
-
-    /// <summary>
-    /// The bot's own combat level, which bounds what it hunts and which offer it prefers: 1 — where a new character belongs, the city fringes — until the
-    /// character's CL is replicated and read here (character-level.md).
-    /// </summary>
-    public int CombatLevel { get; set; } = 1;
-
-    /// <summary>The highest level this bot takes on: its <see cref="CombatLevel"/> plus <see cref="LevelReach"/>.</summary>
-    public int MaxLevel => CombatLevel + LevelReach;
-
     /// <summary>Reads what this bot can see, and teaches its map any facility in view.</summary>
     /// <param name="store">The bot's store, or null before a catalog has arrived.</param>
     /// <param name="facilities">The map to fill as structures are seen.</param>
@@ -219,11 +207,12 @@ public sealed class Perception
 
     /// <summary>
     /// The offer to take at the terminal the bot stands at (lair-objectives.md B-1): of those listed within <paramref name="reachM"/>, the one whose lair
-    /// is nearest the terminal — the shortest ride out — among those within <see cref="MaxLevel"/> (content-levels.md § 7), and the nearest of all when
-    /// none is.
+    /// is nearest the terminal — the shortest ride out — among those at or below <paramref name="maxLevel"/> (content-levels.md § 7), and the nearest of
+    /// all when none is.
     /// </summary>
+    /// <param name="maxLevel">The highest level the bot takes on (<see cref="BotBrain.MaxLevel"/>); any, by default.</param>
     /// <returns>Its netId, or 0 when none is listed within reach.</returns>
-    public uint BestOffer(WorldStore store, float x, float z, float reachM, out uint serial)
+    public uint BestOffer(WorldStore store, float x, float z, float reachM, out uint serial, int maxLevel = int.MaxValue)
     {
         serial = 0;
         if (store?.Self == null || store.Self.NetId == 0)
@@ -268,7 +257,7 @@ public sealed class Perception
                 serial = (uint)serials[slot];
             }
 
-            if (ride < nearestInReach && (levels == null || levels[slot] <= MaxLevel))
+            if (ride < nearestInReach && (levels == null || levels[slot] <= maxLevel))
             {
                 nearestInReach = ride;
                 foundInReach = set.NetIds[slot];
@@ -298,8 +287,9 @@ public sealed class Perception
     /// holds one and a scan would walk an always-empty archetype. See <see cref="Perceived.NearestCreature"/>.
     /// </para>
     /// <para>
-    /// <b>Nor a creature above <see cref="MaxLevel"/></b> (content-levels.md § 7): a level-45 viper in view no longer pulls a CL-1 bot into a fight it
-    /// cannot win.
+    /// <b>Every creature, whatever its level, and its level with it</b> (content-levels.md § 7). Whether to hunt it is the brain's call
+    /// (<see cref="BotBrain.MaxLevel"/>): a mission's defenders are fought at any level, and filtering them out here left a bot standing idle at its
+    /// shielded lair.
     /// </para>
     /// </remarks>
     private Perceived NearestCreature(WorldStore store, int archetype, float x, float z, Perceived world)
@@ -319,12 +309,6 @@ public sealed class Perception
         for (var i = 0; i < set.LiveCount; i++)
         {
             var slot = set.Live[i];
-            var level = levels != null ? (int)levels[slot] : 0;
-            if (level > MaxLevel)
-            {
-                continue;
-            }
-
             var at = set.HeadPosition(slot);
             var px = (float)at[0];
             var pz = set.Dims > 1 ? (float)at[1] : 0f;
@@ -335,7 +319,7 @@ public sealed class Perception
                 bestNetId = set.NetIds[slot];
                 bestX = px;
                 bestZ = pz;
-                bestLevel = level;
+                bestLevel = levels != null ? (int)levels[slot] : 0;
             }
         }
 

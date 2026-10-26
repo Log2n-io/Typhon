@@ -105,8 +105,8 @@ internal sealed class PerceptionChecks : ServedChecks
     }
 
     /// <summary>
-    /// CL-13: a bot does not hunt a creature far above its level. Snakes of level 45 stand 15 m from a CL-1 bot: its eyes pass them over, and the same
-    /// frames read by a CL-45 bot's eyes find them — so they were in view, and their level was read off the wire.
+    /// CL-13: a bot does not hunt a creature far above its level. Snakes of level 45 stand 15 m from the bot: its eyes see them, with their level read off
+    /// the wire, and a CL-1 brain does not make them a hunt where a CL-45 brain does.
     /// </summary>
     [Test]
     [CancelAfter(90_000)]
@@ -150,15 +150,18 @@ internal sealed class PerceptionChecks : ServedChecks
             }
         }
 
-        var low = Replay(link, new WorldStore(link.Plan), new Perception { CombatLevel = 1 }, new FacilityMap());
-        var high = Replay(link, new WorldStore(link.Plan), new Perception { CombatLevel = 45 }, new FacilityMap());
+        var world = Replay(link, new WorldStore(link.Plan), new Perception(), new FacilityMap());
+        var low = new BotBrain(BotMap.Cities, 7u) { CombatLevel = 1 };
+        var high = new BotBrain(BotMap.Cities, 7u) { CombatLevel = 45 };
+        low.Decide(in world, 1);
+        high.Decide(in world, 1);
         Assert.Multiple(() =>
         {
             Assert.That(snakes, Is.Not.Empty.And.Not.Contains(0u), "the snakes are not in the session's view");
-            Assert.That(high.NearestCreature, Is.AnyOf([.. snakes]), "a CL-45 bot does not see the level-45 snakes 15 m away: the premise failed");
-            Assert.That(high.NearestCreatureLevel, Is.EqualTo(45), "the level read off the wire is not the snakes'");
-            Assert.That(snakes, Does.Not.Contain(low.NearestCreature), "a CL-1 bot was offered a level-45 snake to hunt");
-            Assert.That(low.NearestCreatureLevel, Is.LessThanOrEqualTo(1 + Perception.LevelReach), "a CL-1 bot saw a creature past its reach");
+            Assert.That(world.NearestCreature, Is.AnyOf([.. snakes]), "the bot does not see the level-45 snakes 15 m away: the premise failed");
+            Assert.That(world.NearestCreatureLevel, Is.EqualTo(45), "the level read off the wire is not the snakes'");
+            Assert.That(high.Goal, Is.EqualTo(Goal.Hunting), "a CL-45 bot does not hunt a level-45 snake 15 m away: the premise failed");
+            Assert.That(low.Goal, Is.Not.EqualTo(Goal.Hunting), "a CL-1 bot hunts a level-45 snake");
         });
     }
 

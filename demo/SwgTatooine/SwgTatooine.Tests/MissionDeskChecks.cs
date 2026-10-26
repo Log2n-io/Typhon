@@ -548,14 +548,16 @@ internal sealed class MissionDeskChecks : ServedChecks
         Replay(link, store);
         var inReachM = offers.Find(o => o.Info.DistanceM != nearestM).Info.DistanceM;
 
-        var weak = new SwgTatooine.Bots.Brain.Perception { CombatLevel = 1 };
-        var strong = new SwgTatooine.Bots.Brain.Perception { CombatLevel = 30 };
+        var eyes = new SwgTatooine.Bots.Brain.Perception();
+        var weak = new SwgTatooine.Bots.Brain.BotBrain(SwgTatooine.Bots.Brain.BotMap.Cities, 7u) { CombatLevel = 1 };
+        var strong = new SwgTatooine.Bots.Brain.BotBrain(SwgTatooine.Bots.Brain.BotMap.Cities, 7u) { CombatLevel = 30 };
         Assert.Multiple(() =>
         {
-            Assert.That(weak.BestOffer(store, terminal.X + 2f, terminal.Z, 6f, out var serial), Is.Not.Zero, "no offer was seen at the terminal");
+            Assert.That(eyes.BestOffer(store, terminal.X + 2f, terminal.Z, 6f, out var serial, weak.MaxLevel), Is.Not.Zero,
+                "no offer was seen at the terminal");
             Assert.That(offers.Exists(o => o.Info.Serial == serial && o.Info.DistanceM == inReachM), Is.True,
                 "a CL-1 bot did not take the nearest offer within its level");
-            strong.BestOffer(store, terminal.X + 2f, terminal.Z, 6f, out var any);
+            eyes.BestOffer(store, terminal.X + 2f, terminal.Z, 6f, out var any, strong.MaxLevel);
             Assert.That(offers.Exists(o => o.Info.Serial == any && o.Info.DistanceM == nearestM), Is.True, "a CL-30 bot did not take the nearest offer");
         });
     }

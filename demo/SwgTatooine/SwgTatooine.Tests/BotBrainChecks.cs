@@ -445,6 +445,46 @@ public sealed class BotBrainChecks
         MissionLairZ = lairZ,
     };
 
+    /// <summary>
+    /// Content levels (review 1, CL-13): a mission's defenders are fought whatever their level — a CL-1 bot at a lair of level 30 attacks the defender in
+    /// reach, where it would not HUNT that creature met in the open. Filtering them out of sight left a bot idle at its shielded lair for ten minutes.
+    /// </summary>
+    [Test]
+    public void AMissionsDefenders_AreFought_AboveTheBotsLevel()
+    {
+        var brain = new BotBrain(BotMap.Cities, 7u) { CombatLevel = 1 };
+        var shielded = Holding(580f, 790f, 600f, 800f) with
+        {
+            MissionLair = 77u,
+            MissionLairGuards = 2,
+            NearestCreature = 31u,
+            NearestCreatureX = 584f,
+            NearestCreatureZ = 793f,
+            NearestCreatureM = 5f,
+            NearestCreatureLevel = 30,
+        };
+        var atDefender = brain.Decide(in shielded, 10);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Questing));
+            Assert.That(atDefender.Kind, Is.EqualTo(IntentKind.Attack), "a defender above the bot's level was not attacked");
+            Assert.That(atDefender.NetId, Is.EqualTo(31u));
+        });
+
+        // The same creature met with no mission held is not hunted.
+        var wild = new BotBrain(BotMap.Cities, 7u) { CombatLevel = 1 };
+        var open = Empty(580f, 790f) with
+        {
+            NearestCreature = 31u,
+            NearestCreatureX = 584f,
+            NearestCreatureZ = 793f,
+            NearestCreatureM = 5f,
+            NearestCreatureLevel = 30,
+        };
+        wild.Decide(in open, 10);
+        Assert.That(wild.Goal, Is.Not.EqualTo(Goal.Hunting), "a CL-1 bot hunts a level-30 creature");
+    }
+
     /// <summary>B-3: a mission held is ridden out to — on the swoop, straight at its lair — then fought: its defenders first, the lair once they are down.</summary>
     [Test]
     public void AMissionsLairIsRiddenTo_ItsDefendersKilled_ThenTheLairAttacked()

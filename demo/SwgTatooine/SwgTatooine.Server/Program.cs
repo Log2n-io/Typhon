@@ -150,9 +150,13 @@ internal static class Program
 
         // One line answers "is every band populated, and did any frontier patch get squeezed?" (content-levels.md § Monitoring).
         Console.WriteLine($"  {sim.Census.Levels()}");
-        foreach (var displaced in sim.Index.DisplacedFrontiers)
+        // Every planet's, as the census line counts them over the galaxy.
+        for (var planet = 0; planet < sim.Indexes.Length; planet++)
         {
-            Console.WriteLine($"  !! frontier patch {displaced} displaced: no valid bearing");
+            foreach (var displaced in sim.Indexes[planet].DisplacedFrontiers)
+            {
+                Console.WriteLine($"  !! planet {planet}: frontier patch {displaced} displaced: no valid bearing");
+            }
         }
 
         // Live cell count is only reachable through TickContext.SpatialGrid, so it is reported by the telemetry system
