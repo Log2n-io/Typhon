@@ -424,6 +424,11 @@ internal sealed class CombatResolveSystem : CallbackSystem
         .Writes<LairVitals>()
         .Writes<Lair>()
         .Reads<CreatureHome>()
+        // A death's KillEvent carries where and in which realm it happened (character-level.md § 2).
+        .Reads<CreaturePlacement>()
+        .Reads<CreatureRealm>()
+        .Reads<LairPlacement>()
+        .Reads<LairRealm>()
 
         // The player's: health, the clone's teleport and the recovery it wakes up in, and the target that died with it.
         .Writes<PlayerVitals>()
