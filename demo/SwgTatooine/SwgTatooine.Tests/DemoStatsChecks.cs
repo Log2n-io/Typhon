@@ -132,4 +132,44 @@ internal sealed class DemoStatsChecks : ServedChecks
             Assert.That(progression.GetProperty("xpRatePercent").GetInt32(), Is.EqualTo(100));
         });
     }
+
+    /// <summary>IL-13: the <c>items</c> section counts the rows, the drops and the units minted and held by template and Mk, as the rows say.</summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void TheItemsSection_CountsUnitsByTemplateAndMk()
+    {
+        var config = Worlds.Served(Dir);
+        config.WorkerCount = 1;
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+        Harness = new SessionHarness(sim);
+        Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(0x7302));
+        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar");
+        var character = EntityId.Null;
+        SessionHarness.Until(() => SwgTatooine.Server.Accounts.CharacterStore.TryFind(sim.Dbe, EntityId.FromRawValue(0x7302), out character, out _),
+            "the character to be committed");
+        SessionHarness.Until(() => Ledgers.TryWallet(sim, character, out _), "the wallet to be opened");
+        var owner = (long)character.RawValue;
+        sim.Bridge.StageTransfer(ItemLedger.World, owner, ItemCatalog.Hide, 2, 7, ItemMoveKind.Kill, 1);
+        sim.Bridge.StageTransfer(ItemLedger.World, owner, ItemCatalog.Bone, 1, 3, ItemMoveKind.Kill, 1);
+        sim.Bridge.StageTransfer(ItemLedger.World, owner, ItemCatalog.Hide, 2, 2, ItemMoveKind.Kill, 1);
+        SessionHarness.Until(() => Items.Rows(sim).Count == 3, "the three rows");
+        Harness.Ticks(Worlds.ServedHz * 2);
+
+        using var doc = JsonDocument.Parse(sim.Bridge.DemoStatsJson());
+        var items = doc.RootElement.GetProperty("items");
+        Assert.Multiple(() =>
+        {
+            Assert.That(items.GetProperty("rows").GetInt64(), Is.EqualTo(3));
+            Assert.That(items.GetProperty("units").GetInt64(), Is.EqualTo(12));
+            Assert.That(items.GetProperty("stacks").GetInt64(), Is.EqualTo(2));
+            Assert.That(items.GetProperty("minted").GetProperty("mat_hide").EnumerateArray().Select(e => e.GetInt64()), Is.EqualTo(new long[] { 0, 9, 0, 0, 0 }));
+            Assert.That(items.GetProperty("held").GetProperty("mat_hide").EnumerateArray().Select(e => e.GetInt64()), Is.EqualTo(new long[] { 0, 9, 0, 0, 0 }));
+            Assert.That(items.GetProperty("held").GetProperty("mat_bone").EnumerateArray().Select(e => e.GetInt64()), Is.EqualTo(new long[] { 3, 0, 0, 0, 0 }));
+            Assert.That(items.GetProperty("minted").TryGetProperty("mat_metal", out _), Is.False, "a template with nothing minted");
+            Assert.That(items.GetProperty("destroyed").EnumerateObject().Count(), Is.Zero);
+            Assert.That(items.GetProperty("unitsPerMin").GetProperty("60s").GetDouble(), Is.GreaterThan(0d), "the units show in the rate");
+            Assert.That(items.TryGetProperty("bySource", out _) && items.TryGetProperty("lostPerMin", out _) && items.TryGetProperty("queueOverflow", out _), Is.True);
+        });
+    }
 }

@@ -135,6 +135,27 @@ public partial class LedgerHeadArch : Archetype<LedgerHeadArch>
     public static readonly Comp<LedgerHead> Head = Register<LedgerHead>();
 }
 
+/// <summary>A character's stack of one item at one Mk (inventory-loot.md § 2). Non-spatial and Versioned, like a wallet; written by <c>ItemTransfer</c> alone.</summary>
+[Archetype(1, "Item stacks")]
+public partial class ItemStackArch : Archetype<ItemStackArch>
+{
+    public static readonly Comp<ItemStack> Stack = Register<ItemStack>();
+}
+
+/// <summary>The item ledger: one entity per movement of items, appended and never changed (inventory-loot.md § 2).</summary>
+[Archetype(1, "Item ledger")]
+public partial class ItemLedgerArch : Archetype<ItemLedgerArch>
+{
+    public static readonly Comp<ItemLedgerEntry> Entry = Register<ItemLedgerEntry>();
+}
+
+/// <summary>The item ledger's head, one entity: the last sequence number, and the units minted and destroyed.</summary>
+[Archetype(1, "Item ledger head")]
+public partial class ItemLedgerHeadArch : Archetype<ItemLedgerHeadArch>
+{
+    public static readonly Comp<ItemLedgerHead> Head = Register<ItemLedgerHead>();
+}
+
 /// <summary>
 /// A hostile or neutral creature: a lair's beasts, a camp's ninjas and soldiers, and the defenders of a mission's camp.
 /// Moves on the AI cadence, which is slower than the tick, and is the bulk of the moving population.

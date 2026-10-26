@@ -114,7 +114,10 @@ public sealed partial class SimBridge
     private const int SeriesXpKills = 9;
     private const int SeriesXpMissions = 10;
     private const int SeriesLevelUps = 11;
-    private const int SeriesCount = 12;
+    private const int SeriesItemDrops = 12;
+    private const int SeriesItemUnits = 13;
+    private const int SeriesItemsLost = 14;
+    private const int SeriesCount = 15;
 
     /// <summary>The cities as a person sees them named, index for index with the server's map (world-data.ts: Port Sable is Mos Eisley, …).</summary>
     private static readonly string[] CityDisplayNames = ["Port Sable", "Whitestone", "Dry Wells", "Red Mesa", "Tern's Rest", "Tallow", "Far Reach"];
@@ -151,6 +154,9 @@ public sealed partial class SimBridge
         values[SeriesXpKills] = XpGrantedKills;
         values[SeriesXpMissions] = XpGrantedMissions;
         values[SeriesLevelUps] = LevelUps;
+        values[SeriesItemDrops] = ItemDrops;
+        values[SeriesItemUnits] = ItemUnits;
+        values[SeriesItemsLost] = ItemsLost;
         _rates.Sample(System.Diagnostics.Stopwatch.GetElapsedTime(_statsStarted).TotalSeconds, values);
 
         Volatile.Write(ref _population, CountPopulation(tx));
@@ -285,7 +291,16 @@ public sealed partial class SimBridge
         Num(j, "lairsBelowCrowdLevel", levels.LairsBelowCrowdLevel).Append(',');
         Num(j, "crowdObjectiveLevelMax", CrowdObjectiveLevelMax);
         AppendProgression(j, pop, r10, r60);
-        return j.Append("}}").ToString();
+
+        // Items (inventory-loot.md § 8): the counters by template and Mk, and the rates.
+        j.Append("},\"items\":");
+        var rates = new StringBuilder(160);
+        rates.Append(',');
+        Rate(rates, "dropsPerMin", r10[SeriesItemDrops], r60[SeriesItemDrops], 60d).Append(',');
+        Rate(rates, "unitsPerMin", r10[SeriesItemUnits], r60[SeriesItemUnits], 60d).Append(',');
+        Rate(rates, "lostPerMin", r10[SeriesItemsLost], r60[SeriesItemsLost], 60d);
+        AppendItemsJson(j, rates.ToString());
+        return j.Append('}').ToString();
 
         static StringBuilder Bands(StringBuilder b, string name, int[] values)
         {

@@ -142,7 +142,8 @@ public sealed class CausalityLoopTests
         var crossings = _sim.CrossingCommits;
         var lairs = _sim.LairCommits;
         var missions = _sim.MissionCommits;
-        var writes = crossings + lairs + missions;
+        var loot = _sim.LootCommits;
+        var writes = crossings + lairs + missions + loot;
 
         // The WAL's durable LSN moves on the ticks that wrote something durable and on no others. The two numbers come from different places: one from the
         // simulation's counters, the other from the WAL writer thread.

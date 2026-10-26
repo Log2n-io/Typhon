@@ -383,6 +383,9 @@ public sealed partial class TatooineSim
     /// <summary>Ticks on which the mission desk committed anything, each a durable write; see <see cref="SimBridge.MissionCommits"/>.</summary>
     public long MissionCommits => _bridge?.MissionCommits ?? 0;
 
+    /// <summary>Ticks on which the <c>Loot</c> system committed item writes, each a durable write; see <see cref="SimBridge.LootCommits"/>.</summary>
+    public long LootCommits => _bridge?.LootCommits ?? 0;
+
     /// <summary>Entities the mission desk spawned, wrote or destroyed; see <see cref="SimBridge.MissionEntities"/>.</summary>
     public long MissionEntities => _bridge?.MissionEntities ?? 0;
 
@@ -753,6 +756,7 @@ public sealed partial class TatooineSim
         dag.Add(new LairLifeSystem(_bridge));
         dag.Add(new MissionDeskSystem(_bridge));
         dag.Add(new LedgerSystem(_bridge));
+        dag.Add(new LootSystem(_bridge));
         dag.Add(new ProgressionSystem(_bridge));
 
         // Progression has no work but these two, so it consumes both and is skipped on a tick with neither (character-level.md § 2, § 5). In the Report phase,
