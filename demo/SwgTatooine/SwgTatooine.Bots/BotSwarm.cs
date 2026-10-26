@@ -1042,6 +1042,42 @@ public sealed class BotSwarm : IAsyncDisposable
     /// or never reached a port looks exactly like a healthy fleet of walkers, and the first version of this sent two intents per
     /// session in 45 seconds while every number in the report said the run was fine.
     /// </remarks>
+    /// <summary>The highest content level a creature has (content-levels.md): the server's <c>ContentLevels.MaxLevel</c>.</summary>
+    public const int MaxCreatureLevel = 50;
+
+    /// <summary>The median level of the creatures the fleet began hunting, or 0 when it hunted none (or the server sends no level).</summary>
+    public int HuntedLevelMedian()
+    {
+        var byLevel = new long[MaxCreatureLevel + 1];
+        long total = 0;
+        foreach (var bot in Bots)
+        {
+            if (bot == null)
+            {
+                continue;
+            }
+
+            for (var level = 1; level <= MaxCreatureLevel; level++)
+            {
+                var n = Interlocked.Read(ref bot.HuntsByLevel[level]);
+                byLevel[level] += n;
+                total += n;
+            }
+        }
+
+        long seen = 0;
+        for (var level = 1; level <= MaxCreatureLevel; level++)
+        {
+            seen += byLevel[level];
+            if (total > 0 && seen * 2 >= total)
+            {
+                return level;
+            }
+        }
+
+        return 0;
+    }
+
     public (long Boardings, long Hunts, int PortsKnownMax, int BotsThatCanFly, int Creatures) Decisions()
     {
         long boardings = 0;
@@ -2353,6 +2389,9 @@ public sealed class BotSwarm : IAsyncDisposable
 
         public long HuntsStarted;
 
+        /// <summary>Hunts begun, by the level of the creature hunted (index 0: a server that sends no level).</summary>
+        public readonly long[] HuntsByLevel = new long[MaxCreatureLevel + 1];
+
         /// <summary>
         /// Missions (lair-objectives.md): takes sent, missions its journal listed for the first time, completions it stated, cancels sent.
         /// </summary>
@@ -2683,6 +2722,7 @@ public sealed class BotSwarm : IAsyncDisposable
             if (_brain.Goal == Goal.Hunting && before != Goal.Hunting)
             {
                 HuntsStarted++;
+                Interlocked.Increment(ref HuntsByLevel[Math.Clamp(world.NearestCreatureLevel, 0, MaxCreatureLevel)]);
             }
 
             // A target is fought only in a stance, and a swoop, a door, a flight or a clone puts it away — the ride out to a mission's lair did, every time,

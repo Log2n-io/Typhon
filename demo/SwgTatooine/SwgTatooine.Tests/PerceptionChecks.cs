@@ -3,6 +3,7 @@ using Typhon.Client;
 using Typhon.Protocol;
 using SwgTatooine.Bots.Brain;
 using SwgTatooine.Server;
+using Typhon.Engine;
 
 namespace SwgTatooine.Tests;
 
@@ -99,6 +100,64 @@ internal sealed class PerceptionChecks : ServedChecks
             Assert.That(away.HasBody, Is.True, "the body was lost by moving it");
             Assert.That(away.PortRegion, Is.Zero, "60 m from the port, the bot still thought it could board");
             Assert.That(facilities.TryFind(1, Routing.ShuttleportKind, out _), Is.True, "walking away from a port made the bot forget it");
+        });
+    }
+
+    /// <summary>
+    /// CL-13: a bot does not hunt a creature far above its level. Snakes of level 45 stand 15 m from a CL-1 bot: its eyes pass them over, and the same
+    /// frames read by a CL-45 bot's eyes find them — so they were in view, and their level was read off the wire.
+    /// </summary>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void ABot_LeavesACreatureFarAboveItsLevel()
+    {
+        using var sim = new TatooineSim(Worlds.Served(Dir));
+        sim.Initialize();
+        Harness = new SessionHarness(sim);
+        var link = Connect();
+
+        var port = sim.Index.Shuttleports[0];
+        Worlds.Park(sim, link.Session, port.X + 40f, port.Z, out var parked);
+        var lair = EntityId.Null;
+        var config = sim.Config;
+        sim.WriteInTick(tx =>
+        {
+            var rng = new Rng(3);
+            lair = WorldBuilder.SpawnLair(tx, ref rng, CreatureTemplates.Snake, 45, port.X + 55f, port.Z, site: 0, expireTick: 0, config,
+                SwgTatooine.Server.Terrain.TerrainField.Shared(config.ContentScale), 0);
+        });
+        SessionHarness.Until(() => !lair.IsNull, "the lair to be spawned");
+        SessionHarness.UntilNamed(link.Session, lair, "the lair's view to reach the session", parked);
+        Harness.Ticks(6);
+
+        var snakes = new System.Collections.Generic.HashSet<uint>();
+        using (var tx = sim.Dbe.CreateQuickTransaction())
+        {
+            foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+            {
+                var homes = cluster.GetReadOnlySpan(Creature.Home);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    EntityId home = homes[slot].Lair;
+                    if (home == lair)
+                    {
+                        snakes.Add(SessionHarness.NetIdOf(link.Session, cluster.GetEntityId(slot)));
+                    }
+                }
+            }
+        }
+
+        var low = Replay(link, new WorldStore(link.Plan), new Perception { CombatLevel = 1 }, new FacilityMap());
+        var high = Replay(link, new WorldStore(link.Plan), new Perception { CombatLevel = 45 }, new FacilityMap());
+        Assert.Multiple(() =>
+        {
+            Assert.That(snakes, Is.Not.Empty.And.Not.Contains(0u), "the snakes are not in the session's view");
+            Assert.That(high.NearestCreature, Is.AnyOf([.. snakes]), "a CL-45 bot does not see the level-45 snakes 15 m away: the premise failed");
+            Assert.That(high.NearestCreatureLevel, Is.EqualTo(45), "the level read off the wire is not the snakes'");
+            Assert.That(snakes, Does.Not.Contain(low.NearestCreature), "a CL-1 bot was offered a level-45 snake to hunt");
+            Assert.That(low.NearestCreatureLevel, Is.LessThanOrEqualTo(1 + Perception.LevelReach), "a CL-1 bot saw a creature past its reach");
         });
     }
 

@@ -40,7 +40,7 @@ export function MissionJournalPanel() {
             <div className="journal-main">
               <div className="journal-title">{missionTitle(m.name)}</div>
               <div className="journal-meta">
-                Level {m.difficulty} · {m.reward} cr · listed ≈ {formatMissionDistance(m.distanceM)}{' '}
+                Level {m.level} · {m.reward} cr · listed ≈ {formatMissionDistance(m.distanceM)}{' '}
                 {OCTANT_NAMES[m.octant] ?? '?'} of its terminal
                 {m.lair === null ? ' · lair moving…' : ''}
               </div>

@@ -183,6 +183,9 @@
         <h2>The crowd at the lairs</h2>
         <div class="kpis">
             @Kpi("lair hits / s", Rate(st, "crowd", "lairHitsPerSec"))
+            @Kpi("lairs by band I-V", Bands(st, "lairsByBand"), EmptyBand(st))
+            @Kpi("lairs the crowd may fight", F(N(st, "levels", "lairsBelowCrowdLevel"), 0), N(st, "levels", "lairsBelowCrowdLevel") == 0)
+            @Kpi("crowd objective level max", F(N(st, "levels", "crowdObjectiveLevelMax"), 0), N(st, "levels", "crowdObjectiveLevelMax") > 10)
             @Kpi("objectives taken", F(N(st, "crowd", "objectivesTaken"), 0))
             @Kpi("objectives fallen", F(N(st, "crowd", "objectivesFallen"), 0))
             @Kpi("given up", F(N(st, "crowd", "objectivesGivenUp"), 0))
@@ -208,6 +211,16 @@
 
     private static string Rate(JsonNode node, string section, string name)
         => $"{F(N(node, section, name, "10s"), 1)}  ·  {F(N(node, section, name, "60s"), 1)} (60 s)";
+
+    /// <summary>A band count array of <c>/swg/stats</c>'s <c>levels</c>, as "a / b / c / d / e".</summary>
+    private static string Bands(JsonNode node, string name)
+        => node?["levels"]?[name] is JsonArray bands
+            ? string.Join(" / ", bands.Select(b => b is JsonValue v && v.TryGetValue<double>(out var d) ? F(d, 0) : "—"))
+            : "—";
+
+    /// <summary>Whether a band has no standing lair: the frontier patches squeezed, or a band's sites empty.</summary>
+    private static bool EmptyBand(JsonNode node)
+        => node?["levels"]?["lairsByBand"] is JsonArray bands && bands.Any(b => b is JsonValue v && v.TryGetValue<double>(out var d) && d == 0);
 
     private static bool Warn(double value, double limit) => !double.IsNaN(value) && !double.IsNaN(limit) && value > limit;
 

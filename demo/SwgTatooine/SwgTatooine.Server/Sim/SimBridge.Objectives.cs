@@ -5,8 +5,8 @@ using System.Threading;
 namespace SwgTatooine.Server;
 
 /// <summary>
-/// One planet's lair census (lair-objectives.md L-1): per point of interest, its standing wild lairs and the players near it, with the weight
-/// <c>lairs / (1 + players)</c> — where lairs most outnumber the people fighting them.
+/// One planet's lair census (lair-objectives.md L-1): per crowd place — a city's fringe since content levels (content-levels.md § 5) — its standing wild
+/// lairs and the players at it, with the weight <c>lairs / (1 + players)</c> — where lairs most outnumber the people fighting them.
 /// </summary>
 /// <remarks>Built whole once a second by the lair director and published by reference; <c>PlayerThink</c>'s parallel chunks only read it.</remarks>
 internal sealed class LairCensus
@@ -21,7 +21,7 @@ internal sealed class LairCensus
     /// <summary>Each point of interest's weight, <c>lairs / (1 + players)</c>; 0 where no lair stands.</summary>
     public float[] Weight { get; }
 
-    /// <summary>Standing wild lairs per point of interest, by its index in <see cref="WorldIndex.Pois"/>.</summary>
+    /// <summary>Standing wild lairs per crowd place, by its index in <see cref="WorldIndex.CrowdSites"/>.</summary>
     public int[] Lairs { get; }
 
     /// <summary>Players within each point of interest's radius, the crowd and sessions alike.</summary>
@@ -38,7 +38,7 @@ internal sealed class LairCensus
     /// <b>Nearness, because an unattended place is far from everybody by construction</b>: drawn by weight alone, fighters crossed 1 to 12 km of desert
     /// for it, and in five minutes almost none arrived (measured 2026-10-26). Among the places within reach, the unattended still win.
     /// </remarks>
-    public int DrawNear(IReadOnlyList<(float X, float Z, float Radius)> pois, float x, float z, float falloffM, float u)
+    public int DrawNear(IReadOnlyList<(float X, float Z, float Radius, float InnerRadius)> pois, float x, float z, float falloffM, float u)
     {
         var d2 = falloffM * falloffM;
         var total = 0f;
@@ -74,7 +74,7 @@ internal sealed class LairCensus
         return last;
     }
 
-    private static float Near((float X, float Z, float Radius) poi, float x, float z, float falloff2)
+    private static float Near((float X, float Z, float Radius, float InnerRadius) poi, float x, float z, float falloff2)
     {
         var dx = poi.X - x;
         var dz = poi.Z - z;
@@ -162,7 +162,10 @@ public sealed partial class SimBridge
         return all != null && realm < all.Length ? all[realm] : null;
     }
 
-    /// <summary>Counts, per point of interest of every planet, its standing wild lairs and the players near it. The lair director's, once a second.</summary>
+    /// <summary>
+    /// Counts, per crowd place of every planet — each city's fringe (content-levels.md § 5, R1) — its standing wild lairs and the players at it, the city
+    /// itself not counted. The lair director's, once a second.
+    /// </summary>
     private void TakeCensus(long tick)
     {
         if (tick - _lastCensusTick < Math.Max(1, _config.TickRateHz))
@@ -176,29 +179,17 @@ public sealed partial class SimBridge
         for (var planet = 0; planet < indexes.Length; planet++)
         {
             var index = indexes[planet];
-            var census = new LairCensus(index.Pois.Count);
+            var census = new LairCensus(index.CrowdSites.Count);
             var realm = new RealmId((ushort)planet);
-            for (var i = 0; i < index.Pois.Count; i++)
+            for (var i = 0; i < index.CrowdSites.Count; i++)
             {
-                // The points of interest are the first sites, in the same order (WorldBuilder.PlanSites).
-                var lairs = i < index.Sites.Count ? Math.Max(0, index.Sites[i].Live) : 0;
-                var poi = index.Pois[i];
+                var lairs = Math.Max(0, index.Sites[index.CrowdSites[i]].Live);
+                var place = index.CrowdPlaces[i];
                 var players = 0;
                 if (lairs > 0)
                 {
-                    var sphere = new BSphere2F { CenterX = poi.X, CenterY = poi.Z, Radius = poi.Radius };
-                    var near = Dbe.ClusterSpatialQuery<Player>(realm).Radius(in sphere);
-                    try
-                    {
-                        while (near.MoveNext())
-                        {
-                            players++;
-                        }
-                    }
-                    finally
-                    {
-                        near.Dispose();
-                    }
+                    // At the fringe: in its outer disc and not in the city, whose crowd is shopping, not fighting.
+                    players = PlayersWithin(realm, place.X, place.Z, place.Radius) - PlayersWithin(realm, place.X, place.Z, place.InnerRadius);
                 }
 
                 census.Lairs[i] = lairs;
@@ -210,6 +201,27 @@ public sealed partial class SimBridge
         }
 
         Volatile.Write(ref _censuses, all);
+    }
+
+    /// <summary>Players of every kind within a disc.</summary>
+    private int PlayersWithin(RealmId realm, float x, float z, float radius)
+    {
+        var players = 0;
+        var sphere = new BSphere2F { CenterX = x, CenterY = z, Radius = radius };
+        var near = Dbe.ClusterSpatialQuery<Player>(realm).Radius(in sphere);
+        try
+        {
+            while (near.MoveNext())
+            {
+                players++;
+            }
+        }
+        finally
+        {
+            near.Dispose();
+        }
+
+        return players;
     }
 
     /// <summary>
@@ -225,7 +237,7 @@ public sealed partial class SimBridge
             return false;
         }
 
-        var pois = (PlanetIndexes ?? [_index])[realm].Pois;
+        var pois = (PlanetIndexes ?? [_index])[realm].CrowdPlaces;
         var poiIndex = census.DrawNear(pois, x, z, ObjectiveFalloffM * _config.ContentScale, Hash01(salt));
         if (poiIndex < 0)
         {
@@ -233,11 +245,12 @@ public sealed partial class SimBridge
         }
 
         var poi = pois[poiIndex];
-        if (!TryNearestWildLair(ctx, realm, poi.X, poi.Z, poi.Radius, x, z, out var lx, out var lz))
+        if (!TryNearestWildLair(ctx, realm, poi.X, poi.Z, poi.Radius, x, z, out var lx, out var lz, out var level))
         {
             return false;
         }
 
+        NoteObjectiveLevel(level);
         move.SpeedMps = TatooineData.PlayerMountSpeedMps;
         state.Activity = PlayerActivity.Combat;
         state.ActivityTicks = AimAt(ref state, ref move, x, z, lx, lz);
@@ -281,11 +294,12 @@ public sealed partial class SimBridge
 
         counts.Fallen++;
         var scale = _config.ContentScale;
-        if (!TryNearestWildLair(ctx, realm, state.MissionX, state.MissionZ, NextObjectiveM * scale, x, z, out var lx, out var lz))
+        if (!TryNearestWildLair(ctx, realm, state.MissionX, state.MissionZ, NextObjectiveM * scale, x, z, out var lx, out var lz, out var level))
         {
             return false;
         }
 
+        NoteObjectiveLevel(level);
         state.ActivityTicks = AimAt(ref state, ref move, x, z, lx, lz);
         Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
         counts.Taken++;
@@ -345,13 +359,39 @@ public sealed partial class SimBridge
 
     /// <summary>Whether a standing wild lair is at the objective's point. Wild lairs never move, so 2 m is its own position.</summary>
     private bool ObjectiveStands(TickContext ctx, ushort realm, float ox, float oz)
-        => TryNearestWildLair(ctx, realm, ox, oz, 2f, ox, oz, out _, out _);
+        => TryNearestWildLair(ctx, realm, ox, oz, 2f, ox, oz, out _, out _, out _);
 
-    /// <summary>The standing wild lair within <paramref name="radius"/> of a centre that is nearest to (<paramref name="fromX"/>, <paramref name="fromZ"/>).</summary>
-    private bool TryNearestWildLair(TickContext ctx, ushort realm, float cx, float cz, float radius, float fromX, float fromZ, out float lx, out float lz)
+    /// <summary>Raises <see cref="CrowdObjectiveLevelMax"/> to an objective's level.</summary>
+    private void NoteObjectiveLevel(int level)
+    {
+        var seen = Volatile.Read(ref _crowdObjectiveLevelMax);
+        while (level > seen)
+        {
+            var was = Interlocked.CompareExchange(ref _crowdObjectiveLevelMax, level, seen);
+            if (was == seen)
+            {
+                return;
+            }
+
+            seen = was;
+        }
+    }
+
+    private int _crowdObjectiveLevelMax;
+
+    /// <summary>The highest level of a lair the crowd was ever sent to: must stay at or below <see cref="TatooineData.CrowdLevel"/> (CL-10).</summary>
+    public int CrowdObjectiveLevelMax => Volatile.Read(ref _crowdObjectiveLevelMax);
+
+    /// <summary>
+    /// The standing wild lair within <paramref name="radius"/> of a centre that is nearest to (<paramref name="fromX"/>, <paramref name="fromZ"/>), at or
+    /// below <see cref="TatooineData.CrowdLevel"/>: a fringe's lairs are by construction, and this also covers a region lair or a patch edge in the disc.
+    /// </summary>
+    private bool TryNearestWildLair(TickContext ctx, ushort realm, float cx, float cz, float radius, float fromX, float fromZ, out float lx, out float lz,
+        out int level)
     {
         lx = 0f;
         lz = 0f;
+        level = 0;
         var best = float.MaxValue;
         var sphere = new BSphere2F { CenterX = cx, CenterY = cz, Radius = radius };
         var lairs = Dbe.ClusterSpatialQuery<CreatureLair>(new RealmId(realm)).Radius(in sphere);
@@ -366,7 +406,7 @@ public sealed partial class SimBridge
                 }
 
                 var spawner = lair.Read(CreatureLair.Spawner);
-                if (!spawner.Mission.IsNull || !IsStandingLair(spawner, lair.Read(CreatureLair.Vitals)))
+                if (!spawner.Mission.IsNull || spawner.Level > TatooineData.CrowdLevel || !IsStandingLair(spawner, lair.Read(CreatureLair.Vitals)))
                 {
                     continue;
                 }
@@ -380,6 +420,7 @@ public sealed partial class SimBridge
                     best = d2;
                     lx = at.X;
                     lz = at.Z;
+                    level = spawner.Level;
                 }
             }
         }

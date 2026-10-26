@@ -540,6 +540,27 @@ button.active {
 }
 
 .hud table,
+/* A level's con colour against the viewer's CL (content-levels.md § 6, crafting-catalog.md § 14.3). */
+.con-grey {
+  color: #9a9a9a;
+}
+
+.con-green {
+  color: #6fd36f;
+}
+
+.con-yellow {
+  color: #e8d44d;
+}
+
+.con-orange {
+  color: #f0963c;
+}
+
+.con-red {
+  color: #f05a4a;
+}
+
 .inspector table {
   width: 100%;
   border-collapse: collapse;

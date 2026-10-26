@@ -68,7 +68,7 @@ export function MissionTerminal() {
         <thead>
           <tr>
             <th>Mission</th>
-            {header('difficulty', 'Level')}
+            {header('level', 'Level')}
             {header('direction', 'Dir')}
             {header('distance', 'Distance')}
             {header('reward', 'Reward')}
@@ -79,7 +79,7 @@ export function MissionTerminal() {
           {rows.map((o) => (
             <tr key={o.serial}>
               <td>{missionTitle(kindNames[o.kind] ?? '')}</td>
-              <td className="num">{o.difficulty}</td>
+              <td className="num">{o.level}</td>
               <td>{OCTANT_NAMES[o.octant] ?? '?'}</td>
               <td className="num">≈ {formatMissionDistance(o.distanceM)}</td>
               <td className="num">{o.reward} cr</td>

@@ -498,8 +498,10 @@ Console.WriteLine(intentsSent == 0
 if (brain)
 {
     var decisions = swarm.Decisions();
+    var huntedLevel = swarm.HuntedLevelMedian();
     Console.WriteLine(
-        $"brain: {decisions.Boardings} shuttle boarding(s) asked for, {decisions.Hunts} hunt(s) begun; "
+        $"brain: {decisions.Boardings} shuttle boarding(s) asked for, {decisions.Hunts} hunt(s) begun"
+        + $"{(huntedLevel > 0 ? $" (median creature level {huntedLevel})" : "")}; "
         + $"{decisions.PortsKnownMax} port(s) known by the best-travelled bot, {decisions.BotsThatCanFly} bot(s) know two or more, "
         + $"{(decisions.Creatures > 0 ? "a creature was in view at least once" : "no creature was EVER in view")}");
     var homes = swarm.Homes();

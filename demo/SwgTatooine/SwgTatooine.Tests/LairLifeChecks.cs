@@ -85,6 +85,88 @@ public sealed class LairLifeChecks
         });
     }
 
+    /// <summary>
+    /// CL-8: a refilled creature takes its lair's level — every creature standing, the refills among them, carries its lair's level and the level's stats.
+    /// </summary>
+    [Test]
+    public void ARefilledCreature_TakesItsLairsLevel()
+    {
+        Assert.That(_sim.LastStats.CreaturesRespawned, Is.GreaterThan(0), "precondition: a lair replaced a creature");
+        var lairLevel = new Dictionary<EntityId, int>();
+        var wrong = new List<string>();
+        var creatures = 0;
+        using var tx = _sim.Dbe.CreateQuickTransaction();
+        foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
+        {
+            var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
+            for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+            {
+                var slot = BitOperations.TrailingZeroCount(bits);
+                lairLevel[cluster.GetEntityId(slot)] = spawners[slot].Level;
+            }
+        }
+
+        foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+        {
+            var brains = cluster.GetReadOnlySpan(Creature.Ai);
+            var homes = cluster.GetReadOnlySpan(Creature.Home);
+            var vitals = cluster.GetReadOnlySpan(Creature.Vitals);
+            for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+            {
+                var slot = BitOperations.TrailingZeroCount(bits);
+                creatures++;
+                var ai = brains[slot];
+                var health = ContentLevels.CreatureHealth(ai.Level, CreatureTemplates.IsCamp(ai.Template));
+                if (!lairLevel.TryGetValue(homes[slot].Lair, out var level) || level != ai.Level || vitals[slot].MaxHealth != health)
+                {
+                    wrong.Add($"a level-{ai.Level} creature ({vitals[slot].MaxHealth} hp) in a lair of level {level}");
+                }
+            }
+        }
+
+        Assert.That(creatures, Is.GreaterThan(0), "precondition: the world has creatures");
+        Assert.That(wrong, Is.Empty, $"{wrong.Count} of {creatures} creatures, first: {(wrong.Count > 0 ? wrong[0] : "")}");
+    }
+
+    /// <summary>
+    /// CL-8: a replacement lair takes the level of where it stands. Every life ends inside the window, so the wild lairs standing at its end are
+    /// replacements; each agrees with the level map at its position, and its kind covers its level.
+    /// </summary>
+    [Test]
+    public void AReplacementLair_TakesTheLevelOfWhereItStands()
+    {
+        Assert.That(_sim.LastStats.LairsSpawned, Is.GreaterThan(0), "precondition: a site spawned a replacement");
+        var levels = _sim.Index.Levels;
+        var wrong = new List<string>();
+        var wild = 0;
+        using var tx = _sim.Dbe.CreateQuickTransaction();
+        foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
+        {
+            var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
+            var bounds = cluster.GetReadOnlySpan(CreatureLair.Bounds);
+            for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+            {
+                var slot = BitOperations.TrailingZeroCount(bits);
+                var lair = spawners[slot];
+                if (cluster.Realm.Value != 0 || lair.Site == 0)
+                {
+                    continue;
+                }
+
+                wild++;
+                var (x, z) = (bounds[slot].X, bounds[slot].Z);
+                if (!levels.Agrees(x, z, lair.Level) || !CreatureTemplates.CoversLevel(lair.CreatureTemplate, lair.Level))
+                {
+                    wrong.Add($"{CreatureTemplates.Name(lair.CreatureTemplate)} of level {lair.Level} at ({x:F0}, {z:F0}), "
+                        + $"edge {levels.EdgeDistance(x, z):F0} m");
+                }
+            }
+        }
+
+        Assert.That(wild, Is.GreaterThan(0), "precondition: wild lairs stand");
+        Assert.That(wrong, Is.Empty, $"{wrong.Count} of {wild} wild lairs, first: {(wrong.Count > 0 ? wrong[0] : "")}");
+    }
+
     /// <summary>The cascade: a retired lair's creatures went with it — no creature names a lair that is gone.</summary>
     [Test]
     public void NoCreatureOutlivesItsLair()

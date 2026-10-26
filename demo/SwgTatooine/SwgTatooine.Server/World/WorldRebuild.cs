@@ -70,6 +70,7 @@ public static class WorldRebuild
 
         // The lair sites as the build planned them, from the same map and scales: a lair on disk names its site by position in this list.
         WorldBuilder.PlanSites(map, map.Config, index, realm);
+        census.FrontiersDisplaced = index.FrontiersDisplaced;
 
         using var tx = dbe.CreateQuickTransaction();
         RebuildStructures(tx, index, census, realm);
@@ -181,12 +182,16 @@ public static class WorldRebuild
                 var slot = BitOperations.TrailingZeroCount(bits);
                 index.Lairs.Add(cluster.GetEntityId(slot));
                 census.Lairs++;
+                census.LairsByBand[ContentLevels.Band(spawners[slot].Level) - 1]++;
 
                 // What is standing now, which is the recollection half of a site: the director refills each to its target from here.
                 var site = spawners[slot].Site;
                 if (site > 0 && site <= index.Sites.Count)
                 {
-                    index.Sites[site - 1].Live++;
+                    var at = index.Sites[site - 1];
+                    at.Live++;
+                    census.FringeLairs += at.Kind == LairSiteKind.Fringe ? 1 : 0;
+                    census.FrontierLairs += at.Kind == LairSiteKind.Frontier ? 1 : 0;
                 }
             }
         }
@@ -207,6 +212,7 @@ public static class WorldRebuild
             {
                 var slot = BitOperations.TrailingZeroCount(bits);
                 census.Creatures++;
+                census.CreaturesByBand[ContentLevels.Band(brains[slot].Level) - 1]++;
                 var template = brains[slot].Template;
                 if (template < census.CreaturesByTemplate.Length)
                 {

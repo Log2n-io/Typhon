@@ -232,7 +232,9 @@ public sealed partial class SimBridge
                 if (target.IsNull)
                 {
                     // The only spatial query on the player's side of a fight, and it runs only for a fighting player that has nobody to shoot.
-                    if (!TryAcquireTarget(ctx, cluster.Realm, x, z, out target, out targetKind))
+                    // A scripted body fights at or below the crowd's level (content-levels.md § 5); a person chooses.
+                    var maxLevel = possessed ? ContentLevels.MaxLevel : TatooineData.CrowdLevel;
+                    if (!TryAcquireTarget(ctx, cluster.Realm, x, z, maxLevel, out target, out targetKind))
                     {
                         // A SCAN CADENCE, not a wasted tick. A player walking the one to two kilometres to its mission is in Combat the whole way with
                         // nothing in range, and without this it ran two radius queries every tick of that walk: measured at 12 500 query pairs over a
@@ -420,7 +422,8 @@ public sealed partial class SimBridge
     /// repaired it and a lair at zero would have stood broken for the life of the process. Lairs are transient now: one at
     /// zero is retired by the lair director and replaced elsewhere (<c>SimBridge.Lairs.cs</c>).</para>
     /// </remarks>
-    private bool TryAcquireTarget(TickContext ctx, RealmId realm, float x, float z, out EntityId target, out byte kind)
+    /// <param name="maxLevel">The highest level of creature or lair it takes: <see cref="TatooineData.CrowdLevel"/> for a scripted body.</param>
+    private bool TryAcquireTarget(TickContext ctx, RealmId realm, float x, float z, int maxLevel, out EntityId target, out byte kind)
     {
         var sphere = new BSphere2F { CenterX = x, CenterY = z, Radius = RangedRange };
         target = EntityId.Null;
@@ -434,7 +437,7 @@ public sealed partial class SimBridge
             {
                 var hit = e.Current;
                 if (hit.DistanceSq >= bestSq || !ctx.Accessor.TryOpen(hit.Entity, out var candidate)
-                    || candidate.Read(Creature.Vitals).Health <= 0)
+                    || candidate.Read(Creature.Vitals).Health <= 0 || candidate.Read(Creature.Ai).Level > maxLevel)
                 {
                     continue;
                 }
@@ -464,7 +467,8 @@ public sealed partial class SimBridge
                 if (hit.DistanceSq >= bestSq || !ctx.Accessor.TryOpen(hit.Entity, out var candidate)
                     || !IsStandingLair(candidate.Read(CreatureLair.Spawner), candidate.Read(CreatureLair.Vitals))
                     || IsShielded(candidate.Read(CreatureLair.Spawner))
-                    || !candidate.Read(CreatureLair.Spawner).Mission.IsNull)
+                    || !candidate.Read(CreatureLair.Spawner).Mission.IsNull
+                    || candidate.Read(CreatureLair.Spawner).Level > maxLevel)
                 {
                     continue;
                 }
