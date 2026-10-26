@@ -756,7 +756,7 @@ public static class WorldBuilder
     /// number of lairs each keeps standing, and the planet's <see cref="LevelMap"/> (content-levels.md § 2).
     /// </summary>
     /// <remarks>
-    /// <b>From the map, the configuration and the realm alone, so a reopened world plans the identical list</b> (<c>WorldRebuild</c>): a lair on disk names
+    /// <b>From the map, the scales and the realm alone — never the seed — so a reopened world plans the identical list</b> (<c>WorldRebuild</c>): a lair on disk names
     /// its site by position in it (<see cref="Lair.Site"/>), and the director refills each site to the target planned here. The fringes and frontiers are
     /// APPENDED, so the landmarks' and regions' indices are what they always were.
     /// </remarks>
@@ -774,7 +774,9 @@ public static class WorldBuilder
         var s = config.ContentScale;
         var levels = new LevelMap(map.Cities, s);
         index.Levels = levels;
-        var rng = new Rng(((uint)config.Seed ^ 0x1E7E15A3u) + (realm * 0x9E3779B9u));
+        // A constant salt and the realm, NOT the run's seed: the plan is a fact about the map, which a lair on disk names its site by, and a --persist reopen
+        // under another --seed must plan the very same sites and bands (review 1). Each planet still gets its own.
+        var rng = new Rng(0x1E7E15A3u + (realm * 0x9E3779B9u));
 
         // Landmarks: one band each, uniform over the bands their kinds cover — the camps' 25-50, so III to V.
         foreach (var poi in map.Pois)
