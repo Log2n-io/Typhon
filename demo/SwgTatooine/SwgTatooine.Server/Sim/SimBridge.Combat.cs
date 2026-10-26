@@ -475,7 +475,7 @@ public sealed partial class SimBridge
             while (lairs.MoveNext())
             {
                 var hit = lairs.Current;
-                // Never a mission's lair: only the crowd acquires targets here, and a stranger's break only redraws the holder's lair (missions.md M-6,
+                // Never a mission's lair: only the crowd acquires targets here, and a stranger's break only moves the holder's mission (missions.md MS-6,
                 // lair-objectives.md L-5).
                 if (hit.DistanceSq >= bestSq || !ctx.Accessor.TryOpen(hit.Entity, out var candidate)
                     || !IsStandingLair(candidate.Read(CreatureLair.Spawner), candidate.Read(CreatureLair.Vitals))

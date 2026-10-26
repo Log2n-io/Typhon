@@ -314,43 +314,64 @@ public static class TatooineData
     public const int MissionOffersPerTerminal = 20;
 
     /// <summary>
-    /// How far an offer's anchor lies from its terminal, metres.
+    /// How far from its terminal an offer's lair is looked for first, metres (× <c>ContentScale</c>): a lair of the level chosen within it is drawn
+    /// uniformly; with none there, the nearest beyond it. The same reach bounds a held mission's re-target round the lair it lost (missions.md § 8).
     /// </summary>
     /// <remarks>
-    /// [CORE3] places a destroy mission 1-2 km from the PLAYER (<c>randomizeGenericDestroyMission</c>: base 1 000, random 1 000, both difficulty terms zero
-    /// in the shipped configuration), twenty tries, outside every city. Here the origin is the terminal, which stands inside a city of up to 456 m radius, so
-    /// the near bound is the city's edge rather than a kilometre.
+    /// Every band's frontier patch is 1.0-2.0 km from a city's edge (content-levels.md § 2.2), so from a terminal inside a city of up to 456 m radius, 3 km
+    /// takes in each band's patch. [CORE3] placed a destroy mission 1-2 km from the player; here it is a lair the world already has.
     /// </remarks>
-    public const float MissionMinDistanceM = 500f;
+    public const float MissionReachM = 3000f;
 
-    public const float MissionMaxDistanceM = 2000f;
+    /// <summary>How many levels below a character's CL the missions it is shown go (Loïc, 2026-10-26): the demand window's floor.</summary>
+    public const int MissionLevelBelow = 5;
 
-    /// <summary>How far round its anchor a mission's lair is drawn, metres: "about there" (missions.md, R2).</summary>
-    public const float MissionScatterM = 150f;
+    /// <summary>How many levels above its CL a character may take a mission: above it the desk refuses the take (Loïc, 2026-10-26), and bots never try.</summary>
+    public const int MissionLevelAbove = 3;
 
-    /// <summary>Credits per difficulty level, plus as many again per kilometre: 150-300 at difficulty 1 (missions.md § 2.2).</summary>
-    public const int MissionRewardBase = 100;
+    /// <summary>
+    /// A mission's reward by its level, 1 to 50: <c>balance_model.py</c>'s <c>credit_flows(l)['reward']</c> = <c>(wage(l) − vendor_in) / missions_per_h</c>
+    /// (claude/design/SwgTatooine/design/balance/balance_model.py; crafting-catalog.md § 15, decision C2), to the nearest 5 — 485 at 1, 1 500 at 25, 4 850
+    /// at 50. Computed from the model's knobs below, as <see cref="Progression"/>'s XP table is, so a retuned knob moves every level.
+    /// </summary>
+    private static readonly int[] MissionRewards = BuildMissionRewards();
 
-    public const int MissionRewardPerKm = 100;
+    /// <summary><c>CREDITS['wage_cl1']</c>, <c>['wage_cl50']</c>: credits an on-level play-hour earns at CL 1 and CL 50, geometric in between.</summary>
+    public const int WageCl1 = 1000;
+
+    public const int WageCl50 = 10000;
+
+    /// <summary>
+    /// <c>vendor_in</c> as a share of the wage, in thousandths: <c>vendor_sold_share × loot_value × vendor_buys</c> = 0.15 × 1.0 × 0.20 — what an hour's loot
+    /// sold to the vendor brings in, the rest of the wage being the missions'.
+    /// </summary>
+    public const int VendorInPerMille = 30;
+
+    private static int[] BuildMissionRewards()
+    {
+        var table = new int[ContentLevels.MaxLevel + 1];
+        for (var l = 1; l <= ContentLevels.MaxLevel; l++)
+        {
+            var wage = WageCl1 * Math.Pow((double)WageCl50 / WageCl1, (l - 1) / (double)(ContentLevels.MaxLevel - 1));
+            var reward = wage * (1000 - VendorInPerMille) / 1000d / Progression.MissionsPerHour;
+            table[l] = (int)(Math.Round(reward / 5d, MidpointRounding.AwayFromZero) * 5d);
+        }
+
+        return table;
+    }
 
     /// <summary>How long an untaken offer stays listed, seconds, before it is replaced: the shortest, and the spread above it.</summary>
     public const float MissionOfferLifeMinSeconds = 300f;
 
     public const float MissionOfferLifeSpanSeconds = 600f;
 
-    /// <summary>How long a mission's lair stands before it moves somewhere else round its anchor, seconds (missions.md, R6).</summary>
-    public const float MissionLairLifeSeconds = 1200f;
-
     /// <summary>
     /// How close to a mission terminal's centre a body must stand to take one of its missions, metres. The client's own gate is the tighter one.
     /// </summary>
     public const float MissionTerminalReachM = 6f;
 
-    /// <summary>
-    /// The credits a mission pays: <see cref="MissionRewardBase"/> plus <see cref="MissionRewardPerKm"/> per kilometre, per difficulty level, to the nearest 5.
-    /// </summary>
-    public static int MissionReward(int difficulty, float distanceM)
-        => (int)(MathF.Round(difficulty * (MissionRewardBase + (MissionRewardPerKm * distanceM / 1000f)) / 5f) * 5f);
+    /// <summary>The credits a mission of <paramref name="level"/> pays (<see cref="MissionRewards"/>); a level outside 1..50 is clamped into it.</summary>
+    public static int MissionReward(int level) => MissionRewards[Math.Clamp(level, 1, ContentLevels.MaxLevel)];
 
     /// <summary>Which of the eight directions a point lies in from another: 0 north (+Z), then clockwise — 2 east (+X), 4 south, 6 west.</summary>
     public static byte OctantOf(float dx, float dz)

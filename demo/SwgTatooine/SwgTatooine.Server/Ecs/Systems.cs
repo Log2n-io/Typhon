@@ -459,8 +459,8 @@ internal sealed class CombatResolveSystem : CallbackSystem
 /// The mission desk (<c>SimBridge.Missions.cs</c>; missions.md § 3): terminals' offers, takes and cancels, held missions and the lairs drawn for them.
 /// </summary>
 /// <remarks>
-/// <para><b>Serial</b>, because the race between two takers is settled by its order, and because it spawns and destroys — offers, held missions, lairs and
-/// their creatures — through a side transaction, as the lair director does. <b>After the lair director</b>, in the same phase: both write lairs, and a
+/// <para><b>Serial</b>, because the race between two takers is settled by its order, and because it spawns and destroys offers and held missions, and
+/// reserves wild lairs, through a side transaction, as the lair director does. <b>After the lair director</b>, in the same phase: both write lairs, and a
 /// mission's lair broken this tick (<c>CombatResolve</c>, Apply) is then seen by the desk the same tick.</para>
 /// <para><b>Its writes to a body go through the tick's transaction</b>: the journal's revision, the completed count and the wallet's revision. <b>A reward is
 /// paid in its own transaction</b>, the one that ends the mission (<c>SimBridge.Economy.cs</c>, <c>Reward</c>), so it writes wallets and the ledger too —
@@ -483,7 +483,7 @@ internal sealed class MissionDeskSystem : CallbackSystem
         .Writes<MissionOfferRealm>()
         .Writes<HeldMission>()
 
-        // A mission's lair and its occupants, spawned and destroyed like the lair director's.
+        // A wild lair reserved and released (Lair.Mission); a mission lair of a world from before is destroyed at load, its occupants with it.
         .Writes<Lair>()
         .Writes<LairPlacement>()
         .Writes<LairVitals>()

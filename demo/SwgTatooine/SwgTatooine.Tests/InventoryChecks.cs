@@ -279,7 +279,7 @@ internal sealed class InventoryChecks : ServedChecks
 
     /// <summary>
     /// IL-4: a mission lair's own death is never looted from the kill queue — its cache is the desk's, and only for its holder's blow: broken without it, no
-    /// cache, no row, the mission still held.
+    /// cache, no row, and the mission moved to another lair (or lost), not completed.
     /// </summary>
     [Test]
     [CancelAfter(120_000)]
@@ -299,12 +299,13 @@ internal sealed class InventoryChecks : ServedChecks
         });
         sim.Bridge.StageKill(Items.Kill(p.Body, held.Mission.Lair.RawValue, terminal.X + 2f, terminal.Z, (byte)held.Mission.Kind,
             kind: KillVictimKind.Lair, mission: held.Id));
-        SessionHarness.Until(() => HeldBy(sim, p.Character)[0].Mission.Lair != held.Mission.Lair, "a new lair to be drawn");
+        SessionHarness.Until(() => HeldBy(sim, p.Character).Count == 0 || HeldBy(sim, p.Character)[0].Mission.Lair != held.Mission.Lair,
+            "the mission to move to another lair, or be lost");
         Harness.Ticks(Worlds.ServedHz / SimBridge.MissionPassHz + 2);
         Assert.Multiple(() =>
         {
             Assert.That(Items.Rows(sim), Is.Empty, "a cache, or the lair looted as a kill");
-            Assert.That(HeldBy(sim, p.Character)[0].Id, Is.EqualTo(held.Id), "the mission is no longer held");
+            Assert.That(sim.Bridge.MissionsRetargeted + sim.Bridge.MissionsLostLair, Is.EqualTo(1), "the mission was completed, not moved or lost");
             Assert.That(sim.Bridge.ItemDropsBy(DropSource.MissionCache), Is.Zero);
             Assert.That(sim.Bridge.LootRefusedTotal, Is.Zero, "refused rather than skipped");
         });
@@ -338,7 +339,7 @@ internal sealed class InventoryChecks : ServedChecks
         });
     }
 
-    /// <summary>A player logged in at the first terminal holding one of its missions, its lair drawn.</summary>
+    /// <summary>A player logged in at the first terminal holding one of its missions — one its CL 1 may take — and the lair that offer named.</summary>
     private (MissionTerminalRef Terminal, (FakeLink Link, EntityId Body, EntityId Character, long Parked) Player, (EntityId Id, HeldMission Mission) Held)
         TakeAMission(TatooineSim sim, ulong account)
     {
@@ -353,14 +354,14 @@ internal sealed class InventoryChecks : ServedChecks
                 for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
                 {
                     var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    if (infos[slot].Terminal == terminal.Id)
+                    if (infos[slot].Terminal == terminal.Id && infos[slot].Level <= 1 + TatooineData.MissionLevelAbove)
                     {
                         offers.Add((cluster.GetEntityId(slot), infos[slot]));
                     }
                 }
             }
         });
-        Assert.That(offers, Is.Not.Empty, "the premise: offers at the terminal");
+        Assert.That(offers, Is.Not.Empty, "the premise: an offer at the terminal a CL 1 character may take");
         SessionHarness.UntilNamed(p.Link.Session, offers[0].Id, "the offer to reach the client's view", p.Parked);
         p.Link.SendCommand(nameof(TakeMission), new RecordValues
         {

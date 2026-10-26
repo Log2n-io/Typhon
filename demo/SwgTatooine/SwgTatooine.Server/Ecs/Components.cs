@@ -1320,8 +1320,8 @@ public static class PlayerActivity
 
 /// <summary>A creature lair: the object that spawns and owns a population, and what a destroy mission sends a player to break.</summary>
 /// <remarks>
-/// <b>A mission's lair is a lair of its kind</b> (missions.md § 3): spawned when the mission is taken, shielded by its occupants and refilled like any other,
-/// and its life is the mission desk's rather than the lair director's — <see cref="Site"/> is 0, so the director never retires it.
+/// <b>A mission's lair is a wild lair</b> (missions.md § 8): an offer names one the world has, and taking it sets <see cref="Mission"/> — the crowd then
+/// leaves it alone and the lair director does not retire it until the desk releases it.
 /// </remarks>
 [Component("Swg.Lair", 5, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
@@ -1344,7 +1344,8 @@ public struct Lair
 
     /// <summary>
     /// 1 once a blow from <see cref="Owner"/> has landed on this mission lair, 0 otherwise. Breaking it completes the mission only then (missions.md, Q3): a
-    /// lair broken by somebody else alone is drawn again, so a passer-by cannot end a mission, and a fight shared with friends still pays.
+    /// lair broken by somebody else alone sends the mission to another lair of its level, so a passer-by cannot end a mission, and a fight shared with
+    /// friends still pays. Cleared when the reservation is released.
     /// </summary>
     [Field] public int OwnerHit;
 
@@ -1352,8 +1353,8 @@ public struct Lair
     [Field] public float SpawnRadius;
 
     /// <summary>
-    /// The wilderness site that spawned this lair, one-based into <c>SimBridge</c>'s site list (regions, then points of interest); 0 for a mission's lair,
-    /// which belongs to no site: the mission desk retires it, not the lair director.
+    /// The wilderness site that spawned this lair, one-based into <c>SimBridge</c>'s site list (regions, then points of interest); 0 for one placed by hand
+    /// (a check), which the director never retires and an offer never names.
     /// </summary>
     /// <remarks>What the lair director refills: a retired lair is replaced by another drawn from the same site, so a region keeps its density.</remarks>
     [Field] public int Site;
@@ -1365,15 +1366,14 @@ public struct Lair
     /// <remarks>In the 4-byte hole <see cref="Site"/> leaves before the 8-aligned <see cref="Mission"/>, so it costs nothing.</remarks>
     [Field, OnEnter(CodecKind.U8, Name = "level", Saturate = true)] public int Level;
 
-    /// <summary>The held mission this lair was drawn for (<see cref="HeldMissionArch"/>); <c>EntityId.Null</c> on a wild lair.</summary>
+    /// <summary>The held mission that reserved this lair (<see cref="HeldMissionArch"/>); <c>EntityId.Null</c> on an unreserved wild lair.</summary>
     [Field] public EntityId Mission;
 
     /// <summary>The body of the mission's holder, while it is online — whose blows set <see cref="OwnerHit"/>; <c>EntityId.Null</c> on a wild lair.</summary>
     [Field] public EntityLink<Player> Owner;
 
     /// <summary>
-    /// The tick this lair is retired at, whether or not anybody destroyed it: a wild lair by the lair director, a mission's by the desk, which draws its
-    /// mission a new one. 0 for never.
+    /// The tick this lair is retired at by the lair director, whether or not anybody broke it — not while a mission reserves it. 0 for never.
     /// </summary>
     [Field] public long ExpireTick;
 
