@@ -166,6 +166,7 @@ public sealed partial class SimBridge
 
         // A desk transaction that did not commit took its completions and their rewards with it: the desk is read again from the database, where those
         // missions still stand, and pays them on the next pass. Its takes and cancels are refused, so their clients hear it.
+        FlushItemHead(tx);
         var committed = tx.Commit();
         EndDeskEconomy(tick0, committed);
         EndDeskItems(tick0, committed);

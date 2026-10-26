@@ -585,6 +585,37 @@ internal sealed class InventoryChecks : ServedChecks
             });
         });
 
+        // A mission's cache with no reward paying it: the first mint restated as one.
+        Corrupt(sim, tx => Edit(tx, rowIds[0], ItemLedgerArch.Entry, (ref e) =>
+        {
+            e.Kind = ItemMoveKind.Mission;
+            e.Ref = 88;
+        }));
+        var unpaid = ItemEndpoints.Audit(sim.Dbe);
+        Corrupt(sim, tx => Edit(tx, rowIds[0], ItemLedgerArch.Entry, (ref e) =>
+        {
+            e.Kind = ItemMoveKind.Kill;
+            e.Ref = 1;
+        }));
+
+        // World's side naming a stack.
+        Corrupt(sim, tx => Edit(tx, rowIds[0], ItemLedgerArch.Entry, (ref e) => e.FromStack = 5));
+        var worldSide = ItemEndpoints.Audit(sim.Dbe);
+        Corrupt(sim, tx => Edit(tx, rowIds[0], ItemLedgerArch.Entry, (ref e) => e.FromStack = 0));
+
+        // 31 more stacks for the character, one of them outside the grid.
+        var extra = new List<EntityId>();
+        Corrupt(sim, tx =>
+        {
+            for (var k = 0; k <= ItemLedger.Slots; k++)
+            {
+                var s = new ItemStack { Owner = owner, Template = ItemCatalog.Metal, Mk = 1, Slot = (byte)k, Count = 1, Rows = 1 };
+                extra.Add(tx.Spawn<ItemStackArch>(ItemStackArch.Stack.Set(in s)));
+            }
+        });
+        var crowded = ItemEndpoints.Audit(sim.Dbe);
+        Corrupt(sim, tx => extra.ForEach(tx.Destroy));
+
         var clean = ItemEndpoints.Audit(sim.Dbe);
         static bool Only(ItemAuditResult a) => a.Violations.All(v => v.Contains("must go from World", StringComparison.Ordinal));
         Assert.Multiple(() =>
@@ -601,6 +632,10 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(mkV.Violations, Has.Some.StartsWith("seq 1: Mk V in a kill row"));
             Assert.That(emptied.Violations, Has.Some.Contains("emptied by the replay and still stored"));
             Assert.That(twice.Violations, Has.Some.StartsWith("seq 2: mission 77's cache minted again"));
+            Assert.That(unpaid.Violations, Has.Some.StartsWith("mission 88: its cache was minted at tick"), "a cache without its reward");
+            Assert.That(unpaid.Violations, Has.Some.EndsWith("and no reward pays it"));
+            Assert.That(worldSide.Violations, Has.Some.StartsWith("seq 1: World's side names stack 5"));
+            Assert.That(crowded.Violations, Has.Some.StartsWith($"owner {owner}: more than {ItemLedger.Slots} stacks"));
             Assert.That(clean.ViolationCount, Is.EqualTo(1), string.Join("; ", clean.Violations));
             Assert.That(Only(clean), Is.True, string.Join("; ", clean.Violations));
         });

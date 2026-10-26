@@ -130,7 +130,7 @@ public static class ItemEndpoints
     internal const string Empty = "{\"open\":false,\"slots\":30,\"items\":[],\"recent\":[],\"lost\":[]}";
 
     private sealed record IndexSet(DatabaseEngine Dbe, IndexRef BySeq, IndexRef ByFrom, IndexRef ByTo, IndexRef StackByOwner, IndexRef HeadByKey,
-        IndexRef WalletByOwner);
+        IndexRef WalletByOwner, IndexRef CreditBySeq);
 
     private static IndexSet _indexes;
 
@@ -399,6 +399,7 @@ public static class ItemEndpoints
         var held = new Dictionary<int, long>();
         var seen = new HashSet<long>();
         var slotsOf = new Dictionary<long, HashSet<byte>>();
+        var stacksOf = new Dictionary<long, int>();
         using (var found = tx.EnumerateIndex<ItemStack, long>(ix.StackByOwner, long.MinValue, long.MaxValue))
         {
             while (found.MoveNext())
@@ -409,6 +410,14 @@ public static class ItemEndpoints
                 result.Units += s.Count;
                 seen.Add(id);
                 held[Key(s.Template, s.Mk)] = Get(held, Key(s.Template, s.Mk)) + s.Count;
+
+                // Counted apart from the slots: a stack outside the grid, or one sharing a slot, is still one of its owner's.
+                var owned = (stacksOf.TryGetValue(s.Owner, out var c) ? c : 0) + 1;
+                stacksOf[s.Owner] = owned;
+                if (owned == ItemLedger.Slots + 1)
+                {
+                    result.Violation($"owner {s.Owner}: more than {ItemLedger.Slots} stacks");
+                }
                 if (!tx.TryOpen(EntityId.FromRawValue((ulong)s.Owner), out _))
                 {
                     result.Violation($"stack {id}: its owner {s.Owner} is not a character that exists");
@@ -442,11 +451,6 @@ public static class ItemEndpoints
                     if (!slots.Add(s.Slot))
                     {
                         result.Violation($"stack {id}: slot {s.Slot} of {s.Owner} holds another stack too");
-                    }
-
-                    if (slots.Count == ItemLedger.Slots + 1)
-                    {
-                        result.Violation($"owner {s.Owner}: more than {ItemLedger.Slots} stacks");
                     }
                 }
 
@@ -499,6 +503,33 @@ public static class ItemEndpoints
             }
         }
 
+        // A mission's cache comes with its reward: the credit ledger, in this same snapshot, pays that mission on the cache's tick (§ 3.4).
+        if (missionTick.Count > 0)
+        {
+            var rewardTick = new Dictionary<long, long>();
+            using (var credits = tx.EnumerateIndex<LedgerEntry, long>(ix.CreditBySeq, long.MinValue, long.MaxValue))
+            {
+                while (credits.MoveNext())
+                {
+                    var e = credits.CurrentComponent;
+                    if (e.Kind == TransferKind.MissionReward)
+                    {
+                        rewardTick.TryAdd(e.Ref, e.WorldTick);
+                    }
+                }
+            }
+
+            foreach (var (mission, tick) in missionTick)
+            {
+                if (!rewardTick.TryGetValue(mission, out var paid) || paid != tick)
+                {
+                    result.Violation(rewardTick.ContainsKey(mission)
+                        ? $"mission {mission}: its cache was minted at tick {tick}, its reward paid at tick {paid} - not in one transaction"
+                        : $"mission {mission}: its cache was minted at tick {tick} and no reward pays it");
+                }
+            }
+        }
+
         using (var heads = tx.EnumerateIndex<ItemLedgerHead, int>(ix.HeadByKey, ItemLedger.HeadKey, ItemLedger.HeadKey))
         {
             if (heads.MoveNext())
@@ -544,6 +575,13 @@ public static class ItemEndpoints
         {
             result.Violation($"seq {r.Seq}: both sides are {r.From}");
             ok = false;
+        }
+
+        // World's side names no stack and has no count after.
+        if ((r.From == ItemLedger.World && (r.FromStack != 0 || r.FromAfter != 0)) || (r.To == ItemLedger.World && (r.ToStack != 0 || r.ToAfter != 0)))
+        {
+            result.Violation($"seq {r.Seq}: World's side names stack {(r.From == ItemLedger.World ? r.FromStack : r.ToStack)} with "
+                + $"{(r.From == ItemLedger.World ? r.FromAfter : r.ToAfter)} after - World holds no stack");
         }
 
         if (!ItemCatalog.TryGet(r.Template, out var t))
@@ -673,7 +711,8 @@ public static class ItemEndpoints
             dbe.GetIndexRef<ItemLedgerEntry, long>(e => e.To),
             dbe.GetIndexRef<ItemStack, long>(s => s.Owner),
             dbe.GetIndexRef<ItemLedgerHead, int>(h => h.Key),
-            dbe.GetIndexRef<Wallet, long>(w => w.Owner));
+            dbe.GetIndexRef<Wallet, long>(w => w.Owner),
+            dbe.GetIndexRef<LedgerEntry, long>(e => e.Seq));
         Volatile.Write(ref _indexes, set);
         return set;
     }
