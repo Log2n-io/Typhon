@@ -108,6 +108,7 @@ import {
   unprojectRay,
 } from '../render/view-math';
 import { useChat } from '../state/chat-store';
+import { LevelWatch } from '../data/progress';
 import { crossingKindOf, isIndoors, sameRealm, type RealmView, type SceneKind } from '../data/realm-view';
 import { advance, arrived, askedFor, blackout, opacityAt } from './realm-transition';
 import {
@@ -3820,6 +3821,9 @@ export class ClientApp {
   private readonly journal = new MissionJournal(() => useSessionStore.getState().grant?.token ?? null);
   private journalVersion = -1;
   /** The wallet (economy-foundation.md E0-10): read whenever the body's `wallet` revision moves, as the journal is. */
+  /** One's own level, for the chat's level-up line (character-level.md § 8). */
+  private readonly levelWatch = new LevelWatch();
+
   private readonly wallet = new WalletReader(() => useSessionStore.getState().grant?.token ?? null);
   private walletVersion = -1;
   /**
@@ -3865,6 +3869,11 @@ export class ClientApp {
       if (this.journal.version !== this.journalVersion) {
         this.journalVersion = this.journal.version;
         missions.setJournal(this.journal.missions, this.journal.completed);
+      }
+
+      const reached = this.levelWatch.update(source.selfNetId, this.selfField('level'));
+      if (reached !== null) {
+        useChat.getState().notice(`You reached combat level ${reached}.`);
       }
 
       this.wallet.update(source.selfNumber('wallet'));
@@ -4503,7 +4512,12 @@ export class ClientApp {
       return null;
     }
 
-    return { health: source.selfNumber('health'), fraction: this.selfField('hp') };
+    return {
+      health: source.selfNumber('health'),
+      fraction: this.selfField('hp'),
+      level: this.selfField('level'),
+      xpFraction: source.selfNumber('xp') / 255,
+    };
   }
 
   /** A replicated field of any entity in view, or `NaN`. */

@@ -48,6 +48,7 @@ public sealed class Perception
     private int _mountedArchetype = -1;
     private int _mountedField = -1;
     private int _stanceField = -1;
+    private int _levelField = -1;
     private readonly StoreStructures _view = new();
 
     /// <summary>How far above its own combat level a bot fights (content-levels.md § 7): a creature or an offer past it is left alone.</summary>
@@ -97,9 +98,14 @@ public sealed class Perception
             _mountedArchetype = ownArchetype;
             _mountedField = FieldOf(store, ownArchetype, "mounted");
             _stanceField = FieldOf(store, ownArchetype, "stance");
+            _levelField = FieldOf(store, ownArchetype, "level");
         }
 
         var mounted = _mountedField >= 0 && store.Archetypes[ownArchetype].Numbers[_mountedField] is { } m && m[ownSlot] == 1;
+
+        // The body's combat level (character-level.md § 9), for the caller to bound the hunt with (CombatLevel).
+        var level = _levelField >= 0 && store.Archetypes[ownArchetype].Numbers[_levelField] is { } lv ? (int)lv[ownSlot] : 0;
+
         _view.Bind(store, _structures, _kindField, _regionField, _assetField, _yawField);
         var world = new Perceived
         {
@@ -110,6 +116,7 @@ public sealed class Perception
             BoardRefused = BoardRefusedIn(store),
             Mounted = mounted,
             Stance = _stanceField >= 0 && store.Archetypes[ownArchetype].Numbers[_stanceField] is { } st ? (int)st[ownSlot] : 0,
+            Level = level,
             Structures = _view,
         };
 

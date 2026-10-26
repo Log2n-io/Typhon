@@ -2665,6 +2665,13 @@ public sealed class BotSwarm : IAsyncDisposable
             }
 
             var world = _eyes.Read(Client.Store, _brain.Facilities);
+
+            // Its character's level, off the wire, bounds what it hunts and which offer it prefers from the next read on (character-level.md § 9).
+            if (world.Level > 0)
+            {
+                _eyes.CombatLevel = world.Level;
+            }
+
             if (world.NearestCreature != 0)
             {
                 CreaturesSeenMax = Math.Max(CreaturesSeenMax, 1);

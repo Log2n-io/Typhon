@@ -386,6 +386,9 @@ internal sealed class PlayerCombatSystem : QuerySystem
         .Reads<LairPlacement>()
         .Reads<LairVitals>()
         .Reads<Lair>()
+
+        // The shooter's level, carried on its blow for the drain's level factor (character-level.md § 6).
+        .Reads<PlayerLook>()
         .Input(() => _bridge.PlayerView);
 
     protected override void Execute(TickContext ctx) => _bridge.PlayerCombatTick(ctx);
@@ -429,6 +432,15 @@ internal sealed class CombatResolveSystem : CallbackSystem
         .Reads<CreatureRealm>()
         .Reads<LairPlacement>()
         .Reads<LairRealm>()
+
+        // A death's KillEvent: where it fell, in which realm (character-level.md § 2).
+        .Reads<CreaturePlacement>()
+        .Reads<CreatureRealm>()
+        .Reads<LairPlacement>()
+        .Reads<LairRealm>()
+
+        // The level a blow lands on, for the level factor (character-level.md § 6).
+        .Reads<PlayerLook>()
 
         // The player's: health, the clone's teleport and the recovery it wakes up in, and the target that died with it.
         .Writes<PlayerVitals>()
@@ -492,16 +504,45 @@ internal sealed class MissionDeskSystem : CallbackSystem
         .Writes<LedgerEntry>()
         .Writes<LedgerHead>()
 
-        // The body: whether it is down, where it stands; its journal and its completed count.
+        // The body: whether it is down, where it stands; its journal and its completed count. A mission's XP reaches it through Progression.
         .Reads<PlayerPlacement>()
         .Reads<PlayerVitals>()
         .Reads<PlayerRealm>()
         .Writes<PlayerState>()
+        .Reads<PlayerLook>()
 
-        // Whether an offline holder's character still exists.
-        .Reads<Character>();
+        // Whether an offline holder's character still exists; a completed mission's XP, granted with its reward (character-level.md § 5).
+        .Reads<Character>()
+        .Writes<CharacterProgress>();
 
     protected override void Execute(TickContext ctx) => _bridge.MissionDeskTick(ctx);
+}
+
+/// <summary>
+/// Character level and XP (<c>SimBridge.Progression.cs</c>; character-level.md § 4): every kill the combat drain pushed, paid to its killer's character; the
+/// bodies of those who gained brought up to their level.
+/// </summary>
+/// <remarks>
+/// <para><b>Serial, in <see cref="SimPhases.Report"/></b>, after the whole Economy phase: the lair director reads <see cref="PlayerLook"/> there, and a writer of
+/// it in that phase would have to run before it; here the order is the phases'. The XP goes through a side transaction, the bodies through the tick's.</para>
+/// <para><b>A consumer of two queues</b> (<c>TatooineSim.BuildSchedule</c>): the kills, and the bodies the mission desk paid XP to, which it refreshes for
+/// the desk. Skipped on a tick both are empty (ReactiveSkip): it has no other work.</para>
+/// </remarks>
+internal sealed class ProgressionSystem : CallbackSystem
+{
+    private readonly SimBridge _bridge;
+
+    public ProgressionSystem(SimBridge bridge) => _bridge = bridge;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("Progression")
+        .Phase(SimPhases.Report)
+        .Writes<CharacterProgress>()
+        .Reads<Character>()
+        .Writes<PlayerLook>()
+        .Writes<PlayerVitals>();
+
+    protected override void Execute(TickContext ctx) => _bridge.ProgressionTick(ctx);
 }
 
 /// <summary>
@@ -772,6 +813,7 @@ internal sealed class PlayerSessionSystem : CallbackSystem
         // A6 saves the avatar's position onto its character, and a first login creates the character, both on this tick — dressed in the outfit its
         // account chose at sign-up.
         .Writes<Character>()
+        .Writes<CharacterProgress>()
         .Reads<Account>();
 
     protected override void Execute(TickContext ctx) => TatooineReplication.SessionTick(ctx);

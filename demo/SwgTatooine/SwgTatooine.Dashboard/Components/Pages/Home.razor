@@ -180,6 +180,26 @@
     </section>
 
     <section class="card">
+        <h2>Progression</h2>
+        <div class="kpis">
+            @Kpi("mean CL, people", F(N(st, "progression", "meanCl", "people"), 1))
+            @Kpi("mean CL, bots", F(N(st, "progression", "meanCl", "bots"), 1))
+            @Kpi("people by CL band", ClBands(st, "people"))
+            @Kpi("bots by CL band", ClBands(st, "bots"))
+            @Kpi("XP / char-hour", Rate(st, "progression", "xpPerCharHour"))
+            @Kpi("model's XP / char-hour", F(N(st, "progression", "modelXpPerCharHour"), 0))
+            @Kpi("kill : mission XP", $"{Pct(N(st, "progression", "killXp"), N(st, "progression", "killXp") + N(st, "progression", "missionXp"))} : {Pct(N(st, "progression", "missionXp"), N(st, "progression", "killXp") + N(st, "progression", "missionXp"))}")
+            @Kpi("level-ups / min", Rate(st, "progression", "levelUpsPerMin"))
+            @Kpi("level-ups since start", F(N(st, "progression", "levelUps"), 0))
+            @Kpi("grey kills", F(N(st, "progression", "greyKills"), 0))
+            @Kpi("crowd kills", F(N(st, "progression", "crowdKills"), 0))
+            @Kpi("XP commits failed", F(N(st, "progression", "commitsFailed"), 0), N(st, "progression", "commitsFailed") > 0)
+        </div>
+        @Spark("xp/char-hour", "/h")
+        @Spark("level-ups/min", "/min")
+    </section>
+
+    <section class="card">
         <h2>The crowd at the lairs</h2>
         <div class="kpis">
             @Kpi("lair hits / s", Rate(st, "crowd", "lairHitsPerSec"))
@@ -211,6 +231,23 @@
 
     private static string Rate(JsonNode node, string section, string name)
         => $"{F(N(node, section, name, "10s"), 1)}  ·  {F(N(node, section, name, "60s"), 1)} (60 s)";
+
+    /// <summary>A CL histogram, 1-10 … 41-50, as "27 · 3 · 0 · 0 · 0".</summary>
+    private static string ClBands(JsonNode node, string who)
+    {
+        if (node?["progression"]?["bands"]?[who] is not JsonArray bands)
+        {
+            return "—";
+        }
+
+        var parts = new string[bands.Count];
+        for (var i = 0; i < bands.Count; i++)
+        {
+            parts[i] = bands[i]?.ToString() ?? "0";
+        }
+
+        return string.Join(" · ", parts);
+    }
 
     /// <summary>A band count array of <c>/swg/stats</c>'s <c>levels</c>, as "a / b / c / d / e".</summary>
     private static string Bands(JsonNode node, string name)

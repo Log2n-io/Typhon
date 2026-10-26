@@ -53,6 +53,13 @@ internal struct CombatEvent
 
     /// <summary>Which archetype <see cref="Target"/> belongs to. See <see cref="CombatTargetKind"/>.</summary>
     public byte TargetKind;
+
+    /// <summary>
+    /// The attacker's level, for the B4 level factor the drain applies to <see cref="Amount"/> (character-level.md § 6): a character's CL, a creature's content
+    /// level, <see cref="TatooineData.CrowdLevel"/> for a scripted body; 0 for none, which scales nothing.
+    /// </summary>
+    /// <remarks>Carried, so the drain opens no extra entity: it has the target open already and reads its level there. In the padding: still 24 bytes.</remarks>
+    public byte AttackerLevel;
 }
 
 /// <summary>What a <see cref="CombatEvent"/> is.</summary>
@@ -139,6 +146,17 @@ internal struct KillEvent
 
     /// <summary>Its creature template (<see cref="CreatureTemplates"/>): the brain's for a creature or foe, the lair's for a lair. What loot is made of.</summary>
     public byte Species;
+}
+
+/// <summary>A body to bring up to its character's progress: what the mission desk hands <c>Progression</c> after paying a mission's XP (character-level.md § 5).</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct ProgressRefresh
+{
+    /// <summary>The holder's body.</summary>
+    public EntityId Body;
+
+    /// <summary>Its character's progress, as the desk committed it.</summary>
+    public CharacterProgress Progress;
 }
 
 /// <summary>What a <see cref="KillEvent"/> killed.</summary>

@@ -298,6 +298,7 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.RegisterComponentFromAccessor<Account>();
         Dbe.RegisterComponentFromAccessor<AccountSecret>();
         Dbe.RegisterComponentFromAccessor<Character>();
+        Dbe.RegisterComponentFromAccessor<CharacterProgress>();
 
         // Missions (missions.md): offers listed at the terminals, and the held missions — Versioned and non-spatial like Character, for the same reasons.
         Dbe.RegisterComponentFromAccessor<MissionOfferPlacement>();

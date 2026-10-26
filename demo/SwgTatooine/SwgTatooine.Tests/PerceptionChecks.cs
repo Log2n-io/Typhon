@@ -3,6 +3,7 @@ using Typhon.Client;
 using Typhon.Protocol;
 using SwgTatooine.Bots.Brain;
 using SwgTatooine.Server;
+using SwgTatooine.Server.Terrain;
 using Typhon.Engine;
 
 namespace SwgTatooine.Tests;
@@ -158,6 +159,61 @@ internal sealed class PerceptionChecks : ServedChecks
             Assert.That(high.NearestCreatureLevel, Is.EqualTo(45), "the level read off the wire is not the snakes'");
             Assert.That(snakes, Does.Not.Contain(low.NearestCreature), "a CL-1 bot was offered a level-45 snake to hunt");
             Assert.That(low.NearestCreatureLevel, Is.LessThanOrEqualTo(1 + Perception.LevelReach), "a CL-1 bot saw a creature past its reach");
+        });
+    }
+
+    /// <summary>
+    /// character-level.md § 9: a bot reads its own combat level off the wire, and, given it, hunts what is within it — a CL 12 character's bot takes on a
+    /// level 15 creature that a CL 1 bot leaves alone.
+    /// </summary>
+    /// <remarks>The character is given CL 12 between two logins, so the body that carries it is spawned with it, as any login's is.</remarks>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void APerceivedBot_ReadsItsLevel_AndHuntsWithinIt()
+    {
+        var config = Worlds.Served(Dir);
+        config.SpawnSpread = 0;
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+        Harness = new SessionHarness(sim);
+        var account = EntityId.FromRawValue(0x8301);
+        var first = Harness.Connect(TatooineReplication.PlayerKind, account);
+        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the first body to be spawned");
+        Harness.Ticks(2);
+        Assert.That(SwgTatooine.Server.Accounts.CharacterStore.TryFind(sim.Dbe, account, out var character, out _), Is.True, "no character");
+        sim.WriteInTick(tx => tx.OpenMut(character).Set(CharacterArch.Progress, new CharacterProgress { Level = 12, Xp = Progression.XpAt(12) }));
+        var destroyed = TatooineReplication.AvatarsDestroyed;
+        first.Close(CloseCodes.Normal, "logging out");
+        SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed > destroyed, "the first body to be destroyed");
+
+        var link = Harness.Connect(TatooineReplication.PlayerKind, account);
+        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 2, "the second body to be spawned");
+        Harness.Ticks(2);
+        var body = TatooineReplication.ControlledBy(sim.Dbe, link.Session);
+        PlayerPlacement at = default;
+        sim.WriteInTick(tx => at = tx.Open(body).Read(Player.Bounds));
+
+        var lair = EntityId.Null;
+        sim.WriteInTick(tx =>
+        {
+            var rng = new Rng(11);
+            lair = WorldBuilder.SpawnLair(tx, ref rng, CreatureTemplates.Frog, 15, at.X + 15f, at.Z, site: 0, expireTick: 0, config,
+                TerrainField.Shared(config.ContentScale), 0);
+        });
+        SessionHarness.UntilNamed(link.Session, lair, "the lair to reach the bot's view");
+        Harness.Ticks(6);
+
+        // As BotSwarm does: the level read becomes the bound of the next read.
+        var eyes = new Perception();
+        var low = Replay(link, new WorldStore(link.Plan), eyes, new FacilityMap());
+        eyes.CombatLevel = low.Level;
+        var world = Replay(link, new WorldStore(link.Plan), eyes, new FacilityMap());
+        Assert.Multiple(() =>
+        {
+            Assert.That(low.Level, Is.EqualTo(12), "the bot did not read its own level off the wire");
+            Assert.That(low.NearestCreatureLevel, Is.Not.EqualTo(15), "the premise: a CL 1 bound leaves the level 15 frogs alone");
+            Assert.That(world.NearestCreatureLevel, Is.EqualTo(15), "a CL 12 bot left a level 15 creature, within its reach, alone");
         });
     }
 
