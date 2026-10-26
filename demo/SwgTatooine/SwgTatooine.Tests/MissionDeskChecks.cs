@@ -449,6 +449,86 @@ internal sealed class MissionDeskChecks : ServedChecks
         });
     }
 
+    /// <summary>
+    /// CL-11, from real frames: <c>level</c> is on the wire, on enter, for every offer at the terminal, for a mission's lair and for every one of its
+    /// defenders, and each decoded value is the stored one.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void TheLevel_IsOnTheWire()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x6014), terminal);
+        var character = CharacterOf(sim, AnAccount(0x6014));
+        var offers = Offers(sim, terminal);
+        Harness.Ticks(4);
+        var store = new Typhon.Client.WorldStore(link.Plan);
+        Replay(link, store);
+        var seen = 0;
+        Assert.Multiple(() =>
+        {
+            foreach (var (id, info) in offers)
+            {
+                var wire = LevelOnTheWire(store, SessionHarness.NetIdOf(link.Session, id));
+                if (wire >= 0)
+                {
+                    seen++;
+                    Assert.That(wire, Is.EqualTo(info.Level), $"offer {info.Serial}");
+                }
+            }
+        });
+        Assert.That(seen, Is.GreaterThan(0), "no offer's level was decoded");
+
+        var held = TakeAndHold(sim, link, character, offers[0]);
+        Worlds.Park(sim, link.Session, held.Mission.LairX + 15f, held.Mission.LairZ, out var parked);
+        SessionHarness.UntilNamed(link.Session, held.Mission.Lair, "the lair in the view", parked);
+        Harness.Ticks(4);
+        store = new Typhon.Client.WorldStore(link.Plan);
+        Replay(link, store);
+        var defenders = new List<(EntityId Id, int Level)>();
+        using (var tx = sim.Dbe.CreateQuickTransaction())
+        {
+            foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+            {
+                var homes = cluster.GetReadOnlySpan(Creature.Home);
+                var brains = cluster.GetReadOnlySpan(Creature.Ai);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    EntityId home = homes[slot].Lair;
+                    if (home == held.Mission.Lair)
+                    {
+                        defenders.Add((cluster.GetEntityId(slot), brains[slot].Level));
+                    }
+                }
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(LevelOnTheWire(store, SessionHarness.NetIdOf(link.Session, held.Mission.Lair)), Is.EqualTo(held.Mission.Level), "the lair's level");
+            Assert.That(defenders, Is.Not.Empty, "the lair has no defenders");
+            foreach (var (id, level) in defenders)
+            {
+                Assert.That(LevelOnTheWire(store, SessionHarness.NetIdOf(link.Session, id)), Is.EqualTo(level), $"defender {id}");
+            }
+        });
+    }
+
+    /// <summary>The <c>level</c> a store decoded for an entity, or -1 when it holds none.</summary>
+    private static int LevelOnTheWire(Typhon.Client.WorldStore store, uint netId)
+    {
+        if (netId == 0 || !store.TryLocate(netId, out var archetype, out var slot))
+        {
+            return -1;
+        }
+
+        var set = store.Archetypes[archetype];
+        var field = Array.FindIndex(set.Plan.Fields, f => f.Name == "level");
+        return field < 0 || set.Numbers[field] == null ? -1 : (int)set.Numbers[field][slot];
+    }
+
     private static void Replay(FakeLink link, Typhon.Client.WorldStore store)
     {
         var applier = new Typhon.Client.FrameApplier(store);
