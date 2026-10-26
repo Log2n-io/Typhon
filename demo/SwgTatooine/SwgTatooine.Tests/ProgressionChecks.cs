@@ -421,20 +421,34 @@ internal sealed class ProgressionChecks : ServedChecks
 
     // ── Persistence and the endpoint ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>CH-7: progress survives a stop with the player in the world, and the next body carries it.</summary>
+    /// <summary>
+    /// CH-7: progress survives a reopen after a crash — a kill's grant, its level-up included, then the plug pulled with no logout — and the next body
+    /// carries it.
+    /// </summary>
+    /// <remarks>"Crash" as <c>AvatarLoginChecks.AKillWithNoLogoutCostsAtMostTheCadence</c> has it: no Close, no logout, the session dropped.</remarks>
     [Test]
     [CancelAfter(120_000)]
     [Category("Integration")]
-    public void ProgressSurvivesAReopen_AndTheNextBodyCarriesIt()
+    public void ProgressSurvivesAReopenAndACrash()
     {
-        var saved = new CharacterProgress { Level = 4, Xp = Progression.XpAt(4) + 7, KillXp = Progression.XpAt(4) - 100, MissionXp = 107 };
         EntityId character;
+        CharacterProgress saved;
         using (var first = Start(persist: true))
         {
             var me = LogIn(first, 0x8151);
             character = me.Character;
-            first.WriteInTick(tx => tx.OpenMut(character).Set(CharacterArch.Progress, saved));
+            var tap = new ConcurrentQueue<KillEvent>();
+            first.Bridge.KillTap = tap;
+            first.WriteInTick(tx => tx.OpenMut(character).Set(CharacterArch.Progress, new CharacterProgress { Level = 1, Xp = 200, KillXp = 200 }));
+            var wild = StageLair(first, me, CreatureTemplates.Frog, level: 3, gapM: 10f, keepOccupants: false);
+            SetLairHealth(first, wild, 1);
+            Kill(first, me, wild, wild, tap);
+            SessionHarness.Until(() => ProgressOf(first, character).Xp > 200, "the kill to be paid");
             Harness.Ticks(3);
+            saved = ProgressOf(first, character);
+            Assert.That(saved.Level, Is.EqualTo(2), "the premise: the kill took the character to CL 2");
+
+            // The plug pulled: no Close, no logout.
             Harness.Release();
         }
 
@@ -450,12 +464,66 @@ internal sealed class ProgressionChecks : ServedChecks
         {
             Assert.That(back.Character, Is.EqualTo(character));
             Assert.That(progress.Level, Is.EqualTo(saved.Level));
+            Assert.That(progress.Xp, Is.EqualTo(200 + Progression.KillXp(KillVictimKind.Lair, 3, 1)));
             Assert.That(progress.Xp, Is.EqualTo(saved.Xp));
             Assert.That(progress.KillXp, Is.EqualTo(saved.KillXp));
-            Assert.That(progress.MissionXp, Is.EqualTo(saved.MissionXp));
-            Assert.That(body.Look.Level, Is.EqualTo(4));
-            Assert.That(body.Vitals.MaxHealth, Is.EqualTo(Progression.HealthFor(4)));
-            Assert.That(body.Vitals.Health, Is.EqualTo(Progression.HealthFor(4)));
+            Assert.That(body.Look.Level, Is.EqualTo(2), "the next body does not carry the level");
+            Assert.That(body.Look.Xp, Is.EqualTo(Progression.XpByte(in progress)));
+            Assert.That(body.Vitals.MaxHealth, Is.EqualTo(Progression.HealthFor(2)));
+            Assert.That(body.Vitals.Health, Is.EqualTo(Progression.HealthFor(2)));
+        });
+    }
+
+    /// <summary>
+    /// CH-4: two shooters' lethal blows on one creature in one drain make one KillEvent, and one character is paid: the second blow finds a corpse.
+    /// </summary>
+    /// <remarks>Both avatars fight the frog, then on one tick it is put one blow from death and both weapons are re-armed, so both fire on the next.</remarks>
+    [Test]
+    [CancelAfter(120_000)]
+    [Category("Integration")]
+    public void TwoShootersOnOneCorpse_MakeOneKillEvent()
+    {
+        using var sim = Start();
+        var a = LogIn(sim, 0x8181);
+        var b = LogIn(sim, 0x8182);
+        var tap = new ConcurrentQueue<KillEvent>();
+        sim.Bridge.KillTap = tap;
+        var frogs = StageLair(sim, a, CreatureTemplates.Frog, level: 5, gapM: 10f, keepOccupants: true);
+        var frog = OccupantOf(sim, frogs, level: 5, health: 1_000_000);
+        foreach (var me in new[] { a, b })
+        {
+            SessionHarness.Until(() => SessionHarness.NetIdOf(me.Link.Session, frog) != 0, "the frog to reach both views");
+            me.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(me.Link.Session, frog)));
+            me.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
+        }
+
+        SessionHarness.Until(() => TatooineReplication.Intents.TargetsSet >= 2, "both targets to be accepted");
+        Harness.Ticks(Worlds.ServedHz);
+        sim.WriteInTick(tx =>
+        {
+            var creature = tx.OpenMut(frog);
+            var v = creature.Read(Creature.Vitals);
+            v.Health = 1;
+            creature.Set(Creature.Vitals, v);
+            foreach (var body in new[] { a.Body, b.Body })
+            {
+                var player = tx.OpenMut(body);
+                var pv = player.Read(Player.Vitals);
+                pv.AttackCooldown = 0;
+                player.Set(Player.Vitals, pv);
+            }
+        });
+        SessionHarness.Until(() => tap.Any(e => e.Victim == frog), "the frog's death to be pushed");
+        Harness.Ticks(Worlds.ServedHz);
+
+        var paidA = ProgressOf(sim, a.Character).Xp;
+        var paidB = ProgressOf(sim, b.Character).Xp;
+        var death = tap.First(e => e.Victim == frog);
+        Assert.Multiple(() =>
+        {
+            Assert.That(tap.Count(e => e.Victim == frog), Is.EqualTo(1), "one death made more than one KillEvent");
+            Assert.That(death.Killer == a.Body || death.Killer == b.Body, Is.True, "the killer is neither shooter");
+            Assert.That(paidA == 0 ^ paidB == 0, Is.True, $"paid A {paidA} and B {paidB}: exactly one shooter is the killer");
         });
     }
 
@@ -616,8 +684,8 @@ internal sealed class ProgressionChecks : ServedChecks
         return lair;
     }
 
-    /// <summary>One of a lair's occupants, one blow from death.</summary>
-    private static EntityId OccupantOf(TatooineSim sim, EntityId lair, int level)
+    /// <summary>One of a lair's occupants, at <paramref name="health"/>: by default one blow from death.</summary>
+    private static EntityId OccupantOf(TatooineSim sim, EntityId lair, int level, int health = 1)
     {
         var found = EntityId.Null;
         var staged = 0;
@@ -643,7 +711,7 @@ internal sealed class ProgressionChecks : ServedChecks
 
             var body = tx.OpenMut(found);
             var vitals = body.Read(Creature.Vitals);
-            vitals.Health = 1;
+            vitals.Health = health;
             body.Set(Creature.Vitals, vitals);
             staged = body.Read(Creature.Ai).Level;
         });
