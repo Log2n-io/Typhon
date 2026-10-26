@@ -131,9 +131,9 @@ Recovery replays the WAL and reconstructs every transaction whose commit record 
 | Hot field overwritten every tick, OK to lose ≤1 tick (position, velocity, health) | **`SingleVersion`** (default `TickFence`) |
 | A `SingleVersion` write that must be atomic + never lost, but I don't need MVCC (teleport, item pickup, currency debit) | `SingleVersion` + **`Commit` discipline** |
 | Pure per-frame scratch that must *not* survive restart (targeting temporaries, input buffers) | **`Transient`** |
-| Microsecond commits, a few ms of loss acceptable (general game/server tick) | **`GroupCommit`** |
+| Microsecond commits, a few ms of loss acceptable (general server workload, request handlers) | **`GroupCommit`** |
 | Never acknowledge a commit that isn't on disk (financial, irreversible) | **`Immediate`** |
-| Flush once at the end of a bulk load | **`Deferred`**, then `Flush()` |
+| Flush once at the tick boundary or bulk-load end — caller controls when | **`Deferred`**, then `Flush()` |
 | Read millions of entities across all cores at one consistent snapshot | `PointInTimeAccessor` — see [§8](#8-naming-traps) & [ch.5](05-systems.md) |
 
 ---
