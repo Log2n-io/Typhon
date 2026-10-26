@@ -48,6 +48,7 @@ import type { HealthBar } from '../render/labels';
 import { DamageText, type Anchor } from '../render/damage-text';
 import type { AnimationGraph } from '../character/animation-graph';
 import { PlayerNameDirectory } from '../data/player-names';
+import { entityTag, viewerClOf, type EntityTag } from '../data/content-level';
 import { MissionJournal, missionTitle, type MissionOffer } from '../data/missions';
 import { playerMenuItems, WalletReader } from '../data/wallet';
 import { itemIcons, parseInventory, type InventorySnapshot } from '../data/items';
@@ -406,12 +407,17 @@ function hitInside(hit: PickHit): boolean {
 
 /** What the ticket terminal is called on its tag. */
 const TICKET_TERMINAL_LABEL = 'Ticket terminal';
+const TICKET_TERMINAL_TAG: EntityTag = entityTag(TICKET_TERMINAL_LABEL, 0, null);
 
 /** The mission terminal's asset: its `mission` interaction is where the terminal is used from (missions.md § 5). */
 const MISSION_TERMINAL_ASSET = 'mission_terminal';
 
 /** What a selected mission terminal is tagged. */
 const MISSION_TERMINAL_LABEL = 'Mission terminal';
+const MISSION_TERMINAL_TAG: EntityTag = entityTag(MISSION_TERMINAL_LABEL, 0, null);
+
+/** A tag before anything was tagged. */
+const NO_TAG: EntityTag = entityTag('', 0, null);
 
 /** How often an open terminal's list is gathered from the replicated offers, milliseconds: offers change a few times a minute. */
 const OFFER_SCAN_MS = 250;
@@ -661,18 +667,23 @@ export class ClientApp {
   private arrivedX = 0;
   private arrivedZ = 0;
 
-  private selectionText = '';
+  private selectionText: EntityTag = NO_TAG;
   /** The netId and archetype {@link selectionText} was built for: netIds are reused, by another archetype too. */
   private selectionTextNetId = 0;
   private selectionTextArchetype = -1;
   /** The {@link names} version the selection's text was built against: a name arriving later rebuilds it. */
   private selectionTextNames = -1;
+  /** The entity's level and the viewer's CL it was built with: a level-up on either side recolours it. */
+  private selectionTextLevel = 0;
+  private selectionTextViewer: number | null = null;
   /** The hovered thing's tag this frame, or `null`: the selection's text for what the pointer is over, cached the same way. */
-  private hoverTag: string | null = null;
-  private hoverText = '';
+  private hoverTag: EntityTag | null = null;
+  private hoverText: EntityTag = NO_TAG;
   private hoverTextNetId = 0;
   private hoverTextArchetype = -1;
   private hoverTextNames = -1;
+  private hoverTextLevel = 0;
+  private hoverTextViewer: number | null = null;
   /** Where {@link hoverTag} goes: the hover frame's rectangle, kept before the selection's frame reuses {@link frameRect}. */
   private readonly hoverRect: ScreenRect = { left: 0, top: 0, right: 0, bottom: 0 };
   /** The selection's frame, kept for its tag: the bars' frames are measured into {@link frameRect} after it. */
@@ -4158,15 +4169,21 @@ export class ClientApp {
     // renderer's own meshes do: `headingOf`'s fallback, not a snap to north.
     this.selectedY = this.evalY;
     this.selectedHeading = headingOf(this.evalVx, this.evalVz, this.selectedHeading);
+    const level = this.levelOf(netId);
+    const viewerCl = this.viewerCl();
     if (
       this.selectionTextNetId !== netId ||
       this.selectionTextArchetype !== this.evalArchetype ||
-      this.selectionTextNames !== this.names.version
+      this.selectionTextNames !== this.names.version ||
+      this.selectionTextLevel !== level ||
+      this.selectionTextViewer !== viewerCl
     ) {
       this.selectionTextNetId = netId;
       this.selectionTextArchetype = this.evalArchetype;
       this.selectionTextNames = this.names.version;
-      this.selectionText = this.tagText(netId, this.evalArchetype);
+      this.selectionTextLevel = level;
+      this.selectionTextViewer = viewerCl;
+      this.selectionText = this.tagText(netId, this.evalArchetype, level, viewerCl);
     }
 
     return true;
@@ -4179,8 +4196,11 @@ export class ClientApp {
    * thing of that name where the viewer is looking. A real player by its account's name (A12: the replicated `nameId`,
    * resolved over HTTP, same day); the scripted crowd carries none. Everything else keeps its archetype and netId — and a
    * player whose name has not arrived yet keeps it until it does.
+   *
+   * The level follows the name — `name (CL 5)`, in its con colour against the viewer's CL (Loïc, 2026-10-26) — for whatever
+   * replicates a `level`: a player's body, a creature, a lair. The crowd's is 0, and says none.
    */
-  private tagText(netId: number, archetypeIndex: number): string {
+  private tagText(netId: number, archetypeIndex: number, level: number, viewerCl: number | null): EntityTag {
     const archetype = this.archetypes.name(archetypeIndex);
     const kindName =
       archetype === STRUCTURE_ARCHETYPE
@@ -4188,26 +4208,44 @@ export class ClientApp {
         : archetype === 'Player'
           ? (this.names.nameOf(this.fieldOf(netId, 'nameId')) ?? undefined)
           : undefined;
-    return kindName ?? `${this.archetypes.label(archetypeIndex)} #${netId}`;
+    return entityTag(kindName ?? `${this.archetypes.label(archetypeIndex)} #${netId}`, level, viewerCl);
   }
 
-  /** The hovered entity's tag text, rebuilt only when what is hovered, or the names behind it, changed. */
-  private hoverTextOf(netId: number): string | null {
+  /** An entity's replicated `level`, 0 for none: an archetype without one, or the crowd. */
+  private levelOf(netId: number): number {
+    const level = this.fieldOf(netId, 'level');
+    return Number.isFinite(level) && level > 0 ? level : 0;
+  }
+
+  /** The controlled avatar's combat level, what con colours compare with — the HUD's CL; `null` without one: the god camera. */
+  private viewerCl(): number | null {
+    const source = this.source;
+    return source === null || !source.canPlay ? null : viewerClOf(this.selfField('level'));
+  }
+
+  /** The hovered entity's tag text, rebuilt only when what is hovered, the names behind it, or a level changed. */
+  private hoverTextOf(netId: number): EntityTag | null {
     const location = this.world.locate(netId);
     if (location === NOT_FOUND) {
       return null;
     }
 
     const archetype = archetypeOf(location);
+    const level = this.levelOf(netId);
+    const viewerCl = this.viewerCl();
     if (
       this.hoverTextNetId !== netId ||
       this.hoverTextArchetype !== archetype ||
-      this.hoverTextNames !== this.names.version
+      this.hoverTextNames !== this.names.version ||
+      this.hoverTextLevel !== level ||
+      this.hoverTextViewer !== viewerCl
     ) {
       this.hoverTextNetId = netId;
       this.hoverTextArchetype = archetype;
       this.hoverTextNames = this.names.version;
-      this.hoverText = this.tagText(netId, archetype);
+      this.hoverTextLevel = level;
+      this.hoverTextViewer = viewerCl;
+      this.hoverText = this.tagText(netId, archetype, level, viewerCl);
     }
 
     return this.hoverText;
@@ -4733,7 +4771,7 @@ export class ClientApp {
    *
    * @returns Whether the selection was framed, its rectangle then in {@link frameRect} — where its tag is placed.
    */
-  private updateSelectionFeedback(matrix: ArrayLike<number>, selected: number, playing: boolean): string | null {
+  private updateSelectionFeedback(matrix: ArrayLike<number>, selected: number, playing: boolean): EntityTag | null {
     const width = this.cssSize.width;
     const height = this.cssSize.height;
     const self = this.source?.selfNetId ?? 0;
@@ -4772,8 +4810,8 @@ export class ClientApp {
       this.hoverTag =
         hoveredPart !== null
           ? hoveredPart.kind === 'mission'
-            ? MISSION_TERMINAL_LABEL
-            : TICKET_TERMINAL_LABEL
+            ? MISSION_TERMINAL_TAG
+            : TICKET_TERMINAL_TAG
           : this.hoverTextOf(hovered);
       this.hoverRect.left = this.frameRect.left;
       this.hoverRect.right = this.frameRect.right;
@@ -4794,7 +4832,7 @@ export class ClientApp {
 
       this.frames.show(1, this.frameRect, 'passive');
       this.keepSelectionRect();
-      return selectedPart.kind === 'mission' ? MISSION_TERMINAL_LABEL : TICKET_TERMINAL_LABEL;
+      return selectedPart.kind === 'mission' ? MISSION_TERMINAL_TAG : TICKET_TERMINAL_TAG;
     }
 
     if (selected === 0 || !this.frameOf(matrix, selected, width, height)) {

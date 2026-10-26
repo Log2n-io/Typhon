@@ -1,4 +1,4 @@
-import { conColour } from '../data/content-level';
+import { conClass, viewerClOf } from '../data/content-level';
 import { inspectorTitle } from '../data/progress';
 import { doorRealmOf } from '../data/realm-view';
 import { useStats } from '../state/stats-store';
@@ -21,8 +21,7 @@ export function Inspector() {
   const ridingNetId = useStats((s) => s.stats?.ridingNetId) ?? 0;
 
   // The viewer's combat level, for a level's con colour (character-level.md § 8); none for the god camera.
-  const viewerLevel = useStats((s) => s.stats?.vitals?.level ?? Number.NaN);
-  const viewerCl = Number.isFinite(viewerLevel) && viewerLevel > 0 ? viewerLevel : null;
+  const viewerCl = useStats((s) => viewerClOf(s.stats?.vitals?.level));
   if (selectedNetId === 0) {
     return null;
   }
@@ -82,11 +81,11 @@ export function Inspector() {
             )}
             {inspection.fields.map((f) => {
               // A level reads in its con colour against the viewer's CL (content-levels.md § 6): neutral until the CL is replicated.
-              const con = f.name === 'level' ? conColour(Number(f.value), viewerCl) : null;
+              const con = f.name === 'level' ? conClass(Number(f.value), viewerCl) : undefined;
               return (
                 <tr key={f.name}>
                   <td>{f.name}</td>
-                  <td className={con === null ? undefined : `con-${con}`}>{f.value}</td>
+                  <td className={con}>{f.value}</td>
                 </tr>
               );
             })}
