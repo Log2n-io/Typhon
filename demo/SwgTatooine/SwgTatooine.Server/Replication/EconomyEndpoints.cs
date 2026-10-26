@@ -102,7 +102,11 @@ public static class EconomyEndpoints
     public const int MaxLedgerPage = 1_000;
 
     // One engine's indexes, published whole: a reader holds the set it read, so another engine's resolution can never change them under it.
-    private sealed record IndexSet(DatabaseEngine Dbe, IndexRef BySeq, IndexRef ByFrom, IndexRef ByTo, IndexRef WalletByOwner, IndexRef HeadByKey);
+    private sealed record IndexSet(DatabaseEngine Dbe, IndexRef BySeq, IndexRef ByFrom, IndexRef ByTo, IndexRef WalletByOwner, IndexRef HeadByKey)
+    {
+        /// <summary>Each wallet's newest rows, read since only by what was appended: see <see cref="RecentRowCache{T}"/>.</summary>
+        public RecentRowCache<LedgerEntry> Recent { get; } = new(static r => r.Seq, static r => r.From, static r => r.To, RecentRows);
+    }
 
     private static IndexSet _indexes;
 
@@ -193,11 +197,15 @@ public static class EconomyEndpoints
             }
         }
 
-        // The last RecentRows of each side, then the last RecentRows of both: a wallet's rows are two range scans of their side's index.
-        var rows = new List<LedgerEntry>();
-        Collect(tx, ix.ByFrom, key, rows);
-        Collect(tx, ix.ByTo, key, rows);
-        rows.Sort(static (x, y) => y.Seq.CompareTo(x.Seq));
+        // The last RecentRows of both sides: the first read of a wallet is two range scans of their side's index, a later one only the rows appended since
+        // (RecentRowCache).
+        var lastSeq = 0L;
+        using (var heads = tx.EnumerateIndex<LedgerHead, int>(ix.HeadByKey, EconomyLedger.HeadKey, EconomyLedger.HeadKey))
+        {
+            lastSeq = heads.MoveNext() ? heads.CurrentComponent.LastSeq : 0;
+        }
+
+        var rows = ix.Recent.Read(tx, ix.BySeq, ix.ByFrom, ix.ByTo, key, lastSeq);
         var json = new StringBuilder(512);
         json.Append("{\"open\":").Append(open ? "true" : "false").Append(",\"credits\":").Append(credits).Append(",\"transfers\":[");
         for (var i = 0; i < rows.Count && i < RecentRows; i++)
@@ -476,24 +484,6 @@ public static class EconomyEndpoints
     }
 
     private static long Get(Dictionary<long, long> map, long key) => map.TryGetValue(key, out var v) ? v : 0;
-
-    private static void Collect(Transaction tx, IndexRef index, long key, List<LedgerEntry> into)
-    {
-        var start = into.Count;
-        using var rows = tx.EnumerateIndex<LedgerEntry, long>(index, key, key);
-        while (rows.MoveNext())
-        {
-            into.Add(rows.CurrentComponent);
-        }
-
-        // Only the most recent RecentRows of this side can be among the most recent of both.
-        var mine = into.Count - start;
-        if (mine > RecentRows)
-        {
-            into.Sort(start, mine, Comparer<LedgerEntry>.Create(static (x, y) => y.Seq.CompareTo(x.Seq)));
-            into.RemoveRange(start + RecentRows, mine - RecentRows);
-        }
-    }
 
     /// <summary>The other side's name: <c>"World"</c>, a character's, or null for one that is gone.</summary>
     private static string NameOf(Transaction tx, long account)

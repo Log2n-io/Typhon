@@ -130,7 +130,11 @@ public static class ItemEndpoints
     internal const string Empty = "{\"open\":false,\"slots\":30,\"items\":[],\"recent\":[],\"lost\":[]}";
 
     private sealed record IndexSet(DatabaseEngine Dbe, IndexRef BySeq, IndexRef ByFrom, IndexRef ByTo, IndexRef StackByOwner, IndexRef HeadByKey,
-        IndexRef WalletByOwner, IndexRef CreditBySeq);
+        IndexRef WalletByOwner, IndexRef CreditBySeq)
+    {
+        /// <summary>Each character's newest rows, read since only by what was appended: see <see cref="RecentRowCache{T}"/>.</summary>
+        public RecentRowCache<ItemLedgerEntry> Recent { get; } = new(static r => r.Seq, static r => r.From, static r => r.To, RecentRows);
+    }
 
     private static IndexSet _indexes;
 
@@ -230,10 +234,13 @@ public static class ItemEndpoints
                 .Append('}');
         }
 
-        var rows = new List<ItemLedgerEntry>();
-        Collect(tx, ix.ByFrom, key, rows);
-        Collect(tx, ix.ByTo, key, rows);
-        rows.Sort(static (x, y) => y.Seq.CompareTo(x.Seq));
+        var lastSeq = 0L;
+        using (var heads = tx.EnumerateIndex<ItemLedgerHead, int>(ix.HeadByKey, ItemLedger.HeadKey, ItemLedger.HeadKey))
+        {
+            lastSeq = heads.MoveNext() ? heads.CurrentComponent.LastSeq : 0;
+        }
+
+        var rows = ix.Recent.Read(tx, ix.BySeq, ix.ByFrom, ix.ByTo, key, lastSeq);
         json.Append("],\"recent\":[");
         for (var i = 0; i < rows.Count && i < RecentRows; i++)
         {
@@ -676,24 +683,6 @@ public static class ItemEndpoints
     private static int Key(ushort template, byte mk) => (template * 8) + mk;
 
     private static long Get(Dictionary<int, long> map, int key) => map.TryGetValue(key, out var v) ? v : 0;
-
-    private static void Collect(Transaction tx, IndexRef index, long key, List<ItemLedgerEntry> into)
-    {
-        var start = into.Count;
-        using var rows = tx.EnumerateIndex<ItemLedgerEntry, long>(index, key, key);
-        while (rows.MoveNext())
-        {
-            into.Add(rows.CurrentComponent);
-        }
-
-        // Only the most recent RecentRows of this side can be among the most recent of both.
-        var mine = into.Count - start;
-        if (mine > RecentRows)
-        {
-            into.Sort(start, mine, Comparer<ItemLedgerEntry>.Create(static (x, y) => y.Seq.CompareTo(x.Seq)));
-            into.RemoveRange(start + RecentRows, mine - RecentRows);
-        }
-    }
 
     /// <summary>The indexes, resolved once per engine.</summary>
     private static IndexSet Indexes(DatabaseEngine dbe)
