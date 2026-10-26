@@ -61,25 +61,51 @@ public sealed class AssetPlan
     /// <summary>A room's floor graph (§ 5.9), or null.</summary>
     public RoomNav Nav { get; init; }
 
-    /// <summary>Whether a point, in this asset's frame, stands inside its ring: on its floor, with no wall of the ring between it and the origin.</summary>
+    /// <summary>
+    /// Whether a point, in this asset's frame, stands shut in by its ring: on its floor, no wall of the ring between it and the origin, and one between
+    /// it and the floor's rim straight on out.
+    /// </summary>
     /// <remarks>
+    /// <para>
     /// <b>The line to the origin, not a radius.</b> The published port's ring is square boxes round a circle: the diagonal ones reach in to 17.7 m while a
     /// body stands against the wall at 19.1 m on the axes — a radius small enough to be inside everywhere missed the bodies pressed against the wall,
-    /// which are the ones that needed it. A point in the gate sees the origin through it and counts as inside, which only walks it the few metres out.
+    /// which are the ones that needed it.
+    /// </para>
+    /// <para>
+    /// <b>And the line out, so the gate is not inside.</b> A body crossing the gate's mouth sees the origin through it; counted inside, every bot walking
+    /// past it to the mission terminal or the bazaar beside the gate was turned round and lost its errand — 99 of the first 121 walks out (live,
+    /// 2026-10-26). One standing in line with the gate sees out of it too, and walks out through it.
+    /// </para>
     /// </remarks>
-    public bool Encloses(float x, float z)
+    public bool Encloses(float x, float z) => Within(x, z, out var shut) && shut;
+
+    /// <summary>
+    /// Whether a point, in this asset's frame, is on the ring's side of its walls — inside, or in its gate — where a walk that is only going past has
+    /// no business ending: a stretch's end or a detour's point there is walked in through the gate.
+    /// </summary>
+    public bool Within(float x, float z) => Within(x, z, out _);
+
+    private bool Within(float x, float z, out bool shut)
     {
-        if (_floorM <= 0f || (x * x) + (z * z) >= _floorM * _floorM)
+        shut = false;
+        var r2 = (x * x) + (z * z);
+        if (_floorM <= 0f || r2 >= _floorM * _floorM)
         {
             return false;
         }
 
+        // Straight on out from the point, to past the floor's rim.
+        var r = MathF.Sqrt(r2);
+        var outward = r > 1e-3f ? (_floorM + 1f) / r : 0f;
         foreach (var w in _ring)
         {
-            if (SegmentHits(x, z, in w))
+            if (SegmentHits(0f, 0f, x, z, in w))
             {
+                shut = false;
                 return false;
             }
+
+            shut |= outward > 0f && SegmentHits(x, z, x * outward, z * outward, in w);
         }
 
         return true;
@@ -120,22 +146,22 @@ public sealed class AssetPlan
         return ring.Count == 0 ? (0f, []) : (floor, [.. ring]);
     }
 
-    /// <summary>Whether the segment from the origin to (<paramref name="x"/>, <paramref name="z"/>) passes through a box's plan: the slab test.</summary>
-    private static bool SegmentHits(float x, float z, in PlanBox box)
+    /// <summary>Whether the segment from (<paramref name="ax"/>, <paramref name="az"/>) to (<paramref name="bx"/>, <paramref name="bz"/>) passes through a box's plan: the slab test.</summary>
+    private static bool SegmentHits(float ax, float az, float bx, float bz, in PlanBox box)
     {
         var t0 = 0f;
         var t1 = 1f;
-        return Slab(x, box.MinX, box.MaxX, ref t0, ref t1) && Slab(z, box.MinZ, box.MaxZ, ref t0, ref t1);
+        return Slab(ax, bx - ax, box.MinX, box.MaxX, ref t0, ref t1) && Slab(az, bz - az, box.MinZ, box.MaxZ, ref t0, ref t1);
 
-        static bool Slab(float d, float min, float max, ref float t0, ref float t1)
+        static bool Slab(float from, float d, float min, float max, ref float t0, ref float t1)
         {
             if (MathF.Abs(d) < 1e-6f)
             {
-                return min <= 0f && 0f <= max;
+                return min <= from && from <= max;
             }
 
-            var a = min / d;
-            var b = max / d;
+            var a = (min - from) / d;
+            var b = (max - from) / d;
             if (a > b)
             {
                 (a, b) = (b, a);

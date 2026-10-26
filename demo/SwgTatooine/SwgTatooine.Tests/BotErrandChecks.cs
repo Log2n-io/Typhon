@@ -758,6 +758,44 @@ public sealed class BotErrandChecks
     }
 
     /// <summary>
+    /// A long errand whose straight line runs in through a shuttleport's gate is walked a searched stretch at a time, round the port, and gets there.
+    /// </summary>
+    /// <remarks>
+    /// The errand bots trapped in the ports after the first fix (live, 2026-10-26): a walk past 200 m was searched out of its street and into its goal's,
+    /// and walked straight between — across the city, in through the gate.
+    /// </remarks>
+    [Test]
+    public void ALongErrand_GoesRoundAShuttleport_NotInByItsGate()
+    {
+        var port = (X: Here.X + 300f, Z: Here.Z);
+        var terminal = (X: Here.X + 600f, Z: Here.Z);
+        const int yaw = 3;   // the gate faces west, toward the bot
+        var (brain, sim) = Choosing(
+            Goal.Visiting,
+            b => b.Facilities.Observe(1, Routing.MissionTerminalKind, terminal.X, terminal.Z, TerminalAsset + 1, 0),
+            () => new Sim
+            {
+                Planet = [new SeenStructure(port.X, port.Z, Routing.ShuttleportKind, WalledPortAsset, yaw, 1),
+                    new SeenStructure(terminal.X, terminal.Z, 10, TerminalAsset, 0, 1)],
+                Walls = [.. RingWalls().Select(r => CityPath.Turn(yaw, new PlanBox(r.MinX, r.MinZ, r.MaxX, r.MaxZ, 0f, 2f, false)))
+                    .Select(b => (b.MinX + port.X, b.MinZ + port.Z, b.MaxX + port.X, b.MaxZ + port.Z))],
+            });
+
+        for (var tick = 10L; tick < 3000 && brain.FacilitiesUsed == 0; tick++)
+        {
+            sim.Apply(brain.Decide(sim.View(), tick));
+            Assert.That(Routing.Distance(sim.X, sim.Z, port.X, port.Z), Is.GreaterThan(19.5d),
+                $"tick {tick}: the errand walked into the port's plaza, at ({sim.X - port.X:F1}, {sim.Z - port.Z:F1}) from it");
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.FacilitiesUsed, Is.EqualTo(1), $"the errand never reached the terminal; the bot is at ({sim.X - Here.X:F1}, {sim.Z - Here.Z:F1})");
+            Assert.That(brain.PortsLeft, Is.Zero, "it had to be walked out of the port");
+        });
+    }
+
+    /// <summary>
     /// A port encloses its plaza up to its ring's walls — against the wall on an axis too, which a radius small enough for the diagonals missed — and
     /// nothing beyond the ring, even on its floor; a house encloses nothing.
     /// </summary>
@@ -773,7 +811,9 @@ public sealed class BotErrandChecks
             Assert.That(port.Encloses(13f, 13f), Is.True, "on a diagonal, short of its blocks' corners at 18.7 m");
             Assert.That(port.Encloses(15f, 15f), Is.False, "21.2 m on a diagonal: past the ring, on the floor's rim");
             Assert.That(port.Encloses(21f, 0f), Is.False, "outside the wall on an axis");
-            Assert.That(port.Encloses(0f, 19.5f), Is.True, "in the gate: the origin is in sight through it");
+            Assert.That(port.Encloses(0f, 19.5f), Is.False, "in the gate: the origin is in sight through it, and so is the way out");
+            Assert.That(port.Encloses(1f, 21f), Is.False, "across the gate's mouth, on the way to the terminals beside it");
+            Assert.That(port.Encloses(0f, 15f), Is.False, "in line with the gate, inside: straight on out is through it");
             Assert.That(port.Encloses(0f, 26f), Is.False, "where the approach starts, outside");
             Assert.That(new AssetPlan { Id = "house", Walls = LargeHouseWalls }.HasEnclosure, Is.False, "a house rings nothing in");
             Assert.That(new AssetPlan { Id = "bare" }.HasEnclosure, Is.False);

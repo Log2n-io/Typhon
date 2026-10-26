@@ -320,6 +320,7 @@ public sealed class BotBrain
     /// <summary>When it next checks whether it stands inside a shuttleport's walls.</summary>
     private long _portCheckAt;
 
+
     /// <summary>When a walk across the city may be searched again, after one found no way or stuck.</summary>
     private long _cityWalkAt;
 
@@ -1156,34 +1157,30 @@ public sealed class BotBrain
         }
 
         var from = (X: world.X, Z: world.Z);
-        if (far > SearchReachM)
+        if (searching && far > CityLegM)
         {
-            // Searched out of the street it is standing in, straight (ridden past the thirty seconds) across the open, and searched again into the
-            // street it is going to. Both ends, because a body is as likely to start pressed against a house as to end beside one: a straight first
-            // leg from where it stood was a line through whatever it was standing against.
+            // Too far to see the way: the next stretch searched now, and the rest from where that stretch ends — with the buildings in view from there.
+            // An errand used to be searched out of its street and into its goal's, and walked straight between: across a city that line went in
+            // through a shuttleport's gate, and the errand bots stood trapped in its plaza (live, 2026-10-26).
             var heading = Routing.HeadingTo(world.X, world.Z, goal.X, goal.Z);
-            var near = SearchReachM * 0.5f;
-
-            // Never short of `near`: for a goal just past the search's reach the straight part would otherwise end behind where the first search
-            // left the body, and the walk would double back (review 2).
-            var rest = MathF.Max((float)far - (SearchReachM * 0.75f), near);
-            var mid = (X: world.X + (MathF.Cos(heading) * near), Z: world.Z + (MathF.Sin(heading) * near));
-            if (searching && Search(from, mid) is { } outOf)
+            if (SearchToward(from, heading, CityLegM) is not { } stretch)
             {
-                points.AddRange(outOf);
-            }
-            else
-            {
-                points.Add(mid);
+                return false;
             }
 
-            from = (world.X + (MathF.Cos(heading) * rest), world.Z + (MathF.Sin(heading) * rest));
-            points.Add(from);
+            _leg.Start(stretch, stretch.Count, tick);
+            _leg.Ride = far / Routing.RunMps > Routing.RideOverSeconds;
+            _leg.Rest = new LegRest(goal, tail.ToArray(), exactGoal);
+            return true;
         }
 
         if (searching)
         {
-            if (Search(from, goal) is not { } into)
+            // A point that is only a direction (a detour's, a stretch of a crossing) is searched short of any shuttleport's plaza it lands in.
+            var into = exactGoal
+                ? Search(from, goal)
+                : SearchToward(from, Routing.HeadingTo(from.X, from.Z, goal.X, goal.Z), (float)far);
+            if (into == null)
             {
                 return false;
             }
@@ -1208,6 +1205,49 @@ public sealed class BotBrain
         _leg.Start(points, precise, tick);
         _leg.Ride = far / Routing.RunMps > Routing.RideOverSeconds;
         return true;
+    }
+
+    /// <summary>
+    /// A searched walk toward a direction, as far as <paramref name="metres"/> along it — or nearer when the walk would end inside a shuttleport's walls
+    /// or where it started; null when no length finds one.
+    /// </summary>
+    /// <remarks>
+    /// A point ahead on a port's raised pad is walled in, and the search moves an end it cannot reach to the nearest open ground — the plaza, through
+    /// the gate. The end is what is checked, not the point asked for, because the snap is what goes wrong.
+    /// </remarks>
+    private List<(float X, float Z)> SearchToward((float X, float Z) from, float heading, float metres)
+    {
+        foreach (var share in StretchShares)
+        {
+            var reach = metres * share;
+            var to = (from.X + (MathF.Cos(heading) * reach), from.Z + (MathF.Sin(heading) * reach));
+            if (Search(from, to) is { } walk
+                && Routing.Distance(from.X, from.Z, walk[^1].X, walk[^1].Z) > 2d * CornerReachM
+                && !InAPortsWalls(walk[^1]))
+            {
+                return walk;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>How much of a stretch is tried, in order, when the whole of it ends inside a port's walls.</summary>
+    private static readonly float[] StretchShares = [1f, 0.75f, 0.5f, 0.3f];
+
+    /// <summary>Whether a point is inside one of the shuttleports in view, or in its gate.</summary>
+    private bool InAPortsWalls((float X, float Z) p)
+    {
+        foreach (var s in _seen)
+        {
+            if (s.Kind == Routing.ShuttleportKind && _assets.At(s.Asset) is { HasEnclosure: true } plan
+                && Routing.Distance(p.X, p.Z, s.X, s.Z) < 30d && BotAssets.Unplace(s.X, s.Z, s.Yaw, p) is var local && plan.Within(local.X, local.Z))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>A searched walk between two points over the structures last copied into <see cref="_seen"/>; null when walled off.</summary>
@@ -1254,7 +1294,7 @@ public sealed class BotBrain
             var exact = leg.Next >= leg.Precise;
             // Every path point to a body's length, ridden or not: a rider who called a corner reached from eight metres off cut through the house the
             // corner went round — the first live run's stuck bots, all of them pressed against a wall between two waypoints.
-            var reach = leg.Next == leg.Points.Count - 1 ? leg.FinalReach : exact ? 0.6d : CornerReachM;
+            var reach = leg.Next == leg.Points.Count - 1 && leg.Rest == null ? leg.FinalReach : exact ? 0.6d : CornerReachM;
             if (d > reach)
             {
                 break;
@@ -1263,6 +1303,12 @@ public sealed class BotBrain
             leg.Next++;
             leg.Best = double.MaxValue;
             leg.BestAt = tick;
+            if (!leg.Active && leg.Rest != null)
+            {
+                // A stretch walked: the next one, searched from here.
+                return GoOn(in world, tick, out end, replans: 0);
+            }
+
             if (!leg.Active)
             {
                 leg.Ended = LegEnd.Done;
@@ -1301,6 +1347,11 @@ public sealed class BotBrain
                     return Follow(in world, tick, out end);
                 }
             }
+            else if (leg.Rest != null && leg.Replans < 2)
+            {
+                // Stuck on a stretch of a long walk: the rest of the way searched again from where it stands.
+                return GoOn(in world, tick, out end, replans: leg.Replans + 1);
+            }
 
             leg.Ended = LegEnd.Stuck;
             leg.Next = leg.Points.Count;
@@ -1313,7 +1364,7 @@ public sealed class BotBrain
         // Off once, for good, forty metres before the exact part — by distance along the walk, not by which point is next: deciding per waypoint got on
         // and off at every corner of a street, and getting off when the next point was the exact one walked the last 150 m of a long straight at a run.
         // Not for a detour, whose end is only a direction: getting off before it and back on after cost two SetMounts a detour (review 9).
-        if (leg.Ride && !leg.KeepRiding && !leg.Dismounted && d + leg.LengthTo(leg.Next, leg.Precise) < 40d)
+        if (leg.Ride && !leg.KeepRiding && !leg.Dismounted && leg.Rest == null && d + leg.LengthTo(leg.Next, leg.Precise) < 40d)
         {
             leg.Dismounted = true;
         }
@@ -1334,6 +1385,30 @@ public sealed class BotBrain
         }
 
         return Intent.None;
+    }
+
+    /// <summary>
+    /// The rest of a walk planned a stretch at a time, searched from where the body stands: what the walk was riding, keeping and reaching for carries
+    /// over, so the last stretch ends as the walk was asked to.
+    /// </summary>
+    private Intent GoOn(in Perceived world, long tick, out LegEnd end, int replans)
+    {
+        var rest = _leg.Rest;
+        var (ride, keepRiding, dismounted, finalReach) = (_leg.Ride, _leg.KeepRiding, _leg.Dismounted, _leg.FinalReach);
+        if (!PlanWalk(in world, rest.Goal, rest.Tail, tick, rest.ExactGoal))
+        {
+            _leg.Abandon();
+            end = LegEnd.Stuck;
+            _wantMounted = keepRiding && ride;
+            return Intent.Move(0f, 0);
+        }
+
+        _leg.Replans = replans;
+        _leg.Ride = ride;
+        _leg.KeepRiding = keepRiding;
+        _leg.Dismounted = dismounted;
+        _leg.FinalReach = finalReach;
+        return Follow(in world, tick, out end);
     }
 
     /// <summary>Gets on or off the swoop when the goal's wish and the server's state disagree — a few asks, then it stops asking.</summary>
@@ -1518,6 +1593,9 @@ public sealed class BotBrain
         public int Replans;
         public double FinalReach = 0.3d;
 
+        /// <summary>Where the walk goes on to once these points are walked, when it was too long to search in one go; null for a walk searched whole.</summary>
+        public LegRest Rest;
+
         public bool Active => Next < Points.Count;
 
         public void Start(List<(float X, float Z)> points, int precise, long tick)
@@ -1535,6 +1613,7 @@ public sealed class BotBrain
             Ended = LegEnd.Going;
             Replans = 0;
             FinalReach = 0.3d;
+            Rest = null;
         }
 
         public void Clear()
@@ -1545,6 +1624,7 @@ public sealed class BotBrain
             Dismounted = false;
             KeepRiding = false;
             Ended = LegEnd.Going;
+            Rest = null;
         }
 
         /// <summary>Over, for good: nothing more is followed and nothing restarts it.</summary>
@@ -1553,8 +1633,12 @@ public sealed class BotBrain
             Points.Clear();
             Next = 0;
             Ended = LegEnd.Stuck;
+            Rest = null;
         }
     }
+
+    /// <summary>The rest of a walk planned a stretch at a time: its goal, the published points after it, and whether the goal must be reached exactly.</summary>
+    private sealed record LegRest((float X, float Z) Goal, (float X, float Z)[] Tail, bool ExactGoal);
 }
 
 /// <summary>A city on the bot's own map: where it is and how big it is.</summary>
