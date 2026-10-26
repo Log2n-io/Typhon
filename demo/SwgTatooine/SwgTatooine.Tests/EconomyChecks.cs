@@ -377,6 +377,57 @@ internal sealed class EconomyChecks : ServedChecks
         Assert.That(tx.Commit(), Is.True, "the corruption did not commit");
     }
 
+    // ── E0-11: what a bot tips ──────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// E0-11: a bot's tip goes to the nearest NAMED player within its reach — a session's character, which has a wallet — read from the frames it was
+    /// sent, and never to a body of the crowd, which is a <c>Player</c> too and stands nearer.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void ABotsTip_GoesToTheNamedPlayerNearIt_NotToTheCrowd()
+    {
+        using var sim = Start();
+        var p = Pair(sim);
+        var crowd = EntityId.Null;
+        sim.WriteInTick(tx =>
+        {
+            foreach (var cluster in tx.For<Player>().GetClusterEnumerator())
+            {
+                var controls = cluster.GetReadOnlySpan(Player.Control);
+                for (var bits = cluster.OccupancyBits; bits != 0 && crowd.IsNull; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    if (cluster.Realm.Value == 0 && controls[slot].Kind == ControllerKind.Scripted)
+                    {
+                        crowd = cluster.GetEntityId(slot);
+                    }
+                }
+            }
+        });
+        var (x, z) = OpenGround(sim);
+        var placed = Worlds.Park(sim, crowd, x + 2f, z);
+        SessionHarness.UntilNamed(p.A.Session, crowd, "the crowd body in the bot's view", placed);
+        Harness.Ticks(2);
+
+        var store = new Typhon.Client.WorldStore(p.A.Plan);
+        var applier = new Typhon.Client.FrameApplier(store);
+        foreach (var frame in p.A.Sent)
+        {
+            if (frame.Length > 0 && frame[0] == MessageTypes.Tick)
+            {
+                applier.Apply(frame);
+            }
+        }
+
+        var eyes = new SwgTatooine.Bots.Brain.Perception();
+        Assert.Multiple(() =>
+        {
+            Assert.That(eyes.NearestNamedPlayer(store, x, z, 15f), Is.EqualTo(p.BSeenByA), "the bot would not tip the named player five metres away");
+            Assert.That(eyes.NearestNamedPlayer(store, x, z, 4f), Is.Zero, "the crowd body two metres away was taken for somebody with a wallet");
+        });
+    }
+
     private delegate void Mutate<T>(ref T value);
 
     private static void Edit<T>(Transaction tx, EntityId id, Comp<T> component, Mutate<T> change)

@@ -25,10 +25,13 @@ public sealed class Perception
 {
     private const string WorldObject = "WorldObject";
     private const string Creature = "Creature";
+    private const string Player = "Player";
 
     private WorldStore _bound;
     private int _structures = -1;
     private int _creatures = -1;
+    private int _players = -1;
+    private int _nameIdField = -1;
     private int _kindField = -1;
     private int _regionField = -1;
     private int _assetField = -1;
@@ -88,6 +91,60 @@ public sealed class Perception
 
         world = NearestCreature(store, _creatures, x, z, world);
         return Facilities(store, x, z, world, facilities);
+    }
+
+    /// <summary>
+    /// The nearest other player with a name within <paramref name="reachM"/> — a session's character, a person's or a bot's, which is what has a
+    /// wallet (economy-foundation.md E0-11) — or 0. The scripted crowd is a <c>Player</c> too, and carries no name.
+    /// </summary>
+    /// <param name="store">The bot's store.</param>
+    /// <param name="x">The bot, east.</param>
+    /// <param name="z">The bot, north.</param>
+    /// <param name="reachM">How far, metres.</param>
+    /// <returns>Its netId, or 0.</returns>
+    /// <remarks>Not part of <see cref="Read"/>: it is asked only when a tip is due, a few times a minute, rather than scanned every tick.</remarks>
+    public uint NearestNamedPlayer(WorldStore store, float x, float z, float reachM)
+    {
+        if (store?.Self == null || store.Self.NetId == 0)
+        {
+            return 0;
+        }
+
+        Resolve(store);
+        if (_players < 0 || _nameIdField < 0)
+        {
+            return 0;
+        }
+
+        var set = store.Archetypes[_players];
+        var names = set.Numbers[_nameIdField];
+        if (names == null)
+        {
+            return 0;
+        }
+
+        var self = store.Self.NetId;
+        var best = (double)reachM;
+        var bestNetId = 0u;
+        for (var i = 0; i < set.LiveCount; i++)
+        {
+            var slot = set.Live[i];
+            var netId = set.NetIds[slot];
+            if (netId == self || !(names[slot] > 0))
+            {
+                continue;
+            }
+
+            var at = set.HeadPosition(slot);
+            var distance = Routing.Distance(x, z, (float)at[0], set.Dims > 1 ? (float)at[1] : 0f);
+            if (distance <= best)
+            {
+                best = distance;
+                bestNetId = netId;
+            }
+        }
+
+        return bestNetId;
     }
 
     /// <summary>The nearest creature, with its position and distance.</summary>
@@ -258,6 +315,8 @@ public sealed class Perception
         _bound = store;
         _structures = IndexOf(store, WorldObject);
         _creatures = IndexOf(store, Creature);
+        _players = IndexOf(store, Player);
+        _nameIdField = FieldOf(store, _players, "nameId");
 
         // Both fields are resolved against the archetype they are read from, which is the bug this line replaced: the
         // first version resolved a field index against `Player` and then indexed it into whatever archetype held the

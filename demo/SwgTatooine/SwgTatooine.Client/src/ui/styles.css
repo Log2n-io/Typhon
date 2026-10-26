@@ -652,6 +652,88 @@ button.active {
   }
 }
 
+/* The inventory: where the journal goes, and left of it when the journal is open too. */
+.inventory {
+  right: 312px;
+  bottom: 10px;
+  width: 300px;
+  max-height: 70%;
+  overflow-y: auto;
+}
+
+.inventory.beside-journal {
+  right: 684px;
+}
+
+/* Narrower, centred near the top as the journal is (top right is the HUD's); with the journal there, above the action bar. */
+@media (max-width: 1240px) {
+  .inventory {
+    top: 70px;
+    bottom: auto;
+    right: auto;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: calc(100% - 20px);
+  }
+
+  .inventory.beside-journal {
+    top: auto;
+    bottom: 90px;
+    right: auto;
+    max-height: 45%;
+  }
+}
+
+.inventory-credits {
+  color: #ffd27a;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.inventory-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.inventory-slot {
+  aspect-ratio: 1;
+  border: 1px solid rgba(110, 170, 220, 0.25);
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.inventory-history {
+  margin-top: 6px;
+  border-top: 1px solid rgba(110, 170, 220, 0.18);
+  padding-top: 4px;
+}
+
+.inventory-transfer {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  padding: 1px 0;
+}
+
+.inventory-kind {
+  flex: 1;
+  color: var(--muted);
+}
+
+.inventory-amount {
+  font-variant-numeric: tabular-nums;
+}
+
+.inventory-amount.in {
+  color: #b9f5a6;
+}
+
+.inventory-amount.out {
+  color: #ffb39a;
+}
+
 .missions-head {
   display: flex;
   align-items: center;
@@ -838,6 +920,21 @@ button.active {
 .chat-own {
   color: var(--accent);
   opacity: 0.9;
+}
+
+/* The client's own lines — a command's answer, a tip given or received — seen by this player only. */
+.chat-system .chat-text {
+  color: #ffd27a;
+  font-style: italic;
+}
+
+.chat-system .chat-speaker {
+  cursor: default;
+}
+
+.chat-system .chat-speaker:hover {
+  opacity: 0.65;
+  text-decoration: none;
 }
 
 .chat-compose {

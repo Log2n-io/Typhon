@@ -4,6 +4,7 @@ import { DownNotice } from './DownNotice';
 import { Chat } from './Chat';
 import { Hud } from './Hud';
 import { Inspector } from './Inspector';
+import { InventoryWindow } from './InventoryWindow';
 import { NavPane } from './NavPane';
 import { Kicked } from './Kicked';
 import { Login } from './Login';
@@ -61,6 +62,7 @@ export function App() {
       </div>
       <MissionTerminal />
       <MissionJournalPanel />
+      <InventoryWindow />
       <Kicked />
     </div>
   );

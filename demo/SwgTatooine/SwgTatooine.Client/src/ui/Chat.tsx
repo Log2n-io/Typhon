@@ -3,6 +3,8 @@ import { isTyping } from '../camera/camera-input';
 import { useChat } from '../state/chat-store';
 import { clipUtf8, composeSay } from '../state/chat-text';
 import { useUi } from '../state/ui-store';
+import { runChatCommand } from '../state/chat-commands';
+import { parseChatCommand } from '../data/wallet';
 
 /** The most lines the box grows to before it scrolls. */
 const MAX_ROWS = 5;
@@ -16,6 +18,10 @@ const MAX_ROWS = 5;
  * <b>Enter opens the box, Enter sends, Shift+Enter is a new line, Escape abandons</b> (Loïc, 2026-10-25). What is sent
  * comes back as the server's own `Chat` — the line here and the bubble over the avatar's head both — so nothing is shown
  * that the server did not accept. A line refused by the one-a-second rate stays in the box.
+ *
+ * <b>A line starting with `/` is a command, not speech</b> (Loïc, 2026-10-26): `/tip <amount>` gives the selected player
+ * that many credits (`GiveCredits`). Its answer is the client's own line — a refusal's reason, or the tip itself once the
+ * wallet moves — seen by this player only.
  */
 export function Chat() {
   const lines = useChat((s) => s.lines);
@@ -28,6 +34,8 @@ export function Chat() {
   const [composing, setComposing] = useState(false);
   const [draft, setDraft] = useState('');
   const [refused, setRefused] = useState(false);
+  // Bumped by a compose request, so the box is focused with the caret after the text even when it was open already.
+  const [composeSeq, setComposeSeq] = useState(0);
   // A session that stops playing — logged out, kicked, a god camera — has nobody to speak as: the box closes with it.
   const open = composing && playing;
 
@@ -59,10 +67,27 @@ export function Chat() {
   }, [playing, open]);
 
   useEffect(() => {
-    if (open) {
-      box.current?.focus();
+    const field = box.current;
+    if (open && field !== null) {
+      field.focus();
+      field.setSelectionRange(field.value.length, field.value.length);
     }
-  }, [open]);
+  }, [open, composeSeq]);
+
+  // The context menu's "Tip…": the box opens with the command in it, the caret after it.
+  useEffect(
+    () =>
+      useChat.subscribe((state, previous) => {
+        const request = state.composeRequest;
+        if (request !== null && request !== previous.composeRequest) {
+          setRefused(false);
+          setDraft(request.text);
+          setComposing(true);
+          setComposeSeq(request.seq);
+        }
+      }),
+    [],
+  );
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>): void => {
     if (e.key === 'Escape') {
@@ -78,6 +103,14 @@ export function Chat() {
     }
 
     e.preventDefault();
+    const command = parseChatCommand(draft);
+    if (command !== null) {
+      runChatCommand(command);
+      setComposing(false);
+      setDraft('');
+      return;
+    }
+
     const text = composeSay(draft);
     if (text.length === 0) {
       setComposing(false);
@@ -108,20 +141,27 @@ export function Chat() {
         </div>
       ) : (
         <div className="chat-lines">
-          {lines.map((line, i) => (
-            <div key={`${line.tick}-${line.speaker}-${i}`} className="chat-line">
-              <button
-                className={line.own === true ? 'chat-speaker chat-own' : 'chat-speaker'}
-                title="Select the speaker"
-                onClick={() => {
-                  select(line.speaker);
-                }}
-              >
-                {line.own === true ? 'You' : `#${String(line.speaker)}`}
-              </button>
-              <span className="chat-text">{line.text}</span>
-            </div>
-          ))}
+          {lines.map((line, i) =>
+            line.system === true ? (
+              <div key={`system-${String(line.atMs)}-${String(i)}`} className="chat-line chat-system">
+                <span className="chat-speaker">·</span>
+                <span className="chat-text">{line.text}</span>
+              </div>
+            ) : (
+              <div key={`${line.tick}-${line.speaker}-${i}`} className="chat-line">
+                <button
+                  className={line.own === true ? 'chat-speaker chat-own' : 'chat-speaker'}
+                  title="Select the speaker"
+                  onClick={() => {
+                    select(line.speaker);
+                  }}
+                >
+                  {line.own === true ? 'You' : `#${String(line.speaker)}`}
+                </button>
+                <span className="chat-text">{line.text}</span>
+              </div>
+            ),
+          )}
           <div ref={bottom} />
         </div>
       )}
@@ -145,7 +185,7 @@ export function Chat() {
           <div className="hint">
             {refused
               ? 'Too fast: one line a second. Enter to try again.'
-              : 'Enter to say it · Shift+Enter for a new line · Esc to cancel'}
+              : 'Enter to say it · /tip <amount> tips the selected player · Esc to cancel'}
           </div>
         </div>
       ) : (

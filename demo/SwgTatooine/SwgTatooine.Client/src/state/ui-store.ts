@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { useChat } from './chat-store';
 import { useMissions } from './mission-store';
 
 /** One row of the navigation pane. */
@@ -97,7 +98,9 @@ export interface PartRef {
 export type ContextAction =
   | { readonly kind: 'board'; readonly city: number }
   | { readonly kind: 'missions'; readonly terminal: number }
-  | { readonly kind: 'journal' };
+  | { readonly kind: 'journal' }
+  /** Tip another player: the chat opens on `/tip `, the player selected. */
+  | { readonly kind: 'tip'; readonly target: number };
 
 export interface ContextMenuItem {
   readonly label: string;
@@ -116,7 +119,7 @@ export interface ContextMenuState {
   readonly x: number;
   readonly y: number;
   readonly title: string;
-  readonly source: 'ticket' | 'mission';
+  readonly source: 'ticket' | 'mission' | 'player';
   readonly items: readonly ContextMenuItem[];
 }
 
@@ -608,6 +611,13 @@ export const useUi = create<UiState>()((set, get) => ({
         break;
       case 'journal':
         useMissions.getState().openJournal();
+        break;
+      case 'tip':
+        if (get().selectedNetId !== action.target) {
+          get().select(action.target);
+        }
+
+        useChat.getState().compose('/tip ');
         break;
     }
   },

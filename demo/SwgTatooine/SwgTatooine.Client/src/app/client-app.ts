@@ -49,7 +49,9 @@ import { DamageText, type Anchor } from '../render/damage-text';
 import type { AnimationGraph } from '../character/animation-graph';
 import { PlayerNameDirectory } from '../data/player-names';
 import { MissionJournal, missionTitle, type MissionOffer } from '../data/missions';
+import { playerMenuItems, WalletReader } from '../data/wallet';
 import { useMissions } from '../state/mission-store';
+import { useWallet } from '../state/wallet-store';
 import { useSessionStore } from '../state/session-store';
 import { replicationStatsOf } from '../data/replication-stats';
 import type { AssetSet } from '../data/server-config';
@@ -811,6 +813,8 @@ export class ClientApp {
       take: (offer, serial) => this.source?.takeMission(offer, serial) ?? false,
       cancel: (id) => this.source?.abandonMission(id) ?? false,
     });
+    // `/tip` and the player menu's "Tip…" give credits through whatever source is live, the same way.
+    useWallet.getState().setActions({ tip: (target, amount) => this.source?.giveCredits(target, amount) ?? false });
     // A chat cleared is a room left — a reconnect, a realm crossed — and the netIds the bubbles are keyed by are the old
     // room's: a bubble kept would float over whichever body was given the number next.
     this.unsubscribeChat = useChat.subscribe((state, previous) => {
@@ -1271,6 +1275,8 @@ export class ClientApp {
     useChat.getState().setSpeak(() => false);
     useMissions.getState().setActions(null);
     useMissions.getState().closeTerminal();
+    useWallet.getState().setActions(null);
+    useWallet.getState().closeInventory();
     this.bubbles.dispose();
     this.frames.dispose();
     this.pressRing.dispose();
@@ -1358,6 +1364,9 @@ export class ClientApp {
     this.journal.clear();
     this.journalVersion = -1;
     useMissions.getState().resetJournal();
+    this.wallet.clear();
+    this.walletVersion = -1;
+    useWallet.getState().resetWallet();
     this.fight.clear();
     useMissions.getState().closeTerminal();
     this.clock = new Clock(CLOCK_OPTIONS);
@@ -3788,6 +3797,11 @@ export class ClientApp {
   /** The journal: the character's held missions, re-read whenever the body's `journal` revision moves. */
   private readonly journal = new MissionJournal(() => useSessionStore.getState().grant?.token ?? null);
   private journalVersion = -1;
+  /** The wallet (economy-foundation.md E0-10): read whenever the body's `wallet` revision moves, as the journal is. */
+  private readonly wallet = new WalletReader(() => useSessionStore.getState().grant?.token ?? null);
+  private walletVersion = -1;
+  /** The player whose context menu is open, for closing it when they leave the view. */
+  private playerMenuTarget = 0;
   private kindNamesSet: AssetSet | null = null;
   private offersAtMs = Number.NEGATIVE_INFINITY;
   /** The mission terminal whose context menu is open, for closing it when the body walks away. */
@@ -3814,10 +3828,23 @@ export class ClientApp {
         this.journalVersion = this.journal.version;
         missions.setJournal(this.journal.missions, this.journal.completed);
       }
+
+      this.wallet.update(source.selfNumber('wallet'));
+      if (this.wallet.version !== this.walletVersion) {
+        this.walletVersion = this.wallet.version;
+        const wallet = this.wallet.wallet;
+        if (wallet !== null) {
+          useWallet.getState().setWallet(wallet);
+        }
+      }
     }
 
     // The terminal's menu closes when the body walks away from it, as the ticket terminal's does.
     const ui = useUi.getState();
+    if (ui.contextMenu?.source === 'player' && !this.canTip(this.playerMenuTarget)) {
+      ui.closeContextMenu();
+    }
+
     if (ui.contextMenu?.source === 'mission') {
       const menuPart = this.terminalPart(this.missionMenuOwner);
       if (menuPart === null || !this.canUse(menuPart)) {
@@ -3945,11 +3972,29 @@ export class ClientApp {
     // A press with a menu open has already closed it: the menu hears every press first, in the capture phase.
     this.swallowClick = false;
     this.endPress();
-    this.pickAt(x, y);
+    const netId = this.pickAt(x, y);
     const part = this.pickedPart;
     if (part !== null && this.canUse(part)) {
-      this.press = { x, y, startMs: performance.now(), owner: part.owner, fired: false };
+      this.press = { x, y, startMs: performance.now(), owner: part.owner, player: 0, fired: false };
+    } else if (part === null && this.canTip(netId)) {
+      this.press = { x, y, startMs: performance.now(), owner: 0, player: netId, fired: false };
     }
+  }
+
+  /**
+   * Whether this session may offer to tip `netId`: another player in view, one with a name — a session's character, a
+   * person's or a bot's, which is what has a wallet; the scripted crowd carries no name and no wallet.
+   */
+  private canTip(netId: number): boolean {
+    const live = this.source;
+    return (
+      live !== null &&
+      live.canPlay &&
+      netId !== 0 &&
+      netId !== live.selfNetId &&
+      this.archetypeName(netId) === 'Player' &&
+      this.fieldOf(netId, 'nameId') > 0
+    );
   }
 
   /** Ends the press, opened or not: the ring goes, and the cursor is rewritten next frame. */
@@ -3960,7 +4005,7 @@ export class ClientApp {
   }
 
   /** The long press under way, or `null`. `fired` once its menu has opened. */
-  private press: { x: number; y: number; startMs: number; owner: number; fired: boolean } | null = null;
+  private press: { x: number; y: number; startMs: number; owner: number; player: number; fired: boolean } | null = null;
 
   /** Whether the next click is the one a long press ended in. */
   private swallowClick = false;
@@ -3972,8 +4017,8 @@ export class ClientApp {
       return false;
     }
 
-    const part = this.terminalPart(press.owner);
-    if (part === null || !this.canUse(part)) {
+    const part = press.player === 0 ? this.terminalPart(press.owner) : null;
+    if (press.player === 0 ? part === null || !this.canUse(part) : !this.canTip(press.player)) {
       this.endPress();
       return false;
     }
@@ -3987,6 +4032,21 @@ export class ClientApp {
     press.fired = true;
     this.pressRing.hide();
     const ui = useUi.getState();
+    if (part === null) {
+      // Another player: the menu is theirs, titled with their name, and they are the selection the tip will go to.
+      const target = press.player;
+      ui.select(target);
+      this.playerMenuTarget = target;
+      ui.openContextMenu({
+        x: press.x,
+        y: press.y,
+        title: this.names.nameOf(this.fieldOf(target, 'nameId')) ?? `Player #${String(target)}`,
+        source: 'player',
+        items: playerMenuItems(target),
+      });
+      return false;
+    }
+
     ui.selectPart({ owner: part.owner, kind: part.kind });
     this.missionMenuOwner = part.kind === 'mission' ? part.owner : 0;
     ui.openContextMenu(

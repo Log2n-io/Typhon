@@ -140,6 +140,11 @@ export class MockSource implements DataSource, LatencyControl {
     return false;
   }
 
+  /** The mock has no wallets. */
+  giveCredits(): boolean {
+    return false;
+  }
+
   /** The mock serves its whole world to every camera already. */
   setOverview(): void {}
 

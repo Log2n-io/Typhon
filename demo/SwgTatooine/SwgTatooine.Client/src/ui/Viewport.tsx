@@ -8,6 +8,8 @@ import { RealmFade } from './RealmFade';
 import { TerrainLoading } from './TerrainLoading';
 import { refused } from '../app/realm-transition';
 import { TyphonSource } from '../data/source';
+import { tipRefusal } from '../data/wallet';
+import { useChat } from '../state/chat-store';
 import { useMissions } from '../state/mission-store';
 import { useRealms } from '../state/realm-store';
 import { useSessionStore } from '../state/session-store';
@@ -139,6 +141,10 @@ function factoryFor(
       onMissionRefused: (reason, cancelled) => {
         // "Already taken", "three held", "too far": an accepted take is never answered, so the panel hears only this.
         useMissions.getState().refused(reason, cancelled);
+      },
+      onTipRefused: (reason) => {
+        // "Not enough credits", "too far": an accepted tip is never answered — the wallet moves instead.
+        useChat.getState().notice(`Tip refused: ${tipRefusal(reason)}`);
       },
       onSpectateRefused: () => {
         // A refused ride leaves nothing behind on its own: no frame arrives, so nothing takes the camera out of the

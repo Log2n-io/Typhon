@@ -100,6 +100,12 @@ public sealed class BotSwarmOptions
     /// </remarks>
     public bool Brain { get; init; }
 
+    /// <summary>
+    /// How often a thinking bot tips a named player standing near it, seconds — each bot on its own jittered period, half to one and a half times
+    /// this (economy-foundation.md E0-11). 0, the default, never tips: a tip is a ledger row, so a run with tips is a different workload.
+    /// </summary>
+    public double TipSeconds { get; init; }
+
     /// <summary>How far a camera travels per second along its orbit, in metres.</summary>
     public double CameraSpeedMps { get; init; } = 12;
 
@@ -243,6 +249,15 @@ public sealed class BotSwarm : IAsyncDisposable
 
     /// <summary>The server's combat stance command; a bot hunts with the pistol, the one stance that reaches from <c>BotBrain.StrikeM</c>.</summary>
     private const string SetStanceCommand = "SetStance";
+
+    /// <summary>The economy's player-to-player transfer (economy-foundation.md E0-7).</summary>
+    private const string GiveCreditsCommand = "GiveCredits";
+
+    /// <summary>How near a bot looks for somebody to tip, metres: inside the server's 20 m, since the bot reads a position a little old.</summary>
+    private const float TipReachM = 15f;
+
+    /// <summary>The most one bot tip gives: small, so a fleet's tips churn the ledger without draining anybody's 1 000 credits.</summary>
+    private const int MaxBotTip = 50;
 
     /// <summary><c>Stances.Pistol</c> on the server.</summary>
     private const double PistolStance = 3.0;
@@ -869,6 +884,26 @@ public sealed class BotSwarm : IAsyncDisposable
     /// of a thousand bound avatars that sent not one intent, and the only way to notice was to look at the world in a browser. A
     /// number here, next to the sessions, makes "they are standing still" a thing the report says rather than a thing you see.
     /// </remarks>
+    /// <summary>The tips the thinking bots sent, and the times a tip was due with nobody named near enough.</summary>
+    /// <returns>Both counts, over the fleet.</returns>
+    public (long Sent, long NobodyNear) Tips()
+    {
+        long sent = 0;
+        long nobody = 0;
+        foreach (var bot in Bots)
+        {
+            if (bot == null)
+            {
+                continue;
+            }
+
+            sent += Volatile.Read(ref bot.TipsSent);
+            nobody += Volatile.Read(ref bot.TipsNobodyNear);
+        }
+
+        return (sent, nobody);
+    }
+
     public long IntentsSent()
     {
         long sent = 0;
@@ -2200,6 +2235,18 @@ public sealed class BotSwarm : IAsyncDisposable
 
         public long HuntsStarted;
 
+        /// <summary>Tips sent, and tips due with nobody named within reach.</summary>
+        public long TipsSent;
+
+        public long TipsNobodyNear;
+
+        /// <summary>The tip period in ticks, 0 for none; the tick the next one is due; and the bot's own stream for its jitter and amounts.</summary>
+        private readonly long _tipEveryTicks;
+
+        private readonly long _ticksPerSecond;
+        private long _nextTipTick;
+        private uint _tipRandom;
+
         /// <summary>The most creatures this bot has ever had in view at once, so an empty sky can be told from a blind scan.</summary>
         public int CreaturesSeenMax;
 
@@ -2243,6 +2290,10 @@ public sealed class BotSwarm : IAsyncDisposable
                 // choices are not the same sequence read twice.
                 _brain = new BotBrain(BotMap.Cities, (uint)((index * 2246822519u) | 1u), options.TickHz, assets);
                 _eyes = new Perception();
+                _ticksPerSecond = Math.Max(1, options.TickHz);
+                _tipEveryTicks = (long)Math.Round(options.TipSeconds * _ticksPerSecond);
+                _tipRandom = (uint)((index * 3266489917u) | 1u);
+                _nextTipTick = NextTipDelay();
             }
             _heading = (float)((index * golden) % (Math.PI * 2));
 
@@ -2499,6 +2550,48 @@ public sealed class BotSwarm : IAsyncDisposable
                 default:
                     break;   // nothing to say this tick, which is what idling and waiting look like on the wire
             }
+
+            await TipAsync(tick, world, ct).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// A tip when one is due (E0-11): a few credits to the nearest named player within <see cref="TipReachM"/>, through the command a browser's
+        /// <c>/tip</c> sends. Nobody near puts it off a second rather than a whole period, so a bot walking into a crowd tips soon after.
+        /// </summary>
+        private async Task TipAsync(long tick, Perceived world, CancellationToken ct)
+        {
+            if (_tipEveryTicks == 0 || tick < _nextTipTick || !world.HasBody || Client.Plan.CommandByName(GiveCreditsCommand) == null)
+            {
+                return;
+            }
+
+            var target = _eyes.NearestNamedPlayer(Client.Store, world.X, world.Z, TipReachM);
+            if (target == 0)
+            {
+                TipsNobodyNear++;
+                _nextTipTick = tick + _ticksPerSecond;
+                return;
+            }
+
+            var amount = 1 + (int)(NextTipRandom() % MaxBotTip);
+            await Client.SendCommandAsync(
+                GiveCreditsCommand,
+                new RecordValues { ["target"] = FieldValue.Of((double)target), ["amount"] = FieldValue.Of((double)amount) },
+                ct).ConfigureAwait(false);
+            TipsSent++;
+            _nextTipTick = tick + NextTipDelay();
+        }
+
+        /// <summary>Half to one and a half periods, from the bot's own stream: a fleet started together does not tip in step.</summary>
+        private long NextTipDelay() => _tipEveryTicks == 0 ? 0 : (_tipEveryTicks / 2) + (long)(NextTipRandom() % (ulong)Math.Max(1, _tipEveryTicks));
+
+        private ulong NextTipRandom()
+        {
+            // xorshift32, the wanderer's generator.
+            _tipRandom ^= _tipRandom << 13;
+            _tipRandom ^= _tipRandom >> 17;
+            _tipRandom ^= _tipRandom << 5;
+            return _tipRandom;
         }
 
         public async Task SendRegionAsync(long tick, BotSwarmOptions options, CancellationToken ct)

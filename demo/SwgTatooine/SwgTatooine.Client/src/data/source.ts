@@ -29,6 +29,7 @@ import { hullInRadiusM } from './replication-stats';
 import { realmViewOf, type RealmView } from './realm-view';
 import { REASON_NOT_SENT } from '../app/travel';
 import { MISSION_ANSWER_MS } from './missions';
+import { TIP_ANSWER_MS } from './wallet';
 
 /**
  * Where the client's world comes from. The renderer and the UI only ever see the SDK's store, clock and aggregate grid;
@@ -330,6 +331,17 @@ export interface DataSource {
    */
   abandonMission(id: string): boolean;
   /**
+   * Gives another player some of this character's credits (`GiveCredits`, economy-foundation.md E0-7): `/tip` in chat.
+   *
+   * <b>Accepted silently, refused out loud</b>, as a take is: an accepted tip moves both wallets' `wallet` revisions, and a
+   * refusal — not enough credits, too far, not a player — comes back through {@link TyphonSourceOptions.onTipRefused}.
+   *
+   * @param target The recipient's body, as this session holds it.
+   * @param amount Credits, 1 to `MAX_TIP`.
+   * @returns Whether it was sent.
+   */
+  giveCredits(target: number, amount: number): boolean;
+  /**
    * Asks for the god camera's view of the planet (`Overview`), or to come back to the player's own, keeping the avatar.
    *
    * <b>Idempotent, so it can be called every frame</b> with the state the UI wants: only a change is sent, and a new
@@ -365,6 +377,8 @@ export interface TyphonSourceOptions {
    * cancel, the mission it named — `null` for a take.
    */
   readonly onMissionRefused?: (reason: number, cancelled: string | null) => void;
+  /** A tip the server refused, with its `ACKS` reason (`data/wallet.ts` names them). */
+  readonly onTipRefused?: (reason: number) => void;
   /** The server refused the god camera, or the local rate limit did. The session is still served the player's own view. */
   readonly onOverviewRefused?: () => void;
   /** The server's WebSocket URL, which must speak `typhon.3`. */
@@ -429,6 +443,7 @@ export class TyphonSource implements DataSource {
   private sayCommand: MessagePlan | null = null;
   private takeMissionCommand: MessagePlan | null = null;
   private abandonMissionCommand: MessagePlan | null = null;
+  private giveCreditsCommand: MessagePlan | null = null;
   private overviewCommand: MessagePlan | null = null;
 
   /**
@@ -438,6 +453,8 @@ export class TyphonSource implements DataSource {
    * mission's.
    */
   private readonly pendingMissionSeqs = new Map<number, { readonly cancelled: string | null; readonly atMs: number }>();
+  /** The tips sent and not refused yet, by seq, with when they went: {@link pendingMissionSeqs}' rules, after {@link TIP_ANSWER_MS}. */
+  private readonly pendingTipSeqs = new Map<number, number>();
 
   /** The sphere radius last asked for, metres; 0 for none asked. See {@link effectiveRadiusM}. */
   private askedViewRadiusM = 0;
@@ -837,6 +854,28 @@ export class TyphonSource implements DataSource {
     return this.sendMission(this.abandonMissionCommand, { mission }, id);
   }
 
+  giveCredits(target: number, amount: number): boolean {
+    if (this.giveCreditsCommand === null || this.ticks === 0 || target === 0 || amount < 1) {
+      return false;
+    }
+
+    const seq = this.commands?.enqueue(this.giveCreditsCommand, { target, amount }) ?? CommandRefused.RateLimited;
+    if (seq < 0) {
+      return false;
+    }
+
+    const nowMs = performance.now();
+    for (const [old, atMs] of this.pendingTipSeqs) {
+      if (nowMs - atMs > TIP_ANSWER_MS) {
+        this.pendingTipSeqs.delete(old);
+      }
+    }
+
+    this.pendingTipSeqs.set(seq, nowMs);
+    this.sendPending();
+    return true;
+  }
+
   private sendMission(command: MessagePlan | null, values: FieldValues, cancelled: string | null): boolean {
     if (command === null || this.ticks === 0) {
       return false;
@@ -1034,6 +1073,7 @@ export class TyphonSource implements DataSource {
     this.sayCommand = plan.commandByName('Say');
     this.takeMissionCommand = plan.commandByName('TakeMission');
     this.abandonMissionCommand = plan.commandByName('AbandonMission');
+    this.giveCreditsCommand = plan.commandByName('GiveCredits');
     this.overviewCommand = plan.commandByName('Overview');
     this.commands = new CommandQueue({ plan });
     this.region =
@@ -1104,6 +1144,7 @@ export class TyphonSource implements DataSource {
     this.pendingSpectateSeq = -1;
     this.pendingRealmSeq = -1;
     this.pendingMissionSeqs.clear();
+    this.pendingTipSeqs.clear();
     // The store stays: a resume refills it with a RESET frame, and the renderer keeps drawing meanwhile.
     // So does the realm, for the same reason and more strongly — a resumed session's first frame is a
     // `RESET|REALM` of the realm its token recorded (12-realms § 1.6), so clearing it here would tear the scene
@@ -1162,6 +1203,11 @@ export class TyphonSource implements DataSource {
       if (mission !== undefined) {
         this.pendingMissionSeqs.delete(seq);
         this.options.onMissionRefused?.(applier.acks.reason[i], mission.cancelled);
+      }
+
+      // A refused tip, likewise: an accepted one moves the wallets and is not answered.
+      if (this.pendingTipSeqs.delete(seq)) {
+        this.options.onTipRefused?.(applier.acks.reason[i]);
       }
 
       // A refused god camera: the session is still served the player's own view, so the belief goes back to off.

@@ -34,7 +34,8 @@ public sealed partial class TatooineSim
         // fault, and the moment to say so is before a session can connect and be served a world with no geometry.
         var assets = OpenAssetOrigin();
         var shapes = _shapes;
-        EconomyEndpoints.CountersJson = _bridge.EconomyCountersJson;
+        // Read through the field at each request: the bridge is made by StartReplication, below.
+        EconomyEndpoints.CountersJson = () => _bridge?.EconomyCountersJson() ?? "{}";
         StartReplication(shapes);
         try
         {
