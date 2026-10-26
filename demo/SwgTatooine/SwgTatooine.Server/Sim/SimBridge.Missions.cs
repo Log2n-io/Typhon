@@ -15,9 +15,9 @@ namespace SwgTatooine.Server;
 /// finds the offer gone and is refused <see cref="TatooineReplication.MissionTaken"/>. Nothing optimistic, nothing aborts.
 /// </para>
 /// <para>
-/// <b>Missions spawn nothing</b> (Loïc, 2026-10-26): an offer names a lair the world already has, at the level the desk chose for it — weighted by the levels of
-/// the characters around the terminal, with one offer per band always listed — and a take sets that lair's <see cref="Lair.Mission"/>, which keeps the crowd
-/// off it and the lair director from retiring it. A cancel, a completion or an orphaned reservation clears it again: the lair stays, a wild lair, and the
+/// <b>Missions spawn nothing</b> (Loïc, 2026-10-26): an offer names a lair the world already has, at the level the desk chose for it — weighted by the levels
+/// of the characters around the terminal, with one offer per band always listed — and a take sets that lair's <see cref="Lair.Mission"/>, which keeps the
+/// crowd off it and the lair director from retiring it. A cancel, a completion or an orphaned reservation clears it again: the lair stays, a wild lair, and the
 /// director retires it if it is broken or spent.
 /// </para>
 /// <para>
@@ -325,7 +325,9 @@ public sealed partial class SimBridge
 
     // ── Loading ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>The terminals from the world's indexes; the offers, held missions and reservations from the database, which a reopened world already has.</summary>
+    /// <summary>
+    /// The terminals from the world's indexes; the offers, held missions and reservations from the database, which a reopened world already has.
+    /// </summary>
     /// <remarks>
     /// <para>
     /// <b>An offer is matched to its lair by position</b>: its anchor is the lair's, and a wild lair never moves. One whose lair no longer stands wild there
@@ -333,8 +335,8 @@ public sealed partial class SimBridge
     /// stored layout did not change for it.
     /// </para>
     /// <para>
-    /// <b>Every stored offer expiry is clamped to its longest life from now.</b> They are absolute ticks, and a reopened world's tick count starts again at 0: an
-    /// offer listed late in a long run would otherwise stand for as long as that run lasted (#1495).
+    /// <b>Every stored offer expiry is clamped to its longest life from now.</b> They are absolute ticks, and a reopened world's tick count starts again at
+    /// 0: an offer listed late in a long run would otherwise stand for as long as that run lasted (#1495).
     /// </para>
     /// </remarks>
     private void LoadDesk(Transaction tx, long tick)
@@ -953,7 +955,8 @@ public sealed partial class SimBridge
         var dx = lair.X - terminal.X;
         var dz = lair.Z - terminal.Z;
         var dist = MathF.Sqrt((dx * dx) + (dz * dz));
-        var expire = tick + (long)((TatooineData.MissionOfferLifeMinSeconds + (rng.NextFloat() * TatooineData.MissionOfferLifeSpanSeconds)) * _config.TickRateHz);
+        var life = TatooineData.MissionOfferLifeMinSeconds + (rng.NextFloat() * TatooineData.MissionOfferLifeSpanSeconds);
+        var expire = tick + (long)(life * _config.TickRateHz);
         var info = new MissionOfferInfo
         {
             Terminal = terminal.Id,

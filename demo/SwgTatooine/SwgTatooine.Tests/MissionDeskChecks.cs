@@ -427,7 +427,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         });
     }
 
-    /// <summary>MS-2: the demand draw lands in the window of a character around, CL − 5..CL + 3, every level of it; nobody around, a new character's, 1..4.</summary>
+    /// <summary>MS-2: the demand draw lands in the window of a character around, CL − 5..CL + 3, on every level of it; nobody around, in 1..4.</summary>
     [Test]
     public void TheDemandLevel_IsInTheWindowOfACharacterAround()
     {

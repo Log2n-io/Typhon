@@ -326,7 +326,7 @@ public static class TatooineData
     /// <summary>How many levels below a character's CL the missions it is shown go (Loïc, 2026-10-26): the demand window's floor.</summary>
     public const int MissionLevelBelow = 5;
 
-    /// <summary>How many levels above its CL a character may take a mission: above it the desk refuses the take (Loïc, 2026-10-26), and bots never try.</summary>
+    /// <summary>How many levels above its CL a character may take a mission: above it the desk refuses the take (Loïc, 2026-10-26); bots never try.</summary>
     public const int MissionLevelAbove = 3;
 
     /// <summary>

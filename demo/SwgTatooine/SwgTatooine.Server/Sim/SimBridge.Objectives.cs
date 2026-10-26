@@ -98,7 +98,8 @@ internal sealed class LairCensus
 /// once they are down.
 /// </para>
 /// <para>
-/// <b>Mission lairs are never the crowd's</b>: a reserved lair is a holder's, and a stranger's break only moves its mission (missions.md MS-6). Neither an objective nor a target.
+/// <b>Mission lairs are never the crowd's</b>: a reserved lair is a holder's, and a stranger's break only moves its mission (missions.md MS-6). Neither an
+/// objective nor a target.
 /// </para>
 /// </remarks>
 public sealed partial class SimBridge
