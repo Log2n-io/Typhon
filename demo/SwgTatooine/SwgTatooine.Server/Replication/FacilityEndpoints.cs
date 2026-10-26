@@ -26,7 +26,7 @@ namespace SwgTatooine.Server;
 /// </remarks>
 public static class FacilityEndpoints
 {
-    /// <summary>The document served, built by <see cref="Build"/> before the runtime starts; null serves 404, which a reader treats as "not published".</summary>
+    /// <summary>The document served, built by <see cref="Build"/> before the runtime starts; null serves 404: "not published".</summary>
     public static string Json { get; set; }
 
     /// <summary>Maps the endpoint.</summary>

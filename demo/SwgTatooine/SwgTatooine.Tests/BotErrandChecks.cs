@@ -921,7 +921,7 @@ public sealed class BotErrandChecks
         });
     }
 
-    /// <summary>The walk in progress as the brain's trace line states it: the next point's index, the count, where the exact part starts, the next point.</summary>
+    /// <summary>The walk in progress as the brain's trace line states it: the next point's index, the count, where the exact part starts, the point.</summary>
     private static (int Next, int Count, int Precise, (float X, float Z) Point) Leg(BotBrain brain)
     {
         // "leg {next}/{count} exact {precise} ride … next (x, z)"
@@ -936,7 +936,10 @@ public sealed class BotErrandChecks
             point = (float.Parse(xz[0], CultureInfo.InvariantCulture), float.Parse(xz[1], CultureInfo.InvariantCulture));
         }
 
-        return (int.Parse(nc[0], CultureInfo.InvariantCulture), int.Parse(nc[1], CultureInfo.InvariantCulture), int.Parse(parts[3], CultureInfo.InvariantCulture),
+        return (
+            int.Parse(nc[0], CultureInfo.InvariantCulture),
+            int.Parse(nc[1], CultureInfo.InvariantCulture),
+            int.Parse(parts[3], CultureInfo.InvariantCulture),
             point);
     }
 
@@ -1007,7 +1010,11 @@ public sealed class BotErrandChecks
             b => b.Facilities.Observe(1, Routing.MissionTerminalKind, terminal.X, terminal.Z, TerminalAsset + 1, 0),
             () => new Sim
             {
-                Planet = [new SeenStructure(Here.X + 40f, Here.Z + 1f, 0, HouseAsset, 0, 1), new SeenStructure(terminal.X, terminal.Z, 10, TerminalAsset, 0, 1)],
+                Planet =
+                [
+                    new SeenStructure(Here.X + 40f, Here.Z + 1f, 0, HouseAsset, 0, 1),
+                    new SeenStructure(terminal.X, terminal.Z, 10, TerminalAsset, 0, 1),
+                ],
             });
 
         var tick = 10L;

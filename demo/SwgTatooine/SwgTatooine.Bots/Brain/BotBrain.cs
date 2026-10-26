@@ -131,8 +131,8 @@ public sealed class BotBrain
     /// </remarks>
     public const double CornerReachM = 0.75d;
 
-    /// <summary>A walk's exact part — a door's, a terminal's published points — that has not closed by half a metre in this long is stuck, in seconds.</summary>
-    /// <remarks>Long, because a stand point is in a crowd: bodies at a terminal shove each other, and a bot that gave up on being shoved never used one.</remarks>
+    /// <summary>A walk's exact part — a door's, a terminal's published points — that has not closed by half a metre in this long is stuck, seconds.</summary>
+    /// <remarks>Long, because a stand point is in a crowd: bodies at a terminal shove each other, and a bot that gave up on being shoved used none.</remarks>
     public const double StuckSeconds = 4d;
 
     /// <summary>

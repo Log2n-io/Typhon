@@ -318,7 +318,9 @@ public sealed class BotSwarm : IAsyncDisposable
     /// </summary>
     private BotAssets _assets;
 
-    /// <summary>Every facility in the world (<c>GET /swg/facilities</c>), read once per fleet; null when the server lists none — the brains then learn by looking.</summary>
+    /// <summary>
+    /// Every facility in the world (<c>GET /swg/facilities</c>), read once per fleet; null when the server lists none — the brains then learn by looking.
+    /// </summary>
     private List<ListedFacility> _facilities;
 
     /// <summary>Bots driven concurrently within one tick.</summary>
