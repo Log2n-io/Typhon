@@ -669,6 +669,59 @@ public sealed class TraceRecordChainTests
     }
 
     /// <summary>
+    /// A slot taken over from a dead owner still holds that owner's cursors (head == tail, both past zero) until the new owner resets the ring. The
+    /// consumer must not see the slot as drainable in that window: a drain straddling the reset stores the stale tail back over the reset one, and the
+    /// new owner's records are then lost with no drop counted. Staged on the claiming thread, between winning the slot and resetting its ring.
+    /// </summary>
+    [Test]
+    public void ReclaimingADeadOwnersSlot_KeepsItUndrainableUntilItsRingIsReset()
+    {
+        ThreadSlotRegistry.ResetForTests();
+        try
+        {
+            // Previous owner: claims a fresh slot, writes, the consumer drains it, then it gives the slot back.
+            var slotIdx = -1;
+            var previousOwner = new Thread(() =>
+            {
+                slotIdx = ThreadSlotRegistry.GetOrAssignSlot();
+                var ring = ThreadSlotRegistry.GetSlot(slotIdx).Buffer;
+                for (var i = 0; i < 16; i++)
+                {
+                    WriteRecord(ring, 64, (byte)TraceEventKind.SchedulerChunk, 0x33);
+                }
+                ring.Drain(new byte[4096]);
+                ThreadSlotRegistry.ReleaseCurrentThreadForTests();
+            });
+            previousOwner.Start();
+            Assert.That(previousOwner.Join(TimeSpan.FromSeconds(5)), Is.True);
+            var ring = ThreadSlotRegistry.GetSlot(slotIdx).Buffer;
+            Assert.That(ring.IsEmpty, Is.True, "premise: the previous owner's records were drained");
+            Assert.That(ring.BytesPending, Is.Zero);
+
+            var seen = new List<(int Index, bool Drainable, bool StaleCursors)>();
+            ThreadSlotRegistry.ClaimWindowObserverForTests = index =>
+            {
+                var r = ThreadSlotRegistry.GetSlot(index).Buffer;
+                seen.Add((index, ThreadSlotRegistry.IsDrainable(ThreadSlotRegistry.GetSlotState(index)), r != null && r.HeadPosition != 0));
+            };
+
+            var claimed = ThreadSlotRegistry.GetOrAssignSlot();
+
+            Assert.That(claimed, Is.EqualTo(slotIdx), "premise: the free slot is reclaimed, not a fresh one");
+            Assert.That(seen.Count, Is.EqualTo(1));
+            Assert.That(seen[0].StaleCursors, Is.True, "premise: the claim window opened over the previous owner's cursors");
+            Assert.That(seen[0].Drainable, Is.False, "a consumer pass during the claim window would drain a ring that is about to be reset");
+            Assert.That(ThreadSlotRegistry.IsDrainable(ThreadSlotRegistry.GetSlotState(claimed)), Is.True, "the claim publishes the slot once reset");
+        }
+        finally
+        {
+            ThreadSlotRegistry.ClaimWindowObserverForTests = null;
+            ThreadSlotRegistry.ReleaseCurrentThreadForTests();
+            ThreadSlotRegistry.ResetForTests();
+        }
+    }
+
+    /// <summary>
     /// The public breakdown (<see cref="TyphonProfiler.DroppedEventsByKind"/>) reads a claimed slot's drops by kind, and leaves out the drops that carry no
     /// kind (instants), which only <see cref="TyphonProfiler.TotalDroppedEvents"/> counts.
     /// </summary>
