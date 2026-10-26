@@ -1,5 +1,5 @@
 import { placement, pointToWorld, poseToWorld, type Pose } from '../assets/asset-frame';
-import type { Descriptor } from '../assets/descriptor';
+import type { Descriptor, InteractionDesc } from '../assets/descriptor';
 import { structureYaw } from '../assets/structure-assets';
 import type { ContextMenuItem } from '../state/ui-store';
 
@@ -24,9 +24,18 @@ export const TICKET_SLACK_M = 0.5;
 
 /** A ticket terminal's stand point in the world, and how near it counts. */
 export interface TicketTerminal {
+  /** The stand point: where a body walks to and faces the screen from. */
   readonly x: number;
   readonly z: number;
+  /** The stand point's published radius, with {@link TICKET_SLACK_M}. */
   readonly radiusM: number;
+  /**
+   * Where it is usable from, a disc in plan: about the terminal's origin with its `reach_m` when the asset publishes one
+   * (usable from any side), otherwise the stand point's disc. See {@link canUseAt}.
+   */
+  readonly reachX: number;
+  readonly reachZ: number;
+  readonly reachM: number;
   /**
    * The terminal itself, where it is drawn: the eight corners of its render box in the world, planet coordinates, x y z
    * each — what it is hovered, picked and framed as. `null` for a descriptor without bounds.
@@ -61,13 +70,7 @@ export function ticketTerminalOf(
     }
 
     const childPose = poseToWorld(pose, child.pos, child.rot);
-    const at = pointToWorld(childPose, use.pos);
-    return {
-      x: at[0],
-      z: at[2],
-      radiusM: (use.radius ?? 1) + TICKET_SLACK_M,
-      corners: cornersOf(childPose, descriptor),
-    };
+    return terminalAt(childPose, use, cornersOf(childPose, descriptor));
   }
 
   return null;
@@ -96,8 +99,26 @@ export function missionTerminalOf(
   }
 
   const pose = placement([x, y, z], structureYaw(quarters));
+  return terminalAt(pose, use, cornersOf(pose, terminal));
+}
+
+/** A terminal's stand point and use disc in the world, from its interaction placed by `pose` (the asset's own pose). */
+function terminalAt(pose: Pose, use: InteractionDesc, corners: Float64Array | null): TicketTerminal {
   const at = pointToWorld(pose, use.pos);
-  return { x: at[0], z: at[2], radiusM: (use.radius ?? 1) + TICKET_SLACK_M, corners: cornersOf(pose, terminal) };
+  const radiusM = (use.radius ?? 1) + TICKET_SLACK_M;
+  if (use.reach_m === undefined) {
+    return { x: at[0], z: at[2], radiusM, reachX: at[0], reachZ: at[2], reachM: radiusM, corners };
+  }
+
+  // Usable from any side (ASSET_FORMAT § 5.5): reach_m about the asset's origin, the middle of its base. It already reaches
+  // 2.5 m past the terminal's farthest point, so no slack goes on top.
+  const origin = pointToWorld(pose, [0, 0, 0]);
+  return { x: at[0], z: at[2], radiusM, reachX: origin[0], reachZ: origin[2], reachM: use.reach_m, corners };
+}
+
+/** Whether a body standing at (`x`, `z`) can use the terminal: inside its use disc ({@link TicketTerminal.reachM}). */
+export function canUseAt(use: TicketTerminal, x: number, z: number): boolean {
+  return Math.hypot(use.reachX - x, use.reachZ - z) <= use.reachM;
 }
 
 /** The mission terminal's context menu entries: its list of missions, and the journal of the ones held. */

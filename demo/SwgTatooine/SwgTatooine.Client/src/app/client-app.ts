@@ -121,6 +121,7 @@ import {
 } from './shuttle-flight';
 import { ShuttleView } from './shuttle-view';
 import {
+  canUseAt,
   crowdsTerminal,
   missionMenuItems,
   missionTerminalOf,
@@ -4025,7 +4026,7 @@ export class ClientApp {
     return this.terminalsInView().find((p) => p.owner === owner) ?? null;
   }
 
-  /** Whether this session's body stands where `part` can be used: within its published radius of its stand point. */
+  /** Whether this session's body stands where `part` can be used: inside its use disc (`canUseAt`). */
   private canUse(part: TerminalPart): boolean {
     const live = this.source;
     if (live === null || !live.canPlay || live.selfNetId === 0) {
@@ -4034,7 +4035,7 @@ export class ClientApp {
 
     const x = this.predictor.active ? this.predictor.x : this.eyeX;
     const z = this.predictor.active ? this.predictor.z : this.eyeZ;
-    return Math.hypot(part.use.x - x, part.use.z - z) <= part.use.radiusM;
+    return canUseAt(part.use, x, z);
   }
 
   /**
@@ -4366,7 +4367,7 @@ export class ClientApp {
       }
 
       const use = ticketTerminalOf(port, children, s.x, s.y, s.z, s.yaw);
-      if (use !== null && Math.hypot(use.x - x, use.z - z) <= use.radiusM) {
+      if (use !== null && canUseAt(use, x, z)) {
         return true;
       }
     }

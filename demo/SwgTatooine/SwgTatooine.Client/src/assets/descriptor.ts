@@ -113,6 +113,11 @@ export interface InteractionDesc {
   readonly radius: number | null;
   /** A `mount` interaction: the seat it puts the user in (`seats[].id`). */
   readonly seat?: string;
+  /**
+   * Usable from any side within this many metres, in plan, of the asset's origin (the middle of its base), instead of
+   * `radius` about `pos` (ASSET_FORMAT § 5.5, revision 12). `pos` stays where a bot walks to and a user faces from.
+   */
+  readonly reach_m?: number;
 }
 
 /** Where a rider sits on a vehicle (ASSET_FORMAT § 5.8): the root's position, its turn, and the pose it holds. */

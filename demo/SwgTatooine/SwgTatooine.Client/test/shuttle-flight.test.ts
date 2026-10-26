@@ -7,7 +7,7 @@ import {
   shuttleMoment,
   type ShuttleSchedule,
 } from '../src/app/shuttle-flight';
-import { ticketTerminalOf } from '../src/app/ticket-terminal';
+import { canUseAt, ticketTerminalOf } from '../src/app/ticket-terminal';
 import type { Descriptor } from '../src/assets/descriptor';
 
 /** The server's defaults: a landing every 120 s for 30 s, at 50 Hz, seven ports. */
@@ -73,6 +73,35 @@ describe('ticketTerminalOf', () => {
     expect(use!.x).toBeCloseTo(1000 - 2.1434, 4);
     expect(use!.z).toBeCloseTo(2000 + 20.4714 + 0.9, 4);
     expect(use!.radiusM).toBeCloseTo(2, 9);
+  });
+
+  it('without reach_m, is usable only on the stand disc', () => {
+    const use = ticketTerminalOf(PORT, new Map([['ticket_terminal', TERMINAL]]), 1000, 0, 2000, 0)!;
+    expect(use.reachX).toBeCloseTo(use.x, 9);
+    expect(use.reachZ).toBeCloseTo(use.z, 9);
+    expect(use.reachM).toBeCloseTo(use.radiusM, 9);
+    expect(canUseAt(use, use.x, use.z - use.radiusM - 0.1)).toBe(false);
+  });
+
+  it('with reach_m, is usable from any side of the terminal, about its origin, with no slack on top', () => {
+    const reaching = {
+      ...TERMINAL,
+      interactions: [
+        { kind: 'shuttle_ticket', pos: [0, 0, 0.9], rot: [0, 0, 0, 1], forward: '-Z', radius: 1.5, reach_m: 3 },
+      ],
+    } as unknown as Descriptor;
+    const use = ticketTerminalOf(PORT, new Map([['ticket_terminal', reaching]]), 1000, 0, 2000, 0)!;
+    const ox = 1000 - 2.1434;
+    const oz = 2000 + 20.4714;
+    expect(use.x).toBeCloseTo(ox, 4); // the stand point is unchanged: bots still walk there
+    expect(use.z).toBeCloseTo(oz + 0.9, 4);
+    expect(use.reachX).toBeCloseTo(ox, 4);
+    expect(use.reachZ).toBeCloseTo(oz, 4);
+    expect(use.reachM).toBe(3);
+    // Behind the terminal, 2.9 m from its origin: out of the stand disc, inside the reach.
+    expect(canUseAt(use, ox, oz - 2.9)).toBe(true);
+    expect(canUseAt(use, ox + 2.9, oz)).toBe(true);
+    expect(canUseAt(use, ox, oz - 3.1)).toBe(false);
   });
 
   it('is null for a port that publishes no ticket terminal', () => {
