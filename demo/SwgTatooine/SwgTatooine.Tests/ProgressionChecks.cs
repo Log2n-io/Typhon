@@ -142,15 +142,19 @@ internal sealed class ProgressionChecks : ServedChecks
     public void AddXp_CrossesEveryThreshold_AndClampsAtTheCap()
     {
         var p = CharacterProgress.Start;
-        var gained = Progression.AddXp(ref p, Progression.XpAt(3), mission: false);
+        var applied = Progression.AddXp(ref p, Progression.XpAt(3), mission: false);
         var q = new CharacterProgress { Level = 49, Xp = Progression.XpAt(49) };
-        Progression.AddXp(ref q, int.MaxValue / 2, mission: true);
+        var toCap = Progression.AddXp(ref q, int.MaxValue / 2, mission: true);
+        var past = Progression.AddXp(ref q, 500, mission: true);
         var retuned = new CharacterProgress { Level = 7, Xp = 10 };
         Progression.AddXp(ref retuned, 1, mission: false);
         Assert.Multiple(() =>
         {
-            Assert.That(gained, Is.EqualTo(2));
-            Assert.That(p.Level, Is.EqualTo(3));
+            Assert.That(applied, Is.EqualTo(Progression.XpAt(3)), "the XP applied below the cap is the grant");
+            Assert.That(p.Level, Is.EqualTo(3), "two thresholds crossed at once");
+            Assert.That(toCap, Is.EqualTo(Progression.MaxXp - Progression.XpAt(49)), "at the cap only what fits is applied");
+            Assert.That(past, Is.Zero, "nothing is applied past the cap");
+            Assert.That(q.MissionXp, Is.EqualTo(toCap), "the source's total took more than was applied");
             Assert.That(p.KillXp, Is.EqualTo(Progression.XpAt(3)));
             Assert.That(p.MissionXp, Is.Zero);
             Assert.That(q.Level, Is.EqualTo(50));
@@ -305,6 +309,8 @@ internal sealed class ProgressionChecks : ServedChecks
             Assert.That(body.Look.Xp, Is.EqualTo(Progression.XpByte(in progress)), "the body's XP byte is not its character's");
             Assert.That(sim.KillXpOverflow, Is.Zero);
             Assert.That(sim.KillLootOverflow, Is.Zero);
+            Assert.That(sim.ProgressOverflow, Is.Zero);
+            Assert.That(sim.Bridge.KillsGrey + sim.Bridge.KillsWorthless + sim.Bridge.KillsNoCharacter, Is.Zero, "a paid kill was counted as unpaid");
         });
     }
 

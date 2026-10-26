@@ -3820,10 +3820,10 @@ export class ClientApp {
   /** The journal: the character's held missions, re-read whenever the body's `journal` revision moves. */
   private readonly journal = new MissionJournal(() => useSessionStore.getState().grant?.token ?? null);
   private journalVersion = -1;
-  /** The wallet (economy-foundation.md E0-10): read whenever the body's `wallet` revision moves, as the journal is. */
   /** One's own level, for the chat's level-up line (character-level.md § 8). */
   private readonly levelWatch = new LevelWatch();
 
+  /** The wallet (economy-foundation.md E0-10): read whenever the body's `wallet` revision moves, as the journal is. */
   private readonly wallet = new WalletReader(() => useSessionStore.getState().grant?.token ?? null);
   private walletVersion = -1;
   /**

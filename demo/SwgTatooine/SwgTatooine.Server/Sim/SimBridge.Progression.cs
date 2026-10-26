@@ -42,6 +42,8 @@ public sealed partial class SimBridge
     private long _xpGrantedKills;
     private long _xpGrantedMissions;
     private long _killsGrey;
+    private long _killsWorthless;
+    private long _killsNoCharacter;
     private long _killsByCrowd;
     private long _killsNoKiller;
     private long _missionLairKills;
@@ -59,13 +61,19 @@ public sealed partial class SimBridge
     /// <summary>Kills by a character of a victim ten or more levels below it: no XP.</summary>
     public long KillsGrey => Interlocked.Read(ref _killsGrey);
 
+    /// <summary>Kills worth nothing for another reason than the level gap: a victim without a level or of no known kind, or <c>--xp-rate 0</c>.</summary>
+    public long KillsWorthless => Interlocked.Read(ref _killsWorthless);
+
+    /// <summary>Kills by a body whose character could not be opened: it is mapped, but the side transaction cannot see it (deleted, or not yet committed).</summary>
+    public long KillsNoCharacter => Interlocked.Read(ref _killsNoCharacter);
+
     /// <summary>Kills by a body with no character — the scripted crowd's.</summary>
     public long KillsByCrowd => Interlocked.Read(ref _killsByCrowd);
 
     /// <summary>Kills whose blow was not a player's.</summary>
     public long KillsNoKiller => Interlocked.Read(ref _killsNoKiller);
 
-    /// <summary>Mission lairs broken: their XP is the mission's, paid by the desk.</summary>
+    /// <summary>Mission lairs broken by their holder: their XP is the mission's, paid by the desk. A stranger's break is an ordinary lair kill.</summary>
     public long MissionLairKills => Interlocked.Read(ref _missionLairKills);
 
     /// <summary>Levels reached, from kills and missions.</summary>
@@ -124,6 +132,8 @@ public sealed partial class SimBridge
         _levelUps.Clear();
         long granted = 0;
         long grey = 0;
+        long worthless = 0;
+        long noCharacter = 0;
         long crowd = 0;
         long noKiller = 0;
         long missionLairs = 0;
@@ -133,45 +143,85 @@ public sealed partial class SimBridge
         for (var i = 0; i < n; i++)
         {
             ref readonly var kill = ref kills[i];
-            if (kill.VictimKind == KillVictimKind.Lair && !kill.Mission.IsNull)
+            var missionLair = kill.VictimKind == KillVictimKind.Lair && !kill.Mission.IsNull;
+            if (kill.Killer.IsNull)
             {
-                // A mission's lair: its XP is the mission's, paid by the desk with the reward in the transaction that ends it (§ 5).
+                if (missionLair)
+                {
+                    missionLairs++;
+                }
+                else
+                {
+                    noKiller++;
+                }
+
+                continue;
+            }
+
+            if (!_progressCharacterOf.TryGetValue(kill.Killer, out var character))
+            {
+                if (missionLair)
+                {
+                    missionLairs++;
+                }
+                else
+                {
+                    crowd++;
+                }
+
+                continue;
+            }
+
+            // A mission's lair broken by its holder: its XP is the mission's, paid by the desk with the reward in the transaction that ends it (§ 5). Broken
+            // by anybody else, it is a lair like any other (orchestrator, review 2 L3), and the mission is drawn again for its holder.
+            if (missionLair && !IsStranger(tx, kill.Mission, character))
+            {
                 missionLairs++;
                 continue;
             }
 
-            if (kill.Killer.IsNull)
+            if (!tx.TryOpenMut(character, out var entity))
             {
-                noKiller++;
-                continue;
-            }
-
-            if (!_progressCharacterOf.TryGetValue(kill.Killer, out var character) || !tx.TryOpenMut(character, out var entity))
-            {
-                crowd++;
+                noCharacter++;
                 continue;
             }
 
             var progress = entity.Read(CharacterArch.Progress);
-            var xp = Progression.KillXp(kill.VictimKind, kill.VictimLevel, Math.Max(1, (int)progress.Level), rate);
+            var from = Math.Max(1, (int)progress.Level);
+            var xp = Progression.KillXp(kill.VictimKind, kill.VictimLevel, from, rate);
             if (xp == 0)
             {
-                grey++;
+                if (kill.VictimLevel > 0 && kill.VictimLevel <= from - Progression.GreyGap)
+                {
+                    grey++;
+                }
+                else
+                {
+                    worthless++;
+                }
+
                 continue;
             }
 
-            var from = Math.Max(1, (int)progress.Level);
-            if (Progression.AddXp(ref progress, xp, mission: false) > 0)
+            var applied = Progression.AddXp(ref progress, xp, mission: false);
+            if (applied == 0)
+            {
+                continue;   // CL 50 with its XP full: nothing to write, nothing to show
+            }
+
+            if (progress.Level > from)
             {
                 _levelUps.Add(new LevelUp(character, kill.Killer, from, progress.Level, progress.Xp, false, kill.VictimKind, kill.VictimLevel));
             }
 
             entity.Set(CharacterArch.Progress, progress);
             _progressed[kill.Killer] = progress;
-            granted += xp;
+            granted += applied;
         }
 
         Interlocked.Add(ref _killsGrey, grey);
+        Interlocked.Add(ref _killsWorthless, worthless);
+        Interlocked.Add(ref _killsNoCharacter, noCharacter);
         Interlocked.Add(ref _killsByCrowd, crowd);
         Interlocked.Add(ref _killsNoKiller, noKiller);
         Interlocked.Add(ref _missionLairKills, missionLairs);
@@ -216,22 +266,48 @@ public sealed partial class SimBridge
         var progress = entity.Read(CharacterArch.Progress);
         var from = Math.Max(1, (int)progress.Level);
         var xp = Progression.MissionXp(level, from, _config.XpRatePercent);
-        if (xp == 0)
+        var applied = xp == 0 ? 0 : Progression.AddXp(ref progress, xp, mission: true);
+        if (applied == 0)
         {
             return;
         }
 
-        if (Progression.AddXp(ref progress, xp, mission: true) > 0)
+        if (progress.Level > from)
         {
             _levelUps.Add(new LevelUp(holder, body, from, progress.Level, progress.Xp, true, 0, level));
         }
 
         entity.Set(CharacterArch.Progress, progress);
-        _pendingMissionXp += xp;
+        _pendingMissionXp += applied;
         if (!body.IsNull)
         {
             _deskProgress.Add((body, progress));
         }
+    }
+
+    /// <summary>
+    /// The missions the desk completed this tick, with their holders: what <see cref="IsStranger"/> reads for a mission whose entity the desk has destroyed
+    /// before Progression sees its lair's KillEvent. Cleared at the desk's every tick.
+    /// </summary>
+    private readonly Dictionary<EntityId, EntityId> _missionsEndedThisTick = [];
+
+    /// <summary>
+    /// Whether <paramref name="character"/> is somebody other than the holder of <paramref name="mission"/> — a stranger, whose break of its lair is an ordinary
+    /// lair kill. False for the holder, and for a mission whose holder cannot be told (gone, and not completed this tick): no XP rather than XP twice.
+    /// </summary>
+    private bool IsStranger(Transaction tx, EntityId mission, EntityId character)
+    {
+        EntityId holder;
+        if (tx.TryOpen(mission, out var held))
+        {
+            holder = held.Read(HeldMissionArch.Mission).Holder;
+        }
+        else if (!_missionsEndedThisTick.TryGetValue(mission, out holder))
+        {
+            return false;
+        }
+
+        return holder != character;
     }
 
     /// <summary>Mission XP granted in the desk transaction under way; counted when it commits.</summary>

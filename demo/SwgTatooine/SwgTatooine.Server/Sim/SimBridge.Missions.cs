@@ -111,6 +111,7 @@ public sealed partial class SimBridge
     /// <summary>Takes and cancels, and on the pass cadence the held missions' lairs and the terminals' lists.</summary>
     public void MissionDeskTick(TickContext ctx)
     {
+        _missionsEndedThisTick.Clear();
         if (Halted(ctx.TickNumber))
         {
             return;
@@ -713,6 +714,8 @@ public sealed partial class SimBridge
 
         if (completed)
         {
+            // Its lair's KillEvent reaches Progression after this destroy: who held it is read here (character-level.md § 2, L3).
+            _missionsEndedThisTick[id] = m.Holder;
             Interlocked.Increment(ref _missionsCompleted);
             Interlocked.Increment(ref _missionsCompletedTotal);
         }
