@@ -19,6 +19,7 @@ internal sealed class FenceBlockCodecTests
 {
     private const long Lsn = 4242;
     private const long Tsn = 77;
+    private const long WorldTick = 9001;
 
     /// <summary>Writes a block whose columns are filled with a deterministic pattern; returns the wire bytes.</summary>
     private static byte[] WriteBlock(
@@ -61,7 +62,11 @@ internal sealed class FenceBlockCodecTests
             columns[c] = col;
         }
 
-        Assert.That(written, Is.EqualTo(wire.Length), "prefix + columns must exactly fill the measured wire size");
+        // The world-tick trailer (TICK-01), outside BodyLength, as WriteFenceBlocks writes it.
+        BinaryPrimitives.WriteInt64LittleEndian(wire.AsSpan(written), WorldTick);
+        written += RecordCodec.FenceTrailerSize;
+
+        Assert.That(written, Is.EqualTo(wire.Length), "prefix + columns + trailer must exactly fill the measured wire size");
         return wire;
     }
 
@@ -72,6 +77,7 @@ internal sealed class FenceBlockCodecTests
         Assert.That(view.Kind, Is.EqualTo(RecordKind.FenceBlock));
         Assert.That(view.Lsn, Is.EqualTo(Lsn));
         Assert.That(view.Tsn, Is.EqualTo(Tsn));
+        Assert.That(view.WorldTick, Is.EqualTo(WorldTick), "the trailer carries the world tick back");
         Assert.That(view.IsUnknownKind, Is.False, "FenceBlock is a known kind — it must not fall through to the skip path");
         Assert.That(RecordCodec.TryReadFenceBlock(view.Payload, out var block), Is.True);
         return block;
@@ -174,7 +180,7 @@ internal sealed class FenceBlockCodecTests
         {
             // 18 fixed + 4*columns descriptors + span*(8 key + payload)
             Assert.That(RecordCodec.FenceBlockBodyLength(4, 46, 60), Is.EqualTo(18 + 16 + (46 * 68)));
-            Assert.That(RecordCodec.FenceBlockWireSize(4, 46, 60), Is.EqualTo(24 + 18 + 16 + (46 * 68)));
+            Assert.That(RecordCodec.FenceBlockWireSize(4, 46, 60), Is.EqualTo(24 + 18 + 16 + (46 * 68) + 8), "header + body + world-tick trailer");
             Assert.That(RecordCodec.FenceBlockBodyLength(0, 1, 0), Is.EqualTo(18 + 8));
         });
     }

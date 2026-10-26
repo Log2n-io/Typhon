@@ -155,6 +155,12 @@ internal ref struct CommitBatchBuilder
     /// </summary>
     public long CommitStamp;
 
+    /// <summary>
+    /// The world clock at the append (#1495, TICK-01), written on the TxCommit trailer, or on every record of a fence batch. Set inside
+    /// <see cref="DurabilityLog"/>'s append; recovery takes the highest it replays as the floor of the reopened world clock.
+    /// </summary>
+    public long WorldTick;
+
     public CommitBatchBuilder(CommitBatchArena arena, long tsn, ushort uowEpoch, bool fenceMode = false, bool committedDiscipline = false)
     {
         ArgumentNullException.ThrowIfNull(arena);

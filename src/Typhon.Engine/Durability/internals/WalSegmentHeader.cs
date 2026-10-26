@@ -21,8 +21,11 @@ internal unsafe struct WalSegmentHeader
     /// <summary>Magic number identifying a Typhon WAL file: "TYFW" (TYphon File Wal).</summary>
     public const uint MagicValue = 0x54594657;
 
-    /// <summary>Current WAL format version. 2: a TxCommit record carries its commit stamp after its body (plan 06 step 3.2, VIS-03).</summary>
-    public const uint CurrentVersion = 2;
+    /// <summary>
+    /// Current WAL format version. 2: a TxCommit record carries its commit stamp after its body (plan 06 step 3.2, VIS-03). 3: the TxCommit trailer adds the
+    /// world tick, and every fence record carries one (#1495, TICK-01).
+    /// </summary>
+    public const uint CurrentVersion = 3;
 
     /// <summary>Total size of this header struct in bytes (one page).</summary>
     public const int SizeInBytes = 4096;
@@ -77,6 +80,21 @@ internal unsafe struct WalSegmentHeader
         // A span over this header, not a pointer to it: a header can live inside a class.
         var span = MemoryMarshal.CreateReadOnlySpan(ref Unsafe.As<WalSegmentHeader, byte>(ref this), SizeInBytes);
         HeaderCRC = Crc32CUtil.ComputeSkipping(span, HeaderCrcOffset, sizeof(uint));
+    }
+
+    /// <summary>
+    /// Fails loudly on a Typhon WAL segment of another format version: its records would otherwise be skipped as an invalid header, and after a crash that
+    /// is committed data dropped with no error. Pre-alpha, there is no reader for older formats.
+    /// </summary>
+    /// <param name="path">The segment, for the message.</param>
+    internal readonly void ThrowIfAnotherFormat(string path)
+    {
+        if (Magic == MagicValue && Version != CurrentVersion)
+        {
+            throw new DurabilityException(TyphonErrorCode.WalSegmentError,
+                $"WAL segment '{path}' is format {Version}; this engine reads format {CurrentVersion} only. Open it with the engine version that wrote it "
+                + "(a clean close leaves nothing to replay), or remove the WAL if its records are not needed.");
+        }
     }
 
     /// <summary>

@@ -71,8 +71,8 @@ below names the invariant that proves it.
                PREPARE (fallible) · APPEND (fallible: TryClaim)
                ─── the commit point: nothing below fails ───
             1  Owner = TSN (release)   2  stamp = Interlocked.Increment(_nextFreeId)   3  Stamp = stamp (release)
-            4  the records written into the claimed span, the stamp on TxCommit (an 8-byte trailer after the record's body,
-               outside BodyLength); the frame published
+            4  the records written into the claimed span, the stamp on TxCommit (a trailer after the record's body, outside
+               BodyLength, followed by the append's world tick, TICK-01); the frame published
             5  publish (VIS-04)   6  Owner = 0   7  Commit() returns
   invariant every exit before step 1 releases the reservation (Owner = 0, in a finally): a conflict, a lock timeout,
             back-pressure, a unique collision, an abort at APPEND. A full window waits at step 0 alone — holding no chain

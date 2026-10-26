@@ -82,7 +82,9 @@ internal sealed unsafe class WalSegmentReader : IDisposable
         }
 
         using var handle = _fileIO.OpenSegmentForRead(path);
-        return Load(handle, long.MaxValue);
+        var loaded = Load(handle, long.MaxValue);
+        _segmentHeader.ThrowIfAnotherFormat(path);
+        return loaded;
     }
 
     /// <summary>

@@ -43,7 +43,12 @@ public partial class DatabaseEngine
     /// <para><b>Checkpointing is separate and automatic</b> (timer, dirty-page threshold, back-pressure, graceful shutdown).
     /// <see cref="ForceCheckpoint"/> is not part of the tick loop.</para>
     /// </remarks>
-    /// <param name="tickNumber">Monotonic tick identifier. Must increase between calls.</param>
+    /// <param name="tickNumber">
+    /// This session's tick: 0 for the first fence after open, increasing by one per tick. For a host driving the fence itself it also drives the world
+    /// clock (#1495, TICK-01): tick N completes world tick <see cref="WorldTickBase"/> + N, and the clock is never lowered — a host that numbers from
+    /// anything but 0, or carries its own count across sessions, moves the persisted world clock forward by that much for good. The runtime raises the
+    /// clock itself (its scheduler's world tick) and calls the fence without this.
+    /// </param>
     /// <param name="changeSet">ChangeSet for dirty-page tracking across the whole fence. Under the runtime this is the per-tick UoW's shared ChangeSet
     /// (see <see cref="UnitOfWork.ChangeSet"/>), which consolidates the fence's dirty pages with the rest of the tick. <b>Pass <c>null</c> when driving
     /// the fence from a host without a per-tick UoW</b> — this method then creates and commits a one-shot ChangeSet itself, which is correct but yields
@@ -51,6 +56,17 @@ public partial class DatabaseEngine
     /// <returns>Highest LSN written, or 0 if nothing was serialized.</returns>
     public long WriteTickFence(long tickNumber, ChangeSet changeSet = null)
     {
+        NoteTickCompleted(WorldTickBase + tickNumber);
+        return WriteTickFenceNoClock(tickNumber, changeSet);
+    }
+
+    /// <summary>
+    /// <see cref="WriteTickFence"/> without its world-clock raise: the runtime's serial arm, which has raised the clock from its own scheduler — whose base
+    /// a second runtime on the session moves past <see cref="WorldTickBase"/>.
+    /// </summary>
+    internal long WriteTickFenceNoClock(long tickNumber, ChangeSet changeSet = null)
+    {
+
         // AP-03: an engine whose commit pipeline stopped holds a partial publish in memory; the fence appends nothing over it and maintains nothing from it.
         // It returns rather than throws: the tick loop goes on, and the commits it makes are the ones refused.
         if (FenceMustNotAppend(tickNumber))
@@ -317,7 +333,7 @@ public partial class DatabaseEngine
                 var stride = table.ComponentStorageSize;
                 var overhead = table.ComponentOverhead;
                 var componentTypeId = (ushort)ArchetypeRegistry.GetComponentTypeId(table.Definition.POCOType);
-                var recOverhead = RecordHeader.SizeInBytes + SlotRecordBody.FixedSize;
+                var recOverhead = RecordHeader.SizeInBytes + SlotRecordBody.FixedSize + RecordCodec.FenceTrailerSize;
 
                 // One arena per thread — ProcessTableFence is documented safe to call concurrently across distinct tables.
                 var fenceArena = _fenceArena ??= new CommitBatchArena();

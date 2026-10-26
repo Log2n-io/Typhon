@@ -1206,6 +1206,12 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// <summary>Number of ticks executed so far.</summary>
     public long CurrentTickNumber => _currentTickNumber;
 
+    /// <summary>The world tick of this session's tick 0 (<see cref="DatabaseEngine.WorldTickBase"/>, #1495); set by the runtime, 0 without an engine.</summary>
+    internal long WorldTickBase { get; set; }
+
+    /// <summary>The current tick as a world tick: <see cref="CurrentTickNumber"/> plus the world ticks earlier sessions completed (#1495).</summary>
+    public long CurrentWorldTick => WorldTickBase + _currentTickNumber;
+
     // ═══════════════════════════════════════════════════════════════
     // Multi-threaded tick execution
     // ═══════════════════════════════════════════════════════════════
@@ -1521,7 +1527,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             {
                 // Single-threaded dispatch: the tick thread is the one and only worker, so worker 0 is the truthful id (#860).
                 var ctx = SystemStartCallback?.Invoke(sysIdx, 0)
-                          ?? new TickContext { TickNumber = _currentTickNumber, DeltaTime = 0f, WorkerId = 0, ChunkCount = 1 };
+                          ?? new TickContext { TickNumber = _currentTickNumber, WorldTick = CurrentWorldTick, DeltaTime = 0f, WorkerId = 0, ChunkCount = 1 };
                 ctx.DebugValidateWorkerId(WorkerSlotCount, sys.Name);
                 SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
                 try
@@ -1910,7 +1916,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         // System lifecycle hook: create per-system Transaction (called on the worker thread)
         var workerSlot = ToWorkerSlot(workerId);
         var ctx = SystemStartCallback?.Invoke(sysIdx, workerSlot)
-                  ?? new TickContext { TickNumber = _currentTickNumber, DeltaTime = 0f, WorkerId = workerSlot, ChunkCount = 1 };
+                  ?? new TickContext { TickNumber = _currentTickNumber, WorldTick = CurrentWorldTick, DeltaTime = 0f, WorkerId = workerSlot, ChunkCount = 1 };
         var workStart = Stopwatch.GetTimestamp();
         RecordFirstChunkGrab(sysIdx, workStart);
         InspectorChunkStart(sysIdx, 0, workStart, 1);
@@ -2445,7 +2451,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         // ShouldRun was already evaluated by the caller (OnSystemComplete).
         var workerSlot = ToWorkerSlot(workerId);
         var ctx = SystemStartCallback?.Invoke(sysIdx, workerSlot)
-                  ?? new TickContext { TickNumber = _currentTickNumber, DeltaTime = 0f, WorkerId = workerSlot, ChunkCount = 1 };
+                  ?? new TickContext { TickNumber = _currentTickNumber, WorldTick = CurrentWorldTick, DeltaTime = 0f, WorkerId = workerSlot, ChunkCount = 1 };
         var workStart = Stopwatch.GetTimestamp();
         RecordFirstChunkGrab(sysIdx, workStart);
         InspectorChunkStart(sysIdx, 0, workStart, 1);

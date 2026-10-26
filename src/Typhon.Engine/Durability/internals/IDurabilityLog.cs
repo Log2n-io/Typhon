@@ -74,6 +74,9 @@ internal interface IDurabilityLog
     /// <summary>Highest LSN durably written to stable media (LOG-05: never exceeds what reached disk).</summary>
     long DurableLsn { get; }
 
+    /// <summary>The highest world clock any append has written (TICK-01); the checkpoint reads it before its barrier flush.</summary>
+    long MaxAppendedWorldTick { get; }
+
     /// <summary>Highest LSN claimed so far — replaces <c>CommitBuffer.NextLsn - 1</c> peeking at UoW flush (M7).</summary>
     /// <remarks>#937: this is the ALLOCATION frontier. It names LSNs that no frame owns whenever a claim is abandoned or times out,
     /// so it must not be used as a durability wait target — use <see cref="LastPublishedLsn"/> for that.</remarks>

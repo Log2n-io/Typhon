@@ -25,6 +25,12 @@ internal sealed class RecoveryDriver
         public long MaxCommitStamp;
 
         /// <summary>
+        /// The highest world tick on any TxCommit or fence record scanned (#1495, TICK-01): the world clock of the last durable write. The reopened clock
+        /// resumes at no less.
+        /// </summary>
+        public long MaxWorldTick;
+
+        /// <summary>
         /// Identity TSN → commit stamp, for every transaction the window commits (VIS-03; design 05 §3.7). A batch that drew no stamp maps to its TSN.
         /// Commit fate stays keyed on the identity (LOG-04/08).
         /// </summary>
@@ -242,6 +248,12 @@ internal sealed class RecoveryDriver
                         if (view.IsTxCommit && view.CommitStamp > result.MaxCommitStamp)
                         {
                             result.MaxCommitStamp = view.CommitStamp;
+                        }
+
+                        // TICK-01 over every committed write seen: a TxCommit closes a committed batch, a fence record is committed on its own (LOG-04).
+                        if ((view.IsTxCommit || view.IsFence) && view.WorldTick > result.MaxWorldTick)
+                        {
+                            result.MaxWorldTick = view.WorldTick;
                         }
 
                         if (view.IsUnknownKind || view.Lsn <= checkpointLsn)
