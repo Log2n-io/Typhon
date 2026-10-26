@@ -188,7 +188,10 @@ public static class ItemEndpoints
     /// <summary>
     /// A character's inventory as JSON (inventory-loot.md § 3.6): <c>{"open","slots","items":[…by slot…],"recent":[…newest first…],"lost":[…]}</c>.
     /// </summary>
-    /// <remarks><c>id</c>, <c>seq</c> and <c>ref</c> are strings: a 64-bit value is past what a JavaScript number holds exactly.</remarks>
+    /// <remarks>
+    /// <c>id</c>, <c>seq</c> and <c>ref</c> are strings: a 64-bit value is past what a JavaScript number holds exactly. Every item, row and loss carries its
+    /// <c>name</c> and <c>category</c>; a row's <c>dir</c> is <c>"in"</c> when the character received it, <c>"out"</c> when it gave it.
+    /// </remarks>
     public static string InventoryJson(DatabaseEngine dbe, EntityId character)
     {
         ArgumentNullException.ThrowIfNull(dbe);
@@ -222,8 +225,7 @@ public static class ItemEndpoints
                 .Append("\"id\":\"").Append(stacks[i].Id.ToString(inv)).Append('"')
                 .Append(",\"slot\":").Append(s.Slot);
             Item(json, in t, s.Template);
-            json.Append(",\"category\":\"").Append(ItemCategory.NameOf(t.Category)).Append('"')
-                .Append(",\"mk\":").Append(s.Mk)
+            json.Append(",\"mk\":").Append(s.Mk)
                 .Append(",\"count\":").Append(s.Count)
                 .Append('}');
         }
@@ -244,7 +246,8 @@ public static class ItemEndpoints
             Item(json, in t, r.Template);
             json.Append(",\"mk\":").Append(r.Mk)
                 .Append(",\"count\":").Append(r.Count)
-                .Append(",\"ref\":\"").Append(r.Ref.ToString(inv)).Append("\"}");
+                .Append(",\"ref\":\"").Append(r.Ref.ToString(inv)).Append('"')
+                .Append(",\"dir\":\"").Append(r.To == key ? "in" : "out").Append("\"}");
         }
 
         json.Append("],\"lost\":[");
@@ -265,10 +268,14 @@ public static class ItemEndpoints
         return json.Append("]}").ToString();
     }
 
-    // "item" (the asset id) and "name", or "unknown" for a template the catalogue does not hold.
+    // "item" (the asset id), "name" and "category" — the client has no item table — or "unknown" for a template the catalogue does not hold.
     private static void Item(StringBuilder json, in ItemTemplate t, ushort template)
-        => json.Append(",\"item\":\"").Append(t.Id == template && template != 0 ? t.Asset : "unknown")
-            .Append("\",\"name\":\"").Append(t.Id == template && template != 0 ? EconomyEndpoints.Escape(t.Name) : "Unknown").Append('"');
+    {
+        var known = t.Id == template && template != 0;
+        json.Append(",\"item\":\"").Append(known ? t.Asset : "unknown")
+            .Append("\",\"name\":\"").Append(known ? EconomyEndpoints.Escape(t.Name) : "Unknown")
+            .Append("\",\"category\":\"").Append(known ? ItemCategory.NameOf(t.Category) : "unknown").Append('"');
+    }
 
     /// <summary>Rows after <paramref name="after"/>, in sequence, at most <paramref name="limit"/>: <c>{"rows":[…],"next"}</c>.</summary>
     public static string LedgerJson(DatabaseEngine dbe, long after, int limit)

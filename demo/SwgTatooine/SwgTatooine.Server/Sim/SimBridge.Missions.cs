@@ -399,7 +399,7 @@ public sealed partial class SimBridge
                 // is minted in the same transaction (inventory-loot.md § 3.4): the reward, the cache and the end commit together, once.
                 if (Reward(tx, m.Holder, body, id, m.Reward, _deskWorldTick))
                 {
-                    MintCache(tx, m.Holder, body, id, in lair, _deskWorldTick);
+                    MintCache(tx, m.Holder, body, id, in m, _deskWorldTick);
                     EndMission(tx, i, in m, completed: true);
                     _deskCompleted.Add((m.Holder, body, id, m.Kind, m.Level, m.Reward));
                 }

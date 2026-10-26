@@ -126,7 +126,7 @@ public sealed partial class SimBridge
     /// three commit together (inventory-loot.md § 3.4). What does not fit is lost and said so; the mission ends anyway.
     /// </summary>
     /// <returns><see langword="false"/>, having minted nothing, when the holder has no wallet.</returns>
-    private bool MintCache(Transaction tx, EntityId character, EntityId body, EntityId mission, in Lair lair, long worldTick)
+    private bool MintCache(Transaction tx, EntityId character, EntityId body, EntityId mission, in HeldMission held, long worldTick)
     {
         var key = (long)character.RawValue;
         if (!_walletOf.ContainsKey(key))
@@ -134,14 +134,12 @@ public sealed partial class SimBridge
             return false;
         }
 
-        var drop = LootTables.Roll((byte)lair.CreatureTemplate, MissionLairLevel(in lair), DropSource.MissionCache, mission.RawValue, worldTick);
+        // The mission's own level and lair kind: every lair it draws is spawned at that level, because the mission promised it.
+        var drop = LootTables.Roll(held.Kind, held.Level, DropSource.MissionCache, mission.RawValue, worldTick);
         PlaceDrop(tx, character, in drop, ItemMoveKind.Mission, DropSource.MissionCache, (long)mission.RawValue, worldTick);
         _deskItemsMoved.Add(body);
         return true;
     }
-
-    /// <summary>The level a mission lair's cache is rolled at: the lair's own (content-levels.md); 0 (none) reads as 1.</summary>
-    private static int MissionLairLevel(in Lair lair) => lair.Level;
 
     /// <summary>
     /// Places a drop line by line, the core or add-on first, each through <see cref="ItemTransfer"/>; what does not fit is lost — never minted, so no row —
