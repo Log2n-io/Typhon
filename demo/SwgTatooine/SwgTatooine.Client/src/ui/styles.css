@@ -539,7 +539,6 @@ button.active {
   margin: 2px 0 3px;
 }
 
-.hud table,
 /*
  * A level's con colour against the viewer's CL (data/content-level.ts; Loïc, 2026-10-26): green weaker, blue your level,
  * yellow stronger but manageable, red too strong. The yellow is a lemon and the blue a sky blue, so neither reads as the
@@ -561,6 +560,7 @@ button.active {
   color: #ff5a4f;
 }
 
+.hud table,
 .inspector table {
   width: 100%;
   border-collapse: collapse;
