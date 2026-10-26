@@ -32,8 +32,16 @@ public delegate Transaction SideTransactionFactory(DurabilityMode mode, CommitDi
 [PublicAPI]
 public struct TickContext
 {
-    /// <summary>Monotonically increasing tick number (0-based).</summary>
+    /// <summary>Monotonically increasing tick number (0-based), within this session: it starts again at 0 when the database is reopened.</summary>
     public long TickNumber { get; init; }
+
+    /// <summary>
+    /// This tick as a world tick (#1495): <see cref="TickNumber"/> plus the ticks earlier sessions of this database completed
+    /// (<see cref="DatabaseEngine.WorldTickBase"/>). Stamp persisted deadlines with it, not with <see cref="TickNumber"/>, which restarts at 0 on reopen.
+    /// Exact across a clean close; after a crash it resumes at the clock of the last durable write, so a deadline a crash kept is judged against the clock
+    /// that stamped it (TICK-01).
+    /// </summary>
+    public long WorldTick { get; init; }
 
     /// <summary>Elapsed time in seconds since the previous tick. Zero on the first tick.</summary>
     public float DeltaTime { get; init; }

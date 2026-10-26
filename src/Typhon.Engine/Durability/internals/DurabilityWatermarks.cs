@@ -28,6 +28,22 @@ internal static class DurabilityWatermarks
     // summary's: set with the clean flag, cleared with it.
     internal const string BackupStateNonceKey = "BackupStateNonce";
 
+    // The world tick the next session starts at (#1495): one past the last tick a session completed, as of the flip that wrote it. 0 on a database no
+    // session ever ticked. Written by the checkpoint's flip and the clean close's, never lowered.
+    internal const string NextWorldTickKey = "NextWorldTick";
+
+    /// <summary>The world tick the next session starts at, as the last flip persisted it; 0 when none was (a fresh database).</summary>
+    internal static long ReadNextWorldTick(ManagedPagedMMF mmf) => mmf.Bootstrap.GetLong(NextWorldTickKey);
+
+    // Must run inside MutateBootstrapAndPersist. Never lowers: a flip made by a session that ticked less than the value it opened with keeps that value.
+    private static void RaiseNextWorldTick(ManagedPagedMMF mmf, long nextWorldTick)
+    {
+        if (nextWorldTick > mmf.Bootstrap.GetLong(NextWorldTickKey))
+        {
+            mmf.Bootstrap.SetLong(NextWorldTickKey, nextWorldTick);
+        }
+    }
+
     /// <summary>Reads the persisted watermark pair; a fresh database (key absent) reads as <c>(0, false)</c>.</summary>
     internal static (long CheckpointLsn, bool CleanShutdown) Read(ManagedPagedMMF mmf)
     {
@@ -54,10 +70,13 @@ internal static class DurabilityWatermarks
     /// <param name="checkpointLsn">The new watermark.</param>
     /// <param name="sameFlip">A further bootstrap mutation made durable by the same flip — a staged schema commit (SCHEMA-09); null for none.</param>
     /// <param name="undoSameFlip">Reverts <paramref name="sameFlip"/> in memory when the flip's write fails; null for none.</param>
-    internal static void UpdateCheckpointLsn(ManagedPagedMMF mmf, long checkpointLsn, Action sameFlip = null, Action undoSameFlip = null)
+    /// <param name="nextWorldTick">The world tick past the last completed one (#1495), persisted by the same flip; 0 for none.</param>
+    internal static void UpdateCheckpointLsn(ManagedPagedMMF mmf, long checkpointLsn, Action sameFlip = null, Action undoSameFlip = null,
+        long nextWorldTick = 0)
         => mmf.MutateBootstrapAndPersist(() =>
         {
             Write(mmf, checkpointLsn, Read(mmf).CleanShutdown);
+            RaiseNextWorldTick(mmf, nextWorldTick);
             sameFlip?.Invoke();
         }, undoSameFlip);
 
@@ -116,10 +135,12 @@ internal static class DurabilityWatermarks
     /// <param name="mmf">The data file.</param>
     /// <param name="chunkSummaryNonce">The summary file's nonce, or 0 when the close wrote none.</param>
     /// <param name="backupStateNonce">The backup-state file's nonce, or 0 when the close wrote none.</param>
-    internal static void MarkCleanShutdown(ManagedPagedMMF mmf, ulong chunkSummaryNonce, ulong backupStateNonce = 0)
+    /// <param name="nextWorldTick">The world tick past the last completed one (#1495); 0 for none.</param>
+    internal static void MarkCleanShutdown(ManagedPagedMMF mmf, ulong chunkSummaryNonce, ulong backupStateNonce = 0, long nextWorldTick = 0)
         => mmf.MutateBootstrapAndPersist(() =>
         {
             Write(mmf, Read(mmf).CheckpointLsn, true);
+            RaiseNextWorldTick(mmf, nextWorldTick);
             mmf.Bootstrap.SetLong(ChunkSummaryNonceKey, (long)chunkSummaryNonce);
             mmf.Bootstrap.SetLong(BackupStateNonceKey, (long)backupStateNonce);
         });

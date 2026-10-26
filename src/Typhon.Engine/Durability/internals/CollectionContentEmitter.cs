@@ -103,6 +103,10 @@ internal static class CollectionContentEmitter
         return wireBytes;
     }
 
-    /// <summary>Wire size of one CollectionDelta record carrying an element of <paramref name="elementLength"/> bytes.</summary>
-    private static int RecordWireSize(int elementLength) => RecordHeader.SizeInBytes + CollectionDeltaRecordBody.FixedSize + elementLength;
+    /// <summary>
+    /// Wire size of one fence CollectionDelta record carrying an element of <paramref name="elementLength"/> bytes, its world-tick trailer included
+    /// (TICK-01): what the soft batch cap counts.
+    /// </summary>
+    private static int RecordWireSize(int elementLength) =>
+        RecordHeader.SizeInBytes + CollectionDeltaRecordBody.FixedSize + elementLength + RecordCodec.FenceTrailerSize;
 }

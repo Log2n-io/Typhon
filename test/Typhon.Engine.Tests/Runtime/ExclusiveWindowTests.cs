@@ -405,6 +405,102 @@ class ExclusiveWindowTests : TestBase<ExclusiveWindowTests>
         });
     }
 
+    /// <summary>
+    /// The read bracket (#1494) detects a read a whole fence ran DURING — the depth is zero at both ends — and asks for it to be read again, up to the last
+    /// attempt, which is refused; a read no fence touched stands. The entry-only check would miss the first: that is the case the count exists for.
+    /// </summary>
+    [Test]
+    public void AReadAFenceRanDuringIsReadAgainAndAQuietOneStands()
+    {
+        var window = new ExclusiveWindow();
+
+        var straddled = window.BeginRead("probe");
+        using (window.Open())
+        {
+        }
+
+        Assert.That(window.ReadOverlapped(straddled), Is.True, "a fence ran between the read's two ends");
+        Assert.That(window.EndRead("probe", straddled, null, 0), Is.False, "the fence came and went: read again");
+        Assert.That(() => window.EndRead("probe", straddled, null, ExclusiveWindow.MaxReadAttempts - 1), Throws.InvalidOperationException,
+            "overlapped on its last attempt: refused");
+
+        var quiet = window.BeginRead("probe");
+        Assert.That(window.ReadOverlapped(quiet), Is.False);
+        Assert.That(window.EndRead("probe", quiet, null, 0), Is.True);
+    }
+
+    /// <summary>
+    /// The seqcount's close: a token taken between the opening's two increments — count bumped, depth still 0, so the entry check passes — is still detected
+    /// once the fence it read through has closed. A count bumped only at opening finds the same count and a closed window, and says nothing.
+    /// </summary>
+    [Test]
+    public void AReadBegunBetweenTheOpeningsTwoIncrementsIsDetected()
+    {
+        var window = new ExclusiveWindow();
+        var token = -1;
+        window.OpeningProbeForTest = () => token = window.BeginRead("probe");
+        using (window.Open())
+        {
+        }
+
+        window.OpeningProbeForTest = null;
+        Assert.That(token, Is.Not.EqualTo(-1), "precondition: the read began inside Open, between its increments");
+        Assert.That(window.ReadOverlapped(token), Is.True, "the read ran through the whole fence");
+    }
+
+    /// <summary>A real fault is rethrown as itself when no fence overlapped the read; overlapped and refused, it is the refusal's inner exception.</summary>
+    [Test]
+    public void AFaultIsRethrownUnlessAFenceOverlappedTheRead()
+    {
+        var window = new ExclusiveWindow();
+        var fault = new ArgumentException("the read's own bug");
+
+        var quiet = window.BeginRead("probe");
+        Assert.That(() => window.EndRead("probe", quiet, fault, 0), Throws.TypeOf<ArgumentException>());
+
+        var straddled = window.BeginRead("probe");
+        using (window.Open())
+        {
+        }
+
+        Assert.That(() => window.EndRead("probe", straddled, fault, ExclusiveWindow.MaxReadAttempts - 1),
+            Throws.InvalidOperationException.With.InnerException.SameAs(fault));
+    }
+
+    /// <summary>
+    /// A foreign read that would START inside the window is refused before it reads anything — the end check would also catch it, but only after the read ran
+    /// over structures being rewritten, and a reader of the replication blocks follows raw pointers. The fence's own thread begins freely.
+    /// </summary>
+    [Test]
+    public void AForeignReadIsRefusedBeforeItStartsInsideTheWindow()
+    {
+        var window = new ExclusiveWindow();
+        Exception foreign = null;
+        var began = false;
+        using (window.Open())
+        {
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    window.BeginRead("probe");
+                    began = true;
+                }
+                catch (Exception ex)
+                {
+                    foreign = ex;
+                }
+            });
+            thread.Start();
+            thread.Join();
+
+            Assert.That(window.EndRead("probe", window.BeginRead("probe"), null, 0), Is.True, "the fence's own thread reads freely");
+        }
+
+        Assert.That(foreign, Is.InstanceOf<InvalidOperationException>());
+        Assert.That(began, Is.False, "refused at the start, not after the read");
+    }
+
     [Test]
     [CancelAfter(15_000)]
     public void TheFenceThreadsOwnMutationsAreNotViolations()

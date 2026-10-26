@@ -419,8 +419,9 @@ internal sealed class RecordCodecPropertyTests
 
     private static byte[] BuildRawRecord(long lsn, long tsn, byte kind, byte flags, byte[] body)
     {
-        // A TxCommit record is followed by its commit stamp (VIS-03), outside BodyLength.
-        var trailer = (flags & (byte)RecordFlags.TxCommit) != 0 ? RecordCodec.CommitStampTrailerSize : 0;
+        // A TxCommit record is followed by its commit stamp (VIS-03) and world tick (TICK-01), a fence record by its world tick, outside BodyLength.
+        var trailer = (flags & (byte)RecordFlags.TxCommit) != 0 ? RecordCodec.CommitTrailerSize
+            : (flags & (byte)RecordFlags.FenceRecord) != 0 ? RecordCodec.FenceTrailerSize : 0;
         var rec = new byte[RecordHeader.SizeInBytes + body.Length + trailer];
         BinaryPrimitives.WriteInt64LittleEndian(rec, lsn);
         BinaryPrimitives.WriteInt64LittleEndian(rec.AsSpan(8), tsn);

@@ -268,6 +268,7 @@ internal sealed class WalSegmentManager : IDisposable
             var headerBuffer = new byte[WalSegmentHeader.SizeInBytes];
             _fileIO.ReadAligned(handle, 0, headerBuffer);
             var header = MemoryMarshal.Read<WalSegmentHeader>(headerBuffer);
+            header.ThrowIfAnotherFormat(path);
             if (!header.Validate())
             {
                 return false;

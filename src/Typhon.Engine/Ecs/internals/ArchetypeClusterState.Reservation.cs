@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace Typhon.Engine.Internals;
@@ -322,8 +323,40 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     internal long PendingDeaths(int clusterChunkId) => PendingDeathsOf(ref SlotWords(SlotWordTable, clusterChunkId));
 
-    /// <summary>A destroy marked pending (+1), or published or aborted (-1). The publish decrements after it folded the watermark and hid the slot.</summary>
-    internal void AddPendingDeath(int clusterChunkId, int delta) => Interlocked.Add(ref PendingDeathWord(clusterChunkId), delta);
+    /// <summary>
+    /// A destroy marked pending (+1), or published or aborted (-1). The publish decrements after it folded the watermark and hid the slot. The archetype's
+    /// total (<see cref="PendingDeathsTotal"/>) is raised before the cluster's count and lowered after it, so a zero total read first means every cluster
+    /// count read after it is zero too.
+    /// </summary>
+    internal void AddPendingDeath(int clusterChunkId, int delta)
+    {
+        if (delta > 0)
+        {
+            Interlocked.Add(ref _pendingDeathsTotal.Value, delta);
+            Interlocked.Add(ref PendingDeathWord(clusterChunkId), delta);
+        }
+        else
+        {
+            Interlocked.Add(ref PendingDeathWord(clusterChunkId), delta);
+            Interlocked.Add(ref _pendingDeathsTotal.Value, delta);
+        }
+    }
+
+    // Padded both sides like the destroy stamp: every destroying commit of the archetype adds to it twice, and every walk reads it once per cluster.
+    [StructLayout(LayoutKind.Explicit, Size = 192)]
+    private struct PaddedPendingDeaths
+    {
+        [FieldOffset(64)] public long Value;
+    }
+
+    private PaddedPendingDeaths _pendingDeathsTotal;
+
+    /// <summary>
+    /// Destroys of this archetype pending a commit, all clusters together, by acquire (#1496): a cluster walk reads it before a cluster's own count and skips
+    /// that read — a second dependent miss on the slot-word line — while it is zero, which it is unless a destroy is in flight. A retired cluster's count is
+    /// zeroed without this total (<see cref="ResetClaimWords"/>), which can only leave it high: the walk then reads the cluster's count, never misses a death.
+    /// </summary>
+    internal long PendingDeathsTotal => Volatile.Read(ref _pendingDeathsTotal.Value);
 
     /// <summary>
     /// Takes <paramref name="slotIndex"/>'s index lock (VIS-08): the right to maintain its entity's B+Tree entries and element-id tails, and the keys its

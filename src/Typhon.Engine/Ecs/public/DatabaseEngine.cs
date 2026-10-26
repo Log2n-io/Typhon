@@ -685,6 +685,40 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     // DBs. CheckpointLSN is kept only for the diagnostic log line. See rules/durability.md (CS-01..CS-03).
     private bool _cleanShutdownAtOpen;
     private long _checkpointLsnAtOpen;
+
+    /// <summary>
+    /// The world tick this session's tick 0 is (#1495): one past the last tick an earlier session completed, as the database persisted it — 0 for a database
+    /// no session ever ticked. A persistent world stamps deadlines in world ticks (<see cref="TickContext.WorldTick"/>), which keep counting across a reopen,
+    /// where <see cref="TickContext.TickNumber"/> starts again at 0 every session.
+    /// </summary>
+    /// <remarks>
+    /// <b>Exact after a clean close; after a crash, the clock of the last durable write.</b> Every WAL commit and fence record carries the world clock of
+    /// its append (TICK-01), and recovery resumes the clock at the highest it replays — so every deadline a crash kept is judged against the clock it was
+    /// stamped by, never late and never early. What a crash loses is only ticks that wrote nothing durable, and nothing was stamped in those. The checkpoint
+    /// persists the highest clock any append had written before its barrier flush (records the WAL may then recycle), and never less than this base — a
+    /// crash-open's recovered clock lives in the WAL its own seal checkpoint recycles — the clean close the exact clock; both only raise the persisted value.
+    /// A restore replays its WAL the same way: the clock of the last write it restores.
+    /// </remarks>
+    public long WorldTickBase
+    {
+        get => Volatile.Read(ref _worldTickBase);
+        private set => Volatile.Write(ref _worldTickBase, value);
+    }
+
+    // Read by the checkpoint thread (the floor of what it persists), written by the open.
+    private long _worldTickBase;
+
+    /// <summary>The session's world clock: one past the last world tick completed. Read by every WAL append (TICK-01).</summary>
+    internal WorldClock WorldClock { get; } = new(0);
+
+    /// <summary>One past the last tick completed this session, as a world tick (<see cref="WorldTickBase"/> before the first).</summary>
+    public long NextWorldTick => WorldClock.Next;
+
+    /// <summary>
+    /// Records that world tick <paramref name="worldTick"/> completed (#1495): the runtime calls it at every tick end, and <see cref="WriteTickFence"/> for a
+    /// host that drives the fence itself. Never lowers the clock.
+    /// </summary>
+    internal void NoteTickCompleted(long worldTick) => WorldClock.Raise(worldTick + 1);
     private bool _headsTrusted;
 
     /// <summary>Diagnostic + test oracle: the number of archetypes whose Versioned HEADs were rebuilt during the last
@@ -2562,7 +2596,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         var commitBufferCapacity = _options.Resources.WalRingBufferSizeBytes / 2;
         WalManager = new WalManager(walOptions, MemoryAllocator, walFileIO, _durabilityNode, commitBufferCapacity);
-        DurabilityLog = new DurabilityLog(WalManager);
+        DurabilityLog = new DurabilityLog(WalManager) { Clock = WorldClock };
 
         // Determine continuation point from recovery or fresh start
         var lastLSN = _lastRecoveryResult.LastValidLSN;
@@ -2611,6 +2645,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         CheckpointManager = new CheckpointManager(MMF, UowRegistry, WalManager, _options.Resources, EpochManager, StagingBufferPool, _durabilityNode,
             initialCheckpointLsn, () => _lastTickFenceLSN);
         CheckpointManager.Logger = Logger;
+        // TICK-01: the highest clock an append carried, and never below the session's base — after a crash-open the base is the clock the replayed WAL held,
+        // which the recovery seal's checkpoint is about to recycle.
+        CheckpointManager.NextWorldTick = () => Math.Max(WorldTickBase, DurabilityLog.MaxAppendedWorldTick);
         // Persist per-archetype segment SPIs at every checkpoint so a consolidated cluster/EntityMap base is reachable on reopen after a hard crash
         // (#395). Idempotent and skip-unchanged, so a steady-state cycle is nearly free. Runs at cycle start (before the barrier) so its WAL records +
         // dirty pages ride the same cycle. Armed at the end of InitializeArchetypes, or on the crash path just before the recovery seal, so the seal
@@ -2920,6 +2957,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // Clean-shutdown HEAD marker (see field docs): capture both LSNs now; InitializeArchetypes decides trust.
             _cleanShutdownAtOpen = DurabilityWatermarks.ReadCleanShutdown(MMF);
             _checkpointLsnAtOpen = checkpointLSN;
+            WorldTickBase = DurabilityWatermarks.ReadNextWorldTick(MMF);
+            WorldClock.Raise(WorldTickBase);
 
             _failedOpenAtOpen = DurabilityWatermarks.ReadFailedOpen(MMF);
 
@@ -3917,7 +3956,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </remarks>
     private void MarkCleanShutdown(ulong chunkSummaryNonce, ulong backupStateNonce)
     {
-        DurabilityWatermarks.MarkCleanShutdown(MMF, chunkSummaryNonce, backupStateNonce);
+        DurabilityWatermarks.MarkCleanShutdown(MMF, chunkSummaryNonce, backupStateNonce, NextWorldTick);
         var checkpointLsn = DurabilityWatermarks.ReadCheckpointLsn(MMF);
         LogCleanShutdownMarked(checkpointLsn);
         LogWalWatermarksSnapshot("close", checkpointLsn);
@@ -5703,6 +5742,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         LastWalV2RecoveryResult = result;
         LastWalV2RecoveryCheckpointLsn = checkpointLsn;
+
+        // TICK-01: the clock of the last durable write the WAL replayed, when it is past what the last flip persisted. Before any tick or runtime exists.
+        if (result.MaxWorldTick > WorldTickBase)
+        {
+            WorldTickBase = result.MaxWorldTick;
+            WorldClock.Raise(WorldTickBase);
+        }
 
         if (result.StoppedAtCorruption)
         {

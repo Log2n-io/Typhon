@@ -1,4 +1,4 @@
-﻿# ECS Rules
+# ECS Rules
 
 | Field | Value |
 |-------|-------|
@@ -461,7 +461,7 @@ structural mutation.
             test, because x64 gives the same answer either way and the quadrant it protects needs a weak model to observe.
             Reverting the hand-written grow to `Array.Resize` would leave all four cases green.
 
-### CLUSTERWALK-04: A transaction's cluster walk never yields an entity that transaction has destroyed `[fatal][silent]`
+### CLUSTERWALK-04: A cluster walk never yields an entity its own transaction has destroyed, or a committed destroy has removed for its snapshot `[fatal][silent]`
   invariant ∀ transaction t, ∀ e ∈ t's pending destroys (Destroy, DestroyBatch, DestroyBulk, a cascade), ∀ enumerator E created through t
             (ArchetypeAccessor.GetClusterEnumerator, EntityAccessor.GetClusterEnumerator — every overload, TickContext ranges and realms included),
             ∀ cluster c that E.MoveNext reaches after the destroy while e holds slot s of c:
@@ -475,6 +475,16 @@ structural mutation.
   invariant scope is t's OWN pending destroys: through any other transaction or accessor an uncommitted destroy hides nothing (VIS-09). A walk through t
             yields no entity t spawned and has not published: the raw walk is committed HEAD minus own destroys, not read-your-own-writes (point
             access and EcsQuery see own spawns)
+  invariant ANOTHER transaction's destroy past its commit point but not yet published (the slot still occupied: its bit is cleared only when the publish
+            releases it, after that commit's components and spawns) is absent from a walk whose accessor's TSN is at or above its stamp — as from that
+            accessor's point access, which answers "gone" from the commit point through the owner's card (#1496). The walker reads the cluster's
+            pending-death count (raised in PREPARE, lowered after the slot is hidden) by acquire BEFORE the occupancy word; non-zero, each occupied slot is
+            confirmed against its EntityMap record (gone, or its died stamp at or below TSN, hides it) and a slot whose id already reads 0 is hidden. A
+            destroy prepared after that read has a stamp above any snapshot taken before it: not dead to the walk. Only destroys are judged: a published
+            spawn the snapshot predates is still yielded (committed HEAD). An engine walk (no accessor) has no TSN and reads HEAD
+  note the occupancy word is taken at MoveNext, the ids are read when the consumer asks: a slot released AFTER MoveNext by a concurrent commit (its destroy
+            not yet committed then, so alive to the walk) reads as Entity.Null from GetEntityId / EntityIds — SingleVersion data promises no isolation
+            (VIS-09) and the walk does not re-validate per entity. A consumer that may run beside commits skips a null id
   invariant the word is taken per cluster at MoveNext: a ClusterRef's OccupancyBits / ActiveBits / LiveCount / IsFull read the value MoveNext computed. A
             destroy t makes while a cluster is current applies from the next MoveNext of the same walk (the enumerator re-reads t's destroy count per
             cluster — OwnDestroyFilter.Apply, the one check every walker above shares)
@@ -483,13 +493,17 @@ structural mutation.
             ArchetypeClusterState.SlotMoveEpoch, which DatabaseEngine.ExecuteMigrations — the only path moving a live entity between slots — bumps per
             slice, so a destroy whose entity moved is located again
   enforce cost: t with no pending destroy — a null test and a count compare per cluster, no lookup, nothing per entity; a walk through a non-transaction
-          accessor — one null test per cluster. Otherwise one bit test per cluster (OwnDestroyedSlots' per-cluster filter), a small open-addressed
+          accessor — one null test per cluster. Plus, for any walk with an accessor, one acquire load per cluster of the archetype's pending-death total
+          (ArchetypeClusterState.PendingDeathsTotal, a padded line every walk keeps hot; raised before a cluster's count, lowered after it, so zero means
+          every cluster count is zero); only while it is non-zero the cluster's own count (three dependent loads into the slot-word blocks), and only
+          while a destroy is in flight in that cluster one EntityMap lookup per occupied slot. Otherwise one bit test per cluster (OwnDestroyedSlots' per-cluster filter), a small open-addressed
           table probe only in a cluster holding an own destroy, one HashSet probe per candidate slot — never per yielded entity. Slots are located lazily,
           one EntityMap lookup per destroy per (transaction, archetype, move epoch); Destroy itself adds one list append
   never the engine's in-place bookkeeping reads the masked word: ClusterRef.MarkDirty, ClusterRef.SpatialWriteChangesKeys and
         ClusterEnumerator.MarkCurrentDirty read the raw occupancy — a span write into an own-destroyed slot whose destroy is rolled back must still reach
         the dirty bitmap and the index (IX-07)
-  scope: OwnDestroyFilter.Apply, EntityAccessor.OwnDestroyCount, EntityAccessor.OwnDestroyedSlotsFor, AabbClusterEnumerator.OpenOccupancy,
+  scope: OwnDestroyFilter.Apply, OwnDestroyFilter.ReadOccupancy, EntityAccessor.IsDestroyedAtSnapshot, EntityRecordHeader.IsDeadAt,
+         ArchetypeClusterState.PendingDeaths, ArchetypeClusterState.PendingDeathsTotal, ArchetypeClusterState.AddPendingDeath, EntityAccessor.OwnDestroyCount, EntityAccessor.OwnDestroyedSlotsFor, AabbClusterEnumerator.OpenOccupancy,
          ClusterSpatialQueryExtensions.ClusterSpatialQuery, ClusterEnumerator.MoveNext, ClusterEnumerator.Current, ClusterEnumerator.Create, ClusterEnumerator.CreateScoped,
          ClusterRef.OccupancyBits, ClusterRef.ActiveBits, ClusterRef.LiveCount, ClusterRef.IsFull, ClusterRef.Set, ClusterRef.MarkDirty,
          ClusterRef.SpatialWriteChangesKeys, ClusterEnumerator.MarkCurrentDirty, ArchetypeAccessor.GetClusterEnumerator,
@@ -508,7 +522,20 @@ structural mutation.
             crash shape), a destroy moved by the fence before the walk, ClusterRef.Set refused on the slot, MarkDirty still marking it, the transaction's
             spatial query (AABB, Radius, ForEachInRadius, CountRadius, a destroy made mid-query) against the engine's; scope: another
             transaction's walk still yields, commit, rollback, own spawn not yielded, a slot reused after another transaction's destroy still yielded.
+            Another transaction's destroy past its commit point (#1496), staged with CommitAfterAppendProbe so the slot is provably still occupied:
+            AnotherTransactionsDestroyPastItsCommitPoint_IsAbsentFromAWalkThatCannotOpenIt (all four storages) and
+            ..._IsAbsentFromTheTransactionsSpatialQuery (every shape) — all eight red when the pending-death count is not read; and its other side, in the
+            same staged windows: AnOlderReader_StillWalksAnotherTransactionsDestroyPastItsCommitPoint (red when the stamp is not judged against the TSN)
+            and ADestroyPreparedButNotCommitted_IsStillWalked (CommitBeforeAppendProbe: count raised, no card — red when an owner without a card is
+            read as dead); "hide every occupied slot of a counted cluster" reddens both.
             Mutant_AWalkThatIgnoresTheOwnDestroy_IsRejected [RuleMutant]
+  note the release zeroes the slot's id on purpose: it is the "released since" signal FkReverseLookup, the index range scan (Transaction.cs, whose key
+            re-check would otherwise accept a released slot whose old bytes still match) and the migration geometry check read. Pinned by
+            ASlotReleasedAfterMoveNext_ReadsAsNullNotAsAnotherEntity (single-threaded: MoveNext, a committed destroy, then the read).
+  NOT covered, and not guaranteed: a migration between a destroy's PREPARE and its publish. The count stays on the cluster PREPARE found (the record
+            moves, the count does not), so the destination cluster reads zero while holding a committed-dead entity, and a walk there would yield it. Only
+            a spatial archetype migrates, at the fence, and EW-02 confines its writes to systems, whose commits end before the fence — so no compliant
+            application reaches it; EcsQuery's snapshot gate has the same dependence
   NOT covered: a fence migration DURING a walk (outside the contract: a walk during the fence window is excluded, CLUSTERWALK-01 note)
 
 ## Module: CLUSTERVIS — The per-cluster MVCC visibility summary (H1)

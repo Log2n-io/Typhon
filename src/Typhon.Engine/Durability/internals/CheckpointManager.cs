@@ -116,6 +116,12 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     internal Action BeforeSettleProbe { get; set; }
 
     /// <summary>
+    /// Test seam: every cycle behaves as one the coverage gate held back (CK-03) — it writes its pages, but CheckpointLSN does not advance, the flip persists
+    /// nothing, no quarantined free is released and no WAL segment is recycled. False in production.
+    /// </summary>
+    internal bool GateCheckpointForTest { get; set; }
+
+    /// <summary>
     /// Wired by <see cref="DatabaseEngine"/> to <c>PersistArchetypeState</c>. Invoked at the START of every checkpoint cycle (before the durability
     /// barrier) so the per-archetype segment pointers (EntityMap / cluster-segment SPIs in the <c>ArchetypeR1</c> table, plus NextEntityKey + EntityMap
     /// meta) are updated and ride THIS cycle's barrier + dirty-page flush. Without this a checkpoint consolidates a cluster/EntityMap's DATA pages into
@@ -809,6 +815,20 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     private bool _recoveryInProgress;
     private long _totalFlushOnlyCycles;
 
+    /// <summary>
+    /// The highest world clock any WAL append has written (#1495, TICK-01), read at the start of the cycle — BEFORE its barrier flush, so every record that
+    /// carried it is durable once the barrier is — and persisted by the CheckpointLSN flip. Never ahead of the data a crash keeps. Set by the engine; null
+    /// leaves the persisted value alone.
+    /// </summary>
+    internal Func<long> NextWorldTick { get; set; }
+
+    /// <summary>
+    /// The clock a cycle may persist (TICK-01): <paramref name="sampled"/>, the highest clock appended, read before <paramref name="frontier"/>, the
+    /// allocation frontier — or 0, which raises nothing (the persisted value is never lowered), when the cycle's <paramref name="barrierLsn"/> does not
+    /// cover the frontier: an append that carried the sampled clock may then be claimed but not yet durable.
+    /// </summary>
+    internal static long WorldTickToPersist(long sampled, long frontier, long barrierLsn) => barrierLsn >= frontier ? sampled : 0;
+
     /// <summary>Flush-only cycles run (<see cref="RunFlushOnlyCycle"/>, and every cycle during recovery). Diagnostic.</summary>
     public long TotalFlushOnlyCycles => Interlocked.Read(ref _totalFlushOnlyCycles);
 
@@ -1417,6 +1437,12 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             // THIS — not the stale loop-sampled targetLsn — so any records appended since the loop's trigger are now
             // durable and safely covered. A timeout here throws WalBackPressureTimeoutException (transient → CK-06
             // retry).
+            // TICK-01: the highest clock appended, then the allocation frontier. An append raises the max after its claim, with a full fence, so every append
+            // that carried this value holds an LSN at or below the frontier read after it — and the value is persisted only if the barrier below covers
+            // that frontier. A claim still unpublished, or a barrier the in-flight floor lowers (CK-13), leaves the persisted clock where it was this cycle:
+            // never a clock no durable record carries.
+            var worldTick = NextWorldTick?.Invoke() ?? 0;
+            var worldTickFrontier = _walManager.CommitBuffer.NextLsn - 1;
             _walManager.RequestFlush();
             // #937: the allocation frontier can name LSNs no frame owns (an abandoned claim, a claim whose producer timed out over
             // the buffer boundary). Waiting for one of those stalls every cycle — the shutdown cycle included — for the full
@@ -1432,6 +1458,8 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             {
                 barrierLsn = Math.Max(inFlightFloor - 1, Interlocked.Read(ref _checkpointLsn));
             }
+
+            worldTick = WorldTickToPersist(worldTick, worldTickFrontier, barrierLsn);
 
             // Step 2: Collect dirty pages
             int[] dirtyPages;
@@ -1492,7 +1520,8 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             // Coverage gate (CK-03 / STO-1): advance the checkpoint watermark and recycle WAL segments ONLY when every page collected at cycle start was durably
             // written this cycle. If a page was skipped, its committed records may not have reached the data file — advancing CheckpointLSN past them and recycling
             // their WAL segment (CK-04) would lose that data permanently after a crash. A gated page stays dirty (DC > 0) and is retried next cycle.
-            if (stillSkipped == 0)
+            var gated = stillSkipped != 0 || GateCheckpointForTest;
+            if (!gated)
             {
                 _consecutiveGatedCycles = 0;
 
@@ -1513,15 +1542,15 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                 if (stagedCommit != null)
                 {
                     advanced = stagedCommit.TryCommit(() => DurabilityWatermarks.UpdateCheckpointLsn(_mmf, barrierLsn, stagedCommit.Mutate,
-                        stagedCommit.Undo));
+                        stagedCommit.Undo, worldTick));
                 }
                 else
                 {
-                    DurabilityWatermarks.UpdateCheckpointLsn(_mmf, barrierLsn);
+                    DurabilityWatermarks.UpdateCheckpointLsn(_mmf, barrierLsn, nextWorldTick: worldTick);
                 }
             }
 
-            if (stillSkipped == 0 && advanced)
+            if (!gated && advanced)
             {
                 Interlocked.Exchange(ref _checkpointLsn, barrierLsn);
 
@@ -1569,13 +1598,13 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                     }
                 }
             }
-            else if (stillSkipped != 0)
+            else if (gated)
             {
                 Interlocked.Increment(ref _consecutiveGatedCycles);
             }
 
             Interlocked.Increment(ref _totalCheckpoints);
-            covered = stillSkipped == 0 && advanced;
+            covered = !gated && advanced;
             if (reason == CheckpointReason.DirtyPagePressure)
             {
                 // Counted HERE, beside the cycle counter, not at the call site: RunCheckpointCycle returns early under

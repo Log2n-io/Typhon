@@ -329,6 +329,9 @@ public sealed partial class TyphonRuntime : IDisposable
         Engine = engine;
         Scheduler = scheduler;
         Options = options;
+        // The engine's clock as it stands, not the base it opened with: a second runtime on the same session, or one started after a host drove the fence
+        // itself, continues the world ticks already issued instead of repeating them (#1495).
+        scheduler.WorldTickBase = engine?.NextWorldTick ?? 0;
 
         // Parented under the scheduler, not under engine.Parent. The scheduler is always present, whereas a runtime built against an engine with no resource
         // parent would otherwise throw here — during EVERY runtime construction, for a subsystem nothing has switched on yet.
@@ -855,6 +858,7 @@ public sealed partial class TyphonRuntime : IDisposable
             var ctx = new TickContext
             {
                 TickNumber = Scheduler.CurrentTickNumber,
+                WorldTick = Scheduler.CurrentWorldTick,
                 DeltaTime = 0f,
                 Transaction = tx,
                 CreateSideTransaction = _createSideTxDelegate,
@@ -2742,6 +2746,7 @@ public sealed partial class TyphonRuntime : IDisposable
         var ctx = new TickContext
         {
             TickNumber = Scheduler.CurrentTickNumber,
+            WorldTick = Scheduler.CurrentWorldTick,
             DeltaTime = _currentDeltaTime,
             AmortizedDeltaTime = AmortizedDeltaTimeFor(sysIdx),
             WorkerId = workerId,
@@ -2859,6 +2864,7 @@ public sealed partial class TyphonRuntime : IDisposable
         var ctx = new TickContext
         {
             TickNumber = Scheduler.CurrentTickNumber,
+            WorldTick = Scheduler.CurrentWorldTick,
             DeltaTime = _currentDeltaTime,
             AmortizedDeltaTime = amortizedDt,
             Accessor = workerAccessor,
@@ -3017,6 +3023,7 @@ public sealed partial class TyphonRuntime : IDisposable
             var ctx = new TickContext
             {
                 TickNumber = Scheduler.CurrentTickNumber,
+                WorldTick = Scheduler.CurrentWorldTick,
                 DeltaTime = _currentDeltaTime,
                 AmortizedDeltaTime = amortizedDt,
                 Transaction = tx,
@@ -3137,6 +3144,7 @@ public sealed partial class TyphonRuntime : IDisposable
             var ctx = new TickContext
             {
                 TickNumber = scheduler.CurrentTickNumber,
+                WorldTick = scheduler.CurrentWorldTick,
                 DeltaTime = _currentDeltaTime,
                 // DSEL-03 tells every caller to integrate by the amortized step, and this hook belongs to no system, so no rate divisor applies to it.
                 // Set rather than left at its 0 default: a hook that follows that advice would otherwise integrate by nothing at all.
@@ -3395,6 +3403,10 @@ public sealed partial class TyphonRuntime : IDisposable
         // B+Tree and the EntityMap to remove today.
         _entityCommandDrain?.Apply(_entityCommands);
 
+        // The world clock (#1495, TICK-01): this tick ended — an aborted one too, its number is spent. Both fence arms, one call; the fence's records then
+        // carry the next tick's clock, as a commit made between ticks would.
+        Engine?.NoteTickCompleted(scheduler.CurrentWorldTick);
+
         try
         {
             if (_parallelFenceEnabled)
@@ -3424,7 +3436,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 // read from, so the guarantee has to be that nothing is writing). ExclusiveWindow keeps a DEPTH rather than a flag precisely so this nests —
                 // the inner Open() takes it to 2 and back to 1, and the track still sees an open window.
                 using var window = Engine.EpochManager.FenceWindow.Open();
-                InspectorPhase(TickPhase.WriteTickFence, () => Engine.WriteTickFence(scheduler.CurrentTickNumber, _currentUow?.ChangeSet));
+                InspectorPhase(TickPhase.WriteTickFence, () => Engine.WriteTickFenceNoClock(scheduler.CurrentTickNumber, _currentUow?.ChangeSet));
 
                 // The trap #955 closes. DispatchDeferredTracks had exactly ONE call site — inside RunParallelFence — so with EnableParallelFence = false
                 // every deferred track silently never executed. That was invisible while the Fence DAG was the only one, because it is not declared in
@@ -3925,6 +3937,7 @@ public sealed partial class TyphonRuntime : IDisposable
         return new TickContext
         {
             TickNumber = Scheduler.CurrentTickNumber,
+            WorldTick = Scheduler.CurrentWorldTick,
             DeltaTime = _currentDeltaTime,
             AmortizedDeltaTime = amortizedDt,
             Transaction = tx,

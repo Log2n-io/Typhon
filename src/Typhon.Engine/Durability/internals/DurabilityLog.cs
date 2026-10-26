@@ -55,6 +55,40 @@ internal sealed class DurabilityLog : IDurabilityLog
 
     public long DurableLsn => _wal.DurableLsn;
 
+    /// <summary>
+    /// The engine's world clock (#1495, TICK-01): every append writes its value on the records' trailer, so recovery can date the last durable write.
+    /// Null — a log no engine wired — writes 0.
+    /// </summary>
+    internal WorldClock Clock { get; set; }
+
+    private long _maxAppendedWorldTick;
+
+    /// <summary>
+    /// The highest world clock any append has written, by acquire. The checkpoint reads it BEFORE its barrier flush: every record that carried it is then
+    /// durable, so the value it persists is never ahead of the data a crash keeps.
+    /// </summary>
+    public long MaxAppendedWorldTick => Volatile.Read(ref _maxAppendedWorldTick);
+
+    // The clock for this append, recorded as appended. A read first and a CAS only when it rises — the value moves once a tick, every commit of the tick
+    // shares it, so the line stays read-mostly.
+    private long WorldTickForAppend()
+    {
+        var worldTick = Clock?.Next ?? 0;
+        var current = Volatile.Read(ref _maxAppendedWorldTick);
+        while (worldTick > current)
+        {
+            var seen = Interlocked.CompareExchange(ref _maxAppendedWorldTick, worldTick, current);
+            if (seen == current)
+            {
+                break;
+            }
+
+            current = seen;
+        }
+
+        return worldTick;
+    }
+
     public long LastAppendedLsn => _wal.CommitBuffer.NextLsn - 1;
 
     public void RequestFlush() => _wal.RequestFlush();
@@ -96,7 +130,7 @@ internal sealed class DurabilityLog : IDurabilityLog
             // Again once claimed: the claim may have waited out back-pressure while another commit stopped the engine (#1269). Abandoned below.
             ThrowIfStopped();
             var written = RecordCodec.WriteFenceBlocks(
-                claim.DataSpan, blocks, archetypeId, claim.FirstLSN, tsn,
+                claim.DataSpan, blocks, archetypeId, claim.FirstLSN, tsn, WorldTickForAppend(),
                 entityKeysOffset, slotIndices, componentSizes, componentOffsets, totalComponentSize, columnHandleRanges);
 
             // Zero the frame-alignment slack after the last chunk, as Append does: stale bytes from a prior claim would
@@ -155,6 +189,10 @@ internal sealed class DurabilityLog : IDurabilityLog
             // CK-13: before the frame is published. The writer drains frames in LSN order and stops at an unpublished one (WP-06), so a checkpoint
             // barrier at or past this batch has seen the frame's release, and with it this store.
             Volatile.Write(ref inFlightFloor, claim.FirstLSN);
+
+            // TICK-01: raised once the claim holds, so the checkpoint, which samples the max before the allocation frontier, finds this claim under the
+            // frontier it reads (CheckpointManager.RunCycle).
+            batch.WorldTick = WorldTickForAppend();
             AfterFloorProbe?.Invoke();
 
             // ── The commit point (VIS-03 steps 1–3): registered, stamped. Below, only the copy into the claimed span and its publish. ──

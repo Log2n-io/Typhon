@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Threading;
 
 namespace Typhon.Engine;
 
@@ -157,8 +158,9 @@ internal sealed unsafe class OwnDestroyedSlots
 /// <summary>
 /// One walk's view of its transaction's own pending destroys in one archetype (CLUSTERWALK-04): applied to each cluster's occupancy as the walk opens it.
 /// Held by value in the walker — <see cref="ClusterEnumerator{TArch}"/>, the transaction-bound <see cref="AabbClusterEnumerator"/> and radius batch — and
-/// never copied once the walk started. Default (no accessor, an engine walk): <see cref="Apply"/> returns the occupancy untouched for one null test; a
-/// non-transaction accessor costs one more compare (its <see cref="EntityAccessor.OwnDestroyCount"/> stays 0).
+/// never copied once the walk started. Default (no accessor, an engine walk): <see cref="Apply"/> returns the occupancy untouched for one null test. A walk
+/// through any accessor, a system's included, also judges other transactions' destroys in flight against its TSN (#1496, <see cref="ReadOccupancy"/>); a
+/// non-transaction accessor's own-destroy count stays 0.
 /// </summary>
 internal unsafe struct OwnDestroyFilter
 {
@@ -178,20 +180,66 @@ internal unsafe struct OwnDestroyFilter
     /// <summary>
     /// <paramref name="occupancy"/> of cluster <paramref name="chunkId"/> minus the transaction's own pending destroys. Re-reads the transaction's destroy
     /// count per cluster, so a destroy made mid-walk applies from the next cluster. <paramref name="clusterBase"/> is the cluster's primary base,
-    /// <paramref name="state"/> the walked archetype's cluster state.
+    /// <paramref name="state"/> the walked archetype's cluster state. <paramref name="pendingDeaths"/> is the cluster's pending-destroy count, read BEFORE
+    /// the occupancy (<see cref="ReadOccupancy"/>); non-zero, every occupied slot is first confirmed against its EntityMap record (#1496).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal ulong Apply(int chunkId, ulong occupancy, byte* clusterBase, ArchetypeClusterState state)
+    internal ulong Apply(int chunkId, ulong occupancy, byte* clusterBase, ArchetypeClusterState state, long pendingDeaths)
     {
         if (_owner == null || occupancy == 0)
         {
             return occupancy;
+        }
+        if (pendingDeaths != 0)
+        {
+            occupancy = HideCommittedDestroys(occupancy, clusterBase, state);
         }
         if (_owner.OwnDestroyCount != _hiddenAtCount)
         {
             Refresh(state);
         }
         return _hidden == null ? occupancy : _hidden.Unhidden(chunkId, occupancy, clusterBase);
+    }
+
+    /// <summary>
+    /// Cluster <paramref name="chunkId"/>'s occupancy word by acquire, and — for a walk with an accessor — its pending-destroy count read before it, for
+    /// <see cref="Apply"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Why the count, and why first (#1496).</b> A committed destroy is dead for a reader at or above its stamp from the commit point, when point access
+    /// starts answering "gone" through the owner's card; its occupancy bit is cleared only when the publish releases the slot, after the components and
+    /// spawns of the same commit. A walk reading the bit in between yields an entity its own transaction cannot open. The count is raised in PREPARE and
+    /// lowered only after the slot is hidden, so it covers that window; read first, a zero means the occupancy read after it already reflects every hide —
+    /// the protocol the snapshot scans follow (<see cref="ArchetypeClusterState.PendingDeaths"/>). A destroy prepared after this read has a stamp above any
+    /// snapshot taken before it, so it is not dead to this walk. The archetype's total is read first (one load of a line every walk keeps hot): zero, the
+    /// cluster's own count — three dependent loads into the slot-word blocks — is not read at all. The per-slot probe runs only while a destroy is in flight
+    /// in that cluster.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal ulong ReadOccupancy(int chunkId, byte* clusterBase, ArchetypeClusterState state, out long pendingDeaths)
+    {
+        pendingDeaths = _owner == null || state.PendingDeathsTotal == 0 ? 0 : state.PendingDeaths(chunkId);
+        return Volatile.Read(ref *(ulong*)clusterBase);
+    }
+
+    // The slots of a cluster with a destroy in flight whose entity a destroy has removed for the walk's snapshot — or whose id already reads 0: the walk's
+    // occupancy word predates a release that has since cleared the slot — taken out of the word.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private ulong HideCommittedDestroys(ulong occupancy, byte* clusterBase, ArchetypeClusterState state)
+    {
+        var ids = clusterBase + state.Layout.EntityIdsOffset;
+        var kept = occupancy;
+        for (var bits = occupancy; bits != 0; bits &= bits - 1)
+        {
+            var slot = BitOperations.TrailingZeroCount(bits);
+            var raw = Volatile.Read(ref *(long*)(ids + (slot * 8)));
+            if (raw == 0 || _owner.IsDestroyedAtSnapshot(EntityId.FromRaw(raw), _meta))
+            {
+                kept &= ~(1UL << slot);
+            }
+        }
+
+        return kept;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

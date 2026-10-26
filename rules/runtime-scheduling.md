@@ -470,7 +470,7 @@ descends from this one property.
         the conservative form: commit and dispose it before the creating system returns. It is the one path inside the
         runtime that can overlap the window.
   scope: DatabaseEngine.TickFence.cs (WriteTickFence, WriteClusterTickFence), TyphonRuntime.cs (OnTickEndInternal),
-         TickContext.cs (CreateSideTransaction)
+         TickContext.cs (CreateSideTransaction), ExclusiveWindow.BeginRead, ExclusiveWindow.EndRead, ExclusiveWindow.ReadOverlapped
   rationale: the window is not built, it already exists — OnTickEndInternal is the scheduler's TickEndCallback.
     What was missing is that nothing STATED it, so nothing protected it: a licence nobody wrote down is one a
     later change silently revokes. Phases cannot supply this property and never could — see PH-01, which makes
@@ -491,10 +491,29 @@ descends from this one property.
     freed chunk, costs an allocation per reclaiming fence (on the large object heap past ~21 000 clusters), and would leave the other structures as
     exposed. The one engine reader on such a thread is StatisticsRebuilder, an accepted exception (CLUSTERWALK-01's note): its throw is swallowed, its
     pages stay mapped under its EpochGuard, and the cost is a stale estimate.
+    The window also spans the deferred subscriptions track on both fence paths (the serial path opens one around WriteTickFence AND the dispatch,
+    TyphonRuntime.OnTickEndInternal; the parallel path holds RunParallelFence's across it), so the committed views a command's entity reference is judged
+    by (SUB-26) are written inside it: projection, frame stage, PushReplication.Commit, CommitOwed. There the obligation IS ENFORCED, because the read is a
+    public call of bounded size: SubscriptionsCommands.TryResolve / TryNetIdOf / TryResolveAny bracket their read with ExclusiveWindow.BeginRead /
+    EndRead, a seqcount's reader side (#1494). The window bumps a count when it opens AND when it closes — opening alone misses a reader that took its
+    token between the opening's two increments and read through the whole fence. A foreign thread whose call starts inside the window is refused before
+    it reads (the read follows raw pointers into replication blocks); one a whole fence ran during reads again, up to MaxReadAttempts, so a call between
+    ticks is answered; one whose read ends with the window still open is refused. A managed fault of an overlapped read is the refusal's inner
+    exception; an access violation cannot be caught — the residue of a read with no protocol, kept rare by the entry check. A subscriptions-track stage
+    runs inside the window beside the stages committing other sessions' views (SUB-02), enrols in nothing, and is refused like any foreign thread.
+    Cost: two more locked increments per Open/close pair (the serial arm opens twice: around the fence and the track, and inside WriteTickFence), a
+    relaxed load at each end of the call.
   on_violation: silent. A concurrent writer racing a fence that has taken the licences above corrupts index
     structure with no exception at the point of damage — the B+Tree's own validators find it later, or a query
     returns a wrong answer and nothing finds it at all.
-  verified: ExclusiveWindowTests.LiveWorkload_TheFenceNeverSeesAForeignWriter — a spawn / destroy / indexed-field
+  verified: the readers bracket: ExclusiveWindowTests.AReadAFenceRanDuringIsReadAgainAndAQuietOneStands (red when EndRead compares only the depth),
+            ExclusiveWindowTests.AReadBegunBetweenTheOpeningsTwoIncrementsIsDetected (staged by OpeningProbeForTest; red without the close's bump),
+            ExclusiveWindowTests.AForeignReadIsRefusedBeforeItStartsInsideTheWindow (red without BeginRead's entry check),
+            ExclusiveWindowTests.AFaultIsRethrownUnlessAFenceOverlappedTheRead,
+            TryResolveTests.AForeignCallWhileTheFenceWindowIsOpenThrowsAndTheFenceThreadIsAnswered (all three calls, a fence thread answered),
+            TryResolveTests.AFenceThatCameAndWentDuringTheReadIsReadAgainAndOneStillOpenRefusesIt (staged by ReadProbeForTest; red when a call skips
+            EndRead).
+            ExclusiveWindowTests.LiveWorkload_TheFenceNeverSeesAForeignWriter — a spawn / destroy / indexed-field
             rewrite workload over 6+ ticks asserting zero foreign writers, and asserting ObservedFenceMutation too
             so a fence that wrote no guarded structure fails as loudly as one that was raced. Mutant:
             ForeignThreadMutatingAnIndexInsideTheWindow_IsCaught, which now arms the condition with
@@ -1025,6 +1044,64 @@ tick. The hand-written window pass does not survive that, and three shipped copi
   note: no RuleMutant. The guard was mutation-verified by hand when it landed — widening it to `newest < -99` reproduced the exact
         `ArgumentOutOfRangeException` the empty-ring test names — and a mutant of `TryGetRange` itself is caught by the exhaustive cross-check,
         which calls `GetTick` on every tick the helper returns
+
+## Module: TICK — The world clock across sessions
+
+A session numbers its ticks from 0 (`TickContext.TickNumber`, `DagScheduler.CurrentTickNumber`), and a persistent world stores deadlines as absolute
+ticks in its components — a stamp written once per decision keeps a cluster dormant where a countdown would dirty it every tick. Stamped with the
+session tick, every such deadline lies D ticks further away after a reopen of a world that ran D ticks (#1495). The world tick is the session tick plus
+what earlier sessions completed.
+
+### TICK-01: The world tick continues across a reopen; after a crash it is the clock of the last durable write `[silent]`
+  invariant DatabaseEngine.WorldTickBase = the NextWorldTick the last meta flip persisted (DurabilityWatermarks.NextWorldTickKey), raised after a crash-open
+            to the highest world tick the replayed WAL carries (RecoveryDriver.Result.MaxWorldTick); 0 for a database no session ever ticked. A runtime's
+            scheduler is seeded with the engine's NextWorldTick when it is built, so TickContext.WorldTick = DagScheduler.CurrentWorldTick = that seed +
+            TickNumber — a second runtime on one session, or one started after a host drove the fence, continues the world ticks already issued
+  invariant the world clock (DatabaseEngine.WorldClock, NextWorldTick) = one past the last completed world tick, raised by DatabaseEngine.NoteTickCompleted
+            at every tick end (the runtime's OnTickEndInternal with CurrentWorldTick, both fence arms; an aborted tick too, its number is spent) and by
+            WriteTickFence(n) with WorldTickBase + n for a host driving the fence itself — whose n must therefore be the 0-based session tick. Never lowered
+  invariant every WAL append writes the clock as it stands on its records (DurabilityLog: the TxCommit trailer after the commit stamp, every fence record's
+            own trailer, bulk-load records included — WAL format 3; a segment of another format fails the open, WalSegmentHeader.ThrowIfAnotherFormat). A
+            commit made during tick T carries T; a fence, appended once its tick has ended, carries T + 1. The clock is read after the claim, so it is
+            not monotonic in LSN order: recovery takes the max
+  invariant the CheckpointLSN flip persists max(WorldTickBase, the highest clock any append carried), sampled BEFORE the allocation frontier, and only
+            when the cycle's barrier covers that frontier (CheckpointManager.WorldTickToPersist) — an append raises the max after its claim with a full
+            fence, so a claim past the barrier (unpublished, or behind the CK-13 floor) persists nothing that cycle. So never a clock no durable record
+            carried, and never below a crash-open's recovered clock, which lives in the WAL that open's seal recycles. The clean close persists the exact
+            clock (idle ticks included); both only raise the persisted value. The runtime raises the clock from its scheduler and calls the fence through
+            WriteTickFenceNoClock; only a host's WriteTickFence raises WorldTickBase + n
+  invariant hence after a clean close the next session's WorldTickBase is exactly one past the last tick completed; after a crash it is the clock of the
+            last durable write — the tick it was written in, which the reopened session repeats — so every deadline the crash kept is judged against the
+            clock that stamped it, never late and never early. What a crash loses is ticks that wrote nothing durable, in which nothing was stamped. A
+            restore resumes at the clock of the last write it restores (the image's persisted value, or its WAL's replay)
+  note TickNumber keeps its meaning: per session, from 0. Engine consumers that cast it to 32 bits or treat 0 as "none" (subscriptions' claim stamps,
+       telemetry) keep reading it; WorldTick is for what is persisted
+  note "never lowered" has no operator path back: a clock a host inflated (a WriteTickFence numbering from a non-zero start) stays inflated. Pre-alpha,
+       accepted
+  scope: DatabaseEngine.WorldTickBase, DatabaseEngine.NextWorldTick, DatabaseEngine.NoteTickCompleted, DatabaseEngine.WriteTickFence, DatabaseEngine.WorldClock,
+         WorldClock.Raise, DurabilityLog.MaxAppendedWorldTick, DurabilityLog.Clock, RecordCodec.CommitTrailerSize, RecordCodec.FenceTrailerSize,
+         CheckpointManager.WorldTickToPersist, DatabaseEngine.WriteTickFenceNoClock, WalSegmentHeader.ThrowIfAnotherFormat,
+         RecoveryDriver.Result, DurabilityWatermarks.ReadNextWorldTick, DurabilityWatermarks.UpdateCheckpointLsn, DurabilityWatermarks.MarkCleanShutdown,
+         CheckpointManager.NextWorldTick, DagScheduler.CurrentWorldTick, DagScheduler.WorldTickBase, TickContext.WorldTick, TyphonRuntime.OnTickEndInternal
+  on_violation: silent. A deadline stored as a session tick, or a world clock that restarts, leaves every persisted timer of a reopened world D ticks in
+    the future: lairs that never retire, bodies that rest for hours, a downed player who does not get up
+  verified: WorldTickTests.ACleanReopenContinuesTheWorldClock (0, then 10, then 15 across three sessions),
+            WorldTickTests.ASessionThatNeverTicksDoesNotMoveTheClock,
+            WorldTickTests.ACrashResumesAtTheClockOfTheLastDurableWrite (checkpoint at 10, writes to 19, crash: 19, read back from the WAL),
+            WorldTickTests.TheClockACrashResumesAtIsNeverAheadOfTheDataItKept (writes to 9, idle to 20, checkpoint, crash: 9),
+            WorldTickTests.AFenceRecordDatesItsTickForRecovery (SingleVersion writes through fence records: one past the last fenced tick),
+            WorldTickTests.ARecoveredClockSurvivesASecondCrashWithNoWriteBetween,
+            WorldTickTests.AMigratingCrashOpensStagedFlipPersistsTheRecoveredClock (the staged-commit arm of the flip),
+            WorldTickTests.TheCleanCloseKeepsTheClockWhenItsCheckpointCannotAdvance (CheckpointManager.GateCheckpointForTest holds the shutdown cycle back),
+            WorldTickTests.TheRuntimeHandsSystemsTheWorldTick, WorldTickTests.ASecondRuntimeOnOneSessionContinuesTheWorldTicks,
+            WorldTickTests.ARuntimeSystemsCommitIsDatedByItsTickContext (a crash after a runtime resumes at the highest TickContext.WorldTick a system saw),
+            WorldTickTests.TheCheckpointPersistsTheSampledClockOnlyWhenItsBarrierCoversTheFrontier (the decision; the window itself cannot be parked: a
+            cycle cannot finish while a commit is held between its claim and its publish), WorldTickTests.AWalSegmentOfAnotherFormatFailsTheOpen,
+            FenceBlockCodecTests (the trailer round-trips),
+            WorldTickRestoreTests.ARestoredDatabaseResumesAtTheClockOfTheLastWriteItRestores (red only when both the image's value and the replay are lost:
+            either alone restores it). Mutation-checked by hand, each reddening its case: recovery ignoring the WAL's clock, the checkpoint persisting the
+            live clock instead of the appended one, a fence record writing 0, no floor at the base, the staged arm dropping the clock, the clean close
+            writing 0, the scheduler not seeded or seeded with WorldTickBase, the format guard removed
 
 ## Module: Deferred Entity Commands
 

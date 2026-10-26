@@ -265,6 +265,9 @@ internal ref struct RecordView
     /// <summary>A TxCommit record's commit stamp (VIS-03), read from its trailer; 0 on every other record, and on a batch that drew none.</summary>
     public long CommitStamp;
 
+    /// <summary>The world tick of a TxCommit or fence record's append (#1495, TICK-01), read from its trailer; 0 on every other record.</summary>
+    public long WorldTick;
+
     public readonly bool IsTxBegin => (Flags & RecordFlags.TxBegin) != 0;
     public readonly bool IsTxCommit => (Flags & RecordFlags.TxCommit) != 0;
     public readonly bool IsFence => (Flags & RecordFlags.FenceRecord) != 0;
