@@ -510,6 +510,8 @@ if (brain)
     Console.WriteLine(
         $"missions: {missions.Asked} take(s) sent, {missions.Taken} taken, {missions.Completed} completed (paid), {missions.Cancelled} cancelled after "
         + $"{SwgTatooine.Bots.Brain.BotBrain.QuestSeconds:F0} s");
+    var items = swarm.Items();
+    Console.WriteLine($"items: {items.LootRows} loot row(s) read, {items.UnitsLost} unit(s) lost to a full inventory, {items.Stacks} stack(s) held");
     var tips = swarm.Tips();
     Console.WriteLine(tipSeconds > 0
         ? $"tips: {tips.Sent} GiveCredits sent, {tips.NobodyNear} due with nobody named within reach (--tip-seconds {tipSeconds})"
