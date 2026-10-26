@@ -605,7 +605,8 @@ internal sealed class LootSystem : CallbackSystem
         .Writes<ItemLedgerEntry>()
         .Writes<ItemLedgerHead>()
 
-        // Whether the killer stands within reach and in the victim's realm; its items revision.
+        // Whether the killer stands within reach and in the victim's realm, and has a wallet; its items revision.
+        .ReadsFresh<Wallet>()
         .Reads<PlayerPlacement>()
         .Reads<PlayerRealm>()
         .Writes<PlayerState>()

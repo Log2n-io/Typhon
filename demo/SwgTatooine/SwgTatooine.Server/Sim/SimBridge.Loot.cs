@@ -26,6 +26,7 @@ public sealed partial class SimBridge
     private readonly Dictionary<EntityId, EntityId> _lootCharacterOf = [];
     private readonly HashSet<EntityId> _lootItemsMoved = [];
     private readonly List<KillEvent> _stagedScratch = [];
+    private readonly List<(EntityId Character, EntityId Killer, KillEvent Kill)> _lootAccepted = [];
 
     private long _lootRefusedCrowd;
     private long _lootRefusedWallet;
@@ -98,82 +99,89 @@ public sealed partial class SimBridge
             _stagedScratch.Add(s);
         }
 
+        // Who gets what, first: a transaction is opened only when a kill passes, so a tick of the crowd's kills alone writes and commits nothing.
         var tick0 = ctx.Transaction;
         var worldTick = ctx.WorldTick;
         TatooineReplication.FillBodyCharacters(_lootCharacterOf);
+        _lootAccepted.Clear();
+        for (var i = 0; i < n; i++)
+        {
+            Gate(tick0, in kills[i]);
+        }
+
+        foreach (var kill in _stagedScratch)
+        {
+            Gate(tick0, in kill);
+        }
+
+        if (_lootAccepted.Count == 0 && _stagedTransfers.IsEmpty)
+        {
+            return;
+        }
+
         using var tx = ctx.CreateSideTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit);
         while (_stagedTransfers.TryDequeue(out var t))
         {
             ItemTransfer(tx, t.From, t.To, t.Template, t.Mk, t.Count, t.Kind, t.Ref, worldTick);
         }
 
-        for (var i = 0; i < n; i++)
+        foreach (var (character, killer, kill) in _lootAccepted)
         {
-            LootOne(tx, tick0, in kills[i], worldTick);
+            var lair = kill.VictimKind == KillVictimKind.Lair;
+            var source = lair ? DropSource.WildCache : DropSource.Kill;
+            var drop = LootTables.Roll(kill.Species, kill.VictimLevel, source, kill.Victim.RawValue, worldTick);
+            PlaceDrop(tx, character, in drop, lair ? ItemMoveKind.Lair : ItemMoveKind.Kill, source, (long)kill.Victim.RawValue, worldTick);
+            _lootItemsMoved.Add(killer);
         }
 
-        foreach (var kill in _stagedScratch)
-        {
-            LootOne(tx, tick0, in kill, worldTick);
-        }
-
+        FlushItemHead(tx);
         EndLoot(tick0, tx.Commit());
     }
 
-    private void LootOne(Transaction tx, Transaction tick0, in KillEvent kill, long worldTick)
+    /// <summary>
+    /// Whether a kill drops, and to whom: not a mission lair's own death (the desk's), and only to a character's body, with a wallet, in the victim's
+    /// realm, within <see cref="LootTables.LootReachM"/>. Each refusal is counted by its reason.
+    /// </summary>
+    private void Gate(Transaction tick0, in KillEvent kill)
     {
-        var lair = kill.VictimKind == KillVictimKind.Lair;
-        if (lair && !kill.Mission.IsNull)
+        if (kill.VictimKind == KillVictimKind.Lair && !kill.Mission.IsNull)
         {
             return;
         }
 
-        LootKill(tx, tick0, kill.Killer, kill.Victim, lair, kill.VictimLevel, kill.Species, kill.X, kill.Z, kill.Realm, worldTick);
-    }
-
-    /// <summary>
-    /// One kill, looted: who gets it, then the roll, then each line placed. Called by the <c>Loot</c> system in its side transaction.
-    /// </summary>
-    /// <returns>Whether a drop was placed (whole or in part) or lost to a full inventory: the killer's body is then told.</returns>
-    private bool LootKill(Transaction tx, Transaction tick0, EntityId killer, EntityId victim, bool lair, int level, int species, float x, float z, int realm,
-        long worldTick)
-    {
+        var killer = kill.Killer;
         if (killer.IsNull || !_lootCharacterOf.TryGetValue(killer, out var character))
         {
             Interlocked.Increment(ref _lootRefusedCrowd);
-            return false;
+            return;
         }
 
-        if (!_walletOf.ContainsKey((long)character.RawValue))
+        if (!HasWallet(tick0, (long)character.RawValue))
         {
             Interlocked.Increment(ref _lootRefusedWallet);
-            return false;
+            return;
         }
 
         if (!tick0.TryOpen(killer, out var body))
         {
             Interlocked.Increment(ref _lootRefusedCrowd);
-            return false;
+            return;
         }
 
-        if (body.Read(Player.Realm).Value != realm)
+        if (body.Read(Player.Realm).Value != kill.Realm)
         {
             Interlocked.Increment(ref _lootRefusedRealm);
-            return false;
+            return;
         }
 
         var at = body.Read(Player.Bounds);
-        if (Distance2(at.X, at.Z, x, z) > LootTables.LootReachM * LootTables.LootReachM)
+        if (Distance2(at.X, at.Z, kill.X, kill.Z) > LootTables.LootReachM * LootTables.LootReachM)
         {
             Interlocked.Increment(ref _lootRefusedReach);
-            return false;
+            return;
         }
 
-        var source = lair ? DropSource.WildCache : DropSource.Kill;
-        var drop = LootTables.Roll((byte)species, level, source, victim.RawValue, worldTick);
-        PlaceDrop(tx, character, in drop, lair ? ItemMoveKind.Lair : ItemMoveKind.Kill, source, (long)victim.RawValue, worldTick);
-        _lootItemsMoved.Add(killer);
-        return true;
+        _lootAccepted.Add((character, killer, kill));
     }
 
     /// <summary>The <c>Loot</c> transaction ended: counted and its bodies told, or — not committed — the items read again and the drops lost with it.</summary>

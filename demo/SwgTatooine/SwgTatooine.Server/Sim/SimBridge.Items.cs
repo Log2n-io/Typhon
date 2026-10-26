@@ -70,12 +70,15 @@ public sealed partial class SimBridge
     private readonly long[] _pendingDropsBy = new long[4];
     private long _pendingItemRows;
     private long _pendingDrops;
+    private long _pendingRolled;
+    private bool _itemHeadDirty;
     private long _pendingUnits;
     private long _pendingLost;
     private int _pendingStacks;
 
     private long _itemRows;
     private long _itemDrops;
+    private long _itemsRolled;
     private long _itemUnits;
     private long _itemsLost;
     private long _itemStacks;
@@ -91,6 +94,9 @@ public sealed partial class SimBridge
 
     /// <summary>Drops minted into an inventory since start — kills, wild caches, mission caches — whole or in part.</summary>
     public long ItemDrops => Interlocked.Read(ref _itemDrops);
+
+    /// <summary>Drops rolled for a character since start, those lost whole to a full inventory included.</summary>
+    public long ItemsRolled => Interlocked.Read(ref _itemsRolled);
 
     /// <summary>Units minted since start.</summary>
     public long ItemUnits => Interlocked.Read(ref _itemUnits);
@@ -129,7 +135,7 @@ public sealed partial class SimBridge
     private bool MintCache(Transaction tx, EntityId character, EntityId body, EntityId mission, in HeldMission held, long worldTick)
     {
         var key = (long)character.RawValue;
-        if (!_walletOf.ContainsKey(key))
+        if (!HasWallet(tx, key))
         {
             return false;
         }
@@ -164,8 +170,14 @@ public sealed partial class SimBridge
             }
         }
 
-        _pendingDrops++;
-        _pendingDropsBy[(int)source]++;
+        // A drop counts when something of it was placed; one lost whole is only rolled (and its loss counted above).
+        _pendingRolled++;
+        if (placed > 0)
+        {
+            _pendingDrops++;
+            _pendingDropsBy[(int)source]++;
+        }
+
         _itemsDirty = true;
         return placed;
     }
@@ -306,6 +318,7 @@ public sealed partial class SimBridge
 
                 Interlocked.Add(ref _itemRows, _pendingItemRows);
                 Interlocked.Add(ref _itemDrops, _pendingDrops);
+                Interlocked.Add(ref _itemsRolled, _pendingRolled);
                 Interlocked.Add(ref _itemUnits, _pendingUnits);
                 Interlocked.Add(ref _itemsLost, _pendingLost);
                 Interlocked.Add(ref _itemStacks, _pendingStacks);
@@ -331,6 +344,8 @@ public sealed partial class SimBridge
         _pendingLostNotes.Clear();
         _pendingItemRows = 0;
         _pendingDrops = 0;
+        _pendingRolled = 0;
+        _itemHeadDirty = false;
         _pendingUnits = 0;
         _pendingLost = 0;
         _pendingStacks = 0;
@@ -354,7 +369,7 @@ public sealed partial class SimBridge
     private int ItemTransfer(Transaction tx, long from, long to, ushort template, byte mk, int count, byte kind, long reference, long worldTick)
     {
         if (count <= 0 || from == to || !ItemCatalog.TryGet(template, out var t) || !ItemCatalog.MkFits(in t, mk)
-            || (from != ItemLedger.World && !_walletOf.ContainsKey(from)) || (to != ItemLedger.World && !_walletOf.ContainsKey(to)))
+            || (from != ItemLedger.World && !HasWallet(tx, from)) || (to != ItemLedger.World && !HasWallet(tx, to)))
         {
             Interlocked.Increment(ref _itemsRefused);
             return 0;
@@ -393,7 +408,7 @@ public sealed partial class SimBridge
             _itemHead.Minted += placed;
             _pendingMinted[KeyOf(template, mk)] += placed;
             _pendingUnits += placed;
-            WriteItemHead(tx);
+            _itemHeadDirty |= placed > 0;
             return placed;
         }
 
@@ -422,7 +437,7 @@ public sealed partial class SimBridge
             remaining -= take;
         }
 
-        WriteItemHead(tx);
+        _itemHeadDirty = true;
         return count;
     }
 
@@ -576,10 +591,32 @@ public sealed partial class SimBridge
         _itemsDirty = true;
     }
 
-    private void WriteItemHead(Transaction tx)
+    /// <summary>Writes the head once, before the transaction that moved it commits: every row of a drop, or of a tick, moves it in memory only.</summary>
+    private void FlushItemHead(Transaction tx)
     {
+        if (!_itemHeadDirty)
+        {
+            return;
+        }
+
         tx.OpenMut(_itemHeadId).Set(ItemLedgerHeadArch.Head, _itemHead);
+        _itemHeadDirty = false;
         _itemsDirty = true;
+    }
+
+    /// <summary>
+    /// Whether a character has a wallet: from memory while the economy is loaded; from the wallet index when a failed commit of the <c>Ledger</c> or the desk
+    /// dropped it, so this tick's drops are not refused for a wallet that exists.
+    /// </summary>
+    private bool HasWallet(Transaction tx, long key)
+    {
+        if (_economyLoaded)
+        {
+            return _walletOf.ContainsKey(key);
+        }
+
+        using var found = tx.EnumerateIndex<Wallet, long>(Dbe.GetIndexRef<Wallet, long>(w => w.Owner), key, key);
+        return found.MoveNext();
     }
 
     /// <summary>Moves the body's items revision, so its client re-reads <c>GET /swg/inventory</c>.</summary>
@@ -603,6 +640,7 @@ public sealed partial class SimBridge
     {
         j.Append("{\"rows\":").Append(ItemRows)
             .Append(",\"drops\":").Append(ItemDrops)
+            .Append(",\"rolled\":").Append(ItemsRolled)
             .Append(",\"units\":").Append(ItemUnits)
             .Append(",\"lost\":").Append(ItemsLost)
             .Append(",\"stacks\":").Append(ItemStacks)

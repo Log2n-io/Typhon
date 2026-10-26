@@ -420,6 +420,8 @@ internal sealed class InventoryChecks : ServedChecks
 
         SessionHarness.Until(() => Items.Stacks(sim, p.Character).TrueForAll(s => s.Stack.Count == ItemLedger.StackMax), "every stack to be full");
         var full = Items.Rows(sim).Count;
+        var drops = sim.Bridge.ItemDrops;
+        var rolled = sim.Bridge.ItemsRolled;
         sim.Bridge.StageKill(Items.Kill(p.Body, 0xB002, x, z, CreatureTemplates.Frog));
         SessionHarness.Until(() => sim.Bridge.ItemsLost > lostPartial, "the drop to be lost");
         Harness.Ticks(1);
@@ -434,6 +436,8 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(json, Does.Contain("\"lost\":[{\"n\":1,"), "the partial loss is not noted");
             Assert.That(full, Is.EqualTo(rows + 3), "the premise: two of the gland stacks topped up");
             Assert.That(Items.Rows(sim), Has.Count.EqualTo(full), "a row for a drop that did not fit");
+            Assert.That(sim.Bridge.ItemDrops, Is.EqualTo(drops), "a drop lost whole counted as a drop");
+            Assert.That(sim.Bridge.ItemsRolled, Is.EqualTo(rolled + 1), "a drop lost whole not counted as rolled");
             Assert.That(sim.Bridge.ItemsLost - lostPartial, Is.GreaterThanOrEqualTo(LootTables.LootKillUnits), "the whole drop lost");
             Assert.That(lost.GetArrayLength(), Is.GreaterThanOrEqualTo(2));
             Assert.That(lost[lost.GetArrayLength() - 1].GetProperty("item").GetString(), Is.EqualTo("mat_gland").Or.StartsWith("core_").Or.StartsWith("addon_"));
@@ -585,6 +589,37 @@ internal sealed class InventoryChecks : ServedChecks
             });
         });
 
+        // A mission's cache with no reward paying it: the first mint restated as one.
+        Corrupt(sim, tx => Edit(tx, rowIds[0], ItemLedgerArch.Entry, (ref e) =>
+        {
+            e.Kind = ItemMoveKind.Mission;
+            e.Ref = 88;
+        }));
+        var unpaid = ItemEndpoints.Audit(sim.Dbe);
+        Corrupt(sim, tx => Edit(tx, rowIds[0], ItemLedgerArch.Entry, (ref e) =>
+        {
+            e.Kind = ItemMoveKind.Kill;
+            e.Ref = 1;
+        }));
+
+        // World's side naming a stack.
+        Corrupt(sim, tx => Edit(tx, rowIds[0], ItemLedgerArch.Entry, (ref e) => e.FromStack = 5));
+        var worldSide = ItemEndpoints.Audit(sim.Dbe);
+        Corrupt(sim, tx => Edit(tx, rowIds[0], ItemLedgerArch.Entry, (ref e) => e.FromStack = 0));
+
+        // 31 more stacks for the character, one of them outside the grid.
+        var extra = new List<EntityId>();
+        Corrupt(sim, tx =>
+        {
+            for (var k = 0; k <= ItemLedger.Slots; k++)
+            {
+                var s = new ItemStack { Owner = owner, Template = ItemCatalog.Metal, Mk = 1, Slot = (byte)k, Count = 1, Rows = 1 };
+                extra.Add(tx.Spawn<ItemStackArch>(ItemStackArch.Stack.Set(in s)));
+            }
+        });
+        var crowded = ItemEndpoints.Audit(sim.Dbe);
+        Corrupt(sim, tx => extra.ForEach(tx.Destroy));
+
         var clean = ItemEndpoints.Audit(sim.Dbe);
         static bool Only(ItemAuditResult a) => a.Violations.All(v => v.Contains("must go from World", StringComparison.Ordinal));
         Assert.Multiple(() =>
@@ -601,6 +636,10 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(mkV.Violations, Has.Some.StartsWith("seq 1: Mk V in a kill row"));
             Assert.That(emptied.Violations, Has.Some.Contains("emptied by the replay and still stored"));
             Assert.That(twice.Violations, Has.Some.StartsWith("seq 2: mission 77's cache minted again"));
+            Assert.That(unpaid.Violations, Has.Some.StartsWith("mission 88: its cache was minted at tick"), "a cache without its reward");
+            Assert.That(unpaid.Violations, Has.Some.EndsWith("and no reward pays it"));
+            Assert.That(worldSide.Violations, Has.Some.StartsWith("seq 1: World's side names stack 5"));
+            Assert.That(crowded.Violations, Has.Some.StartsWith($"owner {owner}: more than {ItemLedger.Slots} stacks"));
             Assert.That(clean.ViolationCount, Is.EqualTo(1), string.Join("; ", clean.Violations));
             Assert.That(Only(clean), Is.True, string.Join("; ", clean.Violations));
         });
@@ -699,6 +738,44 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(root.GetProperty("items")[1].GetProperty("category").GetString(), Is.EqualTo("core"));
             Assert.That(root.GetProperty("lost")[0].GetProperty("name").GetString(), Is.EqualTo("Armor Enhancement"));
             Assert.That(root.GetProperty("lost")[0].GetProperty("category").GetString(), Is.EqualTo("addon"));
+        });
+    }
+
+    /// <summary>
+    /// The recent rows are read incrementally (<c>RecentRowCache</c>): read after read, as a client reads on every drop, with another character's rows
+    /// between, the answer stays the newest 20 rows of the bearer's, newest first — what a read of its whole history gives. The wallet's, the same.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void TheRecentRows_ReadAfterEveryDrop_AreTheNewestOfTheWholeHistory()
+    {
+        using var sim = Start();
+        var (x, z) = OpenGround(sim);
+        var a = LogIn(sim, 0x740D, x, z);
+        var walletA = EconomyEndpoints.WalletJson(sim.Dbe, a.Character);
+        var b = LogIn(sim, 0x740E, x + 5f, z, 2);
+        var key = (long)a.Character.RawValue;
+        for (var round = 0; round < 6; round++)
+        {
+            Mint(sim, a.Character, 2, (ItemCatalog.Hide, 1, 3), ((ushort)(ItemCatalog.Metal + round), 2, 1));
+            Mint(sim, b.Character, 1, (ItemCatalog.Bone, 1, 2));
+            Mint(sim, a.Character, 2, (ItemCatalog.Venom, 1, 1), (ItemCatalog.Gland, 1, 1));
+            ItemEndpoints.InventoryJson(sim.Dbe, a.Character);
+        }
+
+        sim.Bridge.StageTransfer(key, ItemLedger.World, ItemCatalog.Hide, 1, 4, ItemMoveKind.Kill, 1);
+        SessionHarness.Until(() => Items.Rows(sim).Count == 31, "the hide given back");
+        using var doc = JsonDocument.Parse(ItemEndpoints.InventoryJson(sim.Dbe, a.Character));
+        var answered = doc.RootElement.GetProperty("recent").EnumerateArray().Select(r => long.Parse(r.GetProperty("seq").GetString())).ToList();
+        var whole = Items.Rows(sim).Where(r => r.From == key || r.To == key).Select(r => r.Seq).OrderByDescending(q => q).Take(ItemEndpoints.RecentRows).ToList();
+        using var wallet = JsonDocument.Parse(EconomyEndpoints.WalletJson(sim.Dbe, a.Character));
+        var walletRows = wallet.RootElement.GetProperty("transfers").EnumerateArray().Select(r => r.GetProperty("seq").GetString()).ToList();
+        Assert.Multiple(() =>
+        {
+            Assert.That(answered, Is.EqualTo(whole), "the incremental read is not the newest of the whole history");
+            Assert.That(answered, Has.Count.EqualTo(ItemEndpoints.RecentRows));
+            Assert.That(walletA, Does.Contain("\"kind\":\"grant\""), "the premise: the first wallet read");
+            Assert.That(walletRows, Is.EqualTo(new[] { "1" }), "the other character's grant leaked into the wallet's rows, or its own went missing");
         });
     }
 
