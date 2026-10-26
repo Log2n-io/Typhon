@@ -286,8 +286,64 @@ internal sealed class InventoryChecks : ServedChecks
     public void AMissionLairBrokenBySomebodyElse_DropsNoCache()
     {
         using var sim = Start();
+        var (terminal, p, held) = TakeAMission(sim, 0x7404);
+
+        // Broken with no blow of its holder's (OwnerHit 0), and its death pushed as the drain would push it - at the holder's feet, so only the skip of a
+        // mission lair's death keeps it from being looted.
+        sim.WriteInTick(tx =>
+        {
+            var l = tx.OpenMut(held.Mission.Lair);
+            var v = l.Read(CreatureLair.Vitals);
+            v.Health = 0;
+            l.Set(CreatureLair.Vitals, v);
+        });
+        sim.Bridge.StageKill(Items.Kill(p.Body, held.Mission.Lair.RawValue, terminal.X + 2f, terminal.Z, (byte)held.Mission.Kind,
+            kind: KillVictimKind.Lair, mission: held.Id));
+        SessionHarness.Until(() => HeldBy(sim, p.Character)[0].Mission.Lair != held.Mission.Lair, "a new lair to be drawn");
+        Harness.Ticks(Worlds.ServedHz / SimBridge.MissionPassHz + 2);
+        Assert.Multiple(() =>
+        {
+            Assert.That(Items.Rows(sim), Is.Empty, "a cache, or the lair looted as a kill");
+            Assert.That(HeldBy(sim, p.Character)[0].Id, Is.EqualTo(held.Id), "the mission is no longer held");
+            Assert.That(sim.Bridge.ItemDropsBy(DropSource.MissionCache), Is.Zero);
+            Assert.That(sim.Bridge.LootRefusedTotal, Is.Zero, "refused rather than skipped");
+        });
+    }
+
+    /// <summary>
+    /// A mission lair broken by a stranger is an ordinary lair to the stranger: the wild cache, kind <c>lair</c>, to the stranger's inventory — as it pays
+    /// the stranger lair XP — and nothing to the holder, whose mission stands.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void AMissionLairBrokenByAStranger_DropsAWildCacheToTheStranger()
+    {
+        using var sim = Start();
+        var (terminal, holder, held) = TakeAMission(sim, 0x7410);
+        var stranger = LogIn(sim, 0x7411, terminal.X + 6f, terminal.Z, 2);
+        sim.Bridge.StageKill(Items.Kill(stranger.Body, held.Mission.Lair.RawValue, terminal.X + 6f, terminal.Z, (byte)held.Mission.Kind,
+            kind: KillVictimKind.Lair, mission: held.Id));
+        SessionHarness.Until(() => Items.Rows(sim).Count > 0, "the stranger's cache to be written");
+        Harness.Ticks(2);
+        var rows = Items.Rows(sim);
+        Assert.Multiple(() =>
+        {
+            Assert.That(rows.TrueForAll(r => r.Kind == ItemMoveKind.Lair && r.To == (long)stranger.Character.RawValue), Is.True,
+                "not lair rows to the stranger");
+            Assert.That(rows.TrueForAll(r => r.Ref == (long)held.Mission.Lair.RawValue), Is.True, "a row not naming the lair");
+            Assert.That(rows.Sum(r => r.Count), Is.EqualTo(LootTables.WildCacheUnits + 1), "not a wild cache");
+            Assert.That(Items.Stacks(sim, holder.Character), Is.Empty, "the holder was given something");
+            Assert.That(sim.Bridge.ItemDropsBy(DropSource.WildCache), Is.EqualTo(1));
+            Assert.That(sim.Bridge.ItemDropsBy(DropSource.MissionCache), Is.Zero);
+        });
+    }
+
+    /// <summary>A player logged in at the first terminal holding one of its missions, its lair drawn.</summary>
+    private (MissionTerminalRef Terminal, (FakeLink Link, EntityId Body, EntityId Character, long Parked) Player, (EntityId Id, HeldMission Mission) Held)
+        TakeAMission(TatooineSim sim, ulong account)
+    {
         var terminal = sim.Index.Terminals[0];
-        var p = LogIn(sim, 0x7404, terminal.X + 2f, terminal.Z);
+        var p = LogIn(sim, account, terminal.X + 2f, terminal.Z);
         var offers = new List<(EntityId Id, MissionOfferInfo Info)>();
         sim.WriteInTick(tx =>
         {
@@ -312,28 +368,7 @@ internal sealed class InventoryChecks : ServedChecks
             ["serial"] = FieldValue.Of(offers[0].Info.Serial),
         });
         SessionHarness.Until(() => HeldBy(sim, p.Character).Count == 1 && !HeldBy(sim, p.Character)[0].Mission.Lair.IsNull, "the mission and its lair");
-        var held = HeldBy(sim, p.Character)[0];
-
-        // Broken with no blow of its holder's (OwnerHit 0), and its death pushed as the drain would push it - at the holder's feet, so only the skip of a
-        // mission lair's death keeps it from being looted.
-        sim.WriteInTick(tx =>
-        {
-            var l = tx.OpenMut(held.Mission.Lair);
-            var v = l.Read(CreatureLair.Vitals);
-            v.Health = 0;
-            l.Set(CreatureLair.Vitals, v);
-        });
-        sim.Bridge.StageKill(Items.Kill(p.Body, held.Mission.Lair.RawValue, terminal.X + 2f, terminal.Z, (byte)held.Mission.Kind,
-            kind: KillVictimKind.Lair, mission: held.Id));
-        SessionHarness.Until(() => HeldBy(sim, p.Character)[0].Mission.Lair != held.Mission.Lair, "a new lair to be drawn");
-        Harness.Ticks(Worlds.ServedHz / SimBridge.MissionPassHz + 2);
-        Assert.Multiple(() =>
-        {
-            Assert.That(Items.Rows(sim), Is.Empty, "a cache, or the lair looted as a kill");
-            Assert.That(HeldBy(sim, p.Character)[0].Id, Is.EqualTo(held.Id), "the mission is no longer held");
-            Assert.That(sim.Bridge.ItemDropsBy(DropSource.MissionCache), Is.Zero);
-            Assert.That(sim.Bridge.LootRefusedTotal, Is.Zero, "refused rather than skipped");
-        });
+        return (terminal, p, HeldBy(sim, p.Character)[0]);
     }
 
     // ── IL-5: stacking and the full inventory ───────────────────────────────────────────────────────────────────────
