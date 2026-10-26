@@ -47,7 +47,7 @@ API; the rest are strong recommendations.
 | 6 | Bootstrap with `DatabaseEngine.Open(path, …)`, or DI `services.AddTyphon(…)` (`AddLogging()` is optional — it's self-registered) | `new DatabaseEngine(...)` (no public constructor) |
 | 7 | `using Typhon.Schema.Definition;` for the attributes | Rely on `using Typhon.Engine;` alone — `Archetype<T>` (base class) and `[Archetype]` (attribute) share a name and collide |
 | 8 | Do all writes **inside a transaction** and `Commit()` | Assume `Commit()` implies durability — that depends on the unit-of-work's durability mode |
-| 9 | Pick a **storage mode per component** (`Versioned` = full ACID, `SingleVersion`, `Transient`, `Committed`) | Treat storage/ACID as a global switch |
+| 9 | Pick a **storage mode per component** (`Versioned` = full ACID, `SingleVersion`, `Transient`) | Treat storage/ACID as a global switch; or list `Committed` as a fourth mode — there are exactly three `StorageMode` values; `CommitDiscipline.Commit` is a separate per-transaction axis on `SingleVersion` |
 
 ## 4. A minimal program that compiles
 
