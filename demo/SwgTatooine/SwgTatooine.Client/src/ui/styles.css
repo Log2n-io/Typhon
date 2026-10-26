@@ -727,10 +727,93 @@ button.active {
 }
 
 .inventory-slot {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   aspect-ratio: 1;
   border: 1px solid rgba(110, 170, 220, 0.25);
   border-radius: 3px;
   background: rgba(0, 0, 0, 0.25);
+}
+
+.inventory-slot.filled {
+  border-color: rgba(110, 170, 220, 0.5);
+}
+
+/* Drawn at the size the catalogue rendered it: a scaled icon is a blurred one. */
+.inventory-icon {
+  width: 32px;
+  height: 32px;
+  flex: none;
+  pointer-events: none;
+}
+
+.inventory-initials {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+/* The Mk badge: plain metal, green, blue, violet, gold — the item models' Mk I-V (ASSET_FORMAT.md § 5.11). */
+.inventory-mk {
+  position: absolute;
+  top: 1px;
+  left: 2px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  text-shadow: 0 0 2px #000;
+}
+
+.inventory-mk.mk1 {
+  color: #c4c8cf;
+}
+
+.inventory-mk.mk2 {
+  color: #6fdc6f;
+}
+
+.inventory-mk.mk3 {
+  color: #5aa8ff;
+}
+
+.inventory-mk.mk4 {
+  color: #b77cff;
+}
+
+.inventory-mk.mk5 {
+  color: #ffcf4a;
+}
+
+.inventory-count {
+  position: absolute;
+  right: 2px;
+  bottom: 1px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-shadow: 0 0 2px #000;
+}
+
+.inventory-tip {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--panel-bg);
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.inventory-slot:hover .inventory-tip {
+  display: block;
 }
 
 .inventory-history {
