@@ -207,16 +207,18 @@ internal sealed class PerceptionChecks : ServedChecks
         SessionHarness.UntilNamed(link.Session, lair, "the lair to reach the bot's view");
         Harness.Ticks(6);
 
-        // As BotSwarm does: the level read becomes the bound of the next read.
-        var eyes = new Perception();
-        var low = Replay(link, new WorldStore(link.Plan), eyes, new FacilityMap());
-        eyes.CombatLevel = low.Level;
-        var world = Replay(link, new WorldStore(link.Plan), eyes, new FacilityMap());
+        // As BotSwarm does: the level read off the wire becomes the brain's combat level, and the brain bounds the hunt with it.
+        var world = Replay(link, new WorldStore(link.Plan), new Perception(), new FacilityMap());
+        var unlevelled = new BotBrain(BotMap.Cities, 7u) { CombatLevel = 1 };
+        var levelled = new BotBrain(BotMap.Cities, 7u) { CombatLevel = world.Level };
+        unlevelled.Decide(in world, 1);
+        levelled.Decide(in world, 1);
         Assert.Multiple(() =>
         {
-            Assert.That(low.Level, Is.EqualTo(12), "the bot did not read its own level off the wire");
-            Assert.That(low.NearestCreatureLevel, Is.Not.EqualTo(15), "the premise: a CL 1 bound leaves the level 15 frogs alone");
-            Assert.That(world.NearestCreatureLevel, Is.EqualTo(15), "a CL 12 bot left a level 15 creature, within its reach, alone");
+            Assert.That(world.Level, Is.EqualTo(12), "the bot did not read its own level off the wire");
+            Assert.That(world.NearestCreatureLevel, Is.EqualTo(15), "the premise: the level 15 frogs are the nearest creature");
+            Assert.That(unlevelled.Goal, Is.Not.EqualTo(Goal.Hunting), "the premise: a CL 1 bot leaves a level 15 creature alone");
+            Assert.That(levelled.Goal, Is.EqualTo(Goal.Hunting), "a CL 12 bot left a level 15 creature, within its reach, alone");
         });
     }
 
