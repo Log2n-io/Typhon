@@ -193,8 +193,8 @@ public sealed partial class SimBridge
                 {
                     // A stance reaches between the two bodies' edges; the crowd's weapon reaches between centres, as it always has.
                     var verdict = possessed
-                        ? CheckTarget(ctx, target, targetKind, x, z, 0f, TatooineData.StanceReachM[stance] + places[idx].HalfExtent)
-                        : CheckTarget(ctx, target, targetKind, x, z, rangeSq, -1f);
+                        ? CheckTarget(ctx, target, targetKind, x, z, 0f, TatooineData.StanceReachM[stance] + places[idx].HalfExtent, crowd: false)
+                        : CheckTarget(ctx, target, targetKind, x, z, rangeSq, -1f, crowd: true);
                     if (verdict == TargetVerdict.Gone)
                     {
                         // Dead or destroyed — a broken lair, a mission ended. Nobody's choice survives that, so the target is dropped for a possessed
@@ -335,7 +335,8 @@ public sealed partial class SimBridge
     /// <c>TryOpen</c> rather than <c>TryOpenMut</c> even though the caller may be about to damage what it finds. The
     /// damage itself happens in the consumer, on one thread, through the tick transaction.
     /// </remarks>
-    private static TargetVerdict CheckTarget(TickContext ctx, EntityId target, byte kind, float x, float z, float rangeSq, float edgeReach)
+    /// <param name="crowd">A scripted body's: a lair a held mission reserved since it was acquired is gone for it (missions.md § 8, MS-R5).</param>
+    private static TargetVerdict CheckTarget(TickContext ctx, EntityId target, byte kind, float x, float z, float rangeSq, float edgeReach, bool crowd)
     {
         if (!ctx.Accessor.TryOpen(target, out var entity))
         {
@@ -362,7 +363,7 @@ public sealed partial class SimBridge
             case CombatTargetKind.Lair:
             {
                 var spawner = entity.Read(CreatureLair.Spawner);
-                if (!IsStandingLair(spawner, entity.Read(CreatureLair.Vitals)))
+                if (!IsStandingLair(spawner, entity.Read(CreatureLair.Vitals)) || (crowd && !spawner.Mission.IsNull))
                 {
                     return TargetVerdict.Gone;
                 }

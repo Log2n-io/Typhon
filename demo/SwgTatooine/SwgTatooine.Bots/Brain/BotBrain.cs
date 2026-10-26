@@ -58,7 +58,7 @@ public enum Goal
 /// keeps the behaviour it always had: straight lines, and no doors.
 /// </para>
 /// </remarks>
-public sealed class BotBrain
+public sealed partial class BotBrain
 {
     /// <summary>How close counts as arrived, in metres.</summary>
     /// <remarks>
@@ -246,8 +246,8 @@ public sealed class BotBrain
     /// <summary>What it is doing.</summary>
     public Goal Goal { get; private set; } = Goal.Choosing;
 
-    /// <summary>How far above its own combat level a bot hunts (content-levels.md § 7): a creature past it is left alone, and an offer past it is taken only
-    /// when no other is listed.</summary>
+    /// <summary>How far above its own combat level a bot hunts (content-levels.md § 7): a creature past it is left alone, and an offer past it is never
+    /// taken — the desk would refuse it (missions.md § 8).</summary>
     public const int LevelReach = 3;
 
     /// <summary>
@@ -398,7 +398,7 @@ public sealed class BotBrain
             // Every arrival starts its stay now — the walk in left whatever timer the street had, and a stale one turned the bot round in the doorway.
             if (Goal != Goal.Indoors || arrived)
             {
-                Goal = Goal.Indoors;
+                Become(Goal.Indoors, GoalWhy.EnteredBuilding, tick, (uint)world.Realm);
                 _leaving = false;
                 _until = tick + Ticks(4 + (Next() % 8u));
             }
@@ -409,7 +409,7 @@ public sealed class BotBrain
         if (Goal == Goal.Indoors && _leaving)
         {
             // Out: the crossing has put it back on the planet. Stand a moment where the door left it, as anyone does.
-            Goal = Goal.Idling;
+            Become(Goal.Idling, GoalWhy.LeftBuilding, tick);
             _until = tick + Ticks(2);
         }
 
@@ -466,13 +466,14 @@ public sealed class BotBrain
     /// </remarks>
     private Intent Choose(in Perceived world, long tick)
     {
+        ChoosingFromHere();
         _wantMounted = false;
         _leg.Clear();
 
         // A mission held, its lair placed: that is what it is doing until it is done or given up (lair-objectives.md B-3).
         if (world.MissionsHeld > 0 && world.HasMissionLair)
         {
-            Goal = Goal.Questing;
+            Become(Goal.Questing, GoalWhy.QuestHeld, tick);
             return Quest(in world, tick);
         }
 
@@ -483,7 +484,7 @@ public sealed class BotBrain
 
         if (world.NearestCreature != 0 && world.NearestCreatureM <= NoticeM && world.NearestCreature != _givenUpOn && Huntable(in world))
         {
-            Goal = Goal.Hunting;
+            Become(Goal.Hunting, GoalWhy.CreatureNoticed, tick, world.NearestCreature, world.NearestCreatureM);
             _huntUntil = tick + Ticks(HuntSeconds);
             return Hunt(in world, tick);
         }
@@ -511,7 +512,7 @@ public sealed class BotBrain
                 return Enter(in world, tick);
             }
 
-            Goal = Goal.Idling;
+            Become(Goal.Idling, GoalWhy.IdleChosen, tick);
             _until = tick + _idleTicks;
             return Intent.Move(0f, 0);
         }
@@ -543,7 +544,7 @@ public sealed class BotBrain
         var roll = Next() % 100u;
         if (roll < 20u)
         {
-            Goal = Goal.Idling;
+            Become(Goal.Idling, GoalWhy.IdleChosen, tick);
             _until = tick + _idleTicks;
             return Intent.Move(0f, 0);   // stop where it is: speed class 0 is the server's own "stand still"
         }
@@ -566,7 +567,8 @@ public sealed class BotBrain
         _asked = false;
         _travelBest = double.MaxValue;
         _travelBestAt = tick;
-        Goal = Goal.Travelling;
+        var why = TargetRegion == HomeRegion ? GoalWhy.GoingHome : GoalWhy.TravelChosen;
+        Become(Goal.Travelling, why, tick, (uint)TargetRegion, (float)Routing.Distance(world.X, world.Z, city.X, city.Z));
         return Travel(in world, tick);
     }
 
@@ -593,14 +595,17 @@ public sealed class BotBrain
         if (world.NearestCreature != 0 && tick >= _huntUntil)
         {
             _givenUpOn = world.NearestCreature;
-            Goal = Goal.Choosing;
+            Become(Goal.Choosing, GoalWhy.HuntTimeout, tick);
             return Choose(in world, tick);
         }
 
         if (world.NearestCreature == 0 || world.NearestCreature == _givenUpOn || !Huntable(in world))
         {
             // Killed, or it wandered out of view, or what is nearest now is past this bot's level. Nothing to hunt, so decide again.
-            Goal = Goal.Choosing;
+            var why = world.NearestCreature == 0 ? GoalWhy.HuntTargetGone
+                : world.NearestCreature == _givenUpOn ? GoalWhy.HuntGivenUpTarget
+                : GoalWhy.HuntNotHuntable;
+            Become(Goal.Choosing, why, tick);
             return Choose(in world, tick);
         }
 
@@ -609,7 +614,7 @@ public sealed class BotBrain
         // travelled anywhere — the goal had no end, which is not the same as a goal that takes a long time.
         if (world.NearestCreatureM > NoticeM)
         {
-            Goal = Goal.Choosing;
+            Become(Goal.Choosing, GoalWhy.HuntOutOfRange, tick);
             return Choose(in world, tick);
         }
 
@@ -654,7 +659,7 @@ public sealed class BotBrain
     {
         if (TargetRegion <= 0 || TargetRegion > _cities.Length)
         {
-            Goal = Goal.Choosing;
+            Become(Goal.Choosing, GoalWhy.NoDestination, tick);
             return Choose(in world, tick);
         }
 
@@ -664,7 +669,7 @@ public sealed class BotBrain
         {
             // Arrived. Idle a while rather than choosing again at once: a fleet that re-decided on arrival would travel
             // without pause, and a city nobody stands in is a city whose group set is never held.
-            Goal = Goal.Idling;
+            Become(Goal.Idling, GoalWhy.Arrived, tick);
             _until = tick + _idleTicks;
             TargetRegion = 0;
             _wantMounted = false;
@@ -693,6 +698,7 @@ public sealed class BotBrain
         // stretch was a hundred metres on foot past the edge, and getting on mid-walk rode the walk's corners at the swoop's speed.
         if (_leg.Active && _leg.CityWalk && !inCity)
         {
+            NoteLeg(LegWhy.CityEdge, tick);
             _leg.Clear();
             _travelBest = double.MaxValue;
             _travelBestAt = tick;
@@ -750,6 +756,8 @@ public sealed class BotBrain
             // Stuck against something: search a way round it toward the city — as far as a search reaches, then nearer, then off to either side. A
             // single goal straight ahead can stand inside the next building, and a search that cannot reach its goal finds nothing at all: the
             // second live run's bot pushed against one wall in Dry Wells for four minutes with every search failing.
+            NoteStuck(_travelBestAt, tick);
+            NoteLeg(LegWhy.TravelStuck, tick);
             _travelBest = double.MaxValue;
             _travelBestAt = tick;
             var heading = Routing.HeadingTo(world.X, world.Z, tx, tz);
@@ -762,6 +770,7 @@ public sealed class BotBrain
                     // Round the obstacle on whatever it was travelling on: a rider does not get off to go round a house.
                     _leg.Ride = ride;
                     _leg.KeepRiding = true;
+                    NoteLeg(LegWhy.Detour, tick);
                     return Follow(in world, tick, out _);
                 }
             }
@@ -782,7 +791,7 @@ public sealed class BotBrain
             // Done — paid, the journal says it no longer holds it — or cancelled by somebody else's hand: decide again.
             _questSince = -1;
             _wantMounted = false;
-            Goal = Goal.Choosing;
+            Become(Goal.Choosing, GoalWhy.QuestDone, tick);
             return Choose(in world, tick);
         }
 
@@ -802,7 +811,7 @@ public sealed class BotBrain
             MissionsGivenUp++;
             _questSince = -1;
             _wantMounted = false;
-            Goal = Goal.Idling;
+            Become(Goal.Idling, GoalWhy.QuestTimeout, tick);
             _until = tick + Ticks(2);
             return Intent.AbandonMission;
         }
@@ -867,6 +876,7 @@ public sealed class BotBrain
                     // Abandoned, not cleared: a cleared leg reads as "not yet planned", and the search ran again on every tick until the port was in
                     // range — a whole-grid A* per tick per bot (review 1).
                     _leg.Abandon();
+                    NoteLeg(LegWhy.Abandoned, tick);
                 }
                 else
                 {
@@ -889,6 +899,7 @@ public sealed class BotBrain
 
                 // Stuck on the way to the terminal, or at it and out of range: ask where it stands if that is at the port, else walk there plainly.
                 _leg.Abandon();
+                NoteLeg(LegWhy.Abandoned, tick);
             }
         }
 
@@ -904,7 +915,7 @@ public sealed class BotBrain
     {
         _asked = true;
         _leg.Clear();
-        Goal = Goal.Waiting;
+        Become(Goal.Waiting, GoalWhy.BoardAsked, tick, (uint)TargetRegion);
         _until = tick + _patienceTicks;
         return Intent.Board(TargetRegion);
     }
@@ -938,7 +949,7 @@ public sealed class BotBrain
         // an ordinary arrival, and the two questions are deliberately different ones.
         if (TargetRegion > 0 && RegionAt(world.X, world.Z) == TargetRegion)
         {
-            Goal = Goal.Idling;
+            Become(Goal.Idling, GoalWhy.Landed, tick);
             _until = tick + _idleTicks;
             TargetRegion = 0;
             return Intent.Move(0f, 0);
@@ -949,7 +960,7 @@ public sealed class BotBrain
         if (world.BoardRefused)
         {
             Mode = TravelMode.Swoop;
-            Goal = Goal.Travelling;
+            Become(Goal.Travelling, GoalWhy.BoardRefused, tick);
             return Travel(in world, tick);
         }
 
@@ -960,7 +971,7 @@ public sealed class BotBrain
 
         // Patience spent. Ride instead, and do not ask again on this trip.
         Mode = TravelMode.Swoop;
-        Goal = Goal.Travelling;
+        Become(Goal.Travelling, GoalWhy.ShuttlePatienceOut, tick);
         return Travel(in world, tick);
     }
 
@@ -984,7 +995,7 @@ public sealed class BotBrain
 
         _leg.FinalReach = UseReachM;
 
-        Goal = Goal.Visiting;
+        Become(Goal.Visiting, GoalWhy.ErrandStarted, tick, (uint)kind, (float)Routing.Distance(world.X, world.Z, found.X, found.Z));
         _using = false;
         return true;
     }
@@ -1001,7 +1012,7 @@ public sealed class BotBrain
 
             // Loïc's errand: a mission terminal, then the shuttleport to go somewhere else. Most of the time, not every time.
             _flyNext = Next() % 100u < 60u;
-            Goal = Goal.Choosing;
+            Become(Goal.Choosing, GoalWhy.VisitDone, tick);
             return Choose(in world, tick);
         }
 
@@ -1025,7 +1036,7 @@ public sealed class BotBrain
 
                 return Intent.None;
             default:
-                Goal = Goal.Idling;
+                Become(Goal.Idling, GoalWhy.VisitFailed, tick);
                 _until = tick + Ticks(2);
                 return Intent.Move(0f, 0);
         }
@@ -1045,7 +1056,7 @@ public sealed class BotBrain
         _portZ = port.Z;
         _asked = false;
         _leg.Clear();
-        Goal = Goal.Travelling;
+        Become(Goal.Travelling, GoalWhy.FlightChosen, tick, (uint)TargetRegion);
         return true;
     }
 
@@ -1085,7 +1096,7 @@ public sealed class BotBrain
             return false;
         }
 
-        Goal = Goal.Indoors;
+        Become(Goal.Indoors, GoalWhy.DoorChosen, tick);
         _leaving = false;
         return true;
     }
@@ -1100,7 +1111,7 @@ public sealed class BotBrain
         }
 
         // The path ran out without a crossing, or stuck short of the door: give up on this one.
-        Goal = Goal.Idling;
+        Become(Goal.Idling, GoalWhy.EnterFailed, tick);
         _until = tick + Ticks(2);
         return Intent.Move(0f, 0);
     }
@@ -1247,6 +1258,7 @@ public sealed class BotBrain
             _leg.Ride = far / Routing.RunMps > Routing.RideOverSeconds;
             _leg.Rest = new LegRest(goal, tail.ToArray(), exactGoal);
             Sight(from);
+            NoteLeg(LegWhy.Planned, tick);
             return true;
         }
 
@@ -1286,6 +1298,7 @@ public sealed class BotBrain
             Sight(from);
         }
 
+        NoteLeg(LegWhy.Planned, tick);
         return true;
     }
 
@@ -1420,6 +1433,7 @@ public sealed class BotBrain
             }
 
             leg.Next++;
+            NoteLeg(LegWhy.Waypoint, tick);
             leg.Best = double.MaxValue;
             leg.BestAt = tick;
             if (!leg.Active && leg.Rest != null)
@@ -1431,6 +1445,7 @@ public sealed class BotBrain
             if (!leg.Active)
             {
                 leg.Ended = LegEnd.Done;
+                NoteLeg(LegWhy.Done, tick);
                 end = LegEnd.Done;
 
                 // Off at the end of a walk — except a detour's, which hands back to a ride still under way.
@@ -1451,6 +1466,7 @@ public sealed class BotBrain
         }
         else if (tick - leg.BestAt > (leg.Next < leg.Precise ? _openStuckTicks : _stuckTicks))
         {
+            NoteStuck(leg.BestAt, tick);
             // Stuck on the open-ground part: search again from where it stands, twice, before the goal gives up. The published points are walked
             // exactly and are not searched — stuck there is a door or a terminal in the way, which a new search would not change.
             if (leg.Next < leg.Precise && leg.Replans < 2 && leg.Rest == null)
@@ -1465,6 +1481,7 @@ public sealed class BotBrain
                 {
                     Restore(carried);
                     _leg.Replans = replans;
+                    NoteLeg(LegWhy.Replanned, tick);
                     return Follow(in world, tick, out end);
                 }
             }
@@ -1474,6 +1491,7 @@ public sealed class BotBrain
                 return GoOn(in world, tick, out end, replans: leg.Replans + 1);
             }
 
+            NoteLeg(LegWhy.Stuck, tick);
             leg.Ended = LegEnd.Stuck;
             leg.Next = leg.Points.Count;
             end = LegEnd.Stuck;
@@ -1562,6 +1580,7 @@ public sealed class BotBrain
         if (!PlanWalk(in world, rest.Goal, rest.Tail, tick, rest.ExactGoal))
         {
             _leg.Abandon();
+            NoteLeg(LegWhy.Abandoned, tick);
             end = LegEnd.Stuck;
             _wantMounted = carried.KeepRiding && carried.Ride;
             return Intent.Move(0f, 0);
@@ -1569,6 +1588,7 @@ public sealed class BotBrain
 
         _leg.Replans = replans;
         Restore(carried);
+        NoteLeg(replans > 0 ? LegWhy.Replanned : LegWhy.Stretch, tick);
         return Follow(in world, tick, out end);
     }
 
@@ -1631,7 +1651,7 @@ public sealed class BotBrain
             // Out, or stuck on the way: the goal is chosen again from here either way, and the next check says whether it is still inside.
             _leavingPort = false;
             _leg.Clear();
-            Goal = Goal.Choosing;
+            Become(Goal.Choosing, GoalWhy.PortExited, tick);
             if (end == LegEnd.Stuck)
             {
                 _portCheckAt = tick + Ticks(10);

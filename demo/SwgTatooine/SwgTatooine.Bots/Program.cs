@@ -27,6 +27,8 @@ string homeCity;
 double homeShare;
 int homeMax;
 double tipSeconds;
+string dashboardArg;
+int traceBots;
 try
 {
     var defaults = new BotSwarmOptions();
@@ -76,6 +78,9 @@ try
     homeMax = r.Int("--home-max", defaults.HomeMax, "the most bots that live in --home-city", min: 0);
     // --brain only: a tip is a ledger row, so tipping is its own workload and off unless asked for (economy-foundation.md E0-11).
     tipSeconds = r.Dbl("--tip-seconds", 0d, "a thinking bot tips a named player near it about this often, seconds; 0 never tips", min: 0d);
+    // --brain only: the fleet's statistics and a sample of bots' decisions, posted to the dashboard every 3 s (bot-telemetry.md). Absent, nothing is traced.
+    dashboardArg = r.Str("--dashboard", null, "the dashboard thinking bots report to, e.g. http://127.0.0.1:5090; absent reports nothing", "<url>");
+    traceBots = r.Int("--trace-bots", 0, "bots traced for --dashboard; 0 is 1 % of --bots, at least 10 and at most 50", min: 0);
     // Every god camera moves to the next planet on this period (Realms G3); the report counts the switches applied and the RealmNews heard.
     tourSeconds = r.Int("--god-tour", defaults.TourEverySeconds, "seconds between planet switches; 0 never tours", min: 0);
     planets = r.Int("--planets", defaults.Planets, "planets a touring camera cycles through", min: 1);
@@ -105,6 +110,11 @@ try
     if (!Uri.TryCreate(endpoint, UriKind.Absolute, out endpointUri))
     {
         throw new ArgumentException($"'--endpoint' takes an absolute URI such as ws://127.0.0.1:9100/ws, not '{endpoint}'.");
+    }
+
+    if (dashboardArg != null && !Uri.TryCreate(dashboardArg.EndsWith('/') ? dashboardArg : dashboardArg + "/", UriKind.Absolute, out _))
+    {
+        throw new ArgumentException($"'--dashboard' takes an absolute URL such as http://127.0.0.1:5090, not '{dashboardArg}'.");
     }
 }
 catch (ArgumentException e)
@@ -228,6 +238,8 @@ var options = new BotSwarmOptions
     WanderSeconds = wanderSeconds,
     Brain = brain,
     TipSeconds = tipSeconds,
+    Dashboard = dashboardArg == null ? null : new Uri(dashboardArg.EndsWith('/') ? dashboardArg : dashboardArg + "/"),
+    TraceBots = traceBots,
     Missions = !noMissions,
     HomeCity = homeCity,
     HomeShare = homeShare,
@@ -522,6 +534,12 @@ if (brain)
     Console.WriteLine(
         $"errands: {errands.Mounts} swoop mount/dismount ask(s), {errands.Doors} door crossing(s), {errands.Used} terminal(s) used, "
         + $"{errands.Paths} walk(s) searched round buildings, {errands.Ports} walk(s) out of a shuttleport's plaza");
+    if (options.Dashboard != null)
+    {
+        var reports = swarm.Reports;
+        Console.WriteLine($"telemetry: {reports.Sent} report(s) taken by {options.Dashboard}, {reports.Failed} failed"
+            + (reports.FirstFailure == null ? string.Empty : $" (first: {reports.FirstFailure})"));
+    }
 }
 
 if (swarm.Disconnects.Count == 0)

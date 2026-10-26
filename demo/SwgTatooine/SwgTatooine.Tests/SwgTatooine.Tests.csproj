@@ -21,6 +21,9 @@
          own rules, which needs both assemblies in one place. Before this, nothing in the repository could reach BotSwarm at all,
          which is how "Realm" instead of "realm" survived the whole life of the god-tour flag. -->
     <ProjectReference Include="..\SwgTatooine.Bots\SwgTatooine.Bots.csproj" />
+    <!-- The dashboard, for its bot ingest (bot-telemetry.md): the report the bots write is checked against the model the dashboard reads, and neither
+         of those two projects references the other. -->
+    <ProjectReference Include="..\SwgTatooine.Dashboard\SwgTatooine.Dashboard.csproj" />
     <ProjectReference Include="..\..\..\src\Typhon.Generators.Consumer\Typhon.Generators.Consumer.csproj" ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
   </ItemGroup>
 </Project>

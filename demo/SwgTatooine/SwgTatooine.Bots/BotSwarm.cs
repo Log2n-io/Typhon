@@ -226,6 +226,15 @@ public sealed class BotSwarmOptions
     /// five minutes wondering why the population will not move.
     /// </remarks>
     public Action<string> OnNote { get; init; }
+
+    /// <summary>
+    /// The dashboard the thinking bots report to (bot-telemetry.md): <c>POST {Dashboard}bots/report</c> every few seconds, with the fleet's statistics and
+    /// the traced bots' decisions. Null, the default, reports nothing and traces nothing.
+    /// </summary>
+    public Uri Dashboard { get; init; }
+
+    /// <summary>How many bots are traced when <see cref="Dashboard"/> is set; 0 is one in a hundred, at least 10 and at most 50.</summary>
+    public int TraceBots { get; init; }
 }
 
 /// <summary>
@@ -250,7 +259,7 @@ public sealed class BotSwarmOptions
 /// interest sets broad and the per-session sets genuinely different.
 /// </para>
 /// </remarks>
-public sealed class BotSwarm : IAsyncDisposable
+public sealed partial class BotSwarm : IAsyncDisposable
 {
     private readonly BotSwarmOptions _options;
 
@@ -1266,6 +1275,7 @@ public sealed class BotSwarm : IAsyncDisposable
 
         // The server's own close reasons, polled rather than inferred from close codes. See PollServerStatsAsync.
         _statsPoller = Task.Run(() => PollServerStatsAsync(_stopping.Token), CancellationToken.None);
+        StartTelemetry();
 
         await _settled.Task.WaitAsync(ct).ConfigureAwait(false);
         return BotCount;
@@ -1964,7 +1974,7 @@ public sealed class BotSwarm : IAsyncDisposable
 
         // Both, and the reconciler first: it is the one that opens sockets, so letting it run while the bots are being closed would
         // race a new session into an array the teardown has already walked.
-        foreach (var task in new[] { _reconciler, _driver, _pinger, _statsPoller })
+        foreach (var task in new[] { _reconciler, _driver, _pinger, _statsPoller, _reporter })
         {
             if (task == null)
             {
@@ -2385,7 +2395,7 @@ public sealed class BotSwarm : IAsyncDisposable
     }
 
     /// <summary>One scripted camera: a client, an orbit centre and a phase.</summary>
-    private sealed class Bot
+    private sealed partial class Bot
     {
         private readonly double _centreX;
         private readonly double _centreY;
@@ -2537,6 +2547,7 @@ public sealed class BotSwarm : IAsyncDisposable
 
                 // A bot that cannot read its journal never learns it holds one: it would take a mission at every visit and never go and do it.
                 _takesMissions = options.Missions && _missionsUri != null && !string.IsNullOrEmpty(_token);
+                TraceIfSampled(index, options);
             }
             _heading = (float)((index * golden) % (Math.PI * 2));
 
@@ -2726,6 +2737,7 @@ public sealed class BotSwarm : IAsyncDisposable
             {
                 Volatile.Write(ref AtHome, world.Realm == 0 ? _brain.RegionAt(world.X, world.Z) == _brain.HomeRegion : AtHome);
             }
+            Watch(tick, in world, intent);
             if (TraceAll || Index == TraceIndex)
             {
                 // A brain is read from what it did, tick by tick: one bot's decisions, to stdout, when SWG_BOT_TRACE names its index.
