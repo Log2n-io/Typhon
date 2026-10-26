@@ -30,9 +30,9 @@ namespace Typhon.Engine.Internals;
 /// successful claim, <c>[ThreadStatic] t_slotIndex</c> holds the slot index and subsequent calls return it with a single int read and a branch.
 /// </para>
 /// <para>
-/// <b>Memory ordering:</b> plain field access everywhere. On x64, reads and writes of ≤64-bit primitives are naturally atomic (per CLAUDE.md). The
-/// only synchronization primitive on the registry hot path is <see cref="Interlocked.CompareExchange(ref int, int, int)"/> for slot-state transitions
-/// and high-water-mark advancement, which are genuine read-modify-write sequences that need atomicity.
+/// <b>Memory ordering:</b> slot-state transitions and high-water-mark advancement are <see cref="Interlocked.CompareExchange(ref int, int, int)"/>.
+/// A claim goes Free → Claiming by CAS, resets the slot's ring and owner fields, then publishes Active with a release store that the consumer's
+/// <see cref="GetSlotState"/> acquires — the consumer never drains a ring that is being reset. Everything else is plain field access.
 /// </para>
 /// </remarks>
 internal static class ThreadSlotRegistry
@@ -131,7 +131,20 @@ internal static class ThreadSlotRegistry
     public static ThreadSlot GetSlot(int index) => SSlots[index].Slot;
 
     /// <summary>Access to a slot's lifecycle state. Read-only to avoid accidentally bypassing the CAS transitions.</summary>
-    public static int GetSlotState(int index) => SSlots[index].State;
+    /// <remarks>
+    /// Acquire: pairs with the release store that publishes <see cref="SlotState.Active"/> at the end of <c>AssignClaim</c>, so a consumer that sees
+    /// Active also sees the ring reset and chain pointers written before it (free on x64, <c>ldar</c> on arm64).
+    /// </remarks>
+    public static int GetSlotState(int index) => Volatile.Read(ref SSlots[index].State);
+
+    /// <summary>
+    /// Whether the consumer may read a slot in <paramref name="state"/>: Active and Retiring only. Free has no owner and Claiming is mid-reset — see
+    /// <see cref="SlotState.Claiming"/>.
+    /// </summary>
+    public static bool IsDrainable(int state) => state == (int)SlotState.Active || state == (int)SlotState.Retiring;
+
+    /// <summary>Runs on the claiming thread after it has won a slot and before its ring is reset. Tests only — stages the claim window.</summary>
+    internal static Action<int> ClaimWindowObserverForTests;
 
     /// <summary>
     /// Look up a slot by OS thread ID. Used by the ETW scheduling pump to map kernel <c>OldThreadID</c> / <c>NewThreadID</c> values (which are OS TIDs) onto
@@ -206,7 +219,7 @@ internal static class ThreadSlotRegistry
         for (var i = 0; i < scanLimit; i++)
         {
             if (SSlots[i].State == (int)SlotState.Free &&
-                Interlocked.CompareExchange(ref SSlots[i].State, (int)SlotState.Active, (int)SlotState.Free) == (int)SlotState.Free)
+                Interlocked.CompareExchange(ref SSlots[i].State, (int)SlotState.Claiming, (int)SlotState.Free) == (int)SlotState.Free)
             {
                 AssignClaim(i, threadId);
                 return i;
@@ -225,7 +238,7 @@ internal static class ThreadSlotRegistry
                 return -1; // registry full
             }
 
-            if (Interlocked.CompareExchange(ref SSlots[hwm].State, (int)SlotState.Active, (int)SlotState.Free) == (int)SlotState.Free)
+            if (Interlocked.CompareExchange(ref SSlots[hwm].State, (int)SlotState.Claiming, (int)SlotState.Free) == (int)SlotState.Free)
             {
                 Interlocked.CompareExchange(ref SHighWaterMark, hwm + 1, hwm);
                 AssignClaim(hwm, threadId);
@@ -239,6 +252,8 @@ internal static class ThreadSlotRegistry
 
     private static void AssignClaim(int index, int threadId)
     {
+        ClaimWindowObserverForTests?.Invoke(index);
+
         var slot = SSlots[index].Slot;
         // Lazy-allocate the buffer on first claim of this slot. Reused across re-claims of the same index (no realloc).
         if (slot.Buffer == null)
@@ -274,6 +289,11 @@ internal static class ThreadSlotRegistry
         SlotIndex = index;
         Releaser = new SlotReleaser(index);
         Interlocked.Increment(ref SActiveSlotCount);
+
+        // Release: the slot becomes drainable only now, with its ring reset and its chain re-anchored. Publishing Active at the CAS instead let a consumer
+        // pass drain the slot concurrently with Reset() and store the previous owner's tail back over the reset one — every record this thread wrote
+        // before its head passed that stale tail was then lost, and no drop counter saw it.
+        Volatile.Write(ref SSlots[index].State, (int)SlotState.Active);
 
         // Emit a ThreadInfo record right after the claim so the viewer can label this lane with a real thread name instead of just "Slot N". This runs on the
         // claiming thread, so the per-slot SPSC invariant is preserved (this thread is the sole writer of its ring). If the thread has no name set we pass null

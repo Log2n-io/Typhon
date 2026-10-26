@@ -71,7 +71,9 @@ public class ConcurrencyTracingStressTests
 
         using var observer = new TraceRingObserver(_registry.Profiler);
         TyphonProfiler.AttachExporter(observer);
+        var ringDropsBefore = TyphonProfiler.TotalDroppedEvents;
         TyphonProfiler.Start(_registry.Profiler, BuildMetadata());
+        long ringDrops;
 
         try
         {
@@ -109,11 +111,13 @@ public class ConcurrencyTracingStressTests
                 Assert.That(t.Join(TimeSpan.FromSeconds(30)), Is.True, "Worker thread should finish in 30s");
             }
 
-            // Give the consumer thread time to drain (1 ms cadence; allow several drains)
-            Thread.Sleep(200);
+            // Read before Stop: Stop collapses spillover chains, and a spillover's drop counter goes back to the pool with it.
+            ringDrops = Math.Max(0, TyphonProfiler.TotalDroppedEvents - ringDropsBefore);
         }
         finally
         {
+            // Stop drains every ring to empty and joins the exporter thread, so everything the workers emitted has reached the observer or been
+            // counted as lost by the time it returns — no settling sleep needed.
             TyphonProfiler.Stop();
         }
 
@@ -122,14 +126,22 @@ public class ConcurrencyTracingStressTests
         var totalReleases = observer.CountOf(TraceEventKind.ConcurrencyAccessControlSharedRelease)
                           + observer.CountOf(TraceEventKind.ConcurrencyAccessControlExclusiveRelease);
 
-        // With ring drops possible, we accept ≥ 90% of expected (drop tolerance).
+        // The pipeline may lose records under load, but only in two places, and both count what they lose: a full producer ring (ringDrops) and a
+        // full exporter queue (records fanned out that this, the only exporter, never processed). Every operation's event must therefore be observed
+        // or accounted for. A fixed tolerance (this test used to accept 90 %) cannot tell a counted drop from a silent one: the slot-reclaim race
+        // that SlotState.Claiming closes lost a reclaiming thread's records with no counter moving, and read here as a count just under the bar.
+        // Counts run above the workload: other AccessControl instances in the process emit the same kinds.
+        var exporterLost = TyphonProfiler.TotalRecordsFannedOut - observer.RecordsProcessed;
+        var accountedLoss = ringDrops + exporterLost;
         var expected = ThreadCount * OpsPerThread;
+        var detail = $"ringDrops={ringDrops} exporterLost={exporterLost} queueDrops={TyphonProfiler.TotalDroppedExporterBatches} " +
+                     $"fannedOut={TyphonProfiler.TotalRecordsFannedOut} processed={observer.RecordsProcessed}";
         Assert.Multiple(() =>
         {
-            Assert.That(totalAcquires, Is.GreaterThanOrEqualTo((long)(expected * 0.90)),
-                $"Expected ~{expected} acquire events, got {totalAcquires}.");
-            Assert.That(totalReleases, Is.GreaterThanOrEqualTo((long)(expected * 0.90)),
-                $"Expected ~{expected} release events, got {totalReleases}.");
+            Assert.That(totalAcquires + accountedLoss, Is.GreaterThanOrEqualTo(expected),
+                $"{expected - totalAcquires} acquire events missing, {accountedLoss} accounted for ({detail}).");
+            Assert.That(totalReleases + accountedLoss, Is.GreaterThanOrEqualTo(expected),
+                $"{expected - totalReleases} release events missing, {accountedLoss} accounted for ({detail}).");
         });
     }
 

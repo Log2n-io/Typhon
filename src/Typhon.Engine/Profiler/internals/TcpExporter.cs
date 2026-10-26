@@ -683,7 +683,7 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
         for (var i = 0; i < scanLimit; i++)
         {
             var state = ThreadSlotRegistry.GetSlotState(i);
-            if (state != (int)SlotState.Active && state != (int)SlotState.Retiring)
+            if (!ThreadSlotRegistry.IsDrainable(state))
             {
                 continue;
             }

@@ -7,7 +7,8 @@ namespace Typhon.Engine.Internals;
 /// The state is stored as an <c>int</c> in the slot for use with <see cref="System.Threading.Interlocked.CompareExchange(ref int, int, int)"/>
 /// — C# has no byte overload of CAS. Transitions:
 /// <list type="bullet">
-///   <item><see cref="Free"/> → <see cref="Active"/>: producer claims an unused slot via CAS in <c>ThreadSlotRegistry.GetOrAssignSlot</c></item>
+///   <item><see cref="Free"/> → <see cref="Claiming"/>: producer wins an unused slot via CAS in <c>ThreadSlotRegistry.GetOrAssignSlot</c></item>
+///   <item><see cref="Claiming"/> → <see cref="Active"/>: the same producer publishes the slot (release store) once its ring is reset</item>
 ///   <item><see cref="Active"/> → <see cref="Retiring"/>: the owning thread's <c>SlotReleaser</c> finalizer runs on thread exit</item>
 ///   <item><see cref="Retiring"/> → <see cref="Free"/>: the profiler consumer thread drains the slot's trailing events, then releases it</item>
 /// </list>
@@ -21,5 +22,11 @@ internal enum SlotState
     Active = 1,
 
     /// <summary>Slot's owner thread has exited; the consumer will drain trailing events and release it on the next pass.</summary>
-    Retiring = 2
+    Retiring = 2,
+
+    /// <summary>
+    /// A producer has won the slot and is resetting its ring and owner fields. The consumer skips it: a drain overlapping the ring's reset would write
+    /// the previous owner's tail back over the reset one and silently lose the new owner's records until its head passed that stale tail.
+    /// </summary>
+    Claiming = 3
 }

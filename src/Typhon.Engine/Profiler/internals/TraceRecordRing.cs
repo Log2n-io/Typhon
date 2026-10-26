@@ -132,6 +132,9 @@ internal sealed class TraceRecordRing
     /// </summary>
     public long BytesPending => _head.Value - _tail.Value;
 
+    /// <summary>The producer's monotonic byte cursor. Diagnostics and tests: unlike <see cref="BytesPending"/>, it tells a reset ring from a drained one.</summary>
+    internal long HeadPosition => Volatile.Read(ref _head.Value);
+
     /// <summary>Diagnostic: dump the first N bytes at tail position as hex. For investigating drain-stuck states.</summary>
     public string DumpAtTail(int bytes = 32)
     {
@@ -325,9 +328,9 @@ internal sealed class TraceRecordRing
 
     /// <summary>
     /// Reset head/tail/drop counters to zero. Must not be called concurrently with <see cref="TryReserve(int, out Span{byte})"/>, <see cref="Publish"/>, or
-    /// <see cref="Drain"/> — the slot-registry protocol guarantees this by transitioning a slot through <c>SlotState.Free</c> before the new owner
-    /// claims it. Also clears the chain forward link and per-kind drop counters so a ring returned to the spillover pool can be re-acquired without
-    /// carrying stale state from its previous owner.
+    /// <see cref="Drain"/> — the slot-registry protocol guarantees this: a slot goes Retiring → Free only after the consumer's last drain of it, and a new
+    /// owner resets it while it is <c>SlotState.Claiming</c>, which the consumer skips. Also clears the chain forward link and per-kind drop counters so
+    /// a ring returned to the spillover pool can be re-acquired without carrying stale state from its previous owner.
     /// </summary>
     public void Reset()
     {

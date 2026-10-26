@@ -127,7 +127,7 @@ internal sealed class ProfilerConsumerThread : HighResolutionTimerServiceBase
         for (var i = 0; i < scanLimit; i++)
         {
             var state = ThreadSlotRegistry.GetSlotState(i);
-            if (state != (int)SlotState.Active && state != (int)SlotState.Retiring)
+            if (!ThreadSlotRegistry.IsDrainable(state))
             {
                 continue;
             }
@@ -367,7 +367,7 @@ internal sealed class ProfilerConsumerThread : HighResolutionTimerServiceBase
         for (var i = 0; i < scanLimit; i++)
         {
             var state = ThreadSlotRegistry.GetSlotState(i);
-            if (state != (int)SlotState.Active && state != (int)SlotState.Retiring)
+            if (!ThreadSlotRegistry.IsDrainable(state))
             {
                 continue;
             }
@@ -395,7 +395,7 @@ internal sealed class ProfilerConsumerThread : HighResolutionTimerServiceBase
             var state = ThreadSlotRegistry.GetSlotState(i);
             var buffer = ThreadSlotRegistry.GetSlot(i).Buffer;
             var pending = buffer?.BytesPending ?? 0;
-            var stateName = state switch { 0 => "Free", 1 => "Active", 2 => "Retiring", _ => state.ToString() };
+            var stateName = state switch { 0 => "Free", 1 => "Active", 2 => "Retiring", 3 => "Claiming", _ => state.ToString() };
             sb.Append($" [slot{i}:{stateName} pending={pending}");
             if (buffer != null && pending > 0)
             {
@@ -414,7 +414,7 @@ internal sealed class ProfilerConsumerThread : HighResolutionTimerServiceBase
         for (var i = 0; i < scanLimit; i++)
         {
             var state = ThreadSlotRegistry.GetSlotState(i);
-            if (state != (int)SlotState.Active && state != (int)SlotState.Retiring)
+            if (!ThreadSlotRegistry.IsDrainable(state))
             {
                 continue;
             }
