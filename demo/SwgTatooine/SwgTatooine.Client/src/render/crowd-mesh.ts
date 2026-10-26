@@ -7,7 +7,7 @@ import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData';
 import '@babylonjs/core/Meshes/thinInstanceMesh';
 import type { Scene } from '@babylonjs/core/scene';
 
-import type { Instance } from '../assets/asset-library';
+import type { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh';
 import type { LodDesc } from '../assets/descriptor';
 import { lodLevelOf } from './asset-lod';
 import { SCENE_GROUP } from './render-groups';
@@ -44,7 +44,8 @@ export interface CrowdOutfit {
  * Merges one outfit into one mesh per detail level.
  *
  * @param scene The live scene.
- * @param instance The instantiated outfit.
+ * @param outfit The outfit's meshes: its asset's container's, read and left as they are. Only their vertex data, skin
+ * and materials are read, so nothing has to be placed — see `crowd-mount.ts` for what instantiating used to cost.
  * @param rig The baked atlas, for the skin rebasing.
  * @param material The shared crowd material.
  * @param height The body's height, from its descriptor's render bounds.
@@ -56,14 +57,14 @@ export interface CrowdOutfit {
  */
 export function buildCrowdOutfit(
   scene: Scene,
-  instance: Instance,
+  outfit: { readonly id: string; readonly meshes: readonly AbstractMesh[] },
   rig: CrowdRig,
   material: Material,
   height: number,
-  name = instance.id,
+  name = outfit.id,
   declared: readonly LodDesc[] | null = null,
 ): CrowdOutfit {
-  const parts = skinnedPrimitives(instance);
+  const parts = skinnedPrimitives(outfit);
   const skeleton = parts.at(0)?.skeleton ?? null;
   if (skeleton === null || parts.some((p) => p.skeleton !== skeleton)) {
     throw new Error(`crowd: ${name} needs skinned primitives sharing one skeleton`);

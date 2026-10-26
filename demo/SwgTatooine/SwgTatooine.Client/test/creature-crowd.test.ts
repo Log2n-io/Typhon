@@ -255,6 +255,7 @@ function layer(ids: readonly string[], hashed?: readonly number[]): CrowdLayer {
   return new CrowdLayer({
     scene: null as never,
     plan: plan(),
+    ids,
     outfits: ids.map(outfit),
     skin: { time: 0 } as unknown as CrowdSkinPlugin,
     described: ids.map(() => snake()),
@@ -263,9 +264,19 @@ function layer(ids: readonly string[], hashed?: readonly number[]): CrowdLayer {
   });
 }
 
+/** An outfit's bucket, which exists once the outfit has landed. */
+function bucketOf(l: CrowdLayer, which = 0): NonNullable<CrowdLayer['buckets'][number]> {
+  const bucket = l.buckets[which];
+  if (bucket === null) {
+    throw new Error(`outfit ${String(which)} has not landed`);
+  }
+
+  return bucket;
+}
+
 /** The start row and frame count a body plays, and when its clip started. */
 function clipOf(l: CrowdLayer, bucket = 0, i = 0): { row: number; frames: number; started: number } {
-  const a = l.buckets[bucket].animator.clipA;
+  const a = bucketOf(l, bucket).animator.clipA;
   return { row: a[i * 4], frames: a[i * 4 + 1], started: a[i * 4 + 2] };
 }
 
@@ -322,7 +333,7 @@ describe('a creature on the crowd', () => {
     ninja.outfit = 1;
     const civilians = Array.from({ length: 30 }, (_, i) => record(100 + i));
     l.update([ninja, ...civilians], 31, view(), 0, Number.NaN, Number.NaN);
-    expect(l.buckets[1].count).toBe(1);
-    expect(l.buckets[0].count).toBe(30);
+    expect(bucketOf(l, 1).count).toBe(1);
+    expect(bucketOf(l, 0).count).toBe(30);
   });
 });

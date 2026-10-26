@@ -379,6 +379,12 @@ export class LayerPacker {
   private seenNetId = new Uint32Array(0);
   private band = new Uint8Array(0);
   private yaw = new Float32Array(0);
+  /**
+   * Per slot: where its entity was packed, `index * 3 + band` (see {@link drawnIndex}). Never cleared: a code an earlier
+   * frame left behind is told apart by the band's netId at that index, which is this entity's only if it was packed there
+   * THIS frame — a netId is packed once per frame at most.
+   */
+  private drawnAt = new Int32Array(0);
 
   /**
    * @param archetype Which archetype's store this layer draws.
@@ -412,6 +418,25 @@ export class LayerPacker {
     this.seenNetId.fill(0);
     this.nearCount = 0;
     this.farCount = 0;
+    this.heldCount = 0;
+  }
+
+  /**
+   * Where the entity in `slot` was packed this frame: `index * 3 + band`, the band 0 near, 1 held, 2 far; -1 when it was
+   * not packed. Constant time — the speech bubbles, the health bars and the selection frame ask it for a handful of
+   * netIds a frame, and a scan of every packed instance per question was a quarter of the frame's CPU in a crowded street.
+   */
+  drawnIndex(slot: number, netId: number): number {
+    if (slot < 0 || slot >= this.drawnAt.length) {
+      return -1;
+    }
+
+    const code = this.drawnAt[slot];
+    const index = (code / 3) | 0;
+    const band = code - index * 3;
+    const ids = band === 0 ? this.nearNetIds : band === 1 ? this.heldNetIds : this.farNetIds;
+    const count = band === 0 ? this.nearCount : band === 1 ? this.heldCount : this.farCount;
+    return index < count && ids[index] === netId ? code : -1;
   }
 
   /** Evaluates, culls, bands and packs every live entity of the bound store. */
@@ -420,6 +445,7 @@ export class LayerPacker {
     if (store === null) {
       this.nearCount = 0;
       this.farCount = 0;
+      this.heldCount = 0;
       return;
     }
 
@@ -450,6 +476,7 @@ export class LayerPacker {
     const nearYaw = this.nearYaw;
     const nearNetIds = this.nearNetIds;
     const farNetIds = this.farNetIds;
+    const drawnAt = this.drawnAt;
     const tick = view.renderTick;
     const frac = view.renderFrac;
     let near = 0;
@@ -536,6 +563,7 @@ export class LayerPacker {
         this.heldData[h + 2] = rz;
         this.heldData[h + 3] = packState(styleIndex, fields.mode === null ? 0 : fields.mode[slot]);
         this.heldYaw[held] = yaws[slot];
+        drawnAt[slot] = held * 3 + 1;
         this.heldNetIds[held++] = netId;
         continue;
       }
@@ -599,6 +627,7 @@ export class LayerPacker {
             this.heldData[h + 2] = rz;
             this.heldData[h + 3] = packed;
             this.heldYaw[held] = yaws[slot];
+            drawnAt[slot] = held * 3 + 1;
             this.heldNetIds[held++] = netId;
             continue;
           }
@@ -613,6 +642,7 @@ export class LayerPacker {
         nearData[b + 2] = rz;
         nearData[b + 3] = packed;
         nearYaw[near] = yaws[slot];
+        drawnAt[slot] = near * 3;
         nearNetIds[near++] = netId;
       } else {
         const b = far * 4;
@@ -620,6 +650,7 @@ export class LayerPacker {
         farData[b + 1] = ry;
         farData[b + 2] = rz;
         farData[b + 3] = packed;
+        drawnAt[slot] = far * 3 + 2;
         farNetIds[far++] = netId;
       }
     }
@@ -642,6 +673,8 @@ export class LayerPacker {
       this.seenNetId = seen;
       this.band = band;
       this.yaw = yaw;
+      // Not carried over: a code is only ever read back against this frame's packing, which writes it first.
+      this.drawnAt = new Int32Array(capacity);
     }
 
     this.storeVersion = store.version;

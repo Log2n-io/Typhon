@@ -21,9 +21,11 @@ import type { SceneLighting } from '../render/scene-lighting';
  * rows of a texture; the GLB, its skeleton and its seventeen animation groups are all transient. That is the whole
  * economy of this approach — a crowd of five thousand holds the same GPU memory as nineteen characters do.
  *
- * The cost is concentrated in the loads, not in the bake: the spike measured its bake at 14–21 ms and the loading and
- * merging of nineteen outfits at about 400 ms. If that ever matters it is the merge to move off the critical path, or
- * to do lazily as an outfit is first worn — not the bake.
+ * <b>The layer exists once the bake does; each outfit joins it when its own GLB lands</b> (Loïc, 2026-10-26: what is
+ * lazy loads asynchronously, and nothing waiting on it is drawn). The bake needs its few source outfits — the pinned
+ * rig and the ones with their own keys — so those come first; every other outfit, and every weapon, loads in parallel
+ * behind it, and a body dressed in one still loading is drawn by nobody until it arrives. This used to load the
+ * nineteen one after another and hand back nothing until the last had merged, and the buildings waited for all of it.
  *
  * <b>A creature is a crowd of its own.</b> The characters share one armature, so one atlas serves all nineteen outfits;
  * the rat's 31 joints are not the spider's 39, so each species bakes its own atlas into its own texture and material and
@@ -34,12 +36,15 @@ export interface CrowdMount {
   readonly layer: CrowdLayer;
   readonly rig: CrowdRig;
   readonly plan: AtlasPlan;
-  readonly outfits: readonly CrowdOutfit[];
+  /** Every outfit's id, in the layer's order, whether it has landed or not: what the router dresses bodies by. */
+  readonly ids: readonly string[];
   readonly skin: CrowdSkinPlugin;
   /** The material every outfit is drawn with: a weapon in a hand is drawn with it too. */
   readonly material: Material;
-  /** What the HUD shows: rows, bytes and how many outfits were built. */
-  readonly stats: { rows: number; bytes: number; outfits: number; bakeMs: number; buildMs: number };
+  /** What the HUD shows: rows, bytes and the bake's time. How many outfits have landed is `layer.ready`. */
+  readonly stats: { rows: number; bytes: number; bakeMs: number };
+  /** Settles once every outfit has landed or failed: for a check, never for drawing — the layer draws what it has. */
+  readonly settled: Promise<void>;
   dispose(): void;
 }
 
@@ -115,7 +120,8 @@ export async function mountCrowd(
     (id) => !enemies.has(id),
   );
   if (mount !== null) {
-    await mountWeapons(scene, library, lighting, described, mount, capacity);
+    // Not awaited: a stance whose weapon has not landed is drawn empty-handed until it has.
+    void mountWeapons(scene, library, lighting, described, mount, capacity);
   }
 
   return mount;
@@ -135,19 +141,22 @@ async function mountWeapons(
 ): Promise<void> {
   // The pack's uniform scale, which the rig's joints carry and a weapon's `attach.pos` does not (§ 5.10).
   const scale = described.get(RIG_OUTFIT)?.source?.scale ?? 1;
-  for (const [stance, id] of STANCE_WEAPONS.entries()) {
-    if (id === null || described.get(id)?.kind !== 'weapon') {
-      continue;
-    }
+  // All at once, each handed to the layer as it lands.
+  await Promise.all(
+    [...STANCE_WEAPONS.entries()].map(async ([stance, id]) => {
+      if (id === null || described.get(id)?.kind !== 'weapon') {
+        return;
+      }
 
-    try {
-      const weapon = await buildCrowdWeapon(scene, library, id, mount.rig, mount.material, scale, capacity);
-      lighting.castShadows([weapon.mesh]);
-      mount.layer.setWeapon(stance, weapon);
-    } catch (error) {
-      console.warn(`crowd: weapon ${id} was not built; that stance is drawn empty-handed`, error);
-    }
-  }
+      try {
+        const weapon = await buildCrowdWeapon(scene, library, id, mount.rig, mount.material, scale, capacity);
+        lighting.castShadows([weapon.mesh]);
+        mount.layer.setWeapon(stance, weapon);
+      } catch (error) {
+        console.warn(`crowd: weapon ${id} was not built; that stance is drawn empty-handed`, error);
+      }
+    }),
+  );
 }
 
 /**
@@ -227,12 +236,23 @@ async function build(
     return null;
   }
 
-  // ---- the bake: load only the outfits the plan names as sources ------------------------------------------------
+  // ---- the bake: load only the outfits the plan names as sources, together ---------------------------------------
   const sources = new Map<string, BakeSource>();
-  const sourceIds = new Set(plan.bakes.map((b) => b.source));
-  for (const id of sourceIds) {
-    await library.acquire(id);
-    sources.set(id, { instance: await library.instantiate(id, placement([0, 0, 0], 0), null, `${label}-bake:${id}`) });
+  const sourceIds = [...new Set(plan.bakes.map((b) => b.source))];
+  try {
+    const instances = await Promise.all(
+      sourceIds.map((id) => library.instantiate(id, placement([0, 0, 0], 0), null, `${label}-bake:${id}`)),
+    );
+    for (const [k, id] of sourceIds.entries()) {
+      sources.set(id, { instance: instances[k] });
+    }
+  } catch (error) {
+    for (const source of sources.values()) {
+      source.instance.dispose();
+    }
+
+    console.warn(`${label}: a bake source did not load; the crowd stands down`, error);
+    return null;
   }
 
   const tBake = performance.now();
@@ -248,57 +268,17 @@ async function build(
 
   const bakeMs = performance.now() - tBake;
 
-  // ---- the meshes -----------------------------------------------------------------------------------------------
-  const tBuild = performance.now();
+  // ---- the layer, before any outfit has landed ---------------------------------------------------------------------
   const { material, skin } = createCrowdMaterial(scene, rig);
-  const outfits: CrowdOutfit[] = [];
-  const outfitDescriptors: Descriptor[] = [];
-  for (const id of wearable) {
-    const descriptor = described.get(id);
-    if (descriptor === undefined) {
-      continue;
-    }
-
-    try {
-      await library.acquire(id);
-      const instance = await library.instantiate(id, placement([0, 0, 0], 0), null, `${label}-build:${id}`);
-      try {
-        // Height from this outfit's own render bounds. A constant would be wrong for every outfit but one, and it
-        // drives the projected-size tier, the cull sphere AND the clip rate.
-        const height = descriptor.bounds.render[1][1];
-        outfits.push(buildCrowdOutfit(scene, instance, rig, material, height, id, descriptor.render.lods ?? null));
-        outfitDescriptors.push(descriptor);
-      } finally {
-        instance.dispose();
-      }
-    } catch (error) {
-      // One outfit that will not merge — a texture, five influences, a gap in its ladder — must not cost the crowd
-      // every other costume. It is loud, because each of those is a publishing fault worth fixing.
-      console.warn(`${label}: ${id} was not built`, error);
-    }
-  }
-
-  const buildMs = performance.now() - tBuild;
-  if (outfits.length === 0) {
-    rig.dispose();
-    material.dispose();
-    console.warn(`${label}: no outfit could be built`);
-    return null;
-  }
-
-  // Casting is marked on the merged meshes, which ARE in the scene — unlike a container's, which the shadow map's
-  // predicate never reaches. Receiving is set on the mesh at merge time.
-  for (const outfit of outfits) {
-    lighting.castShadows(outfit.lods.map((l) => l.mesh));
-  }
-
+  const ids = wearable.filter((id) => described.has(id));
+  const outfitDescriptors = ids.map((id) => described.get(id) as Descriptor);
   // The outfits a body nobody dressed may wear. All of them when the filter leaves none, so a catalogue of enemies only
   // still draws its city rather than a city of points.
-  const hashed = outfits.flatMap((outfit, i) => (civilian(outfit.id) ? [i] : []));
+  const hashed = ids.flatMap((id, i) => (civilian(id) ? [i] : []));
   const layer = new CrowdLayer({
     scene,
     plan,
-    outfits,
+    ids,
     skin,
     described: outfitDescriptors,
     capacity,
@@ -312,20 +292,68 @@ async function build(
   // by flipping this one line, and the world is never emptier than it was before the crowd existed.
   layer.confirmDrawing(true);
 
-  console.info(
-    `${label}: ${String(outfits.length)} outfits, ${String(plan.rows)} atlas rows, ` +
-      `${(rig.textureBytes / (1024 * 1024)).toFixed(2)} MB, bake ${bakeMs.toFixed(0)} ms, build ${buildMs.toFixed(0)} ms`,
-  );
+  // ---- each outfit, as it lands ------------------------------------------------------------------------------------
+  let disposed = false;
+  let built = 0;
+  const tBuild = performance.now();
+  const settled = Promise.all(
+    ids.map(async (id, which) => {
+      try {
+        // <b>Read from the container, not from a placement.</b> A merge reads vertex data, the skin and the materials,
+        // all of which the cached container already holds; instantiating a skinned outfit CLONES it — Babylon will not
+        // instance a skinned mesh — with its skeleton and every one of its animation groups, only to be read once and
+        // disposed. Nothing here changes the container, so the avatar placed from the same asset is unaffected.
+        const asset = await library.acquire(id);
+        // Height from this outfit's own render bounds. A constant would be wrong for every outfit but one, and it
+        // drives the projected-size tier, the cull sphere AND the clip rate.
+        const descriptor = outfitDescriptors[which];
+        const outfit: CrowdOutfit = buildCrowdOutfit(
+          scene,
+          { id, meshes: asset.container.meshes },
+          rig,
+          material,
+          descriptor.bounds.render[1][1],
+          id,
+          descriptor.render.lods ?? null,
+        );
+
+        if (disposed) {
+          outfit.dispose();
+          return;
+        }
+
+        // Casting is marked on the merged meshes, which ARE in the scene — unlike a container's, which the shadow map's
+        // predicate never reaches. Receiving is set on the mesh at merge time.
+        lighting.castShadows(outfit.lods.map((l) => l.mesh));
+        layer.addOutfit(which, outfit);
+        built++;
+      } catch (error) {
+        // One outfit that will not merge — a texture, five influences, a gap in its ladder — must not cost the crowd
+        // every other costume. It is loud, because each of those is a publishing fault worth fixing; its wearers are
+        // dressed as civilians from here on.
+        layer.failOutfit(which);
+        console.warn(`${label}: ${id} was not built`, error);
+      }
+    }),
+  ).then(() => {
+    console.info(
+      `${label}: ${String(built)} of ${String(ids.length)} outfits, ${String(plan.rows)} atlas rows, ` +
+        `${(rig.textureBytes / (1024 * 1024)).toFixed(2)} MB, bake ${bakeMs.toFixed(0)} ms, ` +
+        `outfits landed over ${(performance.now() - tBuild).toFixed(0)} ms`,
+    );
+  });
 
   return {
     layer,
     rig,
     plan,
-    outfits,
+    ids,
     skin,
     material,
-    stats: { rows: plan.rows, bytes: rig.textureBytes, outfits: outfits.length, bakeMs, buildMs },
+    stats: { rows: plan.rows, bytes: rig.textureBytes, bakeMs },
+    settled,
     dispose() {
+      disposed = true;
       layer.dispose();
       rig.dispose();
       material.dispose();

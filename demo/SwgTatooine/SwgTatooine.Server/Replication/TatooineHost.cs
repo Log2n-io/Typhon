@@ -1,6 +1,7 @@
 ﻿using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
@@ -9,6 +10,7 @@ using SwgTatooine.Server.Accounts;
 using System;
 using System.Globalization;
 using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
@@ -235,23 +237,90 @@ public static class TatooineHost
         return address;
     }
 
+    /// <summary>
+    /// Where Vite puts the client's content-hashed chunks: its <c>build.assetsDir</c>, which <c>vite.config.ts</c> sets to match. Not Vite's default
+    /// <c>assets</c>, which is the asset set's <see cref="AssetOrigin.RequestPath"/>: every chunk request went to the asset set's files first, missed, and
+    /// fell through to these — two deployments with two cache policies sharing one URL prefix.
+    /// </summary>
+    internal const string ClientChunksPath = "/app";
+
+    /// <summary>The vendored Babylon run-time files, in a folder named for the Babylon version they were fetched for (<c>scripts/fetch-vendor.mjs</c>).</summary>
+    internal const string VendorPrefix = "/vendor/babylon-";
+
+    /// <summary>What a file whose name or folder changes with its content is cached for: a year, and never revalidated.</summary>
+    internal const string Immutable = "public, max-age=31536000, immutable";
+
+    /// <summary>
+    /// The services <see cref="MapClient"/> needs: brotli and gzip for its text and its wasm, compressed per request.
+    /// </summary>
+    /// <remarks>
+    /// <b>At <see cref="CompressionLevel.Optimal"/>, not the providers' default <see cref="CompressionLevel.Fastest"/>.</b> Measured on the 1.2 MB main
+    /// chunk: brotli 370 KB in 4 ms at Fastest, 329 KB in 11 ms at Optimal (gzip 330 KB in 12 ms), 267 KB in 1.3 s at SmallestSize. A chunk is
+    /// immutable and fetched once per browser, so 7 ms buys 11 % of it; SmallestSize would be a build step, not a request.
+    /// </remarks>
+    /// <param name="services">The host's services, before it is built.</param>
+    internal static void AddClient(IServiceCollection services)
+    {
+        services.AddResponseCompression(o =>
+        {
+            o.EnableForHttps = true;
+            o.Providers.Add<BrotliCompressionProvider>();
+            o.Providers.Add<GzipCompressionProvider>();
+        });
+        services.Configure<BrotliCompressionProviderOptions>(o => o.Level = CompressionLevel.Optimal);
+        services.Configure<GzipCompressionProviderOptions>(o => o.Level = CompressionLevel.Optimal);
+    }
+
     /// <summary>Serves the built client from <paramref name="clientRoot"/>: <c>index.html</c> at the root, every other file by its path.</summary>
-    /// <param name="app">The host being built.</param>
+    /// <param name="app">The host being built, whose services went through <see cref="AddClient"/>.</param>
     /// <param name="clientRoot">The client's build output (<c>dist/</c>).</param>
     /// <remarks>
+    /// <para>
     /// <b><c>.env</c> is mapped because ASP.NET answers 404 for an extension it has no type for.</b> Babylon's prefiltered environment is
     /// <c>vendor/babylon-&lt;version&gt;/environmentSpecular.env</c>: Vite serves it in development, this host refused it, and every served run drew
     /// without image-based lighting with nothing but a 404 in the browser console to say so. Mapped by name rather than by serving every unknown type, so a
     /// stray file in a build output is still not served.
+    /// </para>
+    /// <para>
+    /// <b>Cached by what changes its name.</b> A chunk's name carries its content hash and the vendored files' folder carries the Babylon version, so both
+    /// are cached for a year and never asked about again; everything else — <c>index.html</c> first, which names the chunks — is <c>no-cache</c>,
+    /// revalidated by its ETag on every load. Without a <c>Cache-Control</c> at all the browser guessed a freshness from the file's age, and a page
+    /// rebuilt under it could load a day-old <c>index.html</c> naming chunks that no longer exist.
+    /// </para>
+    /// <para>
+    /// <b>Compressed, on this branch only.</b> The bundle is about 1.2 MB of JavaScript in its largest chunk, and text compresses four- to six-fold. Not
+    /// the asset set, which serves its own brotli sidecars, nor the WebSocket, nor the JSON endpoints: the middleware wraps only the paths this serves.
+    /// </para>
     /// </remarks>
     internal static void MapClient(WebApplication app, string clientRoot)
     {
         var files = new PhysicalFileProvider(clientRoot);
         var types = new FileExtensionContentTypeProvider();
         types.Mappings[".env"] = "application/octet-stream";
+        app.UseWhen(context => IsClientFile(context.Request.Path), branch => branch.UseResponseCompression());
         app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
-        app.UseStaticFiles(new StaticFileOptions { FileProvider = files, ContentTypeProvider = types });
+        app.UseStaticFiles(new StaticFileOptions
+        {
+            FileProvider = files,
+            ContentTypeProvider = types,
+            OnPrepareResponse = context =>
+            {
+                var path = context.Context.Request.Path;
+                context.Context.Response.Headers.CacheControl =
+                    path.StartsWithSegments(ClientChunksPath, StringComparison.Ordinal)
+                    || (path.Value ?? string.Empty).StartsWith(VendorPrefix, StringComparison.Ordinal)
+                        ? Immutable
+                        : "no-cache";
+            },
+        });
     }
+
+    /// <summary>Whether a request is for one of the client's own files: the page, a chunk, or a vendored file.</summary>
+    private static bool IsClientFile(PathString path) =>
+        path == "/"
+        || path.Equals("/index.html", StringComparison.OrdinalIgnoreCase)
+        || path.StartsWithSegments(ClientChunksPath, StringComparison.Ordinal)
+        || (path.Value ?? string.Empty).StartsWith(VendorPrefix, StringComparison.Ordinal);
 
     /// <summary>
     /// Serves a running Tatooine over WebSocket until the process is asked to stop.
@@ -332,6 +401,10 @@ public static class TatooineHost
         // The runtime is a singleton the endpoints resolve: the WebSocket endpoint starts its transport against it on the first upgrade, and the catalog
         // endpoint serves exactly the bytes WELCOME carries.
         builder.Services.AddSingleton(runtime);
+        if (!string.IsNullOrEmpty(clientRoot))
+        {
+            AddClient(builder.Services);
+        }
 
         // Identity (A2). The /auth bodies are the only JSON this host serialises through a serializer rather than a Utf8JsonWriter, so they bring their own
         // source-generated context — CreateSlimBuilder has no reflection-based resolver to fall back on.

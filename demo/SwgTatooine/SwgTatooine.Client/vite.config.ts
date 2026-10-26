@@ -34,6 +34,9 @@ export default defineConfig({
   preview: { port: 5191, strictPort: true },
   worker: { format: 'es' },
   build: {
+    // Not Vite's default `assets`: that is the published asset set's URL, served by another folder with another cache policy
+    // (`TatooineHost.ClientChunksPath`, which must match).
+    assetsDir: 'app',
     target: 'es2022',
     sourcemap: true,
     chunkSizeWarningLimit: 4096,

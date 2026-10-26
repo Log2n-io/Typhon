@@ -66,7 +66,13 @@ interface Slot {
 export interface CrowdLayerOptions {
   readonly scene: Scene;
   readonly plan: AtlasPlan;
-  readonly outfits: readonly CrowdOutfit[];
+  /** Every outfit's catalogue id, in the layer's order: what a body is dressed in, whether or not it has loaded yet. */
+  readonly ids: readonly string[];
+  /**
+   * The outfits already built, in the same order; `null` for one still loading, which {@link CrowdLayer.addOutfit} supplies
+   * when it lands. Omitted: every one is still loading.
+   */
+  readonly outfits?: readonly (CrowdOutfit | null)[];
   readonly skin: CrowdSkinPlugin;
   /** Descriptors of the outfits, in the same order, for the role maps and the clip tables. */
   readonly described: readonly Descriptor[];
@@ -80,6 +86,34 @@ export interface CrowdLayerOptions {
    * ninja's costume is never seen walking the market.
    */
   readonly hashed?: readonly number[];
+}
+
+/** One outfit's per-body state; see {@link CrowdLayer.buckets}. */
+interface Bucket {
+  readonly animator: CrowdAnimator;
+  readonly matrices: Float32Array;
+  tiers: Uint8Array;
+  /** Last frame's tiers, which a carried body takes its hysteresis from. Swapped with `tiers` each frame. */
+  previousTiers: Uint8Array;
+  slots: (Slot | null)[];
+  /**
+   * Last frame's slots, read by a body that moved index.
+   *
+   * <b>Ping-ponged, not written in place.</b> Two bodies that swap index would otherwise destroy each other: the
+   * first writes its slot over the index the second has not read from yet, and the second is handed its neighbour's
+   * animation graph. Reading one array and writing another cannot do that whatever the permutation.
+   */
+  previousSlots: (Slot | null)[];
+  /** Where each netId sat LAST frame. Rebuilt as this frame is placed; see the identity note on the class. */
+  byNetId: Map<number, number>;
+  previousByNetId: Map<number, number>;
+  readonly counts: Int32Array;
+  readonly slotOf: Int8Array;
+  /** The stance each body holds a weapon in this frame, 0 for none: which weapon draws one in its hand. */
+  readonly held: Uint8Array;
+  readonly targets: Float32Array[][];
+  count: number;
+  tuning: LocomotionTuning;
 }
 
 /** A body drawn seated this frame, in render space: where its swoop goes. */
@@ -104,7 +138,12 @@ export class CrowdLayer {
   /** How many of {@link riders} this frame filled. */
   riderCount = 0;
 
-  private readonly outfits: readonly CrowdOutfit[];
+  /** Each outfit once built, `null` while it loads (Loïc, 2026-10-26: nothing that waits on an asset is drawn). */
+  private readonly outfits: (CrowdOutfit | null)[];
+  /** Every outfit's id, built or not: what a body wears is decided by these, so it does not change as outfits land. */
+  private readonly ids: readonly string[];
+  /** Outfits that will never build: a body dressed in one wears a civilian's instead, as the router does for a look. */
+  private readonly failed: boolean[];
   private readonly plan: AtlasPlan;
   private readonly skin: CrowdSkinPlugin;
   private readonly described: readonly Descriptor[];
@@ -125,32 +164,7 @@ export class CrowdLayer {
    * `window.__typhon` to answer "what is the crowd actually holding", which is how both of this file's silent
    * failures were finally seen. Nothing outside writes to it.
    */
-  readonly buckets: {
-    readonly animator: CrowdAnimator;
-    readonly matrices: Float32Array;
-    tiers: Uint8Array;
-    /** Last frame's tiers, which a carried body takes its hysteresis from. Swapped with `tiers` each frame. */
-    previousTiers: Uint8Array;
-    slots: (Slot | null)[];
-    /**
-     * Last frame's slots, read by a body that moved index.
-     *
-     * <b>Ping-ponged, not written in place.</b> Two bodies that swap index would otherwise destroy each other: the
-     * first writes its slot over the index the second has not read from yet, and the second is handed its neighbour's
-     * animation graph. Reading one array and writing another cannot do that whatever the permutation.
-     */
-    previousSlots: (Slot | null)[];
-    /** Where each netId sat LAST frame. Rebuilt as this frame is placed; see the identity note on the class. */
-    byNetId: Map<number, number>;
-    previousByNetId: Map<number, number>;
-    readonly counts: Int32Array;
-    readonly slotOf: Int8Array;
-    /** The stance each body holds a weapon in this frame, 0 for none: which {@link weapons} draws one in its hand. */
-    readonly held: Uint8Array;
-    readonly targets: Float32Array[][];
-    count: number;
-    tuning: LocomotionTuning;
-  }[];
+  readonly buckets: (Bucket | null)[];
 
   /** The gait figures the tunings were built from; see `update`. */
   private tunedWalk = Number.NaN;
@@ -203,47 +217,86 @@ export class CrowdLayer {
    * @param netId The body's replicated id.
    */
   civilianOutfitOf(netId: number): string | null {
-    return this.hashed.length === 0 ? null : this.outfits[this.hashed[outfitFor(netId, this.hashed.length)]].id;
+    return this.hashed.length === 0 ? null : this.ids[this.hashed[outfitFor(netId, this.hashed.length)]];
+  }
+
+  /** How many outfits have landed and are drawing. */
+  get ready(): number {
+    let n = 0;
+    for (const outfit of this.outfits) {
+      n += outfit === null ? 0 : 1;
+    }
+
+    return n;
   }
 
   constructor(options: CrowdLayerOptions) {
-    this.outfits = options.outfits;
+    this.ids = options.ids;
+    this.outfits = this.ids.map((_, i) => options.outfits?.[i] ?? null);
+    this.failed = this.ids.map(() => false);
     this.plan = options.plan;
     this.skin = options.skin;
     this.described = options.described;
     this.capacity = options.capacity;
-    this.hashed = options.hashed ?? this.outfits.map((_, i) => i);
+    this.hashed = options.hashed ?? this.ids.map((_, i) => i);
 
-    const share = bucketCapacity(this.capacity, this.outfits.length);
-    this.bucketCapacity = share;
-    this.buckets = this.outfits.map((outfit) => {
-      const levels = outfit.lods.length;
-      // A tier with no level of its own draws the coarsest the outfit has; the sprite tier draws nothing here.
-      const slotOf = Int8Array.from({ length: SPRITE_TIER + 1 }, (_, t) =>
-        t >= SPRITE_TIER ? -1 : Math.min(t, levels - 1),
-      );
-      return {
-        animator: new CrowdAnimator(share, this.plan.fps),
-        matrices: new Float32Array(share * 16),
-        tiers: new Uint8Array(share).fill(CULLED),
-        previousTiers: new Uint8Array(share).fill(CULLED),
-        slots: new Array<Slot | null>(share).fill(null),
-        previousSlots: new Array<Slot | null>(share).fill(null),
-        byNetId: new Map<number, number>(),
-        previousByNetId: new Map<number, number>(),
-        counts: new Int32Array(levels),
-        slotOf,
-        held: new Uint8Array(share),
-        targets: outfit.lods.map(() => [
-          new Float32Array(share * 16),
-          new Float32Array(share * 4),
-          new Float32Array(share * 4),
-          new Float32Array(share * 2),
-        ]),
-        count: 0,
-        tuning: locomotionFrom(Number.NaN, Number.NaN, outfit.height),
-      };
-    });
+    // Shared by every outfit the layer will EVER hold, not the ones built so far: a share that grew as outfits landed
+    // would resize buffers already bound to meshes (see `makeBucket`).
+    this.bucketCapacity = bucketCapacity(this.capacity, this.ids.length);
+    this.buckets = this.outfits.map((outfit) => (outfit === null ? null : this.makeBucket(outfit)));
+  }
+
+  /**
+   * An outfit has loaded: bodies dressed in it are drawn from the next frame. Until then they were drawn by nobody — not a
+   * box, not another outfit — because a body that changes clothes when its own arrives is worse than one that appears.
+   */
+  addOutfit(which: number, outfit: CrowdOutfit): void {
+    if (which < 0 || which >= this.ids.length || this.outfits[which] !== null) {
+      outfit.dispose();
+      return;
+    }
+
+    this.outfits[which] = outfit;
+    this.buckets[which] = this.makeBucket(outfit);
+  }
+
+  /** An outfit will never load: a body dressed in it wears a civilian's outfit instead of being drawn by nobody for good. */
+  failOutfit(which: number): void {
+    if (which >= 0 && which < this.failed.length) {
+      this.failed[which] = true;
+    }
+  }
+
+  /** One outfit's state, its buffers bound to its meshes. */
+  private makeBucket(outfit: CrowdOutfit): Bucket {
+    const share = this.bucketCapacity;
+    const levels = outfit.lods.length;
+    // A tier with no level of its own draws the coarsest the outfit has; the sprite tier draws nothing here.
+    const slotOf = Int8Array.from({ length: SPRITE_TIER + 1 }, (_, t) =>
+      t >= SPRITE_TIER ? -1 : Math.min(t, levels - 1),
+    );
+    const bucket: Bucket = {
+      animator: new CrowdAnimator(share, this.plan.fps),
+      matrices: new Float32Array(share * 16),
+      tiers: new Uint8Array(share).fill(CULLED),
+      previousTiers: new Uint8Array(share).fill(CULLED),
+      slots: new Array<Slot | null>(share).fill(null),
+      previousSlots: new Array<Slot | null>(share).fill(null),
+      byNetId: new Map<number, number>(),
+      previousByNetId: new Map<number, number>(),
+      counts: new Int32Array(levels),
+      slotOf,
+      held: new Uint8Array(share),
+      targets: outfit.lods.map(() => [
+        new Float32Array(share * 16),
+        new Float32Array(share * 4),
+        new Float32Array(share * 4),
+        new Float32Array(share * 2),
+      ]),
+      count: 0,
+      // The gait figures already known, if any: a bucket made after they landed would otherwise keep the clips' own speeds.
+      tuning: locomotionFrom(this.tunedWalk, this.tunedRun, outfit.height),
+    };
 
     // <b>Bound once, at full capacity, and never re-bound.</b> Two reasons, and the first is a bug this cost an
     // evening: Babylon decides `INSTANCES`/`THIN_INSTANCES` when it compiles the effect, from whether the mesh has
@@ -255,17 +308,17 @@ export class CrowdLayer {
     // nineteen outfits' worth of them every frame. The contents are written in place and pushed with a PARTIAL
     // update bounded by the live count, which is the spike's own hard-won note — `thinInstanceBufferUpdated` uploads
     // the whole capacity whatever the count.
-    for (const [which, bucket] of this.buckets.entries()) {
-      for (const [level, lod] of this.outfits[which].lods.entries()) {
-        const target = bucket.targets[level];
-        lod.mesh.thinInstanceSetBuffer('matrix', target[0], 16, false);
-        lod.mesh.thinInstanceSetBuffer('crowdClipA', target[1], 4, false);
-        lod.mesh.thinInstanceSetBuffer('crowdClipB', target[2], 4, false);
-        lod.mesh.thinInstanceSetBuffer('crowdFade', target[3], 2, false);
-        lod.mesh.thinInstanceCount = 0;
-        lod.mesh.isVisible = false;
-      }
+    for (const [level, lod] of outfit.lods.entries()) {
+      const target = bucket.targets[level];
+      lod.mesh.thinInstanceSetBuffer('matrix', target[0], 16, false);
+      lod.mesh.thinInstanceSetBuffer('crowdClipA', target[1], 4, false);
+      lod.mesh.thinInstanceSetBuffer('crowdClipB', target[2], 4, false);
+      lod.mesh.thinInstanceSetBuffer('crowdFade', target[3], 2, false);
+      lod.mesh.thinInstanceCount = 0;
+      lod.mesh.isVisible = false;
     }
+
+    return bucket;
   }
 
   /**
@@ -320,6 +373,10 @@ export class CrowdLayer {
     this.riderCount = 0;
     this.tierTotals.fill(0);
     for (const bucket of this.buckets) {
+      if (bucket === null) {
+        continue;
+      }
+
       bucket.count = 0;
       // This frame's rows start blank and last frame's become readable, so a body that moved index can take its own
       // clip, fade and tier with it. See `CrowdAnimator.beginFrame`.
@@ -349,11 +406,14 @@ export class CrowdLayer {
       this.tunedRun = runMps;
       this.tuningSerial++;
       for (const [which, bucket] of this.buckets.entries()) {
-        bucket.tuning = locomotionFrom(walkMps, runMps, this.outfits[which].height);
+        const outfit = this.outfits[which];
+        if (bucket !== null && outfit !== null) {
+          bucket.tuning = locomotionFrom(walkMps, runMps, outfit.height);
+        }
       }
     }
 
-    const outfitCount = this.outfits.length;
+    const outfitCount = this.ids.length;
     if (outfitCount === 0) {
       return;
     }
@@ -361,12 +421,18 @@ export class CrowdLayer {
     // ---- place every body in its outfit's bucket -----------------------------------------------------------------
     for (let b = 0; b < count; b++) {
       const body = bodies[b];
-      const which =
-        body.outfit >= 0 && body.outfit < outfitCount
-          ? body.outfit
-          : (this.hashed[outfitFor(body.netId, this.hashed.length)] ?? 0);
+      // An outfit that will never load dresses the body as a civilian: a person in the wrong clothes beats a person missing.
+      const civilian = this.hashed[outfitFor(body.netId, this.hashed.length)] ?? 0;
+      const asked = body.outfit >= 0 && body.outfit < outfitCount ? body.outfit : civilian;
+      const which = this.failed[asked] ? civilian : asked;
       const bucket = this.buckets[which];
       const outfit = this.outfits[which];
+      // <b>Still loading: drawn by nobody</b> — no box, no stand-in outfit (Loïc, 2026-10-26). It appears the frame its own
+      // outfit lands, rather than changing clothes in front of the viewer.
+      if (bucket === null || outfit === null) {
+        continue;
+      }
+
       if (bucket.count >= this.bucketCapacity) {
         // A costume worn by far more than its share. Saying so once beats a body silently not being drawn: the
         // headroom below is four times the expected share, so reaching it means the hash is not spreading, not that
@@ -520,6 +586,10 @@ export class CrowdLayer {
 
     for (const [which, bucket] of this.buckets.entries()) {
       const outfit = this.outfits[which];
+      if (bucket === null || outfit === null) {
+        continue;
+      }
+
       // One height for the whole bucket: every body in it wears the same outfit, so an array of 2 048 copies of one
       // constant was 2 048 copies of one constant. `classify` has taken a scalar since it was written.
       classify(bucket.matrices, bucket.count, outfit.height, view, bucket.tiers, this.tierTotals);
@@ -602,7 +672,7 @@ export class CrowdLayer {
    * Copies each body that holds a weapon into that weapon's instances: the body's own placement and clip state, so the
    * shader poses the weapon on the hand it poses. Only for the tiers drawn as meshes — a sprite or a culled body has no hand.
    */
-  private packWeapons(bucket: (typeof this.buckets)[number]): void {
+  private packWeapons(bucket: Bucket): void {
     const animator = bucket.animator;
     for (let i = 0; i < bucket.count; i++) {
       const stance = bucket.held[i];
@@ -637,7 +707,7 @@ export class CrowdLayer {
   /** Hides every crowd mesh — what a profile with no bodies, or a torn-down session, leaves behind. */
   hideAll(): void {
     for (const outfit of this.outfits) {
-      for (const lod of outfit.lods) {
+      for (const lod of outfit?.lods ?? []) {
         lod.mesh.isVisible = false;
         lod.mesh.thinInstanceCount = 0;
       }
@@ -655,7 +725,7 @@ export class CrowdLayer {
 
   dispose(): void {
     for (const outfit of this.outfits) {
-      outfit.dispose();
+      outfit?.dispose();
     }
 
     for (const weapon of this.weapons) {

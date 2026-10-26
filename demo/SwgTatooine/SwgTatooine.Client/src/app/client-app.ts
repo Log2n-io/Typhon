@@ -24,7 +24,6 @@ import { MapCamera } from '../camera/map-camera';
 import { mountAssets, type AssetMount } from './asset-mount';
 import { describeCatalogue, mountCreatureCrowd, mountCrowd, type CrowdMount } from './crowd-mount';
 import { CrowdRouter } from './crowd-router';
-import type { AssetLibrary } from '../assets/asset-library';
 import type { Descriptor } from '../assets/descriptor';
 import { SWOOP_ASSET } from './character-mount';
 import { CrowdSwoops } from './crowd-swoops';
@@ -79,17 +78,18 @@ import {
   type PredictedOverride,
 } from '../render/entity-layer';
 import { NONE_HIDDEN, type CrowdBody, type PlanarPoint } from '../render/layer-packer';
-import { enemySkins } from '../character/outfits';
+import { enemySkins, wearableOutfits } from '../character/outfits';
 import { FLAT_GROUND, type GroundSampler } from '../terrain/ground-sampler';
 import { GroundView, SKY } from '../render/ground';
 import { SceneLighting } from '../render/scene-lighting';
+import { configureScene } from '../render/scene-setup';
 import { PlanetProfile } from '../render/planet-profile';
 import { InteriorProfile } from '../render/interior-profile';
 import { SpaceProfile } from '../render/space-profile';
 import type { SceneProfile } from '../render/scene-profile';
 import { Heightfield } from '../terrain/heightfield';
 import type { TerrainBaked } from '../terrain/terrain.worker';
-import { Labels } from '../render/labels';
+import { Labels, BAR_STACK_PX, pileOn, TAG_STACK_PX } from '../render/labels';
 import { SpeechBubbles, type BubbleAnchor } from '../render/speech-bubbles';
 import { SHUTTLEPORT_STYLE, styleFor } from '../render/styles';
 import {
@@ -125,6 +125,7 @@ import { resetForRealm, resetForSession, type RealmSwitchTargets } from './realm
 import { nextRide, NOT_RIDING, rideOwnsTheView, rideSubjectOf, type RideState } from './ride';
 import { boostFor, DEFAULT_BOOST } from './gait';
 import { ACTION_ICON_SIZE, ACTION_SLOTS, NO_STANCE, serverStance, slotForKey, weaponOf } from './action-bar';
+import { FightRoster } from './fight-roster';
 import {
   AUTOPILOT_AT_REST_SHARE,
   autopilotInput,
@@ -434,6 +435,9 @@ const LAIR_BAR_HEIGHT_M = 3.6;
 /** How far above an enemy's head its health bar floats, metres. */
 const ENEMY_BAR_GAP_M = 0.35;
 
+/** The longest the crowds wait for the structures in view to land before loading anyway; see `structuresFirst`. */
+const STRUCTURES_FIRST_MS = 1500;
+
 const CHARACTER_ARCHETYPES: readonly string[] = ['CityNpc', 'Player', 'Creature'];
 
 /** The most of one creature species drawn at once. A lair holds four to eight; a view holds a few dozen lairs. */
@@ -639,6 +643,26 @@ export class ClientApp {
   private selectionTextArchetype = -1;
   /** The {@link names} version the selection's text was built against: a name arriving later rebuilds it. */
   private selectionTextNames = -1;
+  /** The hovered thing's tag this frame, or `null`: the selection's text for what the pointer is over, cached the same way. */
+  private hoverTag: string | null = null;
+  private hoverText = '';
+  private hoverTextNetId = 0;
+  private hoverTextArchetype = -1;
+  private hoverTextNames = -1;
+  /** Where {@link hoverTag} goes: the hover frame's rectangle, kept before the selection's frame reuses {@link frameRect}. */
+  private readonly hoverRect: ScreenRect = { left: 0, top: 0, right: 0, bottom: 0 };
+  /** The selection's frame, kept for its tag: the bars' frames are measured into {@link frameRect} after it. */
+  private readonly selectionRect: ScreenRect = { left: 0, top: 0, right: 0, bottom: 0 };
+
+  /**
+   * What stands over each body this frame, bottom up — its tag, its health bar, its speech (Loïc, 2026-10-26: the three
+   * piled in that order rather than drawn over each other): netId to the screen y of the top of the pile so far. The tag
+   * starts it at the frame's top edge, a bar goes on top of whatever is there, and a bubble on top of that.
+   */
+  private readonly stackTop = new Map<number, number>();
+
+  /** This frame's view-projection, for the bars' frames: set by {@link updateEnemyBars}. */
+  private barMatrix: ArrayLike<number> = [];
   /** The names behind players' replicated `nameId`s (A12), asked for once per id. */
   private readonly names = new PlayerNameDirectory();
   /**
@@ -674,8 +698,15 @@ export class ClientApp {
   /** Reused each frame: the bodies the character layers diverted, handed to the crowd and then cleared. */
   private readonly crowdBodies: CrowdBody[] = [];
 
-  /** Each creature species' own crowd, in the router's layer order after the characters. */
-  private creatureCrowds: CrowdMount[] = [];
+  /** Each creature species' own crowd, in the router's layer order after the characters; `null` until it has landed. */
+  private creatureCrowds: (CrowdMount | null)[] = [];
+
+  /**
+   * Whether this session's bodies are the crowds' to draw — an asset set announced characters — whether or not they have
+   * landed yet. While it holds, a body no crowd draws yet is drawn by NOBODY rather than as a box (Loïc, 2026-10-26: what
+   * waits on an asset is not drawn). A crowd that will not build clears it, and the boxes come back.
+   */
+  private crowdExpected = false;
 
   /** Which crowd draws each diverted body, and in what; `null` until the crowds are mounted. */
   private crowdRouter: CrowdRouter | null = null;
@@ -704,11 +735,8 @@ export class ClientApp {
       powerPreference: 'default',
     });
     this.scene = new Scene(this.engine);
-    // The camera input owns the canvas: Babylon's own pointer handling would only pick meshes we never let it pick.
-    this.scene.detachControl();
+    configureScene(this.scene);
     this.scene.clearColor = new Color4(SKY.r, SKY.g, SKY.b, 1);
-    this.scene.skipPointerMovePicking = true;
-    this.scene.skipFrustumClipping = true;
     this.camera = new FreeCamera('camera', Vector3.Zero(), this.scene);
     this.camera.fov = this.mapCamera.fov;
     this.camera.inputs.clear();
@@ -765,6 +793,7 @@ export class ClientApp {
     this.events = {
       onAttack: (tick, attacker, target, damage) => {
         this.attacks.onAttack(tick, attacker, target);
+        this.fight.note(attacker, target, this.source?.selfNetId ?? 0, performance.now());
         this.fx.push(tick, attacker, target, damage);
       },
       onChat: (tick, speaker, text) => {
@@ -1005,45 +1034,6 @@ export class ClientApp {
       }
 
       useUi.getState().setActionIcons(icons);
-      // After the mount, because it reads the same library — and deliberately not inside it: a crowd that will not
-      // build must not cost the street its buildings, and a street that will not load must not cost the crowd.
-      try {
-        // Read once, for every crowd: the characters and each creature species plan their atlases from these.
-        const described = await describeCatalogue(mount.library);
-        this.templateHeights = set.creatures.map(
-          (kind) => described.get(kind.bodies[0] ?? '')?.bounds.render[1][1] ?? 1.5,
-        );
-        this.templateBoxes = set.creatures.map((kind) => {
-          const body = described.get(kind.bodies[0] ?? '');
-          return body === undefined ? null : bodyBox(body.kind, body.bounds.render, body.bounds.collision);
-        });
-        const character = described.get(RIG_OUTFIT);
-        this.characterBox =
-          character === undefined ? null : bodyBox(character.kind, character.bounds.render, character.bounds.collision);
-        this.crowd = await mountCrowd(
-          this.scene,
-          mount.library,
-          this.lighting,
-          CROWD_CAPACITY,
-          described,
-          enemySkins(set.creatures),
-        );
-        await this.mountCreatureCrowds(mount.library, set, described);
-        // Everyone else's riders on their swoops, the seat the avatar's rider uses once the swoop's descriptor says where it is.
-        this.crowdSwoops = new CrowdSwoops(this.scene, mount.library, mount.lighting);
-        void mount.library
-          .describe(SWOOP_ASSET)
-          .then((swoop) => {
-            const seat = swoop.seats?.[0];
-            if (seat !== undefined && this.crowd !== null) {
-              this.crowd.layer.seatY = seat.pos[1];
-            }
-          })
-          .catch(() => undefined);
-      } catch (error) {
-        console.error('crowd: not mounted', error);
-      }
-
       this.shapeCache = [];
       this.staticAssets = new StaticAssets(
         mount.library,
@@ -1065,8 +1055,125 @@ export class ClientApp {
       void mount.library.describe(SHUTTLEPORT_ASSET).catch(() => undefined);
       void mount.library.describe(TICKET_TERMINAL_ASSET).catch(() => undefined);
       void mount.library.describe(MISSION_TERMINAL_ASSET).catch(() => undefined);
+
+      // <b>Nothing above waited for anything but the catalogue</b> (Loïc, 2026-10-26: what is lazy loads asynchronously,
+      // and what waits on it is not drawn). The buildings ask for their own GLBs from the next frame, and the crowds build
+      // behind them: until a body's outfit or species has landed it is drawn by nobody — not a box. This used to await the
+      // whole crowd, nineteen outfits one after another, before the first building could even ask for its file.
+      this.crowdExpected = true;
+      void this.structuresFirst().then(() => this.mountCrowds(mount, set));
     } catch (error) {
       console.error('assets: not mounted', error);
+    }
+  }
+
+  /**
+   * Resolves once the structures in view have landed, or after {@link STRUCTURES_FIRST_MS} at the latest.
+   *
+   * <b>A priority, not a dependency.</b> Every GLB decodes through Babylon's one meshopt worker, so the crowds' thirty
+   * files arriving together queued the first building behind them: measured, its file in hand at 0.52 s and placed at
+   * 1.5 s. The world first, then the people in it — and never more than a moment's wait, so a street whose buildings will
+   * not load does not cost it its crowd.
+   */
+  private async structuresFirst(): Promise<void> {
+    const started = performance.now();
+    while (!this.gone() && performance.now() - started < STRUCTURES_FIRST_MS) {
+      const statics = this.staticAssets;
+      // Once a frame has asked for them (samples exist) and none is still coming.
+      if (statics !== null && this.structureCount > 0 && statics.waiting.size === 0 && statics.pending === 0) {
+        return;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+
+  /**
+   * The characters' crowd and every creature species' crowd, each in the background and each drawing what it has.
+   *
+   * <b>The router is made first, from the descriptors alone</b>, with a layer for every crowd that will exist: a body is
+   * routed to the crowd that will draw it whether or not that crowd, or its outfit, has landed yet, and is drawn the frame
+   * it has. A crowd that turns out not to build gives its bodies back to the boxes — failing is not pending.
+   */
+  private async mountCrowds(mount: AssetMount, set: AssetSet): Promise<void> {
+    try {
+      // Read once, for every crowd: the characters and each creature species plan their atlases from these.
+      const described = await describeCatalogue(mount.library);
+      if (this.gone() || this.assets !== mount) {
+        return;
+      }
+
+      this.templateHeights = set.creatures.map(
+        (kind) => described.get(kind.bodies[0] ?? '')?.bounds.render[1][1] ?? 1.5,
+      );
+      this.templateBoxes = set.creatures.map((kind) => {
+        const body = described.get(kind.bodies[0] ?? '');
+        return body === undefined ? null : bodyBox(body.kind, body.bounds.render, body.bounds.collision);
+      });
+      const character = described.get(RIG_OUTFIT);
+      this.characterBox =
+        character === undefined ? null : bodyBox(character.kind, character.bounds.render, character.bounds.collision);
+
+      const species: string[] = [];
+      for (const kind of set.creatures) {
+        for (const id of kind.bodies) {
+          if (described.get(id)?.kind === 'creature' && !species.includes(id)) {
+            species.push(id);
+          }
+        }
+      }
+
+      const people = wearableOutfits(described).filter((id) => described.has(id));
+      this.creatureCrowds = species.map(() => null);
+      this.crowdRouter = new CrowdRouter(set.creatures, people.length > 0 ? people : null, species, set.players);
+
+      // Each crowd on its own: none waits for another, and each is handed over the moment its bake is done.
+      const characters = mountCrowd(
+        this.scene,
+        mount.library,
+        this.lighting,
+        CROWD_CAPACITY,
+        described,
+        enemySkins(set.creatures),
+      ).then((crowd) => {
+        if (this.gone() || this.assets !== mount) {
+          crowd?.dispose();
+          return;
+        }
+
+        if (crowd === null) {
+          // Failing is not pending: without a crowd the people go back to boxes rather than stay invisible.
+          this.crowdExpected = false;
+          this.crowdRouter = new CrowdRouter(set.creatures, null, species, set.players);
+          return;
+        }
+
+        this.crowd = crowd;
+        // Everyone else's riders on their swoops, the seat the avatar's rider uses once the swoop's descriptor says where.
+        this.crowdSwoops = new CrowdSwoops(this.scene, mount.library, mount.lighting);
+        void mount.library
+          .describe(SWOOP_ASSET)
+          .then((swoop) => {
+            const seat = swoop.seats?.[0];
+            if (seat !== undefined && this.crowd !== null) {
+              this.crowd.layer.seatY = seat.pos[1];
+            }
+          })
+          .catch(() => undefined);
+      });
+      const creatures = species.map((id, k) =>
+        mountCreatureCrowd(this.scene, mount.library, this.lighting, id, SPECIES_CAPACITY, described).then((crowd) => {
+          if (this.gone() || this.assets !== mount) {
+            crowd?.dispose();
+            return;
+          }
+
+          this.creatureCrowds[k] = crowd;
+        }),
+      );
+      await Promise.all([characters, ...creatures]);
+    } catch (error) {
+      console.error('crowd: not mounted', error);
     }
   }
 
@@ -1187,11 +1294,12 @@ export class ClientApp {
     this.crowd?.dispose();
     this.crowd = null;
     for (const species of this.creatureCrowds) {
-      species.dispose();
+      species?.dispose();
     }
 
     this.creatureCrowds = [];
     this.crowdRouter = null;
+    this.crowdExpected = false;
     this.gizmos?.dispose();
     this.gizmos = null;
     this.assets?.dispose();
@@ -1250,6 +1358,7 @@ export class ClientApp {
     this.journal.clear();
     this.journalVersion = -1;
     useMissions.getState().resetJournal();
+    this.fight.clear();
     useMissions.getState().closeTerminal();
     this.clock = new Clock(CLOCK_OPTIONS);
 
@@ -3226,7 +3335,14 @@ export class ClientApp {
     const elsewhere = this.elsewhere;
     elsewhere.clear();
     const avatar = this.driveAvatar(live, now, dt);
-    if (avatar !== 0) {
+    const self = avatar !== 0 ? avatar : (live?.selfNetId ?? 0);
+    if (this.assets?.avatarPending === true && self !== 0) {
+      // Its rig still loading, or the outfit it is being re-dressed in: drawn by nobody rather than as a capsule or in
+      // the clothes it is about to change out of (Loïc, 2026-10-26: what waits on an asset is not drawn).
+      this.assets.character?.park();
+      this.assets.ghost?.park();
+      hidden.add(self);
+    } else if (avatar !== 0) {
       hidden.add(avatar);
     }
 
@@ -3242,6 +3358,15 @@ export class ClientApp {
       elsewhere.add(netId);
     }
 
+    // A structure or a camp whose asset is still coming is drawn by nobody, and is not picked: there is nothing there yet.
+    for (const netId of this.staticAssets?.waiting ?? NONE_HIDDEN) {
+      hidden.add(netId);
+    }
+
+    for (const netId of this.lairAssets?.waiting ?? NONE_HIDDEN) {
+      hidden.add(netId);
+    }
+
     this.updateGizmos(ui);
 
     view.hidden = hidden;
@@ -3255,32 +3380,37 @@ export class ClientApp {
     // Not `length = 0`: the records are pooled and reused, so the array keeps its capacity and `crowdCount` is what
     // says how many of them this frame filled.
     view.crowdCount = 0;
-    view.crowd = crowd === null ? null : bodies;
+    view.crowd = crowd === null && !this.crowdExpected ? null : bodies;
     view.perSecond = 1000 / this.clock.tickPeriodMs;
     view.locate = this.locatePlanar;
-    // Only once the router exists: before it, a diverted creature would be routed nowhere and drawn by nobody.
-    view.crowdDraws = (crowd?.layer.isDrawing ?? false) && this.crowdRouter !== null;
+    // While the crowds are expected, the packer hands every near body over and draws no box for it — one whose crowd, or
+    // whose outfit, has not landed is drawn by nobody until it has (Loïc, 2026-10-26). Without them, boxes as before.
+    view.crowdDraws = crowd === null ? this.crowdExpected : crowd.layer.isDrawing;
 
     for (const layer of this.layers) {
       layer.update(view);
     }
 
     const router = this.crowdRouter;
-    if (crowd !== null && router !== null) {
+    if (router !== null) {
       // Each body to the crowd that draws it: the characters (civilians and the camps' enemies) at layer 0, then each
       // species. The gait figures are the SERVER's; before the owner block lands they are NaN and the graph falls back to
       // the clips' own speeds, which is the same thing the avatar does.
       router.route(bodies, view.crowdCount);
       const walk = live?.selfNumber('walkMps') ?? Number.NaN;
       const run = live?.selfNumber('runMps') ?? Number.NaN;
-      const people = router.layers[0];
-      crowd.layer.update(people.bodies, people.count, view, now / 1000, walk, run);
-      for (const [k, species] of this.creatureCrowds.entries()) {
-        const routed = router.layers[k + 1];
-        species.layer.update(routed.bodies, routed.count, view, now / 1000, walk, run);
+      // Layer 0 is the characters only when the router has them; each species follows. A crowd still loading draws nothing.
+      const first = router.layers.length - this.creatureCrowds.length;
+      if (crowd !== null && first > 0) {
+        const people = router.layers[0];
+        crowd.layer.update(people.bodies, people.count, view, now / 1000, walk, run);
+        this.crowdSwoops?.update(crowd.layer.riders, crowd.layer.riderCount);
       }
 
-      this.crowdSwoops?.update(crowd.layer.riders, crowd.layer.riderCount);
+      for (const [k, species] of this.creatureCrowds.entries()) {
+        const routed = router.layers[k + first];
+        species?.layer.update(routed.bodies, routed.count, view, now / 1000, walk, run);
+      }
     }
 
     this.attacks.update(view);
@@ -3345,10 +3475,17 @@ export class ClientApp {
 
       this.updateEnemyBars(matrix, view);
 
+      if (this.hoverTag !== null) {
+        const h = this.hoverRect;
+        this.labels.placeHover((h.left + h.right) * 0.5, h.top, this.hoverTag);
+      } else {
+        this.labels.hideHover();
+      }
+
       if (framedTag !== null) {
         // On the frame's top edge: over what is drawn, at every distance. A lift in metres above the feet put the tag a
         // metre and a half over a person's head, and a fixed pixel offset on top of it.
-        const r = this.frameRect;
+        const r = this.selectionRect;
         this.labels.placeSelection((r.left + r.right) * 0.5, r.top, framedTag);
       } else if (hasSelection) {
         this.labels.updateSelection(
@@ -3895,21 +4032,51 @@ export class ClientApp {
       this.selectionTextNetId = netId;
       this.selectionTextArchetype = this.evalArchetype;
       this.selectionTextNames = this.names.version;
-      // A structure is named for what it is — "Mission terminal", "Bazaar" (2026-10-25, Loïc) — and no number: there is
-      // one thing of that name where the viewer is looking. A real player by its account's name (A12: the replicated
-      // `nameId`, resolved over HTTP, same day); the scripted crowd carries none. Everything else keeps its archetype and
-      // netId — and a player whose name has not arrived yet keeps it until it does.
-      const archetype = this.archetypes.name(this.evalArchetype);
-      const kindName =
-        archetype === STRUCTURE_ARCHETYPE
-          ? STRUCTURE_KIND_NAMES[this.fieldOf(netId, 'kind')]
-          : archetype === 'Player'
-            ? (this.names.nameOf(this.fieldOf(netId, 'nameId')) ?? undefined)
-            : undefined;
-      this.selectionText = kindName ?? `${this.archetypes.label(this.evalArchetype)} #${netId}`;
+      this.selectionText = this.tagText(netId, this.evalArchetype);
     }
 
     return true;
+  }
+
+  /**
+   * What an entity's tag says — the selection's and the hover's alike.
+   *
+   * A structure is named for what it is — "Mission terminal", "Bazaar" (2026-10-25, Loïc) — and no number: there is one
+   * thing of that name where the viewer is looking. A real player by its account's name (A12: the replicated `nameId`,
+   * resolved over HTTP, same day); the scripted crowd carries none. Everything else keeps its archetype and netId — and a
+   * player whose name has not arrived yet keeps it until it does.
+   */
+  private tagText(netId: number, archetypeIndex: number): string {
+    const archetype = this.archetypes.name(archetypeIndex);
+    const kindName =
+      archetype === STRUCTURE_ARCHETYPE
+        ? STRUCTURE_KIND_NAMES[this.fieldOf(netId, 'kind')]
+        : archetype === 'Player'
+          ? (this.names.nameOf(this.fieldOf(netId, 'nameId')) ?? undefined)
+          : undefined;
+    return kindName ?? `${this.archetypes.label(archetypeIndex)} #${netId}`;
+  }
+
+  /** The hovered entity's tag text, rebuilt only when what is hovered, or the names behind it, changed. */
+  private hoverTextOf(netId: number): string | null {
+    const location = this.world.locate(netId);
+    if (location === NOT_FOUND) {
+      return null;
+    }
+
+    const archetype = archetypeOf(location);
+    if (
+      this.hoverTextNetId !== netId ||
+      this.hoverTextArchetype !== archetype ||
+      this.hoverTextNames !== this.names.version
+    ) {
+      this.hoverTextNetId = netId;
+      this.hoverTextArchetype = archetype;
+      this.hoverTextNames = this.names.version;
+      this.hoverText = this.tagText(netId, archetype);
+    }
+
+    return this.hoverText;
   }
 
   /**
@@ -4354,7 +4521,7 @@ export class ClientApp {
     const r = this.frameRect;
     const d = this.drawn;
     out.x = (r.left + r.right) * 0.5;
-    out.y = r.top;
+    out.y = this.stackTop.get(netId) ?? r.top;
     out.depth = projectToScreen(matrix, d.x, d.y, d.z, width, height, this.frameScreen).w;
     return true;
   };
@@ -4390,6 +4557,12 @@ export class ClientApp {
 
   /** The enemy health bars, pooled: the first {@link updateEnemyBars} fills are this frame's. */
   private readonly enemyBars: HealthBar[] = [];
+
+  /** Who the avatar gave or took a blow from lately: a player's target is not replicated, its blows are. */
+  private readonly fight = new FightRoster();
+
+  /** The netIds already given a bar this frame, so a creature both hunting the avatar and struck by it gets one. */
+  private readonly barred = new Set<number>();
 
   /** How tall each creature template's body is, metres, from its first body's descriptor: where its health bar sits. */
   private templateHeights: readonly number[] = [];
@@ -4446,7 +4619,10 @@ export class ClientApp {
       ui.selectPart(null);
     }
 
+    // Framed and tagged as the selection is (Loïc, 2026-10-26): the tag says what a click would select, before the click.
     const hoverIsSelected = hoveredPart !== null ? hoveredPart === selectedPart : hovered === selected;
+    this.hoverTag = null;
+    this.stackTop.clear();
     if (
       !hoverIsSelected &&
       (hoveredPart !== null
@@ -4454,6 +4630,19 @@ export class ClientApp {
         : hovered !== 0 && this.frameOf(matrix, hovered, width, height))
     ) {
       this.frames.show(0, this.frameRect, 'hover');
+      this.hoverTag =
+        hoveredPart !== null
+          ? hoveredPart.kind === 'mission'
+            ? MISSION_TERMINAL_LABEL
+            : TICKET_TERMINAL_LABEL
+          : this.hoverTextOf(hovered);
+      this.hoverRect.left = this.frameRect.left;
+      this.hoverRect.right = this.frameRect.right;
+      this.hoverRect.top = this.frameRect.top;
+      this.hoverRect.bottom = this.frameRect.bottom;
+      if (hoveredPart === null && ui.showLabels) {
+        pileOn(this.stackTop, hovered, this.frameRect.top, TAG_STACK_PX);
+      }
     } else {
       this.frames.hide(0);
     }
@@ -4465,6 +4654,7 @@ export class ClientApp {
       }
 
       this.frames.show(1, this.frameRect, 'passive');
+      this.keepSelectionRect();
       return selectedPart.kind === 'mission' ? MISSION_TERMINAL_LABEL : TICKET_TERMINAL_LABEL;
     }
 
@@ -4479,7 +4669,20 @@ export class ClientApp {
       this.frameRect,
       selectionTone(this.cursorSubject(selected, self), playing, armed, targetsViewer),
     );
+    this.keepSelectionRect();
+    if (ui.showLabels) {
+      pileOn(this.stackTop, selected, this.frameRect.top, TAG_STACK_PX);
+    }
+
     return this.selectionText;
+  }
+
+  /** Keeps the selection's frame for its tag, before the bars measure theirs into {@link frameRect}. */
+  private keepSelectionRect(): void {
+    this.selectionRect.left = this.frameRect.left;
+    this.selectionRect.right = this.frameRect.right;
+    this.selectionRect.top = this.frameRect.top;
+    this.selectionRect.bottom = this.frameRect.bottom;
   }
 
   /** The screen rectangle round a part, into {@link frameRect}; false when it is behind the camera or off screen. */
@@ -4522,9 +4725,18 @@ export class ClientApp {
     }
 
     const archetype = archetypeOf(location);
-    const layer = this.layers.find((l) => l.archetype === archetype);
+    const slot = slotOf(location);
     const d = this.drawn;
-    if (layer === undefined || !layer.instanceOf(netId, d)) {
+    // Every layer over the archetype, not the first: a store can be split between two by style (the shuttleports).
+    let found = false;
+    for (const layer of this.layers) {
+      if (layer.archetype === archetype && layer.instanceOf(netId, slot, d)) {
+        found = true;
+        break;
+      }
+    }
+
+    if (!found) {
       return false;
     }
 
@@ -4558,53 +4770,101 @@ export class ClientApp {
   }
 
   /**
-   * A health bar over every living creature fighting this session's avatar: its replicated `target` — an entity reference,
-   * so the netId it names is this session's own numbering — is this session's `SELF`. Nobody else's fights get one.
+   * A health bar over everyone this session's avatar is fighting (Loïc, 2026-10-26: "the people we're in fight with"): every
+   * living creature whose replicated `target` — an entity reference, so the netId it names is this session's own numbering —
+   * is this session's `SELF`; whatever the avatar is attacking now, its target with a stance drawn; and anyone it gave or
+   * took a blow from in the last ten seconds ({@link FightRoster}), which is how a player — whose target is not on the
+   * wire — is known to be in the fight. Nobody else's fights get one.
    */
   private updateEnemyBars(matrix: ArrayLike<number>, view: FrameView): void {
     const originX = view.originX;
     const originZ = view.originZ;
     const self = this.source?.selfNetId ?? 0;
     const archetype = self === 0 ? -1 : this.archetypes.indexOf('Creature');
+    this.barred.clear();
     let n = 0;
+    this.barMatrix = matrix;
     if (archetype >= 0) {
       const store = this.world.archetypeStore(archetype);
       const targetField = store.fieldIndex('target');
-      const hpField = store.fieldIndex('hp');
-      const templateField = store.fieldIndex('template');
-      if (store.hasPosition && targetField >= 0 && hpField >= 0) {
+      if (targetField >= 0) {
         const targets = store.fieldAt(targetField);
-        const hps = store.fieldAt(hpField);
-        const templates = templateField < 0 ? null : store.fieldAt(templateField);
-        const ground = altitudeField(store);
         for (let i = 0; i < store.liveCount; i++) {
           const slot = store.live[i];
-          if (targets[slot] !== self || !(hps[slot] > 0)) {
-            continue;
+          if (targets[slot] === self) {
+            n = this.foeBar(store.netIds[slot], self, n);
           }
-
-          evaluateSlot(store, slot, this.clock.renderTick, this.clock.renderFrac, this.scratch, 0);
-          const at = this.placement.read(store.dims, this.scratch, 0);
-          if (n >= this.enemyBars.length) {
-            this.enemyBars.push({ x: 0, y: 0, z: 0, fraction: 0, shielded: false });
-          }
-
-          const bar = this.enemyBars[n++];
-          const template = templates === null ? -1 : templates[slot];
-          bar.x = at.x;
-          bar.y =
-            altitudeOf(ground, slot, at, this.profile.ground) +
-            (this.templateHeights[template] ?? 1.5) +
-            ENEMY_BAR_GAP_M;
-          bar.z = at.z;
-          bar.fraction = hps[slot];
-          bar.shielded = false;
         }
       }
     }
 
+    if (self !== 0) {
+      // What the avatar is attacking now: barred from the click, before its first blow lands.
+      const ui = useUi.getState();
+      if (ui.stance !== NO_STANCE && ui.selectedNetId !== 0) {
+        n = this.foeBar(ui.selectedNetId, self, n);
+      }
+
+      this.foeCount = n;
+      this.fight.forEach(performance.now(), this.visitFoe);
+      n = this.foeCount;
+    }
+
     n = this.lairBars(view, n);
     this.labels.updateBars(matrix, originX, originZ, this.cssSize.width, this.cssSize.height, this.enemyBars, n);
+  }
+
+  /** The bar count while {@link fight} is walked: the walk's visitor is bound once, so it carries the count in a field. */
+  private foeCount = 0;
+
+  /** Bound once: the roster's visitor, adding a bar per body still in the fight. */
+  private readonly visitFoe = (netId: number): void => {
+    this.foeCount = this.foeBar(netId, this.source?.selfNetId ?? 0, this.foeCount);
+  };
+
+  /**
+   * A bar over one body in the fight, appended at `n` unless it has one already, is the avatar, is no body with health — a
+   * structure, a lair, which has its own — or is down. Returns the new count; {@link foeCount} follows it.
+   */
+  private foeBar(netId: number, self: number, n: number): number {
+    this.foeCount = n;
+    if (netId === self || this.barred.has(netId)) {
+      return n;
+    }
+
+    const archetype = this.archetypeName(netId);
+    if ((archetype !== 'Player' && archetype !== 'Creature' && archetype !== 'CityNpc') || !this.evaluate(netId)) {
+      return n;
+    }
+
+    const hp = this.fieldOf(netId, 'hp');
+    if (!(hp > 0) || this.fieldOf(netId, 'down') > 0) {
+      return n;
+    }
+
+    if (n >= this.enemyBars.length) {
+      this.enemyBars.push({ x: 0, y: 0, z: 0, fraction: 0, shielded: false, sx: Number.NaN, sy: Number.NaN });
+    }
+
+    const bar = this.enemyBars[n];
+    bar.x = this.evalX;
+    bar.y = this.evalY + this.heightOf(netId) + ENEMY_BAR_GAP_M;
+    bar.z = this.evalZ;
+    bar.fraction = hp;
+    bar.shielded = false;
+    bar.sx = Number.NaN;
+    bar.sy = Number.NaN;
+
+    // On the pile over the body (its tag, if it has one), where the body is drawn: the bubble goes on top of it.
+    if (this.frameOf(this.barMatrix, netId, this.cssSize.width, this.cssSize.height)) {
+      const r = this.frameRect;
+      bar.sx = (r.left + r.right) * 0.5;
+      bar.sy = pileOn(this.stackTop, netId, r.top, BAR_STACK_PX);
+    }
+
+    this.barred.add(netId);
+    this.foeCount = n + 1;
+    return n + 1;
   }
 
   /**
@@ -4645,7 +4905,7 @@ export class ClientApp {
       }
 
       if (n >= this.enemyBars.length) {
-        this.enemyBars.push({ x: 0, y: 0, z: 0, fraction: 0, shielded: false });
+        this.enemyBars.push({ x: 0, y: 0, z: 0, fraction: 0, shielded: false, sx: Number.NaN, sy: Number.NaN });
       }
 
       const bar = this.enemyBars[n++];
@@ -4655,6 +4915,10 @@ export class ClientApp {
       bar.fraction = hps[slot];
       // Guarded by its occupants: nothing breaks it while one stands (the server's IsShielded, every lair).
       bar.shielded = (guards?.[slot] ?? 0) > 0;
+
+      // Projected, not stacked: the pool's slot may hold a body's screen position from earlier in the frame.
+      bar.sx = Number.NaN;
+      bar.sy = Number.NaN;
     }
 
     return n;
@@ -5011,40 +5275,6 @@ export class ClientApp {
     }
 
     return layer.update(samples, taken, this.assetView);
-  }
-
-  /**
-   * Builds each creature species' crowd, and the router that sends bodies to it.
-   *
-   * <b>Only the species the server's table names</b>, each once: a beast is one crowd however many templates wear it.
-   * A species that will not build stays the renderer's own shape — the router simply has no layer for it.
-   */
-  private async mountCreatureCrowds(
-    library: AssetLibrary,
-    set: AssetSet,
-    described: ReadonlyMap<string, Descriptor>,
-  ): Promise<void> {
-    const species: string[] = [];
-    for (const kind of set.creatures) {
-      for (const id of kind.bodies) {
-        if (described.get(id)?.kind === 'creature' && !species.includes(id)) {
-          species.push(id);
-        }
-      }
-    }
-
-    const mounted: CrowdMount[] = [];
-    const ids: string[] = [];
-    for (const id of species) {
-      const crowd = await mountCreatureCrowd(this.scene, library, this.lighting, id, SPECIES_CAPACITY, described);
-      if (crowd !== null) {
-        mounted.push(crowd);
-        ids.push(id);
-      }
-    }
-
-    this.creatureCrowds = mounted;
-    this.crowdRouter = new CrowdRouter(set.creatures, this.crowd?.outfits.map((o) => o.id) ?? null, ids, set.players);
   }
 
   /**

@@ -52,6 +52,33 @@ public static class ChatLines
         Utf8Text256.From("Nearly down — keep at it!"),
     ];
 
+    // What a body of the crowd says when a player attacks it (V33): standing its ground, running, or joining in for somebody else.
+    private static readonly Utf8Text256[] Defiance =
+    [
+        Utf8Text256.From("You'll regret that!"),
+        Utf8Text256.From("Big mistake, friend."),
+        Utf8Text256.From("Oh, you want a fight?"),
+        Utf8Text256.From("Come on then!"),
+        Utf8Text256.From("That's the last shot you'll take!"),
+    ];
+
+    private static readonly Utf8Text256[] Panic =
+    [
+        Utf8Text256.From("Help! Somebody help!"),
+        Utf8Text256.From("Don't shoot!"),
+        Utf8Text256.From("I don't want any trouble!"),
+        Utf8Text256.From("Leave me alone!"),
+        Utf8Text256.From("Run!"),
+    ];
+
+    private static readonly Utf8Text256[] Rally =
+    [
+        Utf8Text256.From("Hey! Leave them alone!"),
+        Utf8Text256.From("You picked the wrong crowd."),
+        Utf8Text256.From("Back off!"),
+        Utf8Text256.From("Pick on someone your own size!"),
+    ];
+
     private static readonly Utf8Text256[] Waiting =
     [
         Utf8Text256.From("Shuttle's late. As usual."),
@@ -103,8 +130,18 @@ public static class ChatLines
         return ref lines[(int)(hash % (uint)lines.Length)];
     }
 
+    /// <summary>What a body says standing its ground against an attacker.</summary>
+    public static ref readonly Utf8Text256 Defiant(uint hash) => ref Defiance[(int)(hash % (uint)Defiance.Length)];
+
+    /// <summary>What a body says running from an attacker.</summary>
+    public static ref readonly Utf8Text256 Panicked(uint hash) => ref Panic[(int)(hash % (uint)Panic.Length)];
+
+    /// <summary>What a body says joining a fight for somebody near it.</summary>
+    public static ref readonly Utf8Text256 Rallying(uint hash) => ref Rally[(int)(hash % (uint)Rally.Length)];
+
     /// <summary>Every line, for a check that wants to assert what the world can say.</summary>
-    public static int Count => Idle.Length + Travelling.Length + Fighting.Length + Waiting.Length + Townsfolk.Length;
+    public static int Count => Idle.Length + Travelling.Length + Fighting.Length + Waiting.Length + Townsfolk.Length + Defiance.Length + Panic.Length
+        + Rally.Length;
 
     /// <summary>The most lines a player's utterance keeps: what a speech bubble over a head can hold and still be a bubble.</summary>
     public const int MaxLines = 4;

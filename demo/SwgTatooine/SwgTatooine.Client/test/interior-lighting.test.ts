@@ -5,6 +5,7 @@ import { PointLight } from '@babylonjs/core/Lights/pointLight';
 import { ShadowGenerator } from '@babylonjs/core/Lights/Shadows/shadowGenerator';
 import { ImageProcessingConfiguration } from '@babylonjs/core/Materials/imageProcessingConfiguration';
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial';
+import type { RenderTargetTexture } from '@babylonjs/core/Materials/Textures/renderTargetTexture';
 import { Vector3 } from '@babylonjs/core/Maths/math.vector';
 import type { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh';
 import { CreateBox } from '@babylonjs/core/Meshes/Builders/boxBuilder';
@@ -40,6 +41,11 @@ function scene(): Scene {
   return new Scene(new NullEngine());
 }
 
+/** What Babylon does as a shadow map is about to render: its list is filled then, once per render. */
+function render(map: RenderTargetTexture): void {
+  map.onBeforeBindObservable.notifyObservers(map);
+}
+
 describe('SceneLighting.setIndoors', () => {
   it("turns the sun to nothing, dims the sky to the testbench's 0.15 and tone-maps, and undoes all three outside", () => {
     const s = scene();
@@ -67,11 +73,85 @@ describe('SceneLighting.setIndoors', () => {
     lighting.setShadows(true);
     const wall = CreateBox('wall', {}, s);
     lighting.castShadows([wall]);
-    const predicate = s.getLightByName('sun')!.getShadowGenerator()!.getShadowMap()!.renderListPredicate;
+    const map = s.getLightByName('sun')!.getShadowGenerator()!.getShadowMap()!;
 
-    expect(predicate(wall)).toBe(true);
+    render(map);
+    expect([...map.renderList!]).toEqual([wall]);
     lighting.setIndoors(true);
-    expect(predicate(wall)).toBe(false);
+    render(map);
+    expect([...map.renderList!]).toEqual([]);
+  });
+});
+
+describe("SceneLighting's casters", () => {
+  function street() {
+    const s = scene();
+    const lighting = new SceneLighting(s, '/vendor/');
+    lighting.setShadows(true);
+    const map = s.getLightByName('sun')!.getShadowGenerator()!.getShadowMap()!;
+    return { s, lighting, map };
+  }
+
+  it('are the marked meshes within the slab, enabled and visible — not the scene', () => {
+    const { s, lighting, map } = street();
+    const wall = CreateBox('wall', {}, s);
+    const hidden = CreateBox('hidden', {}, s);
+    const off = CreateBox('off', {}, s);
+    const far = CreateBox('far', {}, s);
+    CreateBox('unmarked', {}, s);
+    far.position.x = 2000;
+    far.computeWorldMatrix(true);
+    lighting.castShadows([wall, hidden, off, far]);
+    hidden.isVisible = false;
+    off.setEnabled(false);
+
+    render(map);
+    expect([...map.renderList!]).toEqual([wall]);
+    expect(map.renderListPredicate, 'a predicate is run over every mesh of the scene').toBeUndefined();
+  });
+
+  it('leave when they leave the scene', () => {
+    const { s, lighting, map } = street();
+    const wall = CreateBox('wall', {}, s);
+    const shed = CreateBox('shed', {}, s);
+    lighting.castShadows([wall, shed]);
+    render(map);
+    expect(map.renderList).toHaveLength(2);
+
+    shed.dispose();
+    render(map);
+    expect([...map.renderList!]).toEqual([wall]);
+  });
+
+  /**
+   * Babylon's own predicate path emptied the list and pushed into it every frame, and the first push into an empty list
+   * marks every mesh of the scene light-dirty: every receiver re-derived its defines, every frame.
+   */
+  it("mark the scene's meshes light-dirty only when the list empties or fills, never frame after frame", () => {
+    const { s, lighting, map } = street();
+    const wall = CreateBox('wall', {}, s);
+    lighting.castShadows([wall]);
+    const receiver = CreateBox('ground', {}, s);
+    let marked = 0;
+    const mark = receiver._markSubMeshesAsLightDirty.bind(receiver);
+    receiver._markSubMeshesAsLightDirty = (dispose?: boolean) => {
+      marked++;
+      mark(dispose);
+    };
+
+    for (let frame = 0; frame < 3; frame++) {
+      render(map);
+    }
+
+    expect(marked, 'once, as the list filled').toBe(1);
+    lighting.setShadows(false);
+    render(map);
+    render(map);
+    expect(marked, 'once more, as it emptied').toBe(2);
+    lighting.setShadows(true);
+    render(map);
+    render(map);
+    expect(marked, 'and again as it filled').toBe(3);
   });
 });
 
@@ -125,20 +205,19 @@ describe('SceneLighting.lampShadows', () => {
 
   it('casts what is marked and in reach — a body walking in included — and nothing while shadows are off', () => {
     const { s, lighting, lamp, wall } = room();
-    const predicate = lamp.getShadowGenerator()!.getShadowMap()!.renderListPredicate;
+    const map = lamp.getShadowGenerator()!.getShadowMap()!;
     const body = CreateBox('body', {}, s);
     const far = CreateBox('far', {}, s);
     far.position.x = 100;
-    const unmarked = CreateBox('unmarked', {}, s);
+    CreateBox('unmarked', {}, s);
     lighting.castShadows([body, far]);
     far.computeWorldMatrix(true);
 
-    expect(predicate(wall)).toBe(true);
-    expect(predicate(body)).toBe(true);
-    expect(predicate(far), 'beyond the 40 m range').toBe(false);
-    expect(predicate(unmarked)).toBe(false);
+    render(map);
+    expect([...map.renderList!], 'far is beyond the 40 m range').toEqual([wall, body]);
     lighting.setShadows(false);
-    expect(predicate(wall)).toBe(false);
+    render(map);
+    expect([...map.renderList!]).toEqual([]);
   });
 
   it("renders the casters double-sided in the shadow pass, on the engine's state, never touching a material", () => {

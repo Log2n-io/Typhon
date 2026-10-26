@@ -12,6 +12,18 @@
 export const SCENE_GROUP = 1;
 
 /**
+ * The terrain, alone, drawn before everything else — and {@link SCENE_GROUP} keeps the depth it leaves rather than clearing
+ * it (`configureScene`), so it is still the one depth buffer above.
+ *
+ * <b>First, so that what the ground hides costs no shading.</b> Within a group Babylon draws opaque meshes in the order it
+ * collects them, which put the ground wherever it happened to fall among two thousand placements; a building behind a
+ * mesa, drawn before the mesa, was shaded in full and then painted over. Drawn first, the ground's depth rejects it before
+ * its fragment shader runs. A depth-only prepass of the ground was measured instead (2026-10-26) and cost 0.25–0.4 ms of
+ * GPU a frame at 4K for nothing back: the ground's vertex work is the expensive half, and a prepass pays it twice.
+ */
+export const TERRAIN_GROUP = 0;
+
+/**
  * The debug gizmos (portals, spawns, interactions, colliders): drawn after the scene with its depth cleared, so a portal box
  * half inside a wall, or a collider inside the mesh it stands for, shows through it. A gizmo hidden by the thing it
  * describes would be no use for checking that the two agree.

@@ -72,6 +72,33 @@ public static class TatooineData
     public const float RangedRangeM = 75f;
 
     /// <summary>
+    /// [EST] The share of the scripted crowd that fights back when a player attacks it (Loïc, 2026-10-26: "either run away or fight back, but not standing
+    /// waiting to die"); the rest run. A body's temperament is its own, from its id, so it answers every attack the same way.
+    /// </summary>
+    public const float CrowdBraveShare = 0.6f;
+
+    /// <summary>[EST] Under this share of its health a body that fought back breaks off and runs.</summary>
+    public const float CrowdFleeBelowHealth = 0.3f;
+
+    /// <summary>[EST] How far a body runs from its attacker on each blow, metres: past a pistol's 30 m, inside the crowd's own 75 m.</summary>
+    public const float CrowdFleeM = 60f;
+
+    /// <summary>
+    /// [EST] How long a reaction holds before the activity mix decides again, seconds; every blow renews it. Also what makes a blow the start of a new
+    /// incident: one landing after this long without a hit shouts and calls the crowd round it.
+    /// </summary>
+    public const float CrowdReactSeconds = 20f;
+
+    /// <summary>[EST] How far round the body attacked the crowd joins in, metres: a group standing together, not the street.</summary>
+    public const float CrowdAllyRadiusM = 20f;
+
+    /// <summary>[EST] The most bodies that join one attack: a fight, not a riot — and a bound on what one blow writes.</summary>
+    public const int CrowdAllyMax = 6;
+
+    /// <summary>[EST] How far from a city's edge a body running from an attacker still makes for the city rather than straight away, metres.</summary>
+    public const float CrowdFleeToCityM = 400f;
+
+    /// <summary>
     /// How far each combat stance reaches, metres, between the two bodies' EDGES (Loïc, 2026-10-24): unarmed 1, one-handed 3, pistol 30. Indexed by
     /// <c>Stances</c>; no stance reaches nothing, because it does not fight.
     /// </summary>

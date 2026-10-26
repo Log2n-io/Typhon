@@ -24,6 +24,36 @@ export interface HealthBar {
   fraction: number;
   /** A lair its occupants still guard: drawn shielded, because nothing damages it until they are dead. */
   shielded: boolean;
+  /**
+   * Where its bottom centre goes on screen, CSS pixels, when the caller placed it — stacked over a body's tag (`ClientApp`'s
+   * label stack); `NaN` to project (`x`, `y`, `z`) instead.
+   */
+  sx: number;
+  sy: number;
+}
+
+/** How much a selection or hover tag stands above its anchor, CSS pixels: 18 measured (12 px text, line and padding), and a 3 px gap. */
+export const TAG_STACK_PX = 21;
+
+/** How much a health bar stands above its anchor, CSS pixels: its 6 px, its border, and a gap. */
+export const BAR_STACK_PX = 11;
+
+/** The gap between a body's frame and the first thing stacked over it, CSS pixels. */
+export const STACK_GAP_PX = 4;
+
+/**
+ * Puts one more thing on the pile over a body (Loïc, 2026-10-26: tag, then health bar, then speech, never drawn over each
+ * other): its bottom goes on the top of what is already there — or just over the body's frame, for the first — and the pile
+ * grows by its height.
+ *
+ * @param stack netId to the screen y of the top of its pile so far; updated.
+ * @param frameTop The top edge of the body's frame on screen.
+ * @returns Where the new thing's bottom centre goes, screen y.
+ */
+export function pileOn(stack: Map<number, number>, netId: number, frameTop: number, heightPx: number): number {
+  const bottom = stack.get(netId) ?? frameTop - STACK_GAP_PX;
+  stack.set(netId, bottom - heightPx);
+  return bottom;
 }
 
 interface Bar {
@@ -46,6 +76,8 @@ export class Labels {
   private readonly root: HTMLDivElement;
   private readonly places: Label[] = [];
   private readonly selection: Label;
+  /** What the pointer is over: the selection's tag, said the same way (Loïc, 2026-10-26), for what a click would select. */
+  private readonly hover: Label;
   /** The health bars, pooled: one element per bar ever shown at once, hidden when unused. */
   private readonly bars: Bar[] = [];
   private readonly screen: ScreenPoint = { x: 0, y: 0, w: 0 };
@@ -64,6 +96,7 @@ export class Labels {
 
     // Over the head: `updateSelection` is handed the body's top, so the lift is only the air between them.
     this.selection = this.create('', 'label label-selection', 0, 0, 0.25);
+    this.hover = this.create('', 'label label-selection', 0, 0, 0.25);
   }
 
   /** Places every label for a view-projection matrix and a CSS viewport. */
@@ -134,6 +167,20 @@ export class Labels {
     this.place(this.selection, false, 0, 0);
   }
 
+  /** The hovered thing's tag, placed as {@link placeSelection} places the selection's: over the top edge of its frame. */
+  placeHover(x: number, y: number, text: string): void {
+    const label = this.hover;
+    if (label.element.textContent !== text) {
+      label.element.textContent = text;
+    }
+
+    this.place(label, true, x, y - SELECTION_OFFSET_PX);
+  }
+
+  hideHover(): void {
+    this.place(this.hover, false, 0, 0);
+  }
+
   /**
    * Draws a health bar over each of the first `count` bodies — the enemies fighting this session's avatar — and hides the
    * rest of the pool.
@@ -161,7 +208,9 @@ export class Labels {
 
       const body = bodies[i];
       const bar = this.bars[i];
-      const s = projectToScreen(matrix, body.x - originX, body.y, body.z - originZ, width, height, this.screen);
+      const s = Number.isFinite(body.sx)
+        ? { x: body.sx, y: body.sy, w: 1 }
+        : projectToScreen(matrix, body.x - originX, body.y, body.z - originZ, width, height, this.screen);
       // On screen or near it, as the place names are: off it, a bar is a style written for nothing.
       const shown = s.w > 0 && s.x > -100 && s.x < width + 100 && s.y > -50 && s.y < height + 50;
       this.placeBar(bar, shown, s.x, s.y);
@@ -203,6 +252,7 @@ export class Labels {
     }
 
     this.hideSelection();
+    this.hideHover();
     for (const bar of this.bars) {
       this.placeBar(bar, false, 0, 0);
     }

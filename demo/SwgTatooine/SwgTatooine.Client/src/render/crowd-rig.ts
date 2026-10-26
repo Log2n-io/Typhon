@@ -6,6 +6,7 @@ import { Matrix } from '@babylonjs/core/Maths/math.vector';
 import { Mesh } from '@babylonjs/core/Meshes/mesh';
 import type { Scene } from '@babylonjs/core/scene';
 
+import type { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh';
 import type { Instance } from '../assets/asset-library';
 import type { AtlasPlan } from '../character/clip-atlas';
 
@@ -203,14 +204,14 @@ export function rigOffset(rig: CrowdRig, skeleton: Skeleton, tolerance = 1e-2): 
 }
 
 /**
- * The skinned, drawable primitives of an instance.
+ * The skinned, drawable primitives of an instance — or of an asset's container, which holds the same meshes unplaced.
  *
  * <b>Filtered by what they ARE, never by what they are called.</b> The published GLBs carry two EMPTY transform nodes
  * named `Body_LOD1` and `Body_LOD2` beside the armature — residue of the exporter's regrouping step — so a name match
  * finds decoys. Having vertices and a skeleton is the property that matters.
  */
-export function skinnedPrimitives(instance: Instance): Mesh[] {
-  return instance.meshes.filter((m): m is Mesh => m instanceof Mesh && m.getTotalVertices() > 0 && m.skeleton !== null);
+export function skinnedPrimitives(source: { readonly meshes: readonly AbstractMesh[] }): Mesh[] {
+  return source.meshes.filter((m): m is Mesh => m instanceof Mesh && m.getTotalVertices() > 0 && m.skeleton !== null);
 }
 
 /** An instantiated group is named `<label>/<clip>`; this is the clip. */

@@ -179,62 +179,58 @@ export class EntityLayer {
    * Where one entity was drawn this frame and as what: its render-space position and yaw, and its style's box — what the
    * pick tests it as. The far band is a sprite with no yaw; `far` says so, and its frame is the sprite's square.
    *
+   * @param netId The entity.
+   * @param slot Its slot in this layer's store, from the world's `locate`: what makes this a lookup rather than a scan.
    * @returns False when this layer packed no such netId this frame.
    */
-  instanceOf(netId: number, out: DrawnInstance): boolean {
+  instanceOf(netId: number, slot: number, out: DrawnInstance): boolean {
     const p = this.packer;
-    if (
-      this.findMesh(p.nearData, p.nearYaw, p.nearNetIds, this.nearCount, netId, out) ||
-      this.findMesh(p.heldData, p.heldYaw, p.heldNetIds, this.heldCount, netId, out)
-    ) {
-      return true;
+    const code = p.drawnIndex(slot, netId);
+    if (code < 0) {
+      return false;
     }
 
-    for (let k = 0; k < this.farCount; k++) {
-      if (p.farNetIds[k] === netId) {
-        const b = k * 4;
-        out.x = p.farData[b];
-        out.y = p.farData[b + 1] + this.style.spriteLift;
-        out.z = p.farData[b + 2];
-        out.yaw = 0;
-        out.width = this.style.spritePixels;
-        out.height = this.style.spritePixels;
-        out.length = 0;
-        out.far = true;
-        return true;
-      }
+    const index = (code / 3) | 0;
+    const band = code - index * 3;
+    // Against the counts this layer DREW, which are zero while it is hidden even though the packer kept its last frame.
+    if (band === 0) {
+      return index < this.nearCount && this.meshAt(p.nearData, p.nearYaw, index, out);
     }
 
-    return false;
+    if (band === 1) {
+      return index < this.heldCount && this.meshAt(p.heldData, p.heldYaw, index, out);
+    }
+
+    if (index >= this.farCount) {
+      return false;
+    }
+
+    const b = index * 4;
+    out.x = p.farData[b];
+    out.y = p.farData[b + 1] + this.style.spriteLift;
+    out.z = p.farData[b + 2];
+    out.yaw = 0;
+    out.width = this.style.spritePixels;
+    out.height = this.style.spritePixels;
+    out.length = 0;
+    out.far = true;
+    return true;
   }
 
-  /** {@link instanceOf} over one band drawn as meshes: the near band, or the bodies the crowd drew in its place. */
-  private findMesh(
-    data: Float32Array,
-    yaws: Float32Array,
-    netIds: Uint32Array,
-    count: number,
-    netId: number,
-    out: DrawnInstance,
-  ): boolean {
+  /** {@link instanceOf} for one band drawn as meshes: the near band, or the bodies the crowd drew in its place. */
+  private meshAt(data: Float32Array, yaws: Float32Array, index: number, out: DrawnInstance): boolean {
     const sizes = this.style.bounds.sizesFlat;
-    for (let k = 0; k < count; k++) {
-      if (netIds[k] === netId) {
-        const b = k * 4;
-        const style = packedStyle(data[b + 3]);
-        out.x = data[b];
-        out.y = data[b + 1];
-        out.z = data[b + 2];
-        out.yaw = yaws[k];
-        out.width = sizes[style * 3];
-        out.height = sizes[style * 3 + 1];
-        out.length = sizes[style * 3 + 2];
-        out.far = false;
-        return true;
-      }
-    }
-
-    return false;
+    const b = index * 4;
+    const style = packedStyle(data[b + 3]);
+    out.x = data[b];
+    out.y = data[b + 1];
+    out.z = data[b + 2];
+    out.yaw = yaws[index];
+    out.width = sizes[style * 3];
+    out.height = sizes[style * 3 + 1];
+    out.length = sizes[style * 3 + 2];
+    out.far = false;
+    return true;
   }
 
   /** Nearest drawn entity within `maxPixels` of a viewport point (CSS pixels); updates `best` when closer than it. */

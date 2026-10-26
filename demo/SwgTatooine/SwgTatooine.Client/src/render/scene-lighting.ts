@@ -14,6 +14,7 @@ import { Vector3 } from '@babylonjs/core/Maths/math.vector';
 import { SphericalPolynomial } from '@babylonjs/core/Maths/sphericalPolynomial';
 import '@babylonjs/core/Materials/Textures/Loaders/envTextureLoader';
 import type { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh';
+import type { Observer } from '@babylonjs/core/Misc/observable';
 import type { Scene } from '@babylonjs/core/scene';
 
 import {
@@ -28,14 +29,6 @@ import {
   SUN_DIRECTION,
   SUN_INTENSITY,
 } from './sun';
-
-/** Marks a placed mesh as one the sun's shadow map should draw. */
-const CASTS_SUN = 'castsSun';
-
-/** Whether a mesh has been marked by {@link AssetLighting.castShadows}. */
-function isCaster(mesh: AbstractMesh): boolean {
-  return (mesh.metadata as Record<string, unknown> | null)?.[CASTS_SUN] === true;
-}
 
 /**
  * What every lit surface in this scene needs: a sun, and an environment.
@@ -122,6 +115,23 @@ export class SceneLighting {
   /** The sky and the sand this world is lit by; see {@link setSky}. */
   private readonly sky = new Color3(1, 1, 1);
   private readonly bounce = new Color3(1, 1, 1);
+  /**
+   * Every mesh {@link castShadows} marked, while it is in the scene: what each shadow map's list is filled from, as the
+   * map is about to render — never from every mesh of the scene.
+   *
+   * <b>Not by Babylon's `renderListPredicate`, for two costs it hid.</b> A predicate is run over EVERY mesh of the scene,
+   * per map, per frame — some 3 000 to 5 600 meshes on a populated street, against a few hundred casters. And Babylon
+   * rebuilds the list by `push`, which it hooks: the first push into the emptied list reads as the list going from empty to
+   * not, and that marks every mesh of the scene light-dirty — so every receiver re-derived its lighting defines, every
+   * frame, for every map with anything in it. Measured on the CPU profile: `prepareRenderList` at 4.4 % of the page and the
+   * effect re-preparation beside it, both gone. See {@link fill} for how the list is written instead.
+   *
+   * <b>Filled as the map renders, not before the frame</b> (`onBeforeBindObservable`, once per render, after Babylon has
+   * moved everything this frame). The reach tests read each caster's bounding sphere, and before the frame a moving
+   * caster's is dirty: filling there computed every walker's bounds twice a frame, which the profile put at 4 % of the page.
+   */
+  private readonly casters = new Set<AbstractMesh>();
+  private readonly forgetCaster: Observer<AbstractMesh>;
 
   /**
    * @param scene The scene to light — terrain, assets and all. Its clear colour and image processing are left as they are.
@@ -157,6 +167,11 @@ export class SceneLighting {
 
     // Announced on a timer (Babylon's `SetImmediate`), so after the material's constructor has set its own cap of 4.
     scene.onNewMaterialAddedObservable.add(takeEveryLight);
+    // Disposing a mesh removes it from the scene, so this is where a caster leaves the set: a placement streamed out, a
+    // crowd outfit's level of detail, a room left behind.
+    this.forgetCaster = scene.onMeshRemovedObservable.add((mesh) => {
+      this.casters.delete(mesh);
+    });
   }
 
   /**
@@ -287,30 +302,20 @@ export class SceneLighting {
 
     const map = generator.getShadowMap();
     if (map !== null) {
-      // <b>A predicate, not a list — and not the containers' own meshes.</b> Two things were wrong with the obvious
-      // version. A placement is an `InstancedMesh` of a mesh that lives in an `AssetContainer` and is deliberately
-      // never added to the scene, so adding the container's mesh as a caster puts a mesh in the render list that is
-      // not ready to render and parked at the origin: measured, the 2 048 map came back uniformly 1.0 — nothing drawn
-      // at all — with 37 casters registered. And a structure streams in and out as the session moves, so any list
-      // this kept would hold disposed meshes within seconds.
+      // <b>A list this fills, from the placed meshes only — never the containers' own.</b> A placement is an
+      // `InstancedMesh` of a mesh that lives in an `AssetContainer` and is deliberately never added to the scene, so a
+      // container's mesh in the render list is not ready to render and parked at the origin: measured, the 2 048 map
+      // came back uniformly 1.0 — nothing drawn at all — with 37 casters registered. See {@link casters} for how it is
+      // filled, and why no longer by a predicate.
       //
-      // The predicate is re-evaluated from `scene.meshes` every frame, which costs a flag test per mesh (about 250 of
-      // them) and is correct by construction: a disposed placement is not in the scene, so it cannot be in the list.
-      // <b>And a distance test, because the slab is 64 m and the world is not.</b> A caster outside it cannot put a
-      // pixel in the map however long it is kept in the list; it is pure per-frame cost in the list build and in the
-      // depth pass. That was harmless while structures were drawn to 220 m, and it stopped being harmless when the
-      // range went to 1 280: the list went from about 50 casters to 377. Measured either way the frame holds 60 fps
-      // — 6.51 ms against 6.06 ms mean, arms overlapping — so this is not a rescue, it is declining to render a
-      // kilometre of geometry into a map that cannot show it.
-      // A room has no sun (`setIndoors`): nothing is drawn into its map rather than a map for a light of no intensity.
-      map.renderListPredicate = (mesh) =>
-        this.casting &&
-        this.sun.intensity > 0 &&
-        mesh.isEnabled() &&
-        mesh.isVisible &&
-        isCaster(mesh) &&
-        this.withinSlab(mesh);
-      map.renderList = [];
+      // <b>Within the slab, because the slab is 64 m and the world is not.</b> A caster outside it cannot put a pixel in the
+      // map however long it is kept in the list; with structures drawn to 1 280 m that was about 377 casters against 50. A
+      // room has no sun (`setIndoors`): nothing is drawn into its map rather than a map for a light of no intensity.
+      const list: AbstractMesh[] = [];
+      map.renderList = list;
+      map.onBeforeBindObservable.add(() => {
+        fill(list, this.casters, this.casting && this.sun.intensity > 0 ? this.withinSlab : null);
+      });
     }
 
     this.generator = generator;
@@ -345,38 +350,40 @@ export class SceneLighting {
    * Whether a mesh is near enough to the shadow slab to put anything in it.
    *
    * Generous by a mesh's own bounding radius plus a margin, so a long wall whose origin is outside the slab but whose
-   * body crosses it still casts. Reading the bounding sphere costs nothing here: Babylon keeps it on the mesh.
+   * body crosses it still casts. Reading the bounding sphere costs nothing as the map renders: Babylon has just updated it.
    *
    * @param mesh The candidate caster.
    * @returns Whether it can reach the slab.
    */
-  private withinSlab(mesh: AbstractMesh): boolean {
+  private readonly withinSlab = (mesh: AbstractMesh): boolean => {
     const centre = mesh.getBoundingInfo().boundingSphere.centerWorld;
     const dx = centre.x - this.slabX;
     const dz = centre.z - this.slabZ;
     const reach = SHADOW_SLAB_REACH_M + mesh.getBoundingInfo().boundingSphere.radiusWorld;
     return dx * dx + dz * dz <= reach * reach;
-  }
+  };
 
   /**
    * Marks meshes as casting and receiving the sun's shadow.
    *
-   * <b>Called on PLACED meshes, not on a container's.</b> See the predicate in {@link setShadows}: a container's mesh
-   * is not in the scene and renders nothing into the map.
+   * <b>Called on PLACED meshes, not on a container's.</b> See {@link setShadows}: a container's mesh is not in the
+   * scene and renders nothing into the map. A mesh leaves the casters when it leaves the scene.
    *
    * @param meshes The placement's meshes.
    */
   castShadows(meshes: readonly AbstractMesh[]): void {
     for (const mesh of meshes) {
-      mesh.metadata = { ...(mesh.metadata as object | null), [CASTS_SUN]: true };
+      if (!mesh.isDisposed()) {
+        this.casters.add(mesh);
+      }
     }
   }
 
   /**
    * Gives a room's lamps their shadows: a cube map each, the testbench's (`render/lighting.ts`, `add`).
    *
-   * <b>Casters are read from the scene, like the sun's</b> — every marked mesh within the lamp's reach — so the bodies
-   * walking in the room cast as well as its walls and furniture, and nothing has to be told when one leaves.
+   * <b>Casters are the sun's</b> — every marked mesh within the lamp's reach — so the bodies walking in the room cast as
+   * well as its walls and furniture, and nothing has to be told when one leaves.
    *
    * <b>Double-sided in the shadow pass only.</b> A room's shell is one-sided, seen from inside: a wall's back face is
    * what a lamp in the next room sees, and culled it would let that lamp through. Culling is turned off on the ENGINE for
@@ -413,19 +420,20 @@ export class SceneLighting {
         continue;
       }
 
-      map.renderListPredicate = (mesh) => {
-        if (!this.casting || !mesh.isEnabled() || !mesh.isVisible || !isCaster(mesh)) {
-          return false;
-        }
-
-        // Read per mesh, not once: the render origin moves under a room as it does under a street. `Distance`, not
-        // `subtract`: this runs per mesh of the scene, per lamp, per frame, and `subtract` allocates.
+      // Read per mesh, not once: the render origin moves under a room as it does under a street. `Distance`, not
+      // `subtract`: this runs per caster, per lamp, per frame, and `subtract` allocates.
+      const reaches = (mesh: AbstractMesh): boolean => {
         const sphere = mesh.getBoundingInfo().boundingSphere;
         return (
           Vector3.Distance(sphere.centerWorld, light.getAbsolutePosition()) - sphere.radiusWorld <= LAMP_SHADOW_FAR_M
         );
       };
-      map.renderList = [];
+      const list: AbstractMesh[] = [];
+      map.renderList = list;
+      // Once per render, not per cube face: Babylon fires it before the six.
+      map.onBeforeBindObservable.add(() => {
+        fill(list, this.casters, this.casting ? reaches : null);
+      });
       const engine = this.scene.getEngine();
       generator.onBeforeShadowMapRenderMeshObservable.add(() => {
         engine.setState(false);
@@ -457,11 +465,54 @@ export class SceneLighting {
   }
 
   dispose(): void {
+    this.forgetCaster.remove();
+    this.casters.clear();
     this.generator?.dispose();
     this.generator = null;
     this.sun.dispose();
     this.environment.dispose();
     this.scene.environmentTexture = null;
+  }
+}
+
+/**
+ * Rewrites a shadow map's render list in place: the casters `keep` accepts, enabled and visible; none when `keep` is null.
+ *
+ * <b>By index, except across a change of emptiness.</b> Babylon hooks the list's `push` and `splice`, and a hooked call
+ * that leaves the list non-empty after empty — or empty — marks every mesh of the scene light-dirty, because a receiver's
+ * `SHADOW` define follows whether the list has anything in it. So the first caster into an empty list goes through `push`,
+ * and a list emptied goes through `splice`; every other write is by index, which nothing observes, which is the point.
+ *
+ * @param list The map's own list.
+ * @param casters The marked meshes in the scene.
+ * @param keep Whether a caster reaches the map; null for none, without walking them.
+ */
+function fill(
+  list: AbstractMesh[],
+  casters: ReadonlySet<AbstractMesh>,
+  keep: ((mesh: AbstractMesh) => boolean) | null,
+): void {
+  let n = 0;
+  if (keep !== null) {
+    for (const mesh of casters) {
+      if (!mesh.isEnabled() || !mesh.isVisible || !keep(mesh)) {
+        continue;
+      }
+
+      if (n === 0 && list.length === 0) {
+        list.push(mesh);
+      } else {
+        list[n] = mesh;
+      }
+
+      n++;
+    }
+  }
+
+  if (n === 0 && list.length > 0) {
+    list.splice(0);
+  } else {
+    list.length = n;
   }
 }
 

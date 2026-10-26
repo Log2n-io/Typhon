@@ -695,7 +695,7 @@ public sealed partial class SimBridge
                 default:
                     // A lethal blow leaves the player down where it stands, health 0, which is what keeps a second shooter from killing it again: every later
                     // blow in this drain or the next is refused until it is revived.
-                    landed = ApplyToPlayer(ref target, in ev, ctx.TickNumber, ref incapacitated);
+                    landed = ApplyToPlayer(ctx, tx, ref target, in ev, ref incapacitated);
                     if (landed)
                     {
                         damageApplied++;
@@ -882,13 +882,17 @@ public sealed partial class SimBridge
     /// combat pass asks for a <see cref="CombatEventKind.Revive"/> at <see cref="PlayerVitals.UpTick"/> — a knocked-out one gets up where it lies, a dead one
     /// wakes as a clone at the nearest city (<see cref="Revive"/>).
     /// </remarks>
-    private bool ApplyToPlayer(ref EntityRefMut target, in CombatEvent ev, long tick, ref long incapacitated)
+    private bool ApplyToPlayer(TickContext ctx, Transaction tx, ref EntityRefMut target, in CombatEvent ev, ref long incapacitated)
     {
+        var tick = ctx.TickNumber;
         var v = target.Read(Player.Vitals);
         if (v.Health <= 0)
         {
             return false;   // already down
         }
+
+        // A new incident when nothing has hit it for a reaction's length: what makes a body of the crowd shout, and its neighbours join in.
+        var fresh = v.LastHitTick == 0 || tick - v.LastHitTick >= (long)(TatooineData.CrowdReactSeconds * _config.TickRateHz);
 
         // Being hit is what stops the healing, until it has been quiet a while.
         v.LastHitTick = (int)Math.Max(1, tick);
@@ -897,6 +901,7 @@ public sealed partial class SimBridge
         {
             v.Health = health;
             target.Set(Player.Vitals, v);
+            ReactToAttack(ctx, tx, ref target, in ev, in v, fresh);
             TatooineReplication.Replicate(in target);
             return true;
         }
@@ -1025,6 +1030,241 @@ public sealed partial class SimBridge
         TatooineReplication.Replicate(in player);
         Interlocked.Increment(ref _missionsAssigned);
     }
+
+    /// <summary>
+    /// A scripted body a player just hit, still standing, answers — and the crowd round it with it (V33, Loïc 2026-10-26: "either run away or fight back, but
+    /// not standing waiting to die").
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Fight or flight, by what it is doing, its temperament, and how hurt it is</b> (<see cref="WouldFight"/>). One already fighting fights back; one
+    /// idling or waiting for a shuttle runs; anyone else as its temperament says (<see cref="TatooineData.CrowdBraveShare"/>). Under
+    /// <see cref="TatooineData.CrowdFleeBelowHealth"/> everyone runs. Fighting back: the attacker its target, <c>Combat</c>, so its own combat pass shoots
+    /// back at the crowd's 75 m and <c>PlayerThink</c> draws its pistol — closing in if the attacker stands past its reach. Running: towards the nearest city
+    /// when there is one ahead of it and near (<see cref="FleeTo"/>), otherwise <see cref="TatooineData.CrowdFleeM"/> straight away.
+    /// </para>
+    /// <para>
+    /// <b>The first blow of an attack is an incident</b> — nothing has hit the body for <see cref="TatooineData.CrowdReactSeconds"/>: the body says so
+    /// (<see cref="ChatLines.Defiant"/> or <see cref="ChatLines.Panicked"/>), and the crowd within <see cref="TatooineData.CrowdAllyRadiusM"/> joins in,
+    /// each by the same rule — fighting the attacker (<see cref="ChatLines.Rallying"/>) or scattering. Later blows re-decide for the body hit and renew its
+    /// hold; they do not shout again or call the crowd again, which keeps the radius query to one per attack rather than one per shot.
+    /// </para>
+    /// <para>
+    /// <b>A player's blow only.</b> A creature's is what the crowd's fights are already made of, and a possessed body is its person's to steer (SWG-01). A body
+    /// walking to a door, or out of a room, drops that walk — <c>ThinkPortal</c> keys on the activity, so the change ends it — but one already in the doorway
+    /// (<c>EnteringDoor</c>) goes on through: its crossing is queued. Exempting the walk to the door too left a body strolling on under fire (seen live).
+    /// </para>
+    /// <para>
+    /// Here, in the serial drain and through the tick's transaction, because it is the one place a hit is known with its attacker, and one thread writes the
+    /// bodies it moves.
+    /// </para>
+    /// </remarks>
+    private void ReactToAttack(TickContext ctx, Transaction tx, ref EntityRefMut target, in CombatEvent ev, in PlayerVitals v, bool fresh)
+    {
+        _playerArchetype ??= Dbe.ArchetypeIdOf<Player>();
+        if (ev.Attacker.ArchetypeId != _playerArchetype.Value || target.Read(Player.Control).Kind != ControllerKind.Scripted
+            || !tx.TryOpen(ev.Attacker, out var attacker))
+        {
+            return;
+        }
+
+        var from = attacker.Read(Player.Bounds);
+        var realm = target.Read(Player.Realm).Value;
+        var victim = target.Id;
+        if (!Answer(ctx, ref target, ev.Attacker, from.X, from.Z, realm, in v, decide: fresh, shout: fresh, ally: false) || !fresh)
+        {
+            return;
+        }
+
+        // The crowd round it. The engine's index, not this transaction's view: positions from the last fence are what "near" needs.
+        var at = target.Read(Player.Bounds);
+        var sphere = new BSphere2F { CenterX = at.X, CenterY = at.Z, Radius = TatooineData.CrowdAllyRadiusM };
+        var joined = 0;
+        var e = Dbe.ClusterSpatialQuery<Player>(new RealmId(realm)).Radius(in sphere);
+        try
+        {
+            while (e.MoveNext() && joined < TatooineData.CrowdAllyMax)
+            {
+                var id = e.Current.Entity;
+                if (id == victim || id == ev.Attacker || !tx.TryOpenMut(id, out var ally))
+                {
+                    continue;
+                }
+
+                var av = ally.Read(Player.Vitals);
+                if (ally.Read(Player.Control).Kind != ControllerKind.Scripted || av.Down != Downed.Up
+                    || (ally.Read(Player.State).Activity == PlayerActivity.Combat && ally.Read(Player.Session).Target == ev.Attacker))
+                {
+                    continue;   // a person's, down, or in this fight already
+                }
+
+                // Half of them say something: a crowd that all shouts at once is a wall of bubbles.
+                var shout = Hash01(Salt(ctx.TickNumber, id.EntityKey, 0x1B873593u)) < 0.5f;
+                if (Answer(ctx, ref ally, ev.Attacker, from.X, from.Z, realm, in av, decide: true, shout, ally: true))
+                {
+                    TatooineReplication.Replicate(in ally);
+                    joined++;
+                }
+            }
+        }
+        finally
+        {
+            e.Dispose();
+        }
+
+        if (joined != 0)
+        {
+            Interlocked.Add(ref _crowdJoined, joined);
+        }
+    }
+
+    /// <summary>One body's answer to an attacker standing at (<paramref name="fromX"/>, <paramref name="fromZ"/>); false when it does not answer.</summary>
+    /// <param name="decide">
+    /// Fight or flight decided afresh (<see cref="WouldFight"/>) — at an incident's first blow, and for a neighbour joining in. A later blow keeps what the
+    /// first decided: a body fighting this attacker goes on fighting, any other goes on running. Re-deciding on every blow read the activity the first
+    /// blow had just set — an idle body running is <c>Travelling</c>, which is temperament's — and a brave one turned round on the second shot (seen live).
+    /// </param>
+    private bool Answer(TickContext ctx, ref EntityRefMut body, EntityId attacker, float fromX, float fromZ, ushort realm, in PlayerVitals v, bool decide,
+        bool shout, bool ally)
+    {
+        var state = body.Read(Player.State);
+        if (state.Activity == PlayerActivity.EnteringDoor)
+        {
+            return false;
+        }
+
+        var at = body.Read(Player.Bounds);
+        var dx = at.X - fromX;
+        var dz = at.Z - fromZ;
+        var d = MathF.Sqrt((dx * dx) + (dz * dz));
+        if (d < 1e-3f)
+        {
+            // On top of it: any way out will do, and the same one each time.
+            var ang = Hash01(Salt(0, body.Id.EntityKey, 0x6A09E667u)) * MathF.PI * 2f;
+            dx = MathF.Cos(ang);
+            dz = MathF.Sin(ang);
+            d = 1f;
+        }
+
+        var ux = dx / d;
+        var uz = dz / d;
+        var move = body.Read(Player.Move);
+        move.SpeedMps = state.Mounted != 0 ? TatooineData.PlayerMountSpeedMps : TatooineData.PlayerRunSpeedMps;
+        var session = body.Read(Player.Session);
+        var fights = v.Health >= v.MaxHealth * TatooineData.CrowdFleeBelowHealth
+            && (decide ? WouldFight(body.Id, state.Activity) : state.Activity == PlayerActivity.Combat && session.Target == attacker);
+        var line = Salt(ctx.TickNumber, body.Id.EntityKey, 0x2545F491u);
+        if (fights)
+        {
+            session.Target = attacker;
+            session.TargetKind = CombatTargetKind.Player;
+            state.Activity = PlayerActivity.Combat;
+
+            // In reach, it stands and shoots; past it, it closes to half its reach, on the line between them.
+            var reach = RangedRange * 0.8f;
+            (move.DestX, move.DestZ) = d <= reach ? (at.X, at.Z) : (fromX + (ux * RangedRange * 0.5f), fromZ + (uz * RangedRange * 0.5f));
+            Interlocked.Increment(ref _crowdFoughtBack);
+        }
+        else
+        {
+            session.Target = EntityId.Null;
+            state.Activity = PlayerActivity.Travelling;
+            (move.DestX, move.DestZ) = FleeTo(realm, at.X, at.Z, ux, uz);
+            Interlocked.Increment(ref _crowdFled);
+        }
+
+        state.ActivityTicks = (int)(TatooineData.CrowdReactSeconds * _config.TickRateHz);
+        Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, MetresPerTick, at.X, at.Z, move.DestX, move.DestZ);
+        body.Set(Player.State, state);
+        body.Set(Player.Move, move);
+        body.Set(Player.Session, session);
+        if (shout)
+        {
+            ref readonly var said = ref fights ? ref (ally ? ref ChatLines.Rallying(line) : ref ChatLines.Defiant(line)) : ref ChatLines.Panicked(line);
+            if (TatooineReplication.Speak(ctx, body.Id, in said, at.X, at.Z, realm))
+            {
+                Interlocked.Increment(ref _crowdShouts);
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Whether a scripted body stands and fights an attacker: one already fighting does; one idling or waiting for a shuttle does not — it was not looking
+    /// for trouble; anyone else as its temperament says (<see cref="FightsBack"/>).
+    /// </summary>
+    internal bool WouldFight(EntityId body, int activity) => activity switch
+    {
+        PlayerActivity.Combat => true,
+        PlayerActivity.Idle or PlayerActivity.ToShuttle or PlayerActivity.AwaitingShuttle => false,
+        _ => FightsBack(body),
+    };
+
+    /// <summary>
+    /// Where a body running from an attacker runs to: the nearest city of its planet when it lies ahead — away from the attacker, not past it — and within
+    /// <see cref="TatooineData.CrowdFleeToCityM"/> of its edge, to halfway in from the edge on the body's side; otherwise
+    /// <see cref="TatooineData.CrowdFleeM"/> straight away. Inside a room, always straight away.
+    /// </summary>
+    /// <param name="realm">The body's realm.</param>
+    /// <param name="x">Where it is.</param>
+    /// <param name="z">Where it is.</param>
+    /// <param name="ux">The unit direction away from the attacker.</param>
+    /// <param name="uz">The unit direction away from the attacker.</param>
+    internal (float X, float Z) FleeTo(ushort realm, float x, float z, float ux, float uz)
+    {
+        if (realm < PlanetIndexes.Length)
+        {
+            var cities = PlanetIndexes[realm].Cities;
+            var best = -1;
+            var bestD = float.MaxValue;
+            for (var i = 0; i < cities.Count; i++)
+            {
+                var cx = cities[i].X - x;
+                var cz = cities[i].Z - z;
+                var dc = MathF.Sqrt((cx * cx) + (cz * cz));
+                var edge = dc - cities[i].Radius;
+                if (dc > 1f && edge < TatooineData.CrowdFleeToCityM && ((cx * ux) + (cz * uz)) / dc > 0f && dc < bestD)
+                {
+                    best = i;
+                    bestD = dc;
+                }
+            }
+
+            // Not when it is already in the city's heart: halfway in is where it stands, and it "ran" nowhere (seen live).
+            var inward = best < 0 ? 0f : bestD - (cities[best].Radius * 0.5f);
+            if (inward >= TatooineData.CrowdFleeM * 0.5f)
+            {
+                var c = cities[best];
+                return (x + ((c.X - x) / bestD * inward), z + ((c.Z - z) / bestD * inward));
+            }
+        }
+
+        return WorldBuilder.Inside(x + (ux * TatooineData.CrowdFleeM), z + (uz * TatooineData.CrowdFleeM), _config);
+    }
+
+    /// <summary>Whether a scripted body fights back when attacked, rather than running: its temperament, from its id (<see cref="ReactToAttack"/>).</summary>
+    internal bool FightsBack(EntityId body) => Hash01(Salt(0, body.EntityKey, 0x3C6EF372u)) < TatooineData.CrowdBraveShare;
+
+    /// <summary>The player archetype's routing id, so an attacker can be told to be a player; resolved at the first blow.</summary>
+    private ushort? _playerArchetype;
+
+    private long _crowdFoughtBack;
+    private long _crowdFled;
+    private long _crowdJoined;
+    private long _crowdShouts;
+
+    /// <summary>Bodies of the crowd that answered a player's attack by fighting back — the one hit, or one near it.</summary>
+    public long CrowdFoughtBack => Interlocked.Read(ref _crowdFoughtBack);
+
+    /// <summary>Bodies of the crowd that answered a player's attack by running — the one hit, or one near it.</summary>
+    public long CrowdFled => Interlocked.Read(ref _crowdFled);
+
+    /// <summary>Bodies of the crowd that joined in an attack on somebody near them.</summary>
+    public long CrowdJoined => Interlocked.Read(ref _crowdJoined);
+
+    /// <summary>What the crowd said when it was attacked or joined in.</summary>
+    public long CrowdShouts => Interlocked.Read(ref _crowdShouts);
 
     /// <summary>[EST] Seconds a scripted body is given to walk to its mission and fight there; past it the crowd gives the mission up.</summary>
     internal const int MissionWalkSeconds = 300;

@@ -52,6 +52,25 @@ export function prepareAsset(asset: LoadedAsset, lighting: SceneLighting): void 
   lighting.adopt(asset.container.meshes);
 }
 
+/**
+ * Puts the root every placement hangs off at the render origin — only when the origin has moved.
+ *
+ * <b>Writing the same position is not free.</b> `Vector3.set` marks the vector dirty whatever it is given, so the root
+ * recomputed its world matrix every frame and bumped its child counter, and every placement under it — measured, 2 251
+ * meshes in a city and 5 675 over the planet — recomputed its world matrix and bounding box with nothing changed. The
+ * origin snaps by the kilometre, so on all but one frame in thousands there is nothing to write.
+ *
+ * @param root The placements' root.
+ * @param originX The render origin's planet X.
+ * @param originZ Its planet Z.
+ */
+export function placeRoot(root: TransformNode, originX: number, originZ: number): void {
+  const at = root.position;
+  if (at.x !== -originX || at.y !== 0 || at.z !== -originZ) {
+    at.set(-originX, 0, -originZ);
+  }
+}
+
 /** How opaque the "Server pos" ghost is: enough to read its pose, little enough to see the predicted body through it. */
 export const GHOST_ALPHA = 0.4;
 
@@ -60,8 +79,17 @@ export interface AssetMount {
   /** The node every placement hangs off, which carries the render origin; see {@link AssetMount.rebase}. */
   readonly root: TransformNode;
   readonly lighting: SceneLighting;
-  /** The rigged avatar, or `null` when the catalogue publishes no character to be one. Replaced by {@link wear}. */
+  /**
+   * The rigged avatar, or `null` while it loads — see {@link avatarPending} — or when the catalogue publishes no character
+   * to be one. Replaced by {@link wear}.
+   */
   readonly character: CharacterMount | null;
+  /**
+   * Whether the avatar is waiting on an asset: its first character still loading, or a re-dress whose outfit has not
+   * landed. The body is drawn by nobody meanwhile — not a capsule, not the old clothes (Loïc, 2026-10-26: what waits on an
+   * asset is not drawn).
+   */
+  readonly avatarPending: boolean;
   /**
    * The same character at {@link GHOST_ALPHA}, drawn where the SERVER says the avatar is while "Server pos" is on, beside
    * the predicted one; `null` when there is no avatar.
@@ -130,35 +158,58 @@ export async function mountAssets(
   root.position.set(-origin.x, 0, -origin.z);
 
   // The avatar: the one asset whose absence must not stop the rest being drawn, because a catalogue is built elsewhere
-  // and may simply not publish characters.
+  // and may simply not publish characters. <b>Loaded in the background</b>: the mount — and with it every building, the
+  // crowd and the terrain's props — used to wait for the avatar and its ghost to load one after the other first.
   let character: CharacterMount | null = null;
   let ghost: CharacterMount | null = null;
+  // `wearing` is what was last asked for, `drawn` what the rigs are: they differ while a new outfit loads.
+  let wearing: string | null = null;
+  let drawn: string | null = null;
+  let loading = false;
+  const refused = new Set<string>();
+  let disposed = false;
+  // A call, not the variable: the compiler narrows a local across an await and would prove the check away (see `ClientApp.gone`).
+  const isDisposed = (): boolean => disposed;
   if (library.catalogue.assets[AVATAR_ASSET] === undefined) {
     console.warn(`assets: ${AVATAR_ASSET} is not in ${library.version}; the avatar stays a capsule`);
   } else {
-    try {
-      character = await mountCharacter(library, AVATAR_ASSET, root, lighting);
-      ghost = await mountCharacter(library, AVATAR_ASSET, root, lighting, GHOST_ALPHA);
-    } catch (error) {
-      // A 404, a GLB that will not parse, a character published without animations: none of them is a reason for the
-      // street to go undrawn. The catalogue check above was only one of the three ways this fails.
-      console.warn(`assets: ${AVATAR_ASSET} did not mount; the avatar stays a capsule`, error);
-      character?.dispose();
-      character = null;
-      ghost = null;
-    }
+    loading = true;
+    void (async () => {
+      // Together: neither needs the other, and the second is the same GLB, already in hand once the first has it.
+      // Settled rather than `all`, so a rig that loaded beside one that failed is disposed rather than leaked.
+      const [rig, shadow] = await Promise.allSettled([
+        mountCharacter(library, AVATAR_ASSET, root, lighting),
+        mountCharacter(library, AVATAR_ASSET, root, lighting, GHOST_ALPHA),
+      ]);
+      loading = false;
+      if (rig.status === 'rejected' || shadow.status === 'rejected' || isDisposed()) {
+        if (rig.status === 'fulfilled') {
+          rig.value.dispose();
+        }
+
+        if (shadow.status === 'fulfilled') {
+          shadow.value.dispose();
+        }
+
+        if (!isDisposed()) {
+          // A 404, a GLB that will not parse, a character published without animations: none of them is a reason for
+          // the street to go undrawn. The catalogue check above was only one of the three ways this fails.
+          const reason: unknown =
+            rig.status === 'rejected' ? rig.reason : shadow.status === 'rejected' ? shadow.reason : null;
+          console.warn(`assets: ${AVATAR_ASSET} did not mount; the avatar stays a capsule`, reason);
+        }
+
+        return;
+      }
+
+      character = rig.value;
+      ghost = shadow.value;
+      wearing = drawn = AVATAR_ASSET;
+      console.info(`assets: avatar ${AVATAR_ASSET} ${rig.value.height.toFixed(2)} m`);
+    })();
   }
 
-  console.info(
-    `assets: catalogue ${library.version}, ${String(library.ids.length)} published` +
-      (character === null ? ', no avatar' : `, avatar ${AVATAR_ASSET} ${character.height.toFixed(2)} m`),
-  );
-
-  // `wearing` is what was last asked for, `drawn` what the rigs are: they differ while a new outfit loads.
-  let wearing: string | null = character === null ? null : AVATAR_ASSET;
-  let drawn = wearing;
-  const refused = new Set<string>();
-  let disposed = false;
+  console.info(`assets: catalogue ${library.version}, ${String(library.ids.length)} published`);
   return {
     library,
     root,
@@ -171,6 +222,9 @@ export async function mountAssets(
     },
     get wearing() {
       return wearing;
+    },
+    get avatarPending() {
+      return loading || wearing !== drawn;
     },
     wear(assetId: string): void {
       // No avatar at all is a catalogue without characters; re-dressing cannot create one.
@@ -218,7 +272,7 @@ export async function mountAssets(
       })();
     },
     rebase(originX: number, originZ: number): void {
-      root.position.set(-originX, 0, -originZ);
+      placeRoot(root, originX, originZ);
     },
     dispose(): void {
       disposed = true;

@@ -211,6 +211,51 @@ describe('LayerPacker', () => {
   });
 });
 
+/** Where a body was drawn this frame, by its slot: the bubbles, bars and frames ask it, and a scan per question was 24 % CPU. */
+describe('LayerPacker.drawnIndex', () => {
+  const at = (code: number) => ({ index: (code / 3) | 0, band: code % 3 });
+
+  it('finds each body in the band it was packed into, this frame', () => {
+    const { packer, place } = setup();
+    const near = place(11, 0, 100);
+    const far = place(12, 0, 200);
+    const held = place(13, 5, 100);
+    packer.pack({ ...view(), drawnElsewhere: new Set([13]) });
+
+    expect(at(packer.drawnIndex(near, 11))).toEqual({ index: 0, band: 0 });
+    expect(at(packer.drawnIndex(far, 12))).toEqual({ index: 0, band: 2 });
+    expect(at(packer.drawnIndex(held, 13))).toEqual({ index: 0, band: 1 });
+  });
+
+  it('forgets a body not packed this frame, though an earlier frame left its code behind', () => {
+    const { packer, place } = setup();
+    const a = place(21, 0, 100);
+    const b = place(22, 1, 100);
+    packer.pack(view());
+    expect(packer.drawnIndex(a, 21)).toBeGreaterThanOrEqual(0);
+
+    // Hidden now: its slot still holds index 0 or 1 of the near band, which this frame gave to 22 alone.
+    packer.pack({ ...view(), hidden: new Set([21]) });
+    expect(packer.drawnIndex(a, 21)).toBe(-1);
+    expect(at(packer.drawnIndex(b, 22))).toEqual({ index: 0, band: 0 });
+  });
+
+  it('forgets a slot reused by another entity', () => {
+    const { world, packer, place, nextFrame } = setup();
+    const slot = place(31, 0, 100);
+    packer.pack(view());
+    nextFrame();
+    world.leave(31);
+    nextFrame();
+    expect(place(32, 0, 100)).toBe(slot);
+    packer.pack(view());
+
+    expect(packer.drawnIndex(slot, 31)).toBe(-1);
+    expect(packer.drawnIndex(slot, 32)).toBe(0);
+    expect(packer.drawnIndex(-1, 32)).toBe(-1);
+  });
+});
+
 /**
  * A creature standing to fight faces whom it fights — its replicated `target`, a netId of this view — rather than the way
  * its last step left it (Loïc, 2026-10-24: "creatures attacking us are not always facing us").

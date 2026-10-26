@@ -222,6 +222,12 @@ export class StaticAssets {
   /** What is on screen, handed to the packer as the set it must not draw. */
   private readonly drawn = new Set<number>();
   /**
+   * What is in range and has an asset coming that has not landed: drawn by nobody — not as the renderer's box — until it
+   * has (Loïc, 2026-10-26: what waits on an asset is not drawn). A structure whose asset the catalogue does not publish,
+   * or whose load failed, is not in it: nothing is coming, so the box stands.
+   */
+  private readonly waitingSet = new Set<number>();
+  /**
    * The camera the last frame was drawn with, so a placement that lands mid-frame can choose its level at once.
    *
    * <b>Without it a new building draws EVERY level for one frame.</b> A GLB lands between frames with `NO_LEVEL`, and
@@ -292,6 +298,11 @@ export class StaticAssets {
     return this.loading.size;
   }
 
+  /** This frame's structures waiting on their asset; see {@link waitingSet}. Valid after {@link update}. */
+  get waiting(): ReadonlySet<number> {
+    return this.waitingSet;
+  }
+
   /**
    * Brings the placed set in line with what is in range, and draws each placement at one detail level.
    *
@@ -309,6 +320,7 @@ export class StaticAssets {
     this.view = view;
 
     this.wanted.clear();
+    this.waitingSet.clear();
     let cold = 0;
     let warm = 0;
     this.wantsMore = false;
@@ -360,7 +372,13 @@ export class StaticAssets {
         this.drawn.delete(sample.netId);
       }
 
-      if (this.loading.has(sample.netId) || this.library.hasFailed(id)) {
+      if (this.library.hasFailed(id) || this.library.catalogue.assets[id] === undefined) {
+        continue;
+      }
+
+      // Coming — loading now, or held back by the budget below — so it is drawn by nobody until it lands.
+      this.waitingSet.add(sample.netId);
+      if (this.loading.has(sample.netId)) {
         continue;
       }
 
@@ -452,6 +470,7 @@ export class StaticAssets {
     this.placed.clear();
     this.loading.clear();
     this.drawn.clear();
+    this.waitingSet.clear();
   }
 
   private begin(sample: StructureSample, id: string): void {

@@ -125,11 +125,22 @@ function layerOf(outfits: readonly CrowdOutfit[], capacity = 64): CrowdLayer {
   return new CrowdLayer({
     scene: null as never,
     plan: plan(),
+    ids: outfits.map((o) => o.id),
     outfits,
     skin: { time: 0 } as unknown as CrowdSkinPlugin,
     described: outfits.map(() => described()),
     capacity,
   });
+}
+
+/** An outfit's bucket, which exists once the outfit has landed. */
+function bucketOf(l: CrowdLayer, which = 0): NonNullable<CrowdLayer['buckets'][number]> {
+  const bucket = l.buckets[which];
+  if (bucket === null) {
+    throw new Error(`outfit ${String(which)} has not landed`);
+  }
+
+  return bucket;
 }
 
 /** A body at a distance, moving at `speed`. */
@@ -157,7 +168,7 @@ function body(netId: number, z: number, speed = 0, mounted = false): CrowdBody {
 describe('a body keeps its animation when the packer reshuffles the list', () => {
   it('carries its clip across an index change instead of restarting it', () => {
     const layer = layerOf([outfit('a')]);
-    const bucket = layer.buckets[0];
+    const bucket = bucketOf(layer, 0);
 
     // Two bodies, walking. The second is at index 1.
     layer.update([body(10, 20, 1.5), body(11, 24, 1.5)], 2, openView(), 0, 1.4, 4);
@@ -173,7 +184,7 @@ describe('a body keeps its animation when the packer reshuffles the list', () =>
 
   it('keeps two bodies apart when they swap index', () => {
     const layer = layerOf([outfit('a')]);
-    const bucket = layer.buckets[0];
+    const bucket = bucketOf(layer, 0);
     layer.update([body(10, 20, 0), body(11, 24, 1.5)], 2, openView(), 0, 1.4, 4);
     expect(bucket.animator.clipA[0]).toBe(ROWS.idle.startRow);
     expect(bucket.animator.clipA[4]).toBe(ROWS.walk.startRow);
@@ -185,7 +196,7 @@ describe('a body keeps its animation when the packer reshuffles the list', () =>
 
   it('starts a body that was not here last frame from nothing, not from the stranger in its slot', () => {
     const layer = layerOf([outfit('a')]);
-    const bucket = layer.buckets[0];
+    const bucket = bucketOf(layer, 0);
     layer.update([body(10, 20, 1.5)], 1, openView(), 0, 1.4, 4);
     // A different netId arriving at the same index: a RESET renumbers, and index 0 is not an identity.
     layer.update([body(99, 20, 0)], 1, openView(), 0.5, 1.4, 4);
@@ -195,7 +206,7 @@ describe('a body keeps its animation when the packer reshuffles the list', () =>
 
   it('carries the tier too, so hysteresis is not lost with the index', () => {
     const layer = layerOf([outfit('a')]);
-    const bucket = layer.buckets[0];
+    const bucket = bucketOf(layer, 0);
     layer.update([body(10, 20, 0), body(11, 2000, 0)], 2, openView(), 0, 1.4, 4);
     const far = bucket.tiers[1];
     expect(far).not.toBe(CULLED);
@@ -207,7 +218,7 @@ describe('a body keeps its animation when the packer reshuffles the list', () =>
 describe('a rider', () => {
   it('sits — the seated clip held, not restarted — raised onto the seat, and is listed for its swoop', () => {
     const layer = layerOf([outfit('a')]);
-    const bucket = layer.buckets[0];
+    const bucket = bucketOf(layer, 0);
     layer.update([body(10, 20, 40, true)], 1, openView(), 0, 1.4, 4);
     const started = bucket.animator.clipA[2];
     expect(bucket.animator.clipA[0]).toBe(ROWS.ride.startRow);
@@ -223,7 +234,7 @@ describe('a rider', () => {
 
   it('runs again, on the ground, once it gets off', () => {
     const layer = layerOf([outfit('a')]);
-    const bucket = layer.buckets[0];
+    const bucket = bucketOf(layer, 0);
     layer.update([body(10, 20, 40, true)], 1, openView(), 0, 1.4, 4);
     layer.update([body(10, 20, 4, false)], 1, openView(), 1, 1.4, 4);
     expect(bucket.animator.clipA[0]).toBe(ROWS.run.startRow);
@@ -236,20 +247,20 @@ describe('the gait tuning', () => {
   it('is not rebuilt every frame while the server figures are still NaN', () => {
     const layer = layerOf([outfit('a')]);
     layer.update([body(10, 20, 0)], 1, openView(), 0, Number.NaN, Number.NaN);
-    const tuning = layer.buckets[0].tuning;
+    const tuning = bucketOf(layer, 0).tuning;
     // `NaN !== NaN` made this test pass on every frame before the owner block landed, rebuilding every bucket's
     // tuning and walking the whole capacity, inside the render loop.
     layer.update([body(10, 20, 0)], 1, openView(), 0.5, Number.NaN, Number.NaN);
-    expect(layer.buckets[0].tuning).toBe(tuning);
+    expect(bucketOf(layer, 0).tuning).toBe(tuning);
   });
 
   it('is rebuilt, and reaches a live body, when a figure actually moves', () => {
     const layer = layerOf([outfit('a')]);
     layer.update([body(10, 20, 0)], 1, openView(), 0, 1.4, 4);
-    const first = layer.buckets[0].tuning;
+    const first = bucketOf(layer, 0).tuning;
     layer.update([body(10, 20, 0)], 1, openView(), 0.5, 1.4, 9);
-    expect(layer.buckets[0].tuning).not.toBe(first);
-    expect(layer.buckets[0].slots[0]?.graph.tuning).toBe(layer.buckets[0].tuning);
+    expect(bucketOf(layer, 0).tuning).not.toBe(first);
+    expect(bucketOf(layer, 0).slots[0]?.graph.tuning).toBe(bucketOf(layer, 0).tuning);
   });
 });
 
@@ -289,7 +300,7 @@ describe('how much a crowd costs to hold', () => {
 describe('what is drawn', () => {
   it('puts a body on the level its tier chose, and leaves the other levels empty', () => {
     const layer = layerOf([outfit('a')]);
-    const lods = layer.buckets[0];
+    const lods = bucketOf(layer, 0);
     layer.update([body(10, 3, 0)], 1, openView(), 0, 1.4, 4);
     expect(lods.counts[0]).toBe(1);
     expect(lods.counts[1]).toBe(0);
@@ -331,7 +342,7 @@ describe('a body in a combat stance', () => {
     layer.setWeapon(PISTOL, blaster);
     layer.update([body(10, 20), armed(11, 24)], 2, openView(), 0, 1.4, 4);
 
-    const bucket = layer.buckets[0];
+    const bucket = bucketOf(layer, 0);
     const i = bucket.byNetId.get(11)!;
     expect(blaster.count).toBe(1);
     expect([...blaster.targets[0].subarray(0, 16)]).toEqual([...bucket.matrices.subarray(i * 16, i * 16 + 16)]);
@@ -353,7 +364,7 @@ describe('a body in a combat stance', () => {
     const layer = layerOf([outfit('a')]);
     layer.setWeapon(PISTOL, weapon());
     layer.update([armed(11, 24, 0), body(12, 28)], 2, openView(), 0, 1.4, 4);
-    const bucket = layer.buckets[0];
+    const bucket = bucketOf(layer, 0);
     layer.update([armed(11, 24, 1), { ...body(12, 28), strikes: 1 }], 2, openView(), 0.5, 1.4, 4);
 
     expect(bucket.animator.clipA[bucket.byNetId.get(11)! * 4]).toBe(ROWS['clip:Shoot_OneHanded'].startRow);
@@ -367,7 +378,7 @@ describe('a body in a combat stance', () => {
  */
 describe('a body that is hit and goes down', () => {
   const row = (layer: CrowdLayer, netId: number): number => {
-    const bucket = layer.buckets[0];
+    const bucket = bucketOf(layer, 0);
     return bucket.animator.clipA[bucket.byNetId.get(netId)! * 4];
   };
 
@@ -406,5 +417,75 @@ describe('a body that is hit and goes down', () => {
     const layer = layerOf([outfit('a')]);
     layer.update([{ ...body(11, 24), down: 1 }], 1, openView(), 0, 1.4, 4);
     expect(row(layer, 11)).toBe(ROWS.death.startRow);
+  });
+});
+
+describe('outfits that land one by one', () => {
+  function lazyLayer(
+    ids: readonly string[],
+    built: readonly (CrowdOutfit | null)[],
+    hashed?: readonly number[],
+  ): CrowdLayer {
+    return new CrowdLayer({
+      scene: null as never,
+      plan: plan(),
+      ids,
+      outfits: built,
+      skin: { time: 0 } as unknown as CrowdSkinPlugin,
+      described: ids.map(() => described()),
+      capacity: 64,
+      ...(hashed === undefined ? {} : { hashed }),
+    });
+  }
+
+  it('draws nobody wearing an outfit still loading, and draws them the frame it lands', () => {
+    const layer = lazyLayer(['a', 'b'], [outfit('a'), null]);
+    const wearer = body(10, 20);
+    wearer.outfit = 1;
+    layer.update([wearer], 1, openView(), 0, 1.4, 4);
+    expect(layer.drawn.has(10)).toBe(false);
+    expect(layer.buckets[1]).toBeNull();
+
+    layer.addOutfit(1, outfit('b'));
+    layer.update([wearer], 1, openView(), 0.5, 1.4, 4);
+    expect(layer.drawn.has(10)).toBe(true);
+    expect(bucketOf(layer, 1).count).toBe(1);
+    expect(layer.ready).toBe(2);
+  });
+
+  it('dresses a civilian from the whole wardrobe, so nobody changes clothes as outfits land', () => {
+    const ids = ['a', 'b', 'c'];
+    const before = lazyLayer(ids, [outfit('a'), null, null]);
+    const after = lazyLayer(
+      ids,
+      ids.map((id) => outfit(id)),
+    );
+    const civilians = Array.from({ length: 40 }, (_, i) => body(100 + i, 20));
+    for (const c of civilians) {
+      expect(before.civilianOutfitOf(c.netId)).toBe(after.civilianOutfitOf(c.netId));
+    }
+
+    before.update(civilians, civilians.length, openView(), 0, 1.4, 4);
+    after.update(civilians, civilians.length, openView(), 0, 1.4, 4);
+    // Only those whose own outfit is `a` are drawn yet, in the same bucket they will always be drawn in.
+    expect(bucketOf(before, 0).count).toBe(bucketOf(after, 0).count);
+    expect(before.drawn.size).toBe(bucketOf(after, 0).count);
+  });
+
+  it('dresses the wearers of an outfit that will never load as civilians, rather than leaving them invisible', () => {
+    const layer = lazyLayer(['casual', 'ninja'], [outfit('casual'), null], [0]);
+    const ninja = body(10, 20);
+    ninja.outfit = 1;
+    layer.failOutfit(1);
+    layer.update([ninja], 1, openView(), 0, 1.4, 4);
+    expect(layer.drawn.has(10)).toBe(true);
+    expect(bucketOf(layer, 0).count).toBe(1);
+  });
+
+  it('gives a late outfit the gait figures already known, not the clips own speeds', () => {
+    const layer = lazyLayer(['a', 'b'], [outfit('a'), null]);
+    layer.update([], 0, openView(), 0, 1.4, 4);
+    layer.addOutfit(1, outfit('b'));
+    expect(bucketOf(layer, 1).tuning).toEqual(bucketOf(layer, 0).tuning);
   });
 });

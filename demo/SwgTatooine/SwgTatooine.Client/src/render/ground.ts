@@ -11,7 +11,7 @@ import type { Heightfield } from '../terrain/heightfield';
 import { CITIES, POIS } from '../data/world-data';
 import { CELL_TEXTURE_SIZE, fillDeliveredCells, hullUniform, type CellRect } from './debug-cells';
 import { fillHeatmap, slabAt } from './heatmap-fill';
-import { SCENE_GROUP } from './render-groups';
+import { TERRAIN_GROUP } from './render-groups';
 import { HULL_SLOTS } from './shaders';
 import { TerrainMesh, TerrainView } from './terrain-mesh';
 import type { SceneLighting } from './scene-lighting';
@@ -139,7 +139,8 @@ export function fogFor(altitudeM: number, out: Vector2): void {
  * landmark discs, the 256 m / 1 024 m grid, selection radii and the far-tier heatmap — so no overlay is coplanar geometry
  * and nothing z-fights at altitude (`05-client.md` § 6).
  *
- * **It shares the depth buffer with everything else** ({@link SCENE_GROUP}), which it did not use to. While the ground was
+ * **It shares the depth buffer with everything else**, which it did not use to — drawn first and alone in
+ * {@link TERRAIN_GROUP}, whose depth the scene group keeps rather than clearing. While the ground was
  * the plane `y = 0` it could draw alone in group 0 and let Babylon clear depth before the entities, because no segment from
  * a camera above the plane to a point above the plane crosses it — the ground could not occlude anything, exactly. Give it
  * a ridge and that stops being true: entities behind a mesa would draw through it. In a map view a dot behind a hill reads
@@ -178,7 +179,7 @@ export class Ground {
     this.lighting = lighting;
     this.terrain = new TerrainMesh(scene, field);
     const mesh = this.terrain.mesh;
-    mesh.renderingGroupId = SCENE_GROUP;
+    mesh.renderingGroupId = TERRAIN_GROUP;
 
     this.heat = new HeatmapTexture(scene);
     this.cells = new DeliveredCellsTexture(scene);

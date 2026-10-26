@@ -1,6 +1,17 @@
 import { AbstractEngine } from '@babylonjs/core/Engines/abstractEngine';
 import { MeshoptCompression } from '@babylonjs/core/Meshes/Compression/meshoptCompression';
 import { KhronosTextureContainer2 } from '@babylonjs/core/Misc/khronosTextureContainer2';
+import { AutoReleaseWorkerPool } from '@babylonjs/core/Misc/workerPool';
+
+/**
+ * How long an idle KTX2 decoder worker is kept: the session, at `setTimeout`'s ceiling — `Infinity` would fire at once.
+ *
+ * <b>Babylon's default is one second.</b> Assets stream in bursts as the session moves, and a worker terminated between two
+ * bursts is a new worker for the next: its decoder module and its transcoder's wasm fetched (from cache) and compiled again
+ * before the first texture of the burst decodes. Kept, the pool's workers — at most four — cost their wasm memory for the
+ * session, which a client that will stream textures for the whole session spends anyway.
+ */
+export const DECODER_WORKER_IDLE_MS = 2 ** 31 - 1;
 
 /**
  * Points Babylon's run-time decoders at self-hosted copies (ASSET_PIPELINE.md § 6.5.1).
@@ -31,5 +42,8 @@ export function configureDecoders(
     wasmZSTDDecoder: `${root}zstddec.wasm`,
   };
   MeshoptCompression.Configuration = { decoder: { url: `${root}meshopt_decoder.js` } };
+  // Read by the pool's constructor, which the first KTX2 texture runs — after this, which runs before the first load.
+  // Babylon's only pool of this kind here: Draco's is the other user, and no published asset is Draco-compressed.
+  AutoReleaseWorkerPool.DefaultOptions = { idleTimeElapsedBeforeRelease: DECODER_WORKER_IDLE_MS };
   return root;
 }
