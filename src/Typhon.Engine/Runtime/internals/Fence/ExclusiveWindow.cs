@@ -1,6 +1,9 @@
 ﻿using System;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
+using System.Runtime.Intrinsics.X86;
 using System.Threading;
 
 namespace Typhon.Engine.Internals;
@@ -36,6 +39,19 @@ internal sealed class ExclusiveWindow
     /// the serial and parallel fence paths are not mutually exclusive by construction — only by current wiring.
     /// </remarks>
     private int _depth;
+
+    /// <summary>
+    /// Bumped when the window opens and again when it closes — a seqcount — for a reader that must know whether a fence ran while it read
+    /// (<see cref="BeginRead"/>).
+    /// </summary>
+    /// <remarks>
+    /// <b>A count, because the depth alone cannot answer it.</b> A depth sampled before and after a read is zero both times when a whole fence ran in between.
+    /// <b>Bumped on close too, because a count of openings alone is not enough either</b>: a reader can take its token between the opening's two increments
+    /// (count already bumped, depth still 0), read through the whole fence, and find the same count and a closed window at its end. The close's bump moves
+    /// the count past any token taken while the window was opening or open. One more locked increment per <see cref="Open"/> and per close — a tick — on the
+    /// line <see cref="_depth"/>'s own increments have just taken.
+    /// </remarks>
+    private int _openings;
 
     private int _violations;
     private string _firstViolationSite;
@@ -101,10 +117,17 @@ internal sealed class ExclusiveWindow
     /// <summary>Opens the window and enrols the calling thread, which is doing the fence's serial work.</summary>
     internal Scope Open()
     {
+        // Full fences both, before the fence writes anything. A token taken before this bump is outrun by it; one taken between the two increments, which
+        // can see the depth still 0, is outrun by the close's bump (Scope.Dispose).
+        Interlocked.Increment(ref _openings);
+        OpeningProbeForTest?.Invoke();
         Interlocked.Increment(ref _depth);
         FenceThreadDepth++;
         return new Scope(this, true);
     }
+
+    /// <summary>Test seam: runs inside <see cref="Open"/> between its two increments, where a reader sees the count bumped and the depth still 0. Null in production.</summary>
+    internal Action OpeningProbeForTest { get; set; }
 
     /// <summary>Enrols the calling thread as a fence worker without changing the window's open state.</summary>
     internal Scope EnterWorker()
@@ -243,6 +266,101 @@ internal sealed class ExclusiveWindow
             + "obligation. NOTE: an ordinary off-tick write to a Versioned, non-spatial entity is NOT this — it is safe and no longer reported.");
     }
 
+    /// <summary>How many times a read the window overlapped is attempted before it is refused (<see cref="EndRead"/>).</summary>
+    internal const int MaxReadAttempts = 3;
+
+    /// <summary>
+    /// Starts a read of state the fence and the tracks it holds the window across rewrite without a protocol readers can follow — the subscriptions committed
+    /// views (<c>EW-01</c>'s readers clause, <c>SUB-26</c>) — and fails loudly when the caller is a foreign thread and the window is open.
+    /// </summary>
+    /// <param name="site">Call-site name for the message, a literal at every call.</param>
+    /// <returns>The token <see cref="EndRead"/> and <see cref="ReadOverlapped"/> validate against.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>A seqcount's reader side.</b> The reads stay plain; <see cref="EndRead"/> tells whether a fence ran during them. One that came and went is read
+    /// again — a caller between ticks gets its answer — and one still running is refused, since its structures are mid-rewrite.
+    /// </para>
+    /// <para>
+    /// <b>Refused at entry, not only at the end</b>, because the read follows raw pointers into replication blocks: entering while the window is open is
+    /// walking them while they are rewritten. A read the window opens during can still fault, and only a managed fault is caught and judged; that is the
+    /// residue of a read with no protocol, kept rare by the entry check.
+    /// </para>
+    /// <para>
+    /// A fence thread or fence worker passes: it is the writer, or ordered after it. A subscriptions-track stage is neither — it runs inside the window
+    /// beside the stages committing other sessions' views (SUB-02) — and is refused like any other foreign thread.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal int BeginRead(string site)
+    {
+        var openings = Volatile.Read(ref _openings);
+        if (Volatile.Read(ref _depth) != 0 && FenceThreadDepth <= 0)
+        {
+            ReadViolation(site, null);
+        }
+
+        return openings;
+    }
+
+    /// <summary>Whether the window opened, closed or is open since <see cref="BeginRead"/> returned <paramref name="token"/>, for a foreign caller.</summary>
+    /// <param name="token">What <see cref="BeginRead"/> returned.</param>
+    /// <returns><see langword="true"/> when the read overlapped a fence and its answer cannot be trusted.</returns>
+    /// <remarks>
+    /// The read's own loads are plain, and an acquire load does not stop earlier plain loads sinking below it on arm64, so the barrier comes first — the
+    /// <c>OlcLatch.ValidateVersion</c> shape, JIT-folded away on x64 where loads are not reordered with later loads. The thread-static is read only once the
+    /// two words say overlap: the quiet path touches no TLS.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool ReadOverlapped(int token)
+    {
+        if (!X86Base.IsSupported)
+        {
+            Interlocked.MemoryBarrier();
+        }
+
+        return (Volatile.Read(ref _openings) != token || Volatile.Read(ref _depth) != 0) && FenceThreadDepth <= 0;
+    }
+
+    /// <summary>
+    /// Ends a read begun by <see cref="BeginRead"/>: <see langword="true"/> when its answer stands, <see langword="false"/> when a fence came and went during
+    /// it and the caller reads again.
+    /// </summary>
+    /// <param name="site">Call-site name, a literal at every call.</param>
+    /// <param name="token">What <see cref="BeginRead"/> returned.</param>
+    /// <param name="fault">What the read threw, or null. Rethrown when no fence overlapped it — a real fault, not a torn read.</param>
+    /// <param name="attempt">0 for the first read; the read is refused once <see cref="MaxReadAttempts"/> have all been overlapped.</param>
+    /// <exception cref="InvalidOperationException">A fence is running now, or overlapped every attempt; <paramref name="fault"/> is its inner exception.</exception>
+    internal bool EndRead(string site, int token, Exception fault, int attempt)
+    {
+        if (!ReadOverlapped(token))
+        {
+            if (fault != null)
+            {
+                ExceptionDispatchInfo.Throw(fault);
+            }
+
+            return true;
+        }
+
+        if (Volatile.Read(ref _depth) != 0 || attempt + 1 >= MaxReadAttempts)
+        {
+            ReadViolation(site, fault);
+        }
+
+        return false;
+    }
+
+    /// <summary>The refusal <see cref="BeginRead"/> and <see cref="EndRead"/> report.</summary>
+    /// <param name="site">Call-site name.</param>
+    /// <param name="inner">What the overlapped read threw, or null.</param>
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    internal static void ReadViolation(string site, Exception inner) =>
+        throw new InvalidOperationException(
+            $"{site} was called from thread {Environment.CurrentManagedThreadId} while the tick fence was open. It reads a session's committed view, which the "
+            + "fence and the subscriptions track rewrite with no protocol a reader can follow, so its answer would mix two frames. Call it from a system, or "
+            + "between ticks — an off-tick caller marshals the read onto the tick (EW-01's readers clause, SUB-26).", inner);
+
     /// <summary>Undoes one <see cref="Open"/> or <see cref="EnterWorker"/>.</summary>
     internal readonly struct Scope : IDisposable
     {
@@ -267,7 +385,9 @@ internal sealed class ExclusiveWindow
 
             if (_owned)
             {
+                // The seqcount's close (see _openings): every write of the window is behind this full fence.
                 Interlocked.Decrement(ref _window._depth);
+                Interlocked.Increment(ref _window._openings);
             }
         }
     }

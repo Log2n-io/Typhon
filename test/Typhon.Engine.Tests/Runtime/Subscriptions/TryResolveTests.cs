@@ -309,6 +309,252 @@ unsafe class TryResolveTests : TestBase<TryResolveTests>
         });
     }
 
+    /// <summary>
+    /// #1494: through a re-anchor — a move inside a cell, or a teleport whose RESET refills the view over several frames under a small enter budget —
+    /// every tick, before and after its frame, <c>TryResolve</c> accepts exactly what the client holds, and <c>TryNetIdOf</c> names exactly that.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Checked at both points of every tick.</b> Before the tick (the viewpoint already moved) the committed geometry is the last published frame's,
+    /// which is what the client holds; after the frame is published and delivered it is the new one. A window between the two in which neither the old
+    /// view nor the new one resolves — what #1494 reported — fails the first point of the tick after the move.
+    /// </para>
+    /// <para>
+    /// <b>The refill must span frames, or the window is not exercised:</b> the enter budget is a fraction of the view, and the case requires at least one
+    /// delivered frame whose replica is partial. A move inside a cell keeps the cells both windows cover, so it requires the shared entities to resolve on
+    /// every tick.
+    /// </para>
+    /// </remarks>
+    [TestCase(false)]
+    [TestCase(true)]
+    [VerifiesRule("SUB-26")]
+    public void TryResolveFollowsTheClientTickByTickThroughAReanchor(bool teleport)
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        var ids = Populate(dbe);
+        using var harness = Harness(dbe, nameof(TryResolveFollowsTheClientTickByTickThroughAReanchor) + teleport, enterBudget: 30);
+
+        // Settled first: an entity with an event this tick enters through the push step, outside the budget, and every spawn has one.
+        for (var i = 0; i < 3; i++)
+        {
+            harness.RunTick(++_tick);
+        }
+
+        var session = harness.OpenSessions(1, "near")[0];
+        harness.Sessions.SetViewpoint(session, new Vector3D(100.3, 100.7, 0));
+        Run(harness, session, 12);
+        var before = Held(harness, session);
+
+        // A teleport is a move beyond one cell (CellM); the small move stays inside one, beyond the anchor's slack.
+        var to = teleport ? new Vector3D(300.3, 300.7, 0) : new Vector3D(125.3, 100.7, 0);
+        harness.Sessions.SetViewpoint(session, to);
+
+        var commands = harness.Subscriptions.Commands;
+        var failures = new List<string>();
+        var counts = new List<int>();
+        HashSet<uint> previous = null;
+        void Check(string when)
+        {
+            var held = Held(harness, session);
+            var resolvable = Resolvable(harness, session, ids);
+            var nameable = new HashSet<uint>();
+            foreach (var id in ids)
+            {
+                if (commands.TryNetIdOf(session, id, out var netId))
+                {
+                    nameable.Add(netId);
+                }
+            }
+
+            if (!resolvable.SetEquals(held))
+            {
+                failures.Add($"{when}: held {held.Count}, resolvable {resolvable.Count}, held-not-resolvable {held.Except(resolvable).Count()}, "
+                             + $"resolvable-not-held {resolvable.Except(held).Count()}");
+            }
+
+            if (!nameable.SetEquals(resolvable))
+            {
+                failures.Add($"{when}: nameable {nameable.Count} vs resolvable {resolvable.Count}");
+            }
+
+            previous = held;
+        }
+
+        for (var t = 0; t < 12; t++)
+        {
+            Check($"tick +{t} before its frame");
+            harness.RunTick(++_tick);
+            harness.Deliver(session);
+            Check($"tick +{t} after its frame");
+            counts.Add(previous.Count);
+        }
+
+        var after = previous;
+        var shared = before.Intersect(after).Count();
+        Assert.Multiple(() =>
+        {
+            Assert.That(before, Has.Count.GreaterThan(30), "the view must exceed one frame's enter budget, or the refill is one frame");
+            if (teleport)
+            {
+                Assert.That(shared, Is.Zero, "a teleport's two views are disjoint");
+                Assert.That(counts.Count(c => c > 0 && c < after.Count), Is.GreaterThan(0),
+                    $"the refill must leave at least one delivered frame partial (counts per frame: {string.Join(",", counts)})");
+            }
+            else
+            {
+                Assert.That(shared, Is.GreaterThan(0), "a small move keeps entities both views cover");
+            }
+
+            Assert.That(failures, Is.Empty);
+        });
+    }
+
+    /// <summary>
+    /// #1494: a foreign thread that calls <c>TryResolve</c>, <c>TryNetIdOf</c> or <c>TryResolveAny</c> while the fence window is open gets an exception, not an
+    /// answer mixing two frames; the fence's own thread, and any caller once the window is closed, get the answer.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-26")]
+    public void AForeignCallWhileTheFenceWindowIsOpenThrowsAndTheFenceThreadIsAnswered()
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        var ids = Populate(dbe);
+        using var harness = Harness(dbe, nameof(AForeignCallWhileTheFenceWindowIsOpenThrowsAndTheFenceThreadIsAnswered));
+        var session = harness.OpenSessions(1, "near")[0];
+        harness.Sessions.SetViewpoint(session, new Vector3D(100.3, 100.7, 0));
+        Run(harness, session, 4);
+
+        var commands = harness.Subscriptions.Commands;
+        var held = ids.Find(id => commands.TryNetIdOf(session, id, out _));
+        Assert.That(held, Is.Not.EqualTo(default(EntityId)), "the session holds nothing");
+        var netId = harness.NetIdOf(held);
+
+        static Exception Catch(Action call)
+        {
+            try
+            {
+                call();
+                return null;
+            }
+            catch (Exception ex)
+            {
+                return ex;
+            }
+        }
+
+        Exception resolve = null, name = null, any = null;
+        bool onFence;
+        using (dbe.EpochManager.FenceWindow.Open())
+        {
+            var foreign = new System.Threading.Thread(() =>
+            {
+                resolve = Catch(() => commands.TryResolve(session, netId, out _));
+                name = Catch(() => commands.TryNetIdOf(session, held, out _));
+                any = Catch(() => commands.TryResolveAny(session, netId, out _));
+            });
+            foreign.Start();
+            foreign.Join();
+            onFence = commands.TryResolve(session, netId, out _);
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(resolve, Is.InstanceOf<InvalidOperationException>(), "TryResolve from a foreign thread inside the window");
+            Assert.That(name, Is.InstanceOf<InvalidOperationException>(), "TryNetIdOf from a foreign thread inside the window");
+            Assert.That(any, Is.InstanceOf<InvalidOperationException>(), "TryResolveAny from a foreign thread inside the window");
+            Assert.That(onFence, Is.True, "the fence's own thread is answered");
+            Assert.That(commands.TryResolve(session, netId, out _), Is.True, "and so is any caller once the window is closed");
+        });
+    }
+
+    /// <summary>
+    /// #1494, the end of the bracket, through the API: a whole fence run between a call's window check and its reads makes it read again and answer — a
+    /// call between ticks is answered — while a fence still open when the read ends refuses it, for all three calls.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-26")]
+    public void AFenceThatCameAndWentDuringTheReadIsReadAgainAndOneStillOpenRefusesIt()
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        var ids = Populate(dbe);
+        using var harness = Harness(dbe, nameof(AFenceThatCameAndWentDuringTheReadIsReadAgainAndOneStillOpenRefusesIt));
+        var session = harness.OpenSessions(1, "near")[0];
+        harness.Sessions.SetViewpoint(session, new Vector3D(100.3, 100.7, 0));
+        Run(harness, session, 4);
+
+        var commands = harness.Subscriptions.Commands;
+        var held = ids.Find(id => commands.TryNetIdOf(session, id, out _));
+        Assert.That(held, Is.Not.EqualTo(default(EntityId)), "the session holds nothing");
+        var netId = harness.NetIdOf(held);
+        var window = dbe.EpochManager.FenceWindow;
+
+        // A whole fence on the first read of each call: read again, answered.
+        var reads = 0;
+        commands.ReadProbeForTest = () =>
+        {
+            if (reads++ == 0)
+            {
+                using (window.Open())
+                {
+                }
+            }
+        };
+        var resolved = commands.TryResolve(session, netId, out var entity);
+        var resolveReads = reads;
+        reads = 0;
+        var named = commands.TryNetIdOf(session, held, out var namedId);
+        var nameReads = reads;
+        reads = 0;
+        var any = commands.TryResolveAny(session, netId, out _);
+        var anyReads = reads;
+
+        // A fence opened by another thread during the read and still open at its end: refused.
+        using var opened = new System.Threading.ManualResetEventSlim();
+        using var release = new System.Threading.ManualResetEventSlim();
+        var fence = new System.Threading.Thread(() =>
+        {
+            using (window.Open())
+            {
+                opened.Set();
+                release.Wait();
+            }
+        });
+        commands.ReadProbeForTest = () =>
+        {
+            if (!opened.IsSet)
+            {
+                fence.Start();
+                opened.Wait();
+            }
+        };
+        Exception refused = null;
+        try
+        {
+            commands.TryResolve(session, netId, out _);
+        }
+        catch (Exception ex)
+        {
+            refused = ex;
+        }
+        finally
+        {
+            commands.ReadProbeForTest = null;
+            release.Set();
+            fence.Join();
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(resolved && entity == held, Is.True, "TryResolve answered after reading again");
+            Assert.That(resolveReads, Is.EqualTo(2), "TryResolve read twice");
+            Assert.That(named && namedId == netId, Is.True, "TryNetIdOf answered after reading again");
+            Assert.That(nameReads, Is.EqualTo(2), "TryNetIdOf read twice");
+            Assert.That(any, Is.True, "TryResolveAny answered after reading again");
+            Assert.That(anyReads, Is.EqualTo(2), "TryResolveAny read twice");
+            Assert.That(refused, Is.InstanceOf<InvalidOperationException>(), "a fence still open at the read's end refuses it");
+        });
+    }
+
     // =======================================================================
     // TryNetIdOf - the inverse, which must agree with TryResolve exactly
     // =======================================================================

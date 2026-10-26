@@ -1007,23 +1007,57 @@ public sealed class SubscriptionsCommands
     /// entity per tick. It is committed-state accurate: a session served every few ticks (a rate class, overload) is judged against its last published frame,
     /// while the entity's v̂ is this tick's — near the edge the two can disagree by the motion of those ticks.
     /// </para>
+    /// <para>
+    /// <b>A teleport empties what the session holds, for as long as its refill takes.</b> A re-anchor beyond one replication cell is a RESET: the client drops
+    /// its whole view, and the new one is delivered nearest cell first under the enter budget, over one frame or several. An entity it held before the move
+    /// is refused from the RESET frame on, and one of the new view from when its cell is delivered and its enter sent — the same answer the client's own store
+    /// gives, so a command can only name what is on its screen.
+    /// </para>
+    /// <para>
+    /// <b>From a system, or between ticks — never while the fence is open</b> (EW-01's readers clause). The fence and the subscriptions track it holds the
+    /// window across rewrite the committed view field by field with no protocol a reader could follow; a read they overlap would mix two frames, and an
+    /// off-tick poller hits that window (#1494). A foreign thread that calls this while the window is open gets an <see cref="InvalidOperationException"/>
+    /// instead of an answer; one whose read a whole fence ran during reads again (up to three times), so a call between ticks is answered. The check is a
+    /// relaxed load at each end of the call. An off-tick caller still marshals the read onto the tick: it cannot know whether a fence is about to open.
+    /// </para>
     /// </remarks>
+    /// <exception cref="InvalidOperationException">Called from a thread outside the fence while the fence window was open during the call.</exception>
     public bool TryResolve(SessionId session, uint netId, out EntityId entity)
     {
         entity = EntityId.Null;
-        if (!_ingress.Sessions.IsOpen(session) || !_ingress.NetIds.TryGet(netId, out var candidate))
-        {
-            return false;
-        }
-
         var frames = _ingress.Frames;
-        if (frames == null || !frames.Holds(session, netId, candidate))
+        if (frames == null)
         {
             return false;
         }
 
-        entity = candidate;
-        return true;
+        var window = WindowOf(frames);
+        for (var attempt = 0; ; attempt++)
+        {
+            var token = window?.BeginRead(nameof(TryResolve)) ?? 0;
+            ReadProbeForTest?.Invoke();
+            EntityId candidate = default;
+            var held = false;
+            Exception fault = null;
+            try
+            {
+                held = _ingress.Sessions.IsOpen(session) && _ingress.NetIds.TryGet(netId, out candidate) && frames.Holds(session, netId, candidate);
+            }
+            catch (Exception ex) when (window != null)
+            {
+                fault = ex;
+            }
+
+            if (window == null || window.EndRead(nameof(TryResolve), token, fault, attempt))
+            {
+                if (held)
+                {
+                    entity = candidate;
+                }
+
+                return held;
+            }
+        }
     }
 
     /// <summary>
@@ -1048,19 +1082,44 @@ public sealed class SubscriptionsCommands
     /// <para>
     /// <b>Same cost and same contract as <see cref="TryResolve"/>:</b> an EntityMap probe and a geometric test against the session's
     /// COMMITTED geometry — what its last published frame carried — so call it for the entities an application names, not per entity per
-    /// tick. Callable from a system; it reads state the frame stage and the projection write after systems run.
+    /// tick. From a system or between ticks, never while the fence is open: it reads state the projection and the frame stage write inside the
+    /// fence window, and a foreign thread the window overlaps gets an <see cref="InvalidOperationException"/>, as <see cref="TryResolve"/> does.
+    /// An answer is good until the next frame is published — after a teleport's RESET, the entity may not be held again until the refill delivers it.
     /// </para>
     /// </remarks>
+    /// <exception cref="InvalidOperationException">Called from a thread outside the fence while the fence window was open during the call.</exception>
     public bool TryNetIdOf(SessionId session, EntityId entity, out uint netId)
     {
         netId = 0;
-        if (!_ingress.Sessions.IsOpen(session))
+        var frames = _ingress.Frames;
+        if (frames == null)
         {
             return false;
         }
 
-        var frames = _ingress.Frames;
-        return frames != null && frames.TryHeldNetId(session, entity, out netId);
+        var window = WindowOf(frames);
+        for (var attempt = 0; ; attempt++)
+        {
+            var token = window?.BeginRead(nameof(TryNetIdOf)) ?? 0;
+            ReadProbeForTest?.Invoke();
+            uint carried = 0;
+            var held = false;
+            Exception fault = null;
+            try
+            {
+                held = _ingress.Sessions.IsOpen(session) && frames.TryHeldNetId(session, entity, out carried);
+            }
+            catch (Exception ex) when (window != null)
+            {
+                fault = ex;
+            }
+
+            if (window == null || window.EndRead(nameof(TryNetIdOf), token, fault, attempt))
+            {
+                netId = held ? carried : 0;
+                return held;
+            }
+        }
     }
 
     /// <summary>
@@ -1071,17 +1130,56 @@ public sealed class SubscriptionsCommands
     /// <param name="netId">The network identity.</param>
     /// <param name="entity">The entity.</param>
     /// <returns><see langword="false"/> when nothing live holds that identity, or the session is gone.</returns>
+    /// <remarks>
+    /// A tool is not exempt from the threading contract: from a system or between ticks, never while the fence is open — the netId binding and the replica it
+    /// reads are rewritten inside the fence window, and a foreign thread the window overlaps gets an <see cref="InvalidOperationException"/>, as
+    /// <see cref="TryResolve"/> does.
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">Called from a thread outside the fence while the fence window was open during the call.</exception>
     public bool TryResolveAny(SessionId session, uint netId, out EntityId entity)
     {
         entity = EntityId.Null;
-        if (!_ingress.Sessions.IsOpen(session) || !_ingress.NetIds.TryGet(netId, out var candidate) || _ingress.Frames?.IsLive(netId, candidate) != true)
+        var frames = _ingress.Frames;
+        if (frames == null)
         {
             return false;
         }
 
-        entity = candidate;
-        return true;
+        var window = WindowOf(frames);
+        for (var attempt = 0; ; attempt++)
+        {
+            var token = window?.BeginRead(nameof(TryResolveAny)) ?? 0;
+            ReadProbeForTest?.Invoke();
+            EntityId candidate = default;
+            var live = false;
+            Exception fault = null;
+            try
+            {
+                live = _ingress.Sessions.IsOpen(session) && _ingress.NetIds.TryGet(netId, out candidate) && frames.IsLive(netId, candidate);
+            }
+            catch (Exception ex) when (window != null)
+            {
+                fault = ex;
+            }
+
+            if (window == null || window.EndRead(nameof(TryResolveAny), token, fault, attempt))
+            {
+                if (live)
+                {
+                    entity = candidate;
+                }
+
+                return live;
+            }
+        }
     }
+
+    // The engine's fence window, which brackets every writer of what the three entity-reference reads judge (EW-01's readers clause); null only for an
+    // assembler no engine has been attached to.
+    private static ExclusiveWindow WindowOf(FrameAssembler frames) => frames.Engine?.EpochManager.FenceWindow;
+
+    /// <summary>Test seam: runs in each entity-reference read between its window check and its reads (#1494), so a test can run a fence there. Null in production.</summary>
+    internal Action ReadProbeForTest { get; set; }
 
     /// <summary>
     /// The highest sequence number drained into a tick for a session, which is what <c>SELF.lastSeq</c> reports.

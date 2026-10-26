@@ -470,7 +470,7 @@ descends from this one property.
         the conservative form: commit and dispose it before the creating system returns. It is the one path inside the
         runtime that can overlap the window.
   scope: DatabaseEngine.TickFence.cs (WriteTickFence, WriteClusterTickFence), TyphonRuntime.cs (OnTickEndInternal),
-         TickContext.cs (CreateSideTransaction)
+         TickContext.cs (CreateSideTransaction), ExclusiveWindow.BeginRead, ExclusiveWindow.EndRead, ExclusiveWindow.ReadOverlapped
   rationale: the window is not built, it already exists — OnTickEndInternal is the scheduler's TickEndCallback.
     What was missing is that nothing STATED it, so nothing protected it: a licence nobody wrote down is one a
     later change silently revokes. Phases cannot supply this property and never could — see PH-01, which makes
@@ -491,10 +491,29 @@ descends from this one property.
     freed chunk, costs an allocation per reclaiming fence (on the large object heap past ~21 000 clusters), and would leave the other structures as
     exposed. The one engine reader on such a thread is StatisticsRebuilder, an accepted exception (CLUSTERWALK-01's note): its throw is swallowed, its
     pages stay mapped under its EpochGuard, and the cost is a stale estimate.
+    The window also spans the deferred subscriptions track on both fence paths (the serial path opens one around WriteTickFence AND the dispatch,
+    TyphonRuntime.OnTickEndInternal; the parallel path holds RunParallelFence's across it), so the committed views a command's entity reference is judged
+    by (SUB-26) are written inside it: projection, frame stage, PushReplication.Commit, CommitOwed. There the obligation IS ENFORCED, because the read is a
+    public call of bounded size: SubscriptionsCommands.TryResolve / TryNetIdOf / TryResolveAny bracket their read with ExclusiveWindow.BeginRead /
+    EndRead, a seqcount's reader side (#1494). The window bumps a count when it opens AND when it closes — opening alone misses a reader that took its
+    token between the opening's two increments and read through the whole fence. A foreign thread whose call starts inside the window is refused before
+    it reads (the read follows raw pointers into replication blocks); one a whole fence ran during reads again, up to MaxReadAttempts, so a call between
+    ticks is answered; one whose read ends with the window still open is refused. A managed fault of an overlapped read is the refusal's inner
+    exception; an access violation cannot be caught — the residue of a read with no protocol, kept rare by the entry check. A subscriptions-track stage
+    runs inside the window beside the stages committing other sessions' views (SUB-02), enrols in nothing, and is refused like any foreign thread.
+    Cost: two more locked increments per Open/close pair (the serial arm opens twice: around the fence and the track, and inside WriteTickFence), a
+    relaxed load at each end of the call.
   on_violation: silent. A concurrent writer racing a fence that has taken the licences above corrupts index
     structure with no exception at the point of damage — the B+Tree's own validators find it later, or a query
     returns a wrong answer and nothing finds it at all.
-  verified: ExclusiveWindowTests.LiveWorkload_TheFenceNeverSeesAForeignWriter — a spawn / destroy / indexed-field
+  verified: the readers bracket: ExclusiveWindowTests.AReadAFenceRanDuringIsReadAgainAndAQuietOneStands (red when EndRead compares only the depth),
+            ExclusiveWindowTests.AReadBegunBetweenTheOpeningsTwoIncrementsIsDetected (staged by OpeningProbeForTest; red without the close's bump),
+            ExclusiveWindowTests.AForeignReadIsRefusedBeforeItStartsInsideTheWindow (red without BeginRead's entry check),
+            ExclusiveWindowTests.AFaultIsRethrownUnlessAFenceOverlappedTheRead,
+            TryResolveTests.AForeignCallWhileTheFenceWindowIsOpenThrowsAndTheFenceThreadIsAnswered (all three calls, a fence thread answered),
+            TryResolveTests.AFenceThatCameAndWentDuringTheReadIsReadAgainAndOneStillOpenRefusesIt (staged by ReadProbeForTest; red when a call skips
+            EndRead).
+            ExclusiveWindowTests.LiveWorkload_TheFenceNeverSeesAForeignWriter — a spawn / destroy / indexed-field
             rewrite workload over 6+ ticks asserting zero foreign writers, and asserting ObservedFenceMutation too
             so a fence that wrote no guarded structure fails as loudly as one that was raced. Mutant:
             ForeignThreadMutatingAnIndexInsideTheWindow_IsCaught, which now arms the condition with

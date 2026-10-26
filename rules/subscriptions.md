@@ -971,7 +971,16 @@
     overload) is judged against its last published frame while v̂ is this tick's: near the edge the two differ by those ticks' motion
   note TryResolveAny keeps the liveness-only answer — bound, live, still that identity — for tools that are not clients (an admin console), under a name
     that says so
-  scope: SubscriptionsCommands.TryResolve, SubscriptionsCommands.TryResolveAny, FrameAssembler.Holds, PushReplication.HoldsCommitted,
+  note a re-anchor beyond one replication cell is a RESET (PushReplication.Gather's teleport): from the RESET frame on, nothing of the old view
+    resolves, and each entity of the new one resolves once its cell is delivered and its enter sent — over several frames under a small enter budget.
+    That is the client's own store, so it is the rule, not a gap (#1494)
+  invariant TryResolve, TryNetIdOf and TryResolveAny never answer from a read the fence window overlapped (EW-01's readers clause): the committed views
+    are rewritten field by field inside the window (PushReplication.Commit before CommitOwed, an owed list swapped under its count), so such a read
+    mixes two frames (#1494: an off-tick poller's TryNetIdOf "yes" the next TryResolve refused). A foreign call that starts inside the window, or whose
+    read ends with it still open, throws; one a whole fence ran during reads again and is answered. An off-tick caller still marshals onto the tick: it
+    cannot know a fence is not about to open
+  scope: SubscriptionsCommands.TryResolve, SubscriptionsCommands.TryResolveAny, SubscriptionsCommands.TryNetIdOf, ExclusiveWindow.BeginRead,
+    ExclusiveWindow.EndRead, FrameAssembler.Holds, PushReplication.HoldsCommitted,
     PushReplication.TryVisibilityAt, FrameAssembler.IsLive, FrameAssembler.TryHeldNetId, PushReplication.GroupHoldsCommitted, PushHub.PlacedFor, SessionFrameState.CommittedProfile, NetIdEntityIndex.Bind, NetIdEntityIndex.Unbind,
     NetIdEntityIndex.Reserve
   on_violation: silent. A client that names a netId it guessed — or remembered from an event — targets, inspects or trades with an entity behind a wall or
@@ -983,6 +992,10 @@
     TryResolveTests.APartialWorldFillAndAnUnobservedArchetypeAreRefused (red when a World session holds everything, and for an archetype outside the
     set), TryResolveTests.AProfileSwitchResolvesTheOldViewUntilItsFrameIsPublished (red when the current profile is judged),
     TryResolveTests.ADestroyedEntityIsRefusedBeforeItsIdentityIsReleased, TryResolveTests.TheControlledEntityResolvesAnywhereAndTryResolveAnyIgnoresTheView,
+    TryResolveTests.TryResolveFollowsTheClientTickByTickThroughAReanchor (a move inside a cell and a teleport refilled over six frames: before and after
+    every frame, TryResolve equals the replica and TryNetIdOf names exactly that — red when the delivered cells are ignored),
+    TryResolveTests.AForeignCallWhileTheFenceWindowIsOpenThrowsAndTheFenceThreadIsAnswered,
+    TryResolveTests.AFenceThatCameAndWentDuringTheReadIsReadAgainAndOneStillOpenRefusesIt,
     PushVisibilityTests.ACommandNamesAGroupMemberOnlyForTheSessionsThatHoldAndSeeIt (a building no observer reaches and a positionless shard, held
     through their town, both ways; a hidden one refused; a town not held, and the town released — red when the group clause is skipped, and when the
     mask is).
