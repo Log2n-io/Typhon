@@ -123,6 +123,24 @@ public sealed partial class BotBrain
     /// </remarks>
     public const double UseReachM = 1d;
 
+    /// <summary>
+    /// A terminal whose stand point a walk stuck short of is used from here if the body is within this of the terminal, metres: inside the server's own
+    /// reach for a take (<c>TatooineData.MissionTerminalReachM</c>, 6 m) with room to spare.
+    /// </summary>
+    /// <remarks>
+    /// A terminal is a queue. Ringed by other bodies the stand point is out of reach for good, and the walk stuck "0 m to go", failed the errand, and
+    /// tried the same terminal again — the live telemetry's oscillating bots, and a third of all errands failed (2026-10-27). A person in that crowd
+    /// reads the list over the shoulders in front.
+    /// </remarks>
+    public const float TerminalUseFromM = 4f;
+
+    /// <summary>
+    /// A walk's first point within this of the body, and behind it on the way to the next, is passed at once, metres: the open cell a search starts
+    /// from when the body stands in a wall's margin, which can lie behind it.
+    /// </summary>
+    /// <remarks>Walked to, every walk planned from against a wall began by stepping back — and every re-plan from there did it again (live, 2026-10-27).</remarks>
+    public const double StepOutM = 1.5d;
+
     /// <summary>A searched path's point counts as reached this close, metres.</summary>
     /// <remarks>
     /// A path's points are its corners, and every leg between two of them is clear only from corner to corner: called reached from 2.5 m, the walk
@@ -349,8 +367,10 @@ public sealed partial class BotBrain
     /// <summary>After a visit, the shuttle is the next thing it does.</summary>
     private bool _flyNext;
 
-    /// <summary>The kind of facility the errand under way goes to.</summary>
+    /// <summary>The kind of facility the errand under way goes to, and where it stands.</summary>
     private int _visitKind;
+
+    private (float X, float Z) _visitAt;
 
     /// <summary>When it set out on the mission it holds, or -1 while it holds none it has set out on.</summary>
     private long _questSince = -1;
@@ -994,6 +1014,7 @@ public sealed partial class BotBrain
         }
 
         _leg.FinalReach = UseReachM;
+        _visitAt = (found.X, found.Z);
 
         Become(Goal.Visiting, GoalWhy.ErrandStarted, tick, (uint)kind, (float)Routing.Distance(world.X, world.Z, found.X, found.Z));
         _using = false;
@@ -1017,6 +1038,12 @@ public sealed partial class BotBrain
         }
 
         var step = Follow(in world, tick, out var end);
+        if (end == LegEnd.Stuck && Routing.Distance(world.X, world.Z, _visitAt.X, _visitAt.Z) <= TerminalUseFromM)
+        {
+            // Stuck short of the stand point, in the crowd round the terminal: used from here.
+            end = LegEnd.Done;
+        }
+
         switch (end)
         {
             case LegEnd.Going:
@@ -1110,8 +1137,10 @@ public sealed partial class BotBrain
             return step;
         }
 
-        // The path ran out without a crossing, or stuck short of the door: give up on this one.
-        Become(Goal.Idling, GoalWhy.EnterFailed, tick);
+        // The path ran out without a crossing, or stuck short of the door: give up on this one. Told how (the subject: 1 walked to its end, 2 stuck) and
+        // how far short of the door's last point, which is what says whether a door fails by its crowd or by its geometry.
+        var left = _leg.Points.Count > 0 ? Routing.Distance(world.X, world.Z, _leg.Points[^1].X, _leg.Points[^1].Z) : 0d;
+        Become(Goal.Idling, GoalWhy.EnterFailed, tick, (uint)end, (float)left);
         _until = tick + Ticks(2);
         return Intent.Move(0f, 0);
     }
@@ -1552,13 +1581,19 @@ public sealed partial class BotBrain
     {
         var leg = _leg;
         var p = leg.Points[leg.Next];
+        var after = leg.Points[leg.Next + 1];
         var from = leg.Next > 0 ? leg.Points[leg.Next - 1] : leg.Origin;
         if (d <= stride && (((world.X - p.X) * (p.X - from.X)) + ((world.Z - p.Z) * (p.Z - from.Z))) > 0f)
         {
             return true;
         }
 
-        var after = leg.Points[leg.Next + 1];
+        // A walk's first point behind the body on the way to the next: the open cell its search started from, not somewhere to go back to (StepOutM).
+        if (leg.Next == 0 && d <= StepOutM && (((world.X - p.X) * (after.X - p.X)) + ((world.Z - p.Z) * (after.Z - p.Z))) > 0f)
+        {
+            return true;
+        }
+
         return CityPath.SegmentClear(leg.Walls, world.X, world.Z, after.X, after.Z);
     }
 

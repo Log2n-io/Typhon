@@ -1041,6 +1041,98 @@ public sealed class BotErrandChecks
         });
     }
 
+    /// <summary>
+    /// A walk planned from against a wall — the body in the wall's margin, so the search starts from the nearest open cell, which can lie behind it —
+    /// never begins by stepping back to that cell: the first step heads for the terminal, and the errand gets there.
+    /// </summary>
+    /// <remarks>
+    /// Live telemetry (2026-10-27): a bot walking to a terminal sent waypoints flipping by 180° in a row, and every re-plan from where it stood began with
+    /// the same step back.
+    /// </remarks>
+    [Test]
+    public void AWalkFromAgainstAWall_DoesNotStepBackToItsFirstPoint()
+    {
+        var behind = 0;
+        foreach (var east in new[] { 1f, -1f })
+        {
+            // Pressed against the house's north face, inside its walls' margin; the terminal off to one side, beyond its end.
+            var body = (X: Here.X + (0.2f * east), Z: Here.Z + 3.25f);
+            var terminal = (X: Here.X + (25f * east), Z: Here.Z + 9f);
+            List<SeenStructure> planet =
+            [
+                new SeenStructure(Here.X, Here.Z, 0, HouseAsset, 0, 1),
+                new SeenStructure(terminal.X, terminal.Z, 10, TerminalAsset, 0, 1),
+            ];
+            var first = CityPath.Route(planet, Content(), body, (terminal.X, terminal.Z + 0.65f), BotBrain.MaxExpansions)[0];
+            behind += ((first.X - body.X) * (terminal.X - body.X)) + ((first.Z - body.Z) * (terminal.Z - body.Z)) < 0f ? 1 : 0;
+
+            var chosen = false;
+            for (var seed = 1u; seed < 400u && !chosen; seed++)
+            {
+                var brain = new BotBrain(BotMap.Cities, seed, 4d, Content());
+                brain.Facilities.Observe(1, Routing.MissionTerminalKind, terminal.X, terminal.Z, TerminalAsset + 1, 0);
+                var sim = new Sim { X = body.X, Z = body.Z, Planet = planet };
+                var step = brain.Decide(sim.View(), 1);
+                if (brain.Goal != Goal.Visiting)
+                {
+                    continue;
+                }
+
+                chosen = true;
+                var (dx, dz) = step.Kind switch
+                {
+                    IntentKind.Move => (MathF.Cos(step.Heading), MathF.Sin(step.Heading)),
+                    IntentKind.MoveTo => (step.X - body.X, step.Z - body.Z),
+                    _ => (0f, 0f),
+                };
+                Assert.That((dx * (terminal.X - body.X)) + (dz * (terminal.Z - body.Z)), Is.GreaterThan(0f),
+                    $"side {east}: the walk began with a step back ({step.Kind} to ({step.X - Here.X:F2}, {step.Z - Here.Z:F2}), {brain.LegState})");
+
+                sim.Apply(step);
+                for (var tick = 2L; tick < 200 && brain.FacilitiesUsed == 0; tick++)
+                {
+                    sim.Apply(brain.Decide(sim.View(), tick));
+                }
+
+                Assert.That(brain.FacilitiesUsed, Is.EqualTo(1), $"side {east}: the errand never reached the terminal");
+            }
+
+            Assert.That(chosen, Is.True, "no seed under 400 chose the errand at its first decision");
+        }
+
+        Assert.That(behind, Is.GreaterThan(0), "the premise: on neither side did the search start from a cell behind the body");
+    }
+
+    /// <summary>
+    /// A terminal ringed by a crowd — the body held where the ring starts, short of its stand point for good — is used from there when that is inside the
+    /// server's reach for a take, and the take is asked for; held beyond that reach, it is not.
+    /// </summary>
+    /// <remarks>Live telemetry (2026-10-27): walks stuck "0 m to go" at a terminal, and a third of all errands failed.</remarks>
+    [TestCase(3f, 1)]
+    [TestCase(5.5f, 0)]
+    public void ACrowdedTerminal_IsUsedFromWithinTheServersReach(float ring, int used)
+    {
+        var (brain, sim) = Choosing(
+            Goal.Visiting,
+            b => b.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X + 40f, Here.Z, TerminalAsset + 1, 0),
+            () => new Sim { Planet = [new SeenStructure(Here.X + 40f, Here.Z, 10, TerminalAsset, 0, 1)] });
+
+        // This errand only: a second one would start from where the first left the body, and walk a different way.
+        for (var tick = 10L; tick < 80 && brain.FacilitiesUsed == 0 && brain.Goal == Goal.Visiting; tick++)
+        {
+            sim.Held |= Routing.Distance(sim.X, sim.Z, Here.X + 40f, Here.Z) <= ring;
+            sim.Apply(brain.Decide(sim.View(), tick));
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(sim.Held, Is.True, "the premise: the crowd held the body");
+            Assert.That(brain.FacilitiesUsed, Is.EqualTo(used), $"held at ({sim.X - Here.X - 40f:F1}, {sim.Z - Here.Z:F1}) from the terminal");
+            Assert.That(brain.Goal, Is.EqualTo(used == 1 ? Goal.Visiting : Goal.Idling), "the errand did not end as it should");
+            Assert.That(sim.Sent.FindAll(i => i.Kind == IntentKind.TakeMission), Has.Count.EqualTo(used));
+        });
+    }
+
     /// <summary>B-1: at a mission terminal, holding none, the errand ends in a take; holding one, it only looks.</summary>
     [TestCase(0, 1)]
     [TestCase(1, 0)]
