@@ -150,6 +150,14 @@ internal sealed class EconomyChecks : ServedChecks
             Assert.That(audit.Ok, Is.True, string.Join("; ", audit.Violations));
             Assert.That(audit.Entries, Is.EqualTo(3));
             Assert.That(audit.WalletsTotal + audit.World, Is.Zero);
+
+            // E0-12: counted once its transaction committed, and served as such.
+            Assert.That(sim.Bridge.Transfers, Is.EqualTo(3));
+            Assert.That(sim.Bridge.WalletsOpened, Is.EqualTo(2));
+            Assert.That(sim.Bridge.Tips, Is.EqualTo(1));
+            Assert.That(sim.Bridge.TipsRefused, Is.Zero);
+            Assert.That(sim.Bridge.EconomyCommitsFailed, Is.Zero);
+            Assert.That(sim.Bridge.EconomyCountersJson(), Does.StartWith("{\"transfers\":3,\"walletsOpened\":2,\"rewardsPaid\":0,\"tips\":1,\"tipsRefused\":0,"));
         });
     }
 
@@ -197,13 +205,15 @@ internal sealed class EconomyChecks : ServedChecks
         };
         foreach (var (target, amount, reason, what) in cases)
         {
-            var refused = sim.Bridge.TipsRefused;
+            // Each case reads only the reasons that arrived after its own send: two cases share a reason, and a test reading every reason so far could not
+            // tell the second from the first (review, 2026-10-26).
+            var before = Ledgers.Refusals(p.A).Length;
             Ledgers.Tip(p.A, target, amount);
-            SessionHarness.Until(() => sim.Bridge.TipsRefused > refused, $"the tip of {what} to be refused");
+            SessionHarness.Until(() => Ledgers.Refusals(p.A).Length > before, $"the tip of {what} to be refused");
 
             // The command's rate is two a second, burst four: spaced, so the engine's limiter never answers for the economy.
             Harness.Ticks(Worlds.ServedHz / 2 + 1);
-            Assert.That(Ledgers.Refusals(p.A), Does.Contain(reason), what);
+            Assert.That(Ledgers.Refusals(p.A)[before..], Is.EqualTo(new[] { reason }), what);
         }
 
         // Too far: the recipient walks off to forty metres, still in view.
@@ -265,6 +275,28 @@ internal sealed class EconomyChecks : ServedChecks
         var gap = EconomyEndpoints.Audit(sim.Dbe);
         Corrupt(sim, tx => Edit(tx, tipRow, LedgerArch.Entry, (ref e) => e.Seq = 3));
 
+        // A kind its sides do not fit: the tip stated as a mission reward (between two wallets, naming no mission), then as a second grant.
+        Corrupt(sim, tx => Edit(tx, tipRow, LedgerArch.Entry, (ref e) => e.Kind = TransferKind.MissionReward));
+        var reward = EconomyEndpoints.Audit(sim.Dbe);
+        Corrupt(sim, tx => Edit(tx, tipRow, LedgerArch.Entry, (ref e) => e.Kind = TransferKind.Grant));
+        var grant = EconomyEndpoints.Audit(sim.Dbe);
+        Corrupt(sim, tx => Edit(tx, tipRow, LedgerArch.Entry, (ref e) => e.Kind = TransferKind.Tip));
+
+        // Time going back.
+        Corrupt(sim, tx => Edit(tx, tipRow, LedgerArch.Entry, (ref e) => e.WorldTick = -1));
+        var back = EconomyEndpoints.Audit(sim.Dbe);
+        Corrupt(sim, tx => Edit(tx, tipRow, LedgerArch.Entry, (ref e) => e.WorldTick = rows[^1].WorldTick));
+
+        // A wallet whose owner is no character (a grant committed by a tick that was not).
+        var orphan = EntityId.Null;
+        Corrupt(sim, tx =>
+        {
+            var w = new Wallet { Owner = 424_242 };
+            orphan = tx.Spawn<WalletArch>(WalletArch.Purse.Set(in w));
+        });
+        var owner = EconomyEndpoints.Audit(sim.Dbe);
+        Corrupt(sim, tx => tx.Destroy(orphan));
+
         var clean = EconomyEndpoints.Audit(sim.Dbe);
         Assert.Multiple(() =>
         {
@@ -278,6 +310,11 @@ internal sealed class EconomyChecks : ServedChecks
             Assert.That(gap.Ok, Is.False);
             Assert.That(gap.Violations, Has.Some.StartsWith("seq 5: expected 3"));
             Assert.That(gap.Violations, Has.Some.StartsWith("head: last seq 3"));
+            Assert.That(reward.Violations, Has.Some.StartsWith("seq 3: a mission must be paid by World into a wallet"));
+            Assert.That(reward.Violations, Has.Some.StartsWith("seq 3: a mission reward names no mission"));
+            Assert.That(grant.Violations, Has.Some.StartsWith("seq 3: a second grant to"));
+            Assert.That(back.Violations, Has.Some.StartsWith("seq 3: world tick -1 is before"));
+            Assert.That(owner.Violations, Has.Some.StartsWith("wallet 424242: its character does not exist"));
             Assert.That(clean.Ok, Is.True, string.Join("; ", clean.Violations));
         });
     }

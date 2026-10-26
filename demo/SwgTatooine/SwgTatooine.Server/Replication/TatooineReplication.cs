@@ -771,6 +771,9 @@ public static partial class TatooineReplication
     /// <summary><c>ACKS</c> reason: a <see cref="GiveCredits"/> of zero credits, or more than <see cref="EconomyLedger.MaxTip"/>.</summary>
     public const byte TipBadAmount = AckReasons.FirstApplicationReason + 19;
 
+    /// <summary>A tip applied and then lost with its transaction, which did not commit: nothing moved, and it can be sent again.</summary>
+    public const byte TipFailed = AckReasons.FirstApplicationReason + 20;
+
     /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
     /// <remarks>
     /// Measured from the port's centre: its ring wall stands about 20 m out and its ticket terminal 21.4 m, so 30 m takes in the terminal and the gate

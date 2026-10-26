@@ -1367,6 +1367,7 @@ export class ClientApp {
     this.wallet.clear();
     this.walletVersion = -1;
     useWallet.getState().resetWallet();
+    useWallet.getState().closeInventory();
     this.fight.clear();
     useMissions.getState().closeTerminal();
     this.clock = new Clock(CLOCK_OPTIONS);

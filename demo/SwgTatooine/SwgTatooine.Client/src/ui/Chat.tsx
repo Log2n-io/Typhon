@@ -105,9 +105,11 @@ export function Chat() {
     e.preventDefault();
     const command = parseChatCommand(draft);
     if (command !== null) {
-      runChatCommand(command);
-      setComposing(false);
-      setDraft('');
+      if (runChatCommand(command)) {
+        setComposing(false);
+        setDraft('');
+      }
+
       return;
     }
 

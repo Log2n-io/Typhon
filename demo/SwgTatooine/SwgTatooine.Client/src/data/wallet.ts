@@ -46,6 +46,7 @@ export const TIP_REASONS: Readonly<Record<number, string>> = {
   145: 'you cannot tip yourself',
   146: 'too far away — stand within 20 m',
   147: 'that amount cannot be tipped',
+  148: 'the server could not apply it — nothing moved, try again',
 };
 
 /** What a tip refusal reads as; a reason this table does not know still says something. */

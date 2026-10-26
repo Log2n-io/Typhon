@@ -29,6 +29,7 @@ import { hullInRadiusM } from './replication-stats';
 import { realmViewOf, type RealmView } from './realm-view';
 import { REASON_NOT_SENT } from '../app/travel';
 import { MISSION_ANSWER_MS } from './missions';
+import { PendingSeqs } from './pending-seqs';
 import { TIP_ANSWER_MS } from './wallet';
 
 /**
@@ -446,15 +447,10 @@ export class TyphonSource implements DataSource {
   private giveCreditsCommand: MessagePlan | null = null;
   private overviewCommand: MessagePlan | null = null;
 
-  /**
-   * The takes and cancels sent and not refused yet, by seq: the mission a cancel named (`null` for a take) and when it went.
-   * An accepted one is never acked, so an entry is dropped {@link MISSION_ANSWER_MS} after it was sent — kept, a seq the
-   * queue reused (a reconnect restarts it at 1, a wrap after half an hour of driving) read a later command's refusal as a
-   * mission's.
-   */
-  private readonly pendingMissionSeqs = new Map<number, { readonly cancelled: string | null; readonly atMs: number }>();
-  /** The tips sent and not refused yet, by seq, with when they went: {@link pendingMissionSeqs}' rules, after {@link TIP_ANSWER_MS}. */
-  private readonly pendingTipSeqs = new Map<number, number>();
+  /** The takes and cancels sent and not refused yet, by seq: the mission a cancel named, `null` for a take. */
+  private readonly pendingMissionSeqs = new PendingSeqs<string | null>(MISSION_ANSWER_MS);
+  /** The tips sent and not refused yet, by seq, with their amount. */
+  private readonly pendingTipSeqs = new PendingSeqs<number>(TIP_ANSWER_MS);
 
   /** The sphere radius last asked for, metres; 0 for none asked. See {@link effectiveRadiusM}. */
   private askedViewRadiusM = 0;
@@ -864,14 +860,7 @@ export class TyphonSource implements DataSource {
       return false;
     }
 
-    const nowMs = performance.now();
-    for (const [old, atMs] of this.pendingTipSeqs) {
-      if (nowMs - atMs > TIP_ANSWER_MS) {
-        this.pendingTipSeqs.delete(old);
-      }
-    }
-
-    this.pendingTipSeqs.set(seq, nowMs);
+    this.pendingTipSeqs.add(seq, amount, performance.now());
     this.sendPending();
     return true;
   }
@@ -886,19 +875,9 @@ export class TyphonSource implements DataSource {
       return false;
     }
 
-    this.prunePendingMissions(performance.now());
-    this.pendingMissionSeqs.set(seq, { cancelled, atMs: performance.now() });
+    this.pendingMissionSeqs.add(seq, cancelled, performance.now());
     this.sendPending();
     return true;
-  }
-
-  /** Forgets the takes and cancels past {@link MISSION_ANSWER_MS}: accepted, since a refusal would have come by now. */
-  private prunePendingMissions(nowMs: number): void {
-    for (const [seq, ask] of this.pendingMissionSeqs) {
-      if (nowMs - ask.atMs > MISSION_ANSWER_MS) {
-        this.pendingMissionSeqs.delete(seq);
-      }
-    }
   }
 
   say(text: string): boolean {
@@ -1199,14 +1178,14 @@ export class TyphonSource implements DataSource {
       }
 
       // A refused take or cancel: the only thing that will say so, since an accepted one is not answered at all.
-      const mission = this.pendingMissionSeqs.get(seq);
-      if (mission !== undefined) {
-        this.pendingMissionSeqs.delete(seq);
-        this.options.onMissionRefused?.(applier.acks.reason[i], mission.cancelled);
+      const nowMs = performance.now();
+      const cancelled = this.pendingMissionSeqs.take(seq, nowMs);
+      if (cancelled !== undefined) {
+        this.options.onMissionRefused?.(applier.acks.reason[i], cancelled);
       }
 
       // A refused tip, likewise: an accepted one moves the wallets and is not answered.
-      if (this.pendingTipSeqs.delete(seq)) {
+      if (this.pendingTipSeqs.take(seq, nowMs) !== undefined) {
         this.options.onTipRefused?.(applier.acks.reason[i]);
       }
 

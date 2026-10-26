@@ -42,6 +42,9 @@ public sealed partial class SimBridge
 
     // Every held mission, and how many each character holds.
     private readonly List<EntityId> _held = [];
+
+    // The world tick of the desk's tick under way: a reward's ledger row carries it.
+    private long _deskWorldTick;
     private readonly Dictionary<EntityId, int> _heldBy = [];
 
     // Per pass: every character with a body online, and that body.
@@ -119,6 +122,7 @@ public sealed partial class SimBridge
 
         using var tx = ctx.CreateSideTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit);
         var tick0 = ctx.Transaction;
+        _deskWorldTick = ctx.WorldTick;
         if (!_deskLoaded)
         {
             LoadDesk(tx, tick);
@@ -149,7 +153,15 @@ public sealed partial class SimBridge
             }
         }
 
-        tx.Commit();
+        // A desk transaction that did not commit took its completions and their rewards with it: the desk is read again from the database, where those
+        // missions still stand, and pays them on the next pass.
+        var committed = tx.Commit();
+        EndDeskEconomy(tick0, committed);
+        if (!committed)
+        {
+            _deskLoaded = false;
+        }
+
         if (_deskWrites > 0)
         {
             Interlocked.Increment(ref _missionCommits);
@@ -339,7 +351,7 @@ public sealed partial class SimBridge
             if (vitals.Health <= 0 && lair.OwnerHit != 0)
             {
                 // Done, and paid where it was broken (R5): no going back to the terminal. The journal is told it was completed, not just that it left.
-                Reward(tick0, m.Holder, body, id, m.Reward);
+                Reward(tx, tick0, m.Holder, body, id, m.Reward, _deskWorldTick);
                 EndMission(tx, i, in m, completed: true);
                 MissionJournal.NoteCompleted(m.Holder, id, m.Kind, m.Reward);
                 BumpJournal(tick0, body);

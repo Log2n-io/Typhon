@@ -435,8 +435,9 @@ internal sealed class CombatResolveSystem : CallbackSystem
 /// <para><b>Serial</b>, because the race between two takers is settled by its order, and because it spawns and destroys — offers, held missions, lairs and
 /// their creatures — through a side transaction, as the lair director does. <b>After the lair director</b>, in the same phase: both write lairs, and a
 /// mission's lair broken this tick (<c>CombatResolve</c>, Apply) is then seen by the desk the same tick.</para>
-/// <para><b>Its writes to a body go through the tick's transaction</b>: the journal's revision and the completed count. A reward is handed to the
-/// <see cref="LedgerSystem"/>, which runs after it.</para>
+/// <para><b>Its writes to a body go through the tick's transaction</b>: the journal's revision, the completed count and the wallet's revision. <b>A reward is
+/// paid in its own transaction</b>, the one that ends the mission (<c>SimBridge.Economy.cs</c>, <c>Reward</c>), so it writes wallets and the ledger too —
+/// before the <see cref="LedgerSystem"/>, by an edge.</para>
 /// </remarks>
 internal sealed class MissionDeskSystem : CallbackSystem
 {
@@ -468,6 +469,11 @@ internal sealed class MissionDeskSystem : CallbackSystem
         .Writes<CreatureRealm>()
         .Writes<CreatureHome>()
 
+        // A completed mission's reward, paid with its end.
+        .Writes<Wallet>()
+        .Writes<LedgerEntry>()
+        .Writes<LedgerHead>()
+
         // The body: whether it is down, where it stands; its journal and its completed count.
         .Reads<PlayerPlacement>()
         .Reads<PlayerVitals>()
@@ -484,8 +490,9 @@ internal sealed class MissionDeskSystem : CallbackSystem
 /// The economy (<c>SimBridge.Economy.cs</c>; economy-foundation.md): every movement of credits, applied in order, each with its ledger row.
 /// </summary>
 /// <remarks>
-/// <para><b>Serial, and the only writer of <see cref="Wallet"/>, <see cref="LedgerEntry"/> and <see cref="LedgerHead"/></b>: conservation comes from order in
-/// one system, never from concurrent transactions (economy-build § 1). <b>After the mission desk</b>, which hands it the rewards it pays this tick.</para>
+/// <para><b>Serial, and one of the two writers of <see cref="Wallet"/>, <see cref="LedgerEntry"/> and <see cref="LedgerHead"/></b>, the mission desk being the
+/// other: conservation comes from order — one code path, two serial systems ordered by an edge — never from concurrent transactions (economy-build § 1).
+/// <b>After the mission desk</b>, whose rewards are committed by then.</para>
 /// <para>The balances, the head and the rows go through a side transaction, committed once per tick; the wallet revision of each body whose wallet moved
 /// through the tick's own, after that commit.</para>
 /// </remarks>
@@ -506,7 +513,10 @@ internal sealed class LedgerSystem : CallbackSystem
         // A tip is given between two bodies standing together, and lands as a revision on each.
         .Reads<PlayerPlacement>()
         .Reads<PlayerRealm>()
-        .Writes<PlayerState>();
+        .Writes<PlayerState>()
+
+        // A wallet is opened only for a character committed already.
+        .Reads<Character>();
 
     protected override void Execute(TickContext ctx) => _bridge.LedgerTick(ctx);
 }

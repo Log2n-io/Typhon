@@ -54,7 +54,8 @@ public sealed partial class TatooineSim
             // population, so it is the only place its counters mean anything -- and a run that has to be killed to
             // end still gets to say what it measured.
             PrintProximityReport();
-            Console.WriteLine($"  economy: {_bridge.EconomyCountersJson()}");
+            Console.WriteLine($"  economy: {_bridge?.EconomyCountersJson() ?? "{}"}");
+            EconomyEndpoints.CountersJson = null;
         }
     }
 

@@ -101,13 +101,10 @@ public static class EconomyEndpoints
     /// <summary>The most rows one <c>GET /swg/economy/ledger</c> answers with.</summary>
     public const int MaxLedgerPage = 1_000;
 
-    private static DatabaseEngine _indexesOf;
-    private static IndexRef _bySeq;
-    private static IndexRef _byFrom;
-    private static IndexRef _byTo;
-    private static IndexRef _walletByOwner;
-    private static IndexRef _headByKey;
-    private static readonly Lock IndexLock = new();
+    // One engine's indexes, published whole: a reader holds the set it read, so another engine's resolution can never change them under it.
+    private sealed record IndexSet(DatabaseEngine Dbe, IndexRef BySeq, IndexRef ByFrom, IndexRef ByTo, IndexRef WalletByOwner, IndexRef HeadByKey);
+
+    private static IndexSet _indexes;
 
     /// <summary>The running server's economy counters as JSON (<c>GET /swg/economy/stats</c>); set by the server that serves, "{}" until then.</summary>
     public static Func<string> CountersJson { get; set; }
@@ -170,12 +167,12 @@ public static class EconomyEndpoints
     public static string WalletJson(DatabaseEngine dbe, EntityId character)
     {
         ArgumentNullException.ThrowIfNull(dbe);
-        Indexes(dbe);
+        var ix = Indexes(dbe);
         var key = unchecked((long)character.RawValue);
         using var tx = dbe.CreateQuickTransaction();
         var open = false;
         var credits = 0L;
-        using (var wallets = tx.EnumerateIndex<Wallet, long>(_walletByOwner, key, key))
+        using (var wallets = tx.EnumerateIndex<Wallet, long>(ix.WalletByOwner, key, key))
         {
             if (wallets.MoveNext())
             {
@@ -186,8 +183,8 @@ public static class EconomyEndpoints
 
         // The last RecentRows of each side, then the last RecentRows of both: a wallet's rows are two range scans of their side's index.
         var rows = new List<LedgerEntry>();
-        Collect(tx, _byFrom, key, rows);
-        Collect(tx, _byTo, key, rows);
+        Collect(tx, ix.ByFrom, key, rows);
+        Collect(tx, ix.ByTo, key, rows);
         rows.Sort(static (x, y) => y.Seq.CompareTo(x.Seq));
         var json = new StringBuilder(512);
         json.Append("{\"open\":").Append(open ? "true" : "false").Append(",\"credits\":").Append(credits).Append(",\"transfers\":[");
@@ -222,13 +219,13 @@ public static class EconomyEndpoints
     public static string LedgerJson(DatabaseEngine dbe, long after, int limit)
     {
         ArgumentNullException.ThrowIfNull(dbe);
-        Indexes(dbe);
+        var ix = Indexes(dbe);
         using var tx = dbe.CreateQuickTransaction();
         var json = new StringBuilder(4096);
         json.Append("{\"rows\":[");
         var n = 0;
         var last = after;
-        using (var rows = tx.EnumerateIndex<LedgerEntry, long>(_bySeq, after + 1, long.MaxValue))
+        using (var rows = tx.EnumerateIndex<LedgerEntry, long>(ix.BySeq, after + 1, long.MaxValue))
         {
             while (n < limit && rows.MoveNext())
             {
@@ -257,9 +254,11 @@ public static class EconomyEndpoints
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The rules: the sequence runs from 1 without a gap; every amount is above zero and has two distinct sides; a wallet's first row is its grant from
-    /// World; each row's two balances-after equal the replay's; no wallet goes below zero; every wallet equals its replay, its last sequence and its count of
-    /// rows; every side of a row has a wallet; the head's sequence and World's balance equal the replay's; and every balance, World included, sums to zero.
+    /// The rules: the sequence runs from 1 without a gap and the world tick never goes back; every amount is above zero and has two distinct sides; each
+    /// kind has its sides — a grant and a mission reward are paid by World into a wallet, a tip moves between two wallets; a mission is paid once, and names
+    /// it; a wallet's first row is its grant from World, and it has no other; each row's two balances-after equal the replay's; no wallet goes below zero;
+    /// every wallet belongs to a character that exists, and equals its replay, its last sequence and its count of rows; every side of a row has a wallet; the
+    /// head's sequence and World's balance equal the replay's; and every balance, World included, sums to zero.
     /// </para>
     /// <para>
     /// <b>Two independently produced numbers each time</b>, which is what makes it an audit rather than a re-read: the stored balances were written by the
@@ -269,15 +268,17 @@ public static class EconomyEndpoints
     public static EconomyAuditResult Audit(DatabaseEngine dbe)
     {
         ArgumentNullException.ThrowIfNull(dbe);
-        Indexes(dbe);
+        var ix = Indexes(dbe);
         var started = Stopwatch.GetTimestamp();
         var result = new EconomyAuditResult();
         var balance = new Dictionary<long, long> { [EconomyLedger.World] = 0 };
         var rowsOf = new Dictionary<long, int>();
         var lastSeqOf = new Dictionary<long, long>();
         var expected = 1L;
+        var lastTick = long.MinValue;
+        var missionsPaid = new HashSet<long>();
         using var tx = dbe.CreateQuickTransaction();
-        using (var rows = tx.EnumerateIndex<LedgerEntry, long>(_bySeq, long.MinValue, long.MaxValue))
+        using (var rows = tx.EnumerateIndex<LedgerEntry, long>(ix.BySeq, long.MinValue, long.MaxValue))
         {
             while (rows.MoveNext())
             {
@@ -300,10 +301,13 @@ public static class EconomyEndpoints
                     result.Violation($"seq {r.Seq}: both sides are {r.From}");
                 }
 
-                if (r.Kind is < TransferKind.Grant or > TransferKind.Tip)
+                if (r.WorldTick < lastTick)
                 {
-                    result.Violation($"seq {r.Seq}: unknown kind {r.Kind}");
+                    result.Violation($"seq {r.Seq}: world tick {r.WorldTick} is before the previous row's {lastTick}");
                 }
+
+                lastTick = r.WorldTick;
+                Sides(result, missionsPaid, in r);
 
                 FirstRow(result, rowsOf, r.From, in r);
                 FirstRow(result, rowsOf, r.To, in r);
@@ -332,7 +336,7 @@ public static class EconomyEndpoints
         }
 
         var walletOwners = new HashSet<long>();
-        using (var wallets = tx.EnumerateIndex<Wallet, long>(_walletByOwner, long.MinValue, long.MaxValue))
+        using (var wallets = tx.EnumerateIndex<Wallet, long>(ix.WalletByOwner, long.MinValue, long.MaxValue))
         {
             while (wallets.MoveNext())
             {
@@ -340,6 +344,11 @@ public static class EconomyEndpoints
                 result.Wallets++;
                 result.WalletsTotal += w.Balance;
                 walletOwners.Add(w.Owner);
+                if (!tx.TryOpen(EntityId.FromRawValue((ulong)w.Owner), out _))
+                {
+                    result.Violation($"wallet {w.Owner}: its character does not exist");
+                }
+
                 if (!balance.TryGetValue(w.Owner, out var replayed))
                 {
                     result.Violation($"wallet {w.Owner}: holds {w.Balance} and no ledger row ever moved it");
@@ -371,7 +380,7 @@ public static class EconomyEndpoints
             }
         }
 
-        using (var heads = tx.EnumerateIndex<LedgerHead, int>(_headByKey, EconomyLedger.HeadKey, EconomyLedger.HeadKey))
+        using (var heads = tx.EnumerateIndex<LedgerHead, int>(ix.HeadByKey, EconomyLedger.HeadKey, EconomyLedger.HeadKey))
         {
             if (heads.MoveNext())
             {
@@ -402,7 +411,38 @@ public static class EconomyEndpoints
         return result;
     }
 
-    /// <summary>Counts a row against one of its sides, and checks that a wallet's first row is its grant.</summary>
+    /// <summary>Checks a row's kind against its sides, and that a mission is paid once and named.</summary>
+    private static void Sides(EconomyAuditResult result, HashSet<long> missionsPaid, in LedgerEntry r)
+    {
+        switch (r.Kind)
+        {
+            case TransferKind.Grant:
+            case TransferKind.MissionReward:
+                if (r.From != EconomyLedger.World || r.To == EconomyLedger.World)
+                {
+                    result.Violation($"seq {r.Seq}: a {TransferKind.NameOf(r.Kind)} must be paid by World into a wallet, not {r.From} to {r.To}");
+                }
+
+                if (r.Kind == TransferKind.MissionReward && (r.Ref == 0 || !missionsPaid.Add(r.Ref)))
+                {
+                    result.Violation(r.Ref == 0 ? $"seq {r.Seq}: a mission reward names no mission" : $"seq {r.Seq}: mission {r.Ref} paid a second time");
+                }
+
+                break;
+            case TransferKind.Tip:
+                if (r.From == EconomyLedger.World || r.To == EconomyLedger.World)
+                {
+                    result.Violation($"seq {r.Seq}: a tip must move between two wallets, not {r.From} to {r.To}");
+                }
+
+                break;
+            default:
+                result.Violation($"seq {r.Seq}: unknown kind {r.Kind}");
+                break;
+        }
+    }
+
+    /// <summary>Counts a row against one of its sides, and checks that a wallet's first row is its grant and that it has no other.</summary>
     private static void FirstRow(EconomyAuditResult result, Dictionary<long, int> rowsOf, long side, in LedgerEntry r)
     {
         if (side == EconomyLedger.World)
@@ -414,6 +454,10 @@ public static class EconomyEndpoints
         if (n == 0 && (r.Kind != TransferKind.Grant || r.From != EconomyLedger.World || r.To != side))
         {
             result.Violation($"seq {r.Seq}: {side}'s first row is a {TransferKind.NameOf(r.Kind)}, not its grant");
+        }
+        else if (n > 0 && r.Kind == TransferKind.Grant)
+        {
+            result.Violation($"seq {r.Seq}: a second grant to {side}");
         }
 
         rowsOf[side] = n + 1;
@@ -477,26 +521,22 @@ public static class EconomyEndpoints
     }
 
     /// <summary>The indexes, resolved once per engine: resolving one parses an expression tree, which a read a second need not repeat.</summary>
-    private static void Indexes(DatabaseEngine dbe)
+    private static IndexSet Indexes(DatabaseEngine dbe)
     {
-        if (ReferenceEquals(Volatile.Read(ref _indexesOf), dbe))
+        var known = Volatile.Read(ref _indexes);
+        if (ReferenceEquals(known?.Dbe, dbe))
         {
-            return;
+            return known;
         }
 
-        lock (IndexLock)
-        {
-            if (ReferenceEquals(_indexesOf, dbe))
-            {
-                return;
-            }
-
-            _bySeq = dbe.GetIndexRef<LedgerEntry, long>(e => e.Seq);
-            _byFrom = dbe.GetIndexRef<LedgerEntry, long>(e => e.From);
-            _byTo = dbe.GetIndexRef<LedgerEntry, long>(e => e.To);
-            _walletByOwner = dbe.GetIndexRef<Wallet, long>(w => w.Owner);
-            _headByKey = dbe.GetIndexRef<LedgerHead, int>(h => h.Key);
-            Volatile.Write(ref _indexesOf, dbe);
-        }
+        var set = new IndexSet(
+            dbe,
+            dbe.GetIndexRef<LedgerEntry, long>(e => e.Seq),
+            dbe.GetIndexRef<LedgerEntry, long>(e => e.From),
+            dbe.GetIndexRef<LedgerEntry, long>(e => e.To),
+            dbe.GetIndexRef<Wallet, long>(w => w.Owner),
+            dbe.GetIndexRef<LedgerHead, int>(h => h.Key));
+        Volatile.Write(ref _indexes, set);
+        return set;
     }
 }

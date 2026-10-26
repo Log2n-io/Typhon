@@ -580,6 +580,10 @@ internal sealed class MissionDeskChecks : ServedChecks
             Assert.That(Refusals(link), Contains.Item(TatooineReplication.MissionUnknown), "a cancel of nobody's mission was not refused");
             Assert.That(Offers(sim, terminal), Has.Count.EqualTo(TatooineData.MissionOffersPerTerminal), "a cancel put nothing back, and took nothing");
             Assert.That(MissionJournal.Json(sim.Dbe, character), Is.EqualTo(MissionJournal.Empty), "a cancel was stated as a completion");
+
+            // E0-4: taking cost nothing and cancelling paid nothing — the wallet holds its grant and no more, and no reward row was written.
+            Assert.That(Ledgers.Balance(sim, character), Is.EqualTo(EconomyLedger.StartingCredits), "a take or a cancel moved credits");
+            Assert.That(Ledgers.Rows(sim).FindAll(r => r.Kind == TransferKind.MissionReward), Is.Empty, "a cancelled mission was paid");
         });
     }
 

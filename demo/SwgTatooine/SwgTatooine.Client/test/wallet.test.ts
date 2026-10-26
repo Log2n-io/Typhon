@@ -246,7 +246,7 @@ describe('the wallet store', () => {
       },
     });
 
-    runChatCommand({ kind: 'tip', amount: 1000 });
+    expect(runChatCommand({ kind: 'tip', amount: 1000 })).toBe(true);
     expect(sent).toHaveLength(0);
     expect(useChat.getState().lines.at(-1)?.text).toContain('select a player first');
 
@@ -256,7 +256,7 @@ describe('the wallet store', () => {
     const said = useChat.getState().lines.length;
 
     accept = false;
-    runChatCommand({ kind: 'tip', amount: 5 });
+    expect(runChatCommand({ kind: 'tip', amount: 5 })).toBe(false); // kept in the box, to send again
     expect(useChat.getState().lines).toHaveLength(said + 1);
     expect(useChat.getState().lines.at(-1)?.text).toContain('not sent');
 
