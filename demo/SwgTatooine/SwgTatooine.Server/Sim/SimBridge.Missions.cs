@@ -167,6 +167,7 @@ public sealed partial class SimBridge
         // missions still stand, and pays them on the next pass. Its takes and cancels are refused, so their clients hear it.
         var committed = tx.Commit();
         EndDeskEconomy(tick0, committed);
+        EndDeskItems(tick0, committed);
         if (!committed)
         {
             _deskLoaded = false;
@@ -394,9 +395,11 @@ public sealed partial class SimBridge
             if (vitals.Health <= 0 && lair.OwnerHit != 0)
             {
                 // Done, and paid where it was broken (R5): no going back to the terminal. The journal is told it was completed, not just that it left.
-                // Paid in this transaction, and ended in it only if paid: a holder whose wallet opens on the next tick is paid by the next pass.
+                // Paid in this transaction, and ended in it only if paid: a holder whose wallet opens on the next tick is paid by the next pass. Its cache
+                // is minted in the same transaction (inventory-loot.md § 3.4): the reward, the cache and the end commit together, once.
                 if (Reward(tx, m.Holder, body, id, m.Reward, _deskWorldTick))
                 {
+                    MintCache(tx, m.Holder, body, id, in lair, _deskWorldTick);
                     EndMission(tx, i, in m, completed: true);
                     _deskCompleted.Add((m.Holder, body, id, m.Kind, m.Reward));
                 }

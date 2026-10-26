@@ -482,10 +482,13 @@ internal sealed class MissionDeskSystem : CallbackSystem
         .Writes<CreatureRealm>()
         .Writes<CreatureHome>()
 
-        // A completed mission's reward, paid with its end.
+        // A completed mission's reward, paid with its end, and its lair's cache minted with it (inventory-loot.md § 3.4).
         .Writes<Wallet>()
         .Writes<LedgerEntry>()
         .Writes<LedgerHead>()
+        .Writes<ItemStack>()
+        .Writes<ItemLedgerEntry>()
+        .Writes<ItemLedgerHead>()
 
         // The body: whether it is down, where it stands; its journal and its completed count.
         .Reads<PlayerPlacement>()

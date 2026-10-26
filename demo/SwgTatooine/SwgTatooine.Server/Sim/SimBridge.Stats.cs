@@ -93,7 +93,10 @@ public sealed partial class SimBridge
     private const int SeriesMissionsCompleted = 6;
     private const int SeriesMissionsCancelled = 7;
     private const int SeriesLairHits = 8;
-    private const int SeriesCount = 9;
+    private const int SeriesItemDrops = 9;
+    private const int SeriesItemUnits = 10;
+    private const int SeriesItemsLost = 11;
+    private const int SeriesCount = 12;
 
     /// <summary>The cities as a person sees them named, index for index with the server's map (world-data.ts: Port Sable is Mos Eisley, …).</summary>
     private static readonly string[] CityDisplayNames = ["Port Sable", "Whitestone", "Dry Wells", "Red Mesa", "Tern's Rest", "Tallow", "Far Reach"];
@@ -127,6 +130,9 @@ public sealed partial class SimBridge
         values[SeriesMissionsCompleted] = Interlocked.Read(ref _missionsCompletedTotal);
         values[SeriesMissionsCancelled] = Interlocked.Read(ref _missionsCancelledTotal);
         values[SeriesLairHits] = LairHitsTotal;
+        values[SeriesItemDrops] = ItemDrops;
+        values[SeriesItemUnits] = ItemUnits;
+        values[SeriesItemsLost] = ItemsLost;
         _rates.Sample(System.Diagnostics.Stopwatch.GetElapsedTime(_statsStarted).TotalSeconds, values);
 
         Volatile.Write(ref _population, CountPopulation(tx));
@@ -244,7 +250,16 @@ public sealed partial class SimBridge
         Num(j, "heldInRange", ObjectivesHeldInRange).Append(',');
         Num(j, "outOfRange", ObjectivesOutOfRange).Append(',');
         Rate(j, "lairHitsPerSec", r10[SeriesLairHits], r60[SeriesLairHits], 1d);
-        return j.Append("}}").ToString();
+
+        // Items (inventory-loot.md § 8): the counters by template and Mk, and the rates.
+        j.Append("},\"items\":");
+        var rates = new StringBuilder(160);
+        rates.Append(',');
+        Rate(rates, "dropsPerMin", r10[SeriesItemDrops], r60[SeriesItemDrops], 60d).Append(',');
+        Rate(rates, "unitsPerMin", r10[SeriesItemUnits], r60[SeriesItemUnits], 60d).Append(',');
+        Rate(rates, "lostPerMin", r10[SeriesItemsLost], r60[SeriesItemsLost], 60d);
+        AppendItemsJson(j, rates.ToString());
+        return j.Append('}').ToString();
 
         static StringBuilder Num(StringBuilder b, string name, long value)
             => b.Append('"').Append(name).Append("\":").Append(value.ToString(CultureInfo.InvariantCulture));

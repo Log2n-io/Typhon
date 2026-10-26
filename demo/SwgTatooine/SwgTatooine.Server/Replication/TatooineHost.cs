@@ -546,6 +546,7 @@ public static class TatooineHost
         // The missions a character holds (missions.md § 4): its own, by its bearer token, read off the tick.
         app.MapMissionJournal(runtime.Engine);
         app.MapEconomy(runtime.Engine);
+        app.MapItems(runtime.Engine);
 
         app.MapTyphonSubscriptions("/ws");
         app.MapTyphonCatalog("/typhon/catalog.json");
