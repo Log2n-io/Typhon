@@ -2,6 +2,7 @@ import { Fragment } from 'react';
 import { SpeedClass } from '../data/source';
 import { gaitLabel } from '../app/gait';
 import { realmLabel } from '../data/realm-view';
+import { dashboardUrl } from '../data/server-config';
 import { useStats } from '../state/stats-store';
 import { useTerrain } from '../state/terrain-store';
 import { useUi } from '../state/ui-store';
@@ -19,6 +20,11 @@ export function Hud() {
   // conditionally.
   const terrainCached = useTerrain((s) => s.fromCache);
   const terrainLoadMs = useTerrain((s) => s.loadMs);
+  // The demo's dashboard, on the host this page came from, when the server announces one.
+  const dashboard = dashboardUrl(
+    useUi((s) => s.dashboardPort),
+    window.location,
+  );
   if (stats === null) {
     return <div className="panel hud">Starting…</div>;
   }
@@ -108,7 +114,20 @@ export function Hud() {
           </tr>
         </tbody>
       </table>
-      <div className="hud-title">Server ({stats.source.name})</div>
+      <div className="hud-title hud-server-title">
+        <span>Server ({stats.source.name})</span>
+        {dashboard === null ? null : (
+          <a
+            className="hud-dashboard"
+            href={dashboard}
+            target="_blank"
+            rel="noreferrer"
+            title="The demo's dashboard: economy, missions, bots, server health"
+          >
+            Dashboard ↗
+          </a>
+        )}
+      </div>
       <table>
         <tbody>
           <tr>

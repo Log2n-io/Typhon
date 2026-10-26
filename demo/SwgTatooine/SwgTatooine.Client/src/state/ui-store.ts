@@ -214,6 +214,9 @@ export interface UiState {
   readonly jitterMs: number;
   /** netId of the selected entity, 0 for none. */
   readonly selectedNetId: number;
+  /** The demo dashboard's port on the server's host, from `/typhon/demo.json`; `null` for none. */
+  readonly dashboardPort: number | null;
+  readonly setDashboardPort: (port: number | null) => void;
   /** The selected part of a structure, or `null`; never set together with {@link selectedNetId}. */
   readonly selectedPart: PartRef | null;
   readonly follow: boolean;
@@ -378,6 +381,10 @@ export const useUi = create<UiState>()((set, get) => ({
   latencyMs: 40,
   jitterMs: 25,
   selectedNetId: 0,
+  dashboardPort: null,
+  setDashboardPort: (dashboardPort) => {
+    set({ dashboardPort });
+  },
   selectedPart: null,
   follow: false,
   cameraRequest: null,

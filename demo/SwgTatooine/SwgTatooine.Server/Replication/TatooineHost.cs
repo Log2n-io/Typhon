@@ -349,6 +349,9 @@ public static class TatooineHost
     /// Builds the live realm inventory served at <c>/typhon/realms.json</c>, or <see langword="null"/> to serve none.
     /// </param>
     /// <returns>A task that completes when the host has stopped.</returns>
+    /// <summary>The demo dashboard's port on this host, announced in <c>/typhon/demo.json</c>; 0 for none.</summary>
+    public static int DashboardPort { get; set; }
+
     public static async Task ServeAsync(TyphonRuntime runtime, int port, string clientRoot = null, string[] origins = null, string realmsJson = null,
         Func<string> realmInventory = null, string bindAddress = null, int authBurst = 0, int authRefillMs = 0, string originSecret = null,
         bool authInsideVpcOnly = false, string tlsChainPath = null, string tlsKeyPath = null, int tlsPort = 443, int redirectPort = 0,
@@ -617,9 +620,11 @@ public static class TatooineHost
                 : FormattableString.Invariant(
                     $",\"shuttle\":{{\"intervalTicks\":{boarding.IntervalTicks},\"windowTicks\":{boarding.WindowTicks},")
                   + FormattableString.Invariant($"\"ports\":{boarding.PortCount},\"boardM\":{Json(TatooineReplication.ShuttleBoardM)}}}");
+            // The demo's dashboard, on this host: the client links to it. Absent when there is none.
+            var dashboard = DashboardPort > 0 ? FormattableString.Invariant($",\"dashboardPort\":{DashboardPort}") : string.Empty;
             return Results.Text(
                 FormattableString.Invariant(
-                    $"{{\"godRegionMaxEdgeM\":{Json(edge)},\"maxViewRadiusM\":{Json(radius)}{player}{assetSet}{realms}{shuttle}}}"),
+                    $"{{\"godRegionMaxEdgeM\":{Json(edge)},\"maxViewRadiusM\":{Json(radius)}{player}{assetSet}{realms}{shuttle}{dashboard}}}"),
                 "application/json");
         });
 

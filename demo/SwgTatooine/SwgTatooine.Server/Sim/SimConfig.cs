@@ -597,6 +597,12 @@ public sealed class SimConfig
     public int AuthBurst;
 
     /// <summary>
+    /// The port the demo's dashboard (<c>SwgTatooine.Dashboard</c>) listens on, on the same host as this server — published in <c>/typhon/demo.json</c>
+    /// so the client can link to it; 0 when there is none.
+    /// </summary>
+    public int DashboardPort = 5090;
+
+    /// <summary>
     /// <c>--auth-refill-ms M</c>: how long one <c>/auth</c> attempt takes to come back, in milliseconds; <c>0</c> keeps the six-second default.
     /// </summary>
     /// <remarks>See <see cref="AuthBurst"/>. The pair of them is the whole knob, and the sustained rate per key is <c>1000 / M</c> per second.</remarks>

@@ -573,6 +573,25 @@ button.active {
   text-align: left;
 }
 
+/* The Server title with the dashboard's link at its right. */
+.hud-server-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.hud-dashboard {
+  color: var(--accent);
+  font-size: 11px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.hud-dashboard:hover {
+  text-decoration: underline;
+}
+
 /* The players by who drives them, under the Player row: the crowd, the bots, the people. */
 .hud-layers tr.hud-sub td {
   font-size: 11px;

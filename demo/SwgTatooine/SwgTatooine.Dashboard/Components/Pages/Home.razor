@@ -1,0 +1,208 @@
+@page "/"
+@implements IDisposable
+@inject DashboardFeed Feed
+
+<PageTitle>Tatooine dashboard</PageTitle>
+
+@{
+    var s = Feed.Latest;
+    var st = s.Stats;
+    var hl = s.Health;
+}
+
+<header class="top">
+    <h1>Tatooine</h1>
+    <span class="dot @(s.Up ? "up" : "down")"></span>
+    <span class="muted">@(s.Up ? "live" : $"server not answering: {s.Error}")</span>
+    <span class="muted">· @Feed.Server · read @Age(s.At) ago</span>
+</header>
+
+<main class="grid">
+    <section class="card">
+        <h2>Server health</h2>
+        <div class="kpis">
+            @Kpi("tick p50", Ms(N(hl, "tickMs", "p50")))
+            @Kpi("tick p99", Ms(N(hl, "tickMs", "p99")), Warn(N(hl, "tickMs", "p99"), N(hl, "tickMs", "target") * 0.5))
+            @Kpi("budget", Ms(N(hl, "tickMs", "target")))
+            @Kpi("overruns", F(N(hl, "tickMs", "overruns"), 0), N(hl, "tickMs", "overruns") > 0)
+            @Kpi("sessions", F(N(hl, "replication", "sessions"), 0))
+            @Kpi("track p99", Ms(N(hl, "replication", "trackP99Ms")))
+            @Kpi("out", $"{F(s.OutMBps, 1)} MB/s")
+            @Kpi("WAL wait p99", Ms(N(hl, "durabilityMs", "waitP99")))
+        </div>
+        @Spark("tick p99", "ms")
+        <h3>Systems, mean per tick</h3>
+        <table class="bars">
+            @foreach (var (name, us) in Systems(hl))
+            {
+                <tr><td>@name</td><td class="num">@F(us, 0) µs</td><td class="bar"><div style="width:@Pct(us, MaxSystem(hl))"></div></td></tr>
+            }
+        </table>
+    </section>
+
+    <section class="card">
+        <h2>Who is playing</h2>
+        <div class="kpis">
+            @Kpi("bots", F(N(st, "population", "bots"), 0))
+            @Kpi("people", F(N(st, "population", "people"), 0))
+            @Kpi("crowd", F(N(st, "population", "crowd"), 0))
+            @Kpi("bots indoors", F(N(st, "population", "botsIndoors"), 0))
+            @Kpi("bots outside a city", F(N(st, "population", "botsElsewhere"), 0))
+        </div>
+        @Spark("bots", "")
+        <h3>Bots per city</h3>
+        <table class="bars">
+            @foreach (var (city, n) in Cities(st))
+            {
+                <tr><td>@city</td><td class="num">@F(n, 0)</td><td class="bar"><div style="width:@Pct(n, N(st, "population", "bots"))"></div></td></tr>
+            }
+        </table>
+    </section>
+
+    <section class="card">
+        <h2>Economy</h2>
+        <div class="kpis">
+            @Kpi("transactions / s", Rate(st, "economy", "transfersPerSec"))
+            @Kpi("tips / s", Rate(st, "economy", "tipsPerSec"))
+            @Kpi("rewards / min", Rate(st, "economy", "rewardsPerMin"))
+            @Kpi("wallets opened / min", Rate(st, "economy", "walletsOpenedPerMin"))
+            @Kpi("rows since start", F(N(st, "economy", "transfers"), 0))
+            @Kpi("wallets opened since start", F(N(st, "economy", "walletsOpened"), 0))
+            @Kpi("rewards since start", F(N(st, "economy", "rewardsPaid"), 0))
+            @Kpi("tips refused since start", F(N(st, "economy", "tipsRefused"), 0))
+            @Kpi("failed commits", F(N(st, "economy", "commitsFailed"), 0), N(st, "economy", "commitsFailed") > 0)
+        </div>
+        @Spark("tx/s", "/s")
+        <h3>Audit</h3>
+        @if (s.Audit is null)
+        {
+            <p class="muted">not run yet</p>
+        }
+        else
+        {
+            var ok = s.Audit["ok"]?.GetValue<bool>() ?? false;
+            <p>
+                <span class="badge @(ok ? "ok" : "bad")">@(ok ? "consistent" : "VIOLATIONS")</span>
+                @F(N(s.Audit, "entries"), 0) rows replayed, @F(N(s.Audit, "wallets"), 0) wallets,
+                Σ wallets + World = @F(N(s.Audit, "sum"), 0), in @Ms(N(s.Audit, "ms")) — @Age(s.AuditAt) ago
+            </p>
+            @if (!ok && s.Audit["violations"] is JsonArray v)
+            {
+                <ul class="violations">@foreach (var line in v.Take(10)) { <li>@line</li> }</ul>
+            }
+        }
+        <h3>Latest transfers</h3>
+        <table class="ledger">
+            <tr><th>seq</th><th>tick</th><th>kind</th><th>from</th><th>to</th><th class="num">amount</th></tr>
+            @if (s.Ledger?["rows"] is JsonArray rows)
+            {
+                @foreach (var r in rows.Reverse())
+                {
+                    <tr>
+                        <td>@r?["seq"]</td><td>@r?["tick"]</td><td>@r?["kind"]</td>
+                        <td>@Account(r?["from"])</td><td>@Account(r?["to"])</td><td class="num">@r?["amount"]</td>
+                    </tr>
+                }
+            }
+        </table>
+    </section>
+
+    <section class="card">
+        <h2>Missions</h2>
+        <div class="kpis">
+            @Kpi("taken / min", Rate(st, "missions", "takenPerMin"))
+            @Kpi("completed / min", Rate(st, "missions", "completedPerMin"))
+            @Kpi("cancelled / min", Rate(st, "missions", "cancelledPerMin"))
+            @Kpi("held now", F(N(st, "missions", "held"), 0))
+            @Kpi("offers listed", F(N(st, "missions", "offers"), 0))
+            @Kpi("taken since start", F(N(st, "missions", "taken"), 0))
+            @Kpi("completed since start", F(N(st, "missions", "completed"), 0))
+            @Kpi("cancelled since start", F(N(st, "missions", "cancelled"), 0))
+            @Kpi("lairs redrawn", F(N(st, "missions", "lairsRedrawn"), 0))
+        </div>
+        @Spark("missions done/min", "/min")
+    </section>
+
+    <section class="card">
+        <h2>The crowd at the lairs</h2>
+        <div class="kpis">
+            @Kpi("lair hits / s", Rate(st, "crowd", "lairHitsPerSec"))
+            @Kpi("objectives taken", F(N(st, "crowd", "objectivesTaken"), 0))
+            @Kpi("objectives fallen", F(N(st, "crowd", "objectivesFallen"), 0))
+            @Kpi("given up", F(N(st, "crowd", "objectivesGivenUp"), 0))
+            @Kpi("in range checks", F(N(st, "crowd", "heldInRange"), 0))
+            @Kpi("out of range", F(N(st, "crowd", "outOfRange"), 0), N(st, "crowd", "outOfRange") > 0)
+        </div>
+        @Spark("lair hits/s", "/s")
+    </section>
+</main>
+
+@code {
+    protected override void OnInitialized() => Feed.Changed += Refresh;
+
+    public void Dispose() => Feed.Changed -= Refresh;
+
+    private void Refresh() => _ = InvokeAsync(StateHasChanged);
+
+    private static double N(JsonNode node, params string[] path) => DashboardFeed.Number(node, path);
+
+    private static string F(double v, int digits) => double.IsNaN(v) ? "—" : v.ToString(digits == 0 ? "N0" : "N" + digits, CultureInfo.InvariantCulture);
+
+    private static string Ms(double v) => double.IsNaN(v) ? "—" : $"{v.ToString(v < 10 ? "0.00" : "0.0", CultureInfo.InvariantCulture)} ms";
+
+    private static string Rate(JsonNode node, string section, string name)
+        => $"{F(N(node, section, name, "10s"), 1)}  ·  {F(N(node, section, name, "60s"), 1)} (60 s)";
+
+    private static bool Warn(double value, double limit) => !double.IsNaN(value) && !double.IsNaN(limit) && value > limit;
+
+    private static string Pct(double part, double whole)
+        => whole > 0 && !double.IsNaN(part) ? $"{Math.Clamp(part / whole * 100d, 0d, 100d).ToString("0.#", CultureInfo.InvariantCulture)}%" : "0%";
+
+    private static string Age(DateTime at)
+    {
+        if (at == DateTime.MinValue)
+        {
+            return "—";
+        }
+
+        var s = (DateTime.UtcNow - at).TotalSeconds;
+        return s < 90 ? $"{s:0} s" : $"{s / 60:0} min";
+    }
+
+    private static string Account(JsonNode id) => id?.ToString() == "0" ? "World" : $"#{id}";
+
+    private static RenderFragment Kpi(string label, string value, bool alarm = false) => __builder =>
+    {
+        <div class="kpi @(alarm ? "alarm" : null)"><div class="value">@value</div><div class="label">@label</div></div>
+    };
+
+    private RenderFragment Spark(string series, string unit) => __builder =>
+    {
+        var values = Feed.History(series);
+        if (values.Length < 2)
+        {
+            return;
+        }
+
+        var max = Math.Max(1e-9, values.Max());
+        var points = string.Join(' ', values.Select((v, i) => string.Create(CultureInfo.InvariantCulture,
+            $"{i * 300d / (DashboardFeed.HistoryLength - 1):0.#},{38 - (v / max * 36):0.#}")));
+        <div class="spark">
+            <svg viewBox="0 0 300 40" preserveAspectRatio="none"><polyline points="@points" /></svg>
+            <span class="muted">@series — last 10 min, peak @F(max, 1)@unit</span>
+        </div>
+    };
+
+    private static IEnumerable<(string Name, double Us)> Systems(JsonNode health)
+        => (health?["systems"] as JsonArray ?? [])
+            .Select(n => (Name: n?["name"]?.ToString() ?? "?", Us: N(n, "meanUs")))
+            .Where(x => !double.IsNaN(x.Us))
+            .OrderByDescending(x => x.Us)
+            .Take(10);
+
+    private static double MaxSystem(JsonNode health) => Systems(health).Select(x => x.Us).DefaultIfEmpty(1d).Max();
+
+    private static IEnumerable<(string City, double Bots)> Cities(JsonNode stats)
+        => (stats?["population"]?["botsByCity"] as JsonObject ?? [])
+            .Select(p => (City: p.Key, Bots: p.Value is JsonValue v && v.TryGetValue<double>(out var d) ? d : 0d));
+}

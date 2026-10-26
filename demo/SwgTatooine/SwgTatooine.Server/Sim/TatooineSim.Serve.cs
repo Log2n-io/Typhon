@@ -38,6 +38,7 @@ public sealed partial class TatooineSim
         EconomyEndpoints.CountersJson = () => _bridge?.EconomyCountersJson() ?? "{}";
         EconomyEndpoints.CrowdJson = () => _bridge?.CrowdCountersJson() ?? "{}";
         EconomyEndpoints.DemoJson = () => _bridge?.DemoStatsJson() ?? "{}";
+        TatooineHost.DashboardPort = _config.DashboardPort;
         StartReplication(shapes);
         try
         {

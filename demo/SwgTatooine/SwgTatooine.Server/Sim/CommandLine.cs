@@ -142,6 +142,7 @@ public static class CommandLine
             "--max-sessions", c.MaxSessions, "clients connected at once; the engine's session table, 65535 is structural", min: 1, max: 65535);
         c.ResumeGraceS = r.Dbl(
             "--resume-grace", c.ResumeGraceS, "how long a link-dead session's avatar waits for its client, s; 0 disables resume", min: 0d);
+        c.DashboardPort = r.Int("--dashboard-port", c.DashboardPort, "the demo dashboard's port on this host, linked from the client; 0 for none", min: 0, max: 65535);
         c.AuthBurst = r.Int("--auth-burst", c.AuthBurst, "/auth attempts one address may make at once; 0 keeps the default 10", min: 0);
         c.AuthRefillMs = r.Int("--auth-refill-ms", c.AuthRefillMs, "ms for one /auth attempt to come back; 0 keeps the default 6000", min: 0);
         c.GodRegionMaxEdgeM = r.Dbl("--god-region", c.GodRegionMaxEdgeM, "god camera's largest region edge, m; 0 keeps the whole-world camera", min: 0d);

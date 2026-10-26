@@ -218,6 +218,7 @@ export function Viewport() {
                 },
           );
           useUi.getState().setRealms(config.realms);
+          useUi.getState().setDashboardPort(config.dashboardPort);
           // The published asset set, when this server serves one. Mounted here rather than in the constructor because it
           // is the server that says whether there is anything to mount, and that answer arrives over HTTP.
           if (config.assets !== null) {
