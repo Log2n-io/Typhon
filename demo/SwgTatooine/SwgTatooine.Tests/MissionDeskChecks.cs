@@ -392,6 +392,65 @@ internal sealed class MissionDeskChecks : ServedChecks
     }
 
     /// <summary>
+    /// lair-objectives.md L-5: the crowd never fights a mission's lair — a stranger's break would only redraw it (M-6). A scripted fighter is held in
+    /// <c>Combat</c> ten metres from an unshielded mission lair for three seconds, and the lair is never hit.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void TheCrowd_NeverFightsAMissionsLair()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x6012), terminal);
+        var character = CharacterOf(sim, AnAccount(0x6012));
+        var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
+        var lair = held.Mission.Lair;
+        Clear(sim, lair, health: 5);
+
+        var crowd = EntityId.Null;
+        sim.WriteInTick(tx =>
+        {
+            foreach (var cluster in tx.For<Player>().GetClusterEnumerator())
+            {
+                var controls = cluster.GetReadOnlySpan(Player.Control);
+                for (var bits = cluster.OccupancyBits; bits != 0 && crowd.IsNull; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    if (cluster.Realm.Value == 0 && controls[slot].Kind == ControllerKind.Scripted)
+                    {
+                        crowd = cluster.GetEntityId(slot);
+                    }
+                }
+            }
+        });
+        Assert.That(crowd.IsNull, Is.False, "no scripted body to put beside the lair");
+
+        for (var i = 0; i < 6; i++)
+        {
+            Worlds.Park(sim, crowd, held.Mission.LairX + 10f, held.Mission.LairZ, activity: PlayerActivity.Combat);
+            Harness.Ticks(Worlds.ServedHz / 2);
+        }
+
+        var health = 0;
+        var ownerHit = -1;
+        sim.WriteInTick(tx =>
+        {
+            if (tx.TryOpen(lair, out var e))
+            {
+                health = e.Read(CreatureLair.Vitals).Health;
+                ownerHit = e.Read(CreatureLair.Spawner).OwnerHit;
+            }
+        });
+        Assert.Multiple(() =>
+        {
+            Assert.That(Exists(sim, lair), Is.True, "the mission's lair was broken and drawn again: the crowd fought it");
+            Assert.That(health, Is.EqualTo(5), "the crowd damaged a mission's lair");
+            Assert.That(ownerHit, Is.Zero);
+            Assert.That(Held(sim, character), Has.Count.EqualTo(1), "the mission was ended");
+        });
+    }
+
+    /// <summary>
     /// A held mission's lair stands with its occupants round it, and has a life. The pool missions replaced teleported a lair to its player and left them
     /// where they stood: 381 of 386 live mission camps had nobody near them (measured, 2026-10-25). Moved here from <c>LairLifeChecks</c> when the crowd stopped
     /// taking missions: a person's is the only kind there is.

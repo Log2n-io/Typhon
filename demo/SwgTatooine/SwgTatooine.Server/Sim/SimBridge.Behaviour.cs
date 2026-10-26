@@ -563,6 +563,12 @@ public sealed partial class SimBridge
         // counter sitting next to its siblings in the same cache line, so the contended form would have chunks invalidating each other's line to maintain a
         // number nobody reads inside the tick.
         var skipped = 0L;
+        var objectivesTaken = 0L;
+        var objectivesFallen = 0L;
+        var objectivesGivenUp = 0L;
+
+        // A fighter's objective is checked once a second (lair-objectives.md L-4), each on its own beat.
+        var objectiveEvery = Math.Max(1, hz);
 
         // Bodies a door or a shuttle put somewhere else this tick (Teleport, in Spawn, before this phase): see the possessed branch below.
         var landed = LandedThisTick;
@@ -666,6 +672,28 @@ public sealed partial class SimBridge
                 {
                     state.ActivityTicks = Math.Max(0, state.ActivityTicks - k);
 
+                    // A fight ends on its objective (lair-objectives.md L-4, plan G2): a fallen lair is replaced by the next of its point of interest, or
+                    // the fight is over and the fighter decides again; one still standing when the time runs out is given up, and counted as such.
+                    if (state.Activity == PlayerActivity.Combat)
+                    {
+                        if (state.ActivityTicks == 0)
+                        {
+                            if (ObjectiveStands(ctx, realm, state.MissionX, state.MissionZ))
+                            {
+                                objectivesGivenUp++;
+                            }
+                        }
+                        else if ((tick + key) % objectiveEvery < k
+                                 && !KeepObjective(ctx, ref state, ref move, realm, x, z, ref objectivesTaken, ref objectivesFallen))
+                        {
+                            state.ActivityTicks = 0;
+                            move.VelX = 0f;
+                            move.VelZ = 0f;
+                            pushSlots |= 1UL << idx;
+                            continue;
+                        }
+                    }
+
                     // To, through or out of a door: its own waypoints and the crossing test (SimBridge.Portals).
                     if (ThinkPortal(ref state, ref move, ref routes[idx], realm, cluster.GetEntityId(idx), x, z, k, places[idx].HalfExtent))
                     {
@@ -756,21 +784,11 @@ public sealed partial class SimBridge
                     state.ActivityTicks = 200 * hz;
                     Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
                 }
-                else if (roll < 0.82f)
+                else if (roll < 0.82f && TryTakeObjective(ctx, ref state, ref move, realm, x, z, Salt(tick, key, 0x85EBCA77u)))
                 {
-                    // Go and fight: at a point of interest, where the lairs are. The crowd takes no missions (economy-foundation.md § 1): bots are the
-                    // simulated players, and a mission is theirs and the people's.
-                    var poi = PickPoi(Salt(tick, key, 0x85EBCA77u));
-                    var ang = Hash01(Salt(tick, key, 0x1B873593u)) * MathF.PI * 2f;
-                    var r = poi.Radius * MathF.Sqrt(Hash01(Salt(tick, key, 0xCC9E2D51u)));
-                    move.DestX = poi.X + (MathF.Cos(ang) * r);
-                    move.DestZ = poi.Z + (MathF.Sin(ang) * r);
-                    move.SpeedMps = TatooineData.PlayerMountSpeedMps;
-                    state.Activity = PlayerActivity.Combat;
-                    state.ActivityTicks = 120 * hz;
-                    state.MissionX = move.DestX;
-                    state.MissionZ = move.DestZ;
-                    Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+                    // Go and fight (lair-objectives.md): where lairs are left unattended, the nearest standing wild lair there as the objective. The crowd
+                    // takes no missions (economy-foundation.md § 1); with no lair to send it to, it roams instead — below.
+                    objectivesTaken++;
                 }
                 else
                 {
@@ -800,6 +818,13 @@ public sealed partial class SimBridge
         {
             Interlocked.Add(ref _possessedSkipped, skipped);
         }
+
+        if (objectivesTaken + objectivesFallen + objectivesGivenUp != 0)
+        {
+            Interlocked.Add(ref _objectivesTaken, objectivesTaken);
+            Interlocked.Add(ref _objectivesFallen, objectivesFallen);
+            Interlocked.Add(ref _objectivesGivenUp, objectivesGivenUp);
+        }
     }
 
     private (float X, float Z, float Radius) PickCity(uint salt)
@@ -828,17 +853,6 @@ public sealed partial class SimBridge
         }
 
         return _index.Cities.Count - 1;
-    }
-
-    private (float X, float Z, float Radius) PickPoi(uint salt)
-    {
-        if (_index.Pois.Count == 0)
-        {
-            return PickCity(salt);
-        }
-
-        var i = (int)(Hash01(salt) * _index.Pois.Count) % _index.Pois.Count;
-        return _index.Pois[i];
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════

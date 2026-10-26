@@ -122,11 +122,14 @@ public sealed class CausalityLoopTests
         // (economy-foundation.md E0-5) — a mission completed with no session in the world would be one the crowd took. A person's mission, from the take to
         // the reward, is MissionDeskChecks'.
         //
-        // <b>Its fire no longer reaches a lair</b> (LairHits is 0 over this window, measured 2026-10-26): a mission was the only thing that sent a crowd body
-        // TO a lair; a fighter otherwise walks across its point of interest (plan § G.1, G1 — objective-driven combat, not started).
+        // <b>And its fire reaches lairs again</b> (lair-objectives.md L-6): a fighter goes to a lair as its objective. It was 0 over this window between the
+        // crowd's missions going and the objectives coming (2026-10-26).
         Assert.Multiple(() =>
         {
             Assert.That(s.CreaturesKilled, Is.GreaterThan(0), "the crowd killed nothing");
+            Assert.That(s.LairHits, Is.GreaterThan(0), "no crowd fire reached a lair");
+            Assert.That(_sim.Bridge.ObjectivesTaken, Is.GreaterThan(0), "no fighter took a lair as its objective");
+            Assert.That(_sim.Bridge.ObjectivesFallen, Is.GreaterThan(0), "no objective ever fell");
             Assert.That(s.MissionsIssued, Is.Zero, "a mission was taken with no session in the world: the crowd took it");
             Assert.That(s.MissionsCompleted, Is.Zero);
             Assert.That(_sim.Bridge.Transfers, Is.Zero, "credits moved with no session in the world: a kill paid loot, or the crowd was paid");

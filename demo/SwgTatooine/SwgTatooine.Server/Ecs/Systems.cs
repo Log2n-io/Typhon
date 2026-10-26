@@ -69,6 +69,11 @@ internal sealed class PlayerThinkSystem : QuerySystem
 
         // Whether a player is down, so a downed body is left lying.
         .Reads<PlayerVitals>()
+
+        // A fighter's objective: the lairs standing at a point of interest (lair-objectives.md).
+        .Reads<Lair>()
+        .Reads<LairPlacement>()
+        .Reads<LairVitals>()
         .Writes<PlayerState>()
         .Writes<PlayerMotion>()
 
@@ -119,6 +124,9 @@ internal sealed class LairLifeSystem : CallbackSystem
 
         // Read, not consumed: a consumer is skipped on a tick with no corpse, and the pass must run on those too (TatooineSim.BuildSchedule).
         .ReadsEvents(_bridge.CorpseQueue)
+
+        // The census counts the players near each point of interest (lair-objectives.md L-1).
+        .Reads<PlayerPlacement>()
         .Writes<Lair>()
         .Writes<LairPlacement>()
         .Writes<LairVitals>()
