@@ -313,7 +313,8 @@ internal sealed class InventoryChecks : ServedChecks
         SessionHarness.Until(() => HeldBy(sim, p.Character).Count == 1 && !HeldBy(sim, p.Character)[0].Mission.Lair.IsNull, "the mission and its lair");
         var held = HeldBy(sim, p.Character)[0];
 
-        // Broken with no blow of its holder's (OwnerHit 0), and its death pushed as the drain would push it.
+        // Broken with no blow of its holder's (OwnerHit 0), and its death pushed as the drain would push it - at the holder's feet, so only the skip of a
+        // mission lair's death keeps it from being looted.
         sim.WriteInTick(tx =>
         {
             var l = tx.OpenMut(held.Mission.Lair);
@@ -321,7 +322,7 @@ internal sealed class InventoryChecks : ServedChecks
             v.Health = 0;
             l.Set(CreatureLair.Vitals, v);
         });
-        sim.Bridge.StageKill(Items.Kill(p.Body, held.Mission.Lair.RawValue, held.Mission.LairX, held.Mission.LairZ, (byte)held.Mission.Kind,
+        sim.Bridge.StageKill(Items.Kill(p.Body, held.Mission.Lair.RawValue, terminal.X + 2f, terminal.Z, (byte)held.Mission.Kind,
             kind: KillVictimKind.Lair, mission: held.Id));
         SessionHarness.Until(() => HeldBy(sim, p.Character)[0].Mission.Lair != held.Mission.Lair, "a new lair to be drawn");
         Harness.Ticks(Worlds.ServedHz / SimBridge.MissionPassHz + 2);
@@ -330,6 +331,7 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(Items.Rows(sim), Is.Empty, "a cache, or the lair looted as a kill");
             Assert.That(HeldBy(sim, p.Character)[0].Id, Is.EqualTo(held.Id), "the mission is no longer held");
             Assert.That(sim.Bridge.ItemDropsBy(DropSource.MissionCache), Is.Zero);
+            Assert.That(sim.Bridge.LootRefusedTotal, Is.Zero, "refused rather than skipped");
         });
     }
 
