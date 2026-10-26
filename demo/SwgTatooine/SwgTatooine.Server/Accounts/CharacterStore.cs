@@ -110,7 +110,7 @@ public static class CharacterStore
         try
         {
             using var tx = dbe.CreateQuickTransaction();
-            character = tx.Spawn<CharacterArch>(CharacterArch.Profile.Set(fresh));
+            character = tx.Spawn<CharacterArch>(CharacterArch.Profile.Set(fresh), CharacterArch.Progress.Set(CharacterProgress.Start));
             tx.Commit();
             profile = fresh;
             return true;

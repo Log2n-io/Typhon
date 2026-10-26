@@ -98,3 +98,35 @@ public struct Character
     [Field]
     public long LastSavedUtcTicks;
 }
+
+/// <summary>
+/// A character's combat level and XP (character-level.md § 1): CL 1-50, the XP since CL 1, and how much of it came from kills and from missions.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>A component of its own, not fields on <see cref="Character"/>.</b> The profile is written at login and on the position cadence through the tick's
+/// transaction; XP by two serial systems through side transactions. Two writers of one component is the lost update the wallet moved out for; MVCC conflicts
+/// are per component, so a second component on the same entity is enough.
+/// </para>
+/// <para><b>The level is stored, not derived from <see cref="Xp"/></b>: it is read on every bind and every kill, and a retuned table must never take a level
+/// away. The body carries a copy (<see cref="PlayerLook.Level"/>, <see cref="PlayerLook.Xp"/>).</para>
+/// </remarks>
+[Component("Swg.CharacterProgress", 1, StorageMode = StorageMode.Versioned)]
+[StructLayout(LayoutKind.Sequential)]
+public struct CharacterProgress
+{
+    /// <summary>Total XP since CL 1, clamped at <see cref="Progression.MaxXp"/> (1 691 050).</summary>
+    [Field] public int Xp;
+
+    /// <summary>Of which from kills: the 75/25 split per character, for tuning (crafting-catalog § 14.6).</summary>
+    [Field] public int KillXp;
+
+    /// <summary>Of which from missions.</summary>
+    [Field] public int MissionXp;
+
+    /// <summary>1 to 50; 0 = none, never for a created character.</summary>
+    [Field] public byte Level;
+
+    /// <summary>A new character's: CL 1, no XP.</summary>
+    public static CharacterProgress Start => new() { Level = 1 };
+}

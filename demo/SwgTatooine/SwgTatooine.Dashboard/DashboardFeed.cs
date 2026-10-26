@@ -128,6 +128,8 @@ public sealed class DashboardFeed : BackgroundService
             Record("rewards/min", Number(stats, "economy", "rewardsPerMin", "10s"));
             Record("missions done/min", Number(stats, "missions", "completedPerMin", "10s"));
             Record("lair hits/s", Number(stats, "crowd", "lairHitsPerSec", "10s"));
+            Record("xp/char-hour", Number(stats, "progression", "xpPerCharHour", "10s"));
+            Record("level-ups/min", Number(stats, "progression", "levelUpsPerMin", "10s"));
             Record("tick p99", Number(health, "tickMs", "p99"));
             Record("bots", Number(stats, "population", "bots"));
             Record("out MB/s", outMBps);

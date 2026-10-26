@@ -130,6 +130,7 @@ public sealed partial class SimBridge
         using var tx = ctx.CreateSideTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit);
         var tick0 = ctx.Transaction;
         _deskWorldTick = ctx.WorldTick;
+        BeginDeskProgress();
         _deskCompleted.Clear();
         _takesApplied.Clear();
         _cancelsApplied.Clear();
@@ -168,6 +169,7 @@ public sealed partial class SimBridge
         var committed = tx.Commit();
         EndDeskEconomy(tick0, committed);
         EndDeskItems(tick0, committed);
+        RefreshDeskProgress(ctx, committed);
         if (!committed)
         {
             _deskLoaded = false;
@@ -400,6 +402,8 @@ public sealed partial class SimBridge
                 if (Reward(tx, m.Holder, body, id, m.Reward, _deskWorldTick))
                 {
                     MintCache(tx, m.Holder, body, id, in m, _deskWorldTick);
+                    // Its XP with its reward, in this transaction: both or neither (character-level.md § 5).
+                    GrantMissionXp(tx, m.Holder, body, m.Level);
                     EndMission(tx, i, in m, completed: true);
                     _deskCompleted.Add((m.Holder, body, id, m.Kind, m.Level, m.Reward));
                 }

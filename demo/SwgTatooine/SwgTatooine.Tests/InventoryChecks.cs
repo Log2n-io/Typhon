@@ -635,6 +635,73 @@ internal sealed class InventoryChecks : ServedChecks
         });
     }
 
+    /// <summary>
+    /// IL-10, the client's contract: every field <c>src/data/items.ts</c>'s <c>parseInventory</c> requires (<c>isItem</c>, <c>isRow</c>, <c>isLost</c>), of the
+    /// type it requires, on every item, row and loss — the client drops an entry that lacks one, and has no item table to fill a gap from. Plus
+    /// <c>category</c> on rows and losses and a row's <c>dir</c>.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void TheInventoryJson_CarriesEveryFieldTheClientParses()
+    {
+        using var sim = Start();
+        var (x, z) = OpenGround(sim);
+        var p = LogIn(sim, 0x740C, x, z);
+        Mint(sim, p.Character, 2, (ItemCatalog.Hide, 2, 7), (ItemCatalog.CoreArmor, 3, 1));
+        sim.Bridge.StageTransfer((long)p.Character.RawValue, ItemLedger.World, ItemCatalog.Hide, 2, 2, ItemMoveKind.Kill, 1);
+        SessionHarness.Until(() => Items.Rows(sim).Count == 3, "the hide given back");
+        ItemNotes.NoteLost(p.Character, ItemCatalog.AddonArmor, 2, 1, 42);
+
+        using var doc = JsonDocument.Parse(ItemEndpoints.InventoryJson(sim.Dbe, p.Character));
+        var root = doc.RootElement;
+        string[] categories = ["material", "core", "addon", "part", "armor", "potion", "kit", "container"];
+
+        void Fields(JsonElement e, string what, params (string Name, JsonValueKind Kind)[] fields)
+        {
+            foreach (var (name, kind) in fields)
+            {
+                Assert.That(e.TryGetProperty(name, out var v), Is.True, $"{what}: no \"{name}\"");
+                Assert.That(v.ValueKind, Is.EqualTo(kind), $"{what}: \"{name}\"");
+            }
+
+            Assert.That(categories, Does.Contain(e.GetProperty("category").GetString()), $"{what}: category");
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(root.GetProperty("open").ValueKind, Is.EqualTo(JsonValueKind.True));
+            Assert.That(root.GetProperty("slots").ValueKind, Is.EqualTo(JsonValueKind.Number));
+            Assert.That(root.GetProperty("items").GetArrayLength(), Is.EqualTo(2));
+            Assert.That(root.GetProperty("recent").GetArrayLength(), Is.EqualTo(3));
+            Assert.That(root.GetProperty("lost").GetArrayLength(), Is.EqualTo(1));
+            foreach (var item in root.GetProperty("items").EnumerateArray())
+            {
+                Fields(item, "item", ("id", JsonValueKind.String), ("slot", JsonValueKind.Number), ("item", JsonValueKind.String), ("name", JsonValueKind.String),
+                    ("category", JsonValueKind.String), ("mk", JsonValueKind.Number), ("count", JsonValueKind.Number));
+            }
+
+            foreach (var row in root.GetProperty("recent").EnumerateArray())
+            {
+                Fields(row, "row", ("seq", JsonValueKind.String), ("tick", JsonValueKind.Number), ("kind", JsonValueKind.String), ("item", JsonValueKind.String),
+                    ("name", JsonValueKind.String), ("category", JsonValueKind.String), ("mk", JsonValueKind.Number), ("count", JsonValueKind.Number),
+                    ("ref", JsonValueKind.String), ("dir", JsonValueKind.String));
+            }
+
+            foreach (var lost in root.GetProperty("lost").EnumerateArray())
+            {
+                Fields(lost, "lost", ("n", JsonValueKind.Number), ("tick", JsonValueKind.Number), ("item", JsonValueKind.String), ("name", JsonValueKind.String),
+                    ("category", JsonValueKind.String), ("mk", JsonValueKind.Number), ("count", JsonValueKind.Number));
+            }
+
+            var recent = root.GetProperty("recent");
+            Assert.That(recent[0].GetProperty("dir").GetString(), Is.EqualTo("out"), "the hide given back, newest first");
+            Assert.That(recent[1].GetProperty("dir").GetString(), Is.EqualTo("in"));
+            Assert.That(root.GetProperty("items")[1].GetProperty("category").GetString(), Is.EqualTo("core"));
+            Assert.That(root.GetProperty("lost")[0].GetProperty("name").GetString(), Is.EqualTo("Armor Enhancement"));
+            Assert.That(root.GetProperty("lost")[0].GetProperty("category").GetString(), Is.EqualTo("addon"));
+        });
+    }
+
     // ── IL-10: the bearer's own ─────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>IL-10: <c>GET /swg/inventory</c> answers the bearer's own stacks; 401 without a token or with a bad one; an account with no character, empty.</summary>

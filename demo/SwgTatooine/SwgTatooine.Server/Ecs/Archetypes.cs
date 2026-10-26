@@ -303,9 +303,13 @@ public partial class AccountArch : Archetype<AccountArch>
 /// the transient half and a durable row should not point at one.
 /// </para>
 /// </remarks>
-[Archetype(1, "Characters")]
+// Revision 2: CharacterProgress joined the component set (character-level.md § 1).
+[Archetype(2, "Characters")]
 public partial class CharacterArch : Archetype<CharacterArch>
 {
     /// <summary>The character itself: name, wallet, and where it was last seen.</summary>
     public static readonly Comp<Character> Profile = Register<Character>();
+
+    /// <summary>Its combat level and XP, written by the XP system and the mission desk. See <see cref="CharacterProgress"/>.</summary>
+    public static readonly Comp<CharacterProgress> Progress = Register<CharacterProgress>();
 }

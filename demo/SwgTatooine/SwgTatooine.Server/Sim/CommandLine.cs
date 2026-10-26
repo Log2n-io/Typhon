@@ -183,6 +183,7 @@ public static class CommandLine
         c.IdleCreatureFraction = r.Dbl("--idle-creatures", c.IdleCreatureFraction, "share of creatures that never think", min: 0d, max: 1d);
         c.RespawnSeconds = r.Float("--respawn-s", c.RespawnSeconds, "seconds before a lair replaces a creature it lost", min: 0.001f);
         c.CorpseSeconds = r.Float("--corpse-s", c.CorpseSeconds, "seconds a dead creature lies before it is destroyed", min: 0.001f);
+        c.XpRatePercent = r.Int("--xp-rate", c.XpRatePercent, "percent every XP grant is scaled by; 100 = the balance model's", min: 0, max: 100_000);
         var life = r.Floats("--lair-life-s", [c.LairLifeMinSeconds, c.LairLifeMaxSeconds], "shortest,longest seconds a wild lair stands");
         if (life.Length != 2 || !(life[0] > 0f) || life[1] < life[0])
         {

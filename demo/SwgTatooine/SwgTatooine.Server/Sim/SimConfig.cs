@@ -770,6 +770,9 @@ public sealed class SimConfig
     /// </remarks>
     public float CorpseSeconds = 6f;
 
+    /// <summary>Percent every XP grant is scaled by (<c>--xp-rate</c>, character-level.md § 3): a demo and soak knob, not a balance one. 100 is the model's.</summary>
+    public int XpRatePercent = 100;
+
     /// <summary>
     /// The shortest and longest a wild lair stands before it is retired, in seconds (<c>--lair-life-s min,max</c>), whether or not anybody destroyed it.
     /// </summary>

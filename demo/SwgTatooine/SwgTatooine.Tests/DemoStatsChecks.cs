@@ -98,6 +98,41 @@ internal sealed class DemoStatsChecks : ServedChecks
         });
     }
 
+    /// <summary>CH-11: <c>/swg/stats</c> carries the progression section: XP by source, the gates, the bands, XP per character-hour against the model's.</summary>
+    [Test]
+    [CancelAfter(90_000)]
+    public void TheStats_CarryTheProgressionSection()
+    {
+        var config = Worlds.Served(Dir);
+        config.WorkerCount = 1;
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+        Harness = new SessionHarness(sim);
+        Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(0x7311));
+        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar");
+        Harness.Ticks(Worlds.ServedHz * 3);
+
+        using var doc = JsonDocument.Parse(sim.Bridge.DemoStatsJson());
+        var progression = doc.RootElement.GetProperty("progression");
+        Assert.Multiple(() =>
+        {
+            foreach (var key in new[] { "levelUps", "killXp", "missionXp", "greyKills", "crowdKills", "noKillerKills", "missionLairKills", "killsDrained",
+                         "commitsFailed", "xpRatePercent", "modelXpPerCharHour" })
+            {
+                Assert.That(progression.TryGetProperty(key, out _), Is.True, key);
+            }
+
+            var bands = progression.GetProperty("bands");
+            Assert.That(bands.GetProperty("people").EnumerateArray().Select(b => b.GetInt32()), Is.EqualTo(new[] { 1, 0, 0, 0, 0 }), "one person, CL 1");
+            Assert.That(bands.GetProperty("bots").EnumerateArray().Sum(b => b.GetInt32()), Is.Zero);
+            Assert.That(progression.GetProperty("meanCl").GetProperty("people").GetDouble(), Is.EqualTo(1d));
+            Assert.That(progression.GetProperty("modelXpPerCharHour").GetDouble(), Is.EqualTo(1200d), "1 200 × mean CL 1");
+            Assert.That(progression.GetProperty("xpPerCharHour").TryGetProperty("60s", out _), Is.True);
+            Assert.That(progression.GetProperty("levelUpsPerMin").TryGetProperty("10s", out _), Is.True);
+            Assert.That(progression.GetProperty("xpRatePercent").GetInt32(), Is.EqualTo(100));
+        });
+    }
+
     /// <summary>IL-13: the <c>items</c> section counts the rows, the drops and the units minted and held by template and Mk, as the rows say.</summary>
     [Test]
     [CancelAfter(60_000)]

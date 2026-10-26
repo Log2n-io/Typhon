@@ -88,6 +88,9 @@ public readonly struct Perceived
     /// </summary>
     public int Stance { get; init; }
 
+    /// <summary>The body's combat level (<c>level</c>), 1-50; 0 before it arrives. What it hunts is bounded by it (<c>Perception.CombatLevel</c>, character-level.md § 9).</summary>
+    public int Level { get; init; }
+
     /// <summary>Missions its character holds, as the journal (<c>GET /swg/missions</c>) last said; 0 for none.</summary>
     public int MissionsHeld { get; init; }
 

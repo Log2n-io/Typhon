@@ -103,6 +103,9 @@ public sealed partial class SimBridge
             var states = cluster.GetReadOnlySpan(Player.State);
             var controls = cluster.GetReadOnlySpan(Player.Control);
 
+            // The shooter's level, carried on its blow for the drain's level factor (character-level.md § 6).
+            var looks = cluster.GetReadOnlySpan(Player.Look);
+
             // READ-ONLY until a player in this cluster actually fires. GetSpan marks its cluster changed on the HANDOUT, so taking these mutably to read a
             // cooldown would claim a change for every player on every tick — and a cluster of parked players in a cantina writes nothing today, which is
             // precisely the property the activity mix exists to produce.
@@ -257,6 +260,7 @@ public sealed partial class SimBridge
                     Amount = vitals[idx].AttackDamage,
                     Kind = CombatEventKind.Damage,
                     TargetKind = targetKind,
+                    AttackerLevel = possessed ? looks[idx].Level : (byte)TatooineData.CrowdLevel,
                 });
 
                 // A stance strikes on its own steady beat, which a client plays one attack clip per hit to; the crowd keeps its random weapon delay.
@@ -596,6 +600,7 @@ public sealed partial class SimBridge
                     Amount = vitals[idx].AttackDamage,
                     Kind = CombatEventKind.Damage,
                     TargetKind = CombatTargetKind.Player,
+                    AttackerLevel = brains[idx].Level,
                 });
 
                 t.AttackCooldown = minDelay + (int)(Hash01(Salt(ctx.TickNumber, cluster.GetEntityId(idx).EntityKey, 0x1E35A7BDu)) * delaySpan);
@@ -693,6 +698,13 @@ public sealed partial class SimBridge
                 continue;
             }
 
+            // The B4 level factor (character-level.md § 6), here where the target is open: the blow, the health removed and the Attack a client draws all
+            // carry the scaled amount.
+            if (ev.Kind == CombatEventKind.Damage)
+            {
+                events[i].Amount = ScaleByLevel(ev.Amount, ev.AttackerLevel, LevelOf(ref target, ev.TargetKind));
+            }
+
             var landed = false;
             switch (ev.TargetKind)
             {
@@ -754,6 +766,7 @@ public sealed partial class SimBridge
             {
                 xp.Push(kill);
                 loot.Push(kill);
+                KillTap?.Enqueue(kill);
             }
 
             Interlocked.Add(ref _killEvents, _kills.Count);
@@ -900,6 +913,36 @@ public sealed partial class SimBridge
             Species = ai.Template,
         });
         return true;
+    }
+
+    /// <summary>
+    /// A blow scaled by the level difference: × <see cref="Progression.LevelPercent"/>(attacker − target), ×0.5–1.5, at least 1; unchanged when either side has
+    /// no level.
+    /// </summary>
+    internal static int ScaleByLevel(int amount, int attackerLevel, int targetLevel)
+    {
+        if (attackerLevel <= 0 || targetLevel <= 0 || amount <= 0)
+        {
+            return amount;
+        }
+
+        return Math.Max(1, (int)((((long)amount * Progression.LevelPercent(attackerLevel - targetLevel)) + 50) / 100));
+    }
+
+    /// <summary>The level a blow lands on: a creature's or a lair's content level, a character's CL, <see cref="TatooineData.CrowdLevel"/> for a scripted body.</summary>
+    private static int LevelOf(ref EntityRefMut target, byte targetKind)
+    {
+        switch (targetKind)
+        {
+            case CombatTargetKind.Creature:
+                return target.Read(Creature.Ai).Level;
+            case CombatTargetKind.Lair:
+                return target.Read(CreatureLair.Spawner).Level;
+            case CombatTargetKind.Player:
+                return target.Read(Player.Control).Kind == ControllerKind.Scripted ? TatooineData.CrowdLevel : target.Read(Player.Look).Level;
+            default:
+                return 0;
+        }
     }
 
     /// <summary>The killer a <see cref="KillEvent"/> names: the attacker when it is a Player body, nobody when it was a creature.</summary>

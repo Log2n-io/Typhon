@@ -1193,7 +1193,7 @@ public struct PlayerControl
 /// whatever its netId hashed to — so two sessions never agreed on what either of them looked like.
 /// </para>
 /// <para>
-/// <b>A component of its own, for the reason <see cref="PlayerControl"/> is one.</b> It is written once, at spawn, and never again; next to state that changes
+/// <b>A component of its own, for the reason <see cref="PlayerControl"/> is one.</b> It is written at spawn and on progress (a level, the XP byte), rarely; next to state that changes
 /// it would ride every change of that state's cluster for nothing, and it would widen a column every system walks.
 /// </para>
 /// <para>Zero is "no look": the pooled crowd's scripted players are spawned without one and are dressed by netId, as before.</para>
@@ -1203,7 +1203,7 @@ public struct PlayerControl
 /// 8-byte component keeps them at 24. It is the place for the customisation that will follow the outfit, for the same reason.
 /// </para>
 /// </remarks>
-[Component("Swg.PlayerLook", 3, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.PlayerLook", 4, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct PlayerLook
 {
@@ -1213,6 +1213,14 @@ public struct PlayerLook
     /// <summary>1 for a body whose account the bot fleet signed up (<see cref="Accounts.Account"/>'s <c>Bot</c>), 0 otherwise: a viewer's to show, never a branch.</summary>
     /// <remarks>In the padding after <see cref="Outfit"/>: the component stays eight bytes.</remarks>
     [Field, OnEnter(CodecKind.U8, Name = "bot", Saturate = true)] public byte Bot;
+
+    /// <summary>The character's combat level, 1-50 (<see cref="CharacterProgress.Level"/>); 0 for the scripted crowd, which has no character.</summary>
+    /// <remarks>A copy of the character's, written at spawn and on each level-up (character-level.md § 1), for the wire and the combat drain.</remarks>
+    [Field, Replicate(CodecKind.U8, Name = "level", Saturate = true)] public byte Level;
+
+    /// <summary>The way to the next level, in 256ths (<see cref="Progression.XpByte"/>): the owner's XP bar. Written with <see cref="Level"/>.</summary>
+    /// <remarks>Here, and with <see cref="Level"/> in the padding before <see cref="NameId"/>: the component stays eight bytes and <see cref="Player"/> grows nothing.</remarks>
+    [Field, Owner(CodecKind.U8, Name = "xp", Group = "progress", Saturate = true)] public byte Xp;
 
     /// <summary>The character's name as a <see cref="PlayerNames"/> id, 0 for none (the scripted crowd). On the wire once, on enter.</summary>
     [Field, OnEnter(CodecKind.U32, Name = "nameId")] public uint NameId;
