@@ -1,4 +1,4 @@
-import { conColour } from '../data/content-level';
+import { conClass, viewerClOf } from '../data/content-level';
 import { inspectorTitle } from '../data/progress';
 import { doorRealmOf } from '../data/realm-view';
 import { useStats } from '../state/stats-store';
@@ -21,14 +21,22 @@ export function Inspector() {
   const ridingNetId = useStats((s) => s.stats?.ridingNetId) ?? 0;
 
   // The viewer's combat level, for a level's con colour (character-level.md § 8); none for the god camera.
-  const viewerLevel = useStats((s) => s.stats?.vitals?.level ?? Number.NaN);
-  const viewerCl = Number.isFinite(viewerLevel) && viewerLevel > 0 ? viewerLevel : null;
+  const viewerCl = useStats((s) => viewerClOf(s.stats?.vitals?.level));
   if (selectedNetId === 0) {
     return null;
   }
 
   // Stats arrive four times a second: until then, what was published may describe the previous selection.
   const inspection = published?.netId === selectedNetId ? published : null;
+  const title =
+    inspection === null
+      ? null
+      : inspectorTitle(
+          `${inspection.archetype} #${selectedNetId}`,
+          inspection.archetype,
+          Number(inspection.fields.find((f) => f.name === 'level')?.value ?? 0),
+          viewerCl,
+        );
 
   // A door, when the thing picked has one. `interior` rides in with the entity (`Structure.InteriorRealm`), so it is read
   // from the replicated fields by name rather than given a slot of its own in `Inspection` — the inspector already
@@ -48,13 +56,21 @@ export function Inspector() {
   return (
     <div className="panel inspector">
       <div className="hud-title">
-        {inspection === null
-          ? `#${selectedNetId}`
-          : inspectorTitle(
-              `${inspection.archetype} #${selectedNetId}`,
-              inspection.archetype,
-              Number(inspection.fields.find((f) => f.name === 'level')?.value ?? 0),
+        {title === null ? (
+          `#${selectedNetId}`
+        ) : (
+          <>
+            {title.name}
+            {/* As the name tag: only "CL n" in its con colour (render/labels.ts). */}
+            {title.level === '' ? null : (
+              <>
+                {' ('}
+                <span className={title.con === null ? undefined : `con-${title.con}`}>{title.level}</span>
+                {')'}
+              </>
             )}
+          </>
+        )}
       </div>
       {inspection !== null && (
         <table>
@@ -82,11 +98,11 @@ export function Inspector() {
             )}
             {inspection.fields.map((f) => {
               // A level reads in its con colour against the viewer's CL (content-levels.md § 6): neutral until the CL is replicated.
-              const con = f.name === 'level' ? conColour(Number(f.value), viewerCl) : null;
+              const con = f.name === 'level' ? conClass(Number(f.value), viewerCl) : undefined;
               return (
                 <tr key={f.name}>
                   <td>{f.name}</td>
-                  <td className={con === null ? undefined : `con-${con}`}>{f.value}</td>
+                  <td className={con}>{f.value}</td>
                 </tr>
               );
             })}

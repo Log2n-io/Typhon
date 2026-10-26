@@ -3,6 +3,7 @@ import type { Descriptor } from '../src/assets/descriptor';
 import { missionMenuItems, missionTerminalOf } from '../src/app/ticket-terminal';
 import {
   JOURNAL_RETRY_MS,
+  listedOffers,
   MISSION_ANSWER_MS,
   MissionJournal,
   missionRefusal,
@@ -49,6 +50,39 @@ describe('a mission', () => {
     expect(missionRefusal(137)).toContain('down');
     expect(missionRefusal(142)).toContain('not in the world');
     expect(missionRefusal(200)).toBe('Refused (200)');
+  });
+
+  it('reads a take refused above your level (placeholder code, until the server names it)', () => {
+    expect(missionRefusal(150)).toContain('above your level');
+  });
+});
+
+describe("a terminal's filter", () => {
+  const levels = (l: readonly MissionOffer[]) => l.map((o) => o.level);
+  const all = Array.from({ length: 10 }, (_, level) => offer(level + 1, { level }));
+
+  it("lists only the offers from five below the viewer's CL to three above, and says how many it left out", () => {
+    const listed = listedOffers(all, 5, false);
+    expect(levels(listed.rows)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(listed.hidden).toBe(1);
+  });
+
+  it('lists every offer with "Show all"', () => {
+    const listed = listedOffers(all, 5, true);
+    expect(levels(listed.rows)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(listed.hidden).toBe(0);
+  });
+
+  it('lists every offer without a viewer CL', () => {
+    expect(levels(listedOffers(all, null, false).rows)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  });
+
+  it('is toggled in the store', () => {
+    useMissions.setState({ showAll: false });
+    useMissions.getState().toggleShowAll();
+    expect(useMissions.getState().showAll).toBe(true);
+    useMissions.getState().toggleShowAll();
+    expect(useMissions.getState().showAll).toBe(false);
   });
 });
 

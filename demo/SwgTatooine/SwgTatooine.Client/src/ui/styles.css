@@ -540,25 +540,25 @@ button.active {
 }
 
 .hud table,
-/* A level's con colour against the viewer's CL (content-levels.md § 6, crafting-catalog.md § 14.3). */
-.con-grey {
-  color: #9a9a9a;
+/*
+ * A level's con colour against the viewer's CL (data/content-level.ts; Loïc, 2026-10-26): green weaker, blue your level,
+ * yellow stronger but manageable, red too strong. The yellow is a lemon and the blue a sky blue, so neither reads as the
+ * amber --accent.
+ */
+.con-green {
+  color: #62d26f;
 }
 
-.con-green {
-  color: #6fd36f;
+.con-blue {
+  color: #5aaeff;
 }
 
 .con-yellow {
-  color: #e8d44d;
-}
-
-.con-orange {
-  color: #f0963c;
+  color: #f5e642;
 }
 
 .con-red {
-  color: #f05a4a;
+  color: #ff5a4f;
 }
 
 .inspector table {
@@ -929,6 +929,17 @@ button.active {
 .missions-table td.num {
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+/* "Show all": an offer out of the viewer's reach is listed dimmed, its level still in its con colour. */
+.missions-table tr.out-of-reach {
+  opacity: 0.55;
+}
+
+.missions-filter {
+  margin-top: 6px;
+  align-items: center;
+  gap: 8px;
 }
 
 .journal-row {

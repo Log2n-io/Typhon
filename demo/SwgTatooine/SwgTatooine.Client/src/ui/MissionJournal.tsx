@@ -1,5 +1,7 @@
+import { conClass, viewerClOf } from '../data/content-level';
 import { formatMissionDistance, MAX_MISSIONS, missionTitle, OCTANT_NAMES } from '../data/missions';
 import { useMissions } from '../state/mission-store';
+import { useStats } from '../state/stats-store';
 
 /**
  * The mission journal (missions.md § 5): the missions this character holds, each cancellable. Opened from the bottom-right
@@ -16,6 +18,7 @@ export function MissionJournalPanel() {
   const cancel = useMissions((s) => s.cancel);
   const cancelling = useMissions((s) => s.cancelling);
   const close = useMissions((s) => s.closeJournal);
+  const viewerCl = useStats((s) => viewerClOf(s.stats?.vitals?.level));
   if (!open) {
     return null;
   }
@@ -40,8 +43,8 @@ export function MissionJournalPanel() {
             <div className="journal-main">
               <div className="journal-title">{missionTitle(m.name)}</div>
               <div className="journal-meta">
-                Level {m.level} · {m.reward} cr · listed ≈ {formatMissionDistance(m.distanceM)}{' '}
-                {OCTANT_NAMES[m.octant] ?? '?'} of its terminal
+                <span className={conClass(m.level, viewerCl)}>Level {m.level}</span> · {m.reward} cr · listed ≈{' '}
+                {formatMissionDistance(m.distanceM)} {OCTANT_NAMES[m.octant] ?? '?'} of its terminal
                 {m.lair === null ? ' · lair moving…' : ''}
               </div>
             </div>

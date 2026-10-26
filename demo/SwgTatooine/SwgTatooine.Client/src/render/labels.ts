@@ -1,3 +1,4 @@
+import type { EntityTag } from '../data/content-level';
 import { CITIES, POIS } from '../data/world-data';
 import type { GroundSampler } from '../terrain/ground-sampler';
 import { projectToScreen, type ScreenPoint } from './view-math';
@@ -11,6 +12,20 @@ interface Label {
   /** Last written screen position, rounded: a style is written only when it changes. */
   px: number;
   py: number;
+}
+
+/**
+ * A name tag's text, in nodes: the name, then ` (CL 5)` with only `CL 5` in its con colour (Loïc, 2026-10-26). Each part
+ * is written only when it differs from what is shown.
+ */
+interface TagNodes {
+  readonly name: Text;
+  /** ` (`, the level, `)`: hidden for a tag without a level. */
+  readonly suffix: HTMLSpanElement;
+  readonly level: HTMLSpanElement;
+  shownName: string;
+  shownLevel: string;
+  shownClass: string;
 }
 
 /** Selection tag gap above its anchor — the top of the body's frame — CSS pixels. */
@@ -76,8 +91,10 @@ export class Labels {
   private readonly root: HTMLDivElement;
   private readonly places: Label[] = [];
   private readonly selection: Label;
+  private readonly selectionTag: TagNodes;
   /** What the pointer is over: the selection's tag, said the same way (Loïc, 2026-10-26), for what a click would select. */
   private readonly hover: Label;
+  private readonly hoverTag: TagNodes;
   /** The health bars, pooled: one element per bar ever shown at once, hidden when unused. */
   private readonly bars: Bar[] = [];
   private readonly screen: ScreenPoint = { x: 0, y: 0, w: 0 };
@@ -97,6 +114,8 @@ export class Labels {
     // Over the head: `updateSelection` is handed the body's top, so the lift is only the air between them.
     this.selection = this.create('', 'label label-selection', 0, 0, 0.25);
     this.hover = this.create('', 'label label-selection', 0, 0, 0.25);
+    this.selectionTag = Labels.createTag(this.selection.element);
+    this.hoverTag = Labels.createTag(this.hover.element);
   }
 
   /** Places every label for a view-projection matrix and a CSS viewport. */
@@ -135,7 +154,7 @@ export class Labels {
     height: number,
     x: number,
     z: number,
-    text: string,
+    tag: EntityTag,
     baseY: number,
   ): void {
     const label = this.selection;
@@ -143,8 +162,8 @@ export class Labels {
     const s = projectToScreen(matrix, x - originX, y, z - originZ, width, height, this.screen);
     // Behind the camera the projection is NaN: hidden, never written.
     const shown = Number.isFinite(s.x);
-    if (shown && label.element.textContent !== text) {
-      label.element.textContent = text;
+    if (shown) {
+      Labels.writeTag(this.selectionTag, tag);
     }
 
     this.place(label, shown, s.x, s.y - SELECTION_OFFSET_PX);
@@ -154,11 +173,9 @@ export class Labels {
    * The selection's tag, its bottom centre at a point on screen: over the top edge of the body's frame, which is where
    * the body is drawn whatever its height and distance.
    */
-  placeSelection(x: number, y: number, text: string): void {
+  placeSelection(x: number, y: number, tag: EntityTag): void {
     const label = this.selection;
-    if (label.element.textContent !== text) {
-      label.element.textContent = text;
-    }
+    Labels.writeTag(this.selectionTag, tag);
 
     this.place(label, true, x, y - SELECTION_OFFSET_PX);
   }
@@ -168,11 +185,9 @@ export class Labels {
   }
 
   /** The hovered thing's tag, placed as {@link placeSelection} places the selection's: over the top edge of its frame. */
-  placeHover(x: number, y: number, text: string): void {
+  placeHover(x: number, y: number, tag: EntityTag): void {
     const label = this.hover;
-    if (label.element.textContent !== text) {
-      label.element.textContent = text;
-    }
+    Labels.writeTag(this.hoverTag, tag);
 
     this.place(label, true, x, y - SELECTION_OFFSET_PX);
   }
@@ -297,6 +312,39 @@ export class Labels {
       label.px = px;
       label.py = py;
       label.element.style.transform = `translate(${px}px, ${py}px)`;
+    }
+  }
+
+  /** Builds a tag's nodes into an empty label: the name, and a hidden ` (CL n)`. */
+  private static createTag(element: HTMLDivElement): TagNodes {
+    const name = document.createTextNode('');
+    const suffix = document.createElement('span');
+    const level = document.createElement('span');
+    suffix.append(' (', level, ')');
+    suffix.style.display = 'none';
+    element.append(name, suffix);
+    return { name, suffix, level, shownName: '', shownLevel: '', shownClass: '' };
+  }
+
+  private static writeTag(nodes: TagNodes, tag: EntityTag): void {
+    if (nodes.shownName !== tag.name) {
+      nodes.shownName = tag.name;
+      nodes.name.data = tag.name;
+    }
+
+    if (nodes.shownLevel !== tag.level) {
+      if ((nodes.shownLevel === '') !== (tag.level === '')) {
+        nodes.suffix.style.display = tag.level === '' ? 'none' : '';
+      }
+
+      nodes.shownLevel = tag.level;
+      nodes.level.textContent = tag.level;
+    }
+
+    const css = tag.con === null ? '' : `con-${tag.con}`;
+    if (nodes.shownClass !== css) {
+      nodes.shownClass = css;
+      nodes.level.className = css;
     }
   }
 

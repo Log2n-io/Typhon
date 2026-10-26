@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { entityTag, tagText } from '../src/data/content-level';
 import { LevelWatch, inspectorTitle, levelTitle, xpPercent } from '../src/data/progress';
 
 describe('xpPercent', () => {
@@ -62,15 +63,26 @@ describe('LevelWatch', () => {
 });
 
 describe('inspectorTitle', () => {
-  it('titles a player with a character level "Player · CL n"', () => {
-    expect(inspectorTitle('Player #12', 'Player', 4)).toBe('Player · CL 4');
+  it('titles a player with a character level "Player (CL n)", the level in its con colour', () => {
+    const title = inspectorTitle('Player #12', 'Player', 4, 4);
+    expect(tagText(title)).toBe('Player (CL 4)');
+    expect(title.con).toBe('blue');
   });
 
   it('keeps the plain title for the crowd, which has no level', () => {
-    expect(inspectorTitle('Player #12', 'Player', 0)).toBe('Player #12');
+    const title = inspectorTitle('Player #12', 'Player', 0, 4);
+    expect(tagText(title)).toBe('Player #12');
+    expect(title.con).toBeNull();
   });
 
-  it('adds a content level to anything else that carries one', () => {
-    expect(inspectorTitle('Creature #3', 'Creature', 12)).toBe('Creature #3 · L 12');
+  it('adds a content level to anything else that carries one, said as its name tag is', () => {
+    const title = inspectorTitle('Creature #3', 'Creature', 12, 4);
+    expect(tagText(title)).toBe('Creature #3 (CL 12)');
+    expect(title).toEqual(entityTag('Creature #3', 12, 4));
+    expect(title.con).toBe('red');
+  });
+
+  it('leaves the level uncoloured without a viewer CL', () => {
+    expect(inspectorTitle('Creature #3', 'Creature', 12, null).con).toBeNull();
   });
 });

@@ -3,6 +3,8 @@
  * level-up line, and the inspector's title.
  */
 
+import { entityTag, type EntityTag } from './content-level';
+
 /** The highest combat level. */
 export const MAX_LEVEL = 50;
 
@@ -59,11 +61,11 @@ export class LevelWatch {
   }
 }
 
-/** The inspector's title for an entity: "Player · CL 4" for a body with a character level, "… · L 12" for levelled content, the plain title otherwise. */
-export function inspectorTitle(title: string, archetype: string, level: number): string {
-  if (!Number.isFinite(level) || level <= 0) {
-    return title;
-  }
-
-  return archetype === 'Player' ? `Player · CL ${level}` : `${title} · L ${level}`;
+/**
+ * The inspector's title for an entity, said as its name tag is (Loïc, 2026-10-26): "Player (CL 4)" for a body with a
+ * character level, "Creature #3 (CL 12)" for levelled content, the plain title otherwise — the crowd's, at level 0.
+ */
+export function inspectorTitle(title: string, archetype: string, level: number, viewerCl: number | null): EntityTag {
+  const levelled = Number.isFinite(level) && level > 0;
+  return entityTag(levelled && archetype === 'Player' ? 'Player' : title, level, viewerCl);
 }

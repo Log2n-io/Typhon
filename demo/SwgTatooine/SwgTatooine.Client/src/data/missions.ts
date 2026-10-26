@@ -1,3 +1,5 @@
+import { offerInReach } from './content-level';
+
 /**
  * Missions as a client sees them (claude/design/SwgTatooine/design/missions.md): a terminal's offers, replicated, and the
  * missions this character holds — its journal — read over HTTP.
@@ -96,6 +98,23 @@ export function sortOffers(offers: readonly MissionOffer[], by: OfferSort, desce
   return [...offers].sort((a, b) => sign * primary(a, b) || b.reward - a.reward || a.serial - b.serial);
 }
 
+/**
+ * What a terminal lists (Loïc, 2026-10-26): by default only the offers within reach of the viewer's CL
+ * ({@link offerInReach}); with "Show all", every one. `hidden` is how many the default leaves out.
+ */
+export function listedOffers(
+  offers: readonly MissionOffer[],
+  viewerCl: number | null,
+  showAll: boolean,
+): { readonly rows: readonly MissionOffer[]; readonly hidden: number } {
+  if (showAll) {
+    return { rows: offers, hidden: 0 };
+  }
+
+  const rows = offers.filter((o) => offerInReach(o.level, viewerCl));
+  return { rows, hidden: offers.length - rows.length };
+}
+
 /** A refusal of a take or a cancel, as the server's ACKS reasons name them (`TatooineReplication.MissionTaken` …). */
 export const MISSION_REASONS: Readonly<Record<number, string>> = {
   137: 'You are down and cannot take a mission',
@@ -105,6 +124,8 @@ export const MISSION_REASONS: Readonly<Record<number, string>> = {
   141: 'That mission is not yours',
   142: 'You are not in the world',
   149: 'The server could not apply it — nothing changed, try again',
+  // PLACEHOLDER code (2026-10-26): the take refused above CL + 3 is being added server-side; reconcile with its constant.
+  150: 'That mission is above your level',
 };
 
 /**
