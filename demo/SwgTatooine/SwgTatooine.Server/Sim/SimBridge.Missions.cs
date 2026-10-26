@@ -130,6 +130,7 @@ public sealed partial class SimBridge
         using var tx = ctx.CreateSideTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit);
         var tick0 = ctx.Transaction;
         _deskWorldTick = ctx.WorldTick;
+        BeginDeskProgress();
         _deskCompleted.Clear();
         _takesApplied.Clear();
         _cancelsApplied.Clear();
@@ -167,6 +168,7 @@ public sealed partial class SimBridge
         // missions still stand, and pays them on the next pass. Its takes and cancels are refused, so their clients hear it.
         var committed = tx.Commit();
         EndDeskEconomy(tick0, committed);
+        RefreshDeskProgress(tick0, committed);
         if (!committed)
         {
             _deskLoaded = false;
@@ -397,6 +399,8 @@ public sealed partial class SimBridge
                 // Paid in this transaction, and ended in it only if paid: a holder whose wallet opens on the next tick is paid by the next pass.
                 if (Reward(tx, m.Holder, body, id, m.Reward, _deskWorldTick))
                 {
+                    // Its XP with its reward, in this transaction: both or neither (character-level.md § 5).
+                    GrantMissionXp(tx, m.Holder, body, m.Level);
                     EndMission(tx, i, in m, completed: true);
                     _deskCompleted.Add((m.Holder, body, id, m.Kind, m.Reward));
                 }

@@ -116,7 +116,7 @@ public struct MissionOfferRealm
 /// dropped the holder's kind and the crowd's expiry with it.
 /// </para>
 /// </remarks>
-[Component("Swg.HeldMission", 2, StorageMode = StorageMode.Versioned)]
+[Component("Swg.HeldMission", 3, StorageMode = StorageMode.Versioned)]
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public struct HeldMission
 {
@@ -129,6 +129,9 @@ public struct HeldMission
     [Field] public byte Difficulty;
 
     [Field] public byte Octant;
+
+    /// <summary>The offer's level: every lair this mission draws is spawned at it, wherever it stands, because the mission promised it.</summary>
+    [Field] public byte Level;
 
     [Field] public int DistanceM;
 

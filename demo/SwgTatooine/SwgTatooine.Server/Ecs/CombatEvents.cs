@@ -53,6 +53,13 @@ internal struct CombatEvent
 
     /// <summary>Which archetype <see cref="Target"/> belongs to. See <see cref="CombatTargetKind"/>.</summary>
     public byte TargetKind;
+
+    /// <summary>
+    /// The attacker's level, for the B4 level factor the drain applies to <see cref="Amount"/> (character-level.md § 6): a character's CL, a creature's content
+    /// level, <see cref="TatooineData.CrowdLevel"/> for a scripted body; 0 for none, which scales nothing.
+    /// </summary>
+    /// <remarks>Carried, so the drain opens no extra entity: it has the target open already and reads its level there. In the padding: still 24 bytes.</remarks>
+    public byte AttackerLevel;
 }
 
 /// <summary>What a <see cref="CombatEvent"/> is.</summary>

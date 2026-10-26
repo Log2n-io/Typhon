@@ -471,6 +471,12 @@ public static class TatooineData
     /// same reason. Drawn from per lair, as a region's are.
     /// </summary>
     public static readonly int[] PoiLairTemplates = [CreatureTemplates.Ninja, CreatureTemplates.SandNinja, CreatureTemplates.Soldier];
+
+    /// <summary>
+    /// The level the scripted crowd counts as (content-levels.md § 5): its 1 400 hp is CL 10 health and its 95 damage per randomised delay about CL 10
+    /// on-band DPS. It fights only lairs and creatures at or below it — the city fringes — and the B4 level factor reads it for a scripted body.
+    /// </summary>
+    public const int CrowdLevel = 10;
 }
 
 /// <summary>

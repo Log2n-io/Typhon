@@ -39,6 +39,7 @@ public sealed partial class TatooineSim
         EconomyEndpoints.CrowdJson = () => _bridge?.CrowdCountersJson() ?? "{}";
         EconomyEndpoints.DemoJson = () => _bridge?.DemoStatsJson() ?? "{}";
         TatooineHost.DashboardPort = _config.DashboardPort;
+        Console.WriteLine($"progression: XP table from the model, CL 50 at {Progression.MaxXp:N0} XP; --xp-rate {_config.XpRatePercent} %");
         StartReplication(shapes);
         try
         {
@@ -59,6 +60,7 @@ public sealed partial class TatooineSim
             PrintProximityReport();
             Console.WriteLine($"  economy: {_bridge?.EconomyCountersJson() ?? "{}"}");
             Console.WriteLine($"  crowd: {_bridge?.CrowdCountersJson() ?? "{}"}");
+            Console.WriteLine($"  progression: kill queue overflow xp {KillXpOverflow}, loot {KillLootOverflow}");
             EconomyEndpoints.CountersJson = null;
             EconomyEndpoints.CrowdJson = null;
             EconomyEndpoints.DemoJson = null;

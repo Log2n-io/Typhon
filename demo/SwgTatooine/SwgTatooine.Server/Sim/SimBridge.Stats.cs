@@ -67,10 +67,28 @@ internal sealed class RateWindow
     }
 }
 
-/// <summary>Who drives the players, counted once a second: the scripted crowd, the bots, the people — and where the bots are.</summary>
-internal sealed record PopulationCensus(int Crowd, int Bots, int People, int BotsIndoors, int[] BotsByCity)
+/// <summary>
+/// Who drives the players, counted once a second: the scripted crowd, the bots, the people — and where the bots are; the people's and the bots' combat levels
+/// by band of ten (1-10 … 41-50), and the sum of each group's levels.
+/// </summary>
+internal sealed record PopulationCensus(
+    int Crowd,
+    int Bots,
+    int People,
+    int BotsIndoors,
+    int[] BotsByCity,
+    int[] PeopleByBand,
+    int[] BotsByBand,
+    long PeopleLevels,
+    long BotLevels)
 {
-    public static PopulationCensus None { get; } = new(0, 0, 0, 0, []);
+    /// <summary>Bands of ten levels, 1-10 to 41-50.</summary>
+    public const int Bands = 5;
+
+    public static PopulationCensus None { get; } = new(0, 0, 0, 0, [], new int[Bands], new int[Bands], 0, 0);
+
+    /// <summary>The band of a combat level: 0 for 1-10, 4 for 41-50.</summary>
+    public static int BandOf(int level) => Math.Clamp((level - 1) / 10, 0, Bands - 1);
 }
 
 /// <summary>
@@ -93,7 +111,10 @@ public sealed partial class SimBridge
     private const int SeriesMissionsCompleted = 6;
     private const int SeriesMissionsCancelled = 7;
     private const int SeriesLairHits = 8;
-    private const int SeriesCount = 9;
+    private const int SeriesXpKills = 9;
+    private const int SeriesXpMissions = 10;
+    private const int SeriesLevelUps = 11;
+    private const int SeriesCount = 12;
 
     /// <summary>The cities as a person sees them named, index for index with the server's map (world-data.ts: Port Sable is Mos Eisley, …).</summary>
     private static readonly string[] CityDisplayNames = ["Port Sable", "Whitestone", "Dry Wells", "Red Mesa", "Tern's Rest", "Tallow", "Far Reach"];
@@ -127,6 +148,9 @@ public sealed partial class SimBridge
         values[SeriesMissionsCompleted] = Interlocked.Read(ref _missionsCompletedTotal);
         values[SeriesMissionsCancelled] = Interlocked.Read(ref _missionsCancelledTotal);
         values[SeriesLairHits] = LairHitsTotal;
+        values[SeriesXpKills] = XpGrantedKills;
+        values[SeriesXpMissions] = XpGrantedMissions;
+        values[SeriesLevelUps] = LevelUps;
         _rates.Sample(System.Diagnostics.Stopwatch.GetElapsedTime(_statsStarted).TotalSeconds, values);
 
         Volatile.Write(ref _population, CountPopulation(tx));
@@ -136,6 +160,9 @@ public sealed partial class SimBridge
     {
         var cities = _index.Cities;
         var byCity = new int[cities.Count];
+        var peopleByBand = new int[PopulationCensus.Bands];
+        var botsByBand = new int[PopulationCensus.Bands];
+        long peopleLevels = 0, botLevels = 0;
         int crowd = 0, bots = 0, people = 0, indoors = 0;
         foreach (var cluster in tx.For<Player>().GetClusterEnumerator())
         {
@@ -152,13 +179,18 @@ public sealed partial class SimBridge
                     continue;
                 }
 
+                var level = Math.Max(1, (int)looks[slot].Level);
                 if (looks[slot].Bot == 0)
                 {
                     people++;
+                    peopleByBand[PopulationCensus.BandOf(level)]++;
+                    peopleLevels += level;
                     continue;
                 }
 
                 bots++;
+                botsByBand[PopulationCensus.BandOf(level)]++;
+                botLevels += level;
                 if (realm >= _config.Planets)
                 {
                     indoors++;
@@ -184,7 +216,7 @@ public sealed partial class SimBridge
             }
         }
 
-        return new PopulationCensus(crowd, bots, people, indoors, byCity);
+        return new PopulationCensus(crowd, bots, people, indoors, byCity, peopleByBand, botsByBand, peopleLevels, botLevels);
     }
 
     /// <summary><c>GET /swg/stats</c>: the economy and its rates, the missions, who is playing and where, the crowd's lair objectives.</summary>
@@ -244,6 +276,7 @@ public sealed partial class SimBridge
         Num(j, "heldInRange", ObjectivesHeldInRange).Append(',');
         Num(j, "outOfRange", ObjectivesOutOfRange).Append(',');
         Rate(j, "lairHitsPerSec", r10[SeriesLairHits], r60[SeriesLairHits], 1d);
+        AppendProgression(j, pop, r10, r60);
         return j.Append("}}").ToString();
 
         static StringBuilder Num(StringBuilder b, string name, long value)
@@ -252,5 +285,43 @@ public sealed partial class SimBridge
         static StringBuilder Rate(StringBuilder b, string name, double per10, double per60, double scale)
             => b.Append('"').Append(name).Append("\":{\"10s\":").Append((per10 * scale).ToString("0.##", CultureInfo.InvariantCulture))
                 .Append(",\"60s\":").Append((per60 * scale).ToString("0.##", CultureInfo.InvariantCulture)).Append('}');
+    }
+
+    /// <summary>
+    /// The <c>progression</c> section (character-level.md § 10): level-ups and XP by source, the gates that dropped a kill, the online combat levels by band,
+    /// and XP per character-hour against the model's <c>1 200 × mean CL</c> — the ratio is the tuning number.
+    /// </summary>
+    private void AppendProgression(StringBuilder j, PopulationCensus pop, ReadOnlySpan<double> r10, ReadOnlySpan<double> r60)
+    {
+        var inv = CultureInfo.InvariantCulture;
+        var characters = pop.People + pop.Bots;
+        var meanCl = characters == 0 ? 0d : (double)(pop.PeopleLevels + pop.BotLevels) / characters;
+        var perChar = characters == 0 ? 0d : 3600d / characters;
+        j.Append("},\"progression\":{");
+        j.Append("\"levelUps\":").Append(LevelUps.ToString(inv));
+        j.Append(",\"killXp\":").Append(XpGrantedKills.ToString(inv));
+        j.Append(",\"missionXp\":").Append(XpGrantedMissions.ToString(inv));
+        j.Append(",\"greyKills\":").Append(KillsGrey.ToString(inv));
+        j.Append(",\"crowdKills\":").Append(KillsByCrowd.ToString(inv));
+        j.Append(",\"noKillerKills\":").Append(KillsNoKiller.ToString(inv));
+        j.Append(",\"missionLairKills\":").Append(MissionLairKills.ToString(inv));
+        j.Append(",\"killsDrained\":").Append(KillsDrained.ToString(inv));
+        j.Append(",\"commitsFailed\":").Append(ProgressCommitsFailed.ToString(inv));
+        j.Append(",\"xpRatePercent\":").Append(XpRatePercent.ToString(inv));
+        j.Append(",\"bands\":{\"people\":[").AppendJoin(',', pop.PeopleByBand).Append("],\"bots\":[").AppendJoin(',', pop.BotsByBand).Append("]}");
+        j.Append(",\"meanCl\":{\"people\":").Append(Mean(pop.PeopleLevels, pop.People)).Append(",\"bots\":").Append(Mean(pop.BotLevels, pop.Bots)).Append('}');
+        j.Append(",\"xpPerCharHour\":{\"10s\":")
+            .Append(((r10[SeriesXpKills] + r10[SeriesXpMissions]) * perChar).ToString("0", inv))
+            .Append(",\"60s\":")
+            .Append(((r60[SeriesXpKills] + r60[SeriesXpMissions]) * perChar).ToString("0", inv))
+            .Append('}');
+        j.Append(",\"modelXpPerCharHour\":").Append((Progression.XpPerHourPerLevel * meanCl).ToString("0", inv));
+        j.Append(",\"levelUpsPerMin\":{\"10s\":")
+            .Append((r10[SeriesLevelUps] * 60d).ToString("0.##", inv))
+            .Append(",\"60s\":")
+            .Append((r60[SeriesLevelUps] * 60d).ToString("0.##", inv))
+            .Append('}');
+
+        string Mean(long sum, int count) => (count == 0 ? 0d : (double)sum / count).ToString("0.##", inv);
     }
 }

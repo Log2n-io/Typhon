@@ -720,11 +720,13 @@ public static partial class TatooineReplication
                 LastSavedUtcTicks = DateTime.UtcNow.Ticks,
             };
 
-            character = tx.Spawn<CharacterArch>(CharacterArch.Profile.Set(profile));
+            character = tx.Spawn<CharacterArch>(CharacterArch.Profile.Set(profile), CharacterArch.Progress.Set(CharacterProgress.Start));
             System.Threading.Interlocked.Increment(ref _charactersCreated);
         }
 
-        var avatar = SpawnAvatar(tx, session, in profile);
+        // Its level and XP, which its body carries: the level everyone reads, the health that level gives (character-level.md § 4).
+        var progress = ProgressOf(tx, character);
+        var avatar = SpawnAvatar(tx, session, in profile, in progress);
 
         // Control does both halves: it tells the engine which entity this session drives, and — with the AroundControlled player
         // profile — puts the session in that entity's realm and centres its sphere on it.
@@ -1097,7 +1099,7 @@ public static partial class TatooineReplication
     /// first step before its client had seen it, and a zero destination would send it to the planet's origin.
     /// </para>
     /// </remarks>
-    private static EntityId SpawnAvatar(Transaction tx, SessionId session, in Character profile)
+    private static EntityId SpawnAvatar(Transaction tx, SessionId session, in Character profile, in CharacterProgress progress)
     {
         var bounds = default(PlayerPlacement);
         bounds.SetAt(profile.LastPosition.X, profile.LastPosition.Z, profile.LastPosition.Y, TatooineData.PlayerBodyHalfM);
@@ -1126,10 +1128,12 @@ public static partial class TatooineReplication
             SwoopMps = SpeedFor(SpeedClasses.Swoop),
         };
 
+        // Its character's level's health (character-level.md § 1): 1 040 at CL 1, 1 400 at CL 10, the crowd's.
+        var health = Progression.HealthFor(progress.Level);
         var vitals = new PlayerVitals
         {
-            Health = AvatarMaxHealth,
-            MaxHealth = AvatarMaxHealth,
+            Health = health,
+            MaxHealth = health,
             AttackDamage = AvatarAttackDamage,
             AttackCooldown = 0,
         };
@@ -1142,7 +1146,14 @@ public static partial class TatooineReplication
         owner.Target = EntityId.Null;
 
         // What everyone draws this body in, and the name they read on it: the character's own, so every client — this one included — agrees.
-        var look = new PlayerLook { Outfit = profile.Outfit, NameId = PlayerNames.IdFor(profile.Name.AsString), Bot = AccountOf(tx, profile.Account).Bot };
+        var look = new PlayerLook
+        {
+            Outfit = profile.Outfit,
+            NameId = PlayerNames.IdFor(profile.Name.AsString),
+            Bot = AccountOf(tx, profile.Account).Bot,
+            Level = progress.Level,
+            Xp = Progression.XpByte(in progress),
+        };
 
         return tx.Spawn<Player>(
             Player.Bounds.Set(in bounds),
@@ -1155,8 +1166,23 @@ public static partial class TatooineReplication
             Player.Realm.Set(new PlayerRealm(profile.LastRealm)));
     }
 
-    /// <summary>An avatar's health. The pooled crowd's 1400, so a human is neither tougher nor more fragile than the world it is in.</summary>
-    private const int AvatarMaxHealth = 1400;
+    /// <summary>
+    /// A character's level and XP, read where its body is spawned; <see cref="CharacterProgress.Start"/> for one that has none, which a created character
+    /// never is.
+    /// </summary>
+    internal static CharacterProgress ProgressOf(Transaction tx, EntityId character)
+    {
+        if (tx.TryOpen(character, out var entity))
+        {
+            var progress = entity.Read(CharacterArch.Progress);
+            if (progress.Level != 0)
+            {
+                return progress;
+            }
+        }
+
+        return CharacterProgress.Start;
+    }
 
     /// <summary>An avatar's attack damage, matching the pooled crowd's.</summary>
     private const int AvatarAttackDamage = 95;
