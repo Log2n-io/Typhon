@@ -2430,6 +2430,10 @@ public sealed class BotSwarm : IAsyncDisposable
         private bool _itemsPrimed;
         private readonly bool _takesMissions;
         private long _stanceAskedAt = long.MinValue / 2;
+
+        /// <summary>The target last named, and when: an attack re-names it only when it changes, or every two seconds in case the server let it go.</summary>
+        private uint _targetNamed;
+        private long _targetNamedAt = long.MinValue / 2;
         private readonly HashSet<string> _missionsSeen = [];
         private readonly HashSet<string> _completedSeen = [];
 
@@ -2763,11 +2767,34 @@ public sealed class BotSwarm : IAsyncDisposable
                     break;
 
                 case IntentKind.Attack when Client.Plan.CommandByName(SetTargetCommand) != null:
-                    await Client.SendCommandAsync(
-                        SetTargetCommand,
-                        new RecordValues { ["netId"] = FieldValue.Of((double)intent.NetId) },
-                        ct).ConfigureAwait(false);
-                    IntentsSent++;
+                    if (intent.NetId != _targetNamed || tick - _targetNamedAt >= 8)
+                    {
+                        _targetNamed = intent.NetId;
+                        _targetNamedAt = tick;
+                        await Client.SendCommandAsync(
+                            SetTargetCommand,
+                            new RecordValues { ["netId"] = FieldValue.Of((double)intent.NetId) },
+                            ct).ConfigureAwait(false);
+                        IntentsSent++;
+                    }
+
+                    // The motion the attack carries — towards, stand, or away (BotBrain.Engage). Without it the body ran on with its last MoveDir.
+                    if (Client.Plan.CommandByName(MoveDirCommand) != null)
+                    {
+                        await Client.SendCommandAsync(
+                            MoveDirCommand,
+                            new RecordValues
+                            {
+                                ["heading"] = FieldValue.Of((double)intent.Heading),
+                                ["speedClass"] = FieldValue.Of((double)intent.SpeedClass),
+                                ["changePhase"] = FieldValue.Of(0.0),
+                                ["boost"] = FieldValue.Of(1.0),
+                                ["throttle"] = FieldValue.Of(0.0),
+                            },
+                            ct).ConfigureAwait(false);
+                        IntentsSent++;
+                    }
+
                     break;
 
                 case IntentKind.MoveTo when Client.Plan.CommandByName(MoveToCommand) != null:

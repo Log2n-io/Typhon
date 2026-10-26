@@ -86,8 +86,14 @@ public sealed class BotBrain
     /// </remarks>
     public const float NoticeM = 120f;
 
-    /// <summary>How close a bot gets before attacking, in metres — inside the server's own weapon reach.</summary>
+    /// <summary>How close a bot gets before attacking, in metres — inside the server's own weapon reach (the pistol's 30 m, edge to edge).</summary>
     public const float StrikeM = 20f;
+
+    /// <summary>
+    /// How near a creature may come before the bot backs off, in metres: its bite reaches 6 m and it closes at 2-4 m/s, so this leaves two seconds of
+    /// shooting before it could strike. A bot runs at 10 m/s, so it always opens the gap again: it kites (Loïc, 2026-10-26).
+    /// </summary>
+    public const float KiteM = 12f;
 
     /// <summary>How long an idle lasts, in SECONDS, before the bot decides again.</summary>
     /// <remarks>
@@ -585,16 +591,37 @@ public sealed class BotBrain
             return Choose(in world, tick);
         }
 
-        if (world.NearestCreatureM > StrikeM)
+        // Attacking is naming a target and letting the server's combat path resolve it, which is exactly what a browser
+        // does — there is no attack command, and that is the point. Where to stand while it does is Engage's.
+        return Engage(world.X, world.Z, world.NearestCreature, world.NearestCreatureX, world.NearestCreatureZ, world.NearestCreatureM, mobile: true);
+    }
+
+    /// <summary>
+    /// How a bot fights a target at <paramref name="distanceM"/>: closes in past <see cref="StrikeM"/>, stands and shoots between the two, and — a
+    /// creature, which bites — runs from it inside <see cref="KiteM"/>, still shooting. A lair does not move or bite: the bot stands at its range.
+    /// </summary>
+    /// <param name="x">The bot, east.</param>
+    /// <param name="z">The bot, north.</param>
+    /// <param name="target">The target's netId.</param>
+    /// <param name="tx">The target, east.</param>
+    /// <param name="tz">The target, north.</param>
+    /// <param name="distanceM">Between the two.</param>
+    /// <param name="mobile">Whether the target chases and bites (a creature), rather than stands (a lair).</param>
+    /// <returns>An attack carrying its motion: towards, none, or away.</returns>
+    public static Intent Engage(float x, float z, uint target, float tx, float tz, float distanceM, bool mobile)
+    {
+        var run = Routing.SpeedClassOf(TravelMode.Run);
+        if (distanceM > StrikeM)
         {
-            return Intent.Move(
-                Routing.HeadingTo(world.X, world.Z, world.NearestCreatureX, world.NearestCreatureZ),
-                Routing.SpeedClassOf(TravelMode.Run));
+            return Intent.Attack(target, Routing.HeadingTo(x, z, tx, tz), run);
         }
 
-        // In range. Attacking is naming a target and letting the server's combat path resolve it, which is exactly what
-        // a browser does — there is no attack command, and that is the point.
-        return Intent.Attack(world.NearestCreature);
+        if (mobile && distanceM < KiteM)
+        {
+            return Intent.Attack(target, Routing.HeadingTo(tx, tz, x, z), run);
+        }
+
+        return Intent.Attack(target);
     }
 
     /// <summary>Goes to the target city by the mode the route chose.</summary>
@@ -774,17 +801,13 @@ public sealed class BotBrain
         _leg.Clear();
         if (world.MissionLair != 0 && world.MissionLairGuards == 0)
         {
-            return toLair > StrikeM
-                ? Intent.Move(Routing.HeadingTo(world.X, world.Z, world.MissionLairX, world.MissionLairZ), Routing.SpeedClassOf(TravelMode.Run))
-                : Intent.Attack(world.MissionLair);
+            return Engage(world.X, world.Z, world.MissionLair, world.MissionLairX, world.MissionLairZ, (float)toLair, mobile: false);
         }
 
         if (world.NearestCreature != 0
             && Routing.Distance(world.NearestCreatureX, world.NearestCreatureZ, world.MissionLairX, world.MissionLairZ) <= DefenderM)
         {
-            return world.NearestCreatureM > StrikeM
-                ? Intent.Move(Routing.HeadingTo(world.X, world.Z, world.NearestCreatureX, world.NearestCreatureZ), Routing.SpeedClassOf(TravelMode.Run))
-                : Intent.Attack(world.NearestCreature);
+            return Engage(world.X, world.Z, world.NearestCreature, world.NearestCreatureX, world.NearestCreatureZ, world.NearestCreatureM, mobile: true);
         }
 
         // Nothing to shoot in view yet: close on the lair.

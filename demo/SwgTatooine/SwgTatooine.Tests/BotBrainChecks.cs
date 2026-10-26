@@ -69,20 +69,57 @@ public sealed class BotBrainChecks
         Assert.Multiple(() =>
         {
             Assert.That(brain.Goal, Is.EqualTo(Goal.Hunting), "a creature in view did not become a hunt");
-            Assert.That(approach.Kind, Is.EqualTo(IntentKind.Move), "a creature 50 m away was attacked rather than approached");
+            Assert.That(approach.Kind, Is.EqualTo(IntentKind.Attack), "a creature 50 m away was not named while closing in");
+            Assert.That(approach.SpeedClass, Is.EqualTo(Routing.SpeedClassOf(TravelMode.Run)), "a creature 50 m away was not run at");
 
             // The server's convention: 0 along +X, measured toward +Z, so the arguments to Atan2 are (dz, dx).
             Assert.That(approach.Heading, Is.EqualTo(MathF.Atan2(40f, 30f)).Within(0.001f), "the heading does not point at the creature");
             Assert.That(approach.Heading, Is.EqualTo(0.9273f).Within(0.001f), "the heading is not the angle a 3-4-5 triangle makes");
         });
 
-        var close = Empty(0f, 90f) with { NearestCreature = 99u, NearestCreatureX = 0f, NearestCreatureZ = 100f, NearestCreatureM = 10f };
+        var close = Empty(0f, 85f) with { NearestCreature = 99u, NearestCreatureX = 0f, NearestCreatureZ = 100f, NearestCreatureM = 15f };
         var attack = brain.Decide(in close, 2);
 
         Assert.Multiple(() =>
         {
             Assert.That(attack.Kind, Is.EqualTo(IntentKind.Attack), "a creature within reach was not attacked");
             Assert.That(attack.NetId, Is.EqualTo(99u), "the wrong entity was named");
+            Assert.That(attack.SpeedClass, Is.EqualTo((byte)0), "a bot in reach of a creature did not stand to shoot");
+        });
+    }
+
+    /// <summary>
+    /// A bot fights at range (Loïc, 2026-10-26: "they should kite"): it closes in past <see cref="BotBrain.StrikeM"/>, stands and shoots between that
+    /// and <see cref="BotBrain.KiteM"/>, and runs from a creature that comes nearer, still shooting; a lair, which neither moves nor bites, it stands at.
+    /// </summary>
+    [Test]
+    public void ABotKitesACreature_AndStandsAtALair()
+    {
+        var run = Routing.SpeedClassOf(TravelMode.Run);
+
+        // A 3-4-5 triangle again, so a mirrored or negated heading cannot pass: the target 3 east and 4 north of the bot, scaled.
+        var toward = BotBrain.Engage(0f, 0f, 7u, 18f, 24f, 30f, mobile: true);
+        var stand = BotBrain.Engage(0f, 0f, 7u, 9f, 12f, 15f, mobile: true);
+        var away = BotBrain.Engage(0f, 0f, 7u, 3f, 4f, 5f, mobile: true);
+        var lairNear = BotBrain.Engage(0f, 0f, 8u, 3f, 4f, 5f, mobile: false);
+        var lairFar = BotBrain.Engage(0f, 0f, 8u, 18f, 24f, 30f, mobile: false);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(toward.Kind, Is.EqualTo(IntentKind.Attack));
+            Assert.That(toward.NetId, Is.EqualTo(7u), "closing in did not name the target");
+            Assert.That(toward.SpeedClass, Is.EqualTo(run), "a target past strike range was not run at");
+            Assert.That(toward.Heading, Is.EqualTo(MathF.Atan2(4f, 3f)).Within(0.001f), "closing in did not head for the target");
+
+            Assert.That(stand.SpeedClass, Is.EqualTo((byte)0), "a creature between kite and strike range was not stood and shot at");
+            Assert.That(stand.NetId, Is.EqualTo(7u));
+
+            Assert.That(away.SpeedClass, Is.EqualTo(run), "a creature inside kite range was not run from");
+            Assert.That(away.Heading, Is.EqualTo(MathF.Atan2(-4f, -3f)).Within(0.001f), "kiting did not head straight away from the creature");
+            Assert.That(away.NetId, Is.EqualTo(7u), "kiting let go of the target");
+
+            Assert.That(lairNear.SpeedClass, Is.EqualTo((byte)0), "a bot ran from a lair, which does not bite");
+            Assert.That(lairFar.SpeedClass, Is.EqualTo(run), "a lair past strike range was not closed on");
         });
     }
 

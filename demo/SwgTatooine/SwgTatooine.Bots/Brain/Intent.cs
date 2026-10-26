@@ -78,10 +78,16 @@ public readonly record struct Intent(IntentKind Kind, float Heading, byte SpeedC
     /// <returns>The intent.</returns>
     public static Intent Move(float heading, byte speedClass) => new(IntentKind.Move, heading, speedClass, 0, 0);
 
-    /// <summary>Attack an entity, or 0 to stop attacking.</summary>
+    /// <summary>Attack an entity, or 0 to stop attacking, and move while doing it: on a heading at a speed class, or stand (class 0).</summary>
+    /// <remarks>
+    /// <b>The motion travels with the target.</b> Naming a target moves nothing, and the body keeps the last <c>MoveDir</c> it was given: an attack that
+    /// carried no motion left a bot running on through its target and back, all fight long (Loïc, 2026-10-26). So every attack says how to move too.
+    /// </remarks>
     /// <param name="netId">The target.</param>
+    /// <param name="heading">Radians, when <paramref name="speedClass"/> is not 0.</param>
+    /// <param name="speedClass">A class the server grants, or 0 to stand.</param>
     /// <returns>The intent.</returns>
-    public static Intent Attack(uint netId) => new(IntentKind.Attack, 0f, 0, netId, 0);
+    public static Intent Attack(uint netId, float heading = 0f, byte speedClass = 0) => new(IntentKind.Attack, heading, speedClass, netId, 0);
 
     /// <summary>Take a mission at the terminal it stands at.</summary>
     public static Intent TakeMission => new(IntentKind.TakeMission, 0f, 0, 0, 0);
