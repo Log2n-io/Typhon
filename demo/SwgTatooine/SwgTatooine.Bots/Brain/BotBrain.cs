@@ -138,7 +138,7 @@ public sealed partial class BotBrain
     /// A walk's first point within this of the body, and behind it on the way to the next, is passed at once, metres: the open cell a search starts
     /// from when the body stands in a wall's margin, which can lie behind it.
     /// </summary>
-    /// <remarks>Walked to, every walk planned from against a wall began by stepping back — and every re-plan from there did it again (live, 2026-10-27).</remarks>
+    /// <remarks>Walked to, every walk planned from against a wall began by stepping back, and every re-plan from there again (live, 2026-10-27).</remarks>
     public const double StepOutM = 1.5d;
 
     /// <summary>A searched path's point counts as reached this close, metres.</summary>
