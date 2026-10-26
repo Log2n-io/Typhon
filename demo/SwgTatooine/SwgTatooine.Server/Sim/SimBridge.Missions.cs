@@ -132,6 +132,8 @@ public sealed partial class SimBridge
         var tick0 = ctx.Transaction;
         _deskWorldTick = ctx.WorldTick;
         BeginDeskProgress();
+        _deskCounts = default;
+        _deskLairOps.Clear();
         _deskCompleted.Clear();
         _takesApplied.Clear();
         _cancelsApplied.Clear();
@@ -174,6 +176,9 @@ public sealed partial class SimBridge
         RefreshDeskProgress(ctx, committed);
         if (!committed)
         {
+            // Nothing it did happened: its counts and its lairs' index entries go with it, and the retry counts them once (review 4, L2).
+            _deskCounts = default;
+            _deskLairOps.Clear();
             _deskLoaded = false;
             _deskWrites = 0;
             foreach (var command in _takesApplied)
@@ -189,6 +194,7 @@ public sealed partial class SimBridge
             return;
         }
 
+        PublishDeskCounts();
         foreach (var (holder, body, mission, kind, level, reward) in _deskCompleted)
         {
             Interlocked.Increment(ref _missionRewards);
@@ -209,6 +215,57 @@ public sealed partial class SimBridge
             Interlocked.Add(ref _missionEntities, _deskWrites);
             _deskWrites = 0;
         }
+    }
+
+    /// <summary>
+    /// What one desk transaction did, counted as it goes and published only once it commits (review 4, L2): a failed commit is retried on the next pass,
+    /// and counting before the commit counted its completions twice — <c>missions.completed</c> drifting from <c>economy.rewardsPaid</c>, which is counted
+    /// on commit.
+    /// </summary>
+    private struct DeskCounts
+    {
+        public long Issued;
+        public long Taken;
+        public long Completed;
+        public long Abandoned;
+        public long Cancelled;
+        public long OffersListed;
+        public long LairsDrawn;
+        public long LairsRedrawn;
+    }
+
+    private DeskCounts _deskCounts;
+
+    // The mission lairs this desk transaction spawned (true) and destroyed (false), in order, applied to the planet's lair index only once it commits.
+    private readonly List<(ushort Realm, EntityId Lair, bool Added)> _deskLairOps = [];
+
+    /// <summary>Publishes a committed desk transaction's counts and its lairs' index entries.</summary>
+    private void PublishDeskCounts()
+    {
+        Interlocked.Add(ref _missionsIssued, _deskCounts.Issued);
+        Interlocked.Add(ref _missionsTakenTotal, _deskCounts.Taken);
+        Interlocked.Add(ref _missionsCompleted, _deskCounts.Completed);
+        Interlocked.Add(ref _missionsCompletedTotal, _deskCounts.Completed);
+        Interlocked.Add(ref _missionsAbandoned, _deskCounts.Abandoned);
+        Interlocked.Add(ref _missionsCancelledTotal, _deskCounts.Cancelled);
+        Interlocked.Add(ref _missionOffersListed, _deskCounts.OffersListed);
+        Interlocked.Add(ref _missionLairsDrawn, _deskCounts.LairsDrawn);
+        Interlocked.Add(ref _missionLairsRedrawn, _deskCounts.LairsRedrawn);
+        _deskCounts = default;
+
+        foreach (var (realm, lair, added) in _deskLairOps)
+        {
+            if (added)
+            {
+                PlanetIndexes[realm].Lairs.Add(lair);
+            }
+            else
+            {
+                PlanetIndexes[realm].Lairs.Remove(lair);
+            }
+        }
+
+        _deskLairOps.Clear();
     }
 
     // ── Loading ─────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -420,7 +477,7 @@ public sealed partial class SimBridge
                 m.Lair = EntityId.Null;
                 if (TryDrawLair(tx, id, ref m, body, tick))
                 {
-                    Interlocked.Increment(ref _missionLairsRedrawn);
+                    _deskCounts.LairsRedrawn++;
                 }
 
                 tx.OpenMut(id).Set(HeldMissionArch.Mission, m);
@@ -531,7 +588,7 @@ public sealed partial class SimBridge
                 MissionOffer.Realm.Set(new MissionOfferRealm(terminal.Realm)));
             expire = info.ExpireTick;
             _deskWrites++;
-            Interlocked.Increment(ref _missionOffersListed);
+            _deskCounts.OffersListed++;
             return true;
         }
 
@@ -660,8 +717,8 @@ public sealed partial class SimBridge
         _deskWrites++;
         _held.Add(id);
         CountHolder(holder, +1);
-        Interlocked.Increment(ref _missionsIssued);
-        Interlocked.Increment(ref _missionsTakenTotal);
+        _deskCounts.Issued++;
+        _deskCounts.Taken++;
 
         // The lair now, while its holder is here. One that cannot be placed this tick is drawn by the next pass.
         if (TryDrawLair(tx, id, ref m, body, tick))
@@ -717,13 +774,12 @@ public sealed partial class SimBridge
         {
             // Its lair's KillEvent reaches Progression after this destroy: who held it is read here (character-level.md § 2, L3).
             _missionsEndedThisTick[id] = m.Holder;
-            Interlocked.Increment(ref _missionsCompleted);
-            Interlocked.Increment(ref _missionsCompletedTotal);
+            _deskCounts.Completed++;
         }
         else
         {
-            Interlocked.Increment(ref _missionsAbandoned);
-            Interlocked.Increment(ref _missionsCancelledTotal);
+            _deskCounts.Abandoned++;
+            _deskCounts.Cancelled++;
         }
     }
 
@@ -754,12 +810,12 @@ public sealed partial class SimBridge
             spawner.Mission = mission;
             spawner.Owner = body;
             lair.Set(CreatureLair.Spawner, spawner);
-            PlanetIndexes[m.Realm].Lairs.Add(lairId);
+            _deskLairOps.Add((m.Realm, lairId, true));
             _deskWrites += 2 + spawner.SpawnLimit;   // the lair, its occupants, and the lair written again with its mission
             m.Lair = lairId;
             m.LairX = x;
             m.LairZ = z;
-            Interlocked.Increment(ref _missionLairsDrawn);
+            _deskCounts.LairsDrawn++;
             return true;
         }
 
@@ -781,7 +837,7 @@ public sealed partial class SimBridge
         var realm = lair.Read(CreatureLair.Realm).Value;
         _deskWrites += 1 + lair.Read(CreatureLair.Spawner).AliveCount;   // its creatures go with it through the cascade
         tx.Destroy(lairId);
-        PlanetIndexes[realm].Lairs.Remove(lairId);
+        _deskLairOps.Add((realm, lairId, false));
     }
 
     // ── The body's side, through the tick's transaction ─────────────────────────────────────────────────────────────
