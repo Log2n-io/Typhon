@@ -28,6 +28,15 @@ export function Inspector() {
 
   // Stats arrive four times a second: until then, what was published may describe the previous selection.
   const inspection = published?.netId === selectedNetId ? published : null;
+  const title =
+    inspection === null
+      ? null
+      : inspectorTitle(
+          `${inspection.archetype} #${selectedNetId}`,
+          inspection.archetype,
+          Number(inspection.fields.find((f) => f.name === 'level')?.value ?? 0),
+          viewerCl,
+        );
 
   // A door, when the thing picked has one. `interior` rides in with the entity (`Structure.InteriorRealm`), so it is read
   // from the replicated fields by name rather than given a slot of its own in `Inspection` — the inspector already
@@ -47,13 +56,21 @@ export function Inspector() {
   return (
     <div className="panel inspector">
       <div className="hud-title">
-        {inspection === null
-          ? `#${selectedNetId}`
-          : inspectorTitle(
-              `${inspection.archetype} #${selectedNetId}`,
-              inspection.archetype,
-              Number(inspection.fields.find((f) => f.name === 'level')?.value ?? 0),
+        {title === null ? (
+          `#${selectedNetId}`
+        ) : (
+          <>
+            {title.name}
+            {/* As the name tag: only "CL n" in its con colour (render/labels.ts). */}
+            {title.level === '' ? null : (
+              <>
+                {' ('}
+                <span className={title.con === null ? undefined : `con-${title.con}`}>{title.level}</span>
+                {')'}
+              </>
             )}
+          </>
+        )}
       </div>
       {inspection !== null && (
         <table>
