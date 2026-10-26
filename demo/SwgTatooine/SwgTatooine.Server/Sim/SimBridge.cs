@@ -104,6 +104,9 @@ public sealed partial class SimBridge : IShuttleBoarding
     private long _aggroHits;
     private long _creaturesKilled;
 
+    /// <summary>Deaths pushed into the kill queues (<see cref="KillEvent"/>).</summary>
+    private long _killEvents;
+
     // SWG-02's combat counters. Every one of them exists because an acceptance criterion is a claim about what does NOT happen — a player that is not fighting
     // does no damage, a shot beyond weapon range does no damage — and a silent zero cannot tell that apart from a system that never ran.
     private long _playerShots;

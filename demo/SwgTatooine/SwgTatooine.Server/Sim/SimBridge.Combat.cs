@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Numerics;
 using System.Threading;
 
@@ -42,6 +43,18 @@ public sealed partial class SimBridge
     /// would be <c>EventQueueBase.OverflowCount</c>, which the run asserts is zero.
     /// </remarks>
     internal EventQueue<CombatEvent> CombatQueue { get; set; }
+
+    /// <summary>Every death the combat drain resolved this tick, for the XP system (<see cref="KillEvent"/>). Created on the schedule.</summary>
+    internal EventQueue<KillEvent> KillXpQueue { get; set; }
+
+    /// <summary>The same deaths, for the loot system: a queue is drained once, so each consumer has its own.</summary>
+    internal EventQueue<KillEvent> KillLootQueue { get; set; }
+
+    /// <summary>The deaths of the drain under way, pushed into both kill queues when it ends; reused, the drain is serial.</summary>
+    private readonly List<KillEvent> _kills = [];
+
+    /// <summary>The tick of the drain under way, for its <see cref="KillEvent"/>s.</summary>
+    private long _drainTick;
 
     /// <summary>
     /// A fighting player fires at its target: <see cref="SimPhases.Resolve"/>, over <see cref="Player"/>, in parallel.
@@ -634,6 +647,8 @@ public sealed partial class SimBridge
         Span<CombatEvent> events = pending <= 128 ? stackalloc CombatEvent[128] : new CombatEvent[pending];
         var n = CombatQueue.Drain(events);
         var tx = ctx.Transaction;
+        _kills.Clear();
+        _drainTick = ctx.TickNumber;
         var corpseTicks = Math.Max(1, (int)(_config.CorpseSeconds * _config.TickRateHz));
         long damageApplied = 0;
         long killed = 0;
@@ -724,6 +739,20 @@ public sealed partial class SimBridge
                         Amount = (ushort)Math.Clamp(ev.Amount, 0, ushort.MaxValue),
                     });
             }
+        }
+
+        // The deaths, to the XP and the loot systems (character-level.md § 2). After the loop, so the writers are taken once and only on a tick with a death.
+        if (_kills.Count != 0)
+        {
+            var xp = ctx.Writer(KillXpQueue);
+            var loot = ctx.Writer(KillLootQueue);
+            foreach (var kill in _kills)
+            {
+                xp.Push(kill);
+                loot.Push(kill);
+            }
+
+            Interlocked.Add(ref _killEvents, _kills.Count);
         }
 
         if (damageApplied != 0)
@@ -839,23 +868,48 @@ public sealed partial class SimBridge
 
         // One fewer standing between the lair and whoever comes for it: at none, it can be destroyed.
         EntityId home = target.Read(Creature.Home).Lair;
+        var mission = EntityId.Null;
+        var foe = false;
         if (tx.TryOpenMut(home, out var lair))
         {
             var spawner = lair.Read(CreatureLair.Spawner);
+            mission = spawner.Mission;
+            foe = CreatureTemplates.IsCamp(spawner.CreatureTemplate);
             spawner.Guards = Math.Max(0, spawner.Guards - 1);
             lair.Set(CreatureLair.Spawner, spawner);
             TatooineReplication.Replicate(in lair);
         }
 
-        // No loot: a kill pays nothing until items exist (economy-foundation.md § 1, Q5).
+        var at = target.Read(Creature.Bounds);
+        _kills.Add(new KillEvent
+        {
+            Killer = KillerOf(ev.Attacker),
+            Victim = target.Id,
+            Lair = home,
+            Mission = mission,
+            Tick = _drainTick,
+            X = at.X,
+            Z = at.Z,
+            Realm = target.Read(Creature.Realm).Value,
+            VictimKind = foe ? KillVictimKind.Foe : KillVictimKind.Creature,
+            VictimLevel = 0,
+            Species = ai.Template,
+        });
         return true;
+    }
+
+    /// <summary>The killer a <see cref="KillEvent"/> names: the attacker when it is a Player body, nobody when it was a creature.</summary>
+    private EntityId KillerOf(EntityId attacker)
+    {
+        _playerArchetype ??= Dbe.ArchetypeIdOf<Player>();
+        return attacker.ArchetypeId == _playerArchetype.Value ? attacker : EntityId.Null;
     }
 
     /// <summary>
     /// Damage to a lair. A wild lair at zero is retired by the lair director in this tick's Economy phase; a mission's is the mission desk's, after it in the
     /// same phase — completed if its holder's blow is among those that broke it (<see cref="Lair.OwnerHit"/>), drawn again if not.
     /// </summary>
-    private static bool ApplyToLair(ref EntityRefMut target, in CombatEvent ev)
+    private bool ApplyToLair(ref EntityRefMut target, in CombatEvent ev)
     {
         var v = target.Read(CreatureLair.Vitals);
         var spawner = target.Read(CreatureLair.Spawner);
@@ -870,6 +924,26 @@ public sealed partial class SimBridge
         {
             spawner.OwnerHit = 1;
             target.Set(CreatureLair.Spawner, spawner);
+        }
+
+        // Broken by this blow: one KillEvent, once — a later blow finds it no longer standing.
+        if (v.Health == 0)
+        {
+            var at = target.Read(CreatureLair.Bounds);
+            _kills.Add(new KillEvent
+            {
+                Killer = KillerOf(ev.Attacker),
+                Victim = target.Id,
+                Lair = target.Id,
+                Mission = spawner.Mission,
+                Tick = _drainTick,
+                X = at.X,
+                Z = at.Z,
+                Realm = target.Read(CreatureLair.Realm).Value,
+                VictimKind = KillVictimKind.Lair,
+                VictimLevel = 0,
+                Species = (byte)Math.Clamp(spawner.CreatureTemplate, 0, byte.MaxValue),
+            });
         }
 
         TatooineReplication.Replicate(in target);
