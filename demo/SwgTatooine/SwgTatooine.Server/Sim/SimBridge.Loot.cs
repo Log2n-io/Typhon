@@ -75,8 +75,8 @@ public sealed partial class SimBridge
     /// The <c>Loot</c> system: this tick's kills, drained from <see cref="KillLootQueue"/>, each looted in one side transaction committed once.
     /// </summary>
     /// <remarks>
-    /// <b>A mission lair's own death is skipped</b>: its cache is minted by the desk with the mission's reward (inventory-loot.md § 3.4). Its defenders are
-    /// ordinary kills (character-level.md § 2).
+    /// <b>A mission lair's own death, broken by its holder, is skipped</b>: its cache is minted by the desk with the mission's reward (inventory-loot.md
+    /// § 3.4). Broken by a stranger it is an ordinary lair; its defenders are ordinary kills (character-level.md § 2).
     /// </remarks>
     public void LootTick(TickContext ctx)
     {
@@ -139,20 +139,22 @@ public sealed partial class SimBridge
     }
 
     /// <summary>
-    /// Whether a kill drops, and to whom: not a mission lair's own death (the desk's), and only to a character's body, with a wallet, in the victim's
-    /// realm, within <see cref="LootTables.LootReachM"/>. Each refusal is counted by its reason.
+    /// Whether a kill drops, and to whom: only to a character's body, with a wallet, in the victim's realm, within <see cref="LootTables.LootReachM"/>; each
+    /// refusal counted by its reason. A mission lair's own death drops nothing here when its holder broke it — the desk mints that cache with the reward —
+    /// nor when its holder cannot be told; broken by a stranger, it drops the ordinary wild cache to the stranger, as it pays the stranger lair XP
+    /// (character-level.md, <see cref="IsStranger"/>).
     /// </summary>
     private void Gate(Transaction tick0, in KillEvent kill)
     {
-        if (kill.VictimKind == KillVictimKind.Lair && !kill.Mission.IsNull)
-        {
-            return;
-        }
-
         var killer = kill.Killer;
         if (killer.IsNull || !_lootCharacterOf.TryGetValue(killer, out var character))
         {
             Interlocked.Increment(ref _lootRefusedCrowd);
+            return;
+        }
+
+        if (kill.VictimKind == KillVictimKind.Lair && !kill.Mission.IsNull && !IsStranger(tick0, kill.Mission, character))
+        {
             return;
         }
 
