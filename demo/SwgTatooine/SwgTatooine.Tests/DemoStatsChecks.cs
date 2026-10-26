@@ -116,8 +116,9 @@ internal sealed class DemoStatsChecks : ServedChecks
         var progression = doc.RootElement.GetProperty("progression");
         Assert.Multiple(() =>
         {
-            foreach (var key in new[] { "levelUps", "killXp", "missionXp", "greyKills", "crowdKills", "noKillerKills", "missionLairKills", "killsDrained",
-                         "commitsFailed", "xpRatePercent", "modelXpPerCharHour" })
+            foreach (var key in new[] { "levelUps", "killXp", "missionXp", "greyKills", "worthlessKills", "noCharacterKills", "crowdKills", "noKillerKills",
+                         "missionLairKills", "killsDrained", "commitsFailed", "killXpOverflow", "killLootOverflow", "progressOverflow", "xpRatePercent",
+                         "modelXpPerCharHour" })
             {
                 Assert.That(progression.TryGetProperty(key, out _), Is.True, key);
             }
@@ -130,6 +131,7 @@ internal sealed class DemoStatsChecks : ServedChecks
             Assert.That(progression.GetProperty("xpPerCharHour").TryGetProperty("60s", out _), Is.True);
             Assert.That(progression.GetProperty("levelUpsPerMin").TryGetProperty("10s", out _), Is.True);
             Assert.That(progression.GetProperty("xpRatePercent").GetInt32(), Is.EqualTo(100));
+            Assert.That(progression.GetProperty("progressOverflow").GetInt64(), Is.Zero);
         });
     }
 

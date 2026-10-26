@@ -436,12 +436,6 @@ internal sealed class CombatResolveSystem : CallbackSystem
         .Reads<LairPlacement>()
         .Reads<LairRealm>()
 
-        // A death's KillEvent: where it fell, in which realm (character-level.md § 2).
-        .Reads<CreaturePlacement>()
-        .Reads<CreatureRealm>()
-        .Reads<LairPlacement>()
-        .Reads<LairRealm>()
-
         // The level a blow lands on, for the level factor (character-level.md § 6).
         .Reads<PlayerLook>()
 

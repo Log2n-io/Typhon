@@ -413,6 +413,9 @@ public sealed partial class TatooineSim
     /// <summary>Kill events the loot queue dropped at its ceiling; expected to be zero.</summary>
     public long KillLootOverflow => _bridge?.KillLootQueue?.OverflowCount ?? 0L;
 
+    /// <summary>Body refreshes the desk's Progress queue dropped at its ceiling — a body showing a stale level until its next grant; expected to be zero.</summary>
+    public long ProgressOverflow => _bridge?.ProgressQueue?.OverflowCount ?? 0L;
+
     /// <summary>The deepest the combat queue got on the last tick — what says whether the 1 024 budget is anywhere near binding.</summary>
     public long CombatQueuePeak => _bridge?.CombatQueue?.PeakDepth ?? 0L;
 
@@ -687,7 +690,7 @@ public sealed partial class TatooineSim
         _bridge.KillLootQueue = dag.CreateEventQueue<KillEvent>("KillsLoot", 256);
 
         // The bodies of the holders the mission desk paid XP to, for Progression to bring up to it (character-level.md § 5): a few a minute.
-        _bridge.ProgressQueue = dag.CreateEventQueue<ProgressRefresh>("Progress", 64);
+        _bridge.ProgressQueue = dag.CreateEventQueue<ProgressRefresh>("Progress", 256);
 
         if (_config.Shuttles)
         {
