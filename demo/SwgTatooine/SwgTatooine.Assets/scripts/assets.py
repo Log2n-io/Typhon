@@ -161,7 +161,8 @@ def release(kind, upload):
         return
     repo = lock["repo"]
     subprocess.run(["gh", "release", "create", tag, path, "-R", repo, "--title", spec["title"].format(v=version),
-                    "--notes", spec["notes"].format(v=version), "--latest=false"], check=True)
+                    "--notes", spec["notes"].format(v=version), "--latest=false", "--prerelease"], check=True)
+    # --latest=false alone is ignored while the repo has no other full release: a pre-release never takes "Latest"
     lock[kind] = {"version": version, "tag": tag, "file": tag + ".zip", "sha256": digest}
     save(LOCK, lock)
     print(f"  released {repo}@{tag}; assets.lock.json updated, commit it")

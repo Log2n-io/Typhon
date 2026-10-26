@@ -62,5 +62,17 @@
         }
       }
     }
+  },
+  "published": {
+    "version": 11,
+    "tag": "swg-assets-11",
+    "file": "swg-assets-11.zip",
+    "sha256": "53d38147a70be49d409ed8acef6b948a87fb375ad659b9517845fe8a95631371"
+  },
+  "sources": {
+    "version": 1,
+    "tag": "swg-assets-sources-1",
+    "file": "swg-assets-sources-1.zip",
+    "sha256": "05be14de4b1783212cbdc860fed00b65fdd3efee4573f0b3d1eceb8cd2f748bc"
   }
 }
