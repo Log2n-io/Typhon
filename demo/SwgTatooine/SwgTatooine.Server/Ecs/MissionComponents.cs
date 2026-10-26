@@ -6,8 +6,8 @@ namespace SwgTatooine.Server;
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 // Missions (claude/design/SwgTatooine/design/missions.md)
 //
-// An OFFER is listed at a mission terminal, a HELD MISSION belongs to a character, and the lair is spawned for the held
-// mission when it is taken. Nothing is pooled.
+// An OFFER is listed at a mission terminal and names a standing wild lair; a HELD MISSION belongs to a character and
+// reserves that lair when it is taken (missions.md § 8). Nothing is pooled, and nothing is spawned for a mission.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 /// <summary>Where an offer is listed: at its terminal's centre. Its position is what a client finds the terminal's offers by.</summary>
@@ -31,8 +31,8 @@ public struct MissionOfferPlacement
 /// <summary>What an offer says, as a terminal lists it: what you will fight, how hard, what it pays, and roughly where.</summary>
 /// <remarks>
 /// <para>
-/// <b>Approximate on the wire, exact on the server.</b> A client is told a direction and a distance rounded to 100 m; the anchor stays here, and the lair is
-/// drawn round it only when the offer is taken (missions.md, R2).
+/// <b>Approximate on the wire, exact on the server.</b> A client is told a direction and a distance rounded to 100 m; the anchor — the position of the
+/// standing wild lair the offer names, which a take reserves (missions.md § 8) — stays here.
 /// </para>
 /// <para>
 /// <b>Immutable.</b> An offer is listed, then taken or aged out — both destroy it — so every field is sent on enter and the archetype is static.
@@ -69,7 +69,7 @@ public struct MissionOfferInfo
     /// <summary>How far the anchor is from the terminal, metres, rounded to 100.</summary>
     [Field, OnEnter(CodecKind.Varu, Name = "distanceM", Saturate = true)] public int DistanceM;
 
-    /// <summary>The point the lair is drawn round. Not on the wire.</summary>
+    /// <summary>The position of the lair the offer names: how the desk finds that lair after a reopen, a wild lair never moving. Not on the wire.</summary>
     [Field] public float AnchorX;
 
     [Field] public float AnchorZ;
@@ -126,21 +126,21 @@ public struct HeldMission
     /// <summary>The character holding it. Indexed: the journal is "every mission of this character".</summary>
     [Field, Index(AllowMultiple = true)] public EntityId Holder;
 
-    /// <summary>The offer's lair kind, difficulty, direction, and distance as it was listed — what the journal shows.</summary>
+    /// <summary>Its lair's kind (the new one's after a re-target); the offer's difficulty, direction and distance as listed: what the journal shows.</summary>
     [Field] public byte Kind;
 
     [Field] public byte Difficulty;
 
     [Field] public byte Octant;
 
-    /// <summary>The offer's level: every lair this mission draws is spawned at it, wherever it stands, because the mission promised it.</summary>
+    /// <summary>The offer's level, its lair's: a re-target (a stranger's break) moves the mission only to a lair of this level (missions.md § 8).</summary>
     [Field] public byte Level;
 
     [Field] public int DistanceM;
 
     [Field] public int Reward;
 
-    /// <summary>The point every lair of this mission is drawn round.</summary>
+    /// <summary>Where the offer's lair stood: the first lair this mission reserved.</summary>
     [Field] public float AnchorX;
 
     [Field] public float AnchorZ;
@@ -150,7 +150,7 @@ public struct HeldMission
 
     [Field] public float LairZ;
 
-    /// <summary>The lair standing for it now, or <c>EntityId.Null</c>: its holder is offline, or a new one is still to be drawn.</summary>
+    /// <summary>The wild lair this mission reserves (<see cref="Lair.Mission"/>), offline holder or not; re-targeted when a stranger breaks it.</summary>
     [Field] public EntityId Lair;
 
     /// <summary>The tick it was taken.</summary>

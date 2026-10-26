@@ -152,9 +152,9 @@ internal sealed class MissionDeskChecks : ServedChecks
     }
 
     /// <summary>
-    /// STAGED for a re-target: of the free wild lairs — a site's, standing, unreserved, named by no offer — within the desk's reach of a held mission's lair,
-    /// the nearest is made the mission's level (<paramref name="twin"/>), or every one at the mission's level is moved off it (not <paramref name="twin"/>:
-    /// none left to find).
+    /// STAGED for a re-target: of the wild lairs — a site's, standing, unreserved — within the desk's reach of a held mission's lair, the nearest no offer
+    /// names is made the mission's level (<paramref name="twin"/>), or every one at the mission's level, offered or not, is moved off it (not
+    /// <paramref name="twin"/>: none left to find).
     /// </summary>
     /// <returns>The lair made the mission's level, or <c>EntityId.Null</c>.</returns>
     private static EntityId StageTwin(TatooineSim sim, (EntityId Id, HeldMission Mission) held, bool twin = true)
@@ -165,7 +165,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         sim.WriteInTick(tx =>
         {
             var best = float.MaxValue;
-            var free = new List<(EntityId Id, float D2, int Level)>();
+            var free = new List<(EntityId Id, float D2, int Level, bool Offered)>();
             foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
             {
                 var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
@@ -179,23 +179,23 @@ internal sealed class MissionDeskChecks : ServedChecks
                     var dz = places[slot].Z - held.Mission.LairZ;
                     var d2 = (dx * dx) + (dz * dz);
                     if (cluster.Realm.Value == held.Mission.Realm && id != held.Mission.Lair && spawners[slot].Site != 0 && spawners[slot].Mission.IsNull
-                        && vitals[slot].Health > 0 && d2 <= reach * reach && !anchors.Contains((places[slot].X, places[slot].Z)))
+                        && vitals[slot].Health > 0 && d2 <= reach * reach)
                     {
-                        free.Add((id, d2, spawners[slot].Level));
+                        free.Add((id, d2, spawners[slot].Level, anchors.Contains((places[slot].X, places[slot].Z))));
                     }
                 }
             }
 
-            foreach (var (id, d2, _) in free)
+            foreach (var (id, d2, _, offered) in free)
             {
-                if (twin && d2 < best)
+                if (twin && !offered && d2 < best)
                 {
                     best = d2;
                     found = id;
                 }
             }
 
-            foreach (var (id, _, level) in free)
+            foreach (var (id, _, level, _) in free)
             {
                 if (id == found || (!twin && level == held.Mission.Level))
                 {
@@ -209,6 +209,92 @@ internal sealed class MissionDeskChecks : ServedChecks
 
         Assert.That(!twin || !found.IsNull, Is.True, "the premise: a free wild lair within reach of the mission's");
         return found;
+    }
+
+    /// <summary>
+    /// STAGED for review 5 M3: within the desk's reach of a held mission's lair, the only wild lairs of its level are the nearest one an offer names and the
+    /// nearest one no offer names — the latter reserved by another (the offer's id stands in for a mission). Every other one at that level is moved off it.
+    /// </summary>
+    /// <returns>The offered lair, its offer, and the reserved lair.</returns>
+    private static (EntityId Offered, EntityId Offer, EntityId Reserved) StageOfferedAndReservedTwins(TatooineSim sim, (EntityId Id, HeldMission Mission) held)
+    {
+        var offerAt = new Dictionary<(float, float), EntityId>();
+        sim.WriteInTick(tx =>
+        {
+            foreach (var cluster in tx.For<MissionOffer>().GetClusterEnumerator())
+            {
+                var infos = cluster.GetReadOnlySpan(MissionOffer.Info);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    offerAt[(infos[slot].AnchorX, infos[slot].AnchorZ)] = cluster.GetEntityId(slot);
+                }
+            }
+        });
+
+        var reach = TatooineData.MissionReachM * sim.Config.ContentScale;
+        var level = held.Mission.Level;
+        (EntityId, EntityId, EntityId) staged = default;
+        sim.WriteInTick(tx =>
+        {
+            var near = new List<(EntityId Id, float D2, int Level, EntityId Offer)>();
+            foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
+            {
+                var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
+                var vitals = cluster.GetReadOnlySpan(CreatureLair.Vitals);
+                var places = cluster.GetReadOnlySpan(CreatureLair.Bounds);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    var id = cluster.GetEntityId(slot);
+                    var dx = places[slot].X - held.Mission.LairX;
+                    var dz = places[slot].Z - held.Mission.LairZ;
+                    var d2 = (dx * dx) + (dz * dz);
+                    if (cluster.Realm.Value == held.Mission.Realm && id != held.Mission.Lair && spawners[slot].Site != 0 && spawners[slot].Mission.IsNull
+                        && vitals[slot].Health > 0 && d2 <= reach * reach)
+                    {
+                        near.Add((id, d2, spawners[slot].Level, offerAt.GetValueOrDefault((places[slot].X, places[slot].Z))));
+                    }
+                }
+            }
+
+            var offered = (Id: EntityId.Null, D2: float.MaxValue, Offer: EntityId.Null);
+            var free = (Id: EntityId.Null, D2: float.MaxValue);
+            foreach (var (id, d2, _, offer) in near)
+            {
+                if (!offer.IsNull && d2 < offered.D2)
+                {
+                    offered = (id, d2, offer);
+                }
+                else if (offer.IsNull && d2 < free.D2)
+                {
+                    free = (id, d2);
+                }
+            }
+
+            foreach (var (id, _, lairLevel, _) in near)
+            {
+                if (id != offered.Id && id != free.Id && lairLevel != level)
+                {
+                    continue;
+                }
+
+                var l = tx.OpenMut(id);
+                var s = l.Read(CreatureLair.Spawner);
+                s.Level = id == offered.Id || id == free.Id ? level : level == 1 ? 2 : level - 1;
+                if (id == free.Id)
+                {
+                    s.Mission = offered.Offer;
+                }
+
+                l.Set(CreatureLair.Spawner, s);
+            }
+
+            staged = (offered.Id, offered.Offer, free.Id);
+        });
+
+        Assert.That(staged.Item1.IsNull || staged.Item3.IsNull, Is.False, "the premise: an offered and an unoffered wild lair within reach");
+        return staged;
     }
 
     /// <summary>A lair broken by nobody's blow: health 0, its holder's mark not set.</summary>
@@ -1201,6 +1287,129 @@ internal sealed class MissionDeskChecks : ServedChecks
     }
 
     /// <summary>
+    /// Review 5 M1: a crowd fighter that already targets a wild lair drops it once a take reserves it — the target check, not only the acquisition, leaves a
+    /// reserved lair alone. STAGED: the fighter is parked beside the lair in <c>Combat</c> with the lair as its target, before the take and again after.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void TheCrowd_DropsALairItWasFighting_OnceAMissionReservesIt()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x601C), terminal);
+        var character = CharacterOf(sim, AnAccount(0x601C));
+        var offer = Takeable(sim, terminal)[0];
+        var lair = LairAt(sim, terminal.Realm, offer.Info.AnchorX, offer.Info.AnchorZ);
+        Clear(sim, lair, health: 1_000_000);
+
+        var crowd = EntityId.Null;
+        sim.WriteInTick(tx =>
+        {
+            foreach (var cluster in tx.For<Player>().GetClusterEnumerator())
+            {
+                var controls = cluster.GetReadOnlySpan(Player.Control);
+                for (var bits = cluster.OccupancyBits; bits != 0 && crowd.IsNull; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    if (cluster.Realm.Value == 0 && controls[slot].Kind == ControllerKind.Scripted)
+                    {
+                        crowd = cluster.GetEntityId(slot);
+                    }
+                }
+            }
+        });
+        Assert.That(crowd.IsNull, Is.False, "no scripted body to put beside the lair");
+
+        void Aim()
+        {
+            Worlds.Park(sim, crowd, offer.Info.AnchorX + 10f, offer.Info.AnchorZ, activity: PlayerActivity.Combat);
+            sim.WriteInTick(tx =>
+            {
+                var body = tx.OpenMut(crowd);
+                var session = body.Read(Player.Session);
+                session.Target = lair;
+                session.TargetKind = CombatTargetKind.Lair;
+                body.Set(Player.Session, session);
+            });
+        }
+
+        Aim();
+        SessionHarness.Until(() => LairOf(sim, lair).Health < 1_000_000, "the premise: the fighter hits the lair it targets");
+        var held = TakeAndHold(sim, link, character, offer);
+        Assert.That(held.Mission.Lair, Is.EqualTo(lair), "the premise: the take reserved the lair the fighter targets");
+        var reservedAt = LairOf(sim, lair).Health;
+        for (var i = 0; i < 6; i++)
+        {
+            Aim();
+            Harness.Ticks(Worlds.ServedHz / 2);
+        }
+
+        // Past a weapon's longest delay: a fighter on cooldown has not looked at its target yet.
+        Harness.Ticks(Worlds.ServedHz * 4);
+        var target = EntityId.Null;
+        sim.WriteInTick(tx => target = tx.Open(crowd).Read(Player.Session).Target);
+        Assert.Multiple(() =>
+        {
+            Assert.That(LairOf(sim, lair).Health, Is.EqualTo(reservedAt), "the crowd kept hitting a lair a mission reserved");
+            Assert.That(target, Is.Not.EqualTo(lair), "the fighter still targets the reserved lair");
+            Assert.That(LairOf(sim, lair).Spawner.OwnerHit, Is.Zero);
+        });
+    }
+
+    /// <summary>
+    /// Review 5 M2: a stranger whose break leaves the mission no lair of its level within reach — the mission ends on the very tick its break is looted — is
+    /// still a stranger: paid the wild cache. STAGED on a desk pass tick: the lair broken and the stranger's kill handed to Loot in the same tick the desk
+    /// finds it broken, so the mission is gone when Loot asks who held it.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void AStrangersBreak_ThatLosesTheMissionItsLair_IsStillPaidAsAStrangers()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x601D), terminal);
+        var stranger = LogInAt(sim, AnAccount(0x601E), terminal, bindings: 2);
+        var holder = CharacterOf(sim, AnAccount(0x601D));
+        var breaker = CharacterOf(sim, AnAccount(0x601E));
+        var held = TakeAndHold(sim, link, holder, Takeable(sim, terminal)[0]);
+        var body = TatooineReplication.ControlledBy(sim.Dbe, stranger.Session);
+        StageTwin(sim, held, twin: false);
+
+        var passTicks = Worlds.ServedHz / SimBridge.MissionPassHz;
+        var staged = false;
+        for (var i = 0; i <= passTicks && !staged; i++)
+        {
+            sim.WriteInTick((tx, tick) =>
+            {
+                if (tick % passTicks != 0)
+                {
+                    return;
+                }
+
+                var l = tx.OpenMut(held.Mission.Lair);
+                var v = l.Read(CreatureLair.Vitals);
+                v.Health = 0;
+                l.Set(CreatureLair.Vitals, v);
+                sim.Bridge.StageKill(Items.Kill(body, held.Mission.Lair.RawValue, terminal.X + 2f, terminal.Z, (byte)held.Mission.Kind,
+                    kind: KillVictimKind.Lair, mission: held.Id));
+                staged = true;
+            });
+        }
+
+        Assert.That(staged, Is.True, "the premise: the break staged on a desk pass tick");
+        SessionHarness.Until(() => Held(sim, holder).Count == 0, "the mission to be lost");
+        Harness.Ticks(3);
+        var rows = Items.Rows(sim);
+        Assert.Multiple(() =>
+        {
+            Assert.That(sim.Bridge.MissionsLostLair, Is.EqualTo(1), "the premise: the mission lost its lair on the break's tick");
+            Assert.That(rows, Is.Not.Empty, "the stranger was not paid the wild cache: the ended mission's holder could not be told");
+            Assert.That(rows.TrueForAll(r => r.Kind == ItemMoveKind.Lair && r.To == (long)breaker.RawValue), Is.True, "not lair rows to the stranger");
+            Assert.That(Items.Stacks(sim, holder), Is.Empty, "the holder was given something");
+        });
+    }
+
+    /// <summary>
     /// MS-6: a lair broken without its holder's blow moves the mission — same mission, unpaid — to another standing wild lair of its level within the desk's
     /// reach, reserved for it, and the journal says where; the broken lair, released, is retired. With none of its level within reach, the mission is
     /// cancelled: gone from the journal, not stated completed, nothing paid.
@@ -1216,7 +1425,8 @@ internal sealed class MissionDeskChecks : ServedChecks
         var held = TakeAndHold(sim, link, character, Takeable(sim, terminal)[0]);
         var credits = BodyOf(sim, link.Session).Credits;
         var rev = BodyOf(sim, link.Session).JournalRev;
-        StageTwin(sim, held);
+        var (offeredTwin, twinOffer, reservedTwin) = StageOfferedAndReservedTwins(sim, held);
+        var withdrawn = sim.Bridge.MissionOffersWithdrawn;
 
         Break(sim, held.Mission.Lair);
         SessionHarness.Until(() => Held(sim, character).Count != 1 || Held(sim, character)[0].Mission.Lair != held.Mission.Lair, "the mission to move");
@@ -1242,9 +1452,15 @@ internal sealed class MissionDeskChecks : ServedChecks
             Assert.That(Exists(sim, held.Mission.Lair), Is.False, "the broken lair, released, was not retired");
             Assert.That(BodyOf(sim, link.Session).Credits, Is.EqualTo(credits), "paid for a lair somebody else broke");
             Assert.That(sim.Bridge.MissionsRetargeted, Is.GreaterThanOrEqualTo(1));
+
+            // Review 5 M3: a held mission outranks a listing — the offered lair is taken and its offer withdrawn — but never takes one another holds.
+            Assert.That(now.Mission.Lair, Is.EqualTo(offeredTwin), "the mission did not take the lair an offer named, the only one of its level");
+            Assert.That(Exists(sim, twinOffer), Is.False, "the offer naming the lair the mission took is still listed");
+            Assert.That(sim.Bridge.MissionOffersWithdrawn, Is.GreaterThan(withdrawn));
+            Assert.That(LairOf(sim, reservedTwin).Spawner.Mission, Is.EqualTo(twinOffer), "a lair another mission reserved was taken from it");
         });
 
-        // None of its level left within reach: cancelled cleanly.
+        // None of its level left within reach — offered or not: cancelled cleanly.
         StageTwin(sim, now, twin: false);
         Break(sim, now.Mission.Lair);
         SessionHarness.Until(() => Held(sim, character).Count == 0, "the mission to be cancelled");
@@ -1725,9 +1941,11 @@ internal sealed class MissionDeskChecks : ServedChecks
 
     /// <summary>
     /// A reopened world's tick count starts again at 0, so stored offer expiries are clamped to their longest life from the reopen: an offer listed late in a
-    /// long run does not stand for that run's length again. A reservation no held mission stands behind is released — the lair stays, wild again — and a lair
-    /// of no site holding a mission (spawned for one by a world from before missions named wild lairs) is destroyed.
+    /// long run does not stand for that run's length again. A reservation no held mission stands behind is released — the lair stays, wild again. And a held
+    /// mission whose lair is of no site (spawned for it by a world from before missions named wild lairs) has that lair destroyed with its occupants and
+    /// taken out of the planet's lair index, and is re-targeted by the first pass to a wild lair of its level.
     /// </summary>
+    /// <remarks>The first run is paused before it is staged, so its own desk never sees the staging: only the reopen does.</remarks>
     [Test]
     [CancelAfter(180_000)]
     public void AReopenedWorld_ClampsTheExpiriesItStored_AndReleasesOrphanedReservations()
@@ -1736,6 +1954,8 @@ internal sealed class MissionDeskChecks : ServedChecks
         EntityId offerId;
         var orphan = EntityId.Null;
         var legacy = EntityId.Null;
+        EntityId mission;
+        byte level;
         const long FarFuture = 1L << 40;
         using (var first = Start(persist: true))
         {
@@ -1744,7 +1964,13 @@ internal sealed class MissionDeskChecks : ServedChecks
             var character = CharacterOf(first, account);
             var held = TakeAndHold(first, link, character, Takeable(first, terminal)[0]);
             offerId = Offers(first, terminal)[0].Id;
+            mission = held.Id;
+            level = held.Mission.Level;
             var anchors = OfferedAnchors(first);
+            var god = Harness.Connect(TatooineReplication.GodKind);
+            SessionHarness.Until(() => god.Received(MessageTypes.Welcome), "WELCOME");
+            god.SendCommand("SetPaused", new RecordValues { ["paused"] = FieldValue.Of(1) });
+            SessionHarness.Until(() => TatooineReplication.SimulationPaused, "the pause");
             first.WriteInTick(tx =>
             {
                 var o = tx.OpenMut(offerId);
@@ -1772,15 +1998,26 @@ internal sealed class MissionDeskChecks : ServedChecks
                 sp.Mission = offerId;
                 o2.Set(CreatureLair.Spawner, sp);
 
-                // A lair spawned for the held mission the way the desk did before, of no site.
+                // The held mission's lair, as a world from before had it: spawned for it, of no site, beside the wild lair it holds now — which goes back to
+                // the wild, for the re-target to find.
                 var rng = new Rng(31);
                 var terrain = Server.Terrain.TerrainField.Shared(first.Config.ContentScale);
-                legacy = WorldBuilder.SpawnLair(tx, ref rng, CreatureTemplates.Frog, 1, terminal.X + 900f, terminal.Z, site: 0, expireTick: 0, first.Config,
-                    terrain, 0);
+                legacy = WorldBuilder.SpawnLair(tx, ref rng, held.Mission.Kind, held.Mission.Level, held.Mission.LairX + 30f, held.Mission.LairZ, site: 0,
+                    expireTick: 0, first.Config, terrain, 0);
                 var l = tx.OpenMut(legacy);
                 var ls = l.Read(CreatureLair.Spawner);
                 ls.Mission = held.Id;
                 l.Set(CreatureLair.Spawner, ls);
+                var wild = tx.OpenMut(held.Mission.Lair);
+                var ws = wild.Read(CreatureLair.Spawner);
+                ws.Mission = EntityId.Null;
+                ws.Owner = EntityId.Null;
+                wild.Set(CreatureLair.Spawner, ws);
+                var m = tx.OpenMut(held.Id);
+                var hm = m.Read(HeldMissionArch.Mission);
+                hm.Lair = legacy;
+                hm.LairX = held.Mission.LairX + 30f;
+                m.Set(HeldMissionArch.Mission, hm);
             });
             Harness.Release();
         }
@@ -1795,6 +2032,19 @@ internal sealed class MissionDeskChecks : ServedChecks
         var offerLife = (long)((TatooineData.MissionOfferLifeMinSeconds + TatooineData.MissionOfferLifeSpanSeconds) * hz);
         var now = second.Runtime.CurrentTickNumber;
         var (released, health) = LairOf(second, orphan);
+        var after = Held(second, CharacterOf(second, account));
+        var occupants = 0;
+        second.WriteInTick(tx =>
+        {
+            foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+            {
+                var homes = cluster.GetReadOnlySpan(Creature.Home);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    occupants += (EntityId)homes[System.Numerics.BitOperations.TrailingZeroCount(bits)].Lair == legacy ? 1 : 0;
+                }
+            }
+        });
         using var tx2 = second.Dbe.CreateQuickTransaction();
         Assert.Multiple(() =>
         {
@@ -1803,6 +2053,13 @@ internal sealed class MissionDeskChecks : ServedChecks
             Assert.That(released.Mission.IsNull, Is.True, "an orphaned reservation was not released");
             Assert.That(second.Bridge.MissionReservationsOrphaned, Is.EqualTo(1));
             Assert.That(tx2.TryOpen(legacy, out _), Is.False, "a lair spawned for a mission by a world from before still stands");
+            Assert.That(occupants, Is.Zero, "the destroyed lair's occupants were left standing");
+            Assert.That(second.Index.Lairs, Does.Not.Contain(legacy), "the destroyed lair is still in the planet's lair index");
+            Assert.That(after, Has.Count.EqualTo(1), "the mission whose lair was destroyed was lost");
+            Assert.That(after[0].Id, Is.EqualTo(mission));
+            Assert.That(after[0].Mission.Lair, Is.Not.EqualTo(legacy).And.Not.EqualTo(EntityId.Null), "the mission was not re-targeted");
+            Assert.That(LairOf(second, after[0].Mission.Lair).Spawner.Mission, Is.EqualTo(mission), "its new lair is not reserved for it");
+            Assert.That(LairOf(second, after[0].Mission.Lair).Spawner.Level, Is.EqualTo(level), "its new lair is not of its level");
             Assert.That(tx2.Open(offerId).Read(MissionOffer.Info).ExpireTick, Is.LessThanOrEqualTo(now + offerLife), "the offer's expiry was not clamped");
         });
     }

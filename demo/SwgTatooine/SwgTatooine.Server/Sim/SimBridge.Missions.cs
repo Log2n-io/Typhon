@@ -43,8 +43,9 @@ public sealed partial class SimBridge
     private int[] _terminalCity = [];
     private readonly Dictionary<EntityId, int> _terminalOf = [];
 
-    // Every lair a live offer names, and every lair a held mission holds: an offer never names one of either.
-    private readonly HashSet<EntityId> _offeredLairs = [];
+    // Every lair a live offer names, with the terminal listing it, and every lair a held mission holds: an offer never names one of either, and a held
+    // mission never takes one another holds — but may take an offered one (a held mission outranks a listing, review 5 M3).
+    private readonly Dictionary<EntityId, int> _offeredLairs = [];
     private readonly HashSet<EntityId> _heldLairs = [];
 
     // Every held mission, and how many each character holds.
@@ -64,9 +65,11 @@ public sealed partial class SimBridge
     // Per pass: every character with a body online, and that body.
     private readonly Dictionary<EntityId, EntityId> _bodies = [];
 
-    // The standing, unreserved wild lairs, read once at the start of a desk tick that may list or re-target — before the tick writes anything (#1482).
-    private readonly List<LairCandidate> _candidates = [];
-    private readonly Dictionary<EntityId, int> _candidateAt = [];
+    // The standing, unreserved wild lairs by planet and level ([realm × LevelSlots + level]), read once per pass at the start of the desk's tick, before it
+    // writes anything (#1482), and kept for the takes until the next: a pick scans one level's lairs, and the lair it picks is checked again on the spot.
+    private List<LairCandidate>[] _wild = [];
+    private int _wildRealms;
+    private const int LevelSlots = ContentLevels.MaxLevel + 1;
 
     // The demand: per city of every planet, its characters by combat level (0 unused), counted at most once a second when an offer is to be levelled.
     private int[] _cityBase = [];
@@ -94,19 +97,15 @@ public sealed partial class SimBridge
         public byte Level;
     }
 
-    /// <summary>A standing wild lair an offer or a re-target may name, as the desk tick's walk read it.</summary>
+    /// <summary>A standing wild lair an offer or a re-target may name, as the pass's walk read it.</summary>
     private struct LairCandidate
     {
         public EntityId Id;
         public float X;
         public float Z;
         public long ExpireTick;
-        public ushort Realm;
         public byte Level;
         public byte Kind;
-
-        // Named already — by an offer, a held mission, or a pick earlier in this tick.
-        public bool Claimed;
     }
 
     /// <summary>
@@ -189,15 +188,14 @@ public sealed partial class SimBridge
         _deskCompleted.Clear();
         _takesApplied.Clear();
         _cancelsApplied.Clear();
+        // The lairs an offer or a re-target may name, read once a pass before this transaction writes any — a cluster walk must not meet its own
+        // transaction's writes (#1482) — and by the load's own walk on the tick it loads. A take tick reuses the pass's.
         if (!_deskLoaded)
         {
             LoadDesk(tx, tick);
             _deskLoaded = true;
         }
-
-        // The lairs an offer or a re-target may name, read before this transaction writes any: a cluster walk must not meet its own transaction's writes
-        // (#1482). A pass re-targets and tops up; a take tops up its terminal.
-        if (pass || takes.Count > 0)
+        else if (pass)
         {
             ReadCandidates(tx, tick);
         }
@@ -291,6 +289,7 @@ public sealed partial class SimBridge
         public long Retargeted;
         public long LostLair;
         public long AboveLevel;
+        public long ReservationsOrphaned;
     }
 
     private DeskCounts _deskCounts;
@@ -313,6 +312,7 @@ public sealed partial class SimBridge
         Interlocked.Add(ref _missionsRetargeted, _deskCounts.Retargeted);
         Interlocked.Add(ref _missionsLostLair, _deskCounts.LostLair);
         Interlocked.Add(ref _missionTakesAboveLevel, _deskCounts.AboveLevel);
+        Interlocked.Add(ref _missionReservationsOrphaned, _deskCounts.ReservationsOrphaned);
         _deskCounts = default;
 
         foreach (var (realm, lair) in _deskLairRemovals)
@@ -352,9 +352,10 @@ public sealed partial class SimBridge
         var offerLife = (long)((TatooineData.MissionOfferLifeMinSeconds + TatooineData.MissionOfferLifeSpanSeconds) * _config.TickRateHz);
         LoadTerminals();
 
-        // Every walk first, every write after: a walk must not meet its own transaction's writes (#1482).
+        // Every walk first, every write after: a walk must not meet its own transaction's writes (#1482). The lair walk is also this tick's candidates.
         var wildAt = new Dictionary<(ushort Realm, float X, float Z), EntityId>();
         var reserved = new List<(EntityId Lair, ushort Realm, EntityId Mission, int Site)>();
+        ClearCandidates();
         foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
         {
             var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
@@ -371,6 +372,7 @@ public sealed partial class SimBridge
                 else if (s.Site != 0 && vitals[slot].Health > 0)
                 {
                     wildAt[(cluster.Realm.Value, places[slot].X, places[slot].Z)] = cluster.GetEntityId(slot);
+                    AddCandidate(cluster.GetEntityId(slot), cluster.Realm.Value, in s, places[slot].X, places[slot].Z, tick);
                 }
             }
         }
@@ -430,7 +432,7 @@ public sealed partial class SimBridge
             {
                 Release(tx, lairId, mission);
                 _heldLairs.Remove(lairId);
-                _missionReservationsOrphaned++;
+                _deskCounts.ReservationsOrphaned++;
             }
         }
 
@@ -440,7 +442,7 @@ public sealed partial class SimBridge
             if (!_terminalOf.TryGetValue(info.Terminal, out var t)
                 || !wildAt.TryGetValue((realm, info.AnchorX, info.AnchorZ), out var lair)
                 || _heldLairs.Contains(lair)
-                || !_offeredLairs.Add(lair))
+                || !_offeredLairs.TryAdd(lair, t))
             {
                 // A terminal the world no longer has, or a lair that no longer stands wild where the offer points: withdrawn, replaced by the first pass.
                 tx.Destroy(id);
@@ -499,13 +501,12 @@ public sealed partial class SimBridge
     // ── What an offer may name ──────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// The standing wild lairs — a site's, unreserved, unbroken — of every planet, each marked when an offer or a held mission already names it. One walk of
-    /// the lairs, as the lair director's pass; only on a desk tick that may list or re-target.
+    /// The standing wild lairs — a site's, unreserved, unbroken, not past their life — of every planet, by level. One walk of the lairs, as the lair
+    /// director's pass, once a pass; whether an offer or a held mission names one is asked of a lair only when a pick meets it.
     /// </summary>
     private void ReadCandidates(Transaction tx, long tick)
     {
-        _candidates.Clear();
-        _candidateAt.Clear();
+        ClearCandidates();
         foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
         {
             var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
@@ -515,78 +516,180 @@ public sealed partial class SimBridge
             {
                 var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
                 ref readonly var s = ref spawners[slot];
-                if (s.Site == 0 || !s.Mission.IsNull || vitals[slot].Health <= 0 || (s.ExpireTick != 0 && s.ExpireTick <= tick))
+                if (s.Site != 0 && s.Mission.IsNull && vitals[slot].Health > 0)
                 {
-                    continue;
+                    AddCandidate(cluster.GetEntityId(slot), cluster.Realm.Value, in s, places[slot].X, places[slot].Z, tick);
                 }
-
-                var id = cluster.GetEntityId(slot);
-                _candidateAt[id] = _candidates.Count;
-                _candidates.Add(new LairCandidate
-                {
-                    Id = id,
-                    X = places[slot].X,
-                    Z = places[slot].Z,
-                    ExpireTick = s.ExpireTick,
-                    Realm = cluster.Realm.Value,
-                    Level = (byte)Math.Clamp(s.Level, 1, ContentLevels.MaxLevel),
-                    Kind = (byte)Math.Clamp(s.CreatureTemplate, 0, byte.MaxValue),
-                    Claimed = _offeredLairs.Contains(id) || _heldLairs.Contains(id),
-                });
             }
         }
     }
 
+    /// <summary>Empties the candidates, sized for the planets.</summary>
+    private void ClearCandidates()
+    {
+        _wildRealms = PlanetIndexes.Length;
+        if (_wild.Length != _wildRealms * LevelSlots)
+        {
+            _wild = new List<LairCandidate>[_wildRealms * LevelSlots];
+            for (var b = 0; b < _wild.Length; b++)
+            {
+                _wild[b] = [];
+            }
+
+            return;
+        }
+
+        foreach (var bucket in _wild)
+        {
+            bucket.Clear();
+        }
+    }
+
+    /// <summary>One standing wild lair into its planet's and level's bucket; one past its life, or off every planet, is left out.</summary>
+    private void AddCandidate(EntityId id, ushort realm, in Lair s, float x, float z, long tick)
+    {
+        if (realm >= _wildRealms || (s.ExpireTick != 0 && s.ExpireTick <= tick))
+        {
+            return;
+        }
+
+        var level = Math.Clamp(s.Level, 1, ContentLevels.MaxLevel);
+        _wild[(realm * LevelSlots) + level].Add(new LairCandidate
+        {
+            Id = id,
+            X = x,
+            Z = z,
+            ExpireTick = s.ExpireTick,
+            Level = (byte)level,
+            Kind = (byte)Math.Clamp(s.CreatureTemplate, 0, byte.MaxValue),
+        });
+    }
+
+    /// <summary>
+    /// <see cref="PickLair"/>, the lair it picks checked again on the spot: the candidates are the last pass's, and one that fell or was reserved since is
+    /// dropped and the pick drawn again.
+    /// </summary>
+    private bool TryPickLair(Transaction tx, ushort realm, float x, float z, int lo, int hi, bool inWindowOnly, float reachM, bool inReachOnly, long liveTo,
+        bool offered, ref Rng rng, out LairCandidate lair)
+    {
+        while (PickLair(realm, x, z, lo, hi, inWindowOnly, reachM, inReachOnly, liveTo, offered, ref rng, out var bucket, out var index))
+        {
+            var list = _wild[bucket];
+            lair = list[index];
+            if (StandsWild(tx, lair.Id))
+            {
+                return true;
+            }
+
+            list[index] = list[^1];
+            list.RemoveAt(list.Count - 1);
+        }
+
+        lair = default;
+        return false;
+    }
+
     /// <summary>
     /// A standing wild lair of <paramref name="realm"/> to name, by its level first: one in <paramref name="lo"/>..<paramref name="hi"/>, else — unless
-    /// <paramref name="inWindowOnly"/> — the nearest level to that window; among equals, one within <paramref name="reachM"/> of the point, drawn uniformly,
-    /// else the nearest. Its life must last to <paramref name="liveTo"/>.
+    /// <paramref name="inWindowOnly"/> — the nearest level to that window, scanned one level a side at a time; among equals, one within
+    /// <paramref name="reachM"/> of the point, drawn uniformly, else the nearest. Its life must last to <paramref name="liveTo"/>. Never one a held mission
+    /// holds; one an offer names only when <paramref name="offered"/>.
     /// </summary>
-    /// <returns>Its index in the candidates, or -1.</returns>
-    private int PickLair(ushort realm, float x, float z, int lo, int hi, bool inWindowOnly, float reachM, bool inReachOnly, long liveTo, ref Rng rng)
+    private bool PickLair(ushort realm, float x, float z, int lo, int hi, bool inWindowOnly, float reachM, bool inReachOnly, long liveTo, bool offered,
+        ref Rng rng, out int bucket, out int index)
     {
-        var all = CollectionsMarshal.AsSpan(_candidates);
-        var reach2 = reachM * reachM;
-        var best = -1;
-        var bestGap = int.MaxValue;
-        var bestBeyond = float.MaxValue;
-        var ties = 0;
+        bucket = -1;
+        index = -1;
+        if (realm >= _wildRealms)
+        {
+            return false;
+        }
+
+        lo = Math.Clamp(lo, 1, ContentLevels.MaxLevel);
+        hi = Math.Clamp(hi, lo, ContentLevels.MaxLevel);
+        var pick = new LevelScan
+        {
+            X = x,
+            Z = z,
+            Reach2 = reachM * reachM,
+            InReachOnly = inReachOnly,
+            LiveTo = liveTo,
+            Offered = offered,
+            Bucket = -1,
+            BestBeyond = float.MaxValue,
+        };
+        var baseSlot = realm * LevelSlots;
+        for (var level = lo; level <= hi; level++)
+        {
+            ScanLevel(baseSlot + level, ref pick, ref rng);
+        }
+
+        for (var gap = 1; pick.Bucket < 0 && !inWindowOnly && (lo - gap >= 1 || hi + gap <= ContentLevels.MaxLevel); gap++)
+        {
+            if (lo - gap >= 1)
+            {
+                ScanLevel(baseSlot + lo - gap, ref pick, ref rng);
+            }
+
+            if (hi + gap <= ContentLevels.MaxLevel)
+            {
+                ScanLevel(baseSlot + hi + gap, ref pick, ref rng);
+            }
+        }
+
+        bucket = pick.Bucket;
+        index = pick.Index;
+        return bucket >= 0;
+    }
+
+    /// <summary>What a pick has found so far, across the levels it scans.</summary>
+    private struct LevelScan
+    {
+        public float X;
+        public float Z;
+        public float Reach2;
+        public bool InReachOnly;
+        public long LiveTo;
+        public bool Offered;
+        public int Bucket;
+        public int Index;
+        public float BestBeyond;
+        public int Ties;
+    }
+
+    /// <summary>One level's lairs into a pick: within reach, drawn uniformly (reservoir); beyond it, the nearest.</summary>
+    private void ScanLevel(int bucket, ref LevelScan pick, ref Rng rng)
+    {
+        var all = CollectionsMarshal.AsSpan(_wild[bucket]);
         for (var i = 0; i < all.Length; i++)
         {
             ref readonly var c = ref all[i];
-            if (c.Claimed || c.Realm != realm || (c.ExpireTick != 0 && c.ExpireTick < liveTo))
+            if ((c.ExpireTick != 0 && c.ExpireTick < pick.LiveTo) || _heldLairs.Contains(c.Id) || (!pick.Offered && _offeredLairs.ContainsKey(c.Id)))
             {
                 continue;
             }
 
-            var gap = c.Level < lo ? lo - c.Level : c.Level > hi ? c.Level - hi : 0;
-            if (gap > 0 && inWindowOnly)
-            {
-                continue;
-            }
-
-            var d2 = Distance2(c.X, c.Z, x, z);
-            if (d2 > reach2 && inReachOnly)
+            var d2 = Distance2(c.X, c.Z, pick.X, pick.Z);
+            if (d2 > pick.Reach2 && pick.InReachOnly)
             {
                 continue;
             }
 
             // Within reach every lair is as good as another, so the offers spread over the lairs there; beyond it, the nearest.
-            var beyond = d2 <= reach2 ? 0f : d2;
-            if (gap < bestGap || (gap == bestGap && beyond < bestBeyond))
+            var beyond = d2 <= pick.Reach2 ? 0f : d2;
+            if (beyond < pick.BestBeyond)
             {
-                best = i;
-                bestGap = gap;
-                bestBeyond = beyond;
-                ties = 1;
+                pick.Bucket = bucket;
+                pick.Index = i;
+                pick.BestBeyond = beyond;
+                pick.Ties = 1;
             }
-            else if (gap == bestGap && beyond == bestBeyond && rng.NextInt(0, ++ties) == 0)
+            else if (beyond == pick.BestBeyond && rng.NextInt(0, ++pick.Ties) == 0)
             {
-                best = i;
+                pick.Bucket = bucket;
+                pick.Index = i;
             }
         }
-
-        return best;
     }
 
     /// <summary>The characters around each city, by combat level, counted again when the last count is a second old.</summary>
@@ -712,17 +815,21 @@ public sealed partial class SimBridge
             Lair lair = default;
             var health = 0;
             var holds = false;
+            var exists = false;
             if (!m.Lair.IsNull && tx.TryOpen(m.Lair, out var lairEntity))
             {
+                exists = true;
                 holds = Holds(lairEntity, id, out lair, out health);
-            }
-            else
-            {
-                _heldLairs.Remove(m.Lair);
             }
 
             if (!holds)
             {
+                // No longer this mission's to hold — gone, or standing unreserved and broken — unless another mission reserved it since.
+                if (!exists || lair.Mission.IsNull || lair.Mission == id)
+                {
+                    _heldLairs.Remove(m.Lair);
+                }
+
                 // Its lair gone — destroyed with a world from before, or reserved by nothing any more — or taken by another: another of its level near it.
                 Retarget(tx, tick0, i, id, ref m, body, tick);
                 continue;
@@ -778,8 +885,9 @@ public sealed partial class SimBridge
     }
 
     /// <summary>
-    /// Moves a held mission to another standing wild lair of its level within <see cref="TatooineData.MissionReachM"/> of where its lair stood; with none
-    /// there, cancels it (missions.md § 8, MS-6).
+    /// Moves a held mission to another standing wild lair of its level within <see cref="TatooineData.MissionReachM"/> of where its lair stood — one no offer
+    /// names first, else one an offer names, whose offer is withdrawn (a held mission outranks a listing; the pass lists a replacement), never one another
+    /// mission holds; with none there, cancels it (missions.md § 8, MS-6).
     /// </summary>
     private void Retarget(Transaction tx, Transaction tick0, int at, EntityId id, ref HeldMission m, EntityId body, long tick)
     {
@@ -787,9 +895,11 @@ public sealed partial class SimBridge
         var x = unplaced ? m.AnchorX : m.LairX;
         var z = unplaced ? m.AnchorZ : m.LairZ;
         var rng = new Rng(Salt(tick, id.EntityKey, 0x41C64E6Du));
-        var pick = PickLair(m.Realm, x, z, m.Level, m.Level, inWindowOnly: true, TatooineData.MissionReachM * _config.ContentScale, inReachOnly: true,
-            liveTo: 0, ref rng);
-        if (pick < 0)
+        var reach = TatooineData.MissionReachM * _config.ContentScale;
+        var found = TryPickLair(tx, m.Realm, x, z, m.Level, m.Level, inWindowOnly: true, reach, inReachOnly: true, liveTo: 0, offered: false, ref rng,
+                out var c)
+            || TryPickLair(tx, m.Realm, x, z, m.Level, m.Level, inWindowOnly: true, reach, inReachOnly: true, liveTo: 0, offered: true, ref rng, out c);
+        if (!found)
         {
             EndMission(tx, at, id, in m, completed: false);
             _deskCounts.LostLair++;
@@ -801,8 +911,11 @@ public sealed partial class SimBridge
             return;
         }
 
-        ref var c = ref CollectionsMarshal.AsSpan(_candidates)[pick];
-        c.Claimed = true;
+        if (_offeredLairs.ContainsKey(c.Id))
+        {
+            WithdrawOffer(tx, c.Id);
+        }
+
         Reserve(tx, c.Id, id, body);
         m.Lair = c.Id;
         m.Kind = c.Kind;
@@ -851,15 +964,35 @@ public sealed partial class SimBridge
 
                 // Its lair, still standing wild — the offer only aged out — may be named again in this very pass.
                 _offeredLairs.Remove(o.Lair);
-                if (_candidateAt.TryGetValue(o.Lair, out var c))
-                {
-                    CollectionsMarshal.AsSpan(_candidates)[c].Claimed = false;
-                }
-
                 list.RemoveAt(k);
             }
 
             TopUp(tx, tick0, t, tick);
+        }
+    }
+
+    /// <summary>Takes the offer naming a lair off its terminal: a held mission is taking the lair (<see cref="Retarget"/>).</summary>
+    private void WithdrawOffer(Transaction tx, EntityId lairId)
+    {
+        if (!_offeredLairs.Remove(lairId, out var t))
+        {
+            return;
+        }
+
+        var list = _offers[t];
+        for (var k = list.Count - 1; k >= 0; k--)
+        {
+            if (list[k].Lair == lairId)
+            {
+                if (tx.TryOpen(list[k].Id, out _))
+                {
+                    tx.Destroy(list[k].Id);
+                    _deskWrites++;
+                }
+
+                list.RemoveAt(k);
+                _deskCounts.OffersWithdrawn++;
+            }
         }
     }
 
@@ -911,10 +1044,11 @@ public sealed partial class SimBridge
         var rng = new Rng(Salt(tick, ((long)serial << 20) ^ terminal.Id.EntityKey, 0x2D5A4E1Bu));
         var reach = TatooineData.MissionReachM * _config.ContentScale;
         var liveTo = tick + (long)(TatooineData.MissionOfferLifeMinSeconds * _config.TickRateHz);
-        var pick = -1;
+        var found = false;
+        LairCandidate lair = default;
 
         // The floor: every band listed at least once, so higher content stays in view whoever is around (Loïc, 2026-10-26).
-        for (var band = 1; band <= 5 && pick < 0; band++)
+        for (var band = 1; band <= 5 && !found; band++)
         {
             if (bands[band] > 0 || noneInBand[band])
             {
@@ -922,36 +1056,30 @@ public sealed partial class SimBridge
             }
 
             var floor = ContentLevels.BandFloor(band);
-            pick = PickLair(terminal.Realm, terminal.X, terminal.Z, floor, Math.Min(ContentLevels.MaxLevel, floor + 9), inWindowOnly: true, reach,
-                inReachOnly: false, liveTo, ref rng);
-            noneInBand[band] = pick < 0;
+            found = TryPickLair(tx, terminal.Realm, terminal.X, terminal.Z, floor, Math.Min(ContentLevels.MaxLevel, floor + 9), inWindowOnly: true, reach,
+                inReachOnly: false, liveTo, offered: false, ref rng, out lair);
+            noneInBand[band] = !found;
         }
 
-        if (pick < 0)
+        if (!found)
         {
             // The level first; a lair of it within reach, else one anywhere in the character's window within reach, else the nearest to that window.
             var (level, lo, hi) = DemandLevel(_terminalCity[t] < 0 ? null : _demand[_terminalCity[t]], ref rng);
-            pick = PickLair(terminal.Realm, terminal.X, terminal.Z, level, level, inWindowOnly: true, reach, inReachOnly: true, liveTo, ref rng);
-            if (pick < 0)
-            {
-                pick = PickLair(terminal.Realm, terminal.X, terminal.Z, lo, hi, inWindowOnly: true, reach, inReachOnly: true, liveTo, ref rng);
-            }
-
-            if (pick < 0)
-            {
-                pick = PickLair(terminal.Realm, terminal.X, terminal.Z, lo, hi, inWindowOnly: false, reach, inReachOnly: false, liveTo, ref rng);
-            }
+            found = TryPickLair(tx, terminal.Realm, terminal.X, terminal.Z, level, level, inWindowOnly: true, reach, inReachOnly: true, liveTo,
+                    offered: false, ref rng, out lair)
+                || TryPickLair(tx, terminal.Realm, terminal.X, terminal.Z, lo, hi, inWindowOnly: true, reach, inReachOnly: true, liveTo, offered: false,
+                    ref rng, out lair)
+                || TryPickLair(tx, terminal.Realm, terminal.X, terminal.Z, lo, hi, inWindowOnly: false, reach, inReachOnly: false, liveTo, offered: false,
+                    ref rng, out lair);
         }
 
-        if (pick < 0)
+        if (!found)
         {
             offer = default;
             return false;
         }
 
-        ref var lair = ref CollectionsMarshal.AsSpan(_candidates)[pick];
-        lair.Claimed = true;
-        _offeredLairs.Add(lair.Id);
+        _offeredLairs[lair.Id] = t;
         var dx = lair.X - terminal.X;
         var dz = lair.Z - terminal.Z;
         var dist = MathF.Sqrt((dx * dx) + (dz * dz));
@@ -1082,12 +1210,11 @@ public sealed partial class SimBridge
 
         tx.Destroy(offerId);
         _deskWrites++;
-        var stands = !lairId.IsNull && StandsWild(tx, lairId);
-        TopUp(tx, tick0, t, tick);
-        if (!stands)
+        if (lairId.IsNull || !StandsWild(tx, lairId))
         {
-            // Its lair broken or reserved since the last pass: the offer is withdrawn, replaced above, and this take finds it taken.
+            // Its lair broken or reserved since the last pass: the offer is withdrawn and replaced, and this take finds it taken.
             _deskCounts.OffersWithdrawn++;
+            TopUp(tx, tick0, t, tick);
             return false;
         }
 
@@ -1116,6 +1243,9 @@ public sealed partial class SimBridge
         _deskCounts.Issued++;
         _deskCounts.Taken++;
         BumpJournal(tick0, body);
+
+        // The replacement after the reservation, so it cannot name the lair just taken.
+        TopUp(tx, tick0, t, tick);
         return true;
     }
 
@@ -1153,10 +1283,12 @@ public sealed partial class SimBridge
         _held.RemoveAt(at);
         CountHolder(m.Holder, -1);
 
+        // Its lair's KillEvent reaches Progression and Loot after this destroy: who held it is read here (character-level.md § 2, L3). Every end, not
+        // only a completion: a stranger whose break left the mission no lair, or broke it on the tick its holder cancelled, is still a stranger to pay
+        // (review 5 M2). A completion's breaker is told apart by OwnerHit first.
+        _missionsEndedThisTick[id] = m.Holder;
         if (completed)
         {
-            // Its lair's KillEvent reaches Progression after this destroy: who held it is read here (character-level.md § 2, L3).
-            _missionsEndedThisTick[id] = m.Holder;
             _deskCounts.Completed++;
         }
         else
