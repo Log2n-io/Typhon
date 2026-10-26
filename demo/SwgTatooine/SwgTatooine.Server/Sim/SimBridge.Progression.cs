@@ -327,6 +327,9 @@ public sealed partial class SimBridge
         _ => "beast",
     };
 
+    /// <summary>Test hook: when set, every <see cref="KillEvent"/> the combat drain pushes into both kill queues, as it pushed it. Null in a run.</summary>
+    internal System.Collections.Concurrent.ConcurrentQueue<KillEvent> KillTap { get; set; }
+
     /// <summary>Test hook: a death pushed into both kill queues as the combat drain pushes it (shared with inventory-loot's checks).</summary>
     internal void StageKill(TickContext ctx, in KillEvent kill)
     {

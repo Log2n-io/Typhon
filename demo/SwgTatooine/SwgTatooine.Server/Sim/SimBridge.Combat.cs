@@ -762,6 +762,7 @@ public sealed partial class SimBridge
             {
                 xp.Push(kill);
                 loot.Push(kill);
+                KillTap?.Enqueue(kill);
             }
 
             Interlocked.Add(ref _killEvents, _kills.Count);

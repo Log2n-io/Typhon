@@ -770,6 +770,7 @@ internal sealed class MissionDeskChecks : ServedChecks
             Assert.That(Refusals(link), Contains.Item(TatooineReplication.MissionUnknown), "a cancel of nobody's mission was not refused");
             Assert.That(Offers(sim, terminal), Has.Count.EqualTo(TatooineData.MissionOffersPerTerminal), "a cancel put nothing back, and took nothing");
             Assert.That(MissionJournal.Json(sim.Dbe, character), Is.EqualTo(MissionJournal.Empty), "a cancel was stated as a completion");
+            Assert.That(ProgressOf(sim, character).Xp, Is.Zero, "a cancelled mission granted XP (character-level.md CH-5)");
 
             // E0-4: taking cost nothing and cancelling paid nothing — the wallet holds its grant and no more, and no reward row was written.
             Assert.That(Ledgers.Balance(sim, character), Is.EqualTo(EconomyLedger.StartingCredits), "a take or a cancel moved credits");
@@ -1038,6 +1039,66 @@ internal sealed class MissionDeskChecks : ServedChecks
     }
 
     /// <summary>A lair's occupants taken away and its guard count with them, its health set: one blow from broken, nothing to fight it for.</summary>
+    private static CharacterProgress ProgressOf(TatooineSim sim, EntityId character)
+    {
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        return tx.Open(character).Read(CharacterArch.Progress);
+    }
+
+    /// <summary>
+    /// character-level.md CH-5: the holder breaks its mission's lair — a level 5 mission, its lair level 5 — and is paid the mission's XP with its reward, on
+    /// the pass that ends it; the lair's own kill grants nothing, and the holder's body carries the new XP.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void AMissionLairsBreak_GivesNoKillXp_ButItsMissionPaysMissionXpWithTheReward()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x6015), terminal);
+        var character = CharacterOf(sim, AnAccount(0x6015));
+        var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
+        var lair = held.Mission.Lair;
+        sim.WriteInTick(tx =>
+        {
+            var m = tx.Open(held.Id).Read(HeldMissionArch.Mission);
+            m.Level = 5;
+            tx.OpenMut(held.Id).Set(HeldMissionArch.Mission, m);
+            var l = tx.OpenMut(lair);
+            var s = l.Read(CreatureLair.Spawner);
+            s.Level = 5;
+            l.Set(CreatureLair.Spawner, s);
+        });
+
+        Clear(sim, lair, health: 5);
+        Worlds.Park(sim, link.Session, held.Mission.LairX + 10f, held.Mission.LairZ, out var parked);
+        SessionHarness.UntilNamed(link.Session, lair, "the lair to reach the client's view", parked);
+        var before = BodyOf(sim, link.Session);
+        link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(link.Session, lair)));
+        link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
+        SessionHarness.Until(() => Held(sim, character).Count == 0, "the mission to end");
+        Harness.Ticks((Worlds.ServedHz / SimBridge.MissionPassHz) + 2);
+
+        var after = BodyOf(sim, link.Session);
+        var progress = ProgressOf(sim, character);
+        var expected = Progression.MissionXp(5, 1);
+        PlayerLook look = default;
+        var body = TatooineReplication.ControlledBy(sim.Dbe, link.Session);
+        sim.WriteInTick(tx => look = tx.Open(body).Read(Player.Look));
+        Assert.Multiple(() =>
+        {
+            Assert.That(after.Credits - before.Credits, Is.EqualTo(held.Mission.Reward), "the premise: the reward was paid");
+            Assert.That(progress.MissionXp, Is.EqualTo(expected), "the mission's XP was not paid with its reward, or was paid twice");
+            Assert.That(progress.KillXp, Is.Zero, "a mission's lair paid kill XP");
+            Assert.That(progress.Xp, Is.EqualTo(expected));
+            Assert.That(progress.Level, Is.EqualTo(3), $"{expected} XP is exactly CL 3's start");
+            Assert.That(sim.Bridge.MissionLairKills, Is.EqualTo(1));
+            Assert.That(sim.Bridge.XpGrantedMissions, Is.EqualTo(expected));
+            Assert.That(look.Level, Is.EqualTo(3), "the holder's body does not carry the level the mission gave");
+            Assert.That(look.Xp, Is.EqualTo(Progression.XpByte(in progress)));
+        });
+    }
+
     private static void Clear(TatooineSim sim, EntityId lair, int health)
         => sim.WriteInTick(tx =>
         {
