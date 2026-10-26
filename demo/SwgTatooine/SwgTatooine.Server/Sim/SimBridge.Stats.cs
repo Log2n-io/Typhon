@@ -258,6 +258,7 @@ public sealed partial class SimBridge
         Num(j, "lostLair", MissionsLostLair).Append(',');
         Num(j, "offersWithdrawn", MissionOffersWithdrawn).Append(',');
         Num(j, "aboveLevel", MissionTakesAboveLevel).Append(',');
+        Num(j, "offlineReleased", MissionsOfflineReleased).Append(',');
         Rate(j, "takenPerMin", r10[SeriesMissionsTaken], r60[SeriesMissionsTaken], 60d).Append(',');
         Rate(j, "completedPerMin", r10[SeriesMissionsCompleted], r60[SeriesMissionsCompleted], 60d).Append(',');
         Rate(j, "cancelledPerMin", r10[SeriesMissionsCancelled], r60[SeriesMissionsCancelled], 60d);

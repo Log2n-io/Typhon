@@ -20,11 +20,15 @@ namespace SwgTatooine.Tests;
 [NonParallelizable]
 internal sealed class MissionDeskChecks : ServedChecks
 {
-    private SimConfig Config(bool persist = false)
+    private SimConfig Config(bool persist = false, float offlineReleaseS = 0f)
     {
         var config = Worlds.Served(Dir);
         config.WorkerCount = 1;
         config.Persist = persist;
+        if (offlineReleaseS > 0f)
+        {
+            config.MissionOfflineReleaseSeconds = offlineReleaseS;
+        }
 
         // Enough wild lairs that every terminal lists its 20 and a replacement finds a lair to name. An offer names a lair no other offer names (MS-3): at
         // the suite's 0.05, the planet's 96 lairs are all named by the 24 terminals' first lists, and a take leaves nothing to list in its place.
@@ -32,9 +36,9 @@ internal sealed class MissionDeskChecks : ServedChecks
         return config;
     }
 
-    private TatooineSim Start(bool persist = false)
+    private TatooineSim Start(bool persist = false, float offlineReleaseS = 0f)
     {
-        var sim = new TatooineSim(Config(persist));
+        var sim = new TatooineSim(Config(persist, offlineReleaseS));
         sim.Initialize();
         Harness = new SessionHarness(sim);
         return sim;
@@ -1751,6 +1755,142 @@ internal sealed class MissionDeskChecks : ServedChecks
 
         Harness.Connect(TatooineReplication.PlayerKind, account);
         SessionHarness.Until(() => !LairOf(second, lair).Spawner.Owner.IsNull, "the lair to be given to the body at the first login after the restart");
+    }
+
+    // ── M4: a holder away too long ──────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// M4 (Loïc, 2026-10-27): a holder who stays offline past <see cref="SimConfig.MissionOfflineReleaseSeconds"/> (2 s here) loses the mission — gone from
+    /// the journal, not stated completed, nothing paid — and its lair is released: standing, wild again, and the crowd fights it.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void AHolderOfflinePastTheLimit_LosesTheMission_AndTheLairIsWildAgain()
+    {
+        using var sim = Start(offlineReleaseS: 2f);
+        var terminal = FirstTerminal(sim);
+        var account = AnAccount(0x601F);
+        var link = LogInAt(sim, account, terminal);
+        var character = CharacterOf(sim, account);
+        var held = TakeAndHold(sim, link, character, Takeable(sim, terminal)[0]);
+        var lair = held.Mission.Lair;
+
+        link.Close(CloseCodes.Normal, "logging out");
+        SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed >= 1, "the avatar to be destroyed");
+        SessionHarness.Until(() => Held(sim, character).Count == 0, "the mission to be released");
+        var (spawner, health) = LairOf(sim, lair);
+        Assert.Multiple(() =>
+        {
+            Assert.That(sim.Bridge.MissionsOfflineReleased, Is.EqualTo(1));
+            Assert.That(MissionJournal.Json(sim.Dbe, character), Is.EqualTo(MissionJournal.Empty), "a released mission was stated completed");
+            Assert.That(Ledgers.Rows(sim).FindAll(r => r.Kind == TransferKind.MissionReward), Is.Empty, "a released mission was paid");
+            Assert.That(health, Is.GreaterThan(0), "the released lair went with the mission");
+            Assert.That(spawner.Mission.IsNull, Is.True, "the lair is still reserved");
+            Assert.That(spawner.Owner.IsNull, Is.True);
+        });
+
+        // The crowd may fight it again: a fighter aimed at it hits it.
+        Clear(sim, lair, health: 1_000_000);
+        var crowd = AScriptedBody(sim);
+        Worlds.Park(sim, crowd, held.Mission.LairX + 10f, held.Mission.LairZ, activity: PlayerActivity.Combat);
+        sim.WriteInTick(tx =>
+        {
+            var body = tx.OpenMut(crowd);
+            var session = body.Read(Player.Session);
+            session.Target = lair;
+            session.TargetKind = CombatTargetKind.Lair;
+            body.Set(Player.Session, session);
+        });
+        SessionHarness.Until(() => LairOf(sim, lair).Health < 1_000_000, "the crowd to hit the released lair");
+    }
+
+    /// <summary>M4: a holder back before the limit keeps the mission and its lair; the count starts again at the next logout.</summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void AHolderBackBeforeTheLimit_KeepsTheMission()
+    {
+        using var sim = Start(offlineReleaseS: 3f);
+        var terminal = FirstTerminal(sim);
+        var account = AnAccount(0x6020);
+        var link = LogInAt(sim, account, terminal);
+        var character = CharacterOf(sim, account);
+        var held = TakeAndHold(sim, link, character, Takeable(sim, terminal)[0]);
+
+        link.Close(CloseCodes.Normal, "logging out");
+        SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed >= 1, "the avatar to be destroyed");
+        SessionHarness.Until(() => LairOf(sim, held.Mission.Lair).Spawner.Owner.IsNull, "the desk to see the holder gone");
+        Harness.Ticks(Worlds.ServedHz);
+        Harness.Connect(TatooineReplication.PlayerKind, account);
+        SessionHarness.Until(() => !LairOf(sim, held.Mission.Lair).Spawner.Owner.IsNull, "the holder back, its body given the lair");
+
+        // Past the limit counted from the logout: kept, because the holder came back.
+        Harness.Ticks(Worlds.ServedHz * 4);
+        Assert.Multiple(() =>
+        {
+            Assert.That(Held(sim, character), Has.Count.EqualTo(1), "a holder back in time lost the mission");
+            Assert.That(LairOf(sim, held.Mission.Lair).Spawner.Mission, Is.EqualTo(held.Id));
+            Assert.That(sim.Bridge.MissionsOfflineReleased, Is.Zero);
+        });
+    }
+
+    /// <summary>
+    /// M4: the offline time is the desk's memory, not the database's: after a restart with the holder still away, the mission is released once the limit has
+    /// passed counted from the reopen — kept a second in, gone after.
+    /// </summary>
+    [Test]
+    [CancelAfter(180_000)]
+    public void AfterARestart_TheOfflineLimitCountsFromTheReopen()
+    {
+        var account = AnAccount(0x6021);
+        EntityId lair;
+        using (var first = Start(persist: true, offlineReleaseS: 3f))
+        {
+            var terminal = FirstTerminal(first);
+            var link = LogInAt(first, account, terminal);
+            var held = TakeAndHold(first, link, CharacterOf(first, account), Takeable(first, terminal)[0]);
+            lair = held.Mission.Lair;
+            link.Close(CloseCodes.Normal, "logging out");
+            SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed >= 1, "the avatar to be destroyed");
+            Harness.Release();
+        }
+
+        TatooineReplication.ResetSessionAccounting();
+        TatooineReplication.ResetIntentAccounting();
+
+        using var second = Start(persist: true, offlineReleaseS: 3f);
+        Assert.That(second.Reopened, Is.True, "the second run must reopen the first's database, or this proves nothing");
+        var character = CharacterOf(second, account);
+        Harness.Ticks(Worlds.ServedHz);
+        Assert.That(Held(second, character), Has.Count.EqualTo(1), "released before the limit had passed since the reopen");
+        SessionHarness.Until(() => Held(second, character).Count == 0, "the mission to be released after the limit");
+        Assert.Multiple(() =>
+        {
+            Assert.That(second.Bridge.MissionsOfflineReleased, Is.EqualTo(1));
+            Assert.That(LairOf(second, lair).Spawner.Mission.IsNull, Is.True, "the lair is still reserved");
+        });
+    }
+
+    /// <summary>A scripted body on planet 0.</summary>
+    private static EntityId AScriptedBody(TatooineSim sim)
+    {
+        var crowd = EntityId.Null;
+        sim.WriteInTick(tx =>
+        {
+            foreach (var cluster in tx.For<Player>().GetClusterEnumerator())
+            {
+                var controls = cluster.GetReadOnlySpan(Player.Control);
+                for (var bits = cluster.OccupancyBits; bits != 0 && crowd.IsNull; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    if (cluster.Realm.Value == 0 && controls[slot].Kind == ControllerKind.Scripted)
+                    {
+                        crowd = cluster.GetEntityId(slot);
+                    }
+                }
+            }
+        });
+        Assert.That(crowd.IsNull, Is.False, "no scripted body");
+        return crowd;
     }
 
     // ── M-8: cancelling ─────────────────────────────────────────────────────────────────────────────────────────────

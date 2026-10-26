@@ -51,6 +51,10 @@ public sealed partial class SimBridge
     // Every held mission, and how many each character holds.
     private readonly List<EntityId> _held = [];
 
+    // The tick each held mission's holder was first found offline by a pass: in memory only, so a restart counts from the reopen. Kept across a reload after
+    // a failed commit; an entry goes with its mission.
+    private readonly Dictionary<EntityId, long> _offlineSince = [];
+
     // The world tick of the desk's tick under way: a reward's ledger row carries it.
     private long _deskWorldTick;
 
@@ -86,6 +90,7 @@ public sealed partial class SimBridge
     private long _missionTakesAboveLevel;
     private long _missionOffersListed;
     private long _missionReservationsOrphaned;
+    private long _missionsOfflineReleased;
     private bool _withdrawAllOffers;
 
     /// <summary>An offer as the desk remembers it: its entity, when it ages out, the lair it names and that lair's level.</summary>
@@ -131,6 +136,12 @@ public sealed partial class SimBridge
 
     /// <summary>Reservations found at load with no held mission behind them, and released: the lair stays, wild again.</summary>
     public long MissionReservationsOrphaned => Interlocked.Read(ref _missionReservationsOrphaned);
+
+    /// <summary>
+    /// Held missions cancelled because their holder stayed offline <see cref="SimConfig.MissionOfflineReleaseSeconds"/>, their lairs released (Loïc,
+    /// 2026-10-27).
+    /// </summary>
+    public long MissionsOfflineReleased => Interlocked.Read(ref _missionsOfflineReleased);
 
     /// <summary>Takes refused: taken already, at the cap, too far, down, above the taker's level.</summary>
     public long MissionTakesRefused => Interlocked.Read(ref _missionTakesRefused);
@@ -290,6 +301,7 @@ public sealed partial class SimBridge
         public long LostLair;
         public long AboveLevel;
         public long ReservationsOrphaned;
+        public long OfflineReleased;
     }
 
     private DeskCounts _deskCounts;
@@ -313,6 +325,7 @@ public sealed partial class SimBridge
         Interlocked.Add(ref _missionsLostLair, _deskCounts.LostLair);
         Interlocked.Add(ref _missionTakesAboveLevel, _deskCounts.AboveLevel);
         Interlocked.Add(ref _missionReservationsOrphaned, _deskCounts.ReservationsOrphaned);
+        Interlocked.Add(ref _missionsOfflineReleased, _deskCounts.OfflineReleased);
         _deskCounts = default;
 
         foreach (var (realm, lair) in _deskLairRemovals)
@@ -800,6 +813,7 @@ public sealed partial class SimBridge
             if (!tx.TryOpen(id, out var e))
             {
                 _held.RemoveAt(i);
+                _offlineSince.Remove(id);
                 continue;
             }
 
@@ -820,6 +834,14 @@ public sealed partial class SimBridge
             {
                 exists = true;
                 holds = Holds(lairEntity, id, out lair, out health);
+            }
+
+            if (OfflineTooLong(id, body, holds && health <= 0 && lair.OwnerHit != 0, tick))
+            {
+                // Its holder away past the limit (Loïc, 2026-10-27): cancelled, nothing paid, the lair released to the world — wild again for the crowd.
+                EndMission(tx, i, id, in m, completed: false);
+                _deskCounts.OfflineReleased++;
+                continue;
             }
 
             if (!holds)
@@ -874,6 +896,27 @@ public sealed partial class SimBridge
                 _deskWrites++;
             }
         }
+    }
+
+    /// <summary>
+    /// Whether a held mission's holder has been offline for <see cref="SimConfig.MissionOfflineReleaseSeconds"/>: counted from the first pass that found
+    /// it gone, forgotten when it is back. A mission its holder already broke the lair of is done and waits for its pay at the login: never released.
+    /// </summary>
+    private bool OfflineTooLong(EntityId mission, EntityId body, bool brokenByHolder, long tick)
+    {
+        if (!body.IsNull || brokenByHolder)
+        {
+            _offlineSince.Remove(mission);
+            return false;
+        }
+
+        if (!_offlineSince.TryGetValue(mission, out var since))
+        {
+            _offlineSince[mission] = tick;
+            return false;
+        }
+
+        return tick - since >= (long)(_config.MissionOfflineReleaseSeconds * _config.TickRateHz);
     }
 
     /// <summary>Whether a lair is the one a held mission holds — reserved for it, or standing unreserved where the mission says it is.</summary>
@@ -1277,6 +1320,7 @@ public sealed partial class SimBridge
     /// <summary>Destroys a held mission, releases its lair — which stays in the world, wild again — and forgets it.</summary>
     private void EndMission(Transaction tx, int at, EntityId id, in HeldMission m, bool completed)
     {
+        _offlineSince.Remove(id);
         Release(tx, m.Lair, id);
         tx.Destroy(id);
         _deskWrites++;
