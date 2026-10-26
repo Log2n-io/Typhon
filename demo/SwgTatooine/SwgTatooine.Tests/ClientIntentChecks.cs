@@ -1424,8 +1424,8 @@ internal sealed class ClientIntentChecks : ServedChecks
         world.Sim.WriteInTick((tx, _) =>
         {
             var rng = new Rng(7);
-            lair = WorldBuilder.SpawnLair(tx, ref rng, CreatureTemplates.Frog, at.X + selfHalf + WorldBuilder.LairHalfM + gapM, at.Z, site, expireTick: 0,
-                config, terrain, 0);
+            lair = WorldBuilder.SpawnLair(tx, ref rng, CreatureTemplates.Frog, 1, at.X + selfHalf + WorldBuilder.LairHalfM + gapM, at.Z, site,
+                expireTick: 0, config, terrain, 0);
         });
         SessionHarness.Until(() => !lair.IsNull, "the lair to be spawned");
 

@@ -39,6 +39,26 @@ public sealed class WorldIndex
     /// </remarks>
     public List<LairSite> Sites { get; } = [];
 
+    /// <summary>The planet's content levels: the ramp round its cities and the bands beyond (content-levels.md § 2). Planned with <see cref="Sites"/>.</summary>
+    public LevelMap Levels { get; set; }
+
+    /// <summary>
+    /// The sites the scripted crowd is sent to, as indices into <see cref="Sites"/>: the city fringes, levels 1-10 by construction (content-levels.md § 5).
+    /// </summary>
+    public List<int> CrowdSites { get; } = [];
+
+    /// <summary>
+    /// The crowd's places, index-aligned with <see cref="CrowdSites"/>: each fringe's city centre and its outer radius (the city's plus the ramp), and the
+    /// city's radius, inside which nobody is counted as at the fringe.
+    /// </summary>
+    public List<(float X, float Z, float Radius, float InnerRadius)> CrowdPlaces { get; } = [];
+
+    /// <summary>Frontier patches that found no valid bearing and stand where they violate least (content-levels.md § 2.2): 0 on a map that fits.</summary>
+    public int FrontiersDisplaced { get; set; }
+
+    /// <summary>The displaced patches, as "city band N", for the build's one warning line each.</summary>
+    public List<string> DisplacedFrontiers { get; } = [];
+
     /// <summary>
     /// Every mission terminal on the planet: the entity, where it stands, and its city's group key (region + 1) — what the mission desk lists at.
     /// </summary>
@@ -73,14 +93,34 @@ public sealed class WorldIndex
 /// <param name="Realm">Its planet.</param>
 public readonly record struct MissionTerminalRef(EntityId Id, float X, float Z, int Region, ushort Realm);
 
-/// <summary>A disc of the wilderness that keeps a number of lairs standing: a point of interest or a spawn region (<see cref="WorldIndex.Sites"/>).</summary>
+/// <summary>What planned a <see cref="LairSite"/>.</summary>
+public enum LairSiteKind : byte
+{
+    /// <summary>A point of interest.</summary>
+    Landmark,
+
+    /// <summary>A wilderness spawn region.</summary>
+    Region,
+
+    /// <summary>A city's fringe: the annulus its ramp spans, levels 1-10.</summary>
+    Fringe,
+
+    /// <summary>A frontier patch: one per city and band II-V, a short ride out.</summary>
+    Frontier,
+}
+
+/// <summary>
+/// A disc (or, for a city's fringe, an annulus) of the wilderness that keeps a number of lairs standing: a point of interest, a spawn region, a city's fringe
+/// or a frontier patch (<see cref="WorldIndex.Sites"/>).
+/// </summary>
 /// <remarks>
 /// A class, mutated in place by the lair director (<c>SimBridge.LairLifeTick</c>, serial): <see cref="Live"/> and <see cref="NextSpawnTick"/> are the
 /// director's bookkeeping, and the rest is the map's.
 /// </remarks>
 public sealed class LairSite
 {
-    public LairSite(ushort realm, float x, float z, float radius, int[] templates, int target)
+    public LairSite(ushort realm, float x, float z, float radius, int[] templates, int target, LairSiteKind kind = LairSiteKind.Region, int band = 0,
+        float innerRadius = 0f, int city = -1)
     {
         Realm = realm;
         X = x;
@@ -88,7 +128,23 @@ public sealed class LairSite
         Radius = radius;
         Templates = templates;
         Target = target;
+        Kind = kind;
+        Band = band;
+        InnerRadius = innerRadius;
+        City = city;
     }
+
+    /// <summary>What planned it.</summary>
+    public LairSiteKind Kind { get; }
+
+    /// <summary>The band, II-V, it anchors beyond the ramp; 0 for a fringe, whose levels are the ramp's, by position.</summary>
+    public int Band { get; }
+
+    /// <summary>The inner radius of an annulus (a fringe); 0 for a disc.</summary>
+    public float InnerRadius { get; }
+
+    /// <summary>The city whose fringe it is, or whose frontier patch; -1 for a landmark or a region.</summary>
+    public int City { get; }
 
     /// <summary>The planet the site is on.</summary>
     public ushort Realm { get; }

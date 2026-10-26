@@ -2,6 +2,7 @@ using SwgTatooine.Server.Terrain;
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace SwgTatooine.Server;
 
@@ -42,9 +43,6 @@ public sealed partial class SimBridge
 {
     /// <summary>How often the director walks the lairs, per second. Expiry and respawn are measured in minutes; half a second of lag costs nothing.</summary>
     internal const int LairPassHz = 2;
-
-    /// <summary>Tries at a point inside a site and outside every city before a replacement waits for the next pass.</summary>
-    private const int LairPlacementTries = 8;
 
     /// <summary>The corpses <c>CreatureThink</c> hands over. Created on the schedule, like <see cref="CombatQueue"/>.</summary>
     internal EventQueue<CorpseEvent> CorpseQueue { get; set; }
@@ -160,6 +158,11 @@ public sealed partial class SimBridge
         _retiring.Clear();
         _refilling.Clear();
 
+        // The levels' counts (/swg/stats "levels"), read in this walk from the span it reads anyway, so they cost no extra read.
+        Span<int> lairsByBand = stackalloc int[5];
+        Span<int> creaturesByBand = stackalloc int[5];
+        var belowCrowd = 0;
+
         foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
         {
             var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
@@ -168,6 +171,10 @@ public sealed partial class SimBridge
             {
                 var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
                 ref readonly var lair = ref spawners[slot];
+                var band = ContentLevels.Band(lair.Level) - 1;
+                lairsByBand[band]++;
+                creaturesByBand[band] += lair.AliveCount;
+                belowCrowd += lair.Level <= TatooineData.CrowdLevel && lair.Mission.IsNull ? 1 : 0;
                 if (lair.Site != 0 && (vitals[slot].Health <= 0 || (lair.ExpireTick != 0 && tick >= lair.ExpireTick)))
                 {
                     _retiring.Add((cluster.GetEntityId(slot), cluster.Realm.Value, lair.Site));
@@ -181,6 +188,8 @@ public sealed partial class SimBridge
                 }
             }
         }
+
+        Volatile.Write(ref _levelCounts, new LevelCounts(lairsByBand.ToArray(), creaturesByBand.ToArray(), belowCrowd));
 
         var replaceTicks = Math.Max(1L, (long)(_config.LairReplaceSeconds * _config.TickRateHz));
         foreach (var (id, realm, site) in _retiring)
@@ -212,8 +221,9 @@ public sealed partial class SimBridge
             var realm = lair.Read(CreatureLair.Realm).Value;
             var rng = new Rng(Salt(tick, id.EntityKey, 0x2C1B3C6Du));
 
-            // At the lair's position, round which its occupants stand.
-            WorldBuilder.SpawnCreature(tx, ref rng, id, spawner.CreatureTemplate, place.X, place.Z, spawner.AliveCount, _config, terrain, realm);
+            // At the lair's position, round which its occupants stand, and at its level.
+            WorldBuilder.SpawnCreature(tx, ref rng, id, spawner.CreatureTemplate, spawner.Level, place.X, place.Z, spawner.AliveCount, _config, terrain,
+                realm);
             _creaturesRespawned++;
             _lairEntities++;
             spawner.AliveCount++;
@@ -251,14 +261,16 @@ public sealed partial class SimBridge
                 }
 
                 var rng = new Rng(Salt(tick, ((long)planet << 32) | (uint)s, 0x7F4A7C15u));
-                if (!TryPlaceLair(at, ref rng, out var x, out var z))
+                if (!WorldBuilder.TryPlaceLair(at, index.Levels, ref rng, _config, out var x, out var z))
                 {
                     continue;
                 }
 
-                var template = CreatureTemplates.PickLair(at.Templates, ref rng);
+                // Place, then level, then kind: the build's order (content-levels.md § 2.4), so a replacement takes the level of where it stands.
+                var level = index.Levels.LevelAt(x, z, ref rng);
+                var template = CreatureTemplates.PickLair(at.Templates, level, ref rng);
                 var expire = tick + lifeMin + (long)(rng.NextFloat() * lifeSpan);
-                index.Lairs.Add(WorldBuilder.SpawnLair(tx, ref rng, template, x, z, s + 1, expire, _config, terrain, at.Realm));
+                index.Lairs.Add(WorldBuilder.SpawnLair(tx, ref rng, template, level, x, z, s + 1, expire, _config, terrain, at.Realm));
                 _lairsSpawned++;
                 _lairEntities += 1 + CreatureTemplates.SpawnLimit[template];
                 at.Live++;
@@ -269,20 +281,14 @@ public sealed partial class SimBridge
         }
     }
 
-    /// <summary>A point inside a site, inside the world and outside every city — the build's own rule, plus the cities a destroy mission avoids.</summary>
-    private bool TryPlaceLair(LairSite at, ref Rng rng, out float x, out float z)
-    {
-        for (var attempt = 0; attempt < LairPlacementTries; attempt++)
-        {
-            (x, z) = WorldBuilder.Inside(rng.PointInDisc(at.X, at.Z, at.Radius), _config);
-            if (!InsideCity(at.Realm, x, z))
-            {
-                return true;
-            }
-        }
+    private LevelCounts _levelCounts = new([0, 0, 0, 0, 0], [0, 0, 0, 0, 0], 0);
 
-        x = 0f;
-        z = 0f;
-        return false;
-    }
+    /// <summary>The standing lairs and creatures by band, and the wild lairs the crowd may fight, as the director's last pass counted them.</summary>
+    internal LevelCounts Levels => Volatile.Read(ref _levelCounts);
 }
+
+/// <summary>What the lair director's walk counts of the levels (content-levels.md § Monitoring), published whole each pass.</summary>
+/// <param name="LairsByBand">Standing lairs per band, I to V, mission lairs included.</param>
+/// <param name="CreaturesByBand">Creatures alive per band.</param>
+/// <param name="LairsBelowCrowdLevel">Wild lairs at or below <see cref="TatooineData.CrowdLevel"/>: what the crowd can fight. 0 means an idle crowd.</param>
+internal sealed record LevelCounts(int[] LairsByBand, int[] CreaturesByBand, int LairsBelowCrowdLevel);
