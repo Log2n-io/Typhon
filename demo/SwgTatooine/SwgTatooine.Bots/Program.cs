@@ -321,7 +321,15 @@ while (!stopping.IsCancellationRequested)
         + $"stats {Blocks()}  "
         + $"sessions {swarm.ServerMetric("typhon.sessions"),5:F0}  "
         + $"track p99 {swarm.ServerMetric("typhon.subscriptions.track.p99"),7:F3} ms  "
-        + $"tick p99 {swarm.ServerMetric("typhon.tick.p99"),7:F3} ms");
+        + $"tick p99 {swarm.ServerMetric("typhon.tick.p99"),7:F3} ms"
+        + Home());
+}
+
+// The bots that live in the home city, and how many stand in it now: the concentration, watched as it builds.
+string Home()
+{
+    var (living, there) = swarm.Homes();
+    return living == 0 ? string.Empty : $"  home {there}/{living} in {homeCity}";
 }
 
 // TICK frames applied across the population: a connected session that is never produced for looks healthy in every other number.
