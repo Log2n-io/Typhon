@@ -1,4 +1,5 @@
 import type { ContextMenuItem } from '../state/ui-store';
+import { REVISION_RETRY_MS, REVISION_TIMEOUT_MS, RevisionReader, type RevisionFetch } from './revision-reader';
 
 /**
  * The character's wallet (economy-foundation.md): its balance and recent transfers, as `GET /swg/wallet` answers them, and
@@ -107,128 +108,25 @@ export function formatCredits(credits: number): string {
 }
 
 /** How long a failed wallet read waits before it is tried again, milliseconds. */
-export const WALLET_RETRY_MS = 3000;
+export const WALLET_RETRY_MS = REVISION_RETRY_MS;
 
 /** How long a wallet read may take before it is abandoned and retried, milliseconds. */
-export const WALLET_TIMEOUT_MS = 10_000;
+export const WALLET_TIMEOUT_MS = REVISION_TIMEOUT_MS;
 
-type Fetch = (
-  url: string,
-  init: { headers: Record<string, string>; signal?: AbortSignal },
-) => Promise<{ ok: boolean; status?: number; json(): Promise<unknown> }>;
-
-/**
- * The character's wallet, re-read whenever the body's `wallet` revision moves.
- *
- * The journal's rules exactly (`MissionJournal`): the revision is the trigger, not a clock; a failed read is retried after
- * {@link WALLET_RETRY_MS}, a hung one abandoned after {@link WALLET_TIMEOUT_MS}; a revision that moved again meanwhile is
- * read again at once; a 401 or 403 is not retried until the token changes; an answer landing after {@link clear} is dropped.
- */
-export class WalletReader {
-  /** Bumped whenever a new answer arrives. */
-  version = 0;
-
-  private snapshot: WalletSnapshot | null = null;
-  private generation = 0;
-  private refusedToken: string | null = null;
-  private wantedRev = -1;
-  private readRev = -1;
-  private inFlight = false;
-  private retryAtMs = 0;
-
-  private readonly fetcher: Fetch;
-  private readonly token: () => string | null;
-  private readonly now: () => number;
-
+/** The character's wallet, re-read whenever the body's `wallet` revision moves: a {@link RevisionReader} on `swg/wallet`. */
+export class WalletReader extends RevisionReader<WalletSnapshot> {
   /**
    * @param token The bearer token of this session's login, or `null` without one.
    * @param fetcher How a request is made; `fetch`, same-origin.
    * @param now A monotonic clock in milliseconds, for the retry delay.
    */
-  constructor(
-    token: () => string | null,
-    fetcher: Fetch = (url, init) => fetch(url, init),
-    now: () => number = () => performance.now(),
-  ) {
-    this.token = token;
-    this.fetcher = fetcher;
-    this.now = now;
+  constructor(token: () => string | null, fetcher?: RevisionFetch, now?: () => number) {
+    super('swg/wallet', parseWallet, token, fetcher, now);
   }
 
   /** The wallet as last read, or `null` before the first answer. */
   get wallet(): WalletSnapshot | null {
-    return this.snapshot;
-  }
-
-  /**
-   * Called every frame with the body's `wallet` owner field; reads the wallet when it moved since the last read.
-   *
-   * @param rev The revision, or `NaN` while the body has not reported one.
-   */
-  update(rev: number): void {
-    if (!Number.isFinite(rev)) {
-      return;
-    }
-
-    this.wantedRev = rev;
-    if (this.inFlight || rev === this.readRev || this.now() < this.retryAtMs) {
-      return;
-    }
-
-    const token = this.token();
-    if (token === null || token === this.refusedToken) {
-      return;
-    }
-
-    void this.read(rev, token);
-  }
-
-  /** Forgets everything: a new session may be another character on another server. */
-  clear(): void {
-    this.generation++;
-    this.inFlight = false;
-    this.refusedToken = null;
-    this.snapshot = null;
-    this.wantedRev = -1;
-    this.readRev = -1;
-    this.retryAtMs = 0;
-    this.version++;
-  }
-
-  private async read(rev: number, token: string): Promise<void> {
-    const generation = this.generation;
-    this.inFlight = true;
-    let answer: unknown;
-    let refused = false;
-    try {
-      const response = await this.fetcher('swg/wallet', {
-        headers: { Authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(WALLET_TIMEOUT_MS),
-      });
-      refused = response.status === 401 || response.status === 403;
-      answer = response.ok ? await response.json() : null;
-    } catch {
-      answer = null;
-    }
-
-    if (generation !== this.generation) {
-      return; // cleared meanwhile: another session's answer
-    }
-
-    this.inFlight = false;
-    const wallet = parseWallet(answer);
-    if (wallet === null) {
-      this.retryAtMs = this.now() + WALLET_RETRY_MS;
-      this.refusedToken = refused ? token : null;
-      return;
-    }
-
-    this.readRev = rev;
-    this.snapshot = wallet;
-    this.version++;
-    if (this.wantedRev !== rev) {
-      this.update(this.wantedRev);
-    }
+    return this.value;
   }
 }
 
