@@ -41,19 +41,6 @@ internal static class Causality
         return rows;
     }
 
-    /// <summary>The credits every player is carrying, summed — the world's whole <see cref="Inventory"/> balance.</summary>
-    public static long TotalCredits(TatooineSim sim)
-    {
-        using var tx = sim.Dbe.CreateQuickTransaction();
-        var total = 0L;
-        foreach (var id in sim.Index.Players)
-        {
-            total += tx.Open(id).Read(Player.Inventory).Credits;
-        }
-
-        return total;
-    }
-
     /// <summary>Every standing mission lair and the body of the mission's holder.</summary>
     public static List<(EntityId Lair, EntityId Owner, int Health)> LiveMissions(TatooineSim sim)
     {
@@ -104,13 +91,11 @@ public sealed class CausalityLoopTests
     private string _dir;
     private TatooineSim _sim;
     private RunResult _result;
-    private long _creditsBefore;
 
     /// <remarks>
-    /// <b>12 000 ticks, 20 minutes at 10 Hz</b>: long enough for the mission loop to complete several missions, not only to issue one. The crowd gives a
-    /// mission up after SimBridge.MissionWalkSeconds, and a lair stands behind its occupants until they are dead, so a completion in the window depends on
-    /// what is drawn: the pool this replaced held one in 4 000 ticks only on some draws, six in 12 000 (measured, 2026-10-25). The world's build is most of
-    /// the fixture's cost, and the extra ticks about 8 s.
+    /// <b>12 000 ticks, 20 minutes at 10 Hz</b>: long enough for the crowd's fighters to reach a lair and land fire on it on any draw. It was sized for the
+    /// crowd's missions to complete; the crowd takes none since 2026-10-26 (economy-foundation.md § 1), and the length stays rather than gamble a criterion
+    /// on a shorter draw. The world's build is most of the fixture's cost, and the extra ticks about 8 s.
     /// </remarks>
     [OneTimeSetUp]
     public void RunWorld()
@@ -118,7 +103,6 @@ public sealed class CausalityLoopTests
         _dir = Worlds.NewDirectory();
         _sim = new TatooineSim(Causality.LongEnough(_dir, 12_000));
         _sim.Initialize();
-        _creditsBefore = Causality.TotalCredits(_sim);
         _result = _sim.Run();
     }
 
@@ -130,64 +114,62 @@ public sealed class CausalityLoopTests
     }
 
     [Test]
-    public void AC1_ALairDiesFromPlayerFire_AndTheMissionCompletes()
+    public void AC1_TheCrowdFightsCreatures_AndTakesNoMission()
     {
         var s = _sim.LastStats;
 
-        // The chain, each link asserted separately so a break says which link broke: the crowd takes a mission at a terminal, its body is sent to the lair
-        // drawn for it, its fire lands on the lair, and the desk's completion fires (missions.md § 3).
+        // The crowd fights at the points of interest, and kills what comes at it. It takes no missions: those are the people's and the bots'
+        // (economy-foundation.md E0-5) — a mission completed with no session in the world would be one the crowd took. A person's mission, from the take to
+        // the reward, is MissionDeskChecks'.
+        //
+        // <b>Its fire no longer reaches a lair</b> (LairHits is 0 over this window, measured 2026-10-26): a mission was the only thing that sent a crowd body
+        // TO a lair; a fighter otherwise walks across its point of interest (plan § G.1, G1 — objective-driven combat, not started).
         Assert.Multiple(() =>
         {
-            Assert.That(s.MissionsIssued, Is.GreaterThan(0), "no mission was taken: the terminals list nothing, or the crowd never asks, not the combat loop");
-            Assert.That(s.MissionsAssigned, Is.GreaterThanOrEqualTo(s.MissionsIssued),
-                "a mission the crowd took never sent its body to a lair (once at the take, again whenever the lair moved)");
-            Assert.That(s.LairHits, Is.GreaterThan(0), "no player fire reached a lair");
-            Assert.That(s.MissionsCompleted, Is.GreaterThan(0), "lairs were hit but no mission completed");
+            Assert.That(s.CreaturesKilled, Is.GreaterThan(0), "the crowd killed nothing");
+            Assert.That(s.MissionsIssued, Is.Zero, "a mission was taken with no session in the world: the crowd took it");
+            Assert.That(s.MissionsCompleted, Is.Zero);
+            Assert.That(_sim.Bridge.Transfers, Is.Zero, "credits moved with no session in the world: a kill paid loot, or the crowd was paid");
         });
     }
 
     [Test]
-    public void AC2_EveryTickThatWroteInventory_AdvancedTheDurabilityWatermark()
+    public void AC2_EveryTickThatWroteDurably_AdvancedTheDurabilityWatermark()
     {
-        var s = _sim.LastStats;
         var crossings = _sim.CrossingCommits;
         var lairs = _sim.LairCommits;
         var missions = _sim.MissionCommits;
-        var writes = s.CreaturesKilled + s.MissionRewards + crossings + lairs + missions;
+        var writes = crossings + lairs + missions;
 
-        // Each kill pays loot and each completion pays a reward, and both go through the tick's own transaction — so the WAL's durable LSN moves on the ticks
-        // that wrote Inventory and on no others. The two numbers come from different places: one from the simulation's counters, the other from the WAL
-        // writer thread.
+        // The WAL's durable LSN moves on the ticks that wrote something durable and on no others. The two numbers come from different places: one from the
+        // simulation's counters, the other from the WAL writer thread.
         //
-        // <b>A door is an Inventory writer too.</b> A crossing teleports the player, and the player carries its Versioned inventory into the other realm's
-        // cluster: one record per tick that crossed, from TeleportTick's own side transaction. The crowd walks through doors since they became stored
-        // portals (six crossings in this window); the old path chose doors and never arrived at one, so this run used to make none.
+        // <b>What writes durably with no session in the world</b>, since a kill stopped paying loot and the body stopped carrying a Versioned inventory
+        // (economy-foundation.md § 2): a door — a crossing teleports the player into the other realm's cluster, one record per tick that crossed, from
+        // TeleportTick's own side transaction; the lair director — a corpse destroyed and a creature or lair spawned are STRUCTURAL changes, which the WAL logs
+        // whatever the archetype's cluster durability, one record per tick it committed one (SimBridge.Lairs.cs); and the mission desk, whose offers are
+        // structural (SimBridge.Missions.cs). Money is the ledger's, and nothing moves it without a session.
         //
-        // <b>So is the lair director</b>, on a different ground: a corpse destroyed and a creature or lair spawned are STRUCTURAL changes, which the WAL logs
-        // whatever the archetype's cluster durability. One record per tick it committed one, from its own side transaction (SimBridge.Lairs.cs). <b>And the
-        // mission desk</b>, for both reasons: offers and lairs are structural, a held mission is Versioned (SimBridge.Missions.cs).
+        // It is also the proof that ClusterDurability.Checkpoint does what it declares. Twelve thousand ticks of creatures, players and NPCs moving produce no
+        // WAL record of their own.
         //
-        // It is also the proof that ClusterDurability.Checkpoint does what it declares. Four thousand ticks of creatures, players and NPCs moving produce no WAL
-        // record at all; only the Versioned half of Player does.
-        //
-        // <b>Bounded, not equal, and the equality was the flake.</b> Two writes that land on the SAME tick — a loot drop and a mission reward, which nothing
-        // keeps apart — are one transaction and therefore one WAL record, so the advance count is the number of writing TICKS and not the number of writes.
+        // <b>Bounded, not equal, and the equality was the flake.</b> Two writes that land on the SAME tick are one transaction and therefore one WAL record,
+        // so the advance count is the number of writing TICKS and not the number of writes.
         // Asserting equality made the case fail whenever two coincided: measured at three runs in eight when the fixture runs on its own, and green in a full
         // suite run, because what changes is timing. The bound is what the claim was always about — every writing tick advanced the watermark, and nothing
         // else did — and it still fails if a write stops being durable or a second writer appears.
         Assert.Multiple(() =>
         {
-            Assert.That(writes, Is.GreaterThan(0), "precondition: something was looted or rewarded");
+            Assert.That(writes, Is.GreaterThan(0), "precondition: something was written durably — a crossing, the lair director, the desk");
             Assert.That(_sim.WalAdvances, Is.GreaterThan(0), "no tick advanced the durable LSN, so nothing was made durable at all");
             Assert.That(_sim.WalAdvances, Is.LessThanOrEqualTo(writes),
-                $"the durable LSN moved on more ticks than wrote Inventory, so something other than loot and rewards is writing — {_sim.WalWriterBreakdown}");
-            // One record per advancing tick, plus at most one more on a tick that both looted and crossed — the crossing is a second transaction — and the
+                $"the durable LSN moved on more ticks than wrote durably, so something other than a crossing, the lair director or the desk is writing — {_sim.WalWriterBreakdown}");
+            // One record per advancing tick, plus at most one more on a tick that both crossed and wrote otherwise — the crossing is a second transaction — and the
             // lair director's, which are counted per ENTITY rather than per commit: a spawn appends a record per component, so one creature respawned
             // beside one corpse removed was eleven records on one tick (measured; the creature has eight components). Bounded by the sixteen component slots
             // an archetype can hold, which still fails for a writer that is not the director.
             Assert.That(_sim.WalLsnGained, Is.InRange(_sim.WalAdvances, _sim.WalAdvances + crossings + (16 * (_sim.LairEntities + _sim.MissionEntities))),
                 $"one WAL record per advancing tick and one per crossing tick: more would mean an unexpected writer — {_sim.WalWriterBreakdown}");
-            Assert.That(Causality.TotalCredits(_sim), Is.GreaterThan(_creditsBefore), "credits did not grow, so nothing was actually written");
         });
     }
 

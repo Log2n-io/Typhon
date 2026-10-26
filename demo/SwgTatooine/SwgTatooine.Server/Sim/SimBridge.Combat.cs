@@ -843,10 +843,7 @@ public sealed partial class SimBridge
             TatooineReplication.Replicate(in lair);
         }
 
-        // The loot, written to the shooter's Inventory in this transaction. A counter rather than an Item entity, and deliberately: an event cannot spawn
-        // another archetype's entity until #907 is fixed, so real items are S3's work and out of WP-3's scope. What the counter DOES exercise is the thing
-        // worth exercising — a Versioned write on a cluster archetype, in the tick's unit of work, every time something dies.
-        Loot(tx, ev.Attacker, ai.Template);
+        // No loot: a kill pays nothing until items exist (economy-foundation.md § 1, Q5).
         return true;
     }
 
@@ -997,38 +994,6 @@ public sealed partial class SimBridge
         TatooineReplication.Replicate(in target);
         moved = true;
         return true;
-    }
-
-    /// <summary>Points a scripted body at its mission's lair, and sets it walking (the mission desk, at the take and whenever the lair moves).</summary>
-    /// <remarks>
-    /// <para><b>The crowd's only.</b> A person is told over the wire — the journal and its waypoint — and walks there or not, which is what a mission is; a
-    /// destination written onto a possessed body would overwrite the one its client sent, the two-deciders bug SWG-01 exists to prevent.</para>
-    /// <para><b>The timer is sized for the walk, not for the fight.</b> A lair 0.5-2 km out at the mounted speed is one to three minutes away, and the
-    /// 120 s the activity mix hands a fighter would expire mid-desert and re-roll the activity — which is how a mission that was taken would still never
-    /// be reached.</para>
-    /// </remarks>
-    private void SendOnMission(Transaction tx, EntityId body, float x, float z)
-    {
-        if (!tx.TryOpenMut(body, out var player) || player.Read(Player.Control).Kind != ControllerKind.Scripted)
-        {
-            return;
-        }
-
-        var state = player.Read(Player.State);
-        state.Activity = PlayerActivity.Combat;
-        state.ActivityTicks = MissionWalkSeconds * _config.TickRateHz;
-        state.MissionX = x;
-        state.MissionZ = z;
-        player.Set(Player.State, state);
-        var move = player.Read(Player.Move);
-        move.DestX = x;
-        move.DestZ = z;
-        move.SpeedMps = TatooineData.PlayerMountSpeedMps;
-        var place = player.Read(Player.Bounds);
-        Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, MetresPerTick, place.X, place.Z, x, z);
-        player.Set(Player.Move, move);
-        TatooineReplication.Replicate(in player);
-        Interlocked.Increment(ref _missionsAssigned);
     }
 
     /// <summary>
@@ -1265,47 +1230,6 @@ public sealed partial class SimBridge
 
     /// <summary>What the crowd said when it was attacked or joined in.</summary>
     public long CrowdShouts => Interlocked.Read(ref _crowdShouts);
-
-    /// <summary>[EST] Seconds a scripted body is given to walk to its mission and fight there; past it the crowd gives the mission up.</summary>
-    internal const int MissionWalkSeconds = 300;
-
-    /// <summary>A completed mission's payout, into its holder's <see cref="Inventory"/> — a Versioned write in the tick's unit of work.</summary>
-    private void Reward(Transaction tx, EntityId body, int credits)
-    {
-        if (!tx.TryOpenMut(body, out var player))
-        {
-            return;
-        }
-
-        var inv = player.Read(Player.Inventory);
-        inv.Credits += credits;
-        player.Set(Player.Inventory, inv);
-        var state = player.Read(Player.State);
-        state.MissionsCompleted++;
-        player.Set(Player.State, state);
-        TatooineReplication.Replicate(in player);
-        Interlocked.Increment(ref _missionRewards);
-    }
-
-    /// <summary>What a kill drops, into the shooter's <see cref="Inventory"/>.</summary>
-    /// <remarks>
-    /// Silently does nothing when the attacker has gone — a kill still counts, because the creature is just as dead whether or not anybody was left to
-    /// collect. The alternative, dropping the whole kill, would make a creature immortal whenever its killer logged out on the same tick.
-    /// </remarks>
-    private static void Loot(Transaction tx, EntityId attacker, byte template)
-    {
-        if (attacker.IsNull || !tx.TryOpenMut(attacker, out var player))
-        {
-            return;
-        }
-
-        var credits = template < CreatureTemplates.LootCredits.Length ? CreatureTemplates.LootCredits[template] : 0;
-        var inv = player.Read(Player.Inventory);
-        inv.Credits += credits;
-        inv.ItemCount++;
-        inv.ItemValue += credits;
-        player.Set(Player.Inventory, inv);
-    }
 
     /// <summary>
     /// Whether a lair's occupants still stand between it and whoever attacks it: nothing damages it until they are dead (Loïc, 2026-10-24).

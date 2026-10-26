@@ -34,6 +34,7 @@ public sealed partial class TatooineSim
         // fault, and the moment to say so is before a session can connect and be served a world with no geometry.
         var assets = OpenAssetOrigin();
         var shapes = _shapes;
+        EconomyEndpoints.CountersJson = _bridge.EconomyCountersJson;
         StartReplication(shapes);
         try
         {
@@ -52,6 +53,7 @@ public sealed partial class TatooineSim
             // population, so it is the only place its counters mean anything -- and a run that has to be killed to
             // end still gets to say what it measured.
             PrintProximityReport();
+            Console.WriteLine($"  economy: {_bridge.EconomyCountersJson()}");
         }
     }
 

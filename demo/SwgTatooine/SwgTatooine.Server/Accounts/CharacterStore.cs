@@ -101,7 +101,6 @@ public static class CharacterStore
         {
             Account = account,
             Name = (String64)(displayName ?? string.Empty),
-            Credits = StartingCredits,
             LastPosition = spawn,
             LastRealm = realm,
             Outfit = TatooineData.OutfitFor(account, chosen),
@@ -171,13 +170,6 @@ public static class CharacterStore
         tx.Commit();
         return true;
     }
-
-    /// <summary>What a character starts with.</summary>
-    /// <remarks>
-    /// A number rather than zero so the crafting loop ([12](../../../../claude/design/SwgTatooine/design/economy-loop.md)) has something
-    /// to work with on a fresh character, and small enough that it is not the economy.
-    /// </remarks>
-    public const long StartingCredits = 1_000;
 
     /// <summary>
     /// The account id as the account index's key.

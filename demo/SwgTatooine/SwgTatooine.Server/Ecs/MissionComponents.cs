@@ -101,16 +101,6 @@ public struct MissionOfferRealm
     public MissionOfferRealm(ushort value) => Value = value;
 }
 
-/// <summary>Who holds a mission: a person's character, or a scripted body of the crowd.</summary>
-public static class MissionHolderKind
-{
-    /// <summary><see cref="HeldMission.Holder"/> is a <see cref="CharacterArch"/> entity; its body is whichever avatar that character has online.</summary>
-    public const byte Character = 1;
-
-    /// <summary><see cref="HeldMission.Holder"/> is a scripted <see cref="Player"/>: the body itself, which never logs out.</summary>
-    public const byte Scripted = 2;
-}
-
 /// <summary>
 /// A mission somebody took: what the offer said, where its lair is drawn round, and the lair standing for it now.
 /// </summary>
@@ -121,19 +111,17 @@ public static class MissionHolderKind
 /// thread while the tick runs (<c>EW-02</c>).
 /// </para>
 /// <para>
-/// <b>The holder is a plain id, not a link</b>, because it names a character for a person and a body for the crowd. A character deleted with its account
-/// leaves its missions behind; the desk retires a mission whose character it cannot find.
+/// <b>The holder is a plain id, not a link</b>: a character deleted with its account leaves its missions behind, and the desk retires a mission whose
+/// character it cannot find. Only characters hold missions — the scripted crowd stopped taking them on 2026-10-26 (economy-foundation.md § 1); revision 2
+/// dropped the holder's kind and the crowd's expiry with it.
 /// </para>
 /// </remarks>
-[Component("Swg.HeldMission", 1, StorageMode = StorageMode.Versioned)]
+[Component("Swg.HeldMission", 2, StorageMode = StorageMode.Versioned)]
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public struct HeldMission
 {
-    /// <summary>The character (or scripted body) holding it. Indexed: the journal is "every mission of this character".</summary>
+    /// <summary>The character holding it. Indexed: the journal is "every mission of this character".</summary>
     [Field, Index(AllowMultiple = true)] public EntityId Holder;
-
-    /// <summary>See <see cref="MissionHolderKind"/>.</summary>
-    [Field] public byte HolderKind;
 
     /// <summary>The offer's lair kind, difficulty, direction, and distance as it was listed — what the journal shows.</summary>
     [Field] public byte Kind;
@@ -161,9 +149,6 @@ public struct HeldMission
 
     /// <summary>The tick it was taken.</summary>
     [Field] public long TakenTick;
-
-    /// <summary>The tick the crowd gives up on it; 0 for a person, who keeps a mission until it is done or cancelled.</summary>
-    [Field] public long ExpireTick;
 
     /// <summary>The planet it is on.</summary>
     [Field] public ushort Realm;

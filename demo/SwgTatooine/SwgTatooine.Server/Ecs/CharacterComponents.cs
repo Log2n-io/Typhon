@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 namespace SwgTatooine.Server;
 
 /// <summary>
-/// The persistent you: a name, a wallet, and where you were when you logged out (A4).
+/// The persistent you: a name, and where you were when you logged out (A4). The wallet is <see cref="Wallet"/>, keyed by this character.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -24,10 +24,9 @@ namespace SwgTatooine.Server;
 /// of walking rather than a session. Reading it for anything other than deciding where to spawn is a bug waiting to happen.
 /// </para>
 /// </remarks>
-// Pack = 4 on the analyzer's advice: 8 + 64 + 8 + 12 + 2 + 1 + 8 is 103 bytes of field, which the longs would otherwise round to 112
-// — and 104 packed: the outfit sits in what was the padding after the realm. Both fit the inline spawn payload (TYPHON013), with room
-// for the fields G will add.
-[Component("Swg.Character", 2, StorageMode = StorageMode.Versioned)]
+// Pack = 4 on the analyzer's advice: 8 + 64 + 12 + 2 + 1 + 8 is 95 bytes of field, which the longs would otherwise round to 104 — and 96
+// packed. Revision 3: the wallet moved out to its own archetype (Wallet). Fits the inline spawn payload (TYPHON013), with room for the fields G will add.
+[Component("Swg.Character", 3, StorageMode = StorageMode.Versioned)]
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public struct Character
 {
@@ -65,15 +64,6 @@ public struct Character
     /// </remarks>
     [Field]
     public String64 Name;
-
-    /// <summary>The wallet, in credits.</summary>
-    /// <remarks>
-    /// A <c>long</c>, which is right for the data and currently <b>unprojectable above 2³²</b>: every projected field funnels
-    /// through <c>double</c> → <c>uint</c>, so a balance past four billion is silently clamped on the wire (EN-A). Stored
-    /// correctly here; the defect is the projection pipeline's and is filed.
-    /// </remarks>
-    [Field]
-    public long Credits;
 
     /// <summary>Where the avatar was when it was last saved — the position a login spawns it at.</summary>
     [Field]

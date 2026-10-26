@@ -714,7 +714,6 @@ public static partial class TatooineReplication
             {
                 Account = account,
                 Name = identity.Name == default(String64) ? (String64)DisplayNameFor(account) : identity.Name,
-                Credits = CharacterStore.StartingCredits,
                 LastPosition = SpawnFor(account),
                 LastRealm = DefaultSpawnRealm,
                 Outfit = TatooineData.OutfitFor(account, identity.Outfit),
@@ -733,6 +732,9 @@ public static partial class TatooineReplication
 
         BoundPlayer[session.Value] = avatar;
         CharacterOfSession[session.Value] = character;
+
+        // Its wallet, opened with its grant on a first login: the Ledger system's to write, later in this tick (economy-foundation.md E0-1).
+        BodiesBound.Add((character, avatar));
         SessionOfAccount[account.RawValue] = session.Value;
         PlayingAccounts[account.RawValue] = 0;
         AccountOfSession.Remove(session.Value);
@@ -1039,7 +1041,6 @@ public static partial class TatooineReplication
         var saved = profile.Read(CharacterArch.Profile);
         saved.LastPosition = new Point3F { X = place.X, Y = place.Y, Z = place.Z };
         saved.LastRealm = realm.Value;
-        saved.Credits = body.Read(Player.Inventory).Credits;
         saved.LastSavedUtcTicks = DateTime.UtcNow.Ticks;
         profile.Set(CharacterArch.Profile, saved);
 
@@ -1133,8 +1134,6 @@ public static partial class TatooineReplication
             AttackCooldown = 0,
         };
 
-        var inventory = new Inventory { Credits = profile.Credits, ItemCount = 0, ItemValue = 0 };
-
         var control = default(PlayerControl);
         control.Kind = ControllerKind.Human;
 
@@ -1150,7 +1149,6 @@ public static partial class TatooineReplication
             Player.Move.Set(in move),
             Player.State.Set(in state),
             Player.Vitals.Set(in vitals),
-            Player.Inventory.Set(in inventory),
             Player.Control.Set(in control),
             Player.Session.Set(in owner),
             Player.Look.Set(in look),
@@ -1289,9 +1287,21 @@ public static partial class TatooineReplication
         }
     }
 
+    /// <summary>The bodies bound to a character this tick, and their character: for the Ledger system, which opens a first login's wallet.</summary>
+    /// <remarks>Written by the session system (Input phase), drained by the Ledger system (Economy phase): one after the other on the tick, never at once.</remarks>
+    private static readonly List<(EntityId Character, EntityId Body)> BodiesBound = [];
+
+    /// <summary>Moves this tick's bound bodies into <paramref name="into"/>, which it does not clear, and forgets them.</summary>
+    internal static void DrainBodiesBound(List<(EntityId Character, EntityId Body)> into)
+    {
+        into.AddRange(BodiesBound);
+        BodiesBound.Clear();
+    }
+
     /// <summary>Forgets every avatar binding. Called from <see cref="ResetSessionAccounting"/>.</summary>
     private static void ResetAvatarAccounting()
     {
+        BodiesBound.Clear();
         AccountOfSession.Clear();
         CharacterOfSession.Clear();
         SessionOfAccount.Clear();

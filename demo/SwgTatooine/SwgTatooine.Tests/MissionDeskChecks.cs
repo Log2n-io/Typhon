@@ -27,7 +27,6 @@ internal sealed class MissionDeskChecks : ServedChecks
     {
         var config = Worlds.Served(Dir);
         config.WorkerCount = 1;
-        config.CrowdTakesMissions = false;
         config.Persist = persist;
         return config;
     }
@@ -138,12 +137,15 @@ internal sealed class MissionDeskChecks : ServedChecks
         return Held(sim, character).Find(h => h.Id == held.Id);
     }
 
+    /// <summary>The session's character's wallet balance, and its body's journal revision.</summary>
     private static (int Credits, int JournalRev) BodyOf(TatooineSim sim, SessionId session)
     {
         var body = TatooineReplication.ControlledBy(sim.Dbe, session);
+        Assert.That(TatooineReplication.TryBodyOfSession(session, out _, out var character), Is.True, "the session has no character");
+        var credits = (int)Ledgers.Balance(sim, character);
         using var tx = sim.Dbe.CreateQuickTransaction();
         var player = tx.Open(body);
-        return ((int)player.Read(Player.Inventory).Credits, player.Read(Player.State).JournalRev);
+        return (credits, player.Read(Player.State).JournalRev);
     }
 
     private static bool Exists(TatooineSim sim, EntityId id)
@@ -152,22 +154,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         return tx.TryOpen(id, out _);
     }
 
-    /// <summary>Every <c>ACKS</c> reason this session was sent.</summary>
-    private static byte[] Refusals(FakeLink link)
-    {
-        var sink = new AckSink { Reasons = [] };
-        var frame = default(RealmFrame);
-        var sent = link.Sent;
-        for (var i = 0; i < sent.Length; i++)
-        {
-            if (sent[i].Length > 0 && sent[i][0] == MessageTypes.Tick)
-            {
-                TickReader.Read(sent[i], link.Plan, ref frame, ref sink);
-            }
-        }
-
-        return [.. sink.Reasons];
-    }
+    private static byte[] Refusals(FakeLink link) => Ledgers.Refusals(link);
 
     // ── M-1: the lists ──────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -388,12 +375,74 @@ internal sealed class MissionDeskChecks : ServedChecks
         Assert.Multiple(() =>
         {
             Assert.That(after.Credits - before.Credits, Is.EqualTo(held.Mission.Reward), "paid other than the reward, or more than once");
+            var paid = Ledgers.Rows(sim).FindAll(r => r.Kind == TransferKind.MissionReward);
+            Assert.That(paid, Has.Count.EqualTo(1), "one reward row per completion (E0-4)");
+            Assert.That(paid[0].Ref, Is.EqualTo((long)held.Id.RawValue), "the row names the mission it paid");
+            Assert.That(paid[0].To, Is.EqualTo((long)character.RawValue));
+            Assert.That(paid[0].From, Is.EqualTo(EconomyLedger.World));
+            Assert.That(paid[0].Amount, Is.EqualTo(held.Mission.Reward));
+            Assert.That(EconomyEndpoints.Audit(sim.Dbe).Ok, Is.True, "the audit after a reward");
             Assert.That(Exists(sim, lair), Is.False, "the broken lair still stands");
             Assert.That(Exists(sim, held.Id), Is.False, "the mission is still held");
             Assert.That(after.JournalRev, Is.GreaterThan(before.JournalRev), "the journal did not move");
             Assert.That(journal, Does.StartWith("{\"missions\":[]"), "a completed mission is still in the journal");
             Assert.That(journal, Does.Contain($"\"completed\":[{{\"id\":\"{held.Id.RawValue}\""), "the journal does not say it was completed");
             Assert.That(journal, Does.Contain($"\"reward\":{held.Mission.Reward}}}"));
+        });
+    }
+
+    /// <summary>
+    /// A held mission's lair stands with its occupants round it, and has a life. The pool missions replaced teleported a lair to its player and left them
+    /// where they stood: 381 of 386 live mission camps had nobody near them (measured, 2026-10-25). Moved here from <c>LairLifeChecks</c> when the crowd stopped
+    /// taking missions: a person's is the only kind there is.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void AHeldMissionsLair_StandsWithItsDefendersRoundIt_AndHasALife()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x6011), terminal);
+        var character = CharacterOf(sim, AnAccount(0x6011));
+        var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
+        var lair = held.Mission.Lair;
+        Harness.Ticks(3);
+
+        var near = 0;
+        var far = 0;
+        var life = 0L;
+        sim.WriteInTick(tx =>
+        {
+            var at = tx.Open(lair).Read(CreatureLair.Bounds);
+            life = tx.Open(lair).Read(CreatureLair.Spawner).ExpireTick;
+            foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+            {
+                var homes = cluster.GetReadOnlySpan(Creature.Home);
+                var places = cluster.GetReadOnlySpan(Creature.Bounds);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    if (homes[slot].Lair.Id == lair)
+                    {
+                        var dx = places[slot].X - at.X;
+                        var dz = places[slot].Z - at.Z;
+                        if (MathF.Sqrt((dx * dx) + (dz * dz)) <= 30f)
+                        {
+                            near++;
+                        }
+                        else
+                        {
+                            far++;
+                        }
+                    }
+                }
+            }
+        });
+        Assert.Multiple(() =>
+        {
+            Assert.That(near, Is.GreaterThan(0), "a live mission lair has no defender");
+            Assert.That(far, Is.Zero, $"{far} defenders stand far from their live mission lair, {near} near it");
+            Assert.That(life, Is.Not.Zero, "a mission's lair has no life, so it would never move");
         });
     }
 
@@ -679,7 +728,8 @@ internal sealed class MissionDeskChecks : ServedChecks
 
     /// <summary>
     /// A reopened world's tick count starts again at 0, so stored expiries are clamped to their longest life from the reopen: an offer listed late in a long
-    /// run does not stand for that run's length again. And a mission lair no held mission names is destroyed, not left standing for ever.
+    /// run does not stand for that run's length again. And a mission lair no held mission names is destroyed, not left standing for ever. (A held mission has
+    /// no expiry since the crowd stopped taking them.)
     /// </summary>
     [Test]
     [CancelAfter(180_000)]
@@ -687,7 +737,6 @@ internal sealed class MissionDeskChecks : ServedChecks
     {
         var account = AnAccount(0x600F);
         EntityId offerId;
-        EntityId mission;
         var orphan = EntityId.Null;
         const long FarFuture = 1L << 40;
         using (var first = Start(persist: true))
@@ -695,8 +744,7 @@ internal sealed class MissionDeskChecks : ServedChecks
             var terminal = FirstTerminal(first);
             var link = LogInAt(first, account, terminal);
             var character = CharacterOf(first, account);
-            var held = TakeAndHold(first, link, character, Offers(first, terminal)[0]);
-            mission = held.Id;
+            _ = TakeAndHold(first, link, character, Offers(first, terminal)[0]);
             offerId = Offers(first, terminal)[0].Id;
             first.WriteInTick(tx =>
             {
@@ -704,10 +752,6 @@ internal sealed class MissionDeskChecks : ServedChecks
                 var info = o.Read(MissionOffer.Info);
                 info.ExpireTick = FarFuture;
                 o.Set(MissionOffer.Info, info);
-                var m = tx.OpenMut(mission);
-                var hm = m.Read(HeldMissionArch.Mission);
-                hm.ExpireTick = FarFuture;
-                m.Set(HeldMissionArch.Mission, hm);
 
                 // A wild lair made to look like a mission's whose mission is gone: what LoadDesk's sweep is for.
                 foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
@@ -739,7 +783,6 @@ internal sealed class MissionDeskChecks : ServedChecks
         Harness.Ticks(3);
         var hz = Worlds.ServedHz;
         var offerLife = (long)((TatooineData.MissionOfferLifeMinSeconds + TatooineData.MissionOfferLifeSpanSeconds) * hz);
-        var crowdLife = (long)SimBridge.MissionWalkSeconds * hz;
         var now = second.Runtime.CurrentTickNumber;
         using var tx2 = second.Dbe.CreateQuickTransaction();
         Assert.Multiple(() =>
@@ -748,10 +791,6 @@ internal sealed class MissionDeskChecks : ServedChecks
             Assert.That(tx2.TryOpen(orphan, out _), Is.False, "a mission lair no mission names still stands");
             Assert.That(second.Bridge.MissionLairsOrphaned, Is.EqualTo(1));
             Assert.That(tx2.Open(offerId).Read(MissionOffer.Info).ExpireTick, Is.LessThanOrEqualTo(now + offerLife), "the offer's expiry was not clamped");
-            Assert.That(
-                tx2.Open(mission).Read(HeldMissionArch.Mission).ExpireTick,
-                Is.LessThanOrEqualTo(now + crowdLife),
-                "the mission's expiry was not clamped");
         });
     }
 

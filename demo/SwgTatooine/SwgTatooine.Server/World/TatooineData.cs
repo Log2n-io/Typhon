@@ -346,9 +346,6 @@ public static class TatooineData
     /// </summary>
     public const float MissionTerminalReachM = 6f;
 
-    /// <summary>How far from a terminal the scripted crowd may ask it for a mission, metres: a body anywhere in a town.</summary>
-    public const float MissionCrowdReachM = 1000f;
-
     /// <summary>
     /// The credits a mission pays: <see cref="MissionRewardBase"/> plus <see cref="MissionRewardPerKm"/> per kilometre, per difficulty level, to the nearest 5.
     /// </summary>

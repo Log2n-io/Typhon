@@ -287,6 +287,19 @@ public struct TakeMission
     public uint Serial;
 }
 
+/// <summary>
+/// "Give this player some of my credits" (economy-foundation.md E0-7): <c>/tip &lt;amount&gt;</c> typed in chat with a player selected. Applied by the
+/// <c>Ledger</c> system as one <see cref="TransferKind.Tip"/> row, or refused with the reason.
+/// </summary>
+public struct GiveCredits
+{
+    /// <summary>The recipient's body, as the session was shown it.</summary>
+    public uint Target;
+
+    /// <summary>Credits to give, 1 to <see cref="EconomyLedger.MaxTip"/>.</summary>
+    public uint Amount;
+}
+
 /// <summary>"Cancel this mission" — one the session's character holds, named by the id the journal (<c>GET /swg/missions</c>) gave it.</summary>
 public struct AbandonMission
 {
@@ -742,6 +755,21 @@ public static partial class TatooineReplication
 
     /// <summary><c>ACKS</c> reason: a mission command from a session with no body in the world — a spectator, or one whose avatar is not bound yet.</summary>
     public const byte NotInWorld = AckReasons.FirstApplicationReason + 14;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="GiveCredits"/> for more than the giver's wallet holds.</summary>
+    public const byte TipNotEnough = AckReasons.FirstApplicationReason + 15;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="GiveCredits"/> naming nothing this session was shown, or something with no wallet — a creature, a building, the scripted crowd.</summary>
+    public const byte TipNoRecipient = AckReasons.FirstApplicationReason + 16;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="GiveCredits"/> naming the giver's own body.</summary>
+    public const byte TipSelf = AckReasons.FirstApplicationReason + 17;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="GiveCredits"/> to a body farther than <see cref="EconomyLedger.TipReachM"/>, or in another realm.</summary>
+    public const byte TipTooFar = AckReasons.FirstApplicationReason + 18;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="GiveCredits"/> of zero credits, or more than <see cref="EconomyLedger.MaxTip"/>.</summary>
+    public const byte TipBadAmount = AckReasons.FirstApplicationReason + 19;
 
     /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
     /// <remarks>
@@ -1690,6 +1718,14 @@ public static partial class TatooineReplication
             .Rate(2, 4)
             .Roles(SessionRole.Player)
             .Field(a => a.Mission, Codec.U64, "mission"));
+
+        // The economy (economy-foundation.md). Queued, because each is a payment and two tips are two payments; two a second with a burst of four, which a
+        // person typing /tip does not reach. Applied by the Ledger system, in arrival order.
+        subs.Command<GiveCredits>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(g => g.Target, Codec.VarUInt, "target")
+            .Field(g => g.Amount, Codec.VarUInt, "amount"));
 
         // SWG-09. Queued, because each utterance matters and their order is the conversation; one a second, which is the
         // rate 04-protocol § 4 gives it and roughly what a person types.

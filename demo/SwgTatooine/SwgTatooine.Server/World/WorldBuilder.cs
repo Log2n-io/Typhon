@@ -1212,13 +1212,11 @@ public static class WorldBuilder
                     DestZ = z,
                 };
                 var vitals = new PlayerVitals { Health = 1400, MaxHealth = 1400, AttackDamage = 95, AttackCooldown = rng.NextInt(0, 10) };
-                var inv = new Inventory { Credits = 5_000, ItemCount = 0, ItemValue = 0 };
                 var id = tx.Spawn<Player>(
                     Player.Bounds.Set(in bounds),
                     Player.Move.Set(in move),
                     Player.State.Set(in state),
                     Player.Vitals.Set(in vitals),
-                    Player.Inventory.Set(in inv),
                     Player.Realm.Set(new PlayerRealm(_realm)));
                 index.Players.Add(id);
                 census.Players++;

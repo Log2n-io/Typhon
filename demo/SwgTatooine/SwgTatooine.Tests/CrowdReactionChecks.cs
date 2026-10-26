@@ -29,7 +29,6 @@ internal sealed class CrowdReactionChecks : ServedChecks
     {
         var config = Worlds.Served(Dir);
         config.WorkerCount = 1;
-        config.CrowdTakesMissions = false;
         var sim = new TatooineSim(config);
         sim.Initialize();
         Harness = new SessionHarness(sim);

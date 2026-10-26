@@ -1,23 +1,12 @@
 ﻿using SwgTatooine.Server.Terrain;
 using System;
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace SwgTatooine.Server;
 
-/// <summary>A scripted body asking for a mission: pushed by <c>PlayerThink</c> in its "go and fight" branch, served by the mission desk.</summary>
-[StructLayout(LayoutKind.Sequential)]
-internal struct MissionAsk
-{
-    public EntityId Player;
-    public float X;
-    public float Z;
-    public ushort Realm;
-}
-
 /// <summary>
-/// The mission desk (claude/design/SwgTatooine/design/missions.md): terminals list offers, players and the crowd take them, and each held mission has a lair
+/// The mission desk (claude/design/SwgTatooine/design/missions.md): terminals list offers, players take them, and each held mission has a lair
 /// drawn for it — while its holder is online — until the lair is broken by its holder or the mission is cancelled.
 /// </summary>
 /// <remarks>
@@ -27,9 +16,8 @@ internal struct MissionAsk
 /// </para>
 /// <para>
 /// <b>Two transactions, for two kinds of write.</b> Offers, held missions and lairs — spawns and destroys — go through a side transaction, the lair director's
-/// arrangement. What lands on a body — the reward into its Versioned <see cref="Inventory"/>, the journal's revision, a scripted body sent to its lair — goes
-/// through the tick's own transaction, which <c>CombatResolve</c> has already written this tick: a second transaction writing the same Versioned component
-/// would conflict with it.
+/// arrangement. What lands on a body — the journal's revision — goes through the tick's own transaction. A reward is the economy's to pay (<see cref="EconomyLedger"/>):
+/// the desk hands it over, and the <c>Ledger</c> system credits the holder's wallet later in the same tick.
 /// </para>
 /// <para>
 /// <b>In memory: which offers each terminal lists, every held mission, and how many each holder has.</b> Rebuilt from the database on the first tick, so a
@@ -38,9 +26,6 @@ internal struct MissionAsk
 /// </remarks>
 public sealed partial class SimBridge
 {
-    /// <summary>The crowd's asks for a mission. Created on the schedule, like <see cref="CombatQueue"/>.</summary>
-    internal EventQueue<MissionAsk> MissionAskQueue { get; set; }
-
     /// <summary>How often the desk walks the held missions and the terminals, per second: lairs to draw, broken, expired; offers aged out.</summary>
     internal const int MissionPassHz = 2;
 
@@ -55,18 +40,12 @@ public sealed partial class SimBridge
     private List<(EntityId Id, long ExpireTick)>[] _offers = [];
     private readonly Dictionary<EntityId, int> _terminalOf = [];
 
-    // Every held mission, and how many each holder has (a character, or a scripted body).
+    // Every held mission, and how many each character holds.
     private readonly List<EntityId> _held = [];
     private readonly Dictionary<EntityId, int> _heldBy = [];
 
     // Per pass: every character with a body online, and that body.
     private readonly Dictionary<EntityId, EntityId> _bodies = [];
-
-    // The mission each scripted body holds — the crowd holds one at a time — so an ask from a body already on one sends it back to its lair.
-    private readonly Dictionary<EntityId, EntityId> _crowdMission = [];
-
-    // The crowd's asks past the stack's 64, kept: a burst (the first ticks of a world) is not worth an allocation each time.
-    private MissionAsk[] _askSpill = [];
 
     private long _missionLairsDrawn;
     private long _missionCommits;
@@ -119,7 +98,7 @@ public sealed partial class SimBridge
         }
     }
 
-    /// <summary>Takes and cancels, the crowd's asks, and on the pass cadence the held missions' lairs and the terminals' lists.</summary>
+    /// <summary>Takes and cancels, and on the pass cadence the held missions' lairs and the terminals' lists.</summary>
     public void MissionDeskTick(TickContext ctx)
     {
         if (Halted(ctx.TickNumber))
@@ -129,12 +108,11 @@ public sealed partial class SimBridge
 
         var tick = ctx.TickNumber;
         var subs = ctx.Subscriptions;
-        var asks = MissionAskQueue.Count;
         var passTicks = Math.Max(1, _config.TickRateHz / MissionPassHz);
         var pass = !_deskLoaded || tick % passTicks == 0;
         var takes = subs == null ? default : subs.Commands<TakeMission>();
         var abandons = subs == null ? default : subs.Commands<AbandonMission>();
-        if (!pass && asks == 0 && takes.Count == 0 && abandons.Count == 0)
+        if (!pass && takes.Count == 0 && abandons.Count == 0)
         {
             return;
         }
@@ -171,21 +149,6 @@ public sealed partial class SimBridge
             }
         }
 
-        if (asks > 0)
-        {
-            if (asks > 64 && _askSpill.Length < asks)
-            {
-                _askSpill = new MissionAsk[Math.Max(asks, _askSpill.Length * 2)];
-            }
-
-            Span<MissionAsk> batch = asks <= 64 ? stackalloc MissionAsk[64] : _askSpill;
-            var n = MissionAskQueue.Drain(batch);
-            for (var i = 0; i < n; i++)
-            {
-                ServeCrowd(tx, tick0, in batch[i], tick);
-            }
-        }
-
         tx.Commit();
         if (_deskWrites > 0)
         {
@@ -200,14 +163,13 @@ public sealed partial class SimBridge
     /// <summary>The terminals from the world's indexes; the offers and held missions from the database, which a reopened world already has.</summary>
     /// <remarks>
     /// <b>Every stored expiry is clamped to its longest life from now.</b> They are absolute ticks, and a reopened world's tick count starts again at 0: an
-    /// offer listed late in a long run would otherwise stand for as long as that run lasted, its terminal's list frozen, and a crowd body's mission would never
-    /// be given up. Clamping gives each a full life again, which is all a restart can promise.
+    /// offer listed late in a long run would otherwise stand for as long as that run lasted, its terminal's list frozen. Clamping gives each a full life again,
+    /// which is all a restart can promise.
     /// </remarks>
     private void LoadDesk(Transaction tx, long tick)
     {
         MissionJournal.ResetCompletions();
         var offerLife = (long)((TatooineData.MissionOfferLifeMinSeconds + TatooineData.MissionOfferLifeSpanSeconds) * _config.TickRateHz);
-        var crowdLife = (long)MissionWalkSeconds * _config.TickRateHz;
         var lairLife = (long)(TatooineData.MissionLairLifeSeconds * _config.TickRateHz);
         var terminals = new List<MissionTerminalRef>();
         foreach (var index in PlanetIndexes)
@@ -263,7 +225,6 @@ public sealed partial class SimBridge
 
         _held.Clear();
         _heldBy.Clear();
-        _crowdMission.Clear();
         var heldLairs = new HashSet<EntityId>();
         foreach (var cluster in tx.For<HeldMissionArch>().GetClusterEnumerator())
         {
@@ -286,18 +247,6 @@ public sealed partial class SimBridge
 
             var m = heldEntity.Read(HeldMissionArch.Mission);
             CountHolder(m.Holder, +1);
-            if (m.HolderKind == MissionHolderKind.Scripted)
-            {
-                _crowdMission[m.Holder] = id;
-            }
-
-            if (m.ExpireTick > tick + crowdLife)
-            {
-                m.ExpireTick = tick + crowdLife;
-                tx.OpenMut(id).Set(HeldMissionArch.Mission, m);
-                _deskWrites++;
-            }
-
             if (!m.Lair.IsNull && tx.TryOpen(m.Lair, out var lairEntity))
             {
                 heldLairs.Add(m.Lair);
@@ -350,18 +299,17 @@ public sealed partial class SimBridge
             }
 
             var m = e.Read(HeldMissionArch.Mission);
-            var body = BodyOf(tx, in m);
+            var body = BodyOf(in m);
             if (body.IsNull)
             {
-                // Offline (Q6): its lair goes, and comes back at the next login. A scripted body that is gone, or a character that is, ends the mission.
-                var holderGone = m.HolderKind == MissionHolderKind.Scripted || !tx.TryOpen(m.Holder, out _);
-                if (holderGone)
+                // Offline (Q6): its lair goes, and comes back at the next login. A character that is gone ends the mission.
+                if (!tx.TryOpen(m.Holder, out _))
                 {
                     EndMission(tx, i, in m, completed: false);
                     continue;
                 }
 
-                // Except one its holder broke: that mission is done, and is paid at the login — the reward goes into a body, and there is none now.
+                // Except one its holder broke: that mission is done, and is paid at the login, when the pass sees it with its body again.
                 if (!m.Lair.IsNull && !BrokenByHolder(tx, m.Lair))
                 {
                     DestroyLair(tx, m.Lair);
@@ -373,13 +321,6 @@ public sealed partial class SimBridge
                 continue;
             }
 
-            if (m.ExpireTick != 0 && tick >= m.ExpireTick)
-            {
-                // The crowd gives up after what it gives itself to walk there and fight (MissionWalkSeconds).
-                EndMission(tx, i, in m, completed: false);
-                continue;
-            }
-
             if (m.Lair.IsNull || !tx.TryOpen(m.Lair, out var lairEntity))
             {
                 // Taken while the lair could not be placed, logged back in, or its lair gone some other way: draw one.
@@ -387,7 +328,7 @@ public sealed partial class SimBridge
                 {
                     tx.OpenMut(id).Set(HeldMissionArch.Mission, m);
                     _deskWrites++;
-                    NoteLairMoved(tick0, in m, body);
+                    BumpJournal(tick0, body);
                 }
 
                 continue;
@@ -398,14 +339,10 @@ public sealed partial class SimBridge
             if (vitals.Health <= 0 && lair.OwnerHit != 0)
             {
                 // Done, and paid where it was broken (R5): no going back to the terminal. The journal is told it was completed, not just that it left.
-                Reward(tick0, body, m.Reward);
+                Reward(tick0, m.Holder, body, id, m.Reward);
                 EndMission(tx, i, in m, completed: true);
-                if (m.HolderKind == MissionHolderKind.Character)
-                {
-                    MissionJournal.NoteCompleted(m.Holder, id, m.Kind, m.Reward);
-                    BumpJournal(tick0, body);
-                }
-
+                MissionJournal.NoteCompleted(m.Holder, id, m.Kind, m.Reward);
+                BumpJournal(tick0, body);
                 continue;
             }
 
@@ -421,7 +358,7 @@ public sealed partial class SimBridge
 
                 tx.OpenMut(id).Set(HeldMissionArch.Mission, m);
                 _deskWrites++;
-                NoteLairMoved(tick0, in m, body);
+                BumpJournal(tick0, body);
                 continue;
             }
 
@@ -579,60 +516,14 @@ public sealed partial class SimBridge
             return;
         }
 
-        _ = Take(tx, tick0, offerId, character, MissionHolderKind.Character, body, expireTick: 0, tick);
-    }
-
-    /// <summary>A scripted body's ask: the nearest terminal within reach, and its first offer.</summary>
-    private void ServeCrowd(Transaction tx, Transaction tick0, in MissionAsk ask, long tick)
-    {
-        if (_crowdMission.TryGetValue(ask.Player, out var holding))
-        {
-            // One at a time for the crowd. PlayerThink has just sent the body to a point of interest: send it back to its lair, or it walks away from it.
-            if (tx.TryOpen(holding, out var held))
-            {
-                var m = held.Read(HeldMissionArch.Mission);
-                if (!m.Lair.IsNull)
-                {
-                    SendOnMission(tick0, ask.Player, m.LairX, m.LairZ);
-                }
-            }
-
-            return;
-        }
-
-        var reach = TatooineData.MissionCrowdReachM * _config.ContentScale;
-        var best = -1;
-        var bestD = reach * reach;
-        for (var t = 0; t < _terminals.Length; t++)
-        {
-            ref readonly var terminal = ref _terminals[t];
-            var d = Distance2(terminal.X, terminal.Z, ask.X, ask.Z);
-            if (terminal.Realm == ask.Realm && d < bestD && _offers[t].Count > 0)
-            {
-                best = t;
-                bestD = d;
-            }
-        }
-
-        if (best < 0)
-        {
-            return;   // nowhere near a terminal: it fights at its point of interest instead
-        }
-
-        var expire = tick + ((long)MissionWalkSeconds * _config.TickRateHz);
-        var list = _offers[best];
-        while (list.Count > 0 && !Take(tx, tick0, list[0].Id, ask.Player, MissionHolderKind.Scripted, ask.Player, expire, tick))
-        {
-            // The list named an offer that is gone. Nothing else destroys an offer, so this is a desk bug — but a throw here would stop the server.
-            list.RemoveAt(0);
-        }
+        _ = Take(tx, tick0, offerId, character, body, tick);
     }
 
     /// <summary>
     /// Takes an offer: it leaves its terminal, a replacement is listed there, the held mission is created and its lair drawn — one transaction.
     /// </summary>
     /// <returns><see langword="false"/> when the offer is not there to take.</returns>
-    private bool Take(Transaction tx, Transaction tick0, EntityId offerId, EntityId holder, byte holderKind, EntityId body, long expireTick, long tick)
+    private bool Take(Transaction tx, Transaction tick0, EntityId offerId, EntityId holder, EntityId body, long tick)
     {
         if (!tx.TryOpen(offerId, out var offer))
         {
@@ -660,7 +551,6 @@ public sealed partial class SimBridge
         var m = new HeldMission
         {
             Holder = holder,
-            HolderKind = holderKind,
             Kind = info.Kind,
             Difficulty = info.Difficulty,
             Octant = info.Octant,
@@ -669,18 +559,12 @@ public sealed partial class SimBridge
             AnchorX = info.AnchorX,
             AnchorZ = info.AnchorZ,
             TakenTick = tick,
-            ExpireTick = expireTick,
             Realm = realm,
         };
         var id = tx.Spawn<HeldMissionArch>(HeldMissionArch.Mission.Set(in m));
         _deskWrites++;
         _held.Add(id);
         CountHolder(holder, +1);
-        if (holderKind == MissionHolderKind.Scripted)
-        {
-            _crowdMission[holder] = id;
-        }
-
         Interlocked.Increment(ref _missionsIssued);
 
         // The lair now, while its holder is here. One that cannot be placed this tick is drawn by the next pass.
@@ -690,7 +574,7 @@ public sealed partial class SimBridge
             _deskWrites++;
         }
 
-        NoteLairMoved(tick0, in m, body);
+        BumpJournal(tick0, body);
         return true;
     }
 
@@ -731,10 +615,6 @@ public sealed partial class SimBridge
         _deskWrites++;
         _held.RemoveAt(at);
         CountHolder(m.Holder, -1);
-        if (m.HolderKind == MissionHolderKind.Scripted)
-        {
-            _crowdMission.Remove(m.Holder);
-        }
 
         if (completed)
         {
@@ -804,22 +684,6 @@ public sealed partial class SimBridge
 
     // ── The body's side, through the tick's transaction ─────────────────────────────────────────────────────────────
 
-    /// <summary>A mission's lair is somewhere new — or none: the journal moves, and a scripted body is sent there.</summary>
-    private void NoteLairMoved(Transaction tick0, in HeldMission m, EntityId body)
-    {
-        if (m.HolderKind == MissionHolderKind.Scripted)
-        {
-            if (!m.Lair.IsNull)
-            {
-                SendOnMission(tick0, body, m.LairX, m.LairZ);
-            }
-
-            return;
-        }
-
-        BumpJournal(tick0, body);
-    }
-
     /// <summary>Moves the body's journal revision, so its client re-reads <c>GET /swg/missions</c>.</summary>
     private static void BumpJournal(Transaction tick0, EntityId body)
     {
@@ -837,15 +701,7 @@ public sealed partial class SimBridge
     // ── Bookkeeping ─────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>The body a mission's holder has online, or <c>EntityId.Null</c>.</summary>
-    private EntityId BodyOf(Transaction tx, in HeldMission m)
-    {
-        if (m.HolderKind == MissionHolderKind.Scripted)
-        {
-            return tx.TryOpen(m.Holder, out _) ? m.Holder : EntityId.Null;
-        }
-
-        return _bodies.TryGetValue(m.Holder, out var body) ? body : EntityId.Null;
-    }
+    private EntityId BodyOf(in HeldMission m) => _bodies.TryGetValue(m.Holder, out var body) ? body : EntityId.Null;
 
     private int HeldCount(EntityId holder) => _heldBy.TryGetValue(holder, out var n) ? n : 0;
 

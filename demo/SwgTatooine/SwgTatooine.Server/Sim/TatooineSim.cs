@@ -275,7 +275,6 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.RegisterComponentFromAccessor<CityPlacement>();
         Dbe.RegisterComponentFromAccessor<CityArea>();
         Dbe.RegisterComponentFromAccessor<CityRegionRealm>();
-        Dbe.RegisterComponentFromAccessor<Inventory>();
         Dbe.RegisterComponentFromAccessor<StructureRealm>();
         Dbe.RegisterComponentFromAccessor<LairRealm>();
         Dbe.RegisterComponentFromAccessor<NpcRealm>();
@@ -306,6 +305,12 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.RegisterComponentFromAccessor<MissionOfferRegion>();
         Dbe.RegisterComponentFromAccessor<MissionOfferRealm>();
         Dbe.RegisterComponentFromAccessor<HeldMission>();
+
+        // The economy (economy-foundation.md): wallets, the ledger and its head — Versioned and non-spatial, for the same reasons, and written by the
+        // Ledger system alone.
+        Dbe.RegisterComponentFromAccessor<Wallet>();
+        Dbe.RegisterComponentFromAccessor<LedgerEntry>();
+        Dbe.RegisterComponentFromAccessor<LedgerHead>();
 
         // SWG's coordinates are centred on the planet: -8192..+8192 on each axis at the real size. Keeping the origin in
         // the middle rather than at a corner is not cosmetic — every authentic coordinate in the map data is expressed

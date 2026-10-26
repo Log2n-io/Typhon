@@ -117,11 +117,6 @@ public static class MissionJournal
         while (found.MoveNext())
         {
             var m = found.CurrentComponent;
-            if (m.HolderKind != MissionHolderKind.Character)
-            {
-                continue;
-            }
-
             json.Append(first ? "{" : ",{");
             first = false;
             json.Append("\"id\":\"").Append(((ulong)found.CurrentEntityPK).ToString(CultureInfo.InvariantCulture)).Append('"')

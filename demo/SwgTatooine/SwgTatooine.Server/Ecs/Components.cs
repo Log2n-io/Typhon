@@ -969,6 +969,13 @@ public struct PlayerState
     /// </remarks>
     [Field, Owner(CodecKind.Varu, Name = "journal", Group = "mission", Saturate = true)] public int JournalRev;
 
+    /// <summary>Bumped whenever this body's character's wallet moves — a grant, a reward, a tip given or received (economy-foundation.md § 2).</summary>
+    /// <remarks>
+    /// <b>A revision, the journal's pattern</b>: the client re-reads <c>GET /swg/wallet</c> — the balance and the recent rows — when it moves. The balance
+    /// itself is a <c>long</c>, which a projected field cannot carry past 2³² (EN-A); the revision can, and costs the body four bytes.
+    /// </remarks>
+    [Field, Owner(CodecKind.Varu, Name = "wallet", Group = "wallet", Saturate = true)] public int WalletRev;
+
     /// <summary>Missions completed — here only to prove the mission loop closes.</summary>
     [Field] public int MissionsCompleted;
 
@@ -1531,24 +1538,3 @@ public struct PortalDoor
     [Field] public EntityLink<WorldObject> Owner;
 }
 
-/// <summary>
-/// The one thing in this world worth a WAL record. Item ownership and the credit balance are transactional — losing
-/// thirty seconds of them would be losing a player's stuff — so this is <see cref="StorageMode.Versioned"/> and rides
-/// full MVCC and per-commit WAL, on an archetype whose other half has opted out of the WAL entirely.
-/// </summary>
-/// <remarks>
-/// It exists to make the durability split real rather than theoretical. A workload where every archetype has the same
-/// policy never exercises the per-archetype decision, and that decision is one the fence actually makes.
-/// </remarks>
-[Component("Swg.Inventory", 1, StorageMode = StorageMode.Versioned)]
-[StructLayout(LayoutKind.Sequential)]
-public struct Inventory
-{
-    [Field] public long Credits;
-
-    /// <summary>Items carried. Loot from a kill increments it inside a real transaction.</summary>
-    [Field] public int ItemCount;
-
-    /// <summary>Total value of what is carried.</summary>
-    [Field] public long ItemValue;
-}

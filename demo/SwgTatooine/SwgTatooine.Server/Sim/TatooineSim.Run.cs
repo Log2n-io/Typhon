@@ -672,9 +672,6 @@ public sealed partial class TatooineSim
         // The corpses CreatureThink hands to the lair director, which alone may destroy. A few a second at the baseline; sized like the combat queue.
         _bridge.CorpseQueue = dag.CreateEventQueue<CorpseEvent>("Corpses", 1024);
 
-        // The crowd's asks for a mission, from PlayerThink to the mission desk. A few a second at --pop 5.
-        _bridge.MissionAskQueue = dag.CreateEventQueue<MissionAsk>("MissionAsks", 1024);
-
         if (_config.Shuttles)
         {
             dag.Add(new ShuttleSystem(_bridge));
@@ -739,12 +736,12 @@ public sealed partial class TatooineSim
         dag.Add(new EconomySystem(_bridge));
         dag.Add(new LairLifeSystem(_bridge));
         dag.Add(new MissionDeskSystem(_bridge));
+        dag.Add(new LedgerSystem(_bridge));
         // Produced, and read by a system that does NOT declare `Consumes`: the runtime skips a declared consumer on every tick its queues are empty
         // (TyphonRuntime's ReactiveSkip), and both of these have work of their own on such ticks — the lair director's pass, the desk's takes and its
         // pass. So the lair director ran its 2 Hz pass only on a pass tick that also brought a corpse, and the desk never ran at all with the crowd off
         // (found 2026-10-25). The phases order the producers first (Think before Economy); ReadsEvents states the edge on each consumer.
         dag.Produces("CreatureThink", _bridge.CorpseQueue);
-        dag.Produces("PlayerThink", _bridge.MissionAskQueue);
 
         // Only a server has sessions. In the simulation's own DAG rather than one of its own, because an intent writes PlayerMotion and PlayerThink writes it
         // too — see PlayerSessionSystem.

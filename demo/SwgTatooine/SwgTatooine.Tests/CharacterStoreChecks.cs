@@ -108,7 +108,6 @@ internal sealed class CharacterStoreChecks
             Assert.That(created, Is.True, "the first call must create");
             Assert.That(character, Is.Not.EqualTo(default(EntityId)));
             Assert.That(profile.Name.AsString, Is.EqualTo("Han"));
-            Assert.That(profile.Credits, Is.EqualTo(CharacterStore.StartingCredits));
             Assert.That(profile.LastRealm, Is.EqualTo(3));
             Assert.That(profile.LastPosition.X, Is.EqualTo(Somewhere.X));
             Assert.That(profile.LastSavedUtcTicks, Is.GreaterThan(0));
@@ -281,7 +280,6 @@ internal sealed class CharacterStoreChecks
             Assert.That(saved.LastRealm, Is.EqualTo(7));
             Assert.That(saved.LastSavedUtcTicks, Is.GreaterThanOrEqualTo(fresh.LastSavedUtcTicks));
             Assert.That(saved.Name.AsString, Is.EqualTo("Ackbar"), "and nothing else in the component moved");
-            Assert.That(saved.Credits, Is.EqualTo(CharacterStore.StartingCredits));
         });
     }
 

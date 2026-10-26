@@ -61,67 +61,6 @@ public sealed class LairLifeChecks
         Worlds.Delete(_dir);
     }
 
-    /// <summary>
-    /// A mission's lair stands with its occupants round it, and has a life. The pool this replaced teleported a lair to its player and left them where they
-    /// stood: 381 of 386 live mission camps had nobody near them (measured, 2026-10-25). A mission's lair is spawned as its kind now, occupants and all.
-    /// </summary>
-    [Test]
-    public void ALiveMissionLairHasItsDefendersRoundIt()
-    {
-        var lairs = new Dictionary<EntityId, (float X, float Z)>();
-        var near = 0;
-        var far = 0;
-        var endless = 0;
-        using (var tx = _sim.Dbe.CreateQuickTransaction())
-        {
-            foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
-            {
-                var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
-                var places = cluster.GetReadOnlySpan(CreatureLair.Bounds);
-                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
-                {
-                    var slot = BitOperations.TrailingZeroCount(bits);
-                    if (!spawners[slot].Mission.IsNull)
-                    {
-                        lairs[cluster.GetEntityId(slot)] = (places[slot].X, places[slot].Z);
-                        endless += spawners[slot].ExpireTick == 0 ? 1 : 0;
-                    }
-                }
-            }
-
-            foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
-            {
-                var homes = cluster.GetReadOnlySpan(Creature.Home);
-                var places = cluster.GetReadOnlySpan(Creature.Bounds);
-                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
-                {
-                    var slot = BitOperations.TrailingZeroCount(bits);
-                    if (lairs.TryGetValue(homes[slot].Lair, out var at))
-                    {
-                        var d = MathF.Sqrt(((places[slot].X - at.X) * (places[slot].X - at.X)) + ((places[slot].Z - at.Z) * (places[slot].Z - at.Z)));
-                        if (d <= 30f)
-                        {
-                            near++;
-                        }
-                        else
-                        {
-                            far++;
-                        }
-                    }
-                }
-            }
-        }
-
-        Assert.Multiple(() =>
-        {
-            Assert.That(_sim.Bridge.MissionLairsDrawn, Is.GreaterThan(0), "precondition: missions were taken");
-            Assert.That(lairs.Count, Is.GreaterThan(0), "precondition: a mission is live at the end of the run");
-            Assert.That(near, Is.GreaterThan(0), "a live mission lair has no defender");
-            Assert.That(far, Is.LessThanOrEqualTo(near / 10), $"{far} defenders stand far from their live mission lair, {near} near it");
-            Assert.That(endless, Is.Zero, "a mission's lair has no life, so it would never move");
-        });
-    }
-
     [Test]
     public void ADeadCreatureIsDestroyed_AndItsLairReplacesIt()
     {
