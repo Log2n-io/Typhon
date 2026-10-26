@@ -34,7 +34,7 @@ const PARTS: readonly (readonly [string, string, string])[] = [
   ['core_armor', 'Armor Core', 'core'],
   ['core_propulsion', 'Propulsion Core', 'core'],
   ['addon_weapon', 'Weapon Enhancement', 'addon'],
-  ['addon_armor', 'Armour Enhancement', 'addon'],
+  ['addon_armor', 'Armor Enhancement', 'addon'],
   ['addon_tuning', 'Tuning Kit', 'addon'],
   ['addon_additive', 'Additive', 'addon'],
 ];
