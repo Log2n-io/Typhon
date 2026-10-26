@@ -360,6 +360,13 @@ public static class TatooineData
         return table;
     }
 
+    /// <summary>
+    /// How long a held mission's holder may stay offline before the mission is cancelled and its lair released, seconds (Loïc, 2026-10-27): a reserved lair
+    /// never expires, so a holder who does not come back would keep it from the world for ever. Counted by the desk in memory, from the pass that first
+    /// finds the holder gone — after a restart, from the reopen. <see cref="SimConfig.MissionOfflineReleaseSeconds"/> carries it.
+    /// </summary>
+    public const float MissionOfflineReleaseSeconds = 1800f;
+
     /// <summary>How long an untaken offer stays listed, seconds, before it is replaced: the shortest, and the spread above it.</summary>
     public const float MissionOfferLifeMinSeconds = 300f;
 

@@ -795,6 +795,12 @@ public sealed class SimConfig
     public float LairReplaceSeconds = 60f;
 
     /// <summary>
+    /// Seconds a held mission's holder may stay offline before the mission is cancelled and its lair released (<c>--mission-offline-s</c>;
+    /// <see cref="TatooineData.MissionOfflineReleaseSeconds"/>).
+    /// </summary>
+    public float MissionOfflineReleaseSeconds = TatooineData.MissionOfflineReleaseSeconds;
+
+    /// <summary>
     /// Per-system <c>MinChunkSize</c> for the awareness system only. <c>0</c> leaves it on the global floor.
     /// </summary>
     /// <remarks>

@@ -193,6 +193,8 @@ public static class CommandLine
         c.LairLifeMinSeconds = life[0];
         c.LairLifeMaxSeconds = life[1];
         c.LairReplaceSeconds = r.Float("--lair-replace-s", c.LairReplaceSeconds, "seconds before a retired lair's site spawns another", min: 0.001f);
+        c.MissionOfflineReleaseSeconds = r.Float("--mission-offline-s", c.MissionOfflineReleaseSeconds,
+            "seconds a mission's holder may stay offline before the mission is cancelled and its lair released", min: 0.001f);
 
         r.Group("persistence and output");
         c.DatabaseDirectory = r.Str("--db-dir", c.DatabaseDirectory, "where the database file is written", "<path>");
