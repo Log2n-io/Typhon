@@ -44,6 +44,12 @@ public enum GoalWhy : byte
     IdleChosen,
     BoardAsked,
     EnteredBuilding,
+
+    /// <summary>Holding no mission: off to the nearest mission terminal for one (the day's loop, BotBrain remarks).</summary>
+    DeskChosen,
+
+    /// <summary>Its city's mission terminals had nothing for it twice in a row: off to another city.</summary>
+    DeskEmpty,
 }
 
 /// <summary>What happened to a walk (a leg): planned, a point reached, re-planned, stuck, given up.</summary>

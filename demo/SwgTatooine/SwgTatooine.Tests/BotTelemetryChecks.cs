@@ -126,10 +126,12 @@ public sealed class BotTelemetryChecks
             var (x, z) = (Here.X, Here.Z);
             var tick = 1L;
 
-            // A creature at 10 m that never dies: hunted, then given up.
+            // A creature at 10 m that never dies: hunted, then given up. Holding a mission whose lair is still being drawn, so the desk is not the bot's
+            // first stop (the day's loop) and the mix it always had decides.
             var quarry = new Perceived
             {
                 HasBody = true, X = x, Z = z, NearestCreature = 42u, NearestCreatureX = x, NearestCreatureZ = z + 10f, NearestCreatureM = 10f,
+                MissionsHeld = 1,
             };
             brain.Decide(in quarry, tick++);
             if (brain.Goal != Goal.Hunting)

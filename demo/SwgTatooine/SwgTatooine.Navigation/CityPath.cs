@@ -153,6 +153,17 @@ public static class CityPath
     /// <summary>The body's half-extent the walls are grown by — <c>demo.json</c>'s <c>playerBodyHalfM</c>.</summary>
     public const float BodyHalfM = 0.3f;
 
+    /// <summary>
+    /// The air a pulled-straight leg keeps from a wall beyond the body's own half, metres: the grid's walls are grown by the body alone, so a leg pulled
+    /// taut round a corner grazed it, and a body steered a few times a second rather than continuously touched it (live, 2026-10-27).
+    /// </summary>
+    /// <remarks>
+    /// <b>On the pulled legs, not on the grid.</b> Grown into the grid it would close the gaps the grid allows — a gate, a porch's way off, the alleys the
+    /// crowd shares. Here it only decides where a leg may be pulled straight: when the straight leg to a far point would pass closer, the corner before it
+    /// is kept, and the walk still goes everywhere the grid lets it.
+    /// </remarks>
+    public const float AirM = 0.15f;
+
     /// <summary>Rasterises the walls of the structures that touch a rectangle.</summary>
     /// <param name="floorTopM">
     /// A collider topping out at or under this is walked on, not walked into: <see cref="StepM"/> from the ground, and <see cref="PorchTopM"/> for a body
@@ -248,7 +259,8 @@ public static class CityPath
         float maxX,
         float maxZ,
         List<PlanBox> into,
-        float half = BodyHalfM)
+        float half = BodyHalfM,
+        float floorTopM = StepM)
     {
         for (var i = 0; i < structures.Count; i++)
         {
@@ -260,7 +272,7 @@ public static class CityPath
 
             foreach (var wall in walls)
             {
-                if (!IsWall(in wall))
+                if (!IsWall(in wall, floorTopM))
                 {
                     continue;
                 }
@@ -282,7 +294,11 @@ public static class CityPath
     /// Whether a straight step between two points enters none of <paramref name="walls"/> (as <see cref="CollectWalls"/> grew them): exact, not sampled
     /// on a grid — a rectangle by its slabs, a disc by its distance to the step.
     /// </summary>
-    public static bool SegmentClear(List<PlanBox> walls, float ax, float az, float bx, float bz)
+    /// <param name="ignoreEnds">
+    /// Whether a wall whose grown box holds either end is passed over: a body standing in a wall's margin, or a stand point a body's width from a
+    /// terminal, would otherwise fail every step to or from it. For the air check only, which the grid's own test backs.
+    /// </param>
+    public static bool SegmentClear(List<PlanBox> walls, float ax, float az, float bx, float bz, bool ignoreEnds = false)
     {
         var (lx, hx) = ax < bx ? (ax, bx) : (bx, ax);
         var (lz, hz) = az < bz ? (az, bz) : (bz, az);
@@ -291,6 +307,11 @@ public static class CityPath
         foreach (var w in walls)
         {
             if (hx <= w.MinX || lx >= w.MaxX || hz <= w.MinZ || lz >= w.MaxZ)
+            {
+                continue;
+            }
+
+            if (ignoreEnds && (Holds(in w, ax, az) || Holds(in w, bx, bz)))
             {
                 continue;
             }
@@ -320,6 +341,18 @@ public static class CityPath
         }
 
         return true;
+
+        static bool Holds(in PlanBox w, float x, float z)
+        {
+            if (w.Radius > 0f)
+            {
+                var dx = x - ((w.MinX + w.MaxX) * 0.5f);
+                var dz = z - ((w.MinZ + w.MaxZ) * 0.5f);
+                return (dx * dx) + (dz * dz) < w.Radius * w.Radius;
+            }
+
+            return x > w.MinX && x < w.MaxX && z > w.MinZ && z < w.MaxZ;
+        }
 
         // Narrows [t0, t1] to the part of the step inside one axis's open interval; false when none of it is.
         static bool Slab(float a, float d, float min, float max, ref float t0, ref float t1)
@@ -395,16 +428,26 @@ public static class CityPath
         var maxZ = MathF.Max(from.Z, to.Z) + SearchMarginM;
         var cell = MathF.Max(maxX - minX, maxZ - minZ) <= FineSearchM ? CellM * 0.5f : CellM;
         var grid = Walls(structures, assets, minX, minZ, maxX, maxZ, cell: cell);
+        var floorTopM = StepM;
         if (IsBlocked(grid, from.X, from.Z) && OnRaisedFloor(structures, assets, from.X, from.Z))
         {
-            grid = Walls(structures, assets, minX, minZ, maxX, maxZ, floorTopM: PorchTopM, cell: cell);
+            floorTopM = PorchTopM;
+            grid = Walls(structures, assets, minX, minZ, maxX, maxZ, floorTopM: floorTopM, cell: cell);
         }
+
+        // The same walls grown by the body and AirM, for where a leg may be pulled straight; the thread's list, as the grid is the thread's buffer.
+        var air = t_air ??= [];
+        air.Clear();
+        CollectWalls(structures, assets, minX, minZ, maxX, maxZ, air, BodyHalfM + AirM, floorTopM);
 
         // Once more with a wide snap when the ends were deeper in than the usual one reaches. Measured on the crowd at --pop 5: 29 of 123 searches failed,
         // every one with an end inside a building — most on the middle of a shuttleport's pad.
-        return Find(grid, from.X, from.Z, to.X, to.Z, maxExpansions)
-            ?? Find(grid, from.X, from.Z, to.X, to.Z, maxExpansions, WideSnapM);
+        return Find(grid, from.X, from.Z, to.X, to.Z, maxExpansions, air: air)
+            ?? Find(grid, from.X, from.Z, to.X, to.Z, maxExpansions, WideSnapM, air);
     }
+
+    [ThreadStatic]
+    private static List<PlanBox> t_air;
 
     /// <summary>A box turned by quarter turns about the structure's origin — the browser's <c>turn</c> and the server's <c>QuarterTurn</c>.</summary>
     public static PlanBox Turn(int quarters, PlanBox b) => (quarters & 3) switch
@@ -499,6 +542,10 @@ public static class CityPath
 
     /// <summary>A path around the walls as waypoints — the start excluded, the goal last — or null when there is none inside the grid.</summary>
     /// <param name="maxExpansions">Cells it may expand before it gives up; a walled-off goal otherwise costs the whole grid.</param>
+    /// <param name="air">
+    /// The walls grown by the body and <see cref="AirM"/>: a leg is pulled straight only where it keeps that air as well as the grid's clearance. Null
+    /// pulls on the grid alone.
+    /// </param>
     public static List<(float X, float Z)> Find(
         WalkGrid grid,
         float fromX,
@@ -506,7 +553,8 @@ public static class CityPath
         float toX,
         float toZ,
         int maxExpansions = int.MaxValue,
-        float snapM = SnapM)
+        float snapM = SnapM,
+        List<PlanBox> air = null)
     {
         // Eight metres each way: a body pressed into a street corner stands in cells its own width has walled off, and a goal can be a few metres into
         // a building — four cells left a bot wedged in Dry Wells with no search that could start.
@@ -629,11 +677,13 @@ public static class CityPath
         var i = 0;
         while (i < cells.Count)
         {
+            // The goal itself when its cell is open; the open cell the search ended on when it is not — a walk that ended on a point inside a
+            // building ended against its wall. A caller that needs the exact point (a stand point beside a terminal) walks it as its exact part.
             var j = cells.Count - 1;
             while (j > i)
             {
-                var (bx, bz) = CentreOf(grid, cells[j]);
-                if (LineClear(grid, ax, az, bx, bz))
+                var (bx, bz) = j == cells.Count - 1 && goalOpen ? (toX, toZ) : CentreOf(grid, cells[j]);
+                if (LineClear(grid, ax, az, bx, bz) && (air == null || SegmentClear(air, ax, az, bx, bz, ignoreEnds: true)))
                 {
                     break;
                 }
@@ -641,8 +691,6 @@ public static class CityPath
                 j--;
             }
 
-            // The goal itself when its cell is open; the open cell the search ended on when it is not — a walk that ended on a point inside a
-            // building ended against its wall. A caller that needs the exact point (a stand point beside a terminal) walks it as its exact part.
             var p = j == cells.Count - 1 ? (goalOpen ? (toX, toZ) : CentreOf(grid, goal)) : CentreOf(grid, cells[j]);
             path.Add(p);
             (ax, az) = p;
