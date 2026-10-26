@@ -55,6 +55,9 @@ public readonly struct Perceived
     /// <summary>How far that creature is, metres.</summary>
     public float NearestCreatureM { get; init; }
 
+    /// <summary>That creature's level, 1-50 (content-levels.md); 0 from a server that does not send one.</summary>
+    public int NearestCreatureLevel { get; init; }
+
     /// <summary>Whether a <c>BoardShuttle</c> this bot sent was refused in the frame just applied.</summary>
     /// <remarks>
     /// <b>The server's answer, read rather than guessed at.</b> A boarding is the one decision here the server can

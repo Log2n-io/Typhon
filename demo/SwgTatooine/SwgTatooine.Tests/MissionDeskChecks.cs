@@ -516,6 +516,50 @@ internal sealed class MissionDeskChecks : ServedChecks
         });
     }
 
+    /// <summary>
+    /// CL-13: at a terminal, a bot takes the nearest-lair offer within its CL + 3 when one is listed, and the nearest of all only when none is. STAGED
+    /// before the session first sees the offers, so the two rules pick different ones on every draw: the nearest offers are made level 30, the rest 1.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void ABot_PrefersAnOfferWithinItsLevel()
+    {
+        using var sim = Start();
+        Harness.Ticks(3);
+        var terminal = FirstTerminal(sim);
+        var offers = Offers(sim, terminal);
+        offers.Sort((a, b) => a.Info.DistanceM.CompareTo(b.Info.DistanceM));
+        var nearestM = offers[0].Info.DistanceM;
+        Assume.That(offers[^1].Info.DistanceM, Is.GreaterThan(nearestM), "every offer at the terminal is as near as the nearest");
+        sim.WriteInTick(tx =>
+        {
+            foreach (var (id, info) in offers)
+            {
+                var o = tx.OpenMut(id);
+                var staged = o.Read(MissionOffer.Info);
+                staged.Level = (byte)(info.DistanceM == nearestM ? 30 : 1);
+                o.Set(MissionOffer.Info, staged);
+            }
+        });
+
+        var link = LogInAt(sim, AnAccount(0x6015), terminal);
+        Harness.Ticks(4);
+        var store = new Typhon.Client.WorldStore(link.Plan);
+        Replay(link, store);
+        var inReachM = offers.Find(o => o.Info.DistanceM != nearestM).Info.DistanceM;
+
+        var weak = new SwgTatooine.Bots.Brain.Perception { CombatLevel = 1 };
+        var strong = new SwgTatooine.Bots.Brain.Perception { CombatLevel = 30 };
+        Assert.Multiple(() =>
+        {
+            Assert.That(weak.BestOffer(store, terminal.X + 2f, terminal.Z, 6f, out var serial), Is.Not.Zero, "no offer was seen at the terminal");
+            Assert.That(offers.Exists(o => o.Info.Serial == serial && o.Info.DistanceM == inReachM), Is.True,
+                "a CL-1 bot did not take the nearest offer within its level");
+            strong.BestOffer(store, terminal.X + 2f, terminal.Z, 6f, out var any);
+            Assert.That(offers.Exists(o => o.Info.Serial == any && o.Info.DistanceM == nearestM), Is.True, "a CL-30 bot did not take the nearest offer");
+        });
+    }
+
     /// <summary>The <c>level</c> a store decoded for an entity, or -1 when it holds none.</summary>
     private static int LevelOnTheWire(Typhon.Client.WorldStore store, uint netId)
     {
