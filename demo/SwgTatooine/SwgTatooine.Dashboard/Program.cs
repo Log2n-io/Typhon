@@ -35,10 +35,14 @@ builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 builder.Services.AddSingleton(new DashboardFeed(serverUri));
 builder.Services.AddHostedService(sp => sp.GetRequiredService<DashboardFeed>());
 
+// What the bot swarm reports when run with --dashboard (bot-telemetry.md): received here, never asked of the game server, which knows nothing of bots.
+builder.Services.AddSingleton<BotBoard>();
+
 var app = builder.Build();
 app.MapStaticAssets();
 app.UseAntiforgery();
 app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
+BotIngest.Map(app);
 
 Console.WriteLine($"  dashboard on http://{address}:{portNumber}/ reading {serverUri}");
 await app.RunAsync();
