@@ -507,6 +507,346 @@ class ClusterWalkOwnDestroyTests : TestBase<ClusterWalkOwnDestroyTests>
         Assert.That(fresh.ByOccupancy.Count, Is.EqualTo(Population - 1));
     }
 
+    /// <summary>
+    /// #1496: another transaction's destroy, past its commit point but not yet published — the slot still occupied — is absent from a walk whose transaction
+    /// cannot open it, as from that transaction's point access. Staged, not raced: the destroyer is parked right after its commit stamp is drawn
+    /// (<c>CommitAfterAppendProbe</c>), and the reader walks on another thread while it waits.
+    /// </summary>
+    [TestCaseSource(nameof(AllStorages))]
+    [VerifiesRule("CLUSTERWALK-04")]
+    public void AnotherTransactionsDestroyPastItsCommitPoint_IsAbsentFromAWalkThatCannotOpenIt(Storage storage)
+    {
+        using var dbe = SetupEngine();
+        var ids = SpawnCommitted(dbe, storage, Population);
+        var victim = ids[77];
+
+        WalkResult walk = null;
+        var aliveToReader = true;
+        var stillOccupied = false;
+        Exception readerFailure = null;
+        using var destroyer = dbe.CreateQuickTransaction();
+        destroyer.Destroy(victim);
+        dbe.CommitAfterAppendProbe = () =>
+        {
+            dbe.CommitAfterAppendProbe = null;
+            var reader = new Thread(() =>
+            {
+                try
+                {
+                    using var tx = dbe.CreateQuickTransaction();
+                    aliveToReader = tx.IsAlive(victim);
+                    stillOccupied = RawOccupancyHolds(dbe, storage, victim);
+                    walk = Walk(tx, storage, Entry.ArchetypeAccessorAll);
+                }
+                catch (Exception ex)
+                {
+                    readerFailure = ex;
+                }
+            });
+            reader.Start();
+            reader.Join();
+        };
+        try
+        {
+            Assert.That(destroyer.Commit(), Is.True);
+        }
+        finally
+        {
+            dbe.CommitAfterAppendProbe = null;
+        }
+
+        Assert.That(readerFailure, Is.Null, readerFailure?.ToString());
+        Assert.That(aliveToReader, Is.False, "precondition: past the commit point, point access already answers gone");
+        Assert.That(stillOccupied, Is.True, "precondition: the slot is still occupied — the publish has not released it");
+        Assert.That(walk.ByOccupancy, Does.Not.Contain(victim), "the walk yields an entity its own transaction cannot open (#1496)");
+        Assert.That(walk.ByOccupancy.Count, Is.EqualTo(Population - 1), "every other entity, once");
+        AssertConsistent(walk);
+    }
+
+    /// <summary>
+    /// #1496's other side: in the same window, a reader whose snapshot PREDATES the destroy's stamp still sees the entity — by point access and by its walk.
+    /// The hide judges the stamp against the walker's TSN, not "a destroy is in flight".
+    /// </summary>
+    [TestCaseSource(nameof(AllStorages))]
+    [VerifiesRule("CLUSTERWALK-04")]
+    public void AnOlderReader_StillWalksAnotherTransactionsDestroyPastItsCommitPoint(Storage storage)
+    {
+        using var dbe = SetupEngine();
+        var ids = SpawnCommitted(dbe, storage, Population);
+        var victim = ids[77];
+
+        WalkResult walk = null;
+        var aliveToReader = false;
+        Exception readerFailure = null;
+        using var opened = new ManualResetEventSlim();
+        using var go = new ManualResetEventSlim();
+        using var walked = new ManualResetEventSlim();
+        var reader = new Thread(() =>
+        {
+            try
+            {
+                using var tx = dbe.CreateQuickTransaction();   // older than the destroy's stamp
+                opened.Set();
+                go.Wait();
+                aliveToReader = tx.IsAlive(victim);
+                walk = Walk(tx, storage, Entry.ArchetypeAccessorAll);
+            }
+            catch (Exception ex)
+            {
+                readerFailure = ex;
+            }
+            finally
+            {
+                walked.Set();
+            }
+        });
+        reader.Start();
+        Assert.That(opened.Wait(5_000), Is.True, "precondition: the reader's transaction is open");
+
+        using var destroyer = dbe.CreateQuickTransaction();
+        destroyer.Destroy(victim);
+        dbe.CommitAfterAppendProbe = () =>
+        {
+            dbe.CommitAfterAppendProbe = null;
+            go.Set();
+            walked.Wait();
+        };
+        try
+        {
+            Assert.That(destroyer.Commit(), Is.True);
+        }
+        finally
+        {
+            dbe.CommitAfterAppendProbe = null;
+            go.Set();
+            reader.Join();
+        }
+
+        Assert.That(readerFailure, Is.Null, readerFailure?.ToString());
+        Assert.That(aliveToReader, Is.True, "precondition: alive at the older snapshot");
+        Assert.That(walk.ByOccupancy, Does.Contain(victim), "an older snapshot's walk hides a destroy it predates");
+        Assert.That(walk.ByOccupancy.Count, Is.EqualTo(Population));
+        AssertConsistent(walk);
+    }
+
+    /// <summary>
+    /// #1496, before the commit point: the destroy is prepared — the cluster's pending-death count raised — but its stamp is not drawn, so it is not
+    /// committed; a fresh reader's walk still yields the entity, as its point access does.
+    /// </summary>
+    [TestCaseSource(nameof(AllStorages))]
+    [VerifiesRule("CLUSTERWALK-04")]
+    public void ADestroyPreparedButNotCommitted_IsStillWalked(Storage storage)
+    {
+        using var dbe = SetupEngine();
+        var ids = SpawnCommitted(dbe, storage, Population);
+        var victim = ids[77];
+        var state = dbe._archetypeStates[MetaOf(storage).ArchetypeId].ClusterState;
+
+        WalkResult walk = null;
+        var aliveToReader = false;
+        long pendingDeaths = 0;
+        Exception readerFailure = null;
+        using var destroyer = dbe.CreateQuickTransaction();
+        destroyer.Destroy(victim);
+        dbe.CommitBeforeAppendProbe = () =>
+        {
+            dbe.CommitBeforeAppendProbe = null;
+            pendingDeaths = state.PendingDeathsTotal;
+            var reader = new Thread(() =>
+            {
+                try
+                {
+                    using var tx = dbe.CreateQuickTransaction();
+                    aliveToReader = tx.IsAlive(victim);
+                    walk = Walk(tx, storage, Entry.ArchetypeAccessorAll);
+                }
+                catch (Exception ex)
+                {
+                    readerFailure = ex;
+                }
+            });
+            reader.Start();
+            reader.Join();
+        };
+        try
+        {
+            Assert.That(destroyer.Commit(), Is.True);
+        }
+        finally
+        {
+            dbe.CommitBeforeAppendProbe = null;
+        }
+
+        Assert.That(readerFailure, Is.Null, readerFailure?.ToString());
+        Assert.That(pendingDeaths, Is.GreaterThan(0L), "precondition: the destroy is prepared — the walk takes its slow path");
+        Assert.That(aliveToReader, Is.True, "precondition: not committed, so alive");
+        Assert.That(walk.ByOccupancy, Does.Contain(victim), "a prepared, uncommitted destroy hides nothing");
+        Assert.That(walk.ByOccupancy.Count, Is.EqualTo(Population));
+        AssertConsistent(walk);
+    }
+
+    /// <summary>
+    /// CLUSTERWALK-04's stated residue, pinned: the occupancy word is taken at MoveNext and the id is read when asked, so a slot another transaction's
+    /// committed destroy released in between still shows in OccupancyBits and reads Entity.Null — the engine's own "released since" signal, which its
+    /// readers skip (FkReverseLookup, the index range scan). Never another entity's id, never a dangling one.
+    /// </summary>
+    [TestCaseSource(nameof(ReleasingStorages))]
+    public void ASlotReleasedAfterMoveNext_ReadsAsNullNotAsAnotherEntity(Storage storage)
+    {
+        using var dbe = SetupEngine();
+        SpawnCommitted(dbe, storage, Population);
+
+        using var walker = dbe.CreateQuickTransaction();
+        ulong occupancy;
+        int slot;
+        EntityId before, after;
+        switch (storage)
+        {
+            case Storage.SingleVersion:
+                (occupancy, slot, before, after) = ReleaseUnderTheWalk<OwnWalkSvUnit>(dbe, walker);
+                break;
+            case Storage.Transient:
+                (occupancy, slot, before, after) = ReleaseUnderTheWalk<OwnWalkTrUnit>(dbe, walker);
+                break;
+            default:
+                (occupancy, slot, before, after) = ReleaseUnderTheWalk<OwnWalkMixUnit>(dbe, walker);
+                break;
+        }
+
+        Assert.That(before, Is.Not.EqualTo(EntityId.Null), "precondition: the slot held an entity when the walk reached the cluster");
+        Assert.That(occupancy & (1UL << slot), Is.Not.Zero, "the word MoveNext took still holds the slot");
+        Assert.That(after, Is.EqualTo(EntityId.Null), "a slot released since MoveNext reads Entity.Null");
+    }
+
+    // Walks into the first cluster, has another transaction destroy and commit the entity of its first slot, then reads that slot's id again.
+    private static (ulong Occupancy, int Slot, EntityId Before, EntityId After) ReleaseUnderTheWalk<TArch>(DatabaseEngine dbe, Transaction walker)
+        where TArch : class
+    {
+        var accessor = walker.For<TArch>();
+        try
+        {
+            var e = accessor.GetClusterEnumerator();
+            Assert.That(e.MoveNext(), Is.True, "precondition: a cluster to walk");
+            var cluster = e.Current;
+            var occupancy = cluster.OccupancyBits;
+            var slot = BitOperations.TrailingZeroCount(occupancy);
+            var before = cluster.GetEntityId(slot);
+            using (var destroyer = dbe.CreateQuickTransaction())
+            {
+                destroyer.Destroy(before);
+                Assert.That(destroyer.Commit(), Is.True);
+            }
+
+            return (occupancy, slot, before, cluster.GetEntityId(slot));
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+    }
+
+    /// <summary>#1496, through <c>tx.ClusterSpatialQuery</c>: the same staged window, every query shape, the radius batch included.</summary>
+    [TestCase(SpatialForm.Aabb)]
+    [TestCase(SpatialForm.Radius)]
+    [TestCase(SpatialForm.ForEachInRadius)]
+    [TestCase(SpatialForm.CountRadius)]
+    [VerifiesRule("CLUSTERWALK-04")]
+    public void AnotherTransactionsDestroyPastItsCommitPoint_IsAbsentFromTheTransactionsSpatialQuery(SpatialForm form)
+    {
+        using var dbe = SetupSpatialEngine();
+        var ids = SpawnSpatialGrid(dbe, 200);
+        var victim = ids[77];
+
+        HashSet<EntityId> hits = null;
+        var count = 0;
+        var aliveToReader = true;
+        var stillOccupied = false;
+        Exception readerFailure = null;
+        using var destroyer = dbe.CreateQuickTransaction();
+        destroyer.Destroy(victim);
+        dbe.CommitAfterAppendProbe = () =>
+        {
+            dbe.CommitAfterAppendProbe = null;
+            var reader = new Thread(() =>
+            {
+                try
+                {
+                    using var tx = dbe.CreateQuickTransaction();
+                    aliveToReader = tx.IsAlive(victim);
+                    stillOccupied = RawOccupancyHolds(dbe, Archetype<OwnWalkSpatialUnit>.Metadata, victim);
+                    hits = SpatialHits(tx.ClusterSpatialQuery<OwnWalkSpatialUnit>(), form, out count);
+                }
+                catch (Exception ex)
+                {
+                    readerFailure = ex;
+                }
+            });
+            reader.Start();
+            reader.Join();
+        };
+        try
+        {
+            Assert.That(destroyer.Commit(), Is.True);
+        }
+        finally
+        {
+            dbe.CommitAfterAppendProbe = null;
+        }
+
+        Assert.That(readerFailure, Is.Null, readerFailure?.ToString());
+        Assert.That(aliveToReader, Is.False, "precondition: past the commit point, point access already answers gone");
+        Assert.That(stillOccupied, Is.True, "precondition: the slot is still occupied — the publish has not released it");
+        if (form == SpatialForm.CountRadius)
+        {
+            Assert.That(count, Is.EqualTo(ids.Count - 1), "CountRadius counts an entity its transaction cannot open");
+            return;
+        }
+
+        Assert.That(hits, Does.Not.Contain(victim), $"{form} returns an entity its transaction cannot open (#1496)");
+        Assert.That(hits.Count, Is.EqualTo(ids.Count - 1), "every other entity, once");
+    }
+
+    // Whether the victim's slot still reads occupied in the raw word, no transaction applied: the window #1496 is about.
+    private static bool RawOccupancyHolds(DatabaseEngine dbe, Storage storage, EntityId victim) => RawOccupancyHolds(dbe, MetaOf(storage), victim);
+
+    private static unsafe bool RawOccupancyHolds(DatabaseEngine dbe, ArchetypeMetadata meta, EntityId victim)
+    {
+        var state = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
+        var ids = state.ReadActiveClusterList(out var count);
+        using var guard = EpochGuard.Enter(dbe.EpochManager);
+        var accessor = state.ClusterSegment != null ? state.ClusterSegment.CreateChunkAccessor() : default;
+        var transient = state.ClusterSegment == null ? state.TransientSegment.CreateChunkAccessor() : default;
+        try
+        {
+            for (var i = 0; i < count; i++)
+            {
+                var basePtr = state.ClusterSegment != null ? accessor.GetChunkAddress(ids[i]) : transient.GetChunkAddress(ids[i]);
+                var occupancy = *(ulong*)basePtr;
+                for (var bits = occupancy; bits != 0; bits &= bits - 1)
+                {
+                    var slot = BitOperations.TrailingZeroCount(bits);
+                    if (*(long*)(basePtr + state.Layout.EntityIdsOffset + (slot * 8)) == unchecked((long)victim.RawValue))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+        finally
+        {
+            if (state.ClusterSegment != null)
+            {
+                accessor.Dispose();
+            }
+            else
+            {
+                transient.Dispose();
+            }
+        }
+    }
+
     /// <summary>A rolled-back destroy leaves the entity in every later walk.</summary>
     [TestCaseSource(nameof(AllStorages))]
     public void ARolledBackDestroy_LeavesTheEntityInEveryLaterWalk(Storage storage)

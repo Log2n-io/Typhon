@@ -162,6 +162,36 @@ public struct EntityRecordHeader
     }
 
     /// <summary>
+    /// The died half of <see cref="IsVisibleAt(long, CommitCardTable, out bool)"/> alone: whether a destroy has removed this entity for a reader at
+    /// <paramref name="txTsn"/> — a published died at or below it, or a pending one whose owner is <paramref name="txTsn"/> or holds a card stamped at or
+    /// below it. The born side is not asked: a cluster walk judges only destroys against its snapshot (CLUSTERWALK-04), its spawns are committed HEAD.
+    /// <paramref name="reread"/> as there: no card for the owner, the live record has the answer.
+    /// </summary>
+    internal readonly bool IsDeadAt(long txTsn, CommitCardTable cards, out bool reread)
+    {
+        reread = false;
+        if (IsDiedPending)
+        {
+            var owner = DiedTSN & ~PendingBit;
+            if (owner == txTsn)
+            {
+                return true;
+            }
+
+            if (cards == null || !cards.TryGetStamp(owner, out var diedStamp))
+            {
+                reread = true;
+                return false;
+            }
+
+            return diedStamp <= txTsn;
+        }
+
+        var died = DiedTSN;
+        return died != 0 && died <= txTsn;
+    }
+
+    /// <summary>
     /// Check whether this entity is visible to a transaction with the given TSN.
     /// </summary>
     /// <remarks>

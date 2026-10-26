@@ -631,6 +631,10 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     }
 
     /// <summary>Read EntityId for the entity at the given slot (stored as full packed EntityId).</summary>
+    /// <remarks>
+    /// Read now, while <see cref="OccupancyBits"/> was taken at <c>MoveNext</c>: a slot a concurrent commit released in between reads as
+    /// <see cref="EntityId.Null"/>. A walk that may run beside commits — off the tick, or beside a parallel system's — skips a null id (CLUSTERWALK-04).
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly EntityId GetEntityId(int slotIndex)
     {
@@ -1666,8 +1670,8 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     private int _endIndex;
     private ClusterStep _stepCounter;   // strict mode only (#1199): bumped by MoveNext and Dispose; null otherwise
     private EntityAccessor _owner;      // handed to each ClusterRef: its writes need the discipline (#1187)
-    // CLUSTERWALK-04: the walking transaction's own pending destroys (a no-op for a system accessor or an engine walk), and the occupancy MoveNext took
-    // for the current cluster.
+    // CLUSTERWALK-04: the walking accessor's own pending destroys and the destroys other transactions have in flight (both a no-op for an engine walk),
+    // and the occupancy MoveNext took for the current cluster.
     private OwnDestroyFilter _ownDestroys;
     private ulong _occupancy;
 
@@ -1829,7 +1833,8 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
             var chunkId = _clusterIds[_index];
             var basePtr = _hasPersistentAccessor ? _accessor.GetChunkAddress(chunkId) : _transientAccessor.GetChunkAddress(chunkId);
             // CLUSTERWALK-04. Per cluster, not once per walk: a destroy made mid-walk hides its entity from every later cluster.
-            var occupancy = _ownDestroys.Apply(chunkId, *(ulong*)basePtr, basePtr, _state);
+            var raw = _ownDestroys.ReadOccupancy(chunkId, basePtr, _state, out var pendingDeaths);
+            var occupancy = _ownDestroys.Apply(chunkId, raw, basePtr, _state, pendingDeaths);
             if (occupancy != 0)
             {
                 _occupancy = occupancy;

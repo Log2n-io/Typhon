@@ -1054,12 +1054,14 @@ public unsafe ref struct AabbClusterEnumerator
     }
 
     /// <summary>
-    /// Make <paramref name="occupancy"/> the current cluster's slots to drain, none of them decided yet, and count the cluster and its occupied slots in the
-    /// query's tally — all of them, whatever the drain goes on to test, so the count is the same whether or not the block kernel runs (SO-02).
+    /// Read the current cluster's occupancy (with its pending-destroy count first, #1496) and make it the slots to drain, none of them decided yet, and count
+    /// the cluster and its occupied slots in the query's tally — all of them, whatever the drain goes on to test, so the count is the same whether or not the
+    /// block kernel runs (SO-02).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void OpenOccupancy(ulong occupancy)
+    private void OpenOccupancy()
     {
+        var occupancy = _ownDestroys.ReadOccupancy(_currentClusterChunkId, _currentClusterBase, _state, out var pendingDeaths);
         // RM-04: an entity whose realm key names another realm (written this tick, moved at the next fence) is not this query's.
         if (_layout.RealmKeyColumn >= 0)
         {
@@ -1067,7 +1069,7 @@ public unsafe ref struct AabbClusterEnumerator
                 _rs.Realm.Value);
         }
 
-        occupancy = _ownDestroys.Apply(_currentClusterChunkId, occupancy, _currentClusterBase, _state);
+        occupancy = _ownDestroys.Apply(_currentClusterChunkId, occupancy, _currentClusterBase, _state, pendingDeaths);
         _currentOccupancyBits = occupancy;
         _blocksDecided = false;
         _decidedHits = 0UL;
@@ -1204,7 +1206,7 @@ public unsafe ref struct AabbClusterEnumerator
                     EnsureAccessor();
                     _currentClusterBase = _warm.GetChunkAddress(treeChunkId);
                     _currentClusterChunkId = treeChunkId;
-                    OpenOccupancy(Volatile.Read(ref *(ulong*)_currentClusterBase));
+                    OpenOccupancy();
                     return true;
                 }
 
@@ -1233,7 +1235,7 @@ public unsafe ref struct AabbClusterEnumerator
                 EnsureAccessor();
                 _currentClusterBase = _warm.GetChunkAddress(batchedChunkId);
                 _currentClusterChunkId = batchedChunkId;
-                OpenOccupancy(Volatile.Read(ref *(ulong*)_currentClusterBase));
+                OpenOccupancy();
                 return true;
             }
 
@@ -1289,7 +1291,7 @@ public unsafe ref struct AabbClusterEnumerator
                 EnsureAccessor();
                 _currentClusterBase = _warm.GetChunkAddress(chunkId);
                 _currentClusterChunkId = chunkId;
-                OpenOccupancy(Volatile.Read(ref *(ulong*)_currentClusterBase));
+                OpenOccupancy();
                 return true;
             }
 
@@ -1422,7 +1424,7 @@ public unsafe ref struct AabbClusterEnumerator
             EnsureAccessor();
             _currentClusterBase = _warm.GetChunkAddress(chunkId);
             _currentClusterChunkId = chunkId;
-            OpenOccupancy(Volatile.Read(ref *(ulong*)_currentClusterBase));
+            OpenOccupancy();
             return true;
         }
 

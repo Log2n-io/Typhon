@@ -287,6 +287,63 @@ public unsafe partial class EntityAccessor
     }
 
     /// <summary>
+    /// Whether a destroy has removed <paramref name="id"/> for this accessor's snapshot: gone from its EntityMap, or its died stamp — published, or pending
+    /// with its owner's card — at or below <see cref="TSN"/>. A cluster walk asks it for the occupied slots of a cluster with a destroy in flight
+    /// (CLUSTERWALK-04, #1496): the occupancy bit outlives the commit point until the publish releases the slot, and point access already answers "gone".
+    /// </summary>
+    /// <param name="id">The id a cluster slot holds; never null (the walk hides a null slot itself).</param>
+    /// <param name="meta">The walked archetype.</param>
+    internal bool IsDestroyedAtSnapshot(EntityId id, ArchetypeMetadata meta)
+    {
+        var es = _dbe._archetypeStates[meta.ArchetypeId];
+        if (es?.EntityMap == null)
+        {
+            return false;
+        }
+
+        byte* readBuf = stackalloc byte[meta._entityRecordSize];
+        // As IsAlive: a walk normally runs inside the accessor's epoch scope already, and a default guard must not be disposed.
+        var needsGuard = !_ownsPersistentEpochScope && !_epochManager.IsCurrentThreadInScope;
+        var guard = needsGuard ? EpochGuard.Enter(_epochManager) : default;
+        try
+        {
+            if (!_hasEntityMapCache || _entityMapCacheArchId != id.ArchetypeId)
+            {
+                if (_hasEntityMapCache)
+                {
+                    _entityMapCacheAccessor.Dispose();
+                }
+
+                _entityMapCacheAccessor = es.EntityMap.Segment.CreateChunkAccessor();
+                _entityMapCacheArchId = id.ArchetypeId;
+                _hasEntityMapCache = true;
+            }
+
+            if (!es.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref _entityMapCacheAccessor))
+            {
+                return true;
+            }
+
+            var dead = EntityRecordAccessor.GetHeader(readBuf).IsDeadAt(TSN, CommitCards, out var reread);
+            if (!reread)
+            {
+                return dead;
+            }
+
+            // Published since the copy, or its commit aborted: the live record decides, and a value still pending then is not committed.
+            return !es.EntityMap.TryGet(id.EntityKey, readBuf, ref _entityMapCacheAccessor)
+                   || EntityRecordAccessor.GetHeader(readBuf).IsDeadAt(TSN, CommitCards, out _);
+        }
+        finally
+        {
+            if (needsGuard)
+            {
+                guard.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
     /// The committed half of <see cref="IsAlive"/>: <paramref name="id"/> is in its archetype's EntityMap and visible at this accessor's TSN. One cached,
     /// hinted lookup — the same accessor cache <c>ResolveEntity</c> uses. <paramref name="needsGuard"/> enters an epoch scope around it; a caller that
     /// already holds one passes false.
