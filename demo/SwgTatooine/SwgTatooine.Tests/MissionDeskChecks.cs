@@ -46,9 +46,9 @@ internal sealed class MissionDeskChecks : ServedChecks
         var link = Harness.Connect(TatooineReplication.PlayerKind, account);
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= bindings, "the avatar to be spawned");
         Harness.Ticks(2);
-        Worlds.Park(sim, link.Session, terminal.X + 2f, terminal.Z);
+        Worlds.Park(sim, link.Session, terminal.X + 2f, terminal.Z, out var parked);
         var first = Offers(sim, terminal)[0].Id;
-        SessionHarness.Until(() => TatooineReplication.NetIdOf(link.Session, first) != 0, "the terminal's offers to reach the client's view");
+        SessionHarness.UntilNamed(link.Session, first, "the terminal's offers to reach the client's view", parked);
         return link;
     }
 
@@ -113,7 +113,7 @@ internal sealed class MissionDeskChecks : ServedChecks
     private static void Take(FakeLink link, EntityId offer, uint serial)
         => link.SendCommand(nameof(TakeMission), new RecordValues
         {
-            ["offer"] = FieldValue.Of(TatooineReplication.NetIdOf(link.Session, offer)),
+            ["offer"] = FieldValue.Of(SessionHarness.NetIdOf(link.Session, offer)),
             ["serial"] = FieldValue.Of(serial),
         });
 
@@ -130,7 +130,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         {
             throw new AssertionException(
                 $"the mission was not held; refusals sent: [{string.Join(", ", Refusals(link))}]; held {Held(sim, character).Count} (before {before}); "
-                + $"offer exists {Exists(sim, offer.Id)}, netId now {TatooineReplication.NetIdOf(link.Session, offer.Id)}, refused {sim.Bridge.MissionTakesRefused}");
+                + $"offer exists {Exists(sim, offer.Id)}, netId now {SessionHarness.NetIdOf(link.Session, offer.Id)}, refused {sim.Bridge.MissionTakesRefused}");
         }
         var held = Held(sim, character).Find(h => h.Mission.Kind == offer.Info.Kind && h.Mission.AnchorX == offer.Info.AnchorX);
         Assert.That(held.Id.IsNull, Is.False, "the mission held is not the offer taken");
@@ -249,7 +249,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         var ca = CharacterOf(sim, AnAccount(0x6001));
         var cb = CharacterOf(sim, AnAccount(0x6002));
         var offer = Offers(sim, terminal)[0];
-        SessionHarness.Until(() => TatooineReplication.NetIdOf(b.Session, offer.Id) != 0, "the offer to reach the second view");
+        SessionHarness.UntilNamed(b.Session, offer.Id, "the offer to reach the second view");
 
         Take(a, offer.Id, offer.Info.Serial);
         Take(b, offer.Id, offer.Info.Serial);
@@ -287,17 +287,17 @@ internal sealed class MissionDeskChecks : ServedChecks
         Assert.That(Refusals(link), Contains.Item(TatooineReplication.MissionTooFar));
         Assert.That(Held(sim, character), Is.Empty, "a take from afar was granted");
 
-        Worlds.Park(sim, link.Session, terminal.X + 2f, terminal.Z);
+        Worlds.Park(sim, link.Session, terminal.X + 2f, terminal.Z, out var back);
         Harness.Ticks(3);
         for (var i = 0; i < TatooineData.MaxConcurrentMissions; i++)
         {
             var offer = Offers(sim, terminal)[0];
-            SessionHarness.Until(() => TatooineReplication.NetIdOf(link.Session, offer.Id) != 0, "the next offer to reach the view");
+            SessionHarness.UntilNamed(link.Session, offer.Id, "the next offer to reach the view", back);
             TakeAndHold(sim, link, character, offer);
         }
 
         var fourth = Offers(sim, terminal)[0];
-        SessionHarness.Until(() => TatooineReplication.NetIdOf(link.Session, fourth.Id) != 0, "the fourth offer to reach the view");
+        SessionHarness.UntilNamed(link.Session, fourth.Id, "the fourth offer to reach the view");
 
         // A second for the command's bucket (2 a second, a burst of 4): this is the fifth take in a few, and the engine would refuse it for its rate before
         // the desk ever saw it — a refusal, but not the one this case is about.
@@ -373,10 +373,10 @@ internal sealed class MissionDeskChecks : ServedChecks
         var lair = held.Mission.Lair;
 
         Clear(sim, lair, health: 5);
-        Worlds.Park(sim, link.Session, held.Mission.LairX + 10f, held.Mission.LairZ);
-        SessionHarness.Until(() => TatooineReplication.NetIdOf(link.Session, lair) != 0, "the lair to reach the client's view");
+        Worlds.Park(sim, link.Session, held.Mission.LairX + 10f, held.Mission.LairZ, out var parked);
+        SessionHarness.UntilNamed(link.Session, lair, "the lair to reach the client's view", parked);
         var before = BodyOf(sim, link.Session);
-        link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(TatooineReplication.NetIdOf(link.Session, lair)));
+        link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(link.Session, lair)));
         link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         SessionHarness.Until(() => Held(sim, character).Count == 0, "the mission to end");
 
@@ -549,13 +549,13 @@ internal sealed class MissionDeskChecks : ServedChecks
         for (var i = 0; i < TatooineData.MaxConcurrentMissions; i++)
         {
             var offer = Offers(sim, terminal)[0];
-            SessionHarness.Until(() => TatooineReplication.NetIdOf(link.Session, offer.Id) != 0, "the next offer to reach the view");
+            SessionHarness.UntilNamed(link.Session, offer.Id, "the next offer to reach the view");
             var held = TakeAndHold(sim, link, character, offer);
             first = i == 0 ? held : first;
         }
 
         var fourth = Offers(sim, terminal)[0];
-        SessionHarness.Until(() => TatooineReplication.NetIdOf(link.Session, fourth.Id) != 0, "the fourth offer to reach the view");
+        SessionHarness.UntilNamed(link.Session, fourth.Id, "the fourth offer to reach the view");
         Harness.Ticks(Worlds.ServedHz);   // the take's bucket (2 a second, a burst of 4), as in M-3
 
         // Take sent BEFORE the cancel: arriving in one tick, the desk must still run the cancel first.

@@ -551,12 +551,10 @@ public sealed partial class SimBridge
             return;
         }
 
-        // TryResolveAny, and the checks below are why that is still SUB-26's rule. TryResolve answers against the session's COMMITTED geometry, which a
-        // re-anchor empties until the next frame is published — a door, a shuttle, a park: an offer the client was looking at a tick ago resolved to
-        // nothing, and the take was refused "taken" (found by MissionDeskChecks, a take sent the tick after a park; the engine gap is #1494).
-        // What SUB-26 protects is a client naming something outside its view; a body within MissionTerminalReachM of the offer, in its realm, and the offer's
-        // own serial, are a narrower test than the view. Gone — taken by somebody first, or aged out — is "taken".
-        if (!subs.TryResolveAny(command.Session, command.Value.Offer, out var offerId)
+        // TryResolve (SUB-26): a client may only name what it was shown. On the tick, in this system, it is correct (#1494): an offer a re-anchor took out
+        // of the view — a door, a shuttle, a park — resolves again once its cell is delivered, and a take sent before then is refused "taken" like one
+        // for an offer that is gone. The archetype, the serial and the reach below are the take's own rules, not the view's.
+        if (!subs.TryResolve(command.Session, command.Value.Offer, out var offerId)
             || offerId.ArchetypeId != _offerRouting
             || !tx.TryOpen(offerId, out var offer)
             || offer.Read(MissionOffer.Info).Serial != command.Value.Serial)

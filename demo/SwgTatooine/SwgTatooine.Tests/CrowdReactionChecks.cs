@@ -90,10 +90,11 @@ internal sealed class CrowdReactionChecks : ServedChecks
     }
 
     /// <summary>Parks a body of the crowd at a point in an activity; a traveller crawls towards a point a kilometre north, so it keeps travelling.</summary>
-    private static void Place(TatooineSim sim, EntityId body, float x, float z, int activity)
+    /// <returns>The tick of the last write, which a wait for the attacker to name the body counts from.</returns>
+    private static long Place(TatooineSim sim, EntityId body, float x, float z, int activity)
     {
         Worlds.Park(sim, body, x, z, 0, activity);
-        sim.WriteInTick(tx =>
+        return sim.WriteInTick(tx =>
         {
             var p = tx.OpenMut(body);
             var move = p.Read(Player.Move);
@@ -116,14 +117,14 @@ internal sealed class CrowdReactionChecks : ServedChecks
     {
         var (x, z) = OpenGround(sim);
         var (link, body) = LogIn(sim, x, z);
-        Place(sim, quarry, x + 10f, z, activity);
-        SessionHarness.Until(() => TatooineReplication.NetIdOf(link.Session, quarry) != 0, "the quarry to reach the attacker's view");
+        var placed = Place(sim, quarry, x + 10f, z, activity);
+        SessionHarness.UntilNamed(link.Session, quarry, "the quarry to reach the attacker's view", placed);
         return (link, body);
     }
 
     private static void Attack(FakeLink link, EntityId quarry)
     {
-        link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(TatooineReplication.NetIdOf(link.Session, quarry)));
+        link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(link.Session, quarry)));
         link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
     }
 
@@ -320,11 +321,11 @@ internal sealed class CrowdReactionChecks : ServedChecks
         var far = CrowdBody(sim, fightsBack: true, quarry, brave, timid);
         var (x, z) = OpenGround(sim);
         var (link, body) = LogIn(sim, x, z);
-        Place(sim, quarry, x + 10f, z, PlayerActivity.Travelling);
+        var placed = Place(sim, quarry, x + 10f, z, PlayerActivity.Travelling);
         Place(sim, brave, x + 14f, z + 4f, PlayerActivity.Travelling);
         Place(sim, timid, x + 14f, z - 4f, PlayerActivity.Travelling);
         Place(sim, far, x + 10f, z + 45f, PlayerActivity.Travelling);
-        SessionHarness.Until(() => TatooineReplication.NetIdOf(link.Session, quarry) != 0, "the quarry to reach the attacker's view");
+        SessionHarness.UntilNamed(link.Session, quarry, "the quarry to reach the attacker's view", placed);
         Harness.Ticks(3);   // the parked bodies into the spatial index, which the crowd is found through
 
         Attack(link, quarry);
@@ -354,8 +355,8 @@ internal sealed class CrowdReactionChecks : ServedChecks
         var city = Worlds.WidestCity(sim);
         var quarry = CrowdBody(sim, fightsBack: false);
         var (link, _) = LogIn(sim, city.X + city.Radius + 150f, city.Z);
-        Place(sim, quarry, city.X + city.Radius + 140f, city.Z, PlayerActivity.Travelling);
-        SessionHarness.Until(() => TatooineReplication.NetIdOf(link.Session, quarry) != 0, "the quarry to reach the attacker's view");
+        var placed = Place(sim, quarry, city.X + city.Radius + 140f, city.Z, PlayerActivity.Travelling);
+        SessionHarness.UntilNamed(link.Session, quarry, "the quarry to reach the attacker's view", placed);
 
         Attack(link, quarry);
         SessionHarness.Until(() => sim.Bridge.CrowdFled >= 1, "the quarry to answer the first blow");
@@ -385,8 +386,8 @@ internal sealed class CrowdReactionChecks : ServedChecks
         var city = Worlds.WidestCity(sim);
         var quarry = CrowdBody(sim, fightsBack: false);
         var (link, _) = LogIn(sim, city.X + city.Radius + 140f, city.Z);
-        Place(sim, quarry, city.X + city.Radius + 150f, city.Z, PlayerActivity.Travelling);
-        SessionHarness.Until(() => TatooineReplication.NetIdOf(link.Session, quarry) != 0, "the quarry to reach the attacker's view");
+        var placed = Place(sim, quarry, city.X + city.Radius + 150f, city.Z, PlayerActivity.Travelling);
+        SessionHarness.UntilNamed(link.Session, quarry, "the quarry to reach the attacker's view", placed);
 
         Attack(link, quarry);
         SessionHarness.Until(() => sim.Bridge.CrowdFled >= 1, "the quarry to answer the first blow");

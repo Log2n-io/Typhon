@@ -116,11 +116,15 @@ internal static class Worlds
     /// <b>Parked, not merely moved</b>: the activity is set to idle for longer than any case runs and the velocity zeroed, because a player that resumed
     /// deciding would walk out of whatever the case placed it in — out of earshot, or out of a city whose group set the case is asserting on.
     /// </remarks>
-    public static EntityId Park(TatooineSim sim, SessionId session, float x, float z, ushort realm = 0)
+    public static EntityId Park(TatooineSim sim, SessionId session, float x, float z, ushort realm = 0) => Park(sim, session, x, z, out _, realm);
+
+    /// <inheritdoc cref="Park(TatooineSim, SessionId, float, float, ushort)"/>
+    /// <param name="tick">The tick that applied the placement: what a wait for the session's new view counts from (<c>SessionHarness.UntilNamed</c>).</param>
+    public static EntityId Park(TatooineSim sim, SessionId session, float x, float z, out long tick, ushort realm = 0)
     {
         var entity = TatooineReplication.ControlledBy(sim.Dbe, session);
         Assert.That(entity, Is.Not.EqualTo(EntityId.Null), "the session controls no player to place");
-        Park(sim, entity, x, z, realm);
+        tick = Park(sim, entity, x, z, realm);
         return entity;
     }
 

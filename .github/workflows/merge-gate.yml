@@ -164,6 +164,8 @@ jobs:
               # these two lines a change to the bots would run no tests at all, which is the #774 class exactly.
               - 'demo/SwgTatooine/SwgTatooine.Bots/**'
               - 'src/Typhon.Client/**'
+              # The navigation library the server and the bots both plan routes with; in the suite's closure through both.
+              - 'demo/SwgTatooine/SwgTatooine.Navigation/**'
               # The SWG suite runs through the engine's sharder, from its own plan.
               - 'bench/aws/shard.py'
               - 'bench/aws/shards-swg.json'

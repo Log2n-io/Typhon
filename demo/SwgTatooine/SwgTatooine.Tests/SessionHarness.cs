@@ -615,6 +615,50 @@ internal sealed class SessionHarness
         }
     }
 
+    /// <summary>The <c>netId</c> a session's client knows an entity by, read on a tick, or <c>0</c> when it cannot see it.</summary>
+    /// <param name="session">The session.</param>
+    /// <param name="entity">The entity to name.</param>
+    /// <returns>The identity, or <c>0</c>.</returns>
+    /// <remarks>
+    /// <b>On the tick, never from the test thread</b> (#1494): <c>TryNetIdOf</c> throws for a foreign thread's call that overlaps the tick fence —
+    /// about one call in twenty at 50 Hz — where it used to answer, sometimes wrongly, in silence.
+    /// </remarks>
+    public static uint NetIdOf(SessionId session, EntityId entity) => NetIdOnTick(session, entity).NetId;
+
+    /// <summary>
+    /// Waits until a session's client can name an entity, from a frame published after <paramref name="afterTick"/>, and returns the name.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="entity">The entity to name.</param>
+    /// <param name="what">What was being waited for, for the failure message.</param>
+    /// <param name="afterTick">
+    /// The tick that moved the session's body — a park, a door, a shuttle — or -1. A re-anchored view resolves an entity only once its cell has been
+    /// delivered, so an answer from a frame published before the move is the old view's: a take sent on it is refused.
+    /// </param>
+    /// <returns>The identity.</returns>
+    public static uint UntilNamed(SessionId session, EntityId entity, string what, long afterTick = -1)
+    {
+        uint netId = 0;
+        Until(
+            () =>
+            {
+                var (named, tick) = NetIdOnTick(session, entity);
+                netId = named;
+                // A read on tick T answers from the frame T - 1 published, and the move's own frame is the one published by its tick.
+                return named != 0 && (afterTick < 0 || tick > afterTick + 1);
+            },
+            what);
+        return netId;
+    }
+
+    private static (uint NetId, long Tick) NetIdOnTick(SessionId session, EntityId entity)
+    {
+        var sim = (_current ?? throw new InvalidOperationException("no harness is serving: a netId is read on its tick"))._sim;
+        uint netId = 0;
+        var tick = sim.WriteInTick(_ => netId = TatooineReplication.NetIdOf(session, entity));
+        return (netId, tick);
+    }
+
     /// <summary>Waits for a condition the tick or the send pump makes true, or fails.</summary>
     /// <param name="condition">The condition.</param>
     /// <param name="what">What was being waited for, for the failure message.</param>

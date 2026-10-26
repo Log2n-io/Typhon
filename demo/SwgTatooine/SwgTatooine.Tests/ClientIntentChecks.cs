@@ -1121,11 +1121,11 @@ internal sealed class ClientIntentChecks : ServedChecks
 
         // Both must be in the client's view before either can be named, or the refusal below would be "never shown" rather than "dead".
         SessionHarness.Until(
-            () => TatooineReplication.NetIdOf(link.Session, dead) != 0 && TatooineReplication.NetIdOf(link.Session, alive) != 0,
+            () => SessionHarness.NetIdOf(link.Session, dead) != 0 && SessionHarness.NetIdOf(link.Session, alive) != 0,
             "both targets to reach the client's view");
 
-        var deadNetId = TatooineReplication.NetIdOf(link.Session, dead);
-        var aliveNetId = TatooineReplication.NetIdOf(link.Session, alive);
+        var deadNetId = SessionHarness.NetIdOf(link.Session, dead);
+        var aliveNetId = SessionHarness.NetIdOf(link.Session, alive);
         Assert.That(deadNetId, Is.Not.EqualTo(aliveNetId), "the two targets must be distinct identities");
 
         // The LIVE one first, so a server refusing everything is caught by the accept rather than passing on the refuse.
@@ -1168,7 +1168,7 @@ internal sealed class ClientIntentChecks : ServedChecks
         var lair = StageLair(world, gapM: 10f);
         var before = LairHealth(world, lair);
 
-        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(TatooineReplication.NetIdOf(world.Link.Session, lair)));
+        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(world.Link.Session, lair)));
         SessionHarness.Until(() => TatooineReplication.Intents.TargetsSet >= 1, "the target to be accepted");
         world.Harness.Ticks(3 * Worlds.ServedHz);
         var idle = LairHealth(world, lair);
@@ -1208,7 +1208,7 @@ internal sealed class ClientIntentChecks : ServedChecks
         var lair = StageLair(world, gapM);
         var before = LairHealth(world, lair);
 
-        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(TatooineReplication.NetIdOf(world.Link.Session, lair)));
+        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(world.Link.Session, lair)));
         world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(stance));
         SessionHarness.Until(
             () => TatooineReplication.Intents.TargetsSet >= 1 && TatooineReplication.StanceAsks.Applied >= 1,
@@ -1269,7 +1269,7 @@ internal sealed class ClientIntentChecks : ServedChecks
         using var world = new Possessed(Config());
         var lair = StageLair(world, gapM: 10f, site: 1);
         var before = LairHealth(world, lair);
-        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(TatooineReplication.NetIdOf(world.Link.Session, lair)));
+        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(world.Link.Session, lair)));
         world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         SessionHarness.Until(
             () => TatooineReplication.Intents.TargetsSet >= 1 && TatooineReplication.StanceAsks.Applied >= 1,
@@ -1326,9 +1326,9 @@ internal sealed class ClientIntentChecks : ServedChecks
             vitals.Health = 1;
             body.Set(Creature.Vitals, vitals);
         });
-        SessionHarness.Until(() => !frog.IsNull && TatooineReplication.NetIdOf(world.Link.Session, frog) != 0, "the frog to reach the client's view");
+        SessionHarness.Until(() => !frog.IsNull && SessionHarness.NetIdOf(world.Link.Session, frog) != 0, "the frog to reach the client's view");
 
-        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(TatooineReplication.NetIdOf(world.Link.Session, frog)));
+        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(world.Link.Session, frog)));
         world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         world.Harness.Ticks(3 * Worlds.ServedHz);
 
@@ -1461,7 +1461,7 @@ internal sealed class ClientIntentChecks : ServedChecks
         });
 
         world.Harness.Ticks(2);
-        SessionHarness.Until(() => TatooineReplication.NetIdOf(world.Link.Session, lair) != 0, "the lair to reach the client's view");
+        SessionHarness.UntilNamed(world.Link.Session, lair, "the lair to reach the client's view");
         using (var tx = world.Sim.Dbe.CreateQuickTransaction())
         {
             Assert.That(tx.Open(lair).Read(CreatureLair.Bounds).HalfExtent, Is.EqualTo(WorldBuilder.LairHalfM).Within(1e-3f), "the gap assumed the lair's size");
@@ -1508,25 +1508,27 @@ internal sealed class ClientIntentChecks : ServedChecks
             () =>
             {
                 harness.Ticks(1);
-                using var tx = sim.Dbe.CreateQuickTransaction();
-                foreach (var cluster in tx.For<WorldObject>().GetClusterEnumerator())
+                // On the tick: the walk and the netId both (#1494, #1496).
+                sim.WriteInTick(tx =>
                 {
-                    for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                    foreach (var cluster in tx.For<WorldObject>().GetClusterEnumerator())
                     {
-                        var id = cluster.GetEntityId(System.Numerics.BitOperations.TrailingZeroCount(bits));
-                        if (TatooineReplication.NetIdOf(link.Session, id) != 0)
+                        for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
                         {
-                            building = id;
-                            return true;
+                            var id = cluster.GetEntityId(System.Numerics.BitOperations.TrailingZeroCount(bits));
+                            if (TatooineReplication.NetIdOf(link.Session, id) != 0)
+                            {
+                                building = id;
+                                return;
+                            }
                         }
                     }
-                }
-
-                return false;
+                });
+                return !building.IsNull;
             },
             "a building to reach the client's view");
 
-        link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(TatooineReplication.NetIdOf(link.Session, building)));
+        link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(link.Session, building)));
         SessionHarness.Until(() => TatooineReplication.Intents.TargetsSet >= 1, "the building to be accepted as a target");
         harness.Ticks(4 * Worlds.ServedHz);
 

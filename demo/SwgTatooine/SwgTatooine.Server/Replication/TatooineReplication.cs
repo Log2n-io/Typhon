@@ -1017,8 +1017,13 @@ public static partial class TatooineReplication
     /// </para>
     /// <para>
     /// <b>Read through the cached commands surface, exactly as <see cref="SubjectOf"/> is.</b> Both read committed replication state —
-    /// what the session's last published frame carried — which is the state a system reads and is stable between ticks. It answers 0
-    /// before the first tick of a run, because there is no surface to ask yet.
+    /// what the session's last published frame carried — which is the state a system reads. It answers 0 before the first tick of a run,
+    /// because there is no surface to ask yet.
+    /// </para>
+    /// <para>
+    /// <b>On the tick, or between ticks — never while the tick fence is open</b> (#1494). The fence spans the subscriptions track, and
+    /// <c>TryNetIdOf</c> throws for a call from another thread that starts or ends inside it. A system may call this; a test reads it through
+    /// <c>TatooineSim.WriteInTick</c> (<c>SessionHarness.NetIdOf</c>).
     /// </para>
     /// </remarks>
     public static uint NetIdOf(SessionId session, EntityId entity)
@@ -3093,6 +3098,27 @@ public static partial class TatooineReplication
         System.Threading.Interlocked.Increment(ref _boardingsCancelled);
     }
 
+    /// <summary>
+    /// Refuses a command a downed player cannot carry out — it lies where it fell until it gets up or wakes as a clone — and counts it. True when refused.
+    /// </summary>
+    private static bool RefusedDown<T>(SubscriptionsCommands subs, in ClientCommand<T> command, in EntityRefMut player)
+        where T : unmanaged
+    {
+        if (player.Read(Player.Vitals).Down == Downed.Up)
+        {
+            return false;
+        }
+
+        subs.Reject(command, PlayerDown);
+        System.Threading.Interlocked.Increment(ref _refusedDown);
+        return true;
+    }
+
+    /// <summary>How many moves, mounts and boardings a downed player sent and was refused.</summary>
+    public static long RefusedWhileDown => System.Threading.Interlocked.Read(ref _refusedDown);
+
+    private static long _refusedDown;
+
     /// <summary>The player a session controls, opened for writing.</summary>
     /// <param name="subs">This tick's replication surface.</param>
     /// <param name="accessor">The tick transaction's player accessor.</param>
@@ -3115,27 +3141,6 @@ public static partial class TatooineReplication
     /// passed — counting here made a refused <c>MoveDir</c> both applied and refused, and made every <c>SetTarget</c> a movement intent.
     /// </para>
     /// </remarks>
-    /// <summary>
-    /// Refuses a command a downed player cannot carry out — it lies where it fell until it gets up or wakes as a clone — and counts it. True when refused.
-    /// </summary>
-    private static bool RefusedDown<T>(SubscriptionsCommands subs, in ClientCommand<T> command, in EntityRefMut player)
-        where T : unmanaged
-    {
-        if (player.Read(Player.Vitals).Down == Downed.Up)
-        {
-            return false;
-        }
-
-        subs.Reject(command, PlayerDown);
-        System.Threading.Interlocked.Increment(ref _refusedDown);
-        return true;
-    }
-
-    /// <summary>How many moves, mounts and boardings a downed player sent and was refused.</summary>
-    public static long RefusedWhileDown => System.Threading.Interlocked.Read(ref _refusedDown);
-
-    private static long _refusedDown;
-
     private static bool TryOpenControlled(SubscriptionsCommands subs, ArchetypeAccessor<Player> accessor, SessionId session, out EntityRefMut player)
     {
         if (!BoundPlayer.TryGetValue(session.Value, out var entity))
