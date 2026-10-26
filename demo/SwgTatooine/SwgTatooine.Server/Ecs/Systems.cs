@@ -386,6 +386,10 @@ internal sealed class PlayerCombatSystem : QuerySystem
         .Reads<LairPlacement>()
         .Reads<LairVitals>()
         .Reads<Lair>()
+
+        // A creature's level, which a scripted body must not fight above (content-levels.md § 5): its lair's, through its home — not its brain's, which
+        // CreatureCombat writes in this phase.
+        .Reads<CreatureHome>()
         .Input(() => _bridge.PlayerView);
 
     protected override void Execute(TickContext ctx) => _bridge.PlayerCombatTick(ctx);
