@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
 using NUnit.Framework;
@@ -372,6 +373,23 @@ internal sealed class MissionDeskChecks : ServedChecks
 
         var after = BodyOf(sim, link.Session);
         var journal = MissionJournal.Json(sim.Dbe, character);
+
+        // IL-4: its cache, minted in the desk's transaction that paid the reward and ended the mission: the same tick, once.
+        var cache = Items.Rows(sim);
+        var rewardTick = Ledgers.Rows(sim).Find(r => r.Kind == TransferKind.MissionReward).WorldTick;
+        var cacheParts = cache.FindAll(r => ItemCatalog.TryGet(r.Template, out var t) && t.Category is ItemCategory.Core or ItemCategory.Addon);
+        Assert.Multiple(() =>
+        {
+            Assert.That(cache, Is.Not.Empty, "the holder's broken lair dropped no cache");
+            Assert.That(cache.TrueForAll(r => r.Kind == ItemMoveKind.Mission && r.Ref == (long)held.Id.RawValue && r.To == (long)character.RawValue), Is.True,
+                "a cache row of another kind, mission or owner");
+            Assert.That(cache.TrueForAll(r => r.WorldTick == rewardTick), Is.True, "the cache was not minted with the reward");
+            Assert.That(cacheParts, Has.Count.EqualTo(1), "a cache holds exactly one core or add-on");
+            Assert.That(cache.ConvertAll(r => r.Count).Sum() - 1, Is.EqualTo(LootTables.MissionCacheUnits));
+            Assert.That(sim.Bridge.ItemDropsBy(DropSource.MissionCache), Is.EqualTo(1), "the cache was minted more than once");
+            Assert.That(ItemEndpoints.Audit(sim.Dbe).Ok, Is.True, "the item audit after a cache");
+        });
+
         Assert.Multiple(() =>
         {
             Assert.That(after.Credits - before.Credits, Is.EqualTo(held.Mission.Reward), "paid other than the reward, or more than once");

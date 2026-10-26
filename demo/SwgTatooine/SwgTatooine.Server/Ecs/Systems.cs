@@ -561,7 +561,7 @@ internal sealed class LootSystem : CallbackSystem
     protected override void Configure(SystemBuilder b) => b
         .Name("Loot")
         .Phase(SimPhases.Economy)
-        .After("Ledger")
+        .AfterAll("Missions", "Ledger")
         .ReadsEvents(_bridge.KillLootQueue)
         .Writes<ItemStack>()
         .Writes<ItemLedgerEntry>()

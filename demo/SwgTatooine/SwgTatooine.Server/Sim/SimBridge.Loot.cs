@@ -50,6 +50,9 @@ public sealed partial class SimBridge
     // Kills staged by the checks (StageKill), looted by the next tick's Loot as if the combat drain had pushed them.
     private readonly ConcurrentQueue<KillEvent> _stagedKills = new();
 
+    // Transfers staged by the checks (StageTransfer), applied through ItemTransfer in the next tick's Loot transaction, before its kills.
+    private readonly ConcurrentQueue<(long From, long To, ushort Template, byte Mk, int Count, byte Kind, long Ref)> _stagedTransfers = new();
+
     /// <summary>Kills the queue could not hold, and so looted by nobody.</summary>
     public long LootQueueOverflow => KillLootQueue?.OverflowCount ?? 0;
 
@@ -58,6 +61,13 @@ public sealed partial class SimBridge
 
     /// <summary>A kill for the next tick's <c>Loot</c> to loot, as if the combat drain had pushed it: the checks' seam onto the real consumer path.</summary>
     internal void StageKill(in KillEvent kill) => _stagedKills.Enqueue(kill);
+
+    /// <summary>
+    /// A transfer for the next tick's <c>Loot</c> transaction to apply through <see cref="ItemTransfer"/>: the checks' way to fill an inventory, and to
+    /// exercise a destroy and a move, which no system makes yet.
+    /// </summary>
+    internal void StageTransfer(long from, long to, ushort template, byte mk, int count, byte kind, long reference)
+        => _stagedTransfers.Enqueue((from, to, template, mk, count, kind, reference));
 
     /// <summary>
     /// The <c>Loot</c> system: this tick's kills, drained from <see cref="KillLootQueue"/>, each looted in one side transaction committed once.
@@ -74,7 +84,7 @@ public sealed partial class SimBridge
         }
 
         var pending = KillLootQueue?.Count ?? 0;
-        if (pending == 0 && _stagedKills.IsEmpty)
+        if (pending == 0 && _stagedKills.IsEmpty && _stagedTransfers.IsEmpty)
         {
             return;
         }
@@ -91,6 +101,11 @@ public sealed partial class SimBridge
         var worldTick = ctx.WorldTick;
         TatooineReplication.FillBodyCharacters(_lootCharacterOf);
         using var tx = ctx.CreateSideTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit);
+        while (_stagedTransfers.TryDequeue(out var t))
+        {
+            ItemTransfer(tx, t.From, t.To, t.Template, t.Mk, t.Count, t.Kind, t.Ref, worldTick);
+        }
+
         for (var i = 0; i < n; i++)
         {
             LootOne(tx, tick0, in kills[i], worldTick);
