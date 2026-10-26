@@ -539,6 +539,9 @@ internal sealed class ProgressionSystem : CallbackSystem
         .Phase(SimPhases.Report)
         .Writes<CharacterProgress>()
         .Reads<Character>()
+
+        // Who holds a mission whose lair was broken: a stranger's break is a lair kill (IsStranger).
+        .Reads<HeldMission>()
         .Writes<PlayerLook>()
         .Writes<PlayerVitals>();
 
@@ -610,7 +613,10 @@ internal sealed class LootSystem : CallbackSystem
         .Reads<PlayerPlacement>()
         .Reads<PlayerRealm>()
         .Writes<PlayerState>()
-        .Reads<Character>();
+        .Reads<Character>()
+
+        // Who holds a mission whose lair was broken (IsStranger): after the desk, which writes them in this phase.
+        .ReadsFresh<HeldMission>();
 
     protected override void Execute(TickContext ctx) => _bridge.LootTick(ctx);
 }

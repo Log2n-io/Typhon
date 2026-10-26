@@ -909,6 +909,73 @@ internal sealed class MissionDeskChecks : ServedChecks
     }
 
     /// <summary>
+    /// Review 4 M1: the holder lands one blow and a partner the last — the mission is the holder's, paid once by the desk (reward, cache and mission XP),
+    /// and the partner, whose blow broke the lair, is paid no lair XP and no cache: one predicate, the desk's <c>OwnerHit</c>, on all three sides.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void AHolderWhoHitItsLair_AndAPartnerWhoBreaksIt_ArePaidOnce_ByTheDesk()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x6018), terminal);
+        var partner = LogInAt(sim, AnAccount(0x6019), terminal, bindings: 2);
+        var holder = CharacterOf(sim, AnAccount(0x6018));
+        var helper = CharacterOf(sim, AnAccount(0x6019));
+        var held = TakeAndHold(sim, link, holder, Offers(sim, terminal)[0]);
+        var lair = held.Mission.Lair;
+        sim.WriteInTick(tx =>
+        {
+            var m = tx.Open(held.Id).Read(HeldMissionArch.Mission);
+            m.Level = 5;
+            tx.OpenMut(held.Id).Set(HeldMissionArch.Mission, m);
+            var l = tx.OpenMut(lair);
+            var s = l.Read(CreatureLair.Spawner);
+            s.Level = 5;
+            l.Set(CreatureLair.Spawner, s);
+        });
+
+        // The holder's one blow, on a lair far from broken.
+        Clear(sim, lair, health: 1_000_000);
+        Worlds.Park(sim, link.Session, held.Mission.LairX + 10f, held.Mission.LairZ, out var parked);
+        SessionHarness.UntilNamed(link.Session, lair, "the lair to reach the holder's view", parked);
+        link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(link.Session, lair)));
+        link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
+        SessionHarness.Until(() => OwnerHit(sim, lair) != 0, "the holder's blow to be marked");
+        link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.None));
+        Harness.Ticks(4);
+
+        // The partner's, the last.
+        Clear(sim, lair, health: 1);
+        Worlds.Park(sim, partner.Session, held.Mission.LairX - 10f, held.Mission.LairZ, out var parkedB);
+        SessionHarness.UntilNamed(partner.Session, lair, "the lair to reach the partner's view", parkedB);
+        partner.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(partner.Session, lair)));
+        partner.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
+        SessionHarness.Until(() => Held(sim, holder).Count == 0, "the mission to be completed");
+        Harness.Ticks((Worlds.ServedHz / SimBridge.MissionPassHz) + 4);
+
+        var paid = Ledgers.Rows(sim).FindAll(r => r.Kind == TransferKind.MissionReward);
+        Assert.Multiple(() =>
+        {
+            Assert.That(paid, Has.Count.EqualTo(1), "the desk paid other than once");
+            Assert.That(paid[0].To, Is.EqualTo((long)holder.RawValue), "the reward went to somebody other than the holder");
+            Assert.That(ProgressOf(sim, holder).MissionXp, Is.EqualTo(Progression.MissionXp(5, 1)), "the holder's mission XP");
+            Assert.That(ProgressOf(sim, holder).KillXp, Is.Zero);
+            Assert.That(Items.Stacks(sim, holder), Is.Not.Empty, "the holder was not given the mission's cache");
+            Assert.That(ProgressOf(sim, helper).Xp, Is.Zero, "the partner was paid lair XP for a mission the desk paid");
+            Assert.That(Items.Stacks(sim, helper), Is.Empty, "the partner was given a cache for a mission the desk paid");
+            Assert.That(sim.Bridge.MissionLairKills, Is.EqualTo(1));
+        });
+    }
+
+    private static int OwnerHit(TatooineSim sim, EntityId lair)
+    {
+        var hit = 0;
+        sim.WriteInTick(tx => hit = tx.TryOpen(lair, out var l) ? l.Read(CreatureLair.Spawner).OwnerHit : 0);
+        return hit;
+    }
+
+    /// <summary>
     /// character-level.md, review 2 L3: a stranger who breaks somebody's mission lair alone is paid an ordinary lair kill's XP; the holder, whose mission is
     /// drawn again and not paid, gains nothing, and nothing is counted as a mission lair's.
     /// </summary>

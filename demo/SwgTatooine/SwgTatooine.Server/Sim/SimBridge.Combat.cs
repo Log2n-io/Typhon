@@ -1001,6 +1001,7 @@ public sealed partial class SimBridge
                 VictimKind = KillVictimKind.Lair,
                 VictimLevel = (byte)Math.Clamp(spawner.Level, 0, byte.MaxValue),
                 Species = (byte)Math.Clamp(spawner.CreatureTemplate, 0, byte.MaxValue),
+                OwnerHit = (byte)(spawner.OwnerHit != 0 ? 1 : 0),
             });
         }
 

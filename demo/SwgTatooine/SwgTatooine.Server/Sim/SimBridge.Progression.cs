@@ -174,7 +174,7 @@ public sealed partial class SimBridge
 
             // A mission's lair broken by its holder: its XP is the mission's, paid by the desk with the reward in the transaction that ends it (§ 5). Broken
             // by anybody else, it is a lair like any other (orchestrator, review 2 L3), and the mission is drawn again for its holder.
-            if (missionLair && !IsStranger(tx, kill.Mission, character))
+            if (missionLair && !IsStranger(tx, in kill, character))
             {
                 missionLairs++;
                 continue;
@@ -292,11 +292,19 @@ public sealed partial class SimBridge
     private readonly Dictionary<EntityId, EntityId> _missionsEndedThisTick = [];
 
     /// <summary>
-    /// Whether <paramref name="character"/> is somebody other than the holder of <paramref name="mission"/> — a stranger, whose break of its lair is an ordinary
-    /// lair kill. False for the holder, and for a mission whose holder cannot be told (gone, and not completed this tick): no XP rather than XP twice.
+    /// Whether a mission lair's break by <paramref name="character"/> is a stranger's — an ordinary lair kill, paid in XP and in the wild cache. The one
+    /// predicate the XP and the loot systems share, and the desk's own: not when the holder's blow was among those that broke it
+    /// (<see cref="KillEvent.OwnerHit"/>), for then the desk completes the mission and pays it; not when the killer is the holder; and not when the holder
+    /// cannot be told (the mission gone, and not completed this tick) — nothing rather than twice.
     /// </summary>
-    private bool IsStranger(Transaction tx, EntityId mission, EntityId character)
+    private bool IsStranger(Transaction tx, in KillEvent kill, EntityId character)
     {
+        if (kill.OwnerHit != 0)
+        {
+            return false;
+        }
+
+        var mission = kill.Mission;
         EntityId holder;
         if (tx.TryOpen(mission, out var held))
         {
