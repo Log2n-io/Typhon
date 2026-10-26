@@ -535,7 +535,7 @@ internal sealed class MissionDeskChecks : ServedChecks
     }
 
     /// <summary>
-    /// CL-13: at a terminal, a bot takes the nearest-lair offer within its CL + 3 when one is listed, and the nearest of all only when none is. STAGED
+    /// CL-13: at a terminal, a bot takes the nearest-lair offer within its CL + 3 when one is listed, and none when every offer is above it. STAGED
     /// before the session first sees the offers, so the two rules pick different ones on every draw: the nearest offers are made level 30, the rest 1.
     /// </summary>
     [Test]
@@ -577,6 +577,10 @@ internal sealed class MissionDeskChecks : ServedChecks
                 "a CL-1 bot did not take the nearest offer within its level");
             eyes.BestOffer(store, terminal.X + 2f, terminal.Z, 6f, out var any, strong.MaxLevel);
             Assert.That(offers.Exists(o => o.Info.Serial == any && o.Info.DistanceM == nearestM), Is.True, "a CL-30 bot did not take the nearest offer");
+
+            // Every offer above what the bot takes on: none, rather than the nearest of all — which sent CL 1 bots to level-30 defenders until the
+            // ten-minute give-up (46 cancels a minute live, 2026-10-26).
+            Assert.That(eyes.BestOffer(store, terminal.X + 2f, terminal.Z, 6f, out _, maxLevel: 0), Is.Zero, "a bot took an offer above its level");
         });
     }
 

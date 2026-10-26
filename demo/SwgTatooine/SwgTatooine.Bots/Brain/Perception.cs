@@ -207,9 +207,13 @@ public sealed class Perception
 
     /// <summary>
     /// The offer to take at the terminal the bot stands at (lair-objectives.md B-1): of those listed within <paramref name="reachM"/>, the one whose lair
-    /// is nearest the terminal — the shortest ride out — among those at or below <paramref name="maxLevel"/> (content-levels.md § 7), and the nearest of
-    /// all when none is.
+    /// is nearest the terminal — the shortest ride out — among those at or below <paramref name="maxLevel"/> (content-levels.md § 7); none when every
+    /// offer is above it.
     /// </summary>
+    /// <remarks>
+    /// <b>None rather than the nearest of all.</b> Falling back to any level sent CL 1-2 bots to lairs in the higher bands, where the level-scaled
+    /// defenders killed them until the ten-minute give-up: 46 missions cancelled a minute on the first levelled world (2026-10-26), against about 5.
+    /// </remarks>
     /// <param name="maxLevel">The highest level the bot takes on (<see cref="BotBrain.MaxLevel"/>); any, by default.</param>
     /// <returns>Its netId, or 0 when none is listed within reach.</returns>
     public uint BestOffer(WorldStore store, float x, float z, float reachM, out uint serial, int maxLevel = int.MaxValue)
@@ -235,9 +239,7 @@ public sealed class Perception
             return 0;
         }
 
-        var nearest = double.MaxValue;
         var nearestInReach = double.MaxValue;
-        var found = 0u;
         var foundInReach = 0u;
         var serialInReach = 0u;
         for (var i = 0; i < set.LiveCount; i++)
@@ -250,13 +252,6 @@ public sealed class Perception
             }
 
             var ride = distances != null ? distances[slot] : 0d;
-            if (ride < nearest)
-            {
-                nearest = ride;
-                found = set.NetIds[slot];
-                serial = (uint)serials[slot];
-            }
-
             if (ride < nearestInReach && (levels == null || levels[slot] <= maxLevel))
             {
                 nearestInReach = ride;
@@ -265,13 +260,8 @@ public sealed class Perception
             }
         }
 
-        if (foundInReach != 0)
-        {
-            serial = serialInReach;
-            return foundInReach;
-        }
-
-        return found;
+        serial = serialInReach;
+        return foundInReach;
     }
 
     /// <summary>The nearest creature, with its position and distance.</summary>
