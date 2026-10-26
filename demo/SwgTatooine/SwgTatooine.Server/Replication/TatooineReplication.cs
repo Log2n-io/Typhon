@@ -777,6 +777,12 @@ public static partial class TatooineReplication
     /// <summary>A take or a cancel applied and then lost with the desk's transaction, which did not commit: nothing changed, and it can be sent again.</summary>
     public const byte MissionFailed = AckReasons.FirstApplicationReason + 21;
 
+    /// <summary>
+    /// <c>ACKS</c> reason: a <see cref="TakeMission"/> for an offer above the taker character's combat level + <see cref="TatooineData.MissionLevelAbove"/>
+    /// (Loïc, 2026-10-26: a mission above a character is not for it).
+    /// </summary>
+    public const byte MissionAboveLevel = AckReasons.FirstApplicationReason + 22;
+
     /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
     /// <remarks>
     /// Measured from the port's centre: its ring wall stands about 20 m out and its ticket terminal 21.4 m, so 30 m takes in the terminal and the gate

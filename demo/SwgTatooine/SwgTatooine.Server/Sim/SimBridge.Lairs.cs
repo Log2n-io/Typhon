@@ -29,8 +29,9 @@ internal struct CorpseEvent
 ///   <see cref="SimConfig.LairReplaceSeconds"/>, of a kind drawn from the site's mix. The world's population is stationary; its entities are not.</item>
 /// </list>
 /// <para>
-/// <b>A mission's lair is refilled here like any other</b>, and nothing more: it has no site, so it is never retired here. Its life — drawn at the take,
-/// broken, moved, destroyed at its holder's logout — is the mission desk's (<c>SimBridge.Missions.cs</c>), which runs after this system in the same phase.
+/// <b>A mission's lair is a wild lair the desk reserved</b> (<see cref="Lair.Mission"/> set): refilled here like any other, but never retired while the
+/// reservation stands — broken by its holder, the desk must still see it to pay. Released (completed, cancelled, re-targeted), it is a wild lair again and
+/// is retired here on the next pass if broken or spent. The desk (<c>SimBridge.Missions.cs</c>) runs after this system in the same phase.
 /// </para>
 /// <para>
 /// <b>Serial, in the Economy phase, through a side transaction</b> — the arrangement <c>DungeonTick</c> already spawns and destroys with. Serial because a
@@ -175,7 +176,8 @@ public sealed partial class SimBridge
                 lairsByBand[band]++;
                 creaturesByBand[band] += lair.AliveCount;
                 belowCrowd += lair.Level <= TatooineData.CrowdLevel && lair.Mission.IsNull ? 1 : 0;
-                if (lair.Site != 0 && (vitals[slot].Health <= 0 || (lair.ExpireTick != 0 && tick >= lair.ExpireTick)))
+                // A lair a held mission reserves is the desk's until it lets go (missions.md § 8): broken or spent, it is retired on the pass after.
+                if (lair.Site != 0 && lair.Mission.IsNull && (vitals[slot].Health <= 0 || (lair.ExpireTick != 0 && tick >= lair.ExpireTick)))
                 {
                     _retiring.Add((cluster.GetEntityId(slot), cluster.Realm.Value, lair.Site));
 
