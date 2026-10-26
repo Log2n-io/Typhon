@@ -95,6 +95,9 @@ public sealed partial class SimBridge
     private const int SeriesLairHits = 8;
     private const int SeriesCount = 9;
 
+    /// <summary>The cities as a person sees them named, index for index with the server's map (world-data.ts: Port Sable is Mos Eisley, …).</summary>
+    private static readonly string[] CityDisplayNames = ["Port Sable", "Whitestone", "Dry Wells", "Red Mesa", "Tern's Rest", "Tallow", "Far Reach"];
+
     private readonly RateWindow _rates = new(SeriesCount, 60);
     private readonly long _statsStarted = System.Diagnostics.Stopwatch.GetTimestamp();
     private long _lastStatsTick = long.MinValue / 2;
@@ -225,7 +228,8 @@ public sealed partial class SimBridge
         var botsInCities = 0;
         for (var c = 0; c < pop.BotsByCity.Length; c++)
         {
-            var name = c < _map.Cities.Count ? _map.Cities[c].Name : $"city {c}";
+            // The names a person sees — the browser's and the bots' (world-data.ts CITIES) — not the server map's own, index for index.
+            var name = c < CityDisplayNames.Length ? CityDisplayNames[c] : _map.Cities[c].Name;
             j.Append(c == 0 ? "\"" : ",\"").Append(name).Append("\":").Append(pop.BotsByCity[c].ToString(inv));
             botsInCities += pop.BotsByCity[c];
         }
