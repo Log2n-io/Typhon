@@ -23,6 +23,9 @@ int bots, seconds, hz, connectBatch, connectRate, tourSeconds, planets, fuzz, fu
 double regionM, wanderSeconds;
 bool brain;
 bool noMissions;
+string homeCity;
+double homeShare;
+int homeMax;
 double tipSeconds;
 try
 {
@@ -67,6 +70,10 @@ try
     brain = r.Switch("--brain", "player bots decide for themselves from what they are sent, instead of wandering");
     // --brain only: a bot takes missions at the terminals it visits unless told not to — a measurement run's workload stays what it was.
     noMissions = r.Switch("--no-missions", "thinking bots take no missions at the terminals they visit");
+    // --brain only: a share of the population lives in one city and never leaves it, capped so a huge run does not put thousands there.
+    homeCity = r.Str("--home-city", defaults.HomeCity, "the city a share of the thinking bots live in; 'none' for none", "<name>");
+    homeShare = r.Dbl("--home-share", defaults.HomeShare, "the share of the bots that live in --home-city", min: 0d);
+    homeMax = r.Int("--home-max", defaults.HomeMax, "the most bots that live in --home-city", min: 0);
     // --brain only: a tip is a ledger row, so tipping is its own workload and off unless asked for (economy-foundation.md E0-11).
     tipSeconds = r.Dbl("--tip-seconds", 0d, "a thinking bot tips a named player near it about this often, seconds; 0 never tips", min: 0d);
     // Every god camera moves to the next planet on this period (Realms G3); the report counts the switches applied and the RealmNews heard.
@@ -222,6 +229,9 @@ var options = new BotSwarmOptions
     Brain = brain,
     TipSeconds = tipSeconds,
     Missions = !noMissions,
+    HomeCity = homeCity,
+    HomeShare = homeShare,
+    HomeMax = homeMax,
     TourEverySeconds = tourSeconds,
     Planets = planets,
 
@@ -476,6 +486,10 @@ if (brain)
         $"brain: {decisions.Boardings} shuttle boarding(s) asked for, {decisions.Hunts} hunt(s) begun; "
         + $"{decisions.PortsKnownMax} port(s) known by the best-travelled bot, {decisions.BotsThatCanFly} bot(s) know two or more, "
         + $"{(decisions.Creatures > 0 ? "a creature was in view at least once" : "no creature was EVER in view")}");
+    var homes = swarm.Homes();
+    Console.WriteLine(homes.Living == 0
+        ? "home: none (--home-city)"
+        : $"home: {homes.Living} bot(s) live in {homeCity} (--home-share {homeShare:G}, --home-max {homeMax}); {homes.There} stood in it at their last decision");
     var missions = swarm.Missions();
     Console.WriteLine(
         $"missions: {missions.Asked} take(s) sent, {missions.Taken} taken, {missions.Completed} completed (paid), {missions.Cancelled} cancelled after "

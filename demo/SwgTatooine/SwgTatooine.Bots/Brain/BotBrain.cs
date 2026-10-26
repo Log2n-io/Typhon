@@ -176,7 +176,11 @@ public sealed class BotBrain
     /// <param name="seed">Its own seed; two bots with the same seed behave identically.</param>
     /// <param name="ticksPerSecond">How often this bot is driven, which is what its timed goals are measured in.</param>
     /// <param name="assets">The public content (walls, doors, stand points), or null for a brain that only travels and hunts.</param>
-    public BotBrain(City[] cities, uint seed, double ticksPerSecond = 4d, BotAssets assets = null)
+    /// <param name="homeRegion">
+    /// The city this bot lives in, as a region (a city plus one), or 0 for none. A bot with a home goes back to it, and stays: its errands, doors, hunts
+    /// and missions start and end there, and it never travels to another city.
+    /// </param>
+    public BotBrain(City[] cities, uint seed, double ticksPerSecond = 4d, BotAssets assets = null, int homeRegion = 0)
     {
         ArgumentNullException.ThrowIfNull(cities);
         if (cities.Length == 0)
@@ -194,7 +198,11 @@ public sealed class BotBrain
         _patienceTicks = Ticks(ShuttlePatienceSeconds);
         _stuckTicks = Ticks(StuckSeconds);
         Facilities = new FacilityMap();
+        HomeRegion = homeRegion > 0 && homeRegion <= cities.Length ? homeRegion : 0;
     }
+
+    /// <summary>The city this bot lives in, as a region (a city plus one); 0 for a bot that roams the planet.</summary>
+    public int HomeRegion { get; }
 
     /// <summary>What this bot has learned about the cities.</summary>
     public FacilityMap Facilities { get; }
@@ -401,6 +409,32 @@ public sealed class BotBrain
 
         var here = RegionAt(world.X, world.Z);
 
+        // A bot with a home that is not there — it was spawned elsewhere, or a hunt or a mission took it out — goes back.
+        if (HomeRegion != 0 && here != HomeRegion)
+        {
+            return GoTo(in world, tick, HomeRegion - 1, here);
+        }
+
+        // At home: its town's errands and doors, and standing about — never a trip to another city.
+        if (HomeRegion != 0)
+        {
+            _flyNext = false;
+            var pick = Next() % 100u;
+            if (_assets != null && pick < 45u && StartVisit(in world, tick))
+            {
+                return Visit(in world, tick);
+            }
+
+            if (_assets != null && pick < 75u && StartEntering(in world, tick))
+            {
+                return Enter(in world, tick);
+            }
+
+            Goal = Goal.Idling;
+            _until = tick + _idleTicks;
+            return Intent.Move(0f, 0);
+        }
+
         // In a city, with the content to walk it: an errand, a door, or — after an errand — the shuttle. Rolled from the same stream, after the
         // decision above and only when the content exists, so a brain without it draws exactly the sequence it always drew.
         if (_assets != null && here != 0)
@@ -436,7 +470,12 @@ public sealed class BotBrain
         // The city it is standing in is excluded by rolling over the OTHERS, not by nudging a self-selection to the
         // next index: that nudge made one neighbour twice as likely as every other city, and a fleet that visits one
         // place twice as often is a load distribution reported as uniform.
-        var destination = OtherCity(here);
+        return GoTo(in world, tick, OtherCity(here), here);
+    }
+
+    /// <summary>Sets off for a city — by the mode its route chose — and takes the first step.</summary>
+    private Intent GoTo(in Perceived world, long tick, int destination, int here)
+    {
         TargetRegion = destination + 1;
         var city = _cities[destination];
         var route = Routing.Plan(new Journey(world.X, world.Z, city.X, city.Z, here, TargetRegion, Facilities));

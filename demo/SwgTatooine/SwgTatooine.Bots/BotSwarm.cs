@@ -113,6 +113,38 @@ public sealed class BotSwarmOptions
     /// </summary>
     public bool Missions { get; init; } = true;
 
+    /// <summary>
+    /// The city a share of the thinking bots live in, by name (<see cref="BotMap.Cities"/>); null or unknown for none. They go there and stay: their
+    /// errands, doors, hunts and missions start and end in it, and they never travel to another city (Loïc, 2026-10-26: a crowded Port Sable).
+    /// </summary>
+    public string HomeCity { get; init; } = "Port Sable";
+
+    /// <summary>The share of <see cref="Count"/> that lives in <see cref="HomeCity"/>.</summary>
+    public double HomeShare { get; init; } = 0.5;
+
+    /// <summary>The most bots that live there, whatever the count: 8 000 bots put 500 there, not 4 000.</summary>
+    public int HomeMax { get; init; } = 500;
+
+    /// <summary>How many bots live in <see cref="HomeCity"/>: the first ones by index, <c>min(Count × HomeShare, HomeMax)</c>.</summary>
+    public int HomeBots => HomeRegion == 0 ? 0 : Math.Min((int)Math.Floor(Count * Math.Clamp(HomeShare, 0d, 1d)), Math.Max(0, HomeMax));
+
+    /// <summary><see cref="HomeCity"/> as a region — its index plus one — or 0 when it names no city.</summary>
+    public int HomeRegion
+    {
+        get
+        {
+            for (var i = 0; i < BotMap.Cities.Length; i++)
+            {
+                if (string.Equals(BotMap.Cities[i].Name, HomeCity, StringComparison.OrdinalIgnoreCase))
+                {
+                    return i + 1;
+                }
+            }
+
+            return 0;
+        }
+    }
+
     /// <summary>How far a camera travels per second along its orbit, in metres.</summary>
     public double CameraSpeedMps { get; init; } = 12;
 
@@ -902,6 +934,25 @@ public sealed class BotSwarm : IAsyncDisposable
     /// of a thousand bound avatars that sent not one intent, and the only way to notice was to look at the world in a browser. A
     /// number here, next to the sessions, makes "they are standing still" a thing the report says rather than a thing you see.
     /// </remarks>
+    /// <summary>The bots that live in the home city, and how many of them stood in it at their last decision.</summary>
+    public (int Living, int There) Homes()
+    {
+        var living = 0;
+        var there = 0;
+        foreach (var bot in Bots)
+        {
+            if (bot == null || !bot.HasHome)
+            {
+                continue;
+            }
+
+            living++;
+            there += Volatile.Read(ref bot.AtHome) ? 1 : 0;
+        }
+
+        return (living, there);
+    }
+
     /// <summary>The missions the thinking bots asked for, took (their journal said so), completed (paid) and cancelled.</summary>
     /// <returns>The four counts, over the fleet.</returns>
     public (long Asked, long Taken, long Completed, long Cancelled) Missions()
@@ -2304,6 +2355,11 @@ public sealed class BotSwarm : IAsyncDisposable
         private readonly HashSet<string> _missionsSeen = [];
         private readonly HashSet<string> _completedSeen = [];
 
+        /// <summary>Whether this bot lives in the home city, and whether it stood in it at its last decision.</summary>
+        public bool HasHome => _brain != null && _brain.HomeRegion != 0;
+
+        public bool AtHome;
+
         /// <summary>Tips sent, and tips due with nobody named within reach.</summary>
         public long TipsSent;
 
@@ -2357,7 +2413,13 @@ public sealed class BotSwarm : IAsyncDisposable
                 // Its own stream, from its own index, for the reason the wanderer's is: a run has to reproduce, and a thousand bots
                 // sharing one stream would decide in lockstep. A different multiplier from the wanderer's so a bot's course and its
                 // choices are not the same sequence read twice.
-                _brain = new BotBrain(BotMap.Cities, (uint)((index * 2246822519u) | 1u), options.TickHz, assets);
+                // The first bots by index live in the home city; the index is the account's, so a bot keeps its home across runs.
+                _brain = new BotBrain(
+                    BotMap.Cities,
+                    (uint)((index * 2246822519u) | 1u),
+                    options.TickHz,
+                    assets,
+                    index < options.HomeBots ? options.HomeRegion : 0);
                 _eyes = new Perception();
                 _ticksPerSecond = Math.Max(1, options.TickHz);
                 _tipEveryTicks = (long)Math.Round(options.TipSeconds * _ticksPerSecond);
@@ -2545,6 +2607,10 @@ public sealed class BotSwarm : IAsyncDisposable
 
             var before = _brain.Goal;
             var intent = _brain.Decide(in world, tick);
+            if (_brain.HomeRegion != 0 && world.HasBody)
+            {
+                Volatile.Write(ref AtHome, world.Realm == 0 ? _brain.RegionAt(world.X, world.Z) == _brain.HomeRegion : AtHome);
+            }
             if (TraceAll || Index == TraceIndex)
             {
                 // A brain is read from what it did, tick by tick: one bot's decisions, to stdout, when SWG_BOT_TRACE names its index.

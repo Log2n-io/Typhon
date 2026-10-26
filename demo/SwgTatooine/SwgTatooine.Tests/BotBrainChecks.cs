@@ -540,6 +540,54 @@ public sealed class BotBrainChecks
         });
     }
 
+    /// <summary>A bot that lives in a city and stands outside it goes back to it.</summary>
+    [Test]
+    public void AHomeBotAwayFromHome_GoesHome()
+    {
+        var home = BotMap.Cities[0];
+        var away = BotMap.Cities[1];
+        var brain = new BotBrain(BotMap.Cities, 7u, 4d, null, homeRegion: 1);
+        brain.Decide(Empty(away.X, away.Z), 1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Travelling), "a bot away from home did not set off");
+            Assert.That(brain.TargetRegion, Is.EqualTo(1), $"it set off for region {brain.TargetRegion}, not {home.Name}");
+        });
+    }
+
+    /// <summary>A bot at home stays: over thousands of decisions it never sets off for another city, by any mode.</summary>
+    [Test]
+    public void AHomeBotAtHome_NeverLeavesForAnotherCity()
+    {
+        var home = BotMap.Cities[0];
+        foreach (var seed in new[] { 1u, 7u, 99u, 12345u })
+        {
+            var brain = new BotBrain(BotMap.Cities, seed, 4d, null, homeRegion: 1);
+            for (var tick = 1L; tick < 20_000; tick++)
+            {
+                brain.Decide(Empty(home.X + 20f, home.Z - 30f), tick);
+                Assert.That(brain.TargetRegion is 0 or 1, Is.True, $"seed {seed}, tick {tick}: it set off for region {brain.TargetRegion}");
+                Assert.That(brain.Goal, Is.Not.EqualTo(Goal.Waiting), $"seed {seed}: it queued for a shuttle");
+            }
+        }
+    }
+
+    /// <summary>Half the bots live in the home city, never more than its cap; none when the city is unknown.</summary>
+    [TestCase(500, 250)]
+    [TestCase(8000, 500)]
+    [TestCase(30, 15)]
+    [TestCase(1, 0)]
+    public void HalfTheBots_LiveInPortSable_UpToFiveHundred(int count, int expected)
+    {
+        var options = new SwgTatooine.Bots.BotSwarmOptions { Count = count };
+        Assert.Multiple(() =>
+        {
+            Assert.That(options.HomeRegion, Is.EqualTo(1), "Port Sable is not the default home");
+            Assert.That(options.HomeBots, Is.EqualTo(expected));
+            Assert.That(new SwgTatooine.Bots.BotSwarmOptions { Count = count, HomeCity = "none" }.HomeBots, Is.Zero);
+        });
+    }
+
     /// <summary>A lair being drawn or moved — held, no position yet — is waited for, not ridden at a stale point.</summary>
     [Test]
     public void ALairBeingMovedIsWaitedFor()
