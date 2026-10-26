@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- SwgTatooine.Tests — checks on the SWG demo's realms (Realms G1d): portals, inter-planet shuttles, realm isolation at scale. Beside the demo, like
+       AntHill.Harness.Tests: it references the demo executable and builds small worlds with it. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <LangVersion>default</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="NUnit" Version="4.6.1" />
+    <PackageReference Include="NUnit3TestAdapter" Version="6.2.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.7.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\SwgTatooine.Server\SwgTatooine.Server.csproj" />
+    <ProjectReference Include="..\SwgTatooine.Navigation\SwgTatooine.Navigation.csproj" />
+    <!-- The bot fleet. Referenced here rather than in a project of its own so one fixture can stand up a real /auth host AND a
+         real provisioner against it: the thing worth testing about B5 is that a DERIVED password is acceptable to the SERVER's
+         own rules, which needs both assemblies in one place. Before this, nothing in the repository could reach BotSwarm at all,
+         which is how "Realm" instead of "realm" survived the whole life of the god-tour flag. -->
+    <ProjectReference Include="..\SwgTatooine.Bots\SwgTatooine.Bots.csproj" />
+    <ProjectReference Include="..\..\..\src\Typhon.Generators.Consumer\Typhon.Generators.Consumer.csproj" ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
+  </ItemGroup>
+</Project>

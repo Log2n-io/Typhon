@@ -41,6 +41,7 @@ jobs:
       workbench: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.workbench }}
       aux: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.aux }}
       sdk: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.sdk }}
+      game_client: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.game_client }}
       native: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.native }}
       tla: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.tla }}
       rules: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.rules }}
@@ -154,8 +155,20 @@ jobs:
               - 'demo/AntHill/**'
               - 'demo/AsteroidField/**'
               # The SWG demo's realm checks (Realms G1d) build the demo itself.
-              - 'demo/SwgTatooine/**'
-              - 'demo/SwgTatooine.Tests/**'
+              - 'demo/SwgTatooine/SwgTatooine.Server/**'
+              - 'demo/SwgTatooine/SwgTatooine.Tests/**'
+              # The bot fleet, and Typhon.Client through it (B5, 2026-10-14). SwgTatooine.Tests references the bots so
+              # one fixture can put a real provisioner against a real /auth host -- the thing worth testing is that a
+              # DERIVED password satisfies the SERVER's own rules, which needs both assemblies in one place. Adding
+              # that reference moved both paths into this job's closure, and check-gate-filters.py caught it: without
+              # these two lines a change to the bots would run no tests at all, which is the #774 class exactly.
+              - 'demo/SwgTatooine/SwgTatooine.Bots/**'
+              - 'src/Typhon.Client/**'
+              # The navigation library the server and the bots both plan routes with; in the suite's closure through both.
+              - 'demo/SwgTatooine/SwgTatooine.Navigation/**'
+              # The SWG suite runs through the engine's sharder, from its own plan.
+              - 'bench/aws/shard.py'
+              - 'bench/aws/shards-swg.json'
               # Typhon.Shell.Tests reaches the Workbench through its own references — surfaced by the closure check,
               # not by reading the csproj.
               - 'tools/Typhon.Workbench/**'
@@ -164,6 +177,13 @@ jobs:
               - 'Typhon.slnx'
             # The client SDKs (05-sdks § 6): the .NET client's build closure, the TypeScript SDK, and the golden vectors both
             # decode — a vector changed by a Protocol PR must re-run the decoders that consume it.
+            # <b>The browser game client ran in NO workflow at all</b> (I11). 74 vitest cases, a typecheck and eslint, none of
+            # them executed by CI — while Phase A put the login form and the whole input path into that app. That is the shape
+            # of #774: a suite nobody runs cannot be said to pass, and this one guards what a player actually touches.
+            game_client:
+              - 'demo/SwgTatooine/SwgTatooine.Client/**'
+              # The app compiles the SDK's sources (a Vite alias) and its probe imports the SDK's build: an SDK change can break it.
+              - 'src/Typhon.Client.TypeScript/**'
             sdk:
               - 'src/Typhon.Protocol/**'
               - 'src/Typhon.Generators.Protocol/**'
@@ -853,7 +873,7 @@ jobs:
             test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj \
             test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj \
             test/Typhon.Subscriptions.AspNetCore.Tests/Typhon.Subscriptions.AspNetCore.Tests.csproj \
-            demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj             demo/SwgTatooine.Tests/SwgTatooine.Tests.csproj \
+            demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj \
             demo/AsteroidField/AsteroidField.Tests/AsteroidField.Tests.csproj ; do
             name=$(basename "$proj" .csproj)
             echo "::group::${name}"
@@ -862,6 +882,16 @@ jobs:
               --logger "trx;LogFileName=${name}.trx" --results-directory TestResults || rc=1
             echo "::endgroup::"
           done
+
+          # The SWG demo's suite in four processes, the way the engine's runs (bench/aws/shards-swg.json): its
+          # process-static state rules out fixtures in parallel in one process, and most of its time is paced ticks,
+          # so four processes overlap almost freely — 103 s in one, 35 s in four, measured on a dev box. The sharder
+          # also brings the engine's retry policy and plan-integrity check. It runs --no-build, hence the build.
+          echo "::group::SwgTatooine.Tests (4 shards)"
+          dotnet build demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj -c Release || rc=1
+          SHARD_REPO="$PWD" SHARD_PROJECT=demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj \
+            SHARD_PLAN=bench/aws/shards-swg.json python3 bench/aws/shard.py run --results-dir TestResults/swg-shards || rc=1
+          echo "::endgroup::"
           exit $rc
 
       - name: Upload trx
@@ -869,7 +899,9 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: aux-tests-trx
-          path: TestResults/*.trx
+          path: |
+            TestResults/*.trx
+            TestResults/swg-shards/*.trx
           if-no-files-found: ignore
 
   # ---- The client SDKs: the .NET client suite and the TypeScript SDK, both against the golden vectors. Free runner. ----
@@ -921,6 +953,41 @@ jobs:
           path: TestResults/*.trx
           if-no-files-found: ignore
 
+  # ---- The browser game client: typecheck, eslint, prettier and its 74 vitest cases. Free runner. ----
+  #
+  # I11 of claude/design/SwgTatooine/14-game-programme.md, and the row said why before this existed: "The 74-test Babylon app runs
+  # in no workflow -- only the SDK at src/Typhon.Client.TypeScript does. Phase A puts a login form and the whole input path in that
+  # app; shipping that ungated is how the #774 class recurs."
+  #
+  # `npm run check` is the app's own gate word -- typecheck, lint, format:check, vitest -- so CI runs what a developer runs rather
+  # than a list that drifts from it. `npm run build` is NOT run: it would catch a Vite config break, and it is also the slowest
+  # step here; the typecheck inside `check` covers the compile errors, and the payload build in scripts/publish-swg.ps1 is where a
+  # broken bundle actually shows up.
+  game-client:
+    needs: changes
+    if: needs.changes.outputs.game_client == 'true' && needs.changes.outputs.skip_ut != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      # The SDK's BUILD first: `tools/probe.ts` runs under Node against `dist/`, which no checkout carries, and the type-aware lint
+      # reads every SDK type there as an error type without it -- 254 errors on the first run of this job against the demo's tree.
+      - name: Build — TypeScript SDK
+        working-directory: src/Typhon.Client.TypeScript
+        run: |
+          npm ci
+          npm run build
+
+      - name: Check — SWG browser client
+        working-directory: demo/SwgTatooine/SwgTatooine.Client
+        run: |
+          npm ci
+          npm run check
+
   # ---- The native C/C++ SDK (13 § 7): three toolchains, warnings as errors, the golden vectors, the C-compiled header test, ASan/UBSan,
   # and — on one leg — the live differential test against Typhon.Subscriptions.E2EHost over TCP. Free runners. ----
   native-sdk:
@@ -967,7 +1034,8 @@ jobs:
 
   # ---- The ONLY required check. Aggregates: skipped → pass, failure/cancelled → fail. ----
   gate:
-    needs: [changes, aws-gate, aws-gate-selfhosted, aux-tests, subscriptions-sdk, native-sdk, tla, rule-coverage, invariants, closing-keywords]
+    needs: [changes, aws-gate, aws-gate-selfhosted, aux-tests, subscriptions-sdk, game-client, native-sdk, tla, rule-coverage, invariants,
+      closing-keywords]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -984,8 +1052,9 @@ jobs:
           # Hyphenated job names need bracket notation in an expression — `needs.aux-tests` parses as subtraction.
           auxt="${{ needs['aux-tests'].result }}"
           sdk="${{ needs['subscriptions-sdk'].result }}"
+          client="${{ needs['game-client'].result }}"
           native="${{ needs['native-sdk'].result }}"
-          echo "changes=$changes  aws-gate=$aws  aws-gate-selfhosted=$awssh  aux-tests=$auxt  subscriptions-sdk=$sdk  native-sdk=$native  tla=$tla  rule-coverage=$rules  invariants=$inv  closing-keywords=$keywords  is_fork=$fork"
+          echo "changes=$changes  aws-gate=$aws  aws-gate-selfhosted=$awssh  aux-tests=$auxt  subscriptions-sdk=$sdk  game-client=$client  native-sdk=$native  tla=$tla  rule-coverage=$rules  invariants=$inv  closing-keywords=$keywords  is_fork=$fork"
           fail=0
           # changes must succeed; the two aws-gate variants + tla may legitimately be 'skipped' (nothing relevant
           # changed, or the other runner variant is inactive), and closing-keywords is 'skipped' on push/dispatch.
@@ -997,6 +1066,8 @@ jobs:
           case "$auxt" in failure|cancelled) echo "aux-tests failed"; fail=1 ;; esac
           # subscriptions-sdk is path-gated the same way.
           case "$sdk" in failure|cancelled) echo "subscriptions-sdk failed"; fail=1 ;; esac
+          # game-client too: skipped when demo/SwgTatooine/SwgTatooine.Client/** is untouched (I11).
+          case "$client" in failure|cancelled) echo "game-client failed"; fail=1 ;; esac
           # native-sdk too: 'skipped' when nothing it builds changed.
           case "$native" in failure|cancelled) echo "native-sdk failed"; fail=1 ;; esac
           # rule-coverage is path-gated like tla, so 'skipped' is legitimate; a REGRESSION is not (#703).

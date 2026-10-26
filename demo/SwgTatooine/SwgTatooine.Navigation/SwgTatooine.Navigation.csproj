@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- SwgTatooine.Navigation — walking round a city's buildings, shared by everything that walks one: the bots, which search the structures they were
+       sent, and the server's scripted crowd, which searches the ones it holds. One search, so a bot and a simulated player take the same way round a
+       building, and the browser's city-path.ts is its port. It references nothing but the BCL: the walls come in through IWallPlans. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>SwgTatooine.Navigation</AssemblyName>
+    <RootNamespace>SwgTatooine.Navigation</RootNamespace>
+    <LangVersion>default</LangVersion>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+</Project>

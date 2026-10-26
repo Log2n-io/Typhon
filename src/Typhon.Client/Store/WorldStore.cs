@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using Typhon.Protocol;
 
@@ -24,13 +24,14 @@ public sealed class WorldStore
     private const int SlotBits = 24;
     private const int SlotMask = (1 << SlotBits) - 1;
 
-    private int[] _handles = [];
+    private readonly NetIdMap _handles = new();
 
     /// <summary>Creates a store for a compiled catalog.</summary>
     /// <param name="plan">The session's compiled catalog.</param>
     /// <param name="maxNetId">
-    /// Largest netId accepted. netIds are dense on the server, so the map is a flat array of at most this many entries; a corrupt id beyond it counts as an
-    /// anomaly instead of allocating.
+    /// Largest netId accepted: a corrupt id beyond it counts as an anomaly instead of being mapped. It is a validation bound and no longer a sizing one —
+    /// <see cref="NetIdMap"/> costs what the session HOLDS, where the flat array this replaced cost what the world's id range reached, which was 2 MB a
+    /// session on a world of 85 000 entities whatever the session was watching.
     /// </param>
     /// <param name="maxRenderDelayMs">
     /// The largest render delay motion will be evaluated at, which sizes every archetype's segment ring against the catalog's tick period (see
@@ -228,9 +229,9 @@ public sealed class WorldStore
     /// <returns><see langword="true"/> when the store holds it.</returns>
     public bool TryLocate(uint netId, out int archetype, out int slot)
     {
-        if (netId < (uint)_handles.Length && _handles[netId] != 0)
+        if (_handles.TryGet(netId, out var packed))
         {
-            var handle = _handles[netId] - 1;
+            var handle = packed - 1;
             archetype = handle >>> SlotBits;
             slot = handle & SlotMask;
             return true;
@@ -248,29 +249,13 @@ public sealed class WorldStore
             return false;
         }
 
-        if (netId >= (uint)_handles.Length)
-        {
-            var length = Math.Max(1024, _handles.Length);
-            while (length <= netId)
-            {
-                length *= 2;
-            }
-
-            var grown = new int[Math.Min(length, (int)Math.Min(MaxNetId + 1L, int.MaxValue))];
-            _handles.AsSpan().CopyTo(grown);
-            _handles = grown;
-        }
-
-        _handles[netId] = ((archetype << SlotBits) | slot) + 1;
+        _handles.Set(netId, ((archetype << SlotBits) | slot) + 1);
         return true;
     }
 
     internal void Unmap(uint netId)
     {
-        if (netId < (uint)_handles.Length)
-        {
-            _handles[netId] = 0;
-        }
+        _handles.Remove(netId);
     }
 
     internal void BeginFrame()
@@ -314,7 +299,7 @@ public sealed class WorldStore
             a.Clear();
         }
 
-        Array.Clear(_handles, 0, _handles.Length);
+        _handles.Clear();
         foreach (var g in Aggregates)
         {
             g.Clear();

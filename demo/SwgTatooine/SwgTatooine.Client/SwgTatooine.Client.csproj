@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.Build.NoTargets/3.7.134">
+  <!-- Content-only project: puts the TypeScript 3D client in the solution tree. Building it does nothing; the client builds with npm
+       (`npm run build`, `npm run check`), never through MSBuild. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <!-- npm install, Vite output and `npm run vendor` mirrors: generated, gitignored, and node_modules alone is 255 MB to glob. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);node_modules/**;dist/**;public/vendor/**</DefaultItemExcludes>
+  </PropertyGroup>
+</Project>

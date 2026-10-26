@@ -1,0 +1,1577 @@
+﻿using System;
+using NUnit.Framework;
+using SwgTatooine.Server;
+using SwgTatooine.Server.Terrain;
+using Typhon.Engine;
+using Typhon.Protocol;
+
+namespace SwgTatooine.Tests;
+
+/// <summary>
+/// SWG-01 — a client drives a player by sending intents, and cannot drive it faster than the server allows.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>The claim these exist to make falsifiable</b> is <c>06-gameplay.md § 2</c>'s: "Clients send intents, never positions. The server integrates with the
+/// existing <c>Steer</c>. Speed hacks are impossible by construction." A design principle stated in prose and never measured is indistinguishable from one
+/// that was implemented wrongly, so the first case below sends a destination ten kilometres away and asserts the player moved by exactly one tick of travel.
+/// </para>
+/// <para>
+/// Every case runs against a real world, a real handshake through the real acceptor, and a real session row — see <see cref="SessionHarness"/> for why the
+/// transport is in-process rather than a socket.
+/// </para>
+/// </remarks>
+[Category("Integration")]
+[TestFixture]
+[NonParallelizable]
+internal sealed class ClientIntentChecks : ServedChecks
+{
+    /// <summary>
+    /// Fast, because every case here waits on ticks and the wait is most of its cost; slow enough that one tick of travel (0.2 m at a run) is a
+    /// distance an assertion can separate from two. Every interval the server reads is in seconds and converted at this rate, so nothing else moves with it.
+    /// </summary>
+    private const int TickRateHz = Worlds.ServedHz;
+
+    /// <summary>What a GRANTED run covers in one tick at <see cref="TickRateHz"/>.</summary>
+    /// <remarks>
+    /// Through the gait ladder's scale rather than from <c>PlayerRunSpeedMps</c> raw. What these cases measure is that a
+    /// run moves a body by one tick's worth of the speed the server GRANTS for it, and what it grants is the raw figure
+    /// times <see cref="TatooineData.PlayerGaitScale"/> — scaling the ladder failed six of them at once, every one for a
+    /// reason that had nothing to do with what it checks.
+    /// </remarks>
+    private const float StepM = TatooineData.PlayerRunSpeedMps * TatooineData.PlayerGaitScale / TickRateHz;
+
+    private SimConfig Config()
+    {
+        var config = Worlds.Served(Dir);
+
+        // STAGED, because several cases here place their fixtures a few metres from the capital's centre and need the avatar's 192 m
+        // sphere to cover them. By default arrivals are spread over all seven towns, so an avatar can be kilometres away and see none
+        // of them -- a flake that would depend on the account id. Pinning it to the point states the precondition instead of hoping.
+        config.SpawnSpread = 0;
+        return config;
+    }
+
+    /// <summary>A started server with one player client possessing a player, and the player it possesses.</summary>
+    private sealed class Possessed : IDisposable
+    {
+        public Possessed(SimConfig config)
+        {
+            Sim = new TatooineSim(config);
+            Sim.Initialize();
+            Harness = new SessionHarness(Sim);
+            Link = Harness.Connect(TatooineReplication.PlayerKind);
+
+            SessionHarness.Until(() => Link.Received(MessageTypes.Welcome), "WELCOME");
+
+            // The claim is made by a tick, and the engine applies the Control request in the tick AFTER that — so a case that acted on the first tick would be
+            // sending an intent to a session that controls nothing, which is a legitimate state with its own counter and not what any of these are about.
+            SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the possession to be claimed by a tick");
+            Harness.Ticks(2);
+            Entity = TatooineReplication.ControlledBy(Sim.Dbe, Link.Session);
+            Assert.That(Entity, Is.Not.EqualTo(EntityId.Null), "the session controls nothing, so there is nothing to drive");
+        }
+
+        public TatooineSim Sim { get; }
+
+        public SessionHarness Harness { get; }
+
+        public FakeLink Link { get; }
+
+        /// <summary>The player this client possesses.</summary>
+        public EntityId Entity { get; }
+
+        /// <summary>Where the possessed player is, and where it is heading, read outside the tick.</summary>
+        public (float X, float Z, float DestX, float DestZ, float VelX, float VelZ, int Activity, EntityId Target) Read()
+        {
+            using var tx = Sim.Dbe.CreateQuickTransaction();
+            var entity = tx.For<Player>().Open(Entity);
+            var place = entity.Read(Player.Bounds);
+            var move = entity.Read(Player.Move);
+            var state = entity.Read(Player.State);
+            var owner = entity.Read(Player.Session);
+            return (place.X, place.Z, move.DestX, move.DestZ, move.VelX, move.VelZ, state.Activity, owner.Target);
+        }
+
+        /// <summary>The one-tick split the intent path last left for the move phase (A14b), read outside the tick.</summary>
+        public (float X, float Z, long Tick) ReadBias()
+        {
+            using var tx = Sim.Dbe.CreateQuickTransaction();
+            var move = tx.For<Player>().Open(Entity).Read(Player.Move);
+            return (move.BiasX, move.BiasZ, move.BiasTick);
+        }
+
+        /// <summary>Unhooks the harness from the keepalive before disposing the world, so no later wait can tick a disposed runtime.</summary>
+        public void Dispose()
+        {
+            Harness.Release();
+            Sim.Dispose();
+        }
+    }
+
+    // ── The principle: intents, never positions ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A destination ten kilometres away moves the player by ONE tick of travel, not to the destination.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the speed-hack case, and it passes by construction rather than by check.</b> The command carries a destination; the only thing written from
+    /// it is <c>PlayerMotion.DestX/DestZ</c>, and the velocity that follows is <c>direction × (entitled speed × one tick)</c>. There is no code path from a
+    /// client message to a <c>PlayerPlacement</c>, so no message — however far the destination, however often repeated — can move a player further than the
+    /// server's own integration moves it.
+    /// </para>
+    /// <para>
+    /// The tolerance is a tenth of a step. A tighter one would be asserting floating-point arithmetic; a looser one would not separate one step from two,
+    /// which is the whole distinction.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void AMoveToTenKilometresAwayMovesThePlayerByOneTickOfTravel()
+    {
+        var config = Config();
+        using var world = new Possessed(config);
+        var before = world.Read();
+
+        world.Link.SendCommand(nameof(MoveTo), ClientSays.MoveTo(before.X + 10_000f, before.Z));
+
+        // Two ticks: the first applies the intent and integrates it, and waiting for exactly one is racing the tick driver. The assertion is on the distance
+        // per tick, so it is computed from how many ticks actually elapsed rather than assumed.
+        var start = world.Sim.Runtime.CurrentTickNumber;
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the intent to be applied by a tick");
+        world.Harness.Ticks(2);
+        var elapsed = world.Sim.Runtime.CurrentTickNumber - start;
+
+        var after = world.Read();
+        var travelled = MathF.Sqrt(((after.X - before.X) * (after.X - before.X)) + ((after.Z - before.Z) * (after.Z - before.Z)));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(travelled, Is.GreaterThan(StepM * 0.5f), "the player did not move at all, so the intent reached nothing");
+            Assert.That(travelled, Is.LessThanOrEqualTo(StepM * (elapsed + 1)),
+                $"the player moved {travelled:F2} m in {elapsed} ticks, which is more than {StepM:F2} m per tick — a client moved a player");
+            Assert.That(after.DestX, Is.EqualTo(MathF.Min(before.X + 10_000f, config.WorldEdgeM * 0.5f)).Within(1f),
+                "the destination is the client's, clamped to the world it is in");
+            Assert.That(after.Activity, Is.EqualTo(PlayerActivity.Travelling));
+        });
+    }
+
+    /// <summary>A click runs at the run the server grants a held key, not at half of it.</summary>
+    /// <remarks>
+    /// The case above bounds a <c>MoveTo</c> from above only, so a click that walked at the raw run figure — half the granted one, the gait ladder's scale
+    /// left out — passed it for as long as the scale existed. Ten ticks separate a run from half of one by several steps.
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void AMoveToRunsAtTheGrantedRun()
+    {
+        var config = Config();
+        using var world = new Possessed(config);
+        var before = world.Read();
+
+        world.Link.SendCommand(nameof(MoveTo), ClientSays.MoveTo(before.X + 1_000f, before.Z));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the intent to be applied by a tick");
+        var start = world.Sim.Runtime.CurrentTickNumber;
+        var from = world.Read();
+        world.Harness.Ticks(10);
+        var elapsed = world.Sim.Runtime.CurrentTickNumber - start;
+
+        var after = world.Read();
+        var travelled = MathF.Sqrt(((after.X - from.X) * (after.X - from.X)) + ((after.Z - from.Z) * (after.Z - from.Z)));
+        Assert.That(travelled, Is.GreaterThanOrEqualTo(StepM * (elapsed - 1) * 0.9f), $"a click moved {travelled:F2} m in {elapsed} ticks: slower than a run");
+    }
+
+    /// <summary>
+    /// The destination is clamped to the world, so a client cannot aim a player at coordinates the world does not have.
+    /// </summary>
+    [Test]
+    [Category("Integration")]
+    public void AMoveToOutsideTheWorldIsClamped()
+    {
+        var config = Config();
+        using var world = new Possessed(config);
+        var half = config.WorldEdgeM * 0.5f;
+
+        world.Link.SendCommand(nameof(MoveTo), ClientSays.MoveTo(1e9f, -1e9f));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the intent to be applied");
+        world.Harness.Ticks(2);
+
+        var after = world.Read();
+        Assert.Multiple(() =>
+        {
+            Assert.That(after.DestX, Is.EqualTo(half).Within(0.001f));
+            Assert.That(after.DestZ, Is.EqualTo(-half).Within(0.001f));
+        });
+    }
+
+    /// <summary>A coordinate that is not a number never reaches the tick: the engine's pre-check refuses it on the transport thread.</summary>
+    /// <remarks>
+    /// Asserted through the counter rather than through the state, because "nothing happened" is the claim. A NaN destination that DID reach <c>Steer</c> would
+    /// produce a NaN velocity and a NaN position, which the fence then has to cope with — so this is the cheapest possible place to stop it, and the pre-check
+    /// is where the engine puts stateless syntax.
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void ANotANumberDestinationNeverReachesTheTick()
+    {
+        using var world = new Possessed(Config());
+        var before = world.Read();
+
+        world.Link.SendCommand(nameof(MoveTo), ClientSays.MoveTo(float.NaN, float.PositiveInfinity));
+        world.Harness.Ticks(3);
+
+        var after = world.Read();
+        Assert.Multiple(() =>
+        {
+            Assert.That(TatooineReplication.Intents.Owned, Is.Zero, "a NaN destination reached the tick");
+            Assert.That(after.X, Is.EqualTo(before.X).Within(StepM * 0.01f), "the player moved on a command that should never have been decoded");
+            Assert.That(float.IsFinite(after.DestX) && float.IsFinite(after.DestZ), Is.True);
+        });
+    }
+
+    // ── A14b: the tick an intent changes in is split ────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A run that starts half way into a tick is paid for half of that tick, not all of it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The claim is that both sides integrate the same DURATION, and this is the half of it the server owns.</b> A tick advances a player by one whole
+    /// period of whatever intent it held at the boundary, while a client that predicts moves on the key event — so without this the two differ by
+    /// <c>v x (startPhase - stopPhase)</c>, uniformly over a full tick of travel in either direction, which is the back-step a player sees on every
+    /// release. Measured before the fix at mean 0.164 m over twelve randomised stops at 10 Hz, against 0.167 m predicted for that distribution.
+    /// </para>
+    /// <para>
+    /// Asserted on the bias rather than on a distance, because the bias is state that persists: a position would have to be sampled between two ticks of a
+    /// runtime pacing itself on another thread, which is a race, and the existing cases above show what that costs in tolerance.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void ARunThatStartsMidTickIsPaidForTheRestOfThatTick()
+    {
+        using var world = new Possessed(Config());
+
+        // From rest, and asserted rather than assumed: a pooled player arrives with whatever velocity its previous life left, and the whole point of the
+        // figure below is that it is the share of the NEW velocity that the old one (zero) displaces.
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Stop));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the stop to be applied");
+        Assert.That(world.Read().VelX, Is.EqualTo(0f), "precondition: the player is standing still");
+
+        // 128/255 = 0.502: a key pressed a shade past the middle of a tick.
+        const byte Phase = 128;
+        const float Fraction = Phase / 255f;
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Run, Phase));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 2, "the run to be applied");
+
+        var after = world.Read();
+        var bias = world.ReadBias();
+        Assert.Multiple(() =>
+        {
+            Assert.That(after.VelX, Is.EqualTo(StepM).Within(0.001f), "the velocity is the whole tick's, which is what the bias is subtracted from");
+            Assert.That(bias.X, Is.EqualTo(-StepM * Fraction).Within(0.001f), $"the first tick should move {1f - Fraction:F3} of a step, not all of it");
+            Assert.That(bias.Z, Is.EqualTo(0f).Within(0.001f));
+            Assert.That(bias.Tick, Is.EqualTo(world.Sim.Runtime.CurrentTickNumber).Within(2L), "the bias is owed for the tick that applied the intent");
+        });
+    }
+
+    /// <summary>
+    /// A stop that arrives part way into a tick still pays the run for the part before it — which is the half a player can see.
+    /// </summary>
+    /// <remarks>
+    /// The commonest case in the game and the one the move phase has to go out of its way for: the new velocity is exactly zero, so a move phase that tested
+    /// "standing still" before reading the bias would discard the last fraction of every run anyone ever makes.
+    /// </remarks>
+    [Category("Integration")]
+    [TestCase((byte)0, TestName = "AStopOnTheBoundaryPaysTheRunNothingMore")]
+    [TestCase((byte)64, TestName = "AStopAQuarterIntoATickPaysTheRunThatQuarter")]
+    [TestCase((byte)255, TestName = "AStopAtTheEndOfATickPaysTheRunTheWholeTick")]
+    public void AStopPaysTheRunForTheShareOfTheTickItHeld(byte phase)
+    {
+        using var world = new Possessed(Config());
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Run));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the run to be applied");
+        var running = world.Read();
+        Assert.That(running.VelX, Is.EqualTo(StepM).Within(0.001f), "precondition: the player is running along +X");
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Stop, phase));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 2, "the stop to be applied");
+
+        var after = world.Read();
+        var bias = world.ReadBias();
+        Assert.Multiple(() =>
+        {
+            Assert.That(after.VelX, Is.EqualTo(0f), "the player is stopped from the next tick on, whatever the phase");
+            Assert.That(bias.X, Is.EqualTo(running.VelX * (phase / 255f)).Within(0.001f));
+        });
+    }
+
+    /// <summary>
+    /// A bias is paid ONCE, in metres, on the tick it is stamped for — and a standing player is paid it too.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The move-phase half, driven by writing the split directly rather than by sending an intent, because what is under test is the stamp: the bias is
+    /// never cleared — clearing it would make <c>PlayerMove</c> a third writer of <c>PlayerMotion</c> and need an edge in the DAG to say which writer wins —
+    /// so "applied once" is a property of comparing the stamp, and a stamp that compared wrongly would move a stopped player for ever.
+    /// </para>
+    /// <para>
+    /// The tolerance is a half and a half: it separates not-paid (0) from paid-once from paid-twice, which is the whole claim, and leaves room for terrain
+    /// rung (c), which can shorten a step that climbs and never lengthen one.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void ABiasIsPaidOnceInMetresAndEvenToAStandingPlayer()
+    {
+        using var world = new Possessed(Config());
+        const float OwedX = 0.3f;
+        const float OwedZ = -0.2f;
+        var expected = MathF.Sqrt((OwedX * OwedX) + (OwedZ * OwedZ));
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Stop));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the stop to be applied");
+        var before = world.Read();
+
+        // Staged into a tick (EW-02: PlayerMotion is a spatial archetype's), and owed three ticks after the one that writes it.
+        world.Sim.WriteInTick((tx, tick) =>
+        {
+            var player = tx.OpenMut(world.Entity);
+            var move = player.Read(Player.Move);
+            move.VelX = 0f;
+            move.VelZ = 0f;
+            move.BiasX = OwedX;
+            move.BiasZ = OwedZ;
+            move.BiasTick = tick + 3;
+            player.Set(Player.Move, move);
+        });
+
+        world.Harness.Ticks(8);
+
+        var after = world.Read();
+        var moved = MathF.Sqrt(((after.X - before.X) * (after.X - before.X)) + ((after.Z - before.Z) * (after.Z - before.Z)));
+        Assert.Multiple(() =>
+        {
+            Assert.That(moved, Is.GreaterThan(expected * 0.5f), "a standing player was not paid its bias at all — the standing-still test ran first");
+            Assert.That(moved, Is.LessThan(expected * 1.5f), $"moved {moved:F3} m over eight ticks for a {expected:F3} m bias — the stamp is not being compared");
+            Assert.That(after.VelX, Is.EqualTo(0f), "the bias is not a velocity and must not become one");
+        });
+    }
+
+    /// <summary>A phase of zero is the behaviour the server had before A14b: no bias, the whole tick to the new velocity.</summary>
+    /// <remarks>
+    /// Worth its own case because every intent in the game sends 0 except the two frames a gesture begins and ends on — a bot, a click, a re-send of a held
+    /// key — so this is the path almost all of the traffic takes, and it has to be exactly the old one.
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void APhaseOfZeroLeavesNoBiasAtAll()
+    {
+        using var world = new Possessed(Config());
+        var stale = world.ReadBias();
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(1f, SpeedClasses.Run));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the run to be applied");
+
+        Assert.That(world.ReadBias(), Is.EqualTo(stale), "a phase of zero wrote a bias, so the commonest intent in the game no longer takes the old path");
+    }
+
+    // ── Speed classes ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>A heading and a run class walk the player at the run speed and no faster.</summary>
+    [Test]
+    [Category("Integration")]
+    public void AMoveDirWalksAtTheClassItAsksFor()
+    {
+        using var world = new Possessed(Config());
+        var before = world.Read();
+
+        // Due east: +X, which the heading measures from.
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Run));
+        var start = world.Sim.Runtime.CurrentTickNumber;
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the intent to be applied");
+        world.Harness.Ticks(2);
+        var elapsed = world.Sim.Runtime.CurrentTickNumber - start;
+
+        var after = world.Read();
+        Assert.Multiple(() =>
+        {
+            Assert.That(after.X - before.X, Is.GreaterThan(0f), "a heading of zero is +X");
+            Assert.That(after.X - before.X, Is.LessThanOrEqualTo(StepM * (elapsed + 1)), "faster than the run class is worth");
+            Assert.That(MathF.Abs(after.Z - before.Z), Is.LessThan(StepM), "a heading of zero has no Z component");
+        });
+    }
+
+    /// <summary>
+    /// A14: the avatar carries the speeds its own session is entitled to, and they are the figures the command path grants.
+    /// </summary>
+    /// <remarks>
+    /// <b>Two copies of this mapping would be two speeds, and the one the client integrated would be the one that drifts.</b>
+    /// The client predicts its own movement by running the server's rule, and it sends a speed CLASS rather than a speed — so
+    /// the magnitude has to reach it from here. Asserted against <c>TrySpeedFor</c>'s own output via the commands, not against
+    /// a literal, because a literal in this test would be the third copy.
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void AnAvatarCarriesTheSpeedsItsSessionIsEntitledTo()
+    {
+        using var world = new Possessed(Config());
+
+        // Every class a body on foot can ask for: a direction key walks, Shift runs. The swoop's has its own case, which mounts first.
+        var classes = new[] { SpeedClasses.Walk, SpeedClasses.Run };
+
+        float[] replicated;
+        using (var tx = world.Sim.Dbe.CreateQuickTransaction())
+        {
+            var move = tx.For<Player>().Open(world.Entity).Read(Player.Move);
+            replicated = [move.WalkMps, move.RunMps];
+        }
+
+        // What the command path actually grants, observed rather than asserted against a constant: one intent per gait, each
+        // read back from the velocity the server set.
+        var granted = new float[classes.Length];
+        for (var i = 0; i < classes.Length; i++)
+        {
+            var applied = i + 1;
+            world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, classes[i]));
+            SessionHarness.Until(() => TatooineReplication.Intents.Applied >= applied, $"intent {applied} to be applied");
+            world.Harness.Ticks(1);
+            granted[i] = MathF.Abs(world.Read().VelX);
+        }
+
+        Assert.Multiple(() =>
+        {
+            for (var i = 0; i < classes.Length; i++)
+            {
+                Assert.That(replicated[i], Is.GreaterThan(0f), $"class {classes[i]} has no replicated speed, so the client has nothing to predict with");
+
+                // Steer sets metres per TICK, so the stat is the per-tick step times the rate.
+                Assert.That(granted[i] * TickRateHz, Is.EqualTo(replicated[i]).Within(0.01f),
+                    $"the stat for class {classes[i]} is not what an intent at that class is granted");
+
+                // Strictly faster as the ladder rises: a pair that collapsed — a copy-paste in SpeedFor, or two classes mapped to one constant —
+                // would leave Shift doing nothing and nothing else would notice.
+                if (i > 0)
+                {
+                    Assert.That(replicated[i], Is.GreaterThan(replicated[i - 1]), $"class {classes[i]} is not faster than {classes[i - 1]}");
+                }
+            }
+        });
+    }
+
+    /// <summary>A boost of 1 to 4 multiplies the speed the class is granted, 0 means 1, and a boost past 4 is refused and counted like a class.</summary>
+    /// <remarks>
+    /// Shift+1..4 in the client (Loïc, 2026-10-24: "more like a cheat code"), on walk, run and the swoop alike. The client multiplies the replicated speed by
+    /// the factor it sent, so the factor the server applies has to be exactly that one — a server that applied a different ladder would drift every
+    /// prediction — and the bound is the server's, so asking for a fifth time the run moves nothing.
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void ABoostMultipliesTheGrantedSpeedUpToFour()
+    {
+        using var world = new Possessed(Config());
+
+        float runMps;
+        using (var tx = world.Sim.Dbe.CreateQuickTransaction())
+        {
+            runMps = tx.For<Player>().Open(world.Entity).Read(Player.Move).RunMps;
+        }
+
+        // 0 first, which is what a bot that never names a boost sends; then 1..4, each read back from the velocity the server set.
+        var boosts = new byte[] { 0, 1, 2, 3, 4 };
+        var granted = new float[boosts.Length];
+        for (var i = 0; i < boosts.Length; i++)
+        {
+            var applied = i + 1;
+            world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Run, boost: boosts[i]));
+            SessionHarness.Until(() => TatooineReplication.Intents.Applied >= applied, $"intent {applied} to be applied");
+            world.Harness.Ticks(1);
+            granted[i] = MathF.Abs(world.Read().VelX) * TickRateHz;
+        }
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Run, boost: SpeedClasses.MaxBoost + 1));
+        SessionHarness.Until(() => TatooineReplication.Intents.RefusedSpeed >= 1, "the fifth boost to be refused by the tick");
+        world.Harness.Ticks(1);
+        var afterRefusal = MathF.Abs(world.Read().VelX) * TickRateHz;
+
+        Assert.Multiple(() =>
+        {
+            for (var i = 0; i < boosts.Length; i++)
+            {
+                var factor = Math.Max(1, (int)boosts[i]);
+                Assert.That(granted[i], Is.EqualTo(runMps * factor).Within(0.01f), $"boost {boosts[i]} is not {factor} runs");
+            }
+
+            Assert.That(TatooineReplication.Intents.RefusedSpeed, Is.EqualTo(1), "a boost past the maximum was not refused and counted");
+            Assert.That(afterRefusal, Is.EqualTo(runMps * SpeedClasses.MaxBoost).Within(0.01f), "a refused boost changed the speed");
+        });
+    }
+
+    /// <summary>A throttle scales the granted speed down by its 255ths, 0 meaning all of it — and can never scale it up.</summary>
+    /// <remarks>
+    /// The swoop's drive (client <c>swoop-drive.ts</c>) accelerates and brakes by sending a share of the granted speed. It is safe to take from a client
+    /// only because it is a share: 255 is the most it can name.
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void AThrottleScalesTheGrantedSpeedDown()
+    {
+        using var world = new Possessed(Config());
+
+        float runMps;
+        using (var tx = world.Sim.Dbe.CreateQuickTransaction())
+        {
+            runMps = tx.For<Player>().Open(world.Entity).Read(Player.Move).RunMps;
+        }
+
+        var throttles = new byte[] { 0, 255, 51, 128 };
+        var granted = new float[throttles.Length];
+        for (var i = 0; i < throttles.Length; i++)
+        {
+            var applied = i + 1;
+            world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Run, boost: 2, throttle: throttles[i]));
+            SessionHarness.Until(() => TatooineReplication.Intents.Applied >= applied, $"intent {applied} to be applied");
+            world.Harness.Ticks(1);
+            granted[i] = MathF.Abs(world.Read().VelX) * TickRateHz;
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(granted[0], Is.EqualTo(runMps * 2f).Within(0.01f), "throttle 0 is not the whole of the boosted run");
+            Assert.That(granted[1], Is.EqualTo(runMps * 2f).Within(0.01f), "throttle 255 is not the whole of the boosted run");
+            Assert.That(granted[2], Is.EqualTo(runMps * 2f * 51f / 255f).Within(0.01f), "throttle 51 is not a fifth");
+            Assert.That(granted[3], Is.EqualTo(runMps * 2f * 128f / 255f).Within(0.01f), "throttle 128 is not about half");
+        });
+    }
+
+    /// <summary>
+    /// The teleport threshold is above the fastest gait, with the margin the engine's test needs.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the invariant that broke once and cost a session of debugging in the browser.</b> The engine compared
+    /// <c>step²</c> against <c>(TeleportMaxSpeedMps × tickPeriod)²</c> over QUANTIZED positions with no margin, so an entity at exactly the declared maximum
+    /// tipped over the boundary on about half its ticks — and each tip was reported as a teleport, which forbids interpolation. The symptom is not an error: a
+    /// player stands still for most of a second and then jumps. It was found by watching a mounted player stutter, not by a test. The engine now carries a
+    /// quantization margin (#1074); a threshold below the fastest gait still stutters, which is what this guards.
+    /// </para>
+    /// <para>
+    /// <b>Asserted here because the two numbers live apart and only arithmetic keeps them together.</b> The threshold is a replication constant and the gaits
+    /// are game data; adding a gait is an edit to the second that silently invalidates the first. <c>MaxSpeedMps</c> is computed from the ladder's top for
+    /// that reason, and this fails if anyone replaces it with a figure again.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void TheTeleportThresholdClearsTheFastestGait()
+    {
+        var fastest = 0f;
+        for (byte speedClass = 0; speedClass < SpeedClasses.Count; speedClass++)
+        {
+            // At the largest boost, which is what a client may ask for on any class.
+            fastest = MathF.Max(fastest, TatooineReplication.SpeedFor(speedClass) * SpeedClasses.MaxBoost);
+        }
+
+        Assert.Multiple(() =>
+        {
+            // The GRANTED figure, scale included: the ladder's top and the threshold are both scaled, and the point of
+            // this assertion is that they are scaled by the same thing. Comparing against the raw constant would fail
+            // whenever the ladder is scaled, which is the one case where the two could genuinely drift apart.
+            Assert.That(fastest, Is.EqualTo(TatooineData.PlayerSwoopSpeedMps * TatooineData.PlayerGaitScale * SpeedClasses.MaxBoost),
+                "the fastest granted speed is not the one the threshold is computed from");
+            Assert.That(TatooineReplication.MaxSpeedMps, Is.GreaterThan(fastest),
+                "an entity at the declared maximum reads as a teleport on about half its ticks");
+            Assert.That(TatooineReplication.MaxSpeedMps, Is.EqualTo(fastest * 1.05).Within(0.001),
+                "the margin is 5 %: more wastes a velocity width on every moving entity, less is the stutter");
+        });
+    }
+
+    /// <summary>Speed class 0 stops the player, which is why stop is a class rather than a fourth command type.</summary>
+    [Test]
+    [Category("Integration")]
+    public void SpeedClassZeroStops()
+    {
+        using var world = new Possessed(Config());
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Run));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the move to be applied");
+        world.Harness.Ticks(2);
+        Assert.That(world.Read().VelX, Is.GreaterThan(0f), "the player is not moving, so stopping it proves nothing");
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Stop));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 2, "the stop to be applied");
+        world.Harness.Ticks(2);
+
+        var after = world.Read();
+        Assert.Multiple(() =>
+        {
+            Assert.That(after.VelX, Is.Zero);
+            Assert.That(after.VelZ, Is.Zero);
+        });
+    }
+
+    /// <summary>
+    /// A speed class this server does not grant is refused and counted, rather than clamped.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Refused rather than clamped</b> because a clamp lets a client ask for whatever it likes on every tick and never learn it is not getting it, and the
+    /// refusal count is the only number that says whether anything is trying. What this case sends is a class far past the end of
+    /// <c>SpeedClasses.Count</c>, which is what a client inventing a speed would look like.
+    /// </para>
+    /// <para>
+    /// <b>The counter is asserted, and it took a fix to the wire declaration to make that possible.</b> The class bound was in the command's
+    /// <c>Precheck</c>, which runs on the transport thread — so every over-range class died before the tick and the system's refusal counter could never move,
+    /// while the code claimed "the refusal is counted". The pre-check now checks only finiteness, which is what the engine's contract for one says it is for
+    /// ("rejects the impossible, not the disallowed"), and the entitlement is refused where the entitlement lives.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void ASpeedClassTheServerDoesNotGrantIsRefusedAndCounted()
+    {
+        using var world = new Possessed(Config());
+        var before = world.Read();
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, 200));
+        SessionHarness.Until(() => TatooineReplication.Intents.RefusedSpeed >= 1, "the speed class to be refused by the tick");
+        world.Harness.Ticks(3);
+
+        var after = world.Read();
+        var travelled = MathF.Abs(after.X - before.X) + MathF.Abs(after.Z - before.Z);
+        Assert.Multiple(() =>
+        {
+            Assert.That(TatooineReplication.Intents.RefusedSpeed, Is.EqualTo(1), "the refusal is the only number that says whether anything is trying");
+            Assert.That(TatooineReplication.Intents.Applied, Is.Zero, "a refused intent was counted as applied");
+            Assert.That(travelled, Is.LessThan(StepM), "a refused speed class moved the player");
+            Assert.That(after.VelX, Is.Zero, "a refused intent set a velocity");
+        });
+    }
+
+    /// <summary>
+    /// The swoop's speed is granted only to a player the server put on a swoop, and it is four runs; getting off takes it back.
+    /// </summary>
+    /// <remarks>
+    /// The entitlement is server state (<c>PlayerState.Mounted</c>), so a client that asks for the class without mounting is refused and counted like any
+    /// class it is not granted — a speed hack stays impossible by construction. The replicated <c>swoopMps</c> is what the client predicts with.
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void TheSwoopsSpeedIsGrantedOnlyWhileMounted()
+    {
+        using var world = new Possessed(Config());
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Swoop));
+        SessionHarness.Until(() => TatooineReplication.Intents.RefusedSpeed >= 1, "an unmounted swoop to be refused");
+
+        world.Link.SendCommand(nameof(SetMount), ClientSays.SetMount(true));
+        SessionHarness.Until(() => TatooineReplication.MountAsks.Applied >= 1, "the mount to be applied");
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Swoop));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the swoop to be granted");
+        world.Harness.Ticks(1);
+
+        float swoopMps;
+        int mounted;
+        using (var tx = world.Sim.Dbe.CreateQuickTransaction())
+        {
+            var p = tx.For<Player>().Open(world.Entity);
+            swoopMps = p.Read(Player.Move).SwoopMps;
+            mounted = p.Read(Player.State).Mounted;
+        }
+
+        var granted = MathF.Abs(world.Read().VelX) * TickRateHz;
+        Assert.Multiple(() =>
+        {
+            Assert.That(mounted, Is.EqualTo(1));
+            Assert.That(swoopMps, Is.EqualTo(4f * TatooineReplication.SpeedFor(SpeedClasses.Run)).Within(1e-3f), "four runs, as asked");
+            Assert.That(granted, Is.EqualTo(swoopMps).Within(0.05f), "the stat the client predicts with is not what the server grants");
+        });
+
+        world.Link.SendCommand(nameof(SetMount), ClientSays.SetMount(false));
+        SessionHarness.Until(() => TatooineReplication.MountAsks.Applied >= 2, "the dismount to be applied");
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Swoop));
+        SessionHarness.Until(() => TatooineReplication.Intents.RefusedSpeed >= 2, "the swoop to be refused once off it");
+    }
+
+    /// <summary>
+    /// A stopped player is <c>Idle</c>, not <c>Travelling</c> — and the activity is on the wire, so every watching client sees the difference.
+    /// </summary>
+    /// <remarks>
+    /// <c>SteerTo</c> set <c>Travelling</c> unconditionally, so a client that pressed stop was still broadcast as running. A stop is the commonest intent there
+    /// is, and this is the only visible consequence in the whole intent path.
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void AStoppedPlayerIsIdleOnTheWire()
+    {
+        using var world = new Possessed(Config());
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Run));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the move to be applied");
+        world.Harness.Ticks(2);
+        Assert.That(world.Read().Activity, Is.EqualTo(PlayerActivity.Travelling), "the player is not moving, so stopping it proves nothing");
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Stop));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 2, "the stop to be applied");
+        world.Harness.Ticks(2);
+
+        Assert.That(world.Read().Activity, Is.EqualTo(PlayerActivity.Idle), "a stopped player is still broadcast as running");
+    }
+
+    // ── Targeting ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A target the session was never shown is refused and counted, and the target is left cleared.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the check that makes a target a target rather than a world-wide entity picker.</b> A <c>netId</c> is a small integer, so without the
+    /// geometric test in <c>TryResolve</c> (SUB-26) a client could aim at anything in the world by counting, and could learn that an entity exists by whether
+    /// its guess was accepted. An identity nothing holds is the clearest case of "never shown".
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void ATargetTheSessionWasNeverShownIsRefused()
+    {
+        using var world = new Possessed(Config());
+
+        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(0xFFFF_FF00u));
+        SessionHarness.Until(() => TatooineReplication.Intents.TargetsRefused >= 1, "the target to be refused by a tick");
+        world.Harness.Ticks(1);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(world.Read().Target, Is.EqualTo(EntityId.Null), "a target the client was never shown was accepted");
+            Assert.That(TatooineReplication.Intents.TargetsSet, Is.Zero);
+        });
+    }
+
+    /// <summary>
+    /// A netId of zero is a client saying "nothing" and is not counted as a refusal; a netId it was never shown is, and the two are told apart.
+    /// </summary>
+    /// <remarks>
+    /// <b>Both are sent, because either alone proves nothing.</b> A freshly possessed player's target is already <c>EntityId.Null</c>, so a case that sent only
+    /// <c>SetTarget(0)</c> and asserted the target was null passed whether the command did anything or not — and would pass with the whole zero branch deleted.
+    /// What is falsifiable is the DIFFERENCE: an unknown identity moves the refusal counter and zero does not, with both arriving at the same tick from the
+    /// same client.
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void AClearIsToldApartFromARefusal()
+    {
+        using var world = new Possessed(Config());
+
+        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(0xFFFF_FF00u));
+        SessionHarness.Until(() => TatooineReplication.Intents.TargetsRefused >= 1, "the unknown identity to be refused");
+        var refusedAfterBogus = TatooineReplication.Intents.TargetsRefused;
+
+        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(0u));
+        SessionHarness.Until(() => TatooineReplication.Intents.Owned >= 2, "the clear to reach a tick");
+        world.Harness.Ticks(2);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(refusedAfterBogus, Is.EqualTo(1), "an identity the session was never shown is refused and counted");
+            Assert.That(TatooineReplication.Intents.TargetsRefused, Is.EqualTo(1), "the clear was counted as a refusal too");
+            Assert.That(TatooineReplication.Intents.TargetsSet, Is.Zero, "neither command set a target");
+            Assert.That(world.Read().Target, Is.EqualTo(EntityId.Null));
+        });
+    }
+
+    // ── Possession ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A possessed player is not decided for by <c>PlayerThink</c>, and the destination its client set survives every tick that follows.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Two assertions, because either alone is weak.</b> The counter says the activity mix declined to decide; the surviving destination says what would
+    /// have happened if it had not. An intent sets <c>ActivityTicks</c> to zero — a possessed player has no server-side timer — which is exactly the state in
+    /// which <c>PlayerThink</c> re-decides, so without the skip it would pick a city or a point of interest and overwrite <c>DestX/DestZ</c> within one tick.
+    /// </para>
+    /// <para>
+    /// <c>PossessedSkipped</c> counts player-ticks rather than players, so over twelve ticks it is at least twelve for one possessed player — and exactly zero
+    /// in any measurement run, which is what makes it a usable assertion elsewhere.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void APossessedPlayerIsNotDecidedForByTheSimulation()
+    {
+        using var world = new Possessed(Config());
+        var before = world.Read();
+
+        // A destination well inside the world and far beyond a tick of travel: this case is about the destination SURVIVING, so it must not be one the clamp
+        // would rewrite (which AMoveToOutsideTheWorldIsClamped covers) and must not be one the player can reach inside the run.
+        var destX = before.X > 0f ? before.X - 2_000f : before.X + 2_000f;
+        world.Link.SendCommand(nameof(MoveTo), ClientSays.MoveTo(destX, before.Z));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the intent to be applied");
+        var skippedBefore = world.Sim.Bridge.PossessedSkipped;
+        world.Harness.Ticks(12);
+
+        var after = world.Read();
+        Assert.Multiple(() =>
+        {
+            Assert.That(world.Sim.Bridge.PossessedSkipped - skippedBefore, Is.GreaterThanOrEqualTo(10),
+                "PlayerThink decided for a possessed player, or stopped running");
+            Assert.That(after.DestX, Is.EqualTo(destX).Within(1f),
+                "the destination changed, so something other than the client decided where this player is going");
+            Assert.That(after.Activity, Is.EqualTo(PlayerActivity.Travelling), "the activity was re-decided");
+        });
+    }
+
+    /// <summary>
+    /// An avatar whose client leaves is DESTROYED, rather than left standing in the world for ever.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This case was inverted by A5, and the old assertion is worth recording.</b> It used to require that the player went back
+    /// to the simulation as <c>ControllerKind.Scripted</c>, because a session was handed a body out of the pooled crowd and had to
+    /// give it back. An avatar is not borrowed — it is spawned for the session and belongs to nothing else — so going back to the
+    /// simulation would leave an ownerless body standing where its client left it, which is the leak the old assertion was guarding
+    /// against in the only form it could then take.
+    /// </para>
+    /// <para>
+    /// The failure ruled out is the same one and is still quiet and permanent: a body nobody drives and nobody destroys stays in
+    /// every awareness query and every spatial walk for the life of the process. Over a day of connections the world fills with them.
+    /// This is the half of acceptance criterion A-9 that one login and one logout can show.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void AnAvatarWhoseClientLeavesIsDestroyed()
+    {
+        var config = Config();
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+
+        var harness = Harness = new SessionHarness(sim);
+        var link = harness.Connect(TatooineReplication.PlayerKind);
+        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar to be spawned");
+
+        // The counter moves INSIDE the binding tick, before its transaction commits, so the read below has to wait for a tick that has ended — the same two
+        // ticks AvatarLoginChecks.LogIn takes, and for the same reason. Without them this case passed only because the fixtures ahead of it had warmed the
+        // process: cold, the login is slower than the assertion and the body is not committed yet. It reads as a flake and is a missing wait.
+        harness.Ticks(2);
+
+        var entity = TatooineReplication.ControlledBy(sim.Dbe, link.Session);
+        Assert.That(entity, Is.Not.EqualTo(EntityId.Null), "the session must have been given a body to start with");
+
+        link.Close(CloseCodes.Normal, "leaving");
+        SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed >= 1, "the avatar to be destroyed by a tick");
+        harness.Ticks(2);
+
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        Assert.Multiple(() =>
+        {
+            Assert.That(tx.For<Player>().TryOpen(entity, out _), Is.False, "the avatar outlived its session");
+            Assert.That(TatooineReplication.ControlledBy(sim.Dbe, link.Session), Is.EqualTo(EntityId.Null),
+                "and nothing is marked as controlled by a session that has gone");
+        });
+    }
+
+    /// <summary>
+    /// Claiming a player brings it to a standstill with no half-finished activity, so no system can act on a state its client cannot see.
+    /// </summary>
+    /// <remarks>
+    /// <b>The failure this rules out is a player frozen in an activity for ever.</b> <c>PlayerThink</c> is what advances an activity and it skips a possessed
+    /// player, so one claimed while walking to a shuttleport, queued at one, walking to a door or inside a building would sit in that state for as long as the
+    /// client held it — while the systems that act on those states went on acting on it.
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void ClaimingAPlayerNormalisesItsActivity()
+    {
+        using var world = new Possessed(Config());
+        var after = world.Read();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(after.Activity, Is.EqualTo(PlayerActivity.Idle), "a possessed player starts at a standstill, whatever it was doing");
+            Assert.That(after.VelX, Is.Zero);
+            Assert.That(after.VelZ, Is.Zero);
+        });
+    }
+
+    /// <summary>
+    /// A dungeon never draws a possessed player into its party.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the case the review found and it was live.</b> A dungeon party is drawn from <c>Idle</c> players on planet 0 — which a client that has
+    /// connected and not yet sent an intent is, exactly. It was teleported into the dungeon's realm and pinned with
+    /// <c>ActivityTicks = int.MaxValue / 2</c>, a pin <c>PlayerThink</c> deliberately respects, so it survived the client disconnecting: a player parked in a
+    /// dungeon for the life of the process, still in every awareness query.
+    /// </para>
+    /// <para>
+    /// The dungeon interval is shortened so a draw happens inside the run, and the party is larger than the world's player count so that a draw which ignored
+    /// possession would certainly take this one rather than possibly missing it.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void ADungeonNeverDrawsAPossessedPlayer()
+    {
+        var config = Config();
+        config.Dungeons = 2;
+        config.DungeonIntervalS = 0.2f;
+        config.DungeonStayS = 60f;
+        config.DungeonParty = 64;
+        config.DungeonMobs = 2;
+
+        using var world = new Possessed(config);
+        world.Harness.Ticks(20);
+
+        // Read out before asserting: an EntityRef is a ref struct, so it cannot be captured by the lambdas Assert.Multiple takes.
+        ushort realm;
+        int activity;
+        int activityTicks;
+        byte kind;
+        using (var tx = world.Sim.Dbe.CreateQuickTransaction())
+        {
+            var entity = tx.For<Player>().Open(world.Entity);
+            realm = entity.Read(Player.Realm).Value;
+            var state = entity.Read(Player.State);
+            activity = state.Activity;
+            activityTicks = state.ActivityTicks;
+            kind = entity.Read(Player.Control).Kind;
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(realm, Is.Zero, "a possessed player was teleported into a dungeon realm");
+            Assert.That(activity, Is.Not.EqualTo(PlayerActivity.Inside), "a possessed player was drawn into a dungeon party");
+            Assert.That(activityTicks, Is.LessThan(int.MaxValue / 4), "a possessed player was pinned by a dungeon");
+            Assert.That(kind, Is.EqualTo(ControllerKind.Human), "the player stopped being possessed, so this proves nothing");
+        });
+    }
+
+    /// <summary>
+    /// A measurement run has no sessions, so nothing is possessed and the activity mix decides for every player — which is what every published number assumes.
+    /// </summary>
+    /// <remarks>
+    /// The guard against SWG-01 changing what the benchmark measures by more than the component it added. If possession could leak into a run with no
+    /// replication declared, every figure taken after this would describe a world where some players stand still.
+    /// </remarks>
+    [Test]
+    [Category("Integration")]
+    public void AMeasurementRunPossessesNobody()
+    {
+        var config = Config();
+        config.WarmTicks = 2;
+        config.MeasuredTicks = 10;
+
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+        sim.Run();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(sim.Bridge.PossessedSkipped, Is.Zero, "a run with no sessions skipped a player as possessed");
+            Assert.That(TatooineReplication.Intents.Applied, Is.Zero);
+            Assert.That(TatooineReplication.Intents.Possessions, Is.Zero);
+        });
+    }
+
+    // =======================================================================
+    // A11 - a target has to be ALIVE, not merely resolvable
+    // =======================================================================
+
+    /// <summary>
+    /// A dead target is refused, a live one is accepted, and something with no vitals is not mistaken for dead.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why "resolvable" was not enough.</b> A netId stays resolvable for as long as the session's view holds the entity, so a client
+    /// that clicks the instant something dies — or replays an old click — names a corpse. <c>SetTarget</c> accepted it, and the combat
+    /// system then carried a target it could never resolve a shot against. The refusal belongs at the intent, where it is counted and
+    /// the client is told, rather than dropped per shot downstream.
+    /// </para>
+    /// <para>
+    /// <b>The predicate is tested directly, and the one <c>&amp;&amp;</c> that calls it is not.</b> Reaching the wiring needs a netId for
+    /// a specific dead entity, and there is no server-side entity-to-netId lookup — so a case would have to brute-force
+    /// <c>TryResolve</c> over the view's dense id range from inside a tick. That is more machinery than the branch is worth; the branch
+    /// is one condition visible in review, and this pins the thing that could actually be wrong.
+    /// </para>
+    /// <para>
+    /// <b>The entities are set up before replication starts</b>, which is why a plain transaction and an explicit fence are safe here:
+    /// there is no tick running, so this is the same window <c>WorldBuilder</c> itself builds the world in. Writing a spatial
+    /// archetype while a server ticks would be the one thing <c>EW-02</c> forbids outright.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(60_000)]
+    public void OnlyALiveTargetIsAccepted()
+    {
+        var config = Config();
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+
+        // ConfigureIntents caches the routing ids IsAliveTarget compares against; a serving run does it, a bare Initialize does not.
+        TatooineReplication.ConfigureIntents(sim.Dbe, config.WorldEdgeM, config.TickRateHz);
+
+        EntityId dead, alive, building;
+        using (var tx = sim.Dbe.CreateQuickTransaction())
+        {
+            var bounds = default(PlayerPlacement);
+            bounds.SetAt(0f, 0f, 0f, 1f);
+
+            var corpse = new PlayerVitals { Health = 0, MaxHealth = 1400, AttackDamage = 95 };
+            var living = new PlayerVitals { Health = 1400, MaxHealth = 1400, AttackDamage = 95 };
+
+            dead = tx.Spawn<Player>(Player.Bounds.Set(in bounds), Player.Vitals.Set(in corpse), Player.Realm.Set(new PlayerRealm(0)));
+            alive = tx.Spawn<Player>(Player.Bounds.Set(in bounds), Player.Vitals.Set(in living), Player.Realm.Set(new PlayerRealm(0)));
+            tx.Commit();
+        }
+
+        sim.Dbe.WriteTickFence(1);
+
+        // A building, which has no vitals at all: the world already has them, so one is borrowed rather than spawned.
+        using (var tx = sim.Dbe.CreateQuickTransaction())
+        {
+            building = EntityId.Null;
+            foreach (var cluster in tx.For<WorldObject>().GetClusterEnumerator())
+            {
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    building = cluster.GetEntityId(System.Numerics.BitOperations.TrailingZeroCount(bits));
+                    break;
+                }
+
+                if (building != EntityId.Null)
+                {
+                    break;
+                }
+            }
+        }
+
+        Assert.That(building, Is.Not.EqualTo(EntityId.Null), "the world has no WorldObject, so the no-vitals case would be vacuous");
+
+        using var read = sim.Dbe.CreateQuickTransaction();
+        Assert.Multiple(() =>
+        {
+            Assert.That(TatooineReplication.IsAliveTarget(read, alive), Is.True, "a living player must be targetable");
+            Assert.That(TatooineReplication.IsAliveTarget(read, dead), Is.False, "a player at zero health was accepted as a target");
+
+            // NOT false: a building is not dead, it is unshootable — which ClassifyTarget describes and the combat system refuses.
+            // Answering false here would conflate "you cannot attack a cantina" with "that thing is dead", and a client reacts to
+            // those differently.
+            Assert.That(TatooineReplication.IsAliveTarget(read, building), Is.True, "a building must not be reported as DEAD");
+
+            // An entity that never existed: gone is gone, whatever archetype its id claims.
+            Assert.That(TatooineReplication.IsAliveTarget(read, EntityId.FromRawValue(alive.RawValue | 0xFFFF_0000_0000_0000UL)), Is.False);
+        });
+    }
+
+    /// <summary>
+    /// A <c>SetTarget</c> at an entity the client CAN see but which is dead is refused — the wiring, end to end.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the case that was uncovered, and the reason it is coverable now is a new engine accessor.</b> The refusal needs a
+    /// netId for one specific dead entity, and the identity is held per entity in its replication block while the engine's only public
+    /// direction was netId to entity. <c>SubscriptionsCommands.TryNetIdOf</c> is the inverse, session-scoped so it cannot hand a client
+    /// an identity it was never shown; <c>TatooineReplication.NetIdOf</c> is the demo's line of it.
+    /// </para>
+    /// <para>
+    /// <b>Both halves, because either alone is weak.</b> A live player at the same place must be accepted and the dead one refused, from
+    /// the same client, in the same run — so the case cannot pass against a server that refuses every target, which is what an
+    /// <c>IsAliveTarget</c> returning a constant false would be.
+    /// </para>
+    /// <para>
+    /// The two targets are spawned before replication starts, which is the window <c>WorldBuilder</c> itself builds the world in: no
+    /// tick is running, so a plain transaction and an explicit fence are safe. Writing a spatial archetype while a server ticks is the
+    /// one thing <c>EW-02</c> forbids outright.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void ASetTargetAtADeadEntityTheClientCanSeeIsRefused()
+    {
+        var config = Config();
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+
+        // Where the avatar will be: ConfigureAvatars puts a first login at the capital, so the two targets go there to be inside its sphere.
+        var capital = sim.Map.Cities[0];
+        var ground = TerrainField.Shared(config.ContentScale).GroundAt(capital.X, capital.Z);
+
+        EntityId dead, alive;
+        using (var tx = sim.Dbe.CreateQuickTransaction())
+        {
+            var place = default(PlayerPlacement);
+            place.SetAt(capital.X + 3f, capital.Z + 3f, ground, 1f);
+
+            var corpse = new PlayerVitals { Health = 0, MaxHealth = 1400, AttackDamage = 95 };
+            dead = tx.Spawn<Player>(Player.Bounds.Set(in place), Player.Vitals.Set(in corpse), Player.Realm.Set(new PlayerRealm(0)));
+
+            place.SetAt(capital.X - 3f, capital.Z - 3f, ground, 1f);
+            var living = new PlayerVitals { Health = 1400, MaxHealth = 1400, AttackDamage = 95 };
+            alive = tx.Spawn<Player>(Player.Bounds.Set(in place), Player.Vitals.Set(in living), Player.Realm.Set(new PlayerRealm(0)));
+            tx.Commit();
+        }
+
+        sim.Dbe.WriteTickFence(1);
+
+        var harness = Harness = new SessionHarness(sim);
+        var link = harness.Connect(TatooineReplication.PlayerKind);
+        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar to be spawned");
+        harness.Ticks(4);
+
+        // Both must be in the client's view before either can be named, or the refusal below would be "never shown" rather than "dead".
+        SessionHarness.Until(
+            () => SessionHarness.NetIdOf(link.Session, dead) != 0 && SessionHarness.NetIdOf(link.Session, alive) != 0,
+            "both targets to reach the client's view");
+
+        var deadNetId = SessionHarness.NetIdOf(link.Session, dead);
+        var aliveNetId = SessionHarness.NetIdOf(link.Session, alive);
+        Assert.That(deadNetId, Is.Not.EqualTo(aliveNetId), "the two targets must be distinct identities");
+
+        // The LIVE one first, so a server refusing everything is caught by the accept rather than passing on the refuse.
+        link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(aliveNetId));
+        SessionHarness.Until(() => TatooineReplication.Intents.TargetsSet >= 1, "the live target to be accepted");
+        harness.Ticks(2);
+
+        var afterLive = TargetOf(sim, link.Session);
+
+        var refusedBefore = TatooineReplication.Intents.TargetsRefused;
+        link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(deadNetId));
+        SessionHarness.Until(() => TatooineReplication.Intents.TargetsRefused > refusedBefore, "the dead target to be refused");
+        harness.Ticks(2);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(afterLive, Is.EqualTo(alive), "a live target the client was shown must be accepted");
+            Assert.That(TargetOf(sim, link.Session), Is.EqualTo(EntityId.Null), "a dead target was accepted, or did not clear the previous one");
+            Assert.That(TatooineReplication.Intents.TargetsSet, Is.EqualTo(1), "the dead target must not have been counted as set");
+        });
+    }
+
+    /// <summary>
+    /// A possessed player fights what it targeted only in a combat stance: a target alone is a selection, and the stance is what makes it an attack.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The gap the first half closes</b>: the shooter gated on <c>PlayerActivity.Combat</c>, which only the scripted crowd is ever put in, so a click on a
+    /// creature stored a target no shot was ever fired at. <b>The second half is the stance</b> (Loïc, 2026-10-24: the action bar's 2–4): with a target and
+    /// no stance, nothing is fired at all.
+    /// </para>
+    /// <para>A lair of frogs beside the avatar, its frogs taken away, so the lair is the one thing fought and nothing moves the avatar.</para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void APossessedPlayerFightsItsTargetOnlyInAStance()
+    {
+        using var world = new Possessed(Config());
+        var lair = StageLair(world, gapM: 10f);
+        var before = LairHealth(world, lair);
+
+        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(world.Link.Session, lair)));
+        SessionHarness.Until(() => TatooineReplication.Intents.TargetsSet >= 1, "the target to be accepted");
+        world.Harness.Ticks(3 * Worlds.ServedHz);
+        var idle = LairHealth(world, lair);
+
+        world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
+        SessionHarness.Until(() => TatooineReplication.StanceAsks.Applied >= 1, "the stance to be applied");
+        world.Harness.Ticks(3 * Worlds.ServedHz);
+        var fought = LairHealth(world, lair);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(idle, Is.EqualTo(before), "a player with a target and no stance fired at it");
+            Assert.That(fought, Is.LessThan(before), "a player in a stance, its target in reach, fired nothing");
+        });
+    }
+
+    /// <summary>
+    /// Each stance reaches its own distance, between the two bodies' edges: unarmed 1 m, one-handed 3 m, pistol 30 m (Loïc, 2026-10-24).
+    /// </summary>
+    /// <remarks>
+    /// Half a metre inside and outside each reach. The lair is static and its frogs are gone, so the gap set is the gap fought across.
+    /// </remarks>
+    /// <param name="stance">The stance taken.</param>
+    /// <param name="gapM">The gap between the avatar's edge and the lair's.</param>
+    /// <param name="hits">Whether it is in reach.</param>
+    [TestCase(Stances.Unarmed, 0.5f, true)]
+    [TestCase(Stances.Unarmed, 1.5f, false)]
+    [TestCase(Stances.OneHanded, 2.5f, true)]
+    [TestCase(Stances.OneHanded, 3.5f, false)]
+    [TestCase(Stances.Pistol, 29.5f, true)]
+    [TestCase(Stances.Pistol, 30.5f, false)]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void AStanceReachesItsOwnDistanceBetweenTheBodiesEdges(byte stance, float gapM, bool hits)
+    {
+        using var world = new Possessed(Config());
+        var lair = StageLair(world, gapM);
+        var before = LairHealth(world, lair);
+
+        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(world.Link.Session, lair)));
+        world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(stance));
+        SessionHarness.Until(
+            () => TatooineReplication.Intents.TargetsSet >= 1 && TatooineReplication.StanceAsks.Applied >= 1,
+            "the target and the stance to be accepted");
+
+        // Every stance strikes at least once in 1.5 s.
+        world.Harness.Ticks(3 * Worlds.ServedHz);
+        var after = LairHealth(world, lair);
+        if (hits)
+        {
+            Assert.That(after, Is.LessThan(before), $"stance {stance} did not reach a lair {gapM} m away");
+        }
+        else
+        {
+            Assert.That(after, Is.EqualTo(before), $"stance {stance} reached a lair {gapM} m away");
+        }
+    }
+
+    /// <summary>
+    /// Taking a stance gets the player off its swoop, mounting drops the stance, and a stance the server does not know is refused and counted.
+    /// </summary>
+    [Test]
+    [Category("Integration")]
+    public void AStanceAndTheSwoopExcludeEachOther()
+    {
+        using var world = new Possessed(Config());
+
+        world.Link.SendCommand(nameof(SetMount), ClientSays.SetMount(true));
+        SessionHarness.Until(() => TatooineReplication.MountAsks.Applied >= 1, "the mount to be applied");
+        world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.OneHanded));
+        SessionHarness.Until(() => TatooineReplication.StanceAsks.Applied >= 1, "the stance to be applied");
+        world.Harness.Ticks(1);
+        var armed = State(world);
+
+        world.Link.SendCommand(nameof(SetMount), ClientSays.SetMount(true));
+        SessionHarness.Until(() => TatooineReplication.MountAsks.Applied >= 2, "the second mount to be applied");
+        world.Harness.Ticks(1);
+        var riding = State(world);
+
+        world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Count));
+        SessionHarness.Until(() => TatooineReplication.StanceAsks.Refused >= 1, "an unknown stance to be refused");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(armed, Is.EqualTo((0, (int)Stances.OneHanded)), "a stance taken on the swoop did not get the player off it");
+            Assert.That(riding, Is.EqualTo((1, (int)Stances.None)), "mounting did not drop the stance");
+        });
+    }
+
+    /// <summary>
+    /// A wild lair cannot be damaged while its occupants stand (Loïc, 2026-10-24: a camp is destroyed once all of them are killed) — and can once none does.
+    /// </summary>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void AWildLairIsShieldedByItsOccupantsUntilNoneStands()
+    {
+        using var world = new Possessed(Config());
+        var lair = StageLair(world, gapM: 10f, site: 1);
+        var before = LairHealth(world, lair);
+        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(world.Link.Session, lair)));
+        world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
+        SessionHarness.Until(
+            () => TatooineReplication.Intents.TargetsSet >= 1 && TatooineReplication.StanceAsks.Applied >= 1,
+            "the target and the stance to be accepted");
+        world.Harness.Ticks(3 * Worlds.ServedHz);
+        var guarded = LairHealth(world, lair);
+
+        world.Sim.WriteInTick((tx, _) =>
+        {
+            var l = tx.OpenMut(lair);
+            var spawner = l.Read(CreatureLair.Spawner);
+            spawner.Guards = 0;
+            l.Set(CreatureLair.Spawner, spawner);
+        });
+        world.Harness.Ticks(3 * Worlds.ServedHz);
+        var open = LairHealth(world, lair);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(guarded, Is.EqualTo(before), "a lair took damage while its occupants stood");
+            Assert.That(open, Is.LessThan(before), "a lair with no occupant standing took no damage");
+        });
+    }
+
+    /// <summary>An occupant killed is one guard fewer between its lair and whoever comes for it.</summary>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void KillingAnOccupantTakesAGuardFromItsLair()
+    {
+        using var world = new Possessed(Config());
+        var lair = StageLair(world, gapM: 10f, site: 1, keepOccupants: true);
+        var frog = EntityId.Null;
+        int guards = 0;
+        world.Sim.WriteInTick((tx, _) =>
+        {
+            guards = tx.Open(lair).Read(CreatureLair.Spawner).Guards;
+            foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+            {
+                var homes = cluster.GetReadOnlySpan(Creature.Home);
+                for (var bits = cluster.OccupancyBits; bits != 0 && frog.IsNull; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    if ((EntityId)homes[slot].Lair == lair)
+                    {
+                        frog = cluster.GetEntityId(slot);
+                    }
+                }
+            }
+
+            // One blow from death.
+            var body = tx.OpenMut(frog);
+            var vitals = body.Read(Creature.Vitals);
+            vitals.Health = 1;
+            body.Set(Creature.Vitals, vitals);
+        });
+        SessionHarness.Until(() => !frog.IsNull && SessionHarness.NetIdOf(world.Link.Session, frog) != 0, "the frog to reach the client's view");
+
+        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(world.Link.Session, frog)));
+        world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
+        world.Harness.Ticks(3 * Worlds.ServedHz);
+
+        int after;
+        using (var tx = world.Sim.Dbe.CreateQuickTransaction())
+        {
+            after = tx.Open(lair).Read(CreatureLair.Spawner).Guards;
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(guards, Is.EqualTo(CreatureTemplates.SpawnLimit[CreatureTemplates.Frog]), "a lair is born guarded by every occupant it spawned");
+            Assert.That(after, Is.EqualTo(guards - 1), "a kill did not take a guard from its lair");
+        });
+    }
+
+    /// <summary>A downed player lies where it fell: its moves, its mount and its boarding are refused and counted until it is up again.</summary>
+    [Test]
+    [Category("Integration")]
+    public void ADownedPlayersMovesAreRefused()
+    {
+        using var world = new Possessed(Config());
+        world.Sim.WriteInTick((tx, _) =>
+        {
+            var player = tx.OpenMut(world.Entity);
+            var vitals = player.Read(Player.Vitals);
+            vitals.Health = 0;
+            vitals.Down = Downed.KnockedOut;
+            vitals.UpTick = int.MaxValue / 2;
+            player.Set(Player.Vitals, vitals);
+        });
+        world.Harness.Ticks(2);
+        var before = world.Read();
+        var refused = TatooineReplication.RefusedWhileDown;
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Run));
+        world.Link.SendCommand(nameof(SetMount), ClientSays.SetMount(true));
+        SessionHarness.Until(() => TatooineReplication.RefusedWhileDown >= refused + 2, "the move and the mount to be refused");
+        world.Harness.Ticks(3);
+        var after = world.Read();
+        Assert.Multiple(() =>
+        {
+            Assert.That(MathF.Abs(after.X - before.X) + MathF.Abs(after.Z - before.Z), Is.LessThan(0.01f), "a downed player moved");
+            Assert.That(State(world).Mounted, Is.Zero, "a downed player got on its swoop");
+        });
+    }
+
+    /// <summary>
+    /// The catalog carries what the client draws a fight from: <c>SetStance</c>, the player's <c>stance</c>, and the creature's <c>target</c> as an entity
+    /// reference — the netId of the player it fights, in the viewer's own view, which is how a client knows a creature is fighting IT.
+    /// </summary>
+    [Test]
+    [Category("Integration")]
+    public void TheCatalogCarriesTheStanceAndWhomACreatureFights()
+    {
+        using var world = new Possessed(Config());
+        var plan = world.Link.Plan;
+        var player = plan.ArchetypeByName("Player");
+        var creature = plan.ArchetypeByName("Creature");
+        Assert.Multiple(() =>
+        {
+            Assert.That(plan.CommandByName(nameof(SetStance)), Is.Not.Null, "no SetStance command");
+            Assert.That(Array.Find(player.Fields, f => f.Name == "stance")?.Kind, Is.EqualTo(CodecKind.U8), "the player's stance is not replicated");
+            Assert.That(Array.Find(creature.Fields, f => f.Name == "target")?.Kind, Is.EqualTo(CodecKind.EntityRef), "a creature's target is not replicated");
+            var lair = plan.ArchetypeByName("CreatureLair");
+            Assert.That(Array.Find(lair.Fields, f => f.Name == "hp"), Is.Not.Null, "a lair's health is not replicated, so no client can draw its bar");
+            Assert.That(Array.Find(lair.Fields, f => f.Name == "guards")?.Kind, Is.EqualTo(CodecKind.U8), "a lair's standing guards are not replicated");
+            var offer = plan.ArchetypeByName("MissionOffer");
+            Assert.That(offer, Is.Not.Null, "mission offers are not replicated, so no terminal can list one");
+            Assert.That(Array.Find(offer.Fields, f => f.Name == "serial"), Is.Not.Null, "an offer carries no serial, so a take cannot name it safely");
+            Assert.That(plan.CommandByName(nameof(TakeMission)), Is.Not.Null, "no TakeMission command");
+            Assert.That(plan.CommandByName(nameof(AbandonMission)), Is.Not.Null, "no AbandonMission command");
+        });
+    }
+
+    /// <summary>A lair of frogs <paramref name="gapM"/> from the avatar's edge to its own, its frogs taken away, in the client's view.</summary>
+    /// <param name="site">
+    /// 0: nobody guards it either — its occupants' count goes with them, so it can be damaged at once. A site's lair keeps counting them standing, which is
+    /// what a case about the shield stages.
+    /// </param>
+    private static EntityId StageLair(Possessed world, float gapM, int site = 0, bool keepOccupants = false)
+    {
+        var at = world.Read();
+        float selfHalf;
+        using (var tx = world.Sim.Dbe.CreateQuickTransaction())
+        {
+            selfHalf = tx.For<Player>().Open(world.Entity).Read(Player.Bounds).HalfExtent;
+        }
+
+        var config = world.Sim.Config;
+        var terrain = TerrainField.Shared(config.ContentScale);
+        var lair = EntityId.Null;
+        world.Sim.WriteInTick((tx, _) =>
+        {
+            var rng = new Rng(7);
+            lair = WorldBuilder.SpawnLair(tx, ref rng, CreatureTemplates.Frog, at.X + selfHalf + WorldBuilder.LairHalfM + gapM, at.Z, site, expireTick: 0,
+                config, terrain, 0);
+        });
+        SessionHarness.Until(() => !lair.IsNull, "the lair to be spawned");
+
+        // Its frogs away: a frog nudging the avatar would move the gap the case measures. Taken away, not killed: a wild lair still counts them standing —
+        // unless the case wants it open (site 0).
+        world.Sim.WriteInTick((tx, _) =>
+        {
+            if (keepOccupants)
+            {
+                return;
+            }
+
+            if (site == 0)
+            {
+                var open = tx.OpenMut(lair);
+                var spawner = open.Read(CreatureLair.Spawner);
+                spawner.Guards = 0;
+                open.Set(CreatureLair.Spawner, spawner);
+            }
+
+            foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+            {
+                var homes = cluster.GetReadOnlySpan(Creature.Home);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    if ((EntityId)homes[slot].Lair == lair)
+                    {
+                        tx.Destroy(cluster.GetEntityId(slot));
+                    }
+                }
+            }
+        });
+
+        world.Harness.Ticks(2);
+        SessionHarness.UntilNamed(world.Link.Session, lair, "the lair to reach the client's view");
+        using (var tx = world.Sim.Dbe.CreateQuickTransaction())
+        {
+            Assert.That(tx.Open(lair).Read(CreatureLair.Bounds).HalfExtent, Is.EqualTo(WorldBuilder.LairHalfM).Within(1e-3f), "the gap assumed the lair's size");
+        }
+
+        return lair;
+    }
+
+    private static int LairHealth(Possessed world, EntityId lair)
+    {
+        using var tx = world.Sim.Dbe.CreateQuickTransaction();
+        return tx.Open(lair).Read(CreatureLair.Vitals).Health;
+    }
+
+    private static (int Mounted, int Stance) State(Possessed world)
+    {
+        using var tx = world.Sim.Dbe.CreateQuickTransaction();
+        var state = tx.For<Player>().Open(world.Entity).Read(Player.State);
+        return (state.Mounted, state.Stance);
+    }
+
+    /// <summary>
+    /// A possessed player that selected a BUILDING holds it as its target and fires nothing — and the world keeps ticking.
+    /// </summary>
+    /// <remarks>
+    /// <b>Found on the served demo, 2026-10-24.</b> A click selects and targets, so a click on a building made it the session's target; the moment a session's
+    /// player could fire, the shooter read <c>PlayerVitals</c> from the building, the read threw, and the strict tick abort stopped the world at tick 9 682.
+    /// </remarks>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void APossessedPlayerThatTargetedABuildingFiresNothingAndTheWorldTicksOn()
+    {
+        var config = Config();
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+        var harness = Harness = new SessionHarness(sim);
+        var link = harness.Connect(TatooineReplication.PlayerKind);
+        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar to be spawned");
+
+        // The first building the client was shown: its own view's, so the server accepts it.
+        var building = EntityId.Null;
+        SessionHarness.Until(
+            () =>
+            {
+                harness.Ticks(1);
+                // On the tick: the walk and the netId both (#1494, #1496).
+                sim.WriteInTick(tx =>
+                {
+                    foreach (var cluster in tx.For<WorldObject>().GetClusterEnumerator())
+                    {
+                        for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                        {
+                            var id = cluster.GetEntityId(System.Numerics.BitOperations.TrailingZeroCount(bits));
+                            if (TatooineReplication.NetIdOf(link.Session, id) != 0)
+                            {
+                                building = id;
+                                return;
+                            }
+                        }
+                    }
+                });
+                return !building.IsNull;
+            },
+            "a building to reach the client's view");
+
+        link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(link.Session, building)));
+        SessionHarness.Until(() => TatooineReplication.Intents.TargetsSet >= 1, "the building to be accepted as a target");
+        harness.Ticks(4 * Worlds.ServedHz);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(sim.TickAbort, Is.Null, $"a tick aborted: {sim.TickAbort?.SystemName} {sim.TickAbort?.Reason}");
+            Assert.That(TargetOf(sim, link.Session), Is.EqualTo(building), "the selection is kept: it is the client's to clear");
+        });
+    }
+
+    /// <summary>The first creature whose foreign key names a lair.</summary>
+    private static EntityId FirstCreatureOf(TatooineSim sim, EntityId lair)
+    {
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+        {
+            var homes = cluster.GetReadOnlySpan(Creature.Home);
+            for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+            {
+                var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                if ((EntityId)homes[slot].Lair == lair)
+                {
+                    return cluster.GetEntityId(slot);
+                }
+            }
+        }
+
+        throw new InvalidOperationException("the lair spawned no creature");
+    }
+
+    /// <summary>The entity a session's avatar is currently targeting.</summary>
+    /// <param name="sim">The server.</param>
+    /// <param name="session">The session.</param>
+    /// <returns>The target, or <c>EntityId.Null</c>.</returns>
+    private static EntityId TargetOf(TatooineSim sim, SessionId session)
+    {
+        var avatar = TatooineReplication.ControlledBy(sim.Dbe, session);
+        if (avatar == EntityId.Null)
+        {
+            return EntityId.Null;
+        }
+
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        return tx.For<Player>().Open(avatar).Read(Player.Session).Target;
+    }
+}

@@ -542,7 +542,8 @@ public sealed class TypedDtoRoundTripTests
     /// <remarks>
     /// Worth pinning for the same reason kind 67 is: the generator packs with no alignment padding, so both layouts put wide fields at odd offsets. Kind 68
     /// has an i32 then three f32s then two i64s, and kind 69 opens with a u64 followed by a u16 — which puts its f32 at offset 10 and its i64 at 14, neither
-    /// on a natural boundary. A hand-written decoder that assumes a float starts on a multiple of four gets both wrong.
+    /// on a natural boundary. A hand-written decoder that assumes a float starts on a multiple of four gets both wrong. The appended frame pair keeps that
+    /// property: <c>framesPerSec</c> is an f32 at 26 and <c>framesProduced</c> an i64 at 30.
     /// </remarks>
     [Test]
     public void SubscriptionsTelemetry_DecodesTheDocumentedLayouts_AndAShorterRecordStopsAtItsOwnSize()
@@ -588,7 +589,7 @@ public sealed class TypedDtoRoundTripTests
             Assert.That(clippedServer.ReportedSessions, Is.Zero);
         });
 
-        const int sessionPayload = 26;
+        const int sessionPayload = 38;
         var row = new byte[TraceRecordHeader.CommonHeaderSize + sessionPayload];
         WriteInstantHeader(row, (ushort)row.Length, TraceEventKind.SubscriptionsSessionTelemetry);
         var rp = row.AsSpan(TraceRecordHeader.CommonHeaderSize);
@@ -597,6 +598,9 @@ public sealed class TypedDtoRoundTripTests
         BinaryPrimitives.WriteSingleLittleEndian(rp[10..], 48_000f);        // bytesPerSec
         BinaryPrimitives.WriteInt64LittleEndian(rp[14..], 12L);             // framesSkipped
         BinaryPrimitives.WriteInt32LittleEndian(rp[22..], 2);               // degradeLevel
+        // The pair whose quotient is the session's average payload: 48 000 B/s over 20 frames/s is 2 400 B a frame.
+        BinaryPrimitives.WriteSingleLittleEndian(rp[26..], 20f);            // framesPerSec
+        BinaryPrimitives.WriteInt64LittleEndian(rp[30..], 9_413L);          // framesProduced
 
         var one = SubscriptionsSessionTelemetryEventDto.Decode(row, CurrentTick, TicksPerUs);
         Assert.Multiple(() =>
@@ -606,6 +610,9 @@ public sealed class TypedDtoRoundTripTests
             Assert.That(one.BytesPerSec, Is.EqualTo(48_000f));
             Assert.That(one.FramesSkipped, Is.EqualTo(12L));
             Assert.That(one.DegradeLevel, Is.EqualTo(2));
+            Assert.That(one.FramesPerSec, Is.EqualTo(20f), "an f32 at offset 26, which is 2 mod 4 — the whole reason this layout is pinned");
+            Assert.That(one.FramesProduced, Is.EqualTo(9_413L));
+            Assert.That(one.BytesPerSec / one.FramesPerSec, Is.EqualTo(2_400f), "the quotient the two windowed fields exist to make derivable");
         });
 
         WriteInstantHeader(row, (ushort)(TraceRecordHeader.CommonHeaderSize + 10), TraceEventKind.SubscriptionsSessionTelemetry);
@@ -616,6 +623,17 @@ public sealed class TypedDtoRoundTripTests
             Assert.That(clippedRow.RealmId, Is.EqualTo(ushort.MaxValue));
             Assert.That(clippedRow.BytesPerSec, Is.Zero);
             Assert.That(clippedRow.DegradeLevel, Is.Zero);
+        });
+
+        // The 26-byte prefix is a record from a producer that predates the frame pair, which is the compatibility this layout's append-only rule buys.
+        WriteInstantHeader(row, (ushort)(TraceRecordHeader.CommonHeaderSize + 26), TraceEventKind.SubscriptionsSessionTelemetry);
+        var olderRow = SubscriptionsSessionTelemetryEventDto.Decode(row, CurrentTick, TicksPerUs);
+        Assert.Multiple(() =>
+        {
+            Assert.That(olderRow.BytesPerSec, Is.EqualTo(48_000f), "every field the older producer DID write still decodes");
+            Assert.That(olderRow.DegradeLevel, Is.EqualTo(2));
+            Assert.That(olderRow.FramesPerSec, Is.Zero, "a field the record does not reach reads zero rather than reading the next record's bytes");
+            Assert.That(olderRow.FramesProduced, Is.Zero);
         });
     }
 

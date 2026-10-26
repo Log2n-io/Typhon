@@ -3,6 +3,8 @@ import type { IDockviewPanelProps } from 'dockview-react';
 import { useLiveGaugeData } from '@/hooks/profiler/useLiveGaugeData';
 import { useTelemetrySession } from '@/hooks/profiler/useTelemetrySession';
 import {
+  averageBytesPerSession,
+  averagePayloadBytes,
   differentiate,
   latestServerSample,
   latestSessionRows,
@@ -24,8 +26,13 @@ import {
  * <b>Cumulative counters are differentiated, never shown raw.</b> `framesSkipped` counts since each session opened, so on a long-lived
  * server it is a large number that moves slowly — which reads as trouble when the truth is "none recently". The slope is the diagnostic.
  *
- * <b>The session list says how complete it is.</b> The engine caps rows at 64, so at any real scale the table is a sample. The panel
- * states the difference rather than letting a reader assume they are looking at every session.
+ * <b>The session list says how complete it is, and how it is skewed.</b> The engine caps rows at 64 and spends that cap on the heaviest
+ * senders, so at any real scale the table is a deliberately biased sample: the worst offenders, never a cross-section. The panel states
+ * that rather than letting a reader average these rows and call it the fleet — the <b>per session</b> scalar is what covers everyone.
+ *
+ * <b>Average payload is derived, not sent.</b> A session's `bytesPerSec` and `framesPerSec` share one window so their quotient is the
+ * mean size of a frame to that client, which is the figure that separates "this client sees too much" from "this client is served too
+ * often". Neither term is dropped in favour of the quotient, because each is diagnostic alone.
  */
 export default function SubscriptionsPanel(_props: IDockviewPanelProps) {
   // Same correction as the Spatial panel: telemetry is a property of having profiler data, not of how you connected.
@@ -73,6 +80,7 @@ export default function SubscriptionsPanel(_props: IDockviewPanelProps) {
   }
 
   const occupancy = poolOccupancy(sample.row);
+  const perSession = averageBytesPerSession(sample.row);
 
   return (
     <div className="h-full w-full overflow-auto bg-background" data-testid="subscriptions-panel">
@@ -84,9 +92,15 @@ export default function SubscriptionsPanel(_props: IDockviewPanelProps) {
         </span>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 p-3 md:grid-cols-4" data-testid="subscriptions-scalars">
+      <div className="grid grid-cols-2 gap-3 p-3 md:grid-cols-5" data-testid="subscriptions-scalars">
         <Scalar label="sessions" value={sample.row.sessions.toLocaleString()} />
         <Scalar label="out" value={`${formatBytes(sample.row.netOutBytesPerSec)}/s`} />
+        {/* From the server record, so it is the WHOLE population's average — the table below it is the heaviest sessions and would skew high. */}
+        <Scalar
+          label="per session"
+          value={perSession === null ? '—' : `${formatBytes(perSession)}/s`}
+          note="every open session, not only the rows below"
+        />
         <Scalar label="track p99" value={`${sample.row.trackP99Ms.toFixed(2)} ms`} />
         {/* Beside the track figure on purpose: a replication track that looks slow is often a disk that is slow. */}
         <Scalar label="durability wait p99" value={`${sample.row.durabilityWaitP99Ms.toFixed(2)} ms`} />
@@ -116,6 +130,9 @@ export default function SubscriptionsPanel(_props: IDockviewPanelProps) {
             <th className="px-3 py-1 text-left font-normal">session</th>
             <th className="px-3 py-1 text-left font-normal">realm</th>
             <th className="px-3 py-1 text-right font-normal">out</th>
+            <th className="px-3 py-1 text-right font-normal">frames</th>
+            {/* The quotient of the two columns to its left, both measured over one window — the session's average frame payload. */}
+            <th className="px-3 py-1 text-right font-normal">payload</th>
             <th className="px-3 py-1 text-right font-normal">skipped</th>
             <th className="px-3 py-1 text-right font-normal">degrade</th>
           </tr>
@@ -123,6 +140,7 @@ export default function SubscriptionsPanel(_props: IDockviewPanelProps) {
         <tbody className="font-mono">
           {rows.map((r) => {
             const realm = sessionRealmLabel(r);
+            const payload = averagePayloadBytes(r);
             return (
               <tr key={r.sessionId} className="border-b border-border/50">
                 <td className="px-3 py-1">{r.sessionId}</td>
@@ -131,6 +149,9 @@ export default function SubscriptionsPanel(_props: IDockviewPanelProps) {
                   {realm ?? 'not yet sent'}
                 </td>
                 <td className="px-3 py-1 text-right">{formatBytes(r.bytesPerSec)}/s</td>
+                <td className="px-3 py-1 text-right">{r.framesPerSec.toFixed(1)}/s</td>
+                {/* An em dash, not 0 B: no frame in the window, or a capture older than the field. Zero would assert "its frames are empty". */}
+                <td className="px-3 py-1 text-right">{payload === null ? '—' : formatBytes(payload)}</td>
                 <td className="px-3 py-1 text-right">{r.framesSkipped.toLocaleString()}</td>
                 <td className={`px-3 py-1 text-right ${r.degradeLevel > 0 ? 'text-amber-300' : ''}`}>{r.degradeLevel}</td>
               </tr>
@@ -148,9 +169,10 @@ export default function SubscriptionsPanel(_props: IDockviewPanelProps) {
           </>
         ) : coverage.capped ? (
           <>
-            Showing <b>{coverage.reported}</b> of <b>{coverage.open}</b> open sessions, busiest first —{' '}
-            <b>{coverage.hidden}</b> not shown. The engine caps the per-session rows so the trace cost does not scale with the session
-            count; this table is a sample, not the population.
+            Showing the <b>{coverage.reported}</b> busiest of <b>{coverage.open}</b> open sessions — <b>{coverage.hidden}</b> not shown.
+            The engine caps the per-session rows so the trace cost does not scale with the session count, and spends the cap on the
+            heaviest senders rather than on whichever sessions it walked first. So this is a <i>biased</i> sample, by design: a quiet
+            session is absent, and these rows average higher than the fleet — read <b>per session</b> above for the whole population.
           </>
         ) : (
           <>

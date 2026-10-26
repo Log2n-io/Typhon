@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The SWG demo's test-affected map instruments the demo's own assemblies and nothing else (scripts/affected_suites.py).
+     An edit under src/ is the engine suite's to select, so engine coverage here would only cost: instrumented, the engine's
+     tick loop made a demo fixture take about a minute to collect.
+     The terrain bake is excluded too. Every test process bakes a 64 MB heightfield once, and instrumented that one bake cost
+     about 110 s per fixture whatever the fixture was; the terrain files are selected by a rule instead (TERRAIN_FIXTURES). -->
+<Configuration>
+  <CodeCoverage>
+    <ModulePaths>
+      <Include>
+        <ModulePath>.*SwgTatooine\.(Server|Bots|Tests)\.dll$</ModulePath>
+      </Include>
+    </ModulePaths>
+    <Functions>
+      <Exclude>
+        <Function>^SwgTatooine\.Server\.Terrain\..*</Function>
+      </Exclude>
+    </Functions>
+  </CodeCoverage>
+</Configuration>

@@ -35,6 +35,14 @@
         <Project Path="test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj" />
         <Project Path="test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj" />
     </Folder>
+    <Folder Name="/demo/SwgTatooine/">
+        <Project Path="demo/SwgTatooine/SwgTatooine.BotConsole/SwgTatooine.BotConsole.csproj" />
+        <Project Path="demo/SwgTatooine/SwgTatooine.Bots/SwgTatooine.Bots.csproj" />
+        <Project Path="demo/SwgTatooine/SwgTatooine.Client/SwgTatooine.Client.csproj" />
+        <Project Path="demo/SwgTatooine/SwgTatooine.Navigation/SwgTatooine.Navigation.csproj" />
+        <Project Path="demo/SwgTatooine/SwgTatooine.Server/SwgTatooine.Server.csproj" />
+        <Project Path="demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj" />
+    </Folder>
     <Folder Name="/samples/">
         <Project Path="samples/Typhon.Samples.Swg/Typhon.Samples.Swg.csproj" />
         <Project Path="doc/guide/example/SwgGuide.csproj" />
@@ -49,9 +57,6 @@
         <Project Path="demo/AsteroidField/AsteroidField.Bot/AsteroidField.Bot.csproj" />
         <Project Path="demo/AsteroidField/AsteroidField.Server/AsteroidField.Server.csproj" />
         <Project Path="demo/AsteroidField/AsteroidField.Tests/AsteroidField.Tests.csproj" />
-        <Project Path="demo/SwgTatooine/SwgTatooine.csproj" />
-        <Project Path="demo/SwgTatooine.Bots/SwgTatooine.Bots.csproj" />
-        <Project Path="demo/SwgTatooine.Tests/SwgTatooine.Tests.csproj" />
     </Folder>
     <Folder Name="/tools/">
         <Project Path="tools/Typhon.Workbench/Typhon.Workbench.csproj" />

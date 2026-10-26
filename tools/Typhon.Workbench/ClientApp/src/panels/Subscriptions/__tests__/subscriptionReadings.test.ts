@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import type { SubscriptionsServerTelemetry, SubscriptionsSessionTelemetry, TickData } from '@/libs/profiler/model/traceModel';
 import { SESSION_REALM_UNKNOWN } from '@/libs/profiler/model/traceModel';
 import {
+  averageBytesPerSession,
+  averagePayloadBytes,
   differentiate,
   latestServerSample,
   latestSessionRows,
@@ -26,7 +28,7 @@ function server(over: Partial<SubscriptionsServerTelemetry> = {}): Subscriptions
 }
 
 function session(id: number, over: Partial<SubscriptionsSessionTelemetry> = {}): SubscriptionsSessionTelemetry {
-  return { sessionId: id, realmId: 0, bytesPerSec: 0, framesSkipped: 0, degradeLevel: 0, ...over };
+  return { sessionId: id, realmId: 0, bytesPerSec: 0, framesSkipped: 0, degradeLevel: 0, framesPerSec: 0, framesProduced: 0, ...over };
 }
 
 /** A tick that may or may not carry an emission. `startUs` is real so the panel's tick-period derivation works. */
@@ -171,5 +173,34 @@ describe('sessionRealmLabel', () => {
   it('returns null for the not-yet-told sentinel, which is neither realm 65535 nor realm 0', () => {
     expect(sessionRealmLabel(session(1, { realmId: SESSION_REALM_UNKNOWN }))).toBeNull();
     expect(sessionRealmLabel(session(1, { realmId: 0 }))).toBe('realm 0');
+  });
+});
+
+describe('averagePayloadBytes', () => {
+  it('divides the two figures the engine measured over one window', () => {
+    // 48 kB/s over 20 frames/s is 2 400 B a frame — the figure that says whether a session is expensive because its
+    // frames are fat or because it is served often.
+    expect(averagePayloadBytes(session(1, { bytesPerSec: 48_000, framesPerSec: 20 }))).toBe(2_400);
+  });
+
+  it('is null when the window carried no frame, not 0 bytes a frame', () => {
+    // Zero would assert "its frames are empty". The session was served nothing, so the mean size of a frame to it is
+    // undefined — and this is also what a capture from a producer older than the field looks like, which the wire
+    // cannot distinguish from a genuinely unserved session.
+    expect(averagePayloadBytes(session(1, { bytesPerSec: 0, framesPerSec: 0 }))).toBeNull();
+    expect(averagePayloadBytes(session(1, { bytesPerSec: 48_000, framesPerSec: 0 }))).toBeNull();
+  });
+});
+
+describe('averageBytesPerSession', () => {
+  it('divides the server-wide rate by the whole population, not by the rows that survived the cap', () => {
+    // 8 000 sessions is well past the 64-row cap, and the rows are the HEAVIEST 64 — averaging them would report a
+    // number several times this one and call it the fleet's.
+    expect(averageBytesPerSession(server({ netOutBytesPerSec: 800_000, sessions: 8_000, reportedSessions: 64 }))).toBe(100);
+  });
+
+  it('is null on a server with no session', () => {
+    // Not 0: "each session costs nothing" is a claim about sessions that do not exist.
+    expect(averageBytesPerSession(server({ netOutBytesPerSec: 0, sessions: 0 }))).toBeNull();
   });
 });

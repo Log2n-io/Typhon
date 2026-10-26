@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- SwgTatooine.Bots — the load generator M1-1 needs: scripted god cameras over Typhon.Client, many sessions per
+       process, one shared timer.
+
+       It references Typhon.Client and nothing else of the engine. That is the point rather than an accident: a load
+       generator holding engine internals would measure a path no real client takes, and the blueprint claim of AC-20
+       is the same argument one level down. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>SwgTatooine.Bots</AssemblyName>
+    <RootNamespace>SwgTatooine.Bots</RootNamespace>
+    <LangVersion>default</LangVersion>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- SERVER GC, because this process is a server in every way that matters to the collector: tens of threads, thousands of
+         sockets and a steady stream of short-lived message buffers. A console app defaults to WORKSTATION GC, which collects on
+         one heap and stopped this process for 17 % of a 45-second run at 8 000 sessions. A pause is not merely slow here: the
+         game server closes a session it has not heard a PING from within 750 ms, so a long enough collection does not delay the
+         fleet, it DISCONNECTS it — which is how a collector setting came to look like a network ceiling. Concurrent as well, so
+         gen2 is collected alongside the run rather than in front of it. -->
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\Typhon.Client\Typhon.Client.csproj" />
+    <ProjectReference Include="..\SwgTatooine.Navigation\SwgTatooine.Navigation.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The server's strict command-line reader, by source: the load generator's flags are what an A/B moves, so they are held to the server's standard
+         (#1072) without a reference to the server. -->
+    <Compile Include="..\SwgTatooine.Server\Sim\ArgReader.cs" Link="ArgReader.cs" />
+  </ItemGroup>
+</Project>

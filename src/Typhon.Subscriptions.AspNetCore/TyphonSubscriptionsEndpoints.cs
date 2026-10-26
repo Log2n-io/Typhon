@@ -176,6 +176,11 @@ public static class TyphonSubscriptionsEndpoints
             // Cumulative on purpose: a rate computed server-side would be a rate over a window the caller did not choose. Two reads give the caller theirs.
             writer.WriteNumber("outBytesTotal"u8, stats.NetOutBytesTotal);
             writer.WriteNumber("trackP99Ms"u8, stats.ReplicationTrackP99Ms);
+            // <b>Why the server closed sessions, which only the server knows.</b> The client reads an abrupt close as 1006 and cannot tell silence from a
+            // backlog from a transport fault; worse, the drain below masks a code the engine DID send once a few thousand sessions are closing at once. These
+            // two are cumulative, so two reads bracket a run and say which half of the connection failed.
+            writer.WriteNumber("closedSilent"u8, stats.SessionsClosedSilent);
+            writer.WriteNumber("closedLagging"u8, stats.SessionsClosedLagging);
             // Beside trackP99Ms and a different quantity: that percentile covers the whole stage, most of which is chunks on worker threads, while this is the
             // part no second core can help with. Cumulative with its own denominator, because the ticks the stage was BUSY are not the ticks the engine ran.
             // Both zero unless the engine was started with phase timing on.

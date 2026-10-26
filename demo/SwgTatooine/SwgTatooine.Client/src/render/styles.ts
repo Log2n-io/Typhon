@@ -1,0 +1,278 @@
+import { AiMode, PlayerActivity, StructureKind } from '../data/swg-schema';
+import { TEMPLATE_SIZE_M } from '../data/world-data';
+import type { ShapeKind } from './meshes';
+import { MODE_LIMIT, STYLE_LIMIT } from './view-math';
+
+/**
+ * How each archetype looks: shape, colour and size per style index, a tint per mode, and how big it is for LOD and culling.
+ * Primitive art on purpose (`05-client.md` C5): the point is to read the simulation, not to dress it.
+ */
+
+export type HeadingSource = 'velocity' | 'grid';
+
+/** Style indices per archetype and tints per mode: the sizes of the shaders' uniform arrays, fixed by the packing. */
+export const STYLE_COUNT = STYLE_LIMIT;
+export const TINT_COUNT = MODE_LIMIT;
+
+/** Bounds per style index, derived from the sizes: what culling, LOD and picking use. */
+export interface StyleBounds {
+  /** Bounding-sphere radius in metres, for the shape grown by the selection scale. */
+  readonly radius: Float64Array;
+  /** Height of the bounding sphere's centre above the ground. */
+  readonly centerY: Float64Array;
+  /** Largest size component: the projected size that picks the LOD band. */
+  readonly extent: Float64Array;
+  /** Height of the drawn (not grown) mesh's centre: where a click aims when nothing is hit exactly. */
+  readonly pickY: Float64Array;
+  /**
+   * `(width, height, length)` per style index, flat at stride 3.
+   *
+   * The same numbers as {@link LayerStyle.sizes}, in the layout the pick's box test wants. A pick runs over every drawn
+   * instance, and an array of tuples costs it a pointer chase each.
+   */
+  readonly sizesFlat: Float64Array;
+}
+
+export interface LayerStyle {
+  readonly shape: ShapeKind;
+  /** {@link STYLE_COUNT} RGB colours, by style index. */
+  readonly colors: readonly (readonly [number, number, number])[];
+  /** {@link STYLE_COUNT} sizes (width, height, length) in metres, by style index. Every shape fits its size's box. */
+  readonly sizes: readonly (readonly [number, number, number])[];
+  /** {@link TINT_COUNT} RGBA tints by mode: the colour is mixed toward rgb by a. */
+  readonly tints: readonly (readonly [number, number, number, number])[];
+  /** Mode whose shape is flattened (a corpse), or -1. */
+  readonly flattenMode: number;
+  readonly heading: HeadingSource;
+  /** Sprite diameter in pixels in the far band. */
+  readonly spritePixels: number;
+  /** Height of the sprite above the ground. */
+  readonly spriteLift: number;
+  readonly bounds: StyleBounds;
+}
+
+type StyleInput = Omit<LayerStyle, 'bounds'>;
+
+function withBounds(style: StyleInput): LayerStyle {
+  const radius = new Float64Array(STYLE_COUNT);
+  const centerY = new Float64Array(STYLE_COUNT);
+  const extent = new Float64Array(STYLE_COUNT);
+  const pickY = new Float64Array(STYLE_COUNT);
+  const sizesFlat = new Float64Array(STYLE_COUNT * 3);
+  for (let i = 0; i < STYLE_COUNT; i++) {
+    const [w, h, l] = style.sizes[i] ?? style.sizes[0];
+    sizesFlat[i * 3] = w;
+    sizesFlat[i * 3 + 1] = h;
+    sizesFlat[i * 3 + 2] = l;
+    // Every shape spans x and z in [−½, ½] and y in [0, 1] before scaling (`meshes.ts`), whatever its yaw.
+    radius[i] = 0.5 * Math.hypot(w, h, l);
+    centerY[i] = 0.5 * h;
+    extent[i] = Math.max(w, h, l);
+    pickY[i] = 0.5 * h;
+  }
+
+  return { ...style, bounds: { radius, centerY, extent, pickY, sizesFlat } };
+}
+
+const NO_TINT: [number, number, number, number] = [0, 0, 0, 0];
+
+function fill<T>(values: readonly T[], length: number, filler: T): T[] {
+  return Array.from({ length }, (_, i) => values[i] ?? filler);
+}
+
+const STRUCTURE_COLORS: [number, number, number][] = [];
+STRUCTURE_COLORS[StructureKind.Building] = [0.8, 0.72, 0.58];
+STRUCTURE_COLORS[StructureKind.CraftingStation] = [0.35, 0.75, 0.8];
+STRUCTURE_COLORS[StructureKind.Shuttleport] = [0.7, 0.74, 0.8];
+STRUCTURE_COLORS[StructureKind.PoiProp] = [0.55, 0.42, 0.32];
+STRUCTURE_COLORS[StructureKind.PlayerHouse] = [0.86, 0.8, 0.66];
+STRUCTURE_COLORS[StructureKind.Factory] = [0.62, 0.38, 0.26];
+STRUCTURE_COLORS[StructureKind.Harvester] = [0.45, 0.48, 0.5];
+STRUCTURE_COLORS[StructureKind.CampObject] = [0.66, 0.55, 0.4];
+STRUCTURE_COLORS[StructureKind.Interior] = [0.42, 0.36, 0.3];
+STRUCTURE_COLORS[StructureKind.Bazaar] = [0.85, 0.65, 0.25];
+STRUCTURE_COLORS[StructureKind.MissionTerminal] = [0.35, 0.8, 0.45];
+STRUCTURE_COLORS[StructureKind.TownHall] = [0.84, 0.76, 0.6];
+
+const STRUCTURE_SIZES: [number, number, number][] = [];
+STRUCTURE_SIZES[StructureKind.Building] = [18, 9, 18];
+STRUCTURE_SIZES[StructureKind.CraftingStation] = [1.6, 2.6, 1.6];
+STRUCTURE_SIZES[StructureKind.Bazaar] = [1.2, 1.5, 1.1];
+STRUCTURE_SIZES[StructureKind.MissionTerminal] = [0.63, 1.3, 0.51];
+// 46.2 across, matching the server's reservation and the published asset. The box is only ever seen beyond the range
+// at which the asset itself is placed, so this is the far-field stand-in for it rather than a second opinion.
+STRUCTURE_SIZES[StructureKind.Shuttleport] = [46.2, 5, 46.2];
+STRUCTURE_SIZES[StructureKind.PoiProp] = [5, 4, 5];
+STRUCTURE_SIZES[StructureKind.PlayerHouse] = [14, 7, 14];
+// The server's reservations round the published `factory` and `resource_extractor` (catalogue 11), as tall as they are.
+STRUCTURE_SIZES[StructureKind.Factory] = [6, 5.7, 6];
+STRUCTURE_SIZES[StructureKind.Harvester] = [6.8, 7.2, 6.8];
+STRUCTURE_SIZES[StructureKind.CampObject] = [4, 3, 4];
+// The server's 35.6 m reservation round the hall's origin, which is not its middle: the far-field stand-in is that square.
+STRUCTURE_SIZES[StructureKind.TownHall] = [35.6, 14, 35.6];
+// A floor, not a block: the viewer stands INSIDE a room, so its stand-in — seen only while the asset is not placed — must
+// not wall the camera in. 28 m, the town hall's room's reach.
+STRUCTURE_SIZES[StructureKind.Interior] = [28, 0.05, 28];
+
+/**
+ * The style key of the shuttleport's own layer — a synthetic name, so no archetype the catalog declares can collide
+ * with it. See {@link SHUTTLEPORT_SIZE} for why a port is drawn by a second layer over the same archetype.
+ */
+export const SHUTTLEPORT_STYLE = 'WorldObject/Shuttleport';
+
+/**
+ * A blue, and the one saturated colour in the scene.
+ *
+ * Everything else on the ground is sand, bone or pale stone, deliberately, so one primary reads as "this is the thing
+ * you are looking for" from the far side of a 456 m city disc without any labelling.
+ */
+const SHUTTLEPORT_COLOR: [number, number, number] = [0.13, 0.48, 1];
+
+/**
+ * 32 m across and 24 m tall, against a building's 18 × 9.
+ *
+ * The footprint is kept near the 30 m it was so that the server's 20 m boarding radius still sits OUTSIDE the dome's
+ * wall — a player who can see the prompt is standing beside the port, not inside it. The height is what makes it
+ * visible over the buildings between.
+ */
+const SHUTTLEPORT_SIZE: [number, number, number] = [32, 24, 32];
+
+const CREATURE_COLORS: [number, number, number][] = [
+  [0.58, 0.47, 0.36],
+  [0.5, 0.52, 0.46],
+  [0.36, 0.27, 0.2],
+  [0.8, 0.66, 0.45],
+  [0.5, 0.44, 0.38],
+  [0.75, 0.25, 0.18],
+];
+
+const CREATURE_TINTS: [number, number, number, number][] = [];
+CREATURE_TINTS[AiMode.Pursue] = [1, 0.55, 0.1, 0.5];
+CREATURE_TINTS[AiMode.Fighting] = [1, 0.12, 0.08, 0.7];
+CREATURE_TINTS[AiMode.Leashing] = [0.25, 0.5, 1, 0.4];
+CREATURE_TINTS[AiMode.Dead] = [0.18, 0.17, 0.16, 0.85];
+
+const PLAYER_TINTS: [number, number, number, number][] = [];
+PLAYER_TINTS[PlayerActivity.Combat] = [1, 0.85, 0.1, 0.45];
+PLAYER_TINTS[PlayerActivity.ToShuttle] = [0.2, 0.9, 1, 0.35];
+PLAYER_TINTS[PlayerActivity.AwaitingShuttle] = [0.2, 0.9, 1, 0.6];
+
+/**
+ * The style of each known archetype, by the name the catalog gives it. Keyed by name rather than by index because the
+ * server numbers archetypes in its own order (`data/archetypes.ts`).
+ */
+const STYLE_INPUTS: Readonly<Record<string, StyleInput>> = {
+  WorldObject: {
+    shape: 'box',
+    colors: fill(STRUCTURE_COLORS, STYLE_COUNT, [0.7, 0.7, 0.7]),
+    sizes: fill(STRUCTURE_SIZES, STYLE_COUNT, [4, 4, 4]),
+    tints: fill([], TINT_COUNT, NO_TINT),
+    flattenMode: -1,
+    heading: 'grid',
+    spritePixels: 3,
+    spriteLift: 3,
+  },
+  CreatureLair: {
+    shape: 'mound',
+    colors: fill(
+      [
+        [0.42, 0.33, 0.26],
+        [0.85, 0.35, 0.15],
+      ],
+      STYLE_COUNT,
+      [0.4, 0.3, 0.2],
+    ),
+    // The camp a lair is drawn as — a nest, a hideout or a soldiers' camp, about 6 m across and under 3 m tall — because
+    // this box is also what the pick and the selection frame test it as. At 10 × 3 × 10 and 14 × 5 × 14 a click on a
+    // defender standing round the camp landed on the lair.
+    sizes: fill(
+      [
+        [6, 2.8, 6],
+        [6.2, 2.8, 6.2],
+      ],
+      STYLE_COUNT,
+      [6, 2.8, 6],
+    ),
+    tints: fill([], TINT_COUNT, NO_TINT),
+    flattenMode: -1,
+    heading: 'grid',
+    spritePixels: 4,
+    spriteLift: 2,
+  },
+  Creature: {
+    shape: 'arrow',
+    colors: fill(CREATURE_COLORS, STYLE_COUNT, [0.5, 0.45, 0.4]),
+    sizes: fill(
+      TEMPLATE_SIZE_M.map((s): [number, number, number] => [s * 0.7, s * 0.8, s * 1.4]),
+      STYLE_COUNT,
+      [1, 1, 1.4],
+    ),
+    tints: fill(CREATURE_TINTS, TINT_COUNT, NO_TINT),
+    flattenMode: AiMode.Dead,
+    heading: 'velocity',
+    spritePixels: 3,
+    spriteLift: 1,
+  },
+  CityNpc: {
+    shape: 'prism',
+    colors: fill([[0.4, 0.55, 0.78]], STYLE_COUNT, [0.4, 0.55, 0.78]),
+    sizes: fill([[0.7, 1.8, 0.7]], STYLE_COUNT, [0.7, 1.8, 0.7]),
+    tints: fill([], TINT_COUNT, NO_TINT),
+    flattenMode: -1,
+    heading: 'velocity',
+    spritePixels: 2.5,
+    spriteLift: 1,
+  },
+  Player: {
+    shape: 'prism',
+    colors: fill([[0.25, 0.92, 0.45]], STYLE_COUNT, [0.25, 0.92, 0.45]),
+    sizes: fill([[1.1, 2.2, 1.1]], STYLE_COUNT, [1.1, 2.2, 1.1]),
+    tints: fill(PLAYER_TINTS, TINT_COUNT, NO_TINT),
+    flattenMode: -1,
+    heading: 'velocity',
+    spritePixels: 5,
+    spriteLift: 1.5,
+  },
+  [SHUTTLEPORT_STYLE]: {
+    shape: 'dome',
+    // One colour and one size at every index, because this layer only ever draws one kind: the style index packed per
+    // instance is the raw `kind` field (2 for a port), so the arrays have to answer at 2 as well as at 0.
+    colors: fill([], STYLE_COUNT, SHUTTLEPORT_COLOR),
+    sizes: fill([], STYLE_COUNT, SHUTTLEPORT_SIZE),
+    tints: fill([], TINT_COUNT, NO_TINT),
+    flattenMode: -1,
+    heading: 'grid',
+    // Far-band sprite: bigger and lifted higher than a structure's 3 px, so a port is a visible dot from outside the
+    // city it serves. Walking towards it is the whole point.
+    spritePixels: 9,
+    spriteLift: 14,
+  },
+};
+
+/**
+ * An archetype this client has no art for: a small grey marker. A catalog is allowed to grow an archetype without the
+ * client being rebuilt, and drawing nothing would look exactly like the server not sending it.
+ */
+const UNKNOWN_STYLE: StyleInput = {
+  shape: 'box',
+  colors: fill([[0.55, 0.55, 0.6]], STYLE_COUNT, [0.55, 0.55, 0.6]),
+  sizes: fill([[2, 2, 2]], STYLE_COUNT, [2, 2, 2]),
+  tints: fill([], TINT_COUNT, NO_TINT),
+  flattenMode: -1,
+  heading: 'grid',
+  spritePixels: 3,
+  spriteLift: 1,
+};
+
+const RESOLVED = new Map<string, LayerStyle>();
+
+/** The style for one archetype name, built once per name. */
+export function styleFor(name: string): LayerStyle {
+  let style = RESOLVED.get(name);
+  if (style === undefined) {
+    style = withBounds(STYLE_INPUTS[name] ?? UNKNOWN_STYLE);
+    RESOLVED.set(name, style);
+  }
+
+  return style;
+}

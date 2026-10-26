@@ -653,6 +653,16 @@ internal sealed class SessionFrameState
     /// </remarks>
     public long OperatorStatsBytesMark { get; set; }
 
+    /// <summary>
+    /// <see cref="FramesProduced"/> as of the last operator-telemetry emission, so that emission can report a RATE of frames rather than a lifetime total.
+    /// </summary>
+    /// <remarks>
+    /// Beside <see cref="OperatorStatsBytesMark"/> and advanced with it, in the same pass, for the same reason: the two are the numerator and the denominator
+    /// of the session's average payload, and a window boundary that applied to one and not the other would divide this window's bytes by the session's whole
+    /// history. There is no <c>StatsFramesMark</c> twin because the client-facing <c>STATS</c> block does not carry a frame rate.
+    /// </remarks>
+    public long OperatorStatsFramesMark { get; set; }
+
     /// <summary>Rebinds the slot to a new session: every per-session number starts again.</summary>
     /// <param name="generation">The new session's generation.</param>
     /// <param name="tick">
@@ -688,6 +698,7 @@ internal sealed class SessionFrameState
         StatsBytesMark = 0;
         // Reset with the rest: a reused slot must not report the previous session's bytes as this one's first window.
         OperatorStatsBytesMark = 0;
+        OperatorStatsFramesMark = 0;
         SelfEntity = EntityId.Null;
         CommittedProfile = -1;
         SelfNetId = 0;
@@ -756,8 +767,13 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     /// 64 is chosen against what a panel can show rather than what the engine can hold: a table of a few dozen sessions is readable, and the server record
     /// reports the population so an operator sees that the list is a sample. The alternative — one row per session at the 8192-session limit — would put
     /// half a megabyte of trace on the wire every second for rows nobody scrolls to.
+    /// Which 64 is <see cref="TopSessionRows"/>'s decision, and it is the heaviest by bytes rather than the first the table yields — a cap that truncates
+    /// makes the sample arbitrary at exactly the scale the cap exists for.
     /// </remarks>
     private const int OperatorSessionRowCap = 64;
+
+    /// <summary>The per-session rows kept for this emission, reused across emissions; <see langword="null"/> until the first one that wants rows.</summary>
+    private TopSessionRows _operatorRows;
 
     /// <summary>Tick of the last operator-telemetry emission, -1 before the first. Its own window, independent of the encoder's — see <c>EmitOperatorTelemetry</c>.</summary>
     private long _operatorEmissionTick = -1;
@@ -1614,6 +1630,12 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     /// 8192-session limit would otherwise spend the trace on rows nobody reads; the server record's <c>ReportedSessions</c> against its <c>Sessions</c> says
     /// what was left out, and a consumer is required to render that difference rather than treat the rows as the whole population.
     /// </para>
+    /// <para>
+    /// <b>The cap SELECTS the heaviest sessions rather than truncating the walk</b> (<see cref="TopSessionRows"/>). Both cost one pass, because the pass has to
+    /// visit every session to advance its marks whatever it reports; truncating made the surviving 64 arbitrary at exactly the population where the cap
+    /// engages, so the table could not answer "which session is eating the bandwidth" — the question it is opened for. The consequence to know is that an idle
+    /// session is now invisible on a server above the cap: the rows are a biased sample, deliberately, and the panel names the bias.
+    /// </para>
     /// </remarks>
     internal void EmitOperatorTelemetry(long tickNumber)
     {
@@ -1653,6 +1675,11 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         // what kind 68 documents, would get a negative rate from an ordinary disconnect. The monotonic counter is what that field describes.
         var reported = 0;
         {
+            // Selected, not truncated — see TopSessionRows. The walk below has to visit every session anyway, to advance its marks, so the heaviest are
+            // identified for the cost of comparing a byte count that is already in hand. Allocated on the first emission that wants rows and reused after.
+            var selection = wantSessions ? _operatorRows ??= new TopSessionRows(OperatorSessionRowCap) : null;
+            selection?.Clear();
+
             var sessions = _sessions.GetEnumerator();
             while (sessions.MoveNext())
             {
@@ -1681,19 +1708,46 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
                 var bytes = Math.Max(0, state.BytesPublished - state.OperatorStatsBytesMark);
                 state.OperatorStatsBytesMark = state.BytesPublished;
 
-                if (!wantSessions || reported >= OperatorSessionRowCap)
+                // The frame mark moves with the byte mark, unconditionally and in the same place. The two are the numerator and the denominator of the
+                // session's average payload: advance one window boundary without the other and the panel divides this window's bytes by the session's whole
+                // history. Everything the comment above says about advancing before the cap and the gate applies to this one identically.
+                var frames = Math.Max(0, state.FramesProduced - state.OperatorStatsFramesMark);
+                state.OperatorStatsFramesMark = state.FramesProduced;
+
+                if (selection == null)
                 {
                     continue;
                 }
 
-                TyphonEvent.EmitSubscriptionsSessionTelemetry(
-                    sessionId: session.Value,
+                selection.Offer(new OperatorSessionRow
+                {
+                    SessionId = session.Value,
+                    Bytes = bytes,
+                    Frames = frames,
+                    FramesProduced = state.FramesProduced,
+                    FramesSkipped = state.FramesSkipped,
                     // -1 before the session's first RESET, widened to the wire's unsigned field so a consumer can tell that from realm 0.
-                    realmId: state.CommittedRealm < 0 ? ushort.MaxValue : (ushort)state.CommittedRealm,
-                    bytesPerSec: seconds <= 0 ? 0f : (float)(bytes / seconds),
-                    framesSkipped: state.FramesSkipped,
-                    degradeLevel: state.DegradeLevel);
-                reported++;
+                    RealmId = state.CommittedRealm < 0 ? ushort.MaxValue : (ushort)state.CommittedRealm,
+                    DegradeLevel = state.DegradeLevel,
+                });
+            }
+
+            if (selection != null)
+            {
+                // Emitted heaviest first, so the trace reads in the order the panel shows and a reader of raw records sees the worst offender first.
+                foreach (ref readonly var row in selection.Heaviest())
+                {
+                    TyphonEvent.EmitSubscriptionsSessionTelemetry(
+                        sessionId: row.SessionId,
+                        realmId: row.RealmId,
+                        bytesPerSec: seconds <= 0 ? 0f : (float)(row.Bytes / seconds),
+                        framesSkipped: row.FramesSkipped,
+                        degradeLevel: row.DegradeLevel,
+                        framesPerSec: seconds <= 0 ? 0f : (float)(row.Frames / seconds),
+                        framesProduced: row.FramesProduced);
+                }
+
+                reported = selection.Count;
             }
         }
 

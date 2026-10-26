@@ -530,6 +530,72 @@ sealed class EventDeliveryTests : TestBase<EventDeliveryTests>
     }
 
     /// <summary>
+    /// A near event's radius is measured from where the session's viewpoint IS, not from its anchor: a viewpoint that crosses the radius by less than the
+    /// anchor's slack hears exactly what its distance says, in both directions.
+    /// </summary>
+    /// <remarks>
+    /// The anchor follows the viewpoint only past the slack (R′ / 48, 0.94 m here; 21 m at the SWG demo's 1 024 m sphere), so a radius measured from it
+    /// was wrong by up to the slack: the demo heard a 50 m chat line at 60 m. Each session is anchored on one side of the 10 m radius, then walked
+    /// 0.8 m — inside the slack, so the anchor stays — to the other side, which is the only arrangement where the two answers differ.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-21")]
+    public void ANearRadiusIsMeasuredFromTheViewpointNotTheTrailingAnchor()
+    {
+        const double EventRadius = 10d;
+        const double Walk = 0.8d;
+        var cell = ProjectionTestSchema.ReplicationCellFor(Radius);
+        Assert.That(Walk, Is.LessThan(Math.Min(Radius / 48d, cell / 2d)), "precondition: the walk stays inside the anchor's slack, so the anchor does not follow");
+
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        Spawn(dbe, 1, 20f);
+        using var harness = FrameHarness.Create(dbe, subs =>
+        {
+            Declare(subs);
+            subs.Event<ProjRich>(e => e.RouteNear(r => new Vector3D(r.Pitch, 0d, 0d), radiusM: EventRadius).Field(r => r.Big, Codec.F32));
+        }, nameof(ANearRadiusIsMeasuredFromTheViewpointNotTheTrailingAnchor), replicationCellM: cell);
+        harness.RunFence = true;
+        var sessions = harness.OpenSessions(2, "near");
+
+        // Session 0 is anchored just outside the radius and walks in; session 1 just inside and walks out.
+        var start = new[] { EventRadius + (Walk / 2d), EventRadius - (Walk / 2d) };
+        var end = new[] { EventRadius - (Walk / 2d), EventRadius + (Walk / 2d) };
+        for (var i = 0; i < 2; i++)
+        {
+            Assert.That(harness.Sessions.SetViewpoint(sessions[i], new Vector3D(start[i], 0d, 0d)), Is.True);
+        }
+
+        var tick = 0;
+        for (; tick < FillTicks; tick++)
+        {
+            harness.RunTick(tick + 1);
+            foreach (var session in sessions)
+            {
+                harness.Deliver(session);
+            }
+        }
+
+        for (var i = 0; i < 2; i++)
+        {
+            Assert.That(harness.Sessions.SetViewpoint(sessions[i], new Vector3D(end[i], 0d, 0d)), Is.True);
+        }
+
+        harness.Subscriptions.Commands.Emit(new ProjRich { Pitch = 0f });
+        harness.RunTick(++tick);
+        foreach (var session in sessions)
+        {
+            harness.Deliver(session);
+        }
+
+        int Heard(int i) => harness.Replica(sessions[i]).Events.Received.FindAll(e => e.Name == nameof(ProjRich)).Count;
+        Assert.Multiple(() =>
+        {
+            Assert.That(Heard(0), Is.EqualTo(1), "walked to 9.6 m of the point, its anchor still at 10.4 m: within the radius, so it hears");
+            Assert.That(Heard(1), Is.Zero, "walked to 10.4 m of the point, its anchor still at 9.6 m: outside the radius, so it does not");
+        });
+    }
+
+    /// <summary>
     /// 2.5's acceptance, measured: a steady tick with events allocates no more managed memory than the same tick without (the segments, arenas and routing
     /// lists only grow past their high-water marks), and the serial encode and route cost per event is reported.
     /// </summary>

@@ -352,3 +352,23 @@ scratch/
 # Sample/benchmark databases left behind by a run. The engine creates <name>.typhon
 # as a DIRECTORY, so this needs the trailing slash.
 **/*.typhon/
+
+# Terraform (deploy/aws/tatooine). Added with the module itself, because the first `terraform init` puts 686 MB of
+# provider binaries in .terraform/ and nothing here was ignoring it.
+.terraform/
+
+# State NEVER goes in git: it is held in S3 with a lock (see versions.tf), and a copy in a commit is both a conflict
+# waiting to happen and a file that can contain resource attributes you would not publish.
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Real variable files, which carry account-specific values and sometimes secrets. The *.tfvars.example files in the
+# module ARE tracked -- they are the documentation.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# A crash during apply leaves one of these behind.
+crash.log
+crash.*.log

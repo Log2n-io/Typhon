@@ -24,6 +24,21 @@ public sealed class ClientOptions
     /// <summary>Application data for the session's <c>Opened</c> hook, at most 256 bytes.</summary>
     public byte[] HelloPayload { get; set; } = [];
 
+    /// <summary>
+    /// A resume token from an earlier session of this client, presented on the first <c>HELLO</c>; <see langword="null"/> for a fresh connection.
+    /// </summary>
+    /// <remarks>
+    /// <b>For a client that outlives its own process.</b> Within one process <see cref="TyphonClient.ResumeToken"/> carries itself from one <c>WELCOME</c> to
+    /// the next <c>HELLO</c>, so a reconnect resumes without anybody asking. A client that was restarted — a bot fleet whose box came back, a tool resuming a
+    /// session it had persisted — has no such continuity, and until this existed it could only cold-log: the field was private and nothing could seed it,
+    /// which made "persist the token so a restart resumes" unimplementable from outside the SDK.
+    /// <para>
+    /// A stale, spent or unknown token needs no handling: the server answers with an ordinary new session rather than a refusal, so presenting one is never
+    /// worse than not presenting it.
+    /// </para>
+    /// </remarks>
+    public byte[] ResumeToken { get; init; }
+
     /// <summary>The optional server work to ask for. Granted is a subset; read <see cref="TyphonClient.CapsGranted"/> for what arrived.</summary>
     public Capabilities Caps { get; set; }
 

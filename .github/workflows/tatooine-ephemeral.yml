@@ -1,0 +1,310 @@
+# I7 — create and destroy an ephemeral Tatooine stack from any branch, with a mandatory TTL.
+#
+# 08-hosting § 11.6, which is the sentence this workflow exists to honour: ephemeral instances are destroyed by a timer
+# and not by discipline. So:
+#
+#   * the TTL input has no "none" option, and terraform's own backstop (cost.tf) stops the box independently of this
+#     workflow -- because the common failure is this workflow being cancelled, which is exactly when discipline fails;
+#   * `sweep` destroys every ephemeral stack whose deadline has passed, and runs on a schedule as well as on demand, so
+#     a leaked stack is cleaned up by the next sweep rather than by someone noticing the bill.
+#
+# PROD IS NOT REACHABLE FROM HERE. The guard on `name` refuses it, the tfvars always set persistent_data = false, and
+# the world volume carries prevent_destroy. Three layers, because a `terraform destroy` aimed at the wrong stack is the
+# one mistake in this file that cannot be undone.
+name: tatooine-ephemeral
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to do
+        type: choice
+        required: true
+        options: [create, destroy, sweep]
+        default: create
+      name:
+        description: Stack name, lowercase letters/digits/hyphens. Never "prod".
+        type: string
+        required: true
+      ref:
+        description: The branch or commit to deploy
+        type: string
+        required: false
+        default: main
+      ttl_hours:
+        description: Hours before the stack is stopped and swept
+        type: choice
+        required: true
+        options: ['1', '2', '4', '8', '24']
+        default: '4'
+      bots:
+        description: How many bot boxes
+        type: choice
+        required: true
+        options: ['0', '1', '2', '4']
+        default: '1'
+  schedule:
+    # Hourly sweep. Cheap, and it is what makes the TTL a property of the system rather than of whoever remembers.
+    - cron: '17 * * * *'
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: eu-west-1
+  TF_IN_AUTOMATION: 'true'
+
+concurrency:
+  # Terraform state is one file per stack; two runs against one stack would corrupt it. This group serialises the DISPATCH
+  # paths, but not the sweep against a create -- the sweep's group is its own, because it is not about one stack. What makes
+  # that safe is the S3 state lock (`use_lockfile` in versions.tf), not this group, and the earlier comment claiming
+  # otherwise was wrong.
+  group: tatooine-stack-${{ github.event.inputs.name || 'sweep' }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    # A job of its own, so the refusal is visible in the run's graph rather than buried in a step of the thing it was
+    # supposed to prevent.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      # Through the environment, not spliced into the script. `${{ }}` is substituted textually BEFORE bash parses the
+      # body, so a value containing a quote ends the string and the remainder is executed — in the very job whose
+      # purpose is to validate that value. Dispatch-only limits who can do it; it does not make it acceptable.
+      NAME: ${{ inputs.name }}
+    steps:
+      - name: Refuse anything that could touch prod
+        run: |
+          set -euo pipefail
+          name="$NAME"
+          if [ "$name" = "prod" ] || [ "$name" = "production" ]; then
+            echo "::error::this workflow never touches prod. Use tatooine-deploy.yml, which has the schema gate."
+            exit 1
+          fi
+          if ! printf '%s' "$name" | grep -Eq '^[a-z][a-z0-9-]{1,30}$'; then
+            echo "::error::'$name' is not a valid stack name (2-31 chars, starts with a letter, lowercase/digits/hyphens)"
+            exit 1
+          fi
+          echo "stack '$name' accepted"
+
+  apply:
+    needs: guard
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'create'
+    runs-on: ubuntu-latest
+    outputs:
+      server: ${{ steps.out.outputs.server }}
+      bots: ${{ steps.out.outputs.bots }}
+    env:
+      NAME: ${{ inputs.name }}
+      TTL: ${{ inputs.ttl_hours }}
+      BOT_COUNT: ${{ inputs.bots }}
+      STATE_BUCKET: ${{ secrets.TATOOINE_STATE_BUCKET }}
+      ALERT_EMAIL: ${{ secrets.TATOOINE_ALERT_EMAIL }}
+      # The delegated zone every stack's name hangs under. Absent, the stack still comes up -- reachable by IP and from
+      # inside the VPC -- so an account without the DNS secrets set is a degraded stack rather than a failed run.
+      BASE_DOMAIN: ${{ secrets.TATOOINE_BASE_DOMAIN }}
+      DNS_ZONE_ID: ${{ secrets.TATOOINE_DNS_ZONE_ID }}
+      ACME_EMAIL: ${{ secrets.TATOOINE_ACME_EMAIL }}
+      CERT_BUCKET: ${{ secrets.TATOOINE_CERT_BUCKET }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Apply
+        working-directory: deploy/aws/tatooine
+        run: |
+          set -euo pipefail
+          # One state key per stack, in S3. Without a remote backend the state lives on the runner and is gone when the
+          # job ends -- which means `destroy` has nothing to destroy FROM and every stack leaks by construction.
+          terraform init -input=false \
+            -backend-config="bucket=$STATE_BUCKET" \
+            -backend-config="key=stacks/$NAME.tfstate" \
+            -backend-config="region=$AWS_REGION"
+
+          # The public URL is derived from the stack name: name=temp01 under base_domain=demo.typhondb.io serves
+          # https://temp01.demo.typhondb.io. Nothing here names it, which is the point -- the dispatch input is the only
+          # place a stack is named, so the URL cannot disagree with the resources it belongs to.
+          #
+          # All three or none. public_tls with no name fails a precondition at plan time, and a half-set of secrets is the
+          # configuration most likely to exist, so it is checked rather than assumed.
+          dns=()
+          if [ -n "$BASE_DOMAIN" ] && [ -n "$DNS_ZONE_ID" ] && [ -n "$ACME_EMAIL" ]; then
+            dns=(-var="public_tls=true"
+                 -var="base_domain=$BASE_DOMAIN"
+                 -var="dns_zone_id=$DNS_ZONE_ID"
+                 -var="acme_email=$ACME_EMAIL"
+                 -var="cert_bucket=$CERT_BUCKET")
+            # Not fatal, but worth a line in the log: without the archive, every create of this hostname spends one of the
+            # five certificates Let's Encrypt allows per week for it, and the sixth serves plain HTTP.
+            [ -n "$CERT_BUCKET" ] || echo "::warning::TATOOINE_CERT_BUCKET not set; this stack will issue a new certificate instead of restoring one"
+          else
+            # Explicitly false rather than left empty: an empty array under `set -u` is an unbound expansion on bash 4.3,
+            # and this file should not depend on the runner image's bash being newer than that.
+            dns=(-var="public_tls=false")
+            echo "::warning::TATOOINE_BASE_DOMAIN / _DNS_ZONE_ID / _ACME_EMAIL not all set; this stack gets no public URL"
+          fi
+
+          terraform apply -input=false -auto-approve \
+            -var="name=$NAME" \
+            -var="persistent_data=false" \
+            -var="ttl_hours=$TTL" \
+            -var="bot_count=$BOT_COUNT" \
+            -var="alert_email=$ALERT_EMAIL" \
+            "${dns[@]}"
+
+      - name: Record the deadline and the outputs
+        id: out
+        working-directory: deploy/aws/tatooine
+        run: |
+          set -euo pipefail
+          server=$(terraform output -raw server_instance_id)
+          bots=$(terraform output -json bot_instance_ids | jq -r 'join(",")')
+          echo "server=$server" >> "$GITHUB_OUTPUT"
+          echo "bots=$bots"     >> "$GITHUB_OUTPUT"
+
+          # The deadline goes on the instances as a TAG, which is what `sweep` reads. Keeping it in the workflow's own
+          # state would mean a sweep could only clean up stacks whose creating run it could still see.
+          deadline=$(date -u -d "+$TTL hours" +%Y-%m-%dT%H:%M:%SZ)
+          for instance in $(printf '%s,%s' "$server" "$bots" | tr ',' ' '); do
+            [ -n "$instance" ] && aws ec2 create-tags --resources "$instance" \
+              --tags "Key=tatooine:expires,Value=$deadline" "Key=tatooine:stack,Value=$NAME"
+          done
+          url=$(terraform output -raw url 2>/dev/null || true)
+          if [ -n "$url" ]; then
+            echo "::notice::stack $NAME up at $url; expires $deadline"
+            echo "$url - expires $deadline" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::notice::stack $NAME up (no public URL); expires $deadline"
+          fi
+
+  deploy:
+    needs: apply
+    uses: ./.github/workflows/tatooine-deploy.yml
+    with:
+      stack: ${{ inputs.name }}
+      server_instance: ${{ needs.apply.outputs.server }}
+      bot_instances: ${{ needs.apply.outputs.bots }}
+      # No schema gate: an ephemeral stack builds its world from the seed at every start, so there is no previous world
+      # to open and the gate would have nothing to check.
+      schema_gate: false
+    secrets: inherit
+
+  destroy:
+    needs: guard
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
+    runs-on: ubuntu-latest
+    env:
+      NAME: ${{ inputs.name }}
+      STATE_BUCKET: ${{ secrets.TATOOINE_STATE_BUCKET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Destroy
+        working-directory: deploy/aws/tatooine
+        run: |
+          set -euo pipefail
+          terraform init -input=false \
+            -backend-config="bucket=$STATE_BUCKET" \
+            -backend-config="key=stacks/$NAME.tfstate" \
+            -backend-config="region=$AWS_REGION"
+
+          # persistent_data=false is passed again on the destroy, not inherited: it is what keeps the prod-only world
+          # volume out of this plan entirely. The volume also carries prevent_destroy, so a mistake here fails rather
+          # than deletes -- but a plan that never includes it is better than one that is refused.
+          #
+          # No bot_count either: a destroy is driven by STATE, so passing a count that disagrees with what was created
+          # is at best noise and at worst a plan that reads as though it were going to create something.
+          terraform destroy -input=false -auto-approve \
+            -var="name=$NAME" \
+            -var="persistent_data=false"
+
+  sweep:
+    # On the schedule, and on demand for the impatient.
+    #
+    # It enumerates the STATE BUCKET, not running instances. Filtering on instance tags meant a stack whose instances
+    # were already terminated — by the TTL backstop, by a spot reclaim, or because the tagging step never ran — was
+    # invisible to the sweep, so its Elastic IP, CloudFront distribution, SNS topic and budget stayed behind
+    # permanently with nothing tracking them. The state file is the only thing that knows a stack exists at all, which
+    # makes it the only correct thing to sweep from.
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.action == 'sweep')
+    runs-on: ubuntu-latest
+    env:
+      STATE_BUCKET: ${{ secrets.TATOOINE_STATE_BUCKET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Destroy every expired ephemeral stack
+        run: |
+          set -euo pipefail
+          now=$(date -u +%s)
+
+          # Every stack the state bucket knows about. `prod` is excluded by name — it is the one key this job must never
+          # open — and everything else under stacks/ is by definition ephemeral.
+          mapfile -t stacks < <(aws s3api list-objects-v2 --bucket "$STATE_BUCKET" --prefix 'stacks/' \
+            --query 'Contents[].Key' --output text 2>/dev/null | tr '\t' '\n' \
+            | sed -n 's|^stacks/\(.*\)\.tfstate$|\1|p' | grep -Ev '^(prod|production)$' | sort -u)
+
+          swept=0
+          failed=0
+          for stack in "${stacks[@]}"; do
+            [ -n "$stack" ] || continue
+
+            # The deadline lives on the instances, which is where the create put it. A stack whose instances are gone —
+            # or that was never tagged — has no deadline to read and is swept: that is exactly the shape that leaks, and
+            # an ephemeral stack is by definition safe to destroy.
+            expires=$(aws ec2 describe-instances \
+              --filters "Name=tag:tatooine:stack,Values=$stack" \
+                        'Name=instance-state-name,Values=pending,running,stopping,stopped' \
+              --query 'Reservations[].Instances[].Tags[?Key==`tatooine:expires`].Value | [0][0]' \
+              --output text 2>/dev/null || echo None)
+
+            if [ "$expires" != "None" ] && [ -n "$expires" ] && [ "$(date -u -d "$expires" +%s)" -gt "$now" ]; then
+              echo "$stack is still inside its TTL (expires $expires)"
+              continue
+            fi
+
+            echo "::notice::sweeping $stack (expires ${expires:-unknown})"
+            cd "$GITHUB_WORKSPACE/deploy/aws/tatooine"
+            rm -rf .terraform .terraform.lock.hcl
+            terraform init -input=false \
+              -backend-config="bucket=$STATE_BUCKET" \
+              -backend-config="key=stacks/$stack.tfstate" \
+              -backend-config="region=$AWS_REGION"
+
+            # FAILS the job rather than warning. A warning on a sweep is a stack that is still billing behind a green
+            # tick, which is the one outcome this whole file exists to prevent.
+            if terraform destroy -input=false -auto-approve -var="name=$stack" -var="persistent_data=false"; then
+              aws s3api delete-object --bucket "$STATE_BUCKET" --key "stacks/$stack.tfstate" || true
+              swept=$((swept + 1))
+            else
+              echo "::error::$stack did not destroy cleanly and is STILL BILLING; destroy it by hand"
+              failed=$((failed + 1))
+            fi
+          done
+
+          echo "swept $swept stack(s), $failed failed"
+          [ "$failed" -eq 0 ]

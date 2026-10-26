@@ -39,6 +39,10 @@ export function latestSessionRows(ticks: readonly TickData[]): SubscriptionsSess
     }
     // Deliberately keyed to the tick that carried the SERVER record, not to the newest tick with any row: pairing rows from one emission
     // with a population count from another would let the panel state a difference that never existed.
+    //
+    // The sort is kept although the engine now emits heaviest first (its row cap SELECTS the heaviest rather than truncating the walk).
+    // Two reasons: a capture from a producer that truncated instead arrives in session-table order, and the panel's caption claims this
+    // ordering — a claim it should hold by its own arithmetic and not only by the producer's good behaviour.
     const rows = ticks[i].subscriptionSessions;
     return rows === undefined ? [] : [...rows.values()].sort((a, b) => b.bytesPerSec - a.bytesPerSec);
   }
@@ -146,6 +150,33 @@ export function differentiate(
 /** Frame-pool occupancy as a fraction, or null when the pool has allocated nothing yet. */
 export function poolOccupancy(row: SubscriptionsServerTelemetry): number | null {
   return row.framePoolBlocks > 0 ? row.framePoolRented / row.framePoolBlocks : null;
+}
+
+/**
+ * A session's average frame payload in bytes, or null when the window carried it no frame.
+ *
+ * <b>Why a division and not a wire field.</b> The engine sends `bytesPerSec` and `framesPerSec` over the SAME window precisely so this
+ * is derivable per row, without joining two emissions. It is not sent pre-divided because the two terms are each diagnostic on their
+ * own: a session can be expensive because every frame is fat (it sees too much) or because it is served too often, and only the pair
+ * separates those.
+ *
+ * <b>Null, never zero, when there is no denominator.</b> `framesPerSec` is zero both for a session served no frame in the window and
+ * for a capture from a producer that predates the field — the wire cannot distinguish them, so neither can this. Zero bytes a frame
+ * would assert "its frames are empty", which is a claim neither case supports.
+ */
+export function averagePayloadBytes(row: SubscriptionsSessionTelemetry): number | null {
+  return row.framesPerSec > 0 ? row.bytesPerSec / row.framesPerSec : null;
+}
+
+/**
+ * The fleet-wide average payload per session per second: what the server pushes, divided by the sessions it pushes to.
+ *
+ * <b>From the server record, so it covers every session — not only the rows that survived the cap.</b> Averaging the rows would
+ * average the HEAVIEST 64 of the population and report the result as the fleet's, which at 8 000 sessions is wrong by whatever the
+ * selection skews. Null for a server with no session, because dividing by it would read as "each session costs nothing".
+ */
+export function averageBytesPerSession(row: SubscriptionsServerTelemetry): number | null {
+  return row.sessions > 0 ? row.netOutBytesPerSec / row.sessions : null;
 }
 
 /** How a session's realm should be labelled. `null` means the session has not been told its realm yet. */

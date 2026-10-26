@@ -1,0 +1,141 @@
+#cloud-config
+# The bot box (I4 / B8). Two units: the control panel, which is always on and reached over an SSM tunnel, and the
+# headless fleet, which a workflow starts. The payload arrives by SSM from the deploy workflow.
+
+# bootcmd, for the reason the server's cloud-init gives: write_files runs before runcmd, so a file asking for
+# owner root:tatooine needs the user to exist already.
+bootcmd:
+  - [ cloud-init-per, once, tatooine-user, useradd, --system, --no-create-home, --shell, /usr/sbin/nologin, tatooine ]
+
+package_update: true
+packages:
+  # No awscli here: see the CLI install in runcmd. Ubuntu 24.04 does not package it, and asking for it fails the whole
+  # apt step -- which on the server box meant nothing that shells to `aws` worked at all.
+  - unzip
+  - curl
+  # tc, for the netem shaping the panel applies. iproute2 is usually present; naming it makes the dependency explicit
+  # rather than inherited from whatever the AMI happened to ship.
+  - iproute2
+
+write_files:
+  # --- The control panel ---------------------------------------------------------------------------------------------
+  #
+  # Always on, because it is how the box is operated, and harmless because it binds loopback: reaching it needs an SSM
+  # port forward, which needs the instance role and the operator's own credentials.
+  #
+  #   AmbientCapabilities=CAP_NET_ADMIN   so `tc qdisc` works without sudo for a password-less service account. This is
+  #                                       the one privilege the panel needs and it is the reason the shaping is real: a
+  #                                       delay applied in the client would not reach the ACKs, so the congestion window
+  #                                       and the server's backpressure would behave as they do on loopback -- which is
+  #                                       most of what a remote fleet exists to exercise.
+  - path: /etc/systemd/system/tatooine-botconsole.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=SWG Tatooine bot console (${stack})
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=tatooine
+      Group=tatooine
+      WorkingDirectory=/opt/tatooine/current
+      ExecStart=/opt/tatooine/current/run-console.sh
+      Restart=on-failure
+      RestartSec=5
+      KillSignal=SIGTERM
+      TimeoutStopSec=60
+      LimitNOFILE=1048576
+      EnvironmentFile=/etc/tatooine/bots.env
+      AmbientCapabilities=CAP_NET_ADMIN
+      CapabilityBoundingSet=CAP_NET_ADMIN
+      NoNewPrivileges=true
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # --- The headless fleet --------------------------------------------------------------------------------------------
+  #
+  # Type=oneshot and NOT enabled: a fleet run is a job with an end, not a service. `systemctl start tatooine-fleet` from
+  # an SSM command runs one, and the exit code is the run's verdict -- which is why Restart is absent: restarting a load
+  # generator that failed would hide the failure behind a healthy-looking process.
+  - path: /etc/systemd/system/tatooine-fleet.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=SWG Tatooine headless bot fleet (${stack})
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      User=tatooine
+      Group=tatooine
+      WorkingDirectory=/opt/tatooine/current
+      ExecStart=/opt/tatooine/current/run-fleet.sh
+      TimeoutStartSec=infinity
+      LimitNOFILE=1048576
+      EnvironmentFile=/etc/tatooine/bots.env
+      AmbientCapabilities=CAP_NET_ADMIN
+      CapabilityBoundingSet=CAP_NET_ADMIN
+      NoNewPrivileges=true
+
+  # --- The environment -----------------------------------------------------------------------------------------------
+  #
+  # SWG_BOT_KEY is NOT here and must not be baked into an image or a payload. Bot passwords are derived from it, so the
+  # accounts file beside the binary authorises nothing without it -- which is the whole reason passwords are derived and
+  # never stored. Put it in with
+  #
+  #   aws ssm send-command --document-name AWS-RunShellScript \
+  #     --parameters 'commands=["printf \"SWG_BOT_KEY=%s\\n\" \"$KEY\" >> /etc/tatooine/bots.env"]'
+  #
+  # or, better, keep it in SSM Parameter Store as a SecureString and have the unit read it at start. Either way it goes
+  # to the box and not to the repository, and the SAME value must be used every run: a different key orphans every
+  # account already signed up.
+  - path: /etc/tatooine/bots.env
+    permissions: '0640'
+    owner: root:tatooine
+    content: |
+      ENDPOINT=${server_endpoint}
+      PORT=${console_port}
+      BIND=127.0.0.1
+      BOTS=${bot_sessions}
+      KIND=${bot_kind}
+      CONNECT_RATE=200
+      SECONDS_TO_RUN=3600
+      ACCOUNTS_FILE=/var/lib/tatooine/bots.jsonl
+
+runcmd:
+  # <b>The AWS CLI, from AWS, because Ubuntu 24.04 does not package it.</b> `awscli` was in the package list above and
+  # `apt-cache policy awscli` on 24.04 answers `Candidate: (none)` -- the distro dropped it. apt then failed the whole
+  # install, cloud-init reported `status: error`, and every script here that shells to `aws` died with `aws: not found`:
+  # the DNS record was never published, and only the certificate survived because certbot's route53 plugin talks to the
+  # API through boto3 rather than the CLI.
+  #
+  # Found by applying, not by reading: nothing in `terraform validate` or a YAML render can know what is in an archive.
+  #
+  # Architecture-aware because the bot box is Graviton and the server is x86_64. Installed BEFORE the units below are
+  # started, since all of them need it.
+  - |
+    set -eu
+    case "$(uname -m)" in
+        aarch64) url=https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip ;;
+        x86_64)  url=https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip ;;
+        *) echo "tatooine: no AWS CLI build for $(uname -m)" >&2; exit 1 ;;
+    esac
+    tmp=$(mktemp -d)
+    curl -fsSL "$url" -o "$tmp/awscliv2.zip"
+    unzip -q "$tmp/awscliv2.zip" -d "$tmp"
+    "$tmp/aws/install" --update
+    rm -rf "$tmp"
+    /usr/local/bin/aws --version
+
+  # The service account is created in bootcmd above, before write_files needs it.
+  - [ mkdir, -p, /opt/tatooine/releases, /etc/tatooine, /var/lib/tatooine ]
+  - [ chown, '-R', 'tatooine:tatooine', /opt/tatooine, /var/lib/tatooine ]
+  # 0700: the accounts file holds tokens and resume tokens, both bearer secrets. The store sets the file's own mode too,
+  # and this is the directory half of the same decision.
+  - [ chmod, '0700', /var/lib/tatooine ]
+  - [ systemctl, daemon-reload ]
+  - [ systemctl, enable, tatooine-botconsole.service ]

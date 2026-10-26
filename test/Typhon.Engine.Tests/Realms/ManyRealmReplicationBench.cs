@@ -60,7 +60,7 @@ class ManyRealmReplicationBench : TestBase<ManyRealmReplicationBench>
     /// </para>
     /// <para>
     /// <b>These realms are the pessimistic shape on purpose</b> — one entity and one session each, so every realm pays a realm's fixed cost to carry almost no
-    /// work. The SWG demo's own D-7 figure (<c>demo/SwgTatooine.Tests RealmScaleBench</c>) is <b>~0.24 us</b> per active realm at 65 active realms, less than
+    /// work. The SWG demo's own D-7 figure (<c>demo/SwgTatooine/SwgTatooine.Tests RealmScaleBench</c>) is <b>~0.24 us</b> per active realm at 65 active realms, less than
     /// half of this, because its interiors hold furniture and NPCs. Both are under the threshold; this one is the bound.
     /// </para>
     /// </remarks>

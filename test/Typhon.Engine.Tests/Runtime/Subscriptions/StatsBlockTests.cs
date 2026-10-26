@@ -356,23 +356,21 @@ class StatsBlockTests : TestBase<StatsBlockTests>
             Assert.That(client.AwaitBlock(), Is.True, "a session never received its first block, so nothing was shared with it");
         }
 
+        // Read the counters CUMULATIVELY rather than over a second window. The window version snapshotted them, waited for one more block
+        // per client, and differenced — and it flaked, because emission stops once every session is fully streamed: with a static world
+        // there is nothing to put in a frame, and a STATS block does not force one. Past that point the second wait is satisfied from
+        // frames already queued, both deltas are 0, and the fixture reports "re-encoded per session" about an emission that never ran.
+        // The claim in this test's name is cumulative anyway: whatever the window, each emission encodes the server segment once and
+        // copies it into one frame per subscribed session, so over three sessions the copies must outrun the encodes.
         var stats = world.Subscriptions.Stats;
         var encodes = stats.ServerSegmentEncodes;
         var copies = stats.ServerSegmentCopies;
 
-        foreach (var client in clients)
-        {
-            Assert.That(client.AwaitBlock(), Is.True);
-        }
-
-        var deltaEncodes = stats.ServerSegmentEncodes - encodes;
-        var deltaCopies = stats.ServerSegmentCopies - copies;
-
         Assert.Multiple(() =>
         {
-            Assert.That(deltaCopies, Is.GreaterThan(0), "no block was written at all over the window");
-            Assert.That(deltaCopies, Is.GreaterThan(deltaEncodes),
-                $"{deltaCopies} block(s) cost {deltaEncodes} encode(s): the server segment is being re-encoded per session instead of copied");
+            Assert.That(encodes, Is.GreaterThan(0), "no server segment was encoded at all, so there is nothing to share");
+            Assert.That(copies, Is.GreaterThan(encodes),
+                $"{copies} block(s) cost {encodes} encode(s): the server segment is being re-encoded per session instead of copied");
         });
     }
 

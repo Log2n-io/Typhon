@@ -4172,6 +4172,11 @@ public unsafe partial class Transaction : EntityAccessor
             // Next, and it cannot throw: a claim left behind would make every later supply of its component time out for the engine's life.
             ReleaseFirstSupplyClaims();
 
+            // The same shape for unique keys (#1390), and deliberately here rather than anywhere earlier: a commit that published has its keys in the tree
+            // by now, so the next commit's descent finds them with no claim to help it, and one that did not publish has nothing to find. A claim left
+            // behind would refuse that key to every later commit for the engine's life.
+            ReleaseUniqueKeyClaims();
+
             // AP-01 safety net: if the commit threw between PREPARE and PUBLISH, retained handler locks would otherwise be orphaned. On the success
             // path PublishPreparedComponents already drained and cleared _publishEntries, so this is a no-op.
             ReleaseRetainedPublishLocks();

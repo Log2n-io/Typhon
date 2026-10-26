@@ -1,0 +1,462 @@
+@* The bot box's one page: set a fleet up, start it, watch what the server does with it.
+
+   Every number here is read straight off FleetRunner, which owns the sessions in this same process — there is no API
+   between the page and the fleet, which is the whole reason this is Blazor Server and in-process (see the csproj).
+
+   The form is disabled while a run is up rather than hidden: an operator should be able to read the configuration that
+   produced the numbers they are looking at, and a form that vanishes makes a run unidentifiable a minute later. *@
+@page "/"
+@rendermode InteractiveServer
+@implements IDisposable
+@inject FleetRunner Runner
+@inject FleetSettings Settings
+
+<h1>Bot console</h1>
+
+<section class="panel">
+    <h2>Fleet</h2>
+    @* Every field carries a `title`, so the full explanation is one hover away and the label can stay short. This page is reached
+       over an SSM tunnel on a headless box with no documentation beside it, and "Wander (s)" being read as a population — and set
+       to 8000, giving a two-hour dwell and a fleet walking in straight lines — is what a terse label costs. *@
+    <div class="grid">
+        <label title="The server's WebSocket endpoint, as a URI. `SwgTatooine.Server --serve <port>` listens at ws://host:<port>/ws and nothing else — a tcp:// URL reads plausibly, connects to nothing, and the run reports a healthy zero. On the bot box this is the server's PRIVATE address, because 07-bots §5 puts both machines in one subnet so the traffic is free and still a real TCP/TLS/WebSocket path.">
+            Endpoint
+            <input @bind="Settings.Endpoint" disabled="@Busy" />
+        </label>
+        <label title="HOW MANY SESSIONS TO OPEN — this is the population. Each one is a separate WebSocket and, for `player`, its own account and avatar. The ramp opens them at the connect rate below, and once the run is up the live dial (which appears under Run) moves this number without a restart.">
+            Bots <small>the population</small>
+            <input type="number" min="1" max="60000" @bind="Settings.Count" disabled="@Busy" />
+        </label>
+        <label title="The pipeline's unit of work: this many bots are signed up, connected and handed to the driver as ONE step, so the chunk before this one is already walking while this one signs up. Bigger amortises per-chunk overhead; smaller gets the first bots on screen sooner. 250 puts them there in about a second at any population. Deliberately not derived from the connect rate, whose per-socket quantum (8 at 400/s) is far too small for a batch of signups.">
+            Chunk size <small>provision + connect + drive, per step</small>
+            <input type="number" min="1" max="5000" @bind="Settings.ChunkSize" disabled="@Busy" />
+        </label>
+        <label title="The ceiling the live dial may be turned up to, and the size of the session array. It costs an allocation and nothing else: accounts are signed up a chunk at a time as the ramp reaches them, so a capacity of 10000 with 500 bots provisions about 500 accounts, not 10000. 0 means the Bots count is also the ceiling.">
+            Capacity <small>ceiling the live dial may reach; 0 = the count</small>
+            <input type="number" min="0" max="60000" @bind="Settings.MaxCount" disabled="@Busy" />
+        </label>
+        <label title="`god` is an anonymous, read-only camera: it needs no account and no key, declares its own region of interest, and cannot move a body. `player` IS an account — it signs up through /auth, presents a token, and the server binds it a real avatar that other clients can see and that this fleet can walk. Only `player` sessions exercise the intent path, the spatial index and cluster migration.">
+            Kind
+            <select @bind="Settings.Kind" disabled="@Busy">
+                <option value="god">god — anonymous camera, no accounts</option>
+                <option value="player">player — a real account each</option>
+            </select>
+        </label>
+        <label title="The BOT PROCESS's own clock, not the server's. One shared timer fires at this rate and drives every session: pings, region updates and movement intents are all derived from it, so at 4 Hz each bot acts every 250 ms. It models human input cadence. Raising it multiplies this box's CPU and the server's inbound: 5000 bots at 4 Hz is 20 000 actions a second, at 20 Hz it is 100 000. Region updates are additionally capped at 5 Hz on the wire, so past about 20 this buys only more pings.">
+            Driver Hz
+            <input type="number" min="1" max="50" @bind="Settings.TickHz" disabled="@Busy" />
+        </label>
+        <label title="Sessions opened per second during the ramp. A RAIL, not a target to maximise: the cost of admitting faster falls on the server, which spawns each avatar serially inside its own tick transaction, so a fast ramp measures the admission path colliding with the tick rather than a faster server. 200/s is 07-bots §3's figure. The measurement window is armed only once the population is open, so a slow ramp costs time and never the measurement.">
+            Connect rate (/s)
+            <input type="number" min="0" max="5000" @bind="Settings.ConnectRatePerSecond" disabled="@Busy" />
+            <small>A rail, not a target: admitting faster costs the SERVER, which spawns each avatar inside its tick.</small>
+        </label>
+        <label title="A GOD CAMERA's region of interest, in metres — the same thing the server's --god-region sets. It decides how many entities land in that session's subscription, so it is the direct lever on replication cost and bytes per session. It does NOTHING for `player` sessions: a player's view is a fixed 192 m sphere centred on its avatar (PlayerRadiusM, a compile-time constant), chosen by the server rather than asked for by the client.">
+            Region radius (m)
+            <input type="number" min="1" @bind="Settings.RegionRadiusM" disabled="@Busy" />
+        </label>
+        <label title="A DURATION, not a count: how many seconds a bot holds one heading before turning onto another. On each turn it deflects up to ±60° from where it was going — a bounded turn rather than a fresh random angle, so the path travels instead of milling about — and each bot's dwell is jittered ±25 % so the fleet does not turn in lockstep. 12 seconds at the run gait is about 60 m between turns. 0 leaves every avatar standing where it spawned, which is what every run before today did. Player sessions only: MoveDir is refused to a god camera, which has no body.">
+            Seconds before turning <small>player only; 0 stands still. Not a count — see Bots</small>
+            <input type="number" min="0" max="600" @bind="Settings.WanderSeconds" disabled="@Busy" />
+        </label>
+    </div>
+</section>
+
+<section class="panel">
+    <h2>Accounts</h2>
+    @if (Settings.IsPlayer)
+    {
+        <div class="grid">
+            <label title="Where the fleet's account names, auth tokens and resume tokens are kept, one JSON object per line. It holds NO passwords: those are derived from the key below and the bot's index, so losing this file costs one round of logins and losing the key costs nothing. Keeping it between runs is what lets a restarted bot box RESUME its sessions rather than cold-logging a population the server is still holding for absent clients.">
+                Accounts file
+                <input @bind="Settings.AccountsFile" disabled="@Busy" />
+            </label>
+            <label title="How many signups or logins run at once while provisioning. Bounded for the SERVER's sake: each one is a PBKDF2 hash on the game server's own cores, and that server is also running a 50 Hz tick — a few hundred unbounded attempts a second starve the loop. The per-address rate limiter matters here too: the whole bot box is one address, so the server's --auth-burst and --auth-refill-ms have to be opened up or 10 000 signups take an hour and a half.">
+                Signup concurrency
+                <input type="number" min="1" max="64" @bind="Settings.SignupConcurrency" disabled="@Busy" />
+                <small>Bounded for the server's sake: each login is a 600 000-iteration PBKDF2 behind its own semaphore.</small>
+            </label>
+        </div>
+        <p class="note">
+            <strong>@BotCredentials.KeyVariable must be set in this process's environment.</strong> Passwords are derived from it and
+            are never stored, so the accounts file holds only names, tokens and resume tokens — and the same key must be used on
+            every run, or the accounts already signed up cannot be logged into.
+        </p>
+    }
+    else
+    {
+        <p class="note">A god session is anonymous and read-only, so this fleet needs no accounts and no key.</p>
+    }
+</section>
+
+<section class="panel">
+    <h2>Network</h2>
+    <div class="grid">
+        <label title="One-way delay put on this box's interface with `tc netem`, in milliseconds — so 60 here is a 120 ms round trip. IN THE KERNEL, not in the client: a delay added around a send postpones only when the application sees a message, while the ACK still goes back at line rate, so the congestion window, the server's send buffer and every backpressure path behave exactly as they do on loopback — which is most of what a thousand remote sessions are supposed to stress. Interface-wide, so every bot gets the same path. Needs Linux and CAP_NET_ADMIN; 0 shapes nothing.">
+            Latency (ms)
+            <input type="number" min="0" max="2000" @bind="Settings.LatencyMs" disabled="@Busy" />
+        </label>
+        <label title="Variation around the delay, in milliseconds: netem draws each packet's delay from latency ± this. It models a path, not a person — per-bot variability in reaction time belongs to the brain's think time, which is an application-level number and a different thing. Conflating the two gives a run in which neither is interpretable.">
+            Jitter (ms)
+            <input type="number" min="0" max="2000" @bind="Settings.JitterMs" disabled="@Busy" />
+        </label>
+        <label title="Which network interface to shape, e.g. `ens5`. Left empty, the shaper resolves the interface on the route to the endpoint's host — which is the right question, because on the intended placement the bot box reaches the server by private IP and may have no route off the VPC at all. The device that was actually shaped is reported back and remembered, so the clear-down unshapes THAT one even if the route has since changed.">
+            Interface
+            <input placeholder="default route" @bind="Settings.NetworkInterface" disabled="@Busy" />
+        </label>
+    </div>
+    <p class="note">
+        Shaped in the kernel with <code>tc netem</code>, so the delay reaches the ACKs and therefore the congestion window and the
+        server's backpressure — which a delay added inside the client would not. It is interface-wide, so every bot gets the same
+        path; per-bot variability is the brain's reaction latency, which models a human's hands rather than a network.
+        @if (!NetemShaper.Supported)
+        {
+            <strong>This host cannot shape (Linux and tc netem only), so a non-zero latency will fail the start rather than be ignored.</strong>
+        }
+    </p>
+</section>
+
+<section class="panel">
+    <h2>Run</h2>
+    <p>
+        <button @onclick="StartAsync" disabled="@Busy">Start</button>
+        <button @onclick="StopAsync" disabled="@(!Busy)">Stop</button>
+        <span class="phase">@_snapshot.Phase</span>
+        @if (_snapshot.Shaping != null)
+        {
+            <span class="shaping">@_snapshot.Shaping</span>
+        }
+    </p>
+
+    @if (Busy)
+    {
+        @* LIVE, and the reason this panel was re-architected. Changing a population used to mean Stop, edit, Start -- a teardown, a
+           fresh ramp and a new measurement window, so "what happens at five thousand" was a different run rather than a different
+           moment in the same one. The reconciler opens or closes sessions at the connect rate, so this is a dial. *@
+        <div class="grid">
+            <label title="The population to aim for NOW, without restarting. A reconciler opens or closes sessions at the connect rate until the live count matches. Growing reuses accounts already provisioned, which is why Capacity had to be declared before the run. Shrinking closes sessions PROPERLY from the tail rather than dropping them: a dropped socket leaves the server holding that avatar for its whole 60-second resume grace, so a cut would otherwise leave bodies standing and contaminate the next minute of measurement. Capped at the capacity shown.">
+                Live population <small>of @_snapshot.Capacity capacity</small>
+                <input type="number" min="0" max="@_snapshot.Capacity" @bind="_liveTarget" />
+            </label>
+            <label title="Re-shape the interface mid-run: latency then jitter, in milliseconds. Costs one `tc` command and disturbs no session, because netem replaces the qdisc in place — so a single measurement window can carry a whole latency sweep with the SAME population across every arm, which is what makes the arms comparable. 0 latency clears the shaping. Reports 'refused' rather than failing the run where the host cannot shape, which on Windows is always.">
+                Live latency / jitter (ms) <small>re-shapes in place, no reconnect</small>
+                <span>
+                    <input type="number" min="0" max="2000" @bind="_liveLatencyMs" style="width:5rem" />
+                    <input type="number" min="0" max="2000" @bind="_liveJitterMs" style="width:5rem" />
+                </span>
+            </label>
+        </div>
+        <p>
+            <button @onclick="ApplyTarget" title="Send the number in the box to the reconciler.">Apply population</button>
+            <button @onclick="() => Step(-500)" title="Shrink by 500 from what is RUNNING, not from the box — so repeated presses do not compound an edit you made and forgot.">−500</button>
+            <button @onclick="() => Step(500)" title="Grow by 500 from what is running.">+500</button>
+            <button @onclick="() => Step(2000)" title="Grow by 2000 from what is running.">+2000</button>
+            <button @onclick="ApplyShaping" title="Apply the latency and jitter in the boxes to the interface now, leaving every session connected.">Apply shaping</button>
+        </p>
+        @if (_snapshot.Target != _snapshot.Connected)
+        {
+            <p class="note">
+                Reconciling: @_snapshot.Connected connected, aiming for @_snapshot.Target at
+                @Settings.ConnectRatePerSecond.ToString("N0", CultureInfo.InvariantCulture)/s.
+            </p>
+        }
+    }
+
+    @if (_snapshot.Fault != null)
+    {
+        <p class="fault">@_snapshot.Fault</p>
+    }
+
+    @if (_snapshot.ProtocolFaults > 0)
+    {
+        @* Leads, because a protocol fault is OUR bug: the numbers below are then describing a run that did not send what it
+           thought it was sending, which is how the god tour spent its whole life asking for nothing. *@
+        <p class="fault">
+            PROTOCOL FAULTS: @_snapshot.ProtocolFaults distinct message(s) this program asked for and the catalog does not describe.
+            The figures below are NOT a clean measurement.
+        </p>
+    }
+
+    <table>
+        <tbody>
+            <tr>
+                <th title="Connected right now, the population being aimed for, how many ever opened, and the ceiling. 'Retired' counts sessions closed deliberately by a shrink, which is how a cut is told apart from a disconnect.">Sessions</th>
+                <td>
+                    <b>@_snapshot.Connected</b> connected · target @_snapshot.Target · @_snapshot.Opened opened ·
+                    capacity @_snapshot.Capacity
+                    @if (_snapshot.Retired > 0)
+                    {
+                        <text> · @_snapshot.Retired retired by a shrink</text>
+                    }
+                </td>
+            </tr>
+            <tr><th title="How many sessions the engine has placed in a realm. A session with no realm is served nothing, so this should equal the connected count; a gap means sessions are up but blind.">Holding a realm</th><td>@_snapshot.InRealm of @_snapshot.Connected</td></tr>
+            <tr><th title="Accounts signed up or logged in, against the capacity. Signed up a chunk at a time as the ramp reaches them, so this tracks the population rather than running ahead of it: a capacity of 10000 with 500 bots shows about 500.">Accounts ready</th><td>@_snapshot.Provisioned of @_snapshot.Capacity</td></tr>
+            <tr><th title="How long this run has been up. The measurement window is armed once the population first opens, so a long ramp does not eat it.">Elapsed</th><td>@_snapshot.Elapsed.ToString(@"hh\:mm\:ss")</td></tr>
+            <tr>
+                <th title="The game server's own tick duration, read from its stats endpoint. The budget is 1000/Hz ms - 20 ms at 50 Hz. p50 and p99 are sampled once a second so they forget spikes, which is why the worst p99 seen is shown alongside, and the over-budget figure counts SAMPLES in which the p99 exceeded one tick period. It is the fleet's own count, not the server's: the catalog publishes no overrun metric, and this row used to claim one it had never measured.">Server tick</th>
+                <td>
+                    p50 @Ms(_snapshot.ServerTickP50) · p99 @Ms(_snapshot.ServerTickP99) · worst p99 @Ms(_snapshot.ServerTickP99Worst)
+                    @* Overruns lead the tick row when there are any: a p99 sampled once a second forgets a spike, and "the budget was
+                       missed N times" is the claim a sampled percentile cannot make. *@
+                    @if (_snapshot.ServerOverruns > 0)
+                    {
+                        <strong class="fault"> · p99 over budget in @_snapshot.ServerOverruns sample(s)</strong>
+                    }
+                    else
+                    {
+                        <text> · p99 within budget every sample</text>
+                    }
+                </td>
+            </tr>
+            <tr><th title="The SERVER's own count, read from its stats rather than inferred here. Disagreeing with the connected count above means sessions this fleet thinks are gone are still being held — the resume grace keeps a link-dead avatar standing for 60 seconds.">Server sessions</th><td>@_snapshot.ServerSessions.ToString("N0", CultureInfo.InvariantCulture) (the server's own count)</td></tr>
+            <tr>
+                <th title="Per-second rates, differenced against the previous sample rather than averaged over the run. This is the row to watch when you move the dial: the cumulative figures take a minute to reflect a change, while the derivative shows it immediately.">Now</th>
+                @* The DERIVATIVES, which is what an operator moving a slider actually needs: a run-long average drifts for a minute
+                   after a change while the thing worth watching is what the fleet is doing this second. *@
+                <td>
+                    @_snapshot.MessagesPerSecond.ToString("N0", CultureInfo.InvariantCulture) msg/s ·
+                    @Mib(_snapshot.BytesPerSecond) ·
+                    @_snapshot.IntentsPerSecond.ToString("N0", CultureInfo.InvariantCulture) intents/s
+                </td>
+            </tr>
+            <tr><th title="MoveDir intents this fleet has sent. Zero with player sessions bound means the population is standing still, which measures replication only and leaves the intent path, the spatial index and cluster migration untouched.">Movement</th>
+                <td>
+                    @if (_snapshot.IntentsSent == 0)
+                    {
+                        <strong>no intents sent — the population is standing still</strong>
+                    }
+                    else
+                    {
+                        @($"{_snapshot.IntentsSent:N0} MoveDir sent")
+                    }
+                </td>
+            </tr>
+            <tr><th title="Cumulative messages and bytes received since the run started. Use the per-second row above to see what the fleet is doing now; these drift for a minute after any change.">Totals</th><td>@_snapshot.Messages.ToString("N0", CultureInfo.InvariantCulture) messages · @Mib(_snapshot.Bytes) total</td></tr>
+            <tr><th title="Bytes per second per session, averaged over the run — the capacity number, since it is what multiplies by the population you are planning for. Across AZs this is also the bill: 1000 sessions at 20 KB/s is about $1050 a month.">Wire per session</th><td>@_snapshot.BytesPerSessionPerSecond.ToString("N0", CultureInfo.InvariantCulture) B/s</td></tr>
+            <tr>
+                <th title="What the SERVER says it closed, read from its own stats endpoint rather than inferred from close codes. A session closed for silence (4001) reaches this process as 1006 - an abnormal close with no code - because the server's close drain overtakes the code, so the Disconnects row below cannot tell you this and used to leave it to be guessed at. Silence means this box failed to ping inside 3/pingHz seconds; lagging means the server shed a client whose backlog it could not drain.">Closed by the server</th>
+                <td>
+                    @if (_snapshot.ServerStatsError != null)
+                    {
+                        <span>stats unavailable: @_snapshot.ServerStatsError</span>
+                    }
+                    else
+                    {
+                        @($"silence {_snapshot.ServerClosedSilent:N0} · lagging {_snapshot.ServerClosedLagging:N0}")
+                    }
+                </td>
+            </tr>
+            <tr>
+                <th title="Sessions this fleet found closed and replaced. The reconciler reads every bot's socket each round, takes the dead ones out of the population and re-opens to the target - so a run whose target never moved and whose figure here is in the thousands HELD its population by replacing it, which is a weaker claim than having kept it. Before this existed a closed session stayed in the count forever and the dial never recovered a single loss.">Replaced after loss</th>
+                <td>@_snapshot.RetiredDead.ToString("N0", CultureInfo.InvariantCulture)</td>
+            </tr>
+            <tr>
+                <th title="How long one pass of pinging every session takes, last and worst. This is the number that decides whether the fleet keeps its population: the server closes a session it has not heard from within 3/pingHz seconds - 750 ms at 4 Hz - and the ping loop has its own cadence, so a sweep approaching that window is the warning that precedes a silence close. Beside it, total GC pause in this process, because a collection long enough to delay a sweep is the usual cause.">Ping sweep · GC</th>
+                <td>@($"{_snapshot.PingSweepMs:F0} ms (worst {_snapshot.PingSweepWorstMs:F0}) · GC paused {_snapshot.GcPauseMs:F0} ms")</td>
+            </tr>
+            <tr><th title="Exceptions raised inside the clients' own receive loops. Not disconnects: a fault is a decode or protocol error on a session that may still be up, and any non-zero value makes the figures suspect.">Receive-loop faults</th><td>@_snapshot.Faults</td></tr>
+            <tr>
+                <th title="Sessions asked for that never opened, with the first reason. The reason matters more than the count: a server refusing because its session table is full looks exactly like a generator that stopped trying, and the close reason used to be discarded one line above the counter that said something had failed.">Could not open</th>
+                <td>
+                    @if (_snapshot.OpenFailures == 0)
+                    {
+                        <text>none</text>
+                    }
+                    else
+                    {
+                        @* The REASON, which this panel used to leave out: a server refusing for a full session table looked exactly
+                           like a generator that had stopped trying, and that cost an afternoon. *@
+                        <strong>@_snapshot.OpenFailures refused or failed</strong>
+                        <text> — first: @_snapshot.FirstOpenFailure</text>
+                    }
+                </td>
+            </tr>
+            <tr>
+                <th title="Sessions lost, by WebSocket close code. 1006 is an abnormal close with no code, usually this box failing to keep up. 1013 is the server shedding a client under load. 4001 means the fleet stopped pinging. 4102 means not authenticated, 4103 that the house is full.">Disconnects</th>
+                <td>
+                    @if (_snapshot.Disconnects.Count == 0)
+                    {
+                        <text>none</text>
+                    }
+                    else
+                    {
+                        @* By close code, because that is the measurement: 1013 means the server shed this client, 4001 means the
+                           fleet failed to ping, 4102 means it was not authenticated. "Some sessions dropped" says none of that. *@
+                        @string.Join(" · ", _snapshot.Disconnects.Select(d => $"{d.Key}: {d.Value}"))
+                    }
+                </td>
+            </tr>
+        </tbody>
+    </table>
+</section>
+
+<section class="panel">
+    <h2>Log</h2>
+    <pre>@string.Join("\n", _log)</pre>
+</section>
+
+@code {
+    private FleetSnapshot _snapshot;
+    private string[] _log = [];
+    private bool _disposed;
+
+    /// <summary>The live controls, held apart from <see cref="Settings"/> because that form is the NEXT run's configuration.</summary>
+    /// <remarks>
+    /// Separate fields rather than reusing the form: the form is disabled while a run is up, and it describes the run that was
+    /// started — editing it to drive a live change would leave the panel claiming a configuration the run does not have.
+    /// </remarks>
+    private int _liveTarget;
+
+    private int _liveLatencyMs;
+    private int _liveJitterMs;
+
+    /// <summary>Whether a run is up, which is what disables the form.</summary>
+    private bool Busy => Runner.Busy;
+
+    protected override void OnInitialized()
+    {
+        Runner.Changed += OnChanged;
+        Refresh();
+    }
+
+    public void Dispose()
+    {
+        // The flag before the unsubscribe: a notification already in flight can still reach OnChanged, and InvokeAsync on a
+        // torn-down circuit throws ObjectDisposedException — which, on a discarded task, surfaced nowhere at all.
+        _disposed = true;
+        Runner.Changed -= OnChanged;
+    }
+
+    /// <summary>Starts the fleet, keeping a failure on the page rather than as an unhandled circuit error.</summary>
+    private async Task StartAsync()
+    {
+        try
+        {
+            await Runner.StartAsync(Settings);
+        }
+        catch (Exception)
+        {
+            // FleetRunner has already recorded the fault and moved to Faulted, and the snapshot shows it. Letting it escape here
+            // would tear the Blazor circuit down and replace a readable message with a blank page.
+        }
+
+        Refresh();
+    }
+
+    /// <summary>Moves the live population to whatever is in the box.</summary>
+    private void ApplyTarget()
+    {
+        _liveTarget = Runner.SetTarget(_liveTarget);
+        Refresh();
+    }
+
+    /// <summary>Nudges the live population by a step, for the common case of "a bit more, and again".</summary>
+    /// <param name="by">Sessions to add, or remove when negative.</param>
+    private void Step(int by)
+    {
+        // Stepped from what is RUNNING rather than from the box, so repeated presses do not compound an edit the operator made and
+        // then forgot about.
+        _liveTarget = Runner.SetTarget(Math.Max(0, _snapshot.Target + by));
+        Refresh();
+    }
+
+    /// <summary>Re-shapes the interface without touching the sessions.</summary>
+    private async Task ApplyShaping()
+    {
+        await Runner.ReshapeAsync(_liveLatencyMs, _liveJitterMs);
+        Refresh();
+    }
+
+    /// <summary>Stops the fleet.</summary>
+    private async Task StopAsync()
+    {
+        await Runner.StopAsync();
+        Refresh();
+    }
+
+    /// <summary>
+    /// Pulls a new snapshot onto the page, from whichever thread raised the event.
+    /// </summary>
+    /// <remarks>
+    /// <c>InvokeAsync</c> because <c>Changed</c> is raised from the runner's own timer and from its connect loop — not from the
+    /// renderer's synchronisation context. Calling <c>StateHasChanged</c> directly from there is the classic Blazor Server race:
+    /// it works until the day two threads render at once.
+    /// </remarks>
+    private void OnChanged()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        // The task is OBSERVED rather than discarded. `_ = InvokeAsync(...)` dropped two real exceptions on the floor: a throw
+        // from Refresh, and the ObjectDisposedException InvokeAsync raises once the circuit is gone. FleetRunner.Notify's own
+        // try/catch cannot see either, because by then the work is on the renderer's queue and not on its call stack.
+        _ = ObserveAsync();
+    }
+
+    /// <summary>Re-renders, swallowing only what a torn-down circuit legitimately throws.</summary>
+    private async Task ObserveAsync()
+    {
+        try
+        {
+            await InvokeAsync(Refresh);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The circuit went away between the notification and the render. Expected, and nothing to report to anyone.
+        }
+        catch (OperationCanceledException)
+        {
+            // Same.
+        }
+    }
+
+    /// <summary>Reads the runner once and re-renders.</summary>
+    private void Refresh()
+    {
+        _snapshot = Runner.Snapshot();
+        _log = Runner.Log();
+
+        // Seeded from the run, once. After that the boxes are the operator's: overwriting them every second would snatch a number
+        // out from under somebody typing it, which at 1 Hz is unusable.
+        if (!_seeded && _snapshot.Capacity > 0)
+        {
+            _seeded = true;
+            _liveTarget = _snapshot.Target;
+            _liveLatencyMs = Settings.LatencyMs;
+            _liveJitterMs = Settings.JitterMs;
+        }
+
+        StateHasChanged();
+    }
+
+    private bool _seeded;
+
+    /// <summary>A millisecond figure, or a dash when the server has not reported one yet.</summary>
+    /// <param name="value">The value.</param>
+    /// <returns>The text.</returns>
+    private static string Ms(double value)
+        => value > 0 ? value.ToString("F2", CultureInfo.InvariantCulture) + " ms" : "—";
+
+    /// <summary>Bytes as something readable at a glance: a fleet's wire figures span kilobytes to tens of gigabytes in one run.</summary>
+    /// <param name="bytes">The count.</param>
+    /// <returns>The figure, with a unit.</returns>
+    private static string Mib(long bytes)
+    {
+        if (bytes >= 1L << 30)
+        {
+            return ((double)bytes / (1L << 30)).ToString("F2", CultureInfo.InvariantCulture) + " GiB";
+        }
+
+        if (bytes >= 1L << 20)
+        {
+            return ((double)bytes / (1L << 20)).ToString("F1", CultureInfo.InvariantCulture) + " MiB";
+        }
+
+        return bytes >= 1024
+            ? ((double)bytes / 1024).ToString("F0", CultureInfo.InvariantCulture) + " KiB"
+            : bytes.ToString("N0", CultureInfo.InvariantCulture) + " B";
+    }
+}

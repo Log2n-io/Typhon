@@ -28,19 +28,19 @@ class BlueprintCheckTests(unittest.TestCase):
         self.root = tempfile.mkdtemp(prefix="blueprint-check-")
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
-        self.blueprint = os.path.join(self.root, "demo", "SwgTatooine", "Replication")
-        self.sim = os.path.join(self.root, "demo", "SwgTatooine", "Sim")
+        self.blueprint = os.path.join(self.root, "demo", "SwgTatooine", "SwgTatooine.Server", "Replication")
+        self.sim = os.path.join(self.root, "demo", "SwgTatooine", "SwgTatooine.Server", "Sim")
         self.properties = os.path.join(self.root, "src", "Typhon.Engine", "Properties")
         for directory in (self.blueprint, self.sim, self.properties):
             os.makedirs(directory, exist_ok=True)
 
         self.write(os.path.join(self.blueprint, "Replication.cs"), "class R { void Declare() { } }\n")
-        self.write(os.path.join(self.properties, "AssemblyInfo.cs"), '[assembly: InternalsVisibleTo("SwgTatooine")]\n')
+        self.write(os.path.join(self.properties, "AssemblyInfo.cs"), '[assembly: InternalsVisibleTo("SwgTatooine.Server")]\n')
 
         self.module = load(self.root)
         # One allow-listed file in debt, so the friend line is justified and the ratchet has a baseline.
         self.write(os.path.join(self.sim, "TatooineSim.cs"), "class S { ArchetypeClusterState _cs; }\n")
-        self.module.INTERNALS_ALLOWLIST = {"demo/SwgTatooine/Sim/TatooineSim.cs": "the knobs"}
+        self.module.INTERNALS_ALLOWLIST = {"demo/SwgTatooine/SwgTatooine.Server/Sim/TatooineSim.cs": "the knobs"}
 
     @staticmethod
     def write(path, text):

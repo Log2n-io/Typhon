@@ -36037,6 +36037,24 @@
             "description": "`SubscriptionsSessionTelemetry` event payload — degrade level.",
             "format": "int32"
           },
+          "framesPerSec": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SubscriptionsSessionTelemetry` event payload — frames per sec.",
+            "format": "float"
+          },
+          "framesProduced": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsSessionTelemetry` event payload — frames produced.",
+            "format": "int64"
+          },
           "threadSlot": {
             "pattern": "^-?(?:0|[1-9]\\d*)$",
             "type": [

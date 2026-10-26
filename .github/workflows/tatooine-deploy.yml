@@ -1,0 +1,233 @@
+# I6 + I9 + I10 — deploy a payload to a Tatooine stack over SSM, with no SSH and no stored keys.
+#
+# Manual only. Nothing about the game deploys on a push: 08-hosting § 11.2's prod is "off by default, started on demand",
+# and an ephemeral stack is created by tatooine-ephemeral.yml, which calls this.
+#
+#   build  -> publish both payloads, upload to S3 under a key naming the commit
+#   deploy -> stage the release, then (prod) snapshot + schema gate, then swap the symlink and restart
+#
+# I10 is the gate and it is the step that earns this workflow's keep: adding a component to an existing archetype on
+# reopen is a known landmine (EN-8), every long-lived world hits it the first time a field is added, and this turns that
+# from an outage into a failed deploy.
+#
+# THE GATE RUNS INSIDE THE DEPLOY, WITH THE SERVICE STOPPED, and that is a correctness requirement rather than a tidying.
+# It used to be its own job that `cp -a`'d the world while the server was writing to it: a copy taken across many files
+# at different instants is not even crash-consistent, so the gate could fail -- or pass -- for reasons that had nothing
+# to do with the schema. Stopping first makes the copy a real point-in-time world, and it costs no extra downtime
+# because the deploy restarts the service anyway.
+name: tatooine-deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      stack:
+        description: Which stack to deploy to (the terraform `name`)
+        type: string
+        required: true
+        default: demo
+      server_instance:
+        description: The server instance id (terraform output server_instance_id)
+        type: string
+        required: true
+      bot_instances:
+        description: Bot instance ids, comma-separated. Empty deploys only the server.
+        type: string
+        required: false
+        default: ''
+      schema_gate:
+        description: Open the existing world with the new build before swapping. REQUIRED for prod.
+        type: boolean
+        required: true
+        default: true
+  workflow_call:
+    inputs:
+      stack:
+        type: string
+        required: true
+      server_instance:
+        type: string
+        required: true
+      bot_instances:
+        type: string
+        required: false
+        default: ''
+      schema_gate:
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  # I9: GitHub mints an OIDC token, AWS exchanges it for short-lived credentials, and no AWS key is ever stored in this
+  # repository. The existing benchmark.yml still uses AWS_ACCESS_KEY_ID secrets; replacing those is I9's remaining half.
+  id-token: write
+
+env:
+  AWS_REGION: eu-west-1
+
+concurrency:
+  # One deploy per stack at a time. Two concurrent deploys would race on the `current` symlink and the box would end up
+  # running one build's binary against the other's client.
+  group: tatooine-deploy-${{ inputs.stack }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      key: ${{ steps.publish.outputs.key }}
+      commit: ${{ steps.publish.outputs.commit }}
+      bucket: ${{ steps.bucket.outputs.bucket }}
+    env:
+      # Through the environment, never spliced into a `run:` body. A workflow input is attacker-controlled in the general
+      # case, and `${{ }}` is substituted textually BEFORE bash parses the script -- so a value containing a quote ends
+      # the string and the rest is executed. `env:` passes it as data instead, and this is the rule for every input in
+      # this file.
+      STACK: ${{ inputs.stack }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The publish script asks git for the commit and whether the tree is dirty, which needs real history.
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Refuse a stack name that is not a stack name
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$STACK" | grep -Eq '^[a-z][a-z0-9-]{1,30}$'; then
+            echo "::error::'$STACK' is not a valid stack name (2-31 chars, starts with a letter, lowercase/digits/hyphens)"
+            exit 1
+          fi
+
+      # The 3D asset set is not in git: it is a release of this repository, pinned in assets.lock.json. The server refuses
+      # to serve without it, so the payload carries it and the publish script refuses a payload that would not.
+      - name: Fetch the published asset set
+        run: python3 demo/SwgTatooine/SwgTatooine.Assets/scripts/assets.py fetch published
+
+      - name: Publish the server and the bot box
+        id: publish
+        shell: pwsh
+        run: |
+          ./scripts/publish-swg.ps1 -Runtime linux-x64 -Archive
+          # linux-arm64 for the bots: they are client code, so the arm64 caution that holds the SERVER back (08-hosting
+          # § 1, the torn-page-with-valid-CRC class) does not apply to them, and Graviton is 26 % cheaper.
+          ./scripts/publish-swg-bots.ps1 -Runtime linux-arm64 -Archive
+          $commit = (git rev-parse --short HEAD).Trim()
+          "commit=$commit"                   >> $env:GITHUB_OUTPUT
+          "key=$env:STACK/$commit"           >> $env:GITHUB_OUTPUT
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      # DERIVED, not a secret, and it has to be: iam.tf makes the payload bucket PER STACK
+      # (`tatooine-payload-<account>-<name>`) because one bucket shared by every stack meant an ephemeral destroy
+      # targeted prod's payload history. A single TATOOINE_PAYLOAD_BUCKET secret cannot name a per-stack bucket, so this
+      # job uploaded to whatever one bucket the secret held while the instance's IAM policy granted it read on its own --
+      # a deploy that succeeds here and then cannot be fetched on the box.
+      - name: Name this stack's payload bucket
+        id: bucket
+        run: |
+          set -euo pipefail
+          account=$(aws sts get-caller-identity --query Account --output text)
+          echo "bucket=tatooine-payload-$account-$STACK" >> "$GITHUB_OUTPUT"
+
+      - name: Upload both payloads
+        env:
+          BUCKET: ${{ steps.bucket.outputs.bucket }}
+          KEY: ${{ steps.publish.outputs.key }}
+        run: |
+          set -euo pipefail
+          aws s3 cp artifacts/swg-linux-x64.tar.gz        "s3://$BUCKET/$KEY/server.tar.gz"
+          aws s3 cp artifacts/swg-bots-linux-arm64.tar.gz "s3://$BUCKET/$KEY/bots.tar.gz"
+          echo "payload at s3://$BUCKET/$KEY/"
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      BUCKET: ${{ needs.build.outputs.bucket }}
+      KEY: ${{ needs.build.outputs.key }}
+      COMMIT: ${{ needs.build.outputs.commit }}
+      SERVER: ${{ inputs.server_instance }}
+      BOTS: ${{ inputs.bot_instances }}
+      STACK: ${{ inputs.stack }}
+      GATE: ${{ inputs.schema_gate }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      # Before anything is stopped, so a gate that passes and a deploy that then goes wrong still has a point to restore
+      # to. Typhon has no backup/restore implementation (overview/07-backup.md), so this snapshot IS prod's backup --
+      # and it is crash-consistent, which makes every restore a real power-loss recovery test.
+      - name: Snapshot the world
+        if: inputs.schema_gate
+        run: |
+          set -euo pipefail
+          volume=$(aws ec2 describe-instances --instance-ids "$SERVER" \
+            --query "Reservations[0].Instances[0].BlockDeviceMappings[?DeviceName!='/dev/sda1'].Ebs.VolumeId | [0]" --output text)
+          if [ "$volume" = "None" ] || [ -z "$volume" ]; then
+            echo "::notice::no data volume on this stack; ephemeral worlds die with the instance, so there is nothing to snapshot"
+            exit 0
+          fi
+
+          snapshot=$(aws ec2 create-snapshot --volume-id "$volume" \
+            --description "tatooine $STACK pre-deploy $COMMIT" \
+            --tag-specifications 'ResourceType=snapshot,Tags=[{Key=project,Value=tatooine}]' \
+            --query SnapshotId --output text)
+          echo "::notice::snapshot $snapshot of $volume"
+
+      - name: Stage, gate and swap
+        run: |
+          set -euo pipefail
+
+          # The remote script is built with a QUOTED heredoc, so the runner's shell expands nothing: every value it needs
+          # arrives as an exported variable at the top instead. The previous version used an unquoted heredoc and relied
+          # on escaping each `\$` by hand, which is a quoting puzzle that only has to be got wrong once.
+          {
+            printf 'set -eu\n'
+            printf 'BUCKET=%q\n' "$BUCKET"
+            printf 'KEY=%q\n'    "$KEY"
+            printf 'COMMIT=%q\n' "$COMMIT"
+            printf 'GATE=%q\n'   "$GATE"
+            cat .github/scripts/tatooine-deploy-server.sh
+          } > remote.sh
+
+          bash .github/scripts/ssm-run.sh "$SERVER" "$(cat remote.sh)" 1200
+
+      - name: Deploy the bot boxes
+        if: inputs.bot_instances != ''
+        run: |
+          set -euo pipefail
+          {
+            printf 'set -eu\n'
+            printf 'BUCKET=%q\n' "$BUCKET"
+            printf 'KEY=%q\n'    "$KEY"
+            printf 'COMMIT=%q\n' "$COMMIT"
+            cat .github/scripts/tatooine-deploy-bots.sh
+          } > remote-bots.sh
+
+          for instance in $(printf '%s' "$BOTS" | tr ',' ' '); do
+            bash .github/scripts/ssm-run.sh "$instance" "$(cat remote-bots.sh)" 600
+          done
+
+      - name: How to roll back
+        if: always()
+        run: |
+          echo "Rollback is the previous symlink. Over SSM:"
+          echo "  ln -sfnT /opt/tatooine/releases/<previous> /opt/tatooine/current && systemctl restart tatooine.service"
+          echo "Releases on the box are listed at the end of the deploy step above."

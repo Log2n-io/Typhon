@@ -1,0 +1,833 @@
+using System;
+using System.Collections.Generic;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.HttpResults;
+using NUnit.Framework;
+using SwgTatooine.Server;
+using SwgTatooine.Server.Accounts;
+using Typhon.Engine;
+using Typhon.Protocol;
+
+namespace SwgTatooine.Tests;
+
+/// <summary>
+/// The mission desk (claude/design/SwgTatooine/design/missions.md § 7): terminals list offers, one taker wins, a held mission's lair is drawn round its
+/// anchor while its holder is online, and it ends when its holder breaks the lair or cancels.
+/// </summary>
+/// <remarks>
+/// <b>The crowd is kept off the terminals</b> (<see cref="SimConfig.CrowdTakesMissions"/>): a case that takes one particular offer must not find a scripted
+/// body took it first. The crowd's own missions are <see cref="CausalityLoopTests"/>' — a measured run where the crowd takes them, fights and completes.
+/// </remarks>
+[Category("Integration")]
+[TestFixture]
+[NonParallelizable]
+internal sealed class MissionDeskChecks : ServedChecks
+{
+    private SimConfig Config(bool persist = false)
+    {
+        var config = Worlds.Served(Dir);
+        config.WorkerCount = 1;
+        config.CrowdTakesMissions = false;
+        config.Persist = persist;
+        return config;
+    }
+
+    private TatooineSim Start(bool persist = false)
+    {
+        var sim = new TatooineSim(Config(persist));
+        sim.Initialize();
+        Harness = new SessionHarness(sim);
+        return sim;
+    }
+
+    /// <summary>Logs an account in, parks its body at the terminal, and waits for the terminal's offers to reach its view.</summary>
+    private FakeLink LogInAt(TatooineSim sim, EntityId account, MissionTerminalRef terminal, long bindings = 1)
+    {
+        var link = Harness.Connect(TatooineReplication.PlayerKind, account);
+        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= bindings, "the avatar to be spawned");
+        Harness.Ticks(2);
+        Worlds.Park(sim, link.Session, terminal.X + 2f, terminal.Z, out var parked);
+        var first = Offers(sim, terminal)[0].Id;
+        SessionHarness.UntilNamed(link.Session, first, "the terminal's offers to reach the client's view", parked);
+        return link;
+    }
+
+    private static EntityId AnAccount(ulong id) => EntityId.FromRawValue(id);
+
+    private static MissionTerminalRef FirstTerminal(TatooineSim sim)
+    {
+        Assert.That(sim.Index.Terminals, Is.Not.Empty, "the premise: the world has a mission terminal");
+        return sim.Index.Terminals[0];
+    }
+
+    /// <summary>The offers listed at a terminal, in no particular order.</summary>
+    /// <remarks>
+    /// <b>Read on the tick, not beside it.</b> An offer is SingleVersion: read from the test thread while the desk's commit published, a cluster walk yielded
+    /// the offer just taken — its occupancy bit not yet cleared — while point access already said it was gone, and the case took a taken offer (5 runs in
+    /// 10). Between ticks the two agree.
+    /// </remarks>
+    private static List<(EntityId Id, MissionOfferInfo Info)> Offers(TatooineSim sim, MissionTerminalRef terminal)
+    {
+        var rows = new List<(EntityId, MissionOfferInfo)>();
+        sim.WriteInTick(tx =>
+        {
+            foreach (var cluster in tx.For<MissionOffer>().GetClusterEnumerator())
+            {
+                var infos = cluster.GetReadOnlySpan(MissionOffer.Info);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    if (infos[slot].Terminal == terminal.Id)
+                    {
+                        rows.Add((cluster.GetEntityId(slot), infos[slot]));
+                    }
+                }
+            }
+        });
+
+        return rows;
+    }
+
+    private static EntityId CharacterOf(TatooineSim sim, EntityId account)
+    {
+        Assert.That(CharacterStore.TryFind(sim.Dbe, account, out var character, out _), Is.True, "the account has no character");
+        return character;
+    }
+
+    /// <summary>The missions a holder has, read the way the journal reads them: through the index.</summary>
+    private static List<(EntityId Id, HeldMission Mission)> Held(TatooineSim sim, EntityId holder)
+    {
+        var rows = new List<(EntityId, HeldMission)>();
+        var key = unchecked((long)holder.RawValue);
+        var indexRef = sim.Dbe.GetIndexRef<HeldMission, EntityId>(m => m.Holder);
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        using var found = tx.EnumerateIndex<HeldMission, long>(indexRef, key, key);
+        while (found.MoveNext())
+        {
+            rows.Add((EntityId.FromRawValue((ulong)found.CurrentEntityPK), found.CurrentComponent));
+        }
+
+        return rows;
+    }
+
+    private static void Take(FakeLink link, EntityId offer, uint serial)
+        => link.SendCommand(nameof(TakeMission), new RecordValues
+        {
+            ["offer"] = FieldValue.Of(SessionHarness.NetIdOf(link.Session, offer)),
+            ["serial"] = FieldValue.Of(serial),
+        });
+
+    /// <summary>Takes an offer and waits until the character holds one more mission than before, its lair drawn.</summary>
+    private (EntityId Id, HeldMission Mission) TakeAndHold(TatooineSim sim, FakeLink link, EntityId character, (EntityId Id, MissionOfferInfo Info) offer)
+    {
+        var before = Held(sim, character).Count;
+        Take(link, offer.Id, offer.Info.Serial);
+        try
+        {
+            SessionHarness.Until(() => Held(sim, character).Count > before, "the mission to be held");
+        }
+        catch (AssertionException)
+        {
+            throw new AssertionException(
+                $"the mission was not held; refusals sent: [{string.Join(", ", Refusals(link))}]; held {Held(sim, character).Count} (before {before}); "
+                + $"offer exists {Exists(sim, offer.Id)}, netId now {SessionHarness.NetIdOf(link.Session, offer.Id)}, refused {sim.Bridge.MissionTakesRefused}");
+        }
+        var held = Held(sim, character).Find(h => h.Mission.Kind == offer.Info.Kind && h.Mission.AnchorX == offer.Info.AnchorX);
+        Assert.That(held.Id.IsNull, Is.False, "the mission held is not the offer taken");
+        SessionHarness.Until(() => !Held(sim, character).Find(h => h.Id == held.Id).Mission.Lair.IsNull, "the mission's lair to be drawn");
+        return Held(sim, character).Find(h => h.Id == held.Id);
+    }
+
+    private static (int Credits, int JournalRev) BodyOf(TatooineSim sim, SessionId session)
+    {
+        var body = TatooineReplication.ControlledBy(sim.Dbe, session);
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        var player = tx.Open(body);
+        return ((int)player.Read(Player.Inventory).Credits, player.Read(Player.State).JournalRev);
+    }
+
+    private static bool Exists(TatooineSim sim, EntityId id)
+    {
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        return tx.TryOpen(id, out _);
+    }
+
+    /// <summary>Every <c>ACKS</c> reason this session was sent.</summary>
+    private static byte[] Refusals(FakeLink link)
+    {
+        var sink = new AckSink { Reasons = [] };
+        var frame = default(RealmFrame);
+        var sent = link.Sent;
+        for (var i = 0; i < sent.Length; i++)
+        {
+            if (sent[i].Length > 0 && sent[i][0] == MessageTypes.Tick)
+            {
+                TickReader.Read(sent[i], link.Plan, ref frame, ref sink);
+            }
+        }
+
+        return [.. sink.Reasons];
+    }
+
+    // ── M-1: the lists ──────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// M-1: every terminal lists its offers, each 0.5-2 km out, outside every city, its direction and distance true of its anchor to within an eighth and
+    /// 50 m.
+    /// </summary>
+    [Test]
+    [CancelAfter(90_000)]
+    public void EveryTerminalListsItsOffers_EachAboutWhereItSays()
+    {
+        using var sim = Start();
+        Harness.Ticks(3);
+        var scale = sim.Config.ContentScale;
+        Assert.Multiple(() =>
+        {
+            foreach (var terminal in sim.Index.Terminals)
+            {
+                var offers = Offers(sim, terminal);
+                Assert.That(offers, Has.Count.EqualTo(TatooineData.MissionOffersPerTerminal), $"terminal at {terminal.X:F0},{terminal.Z:F0}");
+                foreach (var (_, info) in offers)
+                {
+                    var dx = info.AnchorX - terminal.X;
+                    var dz = info.AnchorZ - terminal.Z;
+                    var d = MathF.Sqrt((dx * dx) + (dz * dz));
+                    Assert.That(d, Is.InRange(TatooineData.MissionMinDistanceM * scale - 1f, TatooineData.MissionMaxDistanceM * scale + 1f), "anchor distance");
+                    Assert.That(MathF.Abs(info.DistanceM - d), Is.LessThanOrEqualTo(50f), "the listed distance is the anchor's, rounded to 100 m");
+                    Assert.That(info.Octant, Is.EqualTo(TatooineData.OctantOf(dx, dz)), "the listed direction is the anchor's");
+                    Assert.That(info.Difficulty, Is.EqualTo(1));
+                    Assert.That(info.Reward, Is.EqualTo(TatooineData.MissionReward(1, d / scale)).Within(5), "the reward follows the distance");
+                    foreach (var city in sim.Index.Cities)
+                    {
+                        var cx = info.AnchorX - city.X;
+                        var cz = info.AnchorZ - city.Z;
+                        Assert.That((cx * cx) + (cz * cz), Is.GreaterThanOrEqualTo(city.Radius * city.Radius), "an anchor inside a city");
+                    }
+                }
+            }
+        });
+    }
+
+    /// <summary>The direction an offer reads is the eighth of the compass its anchor lies in: north is +Z, east +X, clockwise.</summary>
+    [TestCase(0f, 1f, 0)]
+    [TestCase(1f, 1f, 1)]
+    [TestCase(1f, 0f, 2)]
+    [TestCase(1f, -1f, 3)]
+    [TestCase(0f, -1f, 4)]
+    [TestCase(-1f, -1f, 5)]
+    [TestCase(-1f, 0f, 6)]
+    [TestCase(-1f, 1f, 7)]
+    [TestCase(0.38f, 1f, 0)]
+    [TestCase(0.42f, 1f, 1)]
+    public void TheOctantIsTheCompassEighth(float dx, float dz, int octant) => Assert.That(TatooineData.OctantOf(dx, dz), Is.EqualTo(octant));
+
+    /// <summary>The reward: per difficulty, a base and as much again per kilometre, to the nearest 5.</summary>
+    [Test]
+    public void TheRewardGrowsWithDistanceAndDifficulty()
+    {
+        Assert.Multiple(() =>
+        {
+            Assert.That(TatooineData.MissionReward(1, 500f), Is.EqualTo(150));
+            Assert.That(TatooineData.MissionReward(1, 2000f), Is.EqualTo(300));
+            Assert.That(TatooineData.MissionReward(2, 1000f), Is.EqualTo(400));
+            Assert.That(TatooineData.MissionReward(1, 1234f) % 5, Is.Zero);
+        });
+    }
+
+    // ── M-2, M-3: taking ────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>M-2: two players take the same offer: exactly one holds it, the other is told it is taken, and the terminal lists its 20 again.</summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void TwoTakersOfOneOffer_OneHoldsIt_TheOtherIsToldItIsTaken()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var a = LogInAt(sim, AnAccount(0x6001), terminal, bindings: 1);
+        var b = LogInAt(sim, AnAccount(0x6002), terminal, bindings: 2);
+        var ca = CharacterOf(sim, AnAccount(0x6001));
+        var cb = CharacterOf(sim, AnAccount(0x6002));
+        var offer = Offers(sim, terminal)[0];
+        SessionHarness.UntilNamed(b.Session, offer.Id, "the offer to reach the second view");
+
+        Take(a, offer.Id, offer.Info.Serial);
+        Take(b, offer.Id, offer.Info.Serial);
+        SessionHarness.Until(() => Held(sim, ca).Count + Held(sim, cb).Count >= 1 && sim.Bridge.MissionTakesRefused >= 1, "both takes to be answered");
+        Harness.Ticks(3);
+
+        var held = Held(sim, ca).Count + Held(sim, cb).Count;
+        var loser = Held(sim, ca).Count == 1 ? b : a;
+        Assert.Multiple(() =>
+        {
+            Assert.That(held, Is.EqualTo(1), "one offer, two holders");
+            Assert.That(Refusals(loser), Contains.Item(TatooineReplication.MissionTaken), "the second taker was not told the mission is taken");
+            Assert.That(Exists(sim, offer.Id), Is.False, "a taken offer is still listed");
+            Assert.That(Offers(sim, terminal), Has.Count.EqualTo(TatooineData.MissionOffersPerTerminal), "the terminal did not list a replacement");
+        });
+    }
+
+    /// <summary>M-3: a take from away from the terminal is refused as too far, and a fourth held mission as over the cap.</summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void TooFarFromTheTerminal_OrPastThreeHeld_IsRefused()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x6003), terminal);
+        var character = CharacterOf(sim, AnAccount(0x6003));
+
+        // 10 m out: inside the view, past the terminal's reach.
+        Worlds.Park(sim, link.Session, terminal.X + 10f, terminal.Z);
+        Harness.Ticks(3);
+        var far = Offers(sim, terminal)[0];
+        Take(link, far.Id, far.Info.Serial);
+        SessionHarness.Until(() => sim.Bridge.MissionTakesRefused >= 1, "the take from afar to be refused");
+        Harness.Ticks(3);
+        Assert.That(Refusals(link), Contains.Item(TatooineReplication.MissionTooFar));
+        Assert.That(Held(sim, character), Is.Empty, "a take from afar was granted");
+
+        Worlds.Park(sim, link.Session, terminal.X + 2f, terminal.Z, out var back);
+        Harness.Ticks(3);
+        for (var i = 0; i < TatooineData.MaxConcurrentMissions; i++)
+        {
+            var offer = Offers(sim, terminal)[0];
+            SessionHarness.UntilNamed(link.Session, offer.Id, "the next offer to reach the view", back);
+            TakeAndHold(sim, link, character, offer);
+        }
+
+        var fourth = Offers(sim, terminal)[0];
+        SessionHarness.UntilNamed(link.Session, fourth.Id, "the fourth offer to reach the view");
+
+        // A second for the command's bucket (2 a second, a burst of 4): this is the fifth take in a few, and the engine would refuse it for its rate before
+        // the desk ever saw it — a refusal, but not the one this case is about.
+        Harness.Ticks(Worlds.ServedHz);
+        Take(link, fourth.Id, fourth.Info.Serial);
+        SessionHarness.Until(() => sim.Bridge.MissionTakesRefused >= 2, "the fourth take to be refused");
+        Harness.Ticks(3);
+        Assert.Multiple(() =>
+        {
+            Assert.That(Refusals(link), Contains.Item(TatooineReplication.MissionCap));
+            Assert.That(Held(sim, character), Has.Count.EqualTo(TatooineData.MaxConcurrentMissions));
+            Assert.That(Exists(sim, fourth.Id), Is.True, "a refused take took the offer off the list");
+        });
+    }
+
+    // ── M-4: the lair and the journal ───────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>M-4: a taken mission's lair stands round its anchor with its occupants, and the journal says where — its revision moved.</summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void ATakenMissionsLairStandsRoundItsAnchor_AndTheJournalSaysWhere()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x6004), terminal);
+        var character = CharacterOf(sim, AnAccount(0x6004));
+        var revBefore = BodyOf(sim, link.Session).JournalRev;
+        var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
+
+        Lair spawner;
+        LairPlacement place;
+        using (var tx = sim.Dbe.CreateQuickTransaction())
+        {
+            var lair = tx.Open(held.Mission.Lair);
+            spawner = lair.Read(CreatureLair.Spawner);
+            place = lair.Read(CreatureLair.Bounds);
+        }
+
+        var journal = MissionJournal.Json(sim.Dbe, character);
+        var dx = place.X - held.Mission.AnchorX;
+        var dz = place.Z - held.Mission.AnchorZ;
+        Assert.Multiple(() =>
+        {
+            Assert.That(MathF.Sqrt((dx * dx) + (dz * dz)), Is.LessThanOrEqualTo(TatooineData.MissionScatterM * sim.Config.ContentScale + 0.01f));
+            Assert.That(spawner.CreatureTemplate, Is.EqualTo(held.Mission.Kind), "the lair is not the kind the offer named");
+            Assert.That(spawner.AliveCount, Is.EqualTo(spawner.SpawnLimit).And.GreaterThan(0), "the lair has no occupants");
+            Assert.That(spawner.Mission, Is.EqualTo(held.Id), "the lair does not name its mission");
+            Assert.That(spawner.Site, Is.Zero, "a mission's lair belongs to no site, or the lair director would retire it");
+            Assert.That(BodyOf(sim, link.Session).JournalRev, Is.GreaterThan(revBefore), "the journal's revision did not move");
+            Assert.That(journal, Does.Contain($"\"id\":\"{held.Id.RawValue}\""));
+            Assert.That(journal, Does.Contain($"\"x\":{held.Mission.LairX.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)}"));
+            Assert.That(journal, Does.StartWith("{\"missions\":[{").And.EndWith("\"completed\":[]}"));
+        });
+    }
+
+    // ── M-5, M-6: the lair broken, or gone ──────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// M-5: the holder shoots its lair down, occupants already gone: paid the reward once, the mission and its lair gone, the journal moved.
+    /// </summary>
+    /// <remarks>
+    /// Staged at the lair: the body parked beside it, its occupants taken away and its health one blow, so the case is the desk and not a fight.
+    /// </remarks>
+    [Test]
+    [CancelAfter(120_000)]
+    public void TheHolderBreaksItsLair_PaidOnce_TheMissionEnds()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x6005), terminal);
+        var character = CharacterOf(sim, AnAccount(0x6005));
+        var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
+        var lair = held.Mission.Lair;
+
+        Clear(sim, lair, health: 5);
+        Worlds.Park(sim, link.Session, held.Mission.LairX + 10f, held.Mission.LairZ, out var parked);
+        SessionHarness.UntilNamed(link.Session, lair, "the lair to reach the client's view", parked);
+        var before = BodyOf(sim, link.Session);
+        link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(link.Session, lair)));
+        link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
+        SessionHarness.Until(() => Held(sim, character).Count == 0, "the mission to end");
+
+        // Past the next pass, or a second payment by it would go unseen.
+        Harness.Ticks((Worlds.ServedHz / SimBridge.MissionPassHz) + 2);
+
+        var after = BodyOf(sim, link.Session);
+        var journal = MissionJournal.Json(sim.Dbe, character);
+        Assert.Multiple(() =>
+        {
+            Assert.That(after.Credits - before.Credits, Is.EqualTo(held.Mission.Reward), "paid other than the reward, or more than once");
+            Assert.That(Exists(sim, lair), Is.False, "the broken lair still stands");
+            Assert.That(Exists(sim, held.Id), Is.False, "the mission is still held");
+            Assert.That(after.JournalRev, Is.GreaterThan(before.JournalRev), "the journal did not move");
+            Assert.That(journal, Does.StartWith("{\"missions\":[]"), "a completed mission is still in the journal");
+            Assert.That(journal, Does.Contain($"\"completed\":[{{\"id\":\"{held.Id.RawValue}\""), "the journal does not say it was completed");
+            Assert.That(journal, Does.Contain($"\"reward\":{held.Mission.Reward}}}"));
+        });
+    }
+
+    /// <summary>M-6: a lair broken without its holder's blow is drawn again, the mission still held and unpaid.</summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void ALairBrokenBySomebodyElse_IsDrawnAgain_TheMissionStillHeld()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x6006), terminal);
+        var character = CharacterOf(sim, AnAccount(0x6006));
+        var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
+        var credits = BodyOf(sim, link.Session).Credits;
+
+        sim.WriteInTick(tx =>
+        {
+            var l = tx.OpenMut(held.Mission.Lair);
+            var v = l.Read(CreatureLair.Vitals);
+            v.Health = 0;
+            l.Set(CreatureLair.Vitals, v);
+        });
+        SessionHarness.Until(() => Held(sim, character)[0].Mission.Lair != held.Mission.Lair, "a new lair to be drawn");
+        var now = Held(sim, character)[0];
+        Assert.Multiple(() =>
+        {
+            Assert.That(now.Id, Is.EqualTo(held.Id), "the mission was replaced, not its lair");
+            Assert.That(Exists(sim, held.Mission.Lair), Is.False, "the broken lair still stands");
+            Assert.That(Exists(sim, now.Mission.Lair), Is.True);
+            Assert.That(BodyOf(sim, link.Session).Credits, Is.EqualTo(credits), "paid for a lair somebody else broke");
+            Assert.That(sim.Bridge.MissionLairsRedrawn, Is.GreaterThanOrEqualTo(1));
+        });
+    }
+
+    /// <summary>M-6: a lair whose life runs out moves — drawn again round the same anchor.</summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void ALairWhoseLifeRunsOut_IsDrawnAgainRoundTheSameAnchor()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x6007), terminal);
+        var character = CharacterOf(sim, AnAccount(0x6007));
+        var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
+
+        sim.WriteInTick(tx =>
+        {
+            var l = tx.OpenMut(held.Mission.Lair);
+            var s = l.Read(CreatureLair.Spawner);
+            s.ExpireTick = 1;
+            l.Set(CreatureLair.Spawner, s);
+        });
+        SessionHarness.Until(() => Held(sim, character)[0].Mission.Lair != held.Mission.Lair, "the expired lair to move");
+        var now = Held(sim, character)[0].Mission;
+        var dx = now.LairX - now.AnchorX;
+        var dz = now.LairZ - now.AnchorZ;
+        Assert.Multiple(() =>
+        {
+            Assert.That(Exists(sim, held.Mission.Lair), Is.False);
+            Assert.That(MathF.Sqrt((dx * dx) + (dz * dz)), Is.LessThanOrEqualTo(TatooineData.MissionScatterM * sim.Config.ContentScale + 0.01f));
+        });
+    }
+
+    // ── M-7: offline, and across a restart ──────────────────────────────────────────────────────────────────────────
+
+    /// <summary>M-7: a logout takes the lair down and keeps the mission; the next login draws it again — and both survive a restart.</summary>
+    [Test]
+    [CancelAfter(180_000)]
+    public void ALogoutTakesTheLairDown_ALoginDrawsItAgain_AcrossARestart()
+    {
+        var account = AnAccount(0x6008);
+        EntityId mission;
+        using (var first = Start(persist: true))
+        {
+            var terminal = FirstTerminal(first);
+            var link = LogInAt(first, account, terminal);
+            var character = CharacterOf(first, account);
+            var held = TakeAndHold(first, link, character, Offers(first, terminal)[0]);
+            mission = held.Id;
+
+            link.Close(CloseCodes.Normal, "logging out");
+            SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed >= 1, "the avatar to be destroyed");
+            SessionHarness.Until(() => Held(first, character)[0].Mission.Lair.IsNull, "the offline holder's lair to go");
+            Assert.That(Exists(first, held.Mission.Lair), Is.False, "an offline holder's lair still stands");
+
+            // Back in: drawn again.
+            Harness.Connect(TatooineReplication.PlayerKind, account);
+            SessionHarness.Until(() => !Held(first, character)[0].Mission.Lair.IsNull, "the lair to be drawn again at login");
+            Harness.Release();
+        }
+
+        TatooineReplication.ResetSessionAccounting();
+        TatooineReplication.ResetIntentAccounting();
+
+        using var second = Start(persist: true);
+        Assert.That(second.Reopened, Is.True, "the second run must reopen the first's database, or this proves nothing");
+        var reopened = CharacterOf(second, account);
+        Harness.Ticks(2 * (Worlds.ServedHz / SimBridge.MissionPassHz));
+        Assert.That(Held(second, reopened), Has.Count.EqualTo(1), "the held mission did not survive the restart");
+        Assert.That(Held(second, reopened)[0].Id, Is.EqualTo(mission));
+        Assert.That(Held(second, reopened)[0].Mission.Lair.IsNull, Is.True, "nobody is online, so no lair stands for it");
+
+        Harness.Connect(TatooineReplication.PlayerKind, account);
+        SessionHarness.Until(() => !Held(second, reopened)[0].Mission.Lair.IsNull, "the lair to be drawn at the first login after the restart");
+    }
+
+    // ── M-8: cancelling ─────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// M-8: a cancel destroys the mission and its lair, and is not stated as a completion; a cancel of somebody else's real mission, or of none, is refused.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void ACancelEndsTheMissionAndItsLair_AndAStrangersIsRefused()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x6009), terminal, bindings: 1);
+        var stranger = LogInAt(sim, AnAccount(0x600A), terminal, bindings: 2);
+        var character = CharacterOf(sim, AnAccount(0x6009));
+        var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
+
+        // The stranger names the real mission: the holder check, not the lookup, must refuse it.
+        stranger.SendCommand(nameof(AbandonMission), new RecordValues { ["mission"] = FieldValue.OfUInt64(held.Id.RawValue) });
+        SessionHarness.Until(() => Array.IndexOf(Refusals(stranger), TatooineReplication.MissionUnknown) >= 0, "the stranger's cancel to be refused");
+        Assert.That(Held(sim, character), Has.Count.EqualTo(1), "a stranger cancelled somebody else's mission");
+
+        link.SendCommand(nameof(AbandonMission), new RecordValues { ["mission"] = FieldValue.OfUInt64(held.Id.RawValue + 1_000_000UL) });
+        link.SendCommand(nameof(AbandonMission), new RecordValues { ["mission"] = FieldValue.OfUInt64(held.Id.RawValue) });
+        SessionHarness.Until(() => Held(sim, character).Count == 0, "the mission to be cancelled");
+        Harness.Ticks(3);
+        Assert.Multiple(() =>
+        {
+            Assert.That(Exists(sim, held.Mission.Lair), Is.False, "a cancelled mission's lair still stands");
+            Assert.That(Refusals(link), Contains.Item(TatooineReplication.MissionUnknown), "a cancel of nobody's mission was not refused");
+            Assert.That(Offers(sim, terminal), Has.Count.EqualTo(TatooineData.MissionOffersPerTerminal), "a cancel put nothing back, and took nothing");
+            Assert.That(MissionJournal.Json(sim.Dbe, character), Is.EqualTo(MissionJournal.Empty), "a cancel was stated as a completion");
+        });
+    }
+
+    /// <summary>
+    /// A cancel and a take sent together by a character at the cap swap one mission: the cancel goes first (missions.md § 2, one session's order).
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void ACancelAndATakeSentTogetherAtTheCap_SwapOneMission()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x600B), terminal);
+        var character = CharacterOf(sim, AnAccount(0x600B));
+        (EntityId Id, HeldMission Mission) first = default;
+        for (var i = 0; i < TatooineData.MaxConcurrentMissions; i++)
+        {
+            var offer = Offers(sim, terminal)[0];
+            SessionHarness.UntilNamed(link.Session, offer.Id, "the next offer to reach the view");
+            var held = TakeAndHold(sim, link, character, offer);
+            first = i == 0 ? held : first;
+        }
+
+        var fourth = Offers(sim, terminal)[0];
+        SessionHarness.UntilNamed(link.Session, fourth.Id, "the fourth offer to reach the view");
+        Harness.Ticks(Worlds.ServedHz);   // the take's bucket (2 a second, a burst of 4), as in M-3
+
+        // Take sent BEFORE the cancel: arriving in one tick, the desk must still run the cancel first.
+        Take(link, fourth.Id, fourth.Info.Serial);
+        link.SendCommand(nameof(AbandonMission), new RecordValues { ["mission"] = FieldValue.OfUInt64(first.Id.RawValue) });
+        SessionHarness.Until(() => !Exists(sim, first.Id), "the cancel to land");
+        Harness.Ticks(3);
+        Assert.Multiple(() =>
+        {
+            Assert.That(Refusals(link), Does.Not.Contain(TatooineReplication.MissionCap), "the take was judged before the cancel");
+            Assert.That(Exists(sim, fourth.Id), Is.False, "the fourth offer was not taken");
+            Assert.That(Held(sim, character), Has.Count.EqualTo(TatooineData.MaxConcurrentMissions));
+        });
+    }
+
+    /// <summary>A take whose serial is not the offer's — the netId reused, or a list gone stale — is refused as taken, and the offer stays listed.</summary>
+    [Test]
+    [CancelAfter(90_000)]
+    public void ATakeWithTheWrongSerial_IsRefusedTaken()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x600C), terminal);
+        var character = CharacterOf(sim, AnAccount(0x600C));
+        var offer = Offers(sim, terminal)[0];
+
+        Take(link, offer.Id, offer.Info.Serial + 1_000u);
+        SessionHarness.Until(() => sim.Bridge.MissionTakesRefused >= 1, "the take to be refused");
+        Harness.Ticks(3);
+        Assert.Multiple(() =>
+        {
+            Assert.That(Refusals(link), Contains.Item(TatooineReplication.MissionTaken));
+            Assert.That(Held(sim, character), Is.Empty);
+            Assert.That(Exists(sim, offer.Id), Is.True, "a refused take took the offer off the list");
+        });
+    }
+
+    // ── Offline, broken, dropped ────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A holder who breaks the lair and logs out before the desk's next pass is paid at the next login: the broken lair waits, it is not taken down and
+    /// drawn again unpaid.
+    /// </summary>
+    /// <remarks>
+    /// The world is paused (the desk is gated, the sessions are not) so that the lair is broken and the body gone before the desk looks — the order a fast
+    /// logout gives, staged rather than raced for.
+    /// </remarks>
+    [Test]
+    [CancelAfter(180_000)]
+    public void BrokenThenLoggedOutBeforeThePass_PaidAtTheNextLogin()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var account = AnAccount(0x600D);
+        var link = LogInAt(sim, account, terminal);
+        var character = CharacterOf(sim, account);
+        var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
+        var credits = BodyOf(sim, link.Session).Credits;
+
+        var god = Harness.Connect(TatooineReplication.GodKind);
+        SessionHarness.Until(() => god.Received(MessageTypes.Welcome), "WELCOME");
+        god.SendCommand("SetPaused", new RecordValues { ["paused"] = FieldValue.Of(1) });
+        SessionHarness.Until(() => TatooineReplication.SimulationPaused, "the pause");
+        sim.WriteInTick(tx =>
+        {
+            var l = tx.OpenMut(held.Mission.Lair);
+            var s = l.Read(CreatureLair.Spawner);
+            s.OwnerHit = 1;
+            l.Set(CreatureLair.Spawner, s);
+            var v = l.Read(CreatureLair.Vitals);
+            v.Health = 0;
+            l.Set(CreatureLair.Vitals, v);
+        });
+        var destroyed = TatooineReplication.AvatarsDestroyed;
+        link.Close(CloseCodes.Normal, "logging out");
+        SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed > destroyed, "the avatar to be destroyed");
+        god.SendCommand("SetPaused", new RecordValues { ["paused"] = FieldValue.Of(0) });
+        SessionHarness.Until(() => !TatooineReplication.SimulationPaused, "the resume");
+
+        Harness.Ticks(2 * (Worlds.ServedHz / SimBridge.MissionPassHz));
+        Assert.Multiple(() =>
+        {
+            Assert.That(Held(sim, character), Has.Count.EqualTo(1), "the mission ended with nobody to pay");
+            Assert.That(Exists(sim, held.Mission.Lair), Is.True, "the broken lair was taken down while its holder was away");
+        });
+
+        var back = Harness.Connect(TatooineReplication.PlayerKind, account);
+        SessionHarness.Until(() => Held(sim, character).Count == 0, "the mission to complete at the login");
+        Harness.Ticks(3);
+        Assert.Multiple(() =>
+        {
+            Assert.That(BodyOf(sim, back.Session).Credits - credits, Is.EqualTo(held.Mission.Reward), "not paid at the login");
+            Assert.That(Exists(sim, held.Mission.Lair), Is.False);
+            Assert.That(MissionJournal.Json(sim.Dbe, character), Does.Contain($"\"completed\":[{{\"id\":\"{held.Id.RawValue}\""));
+        });
+    }
+
+    /// <summary>
+    /// A link that drops is not a logout (missions.md, Q6): the body is held for its resume, and the mission's lair stands through it, damage and all.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void ADroppedLink_KeepsTheLairStanding()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x600E), terminal);
+        var character = CharacterOf(sim, AnAccount(0x600E));
+        var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
+
+        var holds = TatooineReplication.ResumesHeld;
+        link.Close(CloseCodes.GoingAway, "the link died");
+        SessionHarness.Until(() => TatooineReplication.ResumesHeld > holds, "the body to be held for a resume");
+        Harness.Ticks(2 * (Worlds.ServedHz / SimBridge.MissionPassHz));
+        Assert.Multiple(() =>
+        {
+            Assert.That(Held(sim, character)[0].Mission.Lair, Is.EqualTo(held.Mission.Lair), "the lair was taken down, or moved, for a dropped link");
+            Assert.That(Exists(sim, held.Mission.Lair), Is.True);
+        });
+    }
+
+    /// <summary>
+    /// A reopened world's tick count starts again at 0, so stored expiries are clamped to their longest life from the reopen: an offer listed late in a long
+    /// run does not stand for that run's length again. And a mission lair no held mission names is destroyed, not left standing for ever.
+    /// </summary>
+    [Test]
+    [CancelAfter(180_000)]
+    public void AReopenedWorld_ClampsTheExpiriesItStored()
+    {
+        var account = AnAccount(0x600F);
+        EntityId offerId;
+        EntityId mission;
+        var orphan = EntityId.Null;
+        const long FarFuture = 1L << 40;
+        using (var first = Start(persist: true))
+        {
+            var terminal = FirstTerminal(first);
+            var link = LogInAt(first, account, terminal);
+            var character = CharacterOf(first, account);
+            var held = TakeAndHold(first, link, character, Offers(first, terminal)[0]);
+            mission = held.Id;
+            offerId = Offers(first, terminal)[0].Id;
+            first.WriteInTick(tx =>
+            {
+                var o = tx.OpenMut(offerId);
+                var info = o.Read(MissionOffer.Info);
+                info.ExpireTick = FarFuture;
+                o.Set(MissionOffer.Info, info);
+                var m = tx.OpenMut(mission);
+                var hm = m.Read(HeldMissionArch.Mission);
+                hm.ExpireTick = FarFuture;
+                m.Set(HeldMissionArch.Mission, hm);
+
+                // A wild lair made to look like a mission's whose mission is gone: what LoadDesk's sweep is for.
+                foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
+                {
+                    var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
+                    for (var bits = cluster.OccupancyBits; bits != 0 && orphan.IsNull; bits &= bits - 1)
+                    {
+                        var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                        if (spawners[slot].Site != 0)
+                        {
+                            orphan = cluster.GetEntityId(slot);
+                        }
+                    }
+                }
+
+                var o2 = tx.OpenMut(orphan);
+                var sp = o2.Read(CreatureLair.Spawner);
+                sp.Mission = offerId;
+                o2.Set(CreatureLair.Spawner, sp);
+            });
+            Harness.Release();
+        }
+
+        TatooineReplication.ResetSessionAccounting();
+        TatooineReplication.ResetIntentAccounting();
+
+        using var second = Start(persist: true);
+        Assert.That(second.Reopened, Is.True, "the second run must reopen the first's database, or this proves nothing");
+        Harness.Ticks(3);
+        var hz = Worlds.ServedHz;
+        var offerLife = (long)((TatooineData.MissionOfferLifeMinSeconds + TatooineData.MissionOfferLifeSpanSeconds) * hz);
+        var crowdLife = (long)SimBridge.MissionWalkSeconds * hz;
+        var now = second.Runtime.CurrentTickNumber;
+        using var tx2 = second.Dbe.CreateQuickTransaction();
+        Assert.Multiple(() =>
+        {
+            Assert.That(orphan.IsNull, Is.False, "the premise: a wild lair to orphan");
+            Assert.That(tx2.TryOpen(orphan, out _), Is.False, "a mission lair no mission names still stands");
+            Assert.That(second.Bridge.MissionLairsOrphaned, Is.EqualTo(1));
+            Assert.That(tx2.Open(offerId).Read(MissionOffer.Info).ExpireTick, Is.LessThanOrEqualTo(now + offerLife), "the offer's expiry was not clamped");
+            Assert.That(
+                tx2.Open(mission).Read(HeldMissionArch.Mission).ExpireTick,
+                Is.LessThanOrEqualTo(now + crowdLife),
+                "the mission's expiry was not clamped");
+        });
+    }
+
+    // ── The journal over HTTP ───────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// <c>GET /swg/missions</c>: no token, a bad one, or an expired one from an account not playing is a 401; a good one answers its own character's journal
+    /// — the bearer names the account, nothing in the request names a character — and an expired one is still good while its account plays.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void TheJournalEndpoint_AnswersItsBearersOwn()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var owner = AnAccount(0x6010);
+        var link = LogInAt(sim, owner, terminal);
+        var held = TakeAndHold(sim, link, CharacterOf(sim, owner), Offers(sim, terminal)[0]);
+
+        (int Status, string Body) Get(string authorization)
+        {
+            var context = new DefaultHttpContext();
+            if (authorization != null)
+            {
+                context.Request.Headers.Authorization = authorization;
+            }
+
+            return MissionJournal.GetForChecks(sim.Dbe, context) switch
+            {
+                ContentHttpResult c => (c.StatusCode ?? 200, c.ResponseContent),
+                IStatusCodeHttpResult s => (s.StatusCode ?? 0, null),
+                var other => throw new AssertionException($"unexpected result {other}"),
+            };
+        }
+
+        var good = Get("Bearer " + AuthToken.Mint(owner));
+        var lower = Get("bearer " + AuthToken.Mint(owner));
+        var expiredPlaying = Get("Bearer " + AuthToken.Mint(owner, TimeSpan.FromSeconds(-10)));
+        var idle = AnAccount(0x6011);
+        Assert.Multiple(() =>
+        {
+            Assert.That(Get(null).Status, Is.EqualTo(401), "no token");
+            Assert.That(Get("Bearer not-a-token").Status, Is.EqualTo(401), "a bad token");
+            Assert.That(Get("Bearer " + AuthToken.Mint(idle, TimeSpan.FromSeconds(-10))).Status, Is.EqualTo(401), "an expired token, its account away");
+            Assert.That(Get("Bearer " + AuthToken.Mint(idle)).Body, Is.EqualTo(MissionJournal.Empty), "an account with no character");
+            Assert.That(good.Status, Is.EqualTo(200));
+            Assert.That(good.Body, Does.Contain($"\"id\":\"{held.Id.RawValue}\""), "the bearer's own mission is missing");
+            Assert.That(lower.Body, Is.EqualTo(good.Body), "the scheme is case-insensitive");
+            Assert.That(expiredPlaying.Status, Is.EqualTo(200), "an expired token refused while its account plays");
+        });
+    }
+
+    /// <summary>A lair's occupants taken away and its guard count with them, its health set: one blow from broken, nothing to fight it for.</summary>
+    private static void Clear(TatooineSim sim, EntityId lair, int health)
+        => sim.WriteInTick(tx =>
+        {
+            foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+            {
+                var homes = cluster.GetReadOnlySpan(Creature.Home);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    if ((EntityId)homes[slot].Lair == lair)
+                    {
+                        tx.Destroy(cluster.GetEntityId(slot));
+                    }
+                }
+            }
+
+            var l = tx.OpenMut(lair);
+            var s = l.Read(CreatureLair.Spawner);
+            s.Guards = 0;
+            s.AliveCount = 0;
+            l.Set(CreatureLair.Spawner, s);
+            var v = l.Read(CreatureLair.Vitals);
+            v.Health = health;
+            l.Set(CreatureLair.Vitals, v);
+        });
+}

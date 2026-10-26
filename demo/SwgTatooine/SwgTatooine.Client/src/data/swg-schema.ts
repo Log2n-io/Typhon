@@ -1,0 +1,204 @@
+import type { GridSchema, WorldSchema } from '@typhondb/client';
+
+/**
+ * What the server's catalog will describe for this demo (`claude/design/SwgTatooine/04-protocol.md` § 2), in the shape the
+ * SDK store needs. Until the live server exists the mock produces exactly this; afterwards the catalog parser does.
+ */
+
+export const Archetype = {
+  WorldObject: 0,
+  CreatureLair: 1,
+  Creature: 2,
+  CityNpc: 3,
+  Player: 4,
+} as const;
+
+export type ArchetypeIndex = (typeof Archetype)[keyof typeof Archetype];
+
+export const ARCHETYPE_COUNT = 5;
+
+/**
+ * Change groups, shared by every archetype, in the catalog's canonical order (`03-wire-protocol.md` W14). Entering fields
+ * carry no group (W15: `onEnter`), and motion travels as segments, not as a group.
+ */
+export const Group = { State: 0, Vitals: 1 } as const;
+const GROUPS = ['state', 'vitals'];
+
+/** Ground positions: 2D on the wire, x and z in the world. */
+const MOVING = { kind: 'motion', dims: 2 } as const;
+
+/** The server's DEFAULT tick period (10 Hz, Core3-faithful). The real one comes from the catalog; see below. */
+export const TICK_PERIOD_MS = 100;
+
+/**
+ * The shortest tick period this client is built to interpolate, in milliseconds.
+ *
+ * <b>It sizes the segment ring, and sizing that from the wrong period is why a faster server stuttered.</b>
+ * `WorldStore` keeps `ceil(maxRenderDelayMs / period) + 2` segments per entity — enough history that render time, which
+ * runs behind the newest frame, always lands inside a segment it still holds. The period is the SERVER's, and the server's
+ * is `--hz`: at the 10 Hz this file assumed, five segments; at 25 Hz, ten. Sized for 10 Hz and fed 25, the ring wrapped
+ * and overwrote the segment render time was about to need, so entities jumped between positions instead of moving
+ * between them — the faster the server, the worse it got, which is the opposite of what anyone expects from raising the
+ * tick rate.
+ *
+ * Sized for the fastest rather than resolved at connect because the ring is allocated with the store, before any catalog
+ * has arrived. 20 ms covers every rate up to 50 Hz; the cost is segments held and not used by a slower server.
+ */
+export const FASTEST_TICK_PERIOD_MS = 20;
+
+export const SWG_SCHEMA: WorldSchema = {
+  tickPeriodUs: FASTEST_TICK_PERIOD_MS * 1000,
+  archetypes: [
+    {
+      index: Archetype.WorldObject,
+      name: 'WorldObject',
+      position: { kind: 'static', dims: 2 },
+      groups: GROUPS,
+      // `region` is the city or point of interest this structure belongs to, as city + 1 with 0 for the wild — the
+      // encoding a sparse index forces, since it never files key 0. The shuttleport prompt reads both fields.
+      fields: [
+        { name: 'kind', kind: 'u8' },
+        { name: 'region', kind: 'i16' },
+      ],
+    },
+    {
+      index: Archetype.CreatureLair,
+      name: 'CreatureLair',
+      position: MOVING,
+      groups: GROUPS,
+      fields: [
+        { name: 'template', kind: 'u8' },
+        { name: 'missionId', kind: 'u8', group: Group.State },
+        { name: 'hp', kind: 'f32', group: Group.Vitals },
+      ],
+    },
+    {
+      index: Archetype.Creature,
+      name: 'Creature',
+      position: MOVING,
+      groups: GROUPS,
+      fields: [
+        { name: 'template', kind: 'u8' },
+        { name: 'mode', kind: 'u8', group: Group.State },
+        { name: 'target', kind: 'u32', group: Group.State },
+        { name: 'hp', kind: 'f32', group: Group.Vitals },
+      ],
+    },
+    {
+      index: Archetype.CityNpc,
+      name: 'CityNpc',
+      position: MOVING,
+      groups: GROUPS,
+      fields: [{ name: 'mode', kind: 'u8', group: Group.State }],
+    },
+    {
+      index: Archetype.Player,
+      name: 'Player',
+      position: MOVING,
+      groups: GROUPS,
+      fields: [
+        { name: 'activity', kind: 'u8', group: Group.State },
+        { name: 'controller', kind: 'u8', group: Group.State },
+        { name: 'target', kind: 'u32', group: Group.State },
+        { name: 'hp', kind: 'f32', group: Group.Vitals },
+      ],
+    },
+  ],
+};
+
+/** The far tier: per-cell counts at 256 m over the whole planet. WorldObject is not counted (it never moves). */
+export const AGG_GRID: GridSchema = {
+  index: 0,
+  // Axis 0 is world x, axis 1 world z.
+  origin: [-8192, -8192],
+  cell: 256,
+  dims: [64, 64],
+  archetypes: [Archetype.CreatureLair, Archetype.Creature, Archetype.CityNpc, Archetype.Player],
+};
+
+/** Position quantum: 24 bits over the 16 384 m planet (`03-wire-protocol.md` § 4). */
+export const POSITION_QUANTUM_M = 16384 / (1 << 24);
+
+/** Velocity quantum: 1/16 of a position quantum per tick. */
+export const VELOCITY_QUANTUM_M = POSITION_QUANTUM_M / 16;
+
+export const AI_MODE_NAMES: readonly string[] = ['Idle', 'Wander', 'Pursue', 'Fighting', 'Leashing', 'Dead'];
+export const AiMode = { Idle: 0, Wander: 1, Pursue: 2, Fighting: 3, Leashing: 4, Dead: 5 } as const;
+
+export const PLAYER_ACTIVITY_NAMES: readonly string[] = [
+  'Idle',
+  'Travelling',
+  'Combat',
+  'Roaming',
+  'To shuttle',
+  'Awaiting shuttle',
+  'To a door',
+  'Inside',
+  'Through a door',
+  'Leaving a room',
+];
+export const PlayerActivity = {
+  Idle: 0,
+  Travelling: 1,
+  Combat: 2,
+  Roaming: 3,
+  ToShuttle: 4,
+  AwaitingShuttle: 5,
+
+  /**
+   * Walking to where a building's door path starts, in front of its ramp (Realms G1b).
+   *
+   * These were missing while the server had them, which is a quiet way to be wrong: `activity` is a `u8` the
+   * renderer and the inspector both read, so a body in either state was shown under whatever name the lookup fell
+   * through to rather than as unknown.
+   */
+  ToPortal: 6,
+
+  /** Inside a building, a dungeon or any other interior realm. */
+  Inside: 7,
+
+  /** Walking the door path, through the door. */
+  EnteringDoor: 8,
+
+  /** Walking out of a room through its navigation, then through its way out. */
+  LeavingRoom: 9,
+} as const;
+
+export const CONTROLLER_NAMES: readonly string[] = ['Simulated', 'Bot', 'Human'];
+
+export const STRUCTURE_KIND_NAMES: readonly string[] = [
+  'Building',
+  'Crafting station',
+  'Shuttleport',
+  'Landmark prop',
+  'House',
+  'Factory',
+  'Harvester',
+  'Camp object',
+  'Room',
+  'Bazaar',
+  'Mission terminal',
+  'Town hall',
+];
+export const StructureKind = {
+  Building: 0,
+  CraftingStation: 1,
+  Shuttleport: 2,
+  PoiProp: 3,
+  PlayerHouse: 4,
+  Factory: 5,
+  Harvester: 6,
+  CampObject: 7,
+
+  /** A building's room: the one structure of an interior realm, at its origin, drawn from its asset like any building. */
+  Interior: 8,
+
+  /** A bazaar terminal: one beside every shuttleport's gate, more over the city by its area. */
+  Bazaar: 9,
+
+  /** A mission terminal, placed like a bazaar. */
+  MissionTerminal: 10,
+
+  /** A city's town hall: across from its shuttleport's gate, its door facing it, with a room behind the door like a house's. */
+  TownHall: 11,
+} as const;

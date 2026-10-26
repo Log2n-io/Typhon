@@ -108,6 +108,19 @@ public sealed class RuntimeStatsSnapshot
     /// <summary>Bytes the send pump has written since the process started. <b>Cumulative</b>: difference two reads to get a rate.</summary>
     public long NetOutBytesTotal { get; init; }
 
+    /// <summary>Sessions the server closed because it had heard no <c>PING</c> inside the silence window (4001). <b>Cumulative.</b></summary>
+    /// <remarks>
+    /// <b>Exposed because the engine was counting both of these and nothing read them.</b> A client sees an abrupt close as 1006 —
+    /// no close frame arrived, so the peer's reason is unknowable from that side — and a fleet losing thousands of sessions had
+    /// nothing but that number to go on. The decision is made here, so the count belongs here: silence means the client stopped
+    /// talking, <see cref="SessionsClosedLagging"/> means it stopped keeping up, and those are opposite investigations.
+    /// </remarks>
+    public long SessionsClosedSilent { get; init; }
+
+    /// <summary>Sessions the server closed because they fell too far behind the frames being produced (1013). <b>Cumulative.</b></summary>
+    /// <remarks>Read beside <see cref="SessionsClosedSilent"/>: together they say whether a loss was the client's silence or its backlog.</remarks>
+    public long SessionsClosedLagging { get; init; }
+
     /// <summary>99th-percentile cost of the replication track itself over the window, in milliseconds.</summary>
     public double ReplicationTrackP99Ms { get; init; }
 

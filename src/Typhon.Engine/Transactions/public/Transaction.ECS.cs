@@ -2538,13 +2538,17 @@ public unsafe partial class Transaction
                         ref var accessor = ref ReferenceEquals(field.Index.Segment, cs.IndexSegmentString64)
                             ? ref check.PersistentIndexesS64.For(cs.IndexSegmentString64)
                             : ref check.PersistentIndexes.For(field.Index.Segment);
+                        // CLAIM BEFORE THE DESCENT, and the order is the whole correctness of this (#1390). Read first and the key is checked against a
+                        // tree the winner has not published into yet, after which the winner can publish AND release its claim before this line takes it —
+                        // leaving two commits past validation for one key, which is the state the claim exists to rule out. Claimed first, either the
+                        // winner still holds the claim and this is refused here, or it has finished and the descent below sees the key it published.
+                        ClaimOwnKey(field.Index, key);
+
                         var holder = field.Index.TryGet(key, ref accessor);
                         if (holder.IsSuccess && holder.Value != location && !IsFreedBeforeThisWrite(field.Index, key))
                         {
                             ThrowHelper.ThrowUniqueConstraintViolation();
                         }
-
-                        ClaimOwnKey(field.Index, key);
                     }
 
                     if (oldComp != null)
@@ -2819,13 +2823,15 @@ public unsafe partial class Transaction
 
                 var key = source + field.FieldOffset;
                 ref var accessor = ref ReferenceEquals(field.Index.Segment, s64Segment) ? ref indexesS64.For(s64Segment) : ref indexes.For(field.Index.Segment);
+                // Claimed before the descent, for the reason CheckVersionedUniqueKeys gives: the other order lets a winner publish and release inside the
+                // window between this read and the claim.
+                ClaimOwnKey(field.Index, key);
+
                 // A key a Versioned write of this commit moves away is free by then: their index moves publish before the spawns.
                 if (field.Index.TryGet(key, ref accessor).IsSuccess && !IsFreedBeforeThisWrite(field.Index, key))
                 {
                     ThrowHelper.ThrowUniqueConstraintViolation();
                 }
-
-                ClaimOwnKey(field.Index, key);
             }
         }
     }
@@ -2893,14 +2899,15 @@ public unsafe partial class Transaction
                         ref var accessor = ref ReferenceEquals(field.Index.Segment, cs.IndexSegmentString64)
                             ? ref check.PersistentIndexesS64.For(cs.IndexSegmentString64)
                             : ref check.PersistentIndexes.For(field.Index.Segment);
+                        // Claimed before the descent, for the reason CheckVersionedUniqueKeys gives.
+                        ClaimOwnKey(field.Index, key);
+
                         var holder = field.Index.TryGet(key, ref accessor);
                         if (holder.IsSuccess && holder.Value != location && !IsFreedBeforeThisWrite(field.Index, key)
                             && !IsRemovedByOwnDestroy(meta, cs, ref check, holder.Value, compSlot))
                         {
                             ThrowHelper.ThrowUniqueConstraintViolation();
                         }
-
-                        ClaimOwnKey(field.Index, key);
 
                         // Once this write publishes, its old key is free for the writes visited after it.
                         t_validationFreedKeys ??= new HashSet<UniqueKeyRef>();
@@ -2911,8 +2918,23 @@ public unsafe partial class Transaction
         }
     }
 
-    /// <summary>Records a key this transaction puts in a unique index; a second put of one key — by the index's own comparison — is a violation.</summary>
-    private static void ClaimOwnKey(IBTreeIndex index, byte* key)
+    /// <summary>
+    /// Records a key this transaction puts in a unique index, within the commit and across the engine's in-flight commits; either kind of second put — by
+    /// the index's own comparison — is a violation.
+    /// </summary>
+    /// <remarks>
+    /// <b>The engine-wide claim is what makes a uniqueness RACE a refusal rather than a stopped engine</b> (#1390). The tree descent above this call can only
+    /// see keys that have published, so N commits spawning one key all find it free; the claim is the part they can see of each other. Refused here, the loser
+    /// is before its append, so it rolls back and its caller catches <c>UniqueConstraintViolationException</c> — which is the whole contract
+    /// <c>ValidatePublishBeforeAppend</c> exists to keep. Refused in the publish instead, as it was, the loser was past the point of no return and AP-02 left
+    /// only one answer: stop committing.
+    /// <para>
+    /// Claimed in the order the validation visits the keys, and released together at the end of <c>Commit</c> (<see cref="ReleaseUniqueKeyClaims"/>). The
+    /// in-commit set stays as it was and is checked first: it is per-thread, free of a lock, and a commit that puts one key twice is its own error rather than
+    /// a race with anybody.
+    /// </para>
+    /// </remarks>
+    private void ClaimOwnKey(IBTreeIndex index, byte* key)
     {
         if (index.SkipsKey(key))
         {
@@ -2920,10 +2942,45 @@ public unsafe partial class Transaction
         }
 
         t_validationOwnKeys ??= new HashSet<UniqueKeyRef>();
-        if (!t_validationOwnKeys.Add(new UniqueKeyRef(index, key)))
+        var claim = new UniqueKeyRef(index, key);
+        if (!t_validationOwnKeys.Add(claim))
         {
             ThrowHelper.ThrowUniqueConstraintViolation();
         }
+
+        if (!_dbe.UniqueKeys.TryClaim(index, key))
+        {
+            ThrowHelper.ThrowUniqueConstraintViolation();
+        }
+
+        (_uniqueKeyClaims ??= new List<UniqueKeyRef>()).Add(claim);
+    }
+
+    /// <summary>The engine-wide unique-key claims this commit holds, in the order it took them; null until it takes one.</summary>
+    private List<UniqueKeyRef> _uniqueKeyClaims;
+
+    /// <summary>
+    /// Gives back every engine-wide unique-key claim this commit took, whatever became of the commit.
+    /// </summary>
+    /// <remarks>
+    /// <b>Called from <c>Commit</c>'s own finally, and that placement is the contract.</b> It is late on purpose: by then a commit that got through has
+    /// published its keys into the tree, so the next commit's descent finds them without needing a claim, and a commit that did not get through has nothing
+    /// in the tree to find. Releasing earlier — between the append and the publish, say — would reopen exactly the window the claims close. It is also before
+    /// <c>Dispose</c>, which is what keeps the claims' key pointers valid for as long as they are held (<see cref="UniqueKeyRef"/>).
+    /// </remarks>
+    private void ReleaseUniqueKeyClaims()
+    {
+        if (_uniqueKeyClaims == null || _uniqueKeyClaims.Count == 0)
+        {
+            return;
+        }
+
+        foreach (ref readonly var claim in CollectionsMarshal.AsSpan(_uniqueKeyClaims))
+        {
+            _dbe.UniqueKeys.Release(claim);
+        }
+
+        _uniqueKeyClaims.Clear();
     }
 
     private static bool IsFreedBeforeThisWrite(IBTreeIndex index, byte* key) =>
@@ -2963,30 +3020,6 @@ public unsafe partial class Transaction
         }
 
         return false;
-    }
-
-    /// <summary>
-    /// A key in one unique index, by reference: the bytes stay put while the validation's epoch scope lives. Equal and hashed by the index's own key
-    /// comparison, so a floating-point -0 and +0 are one key, as are two NaNs.
-    /// </summary>
-    private readonly struct UniqueKeyRef : IEquatable<UniqueKeyRef>
-    {
-        private readonly IBTreeIndex _index;
-        private readonly byte* _key;
-        private readonly int _hash;
-
-        public UniqueKeyRef(IBTreeIndex index, byte* key)
-        {
-            _index = index;
-            _key = key;
-            _hash = HashCode.Combine(RuntimeHelpers.GetHashCode(index), index.KeyHash(key));
-        }
-
-        public bool Equals(UniqueKeyRef other) => ReferenceEquals(_index, other._index) && _index.KeysEqual(_key, other._key);
-
-        public override bool Equals(object obj) => obj is UniqueKeyRef other && Equals(other);
-
-        public override int GetHashCode() => _hash;
     }
 
     /// <summary>

@@ -423,13 +423,20 @@ public enum TraceEventKind : byte
     /// <remarks>
     /// <para>
     /// Payload, tightly packed: <c>sessionId: u64</c>, <c>realmId: u16</c>, <c>bytesPerSec: f32</c>, <c>framesSkipped: i64</c>,
-    /// <c>degradeLevel: i32</c>. 26 bytes. Append-only, as above. <c>realmId</c> is <c>0xFFFF</c> for a session that has not been told its realm yet, which is
-    /// the committed realm's own "-1 before the first RESET" widened to an unsigned field — a consumer can tell that from "in realm 0".
+    /// <c>degradeLevel: i32</c>, <c>framesPerSec: f32</c>, <c>framesProduced: i64</c>. 38 bytes. Append-only, as above. <c>realmId</c> is <c>0xFFFF</c> for a
+    /// session that has not been told its realm yet, which is the committed realm's own "-1 before the first RESET" widened to an unsigned field — a consumer
+    /// can tell that from "in realm 0".
+    /// </para>
+    /// <para>
+    /// <b><c>bytesPerSec</c> and <c>framesPerSec</c> share one window, so their quotient is this session's average frame payload.</b> That quotient is the
+    /// reason the frame figure is a rate and not only the cumulative <c>framesProduced</c> beside it: a consumer must be able to divide within one row rather
+    /// than joining two emissions, and dividing the two cumulative counters would yield the session's lifetime average instead of the window's.
     /// </para>
     /// <para>
     /// <b>Capped by design, and the cap is visible.</b> Volume scales with the session count, not with the engine, so a server at
-    /// its 8192-session limit would otherwise spend the trace on rows nobody reads. The emission stops at a bound and kind 68's
-    /// <c>reportedSessions</c> against its <c>sessions</c> says what was left out.
+    /// its 8192-session limit would otherwise spend the trace on rows nobody reads. The emission keeps the <b>heaviest</b> sessions by bytes in the window —
+    /// not the first the session table yields — and kind 68's <c>reportedSessions</c> against its <c>sessions</c> says what was left out. A consumer must
+    /// therefore not read the rows as a uniform sample: above the cap, an idle session is absent by construction.
     /// </para>
     /// <para>Gated on <c>SubscriptionsSessionTelemetryActive</c>, separately from kind 68 for that reason.</para>
     /// </remarks>

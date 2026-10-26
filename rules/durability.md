@@ -208,6 +208,18 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
               it removes every persistent slot), one a staged write visited earlier moves away, or one its own entity
               holds. Keys are compared by the index's own comparison (`IBTreeIndex.KeysEqual` / `KeyHash`): -0 and +0
               are one float key;
+            - the same key wanted by another commit that has not published yet (`UniqueKeyClaims`, #1390). The descent above
+              sees only published keys, so N commits spawning one key all found it free, all appended, and the first publish
+              to insert it won while the rest threw out of `BTree.Insert` — past the append, where the third invariant below
+              leaves only "stop the engine" for what the caller had asked as a question. A claim is taken per key as the
+              validation visits it and released at the end of `Commit` (`Transaction.ReleaseUniqueKeyClaims`): late on purpose,
+              and taken BEFORE the key's descent, not after — read first and the key is checked against a tree the winner has
+              not published into yet, after which the winner can publish and release its claim before the loser takes it,
+              leaving two commits past validation for one key (which left one racer in eight still reaching its publish);
+              since by then a commit that published has put its keys in the tree for the next descent to find, and one that
+              did not has nothing there to find. A commit refused by a live claim is NOT made to wait — told the key is taken,
+              it may have raced a claim whose owner then aborted, and that spurious refusal is accepted deliberately because
+              waiting on several keys needs a global acquisition order or two commits deadlock on each other;
             - a spawn that leaves unset a Versioned component a unique index covers: `PublishSpawns` would index it under
               whatever its claimed cluster slot holds (`InvalidOperationException`; the same stale key under an AllowMultiple
               index is #1259);
@@ -248,6 +260,7 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
   never go on appending over a partial publish: a later record builds on what the partial publish left, and recovery replays
         the log over the pages, not over what memory held
   scope: Transaction.Commit, Transaction.ValidatePublishBeforeAppend, Transaction.CheckStagedUniqueKeys,
+         Transaction.ClaimOwnKey, Transaction.ReleaseUniqueKeyClaims, UniqueKeyClaims.TryClaim, UniqueKeyClaims.Release,
          Transaction.IsRemovedByOwnDestroy, Transaction.CompleteAfterFailedPublish, Transaction.WaitAndFinalize,
          PagedMMF.PublishSince, TimeoutOptions.CommitPublishBackpressureTimeout, IBTreeIndex.KeysEqual,
          DatabaseEngine.LatchCommitPipelineFailure, DatabaseEngine.CommitPipelineFailure, DatabaseEngine.PinnedCommitFloor,

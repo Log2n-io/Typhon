@@ -1,0 +1,509 @@
+#cloud-config
+# The game server box (I4). Installs the unit file and the directory layout; the PAYLOAD arrives by SSM from the deploy
+# workflow, not from here -- see instances.tf for why a box that fetches on boot cannot be rolled back by a restart.
+
+# <b>bootcmd, because write_files runs BEFORE runcmd.</b> The env file below asks for owner root:tatooine, and with the
+# useradd in runcmd that user did not exist yet: the chown failed, server.env stayed root:root at mode 0640, and the
+# User=tatooine unit could not read its own EnvironmentFile. On some cloud-init versions the failing write aborts the
+# rest of the module, which also meant the volume-mount script was never written and prod's world was never mounted.
+bootcmd:
+  - [ cloud-init-per, once, tatooine-user, useradd, --system, --no-create-home, --shell, /usr/sbin/nologin, tatooine ]
+
+package_update: true
+packages:
+  # No awscli here: see the CLI install in runcmd. unzip and curl are what that install needs, and both are in main.
+  - unzip
+  - curl
+  # certbot and its Route 53 plugin, from the distribution rather than snap: one package manager in cloud-init, and the
+  # distribution's packaging installs certbot.timer, which is what owns renewal. No cron of ours to forget. The plugin
+  # also brings boto3, which is why the certificate still worked on the run where the CLI was missing.
+  - certbot
+  - python3-certbot-dns-route53
+
+write_files:
+  # --- The unit ------------------------------------------------------------------------------------------------------
+  #
+  # 08-hosting § 6's numbers, and each one earns its place:
+  #
+  #   LimitNOFILE=1048576   one fd per session plus the engine's files. The default 1024 would refuse the 1025th client,
+  #                         and it would do it as a socket error rather than as anything that reads like a limit.
+  #   KillSignal=SIGTERM    the host already registers ApplicationStopping -> KickEveryone (TatooineHost.cs), so SIGTERM
+  #                         tells every client the server is going BEFORE Kestrel drops their sockets, and the engine
+  #                         writes a final checkpoint and a clean-shutdown marker.
+  #   TimeoutStopSec=120    long enough for that checkpoint. Too short and systemd SIGKILLs mid-write, which turns every
+  #                         restart into a crash-recovery test -- a thing worth doing deliberately, not on every deploy.
+  #   Restart=on-failure    what makes `kill -9` recovery a repeatable property rather than an anecdote (I4's wording).
+  - path: /etc/systemd/system/tatooine.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=SWG Tatooine game server (${stack})
+      After=network-online.target tatooine-data.service tatooine-dns.service tatooine-certificate.service
+      Wants=network-online.target tatooine-dns.service tatooine-certificate.service
+
+      # Requires, where dns and certificate are only Wants: a box whose delegation is unfinished should still come up
+      # serving plain HTTP, but one that could not place its world must not start a server that would create a fresh one
+      # on the root disk and serve it as though it were the world it was asked for.
+      Requires=tatooine-data.service
+
+      [Service]
+      Type=simple
+      User=tatooine
+      Group=tatooine
+      WorkingDirectory=/opt/tatooine/current
+      ExecStart=/opt/tatooine/current/run.sh
+      Restart=on-failure
+      RestartSec=5
+      KillSignal=SIGTERM
+      TimeoutStopSec=120
+      LimitNOFILE=1048576
+      EnvironmentFile=/etc/tatooine/server.env
+
+      # 443 and 80 are privileged and this runs as `tatooine`, not root. The alternative is a reverse proxy in front, which
+      # is a whole extra component to install, configure and keep patched for the sake of one bind.
+      AmbientCapabilities=CAP_NET_BIND_SERVICE
+      CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+      # The certificate lives under /etc/letsencrypt, which ProtectSystem=strict makes read-only -- which is what we want:
+      # the service reads it and certbot (as root, from its own timer) writes it.
+      ReadOnlyPaths=/etc/letsencrypt
+
+      # Fetched at every start, from SSM Parameter Store. The leading `-` makes it optional so a private soak with no front
+      # door still starts. See tatooine-fetch-env for why this is not in user_data.
+      ExecStartPre=/usr/local/sbin/tatooine-fetch-env
+      EnvironmentFile=-/run/tatooine/fetched.env
+
+      # The name has to point here before a certificate can be issued for it, and the certificate has to exist before
+      # Kestrel can bind 443. Both are oneshot units that have already run by this point -- `Wants`, not `Requires`, so a
+      # box whose delegation is unfinished still comes up serving plain HTTP with a loud line rather than crash-looping.
+
+      # The payload is read-only to the service and the world is the one thing it writes. A compromise through the game
+      # protocol then cannot rewrite the binary it is running, which is the cheapest containment available here.
+      ProtectSystem=strict
+
+      # <b>systemd creates /run/tatooine, not the fetch script.</b> ProtectSystem=strict makes the whole hierarchy
+      # read-only apart from what is listed, /run included, so the script's own `mkdir` failed with "Read-only file
+      # system" -- the third layer of the same lesson, after the namespace one below: this sandbox was never exercised
+      # until a real boot. RuntimeDirectory is the mechanism for exactly this: systemd makes the directory with the right
+      # owner and mode before the unit runs, and removes it on stop, so a secret written there cannot outlive the service.
+      RuntimeDirectory=tatooine
+      RuntimeDirectoryMode=0750
+
+      # <b>The `-` matters.</b> ReadWritePaths needs its target to exist before the unit starts -- systemd builds the mount
+      # namespace per command and answers 226/NAMESPACE when a path is missing, before any ExecStartPre could create it,
+      # and a `+`-prefixed one does not escape that either. The directory is therefore created by runcmd below, once; the
+      # `-` is so that a box where that somehow did not happen fails with the engine's own message about an unwritable
+      # database rather than with a namespace error that explains nothing.
+      ReadWritePaths=-${data_dir}
+      PrivateTmp=true
+      NoNewPrivileges=true
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # --- The environment -----------------------------------------------------------------------------------------------
+  #
+  # run.sh (generated by scripts/publish-swg.ps1) reads PORT, BIND, ORIGIN and DB_DIR. BIND must be 0.0.0.0 to be
+  # reachable at all, and the server REFUSES a reachable bind with no --origin (I1): allowing any origin on a public bind
+  # would let any page a visitor opens drive this server from their browser.
+  #
+  # ORIGIN and TATOOINE_ORIGIN_SECRET are NOT here. They come from SSM, through tatooine-fetch-env below, because
+  # user_data is readable by anything on this instance through the metadata service with no credentials -- and because
+  # instances.tf must carry `ignore_changes = [user_data]`, so a value baked in here could never be rotated.
+  - path: /etc/tatooine/server.env
+    permissions: '0640'
+    owner: root:tatooine
+    content: |
+      PORT=${game_port}
+      BIND=0.0.0.0
+      DB_DIR=${data_dir}
+      TLS_CHAIN=${tls_chain}
+      TLS_KEY=${tls_key}
+      TLS_PORT=443
+      REDIRECT_PORT=80
+
+      # <b>AUTH_LOCAL_ONLY and AUTH_ITERATIONS are one decision, not two.</b> Hiding /auth from the internet was the answer
+      # to a signup costing ~51 ms of a core at the default 600 000 iterations: on a box also running a 50 Hz tick, a few
+      # hundred junk attempts a second starve the loop, and the WAF that was to rate-limit it went away with the CDN.
+      #
+      # Lowering the work factor changes that arithmetic. Measured on a 7950X: 600 000 is 50.75 ms and about 79 attempts a
+      # second across the four gated cores; 100 000 is 8.32 ms and about 481. Six times the headroom, which with the per-/24
+      # limiter in front is enough to let a browser reach /auth at all -- and a demo has to be playable.
+      #
+      # What it costs: resistance to OFFLINE cracking if the hash table ever leaked. These accounts hold no PII, no email
+      # and no payment, so the honest residual risk is somebody reusing a password they use elsewhere. 100 000 is still a
+      # serious hash; the floor in PasswordHash refuses anything that would be decorative.
+      #
+      # Set AUTH_LOCAL_ONLY=1 again for a box that should be look-only, and raise AUTH_ITERATIONS back to the default for
+      # anything holding credentials somebody would mind losing.
+      AUTH_LOCAL_ONLY=
+      AUTH_ITERATIONS=100000
+
+  # --- The fetched half ------------------------------------------------------------------------------------------------
+  #
+  # ORIGIN and the front-door secret, read at every service start from the parameter runtime-config.tf creates. Rotating
+  # either is then "update the parameter, restart the unit" -- no instance replacement, and nothing sensitive in user_data.
+  #
+  # Written to /run, which is tmpfs: the secret never touches a disk, and a reboot cannot leave a stale copy behind.
+  - path: /usr/local/sbin/tatooine-fetch-env
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      set -eu
+
+      # /run/tatooine is created by the unit's RuntimeDirectory=, not here: under ProtectSystem=strict this script cannot
+      # write to /run at all, which is how that was discovered.
+
+      # --with-decryption because the parameter is a SecureString. A failure here is NOT fatal: a stack with no front door
+      # has nothing to fetch, and the unit's EnvironmentFile for this file is optional. A stack that DOES need it fails
+      # visibly instead, when the server refuses a reachable bind with no --origin.
+      # NO chown anywhere below. This runs as the unit's User=, which is `tatooine` and not root, so a chown fails with
+      # "Operation not permitted" and takes the whole unit with it. It is also unnecessary: RuntimeDirectory= creates
+      # /run/tatooine owned by that same user, so a file written here already belongs to it. The umask is what keeps the
+      # secret off every other account, and it is set before either branch so both get it.
+      umask 027
+      if value=$(aws ssm get-parameter --with-decryption --name "${env_parameter}" \
+                     --region "${region}" --query 'Parameter.Value' --output text 2>/dev/null); then
+          printf '%s\n' "$value" > /run/tatooine/fetched.env
+          echo "tatooine: fetched runtime configuration from ${env_parameter}"
+      else
+          echo "tatooine: no runtime configuration at ${env_parameter}; starting without ORIGIN" >&2
+          : > /run/tatooine/fetched.env
+      fi
+
+  # --- The DNS record (M6) ---------------------------------------------------------------------------------------------
+  #
+  # <b>The instance publishes its own address, so there is no Elastic IP.</b> An EIP bills while ALLOCATED, including when the
+  # box it belongs to is stopped -- and prod is stopped by default, so a static address would be a standing charge on an idle
+  # stack. Writing the record at boot costs nothing while stopped and is the whole reason the subzone lives in Route 53: the
+  # instance role authorises the write, so there is no API credential on a public-facing game server.
+  #
+  # TTL 60, because the address changes on every stop and start and a viewer should not be sent to the old one for an hour.
+  - path: /usr/local/sbin/tatooine-publish-dns
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      set -eu
+      [ -n "${dns_zone_id}" ] || { echo "tatooine: no DNS zone for this stack; nothing to publish"; exit 0; }
+
+      # IMDSv2: a token first, because the instance requires it (http_tokens = "required"). The hop limit is 1, which is why
+      # this works from the instance and not from a container on it.
+      token=$(curl -sS -X PUT 'http://169.254.169.254/latest/api/token' \
+                   -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' --max-time 5)
+      ip=$(curl -sS -H "X-aws-ec2-metadata-token: $token" --max-time 5 \
+                'http://169.254.169.254/latest/meta-data/public-ipv4')
+
+      case "$ip" in
+          '' | *[!0-9.]* ) echo "tatooine: no public IPv4 to publish ('$ip')" >&2; exit 1 ;;
+      esac
+
+      changes=''
+      for name in ${dns_names}; do
+          [ -z "$changes" ] || changes="$changes,"
+          record="{\"Name\":\"$name\",\"Type\":\"A\",\"TTL\":60,\"ResourceRecords\":[{\"Value\":\"$ip\"}]}"
+          changes="$changes{\"Action\":\"UPSERT\",\"ResourceRecordSet\":$record}"
+      done
+
+      aws route53 change-resource-record-sets --hosted-zone-id '${dns_zone_id}' \
+          --change-batch "{\"Comment\":\"tatooine boot\",\"Changes\":[$changes]}" \
+          --query 'ChangeInfo.Id' --output text
+      echo "tatooine: published ${dns_names} -> $ip"
+
+  - path: /etc/systemd/system/tatooine-dns.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Publish this instance's address into its Route 53 subzone
+      After=network-online.target cloud-init.service
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/sbin/tatooine-publish-dns
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # --- The certificate (M7) --------------------------------------------------------------------------------------------
+  #
+  # <b>DNS-01, not HTTP-01, and that is forced rather than preferred.</b> HTTP-01 needs port 80 reachable from Let's Encrypt's
+  # validation addresses, which are not a published set -- so it would mean opening 80 to the whole internet on a box whose
+  # security group is otherwise narrow. DNS-01 proves control by writing a TXT record and needs no inbound at all.
+  #
+  # --dns-route53 authenticates with the INSTANCE ROLE. No ACME account key to distribute, no registrar API credential on the
+  # box. That is the payoff for delegating the subzone to Route 53 rather than driving the registrar's own API.
+  #
+  # Renewal is certbot.timer's, installed by the package. It runs twice a day, renews inside thirty days of expiry, and the
+  # server picks the new files up without restarting (TlsCertificate watches their write time), so there is no scheduled
+  # interruption.
+  #
+  # <b>And /etc/letsencrypt is restored from S3 before certbot is asked for anything.</b> Without that, every create of a
+  # stack is a fresh issuance, and Let's Encrypt allows FIVE per week per exact set of names -- no override, one slot back
+  # every 34 hours. Reusing a hostname, which is the whole point of naming stacks, is exactly what spends them: the sixth
+  # `temp01` of a week gets no certificate and serves plain HTTP. With the archive, a re-created stack finds a certificate
+  # that is not due for renewal and asks for nothing at all.
+  #
+  # The archive goes back up from `--deploy-hook`, so it is refreshed on the initial issuance and on every timer renewal,
+  # and not on a boot that changed nothing.
+  - path: /usr/local/sbin/tatooine-certificate
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      set -eu
+      [ -n "${acme_email}" ] || { echo "tatooine: no ACME email configured; not requesting a certificate"; exit 0; }
+      [ -n "${dns_names}" ] || { echo "tatooine: no names to certify"; exit 0; }
+
+      domains=''
+      for name in ${dns_names}; do
+          domains="$domains -d $name"
+      done
+
+      # Restore first, and only when there is nothing local to lose. A reboot of the same instance still has its certificate
+      # on disk and must not have it replaced by whatever was last uploaded; a brand-new instance has an empty
+      # /etc/letsencrypt and is the case this exists for.
+      #
+      # tar, not `aws s3 sync`: /etc/letsencrypt/live/<name>/*.pem are SYMLINKS into ../../archive, and sync would follow
+      # them and restore four regular files -- which certbot then refuses to renew, because it expects symlinks there. tar
+      # also carries the file modes and the ACME account key, so the same account is reused rather than a new one registered
+      # on every create.
+      if [ -n "${cert_bucket}" ] && [ ! -d /etc/letsencrypt/live/tatooine ]; then
+          saved=$(mktemp /tmp/letsencrypt.XXXXXX.tgz)
+          if aws s3 cp "s3://${cert_bucket}/${cert_prefix}/letsencrypt.tgz" "$saved" --only-show-errors; then
+              mkdir -p /etc/letsencrypt
+              tar -xzf "$saved" -C /etc/letsencrypt
+              echo "tatooine: restored the certificate archive for ${cert_prefix}"
+          else
+              # Expected for the first stack to use this hostname. The ListBucket grant is what makes a real denial look
+              # different from this one in CloudTrail.
+              echo "tatooine: no certificate archive for ${cert_prefix}; asking Let's Encrypt for one"
+          fi
+          rm -f "$saved"
+      fi
+
+      # --keep-until-expiring so a restart does not spend a rate-limit slot: Let's Encrypt allows five duplicate
+      # certificates per week, and a crash-looping unit would burn that in minutes and then be locked out for days.
+      #
+      # --dns-route53-propagation-seconds 30: the default waits 10, and a brand-new subzone's first answer can take longer
+      # than that to be visible to Let's Encrypt's resolvers.
+      certbot certonly --non-interactive --agree-tos --keep-until-expiring \
+          --dns-route53 --dns-route53-propagation-seconds 30 \
+          --email '${acme_email}' $domains \
+          --cert-name tatooine \
+          --deploy-hook /usr/local/sbin/tatooine-certificate-archive
+
+      # The service runs as `tatooine` and ProtectSystem=strict leaves /etc/letsencrypt read-only to it, so it needs to be
+      # able to traverse and read. 0750 on the directories plus group ownership is the narrowest thing that works; the key
+      # itself stays unreadable to everyone else on the box.
+      chgrp -R tatooine /etc/letsencrypt/live /etc/letsencrypt/archive
+      chmod -R g+rX /etc/letsencrypt/live /etc/letsencrypt/archive
+      echo "tatooine: certificate ready for ${dns_names}"
+
+  # Run by certbot's --deploy-hook: on the initial issuance, and from certbot.timer on every renewal. Never from a boot that
+  # changed nothing, which is why it is a hook and not a line at the end of the script above.
+  - path: /usr/local/sbin/tatooine-certificate-archive
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      set -eu
+      [ -n "${cert_bucket}" ] || exit 0
+      [ -d /etc/letsencrypt/archive ] || exit 0
+
+      # Built in /tmp and then copied, rather than streamed: a `tar | aws s3 cp -` whose tar fails midway still uploads a
+      # truncated object and exits 0 through the pipe, and the only copy of the certificate would then be the broken one.
+      # The bucket is versioned as a second line of defence against exactly that.
+      saved=$(mktemp /tmp/letsencrypt.XXXXXX.tgz)
+      tar -czf "$saved" -C /etc/letsencrypt .
+      aws s3 cp "$saved" "s3://${cert_bucket}/${cert_prefix}/letsencrypt.tgz" --only-show-errors
+      rm -f "$saved"
+      echo "tatooine: certificate archive saved for ${cert_prefix}"
+
+  - path: /etc/systemd/system/tatooine-certificate.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Obtain or renew the Let's Encrypt certificate over DNS-01
+      After=tatooine-dns.service
+      Wants=tatooine-dns.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/sbin/tatooine-certificate
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # --- The world's disk ----------------------------------------------------------------------------------------------
+  #
+  # <b>Two disks, two meanings, and this script is where the instance type's whole reason for existing was being thrown
+  # away.</b> The server runs on a c6id, and the `d` is a local NVMe soldered to the host: an fsync on it measured 68 us
+  # against 2.77 ms on gp3, which is the difference between a durability wait that disappears into a tick and one that
+  # dominates it. Nothing mounted it. An ephemeral stack exited this script on its first line and put the world on the
+  # root gp3, so every durability number ever measured on this stack was an EBS number, and the instance family was paid
+  # for and not used.
+  #
+  #   persistent = true    prod. The world is on the attached EBS volume and must survive the instance, so the instance
+  #                        store is not an option at any speed. Formatted only when it has no filesystem -- prod's world
+  #                        is on it and an unconditional mkfs would destroy it on the first reboot; `blkid` answering
+  #                        nothing is the only safe signal that a volume is new.
+  #   persistent = false   ephemeral. The world dies with the instance by definition, which is exactly the instance
+  #                        store's own contract, so it goes there and gets the disk we are paying for. Formatted whenever
+  #                        it comes up blank, which is after every stop: a stopped instance gets a brand new one.
+  #
+  # <b>It also had prod's device discovery wrong, which is worse than slow.</b> The loop took the first of
+  # /dev/sdf, /dev/xvdf and `ls /dev/nvme*n1` that existed -- and on Nitro the EBS volume never appears as /dev/sdf, so
+  # the glob decided, in whatever order the kernel enumerated. On a c6id that glob includes the INSTANCE STORE: prod's
+  # world could be mkfs'd onto a disk that evaporates at the next stop, with the volume holding the real world sitting
+  # untouched beside it. Devices are classified by their controller model now, which is what actually distinguishes them.
+  - path: /usr/local/sbin/tatooine-mount-data
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      set -eu
+
+      # The root disk, so no branch below can offer it as somewhere to put a filesystem. findmnt gives a partition
+      # (/dev/nvme0n1p1); the classifier works on devices, so the comparison is on the device name as a prefix.
+      root_src=$(findmnt -no SOURCE / 2>/dev/null || echo "")
+
+      # EBS and instance store are told apart by the NVMe controller's model string -- "Amazon Elastic Block Store" and
+      # "Amazon EC2 NVMe Instance Storage". A serial number would identify EBS (it carries the requested device name) and
+      # says nothing about an instance store, so the model is the one signal that classifies both.
+      ebs=""
+      store=""
+      for d in /dev/nvme*n1; do
+          [ -b "$d" ] || continue
+          case "$root_src" in
+              "$d"*) continue ;;
+          esac
+
+          ctrl=$(basename "$d"); ctrl=$${ctrl%n1}
+          model=$(cat "/sys/class/nvme/$ctrl/model" 2>/dev/null || echo "")
+          case "$model" in
+              *"Instance Storage"*) [ -n "$store" ] || store="$d" ;;
+              *"Elastic Block Store"*) [ -n "$ebs" ] || ebs="$d" ;;
+              *) echo "tatooine: $d has an unrecognised model '$model'; leaving it alone" >&2 ;;
+          esac
+      done
+
+      # Pre-Nitro names, kept as a fallback for the EBS half only: an instance store has never been reachable this way.
+      for candidate in /dev/sdf /dev/xvdf; do
+          [ -n "$ebs" ] && break
+          [ -b "$candidate" ] && ebs="$candidate"
+      done
+
+      if [ "${persistent}" = "true" ]; then
+          dev="$ebs"
+          if [ -z "$dev" ]; then
+              echo "tatooine: no EBS data volume found; refusing to start with prod's world on the root disk" >&2
+              exit 1
+          fi
+
+          # NEVER unconditional: this is prod's world.
+          if [ -z "$(blkid -o value -s TYPE "$dev" 2>/dev/null || true)" ]; then
+              echo "tatooine: $dev has no filesystem, creating one"
+              mkfs.ext4 -F "$dev"
+          fi
+
+          grep -q "^$dev " /etc/fstab || echo "$dev ${data_dir} ext4 defaults,nofail 0 2" >> /etc/fstab
+      else
+          dev="$store"
+          if [ -z "$dev" ]; then
+              # Not a failure: an instance family with no local disk is a legitimate choice for a small stack and the
+              # world on the root volume still works. Said out loud, because it changes what a durability number means.
+              echo "tatooine: no instance store on this instance type; the world stays on the root volume (EBS timings)" >&2
+              mkdir -p ${data_dir}
+              chown tatooine:tatooine ${data_dir}
+              exit 0
+          fi
+
+          # Safe to format whenever it is blank, and it IS blank after every stop, because an instance store does not
+          # survive one. An ephemeral world dies with the instance by contract, so a mkfs here destroys nothing the stop
+          # had not already taken.
+          if [ -z "$(blkid -o value -s TYPE "$dev" 2>/dev/null || true)" ]; then
+              echo "tatooine: formatting instance store $dev for the world"
+              mkfs.ext4 -F "$dev"
+          fi
+
+          # And NO fstab entry for it. The device name is stable; its content is not. An entry would have the next boot
+          # try to mount a blank disk before this script could format it, and `nofail` would then leave the server writing
+          # its world into the mount point on the root disk instead -- silently back on gp3, which is the failure this
+          # whole script exists to end.
+          :
+      fi
+
+      mkdir -p ${data_dir}
+      mountpoint -q ${data_dir} || mount "$dev" ${data_dir}
+      chown tatooine:tatooine ${data_dir}
+      echo "tatooine: world on $dev at ${data_dir} ($(findmnt -no FSTYPE ${data_dir}))"
+
+  # <b>A unit, not a runcmd, because runcmd runs ONCE per instance and this has to run on every boot.</b> The instance
+  # store comes up blank after a stop, so a first-boot-only mount left the world on the root disk from the second boot
+  # onwards -- and prod's fstab entry is not enough on its own either, since `nofail` turns a failed mount into a silent
+  # fallback onto the mount point. Ordered before the server with Requires, so a box that cannot place its world does not
+  # start a server that would quietly create one somewhere else.
+  - path: /etc/systemd/system/tatooine-data.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=SWG Tatooine world disk (${stack})
+      After=local-fs.target
+      Before=tatooine.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/sbin/tatooine-mount-data
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # <b>The AWS CLI, from AWS, because Ubuntu 24.04 does not package it.</b> `awscli` was in the package list above and
+  # `apt-cache policy awscli` on 24.04 answers `Candidate: (none)` -- the distro dropped it. apt then failed the whole
+  # install, cloud-init reported `status: error`, and every script here that shells to `aws` died with `aws: not found`:
+  # the DNS record was never published, and only the certificate survived because certbot's route53 plugin talks to the
+  # API through boto3 rather than the CLI.
+  #
+  # Found by applying, not by reading: nothing in `terraform validate` or a YAML render can know what is in an archive.
+  #
+  # Architecture-aware because the bot box is Graviton and the server is x86_64. Installed BEFORE the units below are
+  # started, since all of them need it.
+  - |
+    set -eu
+    case "$(uname -m)" in
+        aarch64) url=https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip ;;
+        x86_64)  url=https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip ;;
+        *) echo "tatooine: no AWS CLI build for $(uname -m)" >&2; exit 1 ;;
+    esac
+    tmp=$(mktemp -d)
+    curl -fsSL "$url" -o "$tmp/awscliv2.zip"
+    unzip -q "$tmp/awscliv2.zip" -d "$tmp"
+    "$tmp/aws/install" --update
+    rm -rf "$tmp"
+    /usr/local/bin/aws --version
+
+  # The service account is created in bootcmd above, before write_files needs it.
+  #
+  # ${data_dir} is created HERE, before anything starts, for the reason the unit's ReadWritePaths comment gives. It is a
+  # MOUNT POINT in both shapes now -- prod's EBS volume or an ephemeral stack's instance store goes over it -- and the
+  # directory still has to exist before the disk unit or the server can use it.
+  - [ mkdir, -p, /opt/tatooine/releases, /etc/tatooine, '${data_dir}' ]
+  - [ chown, '-R', 'tatooine:tatooine', '${data_dir}' ]
+  - [ chown, '-R', 'tatooine:tatooine', /opt/tatooine ]
+  - [ systemctl, daemon-reload ]
+
+  # ENABLED and started: the disk has to be in place before the first deploy starts the server, and enabling it is what
+  # makes it run on every later boot -- which is the half runcmd could never do, since runcmd runs once per instance.
+  - [ systemctl, enable, '--now', tatooine-data.service ]
+
+  # The record first, then the certificate for the name it points at. Both are started HERE as well as enabled, because they
+  # must have run before the first deploy starts the server -- and both are oneshot, so a failure is visible in
+  # `systemctl status` rather than a restart loop. A box whose delegation is unfinished fails the certificate step and still
+  # serves plain HTTP, which is diagnosable.
+  - [ systemctl, enable, '--now', tatooine-dns.service ]
+  - [ systemctl, enable, '--now', tatooine-certificate.service ]
+
+  # ENABLED but not started: there is no payload yet, so starting it here would log a failure and sit in a restart loop
+  # until the first deploy. Enabled means it comes back with the box after a stop/start, which is prod's normal life.
+  - [ systemctl, enable, tatooine.service ]

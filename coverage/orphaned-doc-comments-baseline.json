@@ -1,7 +1,7 @@
 {
   "demo/AntHill/AntHill.Core/Engine/TyphonBridge.cs": 1,
-  "demo/SwgTatooine.Bots/BotSwarm.cs": 1,
-  "demo/SwgTatooine/Sim/TatooineSim.cs": 1,
+  "demo/SwgTatooine/SwgTatooine.Bots/BotSwarm.cs": 1,
+  "demo/SwgTatooine/SwgTatooine.Server/Sim/TatooineSim.cs": 1,
   "src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs": 4,
   "src/Typhon.Engine/Ecs/public/DatabaseEngine.SpatialTelemetry.cs": 1,
   "src/Typhon.Engine/Ecs/public/DatabaseEngine.cs": 3,

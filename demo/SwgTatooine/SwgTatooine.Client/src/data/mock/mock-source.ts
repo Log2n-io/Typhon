@@ -1,0 +1,366 @@
+import { RealmFrame, type AggregateGrid, type Clock, type WorldStore } from '@typhondb/client';
+import type { DataSource, EventSink, LatencyControl, SourceStats } from '../source';
+import { realmViewOf, type RealmView } from '../realm-view';
+import { PLANET_HALF_EXTENT_M } from '../world-data';
+import { applyTick } from './apply';
+import { TickFlags, type MainToWorker, type TickMessage, type WorkerToMain } from './protocol';
+
+/**
+ * The one realm the mock has: planet 0, at the size the mock's own world is generated over.
+ *
+ * <b>The mock is one planet by construction</b> — its bins, its motion rule and its placement limits all read
+ * `PLANET_HALF_EXTENT_M` directly — so this is a fact about it rather than a simplification. It exists so the app
+ * can treat every source the same way: a scene is chosen from a realm, and a source that cannot switch realms
+ * still has one.
+ *
+ * `appTag` 0 is a planet in slot 0 with the default palette and place table, which is exactly Tatooine.
+ */
+const MOCK_PLANET: RealmView = realmViewOf(
+  // Axis 2 is the degenerate slab a flat `SpatialGridConfig` leaves behind, `[0, cellM]` — not a height. A
+  // `RealmFrame` requires a strict `min < max` on every axis, so it cannot be zero-width, and `realmViewOf`
+  // gives a flat realm no altitude whatever it holds.
+  new RealmFrame(
+    0,
+    1,
+    0,
+    0,
+    24,
+    64,
+    false,
+    [-PLANET_HALF_EXTENT_M, -PLANET_HALF_EXTENT_M, 0],
+    [PLANET_HALF_EXTENT_M, PLANET_HALF_EXTENT_M, 64],
+  ),
+)!;
+
+/** The part of a `Worker` the source uses: tests hand in a fake. */
+export interface WorkerLike {
+  onmessage: ((event: MessageEvent<WorkerToMain>) => void) | null;
+  postMessage(message: MainToWorker): void;
+  terminate(): void;
+}
+
+export interface MockSourceOptions {
+  readonly world: WorldStore;
+  readonly grid: AggregateGrid;
+  readonly clock: Clock;
+  readonly events: EventSink;
+  readonly seed: number;
+  readonly population: number;
+  /** Simulated one-way network delay and jitter, so the clock sees what a real link gives it. */
+  readonly latencyMs: number;
+  readonly jitterMs: number;
+  /** Test seams: the worker, and the random source of the jitter. */
+  readonly createWorker?: () => WorkerLike;
+  readonly random?: () => number;
+}
+
+/** Frames remembered for the wire rate: enough for a second of ticks at up to 60 Hz. */
+const BYTE_RING = 64;
+
+function createMockWorker(): WorkerLike {
+  return new Worker(new URL('./mock.worker.ts', import.meta.url), { type: 'module' });
+}
+
+/**
+ * The mock server as a {@link DataSource}: a worker produces frames, and this applies them to the store strictly in
+ * arrival order. Simulated latency delays whole frames but never reorders them.
+ */
+export class MockSource implements DataSource, LatencyControl {
+  private readonly options: MockSourceOptions;
+  private worker: WorkerLike | null = null;
+  private readonly queue: { message: TickMessage; releaseAt: number }[] = [];
+  private queueHead = 0;
+  private drainTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastReleaseAt = 0;
+  /** Tick and wire bytes of recent frames. Frames are skipped when a tick carries nothing, so a rate counts ticks, not frames. */
+  private readonly byteTicks = new Float64Array(BYTE_RING).fill(Number.NEGATIVE_INFINITY);
+  private readonly byteCounts = new Float64Array(BYTE_RING);
+  private byteNext = 0;
+  private current: SourceStats;
+
+  private latencyMs: number;
+  private jitterMs: number;
+
+  /** The world it was handed: the mock does not build its own, so the app is already drawing this one. */
+  get world(): WorldStore {
+    return this.options.world;
+  }
+
+  get grid(): AggregateGrid {
+    return this.options.grid;
+  }
+
+  /** What the mock server reports it is serving, the same figure its stats carry. */
+  get effectiveRadiusM(): number {
+    return this.current.server?.effectiveRadius ?? 0;
+  }
+
+  /** Planet 0, always: see {@link MOCK_PLANET}. */
+  get realm(): RealmView {
+    return MOCK_PLANET;
+  }
+
+  /** Never: the mock's world is one realm on one profile, and nothing in it can empty the store. */
+  get resetCount(): number {
+    return 0;
+  }
+
+  /** The mock has one profile and no sessions to move between them, so the control hides rather than pretending. */
+  get canSpectate(): boolean {
+    return false;
+  }
+
+  get spectatingNetId(): number {
+    return 0;
+  }
+
+  spectate(): void {}
+
+  /** The mock owns the world it draws and serves all of it, so there is no sphere to widen. */
+  setViewRadius(): void {}
+
+  boardShuttle(): void {}
+
+  /** The mock has no swoops. */
+  setMount(): void {}
+
+  setStance(): void {}
+
+  /** Nobody in the mock is listening. */
+  say(): boolean {
+    return false;
+  }
+
+  /** The mock lists no missions. */
+  takeMission(): boolean {
+    return false;
+  }
+
+  abandonMission(): boolean {
+    return false;
+  }
+
+  /** The mock serves its whole world to every camera already. */
+  setOverview(): void {}
+
+  get overview(): boolean {
+    return false;
+  }
+
+  /** The mock controls nothing: it has no sessions and no SELF block. */
+  get selfNetId(): number {
+    return 0;
+  }
+
+  /** No SELF block, so no owner field ever arrived — which is what `NaN` means, and it is what stops A14 predicting here. */
+  selfNumber(): number {
+    return NaN;
+  }
+
+  /** The mock's own worker stops on demand, so pausing has always worked here. */
+  get canPause(): boolean {
+    return true;
+  }
+
+  /**
+   * The mock has one realm, so it cannot honour this — and says so rather than accepting and doing nothing.
+   *
+   * The selector hides itself against a source that answers false, which is the same way the Pause button behaves
+   * against a catalog that does not declare `SetPaused`: a control that cannot work is worse than no control.
+   */
+  /**
+   * The mock has no avatar and no server to send an intent to (A9).
+   *
+   * False rather than "accept and ignore", so no UI offers a control that cannot work — the same rule `canViewRealm` and
+   * `canPause` follow here.
+   */
+  get canPlay(): boolean {
+    return false;
+  }
+
+  /** @inheritdoc */
+  moveTo(): void {}
+
+  /** @inheritdoc */
+  moveDir(): void {}
+
+  /**
+   * Twice the simulated one-way delay, so the mock exercises the correction a live link needs rather than a zero that
+   * hides it.
+   */
+  get rttMs(): number {
+    return this.options.latencyMs * 2;
+  }
+
+  /** @inheritdoc */
+  setTarget(): void {}
+
+  get canViewRealm(): boolean {
+    return false;
+  }
+
+  viewRealm(): void {
+    // Nothing. `canViewRealm` is false, so no UI offers this, and a caller that asked anyway gets what it was told.
+  }
+
+  /**
+   * The mock has no `DEBUG` block, and inventing one would be worse than having none: the overlay exists to show what
+   * the ENGINE holds, so a mock that drew a plausible grid and window would be the one thing on screen that could not
+   * be believed.
+   */
+  get debug(): null {
+    return null;
+  }
+
+  constructor(options: MockSourceOptions) {
+    this.options = options;
+    this.latencyMs = options.latencyMs;
+    this.jitterMs = options.jitterMs;
+    this.current = {
+      name: `mock x${options.population}`,
+      running: false,
+      ticksApplied: 0,
+      lastTick: -1,
+      viewComplete: false,
+      wireBytesPerSec: 0,
+      applyMs: 0,
+      server: null,
+      session: null,
+    };
+  }
+
+  get stats(): SourceStats {
+    return this.current;
+  }
+
+  get latency(): LatencyControl {
+    return this;
+  }
+
+  start(): void {
+    if (this.worker !== null) {
+      return;
+    }
+
+    const worker = (this.options.createWorker ?? createMockWorker)();
+    worker.onmessage = (event: MessageEvent<WorkerToMain>) => {
+      this.onWorkerMessage(event.data);
+    };
+    worker.postMessage({ type: 'start', seed: this.options.seed, population: this.options.population });
+    this.worker = worker;
+    this.current = { ...this.current, running: true };
+  }
+
+  dispose(): void {
+    if (this.worker !== null) {
+      this.worker.postMessage({ type: 'stop' });
+      this.worker.terminate();
+      this.worker = null;
+    }
+
+    if (this.drainTimer !== null) {
+      clearTimeout(this.drainTimer);
+      this.drainTimer = null;
+    }
+
+    this.queue.length = 0;
+    this.queueHead = 0;
+    this.current = { ...this.current, running: false };
+  }
+
+  setRegion(x: number, z: number, radius: number): void {
+    this.worker?.postMessage({ type: 'region', x, z, radius });
+  }
+
+  /** Changes the simulated network delay; frames already queued keep their release times, so order holds. */
+  setLatency(latencyMs: number, jitterMs: number): void {
+    this.latencyMs = latencyMs;
+    this.jitterMs = jitterMs;
+  }
+
+  setPaused(paused: boolean): void {
+    this.worker?.postMessage({ type: 'pause', paused });
+  }
+
+  private onWorkerMessage(message: WorkerToMain): void {
+    if (message.type === 'ready') {
+      return;
+    }
+
+    const now = performance.now();
+    const delay = this.latencyMs + (this.options.random ?? Math.random)() * this.jitterMs;
+    // A frame never overtakes the previous one: TCP delivers in order.
+    const releaseAt = Math.max(now + delay, this.lastReleaseAt);
+    this.lastReleaseAt = releaseAt;
+    this.queue.push({ message, releaseAt });
+    this.drain();
+  }
+
+  private drain(): void {
+    if (this.drainTimer !== null) {
+      clearTimeout(this.drainTimer);
+      this.drainTimer = null;
+    }
+
+    const now = performance.now();
+    while (this.queueHead < this.queue.length && this.queue[this.queueHead].releaseAt <= now) {
+      this.apply(this.queue[this.queueHead++].message);
+    }
+
+    if (this.queueHead > 64 && this.queueHead * 2 > this.queue.length) {
+      this.queue.splice(0, this.queueHead);
+      this.queueHead = 0;
+    }
+
+    if (this.queueHead < this.queue.length) {
+      this.drainTimer = setTimeout(
+        () => {
+          this.drain();
+        },
+        Math.max(0, this.queue[this.queueHead].releaseAt - now),
+      );
+    }
+  }
+
+  private apply(message: TickMessage): void {
+    const { world, grid, clock, events } = this.options;
+    const started = performance.now();
+    applyTick(world, grid, message, events);
+    const applied = performance.now();
+    clock.onFrame(message.tick, applied);
+
+    // Bytes of the frames of the last second of ticks, at the current tick period.
+    this.byteTicks[this.byteNext] = message.tick;
+    this.byteCounts[this.byteNext] = message.stats.wireBytes;
+    this.byteNext = (this.byteNext + 1) % BYTE_RING;
+    const windowTicks = Math.max(1, Math.round(1000 / clock.tickPeriodMs));
+    let bytes = 0;
+    for (let i = 0; i < BYTE_RING; i++) {
+      const age = message.tick - this.byteTicks[i];
+      if (age >= 0 && age < windowTicks) {
+        bytes += this.byteCounts[i];
+      }
+    }
+
+    this.current = {
+      name: this.current.name,
+      running: true,
+      ticksApplied: this.current.ticksApplied + 1,
+      lastTick: message.tick,
+      viewComplete: (message.flags & TickFlags.ViewComplete) !== 0,
+      wireBytesPerSec: (bytes * 1000) / (windowTicks * clock.tickPeriodMs),
+      applyMs: applied - started,
+      server: {
+        simMs: message.stats.simMs,
+        replicationMs: message.stats.replicationMs,
+        watched: message.stats.watched,
+        effectiveRadius: message.stats.effectiveRadius,
+        worldEntities: message.stats.worldEntities,
+      },
+
+      // The mock has no session: no PING loop, no session-scoped metrics, no RegionSender. Reporting zeros here would
+      // read as "this client costs the server nothing", which is a claim rather than an absence (CLI3D-06).
+      session: null,
+    };
+  }
+}

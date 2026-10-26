@@ -1,0 +1,245 @@
+import type { CrossingKind } from '../data/realm-view';
+
+/**
+ * Where a realm transition is in its run.
+ *
+ * `out` and `hold` exist only for a crossing the viewer ASKED for, because that is the only kind the client sees
+ * coming. A door is server-initiated: the client learns at `onRealmChanged`, by which point the store is already empty
+ * and there is nothing left to fade out of. Faking one would mean delaying the frame's apply, which SUB-29 forbids and
+ * which would desynchronise the clock.
+ */
+export type TransitionPhase = 'idle' | 'out' | 'hold' | 'in';
+
+export interface TransitionState {
+  readonly phase: TransitionPhase;
+  /** When the current phase began, in `performance.now()` milliseconds. */
+  readonly sinceMs: number;
+  /** How long the current ramp takes. Zero in `hold`, which ends on an event rather than a clock. */
+  readonly durationMs: number;
+  /** What the caption says, or `''` for none. */
+  readonly caption: string;
+  /**
+   * Whether the arrival has already landed.
+   *
+   * <b>Needed because the frame usually beats the fade.</b> Against a local server the round trip is about a
+   * millisecond, so a `REALM` block arrives well inside the 180 ms fade-out — and a state machine that only knew
+   * "waiting" or "not waiting" had nowhere to record an arrival that came too early. It parked in `hold` and sat there
+   * until the safety valve fired, which is a 2.5 s black screen on the happy path.
+   */
+  readonly settled: boolean;
+  /** How long `hold` may last before the screen is given back, ms: {@link HOLD_LIMIT_MS}, or a predicted door's shorter one. */
+  readonly holdMs: number;
+}
+
+/**
+ * How long a viewer may be held at full opacity before the screen is given back.
+ *
+ * <b>The most important number here.</b> `ViewRealm` is rate-limited at one per tick, refused for a realm that does not
+ * exist, and answered by a frame the client does not control — so every failure mode ends with a hold that never
+ * receives its arrival. Without this the result is a black screen over a live, working simulation, which is the worst
+ * outcome of the whole feature and the one most likely to be blamed on the engine.
+ */
+export const HOLD_LIMIT_MS = 2500;
+
+/**
+ * How long a PREDICTED door holds black before giving the screen back, ms.
+ *
+ * <b>The prediction can be wrong</b> — a tap of a key on the threshold, a body the server stopped in the jamb — and then
+ * nothing arrives. Under {@link HOLD_LIMIT_MS} that was 2.95 s of black for a step that did not happen. A right
+ * prediction is answered within a few ticks and a round trip, well inside this; one answered later still gets its black
+ * frame, because the arrival itself calls {@link blackout}.
+ */
+export const DOOR_HOLD_MS = 600;
+
+export const IDLE: TransitionState = {
+  phase: 'idle',
+  sinceMs: 0,
+  durationMs: 0,
+  caption: '',
+  settled: false,
+  holdMs: HOLD_LIMIT_MS,
+};
+
+/** How long the screen takes to come back after a refusal — brisk, because nothing changed and nothing is loading. */
+const REFUSED_IN_MS = 140;
+
+/** How long the screen takes to come back once a fade-out completes over an arrival that already landed. */
+const IN_AFTER_SETTLED_MS = 220;
+
+/**
+ * Per-crossing timings, milliseconds. `out` is 0 wherever the client cannot see the crossing coming.
+ *
+ * <b>A door is the exception, and the testbench's timings</b> (0.25 s out, 0.35 s in): the client predicts its own body's
+ * step through a door's plane before the server answers (`door-crossing.ts`), so the fade starts on the step, holds
+ * black over the switch, and comes back once the camera is behind the body in the new realm.
+ */
+const TIMING: Record<CrossingKind, { out: number; in: number; hold: number; caption: string }> = {
+  // Asked for, and a journey in the fiction: the shuttle has a boarding window, so time passing is honest here.
+  travel: { out: 180, in: 220, hold: HOLD_LIMIT_MS, caption: 'Travelling…' },
+
+  // A door: predicted from the body's own step, so its hold is the short one.
+  transition: { out: 250, in: 350, hold: DOOR_HOLD_MS, caption: '' },
+
+  // Nothing travels into space in this demo; the camera looks somewhere else. A dissolve with no caption, because
+  // captioning it would claim a journey that does not happen.
+  channel: { out: 120, in: 120, hold: HOLD_LIMIT_MS, caption: '' },
+
+  // Arriving from nothing, and leaving to nothing.
+  arrive: { out: 0, in: 160, hold: HOLD_LIMIT_MS, caption: '' },
+  leave: { out: 0, in: 0, hold: HOLD_LIMIT_MS, caption: '' },
+};
+
+/**
+ * The viewer asked to be put in another realm.
+ *
+ * Ignored unless idle: a second ask during a crossing must not restart the ramp, or a viewer clicking twice would be
+ * held at full opacity for as long as they kept clicking.
+ */
+export function askedFor(state: TransitionState, kind: CrossingKind, nowMs: number): TransitionState {
+  if (state.phase !== 'idle') {
+    return state;
+  }
+
+  const timing = TIMING[kind];
+  if (timing.out === 0) {
+    return state;
+  }
+
+  return {
+    phase: 'out',
+    sinceMs: nowMs,
+    durationMs: timing.out,
+    caption: timing.caption,
+    settled: false,
+    holdMs: timing.hold,
+  };
+}
+
+/**
+ * The realm changed: a `REALM` block has been applied and the scene has been swapped.
+ *
+ * <b>Always ends in a fade IN, whatever it interrupted.</b> Arriving straight from `idle` is the server-initiated case
+ * — a door — and is the common one; arriving during `out` is the crossing the viewer asked for, arriving before the
+ * ramp finished. Either way the screen has to come back, and it comes back from wherever it had got to.
+ */
+export function arrived(state: TransitionState, kind: CrossingKind, nowMs: number): TransitionState {
+  const timing = TIMING[kind];
+  if (timing.in === 0) {
+    return IDLE;
+  }
+
+  // A second arrival during a fade-IN does not restart it. Snapping the screen back to opaque to fade it in again is
+  // the flash the `out` branch below exists to avoid, reached from the other side — and a door opening onto the tail of
+  // a previous crossing is exactly when it happens.
+  if (state.phase === 'in') {
+    return state;
+  }
+
+  // Let the fade-out finish first: cutting to full opacity mid-ramp is a flash, and more noticeable than the crossing
+  // it was hiding. The arrival is RECORDED rather than acted on, and `advance` turns it into the fade-in when the ramp
+  // completes — this is the ordinary case against a local server, where the frame beats the fade every time.
+  if (state.phase === 'out' && nowMs - state.sinceMs < state.durationMs) {
+    return { ...state, settled: true };
+  }
+
+  return { phase: 'in', sinceMs: nowMs, durationMs: timing.in, caption: '', settled: true, holdMs: HOLD_LIMIT_MS };
+}
+
+/**
+ * Black, now: a door crossing landed, and the new realm must not be seen until the camera has been put in it.
+ *
+ * <b>A fade-out still running is cut to black, not left to finish.</b> The server's switch does not wait for the client's
+ * quarter second: measured live, it landed with the curtain at 61 %, over a frame in which the camera was still between
+ * the old realm's coordinates and the new one's.
+ *
+ * It holds for the full {@link HOLD_LIMIT_MS}: the crossing HAS happened, and what it waits for is the camera's placement,
+ * which gives up well before that (`door-arrival.ts`).
+ *
+ * @param state The current state.
+ * @param nowMs When.
+ */
+export function blackout(state: TransitionState, nowMs: number): TransitionState {
+  // Already black for the full limit: unchanged. Black on a predicted door's SHORT hold is not enough — the switch it
+  // predicted has landed, and the camera's placement can take longer than what is left of it.
+  if (state.phase === 'hold' && state.holdMs === HOLD_LIMIT_MS) {
+    return state;
+  }
+
+  return { phase: 'hold', sinceMs: nowMs, durationMs: 0, caption: '', settled: false, holdMs: HOLD_LIMIT_MS };
+}
+
+/**
+ * The crossing is not coming: the server refused the ask, or the local rate limit did.
+ *
+ * <b>The screen comes back at once rather than waiting out {@link HOLD_LIMIT_MS}.</b> The limit is a safety valve for
+ * the case where nothing answers at all; an answer that says "no" is not that case, and making a viewer stare at an
+ * opaque screen for two and a half seconds after the server already replied is the thing the reason codes exist to
+ * prevent.
+ */
+export function refused(state: TransitionState, nowMs: number): TransitionState {
+  if (state.phase === 'idle' || state.phase === 'in') {
+    return state;
+  }
+
+  return { phase: 'in', sinceMs: nowMs, durationMs: REFUSED_IN_MS, caption: '', settled: false, holdMs: HOLD_LIMIT_MS };
+}
+
+/**
+ * Advances the state for the clock alone: finishes a ramp, and gives the screen back when a hold has waited too long.
+ *
+ * @returns the state at `nowMs`, which is `state` itself when nothing changed.
+ */
+export function advance(state: TransitionState, nowMs: number): TransitionState {
+  const elapsed = nowMs - state.sinceMs;
+  switch (state.phase) {
+    case 'out':
+      if (elapsed < state.durationMs) {
+        return state;
+      }
+
+      // A finished fade-out goes straight into the fade-in when the arrival already landed, and waits in `hold`
+      // otherwise. Only the second of those can strand a viewer, which is why only it needs a time limit.
+      return state.settled
+        ? {
+            phase: 'in',
+            sinceMs: nowMs,
+            durationMs: IN_AFTER_SETTLED_MS,
+            caption: '',
+            settled: true,
+            holdMs: HOLD_LIMIT_MS,
+          }
+        : { ...state, phase: 'hold', sinceMs: nowMs, durationMs: 0 };
+
+    case 'hold':
+      // The safety valve. An ask that is refused, rate-limited or simply never answered leaves the viewer here, and a
+      // black screen over a running world is worse than a crossing that visibly did not happen.
+      return elapsed >= state.holdMs
+        ? { phase: 'in', sinceMs: nowMs, durationMs: 200, caption: '', settled: false, holdMs: HOLD_LIMIT_MS }
+        : state;
+
+    case 'in':
+      return elapsed >= state.durationMs ? IDLE : state;
+
+    default:
+      return state;
+  }
+}
+
+/** How opaque the screen is now: 0 shows the world, 1 hides it completely. */
+export function opacityAt(state: TransitionState, nowMs: number): number {
+  const elapsed = nowMs - state.sinceMs;
+  switch (state.phase) {
+    case 'out':
+      return state.durationMs <= 0 ? 1 : clamp01(elapsed / state.durationMs);
+    case 'hold':
+      return 1;
+    case 'in':
+      return state.durationMs <= 0 ? 0 : 1 - clamp01(elapsed / state.durationMs);
+    default:
+      return 0;
+  }
+}
+
+function clamp01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}

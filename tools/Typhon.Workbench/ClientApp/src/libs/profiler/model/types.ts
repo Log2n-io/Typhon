@@ -874,6 +874,11 @@ export interface TraceEvent {
   sessionId?: number;
   bytesPerSec?: number;
   degradeLevel?: number;
+  // `framesPerSec` shares `bytesPerSec`'s window on purpose: their quotient is the session's average frame payload, which
+  // dividing the two CUMULATIVE counters would not give — that would be the session's lifetime average. Appended after
+  // `degradeLevel`, so a capture from an older producer stops at 26 bytes and both of these read zero.
+  framesPerSec?: number;
+  framesProduced?: number;
 
   // NOTE kind 67 reuses `budgetConfiguredMs` / `efficiencyTolerance` declared above for kind 66. On a REALM row they are
   // that realm's DECLARATION: maintenance is budgeted per archetype from realm 0's grid, so a realm's declared value is

@@ -344,6 +344,10 @@ function decodeInstant(
         bytesPerSec: at69(10, 4, (o) => reader.readF32(o), 0),
         framesSkipped: at69(14, 8, (o) => reader.readI64AsNumber(o), 0),
         degradeLevel: at69(22, 4, (o) => reader.readI32(o), 0),
+        // Appended after degradeLevel, so a capture from a producer that predates them stops at 26 and both read zero. framesPerSec shares
+        // bytesPerSec's window, which is what makes their quotient the session's average frame payload.
+        framesPerSec: at69(26, 4, (o) => reader.readF32(o), 0),
+        framesProduced: at69(30, 8, (o) => reader.readI64AsNumber(o), 0),
       };
     }
 

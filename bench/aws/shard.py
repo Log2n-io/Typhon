@@ -40,6 +40,14 @@ test-affected map).
 Env knobs (run mode): SHARD_REPO (repo root, default cwd), SHARD_CONFIG (default
 Release), SHARD_CONCURRENCY (shards to run at once, default = all of them).
 
+ANOTHER PROJECT: SHARD_PROJECT (a .csproj, relative to SHARD_REPO) with SHARD_PLAN
+(its own plan) shards a different suite with the same machinery — the SWG demo's
+does, `bench/aws/shards-swg.json`. Its suite has the same reason to want it: process-
+static state (TatooineReplication's counters) rules out fixtures in parallel in one
+process, and most of its time is paced ticks, so K processes overlap almost freely.
+A quiet or gated pass whose category no source file of the project names is skipped
+rather than started: such a pass selects nothing and costs a test-host start.
+
 SHARD_CONCURRENCY=1 runs the SAME plan strictly sequentially. That is what the macOS
 arm64 nightly uses: a 3-core hosted runner cannot take K=8 concurrent processes (the
 gate's K is sized for 16 physical cores), but running a DIFFERENT, looser filter there
@@ -54,7 +62,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 HERE        = os.path.dirname(os.path.abspath(__file__))
 REPO        = os.environ.get("SHARD_REPO") or os.getcwd()
-TESTPROJ    = os.path.join(REPO, "test", "Typhon.Engine.Tests", "Typhon.Engine.Tests.csproj")
+TESTPROJ    = os.path.join(REPO, os.environ.get("SHARD_PROJECT") or os.path.join("test", "Typhon.Engine.Tests", "Typhon.Engine.Tests.csproj"))
 RUNSETTINGS = os.path.join(HERE, "workers1.runsettings")
 SHARDS_JSON = os.environ.get("SHARD_PLAN") or os.path.join(HERE, "shards.json")
 CFG         = os.environ.get("SHARD_CONFIG", "Release")
@@ -289,6 +297,32 @@ def cmd_sync():
 
 # ── run (CI) ────────────────────────────────────────────────────────────────
 
+def project_names_category(category):
+    """Whether any source file of the project under test names a category, as a quoted literal.
+
+    A pass for a category the project never names would select nothing: it is skipped instead of started. Erring towards
+    running — any mention of the string counts, a comment included — so a pass is skipped only where it certainly selects
+    nothing."""
+    root = os.path.dirname(TESTPROJ)
+    needle = f'"{category}"'
+    for d, dirs, files in os.walk(root):
+        dirs[:] = [x for x in dirs if x not in ("bin", "obj", "TestResults")]
+        for f in files:
+            if f.endswith(".cs"):
+                with open(os.path.join(d, f), encoding="utf-8", errors="replace") as fh:
+                    if needle in fh.read():
+                        return True
+    return False
+
+def skipped_trx(results_dir, label):
+    """The trx a skipped pass would have written, removed if an earlier run left one: a missing file reads as an empty run, a stale one
+    would report that run's results as this one's."""
+    path = os.path.join(results_dir, f"shard{label}.trx")
+    if os.path.exists(path):
+        os.remove(path)
+    return path
+
+
 def run_one(label, flt, results_dir, project=None, env_extra=None):
     trx = f"shard{label}.trx"
     cmd = ["dotnet", "test", project or TESTPROJ, "-c", CFG, "--no-build",
@@ -400,12 +434,16 @@ def cmd_run(results_dir):
         t, p, f = parse_trx(trx); tot += t; pas += p; fail += f
         print(f"  {label:>2}  {rc:3d}  {dt:5.0f}s  {t:5d}  {p:5d}  {f:5d}", flush=True)
 
-    print("\nserial quiet pass (Category=Sensitive, workers=1, no siblings)...", flush=True)
     s0 = time.time()
-    _, src, sdt, strx = run_one("S", SENSITIVE_FILTER, results_dir)
+    if project_names_category("Sensitive"):
+        print("\nserial quiet pass (Category=Sensitive, workers=1, no siblings)...", flush=True)
+        _, src, sdt, strx = run_one("S", SENSITIVE_FILTER, results_dir)
+        st, sp, sf = parse_trx(strx); tot += st; pas += sp; fail += sf
+        print(f"   S  {src:3d}  {sdt:5.0f}s  {st:5d}  {sp:5d}  {sf:5d}", flush=True)
+    else:
+        strx = skipped_trx(results_dir, "S")
+        print("\nserial quiet pass skipped: no test of this project is Category=Sensitive", flush=True)
     ser = time.time() - s0
-    st, sp, sf = parse_trx(strx); tot += st; pas += sp; fail += sf
-    print(f"   S  {src:3d}  {sdt:5.0f}s  {st:5d}  {sp:5d}  {sf:5d}", flush=True)
 
     # ── gated passes ────────────────────────────────────────────────────────
     # One process per entry, with its flags set. A pass that selects no test prints zeros and costs ~2 s; that is the
@@ -413,6 +451,10 @@ def cmd_run(results_dir):
     gated_trx = []
     gated_secs = 0.0
     for label, category, env_extra, why in GATED_PASSES:
+        if not project_names_category(category):
+            print(f"\ngated pass {label} skipped: no test of this project is Category={category}", flush=True)
+            gated_trx.append(skipped_trx(results_dir, label))
+            continue
         print(f"\ngated pass {label} (Category={category}, workers=1) — {why}...", flush=True)
         g0 = time.time()
         _, grc, gdt, gtrx = run_one(label, gated_filter(category), results_dir, env_extra=env_extra)

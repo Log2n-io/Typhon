@@ -55,6 +55,18 @@ internal struct PushSessionState
     public double PRadius;
     public WindowRows P;
 
+    /// <summary>
+    /// Where this gather saw a sphere session's viewpoint: what a <see cref="EventRouting.Near"/> event's view radius is measured from (SUB-21).
+    /// </summary>
+    /// <remarks>
+    /// <b>Not the pending anchor.</b> The anchor follows the viewpoint only once it drifts past the slack — R′ / 48, so 21 m at a 1 024 m sphere —
+    /// which is right for which cells a session holds and wrong for a radius: a chat line said 60 m away was heard by a listener whose anchor had
+    /// stayed 20 m behind it. A ClientRegion session's pending anchor is already its focus, so it does not read this.
+    /// </remarks>
+    public double PViewX;
+    public double PViewY;
+    public double PViewZ;
+
     // The LOD level (09 § 10), committed with the frame like the anchor: Level is what every change held back so far was scheduled by, PLevel what this
     // frame's gather moved it to (towards the link's TargetLevel).
     public byte Level;

@@ -98,6 +98,10 @@ public sealed class TyphonClient : IAsyncDisposable
         _options = options;
         _transportFactory = transportFactory ?? (() => ForEndpoint(options));
         _policy = new ReconnectPolicy(options);
+
+        // A client restarted from persisted state starts holding the token its previous process was given, so its first HELLO resumes rather than cold-logs.
+        // Null for every other caller, which is every caller that has not asked.
+        ResumeToken = options.ResumeToken;
     }
 
     /// <summary>Raised when a session opens, with the catalog the server sent.</summary>
@@ -159,6 +163,10 @@ public sealed class TyphonClient : IAsyncDisposable
     public uint SessionId { get; private set; }
 
     /// <summary>The resume token from the last <c>WELCOME</c>, or <see langword="null"/>.</summary>
+    /// <remarks>
+    /// Seeded from <see cref="ClientOptions.ResumeToken"/> when one was given, so a client restarted from persisted state presents it on its first
+    /// <c>HELLO</c> exactly as a reconnect within one process would.
+    /// </remarks>
     public byte[] ResumeToken { get; private set; }
 
     /// <summary>The digest of the catalog this session holds, as the server reported it.</summary>
@@ -175,6 +183,15 @@ public sealed class TyphonClient : IAsyncDisposable
 
     /// <summary>Whether a session is open right now.</summary>
     public bool IsConnected => _transport is { IsConnected: true } && Plan != null;
+
+    /// <summary>
+    /// What the transport knows about an abnormal close beyond its code, or <see langword="null"/>.
+    /// </summary>
+    /// <remarks>
+    /// Surfaced because a close code of 1006 says only that no close frame arrived. A caller counting abrupt disconnects — a load
+    /// generator, say — needs the local failure behind them to tell a reset by the peer from an abort or a timeout.
+    /// </remarks>
+    public string CloseDetail => _transport?.CloseDetail;
 
     /// <summary>How many messages have been received across every attempt.</summary>
     public long MessagesReceived { get; private set; }

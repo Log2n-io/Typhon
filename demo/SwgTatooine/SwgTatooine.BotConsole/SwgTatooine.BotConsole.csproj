@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <!-- SwgTatooine.BotConsole — the operator surface for the bot box (B9 / 08-hosting § 11.3 item 8).
+
+       Blazor Server, in process, hosting the fleet itself. That is roadmap Q1 and programme D9's answer for the back
+       office, applied one box over, and the reasons carry: this is a handful of forms and tables over live server-side
+       state, so it needs no second npm build, no OpenAPI client and no serialisation layer — a page reads FleetRunner's
+       counters directly off the object that owns the sessions.
+
+       Hosting the fleet in the SAME process is the load-bearing choice. The alternative — a panel that starts the
+       console runner as a child process — would need an IPC channel invented for counters that are currently fields,
+       and every number on the page would be a copy with a lag nobody could characterise.
+
+       It binds LOOPBACK by default and is reached over an SSM tunnel (08-hosting § 8, roadmap Q6: tunnel-only, no
+       operator password). A control panel that can start a thousand sessions must not be on a public interface. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>SwgTatooine.BotConsole</AssemblyName>
+    <RootNamespace>SwgTatooine.BotConsole</RootNamespace>
+    <LangVersion>default</LangVersion>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\SwgTatooine.Bots\SwgTatooine.Bots.csproj" />
+  </ItemGroup>
+</Project>

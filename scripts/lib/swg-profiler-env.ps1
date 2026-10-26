@@ -17,7 +17,7 @@
         operator just asked for.
 
     It deliberately does not decide anything: the server cannot switch its own profiler on (the engine bakes its
-    telemetry gate before Main runs, see demo/SwgTatooine/Sim/ProfilerArgs.cs), so this is the only layer that can, and
+    telemetry gate before Main runs, see demo/SwgTatooine/SwgTatooine.Server/Sim/ProfilerArgs.cs), so this is the only layer that can, and
     it keeps no policy of its own beyond set-or-clear.
 #>
 

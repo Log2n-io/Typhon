@@ -1,0 +1,5 @@
+node_modules/
+dist/
+
+# Mirrored by `npm run vendor`: Babylon run-time decoders, pinned to the installed engine version.
+public/vendor/

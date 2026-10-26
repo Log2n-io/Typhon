@@ -1,0 +1,9 @@
+# Fetched by scripts/assets.py at the versions pinned in assets.lock.json, or produced by the pipeline. Never committed:
+# the repository holds the scripts, the contract and the pins, and the bytes live in GitHub Releases (README.md).
+/blender/
+/textures/
+/externals/
+/tools/
+/build/
+/dist/
+__pycache__/

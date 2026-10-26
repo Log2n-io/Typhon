@@ -1,0 +1,500 @@
+﻿using System;
+using System.Collections.Generic;
+using NUnit.Framework;
+using SwgTatooine.Server;
+using Typhon.Engine;
+using Typhon.Schema.Definition;
+
+namespace SwgTatooine.Tests;
+
+/// <summary>
+/// Shared reads for the SWG-02 fixtures: the state a causality claim has to be checked against, not the state a report prints.
+/// </summary>
+internal static class Causality
+{
+    /// <summary>Every creature's identity, position, mode, target and health, through the realm's spatial index and then the entity.</summary>
+    public static List<(EntityId Id, float X, float Z, int Mode, EntityId Target, int Health)> Creatures(TatooineSim sim)
+    {
+        var rows = new List<(EntityId, float, float, int, EntityId, int)>();
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        Span<ClusterSpatialQueryResult> buffer = new ClusterSpatialQueryResult[64];
+        var e = sim.Dbe.ClusterSpatialQuery<Creature>(RealmId.Default).AABB(in Worlds.Everywhere);
+        try
+        {
+            int got;
+            while ((got = e.Fill(buffer)) > 0)
+            {
+                for (var i = 0; i < got; i++)
+                {
+                    var entity = tx.Open(buffer[i].Entity);
+                    var p = entity.Read(Creature.Bounds);
+                    var ai = entity.Read(Creature.Ai);
+                    rows.Add((buffer[i].Entity, p.X, p.Z, ai.Mode, ai.Target, entity.Read(Creature.Vitals).Health));
+                }
+            }
+        }
+        finally
+        {
+            e.Dispose();
+        }
+
+        return rows;
+    }
+
+    /// <summary>The credits every player is carrying, summed — the world's whole <see cref="Inventory"/> balance.</summary>
+    public static long TotalCredits(TatooineSim sim)
+    {
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        var total = 0L;
+        foreach (var id in sim.Index.Players)
+        {
+            total += tx.Open(id).Read(Player.Inventory).Credits;
+        }
+
+        return total;
+    }
+
+    /// <summary>Every standing mission lair and the body of the mission's holder.</summary>
+    public static List<(EntityId Lair, EntityId Owner, int Health)> LiveMissions(TatooineSim sim)
+    {
+        var rows = new List<(EntityId, EntityId, int)>();
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        foreach (var id in sim.Index.Lairs)
+        {
+            var entity = tx.Open(id);
+            var lair = entity.Read(CreatureLair.Spawner);
+            if (!lair.Mission.IsNull)
+            {
+                rows.Add((id, lair.Owner, entity.Read(CreatureLair.Vitals).Health));
+            }
+        }
+
+        return rows;
+    }
+
+    /// <summary>A world long enough for the loop to close: the walk to a mission is one to two kilometres at 12 m/s, which is minutes of simulated time.</summary>
+    /// <remarks>
+    /// <b>Unpaced, and that is not a shortcut.</b> Every interval in the simulation is expressed in seconds and converted at the configured rate (S0-3), so an
+    /// unpaced run is the same world sampled as fast as the box will go. Paced, these fixtures would take six minutes of wall-clock each to reach the first
+    /// mission completion; unpaced they take about three seconds.
+    /// </remarks>
+    public static SimConfig LongEnough(string dir, int ticks)
+    {
+        var config = Worlds.Small(dir);
+        config.WarmTicks = 0;
+        config.MeasuredTicks = ticks;
+        config.Unpaced = true;
+        return config;
+    }
+}
+
+/// <summary>
+/// AC-1, AC-2 and AC-4's aggregate half: the causality loop actually closes, and every effect it produced is accounted for.
+/// </summary>
+/// <remarks>
+/// One world, run once, asserted many times — the run is the expensive part, and the criteria are claims about the same window rather than about different
+/// worlds. What each test must not do is re-derive its expectation from the same counter it is checking, which is why the durability assertion is an identity
+/// between two independently produced numbers (the WAL's own watermark, and the count of things that wrote to it).
+/// </remarks>
+[Category("Integration")]
+[TestFixture]
+[NonParallelizable]
+public sealed class CausalityLoopTests
+{
+    private string _dir;
+    private TatooineSim _sim;
+    private RunResult _result;
+    private long _creditsBefore;
+
+    /// <remarks>
+    /// <b>12 000 ticks, 20 minutes at 10 Hz</b>: long enough for the mission loop to complete several missions, not only to issue one. The crowd gives a
+    /// mission up after SimBridge.MissionWalkSeconds, and a lair stands behind its occupants until they are dead, so a completion in the window depends on
+    /// what is drawn: the pool this replaced held one in 4 000 ticks only on some draws, six in 12 000 (measured, 2026-10-25). The world's build is most of
+    /// the fixture's cost, and the extra ticks about 8 s.
+    /// </remarks>
+    [OneTimeSetUp]
+    public void RunWorld()
+    {
+        _dir = Worlds.NewDirectory();
+        _sim = new TatooineSim(Causality.LongEnough(_dir, 12_000));
+        _sim.Initialize();
+        _creditsBefore = Causality.TotalCredits(_sim);
+        _result = _sim.Run();
+    }
+
+    [OneTimeTearDown]
+    public void Dispose()
+    {
+        _sim?.Dispose();
+        Worlds.Delete(_dir);
+    }
+
+    [Test]
+    public void AC1_ALairDiesFromPlayerFire_AndTheMissionCompletes()
+    {
+        var s = _sim.LastStats;
+
+        // The chain, each link asserted separately so a break says which link broke: the crowd takes a mission at a terminal, its body is sent to the lair
+        // drawn for it, its fire lands on the lair, and the desk's completion fires (missions.md § 3).
+        Assert.Multiple(() =>
+        {
+            Assert.That(s.MissionsIssued, Is.GreaterThan(0), "no mission was taken: the terminals list nothing, or the crowd never asks, not the combat loop");
+            Assert.That(s.MissionsAssigned, Is.GreaterThanOrEqualTo(s.MissionsIssued),
+                "a mission the crowd took never sent its body to a lair (once at the take, again whenever the lair moved)");
+            Assert.That(s.LairHits, Is.GreaterThan(0), "no player fire reached a lair");
+            Assert.That(s.MissionsCompleted, Is.GreaterThan(0), "lairs were hit but no mission completed");
+        });
+    }
+
+    [Test]
+    public void AC2_EveryTickThatWroteInventory_AdvancedTheDurabilityWatermark()
+    {
+        var s = _sim.LastStats;
+        var crossings = _sim.CrossingCommits;
+        var lairs = _sim.LairCommits;
+        var missions = _sim.MissionCommits;
+        var writes = s.CreaturesKilled + s.MissionRewards + crossings + lairs + missions;
+
+        // Each kill pays loot and each completion pays a reward, and both go through the tick's own transaction — so the WAL's durable LSN moves on the ticks
+        // that wrote Inventory and on no others. The two numbers come from different places: one from the simulation's counters, the other from the WAL
+        // writer thread.
+        //
+        // <b>A door is an Inventory writer too.</b> A crossing teleports the player, and the player carries its Versioned inventory into the other realm's
+        // cluster: one record per tick that crossed, from TeleportTick's own side transaction. The crowd walks through doors since they became stored
+        // portals (six crossings in this window); the old path chose doors and never arrived at one, so this run used to make none.
+        //
+        // <b>So is the lair director</b>, on a different ground: a corpse destroyed and a creature or lair spawned are STRUCTURAL changes, which the WAL logs
+        // whatever the archetype's cluster durability. One record per tick it committed one, from its own side transaction (SimBridge.Lairs.cs). <b>And the
+        // mission desk</b>, for both reasons: offers and lairs are structural, a held mission is Versioned (SimBridge.Missions.cs).
+        //
+        // It is also the proof that ClusterDurability.Checkpoint does what it declares. Four thousand ticks of creatures, players and NPCs moving produce no WAL
+        // record at all; only the Versioned half of Player does.
+        //
+        // <b>Bounded, not equal, and the equality was the flake.</b> Two writes that land on the SAME tick — a loot drop and a mission reward, which nothing
+        // keeps apart — are one transaction and therefore one WAL record, so the advance count is the number of writing TICKS and not the number of writes.
+        // Asserting equality made the case fail whenever two coincided: measured at three runs in eight when the fixture runs on its own, and green in a full
+        // suite run, because what changes is timing. The bound is what the claim was always about — every writing tick advanced the watermark, and nothing
+        // else did — and it still fails if a write stops being durable or a second writer appears.
+        Assert.Multiple(() =>
+        {
+            Assert.That(writes, Is.GreaterThan(0), "precondition: something was looted or rewarded");
+            Assert.That(_sim.WalAdvances, Is.GreaterThan(0), "no tick advanced the durable LSN, so nothing was made durable at all");
+            Assert.That(_sim.WalAdvances, Is.LessThanOrEqualTo(writes),
+                $"the durable LSN moved on more ticks than wrote Inventory, so something other than loot and rewards is writing — {_sim.WalWriterBreakdown}");
+            // One record per advancing tick, plus at most one more on a tick that both looted and crossed — the crossing is a second transaction — and the
+            // lair director's, which are counted per ENTITY rather than per commit: a spawn appends a record per component, so one creature respawned
+            // beside one corpse removed was eleven records on one tick (measured; the creature has eight components). Bounded by the sixteen component slots
+            // an archetype can hold, which still fails for a writer that is not the director.
+            Assert.That(_sim.WalLsnGained, Is.InRange(_sim.WalAdvances, _sim.WalAdvances + crossings + (16 * (_sim.LairEntities + _sim.MissionEntities))),
+                $"one WAL record per advancing tick and one per crossing tick: more would mean an unexpected writer — {_sim.WalWriterBreakdown}");
+            Assert.That(Causality.TotalCredits(_sim), Is.GreaterThan(_creditsBefore), "credits did not grow, so nothing was actually written");
+        });
+    }
+
+    [Test]
+    public void AC2_TheDurabilityWaitIsReportedBesideCompute_AndIsNotTheWholeStory()
+    {
+        // Not a threshold on the wait — that is AC-6's, and at this population it would be measuring the box. What is asserted is that the split EXISTS and is
+        // non-negative, because the figure it replaced was a hard zero for every tick of every run and nothing would have noticed if it still were.
+        Assert.Multiple(() =>
+        {
+            Assert.That(_result.DurabilityMedianMs, Is.GreaterThanOrEqualTo(0f));
+            Assert.That(_result.DurabilityP99Ms, Is.GreaterThanOrEqualTo(_result.DurabilityMedianMs));
+            Assert.That(_result.DurabilityMaxMs, Is.GreaterThanOrEqualTo(_result.DurabilityP99Ms));
+            Assert.That(_result.DurabilityMedianMs, Is.LessThan(_result.TickMedianMs), "the wait cannot exceed the tick that contains it");
+        });
+    }
+
+    [Test]
+    public void AC4_BothRefusalsAreCounted_AndNotOneEffectWasLost()
+    {
+        var s = _sim.LastStats;
+        Assert.Multiple(() =>
+        {
+            // A player that is not fighting does no damage. Counted rather than assumed: with the activity mix at 22 % combat, the overwhelming majority of
+            // player-ticks must land here, and a zero would mean the activity gate was removed.
+            Assert.That(s.ShotsSkippedNotFighting, Is.GreaterThan(s.PlayerShots), "most player-ticks are not fighting; a zero means the gate is gone");
+            Assert.That(s.PlayerShots, Is.GreaterThan(0), "nobody fired at all");
+
+            // Every shot pushed an event, and every event was applied — or named a target destroyed in between: a mission's lair moved or ended takes its
+            // occupants with it, mid-fight or not (SimBridge.Missions.cs). Lost is what neither accounts for.
+            Assert.That(s.DamageApplied + s.EventsStale, Is.EqualTo(s.PlayerShots + s.CreatureAttacks), "an effect was produced and neither applied nor counted");
+            Assert.That(s.EventsStale, Is.LessThanOrEqualTo((s.PlayerShots + s.CreatureAttacks) / 50), "more than a blow in fifty named a target that had gone");
+            Assert.That(_sim.CombatQueueOverflow, Is.Zero, "the queue dropped an effect: raise its per-tick budget");
+        });
+    }
+
+    [Test]
+    public void AC4_TheQueueIsNowhereNearItsBudget()
+    {
+        // The 1 024 figure is an order of magnitude above the worst case it was sized for, and this is the check that says so rather than assuming it. If a
+        // future population change brings the peak near the budget, this fails before an overflow silently drops an effect.
+        Assert.That(_sim.CombatQueuePeak, Is.LessThan(256), $"the combat queue peaked at {_sim.CombatQueuePeak} against a 1 024 budget");
+    }
+
+    /// <summary>AC-3's end state: nothing is left in a combat mode with nobody to fight.</summary>
+    /// <remarks>
+    /// <b>The leash's own half of AC-3 is <see cref="CreatureLeashTests"/>, and it used to be asserted here.</b> The claim was
+    /// <c>ChaseGivenUp &gt; 0</c> over this run -- which needs some creature, somewhere, to be dragged past 75 m by some player in
+    /// 4 000 ticks. It held until the day the world's structures moved, because what it really sampled was whether this seed happened
+    /// to produce a kiting. A criterion that waits for an emergent event instead of staging it reports the dice, so the leash is now
+    /// driven directly and this fixture keeps only what a snapshot can honestly say.
+    /// </remarks>
+    [Test]
+    public void AC3_NoCreatureIsLeftFightingNothing()
+    {
+        var rows = Causality.Creatures(_sim);
+        var orphans = 0;
+        var engaged = 0;
+        foreach (var row in rows)
+        {
+            if (row.Mode is not (AiMode.Pursue or AiMode.Fighting))
+            {
+                continue;
+            }
+
+            engaged++;
+            if (row.Target.IsNull)
+            {
+                orphans++;
+            }
+        }
+
+        // The defect this guards is gap G6's end state: Pursue was sticky and targetless, so pursuers accumulated for the life of the process. Every
+        // creature in a combat mode must now name somebody.
+        Assert.That(orphans, Is.Zero, $"{orphans} of {engaged} engaged creatures are pursuing nobody");
+    }
+}
+
+/// <summary>
+/// AC-3's other half: a chase past <see cref="TatooineData.MaxChaseRangeM"/> is abandoned, and the creature that abandons it goes back to wandering.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Staged, because a long run cannot be relied on to produce one.</b> A give-up needs a player to outpace a creature by 75 m while that creature is
+/// pursuing it -- a conjunction of a mount, a direction and a head start that a 4 000-tick window either throws up or does not, depending on the seed. The
+/// fight is therefore assembled: one creature in <see cref="AiMode.Pursue"/> naming one player, and that player standing 300 m away.
+/// </para>
+/// <para>
+/// <b>Asserted on this creature's own end state, not only on the counter.</b> <c>ChaseGivenUp</c> is the world's, so another creature's give-up would satisfy
+/// it; what makes the case falsifiable is that the staged creature is back in <see cref="AiMode.Wander"/> naming nobody, which is what the leash branch does
+/// and nothing else does from <see cref="AiMode.Pursue"/> while the target is alive and open.
+/// </para>
+/// </remarks>
+[Category("Integration")]
+[TestFixture]
+[NonParallelizable]
+public sealed class CreatureLeashTests
+{
+    private string _dir;
+    private TatooineSim _sim;
+    private EntityId _creature;
+    private EntityId _quarry;
+
+    [OneTimeSetUp]
+    public void RunWorld()
+    {
+        _dir = Worlds.NewDirectory();
+
+        // SIXTY ticks, because ten buy exactly one decision. A creature decides once every four to ten ticks (WorldBuilder.AiTicksMin/Max, at this
+        // world's 10 Hz), and the margin was measured rather than assumed: at the end of a ten-tick run the staged creature's ThinkCooldown read 4 to 6,
+        // meaning it had decided once and was still waiting for its second. One decision is no margin at all -- it has to fall after the staging is
+        // published and before the run stops, and an unpaced run's length is not even fixed (TatooineSim.Run overshoots its request by an unknown number
+        // of ticks). Six seconds give it six or more decisions.
+        var config = Causality.LongEnough(_dir, 60);
+        config.WorkerCount = 1;
+        _sim = new TatooineSim(config);
+        _sim.Initialize();
+
+        var chosen = default((EntityId Id, float X, float Z, int Mode, EntityId Target, int Health));
+        foreach (var row in Causality.Creatures(_sim))
+        {
+            // Inside the world by a margin, for PlayerDownTests' reason: a spawn region may place a creature past the planet's f32 extent, and a teleport
+            // onto or away from such a creature is clamped back inside -- which would decide the very distance this case is about.
+            var margin = (_sim.Config.WorldEdgeM * 0.5f) - 500f;
+            if (row.Mode != AiMode.Dead && row.Health > 0 && MathF.Abs(row.X) < margin && MathF.Abs(row.Z) < margin)
+            {
+                chosen = row;
+                break;
+            }
+        }
+
+        Assert.That(chosen.Id.IsNull, Is.False, "precondition: the world has a living creature inside its own bounds");
+        _creature = chosen.Id;
+        _quarry = _sim.Index.Players[0];
+        var player = _quarry;
+
+        // Four times the leash, towards the origin so the planet's edge cannot clamp the player back into range.
+        var farX = chosen.X + (chosen.X > 0f ? -300f : 300f);
+
+        // Commit discipline, like PortalTests' crossings: the staging is published before the world is ticked rather than at whichever fence came next.
+        using (var tx = _sim.Dbe.CreateQuickTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit))
+        {
+            var creature = tx.OpenMut(_creature);
+            var ai = creature.Read(Creature.Ai);
+            ai.Mode = AiMode.Pursue;
+            ai.Target = player;
+
+            // Home is where it stands, so the LAIR leash cannot pre-empt the quarry leash: that branch is tested first and would send the creature home
+            // without ever reading the target, which looks identical in the end state and is a different mechanism.
+            ai.HomeX = chosen.X;
+            ai.HomeZ = chosen.Z;
+            creature.Set(Creature.Ai, ai);
+
+            // Decides on the first tick rather than in four to ten, so the window holds as many decisions as possible.
+            var timers = creature.Read(Creature.Timers);
+            timers.ThinkCooldown = 0;
+            creature.Set(Creature.Timers, timers);
+
+            var quarry = tx.OpenMut(player);
+
+            // Parked, and parked where it is going to stand: a player that resumed deciding would walk, and at 300 m the direction it walked would decide
+            // whether the leash was reached at all.
+            var state = quarry.Read(Player.State);
+            state.Activity = PlayerActivity.Roaming;
+            state.ActivityTicks = int.MaxValue / 2;
+            quarry.Set(Player.State, state);
+            var move = quarry.Read(Player.Move);
+            move.VelX = 0f;
+            move.VelZ = 0f;
+            move.DestX = farX;
+            move.DestZ = chosen.Z;
+            quarry.Set(Player.Move, move);
+
+            var at = default(PlayerPlacement);
+            at.SetAt(farX, chosen.Z, 0f, quarry.Read(Player.Bounds).HalfExtent);
+            tx.Teleport(player, Player.Bounds, RealmId.Default, in at);
+            Assert.That(tx.Commit(), Is.True, "the staging did not commit, so nothing below is about the world that ran");
+        }
+
+        _sim.Run();
+    }
+
+    [OneTimeTearDown]
+    public void Dispose()
+    {
+        _sim?.Dispose();
+        Worlds.Delete(_dir);
+    }
+
+    [Test]
+    public void ACreatureWhoseQuarryIsPastTheLeash_GivesUpAndGoesBackToWandering()
+    {
+        int mode;
+        EntityId target;
+        float separation;
+        using (var tx = _sim.Dbe.CreateQuickTransaction())
+        {
+            var creature = tx.Open(_creature);
+            var ai = creature.Read(Creature.Ai);
+            mode = ai.Mode;
+            target = ai.Target;
+            var here = creature.Read(Creature.Bounds);
+            var there = tx.Open(_quarry).Read(Player.Bounds);
+            var dx = there.X - here.X;
+            var dz = there.Z - here.Z;
+            separation = MathF.Sqrt((dx * dx) + (dz * dz));
+        }
+
+        Assert.Multiple(() =>
+        {
+            // Stated rather than assumed: everything below is about a quarry out of reach, and a staging that left it in reach would make the rest of the
+            // case pass or fail for a reason that has nothing to do with the leash.
+            Assert.That(separation, Is.GreaterThan(TatooineData.MaxChaseRangeM),
+                $"the staged quarry ended up {separation:F0} m away, inside the {TatooineData.MaxChaseRangeM:F0} m leash: this case is not testing the leash");
+
+            Assert.That(_sim.LastStats.ChaseGivenUp, Is.GreaterThan(0), "no chase was abandoned past MaxChaseRangeM: the leash is not being reached");
+            Assert.That(mode, Is.EqualTo(AiMode.Wander), "a creature whose quarry is 300 m away is still in a combat mode: the leash did not fire for it");
+            Assert.That(target, Is.EqualTo(EntityId.Null), "it gave the chase up and kept the target, which is gap G6 coming back");
+        });
+    }
+}
+
+/// <summary>
+/// AC-4's falsifiable half: drive-by combat is gone. A player standing next to a creature and not fighting it does nothing to it.
+/// </summary>
+/// <remarks>
+/// <b>This is the test the old model could not pass, and the only one that states gap G8 directly.</b> Before SWG-02 combat ran from the creature's side over a
+/// 75 m radius with no reference to the player's activity or target, so "standing near" and "attacking" were the same thing. The world is built, one player is
+/// placed beside one creature in an activity that is not Combat, and the creature's health is read afterwards.
+/// </remarks>
+[TestFixture]
+[NonParallelizable]
+public sealed class DriveByCombatIsGoneTests
+{
+    private string _dir;
+    private TatooineSim _sim;
+    private EntityId _creature;
+    private int _healthBefore;
+
+    [OneTimeSetUp]
+    public void RunWorld()
+    {
+        _dir = Worlds.NewDirectory();
+        var config = Causality.LongEnough(_dir, 40);
+        config.WorkerCount = 1;
+        _sim = new TatooineSim(config);
+        _sim.Initialize();
+
+        var rows = Causality.Creatures(_sim);
+        Assert.That(rows, Is.Not.Empty, "precondition: the world has creatures");
+
+        // A PASSIVE creature, so its own aggro query cannot start a fight and turn this into a test of something else. Banthas and rontos never attack on sight.
+        var chosen = default((EntityId Id, float X, float Z, int Mode, EntityId Target, int Health));
+        using (var tx = _sim.Dbe.CreateQuickTransaction())
+        {
+            foreach (var row in rows)
+            {
+                if (tx.Open(row.Id).Read(Creature.Ai).AggroRadius <= 0f && row.Mode != AiMode.Dead)
+                {
+                    chosen = row;
+                    break;
+                }
+            }
+        }
+
+        Assert.That(chosen.Id.IsNull, Is.False, "precondition: the world has a living passive creature");
+        _creature = chosen.Id;
+        _healthBefore = chosen.Health;
+
+        using (var tx = _sim.Dbe.CreateQuickTransaction())
+        {
+            var id = _sim.Index.Players[0];
+            var player = tx.OpenMut(id);
+
+            // Roaming, parked, and with a timer long enough that the activity mix never re-rolls it into Combat during the window.
+            var state = player.Read(Player.State);
+            state.Activity = PlayerActivity.Roaming;
+            state.ActivityTicks = int.MaxValue / 2;
+            player.Set(Player.State, state);
+            var move = player.Read(Player.Move);
+            move.VelX = 0f;
+            move.VelZ = 0f;
+            player.Set(Player.Move, move);
+
+            // Standing on the creature's toes: two metres, well inside both the 75 m weapon and the 6 m melee reach.
+            var at = default(PlayerPlacement);
+            at.SetAt(chosen.X + 2f, chosen.Z, 0f, player.Read(Player.Bounds).HalfExtent);
+            tx.Teleport(id, Player.Bounds, RealmId.Default, in at);
+            tx.Commit();
+        }
+
+        _sim.Run();
+    }
+
+    [OneTimeTearDown]
+    public void Dispose()
+    {
+        _sim?.Dispose();
+        Worlds.Delete(_dir);
+    }
+
+    [Test]
+    public void APlayerNotInCombat_DoesNoDamageToTheCreatureItIsStandingOn()
+    {
+        using var tx = _sim.Dbe.CreateQuickTransaction();
+        var after = tx.Open(_creature).Read(Creature.Vitals).Health;
+        Assert.That(after, Is.EqualTo(_healthBefore),
+            "a roaming player damaged a creature it was standing next to: the activity gate is gone and combat is drive-by again");
+    }
+}
