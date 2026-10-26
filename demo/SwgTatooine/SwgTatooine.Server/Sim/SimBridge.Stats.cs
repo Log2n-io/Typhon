@@ -251,6 +251,14 @@ public sealed partial class SimBridge
         Num(j, "outOfRange", ObjectivesOutOfRange).Append(',');
         Rate(j, "lairHitsPerSec", r10[SeriesLairHits], r60[SeriesLairHits], 1d);
 
+        // Content levels (content-levels.md § Monitoring): every band populated, and the crowd kept at or below its level.
+        var levels = Levels;
+        j.Append("},\"levels\":{");
+        Bands(j, "lairsByBand", levels.LairsByBand).Append(',');
+        Bands(j, "creaturesByBand", levels.CreaturesByBand).Append(',');
+        Num(j, "lairsBelowCrowdLevel", levels.LairsBelowCrowdLevel).Append(',');
+        Num(j, "crowdObjectiveLevelMax", CrowdObjectiveLevelMax);
+
         // Items (inventory-loot.md § 8): the counters by template and Mk, and the rates.
         j.Append("},\"items\":");
         var rates = new StringBuilder(160);
@@ -260,6 +268,17 @@ public sealed partial class SimBridge
         Rate(rates, "lostPerMin", r10[SeriesItemsLost], r60[SeriesItemsLost], 60d);
         AppendItemsJson(j, rates.ToString());
         return j.Append('}').ToString();
+
+        static StringBuilder Bands(StringBuilder b, string name, int[] values)
+        {
+            b.Append('"').Append(name).Append("\":[");
+            for (var i = 0; i < values.Length; i++)
+            {
+                b.Append(i == 0 ? "" : ",").Append(values[i].ToString(CultureInfo.InvariantCulture));
+            }
+
+            return b.Append(']');
+        }
 
         static StringBuilder Num(StringBuilder b, string name, long value)
             => b.Append('"').Append(name).Append("\":").Append(value.ToString(CultureInfo.InvariantCulture));

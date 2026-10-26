@@ -467,6 +467,223 @@ internal sealed class MissionDeskChecks : ServedChecks
         });
     }
 
+    /// <summary>
+    /// CL-11, from real frames: <c>level</c> is on the wire, on enter, for every offer at the terminal, for a mission's lair and for every one of its
+    /// defenders, and each decoded value is the stored one.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void TheLevel_IsOnTheWire()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x6014), terminal);
+        var character = CharacterOf(sim, AnAccount(0x6014));
+        var offers = Offers(sim, terminal);
+        Harness.Ticks(4);
+        var store = new Typhon.Client.WorldStore(link.Plan);
+        Replay(link, store);
+        var seen = 0;
+        Assert.Multiple(() =>
+        {
+            foreach (var (id, info) in offers)
+            {
+                var wire = LevelOnTheWire(store, SessionHarness.NetIdOf(link.Session, id));
+                if (wire >= 0)
+                {
+                    seen++;
+                    Assert.That(wire, Is.EqualTo(info.Level), $"offer {info.Serial}");
+                }
+            }
+        });
+        Assert.That(seen, Is.GreaterThan(0), "no offer's level was decoded");
+
+        var held = TakeAndHold(sim, link, character, offers[0]);
+        Worlds.Park(sim, link.Session, held.Mission.LairX + 15f, held.Mission.LairZ, out var parked);
+        SessionHarness.UntilNamed(link.Session, held.Mission.Lair, "the lair in the view", parked);
+        Harness.Ticks(4);
+        store = new Typhon.Client.WorldStore(link.Plan);
+        Replay(link, store);
+        var defenders = new List<(EntityId Id, int Level)>();
+        using (var tx = sim.Dbe.CreateQuickTransaction())
+        {
+            foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+            {
+                var homes = cluster.GetReadOnlySpan(Creature.Home);
+                var brains = cluster.GetReadOnlySpan(Creature.Ai);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    EntityId home = homes[slot].Lair;
+                    if (home == held.Mission.Lair)
+                    {
+                        defenders.Add((cluster.GetEntityId(slot), brains[slot].Level));
+                    }
+                }
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(LevelOnTheWire(store, SessionHarness.NetIdOf(link.Session, held.Mission.Lair)), Is.EqualTo(held.Mission.Level), "the lair's level");
+            Assert.That(defenders, Is.Not.Empty, "the lair has no defenders");
+            foreach (var (id, level) in defenders)
+            {
+                Assert.That(LevelOnTheWire(store, SessionHarness.NetIdOf(link.Session, id)), Is.EqualTo(level), $"defender {id}");
+            }
+        });
+    }
+
+    /// <summary>
+    /// CL-13: at a terminal, a bot takes the nearest-lair offer within its CL + 3 when one is listed, and the nearest of all only when none is. STAGED
+    /// before the session first sees the offers, so the two rules pick different ones on every draw: the nearest offers are made level 30, the rest 1.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void ABot_PrefersAnOfferWithinItsLevel()
+    {
+        using var sim = Start();
+        Harness.Ticks(3);
+        var terminal = FirstTerminal(sim);
+        var offers = Offers(sim, terminal);
+        offers.Sort((a, b) => a.Info.DistanceM.CompareTo(b.Info.DistanceM));
+        var nearestM = offers[0].Info.DistanceM;
+        Assume.That(offers[^1].Info.DistanceM, Is.GreaterThan(nearestM), "every offer at the terminal is as near as the nearest");
+        sim.WriteInTick(tx =>
+        {
+            foreach (var (id, info) in offers)
+            {
+                var o = tx.OpenMut(id);
+                var staged = o.Read(MissionOffer.Info);
+                staged.Level = (byte)(info.DistanceM == nearestM ? 30 : 1);
+                o.Set(MissionOffer.Info, staged);
+            }
+        });
+
+        var link = LogInAt(sim, AnAccount(0x6015), terminal);
+        Harness.Ticks(4);
+        var store = new Typhon.Client.WorldStore(link.Plan);
+        Replay(link, store);
+        var inReachM = offers.Find(o => o.Info.DistanceM != nearestM).Info.DistanceM;
+
+        var weak = new SwgTatooine.Bots.Brain.Perception { CombatLevel = 1 };
+        var strong = new SwgTatooine.Bots.Brain.Perception { CombatLevel = 30 };
+        Assert.Multiple(() =>
+        {
+            Assert.That(weak.BestOffer(store, terminal.X + 2f, terminal.Z, 6f, out var serial), Is.Not.Zero, "no offer was seen at the terminal");
+            Assert.That(offers.Exists(o => o.Info.Serial == serial && o.Info.DistanceM == inReachM), Is.True,
+                "a CL-1 bot did not take the nearest offer within its level");
+            strong.BestOffer(store, terminal.X + 2f, terminal.Z, 6f, out var any);
+            Assert.That(offers.Exists(o => o.Info.Serial == any && o.Info.DistanceM == nearestM), Is.True, "a CL-30 bot did not take the nearest offer");
+        });
+    }
+
+    /// <summary>
+    /// CL-8, staged: a wild lair above level 1 loses a creature and is owed it now; the creature the director refills it with carries the lair's level and
+    /// the level's stats — not the ramp's at the gate, not level 1.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void ARefilledCreature_TakesItsLairsLevel()
+    {
+        using var sim = Start();
+        Harness.Ticks(3);
+        var lair = EntityId.Null;
+        var level = 0;
+        var gone = EntityId.Null;
+        var before = new HashSet<EntityId>();
+        using (var tx = sim.Dbe.CreateQuickTransaction())
+        {
+            foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
+            {
+                var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
+                for (var bits = cluster.OccupancyBits; bits != 0 && lair.IsNull; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    if (spawners[slot].Site != 0 && spawners[slot].Level > 1 && spawners[slot].AliveCount == spawners[slot].SpawnLimit)
+                    {
+                        lair = cluster.GetEntityId(slot);
+                        level = spawners[slot].Level;
+                    }
+                }
+            }
+
+            foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+            {
+                var homes = cluster.GetReadOnlySpan(Creature.Home);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    EntityId home = homes[slot].Lair;
+                    if (home == lair)
+                    {
+                        before.Add(cluster.GetEntityId(slot));
+                        gone = cluster.GetEntityId(slot);
+                    }
+                }
+            }
+        }
+
+        Assert.That(lair.IsNull, Is.False, "no full wild lair above level 1 to stage");
+        sim.WriteInTick((tx, tick) =>
+        {
+            tx.Destroy(gone);
+            var l = tx.OpenMut(lair);
+            var s = l.Read(CreatureLair.Spawner);
+            s.AliveCount--;
+            s.Guards--;
+            s.NextSpawnTick = tick + 1;
+            l.Set(CreatureLair.Spawner, s);
+        });
+        before.Remove(gone);
+
+        CreatureBrain brain = default;
+        CreatureVitals vitals = default;
+        SessionHarness.Until(
+            () =>
+            {
+                using var tx = sim.Dbe.CreateQuickTransaction();
+                foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+                {
+                    var homes = cluster.GetReadOnlySpan(Creature.Home);
+                    for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                    {
+                        var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                        EntityId home = homes[slot].Lair;
+                        if (home == lair && !before.Contains(cluster.GetEntityId(slot)))
+                        {
+                            brain = cluster.GetReadOnlySpan(Creature.Ai)[slot];
+                            vitals = cluster.GetReadOnlySpan(Creature.Vitals)[slot];
+                            return true;
+                        }
+                    }
+                }
+
+                return false;
+            },
+            "the lair to refill its creature");
+        var foe = CreatureTemplates.IsCamp(brain.Template);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Level, Is.EqualTo(level), "the refilled creature is not at its lair's level");
+            Assert.That(vitals.MaxHealth, Is.EqualTo(ContentLevels.CreatureHealth(level, foe)), "its health is not its level's");
+            Assert.That(vitals.AttackDamage, Is.EqualTo(ContentLevels.CreatureHit(level, foe)), "its hit is not its level's");
+        });
+    }
+
+    /// <summary>The <c>level</c> a store decoded for an entity, or -1 when it holds none.</summary>
+    private static int LevelOnTheWire(Typhon.Client.WorldStore store, uint netId)
+    {
+        if (netId == 0 || !store.TryLocate(netId, out var archetype, out var slot))
+        {
+            return -1;
+        }
+
+        var set = store.Archetypes[archetype];
+        var field = Array.FindIndex(set.Plan.Fields, f => f.Name == "level");
+        return field < 0 || set.Numbers[field] == null ? -1 : (int)set.Numbers[field][slot];
+    }
+
     private static void Replay(FakeLink link, Typhon.Client.WorldStore store)
     {
         var applier = new Typhon.Client.FrameApplier(store);
@@ -683,6 +900,98 @@ internal sealed class MissionDeskChecks : ServedChecks
             Assert.That(BodyOf(sim, link.Session).Credits, Is.EqualTo(credits), "paid for a lair somebody else broke");
             Assert.That(sim.Bridge.MissionLairsRedrawn, Is.GreaterThanOrEqualTo(1));
         });
+    }
+
+    /// <summary>
+    /// CL-9: every offer carries the content level of its anchor — the ramp's exactly, its band beyond — and a kind whose range covers it.
+    /// </summary>
+    [Test]
+    [CancelAfter(90_000)]
+    public void AnOffer_CarriesTheLevelOfItsAnchor()
+    {
+        using var sim = Start();
+        Harness.Ticks(3);
+        var levels = sim.Index.Levels;
+        var offers = 0;
+        Assert.Multiple(() =>
+        {
+            foreach (var terminal in sim.Index.Terminals)
+            {
+                foreach (var (_, info) in Offers(sim, terminal))
+                {
+                    offers++;
+                    Assert.That(levels.Agrees(info.AnchorX, info.AnchorZ, info.Level), Is.True,
+                        $"an offer of level {info.Level} at {levels.EdgeDistance(info.AnchorX, info.AnchorZ):F0} m from a city's edge");
+                    Assert.That(CreatureTemplates.CoversLevel(info.Kind, info.Level), Is.True,
+                        $"{CreatureTemplates.Name(info.Kind)} offered at level {info.Level}");
+                }
+            }
+        });
+        Assert.That(offers, Is.GreaterThan(0), "no offer was listed");
+    }
+
+    /// <summary>
+    /// CL-9, CL-11: a taken mission holds its offer's level, its lair and the lair's defenders are spawned at it, and the journal says it; drawn again after
+    /// a stranger breaks it, the lair keeps the MISSION's level — set here to one no spot near the anchor has, so the redraw cannot have read the map.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void AMissionLair_KeepsItsLevel_WhenRedrawn()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x6011), terminal);
+        var character = CharacterOf(sim, AnAccount(0x6011));
+        var offer = Offers(sim, terminal)[0];
+        var held = TakeAndHold(sim, link, character, offer);
+        Assert.Multiple(() =>
+        {
+            Assert.That(held.Mission.Level, Is.EqualTo(offer.Info.Level).And.GreaterThan(0), "the held mission is not at its offer's level");
+            Assert.That(LairLevels(sim, held.Mission.Lair), Is.EqualTo((offer.Info.Level, offer.Info.Level)), "the lair or its defenders are off level");
+            Assert.That(MissionJournal.Json(sim.Dbe, character), Does.Contain($"\"level\":{offer.Info.Level},"), "the journal does not say the level");
+        });
+
+        const byte promised = 47;
+        sim.WriteInTick(tx =>
+        {
+            var m = tx.OpenMut(held.Id);
+            var mission = m.Read(HeldMissionArch.Mission);
+            mission.Level = promised;
+            m.Set(HeldMissionArch.Mission, mission);
+            var l = tx.OpenMut(held.Mission.Lair);
+            var v = l.Read(CreatureLair.Vitals);
+            v.Health = 0;
+            l.Set(CreatureLair.Vitals, v);
+        });
+        SessionHarness.Until(() => Held(sim, character)[0].Mission.Lair != held.Mission.Lair, "a new lair to be drawn");
+        var now = Held(sim, character)[0].Mission;
+        Assert.That(LairLevels(sim, now.Lair), Is.EqualTo(((int)promised, (int)promised)), "the redrawn lair is not at the mission's level");
+    }
+
+    /// <summary>A lair's level, and its creatures' — the lowest of them, which is theirs when they agree.</summary>
+    private static (int Lair, int Creatures) LairLevels(TatooineSim sim, EntityId lairId)
+    {
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        var lair = tx.Open(lairId).Read(CreatureLair.Spawner).Level;
+        var lowest = int.MaxValue;
+        var highest = 0;
+        foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+        {
+            var homes = cluster.GetReadOnlySpan(Creature.Home);
+            var brains = cluster.GetReadOnlySpan(Creature.Ai);
+            for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+            {
+                var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                EntityId home = homes[slot].Lair;
+                if (home == lairId)
+                {
+                    lowest = Math.Min(lowest, brains[slot].Level);
+                    highest = Math.Max(highest, brains[slot].Level);
+                }
+            }
+        }
+
+        return (lair, lowest == highest ? lowest : -1);
     }
 
     /// <summary>M-6: a lair whose life runs out moves — drawn again round the same anchor.</summary>

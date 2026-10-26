@@ -471,6 +471,27 @@ public static class TatooineData
     /// same reason. Drawn from per lair, as a region's are.
     /// </summary>
     public static readonly int[] PoiLairTemplates = [CreatureTemplates.Ninja, CreatureTemplates.SandNinja, CreatureTemplates.Soldier];
+
+    /// <summary>
+    /// The level the scripted crowd counts as (content-levels.md § 5): its 1 400 hp is CL 10 health and its 95 damage per randomised delay about CL 10
+    /// on-band DPS. It fights only lairs and creatures at or below it — the city fringes — and the B4 level factor reads it for a scripted body.
+    /// </summary>
+    public const int CrowdLevel = 10;
+
+    /// <summary>Lairs per km² in a city's fringe, the annulus its ramp spans (content-levels.md § 2.2). [EST].</summary>
+    public const float FringeLairsPerSqKm = 10f;
+
+    /// <summary>A frontier patch's radius, metres: four per city, one per band II-V, 1.0-2.0 km from its edge.</summary>
+    public const float FrontierRadiusM = 300f;
+
+    /// <summary>Lairs a frontier patch keeps standing.</summary>
+    public const int FrontierLairs = 6;
+
+    /// <summary>
+    /// The share of their authored density the wilderness regions keep, so the city fringes and frontier patches content levels added do not grow the
+    /// world (Loïc, 2026-10-26, R2: hold the total): the lair and creature counts stay within a few per cent of what they were.
+    /// </summary>
+    public const float RegionDensityShare = 0.75f;
 }
 
 /// <summary>
@@ -509,52 +530,77 @@ public static class CreatureTemplates
     /// <summary>Creatures a lair of each template keeps alive. [EST], shaped by how SWG lairs felt: 4-6 typical, more for a camp.</summary>
     public static readonly int[] SpawnLimit = [6, 5, 4, 4, 4, 6, 5, 5, 6, 3];
 
-    /// <summary>Hit points. [EST].</summary>
-    public static readonly int[] Health = [180, 120, 220, 300, 520, 160, 640, 700, 760, 420];
+    /// <summary>The wild kinds — every template but the missions-only <see cref="BlueSoldier"/> — are 0 to this, exclusive.</summary>
+    public const int WildCount = 9;
+
+    /// <summary>
+    /// The lowest level a lair of each template is spawned at (crafting-catalog.md § 14.2, Loïc's B2 ranges): a species is a look and a ratio, its stats
+    /// come from the level (<see cref="ContentLevels"/>). Camps only from 25, so new characters fight beasts; the blue soldiers cover every level, for
+    /// missions.
+    /// </summary>
+    public static readonly int[] MinLevel = [1, 1, 8, 8, 18, 1, 25, 32, 38, 1];
+
+    /// <summary>The highest level of each template's range (<see cref="MinLevel"/>).</summary>
+    public static readonly int[] MaxLevel = [10, 10, 22, 22, 32, 10, 40, 46, 50, 50];
+
+    /// <summary>Whether a template's range covers a level.</summary>
+    public static bool CoversLevel(int template, int level) => level >= MinLevel[template] && level <= MaxLevel[template];
 
     /// <summary>Whether a template is a camp of foes — people — rather than a beasts' lair.</summary>
     public static bool IsCamp(int template) => template is Ninja or SandNinja or Soldier or BlueSoldier;
 
     /// <summary>
-    /// A lair's hit points: four of its own occupants', and never under 1 500 — harder to destroy than any foe it holds (Loïc, 2026-10-24), and only once
-    /// they are all dead (<c>Lair.Guards</c>).
+    /// A lair kind for a site at a level: the site's kinds that cover the level or, when none does, every wild kind that does (content-levels.md § 2.4);
+    /// then a camp with <see cref="TatooineData.CampShare"/>'s odds when one qualifies, a beasts' lair otherwise, uniform within each.
     /// </summary>
-    public static int LairHealth(int template) => System.Math.Max(1500, 4 * Health[template]);
-
-    /// <summary>
-    /// A lair kind for a site: a camp with <see cref="TatooineData.CampShare"/>'s odds when the site names one, a beasts' lair otherwise, uniform within each.
-    /// </summary>
-    public static int PickLair(int[] kinds, ref Rng rng)
+    /// <remarks>Allocation-free: the lair director calls it on the tick.</remarks>
+    public static int PickLair(int[] kinds, int level, ref Rng rng)
     {
-        var camps = 0;
+        System.Span<int> pool = stackalloc int[Count];
+        var n = 0;
         foreach (var k in kinds)
         {
-            camps += IsCamp(k) ? 1 : 0;
-        }
-
-        var beasts = kinds.Length - camps;
-        var wantCamp = camps > 0 && (beasts == 0 || rng.NextFloat() < TatooineData.CampShare);
-        var pick = rng.NextInt(0, wantCamp ? camps : beasts);
-        foreach (var k in kinds)
-        {
-            if (IsCamp(k) == wantCamp && pick-- == 0)
+            if (CoversLevel(k, level))
             {
-                return k;
+                pool[n++] = k;
             }
         }
 
-        return kinds[0];
+        if (n == 0)
+        {
+            for (var k = 0; k < WildCount; k++)
+            {
+                if (CoversLevel(k, level))
+                {
+                    pool[n++] = k;
+                }
+            }
+        }
+
+        if (n == 0)
+        {
+            return kinds.Length > 0 ? kinds[0] : Rat;
+        }
+
+        var camps = 0;
+        for (var i = 0; i < n; i++)
+        {
+            camps += IsCamp(pool[i]) ? 1 : 0;
+        }
+
+        var beasts = n - camps;
+        var wantCamp = camps > 0 && (beasts == 0 || rng.NextFloat() < TatooineData.CampShare);
+        var pick = rng.NextInt(0, wantCamp ? camps : beasts);
+        for (var i = 0; i < n; i++)
+        {
+            if (IsCamp(pool[i]) == wantCamp && pick-- == 0)
+            {
+                return pool[i];
+            }
+        }
+
+        return pool[0];
     }
-
-    /// <summary>Damage per attack. [EST].</summary>
-    public static readonly int[] Damage = [12, 8, 16, 24, 34, 14, 38, 40, 32, 26];
-
-    /// <summary>[EST] Credits a kill drops, roughly a quarter of the creature's hit points — big game pays more.</summary>
-    /// <remarks>
-    /// The value is arbitrary and says so; what is not arbitrary is that a kill writes it into <see cref="Inventory"/> on the tick the creature dies, which
-    /// is the first steady-state <c>Versioned</c> write this world has ever made (gap G3).
-    /// </remarks>
-    public static readonly int[] LootCredits = [45, 30, 55, 75, 130, 40, 160, 175, 190, 105];
 
     /// <summary>Movement speed in metres per second. [EST], below a player's 5 m/s so a player can always disengage.</summary>
     public static readonly float[] SpeedMps = [3.4f, 2.6f, 2.0f, 2.4f, 3.0f, 4.0f, 4.2f, 4.2f, 3.8f, 3.6f];

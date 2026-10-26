@@ -1,6 +1,10 @@
+import { conColour } from '../data/content-level';
 import { doorRealmOf } from '../data/realm-view';
 import { useStats } from '../state/stats-store';
 import { useUi } from '../state/ui-store';
+
+/** The viewer's combat level, for a level's con colour: none until the character's CL is replicated (character-level.md). */
+const VIEWER_CL: number | null = null;
 
 /** The picked entity, live: what the server replicated for it, and where it is going. */
 export function Inspector() {
@@ -68,12 +72,16 @@ export function Inspector() {
                 </tr>
               </>
             )}
-            {inspection.fields.map((f) => (
-              <tr key={f.name}>
-                <td>{f.name}</td>
-                <td>{f.value}</td>
-              </tr>
-            ))}
+            {inspection.fields.map((f) => {
+              // A level reads in its con colour against the viewer's CL (content-levels.md § 6): neutral until the CL is replicated.
+              const con = f.name === 'level' ? conColour(Number(f.value), VIEWER_CL) : null;
+              return (
+                <tr key={f.name}>
+                  <td>{f.name}</td>
+                  <td className={con === null ? undefined : `con-${con}`}>{f.value}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       )}

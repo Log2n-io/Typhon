@@ -44,7 +44,7 @@ export function iconFile(catalogue: Catalogue, assetId: string, size: number): s
 }
 
 export type AssetKind =
-  'building' | 'interior' | 'interactable' | 'prop' | 'vehicle' | 'character' | 'creature' | 'weapon';
+  'building' | 'interior' | 'interactable' | 'prop' | 'vehicle' | 'character' | 'creature' | 'weapon' | 'item';
 
 export type ShapeDesc =
   | { readonly type: 'box'; readonly half: Vec3 }
@@ -195,6 +195,26 @@ export interface WeaponDesc {
   readonly attach: { readonly joint: string; readonly pos: Vec3; readonly rot: Quat };
 }
 
+/** One Mk's look (ASSET_FORMAT.md § 5.11): the factors the item's Mk material takes at that level. Linear colours. */
+export interface ItemMkLevel {
+  readonly base_color: Vec3;
+  readonly emissive: Vec3;
+  readonly emissive_strength: number;
+}
+
+/**
+ * What a player carries, drops or crafts with (ASSET_FORMAT.md § 5.11). Read only by a 3D model of the item, which nothing
+ * draws yet: the inventory grid needs the catalogue's icons only.
+ */
+export interface ItemDesc {
+  /** `material`, `core`, `addon`, `part`, `armor`, `potion`, `kit`, `container`; a value not known here is skipped (rule 3). */
+  readonly category: string;
+  /** Items that drop at Mk I-V: the GLB material `<asset_id>:<material>` takes `levels[mk - 1]`, Mk I first. */
+  readonly mk?: { readonly material: string; readonly levels: readonly ItemMkLevel[] };
+  /** The crate: the GLB material `<asset_id>:<label>`, a plate whose `TEXCOORD_0` spans 0..1 across it. */
+  readonly label?: string;
+}
+
 export interface Descriptor {
   readonly schema: number;
   readonly id: string;
@@ -204,6 +224,8 @@ export interface Descriptor {
   readonly source?: { readonly scale?: number };
   /** Weapons only (§ 5.10). */
   readonly weapon?: WeaponDesc;
+  /** Items only (§ 5.11). */
+  readonly item?: ItemDesc;
   /** Characters only: the local axis the model faces ("+Z" for the Quaternius rigs). */
   readonly forward?: string;
   readonly render: {

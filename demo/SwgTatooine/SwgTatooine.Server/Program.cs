@@ -148,6 +148,13 @@ internal static class Program
             Console.WriteLine($"  creatures: {composition}");
         }
 
+        // One line answers "is every band populated, and did any frontier patch get squeezed?" (content-levels.md § Monitoring).
+        Console.WriteLine($"  {sim.Census.Levels()}");
+        foreach (var displaced in sim.Index.DisplacedFrontiers)
+        {
+            Console.WriteLine($"  !! frontier patch {displaced} displaced: no valid bearing");
+        }
+
         // Live cell count is only reachable through TickContext.SpatialGrid, so it is reported by the telemetry system
         // once the runtime is up rather than here.
         var perAxis = (int)(config.WorldEdgeM / config.ResolveCellSize());

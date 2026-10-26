@@ -140,11 +140,8 @@ public sealed partial class SimBridge
         return true;
     }
 
-    /// <summary>
-    /// The level a mission lair's cache is rolled at. content-levels.md gives a lair its <c>Level</c>; until it does, every lair reads as level 0 (none),
-    /// which the roll takes as 1.
-    /// </summary>
-    private static int MissionLairLevel(in Lair lair) => 0;
+    /// <summary>The level a mission lair's cache is rolled at: the lair's own (content-levels.md); 0 (none) reads as 1.</summary>
+    private static int MissionLairLevel(in Lair lair) => lair.Level;
 
     /// <summary>
     /// Places a drop line by line, the core or add-on first, each through <see cref="ItemTransfer"/>; what does not fit is lost — never minted, so no row —

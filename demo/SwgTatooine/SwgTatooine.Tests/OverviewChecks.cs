@@ -100,10 +100,13 @@ internal sealed class OverviewChecks : ServedChecks
         player.AskRadius((uint)TatooineReplication.PlayerMaxRadiusM);
         Until(() => player.Holding(nameof(WorldObject)) > narrow, "the wide radius to fill");
 
+        // Stood in the city's fringe, where lairs stand since content levels (content-levels.md § 2.2): the marker is the COUNT, as in the case above.
+        var near = player.Holding(nameof(CreatureLair));
         player.AskOverview(true);
-        Until(() => player.Holding(nameof(CreatureLair)) > 0, "the god camera");
+        Until(() => player.Holding(nameof(CreatureLair)) > near + 20, "the god camera");
+        var planet = player.Holding(nameof(CreatureLair));
         player.AskOverview(false);
-        Until(() => player.Holding(nameof(CreatureLair)) == 0, "the player's own view");
+        Until(() => player.Holding(nameof(CreatureLair)) < planet / 2, "the player's own view");
 
         // The RESET that ends the overview refills the sphere from nothing, so the count is compared with the narrow one rather than the wide one.
         Until(() => player.Holding(nameof(WorldObject)) > narrow, $"the widened radius to come back (held {narrow} at the profile's own)");

@@ -48,7 +48,7 @@ public sealed partial class SimBridge
 
     // What this tick's desk transaction did, applied outside it only once it commits — or answered, when it does not: the completions (told to their
     // bodies and the journal), and the takes and cancels (refused with MissionFailed, so their clients are not left waiting).
-    private readonly List<(EntityId Holder, EntityId Body, EntityId Mission, byte Kind, int Reward)> _deskCompleted = [];
+    private readonly List<(EntityId Holder, EntityId Body, EntityId Mission, byte Kind, byte Level, int Reward)> _deskCompleted = [];
     private readonly List<ClientCommand<TakeMission>> _takesApplied = [];
     private readonly List<ClientCommand<AbandonMission>> _cancelsApplied = [];
     private bool _deskEverLoaded;
@@ -185,7 +185,7 @@ public sealed partial class SimBridge
             return;
         }
 
-        foreach (var (holder, body, mission, kind, reward) in _deskCompleted)
+        foreach (var (holder, body, mission, kind, level, reward) in _deskCompleted)
         {
             Interlocked.Increment(ref _missionRewards);
             if (tick0.TryOpenMut(body, out var player))
@@ -195,7 +195,7 @@ public sealed partial class SimBridge
                 player.Set(Player.State, state);
             }
 
-            MissionJournal.NoteCompleted(holder, mission, kind, reward);
+            MissionJournal.NoteCompleted(holder, mission, kind, level, reward);
             BumpJournal(tick0, body);
         }
 
@@ -401,7 +401,7 @@ public sealed partial class SimBridge
                 {
                     MintCache(tx, m.Holder, body, id, in lair, _deskWorldTick);
                     EndMission(tx, i, in m, completed: true);
-                    _deskCompleted.Add((m.Holder, body, id, m.Kind, m.Reward));
+                    _deskCompleted.Add((m.Holder, body, id, m.Kind, m.Level, m.Reward));
                 }
 
                 continue;
@@ -497,14 +497,17 @@ public sealed partial class SimBridge
                 continue;
             }
 
-            // Difficulty 1 for now (R7), and a kind drawn from every lair kind there is: the beasts' nests, the camps, the blue soldiers.
+            // Difficulty 1 for now (R7). The level is the content level at the anchor (content-levels.md § 4, until B5 picks it per band), and the kind is
+            // drawn uniformly over every kind whose range covers it: the beasts' nests, the camps, the blue soldiers, who cover them all.
             const byte difficulty = 1;
+            var level = PlanetIndexes[terminal.Realm].Levels.LevelAt(ax, az, ref rng);
             var info = new MissionOfferInfo
             {
                 Terminal = terminal.Id,
                 Serial = serial,
-                Kind = (byte)rng.NextInt(0, CreatureTemplates.Count),
+                Kind = (byte)KindAtLevel(level, ref rng),
                 Difficulty = difficulty,
+                Level = (byte)level,
                 Octant = TatooineData.OctantOf(dx, dz),
                 Reward = TatooineData.MissionReward(difficulty, dist / scale),
                 DistanceM = (int)(MathF.Round(dist / 100f) * 100f),
@@ -529,6 +532,27 @@ public sealed partial class SimBridge
         offer = EntityId.Null;
         expire = 0;
         return false;
+    }
+
+    /// <summary>A lair kind drawn uniformly over every kind — the blue soldiers included — whose range covers <paramref name="level"/>.</summary>
+    internal static int KindAtLevel(int level, ref Rng rng)
+    {
+        var n = 0;
+        for (var k = 0; k < CreatureTemplates.Count; k++)
+        {
+            n += CreatureTemplates.CoversLevel(k, level) ? 1 : 0;
+        }
+
+        var pick = rng.NextInt(0, n);
+        for (var k = 0; k < CreatureTemplates.Count; k++)
+        {
+            if (CreatureTemplates.CoversLevel(k, level) && pick-- == 0)
+            {
+                return k;
+            }
+        }
+
+        return CreatureTemplates.BlueSoldier;
     }
 
     // ── Taking ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -617,6 +641,7 @@ public sealed partial class SimBridge
             Holder = holder,
             Kind = info.Kind,
             Difficulty = info.Difficulty,
+            Level = info.Level,
             Octant = info.Octant,
             DistanceM = info.DistanceM,
             Reward = info.Reward,
@@ -714,7 +739,8 @@ public sealed partial class SimBridge
 
             var life = (long)(TatooineData.MissionLairLifeSeconds * _config.TickRateHz);
             var terrain = TerrainField.Shared(_config.ContentScale);
-            var lairId = WorldBuilder.SpawnLair(tx, ref rng, m.Kind, x, z, site: 0, expireTick: tick + life, _config, terrain, m.Realm);
+            // At the mission's level, whatever the content level here: the mission promised it, and a redraw keeps it (content-levels.md § 4).
+            var lairId = WorldBuilder.SpawnLair(tx, ref rng, m.Kind, m.Level, x, z, site: 0, expireTick: tick + life, _config, terrain, m.Realm);
             var lair = tx.OpenMut(lairId);
             var spawner = lair.Read(CreatureLair.Spawner);
             spawner.Mission = mission;

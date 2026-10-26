@@ -66,6 +66,36 @@ internal sealed class DemoStatsChecks : ServedChecks
             Assert.That(root.GetProperty("missions").GetProperty("offers").GetInt32(), Is.GreaterThan(0));
             Assert.That(root.GetProperty("crowd").TryGetProperty("lairHitsPerSec", out _), Is.True);
         });
+
+        // Content levels (content-levels.md § Monitoring): the director's walk counts the standing lairs by band — every one of them — and the ones the
+        // crowd may fight, which the fringes fill.
+        var standing = 0;
+        var belowCrowd = 0;
+        using (var tx = sim.Dbe.CreateQuickTransaction())
+        {
+            foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
+            {
+                var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var lair = spawners[System.Numerics.BitOperations.TrailingZeroCount(bits)];
+                    standing++;
+                    belowCrowd += lair.Level <= TatooineData.CrowdLevel && lair.Mission.IsNull ? 1 : 0;
+                }
+            }
+        }
+
+        var levels = root.GetProperty("levels");
+        var byBand = levels.GetProperty("lairsByBand").EnumerateArray().Select(e => e.GetInt32()).ToArray();
+        Assert.Multiple(() =>
+        {
+            Assert.That(byBand, Has.Length.EqualTo(5));
+            Assert.That(byBand.Sum(), Is.EqualTo(standing).Within(3), "the bands do not count the lairs standing");
+            Assert.That(byBand[0], Is.GreaterThan(0), "no lair in band I: the fringes are empty");
+            Assert.That(levels.GetProperty("creaturesByBand").GetArrayLength(), Is.EqualTo(5));
+            Assert.That(levels.GetProperty("lairsBelowCrowdLevel").GetInt32(), Is.EqualTo(belowCrowd).Within(3).And.GreaterThan(0));
+            Assert.That(levels.GetProperty("crowdObjectiveLevelMax").GetInt32(), Is.InRange(0, TatooineData.CrowdLevel));
+        });
     }
 
     /// <summary>IL-13: the <c>items</c> section counts the rows, the drops and the units minted and held by template and Mk, as the rows say.</summary>

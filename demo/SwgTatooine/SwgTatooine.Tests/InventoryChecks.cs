@@ -136,6 +136,7 @@ internal sealed class InventoryChecks : ServedChecks
         Assert.That(creatures, Is.Not.Empty, "the premise: a creature on the planet");
         var victim = creatures[0].Id;
         var species = creatures[0].Value.Brain.Template;
+        var level = creatures[0].Value.Brain.Level;
 
         // One blow from dead, standing still where it is, and the player beside it.
         var at = (X: 0f, Z: 0f);
@@ -157,7 +158,7 @@ internal sealed class InventoryChecks : ServedChecks
         Harness.Ticks(2);
 
         var rows = Items.Rows(sim);
-        var drop = LootTables.Roll((byte)species, 0, DropSource.Kill, victim.RawValue, rows[0].WorldTick);
+        var drop = LootTables.Roll((byte)species, level, DropSource.Kill, victim.RawValue, rows[0].WorldTick);
         var want = new Dictionary<(ushort, byte), int>();
         for (var i = 0; i < drop.Lines; i++)
         {

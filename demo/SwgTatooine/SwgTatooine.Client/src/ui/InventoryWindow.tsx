@@ -1,8 +1,10 @@
+import { ITEM_ICON_PX, itemInitials, itemTooltip, mkNumeral, slotGrid, type InventoryItem } from '../data/items';
 import { formatCredits } from '../data/wallet';
+import { useItems } from '../state/items-store';
 import { useMissions } from '../state/mission-store';
 import { useWallet } from '../state/wallet-store';
 
-/** The item grid's slots: empty until items exist (economy-foundation.md — items and the bazaar come later). */
+/** The item grid's slots before the first read; the server's answer carries its own (`slots`). */
 export const INVENTORY_SLOTS = 30;
 
 /** How many of the wallet's recent transfers the window lists. */
@@ -15,21 +17,25 @@ const KIND_NAMES: Readonly<Record<string, string>> = {
 };
 
 /**
- * The inventory (economy-foundation.md E0-10): the character's items — none yet, so an empty grid — and its credits at the
- * top right, with the last few transfers under the grid. Toggled by <kbd>I</kbd> and by the bottom-right toolbar.
+ * The inventory (economy-foundation.md E0-10, inventory-loot.md § 6): the character's items in their slots and its credits
+ * at the top right, with the last few transfers under the grid. Toggled by <kbd>I</kbd> and by the bottom-right toolbar.
  *
- * The balance is the wallet as last read (`WalletReader`), which re-reads it whenever a transfer touches this character.
+ * The balance is the wallet as last read (`WalletReader`), which re-reads it whenever a transfer touches this character;
+ * the items are the inventory as last read, re-read whenever the body's `items` revision moves.
  */
 export function InventoryWindow() {
   const open = useWallet((s) => s.inventoryOpen);
   const wallet = useWallet((s) => s.wallet);
   const close = useWallet((s) => s.closeInventory);
   const journalOpen = useMissions((s) => s.journalOpen);
+  const inventory = useItems((s) => s.snapshot);
+  const icons = useItems((s) => s.icons);
   if (!open) {
     return null;
   }
 
   const recent = wallet?.transfers.slice(0, RECENT_SHOWN) ?? [];
+  const cells = slotGrid(inventory?.items ?? [], inventory?.slots ?? INVENTORY_SLOTS);
   return (
     <div
       className={journalOpen ? 'panel inventory beside-journal' : 'panel inventory'}
@@ -46,11 +52,15 @@ export function InventoryWindow() {
         </button>
       </div>
       <div className="inventory-grid" aria-label="Items">
-        {Array.from({ length: INVENTORY_SLOTS }, (_, i) => (
-          <div key={i} className="inventory-slot" />
-        ))}
+        {cells.map((item, i) =>
+          item === null ? (
+            <div key={i} className="inventory-slot" />
+          ) : (
+            <ItemSlot key={i} item={item} icon={icons[item.item]} />
+          ),
+        )}
       </div>
-      <div className="hint">No items yet.</div>
+      {cells.every((c) => c === null) ? <div className="hint">No items yet.</div> : null}
       {recent.length > 0 ? (
         <div className="inventory-history">
           {recent.map((t) => (
@@ -67,6 +77,41 @@ export function InventoryWindow() {
           ))}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * One stack: its icon at the catalogue's 32 px (never scaled; the name's initials without one), its Mk as a numeral coloured
+ * like the model's Mk material (ASSET_FORMAT.md § 5.11), its count when more than one, and on hover its name, Mk and count.
+ */
+function ItemSlot({ item, icon }: { readonly item: InventoryItem; readonly icon: string | undefined }) {
+  const tip = itemTooltip(item);
+  const mk = mkNumeral(item.mk);
+  return (
+    <div
+      className="inventory-slot filled"
+      data-testid={`inventory-slot-${String(item.slot)}`}
+      data-item={item.item}
+      aria-label={tip}
+    >
+      {icon === undefined ? (
+        <span className="inventory-initials">{itemInitials(item.name)}</span>
+      ) : (
+        <img
+          className="inventory-icon"
+          src={icon}
+          width={ITEM_ICON_PX}
+          height={ITEM_ICON_PX}
+          alt=""
+          draggable={false}
+        />
+      )}
+      {mk === '' ? null : <span className={`inventory-mk mk${String(item.mk)}`}>{mk}</span>}
+      {item.count > 1 ? <span className="inventory-count">{item.count}</span> : null}
+      <span className="inventory-tip" role="tooltip">
+        {tip}
+      </span>
     </div>
   );
 }

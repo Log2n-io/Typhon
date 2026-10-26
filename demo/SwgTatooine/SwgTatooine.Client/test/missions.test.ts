@@ -21,6 +21,7 @@ const offer = (serial: number, over: Partial<MissionOffer> = {}): MissionOffer =
   serial,
   kind: 0,
   difficulty: 1,
+  level: 1,
   reward: 150,
   octant: 0,
   distanceM: 500,
@@ -56,13 +57,13 @@ describe('a terminal list', () => {
     offer(1, { reward: 200, distanceM: 1200, octant: 3 }),
     offer(2, { reward: 300, distanceM: 1900, octant: 0 }),
     offer(3, { reward: 150, distanceM: 500, octant: 3 }),
-    offer(4, { reward: 200, distanceM: 1100, octant: 0, difficulty: 2 }),
+    offer(4, { reward: 200, distanceM: 1100, octant: 0, level: 7 }),
   ];
 
   it('sorts by reward, best first, and by distance, nearest first', () => {
     expect(sortOffers(list, 'reward', true).map((o) => o.serial)).toEqual([2, 1, 4, 3]);
     expect(sortOffers(list, 'distance', false).map((o) => o.serial)).toEqual([3, 4, 1, 2]);
-    expect(sortOffers(list, 'difficulty', true)[0].serial).toBe(4);
+    expect(sortOffers(list, 'level', true)[0].serial).toBe(4);
   });
 
   it('sorts by direction north first, clockwise, nearest first within one: missions packed by area', () => {
@@ -71,8 +72,8 @@ describe('a terminal list', () => {
 
   it('never swaps two equal rows between two frames: ties break on the serial', () => {
     const tied = [offer(9), offer(7), offer(8)];
-    expect(sortOffers(tied, 'difficulty', false).map((o) => o.serial)).toEqual([7, 8, 9]);
-    expect(sortOffers([...tied].reverse(), 'difficulty', false).map((o) => o.serial)).toEqual([7, 8, 9]);
+    expect(sortOffers(tied, 'level', false).map((o) => o.serial)).toEqual([7, 8, 9]);
+    expect(sortOffers([...tied].reverse(), 'level', false).map((o) => o.serial)).toEqual([7, 8, 9]);
   });
 });
 
@@ -113,6 +114,7 @@ describe('the journal', () => {
     kind: 6,
     name: 'ninja hideout',
     difficulty: 1,
+    level: 4,
     reward: 200,
     octant: 2,
     distanceM: 1000,
@@ -298,6 +300,7 @@ describe('the mission panels', () => {
       kind: 0,
       name,
       difficulty: 1,
+      level: 2,
       reward,
       octant: 0,
       distanceM: 900,

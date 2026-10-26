@@ -767,7 +767,7 @@ public struct LairVitals
 /// A creature's behaviour state — written every time it thinks, and worth nothing after a crash: a restarted server
 /// re-derives every field from the lair and the terrain.
 /// </summary>
-[Component("Swg.CreatureBrain", 2, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.CreatureBrain", 3, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct CreatureBrain
 {
@@ -829,6 +829,14 @@ public struct CreatureBrain
     /// </summary>
     /// <remarks>Beside <see cref="Template"/> in the padding <see cref="AggroRadius"/> leaves before the 8-byte-aligned <see cref="Target"/>.</remarks>
     [Field, OnEnter(CodecKind.U8, Name = "skin", Saturate = true)] public byte Skin;
+
+    /// <summary>
+    /// The creature's content level, 1-50: its lair's (<see cref="Lair.Level"/>), set at spawn and never changed. Its health and its hit are
+    /// <c>ContentLevels</c>' of it; on the wire once, on enter.
+    /// </summary>
+    /// <remarks>In the brain rather than in <see cref="CreatureVitals"/>: both combat directions already read this span, and it fits the padding before
+    /// <see cref="Target"/>, where vitals would grow from 12 to 16 bytes.</remarks>
+    [Field, OnEnter(CodecKind.U8, Name = "level", Saturate = true)] public byte Level;
 }
 
 /// <summary>The lair a creature belongs to: written once, at spawn, and never again.</summary>
@@ -1307,7 +1315,7 @@ public static class PlayerActivity
 /// <b>A mission's lair is a lair of its kind</b> (missions.md § 3): spawned when the mission is taken, shielded by its occupants and refilled like any other,
 /// and its life is the mission desk's rather than the lair director's — <see cref="Site"/> is 0, so the director never retires it.
 /// </remarks>
-[Component("Swg.Lair", 4, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.Lair", 5, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct Lair
 {
@@ -1341,6 +1349,13 @@ public struct Lair
     /// </summary>
     /// <remarks>What the lair director refills: a retired lair is replaced by another drawn from the same site, so a region keeps its density.</remarks>
     [Field] public int Site;
+
+    /// <summary>
+    /// The lair's content level, 1-50 (content-levels.md): the level map's at where it stands, or its mission's. Every creature it spawns carries it
+    /// (<see cref="CreatureBrain.Level"/>), and its health is <c>ContentLevels.LairHealth</c> of it.
+    /// </summary>
+    /// <remarks>In the 4-byte hole <see cref="Site"/> leaves before the 8-aligned <see cref="Mission"/>, so it costs nothing.</remarks>
+    [Field, OnEnter(CodecKind.U8, Name = "level", Saturate = true)] public int Level;
 
     /// <summary>The held mission this lair was drawn for (<see cref="HeldMissionArch"/>); <c>EntityId.Null</c> on a wild lair.</summary>
     [Field] public EntityId Mission;

@@ -977,6 +977,28 @@ public sealed class BotSwarm : IAsyncDisposable
         return (asked, taken, completed, cancelled);
     }
 
+    /// <summary>The thinking bots' inventories (inventory-loot.md § 7): loot rows their reads met, units they lost to a full inventory, stacks held.</summary>
+    /// <returns>The three counts, over the fleet.</returns>
+    public (long LootRows, long UnitsLost, long Stacks) Items()
+    {
+        long rows = 0;
+        long lost = 0;
+        long stacks = 0;
+        foreach (var bot in Bots)
+        {
+            if (bot == null)
+            {
+                continue;
+            }
+
+            rows += Volatile.Read(ref bot.LootRowsSeen);
+            lost += Volatile.Read(ref bot.ItemsLost);
+            stacks += Volatile.Read(ref bot.Stacks);
+        }
+
+        return (rows, lost, stacks);
+    }
+
     /// <summary>The tips the thinking bots sent, and the times a tip was due with nobody named within reach.</summary>
     /// <returns>Both counts, over the fleet.</returns>
     public (long Sent, long NobodyNear) Tips()
@@ -1020,6 +1042,42 @@ public sealed class BotSwarm : IAsyncDisposable
     /// or never reached a port looks exactly like a healthy fleet of walkers, and the first version of this sent two intents per
     /// session in 45 seconds while every number in the report said the run was fine.
     /// </remarks>
+    /// <summary>The highest content level a creature has (content-levels.md): the server's <c>ContentLevels.MaxLevel</c>.</summary>
+    public const int MaxCreatureLevel = 50;
+
+    /// <summary>The median level of the creatures the fleet began hunting, or 0 when it hunted none (or the server sends no level).</summary>
+    public int HuntedLevelMedian()
+    {
+        var byLevel = new long[MaxCreatureLevel + 1];
+        long total = 0;
+        foreach (var bot in Bots)
+        {
+            if (bot == null)
+            {
+                continue;
+            }
+
+            for (var level = 1; level <= MaxCreatureLevel; level++)
+            {
+                var n = Interlocked.Read(ref bot.HuntsByLevel[level]);
+                byLevel[level] += n;
+                total += n;
+            }
+        }
+
+        long seen = 0;
+        for (var level = 1; level <= MaxCreatureLevel; level++)
+        {
+            seen += byLevel[level];
+            if (total > 0 && seen * 2 >= total)
+            {
+                return level;
+            }
+        }
+
+        return 0;
+    }
+
     public (long Boardings, long Hunts, int PortsKnownMax, int BotsThatCanFly, int Creatures) Decisions()
     {
         long boardings = 0;
@@ -2331,6 +2389,9 @@ public sealed class BotSwarm : IAsyncDisposable
 
         public long HuntsStarted;
 
+        /// <summary>Hunts begun, by the level of the creature hunted (index 0: a server that sends no level).</summary>
+        public readonly long[] HuntsByLevel = new long[MaxCreatureLevel + 1];
+
         /// <summary>
         /// Missions (lair-objectives.md): takes sent, missions its journal listed for the first time, completions it stated, cancels sent.
         /// </summary>
@@ -2345,14 +2406,28 @@ public sealed class BotSwarm : IAsyncDisposable
 
         // Read like a browser's: GET /swg/missions with the bot's own token whenever the body's owner field `journal` moves.
         private static readonly HttpClient JournalHttp = new() { Timeout = TimeSpan.FromSeconds(10) };
+
+        /// <summary>How long a failed owner read waits before it is asked again: three seconds at the usual 4 Hz; the next revision asks anyway.</summary>
+        private const long OwnerReadRetryTicks = 12;
         private readonly Uri _missionsUri;
         private readonly string _token;
-        private ArchetypePlan _journalFor;
-        private int _journalOrdinal = -1;
-        private double _journalAsked = double.NaN;
-        private long _journalRetryAt;
-        private int _journalBusy;
+        private readonly OwnerFieldPoll _journalPoll = new("journal", OwnerReadRetryTicks);
         private bool _journalPrimed;
+
+        /// <summary>
+        /// The inventory (inventory-loot.md § 7): loot rows its reads met for the first time, units its lost notes named, and its stacks at the last read.
+        /// </summary>
+        public long LootRowsSeen;
+
+        public long ItemsLost;
+        public int Stacks;
+
+        // Read like a browser's: GET /swg/inventory with the bot's own token whenever the body's owner field `items` moves. Looting needs no command: a
+        // kill or a broken lair already drops into the killer's inventory.
+        private readonly Uri _inventoryUri;
+        private readonly OwnerFieldPoll _itemsPoll = new("items", OwnerReadRetryTicks);
+        private InventoryView _inventory = InventoryView.None;
+        private bool _itemsPrimed;
         private readonly bool _takesMissions;
         private long _stanceAskedAt = long.MinValue / 2;
         private readonly HashSet<string> _missionsSeen = [];
@@ -2432,6 +2507,7 @@ public sealed class BotSwarm : IAsyncDisposable
                 _nextTipTick = NextTipDelay();
                 _token = options.TokenFor?.Invoke(index);
                 _missionsUri = BotProvisioner.AuthBaseFrom(options.Endpoint) is { } server ? new Uri(server, "swg/missions") : null;
+                _inventoryUri = _missionsUri == null ? null : new Uri(_missionsUri, "inventory");
 
                 // A bot that cannot read its journal never learns it holds one: it would take a mission at every visit and never go and do it.
                 _takesMissions = options.Missions && _missionsUri != null && !string.IsNullOrEmpty(_token);
@@ -2596,6 +2672,7 @@ public sealed class BotSwarm : IAsyncDisposable
 
             // The mission held, as the journal last said, and its lair as the bot sees it once near (lair-objectives.md B-2, B-3).
             PollJournal(tick);
+            PollInventory(tick);
             var missions = _missions;
             world = world with
             {
@@ -2645,6 +2722,7 @@ public sealed class BotSwarm : IAsyncDisposable
             if (_brain.Goal == Goal.Hunting && before != Goal.Hunting)
             {
                 HuntsStarted++;
+                Interlocked.Increment(ref HuntsByLevel[Math.Clamp(world.NearestCreatureLevel, 0, MaxCreatureLevel)]);
             }
 
             // A target is fought only in a stance, and a swoop, a door, a flight or a clone puts it away — the ride out to a mission's lair did, every time,
@@ -2754,42 +2832,20 @@ public sealed class BotSwarm : IAsyncDisposable
         private void PollJournal(long tick)
         {
             var self = Client.Store?.Self;
-            if (_missionsUri == null || string.IsNullOrEmpty(_token) || self?.Archetype == null)
+            if (_missionsUri == null || string.IsNullOrEmpty(_token) || self == null)
             {
                 return;
             }
 
-            if (!ReferenceEquals(self.Archetype, _journalFor))
+            if (_journalPoll.TryBegin(_journalPoll.Revision(self), tick))
             {
-                _journalFor = self.Archetype;
-                _journalOrdinal = -1;
-                foreach (var field in self.Archetype.OwnerFields)
-                {
-                    if (field.Name == "journal")
-                    {
-                        _journalOrdinal = field.Ordinal;
-                    }
-                }
+                _ = ReadJournalAsync(tick);
             }
-
-            if (_journalOrdinal < 0 || _journalOrdinal >= self.Numbers.Length || self.Numbers[_journalOrdinal] is not { Length: > 0 } values)
-            {
-                return;
-            }
-
-            var rev = values[0];
-            if ((rev == _journalAsked && tick < _journalRetryAt) || Interlocked.CompareExchange(ref _journalBusy, 1, 0) != 0)
-            {
-                return;
-            }
-
-            _journalAsked = rev;
-            _journalRetryAt = long.MaxValue;
-            _ = ReadJournalAsync(tick);
         }
 
         private async Task ReadJournalAsync(long tick)
         {
+            var ok = false;
             try
             {
                 using var request = new HttpRequestMessage(HttpMethod.Get, _missionsUri);
@@ -2797,7 +2853,6 @@ public sealed class BotSwarm : IAsyncDisposable
                 using var response = await JournalHttp.SendAsync(request).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
                 {
-                    _journalRetryAt = tick + 12;
                     return;
                 }
 
@@ -2814,15 +2869,72 @@ public sealed class BotSwarm : IAsyncDisposable
                 Interlocked.Add(ref MissionsTaken, taken);
                 Interlocked.Add(ref MissionsCompleted, completed);
                 _missions = view;
+                ok = true;
             }
             catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException or InvalidOperationException
                                           or FormatException)
             {
-                _journalRetryAt = tick + 12;   // three seconds at the usual 4 Hz; the next revision asks anyway
+                // Asked again after OwnerReadRetryTicks; the next revision asks anyway.
             }
             finally
             {
-                Volatile.Write(ref _journalBusy, 0);
+                _journalPoll.End(ok, tick);
+            }
+        }
+
+        /// <summary>
+        /// Reads the inventory when the body's <c>items</c> owner field moved since the last read — the browser's pattern (inventory-loot.md § 7) — or a
+        /// failed read is due again: the load a browser puts on the server, which is the point of parity. One read at a time.
+        /// </summary>
+        private void PollInventory(long tick)
+        {
+            var self = Client.Store?.Self;
+            if (_inventoryUri == null || string.IsNullOrEmpty(_token) || self == null)
+            {
+                return;
+            }
+
+            if (_itemsPoll.TryBegin(_itemsPoll.Revision(self), tick))
+            {
+                _ = ReadInventoryAsync(tick);
+            }
+        }
+
+        private async Task ReadInventoryAsync(long tick)
+        {
+            var ok = false;
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, _inventoryUri);
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _token);
+                using var response = await JournalHttp.SendAsync(request).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    return;
+                }
+
+                // The first read only learns what was already there — rows and losses of an earlier run — so this run's counts are this run's.
+                var view = InventoryView.Parse(
+                    await response.Content.ReadAsStringAsync().ConfigureAwait(false),
+                    _inventory,
+                    count: _itemsPrimed,
+                    out var rows,
+                    out var lost);
+                _itemsPrimed = true;
+                _inventory = view;
+                Interlocked.Add(ref LootRowsSeen, rows);
+                Interlocked.Add(ref ItemsLost, lost);
+                Volatile.Write(ref Stacks, view.Stacks);
+                ok = true;
+            }
+            catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException or InvalidOperationException
+                                          or FormatException or OverflowException)
+            {
+                // Asked again after OwnerReadRetryTicks; the next revision asks anyway.
+            }
+            finally
+            {
+                _itemsPoll.End(ok, tick);
             }
         }
 

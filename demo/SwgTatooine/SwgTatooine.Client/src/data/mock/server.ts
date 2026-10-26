@@ -33,6 +33,9 @@ const AGG_EVERY_TICKS = TICK_HZ;
 /** WebSocket + TLS 1.3 + TCP/IPv4 per message (`04-protocol.md` § 7). */
 const TRANSPORT_OVERHEAD_B = 76;
 
+/** The level every mock creature and lair is sent at: the mock world has no level map, and every level reads alike to a viewer with no CL. */
+const MOCK_LEVEL = 1;
+
 class RecordBuffer {
   data = new Float64Array(1024);
   count = 0;
@@ -224,15 +227,17 @@ export class MockServer {
         break;
       case Archetype.CreatureLair:
         out[0] = w.lairs.template[i];
-        out[1] = w.lairs.missionId[i];
-        out[2] = unorm8(w.lairs.hp[i], w.lairs.maxHp[i]);
+        out[1] = MOCK_LEVEL;
+        out[2] = w.lairs.missionId[i];
+        out[3] = unorm8(w.lairs.hp[i], w.lairs.maxHp[i]);
         break;
       case Archetype.Creature: {
         const target = w.creatures.target[i];
         out[0] = w.creatures.template[i];
-        out[1] = w.creatures.mode[i];
-        out[2] = target >= 0 ? interest[Archetype.Player].netIds[target] : 0;
-        out[3] = unorm8(w.creatures.hp[i], w.creatures.maxHp[i]);
+        out[1] = MOCK_LEVEL;
+        out[2] = w.creatures.mode[i];
+        out[3] = target >= 0 ? interest[Archetype.Player].netIds[target] : 0;
+        out[4] = unorm8(w.creatures.hp[i], w.creatures.maxHp[i]);
         break;
       }
       case Archetype.CityNpc:
