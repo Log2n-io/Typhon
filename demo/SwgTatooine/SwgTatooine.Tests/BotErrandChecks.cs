@@ -1375,7 +1375,7 @@ public sealed class BotPathChecks
         Assert.That(closest, Is.GreaterThanOrEqualTo(CityPath.BodyHalfM + 0.1d), $"a leg passes {closest:F3} m from a wall: {where}");
     }
 
-    /// <summary>The distance from a segment to a rectangle: 0 when they meet, else the nearest of the segment's ends to the box and the box's corners to it.</summary>
+    /// <summary>A segment's distance to a rectangle: 0 when they meet, else the nearest of its ends to the box and of the box's corners to it.</summary>
     private static double SegmentToBox((float X, float Z) a, (float X, float Z) b, float minX, float minZ, float maxX, float maxZ)
     {
         var walls = new List<PlanBox> { new(minX, minZ, maxX, maxZ, 0f, 1f, false) };
