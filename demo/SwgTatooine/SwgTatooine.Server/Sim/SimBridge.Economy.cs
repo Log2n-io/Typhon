@@ -38,9 +38,11 @@ public static class EconomyLedger
 /// holding economy writes that fails to commit forgets both, and the next use reads them again; its counts are dropped with it.
 /// </para>
 /// <para>
-/// <b>A wallet is opened only for a character its transaction can see.</b> A first login spawns its character in the tick's own transaction, which commits
-/// after this one: opened then, a crash between the two would leave a wallet — and a grant — whose owner does not exist. The bind is kept as a request
-/// and the wallet opened on the next tick, once the character is committed.
+/// <b>A wallet is opened only for a character bound on an earlier tick.</b> A first login spawns its character in the session system's transaction,
+/// which commits into the tick's unit of work — visible to the side transactions later in the tick, but made durable only by the tick's flush at its end,
+/// while a side transaction is durable on its own. Opened on the bind's tick, a crash between the two flushes would leave a wallet — and a grant — whose
+/// owner does not exist. The bind is kept as a request and served on the next tick, once the tick that spawned the character has been flushed; a tip
+/// or a reward meanwhile finds no wallet for that character and says so.
 /// </para>
 /// </remarks>
 public sealed partial class SimBridge
@@ -55,9 +57,11 @@ public sealed partial class SimBridge
     // Owner key (a character's raw id) to its wallet.
     private readonly Dictionary<long, EntityId> _walletOf = [];
 
-    // The bodies bound to a character, each with the tick it was bound on: kept until its wallet is open, or it is too old.
+    // The bodies bound to a character, each with the tick it was bound on: kept until its wallet is open, or it is too old. And the characters bound on
+    // the tick under way, whose wallets wait for the next.
     private readonly List<(EntityId Character, EntityId Body, long Tick)> _walletsAsked = [];
     private readonly List<(EntityId Character, EntityId Body)> _boundScratch = [];
+    private readonly HashSet<EntityId> _boundThisTick = [];
 
     // This tick's tips, applied in the Ledger's transaction: refused after all if that transaction does not commit.
     private readonly List<ClientCommand<GiveCredits>> _tipsApplied = [];
@@ -110,25 +114,26 @@ public sealed partial class SimBridge
 
     /// <summary>
     /// A completed mission's payout, credited to its holder's wallet in the desk's own transaction — the one that destroys the mission — so the two commit
-    /// together. Called by the mission desk.
+    /// together. Called by the mission desk, which ends the mission only when this paid it.
     /// </summary>
-    private void Reward(Transaction tx, Transaction tick0, EntityId character, EntityId body, EntityId mission, int reward, long worldTick)
+    /// <returns><see langword="false"/>, having paid nothing, when the holder has no wallet yet (bound on this very tick): the mission stays, paid by a later pass.</returns>
+    private bool Reward(Transaction tx, EntityId character, EntityId body, EntityId mission, int reward, long worldTick)
     {
         EnsureEconomy(tx);
         OpenWallet(tx, character, worldTick);
-        if (reward > 0 && Transfer(tx, EconomyLedger.World, (long)character.RawValue, reward, TransferKind.MissionReward, (long)mission.RawValue, worldTick))
+        if (reward <= 0)
         {
-            _pendingRewards++;
-            _deskWalletsMoved.Add(body);
+            return true;
         }
 
-        Interlocked.Increment(ref _missionRewards);
-        if (tick0.TryOpenMut(body, out var player))
+        if (!Transfer(tx, EconomyLedger.World, (long)character.RawValue, reward, TransferKind.MissionReward, (long)mission.RawValue, worldTick))
         {
-            var state = player.Read(Player.State);
-            state.MissionsCompleted++;
-            player.Set(Player.State, state);
+            return false;
         }
+
+        _pendingRewards++;
+        _deskWalletsMoved.Add(body);
+        return true;
     }
 
     /// <summary>The desk's transaction ended: its rewards counted and their bodies told, or — not committed — the economy read again.</summary>
@@ -160,11 +165,13 @@ public sealed partial class SimBridge
         foreach (var (character, body) in _boundScratch)
         {
             _walletsAsked.Add((character, body, tick));
+            _boundThisTick.Add(character);
         }
 
         var tips = subs == null ? default : subs.Commands<GiveCredits>();
         if (_economyLoaded && _walletsAsked.Count == 0 && tips.Count == 0)
         {
+            _boundThisTick.Clear();
             return;
         }
 
@@ -174,9 +181,9 @@ public sealed partial class SimBridge
         _tipsApplied.Clear();
         using var tx = ctx.CreateSideTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit);
         EnsureEconomy(tx);
-        foreach (var (character, body, _) in _walletsAsked)
+        foreach (var (character, body, asked) in _walletsAsked)
         {
-            if (OpenWallet(tx, character, worldTick))
+            if (asked < tick && OpenWallet(tx, character, worldTick))
             {
                 _walletsMoved.Add(body);
             }
@@ -197,7 +204,9 @@ public sealed partial class SimBridge
             }
         }
 
-        if (!EndEconomy(tx.Commit()))
+        var committed = EndEconomy(tx.Commit());
+        _boundThisTick.Clear();
+        if (!committed)
         {
             // Every transfer of this tick is lost together. The wallet requests stay for the next tick; the tips are refused, so their senders know.
             foreach (var command in _tipsApplied)
@@ -287,12 +296,15 @@ public sealed partial class SimBridge
         _economyDirty = true;
     }
 
-    /// <summary>Opens a character's wallet with its grant, unless it has one or this transaction cannot see the character yet.</summary>
+    /// <summary>
+    /// Opens a character's wallet with its grant, unless it has one, or it was bound on the tick under way (not durable yet), or this transaction cannot see
+    /// it.
+    /// </summary>
     /// <returns><see langword="true"/> when it was opened now.</returns>
     private bool OpenWallet(Transaction tx, EntityId character, long worldTick)
     {
         var key = (long)character.RawValue;
-        if (key == EconomyLedger.World || _walletOf.ContainsKey(key) || !tx.TryOpen(character, out _))
+        if (key == EconomyLedger.World || _walletOf.ContainsKey(key) || _boundThisTick.Contains(character) || !tx.TryOpen(character, out _))
         {
             return false;
         }
@@ -438,6 +450,13 @@ public sealed partial class SimBridge
         // Either side's wallet is opened here if its bind's request has not been served yet; one whose character is not committed yet has none.
         OpenWallet(tx, character, worldTick);
         OpenWallet(tx, recipient, worldTick);
+        if (!_walletOf.ContainsKey((long)character.RawValue))
+        {
+            // Bound this very tick: its wallet opens on the next, and the tip can be sent again then.
+            RefuseTip(subs, in command, TatooineReplication.TipFailed);
+            return;
+        }
+
         if (!_walletOf.ContainsKey((long)recipient.RawValue))
         {
             RefuseTip(subs, in command, TatooineReplication.TipNoRecipient);

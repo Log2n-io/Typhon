@@ -100,6 +100,7 @@ export const MISSION_REASONS: Readonly<Record<number, string>> = {
   140: 'Too far from the terminal',
   141: 'That mission is not yours',
   142: 'You are not in the world',
+  149: 'The server could not apply it — nothing changed, try again',
 };
 
 /**

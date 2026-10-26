@@ -774,6 +774,9 @@ public static partial class TatooineReplication
     /// <summary>A tip applied and then lost with its transaction, which did not commit: nothing moved, and it can be sent again.</summary>
     public const byte TipFailed = AckReasons.FirstApplicationReason + 20;
 
+    /// <summary>A take or a cancel applied and then lost with the desk's transaction, which did not commit: nothing changed, and it can be sent again.</summary>
+    public const byte MissionFailed = AckReasons.FirstApplicationReason + 21;
+
     /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
     /// <remarks>
     /// Measured from the port's centre: its ring wall stands about 20 m out and its ticket terminal 21.4 m, so 30 m takes in the terminal and the gate

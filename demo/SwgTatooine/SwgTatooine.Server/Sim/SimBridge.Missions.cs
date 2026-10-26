@@ -45,6 +45,13 @@ public sealed partial class SimBridge
 
     // The world tick of the desk's tick under way: a reward's ledger row carries it.
     private long _deskWorldTick;
+
+    // What this tick's desk transaction did, applied outside it only once it commits — or answered, when it does not: the completions (told to their
+    // bodies and the journal), and the takes and cancels (refused with MissionFailed, so their clients are not left waiting).
+    private readonly List<(EntityId Holder, EntityId Body, EntityId Mission, byte Kind, int Reward)> _deskCompleted = [];
+    private readonly List<ClientCommand<TakeMission>> _takesApplied = [];
+    private readonly List<ClientCommand<AbandonMission>> _cancelsApplied = [];
+    private bool _deskEverLoaded;
     private readonly Dictionary<EntityId, int> _heldBy = [];
 
     // Per pass: every character with a body online, and that body.
@@ -123,6 +130,9 @@ public sealed partial class SimBridge
         using var tx = ctx.CreateSideTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit);
         var tick0 = ctx.Transaction;
         _deskWorldTick = ctx.WorldTick;
+        _deskCompleted.Clear();
+        _takesApplied.Clear();
+        _cancelsApplied.Clear();
         if (!_deskLoaded)
         {
             LoadDesk(tx, tick);
@@ -154,12 +164,38 @@ public sealed partial class SimBridge
         }
 
         // A desk transaction that did not commit took its completions and their rewards with it: the desk is read again from the database, where those
-        // missions still stand, and pays them on the next pass.
+        // missions still stand, and pays them on the next pass. Its takes and cancels are refused, so their clients hear it.
         var committed = tx.Commit();
         EndDeskEconomy(tick0, committed);
         if (!committed)
         {
             _deskLoaded = false;
+            _deskWrites = 0;
+            foreach (var command in _takesApplied)
+            {
+                subs?.Reject(command, TatooineReplication.MissionFailed);
+            }
+
+            foreach (var command in _cancelsApplied)
+            {
+                subs?.Reject(command, TatooineReplication.MissionFailed);
+            }
+
+            return;
+        }
+
+        foreach (var (holder, body, mission, kind, reward) in _deskCompleted)
+        {
+            Interlocked.Increment(ref _missionRewards);
+            if (tick0.TryOpenMut(body, out var player))
+            {
+                var state = player.Read(Player.State);
+                state.MissionsCompleted++;
+                player.Set(Player.State, state);
+            }
+
+            MissionJournal.NoteCompleted(holder, mission, kind, reward);
+            BumpJournal(tick0, body);
         }
 
         if (_deskWrites > 0)
@@ -180,7 +216,14 @@ public sealed partial class SimBridge
     /// </remarks>
     private void LoadDesk(Transaction tx, long tick)
     {
-        MissionJournal.ResetCompletions();
+        // The completions remembered for the journal are this process's, not the database's: forgotten on the first load only — a reload after a
+        // failed commit would wipe every other character's unread "Mission complete".
+        if (!_deskEverLoaded)
+        {
+            MissionJournal.ResetCompletions();
+            _deskEverLoaded = true;
+        }
+
         var offerLife = (long)((TatooineData.MissionOfferLifeMinSeconds + TatooineData.MissionOfferLifeSpanSeconds) * _config.TickRateHz);
         var lairLife = (long)(TatooineData.MissionLairLifeSeconds * _config.TickRateHz);
         var terminals = new List<MissionTerminalRef>();
@@ -351,10 +394,13 @@ public sealed partial class SimBridge
             if (vitals.Health <= 0 && lair.OwnerHit != 0)
             {
                 // Done, and paid where it was broken (R5): no going back to the terminal. The journal is told it was completed, not just that it left.
-                Reward(tx, tick0, m.Holder, body, id, m.Reward, _deskWorldTick);
-                EndMission(tx, i, in m, completed: true);
-                MissionJournal.NoteCompleted(m.Holder, id, m.Kind, m.Reward);
-                BumpJournal(tick0, body);
+                // Paid in this transaction, and ended in it only if paid: a holder whose wallet opens on the next tick is paid by the next pass.
+                if (Reward(tx, m.Holder, body, id, m.Reward, _deskWorldTick))
+                {
+                    EndMission(tx, i, in m, completed: true);
+                    _deskCompleted.Add((m.Holder, body, id, m.Kind, m.Reward));
+                }
+
                 continue;
             }
 
@@ -528,7 +574,10 @@ public sealed partial class SimBridge
             return;
         }
 
-        _ = Take(tx, tick0, offerId, character, body, tick);
+        if (Take(tx, tick0, offerId, character, body, tick))
+        {
+            _takesApplied.Add(command);
+        }
     }
 
     /// <summary>
@@ -612,6 +661,7 @@ public sealed partial class SimBridge
         var m = e.Read(HeldMissionArch.Mission);
         EndMission(tx, at, in m, completed: false);
         BumpJournal(tick0, body);
+        _cancelsApplied.Add(command);
     }
 
     /// <summary>Destroys a held mission and its lair, and forgets it.</summary>
