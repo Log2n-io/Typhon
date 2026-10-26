@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using NUnit.Framework;
@@ -130,8 +131,13 @@ public sealed class BotErrandChecks
         public List<SeenStructure> Room = [new SeenStructure(0f, 0f, 8, RoomAsset, 0, 0)];
         public readonly List<Intent> Sent = [];
 
-        /// <summary>Missions held, as the journal would say.</summary>
+        /// <summary>Missions held, as the journal would say, and the lair of the one held, when it has one.</summary>
         public int MissionsHeld;
+
+        public (float X, float Z)? Lair;
+
+        /// <summary>Whether the server holds the body where it is, whatever it is asked: a crowd it cannot push through.</summary>
+        public bool Held;
 
         /// <summary>A plan rectangle no step may cross — a house, grown by nothing: the walls the brain must go round. Checked along each step's segment.</summary>
         public (float MinX, float MinZ, float MaxX, float MaxZ)? Forbidden;
@@ -160,6 +166,9 @@ public sealed class BotErrandChecks
             Mounted = Mounted,
             PortRegion = PortRegion,
             MissionsHeld = MissionsHeld,
+            HasMissionLair = Lair.HasValue,
+            MissionLairX = Lair?.X ?? 0f,
+            MissionLairZ = Lair?.Z ?? 0f,
             Structures = new ListStructures(Realm == 0 ? Planet : Room),
         };
 
@@ -204,7 +213,7 @@ public sealed class BotErrandChecks
 
         private void Step(Intent intent)
         {
-            switch (intent.Kind)
+            switch (Held && intent.Kind is IntentKind.Move or IntentKind.MoveTo ? IntentKind.None : intent.Kind)
             {
                 case IntentKind.MoveTo:
                     X = intent.X + ShoveM;
@@ -511,9 +520,11 @@ public sealed class BotErrandChecks
         }
 
         Assert.That(sim.X, Is.LessThan(house.X - 60f), $"a rider pressed against a house never got round it; it is at ({sim.X - house.X:F1}, {sim.Z - house.Z:F1})");
-        // From the detour's first step: a fresh brain's first tick gets off whatever it sits on, which is not the detour's doing.
-        var detour = sim.Sent.FindIndex(i => i.Kind == IntentKind.MoveTo);
-        Assert.That(detour, Is.GreaterThanOrEqualTo(0), "the premise: the rider searched a way round");
+        // From the detour's first step: a fresh brain's first tick gets off whatever it sits on, which is not the detour's doing. In a city the way
+        // round is run (BM-2), so its first step is a heading.
+        var detour = sim.Sent.FindIndex(i => i.Kind == IntentKind.MoveTo || (i.Kind == IntentKind.Move && i.SpeedClass != 0));
+        Assert.That(brain.PathsPlanned, Is.GreaterThan(0), "the premise: the rider searched a way round");
+        Assert.That(detour, Is.GreaterThanOrEqualTo(0), "the premise: it moved");
         Assert.That(sim.Sent.Skip(detour), Does.Not.Contain(Intent.Mount(false)), "it got off its swoop to go round a house, and on again after");
     }
 
@@ -817,6 +828,209 @@ public sealed class BotErrandChecks
             Assert.That(port.Encloses(0f, 26f), Is.False, "where the approach starts, outside");
             Assert.That(new AssetPlan { Id = "house", Walls = LargeHouseWalls }.HasEnclosure, Is.False, "a house rings nothing in");
             Assert.That(new AssetPlan { Id = "bare" }.HasEnclosure, Is.False);
+        });
+    }
+
+    /// <summary>
+    /// BM-2: a city walk round a house is RUN — <c>MoveDir</c> at the run, every decision, from its first point to its last open one — and every corner
+    /// is run past, never stood on; <c>MoveTo</c> only for the exact point at the end. No step crosses the house.
+    /// </summary>
+    /// <remarks>
+    /// Loïc, 2026-10-26: bots in town stopped and started at every corner. Each corner was a <c>MoveTo</c> — "go there and stop" — called reached from
+    /// 0.75 m, and at 2.5 m of running per decision the server stopped the body on it before the next one was sent.
+    /// </remarks>
+    [Test]
+    public void ACityWalk_IsRun_AndItsCornersRunPast()
+    {
+        // The house between the bot and the terminal: the walk goes round two of its corners.
+        var terminal = (X: Here.X + 2f, Z: Here.Z + 18f);
+        var (brain, sim) = Choosing(
+            Goal.Visiting,
+            b => b.Facilities.Observe(1, Routing.MissionTerminalKind, terminal.X, terminal.Z, TerminalAsset + 1, 0),
+            () => new Sim
+            {
+                X = Here.X - 1f,
+                Z = Here.Z - 14f,
+                Planet = [new SeenStructure(Here.X, Here.Z, 0, HouseAsset, 0, 1), new SeenStructure(terminal.X, terminal.Z, 10, TerminalAsset, 0, 1)],
+                Forbidden = (Here.X - 3f, Here.Z - 3f, Here.X + 3f, Here.Z + 3f),
+            });
+
+        var (next, count, precise, point) = Leg(brain);
+        Assert.That(precise, Is.GreaterThanOrEqualTo(2), $"the premise: a walk with corners, not {brain.LegState}");
+        var open = 0;
+        var passed = 0;
+        for (var tick = 10L; tick < 200 && brain.FacilitiesUsed == 0; tick++)
+        {
+            var at = (sim.X, sim.Z);
+            var intent = brain.Decide(sim.View(), tick);
+            var leg = Leg(brain);
+            if (leg.Next < leg.Precise && leg.Count == count)
+            {
+                open++;
+                Assert.That((intent.Kind, intent.SpeedClass), Is.EqualTo((IntentKind.Move, Routing.SpeedClassOf(TravelMode.Run))),
+                    $"tick {tick}: an open point was walked to and stopped on, or not moved toward ({brain.LegState})");
+            }
+
+            // A corner passed while running: the body was not put on it, which is what a MoveTo — stop there — does.
+            if (leg.Count == count && leg.Next > next && next < precise)
+            {
+                passed += Routing.Distance(at.X, at.Z, point.X, point.Z) > 0.05d ? leg.Next - next : 0;
+            }
+
+            (next, count, precise, point) = leg;
+            sim.Apply(intent);
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.FacilitiesUsed, Is.EqualTo(1), "the walk never reached the terminal");
+            Assert.That(open, Is.GreaterThan(4), "the premise: the open part was walked over several decisions");
+            Assert.That(passed, Is.EqualTo(precise), "not every open point was run past");
+            Assert.That(sim.Sent.FindAll(i => i.Kind == IntentKind.MoveTo), Has.Count.LessThanOrEqualTo(2), "MoveTo for more than the exact point");
+        });
+    }
+
+    /// <summary>
+    /// BM-2: a walker shoved off its walk past a corner runs on to the point now in sight, not back to the corner: the point after the next is checked
+    /// for sight — a straight step clear of the walls grown by a body and a margin — and the next is skipped when it is.
+    /// </summary>
+    [Test]
+    public void AShovedWalker_RunsOnToThePointInSight_NotBackToTheCorner()
+    {
+        var terminal = (X: Here.X + 2f, Z: Here.Z + 18f);
+        var (brain, sim) = Choosing(
+            Goal.Visiting,
+            b => b.Facilities.Observe(1, Routing.MissionTerminalKind, terminal.X, terminal.Z, TerminalAsset + 1, 0),
+            () => new Sim
+            {
+                X = Here.X - 1f,
+                Z = Here.Z - 14f,
+                Planet = [new SeenStructure(Here.X, Here.Z, 0, HouseAsset, 0, 1), new SeenStructure(terminal.X, terminal.Z, 10, TerminalAsset, 0, 1)],
+            });
+
+        var (next, _, precise, corner) = Leg(brain);
+        Assert.That((next, precise, corner.Z < Here.Z), Is.EqualTo((0, 3, true)), $"the premise: heading for the house's south-east corner ({brain.LegState})");
+
+        // Shoved by the crowd to the house's east side, north of the corner it was heading for: the next point is in plain sight from there.
+        (sim.X, sim.Z) = (Here.X + 8f, Here.Z + 6f);
+        var step = brain.Decide(sim.View(), 20);
+        Assert.Multiple(() =>
+        {
+            Assert.That(Leg(brain).Next, Is.GreaterThan(0), $"it still heads for the corner behind it ({brain.LegState})");
+            Assert.That((step.Kind, MathF.Sin(step.Heading) > 0f), Is.EqualTo((IntentKind.Move, true)), "it did not run on north");
+        });
+    }
+
+    /// <summary>The walk in progress as the brain's trace line states it: the next point's index, the count, where the exact part starts, the next point.</summary>
+    private static (int Next, int Count, int Precise, (float X, float Z) Point) Leg(BotBrain brain)
+    {
+        // "leg {next}/{count} exact {precise} ride … next (x, z)"
+        var state = brain.LegState;
+        var parts = state.Split(' ');
+        var nc = parts[1].Split('/');
+        var point = (0f, 0f);
+        var at = state.IndexOf(" next (", StringComparison.Ordinal);
+        if (at >= 0)
+        {
+            var xz = state[(at + 7)..].TrimEnd(')').Split(", ");
+            point = (float.Parse(xz[0], CultureInfo.InvariantCulture), float.Parse(xz[1], CultureInfo.InvariantCulture));
+        }
+
+        return (int.Parse(nc[0], CultureInfo.InvariantCulture), int.Parse(nc[1], CultureInfo.InvariantCulture), int.Parse(parts[3], CultureInfo.InvariantCulture),
+            point);
+    }
+
+    /// <summary>
+    /// BM-3: a mission's ride out of town is WALKED to the city's edge — no mount, no swoop inside its disc — then ridden from the edge on, and every step
+    /// inside is a run.
+    /// </summary>
+    /// <remarks>Loïc, 2026-10-26: bots leaving for a lair rode their walk out at the swoop's speed and clipped the houses' corners.</remarks>
+    [Test]
+    public void AMissionsRideOutOfTown_IsWalkedToTheEdge_ThenRidden()
+    {
+        var brain = new BotBrain(BotMap.Cities, 7u, 4d, Content());
+        var lair = (X: Here.X + Here.Radius + 1200f, Z: Here.Z + 40f);
+        var sim = new Sim
+        {
+            X = Here.X - 12f,
+            Z = Here.Z,
+            MissionsHeld = 1,
+            Lair = lair,
+            Planet = [new SeenStructure(Here.X, Here.Z, 0, HouseAsset, 0, 1), new SeenStructure(Here.X + 60f, Here.Z + 3f, 0, HouseAsset, 1, 1)],
+            Forbidden = (Here.X - 3f, Here.Z - 3f, Here.X + 3f, Here.Z + 3f),
+        };
+
+        double? mountedAt = null;
+        var swoopOutside = 0;
+        for (var tick = 1L; tick < 800 && Routing.Distance(sim.X, sim.Z, lair.X, lair.Z) > BotBrain.NoticeM; tick++)
+        {
+            var fromCentre = Routing.Distance(sim.X, sim.Z, Here.X, Here.Z);
+            var intent = brain.Decide(sim.View(), tick);
+            if (fromCentre <= Here.Radius)
+            {
+                Assert.That(intent, Is.Not.EqualTo(Intent.Mount(true)), $"tick {tick}: it got on its swoop in town, {fromCentre:F0} m from the centre");
+                Assert.That(intent.Kind == IntentKind.Move && intent.SpeedClass == Routing.SwoopClass, Is.False, $"tick {tick}: it rode in town");
+                Assert.That(intent.Kind, Is.Not.EqualTo(IntentKind.MoveTo), $"tick {tick}: the walk out stopped on a point ({brain.LegState})");
+            }
+            else
+            {
+                // Out of town the ride is straight: a walk's corners ridden at the swoop's class and walked onto at the run's was the speed jerking.
+                Assert.That(intent.Kind, Is.Not.EqualTo(IntentKind.MoveTo), $"tick {tick}: out of town, it rode the walk's points ({brain.LegState})");
+                mountedAt ??= intent == Intent.Mount(true) ? fromCentre : null;
+                swoopOutside += intent.Kind == IntentKind.Move && intent.SpeedClass == Routing.SwoopClass ? 1 : 0;
+            }
+
+            sim.Apply(intent);
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Questing), "the premise: the mission is what it is doing");
+            Assert.That(brain.PathsPlanned, Is.GreaterThan(0), "the premise: the town was walked on a searched path");
+            Assert.That(mountedAt, Is.Not.Null.And.LessThan(Here.Radius + 15d), "it did not get on its swoop at the city's edge");
+            Assert.That(swoopOutside, Is.GreaterThan(10), "the desert was not ridden");
+            Assert.That(Routing.Distance(sim.X, sim.Z, lair.X, lair.Z), Is.LessThanOrEqualTo(BotBrain.NoticeM), "it never reached the lair");
+        });
+    }
+
+    /// <summary>
+    /// BM-4: a walk that stops making progress — a crowd, a wall the search did not know — is searched again from where the body stands within a second
+    /// and a half, not four.
+    /// </summary>
+    /// <remarks>Loïc, 2026-10-26: bots leaving town pushed into a house for four seconds, sliding along it, before looking for a way round.</remarks>
+    [Test]
+    public void AWalkThatStopsMoving_IsSearchedAgainWithinASecondAndAHalf()
+    {
+        var terminal = (X: Here.X + 120f, Z: Here.Z);
+        var (brain, sim) = Choosing(
+            Goal.Visiting,
+            b => b.Facilities.Observe(1, Routing.MissionTerminalKind, terminal.X, terminal.Z, TerminalAsset + 1, 0),
+            () => new Sim
+            {
+                Planet = [new SeenStructure(Here.X + 40f, Here.Z + 1f, 0, HouseAsset, 0, 1), new SeenStructure(terminal.X, terminal.Z, 10, TerminalAsset, 0, 1)],
+            });
+
+        var tick = 10L;
+        for (; tick < 18; tick++)
+        {
+            sim.Apply(brain.Decide(sim.View(), tick));
+        }
+
+        sim.Held = true;
+        var heldAt = tick;
+        var before = brain.PathsPlanned;
+        for (; tick < heldAt + 40 && brain.PathsPlanned == before; tick++)
+        {
+            sim.Apply(brain.Decide(sim.View(), tick));
+        }
+
+        // The tick the search ran on is the one the loop stopped after: held for that many decisions, at four a second.
+        var heldSeconds = (tick - heldAt) / 4d;
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Visiting), "the premise: still on the errand");
+            Assert.That(brain.PathsPlanned, Is.GreaterThan(before), "a walk held still was never searched again");
+            Assert.That(heldSeconds, Is.LessThanOrEqualTo(1.5d + 0.25d), "searched again only after more than a second and a half held still");
         });
     }
 
