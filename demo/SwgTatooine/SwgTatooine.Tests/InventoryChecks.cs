@@ -803,12 +803,32 @@ internal sealed class InventoryChecks : ServedChecks
         using var doc = JsonDocument.Parse(ItemEndpoints.InventoryJson(sim.Dbe, a.Character));
         var answered = doc.RootElement.GetProperty("recent").EnumerateArray().Select(r => long.Parse(r.GetProperty("seq").GetString())).ToList();
         var whole = Items.Rows(sim).Where(r => r.From == key || r.To == key).Select(r => r.Seq).OrderByDescending(q => q).Take(ItemEndpoints.RecentRows).ToList();
+
+        // A gap past the walk's bound — the world appended more since the last read than the walk would take — reads the side indexes: the same answer.
+        var gap = RecentRowCache<ItemLedgerEntry>.GapFactor * ItemEndpoints.RecentRows + 10;
+        for (var k = 0; k < gap; k++)
+        {
+            sim.Bridge.StageTransfer(ItemLedger.World, (long)b.Character.RawValue, ItemCatalog.Bone, 2, 1, ItemMoveKind.Kill, 2);
+        }
+
+        sim.Bridge.StageTransfer(ItemLedger.World, key, ItemCatalog.Crystal, 3, 1, ItemMoveKind.Kill, 3);
+        SessionHarness.Until(() => Items.Rows(sim).Count == 31 + gap + 1, "the gap's rows");
+        var fullBefore = ItemEndpoints.RecentFullReads(sim.Dbe);
+        using var afterGap = JsonDocument.Parse(ItemEndpoints.InventoryJson(sim.Dbe, a.Character));
+        var answeredAfterGap = afterGap.RootElement.GetProperty("recent").EnumerateArray().Select(r => long.Parse(r.GetProperty("seq").GetString())).ToList();
+        var wholeAfterGap = Items.Rows(sim).Where(r => r.From == key || r.To == key).Select(r => r.Seq).OrderByDescending(q => q).Take(ItemEndpoints.RecentRows)
+            .ToList();
+        var fullAfter = ItemEndpoints.RecentFullReads(sim.Dbe);
         using var wallet = JsonDocument.Parse(EconomyEndpoints.WalletJson(sim.Dbe, a.Character));
         var walletRows = wallet.RootElement.GetProperty("transfers").EnumerateArray().Select(r => r.GetProperty("seq").GetString()).ToList();
         Assert.Multiple(() =>
         {
             Assert.That(answered, Is.EqualTo(whole), "the incremental read is not the newest of the whole history");
             Assert.That(answered, Has.Count.EqualTo(ItemEndpoints.RecentRows));
+            Assert.That(answeredAfterGap, Is.EqualTo(wholeAfterGap), "the read past the walk's bound is not the newest of the whole history");
+            Assert.That(answeredAfterGap[0], Is.EqualTo(31 + gap + 1), "the row after the gap is missing");
+            Assert.That(fullBefore, Is.EqualTo(1), "a warm read went back to the side indexes: only the first read should");
+            Assert.That(fullAfter - fullBefore, Is.EqualTo(1), "the read past the walk's bound walked the world's rows instead of the side indexes");
             Assert.That(walletA, Does.Contain("\"kind\":\"grant\""), "the premise: the first wallet read");
             Assert.That(walletRows, Is.EqualTo(new[] { "1" }), "the other character's grant leaked into the wallet's rows, or its own went missing");
         });
