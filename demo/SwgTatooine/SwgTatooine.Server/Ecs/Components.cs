@@ -952,7 +952,7 @@ public static class AiMode
 /// A player's behaviour. Players are simulated as an activity MIX rather than one loop, because the load a planet
 /// carries is dominated by what fraction of its players are moving at all.
 /// </summary>
-[Component("Swg.PlayerState", 4, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.PlayerState", 5, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct PlayerState
 {
@@ -985,6 +985,12 @@ public struct PlayerState
     /// itself is a <c>long</c>, which a projected field cannot carry past 2³² (EN-A); the revision can, and costs the body four bytes.
     /// </remarks>
     [Field, Owner(CodecKind.Varu, Name = "wallet", Group = "wallet", Saturate = true)] public int WalletRev;
+
+    /// <summary>
+    /// Bumped whenever this body's character's inventory moves — a drop, a cache, a drop lost to a full inventory (inventory-loot.md § 3.6). Revision 5.
+    /// </summary>
+    /// <remarks>The wallet's pattern: the client re-reads <c>GET /swg/inventory</c> when it moves; four bytes keep a <c>Player</c> page at 24 bodies.</remarks>
+    [Field, Owner(CodecKind.Varu, Name = "items", Group = "items", Saturate = true)] public int ItemsRev;
 
     /// <summary>Missions completed — here only to prove the mission loop closes.</summary>
     [Field] public int MissionsCompleted;
