@@ -3,6 +3,7 @@ import type { DataSource, EventSink, LatencyControl, SourceStats } from '../sour
 import { realmViewOf, type RealmView } from '../realm-view';
 import { PLANET_HALF_EXTENT_M } from '../world-data';
 import { applyTick } from './apply';
+import { MockInventory } from './inventory';
 import { TickFlags, type MainToWorker, type TickMessage, type WorkerToMain } from './protocol';
 
 /**
@@ -80,6 +81,9 @@ export class MockSource implements DataSource, LatencyControl {
 
   private latencyMs: number;
   private jitterMs: number;
+
+  /** One character's inventory, answering `GET /swg/inventory` for the window to be exercised without a server. */
+  readonly inventory: MockInventory;
 
   /** The world it was handed: the mock does not build its own, so the app is already drawing this one. */
   get world(): WorldStore {
@@ -219,6 +223,7 @@ export class MockSource implements DataSource, LatencyControl {
 
   constructor(options: MockSourceOptions) {
     this.options = options;
+    this.inventory = new MockInventory(options.seed);
     this.latencyMs = options.latencyMs;
     this.jitterMs = options.jitterMs;
     this.current = {

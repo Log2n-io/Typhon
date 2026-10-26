@@ -108,6 +108,62 @@
     </section>
 
     <section class="card">
+        <h2>Items</h2>
+        @if (st?["items"] is null)
+        {
+            <p class="muted">this server has no items</p>
+        }
+        else
+        {
+            <div class="kpis">
+                @Kpi("drops / min", Rate(st, "items", "dropsPerMin"))
+                @Kpi("units / min", Rate(st, "items", "unitsPerMin"))
+                @Kpi("lost / min", Rate(st, "items", "lostPerMin"))
+                @Kpi("stacks", F(N(st, "items", "stacks"), 0))
+                @Kpi("rows since start", F(N(st, "items", "rows"), 0))
+                @Kpi("drops since start", F(N(st, "items", "drops"), 0))
+                @Kpi("refused", F(N(st, "items", "refused"), 0))
+                @Kpi("queue overflow", F(N(st, "items", "queueOverflow"), 0), N(st, "items", "queueOverflow") > 0)
+                @Kpi("failed commits", F(N(st, "items", "commitsFailed"), 0), N(st, "items", "commitsFailed") > 0)
+            </div>
+            @Spark("drops/min", "/min")
+            <h3>Units held, by Mk</h3>
+            <table class="ledger">
+                <tr><th>item</th><th class="num">I</th><th class="num">II</th><th class="num">III</th><th class="num">IV</th><th class="num">V</th></tr>
+                @foreach (var (id, name) in HeldRows(st))
+                {
+                    <tr>
+                        <td title="@id">@name</td>
+                        @for (var mk = 0; mk < 5; mk++)
+                        {
+                            <td class="num">@F(Held(st, id, mk), 0)</td>
+                        }
+                    </tr>
+                }
+            </table>
+        }
+        <h3>Item audit</h3>
+        @if (s.ItemAudit is null)
+        {
+            <p class="muted">not run yet</p>
+        }
+        else
+        {
+            var itemsOk = s.ItemAudit["ok"]?.GetValue<bool>() ?? false;
+            <p>
+                <span class="badge @(itemsOk ? "ok" : "bad")">@(itemsOk ? "consistent" : "VIOLATIONS")</span>
+                @F(N(s.ItemAudit, "entries"), 0) rows replayed, @F(N(s.ItemAudit, "stacks"), 0) stacks, @F(N(s.ItemAudit, "units"), 0) units held
+                = @F(N(s.ItemAudit, "minted"), 0) minted − @F(N(s.ItemAudit, "destroyed"), 0) destroyed, in @Ms(N(s.ItemAudit, "ms")) — @Age(s.AuditAt) ago
+            </p>
+            @if (!itemsOk && s.ItemAudit["violations"] is JsonArray iv)
+            {
+                <p class="muted">@F(N(s.ItemAudit, "violationCount"), 0) violation(s)</p>
+                <ul class="violations">@foreach (var line in iv.Take(10)) { <li>@line</li> }</ul>
+            }
+        }
+    </section>
+
+    <section class="card">
         <h2>Missions</h2>
         <div class="kpis">
             @Kpi("taken / min", Rate(st, "missions", "takenPerMin"))
@@ -201,6 +257,36 @@
             .Take(10);
 
     private static double MaxSystem(JsonNode health) => Systems(health).Select(x => x.Us).DefaultIfEmpty(1d).Max();
+
+    /// <summary>The lootable items (inventory-loot.md § 3.1), the held-units table's rows in the catalogue's order, by asset id.</summary>
+    private static readonly (string Id, string Name)[] Lootable =
+    [
+        ("mat_metal", "Metal"), ("mat_crystal", "Crystal"), ("mat_gas", "Gas"), ("mat_chemical", "Chemical"), ("mat_fiber", "Fiber"),
+        ("mat_hide", "Hide"), ("mat_bone", "Bone"), ("mat_gland", "Gland"), ("mat_venom", "Venom"),
+        ("core_ranged", "Ranged Weapon Core"), ("core_melee", "Melee Weapon Core"), ("core_armor", "Armor Core"), ("core_propulsion", "Propulsion Core"),
+        ("addon_weapon", "Weapon Enhancement"), ("addon_armor", "Armour Enhancement"), ("addon_tuning", "Tuning Kit"), ("addon_additive", "Additive"),
+    ];
+
+    /// <summary>The 17 lootable items, then any other item the world holds (a later source), by its asset id.</summary>
+    private static IEnumerable<(string Id, string Name)> HeldRows(JsonNode stats)
+    {
+        foreach (var row in Lootable)
+        {
+            yield return row;
+        }
+
+        foreach (var (id, _) in stats?["items"]?["held"] as JsonObject ?? [])
+        {
+            if (!Lootable.Any(l => l.Id == id))
+            {
+                yield return (id, id);
+            }
+        }
+    }
+
+    /// <summary>Units of an item held at a Mk (0-based): 0 for an item the world does not hold, which <c>held</c> leaves out.</summary>
+    private static double Held(JsonNode stats, string id, int mk)
+        => stats?["items"]?["held"]?[id] is JsonArray a && mk < a.Count && a[mk] is JsonValue v && v.TryGetValue<double>(out var d) ? d : 0d;
 
     private static IEnumerable<(string City, double Bots)> Cities(JsonNode stats)
         => (stats?["population"]?["botsByCity"] as JsonObject ?? [])

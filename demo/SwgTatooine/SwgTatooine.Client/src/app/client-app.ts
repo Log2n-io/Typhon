@@ -50,6 +50,11 @@ import type { AnimationGraph } from '../character/animation-graph';
 import { PlayerNameDirectory } from '../data/player-names';
 import { MissionJournal, missionTitle, type MissionOffer } from '../data/missions';
 import { playerMenuItems, WalletReader } from '../data/wallet';
+import { itemIcons, parseInventory, type InventorySnapshot } from '../data/items';
+import { MockSource } from '../data/mock/mock-source';
+import type { MockInventory } from '../data/mock/inventory';
+import { RevisionReader } from '../data/revision-reader';
+import { useItems } from '../state/items-store';
 import { useMissions } from '../state/mission-store';
 import { useWallet } from '../state/wallet-store';
 import { useSessionStore } from '../state/session-store';
@@ -1047,6 +1052,9 @@ export class ClientApp {
       }
 
       useUi.getState().setActionIcons(icons);
+      // The inventory's icons (inventory-loot.md § 6): every 32 px icon of the catalogue, found by the asset id the server
+      // names an item by.
+      useItems.getState().setIcons(itemIcons(mount.library.catalogue, (file) => set.base + file));
       this.shapeCache = [];
       this.staticAssets = new StaticAssets(
         mount.library,
@@ -1377,6 +1385,9 @@ export class ClientApp {
     this.walletVersion = -1;
     useWallet.getState().resetWallet();
     useWallet.getState().closeInventory();
+    this.items.clear();
+    this.itemsVersion = -1;
+    useItems.getState().reset();
     this.fight.clear();
     useMissions.getState().closeTerminal();
     this.clock = new Clock(CLOCK_OPTIONS);
@@ -3811,6 +3822,17 @@ export class ClientApp {
   /** The wallet (economy-foundation.md E0-10): read whenever the body's `wallet` revision moves, as the journal is. */
   private readonly wallet = new WalletReader(() => useSessionStore.getState().grant?.token ?? null);
   private walletVersion = -1;
+  /**
+   * The inventory (inventory-loot.md § 6): read whenever the body's `items` revision moves, as the wallet is. Against the
+   * mock, its own character's inventory answers instead of the server, under a token of its own.
+   */
+  private readonly items = new RevisionReader<InventorySnapshot>(
+    'swg/inventory',
+    parseInventory,
+    () => (this.mockInventory() !== null ? 'mock' : (useSessionStore.getState().grant?.token ?? null)),
+    (url, init) => this.mockInventory()?.fetch(url, init) ?? fetch(url, init),
+  );
+  private itemsVersion = -1;
   /** The player whose context menu is open, for closing it when they leave the view. */
   private playerMenuTarget = 0;
   private kindNamesSet: AssetSet | null = null;
@@ -3819,6 +3841,11 @@ export class ClientApp {
   private missionMenuOwner = 0;
   private offersFor = 0;
   private offersKey = '';
+
+  /** The mock's character inventory when the source is the mock, which has no server to ask; `null` otherwise. */
+  private mockInventory(): MockInventory | null {
+    return this.source instanceof MockSource ? this.source.inventory : null;
+  }
 
   /**
    * The journal and the open terminal's list, every frame: the journal read when its revision moved, the list gathered
@@ -3847,6 +3874,18 @@ export class ClientApp {
         if (wallet !== null) {
           useWallet.getState().setWallet(wallet);
         }
+      }
+    }
+
+    const mock = this.mockInventory();
+    this.items.update(
+      mock !== null ? mock.revision(nowMs) : source?.canPlay === true ? source.selfNumber('items') : Number.NaN,
+    );
+    if (this.items.version !== this.itemsVersion) {
+      this.itemsVersion = this.items.version;
+      const items = this.items.value;
+      if (items !== null) {
+        useItems.getState().setSnapshot(items);
       }
     }
 
