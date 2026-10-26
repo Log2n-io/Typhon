@@ -121,6 +121,7 @@ import {
 } from './shuttle-flight';
 import { ShuttleView } from './shuttle-view';
 import {
+  crowdsTerminal,
   missionMenuItems,
   missionTerminalOf,
   ticketMenuItems,
@@ -396,6 +397,11 @@ const STRUCTURE_ARCHETYPE = 'WorldObject';
 
 /** How far behind a structure's surface a body still counts as picked, metres: one standing against a wall, or at a terminal. */
 const PICK_SURFACE_SLACK_M = 0.6;
+
+/** Whether the layers' pick met a body's box: read through a call, since flow narrowing cannot see `layer.pick` set it. */
+function hitInside(hit: PickHit): boolean {
+  return hit.inside;
+}
 
 /** What the ticket terminal is called on its tag. */
 const TICKET_TERMINAL_LABEL = 'Ticket terminal';
@@ -3713,9 +3719,15 @@ export class ClientApp {
       }
     }
 
+    // A terminal the ray meets wins over a body in front of it that stands AT it (`crowdsTerminal`): a busy port's queue
+    // otherwise took every click meant for the terminal behind it.
+    const bodyHit = hitInside(best);
+    const bodyX = planet.ox + planet.dx * best.depth;
+    const bodyZ = planet.oz + planet.dz * best.depth;
     for (const part of this.terminalsInView()) {
       const t = rayOnSlabs(planet, part.min[0], part.min[1], part.min[2], part.max[0], part.max[1], part.max[2]);
-      if (t <= maxT && (!best.inside || t < best.depth)) {
+      const crowded = bodyHit && best.netId !== 0 && crowdsTerminal(bodyX, bodyZ, part.use, part.min, part.max);
+      if (t <= maxT && (!best.inside || t < best.depth || crowded)) {
         best.archetype = -1;
         best.netId = 0;
         best.pixels = 0;

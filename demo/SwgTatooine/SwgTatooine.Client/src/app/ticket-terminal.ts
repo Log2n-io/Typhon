@@ -147,3 +147,43 @@ export function ticketMenuItems(from: number, names: readonly string[]): Context
   });
   return items;
 }
+
+/** How far round a terminal a body counts as crowding it, metres: the queue at its stand point, a step or two deep. */
+export const TERMINAL_CROWD_M = 1.5;
+
+/**
+ * Whether a body the pick ray met at (`x`, `z`) stands at a terminal — inside its box or its stand disc, widened by
+ * {@link TERMINAL_CROWD_M} — so that a ray which goes on to meet the terminal picks the terminal, not the body.
+ *
+ * <b>Why the terminal wins there.</b> Picking tests bodies before places, which is right in the open and wrong at a busy
+ * terminal: at Port Sable's shuttleport hundreds of bots stand at the ticket and mission terminals for seconds each, and
+ * every click on the terminal landed on whoever stood in front of it, so neither the shuttle nor the mission list could
+ * be opened. A body away from the terminal still wins, and one at it is still picked where the ray misses the terminal.
+ *
+ * @param x Where the ray met the body, east, planet coordinates.
+ * @param z Where it met it, north.
+ * @param use The terminal's stand point and radius.
+ * @param min The terminal's world box, minimum corner (x y z).
+ * @param max Its maximum corner.
+ */
+export function crowdsTerminal(
+  x: number,
+  z: number,
+  use: TicketTerminal,
+  min: readonly number[],
+  max: readonly number[],
+): boolean {
+  const inBox =
+    x >= min[0] - TERMINAL_CROWD_M &&
+    x <= max[0] + TERMINAL_CROWD_M &&
+    z >= min[2] - TERMINAL_CROWD_M &&
+    z <= max[2] + TERMINAL_CROWD_M;
+  if (inBox) {
+    return true;
+  }
+
+  const reach = use.radiusM + TERMINAL_CROWD_M;
+  const dx = x - use.x;
+  const dz = z - use.z;
+  return dx * dx + dz * dz <= reach * reach;
+}
