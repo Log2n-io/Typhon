@@ -909,6 +909,49 @@ internal sealed class MissionDeskChecks : ServedChecks
     }
 
     /// <summary>
+    /// character-level.md, review 2 L3: a stranger who breaks somebody's mission lair alone is paid an ordinary lair kill's XP; the holder, whose mission is
+    /// drawn again and not paid, gains nothing, and nothing is counted as a mission lair's.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void AStrangerWhoBreaksAMissionLair_IsPaidItsKillXp_AndTheHolderNothing()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x6016), terminal);
+        var stranger = LogInAt(sim, AnAccount(0x6017), terminal, bindings: 2);
+        var holder = CharacterOf(sim, AnAccount(0x6016));
+        var breaker = CharacterOf(sim, AnAccount(0x6017));
+        var held = TakeAndHold(sim, link, holder, Offers(sim, terminal)[0]);
+        var lair = held.Mission.Lair;
+        sim.WriteInTick(tx =>
+        {
+            var l = tx.OpenMut(lair);
+            var s = l.Read(CreatureLair.Spawner);
+            s.Level = 5;
+            l.Set(CreatureLair.Spawner, s);
+        });
+
+        Clear(sim, lair, health: 5);
+        Worlds.Park(sim, stranger.Session, held.Mission.LairX + 10f, held.Mission.LairZ, out var parked);
+        SessionHarness.UntilNamed(stranger.Session, lair, "the lair to reach the stranger's view", parked);
+        stranger.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(stranger.Session, lair)));
+        stranger.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
+        SessionHarness.Until(() => ProgressOf(sim, breaker).Xp > 0, "the stranger to be paid the lair");
+        SessionHarness.Until(() => Held(sim, holder)[0].Mission.Lair != lair, "a new lair to be drawn");
+        Harness.Ticks((Worlds.ServedHz / SimBridge.MissionPassHz) + 2);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(ProgressOf(sim, breaker).KillXp, Is.EqualTo(Progression.KillXp(KillVictimKind.Lair, 5, 1)), "the stranger was not paid a lair kill");
+            Assert.That(ProgressOf(sim, holder).Xp, Is.Zero, "the holder gained from a lair it did not break");
+            Assert.That(Held(sim, holder), Has.Count.EqualTo(1), "the premise: the mission is still held");
+            Assert.That(sim.Bridge.MissionLairKills, Is.Zero, "a stranger's break was counted as a mission lair's");
+            Assert.That(sim.ProgressOverflow, Is.Zero);
+        });
+    }
+
+    /// <summary>
     /// CL-9: every offer carries the content level of its anchor — the ramp's exactly, its band beyond — and a kind whose range covers it.
     /// </summary>
     [Test]
@@ -1427,6 +1470,7 @@ internal sealed class MissionDeskChecks : ServedChecks
             Assert.That(progress.Level, Is.EqualTo(3), $"{expected} XP is exactly CL 3's start");
             Assert.That(sim.Bridge.MissionLairKills, Is.EqualTo(1));
             Assert.That(sim.Bridge.XpGrantedMissions, Is.EqualTo(expected));
+            Assert.That(sim.ProgressOverflow, Is.Zero, "a body refresh was dropped");
             Assert.That(look.Level, Is.EqualTo(3), "the holder's body does not carry the level the mission gave");
             Assert.That(look.Xp, Is.EqualTo(Progression.XpByte(in progress)));
         });

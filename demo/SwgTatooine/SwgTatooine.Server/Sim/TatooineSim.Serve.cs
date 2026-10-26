@@ -61,7 +61,7 @@ public sealed partial class TatooineSim
             Console.WriteLine($"  economy: {_bridge?.EconomyCountersJson() ?? "{}"}");
             Console.WriteLine($"  items: {_bridge?.ItemCountersJson() ?? "{}"}");
             Console.WriteLine($"  crowd: {_bridge?.CrowdCountersJson() ?? "{}"}");
-            Console.WriteLine($"  progression: kill queue overflow xp {KillXpOverflow}, loot {KillLootOverflow}");
+            Console.WriteLine($"  progression: queue overflow kills-xp {KillXpOverflow}, kills-loot {KillLootOverflow}, progress {ProgressOverflow}");
             EconomyEndpoints.CountersJson = null;
             EconomyEndpoints.CrowdJson = null;
             EconomyEndpoints.DemoJson = null;

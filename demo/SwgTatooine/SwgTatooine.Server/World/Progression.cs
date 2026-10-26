@@ -135,30 +135,30 @@ public static class Progression
 
     /// <summary>
     /// Adds <paramref name="xp"/> to a character's progress — the total, clamped at <see cref="MaxXp"/>, and the source's — and raises its level across every
-    /// threshold crossed. A level is never lost.
+    /// threshold crossed. A level is never lost. At the cap the grant is cut to what fits, and the source's total takes only that.
     /// </summary>
-    /// <returns>The levels gained, several at once possible.</returns>
+    /// <returns>The XP actually applied: <paramref name="xp"/>, less what the cap cut; 0 at CL 50's full XP.</returns>
     public static int AddXp(ref CharacterProgress p, int xp, bool mission)
     {
-        if (xp <= 0)
+        if (p.Level < 1)
+        {
+            p.Level = 1;
+        }
+
+        var applied = (int)Math.Clamp((long)MaxXp - p.Xp, 0, Math.Max(0, xp));
+        if (applied == 0)
         {
             return 0;
         }
 
-        p.Xp = (int)Math.Min(MaxXp, (long)p.Xp + xp);
+        p.Xp += applied;
         if (mission)
         {
-            p.MissionXp = (int)Math.Min(int.MaxValue, (long)p.MissionXp + xp);
+            p.MissionXp = (int)Math.Min(int.MaxValue, (long)p.MissionXp + applied);
         }
         else
         {
-            p.KillXp = (int)Math.Min(int.MaxValue, (long)p.KillXp + xp);
-        }
-
-        var before = p.Level;
-        if (p.Level < 1)
-        {
-            p.Level = 1;
+            p.KillXp = (int)Math.Min(int.MaxValue, (long)p.KillXp + applied);
         }
 
         while (p.Level < MaxLevel && p.Xp >= Start[p.Level + 1])
@@ -166,7 +166,7 @@ public static class Progression
             p.Level++;
         }
 
-        return p.Level - Math.Max((byte)1, before);
+        return applied;
     }
 
     /// <summary>The way to the next level in 256ths, for the body's <see cref="PlayerLook.Xp"/>: 255 at the cap.</summary>

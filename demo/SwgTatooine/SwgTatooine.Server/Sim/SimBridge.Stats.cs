@@ -336,11 +336,16 @@ public sealed partial class SimBridge
         j.Append(",\"killXp\":").Append(XpGrantedKills.ToString(inv));
         j.Append(",\"missionXp\":").Append(XpGrantedMissions.ToString(inv));
         j.Append(",\"greyKills\":").Append(KillsGrey.ToString(inv));
+        j.Append(",\"worthlessKills\":").Append(KillsWorthless.ToString(inv));
+        j.Append(",\"noCharacterKills\":").Append(KillsNoCharacter.ToString(inv));
         j.Append(",\"crowdKills\":").Append(KillsByCrowd.ToString(inv));
         j.Append(",\"noKillerKills\":").Append(KillsNoKiller.ToString(inv));
         j.Append(",\"missionLairKills\":").Append(MissionLairKills.ToString(inv));
         j.Append(",\"killsDrained\":").Append(KillsDrained.ToString(inv));
         j.Append(",\"commitsFailed\":").Append(ProgressCommitsFailed.ToString(inv));
+        j.Append(",\"killXpOverflow\":").Append((KillXpQueue?.OverflowCount ?? 0L).ToString(inv));
+        j.Append(",\"killLootOverflow\":").Append((KillLootQueue?.OverflowCount ?? 0L).ToString(inv));
+        j.Append(",\"progressOverflow\":").Append((ProgressQueue?.OverflowCount ?? 0L).ToString(inv));
         j.Append(",\"xpRatePercent\":").Append(XpRatePercent.ToString(inv));
         j.Append(",\"bands\":{\"people\":[").AppendJoin(',', pop.PeopleByBand).Append("],\"bots\":[").AppendJoin(',', pop.BotsByBand).Append("]}");
         j.Append(",\"meanCl\":{\"people\":").Append(Mean(pop.PeopleLevels, pop.People)).Append(",\"bots\":").Append(Mean(pop.BotLevels, pop.Bots)).Append('}');
