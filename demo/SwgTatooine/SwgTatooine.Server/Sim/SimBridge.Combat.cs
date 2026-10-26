@@ -896,7 +896,7 @@ public sealed partial class SimBridge
             Z = at.Z,
             Realm = target.Read(Creature.Realm).Value,
             VictimKind = foe ? KillVictimKind.Foe : KillVictimKind.Creature,
-            VictimLevel = 0,
+            VictimLevel = ai.Level,
             Species = ai.Template,
         });
         return true;
@@ -945,7 +945,7 @@ public sealed partial class SimBridge
                 Z = at.Z,
                 Realm = target.Read(CreatureLair.Realm).Value,
                 VictimKind = KillVictimKind.Lair,
-                VictimLevel = 0,
+                VictimLevel = (byte)Math.Clamp(spawner.Level, 0, byte.MaxValue),
                 Species = (byte)Math.Clamp(spawner.CreatureTemplate, 0, byte.MaxValue),
             });
         }
