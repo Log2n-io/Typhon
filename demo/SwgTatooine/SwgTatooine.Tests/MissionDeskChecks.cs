@@ -495,11 +495,32 @@ internal sealed class MissionDeskChecks : ServedChecks
         });
         Assert.That(crowd.IsNull, Is.False, "no scripted body to put beside the lair");
 
+        // Through both paths: the target pick (in Combat beside it), and the objective — the mission's lair handed to the fighter as one, which the
+        // once-a-second check must refuse to keep.
         for (var i = 0; i < 6; i++)
         {
             Worlds.Park(sim, crowd, held.Mission.LairX + 10f, held.Mission.LairZ, activity: PlayerActivity.Combat);
+            sim.WriteInTick(tx =>
+            {
+                var body = tx.OpenMut(crowd);
+                var state = body.Read(Player.State);
+                state.MissionX = held.Mission.LairX;
+                state.MissionZ = held.Mission.LairZ;
+                body.Set(Player.State, state);
+                var route = body.Read(Player.Route);
+                route.Objective = 1;
+                body.Set(Player.Route, route);
+            });
             Harness.Ticks(Worlds.ServedHz / 2);
         }
+
+        var keeps = true;
+        sim.WriteInTick(tx =>
+        {
+            var body = tx.Open(crowd);
+            var s = body.Read(Player.State);
+            keeps = body.Read(Player.Route).Objective == 1 && s.MissionX == held.Mission.LairX && s.MissionZ == held.Mission.LairZ;
+        });
 
         var health = 0;
         var ownerHit = -1;
@@ -517,6 +538,46 @@ internal sealed class MissionDeskChecks : ServedChecks
             Assert.That(health, Is.EqualTo(5), "the crowd damaged a mission's lair");
             Assert.That(ownerHit, Is.Zero);
             Assert.That(Held(sim, character), Has.Count.EqualTo(1), "the mission was ended");
+            Assert.That(keeps, Is.False, "the fighter kept a mission's lair as its objective");
+        });
+    }
+
+    /// <summary>
+    /// A fight with no lair objective — a fight-back, the world's first fighters — is not ended by the objective check, whose stale <c>MissionX</c> names no
+    /// lair (review, 2026-10-26: it ended every fight-back within a second, and counted it as a fallen objective).
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void AFightWithNoObjective_IsNotEndedByTheObjectiveCheck()
+    {
+        using var sim = Start();
+        var crowd = EntityId.Null;
+        sim.WriteInTick(tx =>
+        {
+            foreach (var cluster in tx.For<Player>().GetClusterEnumerator())
+            {
+                var controls = cluster.GetReadOnlySpan(Player.Control);
+                for (var bits = cluster.OccupancyBits; bits != 0 && crowd.IsNull; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    if (cluster.Realm.Value == 0 && controls[slot].Kind == ControllerKind.Scripted)
+                    {
+                        crowd = cluster.GetEntityId(slot);
+                    }
+                }
+            }
+        });
+
+        var (x, z) = (sim.Config.WorldEdgeM * 0.4f, sim.Config.WorldEdgeM * 0.4f);
+        Worlds.Park(sim, crowd, x, z, activity: PlayerActivity.Combat);
+        var fallen = sim.Bridge.ObjectivesFallen;
+        Harness.Ticks(Worlds.ServedHz * 3);
+        var activity = -1;
+        sim.WriteInTick(tx => activity = tx.Open(crowd).Read(Player.State).Activity);
+        Assert.Multiple(() =>
+        {
+            Assert.That(activity, Is.EqualTo(PlayerActivity.Combat), "a fight with no objective was ended by the objective check");
+            Assert.That(sim.Bridge.ObjectivesFallen, Is.EqualTo(fallen), "a fight with no objective was counted as an objective fallen");
         });
     }
 

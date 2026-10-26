@@ -286,6 +286,9 @@ public sealed class BotBrain
     /// <summary>When it set out on the mission it holds, or -1 while it holds none it has set out on.</summary>
     private long _questSince = -1;
 
+    /// <summary>Whether it has reached its mission's lair, so a lair drawn again far away starts a new ride.</summary>
+    private bool _questNear;
+
     /// <summary>Decides what to do this tick.</summary>
     /// <param name="world">What the bot was sent.</param>
     /// <param name="tick">The fleet's tick, which is what the timed goals count in.</param>
@@ -607,6 +610,8 @@ public sealed class BotBrain
         if (_questSince < 0)
         {
             _questSince = tick;
+            _questNear = false;
+            _flyNext = false;
             _travelBest = double.MaxValue;
             _travelBestAt = tick;
             _leg.Clear();
@@ -633,10 +638,19 @@ public sealed class BotBrain
         var toLair = Routing.Distance(world.X, world.Z, world.MissionLairX, world.MissionLairZ);
         if (toLair > NoticeM)
         {
+            if (_questNear)
+            {
+                // Its lair was drawn again somewhere else: a new ride, whose progress is measured from here, not from the fight.
+                _questNear = false;
+                _travelBest = double.MaxValue;
+                _travelBestAt = tick;
+            }
+
             return GoToward(in world, tick, world.MissionLairX, world.MissionLairZ, toLair, ride: true);
         }
 
         // There: on foot, and the fight. Its defenders first — the lair cannot be hurt while any stands — then the lair.
+        _questNear = true;
         _wantMounted = false;
         _leg.Clear();
         if (world.MissionLair != 0 && world.MissionLairGuards == 0)

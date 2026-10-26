@@ -429,6 +429,9 @@ internal sealed class CombatResolveSystem : CallbackSystem
         .Writes<PlayerMotion>()
         .Writes<PlayerSession>()
         .Writes<PlayerPlacement>()
+
+        // A fight-back ends the lair objective the body had (lair-objectives.md).
+        .Writes<PlayerRoute>()
         .Reads<PlayerRealm>()
 
         .Reads<PlayerControl>();

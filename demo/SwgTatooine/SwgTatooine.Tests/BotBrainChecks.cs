@@ -514,6 +514,32 @@ public sealed class BotBrainChecks
         });
     }
 
+    /// <summary>
+    /// B-2: the journal's answer read — the first mission and its lair (null while drawn), its id for a cancel — and the first read only learns what was
+    /// already there, so a run's counts are its own.
+    /// </summary>
+    [Test]
+    public void TheJournal_IsRead_AndItsFirstReadCountsNothing()
+    {
+        var seen = new HashSet<string>();
+        var done = new HashSet<string>();
+        const string First = "{\"missions\":[{\"id\":\"9007199254740993\",\"lair\":{\"x\":12.5,\"z\":-40}}],\"completed\":[{\"id\":\"5\"}]}";
+        var first = SwgTatooine.Bots.MissionView.Parse(First, seen, done, count: false, out var taken0, out var completed0);
+        const string Second = "{\"missions\":[{\"id\":\"9007199254740993\",\"lair\":null},{\"id\":\"8\",\"lair\":null}],"
+            + "\"completed\":[{\"id\":\"5\"},{\"id\":\"6\"}]}";
+        var second = SwgTatooine.Bots.MissionView.Parse(Second, seen, done, count: true, out var taken1, out var completed1);
+        var none = SwgTatooine.Bots.MissionView.Parse("{\"missions\":[],\"completed\":[]}", seen, done, count: true, out _, out _);
+        Assert.Multiple(() =>
+        {
+            Assert.That(first, Is.EqualTo(new SwgTatooine.Bots.MissionView(1, true, 12.5f, -40f, 9007199254740993UL)), "a 64-bit id lost precision, or the lair");
+            Assert.That((taken0, completed0), Is.EqualTo((0, 0)), "the first read counted what was already there");
+            Assert.That(second.Held, Is.EqualTo(2));
+            Assert.That(second.LairKnown, Is.False, "a lair being drawn was given a position");
+            Assert.That((taken1, completed1), Is.EqualTo((1, 1)), "only the new mission and the new completion count");
+            Assert.That(none, Is.EqualTo(SwgTatooine.Bots.MissionView.None));
+        });
+    }
+
     /// <summary>A lair being drawn or moved — held, no position yet — is waited for, not ridden at a stale point.</summary>
     [Test]
     public void ALairBeingMovedIsWaitedFor()

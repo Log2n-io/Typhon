@@ -15,35 +15,16 @@ namespace SwgTatooine.Tests;
 [NonParallelizable]
 internal sealed class ObjectiveChecks
 {
-    /// <summary>L-2: a point of interest is drawn in proportion to its weight, and one with no standing lair never.</summary>
+    /// <summary>L-2: a point of interest's weight is its lairs over its players plus one, and nothing where no lair stands.</summary>
     [Test]
-    public void TheCensus_DrawsByWeight_AndNeverWhereNoLairStands()
+    public void TheWeight_IsLairsOverPlayersPlusOne()
     {
-        var census = new LairCensus(3);
-        census.Lairs[0] = 4;
-        census.Players[0] = 3;   // 4 / (1 + 3) = 1
-        census.Lairs[1] = 0;     // never
-        census.Lairs[2] = 3;     // 3 / (1 + 0) = 3
-        var total = 0f;
-        for (var i = 0; i < 3; i++)
-        {
-            total += census.Lairs[i] / (1f + census.Players[i]);
-            census.Cumulative[i] = total;
-        }
-
-        census.Total = total;
-        var drawn = new int[3];
-        for (var n = 0; n < 4000; n++)
-        {
-            drawn[census.Draw((n + 0.5f) / 4000f)]++;
-        }
-
         Assert.Multiple(() =>
         {
-            Assert.That(drawn[1], Is.Zero, "a point of interest with no standing lair was drawn");
-            Assert.That(drawn[0], Is.EqualTo(1000).Within(2), "the crowded one: a quarter of the draws");
-            Assert.That(drawn[2], Is.EqualTo(3000).Within(2), "the empty one with three lairs: three quarters");
-            Assert.That(new LairCensus(2).Draw(0.5f), Is.EqualTo(-1), "a census with no lair anywhere sent somebody somewhere");
+            Assert.That(LairCensus.WeightOf(4, 3), Is.EqualTo(1f));
+            Assert.That(LairCensus.WeightOf(3, 0), Is.EqualTo(3f));
+            Assert.That(LairCensus.WeightOf(0, 0), Is.Zero, "a point of interest with no standing lair has weight");
+            Assert.That(LairCensus.WeightOf(2, -1), Is.EqualTo(2f), "a negative player count raised the weight");
         });
     }
 
@@ -90,13 +71,34 @@ internal sealed class ObjectiveChecks
 
             var census = sim.Bridge.CensusOf(0);
             Assert.That(census, Is.Not.Null, "no census was ever taken");
+
+            // Counted here from the lairs themselves — not from the site's own counter, which is what the census reads.
+            var standing = new int[sim.Index.Pois.Count];
+            using (var tx = sim.Dbe.CreateQuickTransaction())
+            {
+                foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
+                {
+                    var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
+                    var vitals = cluster.GetReadOnlySpan(CreatureLair.Vitals);
+                    for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                    {
+                        var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                        var site = spawners[slot].Site;
+                        if (cluster.Realm.Value == 0 && site >= 1 && site <= standing.Length && SimBridge.IsStandingLair(spawners[slot], vitals[slot]))
+                        {
+                            standing[site - 1]++;
+                        }
+                    }
+                }
+            }
+
             var b = sim.Bridge;
             Assert.Multiple(() =>
             {
-                for (var i = 0; i < sim.Index.Pois.Count; i++)
+                for (var i = 0; i < standing.Length; i++)
                 {
-                    // Taken at the last whole second; a lair or two may have been retired or replaced since.
-                    Assert.That(census.Lairs[i], Is.EqualTo(Math.Max(0, sim.Index.Sites[i].Live)).Within(2), $"point of interest {i}: census and site disagree");
+                    // Taken at the last whole second; a lair or two may have been broken, retired or replaced since.
+                    Assert.That(census.Lairs[i], Is.EqualTo(standing[i]).Within(2), $"point of interest {i}: the census and the lairs standing there disagree");
                 }
 
                 Assert.That(b.ObjectivesTaken, Is.GreaterThan(0), "no fighter took a lair as its objective");

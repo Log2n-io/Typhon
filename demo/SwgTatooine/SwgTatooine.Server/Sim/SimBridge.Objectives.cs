@@ -15,7 +15,6 @@ internal sealed class LairCensus
     {
         Lairs = new int[pois];
         Players = new int[pois];
-        Cumulative = new float[pois];
         Weight = new float[pois];
     }
 
@@ -28,38 +27,8 @@ internal sealed class LairCensus
     /// <summary>Players within each point of interest's radius, the crowd and sessions alike.</summary>
     public int[] Players { get; }
 
-    /// <summary>The running sum of the draw weights.</summary>
-    public float[] Cumulative { get; }
-
-    /// <summary>The sum of every weight; 0 when no point of interest has a standing lair.</summary>
-    public float Total { get; set; }
-
-    /// <summary>A point of interest drawn in proportion to its weight, from <paramref name="u"/> in [0, 1); -1 when none has a standing lair.</summary>
-    public int Draw(float u)
-    {
-        if (Total <= 0f)
-        {
-            return -1;
-        }
-
-        var t = u * Total;
-        var lo = 0;
-        var hi = Cumulative.Length - 1;
-        while (lo < hi)
-        {
-            var mid = (lo + hi) >> 1;
-            if (Cumulative[mid] > t)
-            {
-                hi = mid;
-            }
-            else
-            {
-                lo = mid + 1;
-            }
-        }
-
-        return lo;
-    }
+    /// <summary>A point of interest's weight: its standing wild lairs over the players there, plus one.</summary>
+    public static float WeightOf(int lairs, int players) => lairs <= 0 ? 0f : lairs / (1f + Math.Max(0, players));
 
     /// <summary>
     /// A point of interest drawn in proportion to its weight times its nearness to (<paramref name="x"/>, <paramref name="z"/>) —
@@ -154,6 +123,7 @@ public sealed partial class SimBridge
     private long _objectivesGivenUp;
     private long _objectivesHeldInRange;
     private long _lairHitsTotal;
+    private long _lastCensusTick = long.MinValue / 2;
     private long _objectivesOutOfRange;
 
     /// <summary>Lairs a fighter of the crowd made its objective, first or next.</summary>
@@ -166,11 +136,12 @@ public sealed partial class SimBridge
     public long ObjectivesGivenUp => Interlocked.Read(ref _objectivesGivenUp);
 
     /// <summary>
-    /// Objective checks of a fighter standing at its stand-off point, its lair standing: each one is L-3's claim tested — it is within weapon range.
+    /// Objective checks that tested L-3 and found it held: the fighter's destination is within weapon range of its standing lair, and — once it has
+    /// stopped — the fighter itself is.
     /// </summary>
     public long ObjectivesHeldInRange => Interlocked.Read(ref _objectivesHeldInRange);
 
-    /// <summary>Those checks that found the fighter out of weapon range of its standing objective: L-3 broken. Must stay 0.</summary>
+    /// <summary>Those checks that found the destination, or the stopped fighter, out of range of its standing objective: L-3 broken. Must stay 0.</summary>
     public long ObjectivesOutOfRange => Interlocked.Read(ref _objectivesOutOfRange);
 
     /// <summary>The crowd's weapon range, metres: what a fighter at its objective must be within.</summary>
@@ -192,8 +163,14 @@ public sealed partial class SimBridge
     }
 
     /// <summary>Counts, per point of interest of every planet, its standing wild lairs and the players near it. The lair director's, once a second.</summary>
-    private void TakeCensus()
+    private void TakeCensus(long tick)
     {
+        if (tick - _lastCensusTick < Math.Max(1, _config.TickRateHz))
+        {
+            return;
+        }
+
+        _lastCensusTick = tick;
         var indexes = PlanetIndexes ?? [_index];
         var all = new LairCensus[indexes.Length];
         for (var planet = 0; planet < indexes.Length; planet++)
@@ -201,7 +178,6 @@ public sealed partial class SimBridge
             var index = indexes[planet];
             var census = new LairCensus(index.Pois.Count);
             var realm = new RealmId((ushort)planet);
-            var total = 0f;
             for (var i = 0; i < index.Pois.Count; i++)
             {
                 // The points of interest are the first sites, in the same order (WorldBuilder.PlanSites).
@@ -227,12 +203,9 @@ public sealed partial class SimBridge
 
                 census.Lairs[i] = lairs;
                 census.Players[i] = players;
-                census.Weight[i] = lairs / (1f + players);
-                total += census.Weight[i];
-                census.Cumulative[i] = total;
+                census.Weight[i] = LairCensus.WeightOf(lairs, players);
             }
 
-            census.Total = total;
             all[planet] = census;
         }
 
@@ -243,7 +216,8 @@ public sealed partial class SimBridge
     /// The "go and fight" decision: a point of interest drawn by the census, and the standing wild lair in it nearest to the fighter as its objective.
     /// </summary>
     /// <returns><see langword="false"/>, having changed nothing, when no point of interest has a standing lair the fighter can be sent to.</returns>
-    private bool TryTakeObjective(TickContext ctx, ref PlayerState state, ref PlayerMotion move, ushort realm, float x, float z, uint salt)
+    private bool TryTakeObjective(TickContext ctx, ref PlayerState state, ref PlayerMotion move, ref PlayerRoute route, ushort realm, float x, float z,
+        uint salt)
     {
         var census = CensusOf(realm);
         if (census == null || realm >= (PlanetIndexes?.Length ?? 1))
@@ -267,6 +241,7 @@ public sealed partial class SimBridge
         move.SpeedMps = TatooineData.PlayerMountSpeedMps;
         state.Activity = PlayerActivity.Combat;
         state.ActivityTicks = AimAt(ref state, ref move, x, z, lx, lz);
+        route.Objective = 1;
         Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
         return true;
     }
@@ -275,24 +250,36 @@ public sealed partial class SimBridge
     /// A fighter's objective, checked: still standing — or, fallen, replaced by the next standing wild lair near it.
     /// </summary>
     /// <returns><see langword="false"/> when it fell and there is no next one: the fight is over.</returns>
-    private bool KeepObjective(TickContext ctx, ref PlayerState state, ref PlayerMotion move, ushort realm, float x, float z, ref long taken, ref long fallen)
+    private bool KeepObjective(TickContext ctx, ref PlayerState state, ref PlayerMotion move, ushort realm, float x, float z, ref ObjectiveCounts counts)
     {
         if (ObjectiveStands(ctx, realm, state.MissionX, state.MissionZ))
         {
-            // L-3, tested on every check rather than sampled: a fighter at its stand-off point is within range of the lair it is there for.
-            var ax = move.DestX - x;
-            var az = move.DestZ - z;
-            if ((ax * ax) + (az * az) < 25f)
+            // L-3, tested on every check of every holder rather than sampled: where it is going is within range of its lair — so nothing steered it away —
+            // and, once it has stopped, so is where it stands.
+            var range2 = RangedRange * RangedRange;
+            var dx = state.MissionX - move.DestX;
+            var dz = state.MissionZ - move.DestZ;
+            var held = (dx * dx) + (dz * dz) <= range2;
+            if (move.VelX == 0f && move.VelZ == 0f)
             {
                 var ox = state.MissionX - x;
                 var oz = state.MissionZ - z;
-                Interlocked.Increment(ref (ox * ox) + (oz * oz) <= RangedRange * RangedRange ? ref _objectivesHeldInRange : ref _objectivesOutOfRange);
+                held &= (ox * ox) + (oz * oz) <= range2;
+            }
+
+            if (held)
+            {
+                counts.HeldInRange++;
+            }
+            else
+            {
+                counts.OutOfRange++;
             }
 
             return true;
         }
 
-        fallen++;
+        counts.Fallen++;
         var scale = _config.ContentScale;
         if (!TryNearestWildLair(ctx, realm, state.MissionX, state.MissionZ, NextObjectiveM * scale, x, z, out var lx, out var lz))
         {
@@ -301,8 +288,33 @@ public sealed partial class SimBridge
 
         state.ActivityTicks = AimAt(ref state, ref move, x, z, lx, lz);
         Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
-        taken++;
+        counts.Taken++;
         return true;
+    }
+
+    /// <summary><c>PlayerThink</c>'s chunk-local objective counts, added to the shared counters once per chunk.</summary>
+    private struct ObjectiveCounts
+    {
+        public long Taken;
+        public long Fallen;
+        public long GivenUp;
+        public long HeldInRange;
+        public long OutOfRange;
+    }
+
+    /// <summary>Adds a chunk's counts to the shared counters.</summary>
+    private void Publish(in ObjectiveCounts counts)
+    {
+        if (counts.Taken + counts.Fallen + counts.GivenUp + counts.HeldInRange + counts.OutOfRange == 0)
+        {
+            return;
+        }
+
+        Interlocked.Add(ref _objectivesTaken, counts.Taken);
+        Interlocked.Add(ref _objectivesFallen, counts.Fallen);
+        Interlocked.Add(ref _objectivesGivenUp, counts.GivenUp);
+        Interlocked.Add(ref _objectivesHeldInRange, counts.HeldInRange);
+        Interlocked.Add(ref _objectivesOutOfRange, counts.OutOfRange);
     }
 
     /// <summary>Makes the lair at (<paramref name="lx"/>, <paramref name="lz"/>) the objective: the destination its stand-off point on the fighter's side.</summary>

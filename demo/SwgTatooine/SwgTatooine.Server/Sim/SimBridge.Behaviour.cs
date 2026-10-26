@@ -563,9 +563,7 @@ public sealed partial class SimBridge
         // counter sitting next to its siblings in the same cache line, so the contended form would have chunks invalidating each other's line to maintain a
         // number nobody reads inside the tick.
         var skipped = 0L;
-        var objectivesTaken = 0L;
-        var objectivesFallen = 0L;
-        var objectivesGivenUp = 0L;
+        var objectives = default(ObjectiveCounts);
 
         // A fighter's objective is checked once a second (lair-objectives.md L-4), each on its own beat.
         var objectiveEvery = Math.Max(1, hz);
@@ -674,18 +672,22 @@ public sealed partial class SimBridge
 
                     // A fight ends on its objective (lair-objectives.md L-4, plan G2): a fallen lair is replaced by the next of its point of interest, or
                     // the fight is over and the fighter decides again; one still standing when the time runs out is given up, and counted as such.
-                    if (state.Activity == PlayerActivity.Combat)
+                    // Only a fight that HAS an objective: a fight-back (CombatResolve's Answer) and the world's first fighters are Combat too, with a
+                    // MissionX/Z that is no lair (review, 2026-10-26).
+                    if (state.Activity == PlayerActivity.Combat && routes[idx].Objective == 1)
                     {
                         if (state.ActivityTicks == 0)
                         {
                             if (ObjectiveStands(ctx, realm, state.MissionX, state.MissionZ))
                             {
-                                objectivesGivenUp++;
+                                objectives.GivenUp++;
                             }
+
+                            routes[idx].Objective = 0;
                         }
-                        else if ((tick + key) % objectiveEvery < k
-                                 && !KeepObjective(ctx, ref state, ref move, realm, x, z, ref objectivesTaken, ref objectivesFallen))
+                        else if ((tick + key) % objectiveEvery < k && !KeepObjective(ctx, ref state, ref move, realm, x, z, ref objectives))
                         {
+                            routes[idx].Objective = 0;
                             state.ActivityTicks = 0;
                             move.VelX = 0f;
                             move.VelZ = 0f;
@@ -747,6 +749,8 @@ public sealed partial class SimBridge
                     continue;
                 }
 
+                // A new decision: whatever the last fight's objective was, it is not this one's.
+                routes[idx].Objective = 0;
                 var roll = Hash01(Salt(tick, key, 0xC2B2AE35u));
                 if (roll < 0.40f
                     && TryWalkToPortal(ref state, ref move, x, z, realm, Salt(tick, key, 0x7F4A7C15u), Salt(tick, key, 0x2C1B3C6Du)))
@@ -784,11 +788,11 @@ public sealed partial class SimBridge
                     state.ActivityTicks = 200 * hz;
                     Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
                 }
-                else if (roll < 0.82f && TryTakeObjective(ctx, ref state, ref move, realm, x, z, Salt(tick, key, 0x85EBCA77u)))
+                else if (roll < 0.82f && TryTakeObjective(ctx, ref state, ref move, ref routes[idx], realm, x, z, Salt(tick, key, 0x85EBCA77u)))
                 {
                     // Go and fight (lair-objectives.md): where lairs are left unattended, the nearest standing wild lair there as the objective. The crowd
                     // takes no missions (economy-foundation.md § 1); with no lair to send it to, it roams instead — below.
-                    objectivesTaken++;
+                    objectives.Taken++;
                 }
                 else
                 {
@@ -819,12 +823,7 @@ public sealed partial class SimBridge
             Interlocked.Add(ref _possessedSkipped, skipped);
         }
 
-        if (objectivesTaken + objectivesFallen + objectivesGivenUp != 0)
-        {
-            Interlocked.Add(ref _objectivesTaken, objectivesTaken);
-            Interlocked.Add(ref _objectivesFallen, objectivesFallen);
-            Interlocked.Add(ref _objectivesGivenUp, objectivesGivenUp);
-        }
+        Publish(in objectives);
     }
 
     private (float X, float Z, float Radius) PickCity(uint salt)

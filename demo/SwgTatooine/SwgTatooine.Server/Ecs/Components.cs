@@ -570,7 +570,7 @@ public struct PlayerMotion
 /// </para>
 /// <para>108 bytes, under the 112 a spawned component may carry.</para>
 /// </remarks>
-[Component("Swg.PlayerRoute", 1, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.PlayerRoute", 2, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct PlayerRoute
 {
@@ -594,6 +594,16 @@ public struct PlayerRoute
     /// this one — a leg that crosses a town, or ends in one.
     /// </summary>
     [Field] public byte City;
+
+    /// <summary>
+    /// 1 while <see cref="PlayerState.MissionX"/>/<see cref="PlayerState.MissionZ"/> is a lair this fighter holds as its objective (lair-objectives.md);
+    /// 0 for none — a fight-back, a clone, any other decision clears it.
+    /// </summary>
+    /// <remarks>
+    /// <b>In the byte of padding before <see cref="X0"/></b>, so a body is no wider: a field on <see cref="PlayerState"/> would have been four bytes on
+    /// every body. Here because the route is the scripted player's own steering state, written by <c>PlayerThink</c> and read nowhere outside the server.
+    /// </remarks>
+    [Field] public byte Objective;
 
     /// <summary>Waypoint 0, east.</summary>
     [Field] public float X0;

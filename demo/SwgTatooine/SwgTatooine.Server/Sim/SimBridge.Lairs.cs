@@ -111,9 +111,9 @@ public sealed partial class SimBridge
         tx.Commit();
 
         // Once a second, after the pass has counted every site's lairs: where the crowd's fighters are sent (lair-objectives.md L-1).
-        if (pass && tick % Math.Max(1, _config.TickRateHz) == 0)
+        if (pass)
         {
-            TakeCensus();
+            TakeCensus(tick);
         }
 
         if (_corpsesRemoved + _lairsRetired + _lairsSpawned + _creaturesRespawned != before)

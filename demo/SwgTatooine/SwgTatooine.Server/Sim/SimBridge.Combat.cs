@@ -1145,6 +1145,15 @@ public sealed partial class SimBridge
         state.ActivityTicks = (int)(TatooineData.CrowdReactSeconds * _config.TickRateHz);
         Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, MetresPerTick, at.X, at.Z, move.DestX, move.DestZ);
         body.Set(Player.State, state);
+
+        // A fight-back or a flight is not the lair objective it may have had: that fight is over (lair-objectives.md; review, 2026-10-26).
+        var route = body.Read(Player.Route);
+        if (route.Objective != 0)
+        {
+            route.Objective = 0;
+            body.Set(Player.Route, route);
+        }
+
         body.Set(Player.Move, move);
         body.Set(Player.Session, session);
         if (shout)

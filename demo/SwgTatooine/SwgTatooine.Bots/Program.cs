@@ -22,6 +22,7 @@ Uri endpointUri;
 int bots, seconds, hz, connectBatch, connectRate, tourSeconds, planets, fuzz, fuzzRate, signupConcurrency, accountBase, maxBots, chunkSize;
 double regionM, wanderSeconds;
 bool brain;
+bool noMissions;
 double tipSeconds;
 try
 {
@@ -64,6 +65,8 @@ try
     // shuttles, which clumps the population and changes the shape of every interest set. Off by default because that is a different
     // workload rather than a better version of the same one, and flipping it silently would make two runs incomparable.
     brain = r.Switch("--brain", "player bots decide for themselves from what they are sent, instead of wandering");
+    // --brain only: a bot takes missions at the terminals it visits unless told not to — a measurement run's workload stays what it was.
+    noMissions = r.Switch("--no-missions", "thinking bots take no missions at the terminals they visit");
     // --brain only: a tip is a ledger row, so tipping is its own workload and off unless asked for (economy-foundation.md E0-11).
     tipSeconds = r.Dbl("--tip-seconds", 0d, "a thinking bot tips a named player near it about this often, seconds; 0 never tips", min: 0d);
     // Every god camera moves to the next planet on this period (Realms G3); the report counts the switches applied and the RealmNews heard.
@@ -218,6 +221,7 @@ var options = new BotSwarmOptions
     WanderSeconds = wanderSeconds,
     Brain = brain,
     TipSeconds = tipSeconds,
+    Missions = !noMissions,
     TourEverySeconds = tourSeconds,
     Planets = planets,
 
