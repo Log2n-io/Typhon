@@ -1283,6 +1283,13 @@ public sealed class BotBrain
     /// </remarks>
     private Intent? MountIntent(in Perceived world, long tick)
     {
+        // In a city, on foot — always (Loïc, 2026-10-26: a rider cannot navigate its streets). The swoop is for the open desert: a ride into a city
+        // ends at its edge, and one out of it starts there. The goals keep wishing as they did; this is the one place a wish reaches the wire.
+        if (_wantMounted && world.Realm == 0 && RegionAt(world.X, world.Z) != 0)
+        {
+            _wantMounted = false;
+        }
+
         if (_wantMounted == world.Mounted)
         {
             _mountAsks = 0;

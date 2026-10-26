@@ -376,14 +376,16 @@ public sealed class BotErrandChecks
         });
     }
 
-    /// <summary>A long errand from a body pressed against a house is ridden round it, and no step of the ride passes through the house.</summary>
+    /// <summary>
+    /// A long errand inside a city is walked round the house the body stands against, never ridden (Loïc, 2026-10-26: in a city, on foot), and no step
+    /// passes through the house.
+    /// </summary>
     /// <remarks>
-    /// The first live run's stuck bots, two defects in one place. A long walk's first stretch was a straight line from where the body stood — through
-    /// the house it stood against — and a mounted leg called a waypoint reached from eight metres off, so the two that went round the corner were
-    /// skipped. Each step's whole segment is checked, because a ten-metre swoop step can hop a wall that a point sample would miss.
+    /// It was ridden: a 380 m errand on the swoop, which in a city's streets cannot navigate. The house check is the first live run's — a long walk's
+    /// first stretch was a straight line through the house it stood against — and each step's whole segment is checked.
     /// </remarks>
     [Test]
-    public void ARiddenErrandStartsRoundTheHouseItStandsAgainst()
+    public void AnErrandInACity_IsWalked_RoundTheHouseItStandsAgainst()
     {
         var house = (X: Here.X, Z: Here.Z);
         var terminal = (X: Here.X - 380f, Z: Here.Z);
@@ -398,7 +400,7 @@ public sealed class BotErrandChecks
                 Forbidden = (house.X - 3f, house.Z - 3f, house.X + 3f, house.Z + 3f),
             });
 
-        for (var tick = 10L; tick < 600 && brain.FacilitiesUsed == 0; tick++)
+        for (var tick = 10L; tick < 1200 && brain.FacilitiesUsed == 0; tick++)
         {
             sim.Apply(brain.Decide(sim.View(), tick));
         }
@@ -406,15 +408,40 @@ public sealed class BotErrandChecks
         Assert.Multiple(() =>
         {
             Assert.That(brain.FacilitiesUsed, Is.EqualTo(1), "the errand never reached the terminal");
-            Assert.That(sim.Sent.Exists(i => i.Kind == IntentKind.Move && i.SpeedClass == Routing.SwoopClass), Is.True, "a 380 m errand was not ridden");
-            Assert.That(sim.Mounted, Is.False, "it arrived at the terminal still on its swoop");
-            var off = sim.Sent.LastIndexOf(Intent.Mount(false));
-            var lastSwoop = sim.Sent.FindLastIndex(i => i.SpeedClass == Routing.SwoopClass);
-            Assert.That(off, Is.GreaterThan(lastSwoop), "it got off and then rode on");
+            Assert.That(sim.Sent.Exists(i => i.Kind == IntentKind.Mount && i.On), Is.False, "it got on the swoop in a city");
+            Assert.That(sim.Sent.Exists(i => i.Kind == IntentKind.Move && i.SpeedClass == Routing.SwoopClass), Is.False, "it rode in a city");
+        });
+    }
 
-            // Forty metres before the stand point, plus a swoop tick's ten of slack: getting off a long straight's length short walks it at a run.
-            var (gx, gz) = sim.GotOffAt ?? (float.NaN, float.NaN);
-            Assert.That(Routing.Distance(gx, gz, terminal.X, terminal.Z + 0.65f), Is.LessThan(50d), "it got off the swoop far short of the terminal");
+    /// <summary>A ride from the desert into a city ends at the city's edge: the rest of the way is on foot (Loïc, 2026-10-26).</summary>
+    [Test]
+    public void ARideIntoACity_EndsAtItsEdge()
+    {
+        var brain = new BotBrain(BotMap.Cities, 7u, 4d, null, homeRegion: 1);
+        var sim = new Sim { X = Here.X + Here.Radius + 900f, Z = Here.Z };
+        var rodeOutside = false;
+        var swoopInside = 0;
+        var reached = false;
+        for (var tick = 1L; tick < 4000 && !reached; tick++)
+        {
+            var inside = Routing.Distance(sim.X, sim.Z, Here.X, Here.Z) <= Here.Radius;
+            var intent = brain.Decide(sim.View(), tick);
+            if (intent.Kind == IntentKind.Move && intent.SpeedClass == Routing.SwoopClass)
+            {
+                rodeOutside |= !inside;
+                swoopInside += inside ? 1 : 0;
+            }
+
+            sim.Apply(intent);
+            reached = Routing.Distance(sim.X, sim.Z, Here.X, Here.Z) <= BotBrain.ArrivedM;
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(rodeOutside, Is.True, "the premise: 900 m of desert was ridden");
+            Assert.That(reached, Is.True, "it never reached the city's centre");
+            Assert.That(swoopInside, Is.LessThanOrEqualTo(1), "it rode on inside the city: one swoop step is the tick its dismount is asked on");
+            Assert.That(sim.Mounted, Is.False, "it is still on the swoop in the city");
         });
     }
 
