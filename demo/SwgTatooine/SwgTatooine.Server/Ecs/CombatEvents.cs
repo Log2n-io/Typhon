@@ -146,6 +146,12 @@ internal struct KillEvent
 
     /// <summary>Its creature template (<see cref="CreatureTemplates"/>): the brain's for a creature or foe, the lair's for a lair. What loot is made of.</summary>
     public byte Species;
+
+    /// <summary>
+    /// For a lair, its <see cref="Server.Lair.OwnerHit"/> as this blow left it: 1 when its mission's holder landed a blow among those that broke it. The
+    /// desk completes the mission on exactly that, so the XP and the loot systems test the same byte: a mission lair's break is a stranger's only at 0.
+    /// </summary>
+    public byte OwnerHit;
 }
 
 /// <summary>A body to bring up to its character's progress: what the mission desk hands <c>Progression</c> after paying a mission's XP (character-level.md § 5).</summary>

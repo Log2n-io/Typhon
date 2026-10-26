@@ -153,7 +153,7 @@ public sealed partial class SimBridge
             return;
         }
 
-        if (kill.VictimKind == KillVictimKind.Lair && !kill.Mission.IsNull && !IsStranger(tick0, kill.Mission, character))
+        if (kill.VictimKind == KillVictimKind.Lair && !kill.Mission.IsNull && !IsStranger(tick0, in kill, character))
         {
             return;
         }
