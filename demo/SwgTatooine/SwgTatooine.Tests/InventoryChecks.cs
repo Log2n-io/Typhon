@@ -279,7 +279,7 @@ internal sealed class InventoryChecks : ServedChecks
 
     /// <summary>
     /// IL-4: a mission lair's own death is never looted from the kill queue — its cache is the desk's, and only for its holder's blow: broken without it, no
-    /// cache, no row, and the mission moved to another lair (or lost), not completed.
+    /// cache, no row, and the mission moved to another lair of its level, still held.
     /// </summary>
     [Test]
     [CancelAfter(120_000)]
@@ -287,6 +287,39 @@ internal sealed class InventoryChecks : ServedChecks
     {
         using var sim = Start();
         var (terminal, p, held) = TakeAMission(sim, 0x7404);
+
+        // A wild lair of the mission's level within the desk's reach, so the mission moves rather than being lost: the nearest one, offered or not — a
+        // held mission may take an offered lair (review 5 M3).
+        sim.WriteInTick(tx =>
+        {
+            var nearest = EntityId.Null;
+            var best = float.MaxValue;
+            foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
+            {
+                var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
+                var vitals = cluster.GetReadOnlySpan(CreatureLair.Vitals);
+                var places = cluster.GetReadOnlySpan(CreatureLair.Bounds);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    var dx = places[slot].X - held.Mission.LairX;
+                    var dz = places[slot].Z - held.Mission.LairZ;
+                    var d2 = (dx * dx) + (dz * dz);
+                    if (cluster.Realm.Value == held.Mission.Realm && cluster.GetEntityId(slot) != held.Mission.Lair && spawners[slot].Site != 0
+                        && spawners[slot].Mission.IsNull && vitals[slot].Health > 0 && d2 < best)
+                    {
+                        best = d2;
+                        nearest = cluster.GetEntityId(slot);
+                    }
+                }
+            }
+
+            Assert.That(MathF.Sqrt(best), Is.LessThanOrEqualTo(TatooineData.MissionReachM * sim.Config.ContentScale), "the premise: a wild lair within reach");
+            var twin = tx.OpenMut(nearest);
+            var s = twin.Read(CreatureLair.Spawner);
+            s.Level = held.Mission.Level;
+            twin.Set(CreatureLair.Spawner, s);
+        });
 
         // Broken with no blow of its holder's (OwnerHit 0), and its death pushed as the drain would push it - at the holder's feet, so only the skip of a
         // mission lair's death keeps it from being looted.
@@ -299,13 +332,16 @@ internal sealed class InventoryChecks : ServedChecks
         });
         sim.Bridge.StageKill(Items.Kill(p.Body, held.Mission.Lair.RawValue, terminal.X + 2f, terminal.Z, (byte)held.Mission.Kind,
             kind: KillVictimKind.Lair, mission: held.Id));
-        SessionHarness.Until(() => HeldBy(sim, p.Character).Count == 0 || HeldBy(sim, p.Character)[0].Mission.Lair != held.Mission.Lair,
-            "the mission to move to another lair, or be lost");
+        SessionHarness.Until(() => HeldBy(sim, p.Character).Count != 1 || HeldBy(sim, p.Character)[0].Mission.Lair != held.Mission.Lair,
+            "the mission to move to another lair");
         Harness.Ticks(Worlds.ServedHz / SimBridge.MissionPassHz + 2);
         Assert.Multiple(() =>
         {
             Assert.That(Items.Rows(sim), Is.Empty, "a cache, or the lair looted as a kill");
-            Assert.That(sim.Bridge.MissionsRetargeted + sim.Bridge.MissionsLostLair, Is.EqualTo(1), "the mission was completed, not moved or lost");
+            Assert.That(HeldBy(sim, p.Character), Has.Count.EqualTo(1), "the mission is no longer held");
+            Assert.That(HeldBy(sim, p.Character)[0].Id, Is.EqualTo(held.Id), "the mission was replaced, not moved");
+            Assert.That(sim.Bridge.MissionsRetargeted, Is.EqualTo(1));
+            Assert.That(sim.Bridge.MissionsLostLair, Is.Zero);
             Assert.That(sim.Bridge.ItemDropsBy(DropSource.MissionCache), Is.Zero);
             Assert.That(sim.Bridge.LootRefusedTotal, Is.Zero, "refused rather than skipped");
         });

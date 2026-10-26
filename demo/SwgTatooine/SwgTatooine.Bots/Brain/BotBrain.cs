@@ -227,8 +227,8 @@ public sealed class BotBrain
     /// <summary>What it is doing.</summary>
     public Goal Goal { get; private set; } = Goal.Choosing;
 
-    /// <summary>How far above its own combat level a bot hunts (content-levels.md § 7): a creature past it is left alone, and an offer past it is taken only
-    /// when no other is listed.</summary>
+    /// <summary>How far above its own combat level a bot hunts (content-levels.md § 7): a creature past it is left alone, and an offer past it is never
+    /// taken — the desk would refuse it (missions.md § 8).</summary>
     public const int LevelReach = 3;
 
     /// <summary>
