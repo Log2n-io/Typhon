@@ -39,7 +39,7 @@ public sealed class WorldIndex
     /// </remarks>
     public List<LairSite> Sites { get; } = [];
 
-    /// <summary>The planet's content levels: the ramp round its cities and the bands beyond (content-levels.md § 2). Planned with <see cref="Sites"/>.</summary>
+    /// <summary>The planet's content levels: the ramp round its cities and the bands beyond (content-levels.md § 2), planned with <see cref="Sites"/>.</summary>
     public LevelMap Levels { get; set; }
 
     /// <summary>

@@ -57,7 +57,7 @@ public struct MissionOfferInfo
     /// <summary>1 for now (missions.md, R7).</summary>
     [Field, OnEnter(CodecKind.U8, Name = "difficulty", Saturate = true)] public byte Difficulty;
 
-    /// <summary>The level of the lair it sends the taker to: for now the content level at its anchor (content-levels.md § 4), until B5 picks it per band.</summary>
+    /// <summary>The level of the lair it sends the taker to: for now the content level at its anchor (content-levels.md § 4), until B5 picks it.</summary>
     [Field, OnEnter(CodecKind.U8, Name = "level", Saturate = true)] public byte Level;
 
     /// <summary>Which way the anchor lies from the terminal: 0 north, then clockwise to 7, north-west.</summary>

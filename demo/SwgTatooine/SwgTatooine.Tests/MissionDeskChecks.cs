@@ -667,6 +667,98 @@ internal sealed class MissionDeskChecks : ServedChecks
         });
     }
 
+    /// <summary>
+    /// CL-9: every offer carries the content level of its anchor — the ramp's exactly, its band beyond — and a kind whose range covers it.
+    /// </summary>
+    [Test]
+    [CancelAfter(90_000)]
+    public void AnOffer_CarriesTheLevelOfItsAnchor()
+    {
+        using var sim = Start();
+        Harness.Ticks(3);
+        var levels = sim.Index.Levels;
+        var offers = 0;
+        Assert.Multiple(() =>
+        {
+            foreach (var terminal in sim.Index.Terminals)
+            {
+                foreach (var (_, info) in Offers(sim, terminal))
+                {
+                    offers++;
+                    Assert.That(levels.Agrees(info.AnchorX, info.AnchorZ, info.Level), Is.True,
+                        $"an offer of level {info.Level} at {levels.EdgeDistance(info.AnchorX, info.AnchorZ):F0} m from a city's edge");
+                    Assert.That(CreatureTemplates.CoversLevel(info.Kind, info.Level), Is.True,
+                        $"{CreatureTemplates.Name(info.Kind)} offered at level {info.Level}");
+                }
+            }
+        });
+        Assert.That(offers, Is.GreaterThan(0), "no offer was listed");
+    }
+
+    /// <summary>
+    /// CL-9, CL-11: a taken mission holds its offer's level, its lair and the lair's defenders are spawned at it, and the journal says it; drawn again after
+    /// a stranger breaks it, the lair keeps the MISSION's level — set here to one no spot near the anchor has, so the redraw cannot have read the map.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void AMissionLair_KeepsItsLevel_WhenRedrawn()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x6011), terminal);
+        var character = CharacterOf(sim, AnAccount(0x6011));
+        var offer = Offers(sim, terminal)[0];
+        var held = TakeAndHold(sim, link, character, offer);
+        Assert.Multiple(() =>
+        {
+            Assert.That(held.Mission.Level, Is.EqualTo(offer.Info.Level).And.GreaterThan(0), "the held mission is not at its offer's level");
+            Assert.That(LairLevels(sim, held.Mission.Lair), Is.EqualTo((offer.Info.Level, offer.Info.Level)), "the lair or its defenders are off level");
+            Assert.That(MissionJournal.Json(sim.Dbe, character), Does.Contain($"\"level\":{offer.Info.Level},"), "the journal does not say the level");
+        });
+
+        const byte promised = 47;
+        sim.WriteInTick(tx =>
+        {
+            var m = tx.OpenMut(held.Id);
+            var mission = m.Read(HeldMissionArch.Mission);
+            mission.Level = promised;
+            m.Set(HeldMissionArch.Mission, mission);
+            var l = tx.OpenMut(held.Mission.Lair);
+            var v = l.Read(CreatureLair.Vitals);
+            v.Health = 0;
+            l.Set(CreatureLair.Vitals, v);
+        });
+        SessionHarness.Until(() => Held(sim, character)[0].Mission.Lair != held.Mission.Lair, "a new lair to be drawn");
+        var now = Held(sim, character)[0].Mission;
+        Assert.That(LairLevels(sim, now.Lair), Is.EqualTo(((int)promised, (int)promised)), "the redrawn lair is not at the mission's level");
+    }
+
+    /// <summary>A lair's level, and its creatures' — the lowest of them, which is theirs when they agree.</summary>
+    private static (int Lair, int Creatures) LairLevels(TatooineSim sim, EntityId lairId)
+    {
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        var lair = tx.Open(lairId).Read(CreatureLair.Spawner).Level;
+        var lowest = int.MaxValue;
+        var highest = 0;
+        foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+        {
+            var homes = cluster.GetReadOnlySpan(Creature.Home);
+            var brains = cluster.GetReadOnlySpan(Creature.Ai);
+            for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+            {
+                var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                EntityId home = homes[slot].Lair;
+                if (home == lairId)
+                {
+                    lowest = Math.Min(lowest, brains[slot].Level);
+                    highest = Math.Max(highest, brains[slot].Level);
+                }
+            }
+        }
+
+        return (lair, lowest == highest ? lowest : -1);
+    }
+
     /// <summary>M-6: a lair whose life runs out moves — drawn again round the same anchor.</summary>
     [Test]
     [CancelAfter(120_000)]
