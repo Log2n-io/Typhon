@@ -80,7 +80,9 @@ internal sealed class DemoStatsChecks : ServedChecks
         Harness = new SessionHarness(sim);
         Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(0x7302));
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar");
-        Assert.That(SwgTatooine.Server.Accounts.CharacterStore.TryFind(sim.Dbe, EntityId.FromRawValue(0x7302), out var character, out _), Is.True);
+        var character = EntityId.Null;
+        SessionHarness.Until(() => SwgTatooine.Server.Accounts.CharacterStore.TryFind(sim.Dbe, EntityId.FromRawValue(0x7302), out character, out _),
+            "the character to be committed");
         SessionHarness.Until(() => Ledgers.TryWallet(sim, character, out _), "the wallet to be opened");
         var owner = (long)character.RawValue;
         sim.Bridge.StageTransfer(ItemLedger.World, owner, ItemCatalog.Hide, 2, 7, ItemMoveKind.Kill, 1);

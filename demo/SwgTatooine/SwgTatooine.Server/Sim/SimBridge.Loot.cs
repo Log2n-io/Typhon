@@ -25,6 +25,7 @@ public sealed partial class SimBridge
     // Per tick with kills: every character with a body online, by its body. A body missing from it is the crowd's.
     private readonly Dictionary<EntityId, EntityId> _lootCharacterOf = [];
     private readonly HashSet<EntityId> _lootItemsMoved = [];
+    private readonly List<KillEvent> _stagedScratch = [];
 
     private long _lootRefusedCrowd;
     private long _lootRefusedWallet;
@@ -91,10 +92,10 @@ public sealed partial class SimBridge
 
         Span<KillEvent> kills = pending <= 64 ? stackalloc KillEvent[64] : new KillEvent[pending];
         var n = pending > 0 ? KillLootQueue.Drain(kills) : 0;
-        var staged = new List<KillEvent>();
+        _stagedScratch.Clear();
         while (_stagedKills.TryDequeue(out var s))
         {
-            staged.Add(s);
+            _stagedScratch.Add(s);
         }
 
         var tick0 = ctx.Transaction;
@@ -111,7 +112,7 @@ public sealed partial class SimBridge
             LootOne(tx, tick0, in kills[i], worldTick);
         }
 
-        foreach (var kill in staged)
+        foreach (var kill in _stagedScratch)
         {
             LootOne(tx, tick0, in kill, worldTick);
         }

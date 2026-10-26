@@ -408,7 +408,14 @@ internal sealed class InventoryChecks : ServedChecks
         var lostPartial = sim.Bridge.ItemsLost;
         var json = ItemEndpoints.InventoryJson(sim.Dbe, p.Character);
 
-        // Nothing fits now: the whole drop lost, no row.
+        // Nothing fits now — every gland stack topped up to 99, whatever Mk the first drop had — the whole drop lost, no row.
+        for (byte mk = 1; mk <= 3; mk++)
+        {
+            sim.Bridge.StageTransfer(ItemLedger.World, (long)p.Character.RawValue, ItemCatalog.Gland, mk, 2, ItemMoveKind.Kill, 1);
+        }
+
+        SessionHarness.Until(() => Items.Stacks(sim, p.Character).TrueForAll(s => s.Stack.Count == ItemLedger.StackMax), "every stack to be full");
+        var full = Items.Rows(sim).Count;
         sim.Bridge.StageKill(Items.Kill(p.Body, 0xB002, x, z, CreatureTemplates.Frog));
         SessionHarness.Until(() => sim.Bridge.ItemsLost > lostPartial, "the drop to be lost");
         Harness.Ticks(1);
@@ -421,7 +428,8 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(partial[^1].ToAfter, Is.EqualTo(ItemLedger.StackMax));
             Assert.That(lostPartial, Is.GreaterThanOrEqualTo(2), "the glands that did not fit");
             Assert.That(json, Does.Contain("\"lost\":[{\"n\":1,"), "the partial loss is not noted");
-            Assert.That(Items.Rows(sim), Has.Count.EqualTo(rows + 1), "a row for a drop that did not fit");
+            Assert.That(full, Is.EqualTo(rows + 3), "the premise: two of the gland stacks topped up");
+            Assert.That(Items.Rows(sim), Has.Count.EqualTo(full), "a row for a drop that did not fit");
             Assert.That(sim.Bridge.ItemsLost - lostPartial, Is.GreaterThanOrEqualTo(LootTables.LootKillUnits), "the whole drop lost");
             Assert.That(lost.GetArrayLength(), Is.GreaterThanOrEqualTo(2));
             Assert.That(lost[lost.GetArrayLength() - 1].GetProperty("item").GetString(), Is.EqualTo("mat_gland").Or.StartsWith("core_").Or.StartsWith("addon_"));
