@@ -1287,6 +1287,26 @@ public static partial class TatooineReplication
         }
     }
 
+    /// <summary>
+    /// The inverse of <see cref="FillCharacterBodies"/>: every body a character drives, held bodies included, to its character — what a kill's killer
+    /// resolves through (character-level.md § 2). A body missing from it is the crowd's: no character, no XP, no loot.
+    /// </summary>
+    internal static void FillBodyCharacters(Dictionary<EntityId, EntityId> characters)
+    {
+        characters.Clear();
+        foreach (var (session, character) in CharacterOfSession)
+        {
+            if (BoundPlayer.TryGetValue(session, out var body))
+            {
+                characters[body] = character;
+            }
+            else if (ResumingPlayer.TryGetValue(session, out var hold))
+            {
+                characters[hold.Avatar] = character;
+            }
+        }
+    }
+
     /// <summary>The bodies bound to a character this tick, and their character: for the Ledger system, which opens a first login's wallet.</summary>
     /// <remarks>Written by the session system (Input phase), drained by the Ledger system (Economy phase): one after the other on the tick, never at once.</remarks>
     private static readonly List<(EntityId Character, EntityId Body)> BodiesBound = [];

@@ -672,6 +672,11 @@ public sealed partial class TatooineSim
         // The corpses CreatureThink hands to the lair director, which alone may destroy. A few a second at the baseline; sized like the combat queue.
         _bridge.CorpseQueue = dag.CreateEventQueue<CorpseEvent>("Corpses", 1024);
 
+        // Every death the combat drain resolves, for the XP and the loot systems (character-level.md § 2): one queue each, since a queue is drained once.
+        // A few deaths a tick at 500 bots; a queue nobody reads yet is simply reset at the next tick's start.
+        _bridge.KillXpQueue = dag.CreateEventQueue<KillEvent>("KillsXp", 256);
+        _bridge.KillLootQueue = dag.CreateEventQueue<KillEvent>("KillsLoot", 256);
+
         if (_config.Shuttles)
         {
             dag.Add(new ShuttleSystem(_bridge));
@@ -732,6 +737,8 @@ public sealed partial class TatooineSim
         dag.Produces("PlayerCombat", _bridge.CombatQueue)
             .Produces("CreatureCombat", _bridge.CombatQueue)
             .Consumes("CombatResolve", _bridge.CombatQueue);
+        dag.Produces("CombatResolve", _bridge.KillXpQueue)
+            .Produces("CombatResolve", _bridge.KillLootQueue);
 
         dag.Add(new EconomySystem(_bridge));
         dag.Add(new LairLifeSystem(_bridge));
