@@ -182,6 +182,8 @@ jobs:
             # of #774: a suite nobody runs cannot be said to pass, and this one guards what a player actually touches.
             game_client:
               - 'demo/SwgTatooine/SwgTatooine.Client/**'
+              # The app compiles the SDK's sources (a Vite alias) and its probe imports the SDK's build: an SDK change can break it.
+              - 'src/Typhon.Client.TypeScript/**'
             sdk:
               - 'src/Typhon.Protocol/**'
               - 'src/Typhon.Generators.Protocol/**'
@@ -971,6 +973,14 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '22'
+
+      # The SDK's BUILD first: `tools/probe.ts` runs under Node against `dist/`, which no checkout carries, and the type-aware lint
+      # reads every SDK type there as an error type without it -- 254 errors on the first run of this job against the demo's tree.
+      - name: Build — TypeScript SDK
+        working-directory: src/Typhon.Client.TypeScript
+        run: |
+          npm ci
+          npm run build
 
       - name: Check — SWG browser client
         working-directory: demo/SwgTatooine/SwgTatooine.Client
