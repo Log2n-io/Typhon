@@ -153,6 +153,7 @@ public sealed partial class SimBridge
     private long _objectivesFallen;
     private long _objectivesGivenUp;
     private long _objectivesHeldInRange;
+    private long _lairHitsTotal;
     private long _objectivesOutOfRange;
 
     /// <summary>Lairs a fighter of the crowd made its objective, first or next.</summary>
@@ -174,6 +175,14 @@ public sealed partial class SimBridge
 
     /// <summary>The crowd's weapon range, metres: what a fighter at its objective must be within.</summary>
     public float CrowdWeaponRangeM => RangedRange;
+
+    /// <summary>Lair hits since start — <c>SimStats.LairHits</c> is the sampler's interval and resets.</summary>
+    public long LairHitsTotal => Interlocked.Read(ref _lairHitsTotal);
+
+    /// <summary>The crowd's objective counters as JSON, for <c>GET /swg/crowd/stats</c> (lair-objectives.md L-6).</summary>
+    public string CrowdCountersJson()
+        => FormattableString.Invariant(
+            $"{{\"lairHits\":{LairHitsTotal},\"objectivesTaken\":{ObjectivesTaken},\"objectivesFallen\":{ObjectivesFallen},\"objectivesGivenUp\":{ObjectivesGivenUp},\"heldInRange\":{ObjectivesHeldInRange},\"outOfRange\":{ObjectivesOutOfRange}}}");
 
     /// <summary>The census of one planet, or <see langword="null"/> before the first one is taken.</summary>
     internal LairCensus CensusOf(int realm)

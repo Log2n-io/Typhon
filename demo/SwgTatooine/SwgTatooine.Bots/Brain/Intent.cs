@@ -32,6 +32,12 @@ public enum IntentKind
 
     /// <summary>Get on the swoop, or off it (<c>SetMount</c>): the browser's 1 key.</summary>
     Mount,
+
+    /// <summary>Take a mission listed at the terminal the bot stands at (<c>TakeMission</c>): the swarm names the offer, the one whose lair is nearest.</summary>
+    TakeMission,
+
+    /// <summary>Cancel the mission held (<c>AbandonMission</c>): the swarm names it, from the journal.</summary>
+    AbandonMission,
 }
 
 /// <summary>One decision.</summary>
@@ -76,6 +82,12 @@ public readonly record struct Intent(IntentKind Kind, float Heading, byte SpeedC
     /// <param name="netId">The target.</param>
     /// <returns>The intent.</returns>
     public static Intent Attack(uint netId) => new(IntentKind.Attack, 0f, 0, netId, 0);
+
+    /// <summary>Take a mission at the terminal it stands at.</summary>
+    public static Intent TakeMission => new(IntentKind.TakeMission, 0f, 0, 0, 0);
+
+    /// <summary>Cancel the mission held.</summary>
+    public static Intent AbandonMission => new(IntentKind.AbandonMission, 0f, 0, 0, 0);
 
     /// <summary>Queue for a shuttle to a region's city.</summary>
     /// <param name="region">The destination, as a city plus one.</param>

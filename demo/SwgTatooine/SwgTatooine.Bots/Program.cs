@@ -472,6 +472,10 @@ if (brain)
         $"brain: {decisions.Boardings} shuttle boarding(s) asked for, {decisions.Hunts} hunt(s) begun; "
         + $"{decisions.PortsKnownMax} port(s) known by the best-travelled bot, {decisions.BotsThatCanFly} bot(s) know two or more, "
         + $"{(decisions.Creatures > 0 ? "a creature was in view at least once" : "no creature was EVER in view")}");
+    var missions = swarm.Missions();
+    Console.WriteLine(
+        $"missions: {missions.Asked} take(s) sent, {missions.Taken} taken, {missions.Completed} completed (paid), {missions.Cancelled} cancelled after "
+        + $"{SwgTatooine.Bots.Brain.BotBrain.QuestSeconds:F0} s");
     var tips = swarm.Tips();
     Console.WriteLine(tipSeconds > 0
         ? $"tips: {tips.Sent} GiveCredits sent, {tips.NobodyNear} due with nobody named within reach (--tip-seconds {tipSeconds})"

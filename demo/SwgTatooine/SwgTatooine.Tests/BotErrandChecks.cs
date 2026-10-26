@@ -103,6 +103,9 @@ public sealed class BotErrandChecks
         public List<SeenStructure> Room = [new SeenStructure(0f, 0f, 8, RoomAsset, 0, 0)];
         public readonly List<Intent> Sent = [];
 
+        /// <summary>Missions held, as the journal would say.</summary>
+        public int MissionsHeld;
+
         /// <summary>A plan rectangle no step may cross — a house, grown by nothing: the walls the brain must go round. Checked along each step's segment.</summary>
         public (float MinX, float MinZ, float MaxX, float MaxZ)? Forbidden;
 
@@ -126,6 +129,7 @@ public sealed class BotErrandChecks
             Realm = Realm,
             Mounted = Mounted,
             PortRegion = PortRegion,
+            MissionsHeld = MissionsHeld,
             Structures = new ListStructures(Realm == 0 ? Planet : Room),
         };
 
@@ -598,6 +602,30 @@ public sealed class BotErrandChecks
             Assert.That((sim.X, sim.Z), Is.EqualTo((port.X - 2f, port.Z + 21.4f)), "it asked from somewhere other than the ticket terminal");
         });
     }
+
+    /// <summary>B-1: at a mission terminal, holding none, the errand ends in a take; holding one, it only looks.</summary>
+    [TestCase(0, 1)]
+    [TestCase(1, 0)]
+    public void AtAMissionTerminal_ItTakesOneWhenItHoldsNone(int held, int takes)
+    {
+        var (brain, sim) = Choosing(
+            Goal.Visiting,
+            b => b.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X + 40f, Here.Z, TerminalAsset + 1, 0),
+            () => new Sim { MissionsHeld = held, Planet = [new SeenStructure(Here.X + 40f, Here.Z, 10, TerminalAsset, 0, 1)] });
+
+        for (var tick = 10L; tick < 200 && brain.FacilitiesUsed == 0; tick++)
+        {
+            sim.Apply(brain.Decide(sim.View(), tick));
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.FacilitiesUsed, Is.EqualTo(1), "the premise: the errand reached the terminal");
+            Assert.That(sim.Sent.FindAll(i => i.Kind == IntentKind.TakeMission), Has.Count.EqualTo(takes));
+            Assert.That(brain.MissionsAsked, Is.EqualTo(takes));
+        });
+    }
+
 }
 
 /// <summary>The pure pieces under the errands: the city walk, the room walk, and reading a descriptor.</summary>

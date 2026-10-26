@@ -392,6 +392,76 @@ internal sealed class MissionDeskChecks : ServedChecks
     }
 
     /// <summary>
+    /// lair-objectives.md B-1, B-3, from the frames a session is sent: at a terminal a bot's eye finds an offer listed there with its serial, the one whose
+    /// lair is nearest; near a held mission's lair, it finds that lair with its occupants standing.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void ABotsEye_FindsTheOfferAtItsTerminal_AndItsMissionsLair()
+    {
+        using var sim = Start();
+        var terminal = FirstTerminal(sim);
+        var link = LogInAt(sim, AnAccount(0x6013), terminal);
+        var character = CharacterOf(sim, AnAccount(0x6013));
+        var offers = Offers(sim, terminal);
+        Harness.Ticks(4);
+
+        var store = new Typhon.Client.WorldStore(link.Plan);
+        var eyes = new SwgTatooine.Bots.Brain.Perception();
+        Replay(link, store);
+        var offer = eyes.BestOffer(store, terminal.X + 2f, terminal.Z, 6f, out var serial);
+        var nearest = int.MaxValue;
+        foreach (var o in offers)
+        {
+            nearest = Math.Min(nearest, o.Info.DistanceM);
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(offer, Is.Not.Zero, "no offer was seen at the terminal the bot stands at");
+            Assert.That(offers.Exists(o => o.Info.Serial == serial && o.Info.DistanceM == nearest), Is.True, "the offer taken is not the nearest lair's");
+            Assert.That(eyes.BestOffer(store, terminal.X + 200f, terminal.Z, 6f, out _), Is.Zero, "an offer was taken from 200 m away");
+        });
+
+        var held = TakeAndHold(sim, link, character, offers[0]);
+        Worlds.Park(sim, link.Session, held.Mission.LairX + 15f, held.Mission.LairZ, out var parked);
+        SessionHarness.UntilNamed(link.Session, held.Mission.Lair, "the lair in the bot's view", parked);
+        Harness.Ticks(2);
+        Replay(link, store);
+        var lair = eyes.LairAt(store, held.Mission.LairX, held.Mission.LairZ, 30f, out var guards);
+        Assert.Multiple(() =>
+        {
+            Assert.That(lair, Is.EqualTo(SessionHarness.NetIdOf(link.Session, held.Mission.Lair)), "the lair seen is not the mission's");
+            Assert.That(guards, Is.GreaterThan(0), "a fresh mission lair's occupants were not seen standing");
+        });
+
+        // Its own stance, read rather than remembered: a swoop, a door, a flight or a clone puts the weapon away, and a bot that remembered drawing it
+        // named targets for minutes without a shot (2026-10-26).
+        var unarmed = eyes.Read(store, new SwgTatooine.Bots.Brain.FacilityMap()).Stance;
+        link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
+        Harness.Ticks(4);
+        Replay(link, store);
+        var armed = eyes.Read(store, new SwgTatooine.Bots.Brain.FacilityMap()).Stance;
+        Assert.Multiple(() =>
+        {
+            Assert.That(unarmed, Is.EqualTo(Stances.None), "the premise: no weapon drawn yet");
+            Assert.That(armed, Is.EqualTo(Stances.Pistol), "the bot does not see the pistol it drew");
+        });
+    }
+
+    private static void Replay(FakeLink link, Typhon.Client.WorldStore store)
+    {
+        var applier = new Typhon.Client.FrameApplier(store);
+        foreach (var frame in link.Sent)
+        {
+            if (frame.Length > 0 && frame[0] == Typhon.Protocol.MessageTypes.Tick)
+            {
+                applier.Apply(frame);
+            }
+        }
+    }
+
+    /// <summary>
     /// lair-objectives.md L-5: the crowd never fights a mission's lair — a stranger's break would only redraw it (M-6). A scripted fighter is held in
     /// <c>Combat</c> ten metres from an unshielded mission lair for three seconds, and the lair is never hit.
     /// </summary>

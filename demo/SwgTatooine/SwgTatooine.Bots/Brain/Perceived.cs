@@ -79,6 +79,30 @@ public readonly struct Perceived
     /// <summary>Whether the body is riding its swoop: the server's replicated <c>mounted</c>, the only authority on it.</summary>
     public bool Mounted { get; init; }
 
+    /// <summary>
+    /// The body's replicated combat stance (<c>stance</c>): 0 none, 3 the pistol. A swoop, a door, a flight and a clone all put the weapon away, so a fight
+    /// reads it rather than remembering having drawn one.
+    /// </summary>
+    public int Stance { get; init; }
+
+    /// <summary>Missions its character holds, as the journal (<c>GET /swg/missions</c>) last said; 0 for none.</summary>
+    public int MissionsHeld { get; init; }
+
+    /// <summary>Whether the journal gave the held mission's lair a position: false while it is being drawn or moved.</summary>
+    public bool HasMissionLair { get; init; }
+
+    /// <summary>Where the held mission's lair stands, east.</summary>
+    public float MissionLairX { get; init; }
+
+    /// <summary>Where the held mission's lair stands, north.</summary>
+    public float MissionLairZ { get; init; }
+
+    /// <summary>The held mission's lair as the bot sees it — the lair in view standing on the journal's point — or 0 while it is out of view.</summary>
+    public uint MissionLair { get; init; }
+
+    /// <summary>That lair's occupants still standing (its replicated <c>guards</c>): it cannot be hurt until they are down.</summary>
+    public int MissionLairGuards { get; init; }
+
     /// <summary>The structures it holds, read when a goal plans a walk; null in a test that needs none.</summary>
     public IStructureView Structures { get; init; }
 }

@@ -434,6 +434,102 @@ public sealed class BotBrainChecks
     [Test]
     public void ABrainWithNoCitiesIsRefused()
         => Assert.That(() => new BotBrain([], 7u), Throws.TypeOf<ArgumentException>(), "an empty map was accepted and would divide by zero on the first roll");
+
+    // ── Missions (lair-objectives.md B-3, B-4) ──────────────────────────────────────────────────────────────────────
+
+    private static Perceived Holding(float x, float z, float lairX, float lairZ) => Empty(x, z) with
+    {
+        MissionsHeld = 1,
+        HasMissionLair = true,
+        MissionLairX = lairX,
+        MissionLairZ = lairZ,
+    };
+
+    /// <summary>B-3: a mission held is ridden out to — on the swoop, straight at its lair — then fought: its defenders first, the lair once they are down.</summary>
+    [Test]
+    public void AMissionsLairIsRiddenTo_ItsDefendersKilled_ThenTheLairAttacked()
+    {
+        var brain = Brain();
+
+        // 600 m east and 800 m north: a 3-4-5 triangle, so the heading is one angle only.
+        var far = Holding(0f, 0f, 600f, 800f);
+        var first = brain.Decide(in far, 1);
+        var mount = brain.Decide(in far, 2);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Questing), "a mission held with its lair placed did not become the goal");
+            Assert.That(first.Kind, Is.EqualTo(IntentKind.Move));
+            Assert.That(first.Heading, Is.EqualTo(MathF.Atan2(800f, 600f)).Within(0.001f), "it does not head for the lair");
+            Assert.That(mount.Kind, Is.EqualTo(IntentKind.Mount), "a kilometre's ride was not ridden on the swoop");
+            Assert.That(mount.On, Is.True);
+        });
+
+        // There — still on the swoop it rode in on, which it leaves on the next tick — a defender 15 m away and 20 m from the lair: it is shot, the lair is
+        // not yet (its guards stand).
+        var shielded = Holding(580f, 790f, 600f, 800f) with
+        {
+            Mounted = true,
+            MissionLair = 77u,
+            MissionLairGuards = 2,
+            NearestCreature = 31u,
+            NearestCreatureX = 590f,
+            NearestCreatureZ = 801f,
+            NearestCreatureM = 15f,
+        };
+        var atDefender = brain.Decide(in shielded, 10);
+
+        // The guards down: the lair.
+        var open = Holding(590f, 795f, 600f, 800f) with { MissionLair = 77u, MissionLairGuards = 0 };
+        var atLair = brain.Decide(in open, 11);
+        Assert.Multiple(() =>
+        {
+            Assert.That(atDefender.Kind, Is.EqualTo(IntentKind.Attack), "a defender in reach was not attacked");
+            Assert.That(atDefender.NetId, Is.EqualTo(31u), "it fired at the shielded lair, not its defender");
+            Assert.That(atLair.Kind, Is.EqualTo(IntentKind.Attack));
+            Assert.That(atLair.NetId, Is.EqualTo(77u), "the lair, open now, was not attacked");
+        });
+
+        // Paid: the journal lists nothing, and the mission is over.
+        brain.Decide(Empty(590f, 795f), 12);
+        Assert.That(brain.Goal, Is.Not.EqualTo(Goal.Questing), "a mission the journal no longer lists is still being done");
+    }
+
+    /// <summary>B-4: a mission not done in <see cref="BotBrain.QuestSeconds"/> is cancelled, once.</summary>
+    [Test]
+    public void AMissionNotDoneInTenMinutesIsCancelled()
+    {
+        var brain = Brain();
+        var stuck = Holding(0f, 0f, 30f, 0f) with { MissionLair = 5u, MissionLairGuards = 3 };
+        var limit = (long)(BotBrain.QuestSeconds * 4) + 2;
+        var cancels = 0;
+        for (var tick = 1L; tick <= limit + 8; tick++)
+        {
+            cancels += brain.Decide(in stuck, tick).Kind == IntentKind.AbandonMission ? 1 : 0;
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(cancels, Is.EqualTo(1), "a mission past its time was not cancelled exactly once");
+            Assert.That(brain.MissionsGivenUp, Is.EqualTo(1));
+        });
+    }
+
+    /// <summary>A lair being drawn or moved — held, no position yet — is waited for, not ridden at a stale point.</summary>
+    [Test]
+    public void ALairBeingMovedIsWaitedFor()
+    {
+        var brain = Brain();
+        brain.Decide(Holding(0f, 0f, 500f, 0f), 1);
+        Assert.That(brain.Goal, Is.EqualTo(Goal.Questing), "the premise");
+        var moving = Empty(0f, 0f) with { MissionsHeld = 1, HasMissionLair = false, Mounted = true };
+        var wait = brain.Decide(in moving, 2);
+        Assert.Multiple(() =>
+        {
+            Assert.That(wait.Kind, Is.EqualTo(IntentKind.Move));
+            Assert.That(wait.SpeedClass, Is.Zero, "it rode on toward where the lair used to be");
+        });
+    }
+
 }
 
 /// <summary>

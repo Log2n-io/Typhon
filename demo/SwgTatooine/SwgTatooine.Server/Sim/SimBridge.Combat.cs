@@ -738,6 +738,7 @@ public sealed partial class SimBridge
 
         if (lairHits != 0)
         {
+            Interlocked.Add(ref _lairHitsTotal, lairHits);
             Interlocked.Add(ref _lairHits, lairHits);
         }
 

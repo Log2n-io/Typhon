@@ -27,6 +27,9 @@ public enum Goal
 
     /// <summary>Going into a building, standing about inside, and coming back out.</summary>
     Indoors,
+
+    /// <summary>Doing the mission it holds: out to its lair, its defenders, then the lair (lair-objectives.md B-3).</summary>
+    Questing,
 }
 
 /// <summary>
@@ -131,6 +134,12 @@ public sealed class BotBrain
     /// <summary>A facility further than this is not an errand, it is a journey, metres.</summary>
     public const float ErrandReachM = 1500f;
 
+    /// <summary>A mission not done this long after the bot set out on it is cancelled (lair-objectives.md B-4).</summary>
+    public const double QuestSeconds = 600d;
+
+    /// <summary>How far round its lair a creature is taken for one of its defenders.</summary>
+    public const float DefenderM = 60f;
+
     /// <summary>A walk is searched on the grid only within this of its goal; further, it is ridden or run straight to there first, metres.</summary>
     /// <remarks>
     /// A search across a whole city is a million cells; one across 200 m is a fortieth of that and covers every street a door or a terminal stands on.
@@ -215,6 +224,11 @@ public sealed class BotBrain
     /// <summary>How many walks it searched round the buildings.</summary>
     public long PathsPlanned { get; private set; }
 
+    /// <summary>Missions it asked to take at a terminal, and missions it gave up on.</summary>
+    public long MissionsAsked { get; private set; }
+
+    public long MissionsGivenUp { get; private set; }
+
     /// <summary>The walk in progress, for a trace line: next point, count, where the exact part starts, ridden, how it ended.</summary>
     public string LegState =>
         $"leg {_leg.Next}/{_leg.Points.Count} exact {_leg.Precise} ride {(_leg.Ride ? 1 : 0)}{(_leg.Dismounted ? "-off" : string.Empty)} end {_leg.Ended}"
@@ -265,6 +279,12 @@ public sealed class BotBrain
 
     /// <summary>After a visit, the shuttle is the next thing it does.</summary>
     private bool _flyNext;
+
+    /// <summary>The kind of facility the errand under way goes to.</summary>
+    private int _visitKind;
+
+    /// <summary>When it set out on the mission it holds, or -1 while it holds none it has set out on.</summary>
+    private long _questSince = -1;
 
     /// <summary>Decides what to do this tick.</summary>
     /// <param name="world">What the bot was sent.</param>
@@ -329,6 +349,8 @@ public sealed class BotBrain
                 return Visit(in world, tick);
             case Goal.Indoors:
                 return Enter(in world, tick);
+            case Goal.Questing:
+                return Quest(in world, tick);
             case Goal.Idling:
                 if (tick < _until)
                 {
@@ -354,6 +376,19 @@ public sealed class BotBrain
     {
         _wantMounted = false;
         _leg.Clear();
+
+        // A mission held, its lair placed: that is what it is doing until it is done or given up (lair-objectives.md B-3).
+        if (world.MissionsHeld > 0 && world.HasMissionLair)
+        {
+            Goal = Goal.Questing;
+            return Quest(in world, tick);
+        }
+
+        if (world.MissionsHeld == 0)
+        {
+            _questSince = -1;
+        }
+
         if (world.NearestCreature != 0 && world.NearestCreatureM <= NoticeM && world.NearestCreature != _givenUpOn)
         {
             Goal = Goal.Hunting;
@@ -498,7 +533,16 @@ public sealed class BotBrain
             return ToTheShuttle(in world, tick);
         }
 
-        _wantMounted = Mode == TravelMode.Swoop && toCentre > 2 * ArrivedM;
+        return GoToward(in world, tick, city.X, city.Z, toCentre, Mode == TravelMode.Swoop);
+    }
+
+    /// <summary>
+    /// Toward a point: on the swoop when <paramref name="ride"/> and still far, the straight line, and round whatever stops it — a travel to a city's
+    /// centre, or a ride out to a mission's lair.
+    /// </summary>
+    private Intent GoToward(in Perceived world, long tick, float tx, float tz, double distance, bool ride)
+    {
+        _wantMounted = ride && distance > 2 * ArrivedM;
 
         // A walk round a building that stood in the straight line, once the watchdog found it; then the straight line again.
         if (_leg.Active)
@@ -514,9 +558,9 @@ public sealed class BotBrain
             _travelBestAt = tick;
         }
 
-        if (toCentre < _travelBest - 1d)
+        if (distance < _travelBest - 1d)
         {
-            _travelBest = toCentre;
+            _travelBest = distance;
             _travelBestAt = tick;
         }
         else if (tick - _travelBestAt > _stuckTicks && _assets != null && world.Structures != null)
@@ -526,15 +570,15 @@ public sealed class BotBrain
             // second live run's bot pushed against one wall in Dry Wells for four minutes with every search failing.
             _travelBest = double.MaxValue;
             _travelBestAt = tick;
-            var heading = Routing.HeadingTo(world.X, world.Z, city.X, city.Z);
+            var heading = Routing.HeadingTo(world.X, world.Z, tx, tz);
             foreach (var (metres, turn) in Detours)
             {
-                var reach = (float)Math.Min(toCentre, metres);
+                var reach = (float)Math.Min(distance, metres);
                 var goal = (world.X + (MathF.Cos(heading + turn) * reach), world.Z + (MathF.Sin(heading + turn) * reach));
                 if (PlanWalk(in world, goal, [], tick, exactGoal: false))
                 {
                     // Round the obstacle on whatever it was travelling on: a rider does not get off to go round a house.
-                    _leg.Ride = Mode == TravelMode.Swoop;
+                    _leg.Ride = ride;
                     _leg.KeepRiding = true;
                     return Follow(in world, tick, out _);
                 }
@@ -542,7 +586,78 @@ public sealed class BotBrain
         }
 
         var speed = world.Mounted ? Routing.SwoopClass : Routing.SpeedClassOf(TravelMode.Run);
-        return Intent.Move(Routing.HeadingTo(world.X, world.Z, city.X, city.Z), speed);
+        return Intent.Move(Routing.HeadingTo(world.X, world.Z, tx, tz), speed);
+    }
+
+    /// <summary>
+    /// The mission held (lair-objectives.md B-3, B-4): ride out to its lair, kill the defenders round it, then break the lair — with a browser's commands
+    /// only. Done when the journal no longer lists it; cancelled after <see cref="QuestSeconds"/>.
+    /// </summary>
+    private Intent Quest(in Perceived world, long tick)
+    {
+        if (world.MissionsHeld == 0)
+        {
+            // Done — paid, the journal says it no longer holds it — or cancelled by somebody else's hand: decide again.
+            _questSince = -1;
+            _wantMounted = false;
+            Goal = Goal.Choosing;
+            return Choose(in world, tick);
+        }
+
+        if (_questSince < 0)
+        {
+            _questSince = tick;
+            _travelBest = double.MaxValue;
+            _travelBestAt = tick;
+            _leg.Clear();
+        }
+
+        if (tick - _questSince > Ticks(QuestSeconds))
+        {
+            // Not done in ten minutes: something it cannot reach or cannot kill. Give it back and get on with the day.
+            MissionsGivenUp++;
+            _questSince = -1;
+            _wantMounted = false;
+            Goal = Goal.Idling;
+            _until = tick + Ticks(2);
+            return Intent.AbandonMission;
+        }
+
+        if (!world.HasMissionLair)
+        {
+            // Being drawn, or moved after somebody else broke it: wait where it is for the journal to say where.
+            _wantMounted = false;
+            return Intent.Move(0f, 0);
+        }
+
+        var toLair = Routing.Distance(world.X, world.Z, world.MissionLairX, world.MissionLairZ);
+        if (toLair > NoticeM)
+        {
+            return GoToward(in world, tick, world.MissionLairX, world.MissionLairZ, toLair, ride: true);
+        }
+
+        // There: on foot, and the fight. Its defenders first — the lair cannot be hurt while any stands — then the lair.
+        _wantMounted = false;
+        _leg.Clear();
+        if (world.MissionLair != 0 && world.MissionLairGuards == 0)
+        {
+            return toLair > StrikeM
+                ? Intent.Move(Routing.HeadingTo(world.X, world.Z, world.MissionLairX, world.MissionLairZ), Routing.SpeedClassOf(TravelMode.Run))
+                : Intent.Attack(world.MissionLair);
+        }
+
+        if (world.NearestCreature != 0
+            && Routing.Distance(world.NearestCreatureX, world.NearestCreatureZ, world.MissionLairX, world.MissionLairZ) <= DefenderM)
+        {
+            return world.NearestCreatureM > StrikeM
+                ? Intent.Move(Routing.HeadingTo(world.X, world.Z, world.NearestCreatureX, world.NearestCreatureZ), Routing.SpeedClassOf(TravelMode.Run))
+                : Intent.Attack(world.NearestCreature);
+        }
+
+        // Nothing to shoot in view yet: close on the lair.
+        return toLair > StrikeM
+            ? Intent.Move(Routing.HeadingTo(world.X, world.Z, world.MissionLairX, world.MissionLairZ), Routing.SpeedClassOf(TravelMode.Run))
+            : Intent.Move(0f, 0);
     }
 
     /// <summary>Flying: to this city's ticket terminal, then the ask.</summary>
@@ -664,6 +779,7 @@ public sealed class BotBrain
     private bool StartVisit(in Perceived world, long tick)
     {
         var kind = Next() % 100u < 60u ? Routing.MissionTerminalKind : Routing.BazaarKind;
+        _visitKind = kind;
         if (!Facilities.TryNearest(kind, world.X, world.Z, out var found, out _)
             || Routing.Distance(world.X, world.Z, found.X, found.Z) > ErrandReachM
             || _assets.At(found.Asset) is not { } plan)
@@ -710,6 +826,14 @@ public sealed class BotBrain
                 _using = true;
                 _wantMounted = false;
                 _until = tick + Ticks(5 + (Next() % 6u));
+
+                // At a mission terminal, holding none: take one, as a person does at the list (lair-objectives.md B-1). The swarm names the offer.
+                if (_visitKind == Routing.MissionTerminalKind && world.MissionsHeld == 0)
+                {
+                    MissionsAsked++;
+                    return Intent.TakeMission;
+                }
+
                 return Intent.None;
             default:
                 Goal = Goal.Idling;

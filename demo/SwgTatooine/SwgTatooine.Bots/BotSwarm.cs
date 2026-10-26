@@ -253,6 +253,17 @@ public sealed class BotSwarm : IAsyncDisposable
     /// <summary>The economy's player-to-player transfer (economy-foundation.md E0-7).</summary>
     private const string GiveCreditsCommand = "GiveCredits";
 
+    /// <summary>A mission taken at a terminal, and one given up (lair-objectives.md B-1, B-4).</summary>
+    private const string TakeMissionCommand = "TakeMission";
+
+    private const string AbandonMissionCommand = "AbandonMission";
+
+    /// <summary>How near the bot an offer is taken from: a terminal's reach (<c>TatooineData.MissionTerminalReachM</c>).</summary>
+    private const float OfferReachM = 6f;
+
+    /// <summary>How near the journal's point a lair in view is taken for the mission's own.</summary>
+    private const float MissionLairMatchM = 30f;
+
     /// <summary>How near a bot looks for somebody to tip, metres: inside the server's 20 m, since the bot reads a position a little old.</summary>
     private const float TipReachM = 15f;
 
@@ -884,7 +895,31 @@ public sealed class BotSwarm : IAsyncDisposable
     /// of a thousand bound avatars that sent not one intent, and the only way to notice was to look at the world in a browser. A
     /// number here, next to the sessions, makes "they are standing still" a thing the report says rather than a thing you see.
     /// </remarks>
-    /// <summary>The tips the thinking bots sent, and the times a tip was due with nobody named near enough.</summary>
+    /// <summary>The missions the thinking bots asked for, took (their journal said so), completed (paid) and cancelled.</summary>
+    /// <returns>The four counts, over the fleet.</returns>
+    public (long Asked, long Taken, long Completed, long Cancelled) Missions()
+    {
+        long asked = 0;
+        long taken = 0;
+        long completed = 0;
+        long cancelled = 0;
+        foreach (var bot in Bots)
+        {
+            if (bot == null)
+            {
+                continue;
+            }
+
+            asked += Volatile.Read(ref bot.MissionTakesSent);
+            taken += Volatile.Read(ref bot.MissionsTaken);
+            completed += Volatile.Read(ref bot.MissionsCompleted);
+            cancelled += Volatile.Read(ref bot.MissionsCancelled);
+        }
+
+        return (asked, taken, completed, cancelled);
+    }
+
+    /// <summary>The tips the thinking bots sent, and the times a tip was due with nobody named within reach.</summary>
     /// <returns>Both counts, over the fleet.</returns>
     public (long Sent, long NobodyNear) Tips()
     {
@@ -2235,6 +2270,30 @@ public sealed class BotSwarm : IAsyncDisposable
 
         public long HuntsStarted;
 
+        /// <summary>
+        /// Missions (lair-objectives.md): takes sent, missions its journal listed for the first time, completions it stated, cancels sent.
+        /// </summary>
+        public long MissionTakesSent;
+
+        public long MissionsTaken;
+        public long MissionsCompleted;
+        public long MissionsCancelled;
+
+        /// <summary>The journal as last read: what the brain is told about the mission it holds.</summary>
+        private volatile MissionView _missions = MissionView.None;
+
+        // Read like a browser's: GET /swg/missions with the bot's own token whenever the body's owner field `journal` moves.
+        private static readonly HttpClient JournalHttp = new() { Timeout = TimeSpan.FromSeconds(10) };
+        private readonly Uri _missionsUri;
+        private readonly string _token;
+        private ArchetypePlan _journalFor;
+        private int _journalOrdinal = -1;
+        private double _journalAsked = double.NaN;
+        private long _journalRetryAt;
+        private int _journalBusy;
+        private readonly HashSet<string> _missionsSeen = [];
+        private readonly HashSet<string> _completedSeen = [];
+
         /// <summary>Tips sent, and tips due with nobody named within reach.</summary>
         public long TipsSent;
 
@@ -2294,6 +2353,8 @@ public sealed class BotSwarm : IAsyncDisposable
                 _tipEveryTicks = (long)Math.Round(options.TipSeconds * _ticksPerSecond);
                 _tipRandom = (uint)((index * 3266489917u) | 1u);
                 _nextTipTick = NextTipDelay();
+                _token = options.TokenFor?.Invoke(index);
+                _missionsUri = BotProvisioner.AuthBaseFrom(options.Endpoint) is { } server ? new Uri(server, "swg/missions") : null;
             }
             _heading = (float)((index * golden) % (Math.PI * 2));
 
@@ -2453,6 +2514,22 @@ public sealed class BotSwarm : IAsyncDisposable
                 CreaturesSeenMax = Math.Max(CreaturesSeenMax, 1);
             }
 
+            // The mission held, as the journal last said, and its lair as the bot sees it once near (lair-objectives.md B-2, B-3).
+            PollJournal(tick);
+            var missions = _missions;
+            world = world with
+            {
+                MissionsHeld = missions.Held,
+                HasMissionLair = missions.LairKnown,
+                MissionLairX = missions.LairX,
+                MissionLairZ = missions.LairZ,
+            };
+            if (missions.LairKnown && world.HasBody && Routing.Distance(world.X, world.Z, missions.LairX, missions.LairZ) <= BotBrain.NoticeM * 2)
+            {
+                var lair = _eyes.LairAt(Client.Store, missions.LairX, missions.LairZ, MissionLairMatchM, out var guards);
+                world = world with { MissionLair = lair, MissionLairGuards = guards };
+            }
+
             var before = _brain.Goal;
             var intent = _brain.Decide(in world, tick);
             if (TraceAll || Index == TraceIndex)
@@ -2484,15 +2561,16 @@ public sealed class BotSwarm : IAsyncDisposable
             if (_brain.Goal == Goal.Hunting && before != Goal.Hunting)
             {
                 HuntsStarted++;
+            }
 
-                // A target is fought only in a stance, and a mount or a door drops it, so each hunt draws the pistol again: one command per hunt, not per
-                // target re-named. A server without the command is one where a target alone is a fight.
-                if (Client.Plan.CommandByName(SetStanceCommand) != null)
-                {
-                    await Client.SendCommandAsync(SetStanceCommand, new RecordValues { ["stance"] = FieldValue.Of(PistolStance) }, ct)
-                        .ConfigureAwait(false);
-                    IntentsSent++;
-                }
+            // A target is fought only in a stance, and a swoop, a door, a flight or a clone puts it away — the ride out to a mission's lair did, every time,
+            // and the bot then named its target for minutes without a shot fired (2026-10-26). So the stance is read, not remembered: drawn whenever the bot
+            // is about to attack without it. A server without the command is one where a target alone is a fight.
+            if (intent.Kind == IntentKind.Attack && world.Stance != (int)PistolStance && Client.Plan.CommandByName(SetStanceCommand) != null)
+            {
+                await Client.SendCommandAsync(SetStanceCommand, new RecordValues { ["stance"] = FieldValue.Of(PistolStance) }, ct)
+                    .ConfigureAwait(false);
+                IntentsSent++;
             }
 
             switch (intent.Kind)
@@ -2547,11 +2625,134 @@ public sealed class BotSwarm : IAsyncDisposable
                     BoardingsAsked++;
                     break;
 
+                case IntentKind.TakeMission when Client.Plan.CommandByName(TakeMissionCommand) != null:
+                    // The offer whose lair is nearest, of those listed at the terminal it stands at: what a person picks from the sorted list.
+                    var offer = _eyes.BestOffer(Client.Store, world.X, world.Z, OfferReachM, out var serial);
+                    if (offer != 0)
+                    {
+                        await Client.SendCommandAsync(
+                            TakeMissionCommand,
+                            new RecordValues { ["offer"] = FieldValue.Of((double)offer), ["serial"] = FieldValue.Of((double)serial) },
+                            ct).ConfigureAwait(false);
+                        IntentsSent++;
+                        MissionTakesSent++;
+                    }
+
+                    break;
+
+                case IntentKind.AbandonMission when Client.Plan.CommandByName(AbandonMissionCommand) != null:
+                    if (missions.FirstId != 0)
+                    {
+                        await Client.SendCommandAsync(
+                            AbandonMissionCommand,
+                            new RecordValues { ["mission"] = FieldValue.OfUInt64(missions.FirstId) },
+                            ct).ConfigureAwait(false);
+                        IntentsSent++;
+                        MissionsCancelled++;
+                    }
+
+                    break;
+
                 default:
                     break;   // nothing to say this tick, which is what idling and waiting look like on the wire
             }
 
             await TipAsync(tick, world, ct).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Reads the journal when the body's <c>journal</c> owner field moved since the last read — the browser's pattern (missions.md § 4) — or a failed
+        /// read is due again. One read at a time; its answer lands in <see cref="_missions"/>.
+        /// </summary>
+        private void PollJournal(long tick)
+        {
+            var self = Client.Store?.Self;
+            if (_missionsUri == null || string.IsNullOrEmpty(_token) || self?.Archetype == null)
+            {
+                return;
+            }
+
+            if (!ReferenceEquals(self.Archetype, _journalFor))
+            {
+                _journalFor = self.Archetype;
+                _journalOrdinal = -1;
+                foreach (var field in self.Archetype.OwnerFields)
+                {
+                    if (field.Name == "journal")
+                    {
+                        _journalOrdinal = field.Ordinal;
+                    }
+                }
+            }
+
+            if (_journalOrdinal < 0 || _journalOrdinal >= self.Numbers.Length || self.Numbers[_journalOrdinal] is not { Length: > 0 } values)
+            {
+                return;
+            }
+
+            var rev = values[0];
+            if ((rev == _journalAsked && tick < _journalRetryAt) || Interlocked.CompareExchange(ref _journalBusy, 1, 0) != 0)
+            {
+                return;
+            }
+
+            _journalAsked = rev;
+            _journalRetryAt = long.MaxValue;
+            _ = ReadJournalAsync(tick);
+        }
+
+        private async Task ReadJournalAsync(long tick)
+        {
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, _missionsUri);
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _token);
+                using var response = await JournalHttp.SendAsync(request).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    _journalRetryAt = tick + 12;
+                    return;
+                }
+
+                using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync().ConfigureAwait(false));
+                var held = 0;
+                var view = MissionView.None;
+                foreach (var m in doc.RootElement.GetProperty("missions").EnumerateArray())
+                {
+                    var id = m.GetProperty("id").GetString();
+                    if (id != null && _missionsSeen.Add(id))
+                    {
+                        Interlocked.Increment(ref MissionsTaken);
+                    }
+
+                    if (held++ == 0)
+                    {
+                        var lair = m.GetProperty("lair");
+                        view = lair.ValueKind == JsonValueKind.Object
+                            ? new MissionView(1, true, lair.GetProperty("x").GetSingle(), lair.GetProperty("z").GetSingle(), ulong.Parse(id ?? "0"))
+                            : new MissionView(1, false, 0f, 0f, ulong.Parse(id ?? "0"));
+                    }
+                }
+
+                foreach (var c in doc.RootElement.GetProperty("completed").EnumerateArray())
+                {
+                    if (c.GetProperty("id").GetString() is { } done && _completedSeen.Add(done))
+                    {
+                        Interlocked.Increment(ref MissionsCompleted);
+                    }
+                }
+
+                _missions = view with { Held = held };
+            }
+            catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException or InvalidOperationException
+                                          or FormatException)
+            {
+                _journalRetryAt = tick + 12;   // three seconds at the usual 4 Hz; the next revision asks anyway
+            }
+            finally
+            {
+                Volatile.Write(ref _journalBusy, 0);
+            }
         }
 
         /// <summary>
@@ -2627,4 +2828,15 @@ public sealed class BotSwarm : IAsyncDisposable
             await Client.SendCommandAsync(BuiltInCommands.ClientRegion, values, ct).ConfigureAwait(false);
         }
     }
+}
+
+/// <summary>What a bot's journal last said about the mission it holds (lair-objectives.md B-2).</summary>
+/// <param name="Held">How many it holds.</param>
+/// <param name="LairKnown">Whether the first one's lair has a position: it does not while being drawn or moved.</param>
+/// <param name="LairX">Its lair, east.</param>
+/// <param name="LairZ">Its lair, north.</param>
+/// <param name="FirstId">Its id, for a cancel; 0 for none.</param>
+internal sealed record MissionView(int Held, bool LairKnown, float LairX, float LairZ, ulong FirstId)
+{
+    public static MissionView None { get; } = new(0, false, 0f, 0f, 0);
 }

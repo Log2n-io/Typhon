@@ -26,18 +26,26 @@ public sealed class Perception
     private const string WorldObject = "WorldObject";
     private const string Creature = "Creature";
     private const string Player = "Player";
+    private const string Lair = "CreatureLair";
+    private const string Offer = "MissionOffer";
 
     private WorldStore _bound;
     private int _structures = -1;
     private int _creatures = -1;
     private int _players = -1;
     private int _nameIdField = -1;
+    private int _lairs = -1;
+    private int _guardsField = -1;
+    private int _offers = -1;
+    private int _serialField = -1;
+    private int _distanceField = -1;
     private int _kindField = -1;
     private int _regionField = -1;
     private int _assetField = -1;
     private int _yawField = -1;
     private int _mountedArchetype = -1;
     private int _mountedField = -1;
+    private int _stanceField = -1;
     private readonly StoreStructures _view = new();
 
     /// <summary>Reads what this bot can see, and teaches its map any facility in view.</summary>
@@ -74,6 +82,7 @@ public sealed class Perception
         {
             _mountedArchetype = ownArchetype;
             _mountedField = FieldOf(store, ownArchetype, "mounted");
+            _stanceField = FieldOf(store, ownArchetype, "stance");
         }
 
         var mounted = _mountedField >= 0 && store.Archetypes[ownArchetype].Numbers[_mountedField] is { } m && m[ownSlot] == 1;
@@ -86,6 +95,7 @@ public sealed class Perception
             Realm = store.Realm?.RealmId ?? 0,
             BoardRefused = BoardRefusedIn(store),
             Mounted = mounted,
+            Stance = _stanceField >= 0 && store.Archetypes[ownArchetype].Numbers[_stanceField] is { } st ? (int)st[ownSlot] : 0,
             Structures = _view,
         };
 
@@ -145,6 +155,95 @@ public sealed class Perception
         }
 
         return bestNetId;
+    }
+
+    /// <summary>
+    /// The lair in view standing within <paramref name="reachM"/> of a point — the held mission's, at the position its journal gave — and its occupants
+    /// still standing (lair-objectives.md B-3).
+    /// </summary>
+    /// <returns>Its netId, or 0 when no lair in view stands there.</returns>
+    public uint LairAt(WorldStore store, float x, float z, float reachM, out int guards)
+    {
+        guards = 0;
+        if (store?.Self == null || store.Self.NetId == 0)
+        {
+            return 0;
+        }
+
+        Resolve(store);
+        if (_lairs < 0)
+        {
+            return 0;
+        }
+
+        var set = store.Archetypes[_lairs];
+        var guardsOf = _guardsField >= 0 ? set.Numbers[_guardsField] : null;
+        var best = (double)reachM;
+        var found = 0u;
+        for (var i = 0; i < set.LiveCount; i++)
+        {
+            var slot = set.Live[i];
+            var at = set.HeadPosition(slot);
+            var distance = Routing.Distance(x, z, (float)at[0], set.Dims > 1 ? (float)at[1] : 0f);
+            if (distance <= best)
+            {
+                best = distance;
+                found = set.NetIds[slot];
+                guards = guardsOf != null ? (int)guardsOf[slot] : 0;
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary>
+    /// The offer to take at the terminal the bot stands at (lair-objectives.md B-1): of those listed within <paramref name="reachM"/>, the one whose lair
+    /// is nearest the terminal — the shortest ride out.
+    /// </summary>
+    /// <returns>Its netId, or 0 when none is listed within reach.</returns>
+    public uint BestOffer(WorldStore store, float x, float z, float reachM, out uint serial)
+    {
+        serial = 0;
+        if (store?.Self == null || store.Self.NetId == 0)
+        {
+            return 0;
+        }
+
+        Resolve(store);
+        if (_offers < 0 || _serialField < 0)
+        {
+            return 0;
+        }
+
+        var set = store.Archetypes[_offers];
+        var serials = set.Numbers[_serialField];
+        var distances = _distanceField >= 0 ? set.Numbers[_distanceField] : null;
+        if (serials == null)
+        {
+            return 0;
+        }
+
+        var nearest = double.MaxValue;
+        var found = 0u;
+        for (var i = 0; i < set.LiveCount; i++)
+        {
+            var slot = set.Live[i];
+            var at = set.HeadPosition(slot);
+            if (Routing.Distance(x, z, (float)at[0], set.Dims > 1 ? (float)at[1] : 0f) > reachM)
+            {
+                continue;
+            }
+
+            var ride = distances != null ? distances[slot] : 0d;
+            if (ride < nearest)
+            {
+                nearest = ride;
+                found = set.NetIds[slot];
+                serial = (uint)serials[slot];
+            }
+        }
+
+        return found;
     }
 
     /// <summary>The nearest creature, with its position and distance.</summary>
@@ -317,6 +416,11 @@ public sealed class Perception
         _creatures = IndexOf(store, Creature);
         _players = IndexOf(store, Player);
         _nameIdField = FieldOf(store, _players, "nameId");
+        _lairs = IndexOf(store, Lair);
+        _guardsField = FieldOf(store, _lairs, "guards");
+        _offers = IndexOf(store, Offer);
+        _serialField = FieldOf(store, _offers, "serial");
+        _distanceField = FieldOf(store, _offers, "distanceM");
 
         // Both fields are resolved against the archetype they are read from, which is the bug this line replaced: the
         // first version resolved a field index against `Player` and then indexed it into whatever archetype held the
