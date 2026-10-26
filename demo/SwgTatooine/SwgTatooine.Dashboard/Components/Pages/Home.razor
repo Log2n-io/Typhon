@@ -129,15 +129,20 @@
             @Spark("drops/min", "/min")
             <h3>Units held, by Mk</h3>
             <table class="ledger">
-                <tr><th>item</th><th class="num">I</th><th class="num">II</th><th class="num">III</th><th class="num">IV</th><th class="num">V</th></tr>
+                <tr>
+                    <th>item</th><th class="num">I</th><th class="num">II</th><th class="num">III</th><th class="num">IV</th><th class="num">V</th>
+                    <th class="num" title="an item without Mk">no Mk</th>
+                </tr>
                 @foreach (var (id, name) in HeldRows(st))
                 {
+                    var held = Held(st, id);
                     <tr>
                         <td title="@id">@name</td>
                         @for (var mk = 0; mk < 5; mk++)
                         {
-                            <td class="num">@F(Held(st, id, mk), 0)</td>
+                            <td class="num">@(held.Length == 1 ? "—" : F(At(held, mk), 0))</td>
                         }
+                        <td class="num">@(held.Length == 1 ? F(held[0], 0) : "—")</td>
                     </tr>
                 }
             </table>
@@ -314,7 +319,7 @@
         ("mat_metal", "Metal"), ("mat_crystal", "Crystal"), ("mat_gas", "Gas"), ("mat_chemical", "Chemical"), ("mat_fiber", "Fiber"),
         ("mat_hide", "Hide"), ("mat_bone", "Bone"), ("mat_gland", "Gland"), ("mat_venom", "Venom"),
         ("core_ranged", "Ranged Weapon Core"), ("core_melee", "Melee Weapon Core"), ("core_armor", "Armor Core"), ("core_propulsion", "Propulsion Core"),
-        ("addon_weapon", "Weapon Enhancement"), ("addon_armor", "Armour Enhancement"), ("addon_tuning", "Tuning Kit"), ("addon_additive", "Additive"),
+        ("addon_weapon", "Weapon Enhancement"), ("addon_armor", "Armor Enhancement"), ("addon_tuning", "Tuning Kit"), ("addon_additive", "Additive"),
     ];
 
     /// <summary>The 17 lootable items, then any other item the world holds (a later source), by its asset id.</summary>
@@ -334,9 +339,17 @@
         }
     }
 
-    /// <summary>Units of an item held at a Mk (0-based): 0 for an item the world does not hold, which <c>held</c> leaves out.</summary>
-    private static double Held(JsonNode stats, string id, int mk)
-        => stats?["items"]?["held"]?[id] is JsonArray a && mk < a.Count && a[mk] is JsonValue v && v.TryGetValue<double>(out var d) ? d : 0d;
+    /// <summary>
+    /// An item's held units as <c>/swg/stats</c> writes them: Mk I-V for an item with Mk, one count for one without (<c>SimBridge.ByTemplate</c>), so a single
+    /// value is never read as Mk I. Empty for an item the world does not hold, which <c>held</c> leaves out.
+    /// </summary>
+    private static double[] Held(JsonNode stats, string id)
+        => stats?["items"]?["held"]?[id] is JsonArray a
+            ? a.Select(n => n is JsonValue v && v.TryGetValue<double>(out var d) ? d : 0d).ToArray()
+            : [];
+
+    /// <summary>One Mk's units (0-based) of an item with Mk; 0 where the array stops.</summary>
+    private static double At(double[] held, int mk) => mk < held.Length ? held[mk] : 0d;
 
     private static IEnumerable<(string City, double Bots)> Cities(JsonNode stats)
         => (stats?["population"]?["botsByCity"] as JsonObject ?? [])
