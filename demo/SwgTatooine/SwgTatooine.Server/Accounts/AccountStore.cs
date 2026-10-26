@@ -72,7 +72,8 @@ public static class AccountStore
     /// <param name="outfit">The outfit chosen, one-based into <see cref="TatooineData.PlayerOutfits"/>; 0 for none, which leaves it to
     /// <see cref="TatooineData.OutfitFor(EntityId)"/> when the character is created.</param>
     /// <returns>What happened.</returns>
-    public static SignupOutcome TrySignup(DatabaseEngine dbe, string offeredName, string password, out EntityId account, int outfit = 0)
+    /// <param name="bot">Whether the bot fleet signed it up: shown to viewers, never acted on (<see cref="Account.Bot"/>).</param>
+    public static SignupOutcome TrySignup(DatabaseEngine dbe, string offeredName, string password, out EntityId account, int outfit = 0, bool bot = false)
     {
         ArgumentNullException.ThrowIfNull(dbe);
         account = default;
@@ -98,6 +99,7 @@ public static class AccountStore
             CreatedUtcTicks = DateTime.UtcNow.Ticks,
             LastSeenUtcTicks = 0,
             Outfit = (byte)outfit,
+            Bot = bot ? (byte)1 : (byte)0,
         };
 
         var secret = default(AccountSecret);

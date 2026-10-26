@@ -18,7 +18,10 @@ namespace SwgTatooine.Bots;
 /// </remarks>
 public sealed record BotAuthRequest(
     [property: JsonPropertyName("name")] string Name,
-    [property: JsonPropertyName("password")] string Password);
+    [property: JsonPropertyName("password")] string Password,
+
+    // A bot says it is one at sign-up, so a viewer can tell it from a person; the server acts on nothing of it.
+    [property: JsonPropertyName("bot")] bool Bot = true);
 
 /// <summary>What a successful <c>/auth</c> call returns.</summary>
 /// <param name="Token">The bearer token to present on <c>HELLO</c>.</param>

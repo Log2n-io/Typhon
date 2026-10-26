@@ -310,3 +310,16 @@ describe('the panel keys', () => {
     expect(panelKey(key('i', { target: new Field() }))).toBeNull();
   });
 });
+
+describe('the players by who drives them', () => {
+  it('no name is the crowd, a bot flag a bot, the rest people', async () => {
+    const { countDrivers } = await import('../src/state/stats-store');
+    // Slots 0..5 live; slot 6 is not live and must not count.
+    const live = [0, 1, 2, 3, 4, 5, 6];
+    const nameIds = [0, 7, 8, 9, 0, 10, 11];
+    const bots = [0, 1, 0, 1, 1, 0, 1];
+    expect(countDrivers(live, 6, nameIds, bots)).toEqual({ crowd: 2, bots: 2, people: 2 });
+    expect(countDrivers(live, 6, null, bots)).toEqual({ crowd: 6, bots: 0, people: 0 });
+    expect(countDrivers(live, 6, nameIds, null)).toEqual({ crowd: 2, bots: 0, people: 4 });
+  });
+});

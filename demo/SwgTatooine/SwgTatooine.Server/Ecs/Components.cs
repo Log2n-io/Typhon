@@ -1189,12 +1189,16 @@ public struct PlayerControl
 /// 8-byte component keeps them at 24. It is the place for the customisation that will follow the outfit, for the same reason.
 /// </para>
 /// </remarks>
-[Component("Swg.PlayerLook", 2, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.PlayerLook", 3, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct PlayerLook
 {
     /// <summary>One plus an index into <see cref="TatooineData.PlayerOutfits"/>, or 0 for none. On the wire once, on enter: it never changes.</summary>
     [Field, OnEnter(CodecKind.U8, Name = "outfit", Saturate = true)] public byte Outfit;
+
+    /// <summary>1 for a body whose account the bot fleet signed up (<see cref="Accounts.Account"/>'s <c>Bot</c>), 0 otherwise: a viewer's to show, never a branch.</summary>
+    /// <remarks>In the padding after <see cref="Outfit"/>: the component stays eight bytes.</remarks>
+    [Field, OnEnter(CodecKind.U8, Name = "bot", Saturate = true)] public byte Bot;
 
     /// <summary>The character's name as a <see cref="PlayerNames"/> id, 0 for none (the scripted crowd). On the wire once, on enter.</summary>
     [Field, OnEnter(CodecKind.U32, Name = "nameId")] public uint NameId;

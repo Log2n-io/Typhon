@@ -152,7 +152,15 @@ import {
 import { Predictor, speedForClass, type GrantedSpeeds } from './predictor';
 import { DEFAULT_THIRD_PERSON_M, MAX_EYE_DISTANCE_M } from '../camera/eye-camera';
 import { bodyOpacityAt, marchEye } from '../camera/eye-clearance';
-import { useStats, type DownNotice, type FeetReport, type Inspection, type PlayerVitals } from '../state/stats-store';
+import {
+  countDrivers,
+  useStats,
+  type DownNotice,
+  type FeetReport,
+  type Inspection,
+  type PlayerDrivers,
+  type PlayerVitals,
+} from '../state/stats-store';
 import { useUi, type NavRow, type ShuttleportPrompt, type UiState } from '../state/ui-store';
 import { insideCity, NAV_KINDS, navLabel, nearestFacilities, relativeBearing, type NavTarget } from './nav-finder';
 import { nearestShuttleport } from './shuttle';
@@ -269,6 +277,7 @@ const PLANET_AT_START: RealmView = {
 
 /** {@link LayerStats} as this app holds it: the readonly face is what the store publishes. */
 interface MutableLayerStats {
+  drivers: PlayerDrivers | null;
   archetype: ArchetypeInfo;
   held: number;
   near: number;
@@ -2821,6 +2830,7 @@ export class ClientApp {
       held: 0,
       near: 0,
       far: 0,
+      drivers: null,
     }));
     this.heatChannels = grid.schema.archetypes.map((index) => ({
       name: this.archetypes.name(index),
@@ -5469,6 +5479,18 @@ export class ClientApp {
       row.held = this.world.archetypeStore(i).liveCount;
       row.near = this.layers[i].nearCount;
       row.far = this.layers[i].farCount;
+      if (row.archetype.name === 'Player') {
+        // Who drives them: the crowd, the bots, the people — a viewer's split, four times a second over the players held.
+        const store = this.world.archetypeStore(i);
+        const nameField = store.fieldIndex('nameId');
+        const botField = store.fieldIndex('bot');
+        row.drivers = countDrivers(
+          store.live,
+          store.liveCount,
+          nameField < 0 ? null : store.fieldAt(nameField),
+          botField < 0 ? null : store.fieldAt(botField),
+        );
+      }
     }
 
     // The layers past the archetypes are the extra ones (the shuttleport's dome): their instances belong to the row of

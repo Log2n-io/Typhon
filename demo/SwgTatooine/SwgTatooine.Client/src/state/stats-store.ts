@@ -41,6 +41,45 @@ export interface LayerStats {
   readonly held: number;
   readonly near: number;
   readonly far: number;
+  /**
+   * The players held, by who drives them — `null` on every other row: the crowd the server simulates (no name), the bots
+   * (their account says so, the replicated `bot`), and the people. Held only: the mesh and dot counts stay the row's.
+   */
+  readonly drivers: PlayerDrivers | null;
+}
+
+/** The players in view by who drives them. */
+export interface PlayerDrivers {
+  readonly crowd: number;
+  readonly bots: number;
+  readonly people: number;
+}
+
+/**
+ * Counts the players of a store by who drives them: no `nameId` is the scripted crowd, `bot` 1 a bot of the fleet, the rest
+ * people. Fields the schema does not carry count as absent: no names at all is all crowd.
+ */
+export function countDrivers(
+  live: ArrayLike<number>,
+  liveCount: number,
+  nameIds: ArrayLike<number> | null,
+  bots: ArrayLike<number> | null,
+): PlayerDrivers {
+  let crowd = 0;
+  let botCount = 0;
+  let people = 0;
+  for (let i = 0; i < liveCount; i++) {
+    const slot = live[i];
+    if (nameIds === null || !(nameIds[slot] > 0)) {
+      crowd++;
+    } else if (bots !== null && bots[slot] === 1) {
+      botCount++;
+    } else {
+      people++;
+    }
+  }
+
+  return { crowd, bots: botCount, people };
 }
 
 export interface InspectedField {

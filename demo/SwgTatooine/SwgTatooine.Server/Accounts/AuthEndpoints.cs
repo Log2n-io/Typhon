@@ -21,7 +21,8 @@ namespace SwgTatooine.Server.Accounts;
 public sealed record AuthRequest(
     [property: JsonPropertyName("name")] string Name,
     [property: JsonPropertyName("password")] string Password,
-    [property: JsonPropertyName("outfit")] int Outfit = 0);
+    [property: JsonPropertyName("outfit")] int Outfit = 0,
+    [property: JsonPropertyName("bot")] bool Bot = false);
 
 /// <summary>What a successful <c>/auth</c> call returns.</summary>
 /// <param name="Token">The bearer token to present on the WebSocket <c>HELLO</c>.</param>
@@ -138,7 +139,7 @@ public static class AuthEndpoints
             return TooMany();
         }
 
-        switch (AccountStore.TrySignup(dbe, request.Name, request.Password, out var account, request.Outfit))
+        switch (AccountStore.TrySignup(dbe, request.Name, request.Password, out var account, request.Outfit, request.Bot))
         {
             case AccountStore.SignupOutcome.Created:
                 return Results.Ok(Minted(account, request.Name));

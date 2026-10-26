@@ -573,6 +573,16 @@ button.active {
   text-align: left;
 }
 
+/* The players by who drives them, under the Player row: the crowd, the bots, the people. */
+.hud-layers tr.hud-sub td {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.hud-layers tr.hud-sub td:first-child {
+  padding-left: 12px;
+}
+
 /* Above the navigation pane, which owns the corner: it is always there while playing, the inspector only with a pick. */
 /* The bottom-right column (App.tsx): the inspector, the waypoint pane and the toolbar, stacked rather than offset. */
 .right-stack {

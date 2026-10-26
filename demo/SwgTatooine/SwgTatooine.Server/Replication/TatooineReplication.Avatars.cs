@@ -1142,7 +1142,7 @@ public static partial class TatooineReplication
         owner.Target = EntityId.Null;
 
         // What everyone draws this body in, and the name they read on it: the character's own, so every client — this one included — agrees.
-        var look = new PlayerLook { Outfit = profile.Outfit, NameId = PlayerNames.IdFor(profile.Name.AsString) };
+        var look = new PlayerLook { Outfit = profile.Outfit, NameId = PlayerNames.IdFor(profile.Name.AsString), Bot = AccountOf(tx, profile.Account).Bot };
 
         return tx.Spawn<Player>(
             Player.Bounds.Set(in bounds),

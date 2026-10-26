@@ -1,3 +1,4 @@
+import { Fragment } from 'react';
 import { SpeedClass } from '../data/source';
 import { gaitLabel } from '../app/gait';
 import { realmLabel } from '../data/realm-view';
@@ -277,12 +278,36 @@ export function Hud() {
         </thead>
         <tbody>
           {stats.layers.map((layer) => (
-            <tr key={layer.archetype.name}>
-              <td>{layer.archetype.label}</td>
-              <td>{layer.held.toLocaleString()}</td>
-              <td>{layer.near.toLocaleString()}</td>
-              <td>{layer.far.toLocaleString()}</td>
-            </tr>
+            <Fragment key={layer.archetype.name}>
+              <tr>
+                <td>{layer.archetype.label}</td>
+                <td>{layer.held.toLocaleString()}</td>
+                <td>{layer.near.toLocaleString()}</td>
+                <td>{layer.far.toLocaleString()}</td>
+              </tr>
+              {layer.drivers === null ? null : (
+                <>
+                  <tr className="hud-sub" title="Players the server simulates: no account, no name">
+                    <td>· crowd</td>
+                    <td>{layer.drivers.crowd.toLocaleString()}</td>
+                    <td />
+                    <td />
+                  </tr>
+                  <tr className="hud-sub" title="Players of the bot fleet: their account says so">
+                    <td>· bots</td>
+                    <td>{layer.drivers.bots.toLocaleString()}</td>
+                    <td />
+                    <td />
+                  </tr>
+                  <tr className="hud-sub" title="Players a person drives in a browser — you included">
+                    <td>· people</td>
+                    <td>{layer.drivers.people.toLocaleString()}</td>
+                    <td />
+                    <td />
+                  </tr>
+                </>
+              )}
+            </Fragment>
           ))}
           <tr>
             <td>Attack lines</td>

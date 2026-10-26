@@ -41,7 +41,7 @@ namespace SwgTatooine.Server;
 /// and an operator can delete an account but never read a password.
 /// </para>
 /// </remarks>
-[Component("Swg.Account", 2, StorageMode = StorageMode.Versioned)]
+[Component("Swg.Account", 3, StorageMode = StorageMode.Versioned)]
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public struct Account
 {
@@ -73,6 +73,15 @@ public struct Account
     /// </remarks>
     [Field]
     public byte Outfit;
+
+    /// <summary>1 for an account the bot fleet signed up (it says so at sign-up), 0 for a person's.</summary>
+    /// <remarks>
+    /// <b>Data, never a branch.</b> The server treats a bot exactly as it treats a browser — that is what makes the fleet a load test. This only lets a
+    /// viewer tell the two apart (Loïc, 2026-10-26: the HUD's player count split into the crowd, the bots and the people). In the byte of padding after
+    /// <see cref="Outfit"/>.
+    /// </remarks>
+    [Field]
+    public byte Bot;
 }
 
 /// <summary>
