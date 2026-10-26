@@ -125,8 +125,10 @@ internal sealed class LairLifeSystem : CallbackSystem
         // Read, not consumed: a consumer is skipped on a tick with no corpse, and the pass must run on those too (TatooineSim.BuildSchedule).
         .ReadsEvents(_bridge.CorpseQueue)
 
-        // The census counts the players near each point of interest (lair-objectives.md L-1).
+        // The census counts the players near each point of interest (lair-objectives.md L-1), and who drives them, where (GET /swg/stats).
         .Reads<PlayerPlacement>()
+        .Reads<PlayerControl>()
+        .Reads<PlayerLook>()
         .Writes<Lair>()
         .Writes<LairPlacement>()
         .Writes<LairVitals>()

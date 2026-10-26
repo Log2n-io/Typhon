@@ -37,6 +37,7 @@ public sealed partial class TatooineSim
         // Read through the field at each request: the bridge is made by StartReplication, below.
         EconomyEndpoints.CountersJson = () => _bridge?.EconomyCountersJson() ?? "{}";
         EconomyEndpoints.CrowdJson = () => _bridge?.CrowdCountersJson() ?? "{}";
+        EconomyEndpoints.DemoJson = () => _bridge?.DemoStatsJson() ?? "{}";
         StartReplication(shapes);
         try
         {
@@ -59,6 +60,7 @@ public sealed partial class TatooineSim
             Console.WriteLine($"  crowd: {_bridge?.CrowdCountersJson() ?? "{}"}");
             EconomyEndpoints.CountersJson = null;
             EconomyEndpoints.CrowdJson = null;
+            EconomyEndpoints.DemoJson = null;
         }
     }
 

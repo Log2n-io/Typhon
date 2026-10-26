@@ -106,6 +106,9 @@ public sealed partial class SimBridge
         if (pass)
         {
             Pass(tx, tick, respawnTicks);
+
+            // The demo's own numbers, once a second (GET /swg/stats): the counters' rates and who is playing where.
+            SampleStats(tx, tick);
         }
 
         tx.Commit();

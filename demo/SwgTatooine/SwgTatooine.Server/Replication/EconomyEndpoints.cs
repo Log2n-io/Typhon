@@ -112,6 +112,9 @@ public static class EconomyEndpoints
     /// <summary>What <c>GET /swg/crowd/stats</c> answers: the served simulation's crowd counters.</summary>
     public static Func<string> CrowdJson { get; set; }
 
+    /// <summary>What <c>GET /swg/stats</c> answers: the served simulation's numbers and their rates.</summary>
+    public static Func<string> DemoJson { get; set; }
+
     /// <summary>Maps the three endpoints.</summary>
     public static IEndpointRouteBuilder MapEconomy(this IEndpointRouteBuilder app, DatabaseEngine dbe)
     {
@@ -124,6 +127,9 @@ public static class EconomyEndpoints
 
         // The crowd's lair objectives (lair-objectives.md L-6): beside the economy's, the demo's own numbers, which no Typhon tool knows about.
         app.MapGet("/swg/crowd/stats", () => Results.Text(CrowdJson?.Invoke() ?? "{}", "application/json"));
+
+        // Everything the demo counts, with its rates, in one answer: the economy, the missions, who is playing where, the crowd.
+        app.MapGet("/swg/stats", () => Results.Text(DemoJson?.Invoke() ?? "{}", "application/json"));
         return app;
     }
 

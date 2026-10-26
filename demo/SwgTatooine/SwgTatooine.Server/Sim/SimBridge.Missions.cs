@@ -627,6 +627,7 @@ public sealed partial class SimBridge
         _held.Add(id);
         CountHolder(holder, +1);
         Interlocked.Increment(ref _missionsIssued);
+        Interlocked.Increment(ref _missionsTakenTotal);
 
         // The lair now, while its holder is here. One that cannot be placed this tick is drawn by the next pass.
         if (TryDrawLair(tx, id, ref m, body, tick))
@@ -681,10 +682,12 @@ public sealed partial class SimBridge
         if (completed)
         {
             Interlocked.Increment(ref _missionsCompleted);
+            Interlocked.Increment(ref _missionsCompletedTotal);
         }
         else
         {
             Interlocked.Increment(ref _missionsAbandoned);
+            Interlocked.Increment(ref _missionsCancelledTotal);
         }
     }
 
