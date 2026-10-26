@@ -26,7 +26,7 @@ namespace SwgTatooine.Dashboard;
 //       "why":        { "HuntTimeout": 12, "CreatureNoticed": 80, ... },   goal reasons since the start (BotBrain.Trace.cs GoalWhy)
 //       "whyPerMin":  { the same keys },
 //       "legs":       { "Planned": 0, "Waypoint": 0, "Done": 0, "Stretch": 0, "Replanned": 0, "Stuck": 0, "Abandoned": 0,
-//                       "TravelStuck": 0, "Detour": 0 },                       walk events since the start (LegWhy)
+//                       "TravelStuck": 0, "Detour": 0, "CityEdge": 0 },        walk events since the start (LegWhy)
 //       "legsPerMin": { the same keys },
 //       "goalChangesPerBotMin": { "mean": 1.2, "p50": 1.0, "p90": 3.0, "max": 12.0 },   across the bots, over the window
 //       "reversalsPerBotMin":   { "mean": 0.1, "p50": 0.0, "p90": 0.5, "max": 4.0 }     a move > 135° off the last within 5 s

@@ -123,16 +123,51 @@ public sealed partial class BotBrain
     /// </remarks>
     public const double UseReachM = 1d;
 
+    /// <summary>
+    /// A terminal whose stand point a walk stuck short of is used from here if the body is within this of the terminal, metres: inside the server's own
+    /// reach for a take (<c>TatooineData.MissionTerminalReachM</c>, 6 m) with room to spare.
+    /// </summary>
+    /// <remarks>
+    /// A terminal is a queue. Ringed by other bodies the stand point is out of reach for good, and the walk stuck "0 m to go", failed the errand, and
+    /// tried the same terminal again — the live telemetry's oscillating bots, and a third of all errands failed (2026-10-27). A person in that crowd
+    /// reads the list over the shoulders in front.
+    /// </remarks>
+    public const float TerminalUseFromM = 4f;
+
+    /// <summary>
+    /// A walk's first point within this of the body, and behind it on the way to the next, is passed at once, metres: the open cell a search starts
+    /// from when the body stands in a wall's margin, which can lie behind it.
+    /// </summary>
+    /// <remarks>Walked to, every walk planned from against a wall began by stepping back, and every re-plan from there again (live, 2026-10-27).</remarks>
+    public const double StepOutM = 1.5d;
+
     /// <summary>A searched path's point counts as reached this close, metres.</summary>
     /// <remarks>
     /// A path's points are its corners, and every leg between two of them is clear only from corner to corner: called reached from 2.5 m, the walk
     /// cut each corner by that much and the third live test's rider steered across a house's corner into its wall. <c>MoveTo</c> puts the body on a
-    /// point, so the reach only has to absorb the server's last step.
+    /// point, so the reach only has to absorb the server's last step. On foot a corner is passed earlier, but only by sight: see <see cref="Follow"/>.
     /// </remarks>
     public const double CornerReachM = 0.75d;
 
-    /// <summary>A leg that has not closed on its next point by half a metre in this long is stuck, in seconds.</summary>
+    /// <summary>A walk's exact part — a door's, a terminal's published points — that has not closed by half a metre in this long is stuck, seconds.</summary>
+    /// <remarks>Long, because a stand point is in a crowd: bodies at a terminal shove each other, and a bot that gave up on being shoved used none.</remarks>
     public const double StuckSeconds = 4d;
+
+    /// <summary>
+    /// A walk's open part, or a straight line, that has not closed by half a metre in this long is stuck, in seconds — then searched again from where the
+    /// body stands.
+    /// </summary>
+    /// <remarks>
+    /// Five decisions at the 4 Hz driver: a body running at 10 m/s covers 12 m in it, so half a metre is no progress at all. It was four seconds, and a bot
+    /// leaving town pushed against a house's wall for all four, sliding along it, before it looked for a way round (Loïc, 2026-10-26).
+    /// </remarks>
+    public const double OpenStuckSeconds = 1.25d;
+
+    /// <summary>
+    /// What a step cut across a corner keeps clear of the corner's wall beyond the body's own half, metres: a heading is renewed a few times a second, not
+    /// continuously, and the server's step does not land on the line to the hundredth.
+    /// </summary>
+    public const float CutClearanceM = 0.1f;
 
     /// <summary>A building further than this is not one a bot in the street decides to walk into, metres.</summary>
     public const float DoorReachM = 120f;
@@ -184,6 +219,7 @@ public sealed partial class BotBrain
     private readonly long _patienceTicks;
     private readonly double _rate;
     private readonly long _stuckTicks;
+    private readonly long _openStuckTicks;
     private readonly List<SeenStructure> _seen = [];
     private readonly Leg _leg = new();
     private uint _rng;
@@ -214,6 +250,7 @@ public sealed partial class BotBrain
         _idleTicks = Ticks(IdleSeconds);
         _patienceTicks = Ticks(ShuttlePatienceSeconds);
         _stuckTicks = Ticks(StuckSeconds);
+        _openStuckTicks = Ticks(OpenStuckSeconds);
         Facilities = new FacilityMap();
         HomeRegion = homeRegion > 0 && homeRegion <= cities.Length ? homeRegion : 0;
     }
@@ -330,8 +367,10 @@ public sealed partial class BotBrain
     /// <summary>After a visit, the shuttle is the next thing it does.</summary>
     private bool _flyNext;
 
-    /// <summary>The kind of facility the errand under way goes to.</summary>
+    /// <summary>The kind of facility the errand under way goes to, and where it stands.</summary>
     private int _visitKind;
+
+    private (float X, float Z) _visitAt;
 
     /// <summary>When it set out on the mission it holds, or -1 while it holds none it has set out on.</summary>
     private long _questSince = -1;
@@ -397,6 +436,9 @@ public sealed partial class BotBrain
         // The swoop, before the goal: getting on or off is a command of its own, and the goal's movement waits a tick for it.
         if (MountIntent(in world, tick) is { } mount)
         {
+            // Getting on or off stands the body still for a tick or two, which is not being stuck.
+            _travelBestAt = tick;
+            _leg.BestAt = tick;
             return mount;
         }
 
@@ -670,6 +712,17 @@ public sealed partial class BotBrain
     private Intent GoToward(in Perceived world, long tick, float tx, float tz, double distance, bool ride)
     {
         _wantMounted = ride && distance > 2 * ArrivedM;
+        var inCity = RegionAt(world.X, world.Z) != 0;
+
+        // Out of the city on its walk out: the rest is open desert, ridden straight from its edge. Walked on to the stretch's end, the last of the
+        // stretch was a hundred metres on foot past the edge, and getting on mid-walk rode the walk's corners at the swoop's speed.
+        if (_leg.Active && _leg.CityWalk && !inCity)
+        {
+            NoteLeg(LegWhy.CityEdge, tick);
+            _leg.Clear();
+            _travelBest = double.MaxValue;
+            _travelBestAt = tick;
+        }
 
         // A walk round a building that stood in the straight line, once the watchdog found it; then the straight line again.
         if (_leg.Active)
@@ -693,7 +746,7 @@ public sealed partial class BotBrain
 
         // In a city, on foot: searched round its buildings before it is walked, a stretch at a time, as a person clicking would. A straight line until
         // stuck walked bots in through a shuttleport's gate and against its far wall.
-        if (_assets != null && world.Structures != null && tick >= _cityWalkAt && RegionAt(world.X, world.Z) != 0)
+        if (_assets != null && world.Structures != null && tick >= _cityWalkAt && inCity)
         {
             var reach = (float)Math.Min(distance, CityLegM);
             var heading = Routing.HeadingTo(world.X, world.Z, tx, tz);
@@ -705,6 +758,7 @@ public sealed partial class BotBrain
             {
                 _leg.Ride = ride;
                 _leg.KeepRiding = true;
+                _leg.CityWalk = true;
                 return Follow(in world, tick, out _);
             }
 
@@ -717,7 +771,7 @@ public sealed partial class BotBrain
             _travelBest = distance;
             _travelBestAt = tick;
         }
-        else if (tick - _travelBestAt > _stuckTicks && _assets != null && world.Structures != null)
+        else if (tick - _travelBestAt > _openStuckTicks && _assets != null && world.Structures != null)
         {
             // Stuck against something: search a way round it toward the city — as far as a search reaches, then nearer, then off to either side. A
             // single goal straight ahead can stand inside the next building, and a search that cannot reach its goal finds nothing at all: the
@@ -960,6 +1014,7 @@ public sealed partial class BotBrain
         }
 
         _leg.FinalReach = UseReachM;
+        _visitAt = (found.X, found.Z);
 
         Become(Goal.Visiting, GoalWhy.ErrandStarted, tick, (uint)kind, (float)Routing.Distance(world.X, world.Z, found.X, found.Z));
         _using = false;
@@ -983,6 +1038,12 @@ public sealed partial class BotBrain
         }
 
         var step = Follow(in world, tick, out var end);
+        if (end == LegEnd.Stuck && Routing.Distance(world.X, world.Z, _visitAt.X, _visitAt.Z) <= TerminalUseFromM)
+        {
+            // Stuck short of the stand point, in the crowd round the terminal: used from here.
+            end = LegEnd.Done;
+        }
+
         switch (end)
         {
             case LegEnd.Going:
@@ -1076,8 +1137,10 @@ public sealed partial class BotBrain
             return step;
         }
 
-        // The path ran out without a crossing, or stuck short of the door: give up on this one.
-        Become(Goal.Idling, GoalWhy.EnterFailed, tick);
+        // The path ran out without a crossing, or stuck short of the door: give up on this one. Told how (the subject: 1 walked to its end, 2 stuck) and
+        // how far short of the door's last point, which is what says whether a door fails by its crowd or by its geometry.
+        var left = _leg.Points.Count > 0 ? Routing.Distance(world.X, world.Z, _leg.Points[^1].X, _leg.Points[^1].Z) : 0d;
+        Become(Goal.Idling, GoalWhy.EnterFailed, tick, (uint)end, (float)left);
         _until = tick + Ticks(2);
         return Intent.Move(0f, 0);
     }
@@ -1223,6 +1286,7 @@ public sealed partial class BotBrain
             _leg.Start(stretch, stretch.Count, tick);
             _leg.Ride = far / Routing.RunMps > Routing.RideOverSeconds;
             _leg.Rest = new LegRest(goal, tail.ToArray(), exactGoal);
+            Sight(from);
             NoteLeg(LegWhy.Planned, tick);
             return true;
         }
@@ -1249,7 +1313,8 @@ public sealed partial class BotBrain
             points.Add(goal);
         }
 
-        var precise = points.Count - 1;
+        // A searched point that is only a direction is not an exact one: the open part runs to the end, and the end is passed rather than stood on.
+        var precise = searching && !exactGoal ? points.Count : points.Count - 1;
         foreach (var p in tail)
         {
             points.Add(p);
@@ -1257,8 +1322,34 @@ public sealed partial class BotBrain
 
         _leg.Start(points, precise, tick);
         _leg.Ride = far / Routing.RunMps > Routing.RideOverSeconds;
+        if (searching)
+        {
+            Sight(from);
+        }
+
         NoteLeg(LegWhy.Planned, tick);
         return true;
+    }
+
+    /// <summary>How far round a searched walk its walls are kept, metres: a body pushed off the walk, or cutting a corner, stays within this of it.</summary>
+    private const float SightMarginM = 12f;
+
+    /// <summary>Keeps the walls round the walk just planned, grown by a body and <see cref="CutClearanceM"/>: what a corner is cut against.</summary>
+    /// <param name="from">Where the body stands, which is where the walk starts.</param>
+    private void Sight((float X, float Z) from)
+    {
+        var leg = _leg;
+        var (minX, minZ, maxX, maxZ) = (from.X, from.Z, from.X, from.Z);
+        foreach (var p in leg.Points)
+        {
+            (minX, maxX) = (MathF.Min(minX, p.X), MathF.Max(maxX, p.X));
+            (minZ, maxZ) = (MathF.Min(minZ, p.Z), MathF.Max(maxZ, p.Z));
+        }
+
+        CityPath.CollectWalls(
+            _seen, _assets, minX - SightMarginM, minZ - SightMarginM, maxX + SightMarginM, maxZ + SightMarginM, leg.Walls, CityPath.BodyHalfM + CutClearanceM);
+        leg.HasWalls = true;
+        leg.Origin = from;
     }
 
     /// <summary>
@@ -1319,9 +1410,18 @@ public sealed partial class BotBrain
     /// <returns>The command.</returns>
     /// <remarks>
     /// <para>
-    /// <b><c>MoveTo</c> for every point, because the server walks to it and stops on it.</b> A heading renewed a few times a second overshoots a door by
-    /// a body's length at a run; a destination does not. It is a destination, so it is sent when the point changes and refreshed every two seconds in
-    /// case one was dropped — not every tick.
+    /// <b>On foot, the open part is RUN: <c>MoveDir</c> at the next point, every decision, and a corner run past rather than stood on.</b> A
+    /// <c>MoveTo</c> is "go there and stop": sent for every corner, with a corner called reached from 0.75 m and a decision every 2.5 m of running, the
+    /// server stopped the body at most corners before the next point was sent — a bot walking a city stopped and started at every one (Loïc,
+    /// 2026-10-26). A corner nearer than one decision's run is run at when the run carries the body past it in the clear — a straight step that enters
+    /// none of the walk's walls grown by a body and <see cref="CutClearanceM"/> (<see cref="CityPath.SegmentClear"/>) — and passed once the body is
+    /// beyond it; walked onto with <c>MoveTo</c>, the one stop left, only when even that step would touch a wall. A point is also passed when the one
+    /// after it is in sight (<see cref="Passes"/>).
+    /// </para>
+    /// <para>
+    /// <b><c>MoveTo</c> for the exact part, because the server walks to it and stops on it.</b> A heading renewed a few times a second overshoots a door
+    /// by a body's length at a run; a destination does not. It is a destination, so it is sent when the point changes and refreshed every two seconds in
+    /// case one was dropped — not every tick. So is every point of a walk with no walls in hand (a room's graph, a port's approach walked backwards).
     /// </para>
     /// <para>
     /// <b>Ridden in the open, walked at the end.</b> A ridden leg is <c>MoveDir</c> at the swoop's class while the point is more than fifteen metres off,
@@ -1339,6 +1439,9 @@ public sealed partial class BotBrain
             return Intent.None;
         }
 
+        // Run by sight: on foot, with the walk's walls in hand. A rider steers as it always did (review 8).
+        var running = leg.HasWalls && !world.Mounted;
+        var stride = Routing.RunMps / _rate;
         var p = leg.Points[leg.Next];
         var d = Routing.Distance(world.X, world.Z, p.X, p.Z);
         while (true)
@@ -1346,10 +1449,14 @@ public sealed partial class BotBrain
             // The last point closest of all: a door's is past its plane, and calling it reached a little short would be calling a crossing that
             // never fired. The server stops a MoveTo on its point, so a body gets there.
             var exact = leg.Next >= leg.Precise;
+            var last = leg.Next == leg.Points.Count - 1;
             // Every path point to a body's length, ridden or not: a rider who called a corner reached from eight metres off cut through the house the
-            // corner went round — the first live run's stuck bots, all of them pressed against a wall between two waypoints.
-            var reach = leg.Next == leg.Points.Count - 1 && leg.Rest == null ? leg.FinalReach : exact ? 0.6d : CornerReachM;
-            if (d > reach)
+            // corner went round — the first live run's stuck bots, all of them pressed against a wall between two waypoints. Run, the end of the open
+            // part (a stretch's end, a direction's) is passed within a stride: it is where the next search starts, not a place to stand.
+            var reach = exact ? (last && leg.Rest == null ? leg.FinalReach : 0.6d)
+                : running && last ? stride
+                : last && leg.Rest == null ? leg.FinalReach : CornerReachM;
+            if (d > reach && !(running && !exact && !last && Passes(in world, d, stride)))
             {
                 break;
             }
@@ -1379,28 +1486,30 @@ public sealed partial class BotBrain
             d = Routing.Distance(world.X, world.Z, p.X, p.Z);
         }
 
-        if (d < leg.Best - 0.5d)
+        // Progress is the walk left — to the next point and on along the rest — so a corner cut, which moves the body off the next point's bearing, counts.
+        var left = d + leg.LengthTo(leg.Next, leg.Points.Count - 1);
+        if (left < leg.Best - 0.5d)
         {
-            leg.Best = d;
+            leg.Best = left;
             leg.BestAt = tick;
         }
-        else if (tick - leg.BestAt > _stuckTicks)
+        else if (tick - leg.BestAt > (leg.Next < leg.Precise ? _openStuckTicks : _stuckTicks))
         {
             NoteStuck(leg.BestAt, tick);
             // Stuck on the open-ground part: search again from where it stands, twice, before the goal gives up. The published points are walked
             // exactly and are not searched — stuck there is a door or a terminal in the way, which a new search would not change.
-            if (leg.Next < leg.Precise && leg.Replans < 2 && leg.Precise < leg.Points.Count)
+            if (leg.Next < leg.Precise && leg.Replans < 2 && leg.Rest == null)
             {
-                var goal = leg.Points[leg.Precise];
-                var tail = leg.Points.GetRange(leg.Precise + 1, leg.Points.Count - leg.Precise - 1).ToArray();
+                // To the exact part's first point, or — a walk whose end is only a direction — to that end, as loosely as it was asked.
+                var exactGoal = leg.Precise < leg.Points.Count;
+                var goal = leg.Points[exactGoal ? leg.Precise : leg.Points.Count - 1];
+                var tail = exactGoal ? leg.Points.GetRange(leg.Precise + 1, leg.Points.Count - leg.Precise - 1).ToArray() : [];
                 var replans = leg.Replans + 1;
-                var ride = leg.Ride;
-                var finalReach = leg.FinalReach;
-                if (PlanWalk(in world, goal, tail, tick))
+                var carried = Carry();
+                if (PlanWalk(in world, goal, tail, tick, exactGoal))
                 {
+                    Restore(carried);
                     _leg.Replans = replans;
-                    _leg.Ride = ride;
-                    _leg.FinalReach = finalReach;
                     NoteLeg(LegWhy.Replanned, tick);
                     return Follow(in world, tick, out end);
                 }
@@ -1436,6 +1545,19 @@ public sealed partial class BotBrain
             return Intent.Move(Routing.HeadingTo(world.X, world.Z, p.X, p.Z), Routing.SwoopClass);
         }
 
+        if (running && leg.Next < leg.Precise)
+        {
+            // Run at it — renewed every decision, as a held key is — unless it is a corner nearer than a stride that cannot be cut yet and the stride
+            // past it would touch a wall: then walked onto, and the next decision runs on from there.
+            var heading = Routing.HeadingTo(world.X, world.Z, p.X, p.Z);
+            var ahead = (X: world.X + (MathF.Cos(heading) * (float)stride), Z: world.Z + (MathF.Sin(heading) * (float)stride));
+            if (d > stride || CityPath.SegmentClear(leg.Walls, world.X, world.Z, ahead.X, ahead.Z))
+            {
+                leg.Sent = (float.NaN, float.NaN);
+                return Intent.Move(heading, Routing.SpeedClassOf(TravelMode.Run));
+            }
+        }
+
         if (leg.Sent != p || tick - leg.SentAt >= Ticks(2))
         {
             leg.Sent = p;
@@ -1447,27 +1569,60 @@ public sealed partial class BotBrain
     }
 
     /// <summary>
+    /// Whether the open point the body is heading for is passed already, on foot: the body is within a stride of it and past it along the walk's line to
+    /// it, or the point after it is in sight (<see cref="CityPath.SegmentClear"/>).
+    /// </summary>
+    /// <remarks>
+    /// Running past is how a corner is passed: a searched walk is pulled taut, so its corners stand at the walls and the step to the point after one
+    /// clears its wall only from a few tenths of a metre off. Sight is for a body off its walk — shoved by the crowd past a corner, or a walk whose point
+    /// was only its way out of a wall's margin — which otherwise ran back to a point it no longer needed.
+    /// </remarks>
+    private bool Passes(in Perceived world, double d, double stride)
+    {
+        var leg = _leg;
+        var p = leg.Points[leg.Next];
+        var after = leg.Points[leg.Next + 1];
+        var from = leg.Next > 0 ? leg.Points[leg.Next - 1] : leg.Origin;
+        if (d <= stride && (((world.X - p.X) * (p.X - from.X)) + ((world.Z - p.Z) * (p.Z - from.Z))) > 0f)
+        {
+            return true;
+        }
+
+        // A walk's first point behind the body on the way to the next: the open cell its search started from, not somewhere to go back to (StepOutM).
+        if (leg.Next == 0 && d <= StepOutM && (((world.X - p.X) * (after.X - p.X)) + ((world.Z - p.Z) * (after.Z - p.Z))) > 0f)
+        {
+            return true;
+        }
+
+        return CityPath.SegmentClear(leg.Walls, world.X, world.Z, after.X, after.Z);
+    }
+
+    /// <summary>What a walk searched again carries over from the one it replaces: ridden, kept riding, got off, a city's, and its last reach.</summary>
+    private (bool Ride, bool KeepRiding, bool Dismounted, bool CityWalk, double FinalReach) Carry() =>
+        (_leg.Ride, _leg.KeepRiding, _leg.Dismounted, _leg.CityWalk, _leg.FinalReach);
+
+    private void Restore((bool Ride, bool KeepRiding, bool Dismounted, bool CityWalk, double FinalReach) carried) =>
+        (_leg.Ride, _leg.KeepRiding, _leg.Dismounted, _leg.CityWalk, _leg.FinalReach) = carried;
+
+    /// <summary>
     /// The rest of a walk planned a stretch at a time, searched from where the body stands: what the walk was riding, keeping and reaching for carries
     /// over, so the last stretch ends as the walk was asked to.
     /// </summary>
     private Intent GoOn(in Perceived world, long tick, out LegEnd end, int replans)
     {
         var rest = _leg.Rest;
-        var (ride, keepRiding, dismounted, finalReach) = (_leg.Ride, _leg.KeepRiding, _leg.Dismounted, _leg.FinalReach);
+        var carried = Carry();
         if (!PlanWalk(in world, rest.Goal, rest.Tail, tick, rest.ExactGoal))
         {
             _leg.Abandon();
             NoteLeg(LegWhy.Abandoned, tick);
             end = LegEnd.Stuck;
-            _wantMounted = keepRiding && ride;
+            _wantMounted = carried.KeepRiding && carried.Ride;
             return Intent.Move(0f, 0);
         }
 
         _leg.Replans = replans;
-        _leg.Ride = ride;
-        _leg.KeepRiding = keepRiding;
-        _leg.Dismounted = dismounted;
-        _leg.FinalReach = finalReach;
+        Restore(carried);
         NoteLeg(replans > 0 ? LegWhy.Replanned : LegWhy.Stretch, tick);
         return Follow(in world, tick, out end);
     }
@@ -1635,6 +1790,20 @@ public sealed partial class BotBrain
         /// <summary>A detour's: ridden to its end, which is only a direction, and not got off before it.</summary>
         public bool KeepRiding;
 
+        /// <summary>A walk across a city toward somewhere beyond it: dropped at the city's edge, where the open desert starts.</summary>
+        public bool CityWalk;
+
+        /// <summary>
+        /// The walls round the walk, grown by a body and <see cref="CutClearanceM"/>, when it was searched (<see cref="HasWalls"/>): what a corner is cut
+        /// against. None for a walk on a published graph — a room's, a port's approach walked backwards — which is walked point by point.
+        /// </summary>
+        public readonly List<PlanBox> Walls = [];
+
+        public bool HasWalls;
+
+        /// <summary>Where the walk started: the line to its first point starts here.</summary>
+        public (float X, float Z) Origin;
+
         /// <summary>The walk from point <paramref name="from"/> to point <paramref name="to"/> along the leg, metres.</summary>
         public double LengthTo(int from, int to)
         {
@@ -1668,6 +1837,9 @@ public sealed partial class BotBrain
             Ride = false;
             Dismounted = false;
             KeepRiding = false;
+            CityWalk = false;
+            Walls.Clear();
+            HasWalls = false;
             Best = double.MaxValue;
             BestAt = tick;
             Sent = (float.NaN, float.NaN);
@@ -1684,6 +1856,7 @@ public sealed partial class BotBrain
             Ride = false;
             Dismounted = false;
             KeepRiding = false;
+            CityWalk = false;
             Ended = LegEnd.Going;
             Rest = null;
         }

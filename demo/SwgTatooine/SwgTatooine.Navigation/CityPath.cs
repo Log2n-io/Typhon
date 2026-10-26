@@ -236,6 +236,112 @@ public static class CityPath
         return grid;
     }
 
+    /// <summary>
+    /// The walls of the structures that touch a rectangle, placed, turned and grown by <paramref name="half"/>, appended to <paramref name="into"/>: what
+    /// <see cref="SegmentClear"/> tests a straight step against. The same rule as <see cref="Walls"/>; only the raster is missing.
+    /// </summary>
+    public static void CollectWalls(
+        IReadOnlyList<SeenStructure> structures,
+        IWallPlans assets,
+        float minX,
+        float minZ,
+        float maxX,
+        float maxZ,
+        List<PlanBox> into,
+        float half = BodyHalfM)
+    {
+        for (var i = 0; i < structures.Count; i++)
+        {
+            var s = structures[i];
+            if (assets.WallsOf(s.Asset) is not { } walls)
+            {
+                continue;
+            }
+
+            foreach (var wall in walls)
+            {
+                if (!IsWall(in wall))
+                {
+                    continue;
+                }
+
+                var b = Turn(s.Yaw, wall);
+                var x0 = s.X + b.MinX - half;
+                var x1 = s.X + b.MaxX + half;
+                var z0 = s.Z + b.MinZ - half;
+                var z1 = s.Z + b.MaxZ + half;
+                if (x1 >= minX && x0 <= maxX && z1 >= minZ && z0 <= maxZ)
+                {
+                    into.Add(b with { MinX = x0, MinZ = z0, MaxX = x1, MaxZ = z1, Radius = b.Radius > 0f ? b.Radius + half : 0f });
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether a straight step between two points enters none of <paramref name="walls"/> (as <see cref="CollectWalls"/> grew them): exact, not sampled
+    /// on a grid — a rectangle by its slabs, a disc by its distance to the step.
+    /// </summary>
+    public static bool SegmentClear(List<PlanBox> walls, float ax, float az, float bx, float bz)
+    {
+        var (lx, hx) = ax < bx ? (ax, bx) : (bx, ax);
+        var (lz, hz) = az < bz ? (az, bz) : (bz, az);
+        var dx = bx - ax;
+        var dz = bz - az;
+        foreach (var w in walls)
+        {
+            if (hx <= w.MinX || lx >= w.MaxX || hz <= w.MinZ || lz >= w.MaxZ)
+            {
+                continue;
+            }
+
+            if (w.Radius > 0f)
+            {
+                var cx = (w.MinX + w.MaxX) * 0.5f;
+                var cz = (w.MinZ + w.MaxZ) * 0.5f;
+                var len2 = (dx * dx) + (dz * dz);
+                var t = len2 > 0f ? Math.Clamp((((cx - ax) * dx) + ((cz - az) * dz)) / len2, 0f, 1f) : 0f;
+                var ex = ax + (dx * t) - cx;
+                var ez = az + (dz * t) - cz;
+                if ((ex * ex) + (ez * ez) < w.Radius * w.Radius)
+                {
+                    return false;
+                }
+
+                continue;
+            }
+
+            var t0 = 0f;
+            var t1 = 1f;
+            if (Slab(ax, dx, w.MinX, w.MaxX, ref t0, ref t1) && Slab(az, dz, w.MinZ, w.MaxZ, ref t0, ref t1) && t0 < t1)
+            {
+                return false;
+            }
+        }
+
+        return true;
+
+        // Narrows [t0, t1] to the part of the step inside one axis's open interval; false when none of it is.
+        static bool Slab(float a, float d, float min, float max, ref float t0, ref float t1)
+        {
+            if (MathF.Abs(d) < 1e-6f)
+            {
+                return a > min && a < max;
+            }
+
+            var ta = (min - a) / d;
+            var tb = (max - a) / d;
+            if (ta > tb)
+            {
+                (ta, tb) = (tb, ta);
+            }
+
+            t0 = MathF.Max(t0, ta);
+            t1 = MathF.Min(t1, tb);
+            return t0 < t1;
+        }
+    }
+
     /// <summary>How far a blocked start or goal is moved to open ground, metres: a body pressed into a corner, a goal a few metres into a building.</summary>
     public const float SnapM = 8f;
 

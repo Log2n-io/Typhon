@@ -327,6 +327,11 @@ public sealed partial class BotSwarm : IAsyncDisposable
     /// </summary>
     private BotAssets _assets;
 
+    /// <summary>
+    /// Every facility in the world (<c>GET /swg/facilities</c>), read once per fleet; null when the server lists none — the brains then learn by looking.
+    /// </summary>
+    private List<ListedFacility> _facilities;
+
     /// <summary>Bots driven concurrently within one tick.</summary>
     /// <remarks>
     /// Large enough that the per-tick cost is a few round trips rather than N of them, small enough that the in-flight sends and their
@@ -1244,6 +1249,18 @@ public sealed partial class BotSwarm : IAsyncDisposable
                 Console.WriteLine(_assets == null
                     ? "  brain: the server publishes no asset set; bots walk straight lines and enter no building"
                     : $"  brain: {_assets.Count} structure assets read; bots walk round buildings, through doors and to terminals");
+                try
+                {
+                    _facilities = await FacilityMap.LoadAsync(http, server, ct).ConfigureAwait(false);
+                    Console.WriteLine(_facilities == null
+                        ? "  brain: the server lists no facilities; bots learn them by looking"
+                        : $"  brain: {_facilities.Count} facilities listed; a bot's nearest terminal is the nearest that exists");
+                }
+                catch (Exception e) when (e is HttpRequestException or System.Text.Json.JsonException or KeyNotFoundException or InvalidOperationException
+                    or FormatException)
+                {
+                    Console.WriteLine($"  !! brain: the facility list could not be read ({e.Message}); bots learn them by looking");
+                }
             }
             catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException or KeyNotFoundException
                 or InvalidOperationException or FormatException)
@@ -1888,7 +1905,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
     /// </remarks>
     private async Task<Bot> OpenOneAsync(int index, CancellationToken ct)
     {
-        var bot = new Bot(index, _options, _assets);
+        var bot = new Bot(index, _options, _assets, _facilities);
         bot.Client.Disconnected += (code, _) => Note(code, bot.Client.CloseDetail);
 
         // Interlocked, because Fault is raised from each client's OWN receive loop: with N bots these are N threads, and `Faults++` is a
@@ -2488,7 +2505,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
         private static readonly bool TraceAll = Environment.GetEnvironmentVariable("SWG_BOT_TRACE") == "all";
         public readonly NewsCounter News = new();
 
-        public Bot(int index, BotSwarmOptions options, BotAssets assets = null)
+        public Bot(int index, BotSwarmOptions options, BotAssets assets = null, IReadOnlyList<ListedFacility> facilities = null)
         {
             // Deterministic from the index, so a run is reproducible and two bots are never in the same place. The golden ratio keeps successive angles from
             // clustering, which a plain index × constant does not.
@@ -2514,6 +2531,11 @@ public sealed partial class BotSwarm : IAsyncDisposable
                     options.TickHz,
                     assets,
                     index < options.HomeBots ? options.HomeRegion : 0);
+                if (facilities != null)
+                {
+                    _brain.Facilities.Seed(facilities);
+                }
+
                 _eyes = new Perception();
                 _ticksPerSecond = Math.Max(1, options.TickHz);
                 _tipEveryTicks = (long)Math.Round(options.TipSeconds * _ticksPerSecond);

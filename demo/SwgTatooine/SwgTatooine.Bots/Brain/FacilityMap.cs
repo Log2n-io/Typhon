@@ -1,4 +1,10 @@
+using System;
 using System.Collections.Generic;
+using System.Net;
+using System.Net.Http;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace SwgTatooine.Bots.Brain;
 
@@ -16,13 +22,19 @@ public readonly record struct Facility(float X, float Z, int AssetSlot, int Yaw)
     public int Asset => AssetSlot - 1;
 }
 
-/// <summary>The facilities a bot has seen, remembered by the region they belong to.</summary>
+/// <summary>One facility as <c>GET /swg/facilities</c> lists it: the region it serves (a city plus one), its kind, and where it stands.</summary>
+public readonly record struct ListedFacility(int Region, int Kind, Facility At);
+
+/// <summary>The facilities a bot knows, remembered by the region they belong to.</summary>
 /// <remarks>
 /// <para>
-/// <b>Learned by looking, which is what a new player does.</b> A bot ships the cities' coordinates — a client ships the
-/// planet map — but not the facilities inside them: which building of a city is its shuttleport is a draw the world
-/// generator made, so the only way to know is to be sent it. A bot walks into a city, sees a structure whose
-/// <c>kind</c> says shuttleport and whose <c>region</c> says which city, and remembers it. The second visit is informed.
+/// <b>Every one that exists, from the server's list, when the server publishes one</b> (<c>GET /swg/facilities</c>, <see cref="Seed"/>). The "nearest
+/// mission terminal" is the nearest that EXISTS (Loïc, 2026-10-26): learned by looking, a bot that landed at a city's port knew the port's terminal and
+/// nothing else, and walked into the city's middle to it past the one at its street's end. A player reads the same list off the planet map.
+/// </para>
+/// <para>
+/// <b>Learned by looking otherwise</b> (<see cref="Observe"/>), which is what this map did before: a bot walks into a city, sees a structure whose
+/// <c>kind</c> says shuttleport and whose <c>region</c> says which city, and remembers it. A server without the list is one whose bots still find their way.
 /// </para>
 /// <para>
 /// <b>Keyed by the region the wire carries, not by a city index.</b> A region is a city plus one and 0 is "no region",
@@ -35,9 +47,7 @@ public readonly record struct Facility(float X, float Z, int AssetSlot, int Yaw)
 /// searched linearly.
 /// </para>
 /// <para>
-/// <b>Per bot, not shared.</b> One table per fleet would make every bot omniscient the moment any of them walked into a
-/// city, which is a different load and a less honest one: the measurement this fleet exists for includes what a client
-/// has to learn.
+/// <b>Per bot</b>, each seeded with its own copy of the list: a few hundred entries, and a bot that never sees the list still learns its own.
 /// </para>
 /// </remarks>
 public sealed class FacilityMap
@@ -47,8 +57,65 @@ public sealed class FacilityMap
 
     private readonly Dictionary<long, List<Facility>> _seen = [];
 
-    /// <summary>How many facilities this bot has learned.</summary>
+    /// <summary>How many facilities this bot knows.</summary>
     public int Count { get; private set; }
+
+    /// <summary>Whether it was given the server's whole list: then a sighting adds nothing, and is not filed.</summary>
+    public bool Seeded { get; private set; }
+
+    /// <summary>Knows every facility listed — the server's list, which is every one that exists — and stops learning by looking.</summary>
+    /// <param name="listed">The list; an empty one leaves the map learning by looking.</param>
+    public void Seed(IReadOnlyList<ListedFacility> listed)
+    {
+        ArgumentNullException.ThrowIfNull(listed);
+        foreach (var f in listed)
+        {
+            Add(f.Region, f.Kind, f.At);
+        }
+
+        Seeded = listed.Count > 0;
+    }
+
+    /// <summary>
+    /// Reads <c>GET /swg/facilities</c>: the facilities of planet 0, where bots live — a city's facilities are kept by the region the wire carries, and a
+    /// region does not say which planet. Null when the server publishes no list (404): its bots learn by looking.
+    /// </summary>
+    public static async Task<List<ListedFacility>> LoadAsync(HttpClient http, Uri server, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(http);
+        ArgumentNullException.ThrowIfNull(server);
+        using var response = await http.GetAsync(new Uri(server, "swg/facilities"), ct).ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+
+        response.EnsureSuccessStatusCode();
+        return Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
+    }
+
+    /// <summary>The list in a <c>/swg/facilities</c> answer, planet 0's only; see <see cref="LoadAsync"/>.</summary>
+    public static List<ListedFacility> Parse(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var listed = new List<ListedFacility>();
+        foreach (var f in doc.RootElement.GetProperty("facilities").EnumerateArray())
+        {
+            if (f.GetProperty("realm").GetInt32() != 0)
+            {
+                continue;
+            }
+
+            // The asset as the wire's slot, plus one: absent is "not sent", 0, never -1.
+            var slot = f.TryGetProperty("asset", out var asset) ? asset.GetInt32() + 1 : 0;
+            listed.Add(new ListedFacility(
+                f.GetProperty("region").GetInt32(),
+                f.GetProperty("kind").GetInt32(),
+                new Facility(f.GetProperty("x").GetSingle(), f.GetProperty("z").GetSingle(), slot, f.GetProperty("yaw").GetInt32())));
+        }
+
+        return listed;
+    }
 
     /// <summary>Remembers a facility the first time it is seen.</summary>
     /// <param name="region">The region it belongs to, as a city plus one; 0 is ignored.</param>
@@ -63,11 +130,20 @@ public sealed class FacilityMap
     /// </remarks>
     public void Observe(int region, int kind, float x, float z, int assetSlot = 0, int yaw = 0)
     {
+        if (!Seeded)
+        {
+            Add(region, kind, new Facility(x, z, assetSlot, yaw));
+        }
+    }
+
+    private void Add(int region, int kind, Facility at)
+    {
         if (region <= 0)
         {
             return;
         }
 
+        var (x, z) = (at.X, at.Z);
         var key = Key(region, kind);
         if (!_seen.TryGetValue(key, out var list))
         {
@@ -83,7 +159,7 @@ public sealed class FacilityMap
             }
         }
 
-        list.Add(new Facility(x, z, assetSlot, yaw));
+        list.Add(at);
         Count++;
     }
 
@@ -104,7 +180,8 @@ public sealed class FacilityMap
         return false;
     }
 
-    /// <summary>The closest known facility of a kind, in any region — the bot's half of the browser's facility pane.</summary>
+    /// <summary>The closest known facility of a kind, in any region — the bot's half of the browser's facility pane; with the server's list, the closest
+    /// that exists.</summary>
     /// <param name="kind">The <c>StructureKind</c>.</param>
     /// <param name="x">From, east.</param>
     /// <param name="z">From, north.</param>

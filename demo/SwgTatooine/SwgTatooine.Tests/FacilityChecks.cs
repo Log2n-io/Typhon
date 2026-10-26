@@ -2,6 +2,9 @@ using NUnit.Framework;
 using SwgTatooine.Server;
 using System;
 using System.Collections.Generic;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.HttpResults;
+using SwgTatooine.Bots.Brain;
 using Typhon.Engine;
 
 namespace SwgTatooine.Tests;
@@ -173,5 +176,90 @@ public sealed class FacilityChecks
             Assert.That(WorldBuilder.SpreadFacilities(456f, 0f), Is.EqualTo(0));
             Assert.That(WorldBuilder.SpreadFacilities(456f, 16f), Is.EqualTo(10));
         });
+    }
+
+    /// <summary>
+    /// BM-1: <c>GET /swg/facilities</c> lists every shuttleport, bazaar and mission terminal the world holds — each where it stands, under its region and
+    /// asset — and a bot reads the list into a map whose nearest terminal is the nearest in the world. Unpublished, it answers 404.
+    /// </summary>
+    [Test]
+    public void TheFacilityList_IsEveryFacility_AndABotsNearestIsTheWorldsNearest()
+    {
+        var world = new List<(int Kind, int Region, ushort Realm, float X, float Z, int Asset, int Yaw)>();
+        using (var tx = _sim.Dbe.CreateQuickTransaction())
+        {
+            foreach (var cluster in tx.For<WorldObject>().GetClusterEnumerator())
+            {
+                var structs = cluster.GetReadOnlySpan(WorldObject.Struct);
+                var places = cluster.GetReadOnlySpan(WorldObject.Bounds);
+                var regions = cluster.GetReadOnlySpan(WorldObject.Region);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    var kind = structs[slot].Kind;
+                    if (kind is StructureKind.Shuttleport or StructureKind.Bazaar or StructureKind.MissionTerminal)
+                    {
+                        world.Add((kind, regions[slot].Value, cluster.Realm.Value, places[slot].X, places[slot].Z, structs[slot].Asset, structs[slot].Yaw));
+                    }
+                }
+            }
+        }
+
+        var json = FacilityEndpoints.Build(_sim.Dbe);
+        FacilityEndpoints.Json = null;
+        var unpublished = FacilityEndpoints.Get();
+        FacilityEndpoints.Json = json;
+        IResult published;
+        try
+        {
+            published = FacilityEndpoints.Get();
+        }
+        finally
+        {
+            FacilityEndpoints.Json = null;
+        }
+
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var listed = new List<(int Kind, int Region, ushort Realm, float X, float Z, int Asset, int Yaw)>();
+        foreach (var f in doc.RootElement.GetProperty("facilities").EnumerateArray())
+        {
+            listed.Add((f.GetProperty("kind").GetInt32(), f.GetProperty("region").GetInt32(), (ushort)f.GetProperty("realm").GetInt32(),
+                f.GetProperty("x").GetSingle(), f.GetProperty("z").GetSingle(),
+                f.TryGetProperty("asset", out var a) ? a.GetInt32() : StructureAssets.NoAsset, f.GetProperty("yaw").GetInt32()));
+        }
+
+        var map = new FacilityMap();
+        map.Seed(FacilityMap.Parse(json));
+        var terminals = world.FindAll(f => f.Kind == StructureKind.MissionTerminal && f.Realm == 0);
+        Assert.Multiple(() =>
+        {
+            Assert.That(unpublished, Is.InstanceOf<NotFound>(), "an unpublished list answered something other than 404");
+            Assert.That(published, Is.InstanceOf<ContentHttpResult>().And.Property("ResponseContent").EqualTo(json));
+            Assert.That(world.FindAll(f => f.Kind == StructureKind.Shuttleport), Has.Count.EqualTo(_sim.Map.Cities.Count), "the premise");
+            Assert.That(listed, Is.EquivalentTo(world).Using<(int, int, ushort, float, float, int, int)>(Same), "not every facility, or not as it stands");
+            Assert.That(map.Count, Is.EqualTo(world.FindAll(f => f.Realm == 0 && f.Region > 0).Count), "the bot's map is not the list");
+        });
+
+        // From points across the planet, the bot's nearest terminal is the world's.
+        for (var i = 0; i < 64; i++)
+        {
+            var x = MathF.Cos(i * 2.4f) * 300f * (i % 23);
+            var z = MathF.Sin(i * 2.4f) * 300f * (i % 23);
+            var nearest = terminals[0];
+            foreach (var t in terminals)
+            {
+                nearest = Sq(t.X - x) + Sq(t.Z - z) < Sq(nearest.X - x) + Sq(nearest.Z - z) ? t : nearest;
+            }
+
+            Assert.That(map.TryNearest(Routing.MissionTerminalKind, x, z, out var found, out var region), Is.True);
+            Assert.That((found.X, found.Z, region), Is.EqualTo((nearest.X, nearest.Z, nearest.Region)).Using<(float, float, int)>(
+                (a, b) => MathF.Abs(a.Item1 - b.Item1) < 0.01f && MathF.Abs(a.Item2 - b.Item2) < 0.01f && a.Item3 == b.Item3), $"from ({x:F0}, {z:F0})");
+        }
+
+        static bool Same((int, int, ushort, float, float, int, int) a, (int, int, ushort, float, float, int, int) b) =>
+            a.Item1 == b.Item1 && a.Item2 == b.Item2 && a.Item3 == b.Item3 && MathF.Abs(a.Item4 - b.Item4) < 0.01f && MathF.Abs(a.Item5 - b.Item5) < 0.01f
+            && a.Item6 == b.Item6 && a.Item7 == b.Item7;
+
+        static float Sq(float v) => v * v;
     }
 }

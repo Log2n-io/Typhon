@@ -838,4 +838,57 @@ public sealed class RoutingChecks
         Assert.That(map.TryFind(2, Port, out var port), Is.True);
         Assert.That(port, Is.EqualTo((10f, 20f)), "a second sighting of the same facility replaced the first");
     }
+
+    /// <summary>
+    /// BM-1: given the server's list, the nearest mission terminal is the nearest that EXISTS — not the port's, which a bot landing there saw first — and
+    /// a bot that has seen nothing knows one. Seeded, a sighting files nothing.
+    /// </summary>
+    /// <remarks>Loïc, 2026-10-26: 2 000 bots crowded the terminal at the city's centre, the only one they had seen, past the ones at its edge.</remarks>
+    [Test]
+    public void ASeededMap_FindsTheNearestTerminalThatExists_NotTheFirstSeen()
+    {
+        const int terminal = Routing.MissionTerminalKind;
+        var listed = new List<ListedFacility>
+        {
+            new(1, terminal, new Facility(0f, 0f, 3, 0)),        // the port's, mid-city
+            new(1, terminal, new Facility(300f, 10f, 3, 1)),     // at the street's end
+            new(2, terminal, new Facility(5000f, 0f, 3, 0)),
+            new(1, Routing.BazaarKind, new Facility(299f, 0f, 4, 0)),
+        };
+
+        var learned = new FacilityMap();
+        learned.Observe(1, terminal, 0f, 0f, 3, 0);
+        var seeded = new FacilityMap();
+        seeded.Observe(1, terminal, 0f, 0f, 3, 0);
+        seeded.Seed(listed);
+        var blind = new FacilityMap();
+        blind.Seed(listed);
+        blind.Observe(3, terminal, 290f, 0f);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(learned.TryNearest(terminal, 280f, 0f, out var first, out _), Is.True, "the premise: looking, it knows the one it saw");
+            Assert.That((first.X, first.Z), Is.EqualTo((0f, 0f)));
+            Assert.That(seeded.TryNearest(terminal, 280f, 0f, out var near, out var region), Is.True);
+            Assert.That((near.X, near.Z, near.Asset, near.Yaw, region), Is.EqualTo((300f, 10f, 2, 1, 1)), "not the nearest terminal that exists");
+            Assert.That(blind.TryNearest(terminal, 280f, 0f, out var unseen, out _), Is.True, "a bot that has seen nothing knows no terminal");
+            Assert.That((unseen.X, unseen.Z), Is.EqualTo((300f, 10f)), "a sighting was filed over the list");
+            Assert.That(blind.Count, Is.EqualTo(listed.Count));
+            Assert.That(new FacilityMap().TryNearest(terminal, 0f, 0f, out _, out _), Is.False, "an empty map answered");
+        });
+    }
+
+    /// <summary>The list as <c>/swg/facilities</c> writes it: planet 0's only, the asset as a slot (absent is 0, never -1).</summary>
+    [Test]
+    public void TheFacilityList_IsReadAsTheServerWritesIt()
+    {
+        var listed = FacilityMap.Parse(
+            "{\"facilities\":[{\"kind\":10,\"region\":2,\"realm\":0,\"x\":1.5,\"z\":-2,\"yaw\":3,\"asset\":4},"
+            + "{\"kind\":2,\"region\":2,\"realm\":0,\"x\":7,\"z\":8,\"yaw\":0},{\"kind\":9,\"region\":1,\"realm\":1,\"x\":0,\"z\":0,\"yaw\":0}]}");
+        Assert.That(listed, Is.EqualTo(new[]
+        {
+            new ListedFacility(2, Routing.MissionTerminalKind, Facility.Of(1.5f, -2f, 4, 3)),
+            new ListedFacility(2, Routing.ShuttleportKind, new Facility(7f, 8f, 0, 0)),
+        }));
+    }
 }

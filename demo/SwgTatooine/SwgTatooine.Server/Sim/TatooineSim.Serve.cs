@@ -38,6 +38,8 @@ public sealed partial class TatooineSim
         EconomyEndpoints.CountersJson = () => _bridge?.EconomyCountersJson() ?? "{}";
         EconomyEndpoints.CrowdJson = () => _bridge?.CrowdCountersJson() ?? "{}";
         EconomyEndpoints.DemoJson = () => _bridge?.DemoStatsJson() ?? "{}";
+        // Before the runtime starts: the facilities never move, and a spatial archetype is read off the tick only while nothing ticks.
+        FacilityEndpoints.Json = FacilityEndpoints.Build(Dbe);
         TatooineHost.DashboardPort = _config.DashboardPort;
         Console.WriteLine($"progression: XP table from the model, CL 50 at {Progression.MaxXp:N0} XP; --xp-rate {_config.XpRatePercent} %");
         StartReplication(shapes);
@@ -65,6 +67,7 @@ public sealed partial class TatooineSim
             EconomyEndpoints.CountersJson = null;
             EconomyEndpoints.CrowdJson = null;
             EconomyEndpoints.DemoJson = null;
+            FacilityEndpoints.Json = null;
         }
     }
 

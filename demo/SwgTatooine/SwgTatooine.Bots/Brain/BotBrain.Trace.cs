@@ -75,6 +75,9 @@ public enum LegWhy : byte
 
     /// <summary>The way round the obstacle the travel watchdog found.</summary>
     Detour,
+
+    /// <summary>A walk across a city toward somewhere beyond it, dropped at the city's edge: the desert is ridden straight.</summary>
+    CityEdge,
 }
 
 /// <summary>
