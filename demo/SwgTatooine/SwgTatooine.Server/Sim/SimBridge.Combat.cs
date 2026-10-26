@@ -886,15 +886,17 @@ public sealed partial class SimBridge
         // One fewer standing between the lair and whoever comes for it: at none, it can be destroyed.
         EntityId home = target.Read(Creature.Home).Lair;
         var mission = EntityId.Null;
-        var foe = false;
         if (tx.TryOpenMut(home, out var lair))
         {
             var spawner = lair.Read(CreatureLair.Spawner);
             mission = spawner.Mission;
-            foe = CreatureTemplates.IsCamp(spawner.CreatureTemplate);
             spawner.Guards = Math.Max(0, spawner.Guards - 1);
             lair.Set(CreatureLair.Spawner, spawner);
             TatooineReplication.Replicate(in lair);
+        }
+        else
+        {
+            home = EntityId.Null;   // a home that is gone is no lair for the KillEvent to name
         }
 
         var at = target.Read(Creature.Bounds);
@@ -908,7 +910,7 @@ public sealed partial class SimBridge
             X = at.X,
             Z = at.Z,
             Realm = target.Read(Creature.Realm).Value,
-            VictimKind = foe ? KillVictimKind.Foe : KillVictimKind.Creature,
+            VictimKind = CreatureTemplates.IsCamp(ai.Template) ? KillVictimKind.Foe : KillVictimKind.Creature,
             VictimLevel = ai.Level,
             Species = ai.Template,
         });
