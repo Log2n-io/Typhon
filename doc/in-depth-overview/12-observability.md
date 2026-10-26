@@ -200,7 +200,7 @@ Design notes carry a 4 MB figure for this constant; the shipped value is the 1 M
 - **256 slots maximum** — `MaxSlots = 256`, an `EpochThreadRegistry`-shape array of cache-line-padded structs.
 - **Per-slot SPSC ring** — variable-size records; producer is the owning thread, consumer is the profiler drain thread.
 - **Lazy allocation** — each slot's 1 MB backing array is allocated on first claim, reused across re-claims of the same slot. Idle slots cost ~30 B (object header + fields).
-- **CAS claim, finalizer release** — slots transition Free → Active via `Interlocked.CompareExchange`; a `[ThreadStatic] SlotReleaser : CriticalFinalizerObject` runs on thread death and marks the slot `Retiring`.
+- **CAS claim, finalizer release** — slots transition Free → Claiming → Active: the CAS in `ClaimSlot` wins an unused slot by moving it to `Claiming`; the new owner resets the ring and then publishes `Active` via a release store (the consumer acquires it, so it never drains a ring that is mid-reset); a `[ThreadStatic] SlotReleaser : CriticalFinalizerObject` on thread death transitions Active → Retiring.
 - **Drop-newest on overflow** — when the ring fills, new records are dropped (and accounted for in a counter the consumer surfaces). The 1 MB budget gives ≥100 K records of breathing room — sized to absorb realistic spawn bursts and parallel-query result flushes.
 
 ### Spillover ring pool
