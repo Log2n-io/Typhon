@@ -560,6 +560,99 @@ internal sealed class MissionDeskChecks : ServedChecks
         });
     }
 
+    /// <summary>
+    /// CL-8, staged: a wild lair above level 1 loses a creature and is owed it now; the creature the director refills it with carries the lair's level and
+    /// the level's stats — not the ramp's at the gate, not level 1.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void ARefilledCreature_TakesItsLairsLevel()
+    {
+        using var sim = Start();
+        Harness.Ticks(3);
+        var lair = EntityId.Null;
+        var level = 0;
+        var gone = EntityId.Null;
+        var before = new HashSet<EntityId>();
+        using (var tx = sim.Dbe.CreateQuickTransaction())
+        {
+            foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
+            {
+                var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
+                for (var bits = cluster.OccupancyBits; bits != 0 && lair.IsNull; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    if (spawners[slot].Site != 0 && spawners[slot].Level > 1 && spawners[slot].AliveCount == spawners[slot].SpawnLimit)
+                    {
+                        lair = cluster.GetEntityId(slot);
+                        level = spawners[slot].Level;
+                    }
+                }
+            }
+
+            foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+            {
+                var homes = cluster.GetReadOnlySpan(Creature.Home);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    EntityId home = homes[slot].Lair;
+                    if (home == lair)
+                    {
+                        before.Add(cluster.GetEntityId(slot));
+                        gone = cluster.GetEntityId(slot);
+                    }
+                }
+            }
+        }
+
+        Assert.That(lair.IsNull, Is.False, "no full wild lair above level 1 to stage");
+        sim.WriteInTick((tx, tick) =>
+        {
+            tx.Destroy(gone);
+            var l = tx.OpenMut(lair);
+            var s = l.Read(CreatureLair.Spawner);
+            s.AliveCount--;
+            s.Guards--;
+            s.NextSpawnTick = tick + 1;
+            l.Set(CreatureLair.Spawner, s);
+        });
+        before.Remove(gone);
+
+        CreatureBrain brain = default;
+        CreatureVitals vitals = default;
+        SessionHarness.Until(
+            () =>
+            {
+                using var tx = sim.Dbe.CreateQuickTransaction();
+                foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+                {
+                    var homes = cluster.GetReadOnlySpan(Creature.Home);
+                    for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                    {
+                        var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                        EntityId home = homes[slot].Lair;
+                        if (home == lair && !before.Contains(cluster.GetEntityId(slot)))
+                        {
+                            brain = cluster.GetReadOnlySpan(Creature.Ai)[slot];
+                            vitals = cluster.GetReadOnlySpan(Creature.Vitals)[slot];
+                            return true;
+                        }
+                    }
+                }
+
+                return false;
+            },
+            "the lair to refill its creature");
+        var foe = CreatureTemplates.IsCamp(brain.Template);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Level, Is.EqualTo(level), "the refilled creature is not at its lair's level");
+            Assert.That(vitals.MaxHealth, Is.EqualTo(ContentLevels.CreatureHealth(level, foe)), "its health is not its level's");
+            Assert.That(vitals.AttackDamage, Is.EqualTo(ContentLevels.CreatureHit(level, foe)), "its hit is not its level's");
+        });
+    }
+
     /// <summary>The <c>level</c> a store decoded for an entity, or -1 when it holds none.</summary>
     private static int LevelOnTheWire(Typhon.Client.WorldStore store, uint netId)
     {

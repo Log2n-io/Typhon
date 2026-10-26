@@ -157,7 +157,8 @@ public sealed class LairLifeChecks
                 var (x, z) = (bounds[slot].X, bounds[slot].Z);
                 if (!levels.Agrees(x, z, lair.Level) || !CreatureTemplates.CoversLevel(lair.CreatureTemplate, lair.Level))
                 {
-                    wrong.Add($"{CreatureTemplates.Name(lair.CreatureTemplate)} of level {lair.Level} at ({x:F0}, {z:F0}), edge {levels.EdgeDistance(x, z):F0} m");
+                    wrong.Add($"{CreatureTemplates.Name(lair.CreatureTemplate)} of level {lair.Level} at ({x:F0}, {z:F0}), "
+                        + $"edge {levels.EdgeDistance(x, z):F0} m");
                 }
             }
         }

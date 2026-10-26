@@ -131,6 +131,48 @@ public sealed class ContentLevelChecks
         }
     }
 
+    /// <summary>
+    /// CL-7: the placement every lair goes through — the build's and the director's — never puts one inside a city or within its no-spawn margin, even for a
+    /// site whose disc covers the city, and a fringe's lairs stand in its annulus.
+    /// </summary>
+    [Test]
+    public void ALairIsNeverPlacedInACity()
+    {
+        var config = new SimConfig();
+        var map = TatooineMap.Build(config);
+        var index = Plan();
+        var margin = ContentLevels.NoSpawnMarginM * config.ContentScale;
+        var rng = new Rng(41);
+        var placed = 0;
+        foreach (var city in map.Cities)
+        {
+            // A disc over the city, reaching 200 m past its edge: most draws fall inside it.
+            var site = new LairSite(0, city.X, city.Z, city.Radius + 200f, [CreatureTemplates.Rat], 1);
+            for (var n = 0; n < 500; n++)
+            {
+                if (WorldBuilder.TryPlaceLair(site, index.Levels, ref rng, config, out var x, out var z))
+                {
+                    placed++;
+                    Assert.That(index.Levels.EdgeDistance(x, z), Is.GreaterThanOrEqualTo(margin - 0.01f), $"a lair placed in {city.Name}");
+                }
+            }
+        }
+
+        Assert.That(placed, Is.GreaterThan(500), "almost nothing was placed: the case tested nothing");
+        foreach (var s in index.CrowdSites)
+        {
+            var fringe = index.Sites[s];
+            for (var n = 0; n < 200; n++)
+            {
+                if (WorldBuilder.TryPlaceLair(fringe, index.Levels, ref rng, config, out var x, out var z))
+                {
+                    var r = MathF.Sqrt(Sq(x - fringe.X) + Sq(z - fringe.Z));
+                    Assert.That(r, Is.InRange(fringe.InnerRadius - 0.01f, fringe.Radius + 0.01f), "a fringe's lair outside its annulus");
+                }
+            }
+        }
+    }
+
     /// <summary>CL-3: two plans with one seed are equal site for site; another seed moves at least one patch.</summary>
     [Test]
     public void TheLevelMap_IsDeterministicFromTheSeed()
