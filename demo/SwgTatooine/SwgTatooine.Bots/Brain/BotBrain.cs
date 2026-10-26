@@ -189,7 +189,7 @@ public sealed partial class BotBrain
     /// What a step cut across a corner keeps clear of the corner's wall beyond the body's own half, metres: a heading is renewed a few times a second, not
     /// continuously, and the server's step does not land on the line to the hundredth.
     /// </summary>
-    public const float CutClearanceM = 0.1f;
+    public const float CutClearanceM = CityPath.AirM;
 
     /// <summary>A building further than this is not one a bot in the street decides to walk into, metres.</summary>
     public const float DoorReachM = 120f;
@@ -291,6 +291,12 @@ public sealed partial class BotBrain
 
     /// <summary>The city this bot lives in, as a region (a city plus one); 0 for a bot that roams the planet.</summary>
     public int HomeRegion { get; }
+
+    /// <summary>
+    /// Whether this bot can take a mission at all — its run takes them and it can read its journal. A bot that cannot skips the desk entirely: the day's
+    /// loop starts at the mix it always had.
+    /// </summary>
+    public bool TakesMissions { get; set; } = true;
 
     /// <summary>What this bot has learned about the cities.</summary>
     public FacilityMap Facilities { get; }
@@ -547,7 +553,7 @@ public sealed partial class BotBrain
         var deskClosed = _emptyDesks >= EmptyDesksToLeave && here == _emptyDeskRegion && tick < _deskRetryAt;
 
         // Holding none: the nearest terminal for one, before anything else (the day's loop, in the remarks).
-        if (world.MissionsHeld == 0 && _assets != null && !deskClosed
+        if (world.MissionsHeld == 0 && TakesMissions && _assets != null && !deskClosed
             && StartVisit(in world, tick, Routing.MissionTerminalKind, GoalWhy.DeskChosen, here == _emptyDeskRegion ? _emptyDeskAt : null))
         {
             return Visit(in world, tick);

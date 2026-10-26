@@ -60,6 +60,18 @@ public sealed class FacilityMap
     /// <summary>How many facilities this bot knows.</summary>
     public int Count { get; private set; }
 
+    /// <summary>How many regions this bot knows a facility of a kind in: a shuttleport per city, so 2 is the fewest that lets it fly anywhere.</summary>
+    public int Regions(int kind)
+    {
+        var n = 0;
+        foreach (var (key, list) in _seen)
+        {
+            n += (int)(key & 0xFF) == (kind & 0xFF) && list.Count > 0 ? 1 : 0;
+        }
+
+        return n;
+    }
+
     /// <summary>Whether it was given the server's whole list: then a sighting adds nothing, and is not filed.</summary>
     public bool Seeded { get; private set; }
 

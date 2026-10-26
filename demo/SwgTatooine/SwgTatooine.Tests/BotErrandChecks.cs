@@ -1192,6 +1192,17 @@ public sealed class BotErrandChecks
             Assert.That(sim.Sent.FindAll(i => i.Kind == IntentKind.TakeMission), Has.Count.EqualTo(1));
             Assert.That(brain.Counters.Why[(int)GoalWhy.DeskChosen], Is.EqualTo(1));
         });
+
+        // A bot whose run cannot take missions skips the desk: the day starts at the mix it always had.
+        var idle = new BotBrain(BotMap.Cities, 7u, 4d, Content()) { TakesMissions = false };
+        idle.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X + 40f, Here.Z, TerminalAsset + 1, 0);
+        var still = new Sim { Planet = [new SeenStructure(Here.X + 40f, Here.Z, 10, TerminalAsset, 0, 1)] };
+        for (var tick = 1L; tick < 400; tick++)
+        {
+            still.Apply(idle.Decide(still.View(), tick));
+        }
+
+        Assert.That(idle.Counters.Why[(int)GoalWhy.DeskChosen], Is.Zero, "a bot that cannot take a mission went to the desk for one");
     }
 
     /// <summary>
@@ -1304,6 +1315,96 @@ public sealed class BotErrandChecks
 public sealed class BotPathChecks
 {
     private static BotAssets OneWall(PlanBox box) => new([new AssetPlan { Id = "wall", Walls = [box] }]);
+
+    /// <summary>
+    /// A searched walk across a staged street — two rows of houses, an alley between each pair — never passes closer to a wall than the body's half and
+    /// 0.1 m: a leg is pulled straight only where it keeps <see cref="CityPath.AirM"/>, and the corner before it is kept otherwise.
+    /// </summary>
+    /// <remarks>Without the air, a leg pulled taut round a corner grazed it at the body's half and a few hundredths: a steered body touched it.</remarks>
+    [Test]
+    public void APulledWalk_KeepsAirAtEveryCorner()
+    {
+        var house = new PlanBox(-3f, -3f, 3f, 3f, 0f, 2.7f, false);
+        var assets = new BotAssets([new AssetPlan { Id = "house", Walls = [house] }]);
+        var structures = new List<SeenStructure>();
+        for (var i = 0; i < 4; i++)
+        {
+            structures.Add(new SeenStructure(i * 10f, 0f, 0, 0, 0, 1));    // the south row, alleys 4 m wide between
+            structures.Add(new SeenStructure((i * 10f) + 5f, 14f, 0, 0, 0, 1));   // the north row, staggered half a house; the street is 8 m wide
+        }
+
+        var ends = new List<(float X, float Z)>();
+        for (var k = 0; k < 7; k++)
+        {
+            ends.Add((-6f + (k * 7.3f), -7f));   // behind the south row
+            ends.Add((-4f + (k * 6.9f), 7f));    // the street
+            ends.Add((-2f + (k * 7.1f), 21f));   // behind the north row
+        }
+
+        var closest = double.MaxValue;
+        var where = string.Empty;
+        var routes = 0;
+        foreach (var from in ends)
+        {
+            foreach (var to in ends)
+            {
+                if (from == to || CityPath.Route(structures, assets, from, to, BotBrain.MaxExpansions) is not { } path)
+                {
+                    continue;
+                }
+
+                routes++;
+                var a = from;
+                foreach (var b in path)
+                {
+                    foreach (var st in structures)
+                    {
+                        var d = SegmentToBox(a, b, st.X + house.MinX, st.Z + house.MinZ, st.X + house.MaxX, st.Z + house.MaxZ);
+                        if (d < closest)
+                        {
+                            (closest, where) = (d, $"({a.X:F1}, {a.Z:F1}) to ({b.X:F1}, {b.Z:F1}), house at ({st.X}, {st.Z})");
+                        }
+                    }
+
+                    a = b;
+                }
+            }
+        }
+
+        Assert.That(routes, Is.GreaterThan(300), "the premise: walks across the street were found");
+        Assert.That(closest, Is.GreaterThanOrEqualTo(CityPath.BodyHalfM + 0.1d), $"a leg passes {closest:F3} m from a wall: {where}");
+    }
+
+    /// <summary>The distance from a segment to a rectangle: 0 when they meet, else the nearest of the segment's ends to the box and the box's corners to it.</summary>
+    private static double SegmentToBox((float X, float Z) a, (float X, float Z) b, float minX, float minZ, float maxX, float maxZ)
+    {
+        var walls = new List<PlanBox> { new(minX, minZ, maxX, maxZ, 0f, 1f, false) };
+        if (!CityPath.SegmentClear(walls, a.X, a.Z, b.X, b.Z))
+        {
+            return 0d;
+        }
+
+        var best = Math.Min(PointToBox(a), PointToBox(b));
+        foreach (var c in new[] { (minX, minZ), (minX, maxZ), (maxX, minZ), (maxX, maxZ) })
+        {
+            best = Math.Min(best, PointToSegment(c));
+        }
+
+        return best;
+
+        double PointToBox((float X, float Z) p) =>
+            Math.Sqrt(Sq(Math.Max(0f, Math.Max(minX - p.X, p.X - maxX))) + Sq(Math.Max(0f, Math.Max(minZ - p.Z, p.Z - maxZ))));
+
+        double PointToSegment((float X, float Z) c)
+        {
+            var (dx, dz) = (b.X - a.X, b.Z - a.Z);
+            var len2 = (dx * dx) + (dz * dz);
+            var t = len2 > 0f ? Math.Clamp((((c.X - a.X) * dx) + ((c.Z - a.Z) * dz)) / len2, 0f, 1f) : 0f;
+            return Math.Sqrt(Sq(a.X + (dx * t) - c.X) + Sq(a.Z + (dz * t) - c.Z));
+        }
+
+        static double Sq(double v) => v * v;
+    }
 
     /// <summary>A wall across the way is walked round, every leg of the walk is clear, and the walk ends on the goal.</summary>
     [Test]

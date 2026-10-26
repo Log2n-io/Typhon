@@ -2484,9 +2484,10 @@ public sealed partial class BotSwarm : IAsyncDisposable
         /// <summary>The most creatures this bot has ever had in view at once, so an empty sky can be told from a blind scan.</summary>
         public int CreaturesSeenMax;
 
-        /// <summary>How many shuttleports this brain has learned: 2 is the fewest that lets it fly anywhere.</summary>
+        /// <summary>How many cities' shuttleports this brain knows, listed or seen: 2 is the fewest that lets it fly anywhere.</summary>
         /// <returns>The count.</returns>
-        public int PortsKnown() => _brain?.Facilities.Count ?? 0;
+        /// <remarks>It counted every facility the map held — bazaars and terminals too — and with the server's list, every one in the world.</remarks>
+        public int PortsKnown() => _brain?.Facilities.Regions(Routing.ShuttleportKind) ?? 0;
 
         /// <summary>What this bot's brain did with the city: swoop asks, doors crossed, terminals used, walks searched, ports walked out of.</summary>
         public (long Mounts, long Doors, long Used, long Paths, long Ports, long InPort) Errands() =>
@@ -2547,6 +2548,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
 
                 // A bot that cannot read its journal never learns it holds one: it would take a mission at every visit and never go and do it.
                 _takesMissions = options.Missions && _missionsUri != null && !string.IsNullOrEmpty(_token);
+                _brain.TakesMissions = _takesMissions;
                 TraceIfSampled(index, options);
             }
             _heading = (float)((index * golden) % (Math.PI * 2));
