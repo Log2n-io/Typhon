@@ -66,6 +66,10 @@ internal sealed class ObjectiveChecks
     // Lairs staged above the crowd's level beside every fringe lair, before the run: passive level-20 snakes, which a fighter at its objective has in range.
     private readonly HashSet<EntityId> _aboveCrowd = [];
 
+    // Their snakes, by id, as staged: a snake killed is destroyed and replaced by a new entity, so one missing at the end was killed — which a health
+    // check alone would miss once the replacement stood at full health (review 1).
+    private readonly HashSet<EntityId> _stagedSnakes = [];
+
     /// <summary>A five-minute run of a small world, with a level-20 lair staged 9 m from every fringe lair.</summary>
     [OneTimeSetUp]
     public void RunWorld()
@@ -112,6 +116,22 @@ internal sealed class ObjectiveChecks
         }
 
         Assert.That(_aboveCrowd, Is.Not.Empty, "no fringe lair to stage beside: the world has no fringe");
+        using (var tx = _sim.Dbe.CreateQuickTransaction())
+        {
+            foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+            {
+                var homes = cluster.GetReadOnlySpan(Creature.Home);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    if (_aboveCrowd.Contains(homes[slot].Lair))
+                    {
+                        _stagedSnakes.Add(cluster.GetEntityId(slot));
+                    }
+                }
+            }
+        }
+
         _sim.Run();
     }
 
@@ -196,34 +216,35 @@ internal sealed class ObjectiveChecks
 
         var hurtLairs = 0;
         var hurtCreatures = 0;
-        var creatures = 0;
+        var killed = 0;
         using var tx = _sim.Dbe.CreateQuickTransaction();
         foreach (var id in _aboveCrowd)
         {
-            var vitals = tx.Open(id).Read(CreatureLair.Vitals);
-            hurtLairs += vitals.Health < vitals.MaxHealth ? 1 : 0;
+            var lair = tx.Open(id);
+            var vitals = lair.Read(CreatureLair.Vitals);
+            var spawner = lair.Read(CreatureLair.Spawner);
+            hurtLairs += vitals.Health < vitals.MaxHealth || spawner.AliveCount < spawner.SpawnLimit ? 1 : 0;
         }
 
-        foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+        // Every staged snake by its own id: still there (not killed and replaced) and never hurt.
+        foreach (var id in _stagedSnakes)
         {
-            var homes = cluster.GetReadOnlySpan(Creature.Home);
-            var vitals = cluster.GetReadOnlySpan(Creature.Vitals);
-            for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+            if (!tx.TryOpen(id, out var snake))
             {
-                var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                if (_aboveCrowd.Contains(homes[slot].Lair))
-                {
-                    creatures++;
-                    hurtCreatures += vitals[slot].Health < vitals[slot].MaxHealth ? 1 : 0;
-                }
+                killed++;
+                continue;
             }
+
+            var vitals = snake.Read(Creature.Vitals);
+            hurtCreatures += vitals.Health < vitals.MaxHealth ? 1 : 0;
         }
 
         Assert.Multiple(() =>
         {
-            Assert.That(creatures, Is.GreaterThan(0), "the staged snakes are gone");
-            Assert.That(hurtLairs, Is.Zero, "the crowd hit a lair above its level");
-            Assert.That(hurtCreatures, Is.Zero, $"the crowd hit {hurtCreatures} of {creatures} creatures above its level");
+            Assert.That(_stagedSnakes, Is.Not.Empty, "no snake was staged");
+            Assert.That(hurtLairs, Is.Zero, "the crowd hit a lair above its level, or killed one of its snakes");
+            Assert.That(killed, Is.Zero, $"the crowd killed {killed} of {_stagedSnakes.Count} creatures above its level");
+            Assert.That(hurtCreatures, Is.Zero, $"the crowd hit {hurtCreatures} of {_stagedSnakes.Count} creatures above its level");
         });
     }
 }
