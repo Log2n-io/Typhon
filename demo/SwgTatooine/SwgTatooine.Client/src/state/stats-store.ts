@@ -27,6 +27,10 @@ export interface PlayerVitals {
   readonly health: number;
   /** Health over its maximum, 0–1, from the replicated `hp` everyone sees (8 bits). */
   readonly fraction: number;
+  /** The character's combat level, 1–50, from the replicated `level`; `NaN` before it arrives (character-level.md § 8). */
+  readonly level: number;
+  /** The way to the next level, 0–1, from the owner-only `xp` byte; `NaN` before it arrives. */
+  readonly xpFraction: number;
 }
 
 /** The avatar is down: knocked out (1) or dead (2), the server's `Downed`, and the seconds until it is up or cloned. */

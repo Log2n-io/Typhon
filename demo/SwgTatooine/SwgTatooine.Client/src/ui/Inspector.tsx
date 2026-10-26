@@ -1,3 +1,4 @@
+import { inspectorTitle } from '../data/progress';
 import { doorRealmOf } from '../data/realm-view';
 import { useStats } from '../state/stats-store';
 import { useUi } from '../state/ui-store';
@@ -42,7 +43,13 @@ export function Inspector() {
   return (
     <div className="panel inspector">
       <div className="hud-title">
-        {inspection === null ? `#${selectedNetId}` : `${inspection.archetype} #${selectedNetId}`}
+        {inspection === null
+          ? `#${selectedNetId}`
+          : inspectorTitle(
+              `${inspection.archetype} #${selectedNetId}`,
+              inspection.archetype,
+              Number(inspection.fields.find((f) => f.name === 'level')?.value ?? 0),
+            )}
       </div>
       {inspection !== null && (
         <table>

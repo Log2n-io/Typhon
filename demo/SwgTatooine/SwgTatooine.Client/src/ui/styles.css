@@ -1367,6 +1367,38 @@ button.active {
   gap: 6px;
 }
 
+.ham-level {
+  font-size: 10px;
+  font-weight: 700;
+  color: #ffd76a;
+  text-shadow: 0 1px 1px #000;
+  white-space: nowrap;
+}
+
+.ham-pools {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* The way to the next combat level, a thin bar under the health. */
+.ham-xp {
+  position: relative;
+  width: 180px;
+  height: 4px;
+  border-radius: 2px;
+  border: 1px solid rgba(0, 0, 0, 0.7);
+  background: rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+.ham-xp-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(180deg, #ffe08a 0%, #d8a21c 100%);
+  transition: width 0.25s ease-out;
+}
+
 .ham-label {
   font-size: 10px;
   font-weight: 700;

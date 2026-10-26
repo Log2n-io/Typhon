@@ -46,6 +46,8 @@ public sealed class Perception
     private int _mountedArchetype = -1;
     private int _mountedField = -1;
     private int _stanceField = -1;
+    private int _levelField = -1;
+    private int _creatureLevelField = -1;
     private readonly StoreStructures _view = new();
 
     /// <summary>Reads what this bot can see, and teaches its map any facility in view.</summary>
@@ -83,6 +85,7 @@ public sealed class Perception
             _mountedArchetype = ownArchetype;
             _mountedField = FieldOf(store, ownArchetype, "mounted");
             _stanceField = FieldOf(store, ownArchetype, "stance");
+            _levelField = FieldOf(store, ownArchetype, "level");
         }
 
         var mounted = _mountedField >= 0 && store.Archetypes[ownArchetype].Numbers[_mountedField] is { } m && m[ownSlot] == 1;
@@ -96,10 +99,11 @@ public sealed class Perception
             BoardRefused = BoardRefusedIn(store),
             Mounted = mounted,
             Stance = _stanceField >= 0 && store.Archetypes[ownArchetype].Numbers[_stanceField] is { } st ? (int)st[ownSlot] : 0,
+            Level = _levelField >= 0 && store.Archetypes[ownArchetype].Numbers[_levelField] is { } lv ? (int)lv[ownSlot] : 0,
             Structures = _view,
         };
 
-        world = NearestCreature(store, _creatures, x, z, world);
+        world = NearestCreature(store, _creatures, _creatureLevelField, x, z, world);
         return Facilities(store, x, z, world, facilities);
     }
 
@@ -246,9 +250,10 @@ public sealed class Perception
         return found;
     }
 
-    /// <summary>The nearest creature, with its position and distance.</summary>
+    /// <summary>The nearest creature the bot could fight, with its position and distance.</summary>
     /// <param name="store">The store.</param>
     /// <param name="archetype">Which archetype to scan, or -1.</param>
+    /// <param name="levelField">The creatures' <c>level</c> field, or -1 when the catalog has none.</param>
     /// <param name="x">The bot, east.</param>
     /// <param name="z">The bot, north.</param>
     /// <param name="world">What has been read so far.</param>
@@ -256,8 +261,10 @@ public sealed class Perception
     /// <remarks>
     /// <b>Lairs are deliberately not scanned</b>: only the god profiles observe them, so a player session's store never
     /// holds one and a scan would walk an always-empty archetype. See <see cref="Perceived.NearestCreature"/>.
+    /// <para><b>A creature <see cref="RedLevels"/> or more above the bot's level is skipped</b> (character-level.md § 9, B5's "red"), when both levels
+    /// are known: a bot does not walk into a fight it cannot win.</para>
     /// </remarks>
-    private static Perceived NearestCreature(WorldStore store, int archetype, float x, float z, Perceived world)
+    private static Perceived NearestCreature(WorldStore store, int archetype, int levelField, float x, float z, Perceived world)
     {
         if (archetype < 0)
         {
@@ -265,6 +272,7 @@ public sealed class Perception
         }
 
         var set = store.Archetypes[archetype];
+        var levels = levelField >= 0 && world.Level > 0 ? set.Numbers[levelField] : null;
         var best = double.MaxValue;
         var bestNetId = 0u;
         var bestX = 0f;
@@ -272,6 +280,11 @@ public sealed class Perception
         for (var i = 0; i < set.LiveCount; i++)
         {
             var slot = set.Live[i];
+            if (levels != null && IsRed((int)levels[slot], world.Level))
+            {
+                continue;
+            }
+
             var at = set.HeadPosition(slot);
             var px = (float)at[0];
             var pz = set.Dims > 1 ? (float)at[1] : 0f;
@@ -292,6 +305,12 @@ public sealed class Perception
 
         return world with { NearestCreature = bestNetId, NearestCreatureX = bestX, NearestCreatureZ = bestZ, NearestCreatureM = (float)best };
     }
+
+    /// <summary>How many levels above the bot a creature is "red", and skipped: B5's band.</summary>
+    public const int RedLevels = 6;
+
+    /// <summary>Whether a creature of <paramref name="creatureLevel"/> is red to a bot of <paramref name="botLevel"/>; never when either is unknown (0).</summary>
+    public static bool IsRed(int creatureLevel, int botLevel) => creatureLevel > 0 && botLevel > 0 && creatureLevel >= botLevel + RedLevels;
 
     /// <summary>Teaches the map every shuttleport, bazaar and mission terminal in view, and notices a port close enough to board at.</summary>
     /// <param name="store">The store.</param>
@@ -414,6 +433,7 @@ public sealed class Perception
         _bound = store;
         _structures = IndexOf(store, WorldObject);
         _creatures = IndexOf(store, Creature);
+        _creatureLevelField = FieldOf(store, _creatures, "level");
         _players = IndexOf(store, Player);
         _nameIdField = FieldOf(store, _players, "nameId");
         _lairs = IndexOf(store, Lair);
