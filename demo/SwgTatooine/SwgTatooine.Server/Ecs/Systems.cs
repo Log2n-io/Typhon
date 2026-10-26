@@ -543,6 +543,40 @@ internal sealed class LedgerSystem : CallbackSystem
 }
 
 /// <summary>
+/// Loot (<c>SimBridge.Loot.cs</c>; inventory-loot.md § 3.4): every kill this tick drops into its killer's inventory, through <c>ItemTransfer</c>.
+/// </summary>
+/// <remarks>
+/// <para><b>Serial, and one of the two writers of <see cref="ItemStack"/>, <see cref="ItemLedgerEntry"/> and <see cref="ItemLedgerHead"/></b>, the mission
+/// desk being the other: conservation comes from order. <b>After the <c>Ledger</c></b>, which is after the desk: a wallet it opened this tick is visible, and
+/// both write <see cref="PlayerState"/>.</para>
+/// <para><b>The only reader of <c>KillLootQueue</c>, by <c>ReadsEvents</c> rather than a declared consumer</b>: a consumer is skipped on every tick its queue
+/// is empty, and the checks' <c>StageKill</c> must reach it on a tick without a fight. An empty tick costs it one early return.</para>
+/// </remarks>
+internal sealed class LootSystem : CallbackSystem
+{
+    private readonly SimBridge _bridge;
+
+    public LootSystem(SimBridge bridge) => _bridge = bridge;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("Loot")
+        .Phase(SimPhases.Economy)
+        .After("Ledger")
+        .ReadsEvents(_bridge.KillLootQueue)
+        .Writes<ItemStack>()
+        .Writes<ItemLedgerEntry>()
+        .Writes<ItemLedgerHead>()
+
+        // Whether the killer stands within reach and in the victim's realm; its items revision.
+        .Reads<PlayerPlacement>()
+        .Reads<PlayerRealm>()
+        .Writes<PlayerState>()
+        .Reads<Character>();
+
+    protected override void Execute(TickContext ctx) => _bridge.LootTick(ctx);
+}
+
+/// <summary>
 /// Shuttle travel (#910's workload): boards queued players while their port's shuttle is down and transports them to the destination port.
 /// </summary>
 /// <remarks>

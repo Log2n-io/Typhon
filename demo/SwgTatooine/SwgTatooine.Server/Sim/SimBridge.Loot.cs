@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
 
@@ -22,7 +23,6 @@ namespace SwgTatooine.Server;
 public sealed partial class SimBridge
 {
     // Per tick with kills: every character with a body online, by its body. A body missing from it is the crowd's.
-    private readonly Dictionary<EntityId, EntityId> _lootBodies = [];
     private readonly Dictionary<EntityId, EntityId> _lootCharacterOf = [];
     private readonly HashSet<EntityId> _lootItemsMoved = [];
 
@@ -47,11 +47,73 @@ public sealed partial class SimBridge
     /// <summary>Every kill looted by nobody, whatever the reason.</summary>
     public long LootRefusedTotal => LootRefusedCrowd + LootRefusedWallet + LootRefusedRealm + LootRefusedReach;
 
+    // Kills staged by the checks (StageKill), looted by the next tick's Loot as if the combat drain had pushed them.
+    private readonly ConcurrentQueue<KillEvent> _stagedKills = new();
+
     /// <summary>Kills the queue could not hold, and so looted by nobody.</summary>
-    public long LootQueueOverflow => 0;
+    public long LootQueueOverflow => KillLootQueue?.OverflowCount ?? 0;
 
     /// <summary>Ticks on which the <c>Loot</c> system committed item writes: each one a durable write (<c>CausalityChecks.AC2</c>).</summary>
     public long LootCommits => Interlocked.Read(ref _lootCommits);
+
+    /// <summary>A kill for the next tick's <c>Loot</c> to loot, as if the combat drain had pushed it: the checks' seam onto the real consumer path.</summary>
+    internal void StageKill(in KillEvent kill) => _stagedKills.Enqueue(kill);
+
+    /// <summary>
+    /// The <c>Loot</c> system: this tick's kills, drained from <see cref="KillLootQueue"/>, each looted in one side transaction committed once.
+    /// </summary>
+    /// <remarks>
+    /// <b>A mission lair's own death is skipped</b>: its cache is minted by the desk with the mission's reward (inventory-loot.md § 3.4). Its defenders are
+    /// ordinary kills (character-level.md § 2).
+    /// </remarks>
+    public void LootTick(TickContext ctx)
+    {
+        if (Halted(ctx.TickNumber))
+        {
+            return;
+        }
+
+        var pending = KillLootQueue?.Count ?? 0;
+        if (pending == 0 && _stagedKills.IsEmpty)
+        {
+            return;
+        }
+
+        Span<KillEvent> kills = pending <= 64 ? stackalloc KillEvent[64] : new KillEvent[pending];
+        var n = pending > 0 ? KillLootQueue.Drain(kills) : 0;
+        var staged = new List<KillEvent>();
+        while (_stagedKills.TryDequeue(out var s))
+        {
+            staged.Add(s);
+        }
+
+        var tick0 = ctx.Transaction;
+        var worldTick = ctx.WorldTick;
+        TatooineReplication.FillBodyCharacters(_lootCharacterOf);
+        using var tx = ctx.CreateSideTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit);
+        for (var i = 0; i < n; i++)
+        {
+            LootOne(tx, tick0, in kills[i], worldTick);
+        }
+
+        foreach (var kill in staged)
+        {
+            LootOne(tx, tick0, in kill, worldTick);
+        }
+
+        EndLoot(tick0, tx.Commit());
+    }
+
+    private void LootOne(Transaction tx, Transaction tick0, in KillEvent kill, long worldTick)
+    {
+        var lair = kill.VictimKind == KillVictimKind.Lair;
+        if (lair && !kill.Mission.IsNull)
+        {
+            return;
+        }
+
+        LootKill(tx, tick0, kill.Killer, kill.Victim, lair, kill.VictimLevel, kill.Species, kill.X, kill.Z, kill.Realm, worldTick);
+    }
 
     /// <summary>
     /// One kill, looted: who gets it, then the roll, then each line placed. Called by the <c>Loot</c> system in its side transaction.
@@ -96,17 +158,6 @@ public sealed partial class SimBridge
         PlaceDrop(tx, character, in drop, lair ? ItemMoveKind.Lair : ItemMoveKind.Kill, source, (long)victim.RawValue, worldTick);
         _lootItemsMoved.Add(killer);
         return true;
-    }
-
-    /// <summary>Fills the body → character map for this tick's kills.</summary>
-    private void FillLootBodies()
-    {
-        TatooineReplication.FillCharacterBodies(_lootBodies);
-        _lootCharacterOf.Clear();
-        foreach (var (character, body) in _lootBodies)
-        {
-            _lootCharacterOf[body] = character;
-        }
     }
 
     /// <summary>The <c>Loot</c> transaction ended: counted and its bodies told, or — not committed — the items read again and the drops lost with it.</summary>

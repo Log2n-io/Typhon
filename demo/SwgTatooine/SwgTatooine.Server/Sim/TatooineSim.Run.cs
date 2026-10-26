@@ -744,6 +744,7 @@ public sealed partial class TatooineSim
         dag.Add(new LairLifeSystem(_bridge));
         dag.Add(new MissionDeskSystem(_bridge));
         dag.Add(new LedgerSystem(_bridge));
+        dag.Add(new LootSystem(_bridge));
         // Produced, and read by a system that does NOT declare `Consumes`: the runtime skips a declared consumer on every tick its queues are empty
         // (TyphonRuntime's ReactiveSkip), and both of these have work of their own on such ticks — the lair director's pass, the desk's takes and its
         // pass. So the lair director ran its 2 Hz pass only on a pass tick that also brought a corpse, and the desk never ran at all with the crowd off
