@@ -19,11 +19,26 @@ namespace SwgTatooine.Server;
 /// together, so a snapshot that holds sequence N holds every row below it. A snapshot older than what is remembered (two readers racing) reads in full and
 /// leaves the memory alone. One per engine: a reopened world starts empty.
 /// </para>
+/// <para>
+/// <b>Bounded both ways.</b> The walk is taken only while the world appended fewer than <see cref="GapFactor"/> × the rows kept since this character's last
+/// read; a character back after a long absence reads its two side indexes instead, which costs its own history rather than the world's. And the memory is
+/// a cache, never the truth: past <see cref="MaxEntries"/> characters it is dropped whole, and the next reads start again from the indexes.
+/// </para>
 /// </remarks>
 internal sealed class RecentRowCache<T>
     where T : unmanaged
 {
+    /// <summary>How many rows kept, times, the world may append between two reads before a read goes back to the side indexes.</summary>
+    public const int GapFactor = 8;
+
+    /// <summary>The most characters remembered; past it the memory is dropped whole.</summary>
+    public const int MaxEntries = 4096;
+
     private readonly ConcurrentDictionary<long, (long Seen, T[] Rows)> _known = new();
+    private long _fullReads;
+
+    /// <summary>Reads that went to the side indexes — a first read, a read past the walk's bound, a read after the memory was dropped.</summary>
+    public long FullReads => System.Threading.Interlocked.Read(ref _fullReads);
     private readonly Func<T, long> _seq;
     private readonly Func<T, long> _from;
     private readonly Func<T, long> _to;
@@ -44,7 +59,8 @@ internal sealed class RecentRowCache<T>
     public List<T> Read(Transaction tx, IndexRef bySeq, IndexRef byFrom, IndexRef byTo, long key, long lastSeq)
     {
         var rows = new List<T>();
-        if (_known.TryGetValue(key, out var known) && known.Seen <= lastSeq)
+        var found = _known.TryGetValue(key, out var known);
+        if (found && known.Seen <= lastSeq && lastSeq - known.Seen <= (long)GapFactor * _keep)
         {
             rows.AddRange(known.Rows);
             if (lastSeq > known.Seen)
@@ -62,6 +78,7 @@ internal sealed class RecentRowCache<T>
         }
         else
         {
+            System.Threading.Interlocked.Increment(ref _fullReads);
             Collect(tx, byFrom, key, rows);
             Collect(tx, byTo, key, rows);
         }
@@ -72,8 +89,13 @@ internal sealed class RecentRowCache<T>
             rows.RemoveRange(_keep, rows.Count - _keep);
         }
 
-        if (known.Rows == null || known.Seen <= lastSeq)
+        if (!found || known.Seen <= lastSeq)
         {
+            if (!found && _known.Count >= MaxEntries)
+            {
+                _known.Clear();
+            }
+
             _known[key] = (lastSeq, rows.ToArray());
         }
 

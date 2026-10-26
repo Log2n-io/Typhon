@@ -149,6 +149,9 @@ public static class ItemEndpoints
         return app;
     }
 
+    /// <summary>How many inventory reads went to the side indexes rather than the walk of the rows appended since: for the checks.</summary>
+    internal static long RecentFullReads(DatabaseEngine dbe) => Indexes(dbe).Recent.FullReads;
+
     /// <summary>The inventory handler itself, for the checks: a request in, the result out.</summary>
     internal static IResult GetInventoryForChecks(DatabaseEngine dbe, HttpContext context) => GetInventory(dbe, context);
 
