@@ -86,3 +86,21 @@ th { color: var(--muted); font-weight: 500; font-size: 12px; }
 .badge.bad { background: rgba(255, 122, 107, .15); color: var(--bad); }
 
 .violations { color: var(--bad); font-size: 12px; }
+
+/* The bot page (bot-telemetry.md). */
+.links { margin-left: auto; }
+.links a { color: var(--accent); text-decoration: none; }
+.links a:hover { text-decoration: underline; }
+.small { font-size: 11px; }
+.card.wide { grid-column: 1 / -1; }
+.swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: baseline; }
+.traced tr { cursor: pointer; }
+.traced tr:hover td { background: rgba(255, 255, 255, .05); }
+.traced tr.selected td { background: rgba(240, 184, 74, .12); }
+.trail { width: 100%; max-width: 420px; aspect-ratio: 1; display: block; background: rgba(255, 255, 255, .02); border-radius: 4px; }
+.trail line { stroke-width: 1.6; vector-effect: non-scaling-stroke; }
+.timeline { font-size: 12px; }
+.timeline td:first-child { width: 70px; white-space: nowrap; color: var(--muted); }
+.timeline td:nth-child(2) { width: 50px; color: var(--muted); }
+.timeline tr.goal td:last-child { color: var(--accent); }
+.timeline tr.reversal td:last-child { color: var(--bad); }
