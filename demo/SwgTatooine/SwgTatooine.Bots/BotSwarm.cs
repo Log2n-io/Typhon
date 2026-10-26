@@ -1053,16 +1053,19 @@ public sealed class BotSwarm : IAsyncDisposable
         return (boardings, hunts, portsMax, canFly, creatures);
     }
 
-    /// <summary>What the brains did with the cities, summed over the fleet: swoop asks, doors crossed, terminals used, walks searched.</summary>
-    public (long Mounts, long Doors, long Used, long Paths) Errands()
+    /// <summary>
+    /// What the brains did with the cities, summed over the fleet: swoop asks, doors crossed, terminals used, walks searched, ports walked out of — and
+    /// how many stand inside a port's walls now with no flight to take there.
+    /// </summary>
+    public (long Mounts, long Doors, long Used, long Paths, long Ports, long InPort) Errands()
     {
-        (long Mounts, long Doors, long Used, long Paths) sum = default;
+        (long Mounts, long Doors, long Used, long Paths, long Ports, long InPort) sum = default;
         foreach (var bot in Bots)
         {
             if (bot != null)
             {
                 var e = bot.Errands();
-                sum = (sum.Mounts + e.Mounts, sum.Doors + e.Doors, sum.Used + e.Used, sum.Paths + e.Paths);
+                sum = (sum.Mounts + e.Mounts, sum.Doors + e.Doors, sum.Used + e.Used, sum.Paths + e.Paths, sum.Ports + e.Ports, sum.InPort + e.InPort);
             }
         }
 
@@ -2379,9 +2382,11 @@ public sealed class BotSwarm : IAsyncDisposable
         /// <returns>The count.</returns>
         public int PortsKnown() => _brain?.Facilities.Count ?? 0;
 
-        /// <summary>What this bot's brain did with the city: swoop asks, doors crossed, terminals used, walks searched.</summary>
-        public (long Mounts, long Doors, long Used, long Paths) Errands() =>
-            _brain == null ? default : (_brain.MountsAsked, _brain.DoorsCrossed, _brain.FacilitiesUsed, _brain.PathsPlanned);
+        /// <summary>What this bot's brain did with the city: swoop asks, doors crossed, terminals used, walks searched, ports walked out of.</summary>
+        public (long Mounts, long Doors, long Used, long Paths, long Ports, long InPort) Errands() =>
+            _brain == null
+                ? default
+                : (_brain.MountsAsked, _brain.DoorsCrossed, _brain.FacilitiesUsed, _brain.PathsPlanned, _brain.PortsLeft, _brain.InPort ? 1 : 0);
 
         /// <summary>This bot's own decision loop and the eye that feeds it; null unless the run is thinking.</summary>
         private readonly BotBrain _brain;

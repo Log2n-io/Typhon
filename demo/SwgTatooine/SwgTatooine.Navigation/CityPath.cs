@@ -143,6 +143,10 @@ public static class CityPath
     /// <summary>Whether a point's cell is walled off.</summary>
     public static bool IsBlocked(WalkGrid grid, float x, float z) => grid.Blocked[CellOf(grid, x, z)] != 0;
 
+    /// <summary>Whether a collider is a wall to a body: not a ramp or a flight of steps, not a floor under <paramref name="floorTopM"/>, not overhead.</summary>
+    public static bool IsWall(in PlanBox wall, float floorTopM = StepM) =>
+        !((wall.Sloped && wall.MaxY <= RampTopM) || wall.MaxY <= floorTopM || wall.MinY >= HeadM);
+
     /// <summary>The cell, metres.</summary>
     public const float CellM = 1f;
 
@@ -180,7 +184,7 @@ public static class CityPath
 
             foreach (var wall in walls)
             {
-                if ((wall.Sloped && wall.MaxY <= RampTopM) || wall.MaxY <= floorTopM || wall.MinY >= HeadM)
+                if (!IsWall(in wall, floorTopM))
                 {
                     continue;
                 }

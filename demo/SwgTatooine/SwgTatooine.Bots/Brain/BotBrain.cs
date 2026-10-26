@@ -153,10 +153,21 @@ public sealed class BotBrain
     /// <summary>A search that has expanded this many cells without reaching its goal gives up: a walled-off goal must not cost the whole grid.</summary>
     public const int MaxExpansions = 120_000;
 
+    /// <summary>A walk across a city is searched this far ahead at a time, metres, and so is a stuck traveller's longest detour.</summary>
+    /// <remarks>
+    /// Short enough that the search's rectangle (its 30 m margin each side included) stays on half-metre cells. Metre cells pull a walk straight across a
+    /// wall's corner: searched 200 m out of a shuttleport's plaza, 5 % of the walks clipped a wall the server stops a body at (measured 2026-10-26, the real
+    /// port's walls, 1 152 starts and headings).
+    /// </remarks>
+    public const float CityLegM = 150f;
+
+    /// <summary>How often a bot in a city checks whether it stands inside a shuttleport's walls, in seconds.</summary>
+    public const double PortCheckSeconds = 1d;
+
     /// <summary>Where a stuck traveller searches a way to, in order: how far along its course, and how far off it (radians).</summary>
     private static readonly (float Metres, float Turn)[] Detours =
     [
-        (SearchReachM, 0f), (SearchReachM * 0.6f, 0f), (SearchReachM * 0.3f, 0f),
+        (CityLegM, 0f), (SearchReachM * 0.6f, 0f), (SearchReachM * 0.3f, 0f),
         (SearchReachM * 0.3f, MathF.PI / 3f), (SearchReachM * 0.3f, -MathF.PI / 3f),
         (SearchReachM * 0.15f, MathF.PI / 2f), (SearchReachM * 0.15f, -MathF.PI / 2f),
     ];
@@ -237,6 +248,12 @@ public sealed class BotBrain
 
     public long MissionsGivenUp { get; private set; }
 
+    /// <summary>How many times it found itself inside a shuttleport's walls with somewhere else to be, and walked out by the gate.</summary>
+    public long PortsLeft { get; private set; }
+
+    /// <summary>Whether its last check found it inside a shuttleport's walls with no flight to take there: what a trapped bot looks like.</summary>
+    public bool InPort { get; private set; }
+
     /// <summary>The walk in progress, for a trace line: next point, count, where the exact part starts, ridden, how it ended.</summary>
     public string LegState =>
         $"leg {_leg.Next}/{_leg.Points.Count} exact {_leg.Precise} ride {(_leg.Ride ? 1 : 0)}{(_leg.Dismounted ? "-off" : string.Empty)} end {_leg.Ended}"
@@ -297,6 +314,15 @@ public sealed class BotBrain
     /// <summary>Whether it has reached its mission's lair, so a lair drawn again far away starts a new ride.</summary>
     private bool _questNear;
 
+    /// <summary>Walking out of a shuttleport's plaza by its gate; the goal is chosen again once out.</summary>
+    private bool _leavingPort;
+
+    /// <summary>When it next checks whether it stands inside a shuttleport's walls.</summary>
+    private long _portCheckAt;
+
+    /// <summary>When a walk across the city may be searched again, after one found no way or stuck.</summary>
+    private long _cityWalkAt;
+
     /// <summary>Decides what to do this tick.</summary>
     /// <param name="world">What the bot was sent.</param>
     /// <param name="tick">The fleet's tick, which is what the timed goals count in.</param>
@@ -346,6 +372,13 @@ public sealed class BotBrain
         if (MountIntent(in world, tick) is { } mount)
         {
             return mount;
+        }
+
+        // Inside a shuttleport's walls with somewhere else to be: out by the gate first, whatever the goal. Nothing stops a body walking in through
+        // the gate, and a straight line on from there ends against the far wall (Loïc, 2026-10-26: bots stood trapped in Port Sable's).
+        if (LeavePort(in world, tick) is { } leave)
+        {
+            return leave;
         }
 
         switch (Goal)
@@ -595,9 +628,36 @@ public sealed class BotBrain
                 return step;
             }
 
+            if (end == LegEnd.Stuck)
+            {
+                // A searched walk that stuck after its own replans: straight on, and the watchdog's detours, for a while before searching again.
+                _cityWalkAt = tick + (2 * _stuckTicks);
+            }
+
             _leg.Clear();
             _travelBest = double.MaxValue;
             _travelBestAt = tick;
+        }
+
+        // In a city, on foot: searched round its buildings before it is walked, a stretch at a time, as a person clicking would. A straight line until
+        // stuck walked bots in through a shuttleport's gate and against its far wall.
+        if (_assets != null && world.Structures != null && tick >= _cityWalkAt && RegionAt(world.X, world.Z) != 0)
+        {
+            var reach = (float)Math.Min(distance, CityLegM);
+            var heading = Routing.HeadingTo(world.X, world.Z, tx, tz);
+            var goal = (world.X + (MathF.Cos(heading) * reach), world.Z + (MathF.Sin(heading) * reach));
+            // A walk that ends where the body already stands — its goal walled in, snapped back to here — is no walk: searched again every tick, it
+            // would be a search a tick that never moves the bot.
+            if (PlanWalk(in world, goal, [], tick, exactGoal: false)
+                && Routing.Distance(world.X, world.Z, _leg.Points[^1].X, _leg.Points[^1].Z) > 2d * CornerReachM)
+            {
+                _leg.Ride = ride;
+                _leg.KeepRiding = true;
+                return Follow(in world, tick, out _);
+            }
+
+            _leg.Clear();
+            _cityWalkAt = tick + (2 * _stuckTicks);
         }
 
         if (distance < _travelBest - 1d)
@@ -1305,6 +1365,73 @@ public sealed class BotBrain
         _mountAskedAt = tick;
         MountsAsked++;
         return Intent.Mount(_wantMounted);
+    }
+
+    /// <summary>
+    /// Out of a shuttleport's plaza by its gate: a searched walk to where the port's published approach starts, outside it, then the goal is chosen again.
+    /// Null when it is not inside one, or is there to fly — walking to the ticket terminal, or queued.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Its own leg, then a fresh choice.</b> The goal under way had a leg of its own, which this one replaced; carrying on with that goal would read
+    /// the exit's end as its leg's, and an errand would use a terminal it never reached.
+    /// </para>
+    /// <para>
+    /// <b>Searched, with the approach walked backwards as the fallback</b> — the published way in, so a way out that exists whatever the search makes of
+    /// the plaza. A bot that sticks even so stands where it is for ten seconds before trying again, so a bot that cannot get out costs a search every
+    /// ten seconds rather than one a tick.
+    /// </para>
+    /// </remarks>
+    private Intent? LeavePort(in Perceived world, long tick)
+    {
+        if (_leavingPort)
+        {
+            var step = Follow(in world, tick, out var end);
+            if (end == LegEnd.Going)
+            {
+                return step;
+            }
+
+            // Out, or stuck on the way: the goal is chosen again from here either way, and the next check says whether it is still inside.
+            _leavingPort = false;
+            _leg.Clear();
+            Goal = Goal.Choosing;
+            if (end == LegEnd.Stuck)
+            {
+                _portCheckAt = tick + Ticks(10);
+            }
+
+            return null;
+        }
+
+        if (_assets == null || tick < _portCheckAt)
+        {
+            return null;
+        }
+
+        _portCheckAt = tick + Ticks(PortCheckSeconds);
+        if (Goal == Goal.Waiting || (Goal == Goal.Travelling && Mode == TravelMode.Shuttle && !_asked)
+            || !Facilities.TryNearest(Routing.ShuttleportKind, world.X, world.Z, out var port, out _)
+            || _assets.At(port.Asset) is not { HasEnclosure: true, UsePath.Length: > 0 } plan
+            || BotAssets.Unplace(port.X, port.Z, port.Yaw, (world.X, world.Z)) is var local && !plan.Encloses(local.X, local.Z))
+        {
+            InPort = false;
+            return null;
+        }
+
+        InPort = true;
+
+        var approach = Placed(port, plan.UsePath);
+        if (!PlanWalk(in world, approach[0], [], tick))
+        {
+            var back = new List<(float X, float Z)>(approach);
+            back.Reverse();
+            _leg.Start(back, 0, tick);
+        }
+
+        _leavingPort = true;
+        PortsLeft++;
+        return Follow(in world, tick, out _);
     }
 
     /// <summary>A published path placed where its structure stands.</summary>

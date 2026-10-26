@@ -28,7 +28,26 @@ public sealed class AssetPlan
     public required string Id { get; init; }
 
     /// <summary>The blocking geometry the server collides with.</summary>
-    public PlanBox[] Walls { get; init; } = [];
+    public PlanBox[] Walls
+    {
+        get => _walls;
+        init
+        {
+            _walls = value ?? [];
+            (_floorM, _ring) = Ring(_walls);
+        }
+    }
+
+    private readonly PlanBox[] _walls = [];
+
+    /// <summary>The radius of its round walked floor when a ring of walls stands on that floor's rim (a shuttleport's plaza), else 0.</summary>
+    private readonly float _floorM;
+
+    /// <summary>The walls of that ring: those reaching out to the floor's rim.</summary>
+    private readonly PlanBox[] _ring = [];
+
+    /// <summary>Whether it has a ring of walls closing in open ground round its origin — a shuttleport's plaza, whose way in and out is its gate.</summary>
+    public bool HasEnclosure => _floorM > 0f;
 
     /// <summary>Its door, or null for a structure nobody enters.</summary>
     public DoorPlan Door { get; init; }
@@ -41,6 +60,92 @@ public sealed class AssetPlan
 
     /// <summary>A room's floor graph (§ 5.9), or null.</summary>
     public RoomNav Nav { get; init; }
+
+    /// <summary>Whether a point, in this asset's frame, stands inside its ring: on its floor, with no wall of the ring between it and the origin.</summary>
+    /// <remarks>
+    /// <b>The line to the origin, not a radius.</b> The published port's ring is square boxes round a circle: the diagonal ones reach in to 17.7 m while a
+    /// body stands against the wall at 19.1 m on the axes — a radius small enough to be inside everywhere missed the bodies pressed against the wall,
+    /// which are the ones that needed it. A point in the gate sees the origin through it and counts as inside, which only walks it the few metres out.
+    /// </remarks>
+    public bool Encloses(float x, float z)
+    {
+        if (_floorM <= 0f || (x * x) + (z * z) >= _floorM * _floorM)
+        {
+            return false;
+        }
+
+        foreach (var w in _ring)
+        {
+            if (SegmentHits(x, z, in w))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The ring of walls closing in open ground, read from the walls themselves: the floor is the widest round collider a body walks on (the port's plaza,
+    /// 21.6 m), and the ring is every wall reaching out to that floor's rim — the outer wall, its gate's pillars, its leaning struts; not the pad, the
+    /// lamp posts or the ticket booth standing inside it.
+    /// </summary>
+    private static (float FloorM, PlanBox[] Ring) Ring(PlanBox[] walls)
+    {
+        var floor = 0f;
+        foreach (var w in walls)
+        {
+            if (w.Radius > 0f && !w.Sloped && w.MaxY <= CityPath.StepM)
+            {
+                floor = MathF.Max(floor, w.Radius);
+            }
+        }
+
+        if (floor <= 0f)
+        {
+            return (0f, []);
+        }
+
+        var ring = new List<PlanBox>();
+        foreach (var w in walls)
+        {
+            var farX = MathF.Max(MathF.Abs(w.MinX), MathF.Abs(w.MaxX));
+            var farZ = MathF.Max(MathF.Abs(w.MinZ), MathF.Abs(w.MaxZ));
+            if (CityPath.IsWall(in w) && MathF.Sqrt((farX * farX) + (farZ * farZ)) >= floor * 0.9f)
+            {
+                ring.Add(w);
+            }
+        }
+
+        return ring.Count == 0 ? (0f, []) : (floor, [.. ring]);
+    }
+
+    /// <summary>Whether the segment from the origin to (<paramref name="x"/>, <paramref name="z"/>) passes through a box's plan: the slab test.</summary>
+    private static bool SegmentHits(float x, float z, in PlanBox box)
+    {
+        var t0 = 0f;
+        var t1 = 1f;
+        return Slab(x, box.MinX, box.MaxX, ref t0, ref t1) && Slab(z, box.MinZ, box.MaxZ, ref t0, ref t1);
+
+        static bool Slab(float d, float min, float max, ref float t0, ref float t1)
+        {
+            if (MathF.Abs(d) < 1e-6f)
+            {
+                return min <= 0f && 0f <= max;
+            }
+
+            var a = min / d;
+            var b = max / d;
+            if (a > b)
+            {
+                (a, b) = (b, a);
+            }
+
+            t0 = MathF.Max(t0, a);
+            t1 = MathF.Min(t1, b);
+            return t0 <= t1;
+        }
+    }
 }
 
 /// <summary>

@@ -322,7 +322,8 @@ while (!stopping.IsCancellationRequested)
         + $"sessions {swarm.ServerMetric("typhon.sessions"),5:F0}  "
         + $"track p99 {swarm.ServerMetric("typhon.subscriptions.track.p99"),7:F3} ms  "
         + $"tick p99 {swarm.ServerMetric("typhon.tick.p99"),7:F3} ms"
-        + Home());
+        + Home()
+        + Errands());
 }
 
 // The bots that live in the home city, and how many stand in it now: the concentration, watched as it builds.
@@ -330,6 +331,13 @@ string Home()
 {
     var (living, there) = swarm.Homes();
     return living == 0 ? string.Empty : $"  home {there}/{living} in {homeCity}";
+}
+
+// Walks searched, and walks out of a shuttleport's plaza: a fleet trapped in a port shows as the second climbing while the first stands still.
+string Errands()
+{
+    var e = swarm.Errands();
+    return e.Paths == 0 && e.Ports == 0 ? string.Empty : $"  walks {e.Paths} ports left {e.Ports} in a port {e.InPort}";
 }
 
 // TICK frames applied across the population: a connected session that is never produced for looks healthy in every other number.
@@ -509,7 +517,7 @@ if (brain)
     var errands = swarm.Errands();
     Console.WriteLine(
         $"errands: {errands.Mounts} swoop mount/dismount ask(s), {errands.Doors} door crossing(s), {errands.Used} terminal(s) used, "
-        + $"{errands.Paths} walk(s) searched round buildings");
+        + $"{errands.Paths} walk(s) searched round buildings, {errands.Ports} walk(s) out of a shuttleport's plaza");
 }
 
 if (swarm.Disconnects.Count == 0)

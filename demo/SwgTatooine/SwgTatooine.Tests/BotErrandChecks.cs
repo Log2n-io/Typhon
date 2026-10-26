@@ -25,6 +25,7 @@ public sealed class BotErrandChecks
     private const int PortAsset = 3;
     private const int BlockAsset = 4;
     private const int LargeHouseAsset = 5;
+    private const int WalledPortAsset = 6;
 
     /// <summary>The published <c>tat_house_large</c>'s walls, as the server serves them in <c>demo.json</c> (already in the world's convention).</summary>
     private static readonly PlanBox[] LargeHouseWalls =
@@ -86,7 +87,33 @@ public sealed class BotErrandChecks
         // A city block: 120 m of wall, deep enough that no search starting inside it gets out, and wide enough to stand on a detour's point whichever
         // western city a seed rides to.
         var block = new AssetPlan { Id = "block", Walls = [new PlanBox(-60f, -60f, 60f, 60f, 0f, 3f, false)] };
-        return new BotAssets([house, room, terminal, port, block, new AssetPlan { Id = "tat_house_large", Walls = LargeHouseWalls }]);
+        return new BotAssets([house, room, terminal, port, block, new AssetPlan { Id = "tat_house_large", Walls = LargeHouseWalls }, WalledPort()]);
+    }
+
+    /// <summary>A shuttleport as the published one is built: a 20 m ring of wall with a gate on +Z, its plaza floor and its raised pad.</summary>
+    private static AssetPlan WalledPort() => new()
+    {
+        Id = "tat_shuttleport",
+        Walls = [.. RingWalls().Select(r => new PlanBox(r.MinX, r.MinZ, r.MaxX, r.MaxZ, 0.3f, 2.3f, false)),
+            new PlanBox(-21.6f, -21.6f, 21.6f, 21.6f, -1f, 0.3f, false, 21.6f),
+            new PlanBox(-12f, -12f, 12f, 12f, 0.3f, 1.26f, false, 12f)],
+        UsePath = [(0f, 26f), (0f, 16f)],
+    };
+
+    /// <summary>The ring's blocks, in the port's frame: 1.8 m squares every 5 degrees at 20 m, but for the gate.</summary>
+    private static IEnumerable<(float MinX, float MinZ, float MaxX, float MaxZ)> RingWalls()
+    {
+        for (var deg = 0; deg < 360; deg += 5)
+        {
+            var x = 20f * MathF.Cos(deg * MathF.PI / 180f);
+            var z = 20f * MathF.Sin(deg * MathF.PI / 180f);
+            if (z > 0f && MathF.Abs(x) < 4.4f)
+            {
+                continue;   // the gate
+            }
+
+            yield return (x - 0.9f, z - 0.9f, x + 0.9f, z + 0.9f);
+        }
     }
 
     private static float Sq(float v) => v * v;
@@ -115,6 +142,9 @@ public sealed class BotErrandChecks
         /// <summary>A plan rectangle the server stops a body at, as its collision does: a step into it ends where it touched.</summary>
         public (float MinX, float MinZ, float MaxX, float MaxZ)? Wall;
 
+        /// <summary>More of them, in the world's frame: a shuttleport's ring.</summary>
+        public List<(float MinX, float MinZ, float MaxX, float MaxZ)> Walls = [];
+
         /// <summary>How far a <c>MoveTo</c> falls short east of its point: the crowd and a terminal's collider shoving a body off a stand point.</summary>
         public float ShoveM;
 
@@ -138,16 +168,23 @@ public sealed class BotErrandChecks
             Sent.Add(intent);
             var (ax, az) = (X, Z);
             Step(intent);
-            if (Wall is { } w)
+            var (bx, bz) = (X, Z);
+            foreach (var w in Wall is { } one ? Walls.Append(one) : Walls)
             {
                 for (var s = 0f; s <= 1f; s += 0.01f)
                 {
-                    var x = ax + ((X - ax) * s);
-                    var z = az + ((Z - az) * s);
+                    var x = ax + ((bx - ax) * s);
+                    var z = az + ((bz - az) * s);
                     if (x > w.MinX && x < w.MaxX && z > w.MinZ && z < w.MaxZ)
                     {
+                        // Stopped at the first wall the step touches, whichever of them it is.
                         var back = MathF.Max(0f, s - 0.01f);
-                        (X, Z) = (ax + ((X - ax) * back), az + ((Z - az) * back));
+                        var (sx, sz) = (ax + ((bx - ax) * back), az + ((bz - az) * back));
+                        if (Routing.Distance(ax, az, sx, sz) < Routing.Distance(ax, az, X, Z))
+                        {
+                            (X, Z) = (sx, sz);
+                        }
+
                         break;
                     }
                 }
@@ -627,6 +664,119 @@ public sealed class BotErrandChecks
         {
             Assert.That(asked.Kind, Is.EqualTo(IntentKind.Board), "the bot never asked to board");
             Assert.That((sim.X, sim.Z), Is.EqualTo((port.X - 2f, port.Z + 21.4f)), "it asked from somewhere other than the ticket terminal");
+        });
+    }
+
+    /// <summary>A bot standing inside a shuttleport's walls with nothing to do there walks out by the gate, and the walls never hold it.</summary>
+    /// <remarks>
+    /// Loïc, 2026-10-26: bots stood trapped against the inside of Port Sable's wall, and reconnecting put them back where they stood. Here, a bot that
+    /// lives in this city wakes on the far side of the plaza from the gate: its home has nothing for it to do, so all it would ever do is stand there.
+    /// </remarks>
+    [Test]
+    public void ABotInsideAShuttleport_WalksOutByItsGate()
+    {
+        var port = (X: Here.X + 100f, Z: Here.Z);
+        var brain = new BotBrain(BotMap.Cities, 7u, 4d, Content(), homeRegion: 1);
+        brain.Facilities.Observe(1, Routing.ShuttleportKind, port.X, port.Z, WalledPortAsset + 1, 0);
+        var sim = new Sim
+        {
+            X = port.X,
+            Z = port.Z - 16f,
+            Planet = [new SeenStructure(port.X, port.Z, Routing.ShuttleportKind, WalledPortAsset, 0, 1)],
+            Walls = [.. RingWalls().Select(r => (r.MinX + port.X, r.MinZ + port.Z, r.MaxX + port.X, r.MaxZ + port.Z))],
+        };
+
+        var outAt = -1L;
+        for (var tick = 1L; tick < 400 && outAt < 0; tick++)
+        {
+            sim.Apply(brain.Decide(sim.View(), tick));
+            outAt = Routing.Distance(sim.X, sim.Z, port.X, port.Z) > 22d ? tick : -1;
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(outAt, Is.GreaterThan(0), $"the bot never left the plaza; it is at ({sim.X - port.X:F1}, {sim.Z - port.Z:F1}) from the port");
+            Assert.That(sim.Z - port.Z, Is.GreaterThan(19f), "it left by somewhere other than the gate");
+            Assert.That(brain.PortsLeft, Is.EqualTo(1));
+        });
+
+        // Out, it stays out: it has nothing to do in there.
+        for (var tick = outAt + 1; tick < outAt + 200; tick++)
+        {
+            sim.Apply(brain.Decide(sim.View(), tick));
+            Assert.That(Routing.Distance(sim.X, sim.Z, port.X, port.Z), Is.GreaterThan(19d), $"tick {tick}: it walked back into the plaza");
+        }
+
+        Assert.That(brain.InPort, Is.False, "out, it is still counted as standing in a port");
+    }
+
+    /// <summary>
+    /// A walk across a city whose straight line runs in through a shuttleport's gate is searched round the port, and never sets foot in its plaza.
+    /// </summary>
+    /// <remarks>
+    /// The straight line until stuck walked in through the gate and against the far wall, where the unstick searches failed for one start in twenty.
+    /// The bot is not told where the port is (it has learned no facility), so only the walk's search can keep it out.
+    /// </remarks>
+    [TestCase(2)]
+    [TestCase(3)]
+    [TestCase(5)]
+    public void AWalkAcrossTown_GoesRoundAShuttleport_NotInByItsGate(int home)
+    {
+        var city = BotMap.Cities[home - 1];
+        var length = (float)Routing.Distance(Here.X, Here.Z, city.X, city.Z);
+        var dir = (X: (city.X - Here.X) / length, Z: (city.Z - Here.Z) / length);
+
+        // The port 60 m along the way, turned so its gate faces the bot; the bot 15 m back from the gate, on the line through it.
+        var port = (X: Here.X + (dir.X * 60f), Z: Here.Z + (dir.Z * 60f));
+        var gates = new[] { (X: 0f, Z: 1f), (X: 1f, Z: 0f), (X: 0f, Z: -1f), (X: -1f, Z: 0f) };
+        var yaw = Enumerable.Range(0, 4).MaxBy(q => -((gates[q].X * dir.X) + (gates[q].Z * dir.Z)));
+        var gate = (X: port.X + (gates[yaw].X * 20f), Z: port.Z + (gates[yaw].Z * 20f));
+        var brain = new BotBrain(BotMap.Cities, 7u, 4d, Content(), homeRegion: home);
+        var sim = new Sim
+        {
+            X = gate.X - (dir.X * 15f),
+            Z = gate.Z - (dir.Z * 15f),
+            Planet = [new SeenStructure(port.X, port.Z, Routing.ShuttleportKind, WalledPortAsset, yaw, 1)],
+            Walls = [.. RingWalls().Select(r => CityPath.Turn(yaw, new PlanBox(r.MinX, r.MinZ, r.MaxX, r.MaxZ, 0f, 2f, false)))
+                .Select(b => (b.MinX + port.X, b.MinZ + port.Z, b.MaxX + port.X, b.MaxZ + port.Z))],
+        };
+
+        var past = false;
+        for (var tick = 1L; tick < 600 && !past; tick++)
+        {
+            sim.Apply(brain.Decide(sim.View(), tick));
+            Assert.That(Routing.Distance(sim.X, sim.Z, port.X, port.Z), Is.GreaterThan(19.5d),
+                $"tick {tick}: it walked into the port's plaza, at ({sim.X - port.X:F1}, {sim.Z - port.Z:F1}) from it");
+            past = ((sim.X - port.X) * dir.X) + ((sim.Z - port.Z) * dir.Z) > 40f;
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Travelling), "the premise: it is on its way home");
+            Assert.That(past, Is.True, $"it never got past the port; it is at ({sim.X - port.X:F1}, {sim.Z - port.Z:F1}) from it");
+        });
+    }
+
+    /// <summary>
+    /// A port encloses its plaza up to its ring's walls — against the wall on an axis too, which a radius small enough for the diagonals missed — and
+    /// nothing beyond the ring, even on its floor; a house encloses nothing.
+    /// </summary>
+    [Test]
+    public void APortEncloses_ItsPlazaUpToTheWall_NotBeyondIt()
+    {
+        var port = WalledPort();
+        Assert.Multiple(() =>
+        {
+            Assert.That(port.HasEnclosure, Is.True);
+            Assert.That(port.Encloses(0f, -16f), Is.True, "mid-plaza");
+            Assert.That(port.Encloses(18.9f, 0f), Is.True, "against the wall on an axis: the ring's block starts at 19.1 m");
+            Assert.That(port.Encloses(13f, 13f), Is.True, "on a diagonal, short of its blocks' corners at 18.7 m");
+            Assert.That(port.Encloses(15f, 15f), Is.False, "21.2 m on a diagonal: past the ring, on the floor's rim");
+            Assert.That(port.Encloses(21f, 0f), Is.False, "outside the wall on an axis");
+            Assert.That(port.Encloses(0f, 19.5f), Is.True, "in the gate: the origin is in sight through it");
+            Assert.That(port.Encloses(0f, 26f), Is.False, "where the approach starts, outside");
+            Assert.That(new AssetPlan { Id = "house", Walls = LargeHouseWalls }.HasEnclosure, Is.False, "a house rings nothing in");
+            Assert.That(new AssetPlan { Id = "bare" }.HasEnclosure, Is.False);
         });
     }
 
