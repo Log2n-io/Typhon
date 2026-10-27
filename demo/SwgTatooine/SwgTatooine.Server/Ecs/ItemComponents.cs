@@ -4,8 +4,8 @@ namespace SwgTatooine.Server;
 
 /// <summary>
 /// What an item ledger row records (inventory-loot.md § 3.2). Items enter from and leave to <see cref="ItemLedger.World"/>; everything else moves between two
-/// characters. Kinds 4-15 are reserved (give, list, buy, vendor, craft, consume, decay, refine, pack, unpack, extract, standard), and the audit refuses them
-/// until they exist.
+/// characters. Kinds 4 and 8-15 are reserved (give, craft, consume, decay, refine, pack, unpack, extract, standard), and the audit refuses them until they exist.
+/// The bazaar's (bazaar.md § 2.2) are 5-7 and 16: a listing's side is the listing's raw id, owner and stack at once.
 /// </summary>
 public static class ItemMoveKind
 {
@@ -18,12 +18,31 @@ public static class ItemMoveKind
     /// <summary>A mission lair's cache, from World, minted with the mission's reward. <see cref="ItemLedgerEntry.Ref"/> is the held mission's raw id.</summary>
     public const byte Mission = 3;
 
+    /// <summary>Units listed on the bazaar: seller → the listing (its escrow). <see cref="ItemLedgerEntry.Ref"/> is the listing's raw id.</summary>
+    public const byte List = 5;
+
+    /// <summary>A sold listing collected: the listing → its buyer. <see cref="ItemLedgerEntry.Ref"/> is the listing's raw id.</summary>
+    public const byte Buy = 6;
+
+    /// <summary>
+    /// Units sold to the vendor: seller → World, destroyed. <see cref="ItemLedgerEntry.Ref"/> is the <see cref="LedgerEntry.Seq"/> of the sale's
+    /// <see cref="TransferKind.Vendor"/> credit row.
+    /// </summary>
+    public const byte Vendor = 7;
+
+    /// <summary>A cancelled or expired listing collected: the listing → its seller. <see cref="ItemLedgerEntry.Ref"/> is the listing's raw id.</summary>
+    public const byte Return = 16;
+
     /// <summary>The name a kind is shown by, over HTTP and in the audit.</summary>
     public static string NameOf(byte kind) => kind switch
     {
         Kill => "kill",
         Lair => "lair",
         Mission => "mission",
+        List => "list",
+        Buy => "buy",
+        Vendor => "vendor",
+        Return => "return",
         _ => "unknown",
     };
 }

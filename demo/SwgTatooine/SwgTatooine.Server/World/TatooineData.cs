@@ -377,6 +377,44 @@ public static class TatooineData
     /// </summary>
     public const float MissionTerminalReachM = 6f;
 
+    // ── The bazaar (claude/design/SwgTatooine/design/bazaar.md § 2.3; fees per crafting-catalog § 15.3) ─────────────────
+
+    /// <summary>How close to a bazaar terminal's centre a body must stand to list, collect, buy or sell to the vendor, metres: the mission terminal's rule.</summary>
+    public const float BazaarReachM = 6f;
+
+    /// <summary>How long a listing stands before it expires and returns to its seller, hours of world time (B8). [EST]</summary>
+    public const int ListingLifeHours = 24;
+
+    /// <summary>The most listings a character has <see cref="ListingState.Listed"/> at once (B9). [EST]</summary>
+    public const int MaxListings = 20;
+
+    /// <summary>The most listings reserved for a character as a buyer — <see cref="ListingState.Sold"/>, not collected — at once (B9). [EST]</summary>
+    public const int MaxReserved = 20;
+
+    /// <summary>The highest unit price a listing may ask, credits.</summary>
+    public const long MaxUnitPrice = 1_000_000;
+
+    /// <summary>The list fee, thousandths of the listing's total, at least 1 credit, paid at listing and never refunded (B6).</summary>
+    public const int ListFeePerMille = 10;
+
+    /// <summary>The sales tax, thousandths of the sale's total, rounded down, paid by the seller at the sale (B6, Q5).</summary>
+    public const int SalesTaxPerMille = 80;
+
+    /// <summary>What the vendor pays, thousandths of the units' market value, rounded down (B7, C3).</summary>
+    public const int VendorBuysPerMille = 200;
+
+    /// <summary>The fastest the desk republishes the browse snapshot, milliseconds (≤ 2 Hz).</summary>
+    public const int MarketPublishMs = 500;
+
+    /// <summary>Listings per page of <c>GET /swg/market</c>.</summary>
+    public const int BrowsePage = 20;
+
+    /// <summary>The list fee of a listing worth <paramref name="total"/> credits: max(1, ⌊1 %⌋).</summary>
+    public static long ListFee(long total) => Math.Max(1, total * ListFeePerMille / 1000);
+
+    /// <summary>The sales tax on a sale of <paramref name="total"/> credits: ⌊8 %⌋, 0 writing no row.</summary>
+    public static long SalesTax(long total) => total * SalesTaxPerMille / 1000;
+
     /// <summary>The credits a mission of <paramref name="level"/> pays (<see cref="MissionRewards"/>); a level outside 1..50 is clamped into it.</summary>
     public static int MissionReward(int level) => MissionRewards[Math.Clamp(level, 1, ContentLevels.MaxLevel)];
 

@@ -17,12 +17,33 @@ public static class TransferKind
     /// <summary>A player's tip to another player (<c>/tip</c>, <see cref="GiveCredits"/>).</summary>
     public const byte Tip = 3;
 
+    /// <summary>A bazaar sale (bazaar.md § 2.2): the buyer pays the seller <c>UnitPrice × Quantity</c>. <see cref="LedgerEntry.Ref"/> is the listing's raw id.</summary>
+    public const byte Sale = 4;
+
+    /// <summary>The bazaar's sales tax, ⌊8 %⌋ of a sale, from the seller to World. <see cref="LedgerEntry.Ref"/> is the listing's raw id.</summary>
+    public const byte Tax = 5;
+
+    /// <summary>The bazaar's list fee, max(1, ⌊1 %⌋) of a listing's total, from the seller to World. <see cref="LedgerEntry.Ref"/> is the listing's raw id.</summary>
+    public const byte ListFee = 6;
+
+    /// <summary>
+    /// A vendor sale's payout, from World to the seller. <see cref="LedgerEntry.Ref"/> is the <see cref="ItemLedgerEntry.Seq"/> of the sale's first item row.
+    /// </summary>
+    public const byte Vendor = 7;
+
+    /// <summary>The first kind past the last one: what a per-kind counter is sized by.</summary>
+    public const byte Count = 8;
+
     /// <summary>The name a kind is shown by, over HTTP and in the audit.</summary>
     public static string NameOf(byte kind) => kind switch
     {
         Grant => "grant",
         MissionReward => "mission",
         Tip => "tip",
+        Sale => "sale",
+        Tax => "tax",
+        ListFee => "listfee",
+        Vendor => "vendor",
         _ => "unknown",
     };
 }
