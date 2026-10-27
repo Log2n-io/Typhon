@@ -115,7 +115,7 @@ public sealed partial class BotSwarm
         fleet.Begin();
         traced.Clear();
         var live = BotCount;
-        Span<long> refusedBy = stackalloc long[MarketReasons];
+        Span<long> refusedBy = stackalloc long[MarketRefusals];
         for (var slot = 0; slot < live; slot++)
         {
             var bot = Volatile.Read(ref _bots[slot]);
@@ -140,7 +140,7 @@ public sealed partial class BotSwarm
             stats[(int)FleetStat.MarketBuyLost] = Volatile.Read(ref bot.MarketBuyLost);
             stats[(int)FleetStat.MarketWon] = Volatile.Read(ref bot.MarketWon);
             stats[(int)FleetStat.MarketCollected] = Volatile.Read(ref bot.MarketCollected);
-            for (var i = 0; i < MarketReasons; i++)
+            for (var i = 0; i < MarketRefusals; i++)
             {
                 refusedBy[i] = Volatile.Read(ref bot.MarketRefused[i]);
                 stats[(int)FleetStat.MarketRefused] += refusedBy[i];

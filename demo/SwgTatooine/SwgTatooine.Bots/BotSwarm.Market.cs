@@ -33,20 +33,36 @@ public sealed partial class BotSwarm
     /// <summary><c>MarketSold</c>: the listing went to somebody else first — a buy's race lost.</summary>
     public const byte MarketSoldReason = MarketFirstReason + 2;
 
-    /// <summary>How many reasons the bazaar has, 151 to 163.</summary>
+    /// <summary>How many reasons the bazaar has of its own, 151 to 163.</summary>
     public const int MarketReasons = 13;
 
-    /// <summary>The reasons' names, by offset from <see cref="MarketFirstReason"/>, for the report.</summary>
+    /// <summary>
+    /// <c>NotInWorld</c> (142): the missions' reason, which the bazaar reuses (bazaar.md § 3.1) — counted as a market refusal only when it answers one of
+    /// this bot's market commands, by sequence.
+    /// </summary>
+    public const byte NotInWorldReason = AckReasons.FirstApplicationReason + 14;
+
+    /// <summary>The refusals a bot counts: the bazaar's own 13, then <see cref="NotInWorldReason"/>.</summary>
+    public const int MarketRefusals = MarketReasons + 1;
+
+    /// <summary>The refusals' names in the server's words, by slot: offset from <see cref="MarketFirstReason"/>, <c>notInWorld</c> last.</summary>
     public static readonly string[] MarketReasonNames =
     [
         "notAtBazaar", "wrongCity", "sold", "notEnough", "noItems", "badListing", "listingCap", "reservedCap", "noRoom", "notYours", "ownListing",
-        "failed", "worthless",
+        "failed", "worthless", "notInWorld",
     ];
+
+    /// <summary>The slot a refusal is counted in, or -1 for one that is not the bazaar's; a 142 only when it answers a market command.</summary>
+    public static int MarketRefusalSlot(byte reason, bool marketCommand)
+    {
+        var offset = reason - MarketFirstReason;
+        return offset is >= 0 and < MarketReasons ? offset : reason == NotInWorldReason && marketCommand ? MarketReasons : -1;
+    }
 
     /// <summary>The fleet's bazaar, summed: trades begun, commands sent by kind, races lost, buys collected, refusals by reason.</summary>
     public MarketTotals Market()
     {
-        var t = new MarketTotals { Refused = new long[MarketReasons] };
+        var t = new MarketTotals { Refused = new long[MarketRefusals] };
         foreach (var bot in Bots)
         {
             if (bot == null)
@@ -62,7 +78,7 @@ public sealed partial class BotSwarm
             t.BuyLost += Volatile.Read(ref bot.MarketBuyLost);
             t.Won += Volatile.Read(ref bot.MarketWon);
             t.Collected += Volatile.Read(ref bot.MarketCollected);
-            for (var i = 0; i < MarketReasons; i++)
+            for (var i = 0; i < MarketRefusals; i++)
             {
                 t.Refused[i] += Volatile.Read(ref bot.MarketRefused[i]);
             }
@@ -104,8 +120,8 @@ public sealed partial class BotSwarm
         public long MarketWon;
         public long MarketCollected;
 
-        /// <summary>The bazaar's refusals of this bot's commands, by reason (offset from <see cref="MarketFirstReason"/>).</summary>
-        public readonly long[] MarketRefused = new long[MarketReasons];
+        /// <summary>The bazaar's refusals of this bot's commands, by slot (<see cref="MarketRefusalSlot"/>).</summary>
+        public readonly long[] MarketRefused = new long[MarketRefusals];
 
         /// <summary>The market's prices are read again after this long (bazaar.md § 8).</summary>
         private static readonly TimeSpan PricesFor = TimeSpan.FromSeconds(60);
@@ -187,15 +203,28 @@ public sealed partial class BotSwarm
             }
         }
 
+        /// <summary>The sequences of its last market commands, for a refusal whose reason is not the bazaar's own (142).</summary>
+        private readonly ushort[] _marketSeqs = new ushort[16];
+
+        private int _marketSeqAt;
+
+        private bool SentMarket(ushort seq)
+        {
+            lock (_marketSeqs)
+            {
+                return seq != 0 && Array.IndexOf(_marketSeqs, seq) >= 0;
+            }
+        }
+
         private void CountRefusals(WorldStore store)
         {
             var acks = store.Acks;
             for (var i = 0; i < acks.Count; i++)
             {
-                var offset = acks[i].Reason - MarketFirstReason;
-                if (offset is >= 0 and < MarketReasons)
+                var slot = MarketRefusalSlot(acks[i].Reason, SentMarket(acks[i].Seq));
+                if (slot >= 0)
                 {
-                    Interlocked.Increment(ref MarketRefused[offset]);
+                    Interlocked.Increment(ref MarketRefused[slot]);
                     if (acks[i].Reason == MarketSoldReason)
                     {
                         Interlocked.Increment(ref MarketBuyLost);
@@ -337,7 +366,12 @@ public sealed partial class BotSwarm
                 return;   // a server without the bazaar: nothing sent, nothing counted
             }
 
-            await Client.SendCommandAsync(command, values, ct).ConfigureAwait(false);
+            var seq = await Client.SendCommandAsync(command, values, ct).ConfigureAwait(false);
+            lock (_marketSeqs)
+            {
+                _marketSeqs[_marketSeqAt++ % _marketSeqs.Length] = seq;
+            }
+
             switch (c.Step)
             {
                 case MarketStep.Collect:
@@ -480,7 +514,7 @@ public struct MarketTotals
     public long Won;
     public long Collected;
 
-    /// <summary>Refusals by reason, offset from <see cref="BotSwarm.MarketFirstReason"/>.</summary>
+    /// <summary>Refusals by slot (<see cref="BotSwarm.MarketRefusalSlot"/>): the bazaar's reasons, then <c>notInWorld</c>.</summary>
     public long[] Refused;
 
     /// <summary>Every refusal.</summary>

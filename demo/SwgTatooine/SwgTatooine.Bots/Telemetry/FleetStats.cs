@@ -101,8 +101,8 @@ public sealed class FleetStats
     /// <summary>Navigation reversals per bot-minute over the window (<see cref="MoveWatch"/>).</summary>
     public Spread ReversalsPerBotMin { get; private set; }
 
-    /// <summary>The bazaar's refusals since the start, by reason (offset from <see cref="BotSwarm.MarketFirstReason"/>): what <see cref="FleetStat.MarketRefused"/> sums.</summary>
-    public long[] MarketRefusedBy { get; } = new long[BotSwarm.MarketReasons];
+    /// <summary>The bazaar's refusals since the start, by slot (<see cref="BotSwarm.MarketRefusalSlot"/>): what <see cref="FleetStat.MarketRefused"/> sums.</summary>
+    public long[] MarketRefusedBy { get; } = new long[BotSwarm.MarketRefusals];
 
     /// <summary>Adds one bot's bazaar refusals, by reason.</summary>
     public void AddMarketRefusals(ReadOnlySpan<long> byReason)
