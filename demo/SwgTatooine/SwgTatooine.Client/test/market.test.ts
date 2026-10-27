@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Descriptor } from '../src/assets/descriptor';
-import { BAZAAR_INTERACTION, bazaarMenuItems, bazaarTerminalOf, canUseAt } from '../src/app/ticket-terminal';
+import {
+  BAZAAR_INTERACTION,
+  bazaarMenuItems,
+  bazaarRegionAt,
+  bazaarTerminalOf,
+  canUseAt,
+  type TicketTerminal,
+} from '../src/app/ticket-terminal';
 import { panelKey } from '../src/app/panel-keys';
 import { lootLines, parseInventory, type InventoryItem } from '../src/data/items';
 import {
@@ -20,7 +27,6 @@ import {
   parseBrowse,
   parseMine,
   parsePrices,
-  regionAt,
   vendorPayout,
   type MarketCommand,
   type MarketListing,
@@ -248,7 +254,6 @@ describe('a city', () => {
   it('is a region, the city index + 1, its name the server’s order', () => {
     expect(cityName(1)).toBe(CITIES[0].name);
     expect(cityName(0)).toBe('');
-    expect(regionAt(CITIES[3].x + 40, CITIES[3].z - 10)).toBe(4);
   });
 });
 
@@ -311,6 +316,38 @@ describe('a bazaar terminal', () => {
     ]);
     expect(items[0].action).toEqual({ kind: 'bazaar', tab: 'browse', scope: 'here' });
     expect(bazaarMenuItems(0)[5].label).toBe('Reserved');
+  });
+
+  it("is in its structure's replicated region, not the city whose centre is nearest it", () => {
+    // A terminal of city 2 (Whitestone) standing a few metres from Port Sable's centre — nearer city 1 by far.
+    const at = (x: number, z: number): TicketTerminal => ({
+      x,
+      z,
+      radiusM: 1.5,
+      reachX: x,
+      reachZ: z,
+      reachM: 3.3,
+      corners: null,
+    });
+    const parts = [
+      { kind: 'mission', owner: 7, use: at(CITIES[0].x, CITIES[0].z) },
+      { kind: 'bazaar', owner: 9, use: at(CITIES[0].x + 5, CITIES[0].z) },
+    ];
+    const regions = new Map([
+      [7, 1],
+      [9, 2],
+    ]);
+    const regionOf = (owner: number): number => regions.get(owner) ?? Number.NaN;
+    expect(bazaarRegionAt(parts, CITIES[0].x + 6, CITIES[0].z, regionOf)).toBe(2);
+    // In reach of both, the mission terminal (first) is passed over; out of reach is nowhere, and a terminal in the wild (region 0) is no city.
+    expect(bazaarRegionAt(parts, CITIES[0].x + 2.5, CITIES[0].z, regionOf)).toBe(2);
+    expect(bazaarRegionAt(parts, CITIES[0].x - 20, CITIES[0].z, regionOf)).toBe(0);
+    expect(bazaarRegionAt(parts, CITIES[0].x + 6, CITIES[0].z, () => 0)).toBe(0);
+    expect(bazaarRegionAt(parts, CITIES[0].x + 6, CITIES[0].z, () => Number.NaN)).toBe(0);
+    // Collect follows it: offered for the terminal's city, not the nearest centre's.
+    const here = bazaarRegionAt(parts, CITIES[0].x + 6, CITIES[0].z, regionOf);
+    expect(collectableHere({ city: 2, realm: 0 }, here, 0)).toBe(true);
+    expect(collectableHere({ city: 1, realm: 0 }, here, 0)).toBe(false);
   });
 
   it('is toggled by B', () => {

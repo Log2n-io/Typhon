@@ -191,6 +191,33 @@ export function bazaarMenuItems(reserved: number): ContextMenuItem[] {
   ];
 }
 
+/**
+ * The region (city + 1) of the bazaar terminal usable from (`x`, `z`), or 0 at none: where list, buy, collect and the vendor
+ * are allowed, and which reservations can be collected (bazaar.md B5).
+ *
+ * <b>The terminal's own replicated `region`, never a guess from where it stands.</b> The server files a terminal under its
+ * city's region (`WorldIndex.Bazaars`) and refuses a collect elsewhere; a terminal standing nearer another city's centre is
+ * still its own city's, so a position-derived city would offer Collect where the server answers `MarketWrongCity`.
+ *
+ * @param parts The terminals in view; only the bazaar ones count.
+ * @param regionOf A structure's replicated `region` field, by netId; 0 for the wild (no city).
+ */
+export function bazaarRegionAt(
+  parts: readonly { readonly kind: string; readonly owner: number; readonly use: TicketTerminal }[],
+  x: number,
+  z: number,
+  regionOf: (owner: number) => number,
+): number {
+  for (const part of parts) {
+    if (part.kind === 'bazaar' && canUseAt(part.use, x, z)) {
+      const region = regionOf(part.owner);
+      return Number.isInteger(region) && region > 0 ? region : 0;
+    }
+  }
+
+  return 0;
+}
+
 /** The eight corners of a child's render box in the world, through its pose, or `null` without bounds. */
 function cornersOf(pose: Pose, descriptor: Descriptor): Float64Array | null {
   // Typed as always there; a hand-written descriptor (a test's) may still leave it out.

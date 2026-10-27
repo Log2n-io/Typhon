@@ -55,7 +55,7 @@ import { itemIcons, parseInventory, type InventorySnapshot } from '../data/items
 import { MockSource } from '../data/mock/mock-source';
 import type { MockInventory } from '../data/mock/inventory';
 import { MOCK_BAZAAR_REGION, type MockMarket } from '../data/mock/market';
-import { parseMine, regionAt, type MarketMine } from '../data/market';
+import { parseMine, type MarketMine } from '../data/market';
 import { useMarket } from '../state/market-store';
 import { RevisionReader } from '../data/revision-reader';
 import { useItems } from '../state/items-store';
@@ -127,6 +127,7 @@ import { ShuttleView } from './shuttle-view';
 import {
   canUseAt,
   bazaarMenuItems,
+  bazaarRegionAt,
   bazaarTerminalOf,
   crowdsTerminal,
   missionMenuItems,
@@ -3976,13 +3977,14 @@ export class ClientApp {
     let here = 0;
     if (mock !== null) {
       here = MOCK_BAZAAR_REGION;
-    } else if (source !== null && source.canPlay) {
-      for (const part of this.terminalsInView()) {
-        if (part.kind === 'bazaar' && this.canUse(part)) {
-          here = regionAt(part.use.reachX, part.use.reachZ);
-          break;
-        }
-      }
+    } else if (source !== null && source.canPlay && source.selfNetId !== 0) {
+      // Where the body stands, as `canUse` reads it; the terminal's city is its structure's replicated region.
+      here = bazaarRegionAt(
+        this.terminalsInView(),
+        this.predictor.active ? this.predictor.x : this.eyeX,
+        this.predictor.active ? this.predictor.z : this.eyeZ,
+        (owner) => this.fieldOf(owner, 'region'),
+      );
     }
 
     market.setHere(here, mock !== null ? 0 : (source?.realm?.realmId ?? -1));

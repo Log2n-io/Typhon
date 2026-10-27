@@ -201,20 +201,6 @@ export function cityName(region: number): string {
   return CITIES[region - 1]?.name ?? '';
 }
 
-/** The region (city index + 1) of the city whose centre is nearest (`x`, `z`): where a bazaar terminal there lists. */
-export function regionAt(x: number, z: number): number {
-  let best = 0;
-  let bestD = Infinity;
-  CITIES.forEach((c, i) => {
-    const d = (c.x - x) * (c.x - x) + (c.z - z) * (c.z - z);
-    if (d < bestD) {
-      bestD = d;
-      best = i + 1;
-    }
-  });
-  return best;
-}
-
 /** What a listing of `total` credits costs and yields (B6): the fee now, the tax at the sale, what the seller is left with. */
 export function fees(total: number): { readonly listFee: number; readonly tax: number; readonly net: number } {
   const t = Math.max(0, Math.floor(total));
