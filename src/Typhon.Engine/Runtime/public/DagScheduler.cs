@@ -1007,11 +1007,12 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// forever. A caller that needs the in-flight tick's work to land must stop dispatching and let the tick complete BEFORE calling this.
     /// </para>
     /// <para>
-    /// Does NOT stop the timer thread — <see cref="Dispose(bool)"/> does, via the base class, and that is the only quiescence point. The thread stays alive
+    /// Does NOT stop the timer thread — <see cref="Quiesce"/> and <see cref="Dispose(bool)"/> do, and they are the quiescence points. The thread stays alive
     /// here but stops producing ticks: <see cref="GetNextTick"/> returns <c>long.MaxValue</c> and <see cref="ExecuteCallbacks"/> bails out, both gated at
     /// tick ENTRY. A tick already past that gate therefore runs to completion, and the increment of <see cref="CurrentTickNumber"/> is the last statement of
     /// that tick's telemetry finalizer — so the counter can advance by ONE after this method returns. Never by more: <c>_workerShutdown</c> is published
-    /// before the join, so every later tick early-returns at the gate. Callers that need "nothing is running" must use <see cref="Dispose(bool)"/>.
+    /// before the join, so every later tick early-returns at the gate. Callers that need "nothing is running" must use <see cref="Quiesce"/> — or
+    /// <see cref="Dispose(bool)"/>, which also frees the resource tree under the scheduler.
     /// </para>
     /// <para>
     /// May legitimately be called ON the timer thread. <see cref="TyphonRuntime.OnTickAborted"/> fires inside the tick-end callback and its documented
@@ -1037,6 +1038,9 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         StopWorkers();
         StopTimerThread();
     }
+
+    /// <summary>Tests only: whether any worker thread is still alive.</summary>
+    internal bool AnyWorkerAliveForTest => Array.Exists(_workers, static w => w.IsAlive);
 
     /// <summary>Signals the workers to exit, releases any that are parked, and joins them (unstarted threads are skipped).</summary>
     private void StopWorkers()

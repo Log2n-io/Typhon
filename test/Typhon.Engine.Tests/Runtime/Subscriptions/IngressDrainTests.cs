@@ -225,6 +225,78 @@ class IngressDrainTests : TestBase<IngressDrainTests>
         ["Speed"] = FieldValue.Of(speed),
     };
 
+    // ── SUB-38 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// #1508 — a transport thread inside <see cref="SubscriptionsIngress.OnCommands"/> is framing into its session's ring, and the teardown that frees the
+    /// ring pool's slabs waits for it to leave.
+    /// </summary>
+    /// <remarks>
+    /// The teardown is <c>SubscriptionsRuntime.Dispose</c>'s order: the ingress, then the pool. Without the ingress's transport-call gate the pool freed the
+    /// slab while the thread below still held the ring, and its write landed in freed memory. The parked thread is a background thread that is released
+    /// only on the passing path, so a regression fails here as an assertion and never writes into the freed slab.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-38")]
+    public void ATransportThreadInsideOnCommands_KeepsItsRingAllocatedThroughTheTeardown()
+    {
+        using var harness = new Harness();
+        var session = harness.Admit();
+        harness.Tick();
+
+        var message = Encode(harness.Plan, 1, ("FireAt", 1, Fire(target: 7, shot: 1)));
+        harness.Ingress.OnCommands(session, message);
+        var slabs = PinnedBlocks(harness.Pool);
+        Assert.That(slabs, Is.Not.Empty, "the session's first COMMANDS took no ring, so there is no slab to free under it");
+
+        using var inside = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        harness.Ingress.InsideCommandsForTest = () =>
+        {
+            inside.Set();
+            release.Wait();
+        };
+
+        var transport = new Thread(() => harness.Ingress.OnCommands(session, message)) { IsBackground = true, Name = "test transport" };
+        transport.Start();
+        Assert.That(inside.Wait(TimeSpan.FromSeconds(5)), Is.True, "the transport thread never reached the ring");
+
+        var teardown = new Thread(() =>
+        {
+            harness.Ingress.Dispose();
+            harness.Pool.Dispose();
+        }) { IsBackground = true, Name = "test teardown" };
+        teardown.Start();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(teardown.Join(200), Is.False, "the ingress's disposal did not wait for the transport thread still framing into a ring");
+            Assert.That(slabs.Where(b => b.IsDisposed).Select(b => b.Id), Is.Empty, "the ring's slab was freed under the transport thread writing it");
+        });
+
+        harness.Ingress.InsideCommandsForTest = null;
+        release.Set();
+        Assert.That(transport.Join(TimeSpan.FromSeconds(5)), Is.True, "the transport thread never left");
+        Assert.That(teardown.Join(TimeSpan.FromSeconds(5)), Is.True, "the teardown never finished once the transport thread left");
+        Assert.That(slabs.Where(b => !b.IsDisposed).Select(b => b.Id), Is.Empty, "the teardown must still free the slabs once nobody holds them");
+    }
+
+    private static List<PinnedMemoryBlock> PinnedBlocks(IResource root)
+    {
+        var blocks = new List<PinnedMemoryBlock>();
+        foreach (var child in root.Children)
+        {
+            if (child is PinnedMemoryBlock block)
+            {
+                blocks.Add(block);
+            }
+
+            blocks.AddRange(PinnedBlocks(child));
+        }
+
+        return blocks;
+    }
+
     // ── SUB-08 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
