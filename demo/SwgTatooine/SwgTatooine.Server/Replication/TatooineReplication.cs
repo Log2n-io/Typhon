@@ -666,6 +666,9 @@ public static partial class TatooineReplication
     /// is a DISC rather than the world, and the exact figure only moves the constant. Tatooine's cells are 256 m, so a disc of this size spans a handful of
     /// them and the cluster index has something to reject.
     /// </remarks>
+    /// <summary>Enters per frame of the whole-world god and overview cameras (ObserverBuilder.Fill, #1511): the engine's default is 500.</summary>
+    public const int GodFillPerFrame = 5000;
+
     public const double PlayerRadiusM = 192d;
 
     /// <summary>How far a session with a RENDERER is served, in metres: the radius a connecting player gets before touching the slider.</summary>
@@ -1618,8 +1621,11 @@ public static partial class TatooineReplication
         {
             subs.Profile(GodProfile, p =>
             {
+                // Fill: an operator's camera, not a population (Loïc, 2026-10-27) — its enters per frame (and owed cap) past the engine's 500, so the whole
+                // planet loads in ~1 s rather than ~8 (#1511's measurement: 84 frames → 11); still paced by bytes, at most half a frame.
                 p.Detection(detection)
                     .World()
+                    .Fill(GodFillPerFrame)
                     .Of<Creature>()
                     .Of<CityNpc>()
                     .Of<Player>()
@@ -1639,6 +1645,7 @@ public static partial class TatooineReplication
                 p.Detection(detection)
                     .World()
                     .AroundControlled()
+                    .Fill(GodFillPerFrame)
                     .Of<Creature>()
                     .Of<CityNpc>()
                     .Of<Player>()
