@@ -104,3 +104,8 @@ th { color: var(--muted); font-weight: 500; font-size: 12px; }
 .timeline td:nth-child(2) { width: 50px; color: var(--muted); }
 .timeline tr.goal td:last-child { color: var(--accent); }
 .timeline tr.reversal td:last-child { color: var(--bad); }
+
+/* "Watch this bot" (bot-telemetry.md § 7). */
+button.watch { font: inherit; font-size: 11px; padding: 1px 8px; border-radius: 3px; border: 1px solid var(--accent); background: transparent; color: var(--accent); cursor: pointer; }
+button.watch:hover { background: rgba(240, 184, 74, .15); }
+h2 button.watch { margin-left: 8px; vertical-align: middle; }

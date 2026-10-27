@@ -5,10 +5,12 @@ import { startInventoryPoll } from '../app/inventory-poll';
 import { fetchRealmInventory } from '../data/realm-inventory';
 import { fetchServerConfig } from '../data/server-config';
 import { RealmFade } from './RealmFade';
+import { WatchBadge } from './WatchBadge';
 import { TerrainLoading } from './TerrainLoading';
 import { refused } from '../app/realm-transition';
 import { TyphonSource } from '../data/source';
 import { tipRefusal } from '../data/wallet';
+import { watchFromMessage, watchFromParam, watchFromUrl, watchOriginAllowed } from '../app/watch-link';
 import { useChat } from '../state/chat-store';
 import { useMissions } from '../state/mission-store';
 import { useRealms } from '../state/realm-store';
@@ -194,6 +196,26 @@ export function Viewport() {
     const app = new ClientApp(canvas, overlay, factoryFor(kind, token, noteClosed), terrain);
     app.start();
 
+    // "Watch this bot" from the dashboard (watch-link.ts): the god camera only, from the URL it was opened with and then
+    // from the follow messages the dashboard posts to this window.
+    let onWatch: ((event: MessageEvent) => void) | null = null;
+    if (godRequested(window.location.search)) {
+      const opened = watchFromUrl(window.location.search);
+      if (opened !== null) {
+        useUi.getState().watchBot(opened);
+      }
+
+      const watchFrom = watchFromParam(window.location.search);
+      onWatch = (event: MessageEvent) => {
+        const target = watchFromMessage(event.data);
+        if (target !== null && watchOriginAllowed(event.origin, window.location.hostname, watchFrom)) {
+          useUi.getState().watchBot(target);
+        }
+      };
+
+      window.addEventListener('message', onWatch);
+    }
+
     // The mock honours whatever it is asked for, so its ceiling is simply the largest the slider offers — stated, not
     // left unknown, because "unknown" makes the HUD hedge with "(asked)" about a source that never clamps anything.
     let cancelled = false;
@@ -256,6 +278,10 @@ export function Viewport() {
 
     return () => {
       cancelled = true;
+      if (onWatch !== null) {
+        window.removeEventListener('message', onWatch);
+      }
+
       if (poll !== 0) {
         window.clearInterval(poll);
       }
@@ -278,6 +304,7 @@ export function Viewport() {
       <div ref={overlayRef} className="viewport-overlay" />
       {terrain === null ? <TerrainLoading /> : null}
       <RealmFade />
+      <WatchBadge />
     </div>
   );
 }

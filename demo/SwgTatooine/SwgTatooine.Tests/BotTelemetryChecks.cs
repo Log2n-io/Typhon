@@ -1,23 +1,29 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Components.Web;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.JSInterop;
 using NUnit.Framework;
 using SwgTatooine.Bots;
 using SwgTatooine.Bots.Brain;
 using SwgTatooine.Bots.Telemetry;
 using SwgTatooine.Dashboard;
 using SwgTatooine.Navigation;
+using BotsPage = SwgTatooine.Dashboard.Components.Pages.Bots;
 
 namespace SwgTatooine.Tests;
 
@@ -204,6 +210,9 @@ public sealed class BotTelemetryChecks
             Assert.That(bot.Goal, Is.EqualTo(nameof(Goal.Hunting)));
             Assert.That(bot.Cl, Is.EqualTo(3));
             Assert.That(bot.X, Is.EqualTo(12.5).Within(0.05));
+            Assert.That(bot.Z, Is.EqualTo(-40.0).Within(0.05));
+            Assert.That(bot.Realm, Is.EqualTo(Realm), "WA-1: the realm the watch crosses into");
+            Assert.That(bot.NetId, Is.EqualTo(Body), "WA-1: the body's netId the god camera follows");
             Assert.That(bot.Home, Is.True);
             Assert.That(bot.Events.First(e => e.Kind == "goal").Enter, Is.EqualTo(nameof(GoalWhy.CreatureNoticed)));
             Assert.That(bot.Events.First(e => e.Kind == "goal").Subject, Is.EqualTo(42));
@@ -265,6 +274,99 @@ public sealed class BotTelemetryChecks
         await app.StopAsync();
     }
 
+    /// <summary>
+    /// WA-1: the watched bot's body is refreshed on every decision — a body that crosses into another realm is replicated under another netId — and a
+    /// report from a swarm that predates the field reads 0, for which the page offers no Watch.
+    /// </summary>
+    [Test]
+    public void TheWatchedBodyIsReportedFresh_AndAbsentReadsZero()
+    {
+        var tracer = new BotTracer(3, 4d);
+        var outside = new Perceived { HasBody = true, X = 1f, Z = 2f };
+        var inside = new Perceived { HasBody = true, X = -3f, Z = 4f, Realm = 9 };
+        tracer.Observe(1, in outside, default, home: false, float.NaN, false, netId: 100u);
+        tracer.Observe(2, in inside, default, home: false, float.NaN, false, netId: 200u);
+        var bot = JsonSerializer.Deserialize<BotReport>(Write(tracer, out _), BotReport.Json).Traced.Single();
+        var old = JsonSerializer.Deserialize<TracedBotReport>("{\"index\":1,\"x\":5,\"z\":6,\"realm\":0}", BotReport.Json);
+        Assert.Multiple(() =>
+        {
+            Assert.That((bot.NetId, bot.Realm, bot.X, bot.Z), Is.EqualTo((200u, 9, -3d, 4d)), "the report kept a stale body");
+            Assert.That(old.NetId, Is.Zero);
+        });
+    }
+
+    /// <summary>
+    /// WA-3: the bots page renders a Watch button for each traced bot with a body — carrying its netId, realm and position, and the client's address
+    /// from the dashboard's options — none for a bot without one, and the page loads the script the button calls.
+    /// </summary>
+    [Test]
+    public async Task TheBotsPage_OffersWatchForEachTracedBotWithABody()
+    {
+        var board = new BotBoard();
+        var report = JsonSerializer.Deserialize<BotReport>(WriteReport(out _, out _), BotReport.Json);
+        var bodiless = JsonSerializer.Deserialize<BotReport>(WriteReport(out _, out _), BotReport.Json).Traced.Single();
+        bodiless.Index = 41;
+        bodiless.NetId = 0;
+        report.Traced.Add(bodiless);
+        Assert.That(board.Ingest(report, DateTime.UtcNow, out var error), Is.True, error);
+
+        var services = new ServiceCollection();
+        services.AddSingleton(board);
+        services.AddSingleton(new WatchLink("http://client.lan:5080/", 5080));
+        services.AddSingleton<IJSRuntime, NoJs>();
+        services.AddLogging();
+        await using var provider = services.BuildServiceProvider();
+        await using var renderer = new HtmlRenderer(provider, NullLoggerFactory.Instance);
+        var html = await renderer.Dispatcher.InvokeAsync(async () => (await renderer.RenderComponentAsync<BotsPage>()).ToHtmlString());
+
+        var app = File.ReadAllText(Path.Combine(DashboardDir(), "Components", "App.razor"));
+        var script = File.ReadAllText(Path.Combine(DashboardDir(), "wwwroot", "watch.js"));
+        Assert.Multiple(() =>
+        {
+            Assert.That(Count(html, "class=\"watch\""), Is.EqualTo(1), "one Watch for the one bot with a body");
+            Assert.That(html, Does.Contain("tatooineWatch.watch(this)"));
+            Assert.That(html, Does.Contain($"data-net-id=\"{Body}\""));
+            Assert.That(html, Does.Contain($"data-realm=\"{Realm}\""));
+            Assert.That(html, Does.Contain("data-x=\"12.5\"").And.Contain("data-z=\"-40\""));
+            Assert.That(html, Does.Contain("data-bot=\"40\""));
+            Assert.That(html, Does.Contain("data-client-url=\"http://client.lan:5080/\"").And.Contain("data-server-port=\"5080\""));
+            Assert.That(app, Does.Contain("<script src=\"watch.js\"></script>"), "the page does not load the script");
+            Assert.That(script, Does.Contain("window.tatooineWatch = { watch, update }"));
+            Assert.That(script, Does.Contain("kind: 'swg-follow'"), "the message kind the client listens for");
+        });
+
+        static int Count(string s, string what) => (s.Length - s.Replace(what, "").Length) / what.Length;
+    }
+
+    /// <summary>The dashboard project's directory, found above the test's own: the page is checked against its source, which is what is served.</summary>
+    private static string DashboardDir()
+    {
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, "SwgTatooine.Dashboard");
+            if (File.Exists(Path.Combine(candidate, "SwgTatooine.Dashboard.csproj")))
+            {
+                return candidate;
+            }
+        }
+
+        throw new InvalidOperationException("SwgTatooine.Dashboard not found above " + AppContext.BaseDirectory);
+    }
+
+    /// <summary>The page's report-time call to the watch script, with no browser to take it.</summary>
+    private sealed class NoJs : IJSRuntime
+    {
+        public ValueTask<TValue> InvokeAsync<TValue>(string identifier, object[] args) => ValueTask.FromResult(default(TValue));
+
+        public ValueTask<TValue> InvokeAsync<TValue>(string identifier, CancellationToken cancellationToken, object[] args) =>
+            ValueTask.FromResult(default(TValue));
+    }
+
+    /// <summary>The traced bot's body in <see cref="WriteReport"/>: a netId, on the planet (a realm other than 0 sends the brain indoors).</summary>
+    private const uint Body = 3456;
+
+    private const int Realm = 0;
+
     /// <summary>A report of one traced bot that noticed a creature, hunted it and moved, as the swarm writes it.</summary>
     private static string WriteReport(out BotTracer tracer, out (long, long)[] cursors)
     {
@@ -276,12 +378,12 @@ public sealed class BotTelemetryChecks
         {
             var world = new Perceived
             {
-                HasBody = true, X = 12.5f, Z = 0f, Level = 3,
-                NearestCreature = 42u, NearestCreatureX = 12.5f, NearestCreatureZ = 50f, NearestCreatureM = 50f,
+                HasBody = true, X = 12.5f, Z = -40f, Level = 3, Realm = Realm,
+                NearestCreature = 42u, NearestCreatureX = 12.5f, NearestCreatureZ = 10f, NearestCreatureM = 50f,
             };
             var intent = brain.Decide(in world, tick);
             var reversal = watch.See(tick, in world, intent, 20, out var heading);
-            tracer.Observe(tick, in world, intent, home: true, heading, reversal);
+            tracer.Observe(tick, in world, intent, home: true, heading, reversal, Body);
         }
 
         var fleet = new FleetStats(4, DateTime.UtcNow.AddSeconds(-30));
