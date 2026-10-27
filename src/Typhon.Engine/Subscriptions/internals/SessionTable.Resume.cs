@@ -147,16 +147,16 @@ internal sealed unsafe partial class SessionTable
 
         try
         {
-            var row = _rows + session.Slot;
-            if (!GateNames(Volatile.Read(ref row->Gate), session))
+            ref var row = ref Rows[session.Slot];
+            if (!GateNames(Volatile.Read(ref row.Gate), session))
             {
                 return false;
             }
 
-            var token = _openTokens + (session.Slot * 2);
+            var token = OpenTokens.Slice(session.Slot * 2, 2);
 
             // Acquire on the high word, which MintResumeToken writes last: a reader that sees it set sees the low word written before it.
-            var hi = (ulong)Volatile.Read(ref *(long*)(token + 1));
+            var hi = Volatile.Read(ref token[1]);
             if (hi == 0)
             {
                 return false;
@@ -213,13 +213,13 @@ internal sealed unsafe partial class SessionTable
 
         try
         {
-            var record = _resumes + slot;
+            ref var record = ref Resumes[slot];
 
             // Acquire: the fields below were written before the release store that armed this record, and a plain read of them could otherwise be hoisted
             // above this one. The deadline is read before the CAS and the CAS is what decides, so a deadline that passes in between costs the client the
             // resume and never the record's integrity.
-            var armed = Volatile.Read(ref record->State);
-            if (armed == 0 || record->TokenLo != lo || record->TokenHi != hi || NowTicks > record->DeadlineTicks)
+            var armed = Volatile.Read(ref record.State);
+            if (armed == 0 || record.TokenLo != lo || record.TokenHi != hi || NowTicks > record.DeadlineTicks)
             {
                 return false;
             }
@@ -230,7 +230,7 @@ internal sealed unsafe partial class SessionTable
             // this thread whatever either side does next, and it is simply dropped when the CAS below is lost.
             var pending = _resumeAppData[slot];
 
-            if (!ConsumeWithoutClaimForTest && Interlocked.CompareExchange(ref record->State, 0, armed) != armed)
+            if (!ConsumeWithoutClaimForTest && Interlocked.CompareExchange(ref record.State, 0, armed) != armed)
             {
                 return false;   // the sweep expired it, or another connection presented the same token first: single use (SUB-12)
             }
@@ -263,17 +263,17 @@ internal sealed unsafe partial class SessionTable
             return;
         }
 
-        var token = _openTokens + (slot * 2);
-        var random = stackalloc byte[ResumeTokenBytes];
-        RandomNumberGenerator.Fill(new Span<byte>(random, ResumeTokenBytes));
+        var token = OpenTokens.Slice(slot * 2, 2);
+        Span<byte> random = stackalloc byte[ResumeTokenBytes];
+        RandomNumberGenerator.Fill(random);
 
-        var lo = (ReadUInt64(new ReadOnlySpan<byte>(random, sizeof(ulong))) << ResumeTokenSlotBits) | (uint)slot;
-        var hi = ReadUInt64(new ReadOnlySpan<byte>(random + sizeof(ulong), sizeof(ulong))) | ResumeTokenNonZeroBit;
+        var lo = (ReadUInt64(random[..sizeof(ulong)]) << ResumeTokenSlotBits) | (uint)slot;
+        var hi = ReadUInt64(random[sizeof(ulong)..]) | ResumeTokenNonZeroBit;
 
         token[0] = lo;
 
         // Release, and last: TryWriteResumeToken reads this word first and takes a set one as "the low word is there too".
-        Volatile.Write(ref *(long*)(token + 1), (long)hi);
+        Volatile.Write(ref token[1], hi);
     }
 
     /// <summary>
@@ -290,28 +290,28 @@ internal sealed unsafe partial class SessionTable
     private bool ArmResume(SessionId session, object appData)
     {
         var slot = session.Slot;
-        var token = _openTokens + (slot * 2);
+        var token = OpenTokens.Slice(slot * 2, 2);
         if (token[1] == 0)
         {
             return false;   // opened before resume was enabled, or never minted: there is no token for a client to come back with
         }
 
-        var record = _resumes + slot;
-        ClaimResumeRecord(slot, record);
+        ref var record = ref Resumes[slot];
+        ClaimResumeRecord(slot, ref record);
 
         while (_armedCount >= _maxPendingResumes && _armedHead >= 0)
         {
-            ClaimResumeRecord(_armedHead, _resumes + _armedHead);
+            ClaimResumeRecord(_armedHead, ref Resumes[_armedHead]);
         }
 
-        record->TokenLo = token[0];
-        record->TokenHi = token[1];
-        record->DeadlineTicks = NowTicks + _resumeGraceTicks;
+        record.TokenLo = token[0];
+        record.TokenHi = token[1];
+        record.DeadlineTicks = NowTicks + _resumeGraceTicks;
         _resumeAppData[slot] = appData;
-        LinkArmed(slot, record);
+        LinkArmed(slot, ref record);
 
         // Release: a link thread that sees this record armed must see the token and the deadline written above.
-        Volatile.Write(ref record->State, session.Value);
+        Volatile.Write(ref record.State, session.Value);
         return true;
     }
 
@@ -331,25 +331,25 @@ internal sealed unsafe partial class SessionTable
         while (_armedHead >= 0)
         {
             var slot = _armedHead;
-            var record = _resumes + slot;
+            ref var record = ref Resumes[slot];
 
-            if (Volatile.Read(ref record->State) == 0)
+            if (Volatile.Read(ref record.State) == 0)
             {
                 // Consumed: the resume already happened, and the list is where that bookkeeping lands. The appData is released HERE because the consume
                 // cannot do it — it took its own copy before the CAS (see TryConsumeResume) and clearing from a link thread would be a managed write
                 // SUB-05 does not allow it. Without this the application's object stayed rooted in this array until the slot armed again, which for a
                 // client that never drops twice is the life of the process.
                 _resumeAppData[slot] = null;
-                Unlink(slot, record);
+                Unlink(slot, ref record);
                 continue;
             }
 
-            if (now <= record->DeadlineTicks)
+            if (now <= record.DeadlineTicks)
             {
                 return;
             }
 
-            ClaimResumeRecord(slot, record);
+            ClaimResumeRecord(slot, ref record);
         }
     }
 
@@ -362,12 +362,12 @@ internal sealed unsafe partial class SessionTable
     /// <see cref="Interlocked.Exchange(ref long, long)"/> rather than a store: a resume in flight on a link thread is mid-CAS against the value this takes
     /// away, and that CAS then fails. Exactly one of the two sides wins, which is the whole of SUB-12.
     /// </remarks>
-    private void ClaimResumeRecord(int slot, ResumeRecord* record)
+    private void ClaimResumeRecord(int slot, ref ResumeRecord record)
     {
-        var previous = Interlocked.Exchange(ref record->State, 0);
+        var previous = Interlocked.Exchange(ref record.State, 0);
         var appData = _resumeAppData[slot];
         _resumeAppData[slot] = null;
-        Unlink(slot, record);
+        Unlink(slot, ref record);
 
         if (previous != 0)
         {
@@ -397,14 +397,14 @@ internal sealed unsafe partial class SessionTable
     /// <summary>Appends a record to the deadline-ordered list.</summary>
     /// <param name="slot">The record's slot.</param>
     /// <param name="record">The record.</param>
-    private void LinkArmed(int slot, ResumeRecord* record)
+    private void LinkArmed(int slot, ref ResumeRecord record)
     {
-        record->Prev = _armedTail;
-        record->Next = -1;
+        record.Prev = _armedTail;
+        record.Next = -1;
 
         if (_armedTail >= 0)
         {
-            _resumes[_armedTail].Next = slot;
+            Resumes[_armedTail].Next = slot;
         }
         else
         {
@@ -418,33 +418,33 @@ internal sealed unsafe partial class SessionTable
     /// <summary>Takes a record out of the deadline-ordered list, if it is in it.</summary>
     /// <param name="slot">The record's slot.</param>
     /// <param name="record">The record.</param>
-    private void Unlink(int slot, ResumeRecord* record)
+    private void Unlink(int slot, ref ResumeRecord record)
     {
-        if (record->Prev < 0 && record->Next < 0 && _armedHead != slot)
+        if (record.Prev < 0 && record.Next < 0 && _armedHead != slot)
         {
             return;
         }
 
-        if (record->Prev >= 0)
+        if (record.Prev >= 0)
         {
-            _resumes[record->Prev].Next = record->Next;
+            Resumes[record.Prev].Next = record.Next;
         }
         else
         {
-            _armedHead = record->Next;
+            _armedHead = record.Next;
         }
 
-        if (record->Next >= 0)
+        if (record.Next >= 0)
         {
-            _resumes[record->Next].Prev = record->Prev;
+            Resumes[record.Next].Prev = record.Prev;
         }
         else
         {
-            _armedTail = record->Prev;
+            _armedTail = record.Prev;
         }
 
-        record->Prev = -1;
-        record->Next = -1;
+        record.Prev = -1;
+        record.Next = -1;
         _armedCount--;
     }
 
@@ -466,9 +466,9 @@ internal sealed unsafe partial class SessionTable
             return;
         }
 
-        var token = _openTokens + (slot * 2);
+        var token = OpenTokens.Slice(slot * 2, 2);
         token[0] = 0;
-        Volatile.Write(ref *(long*)(token + 1), 0);
+        Volatile.Write(ref token[1], 0UL);
     }
 
     /// <summary>Whether a close with this reason leaves a client able to come back.</summary>
