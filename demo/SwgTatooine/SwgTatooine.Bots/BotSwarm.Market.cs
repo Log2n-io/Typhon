@@ -150,12 +150,10 @@ public sealed partial class BotSwarm
         // `/mine` re-read on each `items` revision while the last answer named something — the browser's rule (bazaar.md § 5, "Told").
         private readonly OwnerFieldPoll _minePoll = new("items", OwnerReadRetryTicks);
 
-        /// <summary>One trade read at a time; its plan lands in <see cref="_planned"/> and goes out from the driver at the commands' rate.</summary>
+        /// <summary>One trade read at a time; its plan goes to <see cref="_sender"/> and out from the driver at the commands' rate.</summary>
         private int _tradeBusy;
 
-        private volatile List<MarketCommand> _planned;
-        private readonly Queue<MarketCommand> _sending = new();
-        private long _nextMarketSendTick;
+        private readonly MarketSender _sender = new();
         private uint _marketRng;
 
         /// <summary>The rush's buyer: listings it has tried, and the units it won and has yet to list again.</summary>
@@ -235,7 +233,9 @@ public sealed partial class BotSwarm
 
         /// <summary>What the brain is told of the market: the stacks held and the goods reserved.</summary>
         private Perceived WithMarket(Perceived world) =>
-            _trades ? world with { InventoryStacks = _inventory.Stacks, Reserved = _mine.Reserved } : world;
+            _trades
+                ? world with { InventoryStacks = _inventory.Stacks, Reserved = _mine.Reserved, Trading = Volatile.Read(ref _tradeBusy) != 0 || _sender.Busy }
+                : world;
 
         /// <summary>The bot stands at a bazaar: read what the plan needs, and plan. One at a time; a trade asked while one is read is the same trade.</summary>
         private void BeginTrade(long tick, int region)
@@ -247,17 +247,17 @@ public sealed partial class BotSwarm
 
             MarketTrades++;
             var level = _brain.CombatLevel;
-            _ = TradeAsync(region, level);
+            _ = TradeAsync(region, level, _brain.VisitSerial);
         }
 
-        private async Task TradeAsync(int region, int level)
+        private async Task TradeAsync(int region, int level, long visit)
         {
             try
             {
                 var plan = _rush ? await RushRoundAsync(region).ConfigureAwait(false) : await PlanTradeAsync(region, level).ConfigureAwait(false);
                 if (plan is { Count: > 0 })
                 {
-                    _planned = plan;
+                    _sender.Offer(visit, plan);
                 }
             }
             catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException or InvalidOperationException
@@ -330,34 +330,11 @@ public sealed partial class BotSwarm
                 return;
             }
 
-            if (Interlocked.Exchange(ref _planned, null) is { } plan)
-            {
-                _sending.Clear();
-                foreach (var step in plan)
-                {
-                    _sending.Enqueue(step);
-                }
-            }
-
-            if (_sending.Count == 0)
+            if (_sender.Next(_brain.AtBazaar, _brain.VisitSerial, tick, Math.Max(1L, _ticksPerSecond / 2)) is not { } c)
             {
                 return;
             }
 
-            if (_brain.Goal != Goal.Visiting)
-            {
-                // Walked off — the visit ended: the server would refuse every one of them NotAtBazaar.
-                _sending.Clear();
-                return;
-            }
-
-            if (tick < _nextMarketSendTick)
-            {
-                return;
-            }
-
-            _nextMarketSendTick = tick + Math.Max(1L, _ticksPerSecond / 2);
-            var c = _sending.Dequeue();
             var (command, values) = Encode(c);
             if (Client.Plan.CommandByName(command) == null)
             {
@@ -397,7 +374,7 @@ public sealed partial class BotSwarm
             {
                 if (s.Template == c.Template && s.Mk == c.Mk)
                 {
-                    return (long)Math.Floor(c.Quantity * _prices.ValueOf(s.Item, s.Mk) * 0.2d);
+                    return MarketPlan.VendorPayout(c.Quantity, _prices.ValueOf(s.Item, s.Mk));
                 }
             }
 
@@ -528,5 +505,68 @@ public struct MarketTotals
 
             return sum;
         }
+    }
+}
+
+/// <summary>
+/// A trade's plan on its way out (bazaar.md § 8): one command at a time, at the commands' rate, and only while the bot stands at the bazaar of the visit the
+/// plan was read for. Anything else is dropped, counted: a market command from a body farther than 6 m from a terminal is refused
+/// <c>MarketNotAtBazaar</c>, and live that was 48 refusals a second — plans landing after the bot had left, and queues drained on the walk to the next errand.
+/// </summary>
+public sealed class MarketSender
+{
+    private sealed record Offered(long Visit, List<MarketCommand> Plan);
+
+    private readonly Queue<MarketCommand> _queue = new();
+    private Offered _offered;
+    private long _visit;
+    private long _nextAt = long.MinValue;
+
+    /// <summary>Commands dropped unsent: their visit was over, or a newer plan replaced them.</summary>
+    public long Dropped { get; private set; }
+
+    /// <summary>Whether a plan is still to go out: the bot stands at the bazaar meanwhile (<c>Perceived.Trading</c>).</summary>
+    public bool Busy => _queue.Count > 0 || Volatile.Read(ref _offered) != null;
+
+    /// <summary>Hands over the plan read for <paramref name="visit"/>; any thread.</summary>
+    public void Offer(long visit, List<MarketCommand> plan) => Volatile.Write(ref _offered, new Offered(visit, plan));
+
+    /// <summary>The command to send now, or null; on the driver's thread.</summary>
+    /// <param name="atBazaar">Whether the bot stands at a bazaar's terminal using it.</param>
+    /// <param name="visit">Its errand now: a plan read for another is dropped.</param>
+    /// <param name="tick">The driver's tick.</param>
+    /// <param name="spacing">Ticks between two commands: the rate.</param>
+    public MarketCommand? Next(bool atBazaar, long visit, long tick, long spacing)
+    {
+        if (Interlocked.Exchange(ref _offered, null) is { } offered)
+        {
+            Dropped += _queue.Count;
+            _queue.Clear();
+            _visit = offered.Visit;
+            foreach (var c in offered.Plan)
+            {
+                _queue.Enqueue(c);
+            }
+        }
+
+        if (_queue.Count == 0)
+        {
+            return null;
+        }
+
+        if (!atBazaar || visit != _visit)
+        {
+            Dropped += _queue.Count;
+            _queue.Clear();
+            return null;
+        }
+
+        if (tick < _nextAt)
+        {
+            return null;
+        }
+
+        _nextAt = tick + spacing;
+        return _queue.Dequeue();
     }
 }

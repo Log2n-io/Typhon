@@ -1558,11 +1558,17 @@ public sealed class BotErrandChecks
         var trades = new List<(long Tick, Intent Intent)>();
         var targets = new List<(float X, float Z)>();
         var doneAt = -1L;
+        var atBazaar = new List<long>();
         var was = brain.Goal;
         for (var tick = 1L; tick < 600 && targets.Count < 2; tick++)
         {
             var intent = brain.Decide(sim.View(), tick);
             sim.Apply(intent);
+            if (brain.AtBazaar)
+            {
+                atBazaar.Add(tick);
+            }
+
             if (intent.Kind == IntentKind.Trade)
             {
                 trades.Add((tick, intent));
@@ -1591,6 +1597,12 @@ public sealed class BotErrandChecks
                 "it left before the plan could be sent");
             Assert.That(brain.Counters.Why[(int)GoalWhy.MarketDone], Is.EqualTo(1));
             Assert.That(brain.TradesAsked, Is.EqualTo(1));
+
+            // AtBazaar — the only time the swarm sends a market command — is the stay at the terminal: not the walk there, not the walk to the desk.
+            Assert.That(atBazaar.FirstOrDefault(), Is.EqualTo(trades.Count == 1 ? trades[0].Tick : -1), "at the bazaar before it arrived");
+            Assert.That(atBazaar.Count > 0 ? atBazaar[^1] : 0, Is.EqualTo(doneAt - 1), "at the bazaar after it left");
+            Assert.That(atBazaar.Count, Is.EqualTo(atBazaar.Count > 0 ? atBazaar[^1] - atBazaar[0] + 1 : 0), "not one stay");
+            Assert.That(brain.AtBazaar, Is.False, "at a mission terminal, it counts as at a bazaar");
         });
     }
 
@@ -1665,6 +1677,59 @@ public sealed class BotErrandChecks
             // One errand for good: a round is not a fresh choice and a fresh walk (a search) every two seconds.
             Assert.That(brain.Counters.Why[(int)GoalWhy.MarketChosen], Is.EqualTo(1), "the bazaar was chosen again for a round");
             Assert.That(brain.Counters.Why[(int)GoalWhy.MarketDone], Is.Zero, "a round ended the errand");
+        });
+    }
+
+    /// <summary>
+    /// No market command leaves a bot farther than the server's reach of the terminal (<c>TatooineData.BazaarReachM</c>, 6 m), so none is refused
+    /// <c>MarketNotAtBazaar</c>: the brain and the swarm's sender together, the plan landing <paramref name="lateTicks"/> after the trade was asked — reads
+    /// slow under load — and going out two commands a second. A plan in time is sent whole, the bot standing at the terminal until its last command; one
+    /// that lands after the bot could wait no longer is dropped, never sent from the walk to the next errand (live: 66 057 refusals in 23 minutes).
+    /// </summary>
+    [TestCase(40, 30, 0)]
+    [TestCase(0, 12, 0)]
+    [TestCase(600, 30, 30)]
+    public void ABazaarErrand_SendsEveryMarketCommandFromWithinTheTerminalsReach(int lateTicks, int commands, int dropped)
+    {
+        const double BazaarReachM = 6d;
+        var (brain, sim) = Trader(26, 0);
+        var sender = new MarketSender();
+        var plan = Enumerable.Range(0, commands).Select(_ => MarketCommand.Vendor(8, 1, 5)).ToList();
+        var offerAt = long.MaxValue;
+        var visit = 0L;
+        var reading = false;
+        var sent = new List<double>();
+        for (var tick = 1L; tick < 1200; tick++)
+        {
+            if (tick == offerAt)
+            {
+                sender.Offer(visit, plan);
+                reading = false;
+            }
+
+            var intent = brain.Decide(sim.View() with { Trading = reading || sender.Busy }, tick);
+            sim.Apply(intent);
+            if (intent.Kind == IntentKind.Trade && offerAt == long.MaxValue)
+            {
+                offerAt = tick + lateTicks + 1;
+                visit = brain.VisitSerial;
+                reading = true;
+                sim.Stacks = MarketPlan.KeepStacks;
+            }
+
+            if (sender.Next(brain.AtBazaar, brain.VisitSerial, tick, 2) is { })
+            {
+                sent.Add(Routing.Distance(sim.X, sim.Z, Here.X + 40f, Here.Z));
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(offerAt, Is.LessThan(long.MaxValue), "the premise: the bot traded");
+            Assert.That(sent, Has.Count.EqualTo(commands - dropped), "not every command of a plan in time was sent, or one of a late plan was");
+            Assert.That(sent.Count == 0 ? 0d : sent.Max(), Is.LessThanOrEqualTo(BazaarReachM), "a command was sent from beyond the terminal's reach");
+            Assert.That(sender.Dropped, Is.EqualTo(dropped));
+            Assert.That(brain.Counters.Why[(int)GoalWhy.MarketDone], Is.EqualTo(1), "the bot never left the bazaar");
         });
     }
 

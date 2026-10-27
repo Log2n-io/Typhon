@@ -114,6 +114,63 @@ public sealed class BotMarketChecks
         });
     }
 
+    /// <summary>
+    /// The vendor's payout is the server's, to the credit (<c>MarketValues.VendorPayout</c>: ⌊count × milli × 200 / 10⁶⌋), and a stack it would pay 0 for
+    /// is not sent — the server refuses it <c>MarketWorthless</c> (live: 517 in 23 minutes) — the next cheapest is.
+    /// </summary>
+    [Test]
+    public void AStackTheVendorPaysNothingFor_IsNotSold()
+    {
+        var rng = 7u;
+        var held = new List<HeldStack> { Material("mat_hide", 1, 2), Material("mat_hide", 2, 2), Material("mat_bone", 1, 3) };
+        for (var i = 0; i < MarketPlan.KeepStacks; i++)
+        {
+            held.Add(Material("mat_venom", 4, 50));
+        }
+
+        var vendors = MarketPlan.Plan(held, MarketMine.None, Prices, ref rng, listMaterial: false, null).Where(c => c.Step == MarketStep.Vendor).ToList();
+        Assert.Multiple(() =>
+        {
+            Assert.That(MarketPlan.VendorPayout(2, 1.7d), Is.Zero);
+            Assert.That(MarketPlan.VendorPayout(3, 1.7d), Is.EqualTo(1L));
+            Assert.That(MarketPlan.VendorPayout(99, 11.4d), Is.EqualTo(225L));
+            Assert.That(MarketPlan.VendorPayout(1, 726d), Is.EqualTo(145L));
+            Assert.That(vendors.Select(v => (v.Template, v.Mk, v.Quantity)), Is.EqualTo(new[]
+            {
+                (MarketCatalog.TemplateOf("mat_bone"), 1, 3), (MarketCatalog.TemplateOf("mat_hide"), 2, 2), (MarketCatalog.TemplateOf("mat_venom"), 4, 50),
+            }), "a worthless stack sent, or the next cheapest not sold in its place");
+        });
+    }
+
+    /// <summary>
+    /// The sender sends a plan only to the visit it was read for and only while the bot stands at the bazaar: a plan landing during another visit — even
+    /// at another bazaar — or a bot walked off drops what is left, counted.
+    /// </summary>
+    [Test]
+    public void ThePlanGoesOutOnlyAtItsOwnBazaarVisit()
+    {
+        List<MarketCommand> Plan(int n) => Enumerable.Range(0, n).Select(i => MarketCommand.Vendor(8, 1, 5 + i)).ToList();
+        var sender = new MarketSender();
+        sender.Offer(1, Plan(3));
+        Assert.Multiple(() =>
+        {
+            Assert.That(sender.Busy, Is.True);
+            Assert.That(sender.Next(atBazaar: true, visit: 2, tick: 1, spacing: 2), Is.Null, "a plan read for visit 1 sent at visit 2's bazaar");
+            Assert.That((sender.Dropped, sender.Busy), Is.EqualTo((3L, false)));
+        });
+
+        sender.Offer(3, Plan(3));
+        var first = sender.Next(atBazaar: true, visit: 3, tick: 10, spacing: 2);
+        Assert.Multiple(() =>
+        {
+            Assert.That(first?.Quantity, Is.EqualTo(5), "not the plan's first command");
+            Assert.That(sender.Next(atBazaar: true, visit: 3, tick: 11, spacing: 2), Is.Null, "faster than the rate");
+            Assert.That(sender.Next(atBazaar: true, visit: 3, tick: 12, spacing: 2)?.Quantity, Is.EqualTo(6));
+            Assert.That(sender.Next(atBazaar: false, visit: 3, tick: 14, spacing: 2), Is.Null, "sent from the walk away");
+            Assert.That((sender.Dropped, sender.Busy), Is.EqualTo((4L, false)));
+        });
+    }
+
     /// <summary>A plan for a bot with room, nothing reserved and five listed is empty: it has nothing to do.</summary>
     [Test]
     public void ABotWithRoomAndFiveListed_PlansNothing()
