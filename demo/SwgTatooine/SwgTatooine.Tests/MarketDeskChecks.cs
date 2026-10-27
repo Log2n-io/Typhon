@@ -722,6 +722,32 @@ internal sealed class MarketDeskChecks : ServedChecks
         AuditsOk(sim, "after the vendor sale");
     }
 
+    /// <summary>
+    /// A vendor sale republishes the board, so /swg/market/prices prices what is held before anything of it was ever listed. Without it the board waited
+    /// for a listing change, and bots that list only what /prices prices never listed their first core (found by the bots' served check, 2026-10-27).
+    /// </summary>
+    [Test]
+    [CancelAfter(180_000)]
+    public void AVendorSale_RepublishesTheBoard_SoHeldItemsArePriced()
+    {
+        using var sim = Start();
+        var home = Home(sim);
+        var a = LogIn(sim, 0x8711, At(home), 1);
+        Mint(sim, a, Hide, 2, 120);
+        Harness.Ticks(2);
+        var before = sim.Bridge.MarketBoard.Version;
+
+        Market.Vendor(a.Link, Hide, 2, 30);
+        SessionHarness.Until(() => Market.Units(sim, a.Character, Hide, 2) == 90, "the vendor sale");
+        SessionHarness.Until(() => sim.Bridge.MarketBoard.Version != before, "the board's republish after the vendor sale");
+        var rows = sim.Bridge.MarketBoard.Prices.Where(p => p.Template == Hide && p.Mk == 2).ToList();
+        Assert.Multiple(() =>
+        {
+            Assert.That(rows, Has.Count.EqualTo(1), "a held item never listed is priced once the board republishes");
+            Assert.That(rows.Select(r => r.Listed), Is.All.Zero, "nothing of it is listed");
+        });
+    }
+
     // ── BZ-8: the buyer's level ─────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>BZ-8: the <c>Market</c> system reads no <see cref="CharacterProgress"/>, and two buyers of different combat levels pay the same.</summary>

@@ -839,6 +839,13 @@ public sealed partial class SimBridge
             Interlocked.Add(ref _marketVendorPaid, _marketCounts.VendorPaid);
             Interlocked.Add(ref _marketVendorUnits, _marketCounts.VendorUnits);
             Interlocked.Add(ref _marketVendorSales, _marketCounts.VendorSales);
+
+            // A vendor sale changes what is held, which /prices reports, without touching a listing: without this the board — and the price of every item
+            // held before its first listing — waited for a listing change, and bots that list only what /prices prices never listed the first one.
+            if (_marketCounts.VendorSales != 0)
+            {
+                _marketPublishDue = true;
+            }
             Interlocked.Add(ref _marketListings, _marketCounts.Listings);
             Interlocked.Add(ref _marketCancelled, _marketCounts.Cancelled);
             Interlocked.Add(ref _marketExpired, _marketCounts.Expired);
@@ -1413,7 +1420,9 @@ public sealed partial class SimBridge
     /// <summary>Publishes the board when it changed and <see cref="TatooineData.MarketPublishMs"/> of world time has passed since the last publish.</summary>
     private void MaybePublishMarket(long worldTick)
     {
-        if (!_marketLoaded || !_marketPublishDue)
+        // Due on a change, or every MarketHeldRefreshSeconds regardless: what is held changes with every drop, outside the desk, and /prices prices it.
+        var refresh = Math.Max(1L, (long)TatooineData.MarketHeldRefreshSeconds * _config.TickRateHz);
+        if (!_marketLoaded || (!_marketPublishDue && worldTick - _lastPublishTick < refresh))
         {
             return;
         }

@@ -403,6 +403,9 @@ public static class TatooineData
     /// <summary>What the vendor pays, thousandths of the units' market value, rounded down (B7, C3).</summary>
     public const int VendorBuysPerMille = 200;
 
+    /// <summary>The board republishes at least this often, in seconds of world time, so /swg/market/prices follows what is held (drops change it outside the desk).</summary>
+    public const int MarketHeldRefreshSeconds = 60;
+
     /// <summary>The fastest the desk republishes the browse snapshot, milliseconds (≤ 2 Hz).</summary>
     public const int MarketPublishMs = 500;
 
