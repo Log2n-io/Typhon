@@ -16,6 +16,16 @@ public enum FleetStat
     Mounts,
     Dismounts,
     Reversals,
+
+    // The bazaar (bazaar.md § 8): visits traded at, commands sent by kind, races lost (153), buys seen collected, refusals of every reason.
+    MarketTrades,
+    MarketListed,
+    MarketVendored,
+    MarketBought,
+    MarketBuyLost,
+    MarketWon,
+    MarketCollected,
+    MarketRefused,
 }
 
 /// <summary>A per-bot rate's spread over the fleet.</summary>
@@ -91,6 +101,18 @@ public sealed class FleetStats
     /// <summary>Navigation reversals per bot-minute over the window (<see cref="MoveWatch"/>).</summary>
     public Spread ReversalsPerBotMin { get; private set; }
 
+    /// <summary>The bazaar's refusals since the start, by reason (offset from <see cref="BotSwarm.MarketFirstReason"/>): what <see cref="FleetStat.MarketRefused"/> sums.</summary>
+    public long[] MarketRefusedBy { get; } = new long[BotSwarm.MarketReasons];
+
+    /// <summary>Adds one bot's bazaar refusals, by reason.</summary>
+    public void AddMarketRefusals(ReadOnlySpan<long> byReason)
+    {
+        for (var i = 0; i < byReason.Length && i < MarketRefusedBy.Length; i++)
+        {
+            MarketRefusedBy[i] += byReason[i];
+        }
+    }
+
     /// <summary>Starts a sample.</summary>
     public void Begin()
     {
@@ -99,6 +121,7 @@ public sealed class FleetStats
         Array.Clear(Stats);
         Array.Clear(Why);
         Array.Clear(Legs);
+        Array.Clear(MarketRefusedBy);
         Array.Clear(_botSeen);
     }
 

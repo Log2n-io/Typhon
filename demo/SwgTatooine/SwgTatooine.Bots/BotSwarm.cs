@@ -114,6 +114,27 @@ public sealed class BotSwarmOptions
     public bool Missions { get; init; } = true;
 
     /// <summary>
+    /// Whether a thinking bot trades at the bazaar (bazaar.md § 8): on by default with <c>--brain</c>; <c>--no-market</c> is the A/B arm, whose bots
+    /// stand at a bazaar as they always did and lose what a full inventory cannot hold.
+    /// </summary>
+    public bool Market { get; init; } = true;
+
+    /// <summary>The load test's city by name (<c>--market-rush</c>, bazaar.md § 8), or null: every thinking bot goes there and does nothing but trade.</summary>
+    public string MarketRush { get; init; }
+
+    /// <summary>The listings the rush's sellers keep on the board between them.</summary>
+    public int MarketRushListings { get; init; } = 100;
+
+    /// <summary><see cref="MarketRush"/> as a region — its index plus one — or 0 when it names no city.</summary>
+    public int MarketRushRegion => RegionOf(MarketRush);
+
+    /// <summary>The rush's sellers: one bot in ten, at least one.</summary>
+    public int MarketRushSellers => Math.Max(1, Count / 10);
+
+    /// <summary>Told each bazaar buy a bot sees collected — its index and the listing — for the rush's win log (BZ-17, BZ-18). Null logs nothing.</summary>
+    public Action<int, ulong> OnMarketWin { get; init; }
+
+    /// <summary>
     /// The city a share of the thinking bots live in, by name (<see cref="BotMap.Cities"/>); null or unknown for none. They go there and stay: their
     /// errands, doors, hunts and missions start and end in it, and they never travel to another city (Loïc, 2026-10-26: a crowded Port Sable).
     /// </summary>
@@ -129,20 +150,20 @@ public sealed class BotSwarmOptions
     public int HomeBots => HomeRegion == 0 ? 0 : Math.Min((int)Math.Floor(Count * Math.Clamp(HomeShare, 0d, 1d)), Math.Max(0, HomeMax));
 
     /// <summary><see cref="HomeCity"/> as a region — its index plus one — or 0 when it names no city.</summary>
-    public int HomeRegion
-    {
-        get
-        {
-            for (var i = 0; i < BotMap.Cities.Length; i++)
-            {
-                if (string.Equals(BotMap.Cities[i].Name, HomeCity, StringComparison.OrdinalIgnoreCase))
-                {
-                    return i + 1;
-                }
-            }
+    public int HomeRegion => RegionOf(HomeCity);
 
-            return 0;
+    /// <summary>A city's region by name — its index plus one — or 0 for a name that is no city.</summary>
+    public static int RegionOf(string city)
+    {
+        for (var i = 0; i < BotMap.Cities.Length; i++)
+        {
+            if (string.Equals(BotMap.Cities[i].Name, city, StringComparison.OrdinalIgnoreCase))
+            {
+                return i + 1;
+            }
         }
+
+        return 0;
     }
 
     /// <summary>How far a camera travels per second along its orbit, in metres.</summary>
@@ -1775,6 +1796,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
     private bool AppendOne(Bot bot)
     {
         bot.WatchRealm();
+        bot.WatchMarket();
 
         // After the handshake, because the token arrives in WELCOME: asking before the connect would persist the token the LAST
         // run was given, which is the one that has just been spent.
@@ -2549,6 +2571,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
                 // A bot that cannot read its journal never learns it holds one: it would take a mission at every visit and never go and do it.
                 _takesMissions = options.Missions && _missionsUri != null && !string.IsNullOrEmpty(_token);
                 _brain.TakesMissions = _takesMissions;
+                SetUpMarket(index, options);
                 TraceIfSampled(index, options);
             }
             _heading = (float)((index * golden) % (Math.PI * 2));
@@ -2719,8 +2742,9 @@ public sealed partial class BotSwarm : IAsyncDisposable
             // The mission held, as the journal last said, and its lair as the bot sees it once near (lair-objectives.md B-2, B-3).
             PollJournal(tick);
             PollInventory(tick);
+            PollMine(tick);
             var missions = _missions;
-            world = world with
+            world = WithMarket(world) with
             {
                 MissionsHeld = missions.Held,
                 HasMissionLair = missions.LairKnown,
@@ -2875,6 +2899,11 @@ public sealed partial class BotSwarm : IAsyncDisposable
 
                     break;
 
+                case IntentKind.Trade:
+                    // At a bazaar: the market read and planned off the driver, the plan sent below at the commands' rate (BotSwarm.Market.cs).
+                    BeginTrade(tick, intent.Region);
+                    break;
+
                 case IntentKind.AbandonMission when Client.Plan.CommandByName(AbandonMissionCommand) != null:
                     if (missions.FirstId != 0)
                     {
@@ -2892,6 +2921,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
                     break;   // nothing to say this tick, which is what idling and waiting look like on the wire
             }
 
+            await SendMarketAsync(tick, ct).ConfigureAwait(false);
             await TipAsync(tick, world, ct).ConfigureAwait(false);
         }
 
@@ -2984,12 +3014,17 @@ public sealed partial class BotSwarm : IAsyncDisposable
                 }
 
                 // The first read only learns what was already there — rows and losses of an earlier run — so this run's counts are this run's.
+                var held = new List<HeldStack>();
+                var won = new List<WonListing>();
                 var view = InventoryView.Parse(
                     await response.Content.ReadAsStringAsync().ConfigureAwait(false),
                     _inventory,
                     count: _itemsPrimed,
                     out var rows,
-                    out var lost);
+                    out var lost,
+                    held,
+                    won);
+                SawInventory(held, won);
                 _itemsPrimed = true;
                 _inventory = view;
                 Interlocked.Add(ref LootRowsSeen, rows);

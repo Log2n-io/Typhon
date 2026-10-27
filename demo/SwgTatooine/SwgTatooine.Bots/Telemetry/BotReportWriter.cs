@@ -46,6 +46,9 @@ public static class BotReportWriter
         Rates(w, "legsPerMin", fleet.LegsPerMin, LegNames);
         SpreadOf(w, "goalChangesPerBotMin", fleet.GoalChangesPerBotMin);
         SpreadOf(w, "reversalsPerBotMin", fleet.ReversalsPerBotMin);
+
+        // The bazaar's refusals by reason, in the server's names (bazaar.md § 3.1): what `marketRefused` sums.
+        Counts(w, "marketRefusedBy", fleet.MarketRefusedBy, BotSwarm.MarketReasonNames);
         w.WriteEndObject();
 
         w.WriteStartArray("traced");

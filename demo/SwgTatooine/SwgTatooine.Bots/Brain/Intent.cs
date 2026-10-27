@@ -38,6 +38,12 @@ public enum IntentKind
 
     /// <summary>Cancel the mission held (<c>AbandonMission</c>): the swarm names it, from the journal.</summary>
     AbandonMission,
+
+    /// <summary>
+    /// Trade at the bazaar terminal it stands at (bazaar.md § 8): the swarm reads the market and sends the plan — collect, list, vendor, buy — as the
+    /// commands a browser's bazaar panel sends. <see cref="Intent.Region"/> is the bazaar's city, as a region.
+    /// </summary>
+    Trade,
 }
 
 /// <summary>One decision.</summary>
@@ -94,6 +100,11 @@ public readonly record struct Intent(IntentKind Kind, float Heading, byte SpeedC
 
     /// <summary>Cancel the mission held.</summary>
     public static Intent AbandonMission => new(IntentKind.AbandonMission, 0f, 0, 0, 0);
+
+    /// <summary>Trade at the bazaar it stands at.</summary>
+    /// <param name="region">The bazaar's city, as a city plus one: the city a browse reads and a buy is collected in.</param>
+    /// <returns>The intent.</returns>
+    public static Intent Trade(int region) => new(IntentKind.Trade, 0f, 0, 0, region);
 
     /// <summary>Queue for a shuttle to a region's city.</summary>
     /// <param name="region">The destination, as a city plus one.</param>

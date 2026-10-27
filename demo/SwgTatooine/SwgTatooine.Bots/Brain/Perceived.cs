@@ -109,6 +109,12 @@ public readonly struct Perceived
     /// <summary>That lair's occupants still standing (its replicated <c>guards</c>): it cannot be hurt until they are down.</summary>
     public int MissionLairGuards { get; init; }
 
+    /// <summary>Stacks its inventory holds, as <c>GET /swg/inventory</c> last said (inventory-loot.md § 7); 0 before the first read.</summary>
+    public int InventoryStacks { get; init; }
+
+    /// <summary>Bazaar goods reserved for it — bought elsewhere, or a listing returned — as <c>GET /swg/market/mine</c> last said (bazaar.md § 5).</summary>
+    public int Reserved { get; init; }
+
     /// <summary>The structures it holds, read when a goal plans a walk; null in a test that needs none.</summary>
     public IStructureView Structures { get; init; }
 }

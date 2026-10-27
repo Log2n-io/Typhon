@@ -136,6 +136,11 @@ public sealed class BotErrandChecks
 
         public (float X, float Z)? Lair;
 
+        /// <summary>Stacks the inventory holds, and bazaar goods reserved for the bot, as its reads would say.</summary>
+        public int Stacks;
+
+        public int Reserved;
+
         /// <summary>Whether the server holds the body where it is, whatever it is asked: a crowd it cannot push through.</summary>
         public bool Held;
 
@@ -175,6 +180,8 @@ public sealed class BotErrandChecks
             HasMissionLair = Lair.HasValue,
             MissionLairX = Lair?.X ?? 0f,
             MissionLairZ = Lair?.Z ?? 0f,
+            InventoryStacks = Stacks,
+            Reserved = Reserved,
             NearestCreature = Creature?.Id ?? 0u,
             NearestCreatureX = Creature?.X ?? 0f,
             NearestCreatureZ = Creature?.Z ?? 0f,
@@ -1459,6 +1466,182 @@ public sealed class BotErrandChecks
         });
     }
 
+    /// <summary>A home bot in Port Sable that trades, with its city's bazaar 40 m east and a mission terminal 60 m west.</summary>
+    private static (BotBrain Brain, Sim Sim) Trader(int stacks, int reserved, bool trades = true)
+    {
+        var brain = new BotBrain(BotMap.Cities, 7u, 4d, Content(), homeRegion: 1) { Trades = trades };
+        brain.Facilities.Observe(1, Routing.BazaarKind, Here.X + 40f, Here.Z, TerminalAsset + 1, 0);
+        brain.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X - 60f, Here.Z, TerminalAsset + 1, 0);
+        var sim = new Sim
+        {
+            Stacks = stacks,
+            Reserved = reserved,
+            Planet =
+            [
+                new SeenStructure(Here.X + 40f, Here.Z, Routing.BazaarKind, TerminalAsset, 0, 1),
+                new SeenStructure(Here.X - 60f, Here.Z, Routing.MissionTerminalKind, TerminalAsset, 0, 1),
+            ],
+        };
+        return (brain, sim);
+    }
+
+    /// <summary>
+    /// bazaar.md § 8: a bot that trades, holding <see cref="BotBrain.MarketStacks"/> stacks or more or goods reserved for it, goes to its city's bazaar
+    /// before the desk; a bot with room, nothing reserved, or a run that does not trade goes to the desk as it always did.
+    /// </summary>
+    [TestCase(BotBrain.MarketStacks, 0, true, true)]
+    [TestCase(30, 0, true, true)]
+    [TestCase(0, 1, true, true)]
+    [TestCase(BotBrain.MarketStacks - 1, 0, true, false)]
+    [TestCase(30, 0, false, false)]
+    public void AFullInventory_GoesToTheBazaar_ABotWithRoomDoesNot(int stacks, int reserved, bool trades, bool toMarket)
+    {
+        var (brain, sim) = Trader(stacks, reserved, trades);
+        brain.Decide(sim.View(), 1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Visiting), "the premise: an errand first");
+            Assert.That(brain.VisitTarget, Is.EqualTo(toMarket ? (Here.X + 40f, Here.Z) : (Here.X - 60f, Here.Z)), "not the bazaar, or not the desk");
+            Assert.That(brain.Counters.Why[(int)GoalWhy.MarketChosen], Is.EqualTo(toMarket ? 1 : 0));
+        });
+    }
+
+    /// <summary>
+    /// The bazaar errand end to end: walked to, one <see cref="IntentKind.Trade"/> naming its city, the trade's stay (<see cref="BotBrain.TradeSeconds"/>
+    /// on top of a terminal's), <see cref="GoalWhy.MarketDone"/>, and then the day's loop — the desk — not a second trip to the bazaar.
+    /// </summary>
+    [Test]
+    public void AFullInventory_Trades_ThenGoesBackToTheDesk()
+    {
+        var (brain, sim) = Trader(26, 0);
+        var trades = new List<(long Tick, Intent Intent)>();
+        var targets = new List<(float X, float Z)>();
+        var doneAt = -1L;
+        var was = brain.Goal;
+        for (var tick = 1L; tick < 600 && targets.Count < 2; tick++)
+        {
+            var intent = brain.Decide(sim.View(), tick);
+            sim.Apply(intent);
+            if (intent.Kind == IntentKind.Trade)
+            {
+                trades.Add((tick, intent));
+                sim.Stacks = 18;   // the server's half: the plan vendored the bot down to its floor
+            }
+
+            if (doneAt < 0 && brain.Counters.Why[(int)GoalWhy.MarketDone] > 0)
+            {
+                doneAt = tick;
+            }
+
+            if (brain.Goal == Goal.Visiting && was != Goal.Visiting)
+            {
+                targets.Add((brain.VisitTarget.X - Here.X, brain.VisitTarget.Z - Here.Z));
+            }
+
+            was = brain.Goal;
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(targets, Is.EqualTo(new[] { (40f, 0f), (-60f, 0f) }), "not the bazaar, then the desk");
+            Assert.That(trades, Has.Count.EqualTo(1), "not one trade at the bazaar");
+            Assert.That(trades.Count == 1 ? trades[0].Intent : default, Is.EqualTo(Intent.Trade(1)), "the trade does not name the bazaar's city");
+            Assert.That(doneAt - (trades.Count == 1 ? trades[0].Tick : 0), Is.GreaterThanOrEqualTo((long)((5 + BotBrain.TradeSeconds) * 4)),
+                "it left before the plan could be sent");
+            Assert.That(brain.Counters.Why[(int)GoalWhy.MarketDone], Is.EqualTo(1));
+            Assert.That(brain.TradesAsked, Is.EqualTo(1));
+        });
+    }
+
+    /// <summary>
+    /// A bazaar that changes nothing — a vendor refusing, a bazaar out of reach — cannot hold a bot: the errand is not chosen again for
+    /// <see cref="BotBrain.MarketRetrySeconds"/>, and is chosen again after it.
+    /// </summary>
+    [Test]
+    public void AFullInventoryTheBazaarCannotEmpty_IsNotTakenThereAgainBeforeItsRetry()
+    {
+        var (brain, sim) = Trader(30, 0);
+        var chosenAt = new List<long>();
+        var chosen = 0L;
+        for (var tick = 1L; tick < 1400; tick++)
+        {
+            sim.Apply(brain.Decide(sim.View(), tick));
+            if (brain.Counters.Why[(int)GoalWhy.MarketChosen] > chosen)
+            {
+                chosen = brain.Counters.Why[(int)GoalWhy.MarketChosen];
+                chosenAt.Add(tick);
+            }
+        }
+
+        Assert.That(chosenAt, Has.Count.GreaterThanOrEqualTo(2), "the bazaar was never tried again");
+        for (var i = 1; i < chosenAt.Count; i++)
+        {
+            Assert.That((chosenAt[i] - chosenAt[i - 1]) / 4d, Is.GreaterThanOrEqualTo(BotBrain.MarketRetrySeconds), $"tried again at tick {chosenAt[i]}");
+        }
+    }
+
+    /// <summary>
+    /// The rush (bazaar.md § 8): at the rush city, a bot walks to one of its bazaars and trades a round every <see cref="BotBrain.RushRoundSeconds"/>,
+    /// for good — no desk, no hunt, no errand ends it.
+    /// </summary>
+    [Test]
+    public void ARushBot_TradesAtItsBazaarEveryRound_ForGood()
+    {
+        var brain = new BotBrain(BotMap.Cities, 7u, 4d, Content()) { Trades = true, RushRegion = 1, TakesMissions = false };
+        brain.Facilities.Observe(1, Routing.BazaarKind, Here.X + 40f, Here.Z, TerminalAsset + 1, 0);
+        var sim = new Sim
+        {
+            Creature = (42u, Here.X - 20f, Here.Z + 20f),
+            Planet = [new SeenStructure(Here.X + 40f, Here.Z, Routing.BazaarKind, TerminalAsset, 0, 1)],
+        };
+        var trades = new List<long>();
+        for (var tick = 1L; tick < 600; tick++)
+        {
+            var intent = brain.Decide(sim.View(), tick);
+            sim.Apply(intent);
+            if (intent.Kind == IntentKind.Trade)
+            {
+                Assert.That(intent.Region, Is.EqualTo(1), "a round names another city");
+                trades.Add(tick);
+            }
+
+            if (trades.Count > 0)
+            {
+                Assert.That(brain.Goal, Is.EqualTo(Goal.Visiting), $"tick {tick}: it left its bazaar");
+            }
+        }
+
+        Assert.That(trades, Has.Count.GreaterThanOrEqualTo(60), "not a round every two seconds");
+        for (var i = 1; i < trades.Count; i++)
+        {
+            Assert.That(trades[i] - trades[i - 1], Is.EqualTo((long)(BotBrain.RushRoundSeconds * 4)), $"round {i} came late or early");
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Counters.Why[(int)GoalWhy.CreatureNoticed], Is.Zero, "a rush bot went hunting");
+
+            // One errand for good: a round is not a fresh choice and a fresh walk (a search) every two seconds.
+            Assert.That(brain.Counters.Why[(int)GoalWhy.MarketChosen], Is.EqualTo(1), "the bazaar was chosen again for a round");
+            Assert.That(brain.Counters.Why[(int)GoalWhy.MarketDone], Is.Zero, "a round ended the errand");
+        });
+    }
+
+    /// <summary>A rush bot anywhere else goes to the rush city first, saying why — a home bot included.</summary>
+    [Test]
+    public void ARushBotElsewhere_TravelsToTheRushCity()
+    {
+        var there = BotMap.Cities[1];
+        var brain = new BotBrain(BotMap.Cities, 7u, 4d, Content(), homeRegion: 2) { Trades = true, RushRegion = 1, TakesMissions = false };
+        var sim = new Sim { X = there.X, Z = there.Z };
+        brain.Decide(sim.View(), 1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Travelling));
+            Assert.That(brain.TargetRegion, Is.EqualTo(1), "not to the rush city");
+            Assert.That(brain.Counters.Why[(int)GoalWhy.MarketChosen], Is.EqualTo(1));
+        });
+    }
 }
 
 /// <summary>The pure pieces under the errands: the city walk, the room walk, and reading a descriptor.</summary>

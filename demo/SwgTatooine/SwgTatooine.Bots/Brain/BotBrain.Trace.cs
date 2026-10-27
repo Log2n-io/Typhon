@@ -50,6 +50,12 @@ public enum GoalWhy : byte
 
     /// <summary>Its city's mission terminals had nothing for it twice in a row: off to another city.</summary>
     DeskEmpty,
+
+    /// <summary>Its inventory nearly full, or goods reserved for it: off to its city's bazaar to trade (bazaar.md § 8); a rush bot's every goal.</summary>
+    MarketChosen,
+
+    /// <summary>The bazaar errand done: traded, and back to the day's loop.</summary>
+    MarketDone,
 }
 
 /// <summary>What happened to a walk (a leg): planned, a point reached, re-planned, stuck, given up.</summary>
