@@ -351,7 +351,19 @@ public sealed partial class BotBrain
     public int RushRegion { get; set; }
 
     /// <summary>Whether it stands at a bazaar's terminal using it: the only time a market command can be taken (the server's 6 m).</summary>
-    public bool AtBazaar => Goal == Goal.Visiting && _using && _visitKind == Routing.BazaarKind;
+    /// <remarks>
+    /// <b>And within <see cref="MarketReachM"/> of it, by where the body was last seen.</b> Using a terminal is a goal's state; where the body stands is the
+    /// server's, and a body that slid off its stand point kept going (live, 2026-10-27: 90 % of the bots' market commands refused NotAtBazaar).
+    /// </remarks>
+    public bool AtBazaar => Goal == Goal.Visiting && _using && _visitKind == Routing.BazaarKind
+        && Routing.Distance(_seenX, _seenZ, _visitAt.X, _visitAt.Z) <= MarketReachM;
+
+    /// <summary>
+    /// A market command is sent from within this of the terminal, metres: inside the server's 6 m (<c>TatooineData.BazaarReachM</c>) by the distance a body
+    /// runs in a decision and a half, since the position read is a frame old.
+    /// </summary>
+    public const double MarketReachM = 5d;
+
 
     /// <summary>Errands set out on, counted: a trade's plan belongs to the visit it was asked at, and is dropped when that visit is over.</summary>
     public long VisitSerial { get; private set; }
@@ -501,6 +513,19 @@ public sealed partial class BotBrain
     /// <summary>When a walk across the city may be searched again, after one found no way or stuck.</summary>
     private long _cityWalkAt;
 
+    /// <summary>Where the body was seen at the last decision, east and north.</summary>
+    private float _seenX;
+
+    private float _seenZ;
+
+    /// <summary>The terminal's stand point: the errand's walk ends on it, and a body found off the terminal while using it walks back toward it.</summary>
+    private (float X, float Z) _standAt;
+
+    /// <summary>Whether the body using a terminal was told to stand; and when a body found off its stand point may be walked back again.</summary>
+    private bool _standing;
+
+    private long _restandAt;
+
     /// <summary>The latest it stands at a bazaar for a plan still going out.</summary>
     private long _tradeCap;
 
@@ -521,6 +546,7 @@ public sealed partial class BotBrain
             return Intent.None;   // a camera has nothing to decide, and no body to decide for
         }
 
+        (_seenX, _seenZ) = (world.X, world.Z);
         var arrived = !_realmKnown || world.Realm != _lastRealm;
         if (arrived)
         {
@@ -1181,6 +1207,7 @@ public sealed partial class BotBrain
         }
 
         var use = plan.UsePath.Length > 0 ? Placed(found, plan.UsePath) : [(found.X, found.Z)];
+        _standAt = use[^1];
         if (!PlanWalk(in world, use[0], use[1..], tick))
         {
             if (kind == Routing.MissionTerminalKind)
@@ -1199,6 +1226,7 @@ public sealed partial class BotBrain
 
         Become(Goal.Visiting, why, tick, (uint)kind, (float)Routing.Distance(world.X, world.Z, found.X, found.Z));
         _using = false;
+        _standing = false;
         return true;
     }
 
@@ -1301,6 +1329,22 @@ public sealed partial class BotBrain
     {
         if (_using)
         {
+            // Standing at it. The walk's last step was a MoveTo, and the server does not always end one on its point: a body slid along the terminal's
+            // collider toward its stand point ran on past it, for good (BotMarketLiveChecks). So it is told to stand, once, and walked back toward the
+            // point — a step, then told to stand again — whenever it is found farther from the terminal than it may be used from.
+            if (!_standing)
+            {
+                _standing = true;
+                return Intent.Move(0f, 0);
+            }
+
+            if (Routing.Distance(world.X, world.Z, _visitAt.X, _visitAt.Z) > TerminalUseFromM && tick >= _restandAt)
+            {
+                _restandAt = tick + Ticks(2);
+                _standing = false;
+                return Intent.MoveTo(_standAt.X, _standAt.Z);
+            }
+
             var desk = _visitKind == Routing.MissionTerminalKind;
             if (tick < _until && !(desk && world.MissionsHeld > 0 && world.HasMissionLair))
             {
