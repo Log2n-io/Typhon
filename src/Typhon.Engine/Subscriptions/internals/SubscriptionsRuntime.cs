@@ -917,6 +917,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// <summary>The node this runtime's native blocks are registered under, so a teardown test can check who frees them (#1508).</summary>
     internal IResource ResourcesForTest => _resources;
 
+    /// <summary>The ingress ring pool, so a teardown test can hold a ring the way a transport thread does (#1508).</summary>
+    internal IngressRingPool IngressRingsForTest => _ingressRings;
+
     /// <summary>The owner routing (11 § 2.2), when an archetype declares owner fields; <see langword="null"/> otherwise.</summary>
     internal SelfTracker Self { get; private set; }
 

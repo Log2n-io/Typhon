@@ -442,9 +442,11 @@
   invariant [SendPump.Dispose quiesces, or records the pumps it gave up on] → [frame-pool slabs freed, or kept while a pump is still sending]
   invariant the runtime's blocks sit under one node of its own whose DisposeWithParent is false, and the runtime removes that node from its
     parent when it is disposed — a refused start included
-  never a block of the runtime registered directly under the scheduler, whose Dispose TyphonRuntime calls BEFORE the runtime's
+  invariant within TyphonRuntime.Dispose: [DagScheduler.Quiesce — no tick runs] → [SubscriptionsRuntime.Dispose] → [DagScheduler.Dispose — the
+    cascade over everything registered under the scheduler]; the order is the second line of defence, for a block a later change registers there
+  never a block of the runtime registered directly under the scheduler
   scope: SubscriptionsRuntime.Dispose, SessionTable.Dispose, SendPump.Dispose, FramePool.KeepSlabsForOutstandingSends,
-    ResourceNode.DisposeWithParent, TyphonRuntime.Dispose
+    ResourceNode.DisposeWithParent, TyphonRuntime.Dispose, DagScheduler.Quiesce
   on_violation: an access violation on a thread-pool thread, which no handler catches: the process dies. A pump the last tick queued, run late
     by a busy pool, passes the table's open gate and reads rows the cascade already freed (#1508, SessionTable.OwnerIdAt). Intermittent by
     nature: a freed block below the heap's own-mapping threshold — the session table at the default 8 192 slots is just under it — usually
@@ -457,7 +459,9 @@
     then wakes a pump through the open gate, then requires the runtime's own teardown to free every block. Without the fix the block list is
     the session rows, both ingress slabs and the frame slab, and a woken pump faults in OwnerIdAt. Also
     SendPumpTeardownTests.APumpStillSendingAtDispose_NeverCompletesIntoTheFreedBlock (the kept slabs really are allocated) and
-    SendPumpTeardownTests.ARefusedStart_LeavesNothingUnderTheScheduler. Falsifiability is proved by
+    SendPumpTeardownTests.ARefusedStart_LeavesNothingUnderTheScheduler, and
+    SendPumpTeardownTests.TheRuntimesDisposal_QuiescesSubscriptionsBeforeTheSchedulersCascade (a probe node under the scheduler requires the
+    session table's gate already latched when the cascade reaches it). Falsifiability is proved by
     SendPumpTeardownTests.Mutant_ABlockRegisteredUnderTheScheduler_IsFreedByItsCascade, which
     registers a block where the runtime's used to live and requires the verifier's assertion to reject the scheduler's disposal.
 

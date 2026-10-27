@@ -143,6 +143,23 @@ unsafe class SessionTableTests
         });
     }
 
+    /// <summary>
+    /// #1508 — a slot past the table is a managed exception where it is used, not a read of whatever follows the rows: they are reached through a
+    /// bounds-checked span. With pointer arithmetic, slot 8 of an 8-slot table is the free stack's first line, read back as a row.
+    /// </summary>
+    /// <remarks>Bounds, not lifetime: what keeps the block allocated is the caller gate and the block's single owner (SUB-38), which no span can see.</remarks>
+    [Test]
+    public void ASlotPastTheTableThrowsRatherThanReadingPastTheBlock()
+    {
+        using var table = NewTable(8);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(() => table.IdAt(8), Throws.InstanceOf<IndexOutOfRangeException>(), "a slot past the table read memory past the rows");
+            Assert.That(table.IdAt(7), Is.EqualTo(SessionId.None), "the last slot is inside the table, and free");
+        });
+    }
+
     // ── admission and capacity ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     [Test]
