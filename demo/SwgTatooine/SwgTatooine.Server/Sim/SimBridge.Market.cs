@@ -47,6 +47,91 @@ public sealed class MarketCityView
 
     /// <summary>Σ unit price × quantity of its listed listings, credits.</summary>
     public long ListedValue { get; init; }
+
+    private sealed record Orders(int[] ByPrice, int[] ByNew);
+
+    private Orders _orders;
+
+    /// <summary>Indexes into <see cref="Listings"/> by (unit price, listed tick), cheapest first.</summary>
+    public int[] ByPrice => Ordered().ByPrice;
+
+    /// <summary>Indexes into <see cref="Listings"/> by listed tick, oldest first.</summary>
+    public int[] ByNew => Ordered().ByNew;
+
+    /// <summary>
+    /// A board as the desk sorts it: by (template, Mk, unit price, listed tick, id) — what a browse naming an item binary-searches. The one sort the desk's
+    /// tick pays per changed city.
+    /// </summary>
+    /// <remarks>
+    /// One sort of <see cref="long"/> keys rather than of the rows: template (7 bits), Mk (3), unit price (20 — at most 1 000 000) and the listed tick
+    /// counted from the board's oldest (34 bits: ten years at 50 Hz). Rows equal on all four are in no particular order, which nothing shows.
+    /// </remarks>
+    public static void SortBoard(ListingView[] rows)
+    {
+        var n = rows.Length;
+        if (n < 2)
+        {
+            return;
+        }
+
+        var oldest = long.MaxValue;
+        foreach (ref readonly var v in rows.AsSpan())
+        {
+            oldest = Math.Min(oldest, v.ListedTick);
+        }
+
+        var keys = new long[n];
+        var order = new int[n];
+        for (var i = 0; i < n; i++)
+        {
+            ref readonly var v = ref rows[i];
+            keys[i] = ((long)v.Template << 57) | ((long)v.Mk << 54) | (Math.Min(v.UnitPrice, (1L << 20) - 1) << 34) | Math.Min(v.ListedTick - oldest, (1L << 34) - 1);
+            order[i] = i;
+        }
+
+        Array.Sort(keys, order);
+        var copy = (ListingView[])rows.Clone();
+        for (var i = 0; i < n; i++)
+        {
+            rows[i] = copy[order[i]];
+        }
+    }
+
+    /// <summary>
+    /// The price and age orders, built by the first browse that needs them — on that request's thread, once per city board, never on the tick (the view
+    /// is kept from snapshot to snapshot while its city does not change): two sorts of <see cref="long"/> keys.
+    /// </summary>
+    private Orders Ordered()
+    {
+        var known = Volatile.Read(ref _orders);
+        if (known != null)
+        {
+            return known;
+        }
+
+        // By age: (listed tick, position), then by price: (price, rank by age). Positions and ranks are below 2^20, a price at most 2^20.
+        var rows = Listings;
+        var n = rows.Length;
+        var keys = new long[n];
+        var byNew = new int[n];
+        for (var i = 0; i < n; i++)
+        {
+            keys[i] = (rows[i].ListedTick << 20) | (uint)i;
+            byNew[i] = i;
+        }
+
+        Array.Sort(keys, byNew);
+        var byPrice = new int[n];
+        for (var r = 0; r < n; r++)
+        {
+            keys[byNew[r]] = (rows[byNew[r]].UnitPrice << 24) | (uint)r;
+            byPrice[r] = r;
+        }
+
+        Array.Sort(keys, byPrice);
+        Interlocked.CompareExchange(ref _orders, new Orders(byPrice, byNew), null);
+        return Volatile.Read(ref _orders);
+    }
 }
 
 /// <summary>What the board asks and what it sold at, per (template, Mk) held anywhere or ever sold (bazaar.md § 5, <c>/swg/market/prices</c>).</summary>
@@ -92,6 +177,68 @@ public sealed class MarketSnapshot
 
     /// <summary>The age of the listed listings, seconds: median, 90th percentile, oldest.</summary>
     public (long P50, long P90, long Max) UnsoldAgeS { get; init; }
+
+    private sealed record GlobalOrders(ListingView[] All, int[] ByPrice, int[] ByNew);
+
+    private GlobalOrders _global;
+
+    /// <summary>Every city's listings, one after the other in <see cref="Cities"/>' order: what <see cref="ByPrice"/> and <see cref="ByNew"/> index.</summary>
+    public ListingView[] All => Global().All;
+
+    /// <summary>Indexes into <see cref="All"/> by (unit price, listed tick), cheapest first.</summary>
+    public int[] ByPrice => Global().ByPrice;
+
+    /// <summary>Indexes into <see cref="All"/> by listed tick, oldest first.</summary>
+    public int[] ByNew => Global().ByNew;
+
+    /// <summary>
+    /// Every city's orders together, built by the first browse of all cities that needs them — on that request's thread, once per snapshot, never on the
+    /// tick: two sorts of <see cref="long"/> keys over every listing.
+    /// </summary>
+    private GlobalOrders Global()
+    {
+        var known = Volatile.Read(ref _global);
+        if (known != null)
+        {
+            return known;
+        }
+
+        var n = 0;
+        foreach (var c in Cities)
+        {
+            n += c.Listings.Length;
+        }
+
+        var all = new ListingView[n];
+        var at = 0;
+        foreach (var c in Cities)
+        {
+            Array.Copy(c.Listings, 0, all, at, c.Listings.Length);
+            at += c.Listings.Length;
+        }
+
+        // By age: (listed tick, position) — positions are below 2^20 (the caps bound the book far under it). Then by price: (price, rank by age); a price is
+        // at most 2^20, a rank below 2^24.
+        var keys = new long[n];
+        var byNew = new int[n];
+        for (var i = 0; i < n; i++)
+        {
+            keys[i] = (all[i].ListedTick << 20) | (uint)i;
+            byNew[i] = i;
+        }
+
+        Array.Sort(keys, byNew);
+        var byPrice = new int[n];
+        for (var r = 0; r < n; r++)
+        {
+            keys[byNew[r]] = (all[byNew[r]].UnitPrice << 24) | (uint)r;
+            byPrice[r] = r;
+        }
+
+        Array.Sort(keys, byPrice);
+        Interlocked.CompareExchange(ref _global, new GlobalOrders(all, byPrice, byNew), null);
+        return Volatile.Read(ref _global);
+    }
 }
 
 /// <summary>
@@ -1235,7 +1382,7 @@ public sealed partial class SimBridge
         foreach (var (key, board) in rebuilt)
         {
             var array = board.Listed.ToArray();
-            Array.Sort(array, CompareListingViews);
+            MarketCityView.SortBoard(array);
             var realm = (ushort)(key >> 16);
             var city = (ushort)(key & 0xFFFF);
             _cityViews[key] = new MarketCityView
@@ -1290,27 +1437,6 @@ public sealed partial class SimBridge
             Array.Sort(ticks, 0, n);
             return (ticks[(n - 1) / 2] / hz, ticks[(int)((n - 1) * 0.9)] / hz, ticks[n - 1] / hz);
         }
-    }
-
-    private static int CompareListingViews(ListingView a, ListingView b)
-    {
-        var c = a.Template.CompareTo(b.Template);
-        if (c == 0)
-        {
-            c = a.Mk.CompareTo(b.Mk);
-        }
-
-        if (c == 0)
-        {
-            c = a.UnitPrice.CompareTo(b.UnitPrice);
-        }
-
-        if (c == 0)
-        {
-            c = a.ListedTick.CompareTo(b.ListedTick);
-        }
-
-        return c != 0 ? c : a.Id.CompareTo(b.Id);
     }
 
     /// <summary>Per (template, Mk) listed, held or ever sold: its value, what the board asks and what it sold at.</summary>

@@ -214,6 +214,11 @@ public static class MarketEndpoints
     {
         ArgumentNullException.ThrowIfNull(board);
         ArgumentNullException.ThrowIfNull(q);
+        if (q.Template == 0 && q.Sort != "mk")
+        {
+            return PresortedPage(board, q);
+        }
+
         var matches = new List<ListingView>();
         foreach (var city in board.Cities)
         {
@@ -249,20 +254,83 @@ public static class MarketEndpoints
         });
         var pages = Math.Max(1, (matches.Count + TatooineData.BrowsePage - 1) / TatooineData.BrowsePage);
         var page = Math.Min(q.Page, pages);
+        var from = (page - 1) * TatooineData.BrowsePage;
+        var to = Math.Min(matches.Count, from + TatooineData.BrowsePage);
+        return PageJson(board, q.City, matches.Count, page, pages, matches.GetRange(from, to - from));
+
+        static int Tie(ListingView a, ListingView b) => a.ListedTick != b.ListedTick ? a.ListedTick.CompareTo(b.ListedTick) : a.Id.CompareTo(b.Id);
+    }
+
+    /// <summary>
+    /// A page with no item named, in price or age order: one scan of the presorted order — the city's when one is named, every city's otherwise — counting
+    /// the matches and copying only the page's.
+    /// </summary>
+    private static string PresortedPage(MarketSnapshot board, MarketQuery q)
+    {
+        var city = -1;
+        var cities = 0;
+        for (var c = 0; c < board.Cities.Length; c++)
+        {
+            if ((q.City == 0 || board.Cities[c].City == q.City) && (q.Realm < 0 || board.Cities[c].Realm == q.Realm))
+            {
+                city = c;
+                cities++;
+            }
+        }
+
+        var newest = q.Sort == "new";
+        var one = cities == 1 ? board.Cities[city] : null;
+        var order = one != null
+            ? newest ? one.ByNew : one.ByPrice
+            : newest ? board.ByNew : board.ByPrice;
+        var backwards = newest || q.Sort == "-price";
+        var all = one != null ? one.Listings : board.All;
+        var from = (q.Page - 1) * TatooineData.BrowsePage;
+        var rows = new List<ListingView>(TatooineData.BrowsePage);
+        var total = 0;
+        for (var k = 0; k < order.Length; k++)
+        {
+            ref readonly var v = ref all[order[backwards ? order.Length - 1 - k : k]];
+            if ((cities != 1 && ((q.City != 0 && v.City != q.City) || (q.Realm >= 0 && v.Realm != q.Realm))) || !Matches(in v, q))
+            {
+                continue;
+            }
+
+            if (total >= from && rows.Count < TatooineData.BrowsePage)
+            {
+                rows.Add(v);
+            }
+
+            total++;
+        }
+
+        var pages = Math.Max(1, (total + TatooineData.BrowsePage - 1) / TatooineData.BrowsePage);
+        if (q.Page > pages)
+        {
+            // Past the last page: the last page, as the sorted path answers.
+            return PresortedPage(board, new MarketQuery
+            {
+                City = q.City, Realm = q.Realm, Category = q.Category, Mk = q.Mk, MaxUnit = q.MaxUnit, Sort = q.Sort, Page = pages,
+            });
+        }
+
+        return PageJson(board, q.City, total, q.Page, pages, rows);
+    }
+
+    private static string PageJson(MarketSnapshot board, int queryCity, int total, int page, int pages, List<ListingView> rows)
+    {
         var json = new StringBuilder(256 + (TatooineData.BrowsePage * 256));
         json.Append("{\"v\":").Append(board.Version)
-            .Append(",\"city\":").Append(q.City)
-            .Append(",\"total\":").Append(matches.Count)
+            .Append(",\"city\":").Append(queryCity)
+            .Append(",\"total\":").Append(total)
             .Append(",\"page\":").Append(page)
             .Append(",\"pages\":").Append(pages)
             .Append(",\"listings\":[");
-        var from = (page - 1) * TatooineData.BrowsePage;
-        var to = Math.Min(matches.Count, from + TatooineData.BrowsePage);
-        for (var i = from; i < to; i++)
+        for (var i = 0; i < rows.Count; i++)
         {
-            var v = matches[i];
+            var v = rows[i];
             ItemCatalog.TryGet(v.Template, out var t);
-            json.Append(i == from ? "{" : ",{")
+            json.Append(i == 0 ? "{" : ",{")
                 .Append("\"id\":\"").Append(unchecked((ulong)v.Id)).Append('"')
                 .Append(",\"city\":").Append(v.City)
                 .Append(",\"cityName\":\"").Append(EconomyEndpoints.Escape(CityName(board, v.Realm, v.City))).Append('"')
@@ -281,8 +349,6 @@ public static class MarketEndpoints
         }
 
         return json.Append("]}").ToString();
-
-        static int Tie(ListingView a, ListingView b) => a.ListedTick != b.ListedTick ? a.ListedTick.CompareTo(b.ListedTick) : a.Id.CompareTo(b.Id);
     }
 
     private static bool Matches(in ListingView v, MarketQuery q)
