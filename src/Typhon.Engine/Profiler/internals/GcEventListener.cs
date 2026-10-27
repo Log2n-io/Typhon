@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.Tracing;
 using Typhon.Profiler;
@@ -150,16 +151,9 @@ internal sealed class GcEventListener : EventListener
 
     private void HandleSuspendBegin(EventWrittenEventArgs e)
     {
-        // GCSuspendEEBegin_V1 payload order: Count(u32), Reason(u32). The event fires for EVERY EE suspension, not just GC
-        // (see IsGcSuspendReason) — non-GC suspensions are dropped, and the decision is latched so the unpayloaded
-        // GCRestartEEEnd can be paired to it.
-        var payload = e.Payload;
-        byte reason = 0;
-        if (payload != null && payload.Count >= 2)
-        {
-            reason = (byte)Convert.ToUInt32(payload[1]);
-        }
-
+        // The event fires for EVERY EE suspension, not just GC (see IsGcSuspendReason) — non-GC suspensions are dropped, and the decision is
+        // latched so the unpayloaded GCRestartEEEnd can be paired to it.
+        var reason = SuspendReasonOf(e.PayloadNames, e.Payload);
         _suspendRecorded = IsGcSuspendReason(reason);
         if (_suspendRecorded)
         {
@@ -177,6 +171,39 @@ internal sealed class GcEventListener : EventListener
         {
             _queue.TryEnqueue(GcEventRecord.ForRestartEnd(Stopwatch.GetTimestamp()));
         }
+    }
+
+    /// <summary>
+    /// The suspension's reason from a <c>GCSuspendEEBegin_V1</c> payload — read by its field NAME, and by position 0 only when the names are absent.
+    /// </summary>
+    /// <remarks>
+    /// The payload is <c>Reason(u32), Count(u32), ClrInstanceID(u16)</c>, observed on .NET 10 (2026-10-27). Two Microsoft pages disagree on that order,
+    /// and this listener followed the wrong one from #243 on: it read <c>payload[1]</c>, the GC COUNT, as the reason. Harmless while every suspension
+    /// was recorded; since #351 filtered on the reason, it dropped every GC suspension — no GC pause reached a trace (a count of 1 or 6 aside, by luck).
+    /// By name, a schema that moves the field cannot silently do that again.
+    /// </remarks>
+    internal static byte SuspendReasonOf(IReadOnlyList<string> names, IReadOnlyList<object> payload)
+    {
+        if (payload == null || payload.Count == 0)
+        {
+            return 0;
+        }
+
+        var index = 0;
+        if (names != null)
+        {
+            index = -1;
+            for (var i = 0; i < names.Count; i++)
+            {
+                if (names[i] == "Reason")
+                {
+                    index = i;
+                    break;
+                }
+            }
+        }
+
+        return index >= 0 && index < payload.Count ? (byte)Convert.ToUInt32(payload[index]) : (byte)0;
     }
 
     /// <summary>
