@@ -10,9 +10,11 @@ import { TerrainLoading } from './TerrainLoading';
 import { refused } from '../app/realm-transition';
 import { TyphonSource } from '../data/source';
 import { tipRefusal } from '../data/wallet';
+import type { MarketCommand } from '../data/market';
 import { watchFromMessage, watchFromParam, watchFromUrl, watchOriginAllowed } from '../app/watch-link';
 import { useChat } from '../state/chat-store';
 import { useMissions } from '../state/mission-store';
+import { useMarket } from '../state/market-store';
 import { useRealms } from '../state/realm-store';
 import { useSessionStore } from '../state/session-store';
 import { useTerrain } from '../state/terrain-store';
@@ -99,6 +101,11 @@ export function websocketUrl(location: { protocol: string; host: string }): stri
  * god camera stays reachable with no token at all — it is the one tool that has to work on a box nobody has an account on
  * — which is why this takes a nullable token rather than requiring one.
  */
+/** A bazaar command refused — "Sold to someone else first" — shown on the row it was about (bazaar.md § 6). */
+function onMarketRefused(reason: number, command: MarketCommand): void {
+  useMarket.getState().refused(reason, command);
+}
+
 function factoryFor(
   kind: SourceKind,
   token: string | null,
@@ -112,6 +119,7 @@ function factoryFor(
         population: ui.population,
         latencyMs: ui.latencyMs,
         jitterMs: ui.jitterMs,
+        onMarketRefused,
       });
   }
 
@@ -144,6 +152,7 @@ function factoryFor(
         // "Already taken", "three held", "too far": an accepted take is never answered, so the panel hears only this.
         useMissions.getState().refused(reason, cancelled);
       },
+      onMarketRefused,
       onTipRefused: (reason) => {
         // "Not enough credits", "too far": an accepted tip is never answered — the wallet moves instead.
         useChat.getState().notice(`Tip refused: ${tipRefusal(reason)}`);

@@ -28,6 +28,7 @@ import {
 import { hullInRadiusM } from './replication-stats';
 import { realmViewOf, type RealmView } from './realm-view';
 import { REASON_NOT_SENT } from '../app/travel';
+import { MARKET_ANSWER_MS, marketWire, type MarketCommand } from './market';
 import { MISSION_ANSWER_MS } from './missions';
 import { PendingSeqs } from './pending-seqs';
 import { TIP_ANSWER_MS } from './wallet';
@@ -343,6 +344,15 @@ export interface DataSource {
    */
   giveCredits(target: number, amount: number): boolean;
   /**
+   * Sends one of the bazaar's five commands (bazaar.md § 3.1): list, cancel, buy, collect, sell to the vendor.
+   *
+   * <b>Accepted silently, refused out loud</b> (B11): an accepted one moves the `items` and `wallet` revisions; a refusal comes
+   * back through {@link TyphonSourceOptions.onMarketRefused} with the command it refused.
+   *
+   * @returns Whether it was sent: false from a session whose catalog has no such command, and when its rate is spent.
+   */
+  market(command: MarketCommand): boolean;
+  /**
    * Asks for the god camera's view of the planet (`Overview`), or to come back to the player's own, keeping the avatar.
    *
    * <b>Idempotent, so it can be called every frame</b> with the state the UI wants: only a change is sent, and a new
@@ -380,6 +390,8 @@ export interface TyphonSourceOptions {
   readonly onMissionRefused?: (reason: number, cancelled: string | null) => void;
   /** A tip the server refused, with its `ACKS` reason (`data/wallet.ts` names them). */
   readonly onTipRefused?: (reason: number) => void;
+  /** A bazaar command the server refused, with its `ACKS` reason (`data/market.ts` names them) and the command. */
+  readonly onMarketRefused?: (reason: number, command: MarketCommand) => void;
   /** The server refused the god camera, or the local rate limit did. The session is still served the player's own view. */
   readonly onOverviewRefused?: () => void;
   /** The server's WebSocket URL, which must speak `typhon.3`. */
@@ -446,11 +458,15 @@ export class TyphonSource implements DataSource {
   private abandonMissionCommand: MessagePlan | null = null;
   private giveCreditsCommand: MessagePlan | null = null;
   private overviewCommand: MessagePlan | null = null;
+  /** The bazaar's commands by catalog name (`MarketList` …), those the catalog holds. */
+  private marketCommands = new Map<string, MessagePlan>();
 
   /** The takes and cancels sent and not refused yet, by seq: the mission a cancel named, `null` for a take. */
   private readonly pendingMissionSeqs = new PendingSeqs<string | null>(MISSION_ANSWER_MS);
   /** The tips sent and not refused yet, by seq, with their amount. */
   private readonly pendingTipSeqs = new PendingSeqs<number>(TIP_ANSWER_MS);
+  /** The bazaar commands sent and not refused yet, by seq. */
+  private readonly pendingMarketSeqs = new PendingSeqs<MarketCommand>(MARKET_ANSWER_MS);
 
   /** The sphere radius last asked for, metres; 0 for none asked. See {@link effectiveRadiusM}. */
   private askedViewRadiusM = 0;
@@ -865,6 +881,30 @@ export class TyphonSource implements DataSource {
     return true;
   }
 
+  market(command: MarketCommand): boolean {
+    const wire = marketWire(command);
+    const plan = wire === null ? undefined : this.marketCommands.get(wire.name);
+    if (wire === null || plan === undefined || this.ticks === 0) {
+      return false;
+    }
+
+    let seq: number;
+    try {
+      seq = this.commands?.enqueue(plan, wire.values) ?? CommandRefused.RateLimited;
+    } catch {
+      // A field this catalog's command does not declare: a server older or newer than this client. Nothing was sent.
+      return false;
+    }
+
+    if (seq < 0) {
+      return false;
+    }
+
+    this.pendingMarketSeqs.add(seq, command, performance.now());
+    this.sendPending();
+    return true;
+  }
+
   private sendMission(command: MessagePlan | null, values: FieldValues, cancelled: string | null): boolean {
     if (command === null || this.ticks === 0) {
       return false;
@@ -1054,6 +1094,14 @@ export class TyphonSource implements DataSource {
     this.abandonMissionCommand = plan.commandByName('AbandonMission');
     this.giveCreditsCommand = plan.commandByName('GiveCredits');
     this.overviewCommand = plan.commandByName('Overview');
+    this.marketCommands = new Map();
+    for (const name of ['MarketList', 'MarketCancel', 'MarketBuy', 'MarketCollect', 'SellToVendor']) {
+      const command = plan.commandByName(name);
+      if (command !== null) {
+        this.marketCommands.set(name, command);
+      }
+    }
+
     this.commands = new CommandQueue({ plan });
     this.region =
       plan.clientRegion === null
@@ -1124,6 +1172,7 @@ export class TyphonSource implements DataSource {
     this.pendingRealmSeq = -1;
     this.pendingMissionSeqs.clear();
     this.pendingTipSeqs.clear();
+    this.pendingMarketSeqs.clear();
     // The store stays: a resume refills it with a RESET frame, and the renderer keeps drawing meanwhile.
     // So does the realm, for the same reason and more strongly — a resumed session's first frame is a
     // `RESET|REALM` of the realm its token recorded (12-realms § 1.6), so clearing it here would tear the scene
@@ -1187,6 +1236,12 @@ export class TyphonSource implements DataSource {
       // A refused tip, likewise: an accepted one moves the wallets and is not answered.
       if (this.pendingTipSeqs.take(seq, nowMs) !== undefined) {
         this.options.onTipRefused?.(applier.acks.reason[i]);
+      }
+
+      // A refused bazaar command, likewise (B11): the panel shows the reason on the row it was about.
+      const market = this.pendingMarketSeqs.take(seq, nowMs);
+      if (market !== undefined) {
+        this.options.onMarketRefused?.(applier.acks.reason[i], market);
       }
 
       // A refused god camera: the session is still served the player's own view, so the belief goes back to off.

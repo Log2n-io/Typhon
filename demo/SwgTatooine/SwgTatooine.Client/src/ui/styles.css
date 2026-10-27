@@ -1667,3 +1667,118 @@ button.active {
     opacity: 0;
   }
 }
+
+/* The bazaar (bazaar.md § 6): near the top, right of the toolbar, and clear of the inventory window (whose stacks are picked
+   from it to sell). Deliberately plain: the mission table's rows, a strip of tabs, a refusal under the row it was about. */
+.bazaar {
+  top: 70px;
+  left: 320px;
+  width: 640px;
+  max-width: calc(100% - 340px);
+  max-height: 65%;
+  overflow-y: auto;
+}
+
+/* Narrower, both cannot sit side by side: the bazaar centred at the top, the inventory under it. */
+@media (max-width: 1300px) {
+  .bazaar {
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: calc(100% - 20px);
+    max-height: 45%;
+  }
+
+  .inventory.beside-bazaar {
+    top: auto;
+    bottom: 90px;
+    right: auto;
+    left: 50%;
+    transform: translateX(-50%);
+    max-height: 38%;
+  }
+}
+
+.bazaar-here {
+  color: var(--muted);
+}
+
+.bazaar-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.bazaar-tabs button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.bazaar-filters {
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.bazaar-filters input[type='number'] {
+  width: 80px;
+}
+
+.bazaar-table td {
+  vertical-align: middle;
+}
+
+.bazaar-table td.mk {
+  font-weight: 700;
+}
+
+.bazaar-table td.mk1 {
+  color: #c4c8cf;
+}
+
+.bazaar-table td.mk2 {
+  color: #6fdc6f;
+}
+
+.bazaar-table td.mk3 {
+  color: #5aa8ff;
+}
+
+.bazaar-table td.mk4 {
+  color: #b77cff;
+}
+
+.bazaar-table td.mk5 {
+  color: #ffcf4a;
+}
+
+/* A row the board no longer lists, kept while its refusal is read: "Sold to someone else first". */
+.bazaar-table tr.gone {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.bazaar-row-notice td {
+  padding: 2px 6px 4px;
+  color: #ffb39a;
+  background: rgba(255, 120, 90, 0.12);
+}
+
+.bazaar-pager {
+  margin-top: 6px;
+  align-items: center;
+  gap: 8px;
+}
+
+.bazaar-picked {
+  align-items: center;
+  gap: 8px;
+}
+
+/* With the bazaar open, a stack is picked for the Sell tab by a click. */
+.inventory-slot.pickable {
+  cursor: pointer;
+}
+
+.inventory-slot.picked {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
