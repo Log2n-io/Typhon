@@ -280,6 +280,130 @@ internal sealed class DemoStatsChecks : ServedChecks
         });
     }
 
+    /// <summary>
+    /// BZ-19 with real trades: a list, a buy at the listing's city, a second list left standing and a vendor sale go through the desk, and the market
+    /// section and <c>economy.byKind</c> show them — counters, the city's board, the price row, the rates, the list fees and tax as sinks against the
+    /// vendor's faucet — and the exit line agrees.
+    /// </summary>
+    [Test]
+    [CancelAfter(180_000)]
+    public void TheMarketSection_ShowsARealListBuyAndVendorSale()
+    {
+        var config = Worlds.Served(Dir);
+        config.WorkerCount = 1;
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+        Harness = new SessionHarness(sim);
+        Assert.That(sim.Index.Bazaars, Is.Not.Empty, "the premise: the world has a bazaar");
+        var home = sim.Index.Bazaars[0];
+        var (seller, sellerLink) = Trader(sim, 0x7321, home, 1);
+        var (buyer, buyerLink) = Trader(sim, 0x7322, home, 2);
+        var hide = ItemCatalog.Hide;
+        sim.Bridge.StageTransfer(ItemLedger.World, (long)seller.RawValue, hide, 2, 60, ItemMoveKind.Kill, 1);
+        SessionHarness.Until(() => Market.Units(sim, seller, hide, 2) == 60, "the staged hides");
+        Harness.Ticks(1);
+
+        // 20 at 30 cr (fee 6), bought at its city — collected at once (tax 48); 5 at 40 cr (fee 2), left standing;
+        // 30 to the vendor (⌊30 × 2.8 × 20 %⌋ = 16).
+        var first = ListAndWait(sim, sellerLink, hide, 2, 20, 30);
+        Breathe();
+        Market.Buy(buyerLink, first, 30);
+        SessionHarness.Until(() => !Market.Listings(sim).ContainsKey(first), "the buy, collected at the listing's city");
+        Breathe();
+        ListAndWait(sim, sellerLink, hide, 2, 5, 40);
+        Breathe();
+        Market.Vendor(sellerLink, hide, 2, 30);
+        SessionHarness.Until(() => Market.Units(sim, seller, hide, 2) == 5, "the vendor sale");
+        SessionHarness.Until(() => sim.Bridge.MarketBoard.Total == 1 && sim.Bridge.MarketBoard.Prices.Any(p => p.Template == hide && p.Sales == 1),
+            "the board published with the standing listing and the sale");
+        Harness.Ticks(Worlds.ServedHz * 2);
+        var (auditOk, why) = Market.Audits(sim);
+        Assert.That(auditOk, Is.True, why);
+
+        using var doc = JsonDocument.Parse(sim.Bridge.DemoStatsJson());
+        var market = doc.RootElement.GetProperty("market");
+        var economy = doc.RootElement.GetProperty("economy");
+        var byKind = economy.GetProperty("byKind");
+        var city = market.GetProperty("byCity").EnumerateArray().Single(c => c.GetProperty("city").GetInt32() == home.Region);
+        var row = market.GetProperty("prices").GetProperty("mat_hide").EnumerateArray().Single(p => p.GetProperty("mk").GetInt32() == 2);
+        Assert.Multiple(() =>
+        {
+            Assert.That(market.GetProperty("listings").GetInt64(), Is.EqualTo(2));
+            Assert.That(market.GetProperty("sales").GetInt64(), Is.EqualTo(1));
+            Assert.That(market.GetProperty("volume").GetInt64(), Is.EqualTo(600));
+            Assert.That(market.GetProperty("salesTax").GetInt64(), Is.EqualTo(48));
+            Assert.That(market.GetProperty("listFees").GetInt64(), Is.EqualTo(6 + 2));
+            Assert.That(market.GetProperty("vendorPaid").GetInt64(), Is.EqualTo(16));
+            Assert.That(market.GetProperty("vendorUnits").GetInt64(), Is.EqualTo(30));
+            Assert.That(market.GetProperty("collected").GetInt64(), Is.EqualTo(1), "bought at its city: collected in the buy");
+            Assert.That(market.GetProperty("listed").GetInt64(), Is.EqualTo(1));
+            Assert.That(market.GetProperty("sold").GetInt64(), Is.Zero);
+            Assert.That(market.GetProperty("escrowUnits").GetInt64(), Is.EqualTo(5));
+            Assert.That(market.GetProperty("commitsFailed").GetInt64() + market.GetProperty("aborted").GetInt64(), Is.Zero);
+            Assert.That(market.GetProperty("refused").EnumerateObject().Sum(p => p.Value.GetInt64()), Is.Zero);
+
+            Assert.That(city.GetProperty("listed").GetInt64(), Is.EqualTo(1), "the standing listing, at the seller's city");
+            Assert.That(city.GetProperty("listedValue").GetInt64(), Is.EqualTo(5 * 40));
+            Assert.That(city.GetProperty("name").GetString(), Is.Not.Empty);
+
+            Assert.That(row.GetProperty("sales").GetInt64(), Is.EqualTo(1));
+            Assert.That(row.GetProperty("median").GetInt64(), Is.EqualTo(30));
+            Assert.That(row.GetProperty("min").GetInt64(), Is.EqualTo(30));
+            Assert.That(row.GetProperty("max").GetInt64(), Is.EqualTo(30));
+            Assert.That(row.GetProperty("listed").GetInt64(), Is.EqualTo(1));
+            Assert.That(row.GetProperty("lowest").GetInt64(), Is.EqualTo(40));
+            Assert.That(row.GetProperty("value").GetDouble(), Is.EqualTo(2.8d));
+
+            Assert.That(market.GetProperty("salesPerMin").GetProperty("60s").GetDouble(), Is.GreaterThan(0d), "the sale in the rate");
+            Assert.That(market.GetProperty("vendorPerMin").GetProperty("60s").GetDouble(), Is.GreaterThan(0d));
+            Assert.That(market.GetProperty("feesPerMin").GetProperty("60s").GetDouble(), Is.GreaterThan(0d));
+
+            Assert.That(byKind.GetProperty("sale").GetInt64(), Is.EqualTo(600));
+            Assert.That(byKind.GetProperty("tax").GetInt64(), Is.EqualTo(48));
+            Assert.That(byKind.GetProperty("listfee").GetInt64(), Is.EqualTo(8));
+            Assert.That(byKind.GetProperty("vendor").GetInt64(), Is.EqualTo(16));
+            Assert.That(byKind.GetProperty("grant").GetInt64(), Is.GreaterThan(0), "the two wallets' grants");
+            Assert.That(economy.GetProperty("sinks").GetInt64(), Is.EqualTo(48 + 8), "tax and list fees: the only sinks so far");
+            Assert.That(economy.GetProperty("faucets").GetInt64(),
+                Is.EqualTo(byKind.GetProperty("grant").GetInt64() + byKind.GetProperty("mission").GetInt64() + 16), "grants, rewards, the vendor");
+            Assert.That(economy.GetProperty("sinksPerMin").GetProperty("60s").GetDouble(), Is.GreaterThan(0d));
+        });
+
+        using var exit = JsonDocument.Parse(sim.Bridge.MarketCountersJson());
+        Assert.Multiple(() =>
+        {
+            Assert.That(exit.RootElement.GetProperty("sales").GetInt64(), Is.EqualTo(1), "the exit line");
+            Assert.That(exit.RootElement.GetProperty("vendorPaid").GetInt64(), Is.EqualTo(16));
+            Assert.That(exit.RootElement.GetProperty("sinks").GetInt64(), Is.EqualTo(56));
+        });
+    }
+
+    /// <summary>A player logged in, parked beside <paramref name="bazaar"/>, its wallet open.</summary>
+    private (EntityId Character, FakeLink Link) Trader(TatooineSim sim, ulong account, MissionTerminalRef bazaar, long bindings)
+    {
+        var link = Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(account));
+        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= bindings, "the avatar to be spawned");
+        Harness.Ticks(2);
+        Worlds.Park(sim, link.Session, bazaar.X + 2.5f, bazaar.Z);
+        Assert.That(SwgTatooine.Server.Accounts.CharacterStore.TryFind(sim.Dbe, EntityId.FromRawValue(account), out var character, out _), Is.True);
+        SessionHarness.Until(() => Ledgers.TryWallet(sim, character, out _), "the wallet to be opened");
+        Harness.Ticks(2);
+        return (character, link);
+    }
+
+    /// <summary>Lists, and waits for the new listing.</summary>
+    private long ListAndWait(TatooineSim sim, FakeLink seller, ushort template, byte mk, int quantity, uint unitPrice)
+    {
+        var before = Market.Listings(sim).Keys.ToHashSet();
+        Market.List(seller, template, mk, quantity, unitPrice);
+        SessionHarness.Until(() => Market.Listings(sim).Keys.Any(k => !before.Contains(k)), "the listing");
+        Harness.Ticks(2);
+        return Market.Listings(sim).Keys.First(k => !before.Contains(k));
+    }
+
+    /// <summary>A rate bucket's worth of patience: the market's commands are two a second, a burst of four.</summary>
+    private void Breathe() => Harness.Ticks((Worlds.ServedHz / 2) + 1);
+
     /// <summary>BZ-19: <c>/swg/stats</c> carries <c>market</c> with every key of bazaar.md § 9, a row per city, and <c>economy.byKind</c>.</summary>
     [Test]
     [CancelAfter(60_000)]
