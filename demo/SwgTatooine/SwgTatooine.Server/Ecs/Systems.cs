@@ -622,6 +622,46 @@ internal sealed class LootSystem : CallbackSystem
 }
 
 /// <summary>
+/// The market desk (<c>SimBridge.Market.cs</c>; bazaar.md § 3): every list, cancel, buy, collect and vendor sale, in arrival order, and the listings' expiry.
+/// </summary>
+/// <remarks>
+/// <para><b>Serial, and the third writer of credits and items</b>: one chain <c>Missions → Ledger → Loot → Market</c> orders every pair of writers, and the
+/// one buyer of a listing comes from that order, never from optimistic commits (economy-build § 1, rule 1). <b>The only writer of <see cref="Listing"/></b>.
+/// </para>
+/// <para>Its writes go through a side transaction, committed once per tick with work; the items and wallet revisions of the bodies it moved through the
+/// tick's own, after that commit. It reads no <see cref="CharacterProgress"/>: a price never depends on the buyer (B12).</para>
+/// </remarks>
+internal sealed class MarketSystem : CallbackSystem
+{
+    private readonly SimBridge _bridge;
+
+    public MarketSystem(SimBridge bridge) => _bridge = bridge;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("Market")
+        .Phase(SimPhases.Economy)
+        .AfterAll("Missions", "Ledger", "Loot")
+        .Writes<Listing>()
+
+        // Through its side transaction, as the desk's and the Ledger's — but declared a side write, which does not order: Loot reads wallets fresh (after
+        // every same-phase writer of them) and runs before this, so a Writes here would close a cycle. The order is the explicit chain above.
+        .SideWrites<Wallet>()
+        .Writes<LedgerEntry>()
+        .Writes<LedgerHead>()
+        .Writes<ItemStack>()
+        .Writes<ItemLedgerEntry>()
+        .Writes<ItemLedgerHead>()
+
+        // Where the trader stands, and its items and wallet revisions; the seller's name, read once at listing.
+        .Reads<PlayerPlacement>()
+        .Reads<PlayerRealm>()
+        .Writes<PlayerState>()
+        .Reads<Character>();
+
+    protected override void Execute(TickContext ctx) => _bridge.MarketTick(ctx);
+}
+
+/// <summary>
 /// Shuttle travel (#910's workload): boards queued players while their port's shuttle is down and transports them to the destination port.
 /// </summary>
 /// <remarks>

@@ -439,7 +439,7 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(stacks.Single(s => s.Stack.Template == ItemCatalog.Hide && s.Stack.Count == 2).Stack.Slot, Is.EqualTo(1), "not the lowest free slot");
             Assert.That(stacks.Single(s => s.Id == hide.Id).Stack.Count, Is.EqualTo(ItemLedger.StackMax));
             Assert.That(ItemEndpoints.InventoryJson(sim.Dbe, p.Character),
-                Does.Contain("\"item\":\"mat_metal\",\"name\":\"Metal\",\"category\":\"material\",\"mk\":1,\"count\":5,\"ref\":\"1\",\"dir\":\"out\"}"),
+                Does.Contain("\"item\":\"mat_metal\",\"name\":\"Metal\",\"category\":\"material\",\"template\":3,\"mk\":1,\"count\":5,\"ref\":\"1\",\"dir\":\"out\"}"),
                 "the metal given back is not a row out of the inventory");
             Assert.That(ItemEndpoints.Audit(sim.Dbe).Violations.All(v => v.Contains("must go from World", StringComparison.Ordinal)), Is.True,
                 "the replay of a mint, a destroy and a fill is clean but for the destroy's kind, which no system makes yet");
@@ -521,8 +521,11 @@ internal sealed class InventoryChecks : ServedChecks
 
     // ── IL-7: the writers ───────────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>IL-7: the schedule's declared writers of the three item components are exactly <c>Loot</c> and <c>Missions</c>, and Loot runs after the
-    /// Ledger, which runs after the desk.</summary>
+    /// <summary>
+    /// IL-7, BZ-9: the schedule's declared writers of the three item components are exactly <c>Loot</c>, <c>Market</c> and <c>Missions</c>, of the credit
+    /// components <c>Ledger</c>, <c>Market</c> and <c>Missions</c>, of <see cref="Listing"/> <c>Market</c> alone — and they run in one chain:
+    /// Missions → Ledger → Loot → Market.
+    /// </summary>
     [Test]
     [CancelAfter(60_000)]
     public void OnlyLootAndTheDeskWriteItems()
@@ -532,8 +535,17 @@ internal sealed class InventoryChecks : ServedChecks
         foreach (var type in new[] { typeof(ItemStack), typeof(ItemLedgerEntry), typeof(ItemLedgerHead) })
         {
             var writers = systems.Where(s => s.Access.Writes.Contains(type) || s.Access.SideWrites.Contains(type)).Select(s => s.Name).OrderBy(n => n);
-            Assert.That(writers, Is.EqualTo(new[] { "Loot", "Missions" }), $"the writers of {type.Name}");
+            Assert.That(writers, Is.EqualTo(new[] { "Loot", "Market", "Missions" }), $"the writers of {type.Name}");
         }
+
+        foreach (var type in new[] { typeof(Wallet), typeof(LedgerEntry), typeof(LedgerHead) })
+        {
+            var writers = systems.Where(s => s.Access.Writes.Contains(type) || s.Access.SideWrites.Contains(type)).Select(s => s.Name).OrderBy(n => n);
+            Assert.That(writers, Is.EqualTo(new[] { "Ledger", "Market", "Missions" }), $"the writers of {type.Name}");
+        }
+
+        Assert.That(systems.Where(s => s.Access.Writes.Contains(typeof(Listing)) || s.Access.SideWrites.Contains(typeof(Listing))).Select(s => s.Name),
+            Is.EqualTo(new[] { "Market" }), "the writers of Listing");
 
         int IndexOf(string name) => Array.FindIndex(systems, s => s.Name == name);
         bool Reaches(int from, int to)
@@ -565,6 +577,9 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(Reaches(IndexOf("Missions"), IndexOf("Ledger")), Is.True, "the Ledger is not after the desk");
             Assert.That(Reaches(IndexOf("Ledger"), IndexOf("Loot")), Is.True, "Loot is not after the Ledger");
             Assert.That(Reaches(IndexOf("Loot"), IndexOf("Missions")), Is.False, "Loot before the desk");
+            Assert.That(Reaches(IndexOf("Loot"), IndexOf("Market")), Is.True, "the Market is not after Loot");
+            Assert.That(Reaches(IndexOf("Market"), IndexOf("Missions")) || Reaches(IndexOf("Market"), IndexOf("Ledger"))
+                || Reaches(IndexOf("Market"), IndexOf("Loot")), Is.False, "the Market before another writer");
         });
     }
 
@@ -732,17 +747,17 @@ internal sealed class InventoryChecks : ServedChecks
         var stack = Items.Stacks(sim, p.Character)[0].Id.RawValue;
         Assert.Multiple(() =>
         {
-            Assert.That(audit, Does.StartWith("{\"ok\":true,\"entries\":1,\"lastSeq\":1,\"stacks\":1,\"units\":7,\"minted\":7,\"destroyed\":0,\"violationCount\":0,"
+            Assert.That(audit, Does.StartWith("{\"ok\":true,\"entries\":1,\"lastSeq\":1,\"stacks\":1,\"units\":7,\"escrow\":0,\"minted\":7,\"destroyed\":0,\"violationCount\":0,"
                 + "\"violations\":[],\"ms\":"));
             Assert.That(ledger, Does.StartWith("{\"rows\":[{\"seq\":1,\"tick\":"));
             Assert.That(ledger, Does.Contain($"\"kind\":\"kill\",\"from\":\"0\",\"to\":\"{p.Character.RawValue}\",\"count\":7,\"fromAfter\":0,\"toAfter\":7,"));
             Assert.That(ledger, Does.Contain($"\"item\":\"mat_hide\",\"mk\":2,\"fromStack\":\"0\",\"toStack\":\"{stack}\"}}"));
             Assert.That(ledger, Does.EndWith("],\"next\":1}"));
             Assert.That(inventory, Does.StartWith(
-                $"{{\"open\":true,\"slots\":30,\"items\":[{{\"id\":\"{stack}\",\"slot\":1,\"item\":\"mat_hide\",\"name\":\"Hide\",\"category\":\"material\",\"mk\":2,"
+                $"{{\"open\":true,\"slots\":30,\"items\":[{{\"id\":\"{stack}\",\"slot\":1,\"item\":\"mat_hide\",\"name\":\"Hide\",\"category\":\"material\",\"template\":8,\"mk\":2,"
                 + "\"count\":7}],\"recent\":[{\"seq\":\"1\",\"tick\":"));
             Assert.That(inventory, Does.EndWith(
-                ",\"kind\":\"kill\",\"item\":\"mat_hide\",\"name\":\"Hide\",\"category\":\"material\",\"mk\":2,\"count\":7,\"ref\":\"1\",\"dir\":\"in\"}],\"lost\":[]}"));
+                ",\"kind\":\"kill\",\"item\":\"mat_hide\",\"name\":\"Hide\",\"category\":\"material\",\"template\":8,\"mk\":2,\"count\":7,\"ref\":\"1\",\"dir\":\"in\"}],\"lost\":[]}"));
         });
     }
 
