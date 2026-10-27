@@ -2,11 +2,20 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Net;
+using System.Net.Http;
 using System.Text.Json;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
 using NUnit.Framework;
 using SwgTatooine.Server;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using SwgTatooine.Server.Accounts;
 using Typhon.Engine;
 
@@ -304,8 +313,56 @@ internal sealed class MarketEndpointChecks : ServedChecks
             Assert.That(json, Does.Contain("\"item\":\"mat_bone\",\"name\":\"Bone\",\"category\":\"material\",\"mk\":2,\"qty\":4,\"unit\":25,\"total\":100"));
             Assert.That(json, Does.Contain($"\"seller\":\"{a.Character.RawValue}\""));
             Assert.That(MarketEndpoints.BrowseJson(board, new MarketQuery { City = home.Region, Category = ItemCategory.Core }), Does.Contain("\"total\":0"));
-            Assert.That(MarketEndpoints.PricesJson(board), Does.Contain("{\"item\":\"mat_bone\",\"name\":\"Bone\",\"category\":\"material\",\"mk\":2,\"value\":2,\"vendor\":560,\"listed\":1,\"lowest\":25"));
+            Assert.That(MarketEndpoints.PricesJson(board), Does.Contain("{\"item\":\"mat_bone\",\"template\":9,\"name\":\"Bone\",\"category\":\"material\",\"mk\":2,\"value\":2.8,\"vendor\":560,\"listed\":1,\"lowest\":25"));
         });
+    }
+
+    /// <summary>
+    /// H1 of review 9: the routes the host maps answer from the simulation's board, through the provider it is handed — browse, prices and the audit (whose
+    /// MA-7 runs only against a published board) — and a host mapped without one refuses to start rather than serving an empty board.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public async Task TheMappedRoutes_AnswerFromTheSimulationsBoard()
+    {
+        using var sim = Start();
+        var home = sim.Index.Bazaars[0];
+        var a = LogIn(sim, 0x8E01, home, 1);
+        sim.Bridge.StageTransfer(ItemLedger.World, unchecked((long)a.Character.RawValue), ItemCatalog.Venom, 3, 2, ItemMoveKind.Kill, 1);
+        SessionHarness.Until(() => Market.Units(sim, a.Character, ItemCatalog.Venom, 3) == 2, "the units");
+        Market.List(a.Link, ItemCatalog.Venom, 3, 2, 33);
+        SessionHarness.Until(() => sim.Bridge.MarketBoard.Total == 1, "the board to show the listing");
+        var id = unchecked((ulong)Market.Listings(sim).Keys.Single());
+
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.SetMinimumLevel(LogLevel.Error);
+        builder.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Loopback, 0));
+        await using var app = builder.Build();
+        Assert.That(() => app.MapMarket(sim.Dbe, null), Throws.ArgumentNullException, "a host mapped without the board");
+        app.MapMarket(sim.Dbe, () => sim.Bridge.MarketBoard);
+        await app.StartAsync();
+        try
+        {
+            var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>().Addresses.First();
+            using var client = new HttpClient { BaseAddress = new Uri(address) };
+            var browse = await client.GetStringAsync($"/swg/market?city={home.Region}");
+            var prices = await client.GetStringAsync("/swg/market/prices");
+            var audit = await client.GetStringAsync("/swg/market/audit");
+            var other = await client.GetAsync($"/swg/market?city={home.Region}&sort=new");
+            var first = await client.GetAsync($"/swg/market?city={home.Region}");
+            Assert.Multiple(() =>
+            {
+                Assert.That(browse, Does.Contain($"\"id\":\"{id}\""), "the route's board is not the simulation's");
+                Assert.That(browse, Does.Contain("\"total\":1"));
+                Assert.That(prices, Does.Contain("\"item\":\"mat_venom\",\"template\":11").And.Contain("\"lowest\":33"));
+                Assert.That(audit, Does.StartWith("{\"ok\":true,\"listings\":1,\"listed\":1"));
+                Assert.That(other.Headers.ETag, Is.Not.EqualTo(first.Headers.ETag), "two queries of one board share an ETag");
+            });
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
     }
 
     /// <summary>
@@ -343,7 +400,7 @@ internal sealed class MarketEndpointChecks : ServedChecks
                 context.Request.Headers.Authorization = authorization;
             }
 
-            return MarketEndpoints.GetMineForChecks(sim.Dbe, context) switch
+            return MarketEndpoints.GetMineForChecks(sim.Dbe, sim.Bridge.MarketBoard, context) switch
             {
                 ContentHttpResult c => (c.StatusCode ?? 200, c.ResponseContent),
                 IStatusCodeHttpResult s => (s.StatusCode ?? 0, null),

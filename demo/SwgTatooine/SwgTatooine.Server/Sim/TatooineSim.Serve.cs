@@ -49,7 +49,7 @@ public sealed partial class TatooineSim
                 .ServeAsync(
                     _runtime, port, clientRoot, origins, RealmDirectoryJson(), RealmInventoryJson, bindAddress, _config.AuthBurst, _config.AuthRefillMs,
                     _config.OriginSecret, _config.AuthLocalOnly, _config.TlsChainPath, _config.TlsKeyPath, _config.TlsPort, _config.RedirectPort,
-                    assets, shapes, _config.WorldEdgeM * 0.5)
+                    assets, shapes, _config.WorldEdgeM * 0.5, () => _bridge?.MarketBoard ?? MarketSnapshot.Empty)
                 .ConfigureAwait(false);
         }
         finally

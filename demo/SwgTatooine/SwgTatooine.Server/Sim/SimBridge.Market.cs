@@ -109,14 +109,14 @@ public sealed class MarketCityView
             return known;
         }
 
-        // By age: (listed tick, position), then by price: (price, rank by age). Positions and ranks are below 2^20, a price at most 2^20.
+        // By age: the listed tick (equal ticks in no particular order), then by price: (price, rank by age) — a price at most 2^20, a rank below 2^32.
         var rows = Listings;
         var n = rows.Length;
         var keys = new long[n];
         var byNew = new int[n];
         for (var i = 0; i < n; i++)
         {
-            keys[i] = (rows[i].ListedTick << 20) | (uint)i;
+            keys[i] = rows[i].ListedTick;
             byNew[i] = i;
         }
 
@@ -124,7 +124,7 @@ public sealed class MarketCityView
         var byPrice = new int[n];
         for (var r = 0; r < n; r++)
         {
-            keys[byNew[r]] = (rows[byNew[r]].UnitPrice << 24) | (uint)r;
+            keys[byNew[r]] = (rows[byNew[r]].UnitPrice << 32) | (uint)r;
             byPrice[r] = r;
         }
 
@@ -217,13 +217,12 @@ public sealed class MarketSnapshot
             at += c.Listings.Length;
         }
 
-        // By age: (listed tick, position) — positions are below 2^20 (the caps bound the book far under it). Then by price: (price, rank by age); a price is
-        // at most 2^20, a rank below 2^24.
+        // By age: the listed tick (equal ticks in no particular order), then by price: (price, rank by age) — a price at most 2^20, a rank below 2^32.
         var keys = new long[n];
         var byNew = new int[n];
         for (var i = 0; i < n; i++)
         {
-            keys[i] = (all[i].ListedTick << 20) | (uint)i;
+            keys[i] = all[i].ListedTick;
             byNew[i] = i;
         }
 
@@ -231,7 +230,7 @@ public sealed class MarketSnapshot
         var byPrice = new int[n];
         for (var r = 0; r < n; r++)
         {
-            keys[byNew[r]] = (all[byNew[r]].UnitPrice << 24) | (uint)r;
+            keys[byNew[r]] = (all[byNew[r]].UnitPrice << 32) | (uint)r;
             byPrice[r] = r;
         }
 
@@ -405,8 +404,13 @@ public sealed partial class SimBridge
     private bool _marketLoaded;
     private ushort _listingRouting;
     private readonly Dictionary<long, BookEntry> _book = [];
-    private readonly Dictionary<long, int> _listedBy = [];
-    private readonly Dictionary<long, int> _reservedBy = [];
+    // Per seller: its listings Listed or Returned — what the listing cap counts (B9: a returned listing still holds a slot until it is collected). Per
+    // collector: its Sold and Returned listings — what a collect of all walks, and what the reservation cap counts the Sold of.
+    private readonly Dictionary<long, int> _slotsOf = [];
+    private readonly Dictionary<long, List<BookEntry>> _reservedOf = [];
+
+    // Every listed listing by its expiry, earliest first; an entry no longer listed, or listed again, is skipped when it reaches the head.
+    private readonly PriorityQueue<long, long> _expiries = new();
     private MissionTerminalRef[] _bazaars = [];
     private (ushort Realm, ushort City)[] _bazaarCities = [];
 
@@ -424,6 +428,8 @@ public sealed partial class SimBridge
     private readonly Dictionary<int, MarketCityView> _cityViews = [];
     private readonly Dictionary<int, PriceRing> _priceRings = [];
     private long[] _ageScratch = [];
+    private readonly Dictionary<int, (List<ListingView> Listed, int Reserved, long Value)> _rebuiltScratch = [];
+    private readonly Dictionary<int, (int Listed, long Lowest)> _lowestScratch = [];
 
     // A listing's life in world ticks; 0 = TatooineData.ListingLifeHours. A check stages an expiry by shortening it.
     private long _listingLifeTicks;
@@ -433,7 +439,9 @@ public sealed partial class SimBridge
     private bool _marketWritten;
     private bool _marketAbort;
     private readonly List<(int Key, long Unit)> _pendingSalePrices = [];
+    // This tick's actors' bodies by character, and — only once a character who sent nothing needs one (a seller paid, an expiry) — every body online.
     private readonly Dictionary<EntityId, EntityId> _marketBodies = [];
+    private bool _marketBodiesFilled;
     private readonly HashSet<long> _marketWalletsMoved = [];
     private readonly HashSet<long> _marketItemsMoved = [];
     private readonly List<ClientCommand<MarketList>> _listsApplied = [];
@@ -444,7 +452,7 @@ public sealed partial class SimBridge
     private readonly List<BookEntry> _marketScratch = [];
 
     /// <summary>For a check: listings listed from now on expire after <paramref name="ticks"/> world ticks; 0 restores <see cref="TatooineData.ListingLifeHours"/>.</summary>
-    internal void SetListingLifeTicksForChecks(long ticks) => _listingLifeTicks = ticks;
+    internal void SetListingLifeTicksForChecks(long ticks) => Volatile.Write(ref _listingLifeTicks, ticks);
 
     // For a check: the caps (0 = TatooineData's), and a write failure staged on the next desk transaction that applies anything.
     private int _maxListings;
@@ -454,24 +462,35 @@ public sealed partial class SimBridge
     /// <summary>For a check: the per-character caps, so reaching one takes a few commands rather than twenty; 0 restores <see cref="TatooineData"/>'s.</summary>
     internal void SetMarketCapsForChecks(int listings, int reserved)
     {
-        _maxListings = listings;
-        _maxReserved = reserved;
+        Volatile.Write(ref _maxListings, listings);
+        Volatile.Write(ref _maxReserved, reserved);
     }
 
     /// <summary>
     /// For a check: the next desk transaction that applies a command behaves as if a write failed after its validation passed — disposed uncommitted, every
     /// command refused <see cref="TatooineReplication.MarketFailed"/>, counted <c>market.aborted</c>.
     /// </summary>
-    internal void FailNextMarketWriteForChecks() => _failNextMarket = true;
+    internal void FailNextMarketWriteForChecks() => Volatile.Write(ref _failNextMarket, true);
 
-    private int MaxListings => _maxListings > 0 ? _maxListings : TatooineData.MaxListings;
+    private int MaxListings => Volatile.Read(ref _maxListings) is > 0 and var n ? n : TatooineData.MaxListings;
 
-    private int MaxReserved => _maxReserved > 0 ? _maxReserved : TatooineData.MaxReserved;
+    private int MaxReserved => Volatile.Read(ref _maxReserved) is > 0 and var n ? n : TatooineData.MaxReserved;
 
     /// <summary>For a check: the next market tick publishes the snapshot whatever the time since the last.</summary>
-    internal void PublishMarketNowForChecks() => _lastPublishTick = long.MinValue / 2;
+    internal void PublishMarketNowForChecks() => Volatile.Write(ref _publishNow, true);
 
-    private long ListingLifeTicks => _listingLifeTicks > 0 ? _listingLifeTicks : (long)TatooineData.ListingLifeHours * 3600 * _config.TickRateHz;
+    private bool _publishNow;
+
+    private int _mostBuysInATick;
+
+    /// <summary>For a check: the most buys one desk tick has handled since this was last set — a race is one tick only if all its buys were.</summary>
+    internal int MostBuysInATickForChecks
+    {
+        get => Volatile.Read(ref _mostBuysInATick);
+        set => Volatile.Write(ref _mostBuysInATick, value);
+    }
+
+    private long ListingLifeTicks => Volatile.Read(ref _listingLifeTicks) is > 0 and var n ? n : (long)TatooineData.ListingLifeHours * 3600 * _config.TickRateHz;
 
     private ushort ListingRouting => _listingRouting != 0 ? _listingRouting : _listingRouting = Dbe.ArchetypeIdOf<ListingArch>();
 
@@ -486,21 +505,24 @@ public sealed partial class SimBridge
         _marketPublishDue = true;
     }
 
-    /// <summary>Counts a listing in, or out of, the book's per-state counts and per-character caps.</summary>
-    private void CountListing(in Listing l, int delta)
+    /// <summary>Counts a listing in, or out of, the book's per-state counts, the seller's slots and the collector's reservations.</summary>
+    private void CountListing(BookEntry entry, int delta)
     {
+        ref readonly var l = ref entry.L;
         switch (l.State)
         {
             case ListingState.Listed:
                 _bookListed += delta;
-                Adjust(_listedBy, l.Seller, delta);
+                Adjust(_slotsOf, l.Seller, delta);
                 break;
             case ListingState.Sold:
                 _bookSold += delta;
-                Adjust(_reservedBy, l.Collector, delta);
+                Reserve(entry, delta);
                 break;
             case ListingState.Returned:
                 _bookReturned += delta;
+                Adjust(_slotsOf, l.Seller, delta);
+                Reserve(entry, delta);
                 break;
         }
 
@@ -516,6 +538,48 @@ public sealed partial class SimBridge
                 counts[key] = n;
             }
         }
+    }
+
+    private void Reserve(BookEntry entry, int delta)
+    {
+        var collector = entry.L.Collector;
+        if (delta > 0)
+        {
+            if (!_reservedOf.TryGetValue(collector, out var list))
+            {
+                list = [];
+                _reservedOf[collector] = list;
+            }
+
+            list.Add(entry);
+            return;
+        }
+
+        if (_reservedOf.TryGetValue(collector, out var mine))
+        {
+            mine.Remove(entry);
+            if (mine.Count == 0)
+            {
+                _reservedOf.Remove(collector);
+            }
+        }
+    }
+
+    /// <summary>How many purchases are reserved for a buyer: its Sold listings, at most a few dozen.</summary>
+    private int ReservedCount(long collector)
+    {
+        if (!_reservedOf.TryGetValue(collector, out var mine))
+        {
+            return 0;
+        }
+
+        var n = 0;
+        foreach (var entry in mine)
+        {
+            n += entry.L.State == ListingState.Sold ? 1 : 0;
+        }
+
+        return n;
     }
 
     /// <summary>Reads every listing on the first use after a start or a failed commit; the bazaar terminals from the world's indexes.</summary>
@@ -543,8 +607,9 @@ public sealed partial class SimBridge
         _bazaars = bazaars.ToArray();
         _bazaarCities = [.. cities];
         _book.Clear();
-        _listedBy.Clear();
-        _reservedBy.Clear();
+        _slotsOf.Clear();
+        _reservedOf.Clear();
+        _expiries.Clear();
         _bookListed = _bookSold = _bookReturned = _bookEscrow = 0;
         var names = new Dictionary<long, string>();
         using (var found = tx.EnumerateIndex<Listing, long>(Dbe.GetIndexRef<Listing, long>(l => l.Seller), long.MinValue, long.MaxValue))
@@ -553,8 +618,12 @@ public sealed partial class SimBridge
             {
                 var entry = new BookEntry { Id = EntityId.FromRawValue((ulong)found.CurrentEntityPK), L = found.CurrentComponent };
                 _book[found.CurrentEntityPK] = entry;
-                CountListing(in entry.L, +1);
+                CountListing(entry, +1);
                 _bookEscrow += entry.L.Quantity;
+                if (entry.L.State == ListingState.Listed)
+                {
+                    _expiries.Enqueue(found.CurrentEntityPK, entry.L.ExpireTick);
+                }
             }
         }
 
@@ -599,6 +668,11 @@ public sealed partial class SimBridge
         var lists = subs == null ? default : subs.Commands<MarketList>();
         var vendors = subs == null ? default : subs.Commands<SellToVendor>();
         var commands = cancels.Count + collects.Count + buys.Count + lists.Count + vendors.Count;
+        if (buys.Count > Volatile.Read(ref _mostBuysInATick))
+        {
+            Volatile.Write(ref _mostBuysInATick, buys.Count);
+        }
+
         var expiryPass = ctx.TickNumber % Math.Max(1, _config.TickRateHz) == 0;
         if (_marketLoaded && commands == 0 && !(expiryPass && AnyExpired(worldTick)))
         {
@@ -624,7 +698,8 @@ public sealed partial class SimBridge
             EnsureEconomy(tx);
             EnsureItems(tx);
             EnsureMarket(tx);
-            TatooineReplication.FillCharacterBodies(_marketBodies);
+            _marketBodies.Clear();
+            _marketBodiesFilled = false;
             if (subs != null)
             {
                 // Cancels first: a cancel frees a listing slot for a list of the same tick; collects before vendor sales: a collect frees room.
@@ -659,9 +734,9 @@ public sealed partial class SimBridge
                 ExpireListings(tx, tick0, worldTick);
             }
 
-            if (_failNextMarket && _marketWritten)
+            if (_marketWritten && Volatile.Read(ref _failNextMarket))
             {
-                _failNextMarket = false;
+                Volatile.Write(ref _failNextMarket, false);
                 _marketAbort = true;
             }
 
@@ -698,7 +773,7 @@ public sealed partial class SimBridge
 
         foreach (var key in _marketWalletsMoved)
         {
-            if (_marketBodies.TryGetValue(EntityId.FromRawValue((ulong)key), out var body))
+            if (BodyOf(key, out var body))
             {
                 BumpWallet(tick0, body);
             }
@@ -706,7 +781,7 @@ public sealed partial class SimBridge
 
         foreach (var key in _marketItemsMoved)
         {
-            if (_marketBodies.TryGetValue(EntityId.FromRawValue((ulong)key), out var body))
+            if (BodyOf(key, out var body))
             {
                 BumpItems(tick0, body);
             }
@@ -800,15 +875,17 @@ public sealed partial class SimBridge
         _pendingSalePrices.Clear();
     }
 
-    /// <summary>Whether any listed listing is past its expiry: the 1 Hz pass opens a transaction only then.</summary>
+    /// <summary>Whether any listed listing is past its expiry — the heap's head, stale heads dropped: the 1 Hz pass opens a transaction only then.</summary>
     private bool AnyExpired(long worldTick)
     {
-        foreach (var entry in _book.Values)
+        while (_expiries.TryPeek(out var key, out var expires))
         {
-            if (entry.L.State == ListingState.Listed && entry.L.ExpireTick <= worldTick)
+            if (_book.TryGetValue(key, out var entry) && entry.L.State == ListingState.Listed && entry.L.ExpireTick == expires)
             {
-                return true;
+                return expires <= worldTick;
             }
+
+            _expiries.Dequeue();
         }
 
         return false;
@@ -828,6 +905,7 @@ public sealed partial class SimBridge
         }
 
         key = (long)character.RawValue;
+        _marketBodies[character] = body;
         var at = player.Read(Player.Bounds);
         realm = player.Read(Player.Realm).Value;
         x = at.X;
@@ -863,13 +941,32 @@ public sealed partial class SimBridge
     /// <summary>The body of a character online now, standing at a bazaar of the listing's city: where its goods can be handed over at once (B4).</summary>
     private bool AtListingCity(Transaction tick0, long character, in Listing l)
     {
-        if (!_marketBodies.TryGetValue(EntityId.FromRawValue((ulong)character), out var body) || !tick0.TryOpen(body, out var player))
+        if (!BodyOf(character, out var body) || !tick0.TryOpen(body, out var player))
         {
             return false;
         }
 
         var at = player.Read(Player.Bounds);
         return BazaarNear(player.Read(Player.Realm).Value, at.X, at.Z, out var t) && t.Realm == l.Realm && t.Region == l.City;
+    }
+
+    /// <summary>A character's body online now: an actor's from this tick's commands, anyone else's from every session's, read once a tick when asked.</summary>
+    private bool BodyOf(long character, out EntityId body)
+    {
+        var id = EntityId.FromRawValue((ulong)character);
+        if (_marketBodies.TryGetValue(id, out body))
+        {
+            return true;
+        }
+
+        if (_marketBodiesFilled)
+        {
+            return false;
+        }
+
+        TatooineReplication.FillCharacterBodies(_marketBodies);
+        _marketBodiesFilled = true;
+        return _marketBodies.TryGetValue(id, out body);
     }
 
     private long BalanceOf(Transaction tx, long key)
@@ -917,7 +1014,7 @@ public sealed partial class SimBridge
             return;
         }
 
-        if (_listedBy.TryGetValue(seller, out var listed) && listed >= MaxListings)
+        if (_slotsOf.TryGetValue(seller, out var slots) && slots >= MaxListings)
         {
             RefuseMarket(subs, in command, TatooineReplication.MarketListingCap);
             return;
@@ -948,7 +1045,8 @@ public sealed partial class SimBridge
         var key = (long)id.RawValue;
         var entry = new BookEntry { Id = id, L = l, SellerName = NameOfCharacter(tx, seller) };
         _book[key] = entry;
-        CountListing(in entry.L, +1);
+        _expiries.Enqueue(key, l.ExpireTick);
+        CountListing(entry, +1);
         MarkCityDirty(in entry.L);
         _marketWritten = true;
         if (ItemTransfer(tx, seller, key, v.Template, v.Mk, v.Quantity, ItemMoveKind.List, key, worldTick) != v.Quantity
@@ -1040,7 +1138,7 @@ public sealed partial class SimBridge
         // A purchase handed over at once is never reserved, so the cap is only asked of one that will be.
         var deliversHere = terminal.Realm == entry.L.Realm && terminal.Region == entry.L.City
             && RoomFor(ItemsOf(buyer), entry.L.Template, entry.L.Mk) >= entry.L.Quantity;
-        if (!deliversHere && _reservedBy.TryGetValue(buyer, out var reserved) && reserved >= MaxReserved)
+        if (!deliversHere && ReservedCount(buyer) >= MaxReserved)
         {
             RefuseMarket(subs, in command, TatooineReplication.MarketReservedCap);
             return;
@@ -1129,14 +1227,13 @@ public sealed partial class SimBridge
             return;
         }
 
-        // All of this character's reserved here, oldest first, each that fits.
+        // All of this character's reserved here, oldest first, each that fits: its own reservations, never the book.
         _marketScratch.Clear();
-        var anywhere = false;
-        foreach (var entry in _book.Values)
+        var anywhere = _reservedOf.TryGetValue(collector, out var reservedHere);
+        if (anywhere)
         {
-            if (entry.L.Collector == collector && entry.L.State is ListingState.Sold or ListingState.Returned)
+            foreach (var entry in reservedHere)
             {
-                anywhere = true;
                 if (entry.L.Realm == terminal.Realm && entry.L.City == terminal.Region)
                 {
                     _marketScratch.Add(entry);
@@ -1246,12 +1343,9 @@ public sealed partial class SimBridge
     private void ExpireListings(Transaction tx, Transaction tick0, long worldTick)
     {
         _marketScratch.Clear();
-        foreach (var entry in _book.Values)
+        while (AnyExpired(worldTick))
         {
-            if (entry.L.State == ListingState.Listed && entry.L.ExpireTick <= worldTick)
-            {
-                _marketScratch.Add(entry);
-            }
+            _marketScratch.Add(_book[_expiries.Dequeue()]);
         }
 
         foreach (var entry in _marketScratch)
@@ -1276,11 +1370,11 @@ public sealed partial class SimBridge
     /// <returns><see langword="false"/> when a write failed: the caller aborts the transaction.</returns>
     private bool Close(Transaction tx, Transaction tick0, BookEntry entry, byte state, long collector, long worldTick, bool? deliverHere = null)
     {
-        CountListing(in entry.L, -1);
+        CountListing(entry, -1);
         entry.L.State = state;
         entry.L.Collector = collector;
         entry.L.ClosedTick = worldTick;
-        CountListing(in entry.L, +1);
+        CountListing(entry, +1);
         tx.OpenMut(entry.Id).Set(ListingArch.Entry, entry.L);
         MarkCityDirty(in entry.L);
         _marketWritten = true;
@@ -1304,7 +1398,7 @@ public sealed partial class SimBridge
             return false;
         }
 
-        CountListing(in entry.L, -1);
+        CountListing(entry, -1);
         tx.Destroy(entry.Id);
         _book.Remove(key);
         MarkCityDirty(in entry.L);
@@ -1325,10 +1419,12 @@ public sealed partial class SimBridge
         }
 
         var every = Math.Max(1L, (long)TatooineData.MarketPublishMs * _config.TickRateHz / 1000);
-        if (worldTick - _lastPublishTick < every)
+        if (worldTick - _lastPublishTick < every && !Volatile.Read(ref _publishNow))
         {
             return;
         }
+
+        Volatile.Write(ref _publishNow, false);
 
         _lastPublishTick = worldTick;
         _marketPublishDue = false;
@@ -1341,13 +1437,15 @@ public sealed partial class SimBridge
     /// </summary>
     private MarketSnapshot BuildMarketSnapshot(long worldTick)
     {
-        var rebuilt = new Dictionary<int, (List<ListingView> Listed, int Reserved, long Value)>();
+        var rebuilt = _rebuiltScratch;
+        rebuilt.Clear();
         foreach (var key in _dirtyCities)
         {
             rebuilt[key] = ([], 0, 0);
         }
 
-        var lowest = new Dictionary<int, (int Listed, long Lowest)>();
+        var lowest = _lowestScratch;
+        lowest.Clear();
         if (_ageScratch.Length < _book.Count)
         {
             _ageScratch = new long[Math.Max(64, _book.Count * 2)];
@@ -1434,8 +1532,60 @@ public sealed partial class SimBridge
                 return (0, 0, 0);
             }
 
-            Array.Sort(ticks, 0, n);
-            return (ticks[(n - 1) / 2] / hz, ticks[(int)((n - 1) * 0.9)] / hz, ticks[n - 1] / hz);
+            // Selected, not sorted: two partitions of the scratch, O(n) each, the 90th from the upper half the median left.
+            var p50 = (n - 1) / 2;
+            var p90 = (int)((n - 1) * 0.9);
+            Select(ticks, 0, n - 1, p50);
+            Select(ticks, p50, n - 1, p90);
+            var max = 0L;
+            for (var i = p90; i < n; i++)
+            {
+                max = Math.Max(max, ticks[i]);
+            }
+
+            return (ticks[p50] / hz, ticks[p90] / hz, max / hz);
+        }
+
+        // Hoare's selection: leaves a[k] where a sort would put it, the smaller to its left and the larger to its right.
+        static void Select(long[] a, int lo, int hi, int k)
+        {
+            while (lo < hi)
+            {
+                var pivot = a[lo + ((hi - lo) / 2)];
+                int i = lo, j = hi;
+                while (i <= j)
+                {
+                    while (a[i] < pivot)
+                    {
+                        i++;
+                    }
+
+                    while (a[j] > pivot)
+                    {
+                        j--;
+                    }
+
+                    if (i <= j)
+                    {
+                        (a[i], a[j]) = (a[j], a[i]);
+                        i++;
+                        j--;
+                    }
+                }
+
+                if (k <= j)
+                {
+                    hi = j;
+                }
+                else if (k >= i)
+                {
+                    lo = i;
+                }
+                else
+                {
+                    return;
+                }
+            }
         }
     }
 

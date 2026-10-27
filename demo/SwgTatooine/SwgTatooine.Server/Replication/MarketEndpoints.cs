@@ -50,7 +50,9 @@ public sealed class MarketQuery
         return new MarketQuery
         {
             City = int.TryParse(q["city"], NumberStyles.Integer, CultureInfo.InvariantCulture, out var c) ? Math.Max(0, c) : 0,
-            Realm = int.TryParse(q["realm"], NumberStyles.Integer, CultureInfo.InvariantCulture, out var r) ? r : -1,
+            // A city's number is a region of one planet, and every planet has the same ones: named without its planet, it is planet 0's.
+            Realm = int.TryParse(q["realm"], NumberStyles.Integer, CultureInfo.InvariantCulture, out var r) ? r
+                : int.TryParse(q["city"], NumberStyles.Integer, CultureInfo.InvariantCulture, out var named) && named > 0 ? 0 : -1,
             Category = category,
             Template = string.IsNullOrEmpty(q["item"]) ? (ushort)0 : ItemCatalog.IdOf(q["item"]),
             Mk = int.TryParse(q["mk"], NumberStyles.Integer, CultureInfo.InvariantCulture, out var mk) ? mk : -1,
@@ -89,17 +91,20 @@ public sealed class MarketAuditResult
 
     public double Milliseconds { get; internal set; }
 
+    private readonly HashSet<string> _broken = [];
+
     internal void Violation(string rule, string what)
     {
         ViolationCount++;
+        _broken.Add(rule);
         if (Violations.Count < ViolationsKept)
         {
             Violations.Add(rule + ": " + what);
         }
     }
 
-    /// <summary>Whether a violation of <paramref name="rule"/> (<c>"MA-3"</c>) was found among those kept.</summary>
-    public bool Breaks(string rule) => Violations.Exists(v => v.StartsWith(rule + ":", StringComparison.Ordinal));
+    /// <summary>Whether a violation of <paramref name="rule"/> (<c>"MA-3"</c>) was found, among those kept or past them.</summary>
+    public bool Breaks(string rule) => _broken.Contains(rule);
 
     public string ToJson()
     {
@@ -132,30 +137,33 @@ public sealed class MarketAuditResult
 /// </remarks>
 public static class MarketEndpoints
 {
-    /// <summary>The served simulation's published board; set by the server that serves, <see langword="null"/> until then.</summary>
-    public static Func<MarketSnapshot> Board { get; set; }
-
-    private static MarketSnapshot CurrentBoard => Board?.Invoke() ?? MarketSnapshot.Empty;
-
     /// <summary>Maps the four endpoints.</summary>
-    public static IEndpointRouteBuilder MapMarket(this IEndpointRouteBuilder app, DatabaseEngine dbe)
+    /// <param name="app">The host.</param>
+    /// <param name="dbe">The engine, for <c>/mine</c> and the audit.</param>
+    /// <param name="board">
+    /// The served simulation's published board (<c>SimBridge.MarketBoard</c>), asked at each request. Required: a host mapped without one would serve an
+    /// empty board and an audit that skips MA-7 and says OK.
+    /// </param>
+    public static IEndpointRouteBuilder MapMarket(this IEndpointRouteBuilder app, DatabaseEngine dbe, Func<MarketSnapshot> board)
     {
         ArgumentNullException.ThrowIfNull(app);
         ArgumentNullException.ThrowIfNull(dbe);
-        app.MapGet("/swg/market", (HttpContext context) => GetBrowse(context));
-        app.MapGet("/swg/market/mine", (HttpContext context) => GetMine(dbe, context));
-        app.MapGet("/swg/market/prices", (HttpContext context) => GetPrices(context));
-        app.MapGet("/swg/market/audit", (HttpContext context) => GetAudit(dbe, context));
+        ArgumentNullException.ThrowIfNull(board);
+        app.MapGet("/swg/market", (HttpContext context) => GetBrowse(board() ?? MarketSnapshot.Empty, context));
+        app.MapGet("/swg/market/mine", (HttpContext context) => GetMine(dbe, board() ?? MarketSnapshot.Empty, context));
+        app.MapGet("/swg/market/prices", (HttpContext context) => GetPrices(board() ?? MarketSnapshot.Empty, context));
+        app.MapGet("/swg/market/audit", (HttpContext context) => GetAudit(dbe, board() ?? MarketSnapshot.Empty, context));
         return app;
     }
 
     /// <summary>The mine handler itself, for the checks: a request in, the result out.</summary>
-    internal static IResult GetMineForChecks(DatabaseEngine dbe, HttpContext context) => GetMine(dbe, context);
+    internal static IResult GetMineForChecks(DatabaseEngine dbe, MarketSnapshot board, HttpContext context) => GetMine(dbe, board, context);
 
-    private static IResult GetBrowse(HttpContext context)
+    private static IResult GetBrowse(MarketSnapshot board, HttpContext context)
     {
-        var board = CurrentBoard;
-        var etag = "\"m" + board.Version.ToString(CultureInfo.InvariantCulture) + "\"";
+        // The board's version AND the query: one ETag per answer, so a cached page of one query is never served for another.
+        var etag = "\"m" + board.Version.ToString(CultureInfo.InvariantCulture) + "-" + Fnv(context.Request.QueryString.Value).ToString("x8", CultureInfo.InvariantCulture)
+            + "\"";
         context.Response.Headers.CacheControl = "no-cache";
         context.Response.Headers.ETag = etag;
         var query = MarketQuery.From(context.Request.Query);
@@ -167,7 +175,18 @@ public static class MarketEndpoints
         return Results.Text(BrowseJson(board, query), "application/json");
     }
 
-    private static IResult GetMine(DatabaseEngine dbe, HttpContext context)
+    private static uint Fnv(string s)
+    {
+        var h = 2166136261u;
+        foreach (var c in s ?? "")
+        {
+            h = (h ^ c) * 16777619u;
+        }
+
+        return h;
+    }
+
+    private static IResult GetMine(DatabaseEngine dbe, MarketSnapshot board, HttpContext context)
     {
         context.Response.Headers.CacheControl = "no-store";
         const string scheme = "Bearer ";
@@ -179,20 +198,20 @@ public static class MarketEndpoints
         }
 
         return CharacterStore.TryFind(dbe, account, out var character, out _)
-            ? Results.Text(MineJson(dbe, character, CurrentBoard), "application/json")
+            ? Results.Text(MineJson(dbe, character, board), "application/json")
             : Results.Text(MineEmpty, "application/json");
     }
 
-    private static IResult GetPrices(HttpContext context)
+    private static IResult GetPrices(MarketSnapshot board, HttpContext context)
     {
         context.Response.Headers.CacheControl = "no-cache";
-        return Results.Text(PricesJson(CurrentBoard), "application/json");
+        return Results.Text(PricesJson(board), "application/json");
     }
 
-    private static IResult GetAudit(DatabaseEngine dbe, HttpContext context)
+    private static IResult GetAudit(DatabaseEngine dbe, MarketSnapshot board, HttpContext context)
     {
         context.Response.Headers.CacheControl = "no-store";
-        var result = Audit(dbe, CurrentBoard);
+        var result = Audit(dbe, board);
         Console.WriteLine(
             $"  market audit: {(result.Ok ? "OK" : "VIOLATED")} - {result.Listings} listings ({result.Listed} listed, {result.Sold} sold, {result.Returned} returned), "
             + $"{result.Sales} sales, {result.EscrowUnits} units in escrow, {result.ViolationCount} violation(s), {result.Milliseconds:0.#} ms");
@@ -335,6 +354,7 @@ public static class MarketEndpoints
                 .Append(",\"city\":").Append(v.City)
                 .Append(",\"cityName\":\"").Append(EconomyEndpoints.Escape(CityName(board, v.Realm, v.City))).Append('"')
                 .Append(",\"realm\":").Append(v.Realm)
+                .Append(",\"template\":").Append(v.Template)
                 .Append(",\"item\":\"").Append(t.Asset).Append('"')
                 .Append(",\"name\":\"").Append(EconomyEndpoints.Escape(t.Name ?? "")).Append('"')
                 .Append(",\"category\":\"").Append(ItemCategory.NameOf(t.Category)).Append('"')
@@ -463,6 +483,7 @@ public static class MarketEndpoints
         {
             ItemCatalog.TryGet(l.Template, out var t);
             json.Append("\"id\":\"").Append(unchecked((ulong)id)).Append('"')
+                .Append(",\"template\":").Append(l.Template)
                 .Append(",\"city\":").Append(l.City)
                 .Append(",\"cityName\":\"").Append(EconomyEndpoints.Escape(CityName(board, l.Realm, l.City))).Append('"')
                 .Append(",\"realm\":").Append(l.Realm)
@@ -492,10 +513,11 @@ public static class MarketEndpoints
             ItemCatalog.TryGet(p.Template, out var t);
             json.Append(i == 0 ? "{" : ",{")
                 .Append("\"item\":\"").Append(t.Asset).Append('"')
+                .Append(",\"template\":").Append(p.Template)
                 .Append(",\"name\":\"").Append(EconomyEndpoints.Escape(t.Name ?? "")).Append('"')
                 .Append(",\"category\":\"").Append(ItemCategory.NameOf(t.Category)).Append('"')
                 .Append(",\"mk\":").Append(p.Mk)
-                .Append(",\"value\":").Append(p.Value)
+                .Append(",\"value\":").Append((MarketValues.MilliOf(p.Template, p.Mk) / 1000m).ToString("0.###", CultureInfo.InvariantCulture))
                 .Append(",\"vendor\":").Append(p.VendorMilli)
                 .Append(",\"listed\":").Append(p.Listed)
                 .Append(",\"lowest\":").Append(p.Lowest)
@@ -556,6 +578,7 @@ public static class MarketEndpoints
         // The item ledger's market rows: each listing's escrow replayed, who filled it and who emptied it; the vendor sales' rows grouped by their credit row.
         var trails = new Dictionary<long, Trail>();
         var vendorFirst = new Dictionary<long, long>();
+        var vendorSales = new Dictionary<long, (long Seller, ushort Template, byte Mk, int Units, bool One)>();
         Trail TrailOf(long id)
         {
             if (!trails.TryGetValue(id, out var t))
@@ -609,6 +632,16 @@ public static class MarketEndpoints
                         }
 
                         vendorFirst.TryAdd(r.Ref, r.Seq);
+                        if (!vendorSales.TryGetValue(r.Ref, out var sale))
+                        {
+                            vendorSales[r.Ref] = (r.From, r.Template, r.Mk, r.Count, true);
+                        }
+                        else
+                        {
+                            vendorSales[r.Ref] = (sale.Seller, sale.Template, sale.Mk, sale.Units + r.Count,
+                                sale.One && sale.Seller == r.From && sale.Template == r.Template && sale.Mk == r.Mk);
+                        }
+
                         break;
                 }
             }
@@ -679,6 +712,7 @@ public static class MarketEndpoints
                     break;
                 case ListingState.Returned:
                     result.Returned++;
+                    listedBy[l.Seller] = (listedBy.TryGetValue(l.Seller, out var held) ? held : 0) + 1;
                     if (l.Collector != l.Seller)
                     {
                         result.Violation("MA-1", $"listing {id}: returned to {l.Collector}, not its seller {l.Seller}");
@@ -725,7 +759,7 @@ public static class MarketEndpoints
         {
             if (n > TatooineData.MaxListings)
             {
-                result.Violation("MA-6", $"seller {seller}: {n} listings listed, above {TatooineData.MaxListings}");
+                result.Violation("MA-6", $"seller {seller}: {n} listings listed or returned, above {TatooineData.MaxListings}");
             }
         }
 
@@ -778,6 +812,12 @@ public static class MarketEndpoints
                         result.Violation("MA-2", $"listing {id}: sold for {sale.Amount}, its price is {l.UnitPrice * l.Quantity}");
                     }
 
+                    // Destroyed, its price is gone with it: what is left is that a whole listing was sold, at a whole unit price.
+                    if (!live && sale.Amount % trail.Listed != 0)
+                    {
+                        result.Violation("MA-2", $"listing {id}: sold for {sale.Amount}, not a whole price for its {trail.Listed} units");
+                    }
+
                     var tax = TatooineData.SalesTax(sale.Amount);
                     var taxed = taxRows?.Count ?? 0;
                     if ((tax > 0 && (taxed != 1 || taxRows[0].Amount != tax || taxRows[0].From != trail.Seller || taxRows[0].To != EconomyLedger.World))
@@ -801,6 +841,16 @@ public static class MarketEndpoints
             {
                 result.Violation("MA-3", $"listing {id}: its fee row moved {feeRows[0].Amount} from {feeRows[0].From}, its fee is {(live ? l.Fee : feeRows[0].Amount)} from {trail.Seller}");
             }
+            else
+            {
+                // The fee the rule charges: from the stored price while the listing stands, from its sale once sold and destroyed; a returned one, collected,
+                // left no price behind.
+                var total = live ? l.UnitPrice * l.Quantity : sold && saleRows is { Count: 1 } ? saleRows[0].Amount : 0;
+                if (total > 0 && feeRows[0].Amount != TatooineData.ListFee(total))
+                {
+                    result.Violation("MA-3", $"listing {id}: charged {feeRows[0].Amount}, the fee on {total} is {TatooineData.ListFee(total)}");
+                }
+            }
         }
 
         foreach (var id in sales.Keys)
@@ -808,6 +858,14 @@ public static class MarketEndpoints
             if (!ever.Contains(id))
             {
                 result.Violation("MA-2", $"sale rows name {id}, which was never listed");
+            }
+        }
+
+        foreach (var id in taxes.Keys)
+        {
+            if (!ever.Contains(id))
+            {
+                result.Violation("MA-2", $"tax rows name {id}, which was never listed");
             }
         }
 
@@ -829,6 +887,17 @@ public static class MarketEndpoints
             else if (credit.Ref != firstItem)
             {
                 result.Violation("MA-5", $"vendor credit seq {creditSeq} names item seq {credit.Ref}, its item rows start at {firstItem}");
+            }
+            else
+            {
+                // One sale is one seller's units of one item, paid the floor on all of them, to that seller.
+                var sale = vendorSales[creditSeq];
+                var payout = MarketValues.VendorPayout(sale.Template, sale.Mk, sale.Units);
+                if (!sale.One || credit.To != sale.Seller || credit.Amount != payout)
+                {
+                    result.Violation("MA-5", $"vendor credit seq {creditSeq} paid {credit.Amount} to {credit.To}; its rows sold {sale.Units} of {sale.Template} Mk "
+                        + $"{sale.Mk} from {sale.Seller}{(sale.One ? "" : " and other items or sellers")}, worth {payout}");
+                }
             }
         }
 

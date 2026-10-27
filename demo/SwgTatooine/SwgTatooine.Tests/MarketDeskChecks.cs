@@ -256,6 +256,8 @@ internal sealed class MarketDeskChecks : ServedChecks
         Expect(a, TatooineReplication.MarketBadListing, "a list of no units", () => Market.List(a.Link, Bone, 3, 0, 10));
         Expect(a, TatooineReplication.MarketBadListing, "a list at no price", () => Market.List(a.Link, Bone, 3, 1, 0));
         Expect(a, TatooineReplication.MarketBadListing, "a list of a Mk the template refuses", () => Market.List(a.Link, Bone, 0, 1, 10));
+        Expect(a, TatooineReplication.MarketBadListing, "a list of more than a stack", () => Market.List(a.Link, Bone, 3, 100, 10));
+        Expect(a, TatooineReplication.MarketBadListing, "a list above the highest price", () => Market.List(a.Link, Bone, 3, 1, (uint)TatooineData.MaxUnitPrice + 1));
         Expect(a, TatooineReplication.MarketNoItems, "a list of more than held", () => Market.List(a.Link, Bone, 3, 4, 10));
         Expect(a, TatooineReplication.MarketNotEnough, "a list whose fee the wallet does not cover", () => Market.List(a.Link, Bone, 3, 3, 1_000_000));
         sim.Bridge.SetMarketCapsForChecks(1, 1);
@@ -315,7 +317,60 @@ internal sealed class MarketDeskChecks : ServedChecks
         // And the desk carries on after it: the same list again is applied.
         Breathe();
         ListAndWait(sim, a, Bone, 3, 1, 10);
+
+        // NotInWorld: a command from a session whose wallet is not open yet — its first login, sent before its avatar is bound, so the desk handles it on
+        // the bind's tick at the latest, while the wallet opens only on a later one. A fresh account per try: a command that arrives a tick late is answered
+        // NotYours instead, and the try is made again.
+        var notInWorld = false;
+        for (var i = 0; i < 5 && !notInWorld; i++)
+        {
+            var before = State(sim, a, b);
+            var link = Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(0x8210UL + (ulong)i));
+            SessionHarness.Until(() => link.Sent.Any(m => m.Length > 0 && m[0] == MessageTypes.Welcome), "the WELCOME");
+            Market.Cancel(link, 12345);
+            SessionHarness.Until(
+                () => Count(link, TatooineReplication.NotInWorld) + Count(link, TatooineReplication.MarketNotYours) > 0, "the cancel to be answered");
+            notInWorld = Count(link, TatooineReplication.NotInWorld) == 1;
+            Assert.That(State(sim, a, b), Is.EqualTo(before), "a refused command from a session not in the world wrote something");
+        }
+
+        Assert.That(notInWorld, Is.True, "five first logins and none was refused NotInWorld");
         AuditsOk(sim, "after every refusal");
+    }
+
+    /// <summary>
+    /// BZ-2, B9: a returned listing holds its seller's listing slot until it is collected — listing, cancelling and listing again does not grow the book past
+    /// the cap.
+    /// </summary>
+    [Test]
+    [CancelAfter(180_000)]
+    public void AReturnedListing_HoldsItsSlot_UntilCollected()
+    {
+        using var sim = Start();
+        var home = Home(sim);
+        var a = LogIn(sim, 0x8221, At(home), 1);
+        Mint(sim, a, Hide, 2, 10);
+        sim.Bridge.SetMarketCapsForChecks(2, 0);
+        var (one, _) = ListAndWait(sim, a, Hide, 2, 1, 10);
+        ListAndWait(sim, a, Hide, 2, 1, 10);
+        MoveTo(sim, a, Away(sim));
+        Market.Cancel(a.Link, one);
+        SessionHarness.Until(() => Market.Listings(sim)[one].State == ListingState.Returned, "the cancel from afar");
+        MoveTo(sim, a, At(home));
+        var capped = Count(a.Link, TatooineReplication.MarketListingCap);
+        Breathe();
+        Market.List(a.Link, Hide, 2, 1, 10);
+        Refused(a.Link, TatooineReplication.MarketListingCap, capped, "a list while a returned listing holds the slot");
+        Assert.That(Market.Listings(sim), Has.Count.EqualTo(2), "a listing past the cap");
+
+        Breathe();
+        Market.Collect(a.Link, one);
+        SessionHarness.Until(() => !Market.Listings(sim).ContainsKey(one), "the return to be collected");
+        Harness.Ticks(2);
+        Breathe();
+        ListAndWait(sim, a, Hide, 2, 1, 10);
+        sim.Bridge.SetMarketCapsForChecks(0, 0);
+        AuditsOk(sim, "after the slots");
     }
 
     // ── BZ-3: one buyer ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -333,7 +388,7 @@ internal sealed class MarketDeskChecks : ServedChecks
         var home = Home(sim);
         var elsewhere = Elsewhere(sim);
         var seller = LogIn(sim, 0x8300, At(home), 1);
-        Mint(sim, seller, Hide, 2, 2);
+        Mint(sim, seller, Hide, 2, 6);
         var links = new List<FakeLink>();
         for (var i = 0; i < buyers; i++)
         {
@@ -382,8 +437,19 @@ internal sealed class MarketDeskChecks : ServedChecks
             });
         }
 
-        var first = ListAndWait(sim, seller, Hide, 2, 1, 10).Id;
-        Race(first, split: false);
+        // One tick: the 100 buys are sent back to back, and the desk counts the most buys one of its ticks handled. A race whose buys straddled two ticks is
+        // still a race the desk must settle — checked all the same — but not the one-tick case, so it is run again with a new listing, at most four times.
+        var oneTick = false;
+        for (var attempt = 0; attempt < 4 && !oneTick; attempt++)
+        {
+            Breathe();
+            sim.Bridge.MostBuysInATickForChecks = 0;
+            var first = ListAndWait(sim, seller, Hide, 2, 1, 10).Id;
+            Race(first, split: false);
+            oneTick = sim.Bridge.MostBuysInATickForChecks == buyers;
+        }
+
+        Assert.That(oneTick, Is.True, "four races and none had its 100 buys in one desk tick");
         Breathe();
         var second = ListAndWait(sim, seller, Hide, 2, 1, 10).Id;
         Breathe();
@@ -740,11 +806,27 @@ internal sealed class MarketDeskChecks : ServedChecks
 
         var extra = EntityId.Null;
         Breaks("MA-2",
+            tx => extra = tx.Spawn<LedgerArch>(LedgerArch.Entry.Set(new LedgerEntry { Seq = 1_000_000, Kind = TransferKind.Sale, From = b.Key, To = a.Key, Amount = 100, Ref = sold })),
+            tx => tx.Destroy(extra));
+        Breaks("MA-2",
             tx => extra = tx.Spawn<LedgerArch>(LedgerArch.Entry.Set(new LedgerEntry { Seq = 1_000_000, Kind = TransferKind.Sale, From = b.Key, To = a.Key, Amount = 1, Ref = listed })),
             tx => tx.Destroy(extra));
 
         var (feeId, fee) = FindCredit(sim, r => r.Kind == TransferKind.ListFee && r.Ref == listed);
         Breaks("MA-3", tx => tx.OpenMut(feeId).Set(LedgerArch.Entry, fee with { Ref = 7 }), tx => tx.OpenMut(feeId).Set(LedgerArch.Entry, fee));
+
+        // A fee the stored listing and its row agree on, which is not the rule's.
+        Breaks("MA-3",
+            tx =>
+            {
+                tx.OpenMut(feeId).Set(LedgerArch.Entry, fee with { Amount = fee.Amount + 1 });
+                tx.OpenMut(listingId).Set(ListingArch.Entry, listing with { Fee = listing.Fee + 1 });
+            },
+            tx =>
+            {
+                tx.OpenMut(feeId).Set(LedgerArch.Entry, fee);
+                tx.OpenMut(listingId).Set(ListingArch.Entry, listing);
+            });
 
         var (listRowId, listRow) = FindItem(sim, r => r.Kind == ItemMoveKind.List && r.Ref == listed);
         Breaks("MA-4", tx => tx.OpenMut(listRowId).Set(ItemLedgerArch.Entry, listRow with { To = b.Key, ToStack = b.Key }),
@@ -752,6 +834,7 @@ internal sealed class MarketDeskChecks : ServedChecks
 
         var (vendorId, vendor) = FindCredit(sim, r => r.Kind == TransferKind.Vendor);
         Breaks("MA-5", tx => tx.OpenMut(vendorId).Set(LedgerArch.Entry, vendor with { Ref = vendor.Ref + 1 }), tx => tx.OpenMut(vendorId).Set(LedgerArch.Entry, vendor));
+        Breaks("MA-5", tx => tx.OpenMut(vendorId).Set(LedgerArch.Entry, vendor with { Amount = vendor.Amount + 1 }), tx => tx.OpenMut(vendorId).Set(LedgerArch.Entry, vendor));
 
         var many = new List<EntityId>();
         Breaks("MA-6",
@@ -795,12 +878,13 @@ internal sealed class MarketDeskChecks : ServedChecks
     // ── BZ-11: across a stop ────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// BZ-11 (M5-2 in process): list, buy, collect and vendor, then stop without disposing the harness and reopen: every applied buy is there, no listing
-    /// has two sales, the three audits are clean, and the desk's book reloads equal — the board carries on.
+    /// BZ-11 (the reload half of M5-2): list, buy and vendor, then stop and reopen: every applied buy is there, no listing has two sales, the three audits are
+    /// clean, and the desk's book reloads equal — the board carries on. The stop is a clean one (the simulation is disposed once the trading has
+    /// committed); a kill mid-trade is BZ-18's, live.
     /// </summary>
     [Test]
     [CancelAfter(300_000)]
-    public void TheMarket_SurvivesAStopMidTrading()
+    public void TheMarket_ReloadsEqual_AcrossAReopen()
     {
         Dictionary<long, Listing> before;
         long aBalance;

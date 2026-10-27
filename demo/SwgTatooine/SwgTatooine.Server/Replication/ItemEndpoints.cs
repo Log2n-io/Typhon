@@ -282,13 +282,15 @@ public static class ItemEndpoints
         return json.Append("]}").ToString();
     }
 
-    // "item" (the asset id), "name" and "category" — the client has no item table — or "unknown" for a template the catalogue does not hold.
+    // "item" (the asset id), "name" and "category" — the client has no item table — or "unknown" for a template the catalogue does not hold; and
+    // "template", the id the market commands name it by.
     private static void Item(StringBuilder json, in ItemTemplate t, ushort template)
     {
         var known = t.Id == template && template != 0;
         json.Append(",\"item\":\"").Append(known ? t.Asset : "unknown")
             .Append("\",\"name\":\"").Append(known ? EconomyEndpoints.Escape(t.Name) : "Unknown")
-            .Append("\",\"category\":\"").Append(known ? ItemCategory.NameOf(t.Category) : "unknown").Append('"');
+            .Append("\",\"category\":\"").Append(known ? ItemCategory.NameOf(t.Category) : "unknown")
+            .Append("\",\"template\":").Append(template);
     }
 
     /// <summary>Rows after <paramref name="after"/>, in sequence, at most <paramref name="limit"/>: <c>{"rows":[…],"next"}</c>.</summary>

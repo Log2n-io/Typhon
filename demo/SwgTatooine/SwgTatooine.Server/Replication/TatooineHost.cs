@@ -355,7 +355,7 @@ public static class TatooineHost
     public static async Task ServeAsync(TyphonRuntime runtime, int port, string clientRoot = null, string[] origins = null, string realmsJson = null,
         Func<string> realmInventory = null, string bindAddress = null, int authBurst = 0, int authRefillMs = 0, string originSecret = null,
         bool authInsideVpcOnly = false, string tlsChainPath = null, string tlsKeyPath = null, int tlsPort = 443, int redirectPort = 0,
-        AssetOrigin assets = null, AssetColliders assetShapes = null, double worldHalfM = 0)
+        AssetOrigin assets = null, AssetColliders assetShapes = null, double worldHalfM = 0, Func<MarketSnapshot> marketBoard = null)
     {
         ArgumentNullException.ThrowIfNull(runtime);
 
@@ -547,7 +547,8 @@ public static class TatooineHost
         app.MapMissionJournal(runtime.Engine);
         app.MapEconomy(runtime.Engine);
         app.MapItems(runtime.Engine);
-        app.MapMarket(runtime.Engine);
+        // The bazaar's board is the simulation's, published by its desk: asked at each request. Required — MapMarket refuses to start without it.
+        app.MapMarket(runtime.Engine, marketBoard);
         app.MapProgress(runtime.Engine);
         app.MapFacilities();
 

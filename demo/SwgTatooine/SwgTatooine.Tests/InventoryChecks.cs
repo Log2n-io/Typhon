@@ -439,7 +439,7 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(stacks.Single(s => s.Stack.Template == ItemCatalog.Hide && s.Stack.Count == 2).Stack.Slot, Is.EqualTo(1), "not the lowest free slot");
             Assert.That(stacks.Single(s => s.Id == hide.Id).Stack.Count, Is.EqualTo(ItemLedger.StackMax));
             Assert.That(ItemEndpoints.InventoryJson(sim.Dbe, p.Character),
-                Does.Contain("\"item\":\"mat_metal\",\"name\":\"Metal\",\"category\":\"material\",\"mk\":1,\"count\":5,\"ref\":\"1\",\"dir\":\"out\"}"),
+                Does.Contain("\"item\":\"mat_metal\",\"name\":\"Metal\",\"category\":\"material\",\"template\":3,\"mk\":1,\"count\":5,\"ref\":\"1\",\"dir\":\"out\"}"),
                 "the metal given back is not a row out of the inventory");
             Assert.That(ItemEndpoints.Audit(sim.Dbe).Violations.All(v => v.Contains("must go from World", StringComparison.Ordinal)), Is.True,
                 "the replay of a mint, a destroy and a fill is clean but for the destroy's kind, which no system makes yet");
@@ -754,10 +754,10 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(ledger, Does.Contain($"\"item\":\"mat_hide\",\"mk\":2,\"fromStack\":\"0\",\"toStack\":\"{stack}\"}}"));
             Assert.That(ledger, Does.EndWith("],\"next\":1}"));
             Assert.That(inventory, Does.StartWith(
-                $"{{\"open\":true,\"slots\":30,\"items\":[{{\"id\":\"{stack}\",\"slot\":1,\"item\":\"mat_hide\",\"name\":\"Hide\",\"category\":\"material\",\"mk\":2,"
+                $"{{\"open\":true,\"slots\":30,\"items\":[{{\"id\":\"{stack}\",\"slot\":1,\"item\":\"mat_hide\",\"name\":\"Hide\",\"category\":\"material\",\"template\":8,\"mk\":2,"
                 + "\"count\":7}],\"recent\":[{\"seq\":\"1\",\"tick\":"));
             Assert.That(inventory, Does.EndWith(
-                ",\"kind\":\"kill\",\"item\":\"mat_hide\",\"name\":\"Hide\",\"category\":\"material\",\"mk\":2,\"count\":7,\"ref\":\"1\",\"dir\":\"in\"}],\"lost\":[]}"));
+                ",\"kind\":\"kill\",\"item\":\"mat_hide\",\"name\":\"Hide\",\"category\":\"material\",\"template\":8,\"mk\":2,\"count\":7,\"ref\":\"1\",\"dir\":\"in\"}],\"lost\":[]}"));
         });
     }
 
