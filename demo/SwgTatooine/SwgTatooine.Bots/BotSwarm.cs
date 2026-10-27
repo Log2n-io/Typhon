@@ -1256,8 +1256,8 @@ public sealed partial class BotSwarm : IAsyncDisposable
                         ? "  brain: the server lists no facilities; bots learn them by looking"
                         : $"  brain: {_facilities.Count} facilities listed; a bot's nearest terminal is the nearest that exists");
                 }
-                catch (Exception e) when (e is HttpRequestException or System.Text.Json.JsonException or KeyNotFoundException or InvalidOperationException
-                    or FormatException)
+                catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException or KeyNotFoundException
+                    or InvalidOperationException or FormatException)
                 {
                     Console.WriteLine($"  !! brain: the facility list could not be read ({e.Message}); bots learn them by looking");
                 }

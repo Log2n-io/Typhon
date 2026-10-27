@@ -164,6 +164,15 @@ public static class CityPath
     /// </remarks>
     public const float AirM = 0.15f;
 
+    /// <summary>
+    /// How far round a city's disc its buildings stand, metres: its port, the houses on its edge. A walk in a city is searched out to here, and a walk out
+    /// of one leaves it <see cref="CityLeaveM"/> out — the server's crowd and the bots by the same figure.
+    /// </summary>
+    public const float CityMarginM = 60f;
+
+    /// <summary>How far past a city's disc a walk out of it ends and the open desert starts, metres: a little past <see cref="CityMarginM"/>.</summary>
+    public const float CityLeaveM = CityMarginM + 10f;
+
     /// <summary>Rasterises the walls of the structures that touch a rectangle.</summary>
     /// <param name="floorTopM">
     /// A collider topping out at or under this is walked on, not walked into: <see cref="StepM"/> from the ground, and <see cref="PorchTopM"/> for a body
@@ -294,11 +303,12 @@ public static class CityPath
     /// Whether a straight step between two points enters none of <paramref name="walls"/> (as <see cref="CollectWalls"/> grew them): exact, not sampled
     /// on a grid — a rectangle by its slabs, a disc by its distance to the step.
     /// </summary>
-    /// <param name="ignoreEnds">
-    /// Whether a wall whose grown box holds either end is passed over: a body standing in a wall's margin, or a stand point a body's width from a
-    /// terminal, would otherwise fail every step to or from it. For the air check only, which the grid's own test backs.
+    /// <param name="grownBy">
+    /// What the walls were grown by, for the air check; 0 for a plain test. Given it, a step may come as close to a wall as its nearer end already
+    /// stands, and never closer: a body standing in a wall's air, or a stand point a body's width from a terminal, would otherwise fail every step to or
+    /// from it — and passing over the whole wall for such a step let it graze the wall's far corner, or a disc's other side (review 6).
     /// </param>
-    public static bool SegmentClear(List<PlanBox> walls, float ax, float az, float bx, float bz, bool ignoreEnds = false)
+    public static bool SegmentClear(List<PlanBox> walls, float ax, float az, float bx, float bz, float grownBy = 0f)
     {
         var (lx, hx) = ax < bx ? (ax, bx) : (bx, ax);
         var (lz, hz) = az < bz ? (az, bz) : (bz, az);
@@ -311,9 +321,17 @@ public static class CityPath
                 continue;
             }
 
-            if (ignoreEnds && (Holds(in w, ax, az) || Holds(in w, bx, bz)))
+            // How much of the growth this step is held to: all of it, or as much as its nearer end already keeps.
+            var shrink = 0f;
+            if (grownBy > 0f)
             {
-                continue;
+                var near = MathF.Min(Outside(in w, grownBy, ax, az), Outside(in w, grownBy, bx, bz));
+                if (near <= 0f)
+                {
+                    continue;   // an end on the wall itself: the grid's test is the only one that applies
+                }
+
+                shrink = near < grownBy ? grownBy - near + 1e-3f : 0f;
             }
 
             if (w.Radius > 0f)
@@ -324,7 +342,8 @@ public static class CityPath
                 var t = len2 > 0f ? Math.Clamp((((cx - ax) * dx) + ((cz - az) * dz)) / len2, 0f, 1f) : 0f;
                 var ex = ax + (dx * t) - cx;
                 var ez = az + (dz * t) - cz;
-                if ((ex * ex) + (ez * ez) < w.Radius * w.Radius)
+                var r = w.Radius - shrink;
+                if ((ex * ex) + (ez * ez) < r * r)
                 {
                     return false;
                 }
@@ -334,7 +353,7 @@ public static class CityPath
 
             var t0 = 0f;
             var t1 = 1f;
-            if (Slab(ax, dx, w.MinX, w.MaxX, ref t0, ref t1) && Slab(az, dz, w.MinZ, w.MaxZ, ref t0, ref t1) && t0 < t1)
+            if (Slab(ax, dx, w.MinX + shrink, w.MaxX - shrink, ref t0, ref t1) && Slab(az, dz, w.MinZ + shrink, w.MaxZ - shrink, ref t0, ref t1) && t0 < t1)
             {
                 return false;
             }
@@ -342,16 +361,19 @@ public static class CityPath
 
         return true;
 
-        static bool Holds(in PlanBox w, float x, float z)
+        // How far a point stands outside the wall itself — the box or disc before it was grown — metres; 0 or less on or inside it.
+        static float Outside(in PlanBox w, float grownBy, float x, float z)
         {
             if (w.Radius > 0f)
             {
-                var dx = x - ((w.MinX + w.MaxX) * 0.5f);
-                var dz = z - ((w.MinZ + w.MaxZ) * 0.5f);
-                return (dx * dx) + (dz * dz) < w.Radius * w.Radius;
+                var ox = x - ((w.MinX + w.MaxX) * 0.5f);
+                var oz = z - ((w.MinZ + w.MaxZ) * 0.5f);
+                return MathF.Sqrt((ox * ox) + (oz * oz)) - (w.Radius - grownBy);
             }
 
-            return x > w.MinX && x < w.MaxX && z > w.MinZ && z < w.MaxZ;
+            var gx = MathF.Max(MathF.Max(w.MinX + grownBy - x, 0f), x - (w.MaxX - grownBy));
+            var gz = MathF.Max(MathF.Max(w.MinZ + grownBy - z, 0f), z - (w.MaxZ - grownBy));
+            return gx > 0f || gz > 0f ? MathF.Sqrt((gx * gx) + (gz * gz)) : -1f;
         }
 
         // Narrows [t0, t1] to the part of the step inside one axis's open interval; false when none of it is.
@@ -683,7 +705,7 @@ public static class CityPath
             while (j > i)
             {
                 var (bx, bz) = j == cells.Count - 1 && goalOpen ? (toX, toZ) : CentreOf(grid, cells[j]);
-                if (LineClear(grid, ax, az, bx, bz) && (air == null || SegmentClear(air, ax, az, bx, bz, ignoreEnds: true)))
+                if (LineClear(grid, ax, az, bx, bz) && (air == null || SegmentClear(air, ax, az, bx, bz, BodyHalfM + AirM)))
                 {
                     break;
                 }

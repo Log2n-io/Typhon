@@ -28,8 +28,8 @@ namespace SwgTatooine.Server;
 /// </remarks>
 public sealed partial class SimBridge
 {
-    /// <summary>How far round a city's disc its buildings stand to be walked round, metres: its port and the houses on its edge.</summary>
-    private const float CityMarginM = 60f;
+    /// <summary>How far round a city's disc its buildings stand to be walked round, metres: its port and the houses on its edge — the bots' too.</summary>
+    private const float CityMarginM = CityPath.CityMarginM;
 
     /// <summary>The longest walk one search plans, metres — the bot's <c>SearchReachM</c>, doubled for a crowd that crosses whole towns.</summary>
     private const float SearchReachM = 400f;
@@ -261,7 +261,7 @@ public sealed partial class SimBridge
         dz /= len;
 
         // |p + t·d − c| = R: the positive root, the exit.
-        var r = city.Radius + CityMarginM + 10f;
+        var r = city.Radius + CityPath.CityLeaveM;
         var ox = x - city.X;
         var oz = z - city.Z;
         var b = (ox * dx) + (oz * dz);

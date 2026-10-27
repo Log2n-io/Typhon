@@ -199,9 +199,8 @@ public sealed class FacilityMap
     /// <param name="z">From, north.</param>
     /// <param name="found">The facility.</param>
     /// <param name="region">The region it belongs to.</param>
-    /// <param name="except">One facility not to answer, by where it stands: the terminal that just had nothing.</param>
     /// <returns>Whether any is known.</returns>
-    public bool TryNearest(int kind, float x, float z, out Facility found, out int region, (float X, float Z)? except = null)
+    public bool TryNearest(int kind, float x, float z, out Facility found, out int region)
     {
         found = default;
         region = 0;
@@ -215,11 +214,6 @@ public sealed class FacilityMap
 
             foreach (var f in list)
             {
-                if (except is { } skip && Routing.Distance(skip.X, skip.Z, f.X, f.Z) < SameM)
-                {
-                    continue;
-                }
-
                 var d = Routing.Distance(x, z, f.X, f.Z);
                 if (d < best)
                 {
@@ -231,6 +225,61 @@ public sealed class FacilityMap
         }
 
         return region != 0;
+    }
+
+    /// <summary>
+    /// The nearest few facilities of a kind in ONE region, nearest first, leaving out those standing at any of <paramref name="except"/>: the terminals a
+    /// bot may try in its city, without the ones that already had nothing for it.
+    /// </summary>
+    /// <param name="into">Filled nearest first; its length is how many are wanted.</param>
+    /// <returns>How many were written.</returns>
+    public int NearestIn(int region, int kind, float x, float z, ReadOnlySpan<(float X, float Z)> except, Span<Facility> into)
+    {
+        if (region <= 0 || into.Length == 0 || !_seen.TryGetValue(Key(region, kind), out var list))
+        {
+            return 0;
+        }
+
+        Span<double> far = stackalloc double[into.Length];
+        var n = 0;
+        foreach (var f in list)
+        {
+            var skip = false;
+            foreach (var e in except)
+            {
+                skip |= Routing.Distance(e.X, e.Z, f.X, f.Z) < SameM;
+            }
+
+            if (skip)
+            {
+                continue;
+            }
+
+            // Insertion into the few kept, nearest first.
+            var d = Routing.Distance(x, z, f.X, f.Z);
+            var at = n;
+            while (at > 0 && far[at - 1] > d)
+            {
+                at--;
+            }
+
+            if (at >= into.Length)
+            {
+                continue;
+            }
+
+            for (var i = Math.Min(n, into.Length - 1); i > at; i--)
+            {
+                into[i] = into[i - 1];
+                far[i] = far[i - 1];
+            }
+
+            into[at] = f;
+            far[at] = d;
+            n = Math.Min(n + 1, into.Length);
+        }
+
+        return n;
     }
 
     /// <summary>The table's key: a region and a kind in one long.</summary>
