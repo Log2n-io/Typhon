@@ -225,8 +225,21 @@ class SendPumpTeardownTests : TestBase<SendPumpTeardownTests>
 
             Assert.That(WaitFor(() => NativeBlocks(subs.Frames.Pool).Count > 0, TimeSpan.FromSeconds(5)), Is.True,
                 "no frame was ever encoded, so the frame pool holds no slab and this case would cover the table alone");
+
+            // A ring held the way a session's transport thread holds one. This fixture declares no commands, so no session leases a ring of its own.
+            var rings = subs.IngressRingsForTest;
+            Assert.That(rings.TryAcquire(out var lease), Is.True, "the ingress pool lent no ring");
+
             var blocks = NativeBlocks(subs.ResourcesForTest);
-            Assert.That(blocks.Select(b => b.Id), Does.Contain("Subscriptions.Sessions"), "the session table's rows must be among the blocks the runtime owns");
+            var ingress = subs.ResourcesForTest.Children.Single(c => c.Id == "Subscriptions.IngressRings");
+            Assert.Multiple(() =>
+            {
+                // One per reader the cascade used to free under: the pumps read the rows, a parked send reads a frame slab, a transport thread writes a ring.
+                Assert.That(blocks.Select(b => b.Id), Does.Contain("Subscriptions.Sessions"),
+                    "the session table's rows must be among the blocks the runtime owns");
+                Assert.That(NativeBlocks(subs.Frames.Pool), Is.Not.Empty, "the frame pool's slabs must be among them");
+                Assert.That(NativeBlocks(ingress), Is.Not.Empty, "the ingress ring's slab must be among them");
+            });
 
             // The first half of TyphonRuntime.Dispose, stopped inside the window: the scheduler is gone, the subscriptions runtime is not.
             runtime.Scheduler.Dispose();
@@ -240,6 +253,11 @@ class SendPumpTeardownTests : TestBase<SendPumpTeardownTests>
             Assert.That(WaitFor(() => pump.ActivePumps == 0 && pump.PongsSent > pongs, TimeSpan.FromSeconds(5)), Is.True,
                 "the pump woken inside the window never finished");
 
+            // And a transport thread writing a client's record into its ring does so into memory that is still the ring's.
+            Assert.That(lease.Ring.TryWrite([1, 2, 3]), Is.True, "the ring refused a record inside the window");
+            Assert.That(lease.Ring.IsEmpty, Is.False, "the record written inside the window is not in the ring");
+            rings.Release(lease);
+
             runtime.Dispose();
 
             // One owner, not none: the fix must move the free, not drop it.
@@ -248,6 +266,45 @@ class SendPumpTeardownTests : TestBase<SendPumpTeardownTests>
                 Assert.That(blocks.Where(b => !b.IsDisposed).Select(b => b.Id), Is.Empty, "the runtime's teardown must free every block it owns");
                 Assert.That(subs.ResourcesForTest.Children, Is.Empty, "a freed block must also leave the resource tree");
             });
+        }
+        finally
+        {
+            runtime.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// <see cref="TyphonRuntime.Dispose"/> quiesces the subscriptions runtime before the scheduler's disposal frees what is registered under the scheduler:
+    /// belt and braces with the runtime's own node, for a block a later change registers there (#1508).
+    /// </summary>
+    /// <remarks>
+    /// A probe node under the scheduler records, at the moment the scheduler's cascade reaches it, whether the session table's gate has already latched —
+    /// which happens in the subscriptions runtime's Dispose, after the send pump is torn down and before the frame pool is.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-38")]
+    public void TheRuntimesDisposal_QuiescesSubscriptionsBeforeTheSchedulersCascade()
+    {
+        using var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        Populate(dbe);
+
+        var runtime = CreateRuntime(dbe);
+        var link = new InProcessLink();
+        try
+        {
+            Declare(runtime.Subscriptions);
+            runtime.Start();
+            Connect(StartTransport(runtime), link);
+            Assert.That(WaitFor(() => link.PendingCount > 0, TimeSpan.FromSeconds(5)), Is.True, "the session never received a frame, so nothing was sending");
+
+            var subs = runtime.SubscriptionsContextForTest.Subscriptions;
+            bool? latchedAtCascade = null;
+            _ = new DisposeProbe(runtime.Scheduler, () => latchedAtCascade = subs.Sessions.IsDisposed);
+
+            runtime.Dispose();
+
+            Assert.That(latchedAtCascade, Is.True,
+                "the scheduler's cascade ran while the subscriptions runtime was still live — its pumps and transport threads not yet quiesced");
         }
         finally
         {
@@ -336,6 +393,24 @@ class SendPumpTeardownTests : TestBase<SendPumpTeardownTests>
     private static void AssertNoneFreed(List<PinnedMemoryBlock> blocks) =>
         Assert.That(blocks.Where(b => b.IsDisposed).Select(b => b.Id), Is.Empty,
             $"{FreedByCascade}, under threads its teardown has not quiesced yet");
+
+    /// <summary>A resource node that runs a callback when its parent's cascade disposes it.</summary>
+    private sealed class DisposeProbe : ResourceNode
+    {
+        private readonly Action _onDispose;
+
+        public DisposeProbe(IResource parent, Action onDispose) : base("Probe.1508", ResourceType.Node, parent) => _onDispose = onDispose;
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _onDispose();
+            }
+
+            base.Dispose(disposing);
+        }
+    }
 
     /// <summary>Every native block registered at or below a resource node.</summary>
     /// <param name="root">The node.</param>
