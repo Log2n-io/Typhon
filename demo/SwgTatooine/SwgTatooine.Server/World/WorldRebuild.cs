@@ -150,6 +150,12 @@ public static class WorldRebuild
                 {
                     index.Terminals.Add(new MissionTerminalRef(cluster.GetEntityId(slot), x, z, owner, realm));
                 }
+
+                // The market desk's terminals (bazaar.md § 2.3).
+                if (st.Kind == StructureKind.Bazaar)
+                {
+                    index.Bazaars.Add(new MissionTerminalRef(cluster.GetEntityId(slot), x, z, owner, realm));
+                }
             }
         }
 

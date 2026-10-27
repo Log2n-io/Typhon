@@ -170,6 +170,113 @@
     </section>
 
     <section class="card">
+        <h2>Market</h2>
+        @if (st?["market"] is null)
+        {
+            <p class="muted">this server has no market</p>
+        }
+        else
+        {
+            <div class="kpis">
+                @Kpi("sales / min", Rate(st, "market", "salesPerMin"))
+                @Kpi("volume / min, cr", Rate(st, "market", "volumePerMin"))
+                @Kpi("vendor paid / min, cr", Rate(st, "market", "vendorPerMin"))
+                @Kpi("fees + tax / min, cr", Rate(st, "market", "feesPerMin"))
+                @Kpi("listed now", F(N(st, "market", "listed"), 0))
+                @Kpi("awaiting collection", F(N(st, "market", "sold") + N(st, "market", "returned"), 0))
+                @Kpi("units in escrow", F(N(st, "market", "escrowUnits"), 0))
+                @Kpi("sales since start", F(N(st, "market", "sales"), 0))
+                @Kpi("volume since start, cr", F(N(st, "market", "volume"), 0))
+                @Kpi("unsold age p50 · p90 · max",
+                    $"{Dur(N(st, "market", "unsoldAgeS", "p50"))} · {Dur(N(st, "market", "unsoldAgeS", "p90"))} · {Dur(N(st, "market", "unsoldAgeS", "max"))}")
+                @Kpi("refused", F(Refused(st).Sum(r => r.N), 0))
+                @Kpi("failed commits", F(N(st, "market", "commitsFailed"), 0), N(st, "market", "commitsFailed") > 0)
+                @Kpi("aborted", F(N(st, "market", "aborted"), 0), N(st, "market", "aborted") > 0)
+            </div>
+            @if (Refused(st).Any(r => r.N > 0))
+            {
+                <p class="muted small">refused: @string.Join(" · ", Refused(st).Where(r => r.N > 0).OrderByDescending(r => r.N).Select(r => $"{r.Reason} {F(r.N, 0)}"))</p>
+            }
+            @Spark("sales/min", "/min")
+            <h3>Faucets and sinks, credits since start</h3>
+            <div class="kpis">
+                @Kpi("minted / min (faucets)", Rate(st, "economy", "faucetsPerMin"))
+                @Kpi("destroyed / min (sinks)", Rate(st, "economy", "sinksPerMin"))
+                @Kpi("sinks ÷ faucets", Pct(N(st, "economy", "sinks"), N(st, "economy", "faucets")))
+            </div>
+            <table class="ledger">
+                <tr><th>kind</th><th>flow</th><th class="num">credits</th></tr>
+                @foreach (var (kind, credits) in ByKind(st))
+                {
+                    <tr><td>@kind</td><td class="muted">@FlowOf(kind)</td><td class="num">@F(credits, 0)</td></tr>
+                }
+                <tr><td><b>faucets</b></td><td></td><td class="num">@F(N(st, "economy", "faucets"), 0)</td></tr>
+                <tr><td><b>sinks</b></td><td></td><td class="num">@F(N(st, "economy", "sinks"), 0)</td></tr>
+            </table>
+            @Spark("faucets/min", " cr/min")
+            @Spark("sinks/min", " cr/min")
+            <h3>Listings by city</h3>
+            <table class="bars">
+                <tr><th>city</th><th class="num">listed</th><th class="num">reserved</th><th class="num">value, cr</th><th></th></tr>
+                @foreach (var c in MarketCities(st))
+                {
+                    <tr>
+                        <td>@c.Name</td><td class="num">@F(c.Listed, 0)</td><td class="num">@F(c.Reserved, 0)</td><td class="num">@F(c.Value, 0)</td>
+                        <td class="bar"><div style="width:@Pct(c.Listed, N(st, "market", "listed"))"></div></td>
+                    </tr>
+                }
+            </table>
+            <h3>Price index — median ÷ market value</h3>
+            @if (!Prices(st).Any())
+            {
+                <p class="muted">nothing sold or listed yet</p>
+            }
+            else
+            {
+                <table class="ledger">
+                    <tr>
+                        <th>item</th><th>Mk</th><th class="num">sales</th><th class="num">median</th><th class="num">min – max</th><th class="num">value</th>
+                        <th class="num" title="green: 0.8 – 1.2">index</th><th class="num">listed · lowest</th>
+                    </tr>
+                    @foreach (var p in Prices(st))
+                    {
+                        var index = p.Sales > 0 && p.Value > 0 ? p.Median / p.Value : double.NaN;
+                        <tr>
+                            <td title="@p.Id">@ItemName(p.Id)</td><td>@Roman(p.Mk)</td><td class="num">@F(p.Sales, 0)</td>
+                            <td class="num">@(p.Sales > 0 ? F(p.Median, 0) : "—")</td>
+                            <td class="num">@(p.Sales > 0 ? $"{F(p.Min, 0)} – {F(p.Max, 0)}" : "—")</td>
+                            <td class="num">@F(p.Value, p.Value < 10 ? 1 : 0)</td>
+                            <td class="num" style="color:@IndexColour(index)">@F(index, 2)</td>
+                            <td class="num">@F(p.Listed, 0)@(p.Listed > 0 ? $" · {F(p.Lowest, 0)}" : "")</td>
+                        </tr>
+                    }
+                </table>
+                <p class="muted small">median, min and max over the recent sales; credits per unit</p>
+            }
+        }
+        <h3>Market audit</h3>
+        @if (s.MarketAudit is null)
+        {
+            <p class="muted">not run yet</p>
+        }
+        else
+        {
+            var marketOk = s.MarketAudit["ok"]?.GetValue<bool>() ?? false;
+            <p>
+                <span class="badge @(marketOk ? "ok" : "bad")">@(marketOk ? "consistent" : "VIOLATIONS")</span>
+                @F(N(s.MarketAudit, "listings"), 0) listings (@F(N(s.MarketAudit, "listed"), 0) listed, @F(N(s.MarketAudit, "sold"), 0) sold,
+                @F(N(s.MarketAudit, "returned"), 0) returned), @F(N(s.MarketAudit, "sales"), 0) sales, @F(N(s.MarketAudit, "escrowUnits"), 0) units in escrow,
+                in @Ms(N(s.MarketAudit, "ms")) — @Age(s.AuditAt) ago
+            </p>
+            @if (!marketOk && s.MarketAudit["violations"] is JsonArray mv)
+            {
+                <p class="muted">@F(N(s.MarketAudit, "violationCount"), 0) violation(s)</p>
+                <ul class="violations">@foreach (var line in mv.Take(10)) { <li>@line</li> }</ul>
+            }
+        }
+    </section>
+
+    <section class="card">
         <h2>Missions</h2>
         <div class="kpis">
             @Kpi("taken / min", Rate(st, "missions", "takenPerMin"))
@@ -351,6 +458,56 @@
 
     /// <summary>One Mk's units (0-based) of an item with Mk; 0 where the array stops.</summary>
     private static double At(double[] held, int mk) => mk < held.Length ? held[mk] : 0d;
+
+    /// <summary>A number of seconds as "45 s", "12 min" or "3.5 h".</summary>
+    private static string Dur(double s)
+        => double.IsNaN(s) ? "—" : s < 90 ? $"{F(s, 0)} s" : s < 5400 ? $"{F(s / 60d, 0)} min" : $"{F(s / 3600d, 1)} h";
+
+    /// <summary>The price index's colour: green within 0.8 – 1.2 of the market value, red outside, none without a sale.</summary>
+    private static string IndexColour(double index) => double.IsNaN(index) ? null : index is >= 0.8 and <= 1.2 ? "var(--good)" : "var(--bad)";
+
+    private static string Roman(int mk) => mk switch { 1 => "I", 2 => "II", 3 => "III", 4 => "IV", 5 => "V", _ => "—" };
+
+    private static string ItemName(string id) => Lootable.FirstOrDefault(l => l.Id == id).Name ?? id;
+
+    /// <summary>The market's refusals since start, by reason (bazaar.md § 3.1).</summary>
+    private static IEnumerable<(string Reason, double N)> Refused(JsonNode stats)
+        => (stats?["market"]?["refused"] as JsonObject ?? [])
+            .Select(p => (Reason: p.Key, N: p.Value is JsonValue v && v.TryGetValue<double>(out var d) ? d : 0d));
+
+    /// <summary>The credits moved per credit kind since start (<c>economy.byKind</c>).</summary>
+    private static IEnumerable<(string Kind, double Credits)> ByKind(JsonNode stats)
+        => (stats?["economy"]?["byKind"] as JsonObject ?? [])
+            .Select(p => (Kind: p.Key, Credits: p.Value is JsonValue v && v.TryGetValue<double>(out var d) ? d : 0d));
+
+    /// <summary>Where a credit kind's money goes, as the server classes it (<c>MarketStats.CreditKinds</c>).</summary>
+    private static string FlowOf(string kind) => kind switch
+    {
+        "grant" or "mission" or "vendor" => "faucet: minted",
+        "tax" or "listfee" => "sink: destroyed",
+        "tip" or "sale" => "wallet to wallet",
+        _ => "",
+    };
+
+    private static IEnumerable<(string Name, double Listed, double Reserved, double Value)> MarketCities(JsonNode stats)
+        => (stats?["market"]?["byCity"] as JsonArray ?? [])
+            .Select(c => (Name: c?["name"]?.ToString() ?? "?", Listed: N(c, "listed"), Reserved: N(c, "reserved"), Value: N(c, "listedValue")));
+
+    /// <summary>One price-index row: an item at one Mk, its recent sales, its listings, its market value — credits per unit.</summary>
+    private readonly record struct PriceRow(string Id, int Mk, double Sales, double Median, double Min, double Max, double Value, double Listed, double Lowest);
+
+    /// <summary>The <c>market.prices</c> rows, in the server's order (template, then Mk).</summary>
+    private static IEnumerable<PriceRow> Prices(JsonNode stats)
+    {
+        foreach (var (id, entries) in stats?["market"]?["prices"] as JsonObject ?? [])
+        {
+            foreach (var e in entries as JsonArray ?? [])
+            {
+                yield return new PriceRow(id, (int)N(e, "mk"), N(e, "sales"), N(e, "median"), N(e, "min"), N(e, "max"), N(e, "value"), N(e, "listed"),
+                    N(e, "lowest"));
+            }
+        }
+    }
 
     private static IEnumerable<(string City, double Bots)> Cities(JsonNode stats)
         => (stats?["population"]?["botsByCity"] as JsonObject ?? [])

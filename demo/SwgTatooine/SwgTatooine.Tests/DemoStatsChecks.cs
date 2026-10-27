@@ -174,4 +174,186 @@ internal sealed class DemoStatsChecks : ServedChecks
             Assert.That(items.TryGetProperty("bySource", out _) && items.TryGetProperty("lostPerMin", out _) && items.TryGetProperty("queueOverflow", out _), Is.True);
         });
     }
+
+    /// <summary>
+    /// BZ-19: the <c>market</c> section writes what the desk counted and published — the board by city, the price rows grouped by item with the market
+    /// value to the milli-credit, the unsold's age, the refusals by name — and <c>byKind</c> splits the credits into faucets and sinks.
+    /// </summary>
+    [Test]
+    public void TheMarketSection_WritesTheCountersTheBoardAndTheFlows()
+    {
+        var armor = ItemCatalog.IdOf("core_armor");
+        var hide = ItemCatalog.IdOf("mat_hide");
+        var names = SimBridge.MarketRefusalNames.ToArray();
+        var refused = new long[names.Length];
+        refused[Array.FindIndex(names, n => n.Reason == TatooineReplication.MarketSold)] = 99;
+        var listing = new ListingView(77, armor, 2, 1, 1500, 5, "Kel", 100, 1, 0);
+        var input = new MarketStatsInput
+        {
+            Counters = new MarketCounters(3, 1, 0, 23, 5, 6400, 40, 512, 145, 50, 9, 2, 1, 4, 0, 0),
+            Refused = refused,
+            Board = new MarketSnapshot
+            {
+                Cities =
+                [
+                    new MarketCityView { City = 1, Name = "Port Sable", Listings = [listing, listing with { Id = 78 }], Reserved = 0, ListedValue = 1560 },
+                    new MarketCityView { City = 2, Name = "Whitestone", Reserved = 4 },
+                ],
+                // Published out of order: the section groups by item, Mk ascending.
+                Prices =
+                [
+                    new MarketPriceView(hide, 2, 2, 560, 1, 3, 0, 0, 0, 0),
+                    new MarketPriceView(armor, 2, 1549, 309_800, 2, 1400, 1549, 1500, 1700, 4),
+                    new MarketPriceView(hide, 1, 1, 340, 0, 0, 2, 2, 2, 1),
+                ],
+                UnsoldAgeS = (70, 100, 120),
+            },
+        };
+
+        var j = new System.Text.StringBuilder();
+        MarketStats.Write(j, input, ",\"salesPerMin\":{\"10s\":0,\"60s\":0}");
+        using var doc = JsonDocument.Parse(j.ToString());
+        var market = doc.RootElement;
+        var cities = market.GetProperty("byCity").EnumerateArray().ToArray();
+        var armorPrices = market.GetProperty("prices").GetProperty("core_armor").EnumerateArray().ToArray();
+        var hidePrices = market.GetProperty("prices").GetProperty("mat_hide").EnumerateArray().ToArray();
+        var age = market.GetProperty("unsoldAgeS");
+        Assert.Multiple(() =>
+        {
+            Assert.That(market.GetProperty("listed").GetInt64(), Is.EqualTo(3));
+            Assert.That(market.GetProperty("sold").GetInt64(), Is.EqualTo(1));
+            Assert.That(market.GetProperty("escrowUnits").GetInt64(), Is.EqualTo(23));
+            Assert.That(market.GetProperty("volume").GetInt64(), Is.EqualTo(6400));
+            Assert.That(market.GetProperty("salesTax").GetInt64(), Is.EqualTo(512));
+            Assert.That(market.GetProperty("vendorPaid").GetInt64(), Is.EqualTo(145));
+            Assert.That(market.GetProperty("listings").GetInt64(), Is.EqualTo(9));
+            Assert.That(market.GetProperty("collected").GetInt64(), Is.EqualTo(4));
+            Assert.That(market.GetProperty("salesPerMin").TryGetProperty("60s", out _), Is.True, "the rates are carried");
+
+            Assert.That(cities.Select(c => c.GetProperty("city").GetInt32()), Is.EqualTo(new[] { 1, 2 }));
+            Assert.That(cities.Select(c => c.GetProperty("name").GetString()), Is.EqualTo(new[] { "Port Sable", "Whitestone" }));
+            Assert.That(cities.Select(c => c.GetProperty("listed").GetInt64()), Is.EqualTo(new long[] { 2, 0 }), "the city's listings");
+            Assert.That(cities.Select(c => c.GetProperty("listedValue").GetInt64()), Is.EqualTo(new long[] { 1560, 0 }));
+            Assert.That(cities.Select(c => c.GetProperty("reserved").GetInt64()), Is.EqualTo(new long[] { 0, 4 }));
+
+            Assert.That(armorPrices, Has.Length.EqualTo(1));
+            Assert.That(armorPrices[0].GetProperty("mk").GetInt32(), Is.EqualTo(2));
+            Assert.That(armorPrices[0].GetProperty("sales").GetInt64(), Is.EqualTo(4));
+            Assert.That(armorPrices[0].GetProperty("median").GetInt64(), Is.EqualTo(1549));
+            Assert.That(armorPrices[0].GetProperty("min").GetInt64(), Is.EqualTo(1500));
+            Assert.That(armorPrices[0].GetProperty("max").GetInt64(), Is.EqualTo(1700));
+            Assert.That(armorPrices[0].GetProperty("listed").GetInt64(), Is.EqualTo(2));
+            Assert.That(armorPrices[0].GetProperty("lowest").GetInt64(), Is.EqualTo(1400));
+            Assert.That(armorPrices[0].GetProperty("value").GetDouble(), Is.EqualTo(1549d));
+
+            Assert.That(hidePrices.Select(p => p.GetProperty("mk").GetInt32()), Is.EqualTo(new[] { 1, 2 }), "grouped by item, Mk ascending");
+            Assert.That(hidePrices[0].GetProperty("median").GetInt64(), Is.EqualTo(2));
+            Assert.That(hidePrices[0].GetProperty("value").GetDouble(), Is.EqualTo(1.7d), "a material's value, under a whole credit's precision");
+            Assert.That(hidePrices[1].GetProperty("median").GetInt64(), Is.Zero, "0: no sale");
+            Assert.That(hidePrices[1].GetProperty("lowest").GetInt64(), Is.EqualTo(3));
+            Assert.That(hidePrices[1].GetProperty("value").GetDouble(), Is.EqualTo(2.8d));
+
+            Assert.That(age.GetProperty("p50").GetInt64(), Is.EqualTo(70));
+            Assert.That(age.GetProperty("p90").GetInt64(), Is.EqualTo(100));
+            Assert.That(age.GetProperty("max").GetInt64(), Is.EqualTo(120));
+
+            Assert.That(market.GetProperty("refused").EnumerateObject().Select(p => p.Name), Is.EqualTo(names.Select(n => n.Name)),
+                "every reason named, 0 included");
+            Assert.That(market.GetProperty("refused").GetProperty("sold").GetInt64(), Is.EqualTo(99));
+        });
+
+        // Faucets: grant, mission, vendor. Sinks: tax, list fee. A tip and a sale only move credits between wallets.
+        long[] byKind = [0, 1000, 500, 20, 300, 24, 3, 145];
+        var (faucets, sinks) = MarketStats.FaucetsAndSinks(byKind);
+        var k = new System.Text.StringBuilder("{");
+        MarketStats.WriteByKind(k, byKind);
+        using var kinds = JsonDocument.Parse(k.Append('}').ToString());
+        var byName = kinds.RootElement.GetProperty("byKind");
+        Assert.Multiple(() =>
+        {
+            Assert.That(faucets, Is.EqualTo(1000 + 500 + 145));
+            Assert.That(sinks, Is.EqualTo(24 + 3));
+            Assert.That(byName.EnumerateObject().Select(p => p.Name), Is.EqualTo(new[] { "grant", "mission", "tip", "sale", "tax", "listfee", "vendor" }));
+            Assert.That(byName.GetProperty("vendor").GetInt64(), Is.EqualTo(145));
+            Assert.That(byName.GetProperty("listfee").GetInt64(), Is.EqualTo(3));
+            Assert.That(MarketStats.CreditKinds, Has.Length.EqualTo(TransferKind.Count - 1), "every credit kind has a flow");
+        });
+    }
+
+    /// <summary>BZ-19: <c>/swg/stats</c> carries <c>market</c> with every key of bazaar.md § 9, a row per city, and <c>economy.byKind</c>.</summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void TheMarketSection_IsInTheDemoStats_WithEveryKey()
+    {
+        var config = Worlds.Served(Dir);
+        config.WorkerCount = 1;
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+        Harness = new SessionHarness(sim);
+        Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(0x7303));
+        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar");
+        Harness.Ticks(Worlds.ServedHz * 2);
+
+        using var doc = JsonDocument.Parse(sim.Bridge.DemoStatsJson());
+        var market = doc.RootElement.GetProperty("market");
+        var economy = doc.RootElement.GetProperty("economy");
+        Assert.Multiple(() =>
+        {
+            foreach (var key in new[] { "listed", "sold", "returned", "escrowUnits", "byCity", "sales", "volume", "listFees", "salesTax", "vendorPaid",
+                         "vendorUnits", "listings", "cancelled", "expired", "collected", "commitsFailed", "aborted", "refused", "salesPerMin", "volumePerMin",
+                         "vendorPerMin", "feesPerMin", "prices", "unsoldAgeS" })
+            {
+                Assert.That(market.TryGetProperty(key, out _), Is.True, key);
+            }
+
+            Assert.That(market.GetProperty("byCity").ValueKind, Is.EqualTo(JsonValueKind.Array), "the board's cities, as the desk publishes them");
+            Assert.That(market.GetProperty("unsoldAgeS").TryGetProperty("p90", out _), Is.True);
+            Assert.That(economy.GetProperty("byKind").EnumerateObject().Count(), Is.EqualTo(MarketStats.CreditKinds.Length));
+            Assert.That(economy.TryGetProperty("faucets", out _) && economy.TryGetProperty("sinks", out _), Is.True);
+            Assert.That(economy.GetProperty("faucetsPerMin").TryGetProperty("60s", out _), Is.True);
+            Assert.That(sim.Bridge.MarketCountersJson(), Does.StartWith("{\"listed\":"), "the exit line");
+        });
+
+        using var exit = JsonDocument.Parse(sim.Bridge.MarketCountersJson());
+        Assert.That(exit.RootElement.GetProperty("byKind").EnumerateObject().Count(), Is.EqualTo(MarketStats.CreditKinds.Length));
+    }
+
+    /// <summary>
+    /// The bots page's market column reads the swarm's market keys (BotReport.cs, bazaar.md § 8) — optional, so a swarm without the market still
+    /// reports, and the page says it does not trade.
+    /// </summary>
+    [Test]
+    public void TheMarketSection_ReachesTheBotsPage()
+    {
+        const string report = """
+            {"v":1,"run":"r1","at":"2026-10-27T12:00:00Z","hz":4,"tick":100,
+             "fleet":{"bots":30,"windowS":60,"stuckS":0,"goals":{},
+                      "totals":{"hunts":2,"marketTrades":4,"marketListed":7,"marketBought":3,"marketBuyLost":9,"marketWon":3,"marketRefused":10},
+                      "perMin":{"marketTrades":2.5,"marketVendored":2},"why":{"MarketChosen":4},"whyPerMin":{"MarketDone":1.5}},
+             "traced":[]}
+            """;
+        const string before = """{"v":1,"run":"r2","at":"2026-10-27T12:00:00Z","hz":4,"tick":100,"fleet":{"bots":1,"totals":{"hunts":1}},"traced":[]}""";
+        var board = new SwgTatooine.Dashboard.BotBoard();
+        var taken = board.Ingest(JsonSerializer.Deserialize<SwgTatooine.Dashboard.BotReport>(report, SwgTatooine.Dashboard.BotReport.Json), DateTime.UtcNow,
+            out var error);
+        var fleet = board.Latest.Fleet;
+        Assert.Multiple(() =>
+        {
+            Assert.That(taken, Is.True, error);
+            Assert.That(SwgTatooine.Dashboard.BotBoard.Of(fleet.Totals, "marketBuyLost"), Is.EqualTo(9));
+            Assert.That(SwgTatooine.Dashboard.BotBoard.Of(fleet.Totals, "marketWon"), Is.EqualTo(3));
+            Assert.That(SwgTatooine.Dashboard.BotBoard.Of(fleet.PerMin, "marketVendored"), Is.EqualTo(2d));
+            Assert.That(SwgTatooine.Dashboard.BotBoard.Of(fleet.WhyPerMin, "MarketDone"), Is.EqualTo(1.5d));
+            Assert.That(board.History("market trades/min").Single(), Is.EqualTo(2.5d));
+        });
+
+        taken = board.Ingest(JsonSerializer.Deserialize<SwgTatooine.Dashboard.BotReport>(before, SwgTatooine.Dashboard.BotReport.Json), DateTime.UtcNow,
+            out error);
+        Assert.Multiple(() =>
+        {
+            Assert.That(taken, Is.True, error);
+            Assert.That(board.Latest.Fleet.Totals.ContainsKey("marketTrades"), Is.False, "a swarm without the market: the page says it does not trade");
+            Assert.That(board.History("market trades/min").Single(), Is.Zero, "a new run's history, and no market rate");
+        });
+    }
 }

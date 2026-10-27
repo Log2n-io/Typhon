@@ -41,6 +41,7 @@ class SendPumpTeardownTests : TestBase<SendPumpTeardownTests>
     /// </summary>
     [Test]
     [VerifiesRule("SUB-04")]
+    [VerifiesRule("SUB-38")]
     public void APumpStillSendingAtDispose_NeverCompletesIntoTheFreedBlock()
     {
         using var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
@@ -241,7 +242,7 @@ class SendPumpTeardownTests : TestBase<SendPumpTeardownTests>
                 Assert.That(NativeBlocks(ingress), Is.Not.Empty, "the ingress ring's slab must be among them");
             });
 
-            // The first half of TyphonRuntime.Dispose, stopped inside the window: the scheduler is gone, the subscriptions runtime is not.
+            // The window TyphonRuntime.Dispose used to open by disposing the scheduler first: the scheduler is gone, the subscriptions runtime is not.
             runtime.Scheduler.Dispose();
 
             Assert.That(subs.Sessions.IsDisposed, Is.False, "the table's own teardown has not run, so its gate is still open to every pump");
@@ -300,11 +301,24 @@ class SendPumpTeardownTests : TestBase<SendPumpTeardownTests>
             var subs = runtime.SubscriptionsContextForTest.Subscriptions;
             bool? latchedAtCascade = null;
             _ = new DisposeProbe(runtime.Scheduler, () => latchedAtCascade = subs.Sessions.IsDisposed);
+            bool? tickingAtTeardown = null;
+            bool? workersAtTeardown = null;
+            subs.DisposingForTest = () =>
+            {
+                tickingAtTeardown = runtime.Scheduler.IsRunning;
+                workersAtTeardown = runtime.Scheduler.AnyWorkerAliveForTest;
+            };
 
             runtime.Dispose();
 
-            Assert.That(latchedAtCascade, Is.True,
-                "the scheduler's cascade ran while the subscriptions runtime was still live — its pumps and transport threads not yet quiesced");
+            Assert.Multiple(() =>
+            {
+                // The other side of the order: the subscriptions runtime frees the replication state a tick reaches, so nothing may tick when it begins.
+                Assert.That(tickingAtTeardown, Is.False, "the subscriptions runtime began its teardown with the timer thread still running ticks");
+                Assert.That(workersAtTeardown, Is.False, "the subscriptions runtime began its teardown with a worker thread still alive");
+                Assert.That(latchedAtCascade, Is.True,
+                    "the scheduler's cascade ran while the subscriptions runtime was still live — its pumps and transport threads not yet quiesced");
+            });
         }
         finally
         {
@@ -321,6 +335,7 @@ class SendPumpTeardownTests : TestBase<SendPumpTeardownTests>
     /// itself. Refused here by the ingress rails, which are checked after the session table, the frame pool and the replication state are all allocated.
     /// </remarks>
     [Test]
+    [VerifiesRule("SUB-38")]
     public void ARefusedStart_LeavesNothingUnderTheScheduler()
     {
         using var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
@@ -336,8 +351,9 @@ class SendPumpTeardownTests : TestBase<SendPumpTeardownTests>
             {
                 Assert.That(runtime.Scheduler.Children.Select(c => c.Id), Does.Not.Contain("Subscriptions"),
                     "a refused start left the subscriptions runtime's node registered under a scheduler that will not dispose it");
-                Assert.That(NativeBlocks(runtime.Scheduler).Where(b => !b.IsDisposed).Select(b => b.Id), Has.None.StartsWith("Subscriptions"),
-                    "a refused start left a subscriptions block allocated");
+                // Asked of the allocator, not the tree: a node already taken off the tree hides whatever it still holds from any walk of the tree.
+                Assert.That(((MemoryAllocator)dbe.MemoryAllocator).LiveBlocksForTest.Where(b => HasAncestor(b, "Subscriptions")).Select(b => b.Id),
+                    Is.Empty, "a refused start left a subscriptions block allocated");
             });
         }
         finally
@@ -393,6 +409,20 @@ class SendPumpTeardownTests : TestBase<SendPumpTeardownTests>
     private static void AssertNoneFreed(List<PinnedMemoryBlock> blocks) =>
         Assert.That(blocks.Where(b => b.IsDisposed).Select(b => b.Id), Is.Empty,
             $"{FreedByCascade}, under threads its teardown has not quiesced yet");
+
+    /// <summary>Whether a resource has an ancestor of this id.</summary>
+    private static bool HasAncestor(IResource resource, string id)
+    {
+        for (var node = resource.Parent; node != null; node = node.Parent)
+        {
+            if (node.Id == id)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     /// <summary>A resource node that runs a callback when its parent's cascade disposes it.</summary>
     private sealed class DisposeProbe : ResourceNode

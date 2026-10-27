@@ -239,6 +239,10 @@ internal sealed class SubscriptionsIngress : IDisposable
     private readonly Lock _rowLock = new();
 
     private readonly SessionIngress[] _rows;
+
+    // The transport threads inside OnCommands / RefuseCommands, which write into ring memory the pool frees after this object is disposed (#1508, SUB-38).
+    // Dispose latches it and waits for them, so the pool's slabs are never freed under a record a transport thread is still framing.
+    private CallerGate _transportCalls;
     private readonly List<IngressRingLease> _abandoned = [];
     private readonly List<int> _closing = [];
 
@@ -387,6 +391,28 @@ internal sealed class SubscriptionsIngress : IDisposable
     /// </remarks>
     public void OnCommands(SessionId session, ReadOnlySpan<byte> message)
     {
+        if (!_transportCalls.TryEnter())
+        {
+            // Disposed: the rings are going or gone, and the link is being closed. Nothing is framed and nothing is validated — there is no session left to
+            // close for a malformed message.
+            return;
+        }
+
+        try
+        {
+            OnCommandsInside(session, message);
+        }
+        finally
+        {
+            _transportCalls.Exit();
+        }
+    }
+
+    /// <summary>Tests only: runs on the transport thread inside <see cref="OnCommands"/>, holding the session's ring, before the message is decoded.</summary>
+    internal Action InsideCommandsForTest { get; set; }
+
+    private void OnCommandsInside(SessionId session, ReadOnlySpan<byte> message)
+    {
         var row = RowFor(session);
         if (row == null)
         {
@@ -396,6 +422,8 @@ internal sealed class SubscriptionsIngress : IDisposable
             CommandsMessage.Read(message, Commands.Plan, ref validating, CommandFrame(session, message, out _));
             return;
         }
+
+        InsideCommandsForTest?.Invoke();
 
         var role = SessionRole.Player;
         try
@@ -428,15 +456,27 @@ internal sealed class SubscriptionsIngress : IDisposable
     /// <returns>The commands the message carried, each one a refusal for the abuse rule.</returns>
     public int RefuseCommands(SessionId session, ReadOnlySpan<byte> message)
     {
-        var row = RowFor(session);
-        var sink = new RefusingSink(row);
-        CommandsMessage.Read(message, Commands.Plan, ref sink, CommandFrame(session, message, out _));
-        if (row != null)
+        if (!_transportCalls.TryEnter())
         {
-            row.OverBudgetMessages++;
+            return 0;
         }
 
-        return sink.Count;
+        try
+        {
+            var row = RowFor(session);
+            var sink = new RefusingSink(row);
+            CommandsMessage.Read(message, Commands.Plan, ref sink, CommandFrame(session, message, out _));
+            if (row != null)
+            {
+                row.OverBudgetMessages++;
+            }
+
+            return sink.Count;
+        }
+        finally
+        {
+            _transportCalls.Exit();
+        }
     }
 
     /// <summary>Answers every command of a refused message with a <c>RATE_LIMITED</c> <c>ACK</c>, counts them, and reads nothing else.</summary>
@@ -949,8 +989,17 @@ internal sealed class SubscriptionsIngress : IDisposable
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// <b>Quiesce, then let go of the rings.</b> A transport thread inside <see cref="OnCommands"/> holds a ring it is writing into, and the pool frees the
+    /// ring's slab right after this returns (<c>SubscriptionsRuntime.Dispose</c>). The latch stops new calls; the wait lets the ones inside finish.
+    /// </remarks>
     public void Dispose()
     {
+        if (!_transportCalls.LatchAndDrain())
+        {
+            return;
+        }
+
         lock (_rowLock)
         {
             _abandoned.Clear();

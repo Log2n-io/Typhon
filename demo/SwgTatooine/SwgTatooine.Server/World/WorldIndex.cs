@@ -65,6 +65,11 @@ public sealed class WorldIndex
     public List<MissionTerminalRef> Terminals { get; } = [];
 
     /// <summary>
+    /// Every bazaar terminal on the planet, as <see cref="Terminals"/> holds the mission terminals: the market desk's terminal → city map (bazaar.md § 2.3).
+    /// </summary>
+    public List<MissionTerminalRef> Bazaars { get; } = [];
+
+    /// <summary>
     /// Sine and cosine of a placement quarter turn, in the sense the RENDERER turns the building.
     /// </summary>
     /// <param name="quarters">The replicated quarter turns, 0 to 3.</param>
