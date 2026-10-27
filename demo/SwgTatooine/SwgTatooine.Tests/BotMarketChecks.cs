@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Linq;
 using NUnit.Framework;
 using SwgTatooine.Bots;
+using SwgTatooine.Bots.Brain;
 using SwgTatooine.Server;
 using SwgTatooine.Server.Accounts;
 using Typhon.Engine;
@@ -51,10 +52,10 @@ public sealed class BotMarketChecks
 
     /// <summary>
     /// The plan's order and bounds (§ 8): collect first when goods are reserved; cores and add-ons listed while fewer than 5 are; materials sold to the
-    /// vendor, the cheapest unit first, until 18 stacks are left; a buy last.
+    /// vendor, the cheapest unit first, until <see cref="MarketPlan.KeepStacks"/> stacks are left; a buy last.
     /// </summary>
     [Test]
-    public void ThePlan_Collects_ListsUpToFive_VendorsTheCheapestDownTo18_AndBuysLast()
+    public void ThePlan_Collects_ListsUpToFive_VendorsTheCheapestDownToItsFloor_AndBuysLast()
     {
         var held = FullInventory();
         var rng = 7u;
@@ -72,11 +73,44 @@ public sealed class BotMarketChecks
             Assert.That(lists.Select(c => c.Template), Is.EqualTo(new[] { MarketCatalog.TemplateOf("core_armor"), MarketCatalog.TemplateOf("addon_weapon") }));
             Assert.That(lists[1].Quantity, Is.EqualTo(2), "a stack is listed whole");
             Assert.That(held.Count - lists.Count - vendors.Count, Is.EqualTo(MarketPlan.KeepStacks), "not down to the floor");
-            Assert.That(vendors.All(v => v.Template == MarketCatalog.TemplateOf("mat_hide") && v.Mk == 1), Is.True, "not the cheapest unit first");
-            Assert.That(vendors.Select(v => v.Quantity), Is.Ordered, "of two stacks of one value, not the smaller first");
+            Assert.That(vendors.Select(v => Prices.ValueOf(MarketCatalog.TemplateOf("mat_hide") == v.Template ? "mat_hide" : "mat_bone", v.Mk)), Is.Ordered,
+                "not the cheapest unit first");
+            Assert.That(vendors.Take(6).All(v => v.Template == MarketCatalog.TemplateOf("mat_hide") && v.Mk == 1), Is.True, "not the cheapest unit first");
+            Assert.That(vendors.Take(6).Select(v => v.Quantity), Is.Ordered, "of two stacks of one value, not the smaller first");
             Assert.That(steps[^1], Is.EqualTo(MarketStep.Buy), "the buy is not last");
             Assert.That((plan[^1].Listing, plan[^1].UnitPrice), Is.EqualTo((900UL, 1600L)), "the buy is not at the price shown");
             Assert.That(steps.IndexOf(MarketStep.Vendor), Is.GreaterThan(steps.LastIndexOf(MarketStep.List)), "vendored before listing");
+        });
+    }
+
+    /// <summary>
+    /// Cores and add-ons past the five listed go to the vendor too — after every material, the dearer units — when the floor needs their slots: a core kept
+    /// is a slot lost to the next quest's drops.
+    /// </summary>
+    [Test]
+    public void CoresPastTheFiveListed_GoToTheVendor_AfterTheMaterials()
+    {
+        var rng = 7u;
+        var held = new List<HeldStack>();
+        for (var mk = 1; mk <= 5; mk++)
+        {
+            held.Add(Core("core_armor", mk));
+            held.Add(Core("core_ranged", mk));
+        }
+
+        for (var i = 0; i < 4; i++)
+        {
+            held.Add(Material("mat_hide", 1, 3));
+        }
+
+        var plan = MarketPlan.Plan(held, new MarketMine([1, 2, 3, 4, 5], 0), Prices, ref rng, listMaterial: false, null);
+        var vendors = plan.Where(c => c.Step == MarketStep.Vendor).ToList();
+        Assert.Multiple(() =>
+        {
+            Assert.That(plan.Where(c => c.Step == MarketStep.List), Is.Empty, "listed past five");
+            Assert.That(vendors, Has.Count.EqualTo(held.Count - MarketPlan.KeepStacks), "not down to the floor");
+            Assert.That(vendors.Take(4).All(v => v.Template == MarketCatalog.TemplateOf("mat_hide")), Is.True, "a core sold before a material");
+            Assert.That(vendors.Skip(4).Select(v => v.Mk), Is.Ordered, "not the cheaper core first");
         });
     }
 
@@ -89,7 +123,7 @@ public sealed class BotMarketChecks
         Assert.That(MarketPlan.Plan(held, new MarketMine([1, 2, 3, 4, 5], 0), Prices, ref rng, listMaterial: true, null), Is.Empty);
     }
 
-    /// <summary>A core or add-on is listed at its value × U(0.9, 1.3); a full material stack at × U(1.0, 1.4) — never past either, whatever the draw.</summary>
+    /// <summary>A core or add-on is listed at its value × U(0.9, 1.3); a full material stack at × U(0.9, 1.1) — never past either, whatever the draw.</summary>
     [Test]
     public void ListPrices_AreTheValueTimesTheirBand()
     {
@@ -109,8 +143,8 @@ public sealed class BotMarketChecks
             Assert.That(core.Min(), Is.GreaterThanOrEqualTo((long)(1549 * MarketPlan.ListLow)));
             Assert.That(core.Max(), Is.LessThanOrEqualTo((long)System.Math.Ceiling(1549 * MarketPlan.ListHigh)));
             Assert.That(core.Distinct().Count(), Is.GreaterThan(100), "the draw does not spread the prices");
-            Assert.That(material.Min(), Is.EqualTo(5L), "a 4.5 cr unit listed under its value, rounded");
-            Assert.That(material.Max(), Is.EqualTo(6L), "a 4.5 cr unit listed past 1.4 times it, rounded");
+            Assert.That(material.Min(), Is.EqualTo(4L), "a 4.5 cr unit listed under 0.9 times it, rounded");
+            Assert.That(material.Max(), Is.EqualTo(5L), "a 4.5 cr unit listed past 1.1 times it, rounded");
         });
     }
 
@@ -145,11 +179,11 @@ public sealed class BotMarketChecks
     }
 
     /// <summary>
-    /// A buy (§ 8): the cheapest core or add-on of its band, at ≤ 1.1 × its value a unit and ≤ 30 % of its wallet, never its own listing, never a
-    /// material.
+    /// A buy (§ 8): of its band, a core, an add-on or a material at ≤ 1.2 × its value a unit and ≤ 30 % of its wallet, never its own listing — the best
+    /// bargain, the lowest price to value.
     /// </summary>
     [Test]
-    public void ABuy_IsTheCheapestOfItsBand_WithinValueAndWallet_NotItsOwn()
+    public void ABuy_IsTheBestBargainOfItsBand_WithinValueAndWallet_NotItsOwn()
     {
         BrowseRow Row(ulong id, string item, int mk, long unit, int qty = 1) =>
             new(id, 1, item, MarketCatalog.CategoryOf(item.StartsWith("core") ? "core" : item.StartsWith("addon") ? "addon" : "material"), mk, qty, unit,
@@ -157,19 +191,21 @@ public sealed class BotMarketChecks
 
         var rows = new List<BrowseRow>
         {
-            Row(1, "mat_hide", 2, 1),                // a material
+            Row(1, "mat_hide", 2, 3),                // a material at 1.07 × its 2.8 cr
             Row(2, "core_armor", 3, 100),            // another band
-            Row(3, "core_armor", 2, 1800),           // past 1.1 × 1549
+            Row(3, "core_armor", 2, 1900),           // past 1.2 × 1549
             Row(4, "core_armor", 2, 1400),           // its own
             Row(5, "addon_weapon", 2, 1500, 3),      // 4 500 in all: past 30 % of 10 000
-            Row(6, "core_ranged", 2, 1700),          // the one
-            Row(7, "addon_weapon", 2, 1703),         // dearer
+            Row(6, "core_ranged", 2, 1700),          // 1.10 × its value
+            Row(7, "addon_weapon", 2, 1550),         // the best bargain: 1.0006 × its value
+            Row(8, "mat_bone", 2, 4),                // 1.43 × the model's 2.8 cr: past 1.2
         };
 
         Assert.Multiple(() =>
         {
-            Assert.That(MarketPlan.ChooseBuy(rows, Prices, 2, 10_000, [4UL])?.Id, Is.EqualTo(6UL));
-            Assert.That(MarketPlan.ChooseBuy(rows, Prices, 2, 5_000, [4UL]), Is.Null, "past 30 % of a 5 000 cr wallet");
+            Assert.That(MarketPlan.ChooseBuy(rows, Prices, 2, 10_000, [4UL])?.Id, Is.EqualTo(7UL));
+            Assert.That(MarketPlan.ChooseBuy(rows, Prices, 2, 5_000, [4UL])?.Id, Is.EqualTo(1UL), "past 30 % of a 5 000 cr wallet, the material is all");
+            Assert.That(MarketPlan.ChooseBuy(rows, Prices, 2, 5, [4UL]), Is.Null, "past 30 % of a 5 cr wallet");
             Assert.That(MarketPlan.Band(1), Is.EqualTo(1));
             Assert.That(MarketPlan.Band(10), Is.EqualTo(1));
             Assert.That(MarketPlan.Band(11), Is.EqualTo(2));
@@ -544,5 +580,118 @@ internal sealed class BotMarketDeskChecks : ServedChecks
             Assert.That(rows.Count(r => r.Kind == TransferKind.Sale && (ulong)r.Ref == buys[0].Listing), Is.EqualTo(1), "not one sale of it");
             Assert.That(ok, Is.True, why);
         });
+    }
+
+    /// <summary>
+    /// BZ-16's measure in process: drops lost to a full inventory with the bots' market and without it. Three bots hunt in quests — ten kills each, through
+    /// the real loot path, with no bazaar in between — and between two quests a trading bot does what its brain does: at
+    /// <see cref="BotBrain.MarketStacks"/> stacks or more, the bazaar, its plan read and sent as a bot sends it. The market must lose at most a quarter of
+    /// what no market loses, and the audits stay OK.
+    /// </summary>
+    /// <remarks>
+    /// Live, before this tuning (2026-10-27): ~4 800 units lost a minute with the market against ~5 400 without — 11 % fewer — two thirds of the bots
+    /// questing at any time, at a trigger of 24 stacks and a floor of 18.
+    /// </remarks>
+    [Test]
+    [CancelAfter(300_000)]
+    public void TheMarket_CutsTheDropsLostToAFullInventory()
+    {
+        var without = LostOverQuests(market: false, Dir, out _);
+        Harness?.Release();
+        Harness = null;
+        TatooineReplication.ResetSessionAccounting();
+        TatooineReplication.ResetIntentAccounting();
+        var dir = Worlds.NewDirectory();
+        try
+        {
+            var with = LostOverQuests(market: true, dir, out var audits);
+            TestContext.Progress.WriteLine($"lost to a full inventory over {Quests} quests of {KillsPerQuest} kills, 3 bots: {without} without the market, {with} with it");
+            Assert.Multiple(() =>
+            {
+                Assert.That(without, Is.GreaterThan(40), "the premise: without a market, full inventories lose drops");
+                Assert.That(with * 4, Is.LessThanOrEqualTo(without), $"the market lost {with} units against {without} without it");
+                Assert.That(audits.Ok, Is.True, audits.Why);
+            });
+        }
+        finally
+        {
+            Harness?.Release();
+            Harness = null;
+            Worlds.Delete(dir);
+        }
+    }
+
+    private const int Quests = 8;
+    private const int KillsPerQuest = 16;
+
+    private long LostOverQuests(bool market, string dir, out (bool Ok, string Why) audits)
+    {
+        var config = Worlds.Served(dir);
+        config.WorkerCount = 1;
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+        Harness = new SessionHarness(sim);
+        var home = sim.Index.Bazaars[0];
+        var bots = new List<(Trader T, EntityId Body, (float X, float Z) At)>();
+        for (var i = 0; i < 3; i++)
+        {
+            var at = (home.X + 2.5f, home.Z + (i * 0.6f));
+            var t = LogIn(sim, 0x9200UL + (ulong)i, at, i + 1);
+            bots.Add((t, TatooineReplication.ControlledBy(sim.Dbe, t.Link.Session), at));
+        }
+
+        var victim = 0xB0000UL;
+        var rng = 11u;
+        for (var quest = 0; quest < Quests; quest++)
+        {
+            // The quest: kills of every wild species, levels across the bands, so drops spread over many (template, Mk) — and no bazaar.
+            var drops = sim.Bridge.ItemDrops + sim.Bridge.ItemsLost;
+            foreach (var (_, body, at) in bots)
+            {
+                for (var k = 0; k < KillsPerQuest; k++, victim++)
+                {
+                    var kill = Items.Kill(body, victim, at.X, at.Z, (byte)(victim % CreatureTemplates.WildCount));
+                    kill.VictimLevel = (byte)(1 + (victim * 7 % 40));
+                    sim.Bridge.StageKill(kill);
+                }
+            }
+
+            SessionHarness.Until(() => sim.Bridge.LootCommits > 0 && sim.Bridge.ItemDrops + sim.Bridge.ItemsLost > drops, "the quest's kills to be looted");
+            Harness.Ticks(4);
+            if (!market)
+            {
+                continue;
+            }
+
+            // Between quests, the brain's choice: the bazaar at MarketStacks or more. The bots' plans go out together, two commands a second each.
+            var plans = new List<(Trader T, List<MarketCommand> Plan)>();
+            foreach (var (t, _, _) in bots)
+            {
+                var (held, mine, prices) = Read(sim, t);
+                if (held.Count >= BotBrain.MarketStacks)
+                {
+                    plans.Add((t, MarketPlan.Plan(held, mine, prices, ref rng, listMaterial: false, buy: null)));
+                }
+            }
+
+            for (var i = 0; plans.Any(p => i < p.Plan.Count); i++)
+            {
+                foreach (var (t, plan) in plans)
+                {
+                    if (i < plan.Count)
+                    {
+                        var (name, values) = BotSwarm.Encode(plan[i]);
+                        t.Link.SendCommand(name, values);
+                    }
+                }
+
+                Harness.Ticks((Worlds.ServedHz / 2) + 1);
+            }
+
+            Harness.Ticks(Worlds.ServedHz);
+        }
+
+        audits = Market.Audits(sim);
+        return sim.Bridge.ItemsLost;
     }
 }

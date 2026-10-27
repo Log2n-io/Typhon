@@ -56,6 +56,9 @@ public enum GoalWhy : byte
 
     /// <summary>The bazaar errand done: traded, and back to the day's loop.</summary>
     MarketDone,
+
+    /// <summary>Off to trade with <see cref="BotBrain.MarketFullStacks"/> stacks or more: already losing drops — how often is the measure of too little headroom.</summary>
+    MarketFull,
 }
 
 /// <summary>What happened to a walk (a leg): planned, a point reached, re-planned, stuck, given up.</summary>

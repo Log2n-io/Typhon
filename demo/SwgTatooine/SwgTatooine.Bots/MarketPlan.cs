@@ -39,12 +39,12 @@ public readonly record struct MarketCommand(MarketStep Step, ushort Template, in
 /// <para>
 /// <b>In order: collect, list, vendor, buy.</b> Collect first, so goods waiting for it come in; list its cores and add-ons at
 /// <c>value × U(0.9, 1.3)</c> while it has fewer than <see cref="MaxListed"/>; one in five visits also lists one full material stack at
-/// <c>value × U(1.0, 1.4)</c>; then the vendor takes material stacks, the cheapest first, until <see cref="KeepStacks"/> are left — the floor that keeps
-/// a drop from being lost. A buy, when the visit rolled one, comes last.
+/// <c>value × U(0.9, 1.1)</c>; then the vendor takes stacks, the cheapest unit first (the materials, then cores past those listed), until
+/// <see cref="KeepStacks"/> are left — the floor that keeps a drop from being lost. A buy, when the visit rolled one, comes last.
 /// </para>
 /// <para>
 /// <b>An item with no value is neither listed nor bought</b>: a bot does not invent a price. The value is the board's, else the model's
-/// (<see cref="MarketPrices.ValueOf"/>). The vendor prices its own sale, so a material is sold either way — the cheapest unit first.
+/// (<see cref="MarketPrices.ValueOf"/>). The vendor takes what has a value, the cheapest unit first.
 /// </para>
 /// </remarks>
 public static class MarketPlan
@@ -52,8 +52,9 @@ public static class MarketPlan
     /// <summary>A bot keeps at most this many listings (the design's 5; the server's cap is 20).</summary>
     public const int MaxListed = 5;
 
-    /// <summary>The vendor takes material stacks until this many stacks are left.</summary>
-    public const int KeepStacks = 18;
+    /// <summary>The vendor takes material stacks until this many stacks are left: 22 slots free for the next quest's drops.</summary>
+    /// <remarks>18 left twelve, and the bots back at the bazaar after a quest were full again within it (live, 2026-10-27; see BotBrain.MarketStacks).</remarks>
+    public const int KeepStacks = 8;
 
     /// <summary>A full stack, the server's <c>ItemLedger.StackMax</c>.</summary>
     public const int StackMax = 99;
@@ -66,18 +67,21 @@ public static class MarketPlan
 
     public const double ListHigh = 1.3;
 
-    /// <summary>A full material stack is listed at its value times a draw in this range.</summary>
-    public const double MaterialLow = 1.0;
+    /// <summary>A full material stack is listed at its value times a draw in this range: near its value, so a buyer at ≤ <see cref="BuyOverValue"/> takes it.</summary>
+    public const double MaterialLow = 0.9;
 
-    public const double MaterialHigh = 1.4;
+    public const double MaterialHigh = 1.1;
 
     /// <summary>One visit in this many hundred lists a full material stack, and in <see cref="BuyPercent"/> buys.</summary>
     public const int ListMaterialPercent = 20;
 
-    public const int BuyPercent = 10;
+    public const int BuyPercent = 25;
 
     /// <summary>A buy pays at most this times the value a unit, and at most <see cref="BuyWalletShare"/> of the wallet.</summary>
-    public const double BuyOverValue = 1.1;
+    /// <remarks>
+    /// At 1.1 and one visit in ten, 2 000 bots listing 1 901 times in five minutes made one sale (live, 2026-10-27): cores are listed at up to 1.3 × value.
+    /// </remarks>
+    public const double BuyOverValue = 1.2;
 
     public const double BuyWalletShare = 0.3;
 
@@ -134,8 +138,9 @@ public static class MarketPlan
             }
         }
 
-        // The vendor: materials, the cheapest unit first and the smaller stack of two, until the floor.
-        var materials = left.FindAll(s => s.Category == MarketCategory.Material && s.Template != 0 && s.Count > 0);
+        // The vendor: whatever has a value, the cheapest unit first — the materials, then cores and add-ons past the five listed — and the smaller stack of
+        // two, until the floor. A core kept because five are listed is a slot lost to the next quest's drops.
+        var materials = left.FindAll(s => s.Template != 0 && s.Count > 0 && prices.ValueOf(s.Item, s.Mk) > 0d);
         materials.Sort((a, b) =>
         {
             var byValue = prices.ValueOf(a.Item, a.Mk).CompareTo(prices.ValueOf(b.Item, b.Mk));
@@ -162,24 +167,31 @@ public static class MarketPlan
     }
 
     /// <summary>
-    /// What a buying visit buys from a browse page of its city: the cheapest core or add-on of its band at ≤ <see cref="BuyOverValue"/> × its value a
-    /// unit and ≤ <see cref="BuyWalletShare"/> of its wallet in all, not one of its own; null when none is.
+    /// What a buying visit buys from a browse page of its city: of its band, a core, an add-on or a material at ≤ <see cref="BuyOverValue"/> × its value
+    /// a unit and ≤ <see cref="BuyWalletShare"/> of its wallet in all, not one of its own — the best bargain, the lowest price to value; null when none is.
     /// </summary>
+    /// <remarks>
+    /// Materials too, though the design names cores and add-ons: a core of band I is 726 cr and ≤ 30 % of a 1 000 cr wallet is 300, so a new bot could buy
+    /// none, and a market whose buyers cannot pay is the one sale in five minutes measured live.
+    /// </remarks>
     public static BrowseRow? ChooseBuy(IReadOnlyList<BrowseRow> rows, MarketPrices prices, int band, long wallet, IReadOnlyCollection<ulong> own)
     {
         BrowseRow? best = null;
+        var bestRatio = double.MaxValue;
         foreach (var r in rows)
         {
             var value = prices.ValueOf(r.Item, r.Mk);
-            if (r.Category is not (MarketCategory.Core or MarketCategory.Addon) || r.Mk != band || value <= 0d || r.Unit > BuyOverValue * value
-                || r.Total > BuyWalletShare * wallet || Contains(own, r.Id))
+            if (r.Category is not (MarketCategory.Core or MarketCategory.Addon or MarketCategory.Material) || r.Mk != band || value <= 0d
+                || r.Unit > BuyOverValue * value || r.Total > BuyWalletShare * wallet || Contains(own, r.Id))
             {
                 continue;
             }
 
-            if (best is not { } b || r.Unit < b.Unit)
+            var ratio = r.Unit / value;
+            if (best is not { } b || ratio < bestRatio || (ratio == bestRatio && r.Unit < b.Unit))
             {
                 best = r;
+                bestRatio = ratio;
             }
         }
 

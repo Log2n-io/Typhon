@@ -75,7 +75,8 @@ public enum Goal
 /// <para>
 /// <b>The bazaar is an interlude in that loop, not a loop of its own (bazaar.md § 8).</b> A bot that trades (<see cref="Trades"/>), not on a quest,
 /// with <see cref="MarketStacks"/> stacks or more, or goods reserved for it, goes to a bazaar of its desk's city before the desk — a quest with a full
-/// inventory loses its drops — and not again for <see cref="MarketRetrySeconds"/>, whatever came of it. At any bazaar it reaches, errand or not, it
+/// inventory loses its drops — and not again for <see cref="MarketRetrySeconds"/>, whatever came of it. A questing bot is not turned back: its quest's
+/// end is the next choice, and the bazaar is that choice's first, as soon as one is within errand reach. At any bazaar it reaches, errand or not, it
 /// trades: the swarm sends the plan. A rush bot (<see cref="RushRegion"/>) does nothing else: to the rush city, to one of its bazaars, and a round of
 /// trade every <see cref="RushRoundSeconds"/> for good.
 /// </para>
@@ -225,8 +226,16 @@ public sealed partial class BotBrain
     /// </summary>
     public const double MountRetrySeconds = 10d;
 
-    /// <summary>A bot holding this many stacks or more goes to trade (bazaar.md § 8): six of its 30 slots left, before a drop is lost.</summary>
-    public const int MarketStacks = 24;
+    /// <summary>A bot holding this many stacks or more goes to trade (bazaar.md § 8): ten of its 30 slots left, a quest's worth of drops.</summary>
+    /// <remarks>
+    /// 24 left six, and a bot that set out on a quest with 23 stacks came back full: live, 2 000 bots, two thirds of them questing at any time, the
+    /// market cut the drops lost to a full inventory by a tenth only (2026-10-27). With 20 and the vendor's floor at 8 (<c>MarketPlan.KeepStacks</c>),
+    /// a quest starts with twelve slots free at least.
+    /// </remarks>
+    public const int MarketStacks = 20;
+
+    /// <summary>A bot this full is losing drops: the errand says so (<see cref="GoalWhy.MarketFull"/>) — the measure of headroom too small.</summary>
+    public const int MarketFullStacks = 29;
 
     /// <summary>A bazaar errand, made or failed, is not chosen again for this long, in seconds: a vendor that refuses cannot hold a bot at the bazaar.</summary>
     public const double MarketRetrySeconds = 120d;
@@ -609,10 +618,13 @@ public sealed partial class BotBrain
         var here = RegionAt(world.X, world.Z);
 
         // Nearly full, or goods waiting for it: its city's bazaar, before the desk — a quest taken now would lose its drops (the remarks).
-        if (Trades && _assets != null && tick >= _marketAt && (world.InventoryStacks >= MarketStacks || world.Reserved > 0))
+        // A bazaar out of errand reach — the bot is back from a quest's lair, kilometres out — is no try: it goes when back in reach, not 120 s later.
+        if (Trades && _assets != null && tick >= _marketAt && (world.InventoryStacks >= MarketStacks || world.Reserved > 0)
+            && Bazaar(in world, here) is { } bazaar && Routing.Distance(world.X, world.Z, bazaar.At.X, bazaar.At.Z) <= ErrandReachM)
         {
             _marketAt = tick + Ticks(MarketRetrySeconds);
-            if (Bazaar(in world, here) is { } bazaar && StartVisitAt(in world, tick, Routing.BazaarKind, GoalWhy.MarketChosen, bazaar))
+            var why = world.InventoryStacks >= MarketFullStacks ? GoalWhy.MarketFull : GoalWhy.MarketChosen;
+            if (StartVisitAt(in world, tick, Routing.BazaarKind, why, bazaar))
             {
                 return Visit(in world, tick);
             }
@@ -1167,7 +1179,7 @@ public sealed partial class BotBrain
         _leg.FinalReach = UseReachM;
         _visitAt = (found.X, found.Z);
         _visitRegion = to.Region;
-        _marketErrand = why == GoalWhy.MarketChosen;
+        _marketErrand = why is GoalWhy.MarketChosen or GoalWhy.MarketFull;
 
         Become(Goal.Visiting, why, tick, (uint)kind, (float)Routing.Distance(world.X, world.Z, found.X, found.Z));
         _using = false;

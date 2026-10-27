@@ -271,7 +271,7 @@ public sealed partial class BotSwarm
             }
         }
 
-        /// <summary>A visit's plan (<see cref="MarketPlan.Plan"/>): its market read, a full material stack listed one visit in five, a buy one in ten.</summary>
+        /// <summary>A visit's plan (<see cref="MarketPlan.Plan"/>): its market read, a full material stack listed one visit in five, a buy one in four.</summary>
         private async Task<List<MarketCommand>> PlanTradeAsync(int region, int level)
         {
             var mine = await ReadMineAsync().ConfigureAwait(false);
@@ -280,11 +280,9 @@ public sealed partial class BotSwarm
             BrowseRow? buy = null;
             if (MarketPlan.Next(ref _marketRng) % 100u < MarketPlan.BuyPercent && region != 0)
             {
-                // The cheapest of its band, a core or an add-on, in this city: the browser's filtered first page.
+                // The cheapest of its band in this city: the browser's first page, filtered by Mk.
                 var band = MarketPlan.Band(level);
-                var category = MarketPlan.Next(ref _marketRng) % 2u == 0 ? "core" : "addon";
-                var page = MarketJson.Browse(await GetAsync(new Uri(_browseUri, $"?city={region}&cat={category}&mk={band}&sort=price&page=1"))
-                    .ConfigureAwait(false));
+                var page = MarketJson.Browse(await GetAsync(new Uri(_browseUri, $"?city={region}&mk={band}&sort=price&page=1")).ConfigureAwait(false));
                 var wallet = MarketJson.Credits(await GetAsync(_walletUri).ConfigureAwait(false));
                 buy = MarketPlan.ChooseBuy(page, prices, band, wallet, mine.ListedIds);
             }

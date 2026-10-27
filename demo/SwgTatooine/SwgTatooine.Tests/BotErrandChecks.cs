@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using NUnit.Framework;
+using SwgTatooine.Bots;
 using SwgTatooine.Bots.Brain;
 using SwgTatooine.Navigation;
 
@@ -1502,8 +1503,48 @@ public sealed class BotErrandChecks
         {
             Assert.That(brain.Goal, Is.EqualTo(Goal.Visiting), "the premise: an errand first");
             Assert.That(brain.VisitTarget, Is.EqualTo(toMarket ? (Here.X + 40f, Here.Z) : (Here.X - 60f, Here.Z)), "not the bazaar, or not the desk");
-            Assert.That(brain.Counters.Why[(int)GoalWhy.MarketChosen], Is.EqualTo(toMarket ? 1 : 0));
+            Assert.That(brain.Counters.Why[(int)GoalWhy.MarketChosen] + brain.Counters.Why[(int)GoalWhy.MarketFull], Is.EqualTo(toMarket ? 1 : 0));
         });
+    }
+
+    /// <summary>A bot full enough to be losing drops says so: <see cref="GoalWhy.MarketFull"/>, the telemetry's measure of too little headroom.</summary>
+    [TestCase(BotBrain.MarketFullStacks, GoalWhy.MarketFull)]
+    [TestCase(BotBrain.MarketFullStacks - 1, GoalWhy.MarketChosen)]
+    public void AFullBot_SaysItIsFull(int stacks, GoalWhy why)
+    {
+        var (brain, sim) = Trader(stacks, 0);
+        brain.Decide(sim.View(), 1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.VisitTarget, Is.EqualTo((Here.X + 40f, Here.Z)), "not the bazaar");
+            Assert.That(brain.Counters.Why[(int)why], Is.EqualTo(1));
+            Assert.That(brain.Counters.Why[(int)GoalWhy.MarketChosen] + brain.Counters.Why[(int)GoalWhy.MarketFull], Is.EqualTo(1));
+        });
+    }
+
+    /// <summary>
+    /// A bot back from a quest's lair, its city's bazaar out of errand reach, does not count that as a try: it goes home, and to the bazaar as soon as it
+    /// is back in reach — not <see cref="BotBrain.MarketRetrySeconds"/> later, setting out on its next quest full meanwhile.
+    /// </summary>
+    [Test]
+    public void ABazaarOutOfReach_IsNoTry_TheBotGoesOnceBackInReach()
+    {
+        var (brain, sim) = Trader(BotBrain.MarketFullStacks, 0);
+        sim.X = Here.X + Here.Radius + BotBrain.ErrandReachM;
+        brain.Decide(sim.View(), 1);
+        Assert.That(brain.Goal, Is.EqualTo(Goal.Travelling), "the premise: out in the desert, it goes home first");
+        Assert.That(brain.Counters.Why[(int)GoalWhy.MarketFull], Is.Zero, "a bazaar out of reach was set out for");
+
+        // Home: the ride is the travel's, not the subject; the bot stands in its town.
+        (sim.X, sim.Z) = (Here.X, Here.Z);
+        var marketAt = -1L;
+        for (var tick = 2L; tick < 400 && marketAt < 0; tick++)
+        {
+            sim.Apply(brain.Decide(sim.View(), tick));
+            marketAt = brain.Counters.Why[(int)GoalWhy.MarketFull] > 0 ? tick : -1L;
+        }
+
+        Assert.That(marketAt, Is.InRange(1L, (long)(BotBrain.MarketRetrySeconds * 4) - 1), "back in reach, it did not go to the bazaar before its retry");
     }
 
     /// <summary>
@@ -1525,7 +1566,7 @@ public sealed class BotErrandChecks
             if (intent.Kind == IntentKind.Trade)
             {
                 trades.Add((tick, intent));
-                sim.Stacks = 18;   // the server's half: the plan vendored the bot down to its floor
+                sim.Stacks = MarketPlan.KeepStacks;   // the server's half: the plan vendored the bot down to its floor
             }
 
             if (doneAt < 0 && brain.Counters.Why[(int)GoalWhy.MarketDone] > 0)
@@ -1566,9 +1607,9 @@ public sealed class BotErrandChecks
         for (var tick = 1L; tick < 1400; tick++)
         {
             sim.Apply(brain.Decide(sim.View(), tick));
-            if (brain.Counters.Why[(int)GoalWhy.MarketChosen] > chosen)
+            if (brain.Counters.Why[(int)GoalWhy.MarketChosen] + brain.Counters.Why[(int)GoalWhy.MarketFull] > chosen)
             {
-                chosen = brain.Counters.Why[(int)GoalWhy.MarketChosen];
+                chosen = brain.Counters.Why[(int)GoalWhy.MarketChosen] + brain.Counters.Why[(int)GoalWhy.MarketFull];
                 chosenAt.Add(tick);
             }
         }
