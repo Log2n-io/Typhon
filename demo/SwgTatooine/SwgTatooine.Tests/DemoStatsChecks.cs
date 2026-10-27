@@ -329,7 +329,8 @@ internal sealed class DemoStatsChecks : ServedChecks
             {"v":1,"run":"r1","at":"2026-10-27T12:00:00Z","hz":4,"tick":100,
              "fleet":{"bots":30,"windowS":60,"stuckS":0,"goals":{},
                       "totals":{"hunts":2,"marketTrades":4,"marketListed":7,"marketBought":3,"marketBuyLost":9,"marketWon":3,"marketRefused":10},
-                      "perMin":{"marketTrades":2.5,"marketVendored":2},"why":{"MarketChosen":4},"whyPerMin":{"MarketDone":1.5}},
+                      "perMin":{"marketTrades":2.5,"marketVendored":2},"why":{"MarketChosen":4},"whyPerMin":{"MarketDone":1.5},
+                      "marketRefusedBy":{"sold":9,"notEnough":0,"badListing":1}},
              "traced":[]}
             """;
         const string before = """{"v":1,"run":"r2","at":"2026-10-27T12:00:00Z","hz":4,"tick":100,"fleet":{"bots":1,"totals":{"hunts":1}},"traced":[]}""";
@@ -345,6 +346,16 @@ internal sealed class DemoStatsChecks : ServedChecks
             Assert.That(SwgTatooine.Dashboard.BotBoard.Of(fleet.PerMin, "marketVendored"), Is.EqualTo(2d));
             Assert.That(SwgTatooine.Dashboard.BotBoard.Of(fleet.WhyPerMin, "MarketDone"), Is.EqualTo(1.5d));
             Assert.That(board.History("market trades/min").Single(), Is.EqualTo(2.5d));
+            Assert.That(fleet.MarketRefusedBy["sold"], Is.EqualTo(9));
+            Assert.That(SimBridge.MarketRefusalNames.ToArray().Select(n => n.Name), Is.SupersetOf(fleet.MarketRefusedBy.Keys),
+                "the swarm names refusals as the server does");
+
+            // BZ-16 over 7 listed + 3 bought + 10 refused = 20 commands: 9 races lost are expected; one bad listing is 5 %, a bug.
+            var commands = SwgTatooine.Dashboard.BotBoard.MarketCommands(fleet);
+            Assert.That(commands, Is.EqualTo(20));
+            Assert.That(SwgTatooine.Dashboard.BotBoard.UnexpectedRefusal("sold", 9, commands), Is.False, "153: the race");
+            Assert.That(SwgTatooine.Dashboard.BotBoard.UnexpectedRefusal("badListing", 1, commands), Is.True, "5 % of the commands");
+            Assert.That(SwgTatooine.Dashboard.BotBoard.UnexpectedRefusal("badListing", 1, 100), Is.False, "exactly 1 % is not above it");
         });
 
         taken = board.Ingest(JsonSerializer.Deserialize<SwgTatooine.Dashboard.BotReport>(before, SwgTatooine.Dashboard.BotReport.Json), DateTime.UtcNow,
@@ -354,6 +365,7 @@ internal sealed class DemoStatsChecks : ServedChecks
             Assert.That(taken, Is.True, error);
             Assert.That(board.Latest.Fleet.Totals.ContainsKey("marketTrades"), Is.False, "a swarm without the market: the page says it does not trade");
             Assert.That(board.History("market trades/min").Single(), Is.Zero, "a new run's history, and no market rate");
+            Assert.That(board.Latest.Fleet.MarketRefusedBy, Is.Empty);
         });
     }
 }

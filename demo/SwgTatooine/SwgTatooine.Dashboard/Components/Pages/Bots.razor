@@ -80,6 +80,24 @@
                 @Spark("market trades/min", "/min")
                 <p class="muted small">lost the race: refused 153, another bot bought it first (expected under load) · wins seen collected: bazaar buy rows in
                     the bot's inventory</p>
+                @if (f.MarketRefusedBy.Any(r => r.Value > 0))
+                {
+                    var commands = BotBoard.MarketCommands(f);
+                    <h3>Refused, by reason</h3>
+                    <table class="ledger">
+                        <tr><th>reason</th><th class="num">since start</th><th class="num">of commands</th></tr>
+                        @foreach (var (reason, n) in f.MarketRefusedBy.Where(r => r.Value > 0).OrderByDescending(r => r.Value))
+                        {
+                            <tr style="@(BotBoard.UnexpectedRefusal(reason, n, commands) ? "color:var(--bad)" : null)">
+                                <td>@reason</td><td class="num">@F(n, 0)</td><td class="num">@Pct(n, commands)</td>
+                            </tr>
+                        }
+                    </table>
+                    <p class="muted small">
+                        sold (153), notEnough (154), noRoom (159): the race and the bot's own state · any other above 1 % of the commands is a bot or server bug
+                        (BZ-16)
+                    </p>
+                }
             }
         </section>
 

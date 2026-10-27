@@ -28,6 +28,8 @@ namespace SwgTatooine.Dashboard;
 //                                      trades = bazaar visits; buyLost = refusals 153 (the race loser's); won = bazaar buy rows seen collected in the
 //                                      bot's inventory; refused = every market refusal 151-163
 //       "perMin":     { the same keys, fleet-wide per minute over the window },
+//       "marketRefusedBy": { "notInWorld": 0, "notAtBazaar": 0, "sold": 9, ... },   what marketRefused sums, by the server's reason names
+//                                                                                   (SimBridge.MarketRefusalNames); optional
 //       "why":        { "HuntTimeout": 12, "CreatureNoticed": 80, "MarketChosen": 3, "MarketDone": 3, ... },
 //                                                                          goal reasons since the start (BotBrain.Trace.cs GoalWhy)
 //       "whyPerMin":  { the same keys },
@@ -107,6 +109,9 @@ public sealed class BotFleetReport
     public Dictionary<string, long> Legs { get; set; } = [];
 
     public Dictionary<string, double> LegsPerMin { get; set; } = [];
+
+    /// <summary>The market's refusals since the start, by the server's reason name; empty from a swarm without the market.</summary>
+    public Dictionary<string, long> MarketRefusedBy { get; set; } = [];
 
     public BotSpread GoalChangesPerBotMin { get; set; } = new();
 
