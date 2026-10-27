@@ -31,9 +31,6 @@ internal struct OwedRecord
 
     public uint NetId;
 
-    /// <summary>The record's metered bytes when it was owed: what the cursor-driven steps give up for it.</summary>
-    public int Bytes;
-
     public ushort Archetype;
     public byte Slot;
 
@@ -62,14 +59,29 @@ internal sealed unsafe partial class FrameAssembler
         Overflow,
     }
 
-    private long _owedResets;
+    private long _owedOverflows;
+    private long _owedLosts;
     private long _framesOwing;
+    private int _owedLargestStage;
+    private int _owedLargest;
+
+    /// <summary>
+    /// The largest owed set (15 § 4.3) a session's frame committed in the last frame stage: 0 when every session's frames fit, the god camera's backlog of
+    /// records when its movers outrun its frame. A gauge, read off the tick.
+    /// </summary>
+    public int OwedLargest => Volatile.Read(ref _owedLargest);
 
     /// <summary>Frames the fit left owing records to the next ones: a frame budget that bound (15 § 4.4).</summary>
     public long FramesOwing => Interlocked.Read(ref _framesOwing);
 
-    /// <summary>Frames abandoned for a <c>RESET</c> by the frame budget: an owed set past its cap, or an owed entity its slot lost (15 § 4.3).</summary>
-    public long OwedResets => Interlocked.Read(ref _owedResets);
+    /// <summary>Frames abandoned for a <c>RESET</c> by the frame budget, whatever the cause: <see cref="OwedOverflows"/> + <see cref="OwedLosts"/>.</summary>
+    public long OwedResets => OwedOverflows + OwedLosts;
+
+    /// <summary>Frames abandoned for a <c>RESET</c> because they grew the owed set past its cap (15 § 4.3, C2).</summary>
+    public long OwedOverflows => Interlocked.Read(ref _owedOverflows);
+
+    /// <summary>Frames abandoned for a <c>RESET</c> because an owed entity was found nowhere and met by no record of the frame (15 § 10).</summary>
+    public long OwedLosts => Interlocked.Read(ref _owedLosts);
 
     /// <summary>
     /// The largest frame <paramref name="session"/> may be sent (C10): its own limit under the engine's ceiling, and never below twice the largest enter
@@ -122,18 +134,7 @@ internal sealed unsafe partial class FrameAssembler
         return records;
     }
 
-    private static bool OwesEnter(FrameWorkerScratch scratch)
-    {
-        for (var i = 0; i < scratch.PendingOwedCount; i++)
-        {
-            if (scratch.PendingOwed[i].Kind == OwedKind.Enter)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
+    private static bool OwesEnter(FrameWorkerScratch scratch) => scratch.PendingOwedEnters > 0;
 
     private long _meterViolations;
     private long _meterChecks;
@@ -171,9 +172,6 @@ internal sealed unsafe partial class FrameAssembler
         }
     }
 
-    /// <summary>The most records a session may be owed: past it a <c>RESET</c> is the cheaper repair (15 § 4.3, C2).</summary>
-    private int OwedCap => 4 * Math.Max(1, _options.EnterBudgetPerFrame);
-
     /// <summary>
     /// The byte allowance of a frame's cursor-driven steps (15 § 4.2): half the frame, less the enters the session is owed — so a fill that spilled stops
     /// until its overshoot has drained. Owed updates are not counted: they merge and may never drain while their entities keep changing, and a fill they
@@ -183,8 +181,9 @@ internal sealed unsafe partial class FrameAssembler
         _options.FrameBudgetOffForTest ? int.MaxValue : Math.Max(0, (limit / 2) - (reset ? 0 : state.OwedEnterBytes));
 
     /// <summary>
-    /// The fit (15 § 4.4): makes the frame's entity records take at most <paramref name="target"/> bytes, and owes what does not fit, oldest work first —
-    /// leaves and the controlled entity's records always, then what earlier frames owed, then this frame's updates, then its enters. Leaves
+    /// The fit (15 § 4.4): makes the frame's entity records take at most <paramref name="target"/> bytes, and owes what does not fit — leaves and the
+    /// controlled entity's records always, then the enters earlier frames owed, oldest first, this frame's enters, the updates earlier frames owed, oldest
+    /// first, and this frame's updates. Leaves
     /// <see cref="FrameWorkerScratch.PendingOwed"/> as the session's owed set once the frame is published.
     /// </summary>
     /// <param name="state">The session's frame state, whose committed owed set this frame starts from.</param>
@@ -192,21 +191,30 @@ internal sealed unsafe partial class FrameAssembler
     /// <param name="target">The bytes the entity records may take: the frame's limit less every other block's bound.</param>
     /// <param name="selfNetId">The controlled entity's identity, 0 for none: its records always go, because <c>SELF</c> names it.</param>
     /// <param name="reset">The frame is a RESET: the client's store is cleared, and so is what it was owed.</param>
+    /// <param name="owedCap">
+    /// The most enters the session may be owed — four of its profile's fill budgets: past it a <c>RESET</c> is the cheaper repair (15 § 4.3, C2). Owed
+    /// updates are not capped: there is one per held entity at most, merged, and a RESET does not lower the rate they come at — it would only throw the fill
+    /// away and start it again.
+    /// </param>
     /// <param name="lost">An owed entity found nowhere — not in its slot, not by its identity — and met by no record of this frame: the next frame must
     /// RESET.</param>
     /// <param name="metered">The records' metered bytes when the fast path measured them, -1 otherwise: what sizes the encode buffer.</param>
-    private FitOutcome FitEntities(SessionFrameState state, FrameWorkerScratch scratch, int target, uint selfNetId, bool reset, out bool lost,
+    private FitOutcome FitEntities(SessionFrameState state, FrameWorkerScratch scratch, int target, uint selfNetId, bool reset, int owedCap, out bool lost,
         out int metered)
     {
         lost = false;
         metered = -1;
         scratch.PendingOwedCount = 0;
+        scratch.PendingOwedEnters = 0;
         if (_options.FrameBudgetOffForTest)
         {
             return FitOutcome.Fits;
         }
 
         var owedIn = reset ? 0 : state.OwedCount;
+
+        // The committed set's enters are its prefix (CommitOwed): [0, entersIn) enters, [entersIn, owedIn) updates.
+        var entersIn = reset ? 0 : state.OwedEnters;
         if (owedIn == 0 && (UpperBound(scratch) - EntitiesEncoder.MaxHeaderBytes <= target || (metered = MeteredBytes(scratch)) <= target))
         {
             return FitOutcome.Fits;
@@ -263,12 +271,12 @@ internal sealed unsafe partial class FrameAssembler
             }
         }
 
-        // ── 2. What earlier frames owed, oldest first: the first always goes, and the rest while they fit ─────────────────────────────────────────
+        // ── 2. The controlled entity's owed record, whatever its age ──────────────────────────────────────────────────────────────────────────────
         var full = false;
         var first = true;
         Span<bool> appended = _plans.Length <= 256 ? stackalloc bool[_plans.Length * 4] : new bool[_plans.Length * 4];
 
-        // This frame's own records, before step 2 appends the owed ones it carries: what steps 3 and 4 decide on.
+        // This frame's own records, before the owed ones carried are appended: what step 3 decides on.
         Span<int> own = _plans.Length <= 256 ? stackalloc int[_plans.Length * 4] : new int[_plans.Length * 4];
         for (var a = 0; a < _plans.Length; a++)
         {
@@ -296,58 +304,64 @@ internal sealed unsafe partial class FrameAssembler
             e.Kind = OwedKind.None;
         }
 
-        for (var i = 0; i < owedIn && !full; i++)
+        // ── 3. Enters, then updates — what earlier frames owed first, oldest first, then this frame's own — while they fit; past the first that does not,
+        // every one is owed. An entity its client lacks matters more than one it holds a little stale, and the enters are few — the fill takes at most half
+        // a frame (FillAllowanceOf) — so the updates keep most of the frame. Taken in plain age order, a world of movers owed more updates than a frame
+        // carries, every enter waited behind them, and the enters piled up past the cap (the god camera's RESET loop).
+        //
+        // While updates are owed, the enters take at most half of what the mandatory records left (the first owed enter always goes): a fill takes half the
+        // frame's LIMIT, and the events up to the other half, so a session filling under a stream of events — a player riding into a fight, a god camera
+        // over a battle — would otherwise carry its enters and owe every update, every frame, and the entities it holds would freeze.
+        var entersTarget = owedIn > entersIn ? spent + ((target - spent) / 2) : target;
+        var entersFull = false;
+        CarryOwed(scratch, OwedKind.Enter, 0, entersIn, entersTarget, appended, ref spent, ref first, ref entersFull, ref lost);
+        removed |= Spill(scratch, FrameListKind.Enter, own, selfNetId, entersTarget, ref spent, ref first, ref entersFull);
+        CarryOwed(scratch, OwedKind.Update, entersIn, owedIn, target, appended, ref spent, ref first, ref full, ref lost);
+
+        // What is still owed keeps its order within its kind: the enters earlier frames owed, this frame's spilled enters, the updates earlier frames owed —
+        // and this frame's spilled updates after them. The enters stay the prefix, so what scans for them scans only them.
+        var spare = scratch.OwedSpare;
+        if (spare.Length < scratch.PendingOwedCount)
         {
-            ref var e = ref scratch.PendingOwed[i];
-            if (e.Kind == OwedKind.None)
-            {
-                continue;
-            }
-
-            var plan = _encodePlans[e.Archetype];
-            if (!Located(plan, ref e))
-            {
-                // Neither its slot nor its identity holds the entity, and no record of this frame said where it went. Nothing can be sent for it, and
-                // the client and the geometry would disagree about it from here on: the next frame is a RESET (counted).
-                lost = true;
-                e.Kind = OwedKind.None;
-                continue;
-            }
-
-            var bytes = OwedBytesOf(plan, in e);
-            if (!first && spent + bytes > target)
-            {
-                full = true;
-                break;
-            }
-
-            first = false;
-            spent += bytes;
-            Carry(scratch, in e, appended);
-            e.Kind = OwedKind.None;
+            spare = new OwedRecord[scratch.PendingOwed.Length];
         }
 
-        // What is still owed keeps its order; this frame's spills follow it.
         var kept = 0;
-        for (var i = 0; i < owedIn; i++)
+        for (var i = 0; i < entersIn; i++)
         {
             if (scratch.PendingOwed[i].Kind != OwedKind.None)
             {
-                scratch.PendingOwed[kept++] = scratch.PendingOwed[i];
+                spare[kept++] = scratch.PendingOwed[i];
             }
         }
 
-        scratch.PendingOwedCount = kept;
-        scratch.ClearOwedTable(kept + 64);
-        for (var i = 0; i < kept; i++)
+        for (var i = owedIn; i < scratch.PendingOwedCount; i++)
         {
-            scratch.FileOwed(i);
+            if (scratch.PendingOwed[i].Kind != OwedKind.None)
+            {
+                spare[kept++] = scratch.PendingOwed[i];
+            }
         }
 
-        // ── 3. This frame's updates, then 4. its enters, while they fit; past the first that does not, every one is owed ─────────────────────────
-        removed |= Spill(scratch, FrameListKind.Segment, own, selfNetId, target, ref spent, ref full);
-        removed |= Spill(scratch, FrameListKind.State, own, selfNetId, target, ref spent, ref full);
-        removed |= Spill(scratch, FrameListKind.Enter, own, selfNetId, target, ref spent, ref full);
+        scratch.PendingOwedEnters = kept;
+        for (var i = entersIn; i < owedIn; i++)
+        {
+            if (scratch.PendingOwed[i].Kind != OwedKind.None)
+            {
+                spare[kept++] = scratch.PendingOwed[i];
+            }
+        }
+
+        scratch.OwedSpare = scratch.PendingOwed;
+        scratch.PendingOwed = spare;
+        scratch.PendingOwedCount = kept;
+
+        // The table now files only the updates this frame owes, so its segment and state records merge into one. No record left can meet a kept entry: the
+        // reconcile took out every record of an entity owed when the frame began.
+        scratch.ClearOwedTable(64, kept);
+
+        removed |= Spill(scratch, FrameListKind.Segment, own, selfNetId, target, ref spent, ref first, ref full);
+        removed |= Spill(scratch, FrameListKind.State, own, selfNetId, target, ref spent, ref first, ref full);
 
         // The lists without what was taken out, and re-sorted where owed records were appended to them.
         for (var a = 0; a < _plans.Length; a++)
@@ -372,14 +386,22 @@ internal sealed unsafe partial class FrameAssembler
             Interlocked.Increment(ref _framesOwing);
         }
 
-        // An overflow is a frame that GROWS the owed set past the cap, and never a RESET's: a RESET is the overflow's repair, and a cell heavier than the
-        // cap — delivered whole — owes more than it on the RESET and the frames that drain it, which would otherwise RESET for ever.
-        return !reset && scratch.PendingOwedCount > OwedCap && scratch.PendingOwedCount > owedIn ? FitOutcome.Overflow : FitOutcome.Fitted;
+        // An overflow is a frame that GROWS the owed enters past the cap, and never a RESET's: a RESET is the overflow's repair, and a cell heavier than the
+        // cap — delivered whole — owes more than it on the RESET and the frames that drain it, which would otherwise RESET for ever. Owed updates are not
+        // counted (owedCap): a world whose movers outrun the frame is carried round robin, not refilled from nothing every few seconds.
+        if (reset || scratch.PendingOwedCount <= owedCap)
+        {
+            return FitOutcome.Fitted;
+        }
+
+        var enters = scratch.PendingOwedEnters;
+        return enters > owedCap && enters > entersIn ? FitOutcome.Overflow : FitOutcome.Fitted;
     }
 
     /// <summary>
-    /// Commits a fitted frame's owed set as the session's: the pending and committed arrays trade places, so neither is copied. Each record is metered
-    /// again — a reconcile may have merged groups into it or moved its slot — for the allowance the next frames give up.
+    /// Commits a fitted frame's owed set as the session's: the pending and committed arrays trade places, so neither is copied. The enters — the set's
+    /// prefix — are metered again, a reconcile may have moved their slot, for the allowance the next frames give up; the updates are not, nothing reads
+    /// their bytes, and a world of them is a cache miss each.
     /// </summary>
     private void CommitOwed(SessionFrameState state, FrameWorkerScratch scratch)
     {
@@ -387,32 +409,23 @@ internal sealed unsafe partial class FrameAssembler
         state.Owed = scratch.PendingOwed;
         scratch.PendingOwed = committed.Length > 0 ? committed : new OwedRecord[16];
         state.OwedCount = scratch.PendingOwedCount;
-        var bytes = 0;
-        var enters = 0;
+        state.OwedEnters = scratch.PendingOwedEnters;
         var enterBytes = 0;
-        for (var i = 0; i < state.OwedCount; i++)
+        for (var i = 0; i < state.OwedEnters; i++)
         {
             ref var e = ref state.Owed[i];
-            e.Bytes = OwedBytesOf(_encodePlans[e.Archetype], in e);
-            bytes += e.Bytes;
-            if (e.Kind == OwedKind.Enter)
-            {
-                enters++;
-                enterBytes += e.Bytes;
-            }
+            enterBytes += OwedBytesOf(_encodePlans[e.Archetype], in e);
         }
 
-        state.OwedBytes = bytes;
-        state.OwedEnters = enters;
         state.OwedEnterBytes = enterBytes;
         scratch.PendingOwedCount = 0;
+        scratch.PendingOwedEnters = 0;
     }
 
     /// <summary>A RESET was published: the client's store is empty, and nothing is owed into it.</summary>
     private static void ClearOwed(SessionFrameState state)
     {
         state.OwedCount = 0;
-        state.OwedBytes = 0;
         state.OwedEnters = 0;
         state.OwedEnterBytes = 0;
     }
@@ -588,10 +601,50 @@ internal sealed unsafe partial class FrameAssembler
     }
 
     /// <summary>
+    /// Carries what earlier frames owed of one kind, oldest first, while it fits (15 § 4.4, step 2): the first record of the frame always goes, so the oldest
+    /// owed one is never starved by the mandatory ones.
+    /// </summary>
+    private void CarryOwed(FrameWorkerScratch scratch, byte kind, int from, int to, int target, Span<bool> appended, ref int spent, ref bool first,
+        ref bool full, ref bool lost)
+    {
+        for (var i = from; i < to && !full; i++)
+        {
+            ref var e = ref scratch.PendingOwed[i];
+            if (e.Kind != kind)
+            {
+                continue;
+            }
+
+            var plan = _encodePlans[e.Archetype];
+            if (!Located(plan, ref e))
+            {
+                // Neither its slot nor its identity holds the entity, and no record of this frame said where it went. Nothing can be sent for it, and the
+                // client and the geometry would disagree about it from here on: the next frame is a RESET (counted).
+                lost = true;
+                e.Kind = OwedKind.None;
+                continue;
+            }
+
+            var bytes = OwedBytesOf(plan, in e);
+            if (!first && spent + bytes > target)
+            {
+                full = true;
+                return;
+            }
+
+            first = false;
+            spent += bytes;
+            Carry(scratch, in e, appended);
+            e.Kind = OwedKind.None;
+        }
+    }
+
+    /// <summary>
     /// Takes one kind of this frame's records while they fit, and owes the rest (15 § 4.4, steps 3–4): an update as the groups it carried, merged with the
     /// entity's other record, an enter whole. The controlled entity's records were taken already, and are skipped.
     /// </summary>
-    private bool Spill(FrameWorkerScratch scratch, FrameListKind kind, ReadOnlySpan<int> own, uint selfNetId, int target, ref int spent, ref bool full)
+    private bool Spill(FrameWorkerScratch scratch, FrameListKind kind, ReadOnlySpan<int> own, uint selfNetId, int target, ref int spent, ref bool first,
+        ref bool full)
     {
         var removed = false;
         for (var a = 0; a < _plans.Length; a++)
@@ -610,11 +663,12 @@ internal sealed unsafe partial class FrameAssembler
                 if (!full && spent + bytes <= target)
                 {
                     spent += bytes;
+                    first = false;
                     continue;
                 }
 
                 full = true;
-                Owe(scratch, plan, kind, in r, bytes);
+                Owe(scratch, plan, kind, in r);
                 r.NetId = NetIdAllocator.NoNetId;
                 removed = true;
             }
@@ -623,7 +677,7 @@ internal sealed unsafe partial class FrameAssembler
         return removed;
     }
 
-    private static void Owe(FrameWorkerScratch scratch, ArchetypeEncodePlan plan, FrameListKind kind, in FrameRecord r, int bytes)
+    private static void Owe(FrameWorkerScratch scratch, ArchetypeEncodePlan plan, FrameListKind kind, in FrameRecord r)
     {
         var at = scratch.FindOwed(r.NetId);
         if (at >= 0 && kind != FrameListKind.Enter)
@@ -632,7 +686,6 @@ internal sealed unsafe partial class FrameAssembler
             ref var e = ref scratch.PendingOwed[at];
             e.Segment |= kind == FrameListKind.Segment;
             e.Mask |= kind == FrameListKind.State ? r.GroupMask : (byte)0;
-            e.Bytes += bytes;
             return;
         }
 
@@ -641,7 +694,6 @@ internal sealed unsafe partial class FrameAssembler
             Block = r.Block,
             Entity = ((ReplicationHotEntry*)plan.Hot(r.Block, r.Slot))->Entity,
             NetId = r.NetId,
-            Bytes = bytes,
             Archetype = r.Archetype,
             Slot = r.Slot,
             Kind = kind == FrameListKind.Enter ? OwedKind.Enter : OwedKind.Update,

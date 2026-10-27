@@ -1247,8 +1247,17 @@ internal sealed unsafe partial class FrameAssembler
         return n;
     }
 
-    /// <summary>A frame's enter budget (09 § 10): halved per LOD level, divided by the overload multiplier, never below one.</summary>
-    private int EnterBudget(int level) => Math.Max(1, (_options.EnterBudgetPerFrame >> level) / Math.Max(1, Volatile.Read(ref _tickMultiplier)));
+    /// <summary>
+    /// A frame's enter budget (09 § 10): the profile's fill budget, or the engine's, halved per LOD level, divided by the overload multiplier, never below one.
+    /// </summary>
+    private int EnterBudget(int profile, int level) => Math.Max(1, (FillBudgetOf(profile) >> level) / Math.Max(1, Volatile.Read(ref _tickMultiplier)));
+
+    /// <summary>The enters a frame of <paramref name="profile"/>'s fill may take before any LOD level: its <c>Fill</c>, or the engine's budget.</summary>
+    private int FillBudgetOf(int profile)
+    {
+        var own = Profiles.FillBudgetOf(profile);
+        return own > 0 ? own : Math.Max(1, _options.EnterBudgetPerFrame);
+    }
 
     private void AssemblePush(int index, FrameWorkerScratch scratch, ref BoundViewpoint follow, ref long lost, ref FrameCounters counters, ref long enters,
         ref long leaves, ref long updates, ref int published)
@@ -1316,16 +1325,18 @@ internal sealed unsafe partial class FrameAssembler
             var profile = _pushProfiles[index];
             var (nearBudget, nearCounts) = Profiles.NearOf(profile);
             reset = push.GatherRegion(session, hasRegion, in hasRegion ? ref row.Region : ref NoRegion, Profiles.MaxEdgeOf(profile), nearBudget, nearCounts,
-                Volatile.Read(ref _tickSeconds), state.PendingReset, in Profiles.SetOf(profile), scratch, EnterBudget(0), ref enters, ref leaves,
+                Volatile.Read(ref _tickSeconds), state.PendingReset, in Profiles.SetOf(profile), scratch, EnterBudget(profile, 0), ref enters, ref leaves,
                 ref updates, out complete);
         }
         else
         {
             reset = _pushWorld[index]
-                ? push.GatherWorld(session, state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch, EnterBudget(0), ref enters, ref leaves,
+                ? push.GatherWorld(session, state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch, EnterBudget(_pushProfiles[index], 0),
+                    ref enters, ref leaves,
                     ref updates, out complete)
                 : push.Gather(session, _pushPlaced[index], _pushViewpoints[index], _pushRadius[index], Profiles.BandsOf(_pushProfiles[index]),
-                    state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch, _encodePlans, EnterBudget(push.TargetLevelOf(session)), ref enters,
+                    state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch, _encodePlans,
+                    EnterBudget(_pushProfiles[index], push.TargetLevelOf(session)), ref enters,
                     ref leaves, ref updates, out complete, Profiles.GroupsOf(_pushProfiles[index]));
         }
 
@@ -1448,12 +1459,12 @@ internal sealed unsafe partial class FrameAssembler
         // frames. Before the answers, which read the cursors a withheld completion moves; their bound is reserved from the answers owed.
         var others = EntitiesEncoder.MaxHeaderBytes + OtherBlocksBound(scratch, emitStats, eventCount, eventBytes, aggWrite, aggRows, aggCounts, debugWrite,
             debugGeometry, in self) + 16 + ((Requests?.OwedAnswers(session) ?? 0) * GroupRecordBound);
-        var fit = FitEntities(state, scratch, limit - others, self.Write && !self.None ? self.NetId : NetIdAllocator.NoNetId, reset, out var owedLost,
-            out var metered);
+        var fit = FitEntities(state, scratch, limit - others, self.Write && !self.None ? self.NetId : NetIdAllocator.NoNetId, reset,
+            (int)Math.Min(int.MaxValue, 4L * FillBudgetOf(_pushProfiles[index])), out var owedLost, out var metered);
         if (fit == FitOutcome.Overflow || owedLost)
         {
             // More owed than the cap, or an owed entity found nowhere: a RESET is the repair. Nothing of this frame is committed (SUB-03).
-            Interlocked.Increment(ref _owedResets);
+            Interlocked.Increment(ref owedLost ? ref _owedLosts : ref _owedOverflows);
             state.PendingReset = true;
             send.AbandonFrame(sequence, _skipsCount);
             ReturnIfValid(recycled);
@@ -1491,6 +1502,7 @@ internal sealed unsafe partial class FrameAssembler
             if (fit == FitOutcome.Fitted)
             {
                 CommitOwed(state, scratch);
+                counters.OwedLargest = Math.Max(counters.OwedLargest, state.OwedCount);
                 if (push.Shadow)
                 {
                     push.ShadowOwe(session, state.Owed, state.OwedCount);
@@ -1606,6 +1618,7 @@ internal sealed unsafe partial class FrameAssembler
         if (fit == FitOutcome.Fitted)
         {
             CommitOwed(state, scratch);
+            counters.OwedLargest = Math.Max(counters.OwedLargest, state.OwedCount);
         }
         else if (reset)
         {

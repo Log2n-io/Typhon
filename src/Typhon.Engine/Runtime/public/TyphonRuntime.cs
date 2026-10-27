@@ -648,7 +648,38 @@ public sealed partial class TyphonRuntime : IDisposable
             ReplicationTrackP99Ms = (_subscriptionsContext.Telemetry?.Percentile(newest, window, 0.99, new double[ticks]) ?? 0.0) / 1000.0,
             SessionsClosed = ReadCloseCounts(subscriptions),
             FramesSkipped = ReadSkipCounts(subscriptions),
+            OwedOverflows = subscriptions?.Frames?.OwedOverflows ?? 0L,
+            OwedLosts = subscriptions?.Frames?.OwedLosts ?? 0L,
+            OwedLargest = subscriptions?.Frames?.OwedLargest ?? 0,
+            LogResets = ReadLogResets(subscriptions),
         };
+    }
+
+    /// <summary>
+    /// The push log's RESETs — a gap it no longer covers, or one it cannot fold — summed over every served realm's replication, read as
+    /// <see cref="ReadRealmStats"/> reads them: through <c>SnapshotFor</c>, off the tick, stale by a tick at most and never torn.
+    /// </summary>
+    private long ReadLogResets(SubscriptionsRuntime subscriptions)
+    {
+        var table = Engine?.RealmTable;
+        var hub = subscriptions?.Hub;
+        if (table == null || table.MaxRealms <= 1 || hub == null)
+        {
+            var push = subscriptions?.Push;
+            return push == null ? 0L : System.Threading.Volatile.Read(ref push.LogTooOld) + System.Threading.Volatile.Read(ref push.LogAmbiguous);
+        }
+
+        var sum = 0L;
+        foreach (var realm in table.Registered)
+        {
+            var replication = hub.SnapshotFor(realm.Id.Value);
+            if (replication != null)
+            {
+                sum += System.Threading.Volatile.Read(ref replication.LogTooOld) + System.Threading.Volatile.Read(ref replication.LogAmbiguous);
+            }
+        }
+
+        return sum;
     }
 
     /// <summary>The session table's cumulative closes per reason; zeros with no replication.</summary>

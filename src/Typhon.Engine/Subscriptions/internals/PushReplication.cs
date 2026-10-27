@@ -768,6 +768,8 @@ internal abstract unsafe partial class PushReplication
     /// <summary>
     /// Cell delivery and sweep (10 § 8, L7): time in each, cumulative in Stopwatch ticks, and the entries each decoded against what it emitted — the
     /// measurement that decides whether batched delivery is worth designing. Collected only while <see cref="FrameAssembler.PhaseTimingEnabled"/> is set.
+    /// A delivery decodes the entries an event owns too — their enter is the event step's, and the fill meters it (SUB-36) — so its decoded count includes
+    /// them and its entered count does not.
     /// </summary>
     public long DeliverTicks;
     public long DeliverDecoded;
