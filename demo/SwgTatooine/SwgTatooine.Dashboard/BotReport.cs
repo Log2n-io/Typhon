@@ -22,13 +22,14 @@ namespace SwgTatooine.Dashboard;
 //       "goals":      { "Choosing": 0, "Travelling": 120, "Hunting": 40, ... },          bots per goal now
 //       "totals":     { "goalChanges": 0, "stuckTicks": 0, "hunts": 0, "missionsAsked": 0, "missionsTaken": 0, "missionsCompleted": 0,
 //                       "missionsCancelled": 0, "mounts": 0, "dismounts": 0, "reversals": 0,
-//                       "listed": 0, "vendored": 0, "vendorCredits": 0, "bought": 0, "buyLost": 0, "collected": 0, "marketRefused": 0 },
-//                                                                                                   since the run began; the market's keys (bazaar.md § 8)
-//                                                                                                   are optional, as from a swarm before the market
+//                       "marketTrades": 0, "marketListed": 0, "marketVendored": 0, "marketBought": 0, "marketBuyLost": 0, "marketWon": 0,
+//                       "marketCollected": 0, "marketRefused": 0 },
+//                                      since the run began. The market's keys (bazaar.md § 8) are optional, as from a swarm before the market:
+//                                      trades = bazaar visits; buyLost = refusals 153 (the race loser's); won = bazaar buy rows seen collected in the
+//                                      bot's inventory; refused = every market refusal 151-163
 //       "perMin":     { the same keys, fleet-wide per minute over the window },
-//       "marketRefusedBy": { "sold": 3, "notEnough": 1, ... },   the market's refusals since the start, by the server's reason name
-//                                                                (MarketStats.ReasonNames: sold = 153, the race loser's); optional
-//       "why":        { "HuntTimeout": 12, "CreatureNoticed": 80, ... },   goal reasons since the start (BotBrain.Trace.cs GoalWhy)
+//       "why":        { "HuntTimeout": 12, "CreatureNoticed": 80, "MarketChosen": 3, "MarketDone": 3, ... },
+//                                                                          goal reasons since the start (BotBrain.Trace.cs GoalWhy)
 //       "whyPerMin":  { the same keys },
 //       "legs":       { "Planned": 0, "Waypoint": 0, "Done": 0, "Stretch": 0, "Replanned": 0, "Stuck": 0, "Abandoned": 0,
 //                       "TravelStuck": 0, "Detour": 0, "CityEdge": 0 },        walk events since the start (LegWhy)
@@ -106,9 +107,6 @@ public sealed class BotFleetReport
     public Dictionary<string, long> Legs { get; set; } = [];
 
     public Dictionary<string, double> LegsPerMin { get; set; } = [];
-
-    /// <summary>The market's refusals since the start, by reason name; empty from a swarm without the market.</summary>
-    public Dictionary<string, long> MarketRefusedBy { get; set; } = [];
 
     public BotSpread GoalChangesPerBotMin { get; set; } = new();
 

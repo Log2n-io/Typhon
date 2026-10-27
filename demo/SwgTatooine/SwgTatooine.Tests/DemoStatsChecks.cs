@@ -319,16 +319,17 @@ internal sealed class DemoStatsChecks : ServedChecks
     }
 
     /// <summary>
-    /// The bots page's market column reads the swarm's market keys (BotReport.cs, bazaar.md § 8) — optional, so a swarm without the market still reports —
-    /// and the refusals by the server's reason names.
+    /// The bots page's market column reads the swarm's market keys (BotReport.cs, bazaar.md § 8) — optional, so a swarm without the market still
+    /// reports, and the page says it does not trade.
     /// </summary>
     [Test]
     public void TheMarketSection_ReachesTheBotsPage()
     {
         const string report = """
             {"v":1,"run":"r1","at":"2026-10-27T12:00:00Z","hz":4,"tick":100,
-             "fleet":{"bots":30,"windowS":60,"stuckS":0,"goals":{},"totals":{"hunts":2,"listed":7,"bought":3,"buyLost":9,"vendorCredits":145},
-                      "perMin":{"listed":1.5,"vendored":2,"bought":0.5},"marketRefusedBy":{"sold":9,"notEnough":1}},
+             "fleet":{"bots":30,"windowS":60,"stuckS":0,"goals":{},
+                      "totals":{"hunts":2,"marketTrades":4,"marketListed":7,"marketBought":3,"marketBuyLost":9,"marketWon":3,"marketRefused":10},
+                      "perMin":{"marketTrades":2.5,"marketVendored":2},"why":{"MarketChosen":4},"whyPerMin":{"MarketDone":1.5}},
              "traced":[]}
             """;
         const string before = """{"v":1,"run":"r2","at":"2026-10-27T12:00:00Z","hz":4,"tick":100,"fleet":{"bots":1,"totals":{"hunts":1}},"traced":[]}""";
@@ -339,13 +340,11 @@ internal sealed class DemoStatsChecks : ServedChecks
         Assert.Multiple(() =>
         {
             Assert.That(taken, Is.True, error);
-            Assert.That(SwgTatooine.Dashboard.BotBoard.Of(fleet.Totals, "buyLost"), Is.EqualTo(9));
-            Assert.That(SwgTatooine.Dashboard.BotBoard.Of(fleet.Totals, "vendorCredits"), Is.EqualTo(145));
-            Assert.That(SwgTatooine.Dashboard.BotBoard.Of(fleet.PerMin, "vendored"), Is.EqualTo(2d));
-            Assert.That(fleet.MarketRefusedBy["sold"], Is.EqualTo(9));
-            Assert.That(SimBridge.MarketRefusalNames.ToArray().Select(n => n.Name), Is.SupersetOf(fleet.MarketRefusedBy.Keys),
-                "the swarm names refusals as the server does");
-            Assert.That(board.History("market trades/min").Single(), Is.EqualTo(1.5d + 2d + 0.5d));
+            Assert.That(SwgTatooine.Dashboard.BotBoard.Of(fleet.Totals, "marketBuyLost"), Is.EqualTo(9));
+            Assert.That(SwgTatooine.Dashboard.BotBoard.Of(fleet.Totals, "marketWon"), Is.EqualTo(3));
+            Assert.That(SwgTatooine.Dashboard.BotBoard.Of(fleet.PerMin, "marketVendored"), Is.EqualTo(2d));
+            Assert.That(SwgTatooine.Dashboard.BotBoard.Of(fleet.WhyPerMin, "MarketDone"), Is.EqualTo(1.5d));
+            Assert.That(board.History("market trades/min").Single(), Is.EqualTo(2.5d));
         });
 
         taken = board.Ingest(JsonSerializer.Deserialize<SwgTatooine.Dashboard.BotReport>(before, SwgTatooine.Dashboard.BotReport.Json), DateTime.UtcNow,
@@ -353,8 +352,8 @@ internal sealed class DemoStatsChecks : ServedChecks
         Assert.Multiple(() =>
         {
             Assert.That(taken, Is.True, error);
-            Assert.That(board.Latest.Fleet.Totals.ContainsKey("listed"), Is.False, "a swarm without the market: the page says so");
-            Assert.That(board.Latest.Fleet.MarketRefusedBy, Is.Empty);
+            Assert.That(board.Latest.Fleet.Totals.ContainsKey("marketTrades"), Is.False, "a swarm without the market: the page says it does not trade");
+            Assert.That(board.History("market trades/min").Single(), Is.Zero, "a new run's history, and no market rate");
         });
     }
 }
