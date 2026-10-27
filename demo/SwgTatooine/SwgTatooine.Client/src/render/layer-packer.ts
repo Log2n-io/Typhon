@@ -1,10 +1,14 @@
 import { evaluateSlot, MAX_MOTION_STRIDE, type ArchetypeStore, type FieldArray } from '@typhondb/client';
 import type { LayerStyle } from './styles';
-import { altitudeField, altitudeOf, Placement } from '../data/placement';
+import { altitudeField, altitudeOf, groundedAltitude, Placement } from '../data/placement';
 import { structureYaw } from '../assets/structure-assets';
 import { AiMode } from '../data/swg-schema';
 import { Band, chooseBand, packState, sphereInFrustum } from './view-math';
 import type { GroundSampler } from '../terrain/ground-sampler';
+import { SwoopHover } from '../app/swoop-hover';
+
+/** How long a rider unseen keeps its float, milliseconds: past it, it starts again from rest over the ground it is next seen on. */
+const RIDER_FORGET_MS = 3000;
 
 /** What every layer needs to know about the frame being drawn. */
 export interface FrameView {
@@ -25,6 +29,12 @@ export interface FrameView {
   readonly viewportHeight: number;
   /** The planet's ground, for standing entities on it. Flat until the bake lands (`terrain/heightfield.ts`). */
   readonly ground: GroundSampler;
+  /**
+   * The latest tick, set only when the realm drawn is terrain: then a body stands on {@link ground} at the position it is
+   * DRAWN, plus the deck the server says it is on (`groundedAltitude`). Absent — a room, space, the tests' views — the
+   * server's altitude stands as it is.
+   */
+  readonly groundTick?: number | undefined;
   /**
    * One entity whose position comes from somewhere other than the store: the locally predicted avatar (A14), or `null`.
    *
@@ -339,6 +349,16 @@ export class LayerPacker {
   readonly onlyStyle: number;
   /** Whether this layer's near band is drawn by the crowd as rigged characters rather than as boxes. */
   drawsCharacters = false;
+
+  /**
+   * One float per remote rider in view, on the planet: the spring the own swoop rides (`SwoopHover`), fed the ground the body
+   * is drawn over, so a rider glides over the dunes instead of hugging every bump of the server's bare ground sample
+   * (Loïc, 2026-10-27). Keyed by net id, dropped after {@link RIDER_FORGET_MS} unseen.
+   */
+  private readonly riders = new Map<number, { readonly hover: SwoopHover; seenMs: number }>();
+  private riderGround: GroundSampler | null = null;
+  private readonly riderGroundAt = (x: number, z: number): number => this.riderGround?.heightAt(x, z) ?? 0;
+  private lastPackMs = Number.NaN;
   /** A style index this layer skips, or -1. */
   readonly omitStyle: number;
 
@@ -375,6 +395,9 @@ export class LayerPacker {
   private readonly motion = new Float64Array(MAX_MOTION_STRIDE);
   /** Rewritten per entity, never allocated: the one place that knows where altitude and velocity live. */
   private readonly placement = new Placement();
+  /** Where an entity was at the latest tick, for the deck under it (`groundedAltitude`). */
+  private readonly latest = new Placement();
+  private readonly latestMotion = new Float64Array(MAX_MOTION_STRIDE);
   /** Per slot: the entity whose state the slot arrays describe, its LOD band and its last heading. */
   private seenNetId = new Uint32Array(0);
   private band = new Uint8Array(0);
@@ -440,6 +463,37 @@ export class LayerPacker {
   }
 
   /** Evaluates, culls, bands and packs every live entity of the bound store. */
+  /**
+   * A remote rider's altitude: its float over the ground it is drawn on, stepped one frame. `floorY` is that ground, decks
+   * included (`groundedAltitude`), which the bike may never go under.
+   */
+  private riderFloat(
+    netId: number,
+    floorY: number,
+    at: Placement,
+    nowMs: number,
+    dt: number,
+    perSecond: number,
+  ): number {
+    let rider = this.riders.get(netId);
+    if (rider === undefined || nowMs - rider.seenMs > RIDER_FORGET_MS) {
+      rider = { hover: new SwoopHover(), seenMs: nowMs };
+      this.riders.set(netId, rider);
+      if (this.riders.size > 256) {
+        for (const [id, r] of this.riders) {
+          if (nowMs - r.seenMs > RIDER_FORGET_MS) {
+            this.riders.delete(id);
+          }
+        }
+      }
+    }
+
+    rider.seenMs = nowMs;
+    const speed = Math.hypot(at.vx, at.vz) * perSecond;
+    rider.hover.step(dt, this.riderGroundAt, floorY, at.x, at.z, Math.atan2(at.vz, at.vx), speed);
+    return Number.isFinite(rider.hover.y) ? rider.hover.y : floorY;
+  }
+
   pack(view: FrameView): void {
     const store = this.store;
     if (store === null) {
@@ -459,6 +513,10 @@ export class LayerPacker {
     this.ensureCapacity(count);
 
     const fields = this.fields;
+    const nowMs = performance.now();
+    const riderDt = Number.isFinite(this.lastPackMs) ? Math.min(0.1, (nowMs - this.lastPackMs) / 1000) : 0;
+    this.lastPackMs = nowMs;
+    this.riderGround = view.ground;
     const style = this.style;
     const bounds = style.bounds;
     const spriteLift = style.spriteLift;
@@ -479,6 +537,7 @@ export class LayerPacker {
     const drawnAt = this.drawnAt;
     const tick = view.renderTick;
     const frac = view.renderFrac;
+    const groundTick = view.groundTick;
     let near = 0;
     let far = 0;
     let held = 0;
@@ -517,10 +576,19 @@ export class LayerPacker {
       // Sampled at the PREDICTED ground position when the client owns the heightfield, or the predicted body walks a dune at
       // the height of where the server last confirmed it — a few centimetres, but it reads as the feet sinking. When the
       // server supplies altitude per entity there is nothing to re-sample and its figure stands.
-      const ry =
-        own && fields.ground === null
-          ? at.y + view.ground.heightAt(predicted!.x, predicted!.z)
-          : altitudeOf(fields.ground, slot, at, view.ground);
+      let ry: number;
+      if (own && fields.ground === null) {
+        ry = at.y + view.ground.heightAt(predicted!.x, predicted!.z);
+      } else if (groundTick === undefined || fields.ground === null) {
+        ry = altitudeOf(fields.ground, slot, at, view.ground);
+      } else {
+        evaluateSlot(store, slot, groundTick, 0, this.latestMotion, 0);
+        this.latest.read(dims, this.latestMotion, 0);
+        ry = groundedAltitude(fields.ground, slot, at, this.latest.x, this.latest.z, view.ground);
+        if (this.drawsCharacters && fields.mounted !== null && fields.mounted[slot] === 1) {
+          ry = this.riderFloat(netIds[slot], ry, at, nowMs, riderDt, view.perSecond);
+        }
+      }
 
       const raw = fields.style === null ? 0 : fields.style[slot];
       const styleIndex = fields.styleIsFlag ? (raw > 0 ? 1 : 0) : raw;

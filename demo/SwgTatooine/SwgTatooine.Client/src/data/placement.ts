@@ -58,6 +58,42 @@ export function altitudeOf(
   return field === null ? at.y + ground.heightAt(at.x, at.z) : field[slot];
 }
 
+/** Below this, the server's altitude over this client's terrain is quantisation, not a deck: 16 bits over 480 m is 7.3 mm. */
+export const DECK_MIN_M = 0.05;
+
+/**
+ * Where to draw a MOVING entity on a terrain realm: this client's ground under the position it DRAWS, plus whatever the
+ * server says it stands on above that ground — a deck, a ramp — measured where the server last placed it.
+ *
+ * <b>Why not the server's altitude as it is</b> ({@link altitudeOf}): `y` is the latest sample, a tick newer than the
+ * interpolated, render-delayed x/z it is drawn with, and it only changes per update. On a slope a body floated or sank by the
+ * slope × the distance travelled in the render delay, and stepped at every update — a swoop at 40 m/s over a dune visibly
+ * (Loïc, 2026-10-27). Both sides sample one golden heightfield, so on open ground the deck term is 0 to the quantum and the
+ * altitude is this client's own, smooth at the drawn position; on a deck it is that deck's height, which only the server knows.
+ *
+ * @param field The store's altitude field, or `null` (the mock): then {@link altitudeOf}'s guess.
+ * @param slot The entity's slot.
+ * @param at The DRAWN placement — interpolated at the render tick.
+ * @param latestX The entity's east at the latest tick, where the server's `y` was sampled.
+ * @param latestZ Its north there.
+ * @param ground This client's terrain.
+ */
+export function groundedAltitude(
+  field: FieldArray | null,
+  slot: number,
+  at: Placement,
+  latestX: number,
+  latestZ: number,
+  ground: { heightAt(x: number, z: number): number },
+): number {
+  if (field === null) {
+    return at.y + ground.heightAt(at.x, at.z);
+  }
+
+  const deck = field[slot] - ground.heightAt(latestX, latestZ);
+  return ground.heightAt(at.x, at.z) + (deck > DECK_MIN_M ? deck : 0);
+}
+
 /** The engine axis carrying the first ground coordinate. */
 export const AXIS_X = 0;
 /** The engine axis carrying the second ground coordinate — the renderer's `z`. */

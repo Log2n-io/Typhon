@@ -43,7 +43,7 @@ import {
 import { meanAndP95, overviewPolicy, regionDue } from './frame-policy';
 import { headingFromVelocity } from '../math/vec';
 import { DATA_ARCHETYPES, resolveArchetypes, type ArchetypeInfo, type ArchetypeView } from '../data/archetypes';
-import { altitudeField, altitudeOf, Placement } from '../data/placement';
+import { altitudeField, altitudeOf, groundedAltitude, Placement } from '../data/placement';
 import type { HealthBar } from '../render/labels';
 import { DamageText, type Anchor } from '../render/damage-text';
 import type { AnimationGraph } from '../character/animation-graph';
@@ -325,6 +325,7 @@ class MutableFrameView implements FrameView {
   viewportWidth = 1;
   viewportHeight = 1;
   ground: GroundSampler = FLAT_GROUND;
+  groundTick: number | undefined = undefined;
   predicted: PredictedOverride | null = null;
   hidden: ReadonlySet<number> = NONE_HIDDEN;
   drawnElsewhere: ReadonlySet<number> = NONE_HIDDEN;
@@ -3415,6 +3416,9 @@ export class ClientApp {
     const view = this.view;
     view.renderTick = this.clock.renderTick;
     view.renderFrac = this.clock.renderFrac;
+    // Bodies stand on this client's ground at the position they are drawn, on the planet only: a room's or space's altitude is
+    // the server's to say (groundedAltitude).
+    view.groundTick = this.profile.kind === 'planet' ? this.clock.latestTick : undefined;
     view.originX = this.origin.x;
     view.originZ = this.origin.z;
     view.eyeX = cam.eyeX - this.origin.x;
@@ -5344,13 +5348,25 @@ export class ClientApp {
     }
 
     const slot = slotOf(location);
+    const ground = altitudeField(store);
+    if (ground !== null && this.profile.kind === 'planet') {
+      // Where the server last placed it, for the deck under it: the same altitude the packer draws (groundedAltitude).
+      evaluateSlot(store, slot, this.clock.latestTick, 0, this.scratch, 0);
+      const latest = this.placement.read(store.dims, this.scratch, 0);
+      this.evalLatestX = latest.x;
+      this.evalLatestZ = latest.z;
+    }
+
     evaluateSlot(store, slot, this.clock.renderTick, this.clock.renderFrac, this.scratch, 0);
     const read = this.placement.read(store.dims, this.scratch, 0);
     this.evalX = read.x;
     this.evalZ = read.z;
     this.evalVx = read.vx;
     this.evalVz = read.vz;
-    this.evalY = altitudeOf(altitudeField(store), slot, read, this.profile.ground);
+    this.evalY =
+      ground !== null && this.profile.kind === 'planet'
+        ? groundedAltitude(ground, slot, read, this.evalLatestX, this.evalLatestZ, this.profile.ground)
+        : altitudeOf(ground, slot, read, this.profile.ground);
     this.evalArchetype = archetype;
     return true;
   }
@@ -5765,6 +5781,8 @@ export class ClientApp {
 
   /** {@link evaluate}'s output: one subject's interpolated placement, valid until the next call. */
   private evalX = 0;
+  private evalLatestX = 0;
+  private evalLatestZ = 0;
   private evalZ = 0;
   private evalY = 0;
   private evalVx = 0;
