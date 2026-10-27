@@ -148,6 +148,15 @@ public sealed class BotBoard
     /// <summary>A named rate of a report's map, 0 when the map or the name is absent.</summary>
     public static double Of(Dictionary<string, double> map, string name) => map != null && map.TryGetValue(name, out var v) ? v : 0d;
 
+    /// <summary>The market commands the fleet sent since the start: every one applied (listed, vendored, bought, collected) or refused.</summary>
+    public static long MarketCommands(BotFleetReport f)
+        => Of(f.Totals, "marketListed") + Of(f.Totals, "marketVendored") + Of(f.Totals, "marketBought") + Of(f.Totals, "marketCollected")
+            + Of(f.Totals, "marketRefused");
+
+    /// <summary>BZ-16: a market refusal other than sold (153), notEnough (154) or noRoom (159), above 1 % of the commands sent.</summary>
+    public static bool UnexpectedRefusal(string reason, long count, long commands)
+        => reason is not ("sold" or "notEnough" or "noRoom") && commands > 0 && count * 100 > commands;
+
     /// <summary>A named count of a report's map, 0 when the map or the name is absent.</summary>
     public static long Of(Dictionary<string, long> map, string name) => map != null && map.TryGetValue(name, out var v) ? v : 0L;
 
