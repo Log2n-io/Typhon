@@ -1,6 +1,7 @@
 import { ITEM_ICON_PX, itemInitials, itemTooltip, mkNumeral, slotGrid, type InventoryItem } from '../data/items';
 import { formatCredits } from '../data/wallet';
 import { useItems } from '../state/items-store';
+import { useMarket } from '../state/market-store';
 import { useMissions } from '../state/mission-store';
 import { useWallet } from '../state/wallet-store';
 
@@ -14,6 +15,11 @@ const KIND_NAMES: Readonly<Record<string, string>> = {
   grant: 'Starting credits',
   mission: 'Mission reward',
   tip: 'Tip',
+  // The bazaar's (bazaar.md § 2.2).
+  sale: 'Bazaar sale',
+  tax: 'Sales tax',
+  listfee: 'Listing fee',
+  vendor: 'Vendor',
 };
 
 /**
@@ -22,6 +28,9 @@ const KIND_NAMES: Readonly<Record<string, string>> = {
  *
  * The balance is the wallet as last read (`WalletReader`), which re-reads it whenever a transfer touches this character;
  * the items are the inventory as last read, re-read whenever the body's `items` revision moves.
+ *
+ * <b>With the bazaar open</b> (bazaar.md § 6), a click on a stack picks it for the Sell tab. Units in a listing are not in
+ * the grid: they left the inventory when it was listed.
  */
 export function InventoryWindow() {
   const open = useWallet((s) => s.inventoryOpen);
@@ -30,15 +39,25 @@ export function InventoryWindow() {
   const journalOpen = useMissions((s) => s.journalOpen);
   const inventory = useItems((s) => s.snapshot);
   const icons = useItems((s) => s.icons);
+  const bazaarOpen = useMarket((s) => s.open);
+  const pick = useMarket((s) => s.sell.stack);
   if (!open) {
     return null;
   }
+
+  const onPick = bazaarOpen
+    ? (id: string) => {
+        const market = useMarket.getState();
+        market.selectStack(id);
+        market.setTab('sell');
+      }
+    : null;
 
   const recent = wallet?.transfers.slice(0, RECENT_SHOWN) ?? [];
   const cells = slotGrid(inventory?.items ?? [], inventory?.slots ?? INVENTORY_SLOTS);
   return (
     <div
-      className={journalOpen ? 'panel inventory beside-journal' : 'panel inventory'}
+      className={`panel inventory${journalOpen ? ' beside-journal' : ''}${bazaarOpen ? ' beside-bazaar' : ''}`}
       role="dialog"
       aria-label="Inventory"
     >
@@ -56,7 +75,13 @@ export function InventoryWindow() {
           item === null ? (
             <div key={i} className="inventory-slot" />
           ) : (
-            <ItemSlot key={i} item={item} icon={icons[item.item]} />
+            <ItemSlot
+              key={i}
+              item={item}
+              icon={icons[item.item]}
+              picked={bazaarOpen && item.id === pick}
+              onPick={onPick}
+            />
           ),
         )}
       </div>
@@ -85,15 +110,40 @@ export function InventoryWindow() {
  * One stack: its icon at the catalogue's 32 px (never scaled; the name's initials without one), its Mk as a numeral coloured
  * like the model's Mk material (ASSET_FORMAT.md § 5.11), its count when more than one, and on hover its name, Mk and count.
  */
-function ItemSlot({ item, icon }: { readonly item: InventoryItem; readonly icon: string | undefined }) {
+function ItemSlot({
+  item,
+  icon,
+  picked,
+  onPick,
+}: {
+  readonly item: InventoryItem;
+  readonly icon: string | undefined;
+  /** Whether it is the stack the bazaar's Sell tab holds. */
+  readonly picked: boolean;
+  /** Picks it for the bazaar's Sell tab; `null` with the bazaar closed. */
+  readonly onPick: ((id: string) => void) | null;
+}) {
   const tip = itemTooltip(item);
   const mk = mkNumeral(item.mk);
   return (
     <div
-      className="inventory-slot filled"
+      className={
+        picked
+          ? 'inventory-slot filled picked'
+          : onPick === null
+            ? 'inventory-slot filled'
+            : 'inventory-slot filled pickable'
+      }
       data-testid={`inventory-slot-${String(item.slot)}`}
       data-item={item.item}
       aria-label={tip}
+      onClick={
+        onPick === null
+          ? undefined
+          : () => {
+              onPick(item.id);
+            }
+      }
     >
       {icon === undefined ? (
         <span className="inventory-initials">{itemInitials(item.name)}</span>

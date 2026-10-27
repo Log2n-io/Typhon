@@ -19,6 +19,9 @@ export const TICKET_INTERACTION = 'shuttle_ticket';
 /** The interaction's kind on the published mission terminal (missions.md § 5). */
 export const MISSION_INTERACTION = 'mission';
 
+/** The interaction's kind on the published bazaar terminal (bazaar.md § 6; `bazaar_terminal` rev 3, `reach_m` 3.3). */
+export const BAZAAR_INTERACTION = 'bazaar';
+
 /** How far beyond its published radius the terminal still counts as in reach: the radius is a disc on the stand point. */
 export const TICKET_SLACK_M = 0.5;
 
@@ -93,7 +96,33 @@ export function missionTerminalOf(
   z: number,
   quarters: number,
 ): TicketTerminal | null {
-  const use = terminal.interactions.find((i) => i.kind === MISSION_INTERACTION);
+  return standingTerminalOf(terminal, MISSION_INTERACTION, x, y, z, quarters);
+}
+
+/**
+ * A placed bazaar terminal's stand point and box, or `null` when its asset publishes no `bazaar` interaction: a structure of
+ * its own, as a mission terminal is.
+ */
+export function bazaarTerminalOf(
+  terminal: Descriptor,
+  x: number,
+  y: number,
+  z: number,
+  quarters: number,
+): TicketTerminal | null {
+  return standingTerminalOf(terminal, BAZAAR_INTERACTION, x, y, z, quarters);
+}
+
+/** A terminal that is a structure of its own: its interaction of `kind` placed by its own pose. */
+function standingTerminalOf(
+  terminal: Descriptor,
+  kind: string,
+  x: number,
+  y: number,
+  z: number,
+  quarters: number,
+): TicketTerminal | null {
+  const use = terminal.interactions.find((i) => i.kind === kind);
   if (use === undefined) {
     return null;
   }
@@ -126,6 +155,39 @@ export function missionMenuItems(terminal: number): ContextMenuItem[] {
   return [
     { label: 'Browse missions', hint: 'The missions this terminal lists', action: { kind: 'missions', terminal } },
     { label: 'Mission journal', hint: 'The missions you hold', action: { kind: 'journal' } },
+  ];
+}
+
+/**
+ * The bazaar terminal's context menu entries (bazaar.md § 6): the board of this city or of all, selling, the listings held
+ * and the goods waiting.
+ *
+ * @param reserved How many reservations wait for this character, anywhere; 0 before `/mine` was read.
+ */
+export function bazaarMenuItems(reserved: number): ContextMenuItem[] {
+  return [
+    {
+      label: 'Browse this city',
+      hint: "This city's listings",
+      action: { kind: 'bazaar', tab: 'browse', scope: 'here' },
+    },
+    {
+      label: 'Browse all cities',
+      hint: 'The listings of every city',
+      action: { kind: 'bazaar', tab: 'browse', scope: 'all' },
+    },
+    { label: 'Sell…', hint: 'List items from your inventory', action: { kind: 'bazaar', tab: 'sell' } },
+    {
+      label: 'Sell to vendor…',
+      hint: 'The vendor buys any loot at a fifth of its value',
+      action: { kind: 'bazaar', tab: 'sell' },
+    },
+    { label: 'My listings', hint: 'What you have listed, to cancel', action: { kind: 'bazaar', tab: 'mine' } },
+    {
+      label: reserved > 0 ? `Reserved (${String(reserved)})` : 'Reserved',
+      hint: 'What you bought, or got back, waiting at a city',
+      action: { kind: 'bazaar', tab: 'reserved' },
+    },
   ];
 }
 

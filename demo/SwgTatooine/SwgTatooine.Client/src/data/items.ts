@@ -20,17 +20,22 @@ export interface InventoryItem {
   readonly item: string;
   readonly name: string;
   readonly category: string;
+  /** The item template's id, what a bazaar listing or a vendor sale names (bazaar.md § 3.1); 0 when the server did not say. */
+  readonly template: number;
   /** 1..5; 0 for an item without Mk. */
   readonly mk: number;
   readonly count: number;
 }
 
-/** One row of the item ledger touching this character, World → it for every kind today. */
+/**
+ * One row of the item ledger touching this character: World → it for the drops, and the bazaar's moves (`list` into a
+ * listing, `buy`/`return` out of one, `vendor` to World).
+ */
 export interface InventoryRow {
   /** The ledger's sequence number, as text: a 64-bit value. */
   readonly seq: string;
   readonly tick: number;
-  /** `kill`, `lair`, `mission`; later kinds are read and not announced. */
+  /** `kill`, `lair`, `mission`, `buy`, `return` are announced; `list`, `vendor` and later kinds are read and not. */
   readonly kind: string;
   readonly item: string;
   readonly name: string;
@@ -78,7 +83,7 @@ export function parseInventory(answer: unknown): InventorySnapshot | null {
   return {
     open: a.open === true,
     slots: a.slots,
-    items: a.items.filter(isItem),
+    items: a.items.filter(isItem).map((i) => ({ ...i, template: typeof i.template === 'number' ? i.template : 0 })),
     recent: a.recent.filter(isRow),
     lost: a.lost.filter(isLost),
   };
@@ -145,6 +150,9 @@ const DROP_PREFIX: Readonly<Partial<Record<string, string>>> = {
   kill: 'Loot',
   lair: 'Lair cache',
   mission: 'Mission cache',
+  // Out of a bazaar listing into the inventory (bazaar.md § 6): bought, or one's own listing back.
+  buy: 'Collected',
+  return: 'Collected',
 };
 
 /**

@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { panelKey } from '../app/panel-keys';
 import { useItems } from '../state/items-store';
+import { useMarket } from '../state/market-store';
 import { useMissions } from '../state/mission-store';
 import { useSessionStore } from '../state/session-store';
 import { useUi } from '../state/ui-store';
@@ -11,8 +12,9 @@ import { useWallet } from '../state/wallet-store';
  * and above them the word that a mission was completed. A logged-in player's only — the god camera holds no missions and
  * no wallet — except the inventory's against the mock, whose own character has one (`data/mock/inventory.ts`).
  *
- * <b>And their keys</b> (Loïc, 2026-10-26): <kbd>J</kbd> toggles the journal, <kbd>I</kbd> the inventory — not while
- * typing, not with a modifier held, and not while a context menu is open, whose keys are its own.
+ * <b>And their keys</b> (Loïc, 2026-10-26): <kbd>J</kbd> toggles the journal, <kbd>I</kbd> the inventory, <kbd>B</kbd> the
+ * bazaar (bazaar.md § 6: browsing and cancelling work anywhere; the rest at a bazaar terminal) — not while typing, not with
+ * a modifier held, and not while a context menu is open, whose keys are its own.
  */
 export function BottomBar() {
   const playing = useSessionStore((s) => s.grant !== null);
@@ -25,6 +27,9 @@ export function BottomBar() {
   const completed = useMissions((s) => s.completed);
   const inventoryOpen = useWallet((s) => s.inventoryOpen);
   const toggleInventory = useWallet((s) => s.toggleInventory);
+  const bazaarOpen = useMarket((s) => s.open);
+  const toggleBazaar = useMarket((s) => s.toggle);
+  const reserved = useMarket((s) => s.mine?.reserved.length ?? 0);
 
   useEffect(() => {
     if (!shown) {
@@ -44,6 +49,8 @@ export function BottomBar() {
       e.preventDefault();
       if (panel === 'journal') {
         useMissions.getState().toggleJournal();
+      } else if (panel === 'bazaar') {
+        useMarket.getState().toggle();
       } else {
         useWallet.getState().toggleInventory();
       }
@@ -85,6 +92,15 @@ export function BottomBar() {
           aria-pressed={inventoryOpen}
         >
           <span aria-hidden="true">🎒</span> Inventory
+        </button>
+        <button
+          type="button"
+          className={bazaarOpen ? 'active' : ''}
+          onClick={toggleBazaar}
+          title="Bazaar (B)"
+          aria-pressed={bazaarOpen}
+        >
+          <span aria-hidden="true">⚖</span> Bazaar{reserved > 0 ? ` (${String(reserved)})` : ''}
         </button>
       </div>
     </>

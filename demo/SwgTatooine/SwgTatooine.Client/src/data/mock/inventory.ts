@@ -6,7 +6,8 @@ import { Rng } from './rng';
  * The mock's answer to `GET /swg/inventory` (inventory-loot.md § 3.6), so the inventory window, its icons and the loot lines
  * can be exercised without the server: one character whose inventory a drop fills every {@link MOCK_DROP_MS}, placed by the
  * server's rules — the same item at the same Mk stacks to 99, then opens the lowest free slot; what does not fit is lost
- * and noted. Its `items` revision moves with every drop, as the body's owner field does.
+ * and noted. Its `items` revision moves with every drop, as the body's owner field does, and with every move the mock
+ * bazaar makes (`data/mock/market.ts`): units taken into a listing or sold to the vendor, units collected.
  *
  * Not the server's loot tables (`LootTables.cs`): a drop here is a few units of one or two families, now and then a core or
  * an add-on, at a Mk I-IV, enough to see every badge colour and a loss.
@@ -15,29 +16,42 @@ import { Rng } from './rng';
 /** How often the mock's character loots something, milliseconds. */
 export const MOCK_DROP_MS = 8000;
 
-/** What the mock drops: the 17 lootable items (inventory-loot.md § 3.1), as the server names them. */
-const MATERIALS: readonly (readonly [string, string])[] = [
-  ['mat_metal', 'Metal'],
-  ['mat_crystal', 'Crystal'],
-  ['mat_gas', 'Gas'],
-  ['mat_chemical', 'Chemical'],
-  ['mat_fiber', 'Fiber'],
-  ['mat_hide', 'Hide'],
-  ['mat_bone', 'Bone'],
-  ['mat_gland', 'Gland'],
-  ['mat_venom', 'Venom'],
+/** One lootable item as the server's catalogue holds it (`ItemCatalog.cs`): its template id, asset id, name and category. */
+export interface MockItemDef {
+  readonly template: number;
+  readonly item: string;
+  readonly name: string;
+  readonly category: string;
+}
+
+/** What the mock drops: the 17 lootable items (inventory-loot.md § 3.1), as the server names and numbers them. */
+export const MOCK_MATERIALS: readonly MockItemDef[] = [
+  { template: 3, item: 'mat_metal', name: 'Metal', category: 'material' },
+  { template: 4, item: 'mat_crystal', name: 'Crystal', category: 'material' },
+  { template: 5, item: 'mat_gas', name: 'Gas', category: 'material' },
+  { template: 6, item: 'mat_chemical', name: 'Chemical', category: 'material' },
+  { template: 7, item: 'mat_fiber', name: 'Fiber', category: 'material' },
+  { template: 8, item: 'mat_hide', name: 'Hide', category: 'material' },
+  { template: 9, item: 'mat_bone', name: 'Bone', category: 'material' },
+  { template: 10, item: 'mat_gland', name: 'Gland', category: 'material' },
+  { template: 11, item: 'mat_venom', name: 'Venom', category: 'material' },
 ];
 
-const PARTS: readonly (readonly [string, string, string])[] = [
-  ['core_ranged', 'Ranged Weapon Core', 'core'],
-  ['core_melee', 'Melee Weapon Core', 'core'],
-  ['core_armor', 'Armor Core', 'core'],
-  ['core_propulsion', 'Propulsion Core', 'core'],
-  ['addon_weapon', 'Weapon Enhancement', 'addon'],
-  ['addon_armor', 'Armor Enhancement', 'addon'],
-  ['addon_tuning', 'Tuning Kit', 'addon'],
-  ['addon_additive', 'Additive', 'addon'],
+export const MOCK_PARTS: readonly MockItemDef[] = [
+  { template: 12, item: 'core_ranged', name: 'Ranged Weapon Core', category: 'core' },
+  { template: 13, item: 'core_melee', name: 'Melee Weapon Core', category: 'core' },
+  { template: 14, item: 'core_armor', name: 'Armor Core', category: 'core' },
+  { template: 15, item: 'core_propulsion', name: 'Propulsion Core', category: 'core' },
+  { template: 16, item: 'addon_weapon', name: 'Weapon Enhancement', category: 'addon' },
+  { template: 17, item: 'addon_armor', name: 'Armor Enhancement', category: 'addon' },
+  { template: 18, item: 'addon_tuning', name: 'Tuning Kit', category: 'addon' },
+  { template: 19, item: 'addon_additive', name: 'Additive', category: 'addon' },
 ];
+
+/** The lootable item of template `template`, or `undefined`. */
+export function mockItem(template: number): MockItemDef | undefined {
+  return MOCK_MATERIALS.find((m) => m.template === template) ?? MOCK_PARTS.find((m) => m.template === template);
+}
 
 const STACK_MAX = 99;
 const RECENT = 20;
@@ -52,6 +66,7 @@ interface Stack {
   item: string;
   name: string;
   category: string;
+  template: number;
   mk: number;
   count: number;
 }
@@ -65,6 +80,8 @@ export class MockInventory {
   private readonly lost: LostNote[] = [];
   private startMs = Number.NaN;
   private drops = 0;
+  /** Moves made by the mock bazaar: each moves the revision as a drop does. */
+  private moves = 0;
   private seq = 0;
   private lostN = 0;
   private nextStack = 1;
@@ -79,7 +96,8 @@ export class MockInventory {
   }
 
   /**
-   * The `items` revision at `nowMs`, dropping whatever came due since the last call: 1 on the first call, one more per drop.
+   * The `items` revision at `nowMs`, dropping whatever came due since the last call: 1 on the first call, one more per drop
+   * and per bazaar move.
    *
    * @param nowMs A monotonic clock in milliseconds; its first value starts the clock.
    */
@@ -92,7 +110,7 @@ export class MockInventory {
       this.drop();
     }
 
-    return this.drops + 1;
+    return this.drops + this.moves + 1;
   }
 
   /** The inventory as `GET /swg/inventory` answers it. */
@@ -112,35 +130,96 @@ export class MockInventory {
     });
   };
 
+  /** Units of (`template`, `mk`) held, every stack summed. */
+  held(template: number, mk: number): number {
+    let n = 0;
+    for (const s of this.stacks) {
+      if (s.template === template && s.mk === mk) {
+        n += s.count;
+      }
+    }
+
+    return n;
+  }
+
+  /**
+   * Takes `count` units of (`template`, `mk`) out — into a listing, or to the vendor — the highest slot first, as the server's
+   * `ItemTransfer` debit does; false, and nothing taken, when fewer are held.
+   *
+   * @param kind The rows' kind: `list` or `vendor`.
+   */
+  take(template: number, mk: number, count: number, kind: string, tick: number, ref: string): boolean {
+    if (count < 1 || this.held(template, mk) < count) {
+      return false;
+    }
+
+    let left = count;
+    const own = this.stacks.filter((s) => s.template === template && s.mk === mk).sort((a, b) => b.slot - a.slot);
+    for (const stack of own) {
+      const out = Math.min(left, stack.count);
+      stack.count -= out;
+      left -= out;
+      this.row(tick, stack.item, stack.name, mk, out, ref, kind);
+      if (stack.count === 0) {
+        this.stacks.splice(this.stacks.indexOf(stack), 1);
+      }
+
+      if (left === 0) {
+        break;
+      }
+    }
+
+    this.moves++;
+    return true;
+  }
+
+  /** Whether `count` units of (`template`, `mk`) fit: the key's stacks topped up to 99, then the free slots. */
+  roomFor(template: number, mk: number, count: number): boolean {
+    let room = (this.slots - this.stacks.length) * STACK_MAX;
+    for (const s of this.stacks) {
+      if (s.template === template && s.mk === mk) {
+        room += STACK_MAX - s.count;
+      }
+    }
+
+    return room >= count;
+  }
+
+  /**
+   * Puts `count` units in, all or nothing (the server's `RoomFor`): a bazaar collect, `kind` `buy` or `return`. False, and
+   * nothing placed, when they do not fit.
+   */
+  give(def: MockItemDef, mk: number, count: number, kind: string, tick: number, ref: string): boolean {
+    if (!this.roomFor(def.template, mk, count)) {
+      return false;
+    }
+
+    this.place(def, mk, count, tick, ref, kind);
+    this.moves++;
+    return true;
+  }
+
   private drop(): void {
     this.drops++;
     const tick = this.drops * 20;
     const ref = String(1_000_000 + this.drops);
     const mk = 1 + Math.min(3, Math.floor(this.rng.next() * this.rng.next() * 5));
     if (this.rng.next() < PART_CHANCE) {
-      const [item, name, category] = PARTS[this.rng.int(0, PARTS.length)];
-      this.place(item, name, category, mk, 1, tick, ref);
+      this.place(MOCK_PARTS[this.rng.int(0, MOCK_PARTS.length)], mk, 1, tick, ref, 'kill');
     }
 
-    const first = MATERIALS[this.rng.int(0, MATERIALS.length)];
-    const second = MATERIALS[this.rng.int(0, MATERIALS.length)];
+    const first = MOCK_MATERIALS[this.rng.int(0, MOCK_MATERIALS.length)];
+    const second = MOCK_MATERIALS[this.rng.int(0, MOCK_MATERIALS.length)];
     const split = this.rng.int(1, UNITS_PER_DROP + 1);
-    this.place(first[0], first[1], 'material', mk, split, tick, ref);
+    this.place(first, mk, split, tick, ref, 'kill');
     if (split < UNITS_PER_DROP) {
-      this.place(second[0], second[1], 'material', mk, UNITS_PER_DROP - split, tick, ref);
+      this.place(second, mk, UNITS_PER_DROP - split, tick, ref, 'kill');
     }
   }
 
-  /** The server's placement (`ItemTransfer`, World → character): fill the key's stacks, lowest slot first, then open one. */
-  private place(
-    item: string,
-    name: string,
-    category: string,
-    mk: number,
-    count: number,
-    tick: number,
-    ref: string,
-  ): void {
+  /** The server's placement (`ItemTransfer`, into a character): fill the key's stacks, lowest slot first, then open one. */
+  private place(def: MockItemDef, mk: number, count: number, tick: number, ref: string, kind: string): void {
+    const { item, name, category, template } = def;
     let left = count;
     const own = this.stacks.filter((s) => s.item === item && s.mk === mk).sort((a, b) => a.slot - b.slot);
     for (const stack of own) {
@@ -148,7 +227,7 @@ export class MockInventory {
       if (put > 0) {
         stack.count += put;
         left -= put;
-        this.row(tick, item, name, mk, put, ref);
+        this.row(tick, item, name, mk, put, ref, kind);
       }
     }
 
@@ -161,14 +240,14 @@ export class MockInventory {
       }
 
       const put = Math.min(left, STACK_MAX);
-      this.stacks.push({ id: String(this.nextStack++), slot, item, name, category, mk, count: put });
+      this.stacks.push({ id: String(this.nextStack++), slot, item, name, category, template, mk, count: put });
       left -= put;
-      this.row(tick, item, name, mk, put, ref);
+      this.row(tick, item, name, mk, put, ref, kind);
     }
   }
 
-  private row(tick: number, item: string, name: string, mk: number, count: number, ref: string): void {
-    this.rows.unshift({ seq: String(++this.seq), tick, kind: 'kill', item, name, mk, count, ref });
+  private row(tick: number, item: string, name: string, mk: number, count: number, ref: string, kind: string): void {
+    this.rows.unshift({ seq: String(++this.seq), tick, kind, item, name, mk, count, ref });
     this.rows.length = Math.min(this.rows.length, RECENT);
   }
 

@@ -54,6 +54,9 @@ import { playerMenuItems, WalletReader } from '../data/wallet';
 import { itemIcons, parseInventory, type InventorySnapshot } from '../data/items';
 import { MockSource } from '../data/mock/mock-source';
 import type { MockInventory } from '../data/mock/inventory';
+import { MOCK_BAZAAR_REGION, type MockMarket } from '../data/mock/market';
+import { parseMine, regionAt, type MarketMine } from '../data/market';
+import { useMarket } from '../state/market-store';
 import { RevisionReader } from '../data/revision-reader';
 import { useItems } from '../state/items-store';
 import { useMissions } from '../state/mission-store';
@@ -123,6 +126,8 @@ import {
 import { ShuttleView } from './shuttle-view';
 import {
   canUseAt,
+  bazaarMenuItems,
+  bazaarTerminalOf,
   crowdsTerminal,
   missionMenuItems,
   missionTerminalOf,
@@ -417,6 +422,13 @@ const MISSION_TERMINAL_ASSET = 'mission_terminal';
 const MISSION_TERMINAL_LABEL = 'Mission terminal';
 const MISSION_TERMINAL_TAG: EntityTag = entityTag(MISSION_TERMINAL_LABEL, 0, null);
 
+/** The bazaar terminal's asset: its `bazaar` interaction is where the board is used from (bazaar.md § 6). */
+const BAZAAR_TERMINAL_ASSET = 'bazaar_terminal';
+
+/** What a selected bazaar terminal is tagged: the structure's own name. */
+const BAZAAR_TERMINAL_LABEL = 'Bazaar';
+const BAZAAR_TERMINAL_TAG: EntityTag = entityTag(BAZAAR_TERMINAL_LABEL, 0, null);
+
 /** A tag before anything was tagged. */
 const NO_TAG: EntityTag = entityTag('', 0, null);
 
@@ -431,9 +443,9 @@ const MISSION_NAV_KIND = 1000;
 
 /** A shuttleport's ticket terminal, as a part the viewer can hover, select and long-press: its port and its box. */
 interface TerminalPart {
-  /** A shuttleport's ticket terminal, or a mission terminal (missions.md § 5). */
-  readonly kind: 'ticket' | 'mission';
-  /** The shuttleport's netId, or the mission terminal's own. */
+  /** A shuttleport's ticket terminal, a mission terminal (missions.md § 5) or a bazaar terminal (bazaar.md § 6). */
+  readonly kind: 'ticket' | 'mission' | 'bazaar';
+  /** The shuttleport's netId, or the mission or bazaar terminal's own. */
   readonly owner: number;
   readonly use: TicketTerminal;
   /** The terminal's world box, planet coordinates: what the pick's ray is tested against. */
@@ -849,6 +861,12 @@ export class ClientApp {
     });
     // `/tip` and the player menu's "Tip…" give credits through whatever source is live, the same way.
     useWallet.getState().setActions({ tip: (target, amount) => this.source?.giveCredits(target, amount) ?? false });
+    // The bazaar panel sends through whatever source is live, and reads the board from its server — or the mock's desk.
+    useMarket.getState().setActions({
+      send: (command) => this.source?.market(command) ?? false,
+      fetch: (url, init) => this.mockMarket()?.fetch(url, init) ?? fetch(url, init),
+      token: () => this.marketToken(),
+    });
     // A chat cleared is a room left — a reconnect, a realm crossed — and the netIds the bubbles are keyed by are the old
     // room's: a bubble kept would float over whichever body was given the number next.
     this.unsubscribeChat = useChat.subscribe((state, previous) => {
@@ -1096,6 +1114,7 @@ export class ClientApp {
       void mount.library.describe(SHUTTLEPORT_ASSET).catch(() => undefined);
       void mount.library.describe(TICKET_TERMINAL_ASSET).catch(() => undefined);
       void mount.library.describe(MISSION_TERMINAL_ASSET).catch(() => undefined);
+      void mount.library.describe(BAZAAR_TERMINAL_ASSET).catch(() => undefined);
 
       // <b>Nothing above waited for anything but the catalogue</b> (Loïc, 2026-10-26: what is lazy loads asynchronously,
       // and what waits on it is not drawn). The buildings ask for their own GLBs from the next frame, and the crowds build
@@ -1314,6 +1333,8 @@ export class ClientApp {
     useMissions.getState().closeTerminal();
     useWallet.getState().setActions(null);
     useWallet.getState().closeInventory();
+    useMarket.getState().setActions(null);
+    useMarket.getState().reset();
     this.bubbles.dispose();
     this.frames.dispose();
     this.pressRing.dispose();
@@ -1408,6 +1429,9 @@ export class ClientApp {
     this.items.clear();
     this.itemsVersion = -1;
     useItems.getState().reset();
+    this.mine.clear();
+    this.mineVersion = -1;
+    useMarket.getState().reset();
     this.fight.clear();
     useMissions.getState().closeTerminal();
     this.clock = new Clock(CLOCK_OPTIONS);
@@ -3365,6 +3389,7 @@ export class ClientApp {
     const cam = inEye ? this.eyeCamera : this.mapCamera;
     this.activeAltitude = cam.altitude;
     this.updateMissions(now);
+    this.updateMarket(now);
     this.updateNav(now);
     this.paintNav(cam.yaw);
     this.origin.follow(cam.targetX, cam.targetZ);
@@ -3811,8 +3836,8 @@ export class ClientApp {
   private readonly pickWall: ShapeHit = { t: 0, index: -1 };
 
   /**
-   * The terminals this frame's structures hold — shuttleports' ticket terminals and mission terminals, the parts the pick
-   * and the long press know — rebuilt when the structures are.
+   * The terminals this frame's structures hold — shuttleports' ticket terminals, mission and bazaar terminals, the parts the
+   * pick and the long press know — rebuilt when the structures are.
    *
    * <b>Rebuilt when a descriptor arrives, too.</b> They are asked for when the assets mount and arrive in their own time; a
    * list built before one arrived was kept until the structures next changed, so the first terminal walked up to after a quick
@@ -3824,12 +3849,14 @@ export class ClientApp {
     const port = library?.described(SHUTTLEPORT_ASSET) ?? null;
     const ticket = library?.described(TICKET_TERMINAL_ASSET) ?? null;
     const mission = library?.described(MISSION_TERMINAL_ASSET) ?? null;
+    const bazaar = library?.described(BAZAAR_TERMINAL_ASSET) ?? null;
     if (
       this.partsEpoch === this.structureEpoch &&
       this.partsSet === this.assetSet &&
       this.partsFrom[0] === port &&
       this.partsFrom[1] === ticket &&
-      this.partsFrom[2] === mission
+      this.partsFrom[2] === mission &&
+      this.partsFrom[3] === bazaar
     ) {
       return this.terminalParts;
     }
@@ -3837,7 +3864,7 @@ export class ClientApp {
     this.terminalParts = [];
     this.partsEpoch = this.structureEpoch;
     this.partsSet = this.assetSet;
-    this.partsFrom = [port, ticket, mission];
+    this.partsFrom = [port, ticket, mission, bazaar];
 
     const children = ticket === null ? null : new Map([[TICKET_TERMINAL_ASSET, ticket]]);
     for (let i = 0; i < this.structureCount; i++) {
@@ -3847,7 +3874,9 @@ export class ClientApp {
           ? ticketTerminalOf(port, children, s.x, s.y, s.z, s.yaw)
           : s.kind === StructureKind.MissionTerminal && mission !== null
             ? missionTerminalOf(mission, s.x, s.y, s.z, s.yaw)
-            : null;
+            : s.kind === StructureKind.Bazaar && bazaar !== null
+              ? bazaarTerminalOf(bazaar, s.x, s.y, s.z, s.yaw)
+              : null;
       if (use === null || use.corners === null) {
         continue;
       }
@@ -3861,7 +3890,8 @@ export class ClientApp {
         }
       }
 
-      const kind = s.kind === StructureKind.Shuttleport ? 'ticket' : 'mission';
+      const kind =
+        s.kind === StructureKind.Shuttleport ? 'ticket' : s.kind === StructureKind.Bazaar ? 'bazaar' : 'mission';
       this.terminalParts.push({ kind, owner: s.netId, use, min, max });
     }
 
@@ -3877,7 +3907,10 @@ export class ClientApp {
   private readonly levelWatch = new LevelWatch();
 
   /** The wallet (economy-foundation.md E0-10): read whenever the body's `wallet` revision moves, as the journal is. */
-  private readonly wallet = new WalletReader(() => useSessionStore.getState().grant?.token ?? null);
+  private readonly wallet = new WalletReader(
+    () => (this.mockMarket() !== null ? 'mock' : (useSessionStore.getState().grant?.token ?? null)),
+    (url, init) => this.mockMarket()?.fetch(url, init) ?? fetch(url, init),
+  );
   private walletVersion = -1;
   /**
    * The inventory (inventory-loot.md § 6): read whenever the body's `items` revision moves, as the wallet is. Against the
@@ -3904,6 +3937,79 @@ export class ClientApp {
     return this.source instanceof MockSource ? this.source.inventory : null;
   }
 
+  /** The mock's bazaar and wallet when the source is the mock; `null` otherwise. */
+  private mockMarket(): MockMarket | null {
+    return this.source instanceof MockSource ? this.source.bazaar : null;
+  }
+
+  /** The token the bazaar's reads carry: the login's, or the mock's own. */
+  private marketToken(): string | null {
+    return this.mockMarket() !== null ? 'mock' : (useSessionStore.getState().grant?.token ?? null);
+  }
+
+  // ── Bazaar (bazaar.md § 6) ─────────────────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * This character's listings and reservations (`GET /swg/market/mine`), re-read when its `items` or `wallet` revision moves
+   * — the desk moves one or the other with every change it makes for the character (B10) — while the panel is open, while
+   * the last read held anything, and once per session to begin with.
+   */
+  private readonly mine = new RevisionReader<MarketMine>(
+    'swg/market/mine',
+    parseMine,
+    () => this.marketToken(),
+    (url, init) => this.mockMarket()?.fetch(url, init) ?? fetch(url, init),
+  );
+  private mineVersion = -1;
+  /** The bazaar terminal whose context menu is open, for closing it when the body walks away. */
+  private bazaarMenuOwner = 0;
+
+  /**
+   * The bazaar, every frame: where the body stands (the region of a bazaar terminal in reach, which is where list, buy,
+   * collect and vendor are allowed), `/mine` read on its revisions, the open panel's page re-read when due, and the terminal's
+   * menu closed when the body walks away from it.
+   */
+  private updateMarket(nowMs: number): void {
+    const market = useMarket.getState();
+    const mock = this.mockMarket();
+    const source = this.source;
+    let here = 0;
+    if (mock !== null) {
+      here = MOCK_BAZAAR_REGION;
+    } else if (source !== null && source.canPlay) {
+      for (const part of this.terminalsInView()) {
+        if (part.kind === 'bazaar' && this.canUse(part)) {
+          here = regionAt(part.use.reachX, part.use.reachZ);
+          break;
+        }
+      }
+    }
+
+    market.setHere(here);
+    const wanted = market.open || market.mine === null || market.mine.listed.length + market.mine.reserved.length > 0;
+    const items =
+      mock !== null ? (this.mockInventory()?.revision(nowMs) ?? 0) : (source?.selfNumber('items') ?? Number.NaN);
+    const wallet = mock !== null ? mock.walletRevision() : (source?.selfNumber('wallet') ?? Number.NaN);
+    const playing = mock !== null || source?.canPlay === true;
+    this.mine.update(playing && wanted ? items + wallet : Number.NaN);
+    if (this.mine.version !== this.mineVersion) {
+      this.mineVersion = this.mine.version;
+      const mine = this.mine.value;
+      if (mine !== null) {
+        market.setMine(mine);
+      }
+    }
+
+    market.tick(nowMs);
+    const ui = useUi.getState();
+    if (ui.contextMenu?.source === 'bazaar') {
+      const menuPart = this.terminalPart(this.bazaarMenuOwner);
+      if (menuPart === null || !this.canUse(menuPart)) {
+        ui.closeContextMenu();
+      }
+    }
+  }
+
   /**
    * The journal and the open terminal's list, every frame: the journal read when its revision moved, the list gathered
    * every {@link OFFER_SCAN_MS} — and closed when the body walks away from its terminal, as the ticket menu is.
@@ -3928,14 +4034,22 @@ export class ClientApp {
       if (reached !== null) {
         useChat.getState().notice(`You reached combat level ${reached}.`);
       }
+    }
 
-      this.wallet.update(source.selfNumber('wallet'));
-      if (this.wallet.version !== this.walletVersion) {
-        this.walletVersion = this.wallet.version;
-        const wallet = this.wallet.wallet;
-        if (wallet !== null) {
-          useWallet.getState().setWallet(wallet);
-        }
+    // The mock's character has a wallet of its own, its bazaar's (`data/mock/market.ts`), read the same way.
+    const mockMarket = this.mockMarket();
+    this.wallet.update(
+      mockMarket !== null
+        ? mockMarket.walletRevision()
+        : source?.canPlay === true
+          ? source.selfNumber('wallet')
+          : Number.NaN,
+    );
+    if (this.wallet.version !== this.walletVersion) {
+      this.walletVersion = this.wallet.version;
+      const wallet = this.wallet.wallet;
+      if (wallet !== null) {
+        useWallet.getState().setWallet(wallet);
       }
     }
 
@@ -3948,6 +4062,7 @@ export class ClientApp {
       const items = this.items.value;
       if (items !== null) {
         useItems.getState().setSnapshot(items);
+        useMarket.getState().setStacks(items.items);
       }
     }
 
@@ -4163,6 +4278,18 @@ export class ClientApp {
 
     ui.selectPart({ owner: part.owner, kind: part.kind });
     this.missionMenuOwner = part.kind === 'mission' ? part.owner : 0;
+    this.bazaarMenuOwner = part.kind === 'bazaar' ? part.owner : 0;
+    if (part.kind === 'bazaar') {
+      ui.openContextMenu({
+        x: press.x,
+        y: press.y,
+        title: BAZAAR_TERMINAL_LABEL,
+        source: 'bazaar',
+        items: bazaarMenuItems(useMarket.getState().mine?.reserved.length ?? 0),
+      });
+      return false;
+    }
+
     ui.openContextMenu(
       part.kind === 'mission'
         ? {
@@ -4184,6 +4311,15 @@ export class ClientApp {
           },
     );
     return false;
+  }
+
+  /** What a terminal part is tagged on screen. */
+  private partTag(part: TerminalPart): EntityTag {
+    return part.kind === 'mission'
+      ? MISSION_TERMINAL_TAG
+      : part.kind === 'bazaar'
+        ? BAZAAR_TERMINAL_TAG
+        : TICKET_TERMINAL_TAG;
   }
 
   /** Evaluates the selection's position into {@link selectedX}/{@link selectedZ}; false when it has none. */
@@ -4836,12 +4972,7 @@ export class ClientApp {
         : hovered !== 0 && this.frameOf(matrix, hovered, width, height))
     ) {
       this.frames.show(0, this.frameRect, 'hover');
-      this.hoverTag =
-        hoveredPart !== null
-          ? hoveredPart.kind === 'mission'
-            ? MISSION_TERMINAL_TAG
-            : TICKET_TERMINAL_TAG
-          : this.hoverTextOf(hovered);
+      this.hoverTag = hoveredPart !== null ? this.partTag(hoveredPart) : this.hoverTextOf(hovered);
       this.hoverRect.left = this.frameRect.left;
       this.hoverRect.right = this.frameRect.right;
       this.hoverRect.top = this.frameRect.top;
@@ -4861,7 +4992,7 @@ export class ClientApp {
 
       this.frames.show(1, this.frameRect, 'passive');
       this.keepSelectionRect();
-      return selectedPart.kind === 'mission' ? MISSION_TERMINAL_TAG : TICKET_TERMINAL_TAG;
+      return this.partTag(selectedPart);
     }
 
     if (selected === 0 || !this.frameOf(matrix, selected, width, height)) {

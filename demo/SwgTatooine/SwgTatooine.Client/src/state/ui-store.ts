@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { useChat } from './chat-store';
 import { useMissions } from './mission-store';
+import { useMarket } from './market-store';
 
 /** One row of the navigation pane. */
 export interface NavRow {
@@ -28,6 +29,7 @@ export interface CameraRequest {
   readonly seq: number;
 }
 
+import type { BazaarTab } from '../data/market';
 import type { RealmDirectory } from '../data/server-config';
 import { askedFor, IDLE, type TransitionState } from '../app/realm-transition';
 import { NOT_TRAVELLING, type TravelState } from '../app/travel';
@@ -92,7 +94,7 @@ export interface ShuttleportPrompt {
  */
 export interface PartRef {
   readonly owner: number;
-  readonly kind: 'ticket' | 'mission';
+  readonly kind: 'ticket' | 'mission' | 'bazaar';
 }
 
 /** What a context menu entry does: plain data, carried out by the store. */
@@ -100,6 +102,8 @@ export type ContextAction =
   | { readonly kind: 'board'; readonly city: number }
   | { readonly kind: 'missions'; readonly terminal: number }
   | { readonly kind: 'journal' }
+  /** The bazaar panel on a tab (bazaar.md § 6); Browse of this terminal's city or of every city. */
+  | { readonly kind: 'bazaar'; readonly tab: BazaarTab; readonly scope?: 'here' | 'all' }
   /** Tip another player: the chat opens on `/tip `, the player selected. */
   | { readonly kind: 'tip'; readonly target: number };
 
@@ -120,7 +124,7 @@ export interface ContextMenuState {
   readonly x: number;
   readonly y: number;
   readonly title: string;
-  readonly source: 'ticket' | 'mission' | 'player';
+  readonly source: 'ticket' | 'mission' | 'bazaar' | 'player';
   readonly items: readonly ContextMenuItem[];
 }
 
@@ -640,6 +644,9 @@ export const useUi = create<UiState>()((set, get) => ({
         break;
       case 'journal':
         useMissions.getState().openJournal();
+        break;
+      case 'bazaar':
+        useMarket.getState().openPanel(action.tab, action.scope);
         break;
       case 'tip':
         if (get().selectedNetId !== action.target) {

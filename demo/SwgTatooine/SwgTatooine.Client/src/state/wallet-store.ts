@@ -1,6 +1,8 @@
 import { create } from 'zustand';
+import { marketWalletLine } from '../data/market';
 import { formatCredits, type WalletSnapshot } from '../data/wallet';
 import { useChat } from './chat-store';
+import { useMarket } from './market-store';
 
 /**
  * The wallet on screen (economy-foundation.md E0-10): the balance and recent transfers as last read, whether the inventory
@@ -42,16 +44,30 @@ export const useWallet = create<WalletState>((set, get) => ({
     const before = get().wallet;
     if (before !== null) {
       const known = new Set(before.transfers.map((t) => t.seq));
-      const fresh = wallet.transfers.filter((t) => !known.has(t.seq) && t.kind === 'tip').reverse();
+      const fresh = wallet.transfers.filter((t) => !known.has(t.seq)).reverse();
       for (const t of fresh) {
         const who = t.other ?? 'somebody';
-        useChat
-          .getState()
-          .notice(
-            t.amount > 0
-              ? `${who} tipped you ${formatCredits(t.amount)}`
-              : `You tipped ${who} ${formatCredits(-t.amount)}`,
-          );
+        if (t.kind === 'tip') {
+          useChat
+            .getState()
+            .notice(
+              t.amount > 0
+                ? `${who} tipped you ${formatCredits(t.amount)}`
+                : `You tipped ${who} ${formatCredits(-t.amount)}`,
+            );
+          continue;
+        }
+
+        // The bazaar's (bazaar.md § 6): a sale with the tax the same tick paid, a purchase, the vendor's payment.
+        const tax =
+          t.kind === 'sale' && t.amount > 0
+            ? -(fresh.find((x) => x.kind === 'tax' && x.tick === t.tick)?.amount ?? 0)
+            : 0;
+        const what = t.kind === 'sale' ? useMarket.getState().saleItem(t.amount) : null;
+        const line = marketWalletLine(t.kind, t.amount, t.other, tax, what);
+        if (line !== null) {
+          useChat.getState().notice(line);
+        }
       }
     }
 

@@ -27,6 +27,7 @@ const item = (slot: number, name: string, mk: number, count: number, asset = 'ma
   item: asset,
   name,
   category: 'material',
+  template: 8,
   mk,
   count,
 });
@@ -76,11 +77,17 @@ describe('the inventory answer', () => {
     const answer = {
       open: true,
       slots: 30,
-      items: [{ id: '17', slot: 1, item: 'mat_hide', name: 'Hide', category: 'material', mk: 2, count: 7 }],
+      items: [
+        { id: '17', slot: 1, item: 'mat_hide', name: 'Hide', category: 'material', template: 8, mk: 2, count: 7 },
+      ],
       recent: [{ seq: '4', tick: 123, kind: 'kill', item: 'mat_hide', name: 'Hide', mk: 2, count: 3, ref: '88' }],
       lost: [{ n: 4, tick: 130, item: 'core_armor', name: 'Armor Core', mk: 2, count: 1 }],
     };
     expect(parseInventory(answer)).toEqual(answer);
+
+    // A server that does not name templates (before the bazaar): read, the template 0 — nothing to list it by.
+    const untemplated = { id: '17', slot: 1, item: 'mat_hide', name: 'Hide', category: 'material', mk: 2, count: 7 };
+    expect(parseInventory({ ...answer, items: [untemplated] })?.items[0].template).toBe(0);
   });
 
   it('is refused when a field is missing or of the wrong type, and a malformed row is dropped', () => {
