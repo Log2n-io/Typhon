@@ -85,6 +85,19 @@ public static class MarketPlan
 
     public const double BuyWalletShare = 0.3;
 
+    /// <summary>
+    /// What the vendor pays for <paramref name="count"/> units worth <paramref name="value"/> credits each: the server's floor of count × value × 20 %,
+    /// computed as it computes it, in milli-credits (<c>MarketValues.VendorPayout</c>); 0 is refused <c>MarketWorthless</c>.
+    /// </summary>
+    public static long VendorPayout(int count, double value)
+    {
+        var milli = (long)Math.Round(value * 1000d, MidpointRounding.AwayFromZero);
+        return count <= 0 ? 0 : count * milli * VendorBuysPerMille / 1000 / 1000;
+    }
+
+    /// <summary>The vendor's share of the value, per mille (<c>TatooineData.VendorBuysPerMille</c>).</summary>
+    public const long VendorBuysPerMille = 200;
+
     /// <summary>The Mk band of a combat level (content-levels.md: <c>min(5, (level − 1) / 10 + 1)</c>): the Mk a bot of that level buys.</summary>
     public static int Band(int level) => Math.Clamp(((Math.Max(1, level) - 1) / 10) + 1, 1, 5);
 
@@ -152,6 +165,11 @@ public static class MarketPlan
             if (stacks <= KeepStacks)
             {
                 break;
+            }
+
+            if (VendorPayout(Math.Min(s.Count, StackMax), prices.ValueOf(s.Item, s.Mk)) == 0)
+            {
+                continue;   // the vendor refuses a sale that pays nothing (MarketWorthless): the stack stays
             }
 
             plan.Add(MarketCommand.Vendor(s.Template, s.Mk, Math.Min(s.Count, StackMax)));

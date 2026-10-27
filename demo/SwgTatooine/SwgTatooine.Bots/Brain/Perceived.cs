@@ -115,6 +115,9 @@ public readonly struct Perceived
     /// <summary>Bazaar goods reserved for it — bought elsewhere, or a listing returned — as <c>GET /swg/market/mine</c> last said (bazaar.md § 5).</summary>
     public int Reserved { get; init; }
 
+    /// <summary>Whether its trade at the bazaar is still being read or sent (bazaar.md § 8): the bot stands at the terminal until it is done.</summary>
+    public bool Trading { get; init; }
+
     /// <summary>The structures it holds, read when a goal plans a walk; null in a test that needs none.</summary>
     public IStructureView Structures { get; init; }
 }

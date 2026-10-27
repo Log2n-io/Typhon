@@ -243,6 +243,12 @@ public sealed partial class BotBrain
     /// <summary>Added to the stay at a bazaar it trades at, in seconds: the plan goes out at two commands a second (the commands' rate).</summary>
     public const double TradeSeconds = 10d;
 
+    /// <summary>
+    /// The longest a bot stands at a bazaar past its trade's stay while its plan is still going out (<see cref="Perceived.Trading"/>), in seconds: market
+    /// reads slow under load, and a plan sent after the bot walked off is refused <c>MarketNotAtBazaar</c> command by command.
+    /// </summary>
+    public const double MaxTradeHoldSeconds = 30d;
+
     /// <summary>A rush bot's round of trade comes this often, in seconds (bazaar.md § 8, the load test).</summary>
     public const double RushRoundSeconds = 2d;
 
@@ -343,6 +349,12 @@ public sealed partial class BotBrain
 
     /// <summary>The load test's city, as a region (<c>--market-rush</c>, bazaar.md § 8), or 0: a rush bot goes there, stands at a bazaar and trades.</summary>
     public int RushRegion { get; set; }
+
+    /// <summary>Whether it stands at a bazaar's terminal using it: the only time a market command can be taken (the server's 6 m).</summary>
+    public bool AtBazaar => Goal == Goal.Visiting && _using && _visitKind == Routing.BazaarKind;
+
+    /// <summary>Errands set out on, counted: a trade's plan belongs to the visit it was asked at, and is dropped when that visit is over.</summary>
+    public long VisitSerial { get; private set; }
 
     /// <summary>Bazaar visits it traded at: each one a <see cref="IntentKind.Trade"/>.</summary>
     public long TradesAsked { get; private set; }
@@ -488,6 +500,9 @@ public sealed partial class BotBrain
 
     /// <summary>When a walk across the city may be searched again, after one found no way or stuck.</summary>
     private long _cityWalkAt;
+
+    /// <summary>The latest it stands at a bazaar for a plan still going out.</summary>
+    private long _tradeCap;
 
     /// <summary>When the bazaar errand may be chosen again: set whenever it is tried, made or not.</summary>
     private long _marketAt;
@@ -1180,6 +1195,7 @@ public sealed partial class BotBrain
         _visitAt = (found.X, found.Z);
         _visitRegion = to.Region;
         _marketErrand = why is GoalWhy.MarketChosen or GoalWhy.MarketFull;
+        VisitSerial++;
 
         Become(Goal.Visiting, why, tick, (uint)kind, (float)Routing.Distance(world.X, world.Z, found.X, found.Z));
         _using = false;
@@ -1291,6 +1307,12 @@ public sealed partial class BotBrain
                 return Intent.None;   // at the terminal: what using one looks like on the wire — until the take comes back as a mission held
             }
 
+            if (world.Trading && _visitKind == Routing.BazaarKind && RushRegion == 0 && tick < _tradeCap)
+            {
+                // The plan still going out: every command needs the body at the terminal (the server's 6 m), so the bot stands until the last is sent.
+                return Intent.None;
+            }
+
             if (RushRegion != 0 && _visitKind == Routing.BazaarKind)
             {
                 // The load test stands at its bazaar for good: the next round.
@@ -1352,6 +1374,7 @@ public sealed partial class BotBrain
                 if (_visitKind == Routing.BazaarKind && (Trades || RushRegion != 0))
                 {
                     _until = RushRegion != 0 ? tick + Ticks(RushRoundSeconds) : _until + Ticks(TradeSeconds);
+                    _tradeCap = _until + Ticks(MaxTradeHoldSeconds);
                     TradesAsked++;
                     return Intent.Trade(_visitRegion);
                 }
