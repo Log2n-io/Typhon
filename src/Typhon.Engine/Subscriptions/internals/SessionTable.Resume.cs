@@ -461,7 +461,7 @@ internal sealed unsafe partial class SessionTable
     /// </remarks>
     private void ClearResumeToken(int slot)
     {
-        if (_openTokens == null)
+        if (!ResumeEnabled)
         {
             return;
         }

@@ -77,13 +77,13 @@ internal sealed unsafe partial class SessionTable : IDisposable
     private readonly SessionEvents _events;
     private readonly int _capacity;
 
-    // Nulled by Dispose, after the caller gate has drained: a late caller must find "gone" rather than a pointer into freed memory.
-    // These are where the block's regions start, and nothing indexes them: every indexed access goes through the spans below. The two header words are
-    // single fixed-offset words with no index to check, which is why they are dereferenced directly.
+    // The block and where its regions start. The bases are written once, here, and never again: Dispose zeroes the regions' length (_blockSlots) after the
+    // caller gate has drained, so a late caller indexes an empty table. Nothing indexes the bases directly — every indexed access goes through the spans
+    // below. The two header words are single fixed-offset words with no index to check, which is why they are dereferenced directly, and nulled by Dispose.
     private PinnedMemoryBlock _memory;
     private int _blockSlots;
-    private SessionRow* _rows;
-    private uint* _freeIds;
+    private readonly SessionRow* _rows;
+    private readonly uint* _freeIds;
     private long* _freeHead;
     private int* _pushLock;
 
@@ -115,8 +115,8 @@ internal sealed unsafe partial class SessionTable : IDisposable
     // Resume (01-model § 3), all three committed only when ResumeGraceMs is above zero. The tokens are two words per slot, minted at Open and read for the
     // WELCOME; the records outlive their slots, which is what a pending resume is; the appData is the handle the application re-binds with. See
     // SessionTable.Resume.cs, which is where every one of them is written.
-    private ulong* _openTokens;
-    private ResumeRecord* _resumes;
+    private readonly ulong* _openTokens;
+    private readonly ResumeRecord* _resumes;
     private readonly object[] _resumeAppData;
     private readonly long _resumeGraceTicks;
     private readonly int _maxPendingResumes;
@@ -128,8 +128,8 @@ internal sealed unsafe partial class SessionTable : IDisposable
     private readonly List<int> _closedLastTick = [];
     private readonly List<int> _awaitingSends = [];
 
-    /// <summary>Callers inside a member that dereferences the block, plus the disposing latch in the sign bit. Padded: transport threads move it.</summary>
-    private CacheLinePaddedInt _callers;
+    /// <summary>Callers inside a member that dereferences the block, and the disposing latch. A line of its own: transport threads move it.</summary>
+    private CallerGate _callers;
 
     private ReplicationThreadAffinity _affinity;
     private int _openCount;
@@ -242,7 +242,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
 
             // -1, not the zero the allocation came with: a record's links name slots, and slot 0 is a slot. Zeroed memory would make every record claim to be
             // linked to the first one.
-            if (_resumes != null)
+            if (ResumeEnabled)
             {
                 Resumes[slot].Prev = -1;
                 Resumes[slot].Next = -1;
@@ -256,8 +256,8 @@ internal sealed unsafe partial class SessionTable : IDisposable
     //
     // Spans rather than pointer arithmetic (#1508): an out-of-range slot throws IndexOutOfRangeException where it was used, rather than reading or writing
     // past the row it meant. A span checks the INDEX and nothing else — it says nothing about whether the block is still allocated. That is the caller gate's
-    // job and the block's single owner's (SUB-38): a span over freed native memory reads freed memory exactly as the pointer did. The length is zeroed by
-    // Dispose with the bases, so a tick-side read past the scheduler's bounded join finds an empty table rather than an address.
+    // job and the block's single owner's (SUB-38): a span over freed native memory reads freed memory exactly as the pointer did. Dispose zeroes the length
+    // and leaves the bases, so a tick-side read past the scheduler's bounded join finds an empty table — never a span of the table's length over null.
     //
     // Built with no check of their own (CreateSpan), and a member that has already compared the slot with the length lets the JIT drop the span's check as
     // redundant: TryGetRow compiles to the pointer version's loads, compares and branches. Measured against the pointer form on the members the pumps and
@@ -267,11 +267,11 @@ internal sealed unsafe partial class SessionTable : IDisposable
 
     private Span<uint> FreeIds => MemoryMarshal.CreateSpan(ref Unsafe.AsRef<uint>(_freeIds), _blockSlots);
 
-    /// <summary>Two words per slot, low then high; empty when resume is off.</summary>
-    private Span<ulong> OpenTokens => new(_openTokens, _openTokens == null ? 0 : _capacity * 2);
+    /// <summary>Two words per slot, low then high; empty when resume is off, and once the table is disposed.</summary>
+    private Span<ulong> OpenTokens => new(_openTokens, ResumeEnabled ? _blockSlots * 2 : 0);
 
-    /// <summary>One record per slot; empty when resume is off.</summary>
-    private Span<ResumeRecord> Resumes => new(_resumes, _resumes == null ? 0 : _capacity);
+    /// <summary>One record per slot; empty when resume is off, and once the table is disposed.</summary>
+    private Span<ResumeRecord> Resumes => new(_resumes, ResumeEnabled ? _blockSlots : 0);
 
     /// <summary>How many sessions may be connected at once.</summary>
     public int Capacity => _capacity;
@@ -943,7 +943,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
         // resumable there left the application holding a body that no event would ever release. Found by the SWG demo's own A13 cases.
         if (resumable)
         {
-            resumable = _resumes != null && ArmResume(session, _appData[session.Slot]);
+            resumable = ResumeEnabled && ArmResume(session, _appData[session.Slot]);
         }
 
         row.Value.CloseCode = code;
@@ -1120,7 +1120,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
         {
             // Before the batch is taken, so a grace that elapsed since the last tick is delivered in THIS one rather than waiting for the next: an
             // application that destroys an avatar on ResumeExpired should not hold it a tick longer than the operator's number says.
-            if (_resumes != null)
+            if (ResumeEnabled)
             {
                 ExpireResumes();
             }
@@ -1848,61 +1848,28 @@ internal sealed unsafe partial class SessionTable : IDisposable
 
     // ── the caller gate ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>The sign bit of <see cref="_callers"/>: set once <see cref="Dispose"/> has latched, never cleared.</summary>
-    private const int DisposingBit = unchecked((int)0x8000_0000);
-
     /// <summary>Whether this table has been disposed.</summary>
-    internal bool IsDisposed => Volatile.Read(ref _callers.Value) < 0;
+    internal bool IsDisposed => _callers.IsLatched;
 
     /// <summary>Takes a reference on the native block for the duration of one call.</summary>
     /// <returns><see langword="false"/> once disposal has latched; the caller answers as it would for a slot that is gone.</returns>
-    private bool TryEnter()
-    {
-        while (true)
-        {
-            var observed = Volatile.Read(ref _callers.Value);
-            if (observed < 0)
-            {
-                return false;
-            }
+    private bool TryEnter() => _callers.TryEnter();
 
-            if (Interlocked.CompareExchange(ref _callers.Value, observed + 1, observed) == observed)
-            {
-                return true;
-            }
-        }
-    }
-
-    /// <summary>Drops the reference taken by <see cref="TryEnter"/>. The count lives in the low bits, so this never borrows into the latch.</summary>
-    private void Exit() => Interlocked.Decrement(ref _callers.Value);
+    /// <summary>Drops the reference taken by <see cref="TryEnter"/>.</summary>
+    private void Exit() => _callers.Exit();
 
     /// <inheritdoc />
     /// <remarks>
     /// <b>Quiesce, then free.</b> <see cref="TryLease"/>, <see cref="BeginSend"/>, <see cref="EndSend"/> and <see cref="RequestClose"/> are callable from any
     /// thread, so freeing the block on a "not disposed yet" flag read would be a race with a real use-after-free on the other side of it. The latch stops new
-    /// callers, the wait lets the ones already inside finish, and the pointers are nulled so a bug that reaches past the gate faults immediately instead of
-    /// reading freed memory that still looks like rows.
+    /// callers, the wait lets the ones already inside finish, and the block's length is zeroed so a bug that reaches past the gate indexes an empty table and
+    /// throws, instead of reading freed memory that still looks like rows.
     /// </remarks>
     public void Dispose()
     {
-        while (true)
+        if (!_callers.LatchAndDrain())
         {
-            var observed = Volatile.Read(ref _callers.Value);
-            if (observed < 0)
-            {
-                return;
-            }
-
-            if (Interlocked.CompareExchange(ref _callers.Value, observed | DisposingBit, observed) == observed)
-            {
-                break;
-            }
-        }
-
-        var spin = new SpinWait();
-        while ((Volatile.Read(ref _callers.Value) & ~DisposingBit) != 0)
-        {
-            spin.SpinOnce();
+            return;
         }
 
         _openSlots.Clear();
@@ -1918,11 +1885,12 @@ internal sealed unsafe partial class SessionTable : IDisposable
         Array.Clear(_appData);
         Array.Clear(_declaredLimits);
 
+        // The length, not the bases: a span is built from a base and the length in two plain reads, and a base nulled beside a length not yet zeroed — which
+        // a reader on another core can observe on arm64 — would be a span of the table's length over address zero. With the bases fixed for the table's life,
+        // a reader sees either the whole table or an empty one.
         var memory = _memory;
         _memory = null;
         _blockSlots = 0;
-        _rows = null;
-        _freeIds = null;
         _freeHead = null;
         _pushLock = null;
 

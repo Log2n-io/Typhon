@@ -49,9 +49,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     private ArchetypeReplicationState[] _replicationStates = [];
 
     // The one resource-graph node every native block below is registered under, and the only thing that frees what is left in it (#1508). The resource
-    // parent cascades its disposal to its children, and that parent is the scheduler, which TyphonRuntime disposes BEFORE this object: registered there
-    // directly, the session table's rows, the frame pool's slabs and the ingress rings were freed under the transport threads and send pumps that this
-    // object's Dispose exists to quiesce first. This node opts out of that cascade, so the blocks have one owner and are freed in Dispose's order.
+    // parent cascades its disposal to its children, and that parent is the scheduler: registered there directly, the session table's rows, the frame pool's
+    // slabs and the ingress rings were freed by the scheduler's disposal — which TyphonRuntime used to run first — under the transport threads and send
+    // pumps that this object's Dispose exists to quiesce. This node opts out of that cascade, so the blocks have one owner and are freed in Dispose's order.
     private readonly OwnedResourceNode _resources;
     private readonly SessionTable _sessions;
     private readonly IngressRingPool _ingressRings;
@@ -187,7 +187,8 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             Realm0Frame = BuildRealm0Frame(engine, Options, Math.Max(0, Array.IndexOf(kinds,
                 engine.RealmTable?.TryGet(RealmId.Default.Value)?.Config?.Replication?.Kind ?? "")));
 
-            // Before the first native allocation, which every one of them registers under. See the field.
+            // Before the first native allocation, which every one of them registers under. See the field. The scheduler's cascade skips this node but drops it
+            // from its child list, so a runtime nobody disposes leaks its blocks: a bounded leak, chosen over a free under a running pump.
             _resources = new OwnedResourceNode("Subscriptions", parent);
 
             _sessions = new SessionTable("Subscriptions.Sessions", _resources, engine.MemoryAllocator, Options, registry.Sessions.SessionEvents);
@@ -914,6 +915,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// <summary>The send pump, so a teardown test can read what its quiesce observed (#1006).</summary>
     internal SendPump SendPumpForTest => _sendPump;
 
+    /// <summary>Tests only: runs on entry to <see cref="Dispose"/>, so a test can see what was still running when it began (#1508).</summary>
+    internal Action DisposingForTest { get; set; }
+
     /// <summary>The node this runtime's native blocks are registered under, so a teardown test can check who frees them (#1508).</summary>
     internal IResource ResourcesForTest => _resources;
 
@@ -1331,6 +1335,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
         // Published, not merely assigned: a transport thread reads it through IsAccepting to stop taking connections, and that read is on another core.
         Volatile.Write(ref _disposed, true);
+        DisposingForTest?.Invoke();
 
         // Disposed, not cleared. A disposed state refuses every call that could reach its freed memory, and keeping the array intact leaves the pool counters
         // and the drain-fault count readable afterwards — which is what a shutdown leak is diagnosed from, and what this slice's teardown test asserts on.
@@ -1348,15 +1353,15 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         // turned that designed-for race into a NullReferenceException on a network thread, which is the one outcome neither side can do anything about.
         _sessions?.Dispose();
 
+        // Before the rings and the assembler. Its Dispose closes every link — which is what ends a transport thread's receive, and with it the COMMANDS that
+        // write into a ring — and quiesces the pumps, each of which holds a pointer into the assembler's frame pool for the duration of one send.
+        _sendPump?.Dispose();
+
         // After the table, and in this order for the same reason as the states above: the table is what stops new sessions reaching a ring, so the rings go
-        // once nothing can take one. The ingress drops its rows first, so the pool's Dispose frees slabs no row still names.
+        // once nothing can take one. The ingress latches its transport calls and waits for the ones still framing a record (#1508), then drops its rows, so
+        // the pool's Dispose frees slabs no row names and no transport thread is writing.
         _ingress?.Dispose();
         _ingressRings?.Dispose();
-
-        // Last of all: a frame block outlives the session that produced it only until its send completes, and the assembler returns every block a slot
-        // still names before it frees the pool's slabs.
-        // Before the assembler, because a running pump holds a pointer into the assembler's frame pool for the duration of one send. Its Dispose quiesces.
-        _sendPump?.Dispose();
 
         // #1006: the quiesce above is bounded, so a pump can still be inside a send here, holding a pointer into a frame-pool slab. The assembler leaves those
         // slabs allocated rather than free them under a socket; its send states need no such care, being managed memory it references.
