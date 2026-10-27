@@ -135,7 +135,10 @@ internal sealed unsafe partial class SessionTable : IDisposable
     /// Creates the table and commits its rows.
     /// </summary>
     /// <param name="id">Stable resource id for the backing allocation.</param>
-    /// <param name="parent">Resource-graph parent the allocation registers under.</param>
+    /// <param name="parent">
+    /// Resource-graph parent the allocation registers under. Its disposal must not reach the block before <see cref="Dispose"/> does: a cascade that frees it
+    /// bypasses the caller gate, and a send pump then reads freed rows (SUB-38, #1508).
+    /// </param>
     /// <param name="allocator">Engine allocator.</param>
     /// <param name="options">Operator configuration; <see cref="SubscriptionsOptions.MaxSessions"/> fixes the table's size for its lifetime.</param>
     /// <param name="events">The lifecycle stream this table produces into.</param>
