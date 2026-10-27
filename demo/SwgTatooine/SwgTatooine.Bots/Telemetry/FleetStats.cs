@@ -101,6 +101,18 @@ public sealed class FleetStats
     /// <summary>Navigation reversals per bot-minute over the window (<see cref="MoveWatch"/>).</summary>
     public Spread ReversalsPerBotMin { get; private set; }
 
+    /// <summary>The bazaar's refusals since the start, by reason (offset from <see cref="BotSwarm.MarketFirstReason"/>): what <see cref="FleetStat.MarketRefused"/> sums.</summary>
+    public long[] MarketRefusedBy { get; } = new long[BotSwarm.MarketReasons];
+
+    /// <summary>Adds one bot's bazaar refusals, by reason.</summary>
+    public void AddMarketRefusals(ReadOnlySpan<long> byReason)
+    {
+        for (var i = 0; i < byReason.Length && i < MarketRefusedBy.Length; i++)
+        {
+            MarketRefusedBy[i] += byReason[i];
+        }
+    }
+
     /// <summary>Starts a sample.</summary>
     public void Begin()
     {
@@ -109,6 +121,7 @@ public sealed class FleetStats
         Array.Clear(Stats);
         Array.Clear(Why);
         Array.Clear(Legs);
+        Array.Clear(MarketRefusedBy);
         Array.Clear(_botSeen);
     }
 

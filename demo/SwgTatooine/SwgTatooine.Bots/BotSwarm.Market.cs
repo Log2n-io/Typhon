@@ -71,6 +71,26 @@ public sealed partial class BotSwarm
         return t;
     }
 
+    /// <summary>A plan's command as the bazaar panel sends it: its catalog name and its fields, named as the server declares them (bazaar.md § 3.1).</summary>
+    public static (string Command, RecordValues Values) Encode(MarketCommand c) => c.Step switch
+    {
+        MarketStep.Collect => (MarketCollectCommand, new RecordValues { ["listing"] = FieldValue.OfUInt64(c.Listing) }),
+        MarketStep.List => (MarketListCommand, new RecordValues
+        {
+            ["template"] = FieldValue.Of((double)c.Template),
+            ["mk"] = FieldValue.Of((double)c.Mk),
+            ["quantity"] = FieldValue.Of((double)c.Quantity),
+            ["unitPrice"] = FieldValue.Of((double)c.UnitPrice),
+        }),
+        MarketStep.Vendor => (SellToVendorCommand, new RecordValues
+        {
+            ["template"] = FieldValue.Of((double)c.Template),
+            ["mk"] = FieldValue.Of((double)c.Mk),
+            ["quantity"] = FieldValue.Of((double)c.Quantity),
+        }),
+        _ => (MarketBuyCommand, new RecordValues { ["listing"] = FieldValue.OfUInt64(c.Listing), ["unitPrice"] = FieldValue.Of((double)c.UnitPrice) }),
+    };
+
     private sealed partial class Bot
     {
         /// <summary>The bazaar (bazaar.md § 8): trade visits, commands sent by kind, the vendor's expected payout, races lost, buys collected.</summary>
@@ -311,48 +331,28 @@ public sealed partial class BotSwarm
 
             _nextMarketSendTick = tick + Math.Max(1L, _ticksPerSecond / 2);
             var c = _sending.Dequeue();
+            var (command, values) = Encode(c);
+            if (Client.Plan.CommandByName(command) == null)
+            {
+                return;   // a server without the bazaar: nothing sent, nothing counted
+            }
+
+            await Client.SendCommandAsync(command, values, ct).ConfigureAwait(false);
             switch (c.Step)
             {
-                case MarketStep.Collect when Client.Plan.CommandByName(MarketCollectCommand) != null:
-                    await Client.SendCommandAsync(MarketCollectCommand, new RecordValues { ["listing"] = FieldValue.OfUInt64(c.Listing) }, ct)
-                        .ConfigureAwait(false);
+                case MarketStep.Collect:
                     MarketCollected++;
                     break;
-                case MarketStep.List when Client.Plan.CommandByName(MarketListCommand) != null:
-                    await Client.SendCommandAsync(
-                        MarketListCommand,
-                        new RecordValues
-                        {
-                            ["template"] = FieldValue.Of((double)c.Template),
-                            ["mk"] = FieldValue.Of((double)c.Mk),
-                            ["quantity"] = FieldValue.Of((double)c.Quantity),
-                            ["unitPrice"] = FieldValue.Of((double)c.UnitPrice),
-                        },
-                        ct).ConfigureAwait(false);
+                case MarketStep.List:
                     MarketListed++;
                     break;
-                case MarketStep.Vendor when Client.Plan.CommandByName(SellToVendorCommand) != null:
-                    await Client.SendCommandAsync(
-                        SellToVendorCommand,
-                        new RecordValues
-                        {
-                            ["template"] = FieldValue.Of((double)c.Template),
-                            ["mk"] = FieldValue.Of((double)c.Mk),
-                            ["quantity"] = FieldValue.Of((double)c.Quantity),
-                        },
-                        ct).ConfigureAwait(false);
+                case MarketStep.Vendor:
                     MarketVendored++;
                     MarketVendorCredits += VendorPayout(c);
                     break;
-                case MarketStep.Buy when Client.Plan.CommandByName(MarketBuyCommand) != null:
-                    await Client.SendCommandAsync(
-                        MarketBuyCommand,
-                        new RecordValues { ["listing"] = FieldValue.OfUInt64(c.Listing), ["unitPrice"] = FieldValue.Of((double)c.UnitPrice) },
-                        ct).ConfigureAwait(false);
+                case MarketStep.Buy:
                     MarketBought++;
                     break;
-                default:
-                    return;   // a server without the bazaar: nothing sent, nothing counted
             }
 
             IntentsSent++;

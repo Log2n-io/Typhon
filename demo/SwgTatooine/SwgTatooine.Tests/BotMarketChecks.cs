@@ -2,6 +2,9 @@ using System.Collections.Generic;
 using System.Linq;
 using NUnit.Framework;
 using SwgTatooine.Bots;
+using SwgTatooine.Server;
+using SwgTatooine.Server.Accounts;
+using Typhon.Protocol;
 
 namespace SwgTatooine.Tests;
 
@@ -298,6 +301,63 @@ public sealed class BotMarketChecks
             Assert.That(BotSwarmOptions.RegionOf("Nowhere"), Is.Zero);
             Assert.That(new BotSwarmOptions { Count = 1000 }.MarketRushSellers, Is.EqualTo(100));
             Assert.That(new BotSwarmOptions { Count = 5 }.MarketRushSellers, Is.EqualTo(1));
+        });
+    }
+}
+
+/// <summary>
+/// The bots' bazaar commands against the server's own catalog (bazaar.md § 3.1): each one a bot sends is declared, for a player, and encodes with the
+/// fields the bot names — a misspelt field would throw at every send, and a fleet counting faults instead of trades looks like a quiet market.
+/// </summary>
+[Category("Integration")]
+[TestFixture]
+[NonParallelizable]
+internal sealed class BotMarketCatalogChecks : ServedChecks
+{
+    [Test]
+    [CancelAfter(60_000)]
+    public void EveryCommandABotSends_IsDeclared_AndEncodesAgainstTheServersCatalog()
+    {
+        var config = Worlds.Served(Dir);
+        config.WorkerCount = 1;
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+        Harness = new SessionHarness(sim);
+        Assert.That(
+            AccountStore.TrySignup(sim.Dbe, "bot000007", "a-bot-password-1", out var bot, bot: true),
+            Is.EqualTo(AccountStore.SignupOutcome.Created));
+        var link = Harness.Connect(TatooineReplication.PlayerKind, bot);
+        var plan = link.Plan;
+
+        MarketCommand[] sent =
+        [
+            MarketCommand.Collect(),
+            MarketCommand.Collect(18_446_744_073_709_551_000UL),
+            MarketCommand.List(MarketCatalog.TemplateOf("core_armor"), 2, 1, 1_000_000),
+            MarketCommand.Vendor(MarketCatalog.TemplateOf("mat_hide"), 1, 99),
+            MarketCommand.Buy(42UL, 1549),
+        ];
+        Assert.Multiple(() =>
+        {
+            foreach (var c in sent)
+            {
+                var (name, values) = BotSwarm.Encode(c);
+                var command = plan.CommandByName(name);
+                Assert.That(command, Is.Not.Null, $"{name} is not declared");
+                if (command == null)
+                {
+                    continue;
+                }
+
+                Assert.That(
+                    () =>
+                    {
+                        var writer = new WireWriter(new byte[256]);
+                        CommandsMessage.Write(ref writer, clientTick: 1, [(command, (ushort)1, values)]);
+                    },
+                    Throws.Nothing,
+                    $"{c.Step} does not encode as {name}");
+            }
         });
     }
 }
