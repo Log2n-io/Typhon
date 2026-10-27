@@ -128,7 +128,7 @@ public sealed class BotBoard
             Record("reversals/bot-min p90", f.ReversalsPerBotMin?.P90 ?? 0d);
             Record("legs stuck/min", Of(f.LegsPerMin, "Stuck") + Of(f.LegsPerMin, "TravelStuck"));
             Record("hunts given up/min", Of(f.WhyPerMin, "HuntTimeout") + Of(f.WhyPerMin, "HuntOutOfRange"));
-            Record("market trades/min", Of(f.PerMin, "marketTrades"));
+            Record("market trades/min", Of(f.PerMin, MarketKeys.Trades));
 
             var bots = new List<TracedBotView>(_bots.Count);
             foreach (var (_, bot) in _bots)
@@ -148,10 +148,34 @@ public sealed class BotBoard
     /// <summary>A named rate of a report's map, 0 when the map or the name is absent.</summary>
     public static double Of(Dictionary<string, double> map, string name) => map != null && map.TryGetValue(name, out var v) ? v : 0d;
 
+    /// <summary>
+    /// The swarm's market keys the page reads (bazaar.md § 8): <c>totals</c>/<c>perMin</c> keys are the bots' <c>FleetStat</c> names camel-cased by their
+    /// report writer, <see cref="Chosen"/> and <see cref="Done"/> are <c>why</c> keys (<c>GoalWhy</c>). Held to the bots' writer by a check.
+    /// </summary>
+    public static class MarketKeys
+    {
+        public const string Trades = "marketTrades";
+        public const string Listed = "marketListed";
+        public const string Vendored = "marketVendored";
+        public const string Bought = "marketBought";
+        public const string BuyLost = "marketBuyLost";
+        public const string Won = "marketWon";
+        public const string Collected = "marketCollected";
+        public const string Refused = "marketRefused";
+        public const string Chosen = "MarketChosen";
+        public const string Done = "MarketDone";
+
+        /// <summary>The <c>totals</c>/<c>perMin</c> keys above.</summary>
+        public static readonly string[] Totals = [Trades, Listed, Vendored, Bought, BuyLost, Won, Collected, Refused];
+
+        /// <summary>The <c>why</c>/<c>whyPerMin</c> keys above.</summary>
+        public static readonly string[] Why = [Chosen, Done];
+    }
+
     /// <summary>The market commands the fleet sent since the start: every one applied (listed, vendored, bought, collected) or refused.</summary>
     public static long MarketCommands(BotFleetReport f)
-        => Of(f.Totals, "marketListed") + Of(f.Totals, "marketVendored") + Of(f.Totals, "marketBought") + Of(f.Totals, "marketCollected")
-            + Of(f.Totals, "marketRefused");
+        => Of(f.Totals, MarketKeys.Listed) + Of(f.Totals, MarketKeys.Vendored) + Of(f.Totals, MarketKeys.Bought)
+            + Of(f.Totals, MarketKeys.Collected) + Of(f.Totals, MarketKeys.Refused);
 
     /// <summary>BZ-16: a market refusal other than sold (153), notEnough (154) or noRoom (159), above 1 % of the commands sent.</summary>
     public static bool UnexpectedRefusal(string reason, long count, long commands)
