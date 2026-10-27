@@ -1584,6 +1584,12 @@ public static class WorldBuilder
         {
             _index?.Terminals.Add(new MissionTerminalRef(id, x, z, ownerRegion, _realm));
         }
+
+        // The market desk's terminals (bazaar.md § 2.3), recorded the same way.
+        if (kind == StructureKind.Bazaar)
+        {
+            _index?.Bazaars.Add(new MissionTerminalRef(id, x, z, ownerRegion, _realm));
+        }
     }
 
     /// <summary>A point on the planet that is not inside an NPC city.</summary>

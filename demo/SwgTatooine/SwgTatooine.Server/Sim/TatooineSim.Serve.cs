@@ -62,6 +62,7 @@ public sealed partial class TatooineSim
             PrintProximityReport();
             Console.WriteLine($"  economy: {_bridge?.EconomyCountersJson() ?? "{}"}");
             Console.WriteLine($"  items: {_bridge?.ItemCountersJson() ?? "{}"}");
+            Console.WriteLine($"  market: {_bridge?.MarketCountersJson() ?? "{}"}");
             Console.WriteLine($"  crowd: {_bridge?.CrowdCountersJson() ?? "{}"}");
             Console.WriteLine($"  progression: queue overflow kills-xp {KillXpOverflow}, kills-loot {KillLootOverflow}, progress {ProgressOverflow}");
             EconomyEndpoints.CountersJson = null;

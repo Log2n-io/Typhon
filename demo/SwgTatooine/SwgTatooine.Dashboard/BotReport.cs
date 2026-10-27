@@ -21,9 +21,15 @@ namespace SwgTatooine.Dashboard;
 //       "bots": 2000, "windowS": 64.0, "stuckS": 812.5,
 //       "goals":      { "Choosing": 0, "Travelling": 120, "Hunting": 40, ... },          bots per goal now
 //       "totals":     { "goalChanges": 0, "stuckTicks": 0, "hunts": 0, "missionsAsked": 0, "missionsTaken": 0, "missionsCompleted": 0,
-//                       "missionsCancelled": 0, "mounts": 0, "dismounts": 0, "reversals": 0 },   since the run began
+//                       "missionsCancelled": 0, "mounts": 0, "dismounts": 0, "reversals": 0,
+//                       "marketTrades": 0, "marketListed": 0, "marketVendored": 0, "marketBought": 0, "marketBuyLost": 0, "marketWon": 0,
+//                       "marketCollected": 0, "marketRefused": 0 },
+//                                      since the run began. The market's keys (bazaar.md § 8) are optional, as from a swarm before the market:
+//                                      trades = bazaar visits; buyLost = refusals 153 (the race loser's); won = bazaar buy rows seen collected in the
+//                                      bot's inventory; refused = every market refusal 151-163
 //       "perMin":     { the same keys, fleet-wide per minute over the window },
-//       "why":        { "HuntTimeout": 12, "CreatureNoticed": 80, ... },   goal reasons since the start (BotBrain.Trace.cs GoalWhy)
+//       "why":        { "HuntTimeout": 12, "CreatureNoticed": 80, "MarketChosen": 3, "MarketDone": 3, ... },
+//                                                                          goal reasons since the start (BotBrain.Trace.cs GoalWhy)
 //       "whyPerMin":  { the same keys },
 //       "legs":       { "Planned": 0, "Waypoint": 0, "Done": 0, "Stretch": 0, "Replanned": 0, "Stuck": 0, "Abandoned": 0,
 //                       "TravelStuck": 0, "Detour": 0, "CityEdge": 0 },        walk events since the start (LegWhy)

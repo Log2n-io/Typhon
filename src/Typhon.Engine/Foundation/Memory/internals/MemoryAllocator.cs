@@ -58,6 +58,9 @@ internal class MemoryAllocator : ResourceNode, IMemoryAllocator, IMetricSource, 
     /// <summary>Count of live (not-yet-disposed) <see cref="PinnedMemoryBlock"/> instances from this allocator.</summary>
     public int PinnedLiveBlocks => _pinnedLiveBlocks;
 
+    /// <summary>Tests only: a snapshot of every block this allocator has handed out and not yet seen freed.</summary>
+    internal MemoryBlockBase[] LiveBlocksForTest => _blocks.ToArray();
+
     public MemoryAllocator(IResourceRegistry resourceRegistry, MemoryAllocatorOptions options) :
         base(options?.Name ?? "Default Memory Allocator", ResourceType.Service, resourceRegistry.Allocation)
     {

@@ -300,6 +300,68 @@ public struct GiveCredits
     public uint Amount;
 }
 
+/// <summary>
+/// "List these units on the bazaar" (bazaar.md § 3.1): <see cref="Quantity"/> units of one (template, Mk) from the inventory, at a unit price, at the bazaar
+/// terminal the player stands at. Applied by the <c>Market</c> system, or refused with the reason.
+/// </summary>
+public struct MarketList
+{
+    /// <summary>The item template's id (<see cref="ItemCatalog"/>).</summary>
+    public ushort Template;
+
+    /// <summary>1-5; 0 for an item without a Mk.</summary>
+    public byte Mk;
+
+    /// <summary>Units, 1-99.</summary>
+    public byte Quantity;
+
+    /// <summary>Credits per unit, 1..<see cref="TatooineData.MaxUnitPrice"/>.</summary>
+    public uint UnitPrice;
+}
+
+/// <summary>"Take my listing off the board" — from anywhere (bazaar.md B5). Its units are reserved for the seller at its city, or delivered there.</summary>
+public struct MarketCancel
+{
+    /// <summary>The listing's entity id, raw, as <c>/swg/market/mine</c> gave it.</summary>
+    public ulong Listing;
+}
+
+/// <summary>
+/// "Buy this listing, whole, at this price" — at any bazaar terminal (bazaar.md B2, B5). One buyer: the first wins, a later one is refused
+/// <see cref="TatooineReplication.MarketSold"/>.
+/// </summary>
+public struct MarketBuy
+{
+    /// <summary>The listing's entity id, raw, as <c>/swg/market</c> gave it.</summary>
+    public ulong Listing;
+
+    /// <summary>The unit price the buyer was shown: another price is refused <see cref="TatooineReplication.MarketSold"/>.</summary>
+    public uint UnitPrice;
+}
+
+/// <summary>
+/// "Give me what is reserved for me here" — at a bazaar terminal of the listing's city (bazaar.md B3). 0 collects all of the character's there that fit,
+/// oldest first.
+/// </summary>
+public struct MarketCollect
+{
+    /// <summary>The listing's entity id, raw; 0 for all.</summary>
+    public ulong Listing;
+}
+
+/// <summary>"Sell these units to the vendor" (bazaar.md B7): destroyed, paid ⌊count × value × 20 %⌋ from World. At a bazaar terminal.</summary>
+public struct SellToVendor
+{
+    /// <summary>The item template's id.</summary>
+    public ushort Template;
+
+    /// <summary>1-5; 0 for an item without a Mk.</summary>
+    public byte Mk;
+
+    /// <summary>Units, 1-99.</summary>
+    public byte Quantity;
+}
+
 /// <summary>"Cancel this mission" — one the session's character holds, named by the id the journal (<c>GET /swg/missions</c>) gave it.</summary>
 public struct AbandonMission
 {
@@ -782,6 +844,55 @@ public static partial class TatooineReplication
     /// (Loïc, 2026-10-26: a mission above a character is not for it).
     /// </summary>
     public const byte MissionAboveLevel = AckReasons.FirstApplicationReason + 22;
+
+    // The bazaar's refusals (bazaar.md § 3.1), 151-163. A market command from a session with no body is refused NotInWorld.
+
+    /// <summary>
+    /// <c>ACKS</c> reason: a list, a buy, a collect or a vendor sale from a body not within <see cref="TatooineData.BazaarReachM"/> of a bazaar terminal.
+    /// </summary>
+    public const byte MarketNotAtBazaar = AckReasons.FirstApplicationReason + 23;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="MarketCollect"/> at a bazaar of another city than the listing's.</summary>
+    public const byte MarketWrongCity = AckReasons.FirstApplicationReason + 24;
+
+    /// <summary>
+    /// <c>ACKS</c> reason: a <see cref="MarketBuy"/> for a listing sold to someone else first, no longer listed, gone, or at another price; a
+    /// <see cref="MarketCancel"/> of a listing no longer listed. The race loser's.
+    /// </summary>
+    public const byte MarketSold = AckReasons.FirstApplicationReason + 25;
+
+    /// <summary><c>ACKS</c> reason: a buy, or a list fee, the wallet does not cover.</summary>
+    public const byte MarketNotEnough = AckReasons.FirstApplicationReason + 26;
+
+    /// <summary><c>ACKS</c> reason: a list or a vendor sale of more units than the inventory holds.</summary>
+    public const byte MarketNoItems = AckReasons.FirstApplicationReason + 27;
+
+    /// <summary>
+    /// <c>ACKS</c> reason: a list or a vendor sale naming no item, a Mk its template refuses, a quantity outside 1-99, or a price outside
+    /// 1..<see cref="TatooineData.MaxUnitPrice"/>.
+    /// </summary>
+    public const byte MarketBadListing = AckReasons.FirstApplicationReason + 28;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="MarketList"/> from a character with <see cref="TatooineData.MaxListings"/> listed already.</summary>
+    public const byte MarketListingCap = AckReasons.FirstApplicationReason + 29;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="MarketBuy"/> from a character with <see cref="TatooineData.MaxReserved"/> purchases uncollected.</summary>
+    public const byte MarketReservedCap = AckReasons.FirstApplicationReason + 30;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="MarketCollect"/> whose units do not fit the inventory — for "all", when none did.</summary>
+    public const byte MarketNoRoom = AckReasons.FirstApplicationReason + 31;
+
+    /// <summary><c>ACKS</c> reason: a cancel of a listing that is not the character's, or a collect of one not reserved for it.</summary>
+    public const byte MarketNotYours = AckReasons.FirstApplicationReason + 32;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="MarketBuy"/> of the buyer's own listing.</summary>
+    public const byte MarketOwnListing = AckReasons.FirstApplicationReason + 33;
+
+    /// <summary>A market command applied and then lost with the desk's transaction, which did not commit: nothing changed, and it can be sent again.</summary>
+    public const byte MarketFailed = AckReasons.FirstApplicationReason + 34;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="SellToVendor"/> whose payout rounds to 0 — an item with no market value, or too few units of a cheap one.</summary>
+    public const byte MarketWorthless = AckReasons.FirstApplicationReason + 35;
 
     /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
     /// <remarks>
@@ -1738,6 +1849,35 @@ public static partial class TatooineReplication
             .Roles(SessionRole.Player)
             .Field(g => g.Target, Codec.VarUInt, "target")
             .Field(g => g.Amount, Codec.VarUInt, "amount"));
+
+        // The bazaar (bazaar.md § 3.1). Queued, because each is a payment or a movement of items; the tip's rate. Applied by the Market system, in arrival
+        // order within a kind: the race between two buyers of one listing is settled by that order.
+        subs.Command<MarketList>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Template, Codec.VarUInt, "template")
+            .Field(m => m.Mk, Codec.U8, "mk")
+            .Field(m => m.Quantity, Codec.U8, "quantity")
+            .Field(m => m.UnitPrice, Codec.VarUInt, "unitPrice"));
+        subs.Command<MarketCancel>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Listing, Codec.U64, "listing"));
+        subs.Command<MarketBuy>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Listing, Codec.U64, "listing")
+            .Field(m => m.UnitPrice, Codec.VarUInt, "unitPrice"));
+        subs.Command<MarketCollect>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Listing, Codec.U64, "listing"));
+        subs.Command<SellToVendor>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Template, Codec.VarUInt, "template")
+            .Field(m => m.Mk, Codec.U8, "mk")
+            .Field(m => m.Quantity, Codec.U8, "quantity"));
 
         // SWG-09. Queued, because each utterance matters and their order is the conversation; one a second, which is the
         // rate 04-protocol § 4 gives it and roughly what a person types.

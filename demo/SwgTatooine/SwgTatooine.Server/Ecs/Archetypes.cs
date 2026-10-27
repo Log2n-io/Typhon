@@ -156,6 +156,13 @@ public partial class ItemLedgerHeadArch : Archetype<ItemLedgerHeadArch>
     public static readonly Comp<ItemLedgerHead> Head = Register<ItemLedgerHead>();
 }
 
+/// <summary>The bazaar's listings, each its own escrow stack (bazaar.md § 2.1). Non-spatial and Versioned, like a wallet; written by the <c>Market</c> system alone.</summary>
+[Archetype(1, "Listings")]
+public partial class ListingArch : Archetype<ListingArch>
+{
+    public static readonly Comp<Listing> Entry = Register<Listing>();
+}
+
 /// <summary>
 /// A hostile or neutral creature: a lair's beasts, a camp's ninjas and soldiers, and the defenders of a mission's camp.
 /// Moves on the AI cadence, which is slower than the tick, and is the bulk of the moving population.

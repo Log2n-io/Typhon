@@ -892,9 +892,16 @@ public sealed partial class TyphonRuntime : IDisposable
         // BEFORE the scheduler's disposal (#1508): this latches the session table's gate, closes every link and quiesces the send pumps, and the scheduler's
         // disposal frees everything registered under it. The runtime's own blocks are out of that cascade's reach (SUB-38); this order is what keeps a block
         // some later change does register under the scheduler from being freed under a pump.
-        _subscriptionsRuntime?.Dispose();
-
-        Scheduler.Dispose();
+        try
+        {
+            _subscriptionsRuntime?.Dispose();
+        }
+        finally
+        {
+            // Whatever the subscriptions teardown threw (a cancellation callback faulting inside SendPump.Dispose, say), the scheduler's resources, the
+            // identity allocator and the accessors below are still released.
+            Scheduler.Dispose();
+        }
 
         // AFTER the scheduler, not before. A tick already past the shutdown check keeps dispatching on the timer thread, and every tick ends by draining this
         // allocator's quarantine — so disposing it first opens a window where that drain runs against a disposed object. Scheduler.Dispose joins the workers
