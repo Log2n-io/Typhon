@@ -174,7 +174,7 @@ function BrowseTab() {
           aria-label="City"
           value={query.city}
           onChange={(e) => {
-            setQuery({ city: Number(e.target.value) });
+            setQuery({ city: Number(e.target.value), realm: useMarket.getState().hereRealm });
           }}
         >
           <option value={0}>All cities</option>

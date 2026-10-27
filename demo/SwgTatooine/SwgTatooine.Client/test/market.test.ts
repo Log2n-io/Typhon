@@ -1,8 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Descriptor } from '../src/assets/descriptor';
-import { BAZAAR_INTERACTION, bazaarMenuItems, bazaarTerminalOf, canUseAt } from '../src/app/ticket-terminal';
+import {
+  BAZAAR_INTERACTION,
+  bazaarMenuItems,
+  bazaarRegionAt,
+  bazaarTerminalOf,
+  canUseAt,
+  type TicketTerminal,
+} from '../src/app/ticket-terminal';
 import { panelKey } from '../src/app/panel-keys';
-import { parseInventory, type InventoryItem } from '../src/data/items';
+import { lootLines, parseInventory, type InventoryItem } from '../src/data/items';
 import {
   browseUrl,
   cityName,
@@ -20,7 +27,6 @@ import {
   parseBrowse,
   parseMine,
   parsePrices,
-  regionAt,
   vendorPayout,
   type MarketCommand,
   type MarketListing,
@@ -33,6 +39,13 @@ import { useChat } from '../src/state/chat-store';
 import { collectableHere, ROW_NOTICE_MS, useMarket, type MarketActions } from '../src/state/market-store';
 import { useUi } from '../src/state/ui-store';
 import { useWallet } from '../src/state/wallet-store';
+import goldenBrowse from './golden/market/browse.json';
+import goldenInventory from './golden/market/inventory-seller.json';
+import goldenMineBuyer from './golden/market/mine-buyer.json';
+import goldenMineSeller from './golden/market/mine-seller.json';
+import goldenPrices from './golden/market/prices.json';
+import goldenWalletBuyer from './golden/market/wallet-buyer.json';
+import goldenWalletSeller from './golden/market/wallet-seller.json';
 
 /**
  * The bazaar on the client (bazaar.md § 6, BZ-14): the four answers checked, the fees and the vendor's payout as the desk
@@ -241,7 +254,6 @@ describe('a city', () => {
   it('is a region, the city index + 1, its name the server’s order', () => {
     expect(cityName(1)).toBe(CITIES[0].name);
     expect(cityName(0)).toBe('');
-    expect(regionAt(CITIES[3].x + 40, CITIES[3].z - 10)).toBe(4);
   });
 });
 
@@ -304,6 +316,38 @@ describe('a bazaar terminal', () => {
     ]);
     expect(items[0].action).toEqual({ kind: 'bazaar', tab: 'browse', scope: 'here' });
     expect(bazaarMenuItems(0)[5].label).toBe('Reserved');
+  });
+
+  it("is in its structure's replicated region, not the city whose centre is nearest it", () => {
+    // A terminal of city 2 (Whitestone) standing a few metres from Port Sable's centre — nearer city 1 by far.
+    const at = (x: number, z: number): TicketTerminal => ({
+      x,
+      z,
+      radiusM: 1.5,
+      reachX: x,
+      reachZ: z,
+      reachM: 3.3,
+      corners: null,
+    });
+    const parts = [
+      { kind: 'mission', owner: 7, use: at(CITIES[0].x, CITIES[0].z) },
+      { kind: 'bazaar', owner: 9, use: at(CITIES[0].x + 5, CITIES[0].z) },
+    ];
+    const regions = new Map([
+      [7, 1],
+      [9, 2],
+    ]);
+    const regionOf = (owner: number): number => regions.get(owner) ?? Number.NaN;
+    expect(bazaarRegionAt(parts, CITIES[0].x + 6, CITIES[0].z, regionOf)).toBe(2);
+    // In reach of both, the mission terminal (first) is passed over; out of reach is nowhere, and a terminal in the wild (region 0) is no city.
+    expect(bazaarRegionAt(parts, CITIES[0].x + 2.5, CITIES[0].z, regionOf)).toBe(2);
+    expect(bazaarRegionAt(parts, CITIES[0].x - 20, CITIES[0].z, regionOf)).toBe(0);
+    expect(bazaarRegionAt(parts, CITIES[0].x + 6, CITIES[0].z, () => 0)).toBe(0);
+    expect(bazaarRegionAt(parts, CITIES[0].x + 6, CITIES[0].z, () => Number.NaN)).toBe(0);
+    // Collect follows it: offered for the terminal's city, not the nearest centre's.
+    const here = bazaarRegionAt(parts, CITIES[0].x + 6, CITIES[0].z, regionOf);
+    expect(collectableHere({ city: 2, realm: 0 }, here, 0)).toBe(true);
+    expect(collectableHere({ city: 1, realm: 0 }, here, 0)).toBe(false);
   });
 
   it('is toggled by B', () => {
@@ -641,5 +685,114 @@ describe("the mock's desk", () => {
       expect(reason).toBe(0);
       expect(m.desk.balance).toBeGreaterThan(before);
     }
+  });
+});
+
+/**
+ * The server's own answers, captured from the endpoints at 3a928bd5 by an in-process served check (`MarketEndpoints.BrowseJson`,
+ * `MineJson`, `PricesJson`, `ItemEndpoints.InventoryJson`, `EconomyEndpoints.WalletJson`): a seller listed two Hide Mk III ×3
+ * at 20 and 30 cr, a buyer in another city bought the first. The parsers are held to them, not only to the mock.
+ */
+describe("the server's answers", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    useMarket.getState().reset();
+    useChat.getState().clear();
+    useWallet.getState().resetWallet();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('read as a board page: ids and the seller as decimal strings, the city named, the template', () => {
+    const page = parseBrowse(goldenBrowse)!;
+    expect(page).toMatchObject({ v: 3, city: 1, total: 1, page: 1, pages: 1 });
+    expect(page.listings[0]).toEqual({
+      id: '131085',
+      city: 1,
+      cityName: 'Mos Eisley',
+      realm: 0,
+      item: 'mat_hide',
+      name: 'Hide',
+      category: 'material',
+      template: 8,
+      mk: 3,
+      qty: 3,
+      unit: 30,
+      total: 90,
+      seller: '65538',
+      sellerName: 'player_8f01',
+      ageS: 0,
+    });
+  });
+
+  it('read as /mine: the seller its listing with its fee and ticks, the buyer its reservation', () => {
+    const seller = parseMine(goldenMineSeller)!;
+    const buyer = parseMine(goldenMineBuyer)!;
+    expect(seller.listed[0]).toMatchObject({
+      id: '131085',
+      template: 8,
+      fee: 1,
+      listedTick: 37,
+      expireTick: 4_320_037,
+    });
+    expect(seller.reserved).toEqual([]);
+    expect(buyer.reserved[0]).toMatchObject({
+      id: '65549',
+      state: 'sold',
+      closedTick: 41,
+      cityName: 'Mos Eisley',
+      unit: 20,
+    });
+    expect(buyer.caps).toEqual({ listings: 20, reserved: 20 });
+  });
+
+  it('read as /prices: the value in decimal credits, the vendor in milli-credits, its payout the server’s', () => {
+    const [hide] = parsePrices(goldenPrices)!;
+    expect(hide).toMatchObject({
+      item: 'mat_hide',
+      template: 8,
+      name: 'Hide',
+      mk: 3,
+      value: 4.5,
+      vendor: 900,
+      lowest: 30,
+    });
+    // MarketValues.VendorPayout(Hide, 3, n) = ⌊n × 4 500 × 200 / 1000 / 1000⌋.
+    expect(vendorPayout(3, hide.vendor)).toBe(2);
+    expect(vendorPayout(10, hide.vendor)).toBe(9);
+  });
+
+  it('read as the inventory: rows carry the template, a list row is not announced', () => {
+    const before = parseInventory({ ...goldenInventory, recent: goldenInventory.recent.slice(2) })!;
+    const after = parseInventory(goldenInventory)!;
+    expect(after.recent[0]).toMatchObject({ kind: 'list', item: 'mat_hide', count: 3 });
+    expect(lootLines(before, after)).toEqual([]);
+  });
+
+  it("announce the seller's sale with its goods and tax, the buyer's purchase, by the rows' listing ref", () => {
+    harness();
+    useMarket.getState().setMine({
+      ...parseMine(goldenMineSeller)!,
+      listed: [
+        ...parseMine(goldenMineSeller)!.listed,
+        { ...parseMine(goldenMineSeller)!.listed[0], id: '65549', unit: 20, total: 60 },
+      ],
+    });
+    const seller = parseWallet(goldenWalletSeller)!;
+    useWallet.getState().setWallet({ ...seller, transfers: seller.transfers.filter((t) => t.kind === 'grant') });
+    useWallet.getState().setWallet(seller);
+    expect(useChat.getState().lines.map((l) => l.text)).toEqual([
+      'Sold Hide Mk III ×3 to player_8f02 for 60 cr (tax 4)',
+    ]);
+
+    useChat.getState().clear();
+    useWallet.getState().resetWallet();
+    useMarket.getState().buy({ ...parseBrowse(goldenBrowse)!.listings[0], id: '65549', unit: 20, total: 60 });
+    const buyer = parseWallet(goldenWalletBuyer)!;
+    useWallet.getState().setWallet({ ...buyer, transfers: buyer.transfers.filter((t) => t.kind === 'grant') });
+    useWallet.getState().setWallet(buyer);
+    expect(useChat.getState().lines.map((l) => l.text)).toEqual(['Bought Hide Mk III ×3 from player_8f01 for 60 cr']);
   });
 });

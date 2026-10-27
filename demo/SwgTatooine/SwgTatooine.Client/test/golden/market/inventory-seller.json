@@ -1,0 +1,47 @@
+{
+  "open": true,
+  "slots": 30,
+  "items": [],
+  "recent": [
+    {
+      "seq": "3",
+      "tick": 37,
+      "kind": "list",
+      "item": "mat_hide",
+      "name": "Hide",
+      "category": "material",
+      "template": 8,
+      "mk": 3,
+      "count": 3,
+      "ref": "131085",
+      "dir": "out"
+    },
+    {
+      "seq": "2",
+      "tick": 37,
+      "kind": "list",
+      "item": "mat_hide",
+      "name": "Hide",
+      "category": "material",
+      "template": 8,
+      "mk": 3,
+      "count": 3,
+      "ref": "65549",
+      "dir": "out"
+    },
+    {
+      "seq": "1",
+      "tick": 27,
+      "kind": "kill",
+      "item": "mat_hide",
+      "name": "Hide",
+      "category": "material",
+      "template": 8,
+      "mk": 3,
+      "count": 6,
+      "ref": "1",
+      "dir": "in"
+    }
+  ],
+  "lost": []
+}

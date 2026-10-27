@@ -1,0 +1,11 @@
+{
+  "open": true,
+  "credits": 1054,
+  "transfers": [
+    { "seq": "6", "tick": 41, "kind": "tax", "amount": -4, "other": "World", "ref": "65549" },
+    { "seq": "5", "tick": 41, "kind": "sale", "amount": 60, "other": "player_8f02", "ref": "65549" },
+    { "seq": "4", "tick": 37, "kind": "listfee", "amount": -1, "other": "World", "ref": "131085" },
+    { "seq": "3", "tick": 37, "kind": "listfee", "amount": -1, "other": "World", "ref": "65549" },
+    { "seq": "1", "tick": 2, "kind": "grant", "amount": 1000, "other": "World", "ref": "0" }
+  ]
+}

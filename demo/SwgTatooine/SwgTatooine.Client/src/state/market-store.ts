@@ -117,9 +117,10 @@ export interface MarketState {
   readonly refused: (reason: number, command: MarketCommand) => void;
   /**
    * What a wallet `sale` row of `amount` credits was about, for its chat line: a listing of this character's that sold
-   * (`amount` > 0), or one it bought (< 0); `null` when it does not know. Each is told once.
+   * (`amount` > 0), or one it bought (< 0) — found by the row's `ref`, the listing's id, or else by its total; `null` when it
+   * does not know. Each is told once.
    */
-  readonly saleItem: (amount: number) => string | null;
+  readonly saleItem: (amount: number, ref?: string) => string | null;
   /** Forgets everything of the session: a new session may be another character. */
   readonly reset: () => void;
   readonly setActions: (actions: MarketActions | null) => void;
@@ -202,7 +203,9 @@ export const useMarket = create<MarketState>((set, get) => {
 
     openPanel: (tab, scope) => {
       const query =
-        scope === undefined ? get().query : { ...get().query, city: scope === 'here' ? get().here : 0, page: 1 };
+        scope === undefined
+          ? get().query
+          : { ...get().query, city: scope === 'here' ? get().here : 0, realm: get().hereRealm, page: 1 };
       set({ open: true, tab, query });
       void get().refreshBrowse();
       if (lastNowMs - pricesAtMs > PRICES_REFRESH_MS || get().prices.length === 0) {
@@ -314,7 +317,8 @@ export const useMarket = create<MarketState>((set, get) => {
       }
 
       const price = priceOf(get().prices, stack.item, stack.mk);
-      const unitPrice = Math.max(1, price === undefined ? 1 : price.value > 0 ? price.value : price.lowest);
+      // The value is decimal credits (a material's 1.7): a price is whole credits.
+      const unitPrice = Math.max(1, price === undefined ? 1 : Math.round(price.value > 0 ? price.value : price.lowest));
       set({
         sell: { stack: stackId, quantity: Math.min(stack.count, MAX_LISTING_QTY), unitPrice },
         rowNotices: omit(get().rowNotices, 'sell'),
@@ -403,8 +407,14 @@ export const useMarket = create<MarketState>((set, get) => {
         }
       }, ROW_NOTICE_MS);
     },
-    saleItem: (amount) => {
+    saleItem: (amount, ref) => {
       const book = amount > 0 ? sold : bought;
+      const named = ref === undefined ? undefined : book.get(ref);
+      if (ref !== undefined && named !== undefined) {
+        book.delete(ref);
+        return named.what;
+      }
+
       const total = Math.abs(amount);
       for (const [id, entry] of book) {
         if (entry.total === total) {
