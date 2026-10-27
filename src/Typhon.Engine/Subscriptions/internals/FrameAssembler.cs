@@ -169,15 +169,26 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
     /// <inheritdoc cref="PendingOwed"/>
     internal int PendingOwedCount;
 
+    /// <summary>How many of <see cref="PendingOwed"/> are enters, once the fit has arranged them as its prefix: <c>[0, PendingOwedEnters)</c>.</summary>
+    internal int PendingOwedEnters;
+
+    /// <summary>The fit's second buffer, which the pending owed set is compacted into — enters first — and then trades places with.</summary>
+    internal OwedRecord[] OwedSpare = new OwedRecord[16];
+
     // Open addressing from a netId to its index in PendingOwed, plus one; 0 is empty. Kept under half full, so a probe ends in a few steps. Only the first
     // _owedSize entries are in use — the array keeps its largest size, and a small owed set clears and probes a small prefix of it.
     private int[] _owedTable = new int[32];
     private int _owedSize = 32;
     private int _owedFiled;
+    private int _owedFrom;
 
-    /// <summary>Empties the owed table, sized for <paramref name="entries"/> records; it grows past them as records are filed.</summary>
-    public void ClearOwedTable(int entries)
+    /// <summary>
+    /// Empties the owed table, sized for <paramref name="entries"/> records; it grows past them as records are filed. It files the records of
+    /// <see cref="PendingOwed"/> from <paramref name="from"/> on, and only those.
+    /// </summary>
+    public void ClearOwedTable(int entries, int from = 0)
     {
+        _owedFrom = from;
         var size = 32;
         while (size < entries * 2)
         {
@@ -221,7 +232,7 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
     {
         if ((_owedFiled + 1) * 2 > _owedSize)
         {
-            // Past half full: twice the size, and every record below index filed again — the table only ever files a prefix of PendingOwed.
+            // Past half full: twice the size, and every record below index filed again — the table files a range of PendingOwed, from _owedFrom on.
             _owedSize *= 2;
             if (_owedSize > _owedTable.Length)
             {
@@ -233,7 +244,7 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
             }
 
             _owedFiled = 0;
-            for (var i = 0; i < index; i++)
+            for (var i = _owedFrom; i < index; i++)
             {
                 Place(i);
             }
@@ -575,18 +586,16 @@ internal sealed class SessionFrameState
     public int ReliableOwedCount { get; set; }
 
     /// <summary>
-    /// The entity records the session's published frames had no room for (15 § 4.3), oldest first, in <c>[0, <see cref="OwedCount"/>)</c>: an enter its
-    /// client lacks, or an update it holds stale. Committed with the frame like the geometry; emptied by a <c>RESET</c>.
+    /// The entity records the session's published frames had no room for (15 § 4.3), in <c>[0, <see cref="OwedCount"/>)</c>: the enters its client lacks
+    /// first, oldest first, in <c>[0, <see cref="OwedEnters"/>)</c>, then the updates it holds stale, oldest first. Committed with the frame like the
+    /// geometry; emptied by a <c>RESET</c>.
     /// </summary>
     public OwedRecord[] Owed { get; set; } = [];
 
     /// <inheritdoc cref="Owed"/>
     public int OwedCount { get; set; }
 
-    /// <summary>The metered bytes of <see cref="Owed"/>: what the cursor-driven steps' allowance gives up while it drains.</summary>
-    public int OwedBytes { get; set; }
-
-    /// <summary>How many of <see cref="Owed"/> are enters: while any is, no completion is published (15 § 4.6).</summary>
+    /// <summary>How many of <see cref="Owed"/> are enters — its prefix: while any is, no completion is published (15 § 4.6).</summary>
     public int OwedEnters { get; set; }
 
     /// <summary>The metered bytes of the enters in <see cref="Owed"/>: what the cursor-driven steps' allowance gives up while they drain (15 § 4.2).</summary>
@@ -595,9 +604,10 @@ internal sealed class SessionFrameState
     /// <summary>Whether the session's client lacks <paramref name="netId"/> although its committed geometry or keys hold it (SUB-26, 15 § 4.5).</summary>
     public bool OwesEnter(uint netId)
     {
-        for (var i = 0; i < OwedCount && OwedEnters > 0; i++)
+        // The enters are the owed set's prefix: a session owing a world of stale updates scans only what its client lacks.
+        for (var i = 0; i < OwedEnters; i++)
         {
-            if (Owed[i].NetId == netId && Owed[i].Kind == OwedKind.Enter)
+            if (Owed[i].NetId == netId)
             {
                 return true;
             }
@@ -688,7 +698,6 @@ internal sealed class SessionFrameState
         ReliableOwedHead = 0;
         ReliableOwedCount = 0;
         OwedCount = 0;
-        OwedBytes = 0;
         OwedEnters = 0;
         OwedEnterBytes = 0;
         ViewComplete = false;

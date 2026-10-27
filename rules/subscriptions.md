@@ -458,7 +458,8 @@
     resets
   invariant nothing is stored per (session, entity): what s holds is recomputed from the anchor, the delivered cells and each entity's last pushed
     position, and every event that moves an anchor, moves an entity or delivers a cell emits exactly the enters and leaves that keep it true — with ONE
-    bounded exception, the owed set of SUB-36, empty in the steady state: what s's CLIENT holds is held(s, e) ∧ ¬owedEnter(s, e)
+    bounded exception, the owed set of SUB-36 — empty while s's frames carry what it is due, at most one record per held entity otherwise: what s's
+    CLIENT holds is held(s, e) ∧ ¬owedEnter(s, e)
   invariant [s has never been placed] → s holds NOTHING. A default position is a legal world position, so "never placed" and "placed at the origin"
     must be distinguishable, and the unplaced session is the one that sees nothing
   invariant a profile is served through exactly ONE entity observer, World, Sphere or ClientRegion, with at most one Aggregate beside it (09 § 5) —
@@ -1403,18 +1404,22 @@
   invariant ∀ published frame F of session s: F's entity records, metered (an upper bound of each record's encoding: the inline sections at their widest,
     a wide one at its stored length, a gap at 5 bytes), take at most the frame's limit — s's SessionLimits.FrameBytes, at least twice the largest enter
     record and at most min(FrameBytes, the pool's largest class) — less every other block's bound, the events' half of that limit included; or F carries
-    s's oldest owed record and only the records that must go with it. The oversize backstop judges F by the same limit
+    s's oldest owed enter — or, with none owed, its oldest owed update — and only the records that must go with it. The oversize backstop judges F by the
+    same limit
   invariant ∀ record R the gather produced for s and F does not carry: R's entity is in owed(s) — an Enter when s's client lacks it, an Update (the
     groups, and the segment, R named, OR-merged with the entity's earlier owed change) when it holds it. An owed record carries no value: it is sent from
     the slot's state of the frame that sends it, so a newer change replaces an older one and is never queued behind it
   invariant ∀ e ∈ owed(s): s's committed geometry or keys hold e. A leave of an owed Enter is dropped and cancels it (the client never had e); an update
     of an owed Enter is dropped (e goes whole); a leave of an owed Update cancels it and goes; an enter of e cancels e's owed record
   invariant a frame takes, in order: every leave and the controlled entity's records (its owed record first, whatever its age); the owed enters oldest
-    first; this frame's enters; the owed updates oldest first; this frame's updates — the first record taken always goes, and past the first that does
-    not fit every later one is owed. Enters go ahead of updates because an entity the client lacks is worse than one it holds stale, and they are few (a
-    fill takes at most half the frame): taken in plain age order, a world whose movers outrun the frame kept every enter waiting behind their updates,
-    the owed enters passed the cap and the session RESET every few seconds, never filled (the SWG god camera). A deferral only ages forward within
-    its kind, so no owed record starves
+    first; this frame's enters; the owed updates oldest first; this frame's updates — the first OWED record carried always goes (an owed enter, or an
+    owed update when no enter is owed), and past the first that does not fit every later one of its kind is owed. Enters go ahead of updates because an
+    entity the client lacks is worse than one it holds stale: taken in plain age order, a world whose movers outrun the frame kept every enter waiting
+    behind their updates, the owed enters passed the cap and the session RESET every few seconds, never filled (the SWG god camera). While updates are
+    owed, the enters take at most half of what the leaves and the controlled entity's records left: a fill takes half the frame's limit and the events
+    up to the other half, so enters alone could take every frame's target and freeze what the client holds. The owed set keeps its enters as its
+    prefix, so what looks for an owed enter scans only them. A deferral only ages forward within its kind, and each kind gets a share of every frame
+    that owes it, so no owed record starves
   invariant an owed record names its entity's slot, and its identity: a slot that no longer holds it — a migration while its update was deferred (SUB-22)
     — is found again through the entity; only an entity gone, or no longer that netId, is lost
   invariant cell delivery (Sphere, World, ClientRegion) and the group fill take at most half the frame, less the bytes of the ENTERS s owes: a fill is
@@ -1456,7 +1461,8 @@
     PushWorldChurnTests.AWholeWorldOfMoversOutrunningTheFrameFillsWithoutAReset (red on main: the god camera's RESET loop; red with the cap counting
     updates, or with the owed records carried in plain age order) and PushWorldChurnTests.AWorldFillPacesTheMoversOfTheCellsItDelivers (World and
     ClientRegion; red with the event-owned entities of a delivered cell unmetered), PushWorldChurnTests.AWorldWithAFillOfItsOwnFillsInAFractionOfTheFrames
-    (red with the observer's Fill ignored);
+    (red with the observer's Fill ignored), PushWorldChurnTests.UpdatesOwedUnderAFillAndAStreamOfEventsAreNeverStarved (red with the enters' half
+    lifted, or with owed updates carried only once no enter is owed);
     mutant committed: PushFrameBudgetTests.Mutant_WithoutTheFrameBudgetABurstStalls. Mutants run red: a leave of an owed enter kept, the owed set not
     committed, completion not withheld, the allowance ignored, or counting owed updates, the owed set flushed newest first, an owed entity held for a
     command, the refusal removed, the meter under-counting an enter, an overflow on a frame that does not grow the set, no identity fallback, no HeldAll

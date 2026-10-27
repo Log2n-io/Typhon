@@ -225,7 +225,8 @@ public sealed class SubscriptionsOptions
     /// <para>
     /// <b>A count does not bound bytes</b> — a record with wide sections can reach half a frame — so the fill is paced by bytes too, at half of
     /// <see cref="FrameBytes"/>, and what one frame cannot carry is owed to the next ones (design/Subscriptions/15, SUB-36). It is also the owed set's
-    /// scale: past four budgets of owed records, a session is refilled by a <c>RESET</c> instead.
+    /// scale: past four budgets of owed ENTERS, a session is refilled by a <c>RESET</c> instead (owed updates are carried round robin, uncapped). An
+    /// observer may declare its own budget (<c>ObserverBuilder.Fill</c>), which scales its cap with it.
     /// </para>
     /// </remarks>
     public int EnterBudgetPerFrame { get; init; } = 500;

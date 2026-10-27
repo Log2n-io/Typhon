@@ -1460,7 +1460,7 @@ internal sealed unsafe partial class FrameAssembler
         var others = EntitiesEncoder.MaxHeaderBytes + OtherBlocksBound(scratch, emitStats, eventCount, eventBytes, aggWrite, aggRows, aggCounts, debugWrite,
             debugGeometry, in self) + 16 + ((Requests?.OwedAnswers(session) ?? 0) * GroupRecordBound);
         var fit = FitEntities(state, scratch, limit - others, self.Write && !self.None ? self.NetId : NetIdAllocator.NoNetId, reset,
-            4 * FillBudgetOf(_pushProfiles[index]), out var owedLost, out var metered);
+            (int)Math.Min(int.MaxValue, 4L * FillBudgetOf(_pushProfiles[index])), out var owedLost, out var metered);
         if (fit == FitOutcome.Overflow || owedLost)
         {
             // More owed than the cap, or an owed entity found nowhere: a RESET is the repair. Nothing of this frame is committed (SUB-03).

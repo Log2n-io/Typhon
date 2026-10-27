@@ -160,7 +160,8 @@ public sealed class ObserverBuilder
     /// <remarks>
     /// <b>For a view that holds a world, not a neighbourhood.</b> The engine's budget is the granularity at which a player's view fills smoothly; a World
     /// observer over a planet of 80 000 entities fills at that pace in over a hundred frames — about ten seconds at 10 Hz. Ten times the budget fills it in
-    /// about a second, each frame still within half its limit.
+    /// about a second, each frame still within half its limit. <c>int.MaxValue</c> lifts the count altogether: the fill is then paced by the frame's bytes
+    /// alone — what an operator's spectator wants, and what a population of players does not.
     /// </remarks>
     public ObserverBuilder Fill(int entersPerFrame)
     {

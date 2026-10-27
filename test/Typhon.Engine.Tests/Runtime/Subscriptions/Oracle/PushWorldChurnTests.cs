@@ -40,6 +40,7 @@ class PushWorldChurnTests : TestBase<PushWorldChurnTests>
             subs.Profile(Profile, p => p.World().Of<ProjCreature>());
             subs.Profile(FastProfile, p => p.World().Fill(FastFill).Of<ProjCreature>());
             subs.Profile(RegionProfile, p => p.ClientRegion(2d * RegionHalfM).Of<ProjCreature>());
+            subs.Event<ProjNotice>(e => e.Broadcast());
         }, name, new SubscriptionsOptions
         {
             FrameBytes = frameBytes,
@@ -55,6 +56,49 @@ class PushWorldChurnTests : TestBase<PushWorldChurnTests>
         harness.RunFence = true;
         harness.DrainNetIds = true;
         return harness;
+    }
+
+    /// <summary>
+    /// The longest run of frames that began with updates owed and carried none of them: an owed update's staleness, in frames, beyond the round robin's turn.
+    /// </summary>
+    private sealed class Starvation
+    {
+        private readonly HashSet<uint> _owed = [];
+        private int _run;
+
+        public int Longest { get; private set; }
+
+        /// <summary>Notes, before the tick, which updates the session owes: the owed set past its enters.</summary>
+        public void Before(FrameHarness harness, SessionId session)
+        {
+            _owed.Clear();
+            var state = harness.StateOf(session);
+            for (var i = state?.OwedEnters ?? 0; i < (state?.OwedCount ?? 0); i++)
+            {
+                _owed.Add(state.Owed[i].NetId);
+            }
+        }
+
+        /// <summary>Delivers the tick's frame and notes whether it carried one of the updates owed when it began.</summary>
+        public void Deliver(FrameHarness harness, SessionId session)
+        {
+            foreach (var log in harness.DeliverLogged(session))
+            {
+                var carried = false;
+                foreach (var netId in log.Segments)
+                {
+                    carried |= _owed.Contains(netId);
+                }
+
+                foreach (var (netId, _) in log.States)
+                {
+                    carried |= _owed.Contains(netId);
+                }
+
+                _run = _owed.Count > 0 && !carried ? _run + 1 : 0;
+                Longest = Math.Max(Longest, _run);
+            }
+        }
     }
 
     private static ProjBounds At(float x, float y) => new()
@@ -166,13 +210,15 @@ class PushWorldChurnTests : TestBase<PushWorldChurnTests>
         var tick = 0L;
         var completedUnderLoad = false;
         var largest = 0;
+        var starvation = new Starvation();
         for (var t = 0; t < 150; t++)
         {
             Walk(dbe, world, 0.4, 1.5f);
             Destroy(dbe, world, 2);
             Spawn(dbe, world, 2);
+            starvation.Before(harness, session);
             harness.RunTick(++tick);
-            harness.Deliver(session);
+            starvation.Deliver(harness, session);
             completedUnderLoad |= harness.StateOf(session).ViewComplete;
             largest = Math.Max(largest, harness.Assembler.OwedLargest);
         }
@@ -206,6 +252,7 @@ class PushWorldChurnTests : TestBase<PushWorldChurnTests>
             Assert.That(completedUnderLoad, Is.True, "the fill completes while the world still moves");
             Assert.That(harness.StateOf(session).OwedCount, Is.Zero, "a standing world drains what it owes");
             Assert.That(largest, Is.GreaterThan(OwedCap), "the owed updates, uncapped, passed the enters' cap: the gauge showed the backlog");
+            Assert.That(starvation.Longest, Is.Zero, "every frame that began owing updates carried some of them: the round robin turned under load");
             Assert.That(harness.Assembler.OwedLargest, Is.Zero, "and shows none once drained");
             Assert.That(harness.StateOf(session).ViewComplete, Is.True);
             Assert.That(replica.NetIds(plan), Has.Length.EqualTo(world.Creatures.Count), "the client holds the whole world");
@@ -250,6 +297,50 @@ class PushWorldChurnTests : TestBase<PushWorldChurnTests>
         });
         AssertLegal(harness, sessions[0]);
         AssertLegal(harness, sessions[1]);
+    }
+
+    /// <summary>
+    /// Review 8, M1: a fill of its own pace under a stream of events. The fill takes half the frame's limit and the events the other half, so the entity
+    /// records' target is about what the fill alone takes; with the enters ahead of the updates, every update was owed every frame, and the entities the
+    /// client held froze while it filled. While updates are owed, the enters take at most half of what is left: every frame carries some updates.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-36")]
+    public void UpdatesOwedUnderAFillAndAStreamOfEventsAreNeverStarved()
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        var world = new World(1512);
+        Spawn(dbe, world, 6000);
+        using var harness = Harness(dbe, nameof(UpdatesOwedUnderAFillAndAStreamOfEventsAreNeverStarved), FrameBytes, EnterBudget);
+        var session = harness.OpenSessions(1, FastProfile)[0];
+        var starvation = new Starvation();
+        var tick = 0L;
+        var filling = 0;
+        var owing = 0;
+        for (var t = 0; t < 60; t++)
+        {
+            Walk(dbe, world, 0.4, 1.5f);
+            for (var e = 0; e < 1000; e++)
+            {
+                harness.Subscriptions.Commands.Emit(new ProjNotice { Seq = e, Kind = 1 });
+            }
+
+            starvation.Before(harness, session);
+            harness.RunTick(++tick);
+            var state = harness.StateOf(session);
+            filling += state is { ViewComplete: false } ? 1 : 0;
+            owing += state != null && state.OwedCount > state.OwedEnters && !state.ViewComplete ? 1 : 0;
+            starvation.Deliver(harness, session);
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(filling, Is.GreaterThan(10), "the session filled for many frames");
+            Assert.That(owing, Is.GreaterThan(5), "while owing updates");
+            Assert.That(starvation.Longest, Is.Zero, "and every frame that began owing updates carried some of them");
+            Assert.That(harness.Assembler.OwedResets, Is.Zero);
+        });
+        AssertLegal(harness, session);
     }
 
     private static int InRegion(DatabaseEngine dbe, World world)
