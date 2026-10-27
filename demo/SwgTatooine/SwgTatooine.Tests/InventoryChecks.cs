@@ -719,6 +719,7 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(gap.Violations, Has.Some.StartsWith("seq 9: expected 4"));
             Assert.That(gap.Violations, Has.Some.StartsWith("head: last seq 4"));
             Assert.That(orphaned.Violations, Has.Some.Contains("its owner 424242 is not a character that exists"));
+            Assert.That(orphaned.Violations, Has.Some.Contains("its owner 424242 has no wallet"));
             Assert.That(orphaned.Violations, Has.Some.Contains("no item ledger row ever moved it"));
             Assert.That(mkV.Violations, Has.Some.StartsWith("seq 1: Mk V in a kill row"));
             Assert.That(emptied.Violations, Has.Some.Contains("emptied by the replay and still stored"));

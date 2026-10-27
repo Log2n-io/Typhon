@@ -217,12 +217,10 @@ public static class ItemEndpoints
         }
 
         var stacks = new List<(ulong Id, ItemStack Stack)>();
-        using (var found = tx.EnumerateIndex<ItemStack, long>(ix.StackByOwner, key, key))
+        // A query, not EnumerateIndex: the index enumerator misses a stack destroyed after this snapshot (#1247) — gone from the view for one poll.
+        foreach (var found in tx.Query<ItemStackArch>().WhereField<ItemStack>(s => s.Owner == key).Execute())
         {
-            while (found.MoveNext())
-            {
-                stacks.Add(((ulong)found.CurrentEntityPK, found.CurrentComponent));
-            }
+            stacks.Add((found.RawValue, tx.Open(found).Read(ItemStackArch.Stack)));
         }
 
         stacks.Sort(static (x, y) => x.Stack.Slot.CompareTo(y.Stack.Slot));
@@ -354,6 +352,17 @@ public static class ItemEndpoints
     public static ItemAuditResult Audit(DatabaseEngine dbe)
     {
         ArgumentNullException.ThrowIfNull(dbe);
+        using var tx = dbe.CreateQuickTransaction();
+        return Audit(dbe, tx);
+    }
+
+    /// <summary>The audit read through <paramref name="tx"/>'s snapshot — a check passes a reader older than the commits it stages.</summary>
+    /// <remarks>
+    /// Stacks and listings are destroyed, so they are read by an archetype scan, never by <c>EnumerateIndex</c>: the index enumerator does not find an
+    /// entity destroyed after the snapshot (#1247), which tore the audit live — the ledger rows of a vendor sale or a listing missing, its stack already gone.
+    /// </remarks>
+    internal static ItemAuditResult Audit(DatabaseEngine dbe, Transaction tx)
+    {
         var ix = Indexes(dbe);
         var started = Stopwatch.GetTimestamp();
         var result = new ItemAuditResult();
@@ -363,9 +372,9 @@ public static class ItemEndpoints
         var missionTick = new Dictionary<long, long>();
         var routing = dbe.ArchetypeIdOf<ListingArch>();
         bool IsListing(long key) => key != 0 && EntityId.FromRawValue((ulong)key).ArchetypeId == routing;
+        Func<long, bool> isListing = IsListing;   // converted once: a local function passed as a delegate allocates at every call
         var expected = 1L;
         var lastTick = long.MinValue;
-        using var tx = dbe.CreateQuickTransaction();
         using (var rows = tx.EnumerateIndex<ItemLedgerEntry, long>(ix.BySeq, long.MinValue, long.MaxValue))
         {
             while (rows.MoveNext())
@@ -385,7 +394,7 @@ public static class ItemEndpoints
                 }
 
                 lastTick = r.WorldTick;
-                if (!RowRules(result, missionTick, IsListing, in r))
+                if (!RowRules(result, missionTick, isListing, in r))
                 {
                     continue;
                 }
@@ -418,118 +427,120 @@ public static class ItemEndpoints
         var seen = new HashSet<long>();
         var slotsOf = new Dictionary<long, HashSet<byte>>();
         var stacksOf = new Dictionary<long, int>();
-        using (var found = tx.EnumerateIndex<ItemStack, long>(ix.StackByOwner, long.MinValue, long.MaxValue))
+
+        // The owners with a wallet, read in one index walk: one EnumerateIndex per stack was ~3 KB of setup each, 55 000 times an audit.
+        var walletOwners = new HashSet<long>();
+        using (var wallets = tx.EnumerateIndex<Wallet, long>(ix.WalletByOwner, long.MinValue, long.MaxValue))
         {
-            while (found.MoveNext())
+            while (wallets.MoveNext())
             {
-                var s = found.CurrentComponent;
-                var id = found.CurrentEntityPK;
-                result.Stacks++;
-                result.Units += s.Count;
-                seen.Add(id);
-                held[Key(s.Template, s.Mk)] = Get(held, Key(s.Template, s.Mk)) + s.Count;
+                walletOwners.Add(wallets.CurrentComponent.Owner);
+            }
+        }
 
-                // Counted apart from the slots: a stack outside the grid, or one sharing a slot, is still one of its owner's.
-                var owned = (stacksOf.TryGetValue(s.Owner, out var c) ? c : 0) + 1;
-                stacksOf[s.Owner] = owned;
-                if (owned == ItemLedger.Slots + 1)
-                {
-                    result.Violation($"owner {s.Owner}: more than {ItemLedger.Slots} stacks");
-                }
-                if (!tx.TryOpen(EntityId.FromRawValue((ulong)s.Owner), out _))
-                {
-                    result.Violation($"stack {id}: its owner {s.Owner} is not a character that exists");
-                }
+        foreach (var found in tx.Query<ItemStackArch>())
+        {
+            var s = found.Read(ItemStackArch.Stack);
+            var id = unchecked((long)found.Id.RawValue);
+            result.Stacks++;
+            result.Units += s.Count;
+            seen.Add(id);
+            held[Key(s.Template, s.Mk)] = Get(held, Key(s.Template, s.Mk)) + s.Count;
 
-                using (var wallet = tx.EnumerateIndex<Wallet, long>(ix.WalletByOwner, s.Owner, s.Owner))
-                {
-                    if (!wallet.MoveNext())
-                    {
-                        result.Violation($"stack {id}: its owner {s.Owner} has no wallet");
-                    }
-                }
+            // Counted apart from the slots: a stack outside the grid, or one sharing a slot, is still one of its owner's.
+            var owned = (stacksOf.TryGetValue(s.Owner, out var c) ? c : 0) + 1;
+            stacksOf[s.Owner] = owned;
+            if (owned == ItemLedger.Slots + 1)
+            {
+                result.Violation($"owner {s.Owner}: more than {ItemLedger.Slots} stacks");
+            }
+            if (owned == 1 && !tx.TryOpen(EntityId.FromRawValue((ulong)s.Owner), out _))
+            {
+                result.Violation($"stack {id}: its owner {s.Owner} is not a character that exists");
+            }
 
-                if (s.Count is < 1 or > ItemLedger.StackMax)
-                {
-                    result.Violation($"stack {id}: holds {s.Count}, outside 1..{ItemLedger.StackMax}");
-                }
+            if (owned == 1 && !walletOwners.Contains(s.Owner))
+            {
+                result.Violation($"stack {id}: its owner {s.Owner} has no wallet");
+            }
 
-                if (s.Slot is < 1 or > ItemLedger.Slots)
-                {
-                    result.Violation($"stack {id}: slot {s.Slot}, outside 1..{ItemLedger.Slots}");
-                }
-                else
-                {
-                    if (!slotsOf.TryGetValue(s.Owner, out var slots))
-                    {
-                        slots = [];
-                        slotsOf[s.Owner] = slots;
-                    }
+            if (s.Count is < 1 or > ItemLedger.StackMax)
+            {
+                result.Violation($"stack {id}: holds {s.Count}, outside 1..{ItemLedger.StackMax}");
+            }
 
-                    if (!slots.Add(s.Slot))
-                    {
-                        result.Violation($"stack {id}: slot {s.Slot} of {s.Owner} holds another stack too");
-                    }
+            if (s.Slot is < 1 or > ItemLedger.Slots)
+            {
+                result.Violation($"stack {id}: slot {s.Slot}, outside 1..{ItemLedger.Slots}");
+            }
+            else
+            {
+                if (!slotsOf.TryGetValue(s.Owner, out var slots))
+                {
+                    slots = [];
+                    slotsOf[s.Owner] = slots;
                 }
 
-                if (!stacks.TryGetValue(id, out var replayed))
+                if (!slots.Add(s.Slot))
                 {
-                    result.Violation($"stack {id}: holds {s.Count} and no item ledger row ever moved it");
-                    continue;
+                    result.Violation($"stack {id}: slot {s.Slot} of {s.Owner} holds another stack too");
                 }
+            }
 
-                if (replayed.Count == 0)
-                {
-                    result.Violation($"stack {id}: emptied by the replay and still stored");
-                }
+            if (!stacks.TryGetValue(id, out var replayed))
+            {
+                result.Violation($"stack {id}: holds {s.Count} and no item ledger row ever moved it");
+                continue;
+            }
 
-                if (s.Count != replayed.Count)
-                {
-                    result.Violation($"stack {id}: holds {s.Count}, the replay says {replayed.Count}");
-                }
+            if (replayed.Count == 0)
+            {
+                result.Violation($"stack {id}: emptied by the replay and still stored");
+            }
 
-                if (s.Owner != replayed.Owner || s.Template != replayed.Template || s.Mk != replayed.Mk)
-                {
-                    result.Violation($"stack {id}: is {s.Owner}'s {s.Template} Mk {s.Mk}, its rows say {replayed.Owner}'s {replayed.Template} Mk {replayed.Mk}");
-                }
+            if (s.Count != replayed.Count)
+            {
+                result.Violation($"stack {id}: holds {s.Count}, the replay says {replayed.Count}");
+            }
 
-                if (s.LastSeq != replayed.LastSeq || s.Rows != replayed.Rows)
-                {
-                    result.Violation($"stack {id}: last moved at seq {s.LastSeq} in {s.Rows} rows, the ledger says {replayed.LastSeq} in {replayed.Rows}");
-                }
+            if (s.Owner != replayed.Owner || s.Template != replayed.Template || s.Mk != replayed.Mk)
+            {
+                result.Violation($"stack {id}: is {s.Owner}'s {s.Template} Mk {s.Mk}, its rows say {replayed.Owner}'s {replayed.Template} Mk {replayed.Mk}");
+            }
+
+            if (s.LastSeq != replayed.LastSeq || s.Rows != replayed.Rows)
+            {
+                result.Violation($"stack {id}: last moved at seq {s.LastSeq} in {s.Rows} rows, the ledger says {replayed.LastSeq} in {replayed.Rows}");
             }
         }
 
         // The bazaar's escrow (bazaar.md § 3.2, § 7): a listing is its own stack, its quantity its replayed count — and held, for conservation.
-        using (var listings = tx.EnumerateIndex<Listing, long>(dbe.GetIndexRef<Listing, long>(l => l.Seller), long.MinValue, long.MaxValue))
+        foreach (var listing in tx.Query<ListingArch>())
         {
-            while (listings.MoveNext())
+            var l = listing.Read(ListingArch.Entry);
+            var id = unchecked((long)listing.Id.RawValue);
+            result.Escrow += l.Quantity;
+            seen.Add(id);
+            held[Key(l.Template, l.Mk)] = Get(held, Key(l.Template, l.Mk)) + l.Quantity;
+            if (!stacks.TryGetValue(id, out var replayed))
             {
-                var l = listings.CurrentComponent;
-                var id = listings.CurrentEntityPK;
-                result.Escrow += l.Quantity;
-                seen.Add(id);
-                held[Key(l.Template, l.Mk)] = Get(held, Key(l.Template, l.Mk)) + l.Quantity;
-                if (!stacks.TryGetValue(id, out var replayed))
-                {
-                    result.Violation($"listing {id}: holds {l.Quantity} and no item ledger row ever moved it");
-                    continue;
-                }
+                result.Violation($"listing {id}: holds {l.Quantity} and no item ledger row ever moved it");
+                continue;
+            }
 
-                if (replayed.Count == 0)
-                {
-                    result.Violation($"listing {id}: emptied by the replay and still stored");
-                }
+            if (replayed.Count == 0)
+            {
+                result.Violation($"listing {id}: emptied by the replay and still stored");
+            }
 
-                if (l.Quantity != replayed.Count || l.Template != replayed.Template || l.Mk != replayed.Mk)
-                {
-                    result.Violation($"listing {id}: holds {l.Quantity} of {l.Template} Mk {l.Mk}, the replay says {replayed.Count} of {replayed.Template} Mk {replayed.Mk}");
-                }
+            if (l.Quantity != replayed.Count || l.Template != replayed.Template || l.Mk != replayed.Mk)
+            {
+                result.Violation($"listing {id}: holds {l.Quantity} of {l.Template} Mk {l.Mk}, the replay says {replayed.Count} of {replayed.Template} Mk {replayed.Mk}");
+            }
 
-                if (l.LastSeq != replayed.LastSeq || l.Rows != replayed.Rows)
-                {
-                    result.Violation($"listing {id}: last moved at seq {l.LastSeq} in {l.Rows} rows, the ledger says {replayed.LastSeq} in {replayed.Rows}");
-                }
+            if (l.LastSeq != replayed.LastSeq || l.Rows != replayed.Rows)
+            {
+                result.Violation($"listing {id}: last moved at seq {l.LastSeq} in {l.Rows} rows, the ledger says {replayed.LastSeq} in {replayed.Rows}");
             }
         }
 

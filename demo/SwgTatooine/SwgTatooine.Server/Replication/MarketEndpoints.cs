@@ -433,47 +433,42 @@ public static class MarketEndpoints
         using var tx = dbe.CreateQuickTransaction();
         json.Append("{\"listed\":[");
         var first = true;
-        using (var mine = tx.EnumerateIndex<Listing, long>(dbe.GetIndexRef<Listing, long>(l => l.Seller), key, key))
+        // Queries, not EnumerateIndex: the index enumerator misses a listing destroyed after this snapshot (#1247).
+        foreach (var mine in tx.Query<ListingArch>().WhereField<Listing>(l => l.Seller == key).Execute())
         {
-            while (mine.MoveNext())
+            var l = tx.Open(mine).Read(ListingArch.Entry);
+            if (l.State != ListingState.Listed)
             {
-                var l = mine.CurrentComponent;
-                if (l.State != ListingState.Listed)
-                {
-                    continue;
-                }
-
-                json.Append(first ? "{" : ",{");
-                first = false;
-                Common(json, board, mine.CurrentEntityPK, in l);
-                json.Append(",\"total\":").Append(l.UnitPrice * l.Quantity)
-                    .Append(",\"fee\":").Append(l.Fee)
-                    .Append(",\"listedTick\":").Append(l.ListedTick)
-                    .Append(",\"expireTick\":").Append(l.ExpireTick)
-                    .Append(",\"ageS\":").Append(Math.Max(0, board.WorldTick - l.ListedTick) / board.TickRateHz)
-                    .Append('}');
+                continue;
             }
+
+            json.Append(first ? "{" : ",{");
+            first = false;
+            Common(json, board, unchecked((long)mine.RawValue), in l);
+            json.Append(",\"total\":").Append(l.UnitPrice * l.Quantity)
+                .Append(",\"fee\":").Append(l.Fee)
+                .Append(",\"listedTick\":").Append(l.ListedTick)
+                .Append(",\"expireTick\":").Append(l.ExpireTick)
+                .Append(",\"ageS\":").Append(Math.Max(0, board.WorldTick - l.ListedTick) / board.TickRateHz)
+                .Append('}');
         }
 
         json.Append("],\"reserved\":[");
         first = true;
-        using (var mine = tx.EnumerateIndex<Listing, long>(dbe.GetIndexRef<Listing, long>(l => l.Collector), key, key))
+        foreach (var mine in tx.Query<ListingArch>().WhereField<Listing>(l => l.Collector == key).Execute())
         {
-            while (mine.MoveNext())
+            var l = tx.Open(mine).Read(ListingArch.Entry);
+            if (l.State is not (ListingState.Sold or ListingState.Returned))
             {
-                var l = mine.CurrentComponent;
-                if (l.State is not (ListingState.Sold or ListingState.Returned))
-                {
-                    continue;
-                }
-
-                json.Append(first ? "{" : ",{");
-                first = false;
-                Common(json, board, mine.CurrentEntityPK, in l);
-                json.Append(",\"state\":\"").Append(ListingState.NameOf(l.State)).Append('"')
-                    .Append(",\"closedTick\":").Append(l.ClosedTick)
-                    .Append('}');
+                continue;
             }
+
+            json.Append(first ? "{" : ",{");
+            first = false;
+            Common(json, board, unchecked((long)mine.RawValue), in l);
+            json.Append(",\"state\":\"").Append(ListingState.NameOf(l.State)).Append('"')
+                .Append(",\"closedTick\":").Append(l.ClosedTick)
+                .Append('}');
         }
 
         return json.Append("],\"caps\":{\"listings\":").Append(TatooineData.MaxListings)
@@ -557,22 +552,27 @@ public static class MarketEndpoints
     public static MarketAuditResult Audit(DatabaseEngine dbe, MarketSnapshot board)
     {
         ArgumentNullException.ThrowIfNull(dbe);
+        using var tx = dbe.CreateQuickTransaction();
+        return Audit(dbe, board, tx);
+    }
+
+    /// <summary>
+    /// The audit read through <paramref name="tx"/>'s snapshot. Listings are read by an archetype scan: <c>EnumerateIndex</c> misses one destroyed after
+    /// the snapshot (#1247).
+    /// </summary>
+    internal static MarketAuditResult Audit(DatabaseEngine dbe, MarketSnapshot board, Transaction tx)
+    {
         board ??= MarketSnapshot.Empty;
         var started = Stopwatch.GetTimestamp();
         var result = new MarketAuditResult();
         var routing = dbe.ArchetypeIdOf<ListingArch>();
         bool IsListing(long key) => key != 0 && EntityId.FromRawValue((ulong)key).ArchetypeId == routing;
 
-        using var tx = dbe.CreateQuickTransaction();
-
         // The listings as stored.
         var stored = new Dictionary<long, Listing>();
-        using (var all = tx.EnumerateIndex<Listing, long>(dbe.GetIndexRef<Listing, long>(l => l.Seller), long.MinValue, long.MaxValue))
+        foreach (var listing in tx.Query<ListingArch>())
         {
-            while (all.MoveNext())
-            {
-                stored[all.CurrentEntityPK] = all.CurrentComponent;
-            }
+            stored[unchecked((long)listing.Id.RawValue)] = listing.Read(ListingArch.Entry);
         }
 
         // The item ledger's market rows: each listing's escrow replayed, who filled it and who emptied it; the vendor sales' rows grouped by their credit row.

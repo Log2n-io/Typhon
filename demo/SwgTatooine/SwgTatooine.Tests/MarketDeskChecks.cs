@@ -748,6 +748,41 @@ internal sealed class MarketDeskChecks : ServedChecks
         });
     }
 
+    /// <summary>
+    /// The item and market audits read at a snapshot older than a vendor sale and a cancel collected on the spot — a stack and a listing destroyed after
+    /// it — stay clean. They read through <c>EnumerateIndex</c>, which does not find an entity destroyed after the snapshot (#1247): live, every audit
+    /// reported the stacks the bots had just sold as "not stored", their ledger rows not yet in its snapshot.
+    /// </summary>
+    [Test]
+    [CancelAfter(180_000)]
+    public void TheAudits_AtASnapshotOlderThanTheirDestroys_StayClean()
+    {
+        using var sim = Start();
+        var home = Home(sim);
+        var a = LogIn(sim, 0x8721, At(home), 1);
+        Mint(sim, a, Hide, 2, 30);
+        Mint(sim, a, Bone, 3, 5);
+        var (listing, _) = ListAndWait(sim, a, Bone, 3, 5, 10);
+        SessionHarness.Until(() => sim.Bridge.MarketBoard.Cities.Any(c => c.Listings.Any(v => v.Id == listing)), "the board showing the listing");
+
+        using var reader = sim.Dbe.CreateQuickTransaction();
+        var board = sim.Bridge.MarketBoard;
+        Market.Vendor(a.Link, Hide, 2, 30);
+        Market.Cancel(a.Link, listing);
+        SessionHarness.Until(() => Market.Units(sim, a.Character, Hide, 2) == 0, "the vendor sale of the whole stack");
+        SessionHarness.Until(() => Market.Units(sim, a.Character, Bone, 3) == 5 && !Market.Listings(sim).ContainsKey(listing), "the cancel, collected");
+
+        var items = ItemEndpoints.Audit(sim.Dbe, reader);
+        var market = MarketEndpoints.Audit(sim.Dbe, board, reader);
+        Assert.Multiple(() =>
+        {
+            Assert.That(reader.Query<ItemStackArch>().Execute().Count, Is.GreaterThan(0), "premise: the reader still sees the sold stack");
+            Assert.That(items.Ok, Is.True, string.Join("; ", items.Violations));
+            Assert.That(market.Ok, Is.True, string.Join("; ", market.Violations));
+            Assert.That(items.Escrow, Is.EqualTo(5), "the reader still sees the cancelled listing's escrow");
+        });
+    }
+
     // ── BZ-8: the buyer's level ─────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>BZ-8: the <c>Market</c> system reads no <see cref="CharacterProgress"/>, and two buyers of different combat levels pay the same.</summary>
