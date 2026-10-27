@@ -21,6 +21,11 @@ export interface WalletTransfer {
   readonly amount: number;
   /** The other side: a character's name, `World`, or `null` for one that is gone. */
   readonly other: string | null;
+  /**
+   * What the row was about, as text, when the server says: a bazaar row's listing id (bazaar.md § 2.2) — a sale and its tax
+   * share it.
+   */
+  readonly ref?: string;
 }
 
 /** The wallet as last read. */

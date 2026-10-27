@@ -59,11 +59,15 @@ export const useWallet = create<WalletState>((set, get) => ({
         }
 
         // The bazaar's (bazaar.md § 6): a sale with the tax the same tick paid, a purchase, the vendor's payment.
+        // The tax of a sale is the row naming the same listing (`ref`); a server without refs, the same tick's.
         const tax =
           t.kind === 'sale' && t.amount > 0
-            ? -(fresh.find((x) => x.kind === 'tax' && x.tick === t.tick)?.amount ?? 0)
+            ? -(
+                fresh.find((x) => x.kind === 'tax' && (t.ref === undefined ? x.tick === t.tick : x.ref === t.ref))
+                  ?.amount ?? 0
+              )
             : 0;
-        const what = t.kind === 'sale' ? useMarket.getState().saleItem(t.amount) : null;
+        const what = t.kind === 'sale' ? useMarket.getState().saleItem(t.amount, t.ref) : null;
         const line = marketWalletLine(t.kind, t.amount, t.other, tax, what);
         if (line !== null) {
           useChat.getState().notice(line);

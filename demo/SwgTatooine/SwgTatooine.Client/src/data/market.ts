@@ -114,7 +114,7 @@ export interface MarketPrice {
   readonly category: string;
   readonly template: number;
   readonly mk: number;
-  /** The market value of a unit, credits. */
+  /** The market value of a unit, credits — decimal (a material's 1.7); the others below are whole credits. */
   readonly value: number;
   /** What the vendor pays a unit, milli-credits (credits × 1000). */
   readonly vendor: number;
@@ -139,6 +139,11 @@ export type MarketSort = 'price' | '-price' | 'new' | 'mk';
 export interface MarketQuery {
   /** A city's region, 0 for every city. */
   readonly city: number;
+  /**
+   * The realm of the city browsed, -1 for the server's default — a city named without its realm is planet 0's, and twin realms
+   * share regions.
+   */
+  readonly realm: number;
   readonly cat: MarketCategory;
   /** An asset id, `''` for any. */
   readonly item: string;
@@ -151,12 +156,25 @@ export interface MarketQuery {
   readonly page: number;
 }
 
-export const DEFAULT_QUERY: MarketQuery = { city: 0, cat: '', item: '', mk: 0, max: 0, sort: 'price', page: 1 };
+export const DEFAULT_QUERY: MarketQuery = {
+  city: 0,
+  realm: -1,
+  cat: '',
+  item: '',
+  mk: 0,
+  max: 0,
+  sort: 'price',
+  page: 1,
+};
 
 /** The URL of a board page, relative to the page as the other endpoints are; only the filters that are set. */
 export function browseUrl(q: MarketQuery): string {
   const p = new URLSearchParams();
   p.set('city', String(q.city));
+  if (q.city > 0 && q.realm >= 0) {
+    p.set('realm', String(q.realm));
+  }
+
   if (q.cat !== '') {
     p.set('cat', q.cat);
   }

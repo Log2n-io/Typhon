@@ -190,7 +190,7 @@ export class MockMarket {
       { def, mk, qty: quantity, unit: unitPrice, city: MOCK_BAZAAR_REGION, seller: SELF_ID, sellerName: 'You' },
       id,
     );
-    this.transfer('listfee', -fee, 'World');
+    this.transfer('listfee', -fee, 'World', id);
     return 0;
   }
 
@@ -235,7 +235,7 @@ export class MockMarket {
       return MarketReason.NotEnough;
     }
 
-    this.transfer('sale', -total, l.sellerName);
+    this.transfer('sale', -total, l.sellerName, l.id);
     this.close(l, SOLD, SELF_ID);
     this.deliverIfHere(l, 'buy');
     return 0;
@@ -316,10 +316,10 @@ export class MockMarket {
       this.close(l, SOLD, '900777');
       // Reserved for the buyer at its city: gone from the seller's view either way.
       this.listings.delete(l.id);
-      this.transfer('sale', total, BUYER);
+      this.transfer('sale', total, BUYER, l.id);
       const tax = fees(total).tax;
       if (tax > 0) {
-        this.transfer('tax', -tax, 'World');
+        this.transfer('tax', -tax, 'World', l.id);
       }
     }
   }
@@ -394,7 +394,7 @@ export class MockMarket {
     for (const def of [...MOCK_MATERIALS, ...MOCK_PARTS]) {
       for (let mk = 1; mk <= 5; mk++) {
         const units = [...this.listings.values()].filter((l) => l.state === LISTED && l.def === def && l.mk === mk);
-        const value = Math.floor(mockValue(def, mk) / 1000);
+        const value = mockValue(def, mk) / 1000;
         const lowest = units.length === 0 ? 0 : Math.min(...units.map((l) => l.unit));
         out.push({
           item: def.item,
@@ -406,7 +406,7 @@ export class MockMarket {
           vendor: vendorMilli(def, mk),
           listed: units.reduce((n, l) => n + l.qty, 0),
           lowest,
-          median: units.length === 0 ? 0 : Math.max(1, value),
+          median: units.length === 0 ? 0 : Math.max(1, Math.round(value)),
           min: lowest,
           max: units.length === 0 ? 0 : Math.max(...units.map((l) => l.unit)),
           sales: 0,
@@ -470,9 +470,9 @@ export class MockMarket {
     this.version++;
   }
 
-  private transfer(kind: string, amount: number, other: string): void {
+  private transfer(kind: string, amount: number, other: string, ref = '0'): void {
     this.credits += amount;
-    this.transfers.unshift({ seq: String(this.nextSeq++), tick: this.tick(), kind, amount, other });
+    this.transfers.unshift({ seq: String(this.nextSeq++), tick: this.tick(), kind, amount, other, ref });
     this.transfers.length = Math.min(this.transfers.length, 20);
     this.walletRev++;
   }
