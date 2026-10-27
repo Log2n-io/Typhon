@@ -125,6 +125,7 @@ public static class EconomyEndpoints
         ArgumentNullException.ThrowIfNull(app);
         ArgumentNullException.ThrowIfNull(dbe);
         app.MapGet("/swg/wallet", (HttpContext context) => GetWallet(dbe, context));
+        app.MapGet("/swg/wallet/of", (HttpContext context) => GetWalletOf(dbe, context));
         app.MapGet("/swg/economy/audit", (HttpContext context) => GetAudit(dbe, context));
         app.MapGet("/swg/economy/ledger", (HttpContext context) => GetLedger(dbe, context));
         app.MapGet("/swg/economy/stats", () => Results.Text(CountersJson?.Invoke() ?? "{}", "application/json"));
@@ -151,6 +152,35 @@ public static class EconomyEndpoints
         return CharacterStore.TryFind(dbe, account, out var character, out _)
             ? Results.Text(WalletJson(dbe, character), "application/json")
             : Results.Text("{\"open\":false,\"credits\":0,\"transfers\":[]}", "application/json");
+    }
+
+    /// <summary>
+    /// <c>GET /swg/wallet/of?name=…</c>: another player's balance, by its account name — <c>{"open","credits"}</c>, never its transfers — for the
+    /// selection pane (Loïc, 2026-10-27). Public by decision: anyone who selects a player sees its credits. 404 for a name no account has.
+    /// </summary>
+    private static IResult GetWalletOf(DatabaseEngine dbe, HttpContext context)
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        if (!AccountName.TryNormalize(context.Request.Query["name"].ToString(), out var name)
+            || !AccountStore.TryFind(dbe, name, out var account, out _)
+            || !CharacterStore.TryFind(dbe, account, out var character, out _))
+        {
+            return Results.NotFound();
+        }
+
+        return Results.Text(BalanceJson(dbe, character), "application/json");
+    }
+
+    /// <summary>A character's balance alone: <c>{"open":bool,"credits":n}</c>.</summary>
+    public static string BalanceJson(DatabaseEngine dbe, EntityId character)
+    {
+        ArgumentNullException.ThrowIfNull(dbe);
+        var key = unchecked((long)character.RawValue);
+        using var tx = dbe.CreateQuickTransaction();
+        using var wallets = tx.EnumerateIndex<Wallet, long>(Indexes(dbe).WalletByOwner, key, key);
+        return wallets.MoveNext()
+            ? $"{{\"open\":true,\"credits\":{wallets.CurrentComponent.Balance.ToString(CultureInfo.InvariantCulture)}}}"
+            : "{\"open\":false,\"credits\":0}";
     }
 
     private static IResult GetAudit(DatabaseEngine dbe, HttpContext context)

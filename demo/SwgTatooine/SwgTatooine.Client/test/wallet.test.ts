@@ -3,6 +3,8 @@ import { panelKey } from '../src/app/panel-keys';
 import { transferLabel } from '../src/ui/InventoryWindow';
 import {
   formatCredits,
+  parseBalance,
+  readBalanceOf,
   MAX_TIP,
   parseChatCommand,
   parseWallet,
@@ -331,5 +333,26 @@ describe('the inventory window labels a transfer by its side', () => {
     expect(transferLabel('sale', 726)).toBe('Bazaar sale');
     expect(transferLabel('tax', -58)).toBe('Sales tax');
     expect(transferLabel('somethingNew', 1)).toBe('somethingNew');
+  });
+});
+
+describe("another player's balance (GET /swg/wallet/of)", () => {
+  it('reads the credits of an open wallet and nothing else', () => {
+    expect(parseBalance({ open: true, credits: 1008 })).toBe(1008);
+    expect(parseBalance({ open: false, credits: 0 })).toBeNull();
+    expect(parseBalance({ open: true, credits: 'x' })).toBeNull();
+    expect(parseBalance(null)).toBeNull();
+  });
+
+  it('asks by the escaped name and answers null for an unknown one or a failed read', async () => {
+    const asked: string[] = [];
+    const ok = (url: string): Promise<Response> => {
+      asked.push(url);
+      return Promise.resolve(new Response(JSON.stringify({ open: true, credits: 42 }), { status: 200 }));
+    };
+    expect(await readBalanceOf('bot 001', ok)).toBe(42);
+    expect(asked).toEqual(['swg/wallet/of?name=bot%20001']);
+    expect(await readBalanceOf('nobody', () => Promise.resolve(new Response('', { status: 404 })))).toBeNull();
+    expect(await readBalanceOf('x', () => Promise.reject(new Error('offline')))).toBeNull();
   });
 });

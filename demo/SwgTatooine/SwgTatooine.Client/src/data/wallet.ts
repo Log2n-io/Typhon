@@ -108,6 +108,32 @@ export function parseChatCommand(line: string): ChatCommand | null {
 }
 
 /** Credits as the panels write them: grouped, with the unit. */
+/** How often the inspector reads a selected player's balance again, milliseconds. */
+export const BALANCE_OF_REFRESH_MS = 5000;
+
+/** The answer of `GET /swg/wallet/of`, checked: the credits of an open wallet; `null` for a closed one or anything else. */
+export function parseBalance(json: unknown): number | null {
+  if (typeof json !== 'object' || json === null) {
+    return null;
+  }
+
+  const r = json as { open?: unknown; credits?: unknown };
+  return r.open === true && typeof r.credits === 'number' && Number.isFinite(r.credits) ? r.credits : null;
+}
+
+/** Another player's balance by its account name (`GET /swg/wallet/of`); `null` for an unknown name or a failed read. */
+export async function readBalanceOf(
+  name: string,
+  fetcher: (url: string) => Promise<Response> = (url) => fetch(url),
+): Promise<number | null> {
+  try {
+    const response = await fetcher(`swg/wallet/of?name=${encodeURIComponent(name)}`);
+    return response.ok ? parseBalance(await response.json()) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function formatCredits(credits: number): string {
   return `${credits.toLocaleString('en-US')} cr`;
 }

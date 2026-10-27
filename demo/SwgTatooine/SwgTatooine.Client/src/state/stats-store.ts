@@ -106,6 +106,8 @@ export interface Inspection {
   /** False for an archetype without a position: x, z, speed, heading and epoch mean nothing. */
   readonly hasPosition: boolean;
   readonly fields: readonly InspectedField[];
+  /** A player's account name, once replicated; `null` for anything else, and for the scripted crowd, which has none. */
+  readonly playerName: string | null;
 }
 
 /**

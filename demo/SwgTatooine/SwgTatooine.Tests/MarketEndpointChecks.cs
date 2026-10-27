@@ -366,6 +366,45 @@ internal sealed class MarketEndpointChecks : ServedChecks
     }
 
     /// <summary>
+    /// <c>GET /swg/wallet/of?name=…</c>, for the selection pane (Loïc, 2026-10-27): a player's balance by its account name, through the route the host
+    /// maps — the balance and nothing of its transfers — and 404 for a name no account has.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public async Task AnotherPlayersBalance_IsReadByItsName_WithoutItsTransfers()
+    {
+        using var sim = Start();
+        Assert.That(AccountStore.TrySignup(sim.Dbe, "walletpeek", "wallet-peek-pass-1", out var account), Is.EqualTo(AccountStore.SignupOutcome.Created));
+        var a = LogIn(sim, account.RawValue, sim.Index.Bazaars[0], 1);
+        var balance = Ledgers.Balance(sim, a.Character);
+
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.SetMinimumLevel(LogLevel.Error);
+        builder.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Loopback, 0));
+        await using var app = builder.Build();
+        app.MapEconomy(sim.Dbe);
+        await app.StartAsync();
+        try
+        {
+            var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>().Addresses.First();
+            using var client = new HttpClient { BaseAddress = new Uri(address) };
+            var known = await client.GetStringAsync("/swg/wallet/of?name=WalletPeek");
+            var unknown = await client.GetAsync("/swg/wallet/of?name=nobody-here");
+            var empty = await client.GetAsync("/swg/wallet/of");
+            Assert.Multiple(() =>
+            {
+                Assert.That(known, Is.EqualTo($"{{\"open\":true,\"credits\":{balance}}}"), "the balance, by the name as typed in any case");
+                Assert.That(unknown.StatusCode, Is.EqualTo(HttpStatusCode.NotFound));
+                Assert.That(empty.StatusCode, Is.EqualTo(HttpStatusCode.NotFound));
+            });
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    /// <summary>
     /// BZ-13: <c>/swg/market/mine</c> answers the bearer's own listings and reservations and nobody else's, 401 without a token; the items and wallet
     /// revisions move for both sides of a sale.
     /// </summary>

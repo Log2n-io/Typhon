@@ -1,8 +1,37 @@
 import { conClass, viewerClOf } from '../data/content-level';
 import { inspectorTitle } from '../data/progress';
 import { doorRealmOf } from '../data/realm-view';
+import { useEffect, useState } from 'react';
+import { BALANCE_OF_REFRESH_MS, formatCredits, readBalanceOf } from '../data/wallet';
 import { useStats } from '../state/stats-store';
 import { useUi } from '../state/ui-store';
+
+/** A selected player's credits (Loïc, 2026-10-27), read now and every {@link BALANCE_OF_REFRESH_MS}; `null` until read, or for none. */
+function useBalanceOf(name: string | null): number | null {
+  // Kept with the name it was read for, so a new selection shows nothing until its own read lands, without a reset in the effect.
+  const [read, setRead] = useState<{ readonly name: string; readonly credits: number | null } | null>(null);
+  useEffect(() => {
+    if (name === null) {
+      return undefined;
+    }
+
+    let live = true;
+    const read = (): void => {
+      void readBalanceOf(name).then((credits) => {
+        if (live) {
+          setRead({ name, credits });
+        }
+      });
+    };
+    read();
+    const timer = window.setInterval(read, BALANCE_OF_REFRESH_MS);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+    };
+  }, [name]);
+  return read !== null && read.name === name ? read.credits : null;
+}
 
 /** The picked entity, live: what the server replicated for it, and where it is going. */
 export function Inspector() {
@@ -22,12 +51,14 @@ export function Inspector() {
 
   // The viewer's combat level, for a level's con colour (character-level.md § 8); none for the god camera.
   const viewerCl = useStats((s) => viewerClOf(s.stats?.vitals?.level));
+
+  // Stats arrive four times a second: until then, what was published may describe the previous selection.
+  const inspection = selectedNetId !== 0 && published?.netId === selectedNetId ? published : null;
+  const credits = useBalanceOf(inspection?.playerName ?? null);
   if (selectedNetId === 0) {
     return null;
   }
 
-  // Stats arrive four times a second: until then, what was published may describe the previous selection.
-  const inspection = published?.netId === selectedNetId ? published : null;
   const title =
     inspection === null
       ? null
@@ -75,6 +106,12 @@ export function Inspector() {
       {inspection !== null && (
         <table>
           <tbody>
+            {credits !== null && (
+              <tr>
+                <td>Credits</td>
+                <td>{formatCredits(credits)}</td>
+              </tr>
+            )}
             {inspection.hasPosition && (
               <>
                 <tr>

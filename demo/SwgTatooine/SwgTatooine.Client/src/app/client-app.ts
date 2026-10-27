@@ -5889,6 +5889,8 @@ export class ClientApp {
     const store = this.world.archetypeStore(archetype);
     const fields = describeFields(store, slot);
     const label = this.archetypes.label(archetype);
+    const playerName =
+      this.archetypes.name(archetype) === 'Player' ? (this.names.nameOf(this.fieldOf(netId, 'nameId')) ?? null) : null;
     if (!store.hasPosition) {
       return {
         archetype: label,
@@ -5901,6 +5903,7 @@ export class ClientApp {
         epoch: 0,
         hasPosition: false,
         fields,
+        playerName,
       };
     }
 
@@ -5918,6 +5921,7 @@ export class ClientApp {
       epoch: epochAt(store, slot, tick),
       hasPosition: true,
       fields,
+      playerName,
     };
   }
 }
