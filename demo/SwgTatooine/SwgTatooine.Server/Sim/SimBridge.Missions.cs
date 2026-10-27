@@ -80,6 +80,10 @@ public sealed partial class SimBridge
     private int[][] _demand = [];
     private long _demandTick = long.MinValue / 2;
 
+    // Counted with the demand: the combat level of every character standing within take reach of each terminal, and each city's terminals.
+    private List<int>[] _viewersAt = [];
+    private List<int>[] _terminalsOfCity = [];
+
     private long _missionCommits;
     private long _missionEntities;
     private int _deskWrites;
@@ -501,13 +505,25 @@ public sealed partial class SimBridge
         _offerRouting = Dbe.ArchetypeIdOf<MissionOffer>();
         _offers = new List<OfferRef>[_terminals.Length];
         _terminalCity = new int[_terminals.Length];
+        _viewersAt = new List<int>[_terminals.Length];
+        _terminalsOfCity = new List<int>[_demand.Length];
+        for (var c = 0; c < _terminalsOfCity.Length; c++)
+        {
+            _terminalsOfCity[c] = [];
+        }
+
         _terminalOf.Clear();
         for (var t = 0; t < _terminals.Length; t++)
         {
             _offers[t] = [];
+            _viewersAt[t] = [];
             _terminalOf[_terminals[t].Id] = t;
             var city = CityAround(_terminals[t].Realm, _terminals[t].X, _terminals[t].Z, float.MaxValue);
             _terminalCity[t] = city < 0 ? -1 : _cityBase[_terminals[t].Realm] + city;
+            if (_terminalCity[t] >= 0)
+            {
+                _terminalsOfCity[_terminalCity[t]].Add(t);
+            }
         }
     }
 
@@ -723,6 +739,12 @@ public sealed partial class SimBridge
             Array.Clear(counts);
         }
 
+        foreach (var viewers in _viewersAt)
+        {
+            viewers.Clear();
+        }
+
+        var reach2 = TatooineData.MissionTerminalReachM * TatooineData.MissionTerminalReachM;
         var ramp = ContentLevels.RampM * _config.ContentScale;
         foreach (var body in _bodies.Values)
         {
@@ -741,7 +763,15 @@ public sealed partial class SimBridge
             var city = CityAround(realm, at.X, at.Z, ramp);
             if (city >= 0)
             {
-                _demand[_cityBase[realm] + city][Math.Clamp((int)player.Read(Player.Look).Level, 1, ContentLevels.MaxLevel)]++;
+                var cl = Math.Clamp((int)player.Read(Player.Look).Level, 1, ContentLevels.MaxLevel);
+                _demand[_cityBase[realm] + city][cl]++;
+                foreach (var t in _terminalsOfCity[_cityBase[realm] + city])
+                {
+                    if (_terminals[t].Realm == realm && Distance2(_terminals[t].X, _terminals[t].Z, at.X, at.Z) <= reach2)
+                    {
+                        _viewersAt[t].Add(cl);
+                    }
+                }
             }
         }
     }
@@ -1050,11 +1080,7 @@ public sealed partial class SimBridge
     private void TopUp(Transaction tx, Transaction tick0, int t, long tick)
     {
         var list = _offers[t];
-        if (list.Count >= TatooineData.MissionOffersPerTerminal)
-        {
-            return;
-        }
-
+        CountDemand(tick0, tick);
         Span<int> bands = stackalloc int[6];
         Span<bool> noneInBand = stackalloc bool[6];
         foreach (var o in list)
@@ -1062,7 +1088,31 @@ public sealed partial class SimBridge
             bands[ContentLevels.Band(o.Level)]++;
         }
 
-        CountDemand(tick0, tick);
+        // Whoever stands at the terminal sees at least MissionOffersPerViewer of its level, listed for it past the usual count when the crowd's draw left
+        // it fewer: the demand follows the city, and one low-level player among levelled bots is a rounding error of it.
+        foreach (var cl in _viewersAt[t])
+        {
+            var lo = Math.Max(1, cl - TatooineData.MissionLevelBelow);
+            var hi = Math.Min(ContentLevels.MaxLevel, cl + TatooineData.MissionLevelAbove);
+            var shown = 0;
+            foreach (var o in list)
+            {
+                if (o.Level >= lo && o.Level <= hi)
+                {
+                    shown++;
+                }
+            }
+
+            while (shown < TatooineData.MissionOffersPerViewer
+                && list.Count < TatooineData.MissionOffersPerTerminal + TatooineData.MissionViewerOffersMax
+                && TryListOffer(tx, t, tick, bands, noneInBand, out var offer, lo, hi))
+            {
+                list.Add(offer);
+                bands[ContentLevels.Band(offer.Level)]++;
+                shown++;
+            }
+        }
+
         var guard = 0;
         while (list.Count < TatooineData.MissionOffersPerTerminal && guard++ < TatooineData.MissionOffersPerTerminal)
         {
@@ -1080,7 +1130,11 @@ public sealed partial class SimBridge
     /// One new offer at terminal <paramref name="t"/>, naming a standing wild lair: its level chosen first — a band the terminal lists nothing of, else by the
     /// characters around (<see cref="DemandLevel"/>) — then a lair of that level, preferably within <see cref="TatooineData.MissionReachM"/>.
     /// </summary>
-    private bool TryListOffer(Transaction tx, int t, long tick, Span<int> bands, Span<bool> noneInBand, out OfferRef offer)
+    /// <param name="viewerLo">Above 0, an offer for a character at the terminal: a lair in <paramref name="viewerLo"/>..<paramref name="viewerHi"/>, within
+    /// reach first, never outside the window — one outside would not count as shown and the next pass would list another; neither the floor nor the
+    /// demand is drawn.</param>
+    /// <param name="viewerHi">The window's top, with <paramref name="viewerLo"/>.</param>
+    private bool TryListOffer(Transaction tx, int t, long tick, Span<int> bands, Span<bool> noneInBand, out OfferRef offer, int viewerLo = 0, int viewerHi = 0)
     {
         var terminal = _terminals[t];
         var serial = ++_offerSerial;
@@ -1091,7 +1145,7 @@ public sealed partial class SimBridge
         LairCandidate lair = default;
 
         // The floor: every band listed at least once, so higher content stays in view whoever is around (Loïc, 2026-10-26).
-        for (var band = 1; band <= 5 && !found; band++)
+        for (var band = 1; band <= 5 && !found && viewerLo == 0; band++)
         {
             if (bands[band] > 0 || noneInBand[band])
             {
@@ -1104,7 +1158,14 @@ public sealed partial class SimBridge
             noneInBand[band] = !found;
         }
 
-        if (!found)
+        if (!found && viewerLo > 0)
+        {
+            found = TryPickLair(tx, terminal.Realm, terminal.X, terminal.Z, viewerLo, viewerHi, inWindowOnly: true, reach, inReachOnly: true, liveTo,
+                    offered: false, ref rng, out lair)
+                || TryPickLair(tx, terminal.Realm, terminal.X, terminal.Z, viewerLo, viewerHi, inWindowOnly: true, reach, inReachOnly: false, liveTo,
+                    offered: false, ref rng, out lair);
+        }
+        else if (!found)
         {
             // The level first; a lair of it within reach, else one anywhere in the character's window within reach, else the nearest to that window.
             var (level, lo, hi) = DemandLevel(_terminalCity[t] < 0 ? null : _demand[_terminalCity[t]], ref rng);

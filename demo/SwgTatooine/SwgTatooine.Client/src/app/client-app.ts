@@ -130,12 +130,13 @@ import {
   bazaarRegionAt,
   bazaarTerminalOf,
   crowdsTerminal,
-  missionMenuItems,
+  missionTerminalAction,
   missionTerminalOf,
   ticketMenuItems,
   ticketTerminalOf,
   type TicketTerminal,
 } from './ticket-terminal';
+import { nextTabTarget, TAB_TARGET_RADIUS_M, type TabCandidate } from './tab-target';
 import { rayOnShapes, rayOnSlabs, type ShapeHit } from './world-pick';
 import { pressProgress, PressRing } from '../render/press-ring';
 import { resetForRealm, resetForSession, type RealmSwitchTargets } from './realm-switch';
@@ -483,6 +484,9 @@ const ENEMY_BAR_GAP_M = 0.35;
 const STRUCTURES_FIRST_MS = 1500;
 
 const CHARACTER_ARCHETYPES: readonly string[] = ['CityNpc', 'Player', 'Creature'];
+
+/** What Tab cycles through: players and the creatures to fight, not the city's NPCs. */
+const TAB_TARGET_ARCHETYPES: readonly string[] = ['Player', 'Creature'];
 
 /** The most of one creature species drawn at once. A lair holds four to eight; a view holds a few dozen lairs. */
 const SPECIES_CAPACITY = 512;
@@ -951,6 +955,17 @@ export class ClientApp {
       'keydown',
       (e) => {
         if (isTyping(e)) {
+          return;
+        }
+
+        // Tab: the nearest character, then the next one out at each press (Loïc, 2026-10-27). Not with a modifier, so
+        // Alt+Tab and Ctrl+Tab stay the system's and the browser's.
+        if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+          e.preventDefault();
+          if (!e.repeat) {
+            this.cycleTabTarget();
+          }
+
           return;
         }
 
@@ -3929,7 +3944,6 @@ export class ClientApp {
   private kindNamesSet: AssetSet | null = null;
   private offersAtMs = Number.NEGATIVE_INFINITY;
   /** The mission terminal whose context menu is open, for closing it when the body walks away. */
-  private missionMenuOwner = 0;
   private offersFor = 0;
   private offersKey = '';
 
@@ -4072,13 +4086,6 @@ export class ClientApp {
     const ui = useUi.getState();
     if (ui.contextMenu?.source === 'player' && !this.canTip(this.playerMenuTarget)) {
       ui.closeContextMenu();
-    }
-
-    if (ui.contextMenu?.source === 'mission') {
-      const menuPart = this.terminalPart(this.missionMenuOwner);
-      if (menuPart === null || !this.canUse(menuPart)) {
-        ui.closeContextMenu();
-      }
     }
 
     const open = missions.terminal;
@@ -4279,7 +4286,6 @@ export class ClientApp {
     }
 
     ui.selectPart({ owner: part.owner, kind: part.kind });
-    this.missionMenuOwner = part.kind === 'mission' ? part.owner : 0;
     this.bazaarMenuOwner = part.kind === 'bazaar' ? part.owner : 0;
     if (part.kind === 'bazaar') {
       ui.openContextMenu({
@@ -4292,26 +4298,21 @@ export class ClientApp {
       return false;
     }
 
-    ui.openContextMenu(
-      part.kind === 'mission'
-        ? {
-            x: press.x,
-            y: press.y,
-            title: MISSION_TERMINAL_LABEL,
-            source: 'mission',
-            items: missionMenuItems(part.owner),
-          }
-        : {
-            x: press.x,
-            y: press.y,
-            title: 'Shuttle destinations',
-            source: 'ticket',
-            items: ticketMenuItems(
-              ui.shuttleport?.city ?? -1,
-              CITIES.map((c) => c.name),
-            ),
-          },
-    );
+    if (part.kind === 'mission') {
+      ui.runContextAction(missionTerminalAction(part.owner));
+      return false;
+    }
+
+    ui.openContextMenu({
+      x: press.x,
+      y: press.y,
+      title: 'Shuttle destinations',
+      source: 'ticket',
+      items: ticketMenuItems(
+        ui.shuttleport?.city ?? -1,
+        CITIES.map((c) => c.name),
+      ),
+    });
     return false;
   }
 
@@ -5289,6 +5290,46 @@ export class ClientApp {
 
   /** The `WorldObject` archetype's index in the live catalog, or -1 before it is known. */
   private shuttleArchetype = -1;
+
+  /**
+   * Selects the next character for Tab: players but this one's avatar, and creatures, within {@link TAB_TARGET_RADIUS_M}
+   * of the avatar, ordered by distance (`nextTabTarget`). Nothing near, nothing changes.
+   */
+  private cycleTabTarget(): void {
+    const self = this.source?.selfNetId ?? 0;
+    if (self === 0 || !this.evaluate(self)) {
+      return;
+    }
+
+    const x = this.evalX;
+    const z = this.evalZ;
+    const r2 = TAB_TARGET_RADIUS_M * TAB_TARGET_RADIUS_M;
+    const candidates: TabCandidate[] = [];
+    for (const name of TAB_TARGET_ARCHETYPES) {
+      const archetype = this.archetypes.indexOf(name);
+      if (archetype < 0) {
+        continue;
+      }
+
+      const store = this.world.archetypeStore(archetype);
+      for (let i = 0; i < store.liveCount; i++) {
+        const netId = store.netIds[store.live[i]];
+        if (netId === self || !this.evaluate(netId)) {
+          continue;
+        }
+
+        const d2 = (this.evalX - x) ** 2 + (this.evalZ - z) ** 2;
+        if (d2 <= r2) {
+          candidates.push({ netId, d2, enemy: name === 'Creature' });
+        }
+      }
+    }
+
+    const next = nextTabTarget(candidates, useUi.getState().selectedNetId);
+    if (next !== 0) {
+      useUi.getState().select(next);
+    }
+  }
 
   private evaluate(netId: number): boolean {
     const location = this.world.locate(netId);

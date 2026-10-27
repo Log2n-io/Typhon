@@ -20,7 +20,7 @@ namespace SwgTatooine.Tests;
 [NonParallelizable]
 internal sealed class MissionDeskChecks : ServedChecks
 {
-    private SimConfig Config(bool persist = false, float offlineReleaseS = 0f)
+    private SimConfig Config(bool persist = false, float offlineReleaseS = 0f, float populationScale = 0.3f)
     {
         var config = Worlds.Served(Dir);
         config.WorkerCount = 1;
@@ -32,13 +32,13 @@ internal sealed class MissionDeskChecks : ServedChecks
 
         // Enough wild lairs that every terminal lists its 20 and a replacement finds a lair to name. An offer names a lair no other offer names (MS-3): at
         // the suite's 0.05, the planet's 96 lairs are all named by the 24 terminals' first lists, and a take leaves nothing to list in its place.
-        config.PopulationScale = 0.3f;
+        config.PopulationScale = populationScale;
         return config;
     }
 
-    private TatooineSim Start(bool persist = false, float offlineReleaseS = 0f)
+    private TatooineSim Start(bool persist = false, float offlineReleaseS = 0f, float populationScale = 0.3f)
     {
-        var sim = new TatooineSim(Config(persist, offlineReleaseS));
+        var sim = new TatooineSim(Config(persist, offlineReleaseS, populationScale));
         sim.Initialize();
         Harness = new SessionHarness(sim);
         return sim;
@@ -514,6 +514,57 @@ internal sealed class MissionDeskChecks : ServedChecks
             {
                 Assert.That(bands[band], Is.GreaterThanOrEqualTo(1), $"band {band} is not listed");
             }
+        });
+    }
+
+    /// <summary>
+    /// A character standing at a terminal whose list the crowd's levels filled is shown <see cref="TatooineData.MissionOffersPerViewer"/> offers of its own
+    /// window, listed for it past <see cref="TatooineData.MissionOffersPerTerminal"/>, and none outside it: live, a CL 1 player among CL 16 bots saw one
+    /// (Loïc, 2026-10-27).
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void ACharacterAtATerminal_IsShownOffersOfItsLevel_WhateverTheCrowdsLevel()
+    {
+        // 0.6: at the suite's 0.3 the 24 terminals' 480 offers name nearly every one of its ~470 lairs, and a viewer's offer has nothing left to name.
+        using var sim = Start(populationScale: 0.6f);
+        var terminal = FirstTerminal(sim);
+        var veteran = LogInAt(sim, AnAccount(0x6031), terminal);
+        var body = TatooineReplication.ControlledBy(sim.Dbe, veteran.Session);
+        sim.WriteInTick(tx =>
+        {
+            var b = tx.OpenMut(body);
+            var look = b.Read(Player.Look);
+            look.Level = 1;
+            b.Set(Player.Look, look);
+        });
+
+        var listed = sim.Bridge.MissionOffersListed;
+        sim.Bridge.WithdrawAllOffersForChecks();
+        SessionHarness.Until(() => sim.Bridge.MissionOffersListed >= listed + TatooineData.MissionOffersPerTerminal, "the list drawn for the CL 1 crowd");
+        Harness.Ticks(3);
+        // The live case inverted — a CL 33 newcomer (window 28..36) among a CL 1 crowd: the terminals with nobody around draw CL 1 and fall back upward
+        // when its lairs run out, so the low levels are the ones a small world runs out of, and the mechanism is the same either way.
+        static int InWindow(List<(EntityId Id, MissionOfferInfo Info)> offers) => offers.FindAll(o => o.Info.Level is >= 28 and <= 36).Count;
+        var before = Offers(sim, terminal);
+
+        var newcomer = LogInAt(sim, AnAccount(0x6032), terminal, bindings: 2);
+        var newBody = TatooineReplication.ControlledBy(sim.Dbe, newcomer.Session);
+        sim.WriteInTick(tx =>
+        {
+            var b = tx.OpenMut(newBody);
+            var look = b.Read(Player.Look);
+            look.Level = 33;
+            b.Set(Player.Look, look);
+        });
+        SessionHarness.Until(() => InWindow(Offers(sim, terminal)) >= TatooineData.MissionOffersPerViewer, "offers of the CL 33 newcomer's window");
+        var after = Offers(sim, terminal);
+        Assert.Multiple(() =>
+        {
+            Assert.That(InWindow(before), Is.LessThan(TatooineData.MissionOffersPerViewer), "the premise: the crowd's draw left a CL 33 character too few");
+            Assert.That(before, Has.Count.EqualTo(TatooineData.MissionOffersPerTerminal), "the premise: the list was full");
+            Assert.That(after, Has.Count.LessThanOrEqualTo(TatooineData.MissionOffersPerTerminal + TatooineData.MissionOffersPerViewer),
+                "an offer listed for the newcomer outside its window");
         });
     }
 

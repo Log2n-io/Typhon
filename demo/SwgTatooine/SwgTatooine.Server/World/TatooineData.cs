@@ -314,6 +314,15 @@ public static class TatooineData
     public const int MissionOffersPerTerminal = 20;
 
     /// <summary>
+    /// How many offers in its window (CL − <see cref="MissionLevelBelow"/> to CL + <see cref="MissionLevelAbove"/>) a character standing at a terminal is
+    /// always shown: the demand draw follows the city's crowd, so a lone low-level player among levelled bots saw one offer of its level (Loïc, 2026-10-27).
+    /// </summary>
+    public const int MissionOffersPerViewer = 3;
+
+    /// <summary>The most offers a terminal lists past <see cref="MissionOffersPerTerminal"/> for the characters standing at it; they age out as any offer.</summary>
+    public const int MissionViewerOffersMax = 10;
+
+    /// <summary>
     /// How far from its terminal an offer's lair is looked for first, metres (× <c>ContentScale</c>): a lair of the level chosen within it is drawn
     /// uniformly; with none there, the nearest beyond it. The same reach bounds a held mission's re-target round the lair it lost (missions.md § 8).
     /// </summary>

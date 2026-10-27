@@ -1,7 +1,7 @@
 import { placement, pointToWorld, poseToWorld, type Pose } from '../assets/asset-frame';
 import type { Descriptor, InteractionDesc } from '../assets/descriptor';
 import { structureYaw } from '../assets/structure-assets';
-import type { ContextMenuItem } from '../state/ui-store';
+import type { ContextAction, ContextMenuItem } from '../state/ui-store';
 
 /**
  * Where a shuttleport's ticket terminal is used from: the published `shuttle_ticket` interaction of its `ticket_terminal`
@@ -150,12 +150,12 @@ export function canUseAt(use: TicketTerminal, x: number, z: number): boolean {
   return Math.hypot(use.reachX - x, use.reachZ - z) <= use.reachM;
 }
 
-/** The mission terminal's context menu entries: its list of missions, and the journal of the ones held. */
-export function missionMenuItems(terminal: number): ContextMenuItem[] {
-  return [
-    { label: 'Browse missions', hint: 'The missions this terminal lists', action: { kind: 'missions', terminal } },
-    { label: 'Mission journal', hint: 'The missions you hold', action: { kind: 'journal' } },
-  ];
+/**
+ * What using a mission terminal does: open its list of missions at once, no menu between (Loïc, 2026-10-27). The journal of the
+ * missions held is the toolbar's, not the terminal's.
+ */
+export function missionTerminalAction(terminal: number): ContextAction {
+  return { kind: 'missions', terminal };
 }
 
 /**

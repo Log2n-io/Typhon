@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Descriptor } from '../src/assets/descriptor';
-import { missionMenuItems, missionTerminalOf } from '../src/app/ticket-terminal';
+import { missionTerminalAction, missionTerminalOf } from '../src/app/ticket-terminal';
 import {
   JOURNAL_RETRY_MS,
   listedOffers,
@@ -134,11 +134,8 @@ describe('a mission terminal', () => {
     expect(missionTerminalOf({ ...terminal, interactions: [] }, 0, 0, 0, 0)).toBeNull();
   });
 
-  it('offers its list and the journal', () => {
-    expect(missionMenuItems(42).map((i) => i.action)).toEqual([
-      { kind: 'missions', terminal: 42 },
-      { kind: 'journal' },
-    ]);
+  it("opens its own list of missions at once, the journal being the toolbar's", () => {
+    expect(missionTerminalAction(42)).toEqual({ kind: 'missions', terminal: 42 });
   });
 });
 
