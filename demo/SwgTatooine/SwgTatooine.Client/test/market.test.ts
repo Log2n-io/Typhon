@@ -178,7 +178,7 @@ describe('the answers', () => {
     expect(parseBrowse(null)).toBeNull();
   });
 
-  it('read /mine: listed with its fee and ticks, reserved with their state, the caps, the city as the server names it', () => {
+  it('read /mine: listed with its fee and ticks, reserved with their state, the caps, the city as this client names it', () => {
     const mine = parseMine({
       listed: [
         {
@@ -209,7 +209,7 @@ describe('the answers', () => {
       total: 900,
       fee: 9,
       expireTick: 1_728_100,
-      cityName: 'Whitestone II',
+      cityName: CITIES[1].name,
       realm: 3,
     });
     expect(mine?.reserved.map((r) => r.state)).toEqual(['sold']);
@@ -711,7 +711,7 @@ describe("the server's answers", () => {
     expect(page.listings[0]).toEqual({
       id: '131085',
       city: 1,
-      cityName: 'Mos Eisley',
+      cityName: CITIES[0].name,
       realm: 0,
       item: 'mat_hide',
       name: 'Hide',
@@ -742,7 +742,7 @@ describe("the server's answers", () => {
       id: '65549',
       state: 'sold',
       closedTick: 41,
-      cityName: 'Mos Eisley',
+      cityName: CITIES[0].name,
       unit: 20,
     });
     expect(buyer.caps).toEqual({ listings: 20, reserved: 20 });

@@ -521,7 +521,9 @@ function goodsOf(r: Record<string, unknown>): MarketGoods | null {
   return {
     id,
     city,
-    cityName: typeof r.cityName === 'string' && r.cityName !== '' ? r.cityName : cityName(city),
+    // The browser's own name by index: the server keeps Star Wars Galaxies' (world-data.ts), so its `cityName` is the fallback for an index this
+    // client does not know, never the first choice — a row named "Mos Eisley" under a filter that says "Port Sable" was the same city twice.
+    cityName: cityName(city) !== '' ? cityName(city) : typeof r.cityName === 'string' ? r.cityName : '',
     realm: typeof r.realm === 'number' ? r.realm : -1,
     item: str(r.item),
     name: str(r.name),

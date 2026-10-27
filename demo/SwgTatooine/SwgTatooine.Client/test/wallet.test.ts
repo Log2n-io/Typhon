@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { panelKey } from '../src/app/panel-keys';
+import { transferLabel } from '../src/ui/InventoryWindow';
 import {
   formatCredits,
   MAX_TIP,
@@ -321,5 +322,14 @@ describe('the players by who drives them', () => {
     expect(countDrivers(live, 6, nameIds, bots)).toEqual({ crowd: 2, bots: 2, people: 2 });
     expect(countDrivers(live, 6, null, bots)).toEqual({ crowd: 6, bots: 0, people: 0 });
     expect(countDrivers(live, 6, nameIds, null)).toEqual({ crowd: 2, bots: 0, people: 4 });
+  });
+});
+
+describe('the inventory window labels a transfer by its side', () => {
+  it('a sale row is a purchase to the buyer and a sale to the seller; other kinds keep their one name', () => {
+    expect(transferLabel('sale', -653)).toBe('Bazaar purchase');
+    expect(transferLabel('sale', 726)).toBe('Bazaar sale');
+    expect(transferLabel('tax', -58)).toBe('Sales tax');
+    expect(transferLabel('somethingNew', 1)).toBe('somethingNew');
   });
 });

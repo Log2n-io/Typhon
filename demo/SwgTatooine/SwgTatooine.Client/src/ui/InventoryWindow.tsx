@@ -22,6 +22,15 @@ const KIND_NAMES: Readonly<Record<string, string>> = {
   vendor: 'Vendor',
 };
 
+/** A transfer's line in the window: a `sale` row is the buyer's purchase when credits left this character, the seller's sale when they came in. */
+export function transferLabel(kind: string, amount: number): string {
+  if (kind === 'sale' && amount < 0) {
+    return 'Bazaar purchase';
+  }
+
+  return KIND_NAMES[kind] ?? kind;
+}
+
 /**
  * The inventory (economy-foundation.md E0-10, inventory-loot.md § 6): the character's items in their slots and its credits
  * at the top right, with the last few transfers under the grid. Toggled by <kbd>I</kbd> and by the bottom-right toolbar.
@@ -91,7 +100,7 @@ export function InventoryWindow() {
           {recent.map((t) => (
             <div className="inventory-transfer" key={t.seq}>
               <span className="inventory-kind">
-                {KIND_NAMES[t.kind] ?? t.kind}
+                {transferLabel(t.kind, t.amount)}
                 {t.kind === 'tip' && t.other !== null ? (t.amount > 0 ? ` from ${t.other}` : ` to ${t.other}`) : ''}
               </span>
               <span className={t.amount >= 0 ? 'inventory-amount in' : 'inventory-amount out'}>
