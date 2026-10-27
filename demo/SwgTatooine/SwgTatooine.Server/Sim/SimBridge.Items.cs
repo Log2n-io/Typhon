@@ -362,20 +362,33 @@ public sealed partial class SimBridge
     /// free slot, and places what fits. Character → World destroys, highest slot first, all of it or nothing. Character → character moves, all of it or
     /// nothing.
     /// </para>
+    /// <para>
+    /// <b>A listing is a side too</b> (bazaar.md § 3.2), recognised by its archetype: character → listing debits the character's stacks, highest slot first,
+    /// into the listing's escrow, one row per source stack, <c>ToStack</c> the listing; listing → character is all-or-nothing and credits stacks as a mint
+    /// does, <c>FromStack</c> the listing. The listing's <see cref="Listing.Quantity"/>, <see cref="Listing.LastSeq"/> and <see cref="Listing.Rows"/> are
+    /// written with the rows; destroying an emptied one is the desk's. A listing has no wallet, and is never asked for one.
+    /// </para>
     /// <para><b>Never throws</b>: a transfer the validation refuses — a bad count or side, an unknown template, a Mk its rule refuses, a side with no wallet, a
     /// debit it does not cover — writes nothing, is counted, and returns 0.</para>
     /// </remarks>
     /// <returns>The units placed; what did not fit is the caller's to report.</returns>
     private int ItemTransfer(Transaction tx, long from, long to, ushort template, byte mk, int count, byte kind, long reference, long worldTick)
     {
+        var fromListing = IsListing(from);
+        var toListing = IsListing(to);
         if (count <= 0 || from == to || !ItemCatalog.TryGet(template, out var t) || !ItemCatalog.MkFits(in t, mk)
-            || (from != ItemLedger.World && !HasWallet(tx, from)) || (to != ItemLedger.World && !HasWallet(tx, to)))
+            || (from != ItemLedger.World && !fromListing && !HasWallet(tx, from)) || (to != ItemLedger.World && !toListing && !HasWallet(tx, to)))
         {
             Interlocked.Increment(ref _itemsRefused);
             return 0;
         }
 
         EnsureItems(tx);
+        if (fromListing || toListing)
+        {
+            return EscrowTransfer(tx, from, to, fromListing, template, mk, count, kind, reference, worldTick);
+        }
+
         if (from != ItemLedger.World)
         {
             var source = ItemsOf(from);
@@ -437,6 +450,63 @@ public sealed partial class SimBridge
             remaining -= take;
         }
 
+        _itemHeadDirty = true;
+        return count;
+    }
+
+    /// <summary>
+    /// A transfer with a listing on one side (bazaar.md § 3.2): into its escrow from a character, or out of it, whole, to a character. Validated whole before
+    /// the first write.
+    /// </summary>
+    private int EscrowTransfer(Transaction tx, long from, long to, bool fromListing, ushort template, byte mk, int count, byte kind, long reference,
+        long worldTick)
+    {
+        var listingKey = fromListing ? from : to;
+        var other = fromListing ? to : from;
+        if (other == ItemLedger.World || IsListing(other) || !_book.TryGetValue(listingKey, out var entry) || entry.L.Template != template
+            || entry.L.Mk != mk)
+        {
+            Interlocked.Increment(ref _itemsRefused);
+            return 0;
+        }
+
+        var items = ItemsOf(other);
+        if (fromListing ? entry.L.Quantity < count || RoomFor(items, template, mk) < count
+                : UnitsOf(items, template, mk) < count || entry.L.Quantity + count > ItemLedger.StackMax)
+        {
+            Interlocked.Increment(ref _itemsRefused);
+            return 0;
+        }
+
+        var remaining = count;
+        while (remaining > 0)
+        {
+            int move;
+            if (fromListing)
+            {
+                var dst = SlotToFill(items, template, mk);
+                move = Math.Min(remaining, ItemLedger.StackMax - items.Slots[dst].Count);
+                var toAfter = Credit(tx, to, items, dst, template, mk, move, out var toStack);
+                entry.L.Quantity -= move;
+                AppendItemRow(tx, from, to, listingKey, toStack, entry.L.Quantity, toAfter, move, template, mk, kind, reference, worldTick);
+            }
+            else
+            {
+                var src = SlotToTake(items, template, mk);
+                move = Math.Min(remaining, items.Slots[src].Count);
+                var fromAfter = Debit(tx, items, src, move, out var fromStack);
+                entry.L.Quantity += move;
+                AppendItemRow(tx, from, to, fromStack, listingKey, fromAfter, entry.L.Quantity, move, template, mk, kind, reference, worldTick);
+            }
+
+            entry.L.LastSeq = _itemHead.LastSeq;
+            entry.L.Rows++;
+            remaining -= move;
+        }
+
+        _bookEscrow += fromListing ? -count : count;
+        tx.OpenMut(entry.Id).Set(ListingArch.Entry, entry.L);
+        MarkCityDirty(in entry.L);
         _itemHeadDirty = true;
         return count;
     }

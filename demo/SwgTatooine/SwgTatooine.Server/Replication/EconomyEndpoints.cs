@@ -297,6 +297,7 @@ public static class EconomyEndpoints
         var expected = 1L;
         var lastTick = long.MinValue;
         var missionsPaid = new HashSet<long>();
+        var listingsSold = new HashSet<long>();
         using var tx = dbe.CreateQuickTransaction();
         using (var rows = tx.EnumerateIndex<LedgerEntry, long>(ix.BySeq, long.MinValue, long.MaxValue))
         {
@@ -327,7 +328,7 @@ public static class EconomyEndpoints
                 }
 
                 lastTick = r.WorldTick;
-                Sides(result, missionsPaid, in r);
+                Sides(result, missionsPaid, listingsSold, in r);
 
                 FirstRow(result, rowsOf, r.From, in r);
                 FirstRow(result, rowsOf, r.To, in r);
@@ -431,8 +432,8 @@ public static class EconomyEndpoints
         return result;
     }
 
-    /// <summary>Checks a row's kind against its sides, and that a mission is paid once and named.</summary>
-    private static void Sides(EconomyAuditResult result, HashSet<long> missionsPaid, in LedgerEntry r)
+    /// <summary>Checks a row's kind against its sides, that a mission is paid once and named, and that a listing is sold at most once, ever.</summary>
+    private static void Sides(EconomyAuditResult result, HashSet<long> missionsPaid, HashSet<long> listingsSold, in LedgerEntry r)
     {
         switch (r.Kind)
         {
@@ -450,9 +451,31 @@ public static class EconomyEndpoints
 
                 break;
             case TransferKind.Tip:
+            case TransferKind.Sale:
                 if (r.From == EconomyLedger.World || r.To == EconomyLedger.World)
                 {
-                    result.Violation($"seq {r.Seq}: a tip must move between two wallets, not {r.From} to {r.To}");
+                    result.Violation($"seq {r.Seq}: a {TransferKind.NameOf(r.Kind)} must move between two wallets, not {r.From} to {r.To}");
+                }
+
+                // The bazaar's one-buyer rule, as the credit ledger sees it (bazaar.md § 7): a listing's sale row appears at most once, ever.
+                if (r.Kind == TransferKind.Sale && (r.Ref == 0 || !listingsSold.Add(r.Ref)))
+                {
+                    result.Violation(r.Ref == 0 ? $"seq {r.Seq}: a sale names no listing" : $"seq {r.Seq}: listing {r.Ref} sold a second time");
+                }
+
+                break;
+            case TransferKind.Tax:
+            case TransferKind.ListFee:
+                if (r.From == EconomyLedger.World || r.To != EconomyLedger.World || r.Ref == 0)
+                {
+                    result.Violation($"seq {r.Seq}: a {TransferKind.NameOf(r.Kind)} must be paid by a wallet to World for a listing, not {r.From} to {r.To} for {r.Ref}");
+                }
+
+                break;
+            case TransferKind.Vendor:
+                if (r.From != EconomyLedger.World || r.To == EconomyLedger.World || r.Ref == 0)
+                {
+                    result.Violation($"seq {r.Seq}: a vendor payout must be paid by World into a wallet for item rows, not {r.From} to {r.To} for {r.Ref}");
                 }
 
                 break;

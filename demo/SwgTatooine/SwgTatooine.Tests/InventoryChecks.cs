@@ -521,8 +521,11 @@ internal sealed class InventoryChecks : ServedChecks
 
     // ── IL-7: the writers ───────────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>IL-7: the schedule's declared writers of the three item components are exactly <c>Loot</c> and <c>Missions</c>, and Loot runs after the
-    /// Ledger, which runs after the desk.</summary>
+    /// <summary>
+    /// IL-7, BZ-9: the schedule's declared writers of the three item components are exactly <c>Loot</c>, <c>Market</c> and <c>Missions</c>, of the credit
+    /// components <c>Ledger</c>, <c>Market</c> and <c>Missions</c>, of <see cref="Listing"/> <c>Market</c> alone — and they run in one chain:
+    /// Missions → Ledger → Loot → Market.
+    /// </summary>
     [Test]
     [CancelAfter(60_000)]
     public void OnlyLootAndTheDeskWriteItems()
@@ -532,8 +535,17 @@ internal sealed class InventoryChecks : ServedChecks
         foreach (var type in new[] { typeof(ItemStack), typeof(ItemLedgerEntry), typeof(ItemLedgerHead) })
         {
             var writers = systems.Where(s => s.Access.Writes.Contains(type) || s.Access.SideWrites.Contains(type)).Select(s => s.Name).OrderBy(n => n);
-            Assert.That(writers, Is.EqualTo(new[] { "Loot", "Missions" }), $"the writers of {type.Name}");
+            Assert.That(writers, Is.EqualTo(new[] { "Loot", "Market", "Missions" }), $"the writers of {type.Name}");
         }
+
+        foreach (var type in new[] { typeof(Wallet), typeof(LedgerEntry), typeof(LedgerHead) })
+        {
+            var writers = systems.Where(s => s.Access.Writes.Contains(type) || s.Access.SideWrites.Contains(type)).Select(s => s.Name).OrderBy(n => n);
+            Assert.That(writers, Is.EqualTo(new[] { "Ledger", "Market", "Missions" }), $"the writers of {type.Name}");
+        }
+
+        Assert.That(systems.Where(s => s.Access.Writes.Contains(typeof(Listing)) || s.Access.SideWrites.Contains(typeof(Listing))).Select(s => s.Name),
+            Is.EqualTo(new[] { "Market" }), "the writers of Listing");
 
         int IndexOf(string name) => Array.FindIndex(systems, s => s.Name == name);
         bool Reaches(int from, int to)
@@ -565,6 +577,9 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(Reaches(IndexOf("Missions"), IndexOf("Ledger")), Is.True, "the Ledger is not after the desk");
             Assert.That(Reaches(IndexOf("Ledger"), IndexOf("Loot")), Is.True, "Loot is not after the Ledger");
             Assert.That(Reaches(IndexOf("Loot"), IndexOf("Missions")), Is.False, "Loot before the desk");
+            Assert.That(Reaches(IndexOf("Loot"), IndexOf("Market")), Is.True, "the Market is not after Loot");
+            Assert.That(Reaches(IndexOf("Market"), IndexOf("Missions")) || Reaches(IndexOf("Market"), IndexOf("Ledger"))
+                || Reaches(IndexOf("Market"), IndexOf("Loot")), Is.False, "the Market before another writer");
         });
     }
 
@@ -732,7 +747,7 @@ internal sealed class InventoryChecks : ServedChecks
         var stack = Items.Stacks(sim, p.Character)[0].Id.RawValue;
         Assert.Multiple(() =>
         {
-            Assert.That(audit, Does.StartWith("{\"ok\":true,\"entries\":1,\"lastSeq\":1,\"stacks\":1,\"units\":7,\"minted\":7,\"destroyed\":0,\"violationCount\":0,"
+            Assert.That(audit, Does.StartWith("{\"ok\":true,\"entries\":1,\"lastSeq\":1,\"stacks\":1,\"units\":7,\"escrow\":0,\"minted\":7,\"destroyed\":0,\"violationCount\":0,"
                 + "\"violations\":[],\"ms\":"));
             Assert.That(ledger, Does.StartWith("{\"rows\":[{\"seq\":1,\"tick\":"));
             Assert.That(ledger, Does.Contain($"\"kind\":\"kill\",\"from\":\"0\",\"to\":\"{p.Character.RawValue}\",\"count\":7,\"fromAfter\":0,\"toAfter\":7,"));

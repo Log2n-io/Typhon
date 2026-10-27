@@ -33,6 +33,9 @@ public sealed class ItemAuditResult
     /// <summary>Σ of every stored stack's count.</summary>
     public long Units { get; internal set; }
 
+    /// <summary>Units in the bazaar's escrow: Σ of the stored listings' quantities (bazaar.md § 3.2). Held, for conservation, but not in a stack.</summary>
+    public long Escrow { get; internal set; }
+
     /// <summary>Units minted, by the replay.</summary>
     public long Minted { get; internal set; }
 
@@ -66,6 +69,7 @@ public sealed class ItemAuditResult
             .Append(",\"lastSeq\":").Append(LastSeq)
             .Append(",\"stacks\":").Append(Stacks)
             .Append(",\"units\":").Append(Units)
+            .Append(",\"escrow\":").Append(Escrow)
             .Append(",\"minted\":").Append(Minted)
             .Append(",\"destroyed\":").Append(Destroyed)
             .Append(",\"violationCount\":").Append(ViolationCount)
@@ -355,6 +359,8 @@ public static class ItemEndpoints
         var minted = new Dictionary<int, long>();
         var destroyed = new Dictionary<int, long>();
         var missionTick = new Dictionary<long, long>();
+        var routing = dbe.ArchetypeIdOf<ListingArch>();
+        bool IsListing(long key) => key != 0 && EntityId.FromRawValue((ulong)key).ArchetypeId == routing;
         var expected = 1L;
         var lastTick = long.MinValue;
         using var tx = dbe.CreateQuickTransaction();
@@ -377,7 +383,7 @@ public static class ItemEndpoints
                 }
 
                 lastTick = r.WorldTick;
-                if (!RowRules(result, missionTick, in r))
+                if (!RowRules(result, missionTick, IsListing, in r))
                 {
                     continue;
                 }
@@ -492,11 +498,44 @@ public static class ItemEndpoints
             }
         }
 
+        // The bazaar's escrow (bazaar.md § 3.2, § 7): a listing is its own stack, its quantity its replayed count — and held, for conservation.
+        using (var listings = tx.EnumerateIndex<Listing, long>(dbe.GetIndexRef<Listing, long>(l => l.Seller), long.MinValue, long.MaxValue))
+        {
+            while (listings.MoveNext())
+            {
+                var l = listings.CurrentComponent;
+                var id = listings.CurrentEntityPK;
+                result.Escrow += l.Quantity;
+                seen.Add(id);
+                held[Key(l.Template, l.Mk)] = Get(held, Key(l.Template, l.Mk)) + l.Quantity;
+                if (!stacks.TryGetValue(id, out var replayed))
+                {
+                    result.Violation($"listing {id}: holds {l.Quantity} and no item ledger row ever moved it");
+                    continue;
+                }
+
+                if (replayed.Count == 0)
+                {
+                    result.Violation($"listing {id}: emptied by the replay and still stored");
+                }
+
+                if (l.Quantity != replayed.Count || l.Template != replayed.Template || l.Mk != replayed.Mk)
+                {
+                    result.Violation($"listing {id}: holds {l.Quantity} of {l.Template} Mk {l.Mk}, the replay says {replayed.Count} of {replayed.Template} Mk {replayed.Mk}");
+                }
+
+                if (l.LastSeq != replayed.LastSeq || l.Rows != replayed.Rows)
+                {
+                    result.Violation($"listing {id}: last moved at seq {l.LastSeq} in {l.Rows} rows, the ledger says {replayed.LastSeq} in {replayed.Rows}");
+                }
+            }
+        }
+
         foreach (var (id, replayed) in stacks)
         {
             if (replayed.Count > 0 && !seen.Contains(id))
             {
-                result.Violation($"stack {id}: the replay leaves it {replayed.Count} and it is not stored");
+                result.Violation($"{(IsListing(id) ? "listing" : "stack")} {id}: the replay leaves it {replayed.Count} and it is not stored");
             }
         }
 
@@ -555,9 +594,9 @@ public static class ItemEndpoints
                     result.Violation($"head: minted {h.Minted} and destroyed {h.Destroyed}, the replay says {result.Minted} and {result.Destroyed}");
                 }
 
-                if (h.Minted - h.Destroyed != result.Units)
+                if (h.Minted - h.Destroyed != result.Units + result.Escrow)
                 {
-                    result.Violation($"conservation: the head says {h.Minted - h.Destroyed} units are held, the stacks hold {result.Units}");
+                    result.Violation($"conservation: the head says {h.Minted - h.Destroyed} units are held, the stacks hold {result.Units} and escrow {result.Escrow}");
                 }
             }
             else if (result.Entries > 0)
@@ -572,7 +611,7 @@ public static class ItemEndpoints
 
     /// <summary>A row's own rules: a count, two sides, a known template and its Mk, a kind with its sides, Mk V only from a mission, a mission's one tick.</summary>
     /// <returns>Whether it can be replayed.</returns>
-    private static bool RowRules(ItemAuditResult result, Dictionary<long, long> missionTick, in ItemLedgerEntry r)
+    private static bool RowRules(ItemAuditResult result, Dictionary<long, long> missionTick, Func<long, bool> isListing, in ItemLedgerEntry r)
     {
         var ok = true;
         if (r.Count <= 0)
@@ -615,12 +654,35 @@ public static class ItemEndpoints
                 }
 
                 break;
+            case ItemMoveKind.List:
+                if (r.From == ItemLedger.World || isListing(r.From) || !isListing(r.To) || r.ToStack != r.To)
+                {
+                    result.Violation($"seq {r.Seq}: a list row must go from a character into a listing, its own stack, not {r.From} to {r.To}");
+                }
+
+                break;
+            case ItemMoveKind.Buy:
+            case ItemMoveKind.Return:
+                if (!isListing(r.From) || r.FromStack != r.From || r.To == ItemLedger.World || isListing(r.To))
+                {
+                    result.Violation($"seq {r.Seq}: a {ItemMoveKind.NameOf(r.Kind)} row must go from a listing, its own stack, to a character, not {r.From} to {r.To}");
+                }
+
+                break;
+            case ItemMoveKind.Vendor:
+                if (r.From == ItemLedger.World || isListing(r.From) || r.To != ItemLedger.World)
+                {
+                    result.Violation($"seq {r.Seq}: a vendor row must go from a character to World, not {r.From} to {r.To}");
+                }
+
+                break;
             default:
                 result.Violation($"seq {r.Seq}: unknown kind {r.Kind}");
                 break;
         }
 
-        if (r.Mk == 5 && r.Kind != ItemMoveKind.Mission)
+        // Only a mission cache MINTS Mk V; units already held may be listed, bought, returned or sold to the vendor.
+        if (r.Mk == 5 && r.From == ItemLedger.World && r.Kind != ItemMoveKind.Mission)
         {
             result.Violation($"seq {r.Seq}: Mk V in a {ItemMoveKind.NameOf(r.Kind)} row - only a mission cache holds Mk V");
         }
