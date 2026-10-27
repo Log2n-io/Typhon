@@ -17,6 +17,10 @@ class PushWorldChurnTests : TestBase<PushWorldChurnTests>
 {
     private const string Profile = "god";
 
+    // The god camera given a fill budget of its own: ten engine budgets.
+    private const string FastProfile = "god-fast";
+    private const int FastFill = 10 * EnterBudget;
+
     // The god camera under --god-region: a ClientRegion profile, sent a square region as wide as a flat grid of 256 m cells allows.
     private const string RegionProfile = "god-region";
     private const double RegionHalfM = 6000d;
@@ -34,6 +38,7 @@ class PushWorldChurnTests : TestBase<PushWorldChurnTests>
         {
             ProjectionTestSchema.DeclareCreature(subs);
             subs.Profile(Profile, p => p.World().Of<ProjCreature>());
+            subs.Profile(FastProfile, p => p.World().Fill(FastFill).Of<ProjCreature>());
             subs.Profile(RegionProfile, p => p.ClientRegion(2d * RegionHalfM).Of<ProjCreature>());
         }, name, new SubscriptionsOptions
         {
@@ -207,6 +212,44 @@ class PushWorldChurnTests : TestBase<PushWorldChurnTests>
             Assert.That(misplaced, Is.Zero, "and every creature where it stands: no update was lost");
         });
         AssertLegal(harness, session);
+    }
+
+    /// <summary>
+    /// A World observer with a fill budget of its own (<c>Fill</c>): a still world fills in a fraction of the frames the engine's budget takes, each frame
+    /// within its limit, owing nothing — the frame's byte allowance paces it all the same — and no RESET.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-36")]
+    [VerifiesRule("SUB-22")]
+    public void AWorldWithAFillOfItsOwnFillsInAFractionOfTheFrames()
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        var world = new World(1511);
+        Spawn(dbe, world, 2000);
+        using var harness = Harness(dbe, nameof(AWorldWithAFillOfItsOwnFillsInAFractionOfTheFrames), FrameBytes, EnterBudget);
+        var sessions = new[] { harness.OpenSessions(1, Profile)[0], harness.OpenSessions(1, FastProfile)[0] };
+        var plan = harness.PlanIndex(nameof(ProjCreature));
+        var frames = new int[2];
+        var tick = 0L;
+        for (var t = 0; t < 300 && harness.StateOf(sessions[0]) is not { ViewComplete: true }; t++)
+        {
+            harness.RunTick(++tick);
+            for (var s = 0; s < 2; s++)
+            {
+                harness.Deliver(sessions[s]);
+                frames[s] += harness.StateOf(sessions[s]) is { ViewComplete: true } ? 0 : 1;
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(harness.Replica(sessions[0]).NetIds(plan), Has.Length.EqualTo(2000));
+            Assert.That(harness.Replica(sessions[1]).NetIds(plan), Has.Length.EqualTo(2000));
+            Assert.That(frames[1] * 4, Is.LessThan(frames[0]), $"the own fill took {frames[1]} frames against the engine budget's {frames[0]}");
+            Assert.That(harness.Assembler.OwedResets, Is.Zero);
+        });
+        AssertLegal(harness, sessions[0]);
+        AssertLegal(harness, sessions[1]);
     }
 
     private static int InRegion(DatabaseEngine dbe, World world)

@@ -1425,7 +1425,8 @@
     first frame that owes no enter, whatever the budgets left (GroupSessionState.HeldAll); a view whose every cell is delivered is complete, budgets spent
     or not
   invariant owed(s) is pending until the frame is published, committed with it, kept by a skip, emptied by a published RESET — an events-only one too; a
-    frame that GROWS its ENTERS past 4 × EnterBudgetPerFrame (FrameAssembler.OwedOverflows), or that meets an owed entity found nowhere
+    frame that GROWS its ENTERS past 4 × its profile's fill budget — Fill, or EnterBudgetPerFrame (FrameAssembler.OwedOverflows), or that meets an
+    owed entity found nowhere
     (FrameAssembler.OwedLosts), is abandoned and the next is a RESET. Owed updates are not capped: one per held entity at most, merged, and a RESET
     does not lower the rate they come at — it throws the fill away and starts it again. A RESET frame never overflows — it is the repair, and a cell
     heavier than the cap, delivered whole, owes more on the RESET and the frames that drain it
@@ -1454,7 +1455,8 @@
     PushOracleTests.ClientRegionsUnderAFrameAFewRecordsWideConverge, PushGroupTests.SessionsHoldExactlyTheTownsTheyMeetUnderAFrameAFewRecordsWide,
     PushWorldChurnTests.AWholeWorldOfMoversOutrunningTheFrameFillsWithoutAReset (red on main: the god camera's RESET loop; red with the cap counting
     updates, or with the owed records carried in plain age order) and PushWorldChurnTests.AWorldFillPacesTheMoversOfTheCellsItDelivers (World and
-    ClientRegion; red with the event-owned entities of a delivered cell unmetered);
+    ClientRegion; red with the event-owned entities of a delivered cell unmetered), PushWorldChurnTests.AWorldWithAFillOfItsOwnFillsInAFractionOfTheFrames
+    (red with the observer's Fill ignored);
     mutant committed: PushFrameBudgetTests.Mutant_WithoutTheFrameBudgetABurstStalls. Mutants run red: a leave of an owed enter kept, the owed set not
     committed, completion not withheld, the allowance ignored, or counting owed updates, the owed set flushed newest first, an owed entity held for a
     command, the refusal removed, the meter under-counting an enter, an overflow on a frame that does not grow the set, no identity fallback, no HeldAll
@@ -1463,7 +1465,8 @@
 ### SUB-22: A session's LOD level defers updates and never loses one `[fatal][silent]`
   invariant a session's LOD level ℓ ∈ 0..3 commits with its frame (SUB-03); the frame is gathered with the committed level's bands before (what every
     held-back change was scheduled by) and the target level's after. At ℓ every declared band's period is min(N · 2^ℓ, 8) at the same boundary, and a
-    profile with none has one beyond R′/2, every 2^ℓ ticks; the enter budget is max(1, (EnterBudgetPerFrame >> target level) / tick multiplier). A
+    profile with none has one beyond R′/2, every 2^ℓ ticks; the enter budget is max(1, (B >> target level) / tick multiplier), B the observer's Fill or
+    else EnterBudgetPerFrame. A
     World session has no level: its frames return it to 0
   invariant overload: while the tick multiplier is above 1, every Sphere session's target level is its budget level + 1 (at most 3) and every profile
     is served at min(2 · divisor, 4); both follow the multiplier the tick started with and fall back with it

@@ -187,12 +187,6 @@ internal sealed unsafe partial class FrameAssembler
     }
 
     /// <summary>
-    /// The most enters a session may be owed: past it a <c>RESET</c> is the cheaper repair (15 § 4.3, C2). Owed updates are not capped: there is one per
-    /// held entity at most, merged, and a RESET does not lower the rate they come at — it would only throw the fill away and start it again.
-    /// </summary>
-    private int OwedCap => 4 * Math.Max(1, _options.EnterBudgetPerFrame);
-
-    /// <summary>
     /// The byte allowance of a frame's cursor-driven steps (15 § 4.2): half the frame, less the enters the session is owed — so a fill that spilled stops
     /// until its overshoot has drained. Owed updates are not counted: they merge and may never drain while their entities keep changing, and a fill they
     /// held back would never complete. A RESET empties the owed set, and fills under the whole half.
@@ -211,10 +205,15 @@ internal sealed unsafe partial class FrameAssembler
     /// <param name="target">The bytes the entity records may take: the frame's limit less every other block's bound.</param>
     /// <param name="selfNetId">The controlled entity's identity, 0 for none: its records always go, because <c>SELF</c> names it.</param>
     /// <param name="reset">The frame is a RESET: the client's store is cleared, and so is what it was owed.</param>
+    /// <param name="owedCap">
+    /// The most enters the session may be owed — four of its profile's fill budgets: past it a <c>RESET</c> is the cheaper repair (15 § 4.3, C2). Owed
+    /// updates are not capped: there is one per held entity at most, merged, and a RESET does not lower the rate they come at — it would only throw the fill
+    /// away and start it again.
+    /// </param>
     /// <param name="lost">An owed entity found nowhere — not in its slot, not by its identity — and met by no record of this frame: the next frame must
     /// RESET.</param>
     /// <param name="metered">The records' metered bytes when the fast path measured them, -1 otherwise: what sizes the encode buffer.</param>
-    private FitOutcome FitEntities(SessionFrameState state, FrameWorkerScratch scratch, int target, uint selfNetId, bool reset, out bool lost,
+    private FitOutcome FitEntities(SessionFrameState state, FrameWorkerScratch scratch, int target, uint selfNetId, bool reset, int owedCap, out bool lost,
         out int metered)
     {
         lost = false;
@@ -368,14 +367,14 @@ internal sealed unsafe partial class FrameAssembler
 
         // An overflow is a frame that GROWS the owed enters past the cap, and never a RESET's: a RESET is the overflow's repair, and a cell heavier than the
         // cap — delivered whole — owes more than it on the RESET and the frames that drain it, which would otherwise RESET for ever. Owed updates are not
-        // counted (OwedCap): a world whose movers outrun the frame is carried round robin, not refilled from nothing every few seconds.
-        if (reset || scratch.PendingOwedCount <= OwedCap)
+        // counted (owedCap): a world whose movers outrun the frame is carried round robin, not refilled from nothing every few seconds.
+        if (reset || scratch.PendingOwedCount <= owedCap)
         {
             return FitOutcome.Fitted;
         }
 
         var enters = OwedEnterCount(scratch);
-        return enters > OwedCap && enters > state.OwedEnters ? FitOutcome.Overflow : FitOutcome.Fitted;
+        return enters > owedCap && enters > state.OwedEnters ? FitOutcome.Overflow : FitOutcome.Fitted;
     }
 
     private static int OwedEnterCount(FrameWorkerScratch scratch)

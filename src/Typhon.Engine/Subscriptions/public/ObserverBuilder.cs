@@ -152,6 +152,28 @@ public sealed class ObserverBuilder
     }
 
     /// <summary>
+    /// The most full enter records this observer's fill may take in one frame, in place of <see cref="SubscriptionsOptions.EnterBudgetPerFrame"/> — and so
+    /// its sessions' owed-enter cap, four of them (SUB-36). The frame's byte allowance, half a frame, paces the fill whatever the count.
+    /// </summary>
+    /// <param name="entersPerFrame">The enters a frame's fill may take.</param>
+    /// <returns>This builder.</returns>
+    /// <remarks>
+    /// <b>For a view that holds a world, not a neighbourhood.</b> The engine's budget is the granularity at which a player's view fills smoothly; a World
+    /// observer over a planet of 80 000 entities fills at that pace in over a hundred frames — about ten seconds at 10 Hz. Ten times the budget fills it in
+    /// about a second, each frame still within half its limit.
+    /// </remarks>
+    public ObserverBuilder Fill(int entersPerFrame)
+    {
+        if (entersPerFrame <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(entersPerFrame), entersPerFrame, "A fill budget is a positive count of enters a frame.");
+        }
+
+        _observer.FillBudget = entersPerFrame;
+        return this;
+    }
+
+    /// <summary>
     /// Declares a Sphere's distance bands (09 § 9): beyond a fraction of the radius, an entity's updates are sent every N ticks.
     /// </summary>
     /// <param name="bands">The bands, innermost first — <c>b =&gt; b.Every(2, beyond: 0.5).Every(4, beyond: 0.75)</c>.</param>
@@ -254,6 +276,9 @@ public sealed class ObserverDeclaration
 
     /// <summary>The near tier's entity budget; 0 when none was declared.</summary>
     public int NearBudget { get; internal set; }
+
+    /// <summary>The enters a frame's fill may take (<see cref="ObserverBuilder.Fill"/>); 0 for the engine's <c>EnterBudgetPerFrame</c>.</summary>
+    public int FillBudget { get; internal set; }
 
     /// <summary>The far tier's tile edge in metres; 0 when there is no far tier.</summary>
     public double FarTileM { get; internal set; }
