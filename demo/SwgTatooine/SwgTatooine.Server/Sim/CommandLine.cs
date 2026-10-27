@@ -133,6 +133,7 @@ public static class CommandLine
         c.SessionBudgetBytesPerSecond = r.Int("--session-budget", c.SessionBudgetBytesPerSecond,
             "per-player outbound budget, bytes per second; 0 is none", min: 0);
         c.IngressBytesPerSecond = r.Int("--ingress-budget", c.IngressBytesPerSecond, "per-session inbound budget, bytes per second", min: 0);
+        c.EnterBudgetPerFrame = r.Int("--enter-budget", c.EnterBudgetPerFrame, "entity enters per session frame (owed cap 4x); 0 = engine default", min: 0);
         c.PlayerLeaveM = r.Dbl("--player-leave", c.PlayerLeaveM, "players' leave radius, m; 0 is none", min: 0d);
         c.AvatarSaveIntervalS = r.Dbl(
             "--avatar-save-interval", c.AvatarSaveIntervalS, "how often a live avatar's position is saved, s; 0 disables it", min: 0d);

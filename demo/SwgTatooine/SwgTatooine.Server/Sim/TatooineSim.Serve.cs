@@ -208,6 +208,9 @@ public sealed partial class TatooineSim
                 // Required once a group set is declared, and it is an allocation rather than a ceiling: every session holds this many keys and cursors per
                 // set whether it meets a city or not. See TatooineReplication.MaxCityGroupsPerSession for why four.
                 MaxGroupsPerSession = TatooineReplication.MaxCityGroupsPerSession,
+
+                // --enter-budget: 0 keeps the engine's default; set, it also moves the owed cap (4 x) the whole-world god camera's fill runs into.
+                EnterBudgetPerFrame = _config.EnterBudgetPerFrame > 0 ? _config.EnterBudgetPerFrame : new SubscriptionsOptions().EnterBudgetPerFrame,
             },
         });
 

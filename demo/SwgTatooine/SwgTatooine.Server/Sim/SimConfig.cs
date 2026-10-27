@@ -508,6 +508,12 @@ public sealed class SimConfig
     public int IngressBytesPerSecond = 16 * 1024;
 
     /// <summary>
+    /// <c>--enter-budget N</c>: entity enters a session's frame may carry (the engine's <c>EnterBudgetPerFrame</c>, which also sets the owed cap at 4 × N);
+    /// 0 keeps the engine's default (500). Exposed to measure the whole-world god camera, whose fill a RESET restarts once its owed set passes the cap.
+    /// </summary>
+    public int EnterBudgetPerFrame;
+
+    /// <summary>
     /// <c>--max-clients N</c>: how many player sessions are admitted at once; 0 (the default) is unlimited.
     /// </summary>
     /// <remarks>
