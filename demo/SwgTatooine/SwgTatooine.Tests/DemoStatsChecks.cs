@@ -368,4 +368,44 @@ internal sealed class DemoStatsChecks : ServedChecks
             Assert.That(board.Latest.Fleet.MarketRefusedBy, Is.Empty);
         });
     }
+
+    /// <summary>
+    /// Every market key the bots page reads is one the swarm's own report writer emits — a renamed <c>FleetStat</c> or <c>GoalWhy</c> fails here, not on a
+    /// blank card — and its refusals are named as the server names them.
+    /// </summary>
+    [Test]
+    public void TheMarketSection_BotsPageKeys_AreTheSwarmsOwn()
+    {
+        var fleet = new SwgTatooine.Bots.Telemetry.FleetStats(1, DateTime.UtcNow.AddSeconds(-30));
+        fleet.Begin();
+        fleet.Stats[(int)SwgTatooine.Bots.Telemetry.FleetStat.MarketBought] = 3;
+        fleet.Stats[(int)SwgTatooine.Bots.Telemetry.FleetStat.MarketBuyLost] = 9;
+        var byReason = new long[SwgTatooine.Bots.BotSwarm.MarketReasons];
+        byReason[Array.IndexOf(SwgTatooine.Bots.BotSwarm.MarketReasonNames, "sold")] = 9;
+        fleet.AddMarketRefusals(byReason);
+        fleet.End(DateTime.UtcNow);
+        var buffer = new System.Buffers.ArrayBufferWriter<byte>();
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            SwgTatooine.Bots.Telemetry.BotReportWriter.Write(w, "run1", DateTime.UtcNow, 4d, 100, fleet, [], default);
+        }
+
+        var board = new SwgTatooine.Dashboard.BotBoard();
+        var report = JsonSerializer.Deserialize<SwgTatooine.Dashboard.BotReport>(buffer.WrittenSpan, SwgTatooine.Dashboard.BotReport.Json);
+        var taken = board.Ingest(report, DateTime.UtcNow, out var error);
+        var f = board.Latest.Fleet;
+        Assert.Multiple(() =>
+        {
+            Assert.That(taken, Is.True, error);
+            Assert.That(f.Totals.Keys, Is.SupersetOf(SwgTatooine.Dashboard.BotBoard.MarketKeys.Totals), "totals");
+            Assert.That(f.PerMin.Keys, Is.SupersetOf(SwgTatooine.Dashboard.BotBoard.MarketKeys.Totals), "perMin");
+            Assert.That(f.Why.Keys, Is.SupersetOf(SwgTatooine.Dashboard.BotBoard.MarketKeys.Why), "why");
+            Assert.That(f.WhyPerMin.Keys, Is.SupersetOf(SwgTatooine.Dashboard.BotBoard.MarketKeys.Why), "whyPerMin");
+            Assert.That(SwgTatooine.Dashboard.BotBoard.Of(f.Totals, SwgTatooine.Dashboard.BotBoard.MarketKeys.Bought), Is.EqualTo(3));
+            Assert.That(SwgTatooine.Dashboard.BotBoard.Of(f.Totals, SwgTatooine.Dashboard.BotBoard.MarketKeys.BuyLost), Is.EqualTo(9));
+            Assert.That(f.MarketRefusedBy["sold"], Is.EqualTo(9));
+            Assert.That(SimBridge.MarketRefusalNames.ToArray().Select(n => n.Name), Is.SupersetOf(f.MarketRefusedBy.Keys),
+                "the swarm names refusals as the server does");
+        });
+    }
 }

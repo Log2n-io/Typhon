@@ -52,30 +52,32 @@
 
         <section class="card">
             <h2>Market</h2>
-            @if (!f.Totals.ContainsKey("marketTrades"))
+            @if (!f.Totals.ContainsKey(BotBoard.MarketKeys.Trades))
             {
                 <p class="muted">this swarm does not trade (built before the market, or run with --no-market)</p>
             }
             else
             {
-                var bought = BotBoard.Of(f.Totals, "marketBought");
-                var lost = BotBoard.Of(f.Totals, "marketBuyLost");
+                var bought = BotBoard.Of(f.Totals, BotBoard.MarketKeys.Bought);
+                var lost = BotBoard.Of(f.Totals, BotBoard.MarketKeys.BuyLost);
                 <div class="kpis">
-                    @Kpi("bazaar visits / min", F(BotBoard.Of(f.PerMin, "marketTrades"), 1))
+                    @Kpi("bazaar visits / min", F(BotBoard.Of(f.PerMin, BotBoard.MarketKeys.Trades), 1))
                     @Kpi("listed · vendored · bought / min",
-                        $"{F(BotBoard.Of(f.PerMin, "marketListed"), 1)} · {F(BotBoard.Of(f.PerMin, "marketVendored"), 1)} · "
-                        + F(BotBoard.Of(f.PerMin, "marketBought"), 1))
-                    @Kpi("collected / min", F(BotBoard.Of(f.PerMin, "marketCollected"), 1))
-                    @Kpi("bazaar visits since start", F(BotBoard.Of(f.Totals, "marketTrades"), 0))
-                    @Kpi("listed since start", F(BotBoard.Of(f.Totals, "marketListed"), 0))
-                    @Kpi("vendored since start", F(BotBoard.Of(f.Totals, "marketVendored"), 0))
+                        $"{F(BotBoard.Of(f.PerMin, BotBoard.MarketKeys.Listed), 1)} · "
+                        + $"{F(BotBoard.Of(f.PerMin, BotBoard.MarketKeys.Vendored), 1)} · "
+                        + F(BotBoard.Of(f.PerMin, BotBoard.MarketKeys.Bought), 1))
+                    @Kpi("collected / min", F(BotBoard.Of(f.PerMin, BotBoard.MarketKeys.Collected), 1))
+                    @Kpi("bazaar visits since start", F(BotBoard.Of(f.Totals, BotBoard.MarketKeys.Trades), 0))
+                    @Kpi("listed since start", F(BotBoard.Of(f.Totals, BotBoard.MarketKeys.Listed), 0))
+                    @Kpi("vendored since start", F(BotBoard.Of(f.Totals, BotBoard.MarketKeys.Vendored), 0))
                     @Kpi("bought · lost the race", $"{F(bought, 0)} · {F(lost, 0)}")
                     @Kpi("race won", Pct(bought, bought + lost))
-                    @Kpi("wins seen collected", F(BotBoard.Of(f.Totals, "marketWon"), 0))
-                    @Kpi("collected since start", F(BotBoard.Of(f.Totals, "marketCollected"), 0))
-                    @Kpi("refused since start (151-163)", F(BotBoard.Of(f.Totals, "marketRefused"), 0))
+                    @Kpi("wins seen collected", F(BotBoard.Of(f.Totals, BotBoard.MarketKeys.Won), 0))
+                    @Kpi("collected since start", F(BotBoard.Of(f.Totals, BotBoard.MarketKeys.Collected), 0))
+                    @Kpi("refused since start (151-163)", F(BotBoard.Of(f.Totals, BotBoard.MarketKeys.Refused), 0))
                     @Kpi("market chosen · done / min",
-                        $"{F(BotBoard.Of(f.WhyPerMin, "MarketChosen"), 1)} · {F(BotBoard.Of(f.WhyPerMin, "MarketDone"), 1)}")
+                        $"{F(BotBoard.Of(f.WhyPerMin, BotBoard.MarketKeys.Chosen), 1)} · "
+                        + F(BotBoard.Of(f.WhyPerMin, BotBoard.MarketKeys.Done), 1))
                 </div>
                 @Spark("market trades/min", "/min")
                 <p class="muted small">lost the race: refused 153, another bot bought it first (expected under load) · wins seen collected: bazaar buy rows in
