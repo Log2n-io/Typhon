@@ -51,6 +51,47 @@
         </section>
 
         <section class="card">
+            <h2>Market</h2>
+            @if (!f.Totals.ContainsKey("listed"))
+            {
+                <p class="muted">this swarm does not trade (built before the market, or run with --no-market)</p>
+            }
+            else
+            {
+                var bought = BotBoard.Of(f.Totals, "bought");
+                var lost = BotBoard.Of(f.Totals, "buyLost");
+                <div class="kpis">
+                    @Kpi("listed · vendored · bought / min",
+                        $"{F(BotBoard.Of(f.PerMin, "listed"), 1)} · {F(BotBoard.Of(f.PerMin, "vendored"), 1)} · {F(BotBoard.Of(f.PerMin, "bought"), 1)}")
+                    @Kpi("collected / min", F(BotBoard.Of(f.PerMin, "collected"), 1))
+                    @Kpi("vendor credits / min", F(BotBoard.Of(f.PerMin, "vendorCredits"), 0))
+                    @Kpi("listed since start", F(BotBoard.Of(f.Totals, "listed"), 0))
+                    @Kpi("vendored since start", F(BotBoard.Of(f.Totals, "vendored"), 0))
+                    @Kpi("vendor credits since start", F(BotBoard.Of(f.Totals, "vendorCredits"), 0))
+                    @Kpi("bought · lost the race", $"{F(bought, 0)} · {F(lost, 0)}")
+                    @Kpi("race won", Pct(bought, bought + lost))
+                    @Kpi("collected since start", F(BotBoard.Of(f.Totals, "collected"), 0))
+                    @Kpi("refused since start", F(BotBoard.Of(f.Totals, "marketRefused"), 0))
+                </div>
+                @Spark("market trades/min", "/min")
+                @if (f.MarketRefusedBy.Any(r => r.Value > 0))
+                {
+                    <h3>Refused, by reason</h3>
+                    <table class="ledger">
+                        <tr><th>reason</th><th class="num">since start</th></tr>
+                        @foreach (var (reason, n) in f.MarketRefusedBy.Where(r => r.Value > 0).OrderByDescending(r => r.Value))
+                        {
+                            <tr><td>@reason</td><td class="num">@F(n, 0)</td></tr>
+                        }
+                    </table>
+                    <p class="muted small">
+                        sold: lost a race (expected under load) · notEnough, noRoom: the bot's own state · any other: a bot or server bug
+                    </p>
+                }
+            }
+        </section>
+
+        <section class="card">
             <h2>What they are doing</h2>
             <table class="bars">
                 @foreach (var (goal, n) in f.Goals.Where(g => g.Value > 0).OrderByDescending(g => g.Value))

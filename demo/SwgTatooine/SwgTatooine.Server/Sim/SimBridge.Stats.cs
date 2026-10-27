@@ -92,8 +92,8 @@ internal sealed record PopulationCensus(
 }
 
 /// <summary>
-/// The demo's own numbers, served at <c>GET /swg/stats</c> (Loïc, 2026-10-26): the economy with its rates, the missions, who is playing and where, and
-/// the crowd's lair objectives.
+/// The demo's own numbers, served at <c>GET /swg/stats</c> (Loïc, 2026-10-26): the economy with its rates, the missions, who is playing and where,
+/// the crowd's lair objectives, the items and the market.
 /// </summary>
 /// <remarks>
 /// Sampled once a second in the lair director's pass, which already keeps that clock for the lair census: the counters into a <see cref="RateWindow"/>,
@@ -117,7 +117,13 @@ public sealed partial class SimBridge
     private const int SeriesItemDrops = 12;
     private const int SeriesItemUnits = 13;
     private const int SeriesItemsLost = 14;
-    private const int SeriesCount = 15;
+    private const int SeriesMarketSales = 15;
+    private const int SeriesMarketVolume = 16;
+    private const int SeriesVendorPaid = 17;
+    private const int SeriesMarketFees = 18;
+    private const int SeriesFaucets = 19;
+    private const int SeriesSinks = 20;
+    private const int SeriesCount = 21;
 
     /// <summary>The cities as a person sees them named, index for index with the server's map (world-data.ts: Port Sable is Mos Eisley, …).</summary>
     private static readonly string[] CityDisplayNames = ["Port Sable", "Whitestone", "Dry Wells", "Red Mesa", "Tern's Rest", "Tallow", "Far Reach"];
@@ -157,6 +163,7 @@ public sealed partial class SimBridge
         values[SeriesItemDrops] = ItemDrops;
         values[SeriesItemUnits] = ItemUnits;
         values[SeriesItemsLost] = ItemsLost;
+        SampleMarket(values);
         _rates.Sample(System.Diagnostics.Stopwatch.GetElapsedTime(_statsStarted).TotalSeconds, values);
 
         Volatile.Write(ref _population, CountPopulation(tx));
@@ -248,6 +255,7 @@ public sealed partial class SimBridge
         Rate(j, "rewardsPerMin", r10[SeriesRewards], r60[SeriesRewards], 60d).Append(',');
         Rate(j, "walletsOpenedPerMin", r10[SeriesGrants], r60[SeriesGrants], 60d).Append(',');
         Rate(j, "tipsRefusedPerMin", r10[SeriesTipsRefused], r60[SeriesTipsRefused], 60d);
+        AppendCreditsByKind(j, r10, r60);
         j.Append("},\"missions\":{");
         Num(j, "held", MissionsHeld).Append(',');
         Num(j, "offers", MissionOffersStanding).Append(',');
@@ -304,6 +312,10 @@ public sealed partial class SimBridge
         Rate(rates, "unitsPerMin", r10[SeriesItemUnits], r60[SeriesItemUnits], 60d).Append(',');
         Rate(rates, "lostPerMin", r10[SeriesItemsLost], r60[SeriesItemsLost], 60d);
         AppendItemsJson(j, rates.ToString());
+
+        // The market (bazaar.md § 9): the board by city, its flows and their rates, the price index, the unsold's age.
+        j.Append(",\"market\":");
+        AppendMarketJson(j, r10, r60);
         return j.Append('}').ToString();
 
         static StringBuilder Bands(StringBuilder b, string name, int[] values)

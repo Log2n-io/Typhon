@@ -20,6 +20,7 @@ namespace SwgTatooine.Dashboard;
 /// <param name="Ledger">The latest ledger rows, or null.</param>
 /// <param name="OutMBps">Replication out, megabytes a second, between the last two reads.</param>
 /// <param name="ItemAudit">The last <c>GET /swg/items/audit</c> (inventory-loot.md § 3.5), or null before the first or from a server without items.</param>
+/// <param name="MarketAudit">The last <c>GET /swg/market/audit</c> (bazaar.md § 7), or null before the first or from a server without a market.</param>
 public sealed record DashboardSnapshot(
     DateTime At,
     bool Up,
@@ -30,14 +31,15 @@ public sealed record DashboardSnapshot(
     DateTime AuditAt,
     JsonNode Ledger,
     double OutMBps,
-    JsonNode ItemAudit)
+    JsonNode ItemAudit,
+    JsonNode MarketAudit)
 {
-    public static DashboardSnapshot Empty { get; } = new(DateTime.MinValue, false, "not read yet", null, null, null, DateTime.MinValue, null, 0d, null);
+    public static DashboardSnapshot Empty { get; } = new(DateTime.MinValue, false, "not read yet", null, null, null, DateTime.MinValue, null, 0d, null, null);
 }
 
 /// <summary>
-/// Reads the game server every two seconds — its stats, its health, the ledger's latest rows — and audits the economy and the items every thirty; keeps a
-/// few minutes of history for the sparklines. One poller for every page open, so ten people watching do not mean ten times the reads.
+/// Reads the game server every two seconds — its stats, its health, the ledger's latest rows — and audits the economy, the items and the market every
+/// thirty; keeps a few minutes of history for the sparklines. One poller for every page open, so ten people watching do not mean ten times the reads.
 /// </summary>
 public sealed class DashboardFeed : BackgroundService
 {
@@ -103,11 +105,13 @@ public sealed class DashboardFeed : BackgroundService
             var auditNode = previous.Audit;
             var auditAt = previous.AuditAt;
             var itemAudit = previous.ItemAudit;
+            var marketAudit = previous.MarketAudit;
             if (audit)
             {
                 auditNode = JsonNode.Parse(await _http.GetStringAsync("swg/economy/audit", ct).ConfigureAwait(false));
                 auditAt = DateTime.UtcNow;
-                itemAudit = await ItemAuditAsync(ct).ConfigureAwait(false);
+                itemAudit = await OptionalAuditAsync("swg/items/audit", ct).ConfigureAwait(false);
+                marketAudit = await OptionalAuditAsync("swg/market/audit", ct).ConfigureAwait(false);
             }
 
             // The ledger's end: the audit's last sequence when there is one — the economy's counters start again at 0 with the process, the ledger does
@@ -125,6 +129,9 @@ public sealed class DashboardFeed : BackgroundService
 
             Record("tx/s", Number(stats, "economy", "transfersPerSec", "10s"));
             Record("drops/min", Number(stats, "items", "dropsPerMin", "10s"));
+            Record("sales/min", Number(stats, "market", "salesPerMin", "10s"));
+            Record("faucets/min", Number(stats, "economy", "faucetsPerMin", "10s"));
+            Record("sinks/min", Number(stats, "economy", "sinksPerMin", "10s"));
             Record("rewards/min", Number(stats, "economy", "rewardsPerMin", "10s"));
             Record("missions done/min", Number(stats, "missions", "completedPerMin", "10s"));
             Record("lair hits/s", Number(stats, "crowd", "lairHitsPerSec", "10s"));
@@ -133,7 +140,7 @@ public sealed class DashboardFeed : BackgroundService
             Record("tick p99", Number(health, "tickMs", "p99"));
             Record("bots", Number(stats, "population", "bots"));
             Record("out MB/s", outMBps);
-            Volatile.Write(ref _latest, new DashboardSnapshot(now, true, null, stats, health, auditNode, auditAt, ledger, outMBps, itemAudit));
+            Volatile.Write(ref _latest, new DashboardSnapshot(now, true, null, stats, health, auditNode, auditAt, ledger, outMBps, itemAudit, marketAudit));
         }
         catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
         {
@@ -144,12 +151,12 @@ public sealed class DashboardFeed : BackgroundService
     }
 
     /// <summary>
-    /// The item audit, run with the credit audit; null when the server has no items (an older build answers 404), which must not mark the whole server
-    /// down. It is timed with the audit it ran beside.
+    /// The item or the market audit, run with the credit audit; null when the server has no such thing (an older build answers 404), which must not mark
+    /// the whole server down. It is timed with the audit it ran beside.
     /// </summary>
-    private async Task<JsonNode> ItemAuditAsync(CancellationToken ct)
+    private async Task<JsonNode> OptionalAuditAsync(string path, CancellationToken ct)
     {
-        using var response = await _http.GetAsync("swg/items/audit", ct).ConfigureAwait(false);
+        using var response = await _http.GetAsync(path, ct).ConfigureAwait(false);
         return response.IsSuccessStatusCode ? JsonNode.Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false)) : null;
     }
 
