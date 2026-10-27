@@ -44,6 +44,7 @@ internal sealed class RecentRowCache<T>
     private readonly Func<T, long> _to;
     private readonly int _keep;
     private readonly Comparison<T> _newestFirst;
+    private readonly IComparer<T> _newestFirstComparer;
 
     public RecentRowCache(Func<T, long> seq, Func<T, long> from, Func<T, long> to, int keep)
     {
@@ -52,6 +53,7 @@ internal sealed class RecentRowCache<T>
         _to = to;
         _keep = keep;
         _newestFirst = (x, y) => _seq(y).CompareTo(_seq(x));
+        _newestFirstComparer = Comparer<T>.Create(_newestFirst);
     }
 
     /// <summary>The <paramref name="key"/> side's newest rows, newest first, at most the count kept, as of <paramref name="tx"/>'s snapshot.</summary>
@@ -104,18 +106,28 @@ internal sealed class RecentRowCache<T>
 
     private void Collect(Transaction tx, IndexRef index, long key, List<T> into)
     {
+        // Only the newest of this side can be among the newest of both, so the side is trimmed to them whenever it reaches twice the count kept: the buffer
+        // stays O(kept) instead of growing with the character's whole history — a full read of a bot with thousands of rows was the server's top allocator.
         var start = into.Count;
         using var found = tx.EnumerateIndex<T, long>(index, key, key);
         while (found.MoveNext())
         {
             into.Add(found.CurrentComponent);
+            if (into.Count - start == 2 * _keep)
+            {
+                Trim(into, start);
+            }
         }
 
-        // Only the newest of this side can be among the newest of both.
+        Trim(into, start);
+    }
+
+    private void Trim(List<T> into, int start)
+    {
         var mine = into.Count - start;
         if (mine > _keep)
         {
-            into.Sort(start, mine, Comparer<T>.Create(_newestFirst));
+            into.Sort(start, mine, _newestFirstComparer);
             into.RemoveRange(start + _keep, mine - _keep);
         }
     }

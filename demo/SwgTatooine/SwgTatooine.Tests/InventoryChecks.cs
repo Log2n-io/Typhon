@@ -833,6 +833,31 @@ internal sealed class InventoryChecks : ServedChecks
     /// The recent rows are read incrementally (<c>RecentRowCache</c>): read after read, as a client reads on every drop, with another character's rows
     /// between, the answer stays the newest 20 rows of the bearer's, newest first — what a read of its whole history gives. The wallet's, the same.
     /// </summary>
+    /// <summary>
+    /// A first read of a character whose history on one side is several times the rows kept — the side trimmed as it is walked, never held whole — still
+    /// answers the newest of the whole history, in order.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void TheFirstRead_OfALongHistory_IsItsNewestRows()
+    {
+        using var sim = Start();
+        var (x, z) = OpenGround(sim);
+        var a = LogIn(sim, 0x7411, x, z);
+        var key = (long)a.Character.RawValue;
+        const int Long = ItemEndpoints.RecentRows * 5 + 3;
+        for (var k = 0; k < Long; k++)
+        {
+            sim.Bridge.StageTransfer(ItemLedger.World, key, ItemCatalog.Bone, 1, 1, ItemMoveKind.Kill, 1);
+        }
+
+        SessionHarness.Until(() => Items.Rows(sim).Count(r => r.To == key) == Long, "the long history");
+        using var doc = JsonDocument.Parse(ItemEndpoints.InventoryJson(sim.Dbe, a.Character));
+        var answered = doc.RootElement.GetProperty("recent").EnumerateArray().Select(r => long.Parse(r.GetProperty("seq").GetString())).ToList();
+        var whole = Items.Rows(sim).Where(r => r.From == key || r.To == key).Select(r => r.Seq).OrderByDescending(q => q).Take(ItemEndpoints.RecentRows).ToList();
+        Assert.That(answered, Is.EqualTo(whole), "the first read of a long history is not its newest rows");
+    }
+
     [Test]
     [CancelAfter(120_000)]
     public void TheRecentRows_ReadAfterEveryDrop_AreTheNewestOfTheWholeHistory()
