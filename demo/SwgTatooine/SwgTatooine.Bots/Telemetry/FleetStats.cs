@@ -16,6 +16,16 @@ public enum FleetStat
     Mounts,
     Dismounts,
     Reversals,
+
+    // The bazaar (bazaar.md § 8): visits traded at, commands sent by kind, races lost (153), buys seen collected, refusals of every reason.
+    MarketTrades,
+    MarketListed,
+    MarketVendored,
+    MarketBought,
+    MarketBuyLost,
+    MarketWon,
+    MarketCollected,
+    MarketRefused,
 }
 
 /// <summary>A per-bot rate's spread over the fleet.</summary>

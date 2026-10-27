@@ -132,6 +132,18 @@ public sealed partial class BotSwarm
             stats[(int)FleetStat.Mounts] = Volatile.Read(ref bot.Mounts);
             stats[(int)FleetStat.Dismounts] = Volatile.Read(ref bot.Dismounts);
             stats[(int)FleetStat.Reversals] = Volatile.Read(ref bot.Moves.Reversals);
+            stats[(int)FleetStat.MarketTrades] = Volatile.Read(ref bot.MarketTrades);
+            stats[(int)FleetStat.MarketListed] = Volatile.Read(ref bot.MarketListed);
+            stats[(int)FleetStat.MarketVendored] = Volatile.Read(ref bot.MarketVendored);
+            stats[(int)FleetStat.MarketBought] = Volatile.Read(ref bot.MarketBought);
+            stats[(int)FleetStat.MarketBuyLost] = Volatile.Read(ref bot.MarketBuyLost);
+            stats[(int)FleetStat.MarketWon] = Volatile.Read(ref bot.MarketWon);
+            stats[(int)FleetStat.MarketCollected] = Volatile.Read(ref bot.MarketCollected);
+            for (var i = 0; i < MarketReasons; i++)
+            {
+                stats[(int)FleetStat.MarketRefused] += Volatile.Read(ref bot.MarketRefused[i]);
+            }
+
             fleet.Add(slot, brain.Goal, brain.Counters, stats);
             if (bot.Tracer != null)
             {

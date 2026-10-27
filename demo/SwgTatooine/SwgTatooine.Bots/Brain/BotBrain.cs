@@ -73,6 +73,13 @@ public enum Goal
 /// <item>No terminal known within reach, or no content to walk to one: the mix this brain always had — a hunt, an errand, a door, idling, travel.</item>
 /// </list>
 /// <para>
+/// <b>The bazaar is an interlude in that loop, not a loop of its own (bazaar.md § 8).</b> A bot that trades (<see cref="Trades"/>), not on a quest,
+/// with <see cref="MarketStacks"/> stacks or more, or goods reserved for it, goes to a bazaar of its desk's city before the desk — a quest with a full
+/// inventory loses its drops — and not again for <see cref="MarketRetrySeconds"/>, whatever came of it. At any bazaar it reaches, errand or not, it
+/// trades: the swarm sends the plan. A rush bot (<see cref="RushRegion"/>) does nothing else: to the rush city, to one of its bazaars, and a round of
+/// trade every <see cref="RushRoundSeconds"/> for good.
+/// </para>
+/// <para>
 /// So travel between cities is the exception: a roaming bot leaves a city only after two of its terminals in a row had nothing for it — or, with no
 /// terminal in reach at all, by the old roll. Every city has terminals and the desk lists most offers within a bot's band, so a fleet spends its day on
 /// missions and the rides out to them, which is the load this demo exists to produce.
@@ -218,6 +225,18 @@ public sealed partial class BotBrain
     /// </summary>
     public const double MountRetrySeconds = 10d;
 
+    /// <summary>A bot holding this many stacks or more goes to trade (bazaar.md § 8): six of its 30 slots left, before a drop is lost.</summary>
+    public const int MarketStacks = 24;
+
+    /// <summary>A bazaar errand, made or failed, is not chosen again for this long, in seconds: a vendor that refuses cannot hold a bot at the bazaar.</summary>
+    public const double MarketRetrySeconds = 120d;
+
+    /// <summary>Added to the stay at a bazaar it trades at, in seconds: the plan goes out at two commands a second (the commands' rate).</summary>
+    public const double TradeSeconds = 10d;
+
+    /// <summary>A rush bot's round of trade comes this often, in seconds (bazaar.md § 8, the load test).</summary>
+    public const double RushRoundSeconds = 2d;
+
     /// <summary>A mission not done this long after the bot set out on it is cancelled (lair-objectives.md B-4).</summary>
     public const double QuestSeconds = 600d;
 
@@ -306,6 +325,18 @@ public sealed partial class BotBrain
     /// loop starts at the mix it always had.
     /// </summary>
     public bool TakesMissions { get; set; } = true;
+
+    /// <summary>
+    /// Whether this bot trades at the bazaar (bazaar.md § 8): its run trades and it can read its market. Off, a bazaar is an errand that ends in
+    /// standing there, as it always was.
+    /// </summary>
+    public bool Trades { get; set; }
+
+    /// <summary>The load test's city, as a region (<c>--market-rush</c>, bazaar.md § 8), or 0: a rush bot goes there, stands at a bazaar and trades.</summary>
+    public int RushRegion { get; set; }
+
+    /// <summary>Bazaar visits it traded at: each one a <see cref="IntentKind.Trade"/>.</summary>
+    public long TradesAsked { get; private set; }
 
     /// <summary>What this bot has learned about the cities.</summary>
     public FacilityMap Facilities { get; }
@@ -449,6 +480,12 @@ public sealed partial class BotBrain
     /// <summary>When a walk across the city may be searched again, after one found no way or stuck.</summary>
     private long _cityWalkAt;
 
+    /// <summary>When the bazaar errand may be chosen again: set whenever it is tried, made or not.</summary>
+    private long _marketAt;
+
+    /// <summary>The errand under way is the bazaar errand (<see cref="GoalWhy.MarketChosen"/>), not an errand that happens to end at a bazaar.</summary>
+    private bool _marketErrand;
+
     /// <summary>Decides what to do this tick.</summary>
     /// <param name="world">What the bot was sent.</param>
     /// <param name="tick">The fleet's tick, which is what the timed goals count in.</param>
@@ -551,6 +588,12 @@ public sealed partial class BotBrain
         _wantMounted = false;
         _leg.Clear();
 
+        // The load test: nothing but the rush city's bazaar.
+        if (RushRegion != 0 && _assets != null)
+        {
+            return Rush(in world, tick, RegionAt(world.X, world.Z));
+        }
+
         // A mission held, its lair placed: that is what it is doing until it is done or given up (lair-objectives.md B-3).
         if (world.MissionsHeld > 0 && world.HasMissionLair)
         {
@@ -564,6 +607,16 @@ public sealed partial class BotBrain
         }
 
         var here = RegionAt(world.X, world.Z);
+
+        // Nearly full, or goods waiting for it: its city's bazaar, before the desk — a quest taken now would lose its drops (the remarks).
+        if (Trades && _assets != null && tick >= _marketAt && (world.InventoryStacks >= MarketStacks || world.Reserved > 0))
+        {
+            _marketAt = tick + Ticks(MarketRetrySeconds);
+            if (Bazaar(in world, here) is { } bazaar && StartVisitAt(in world, tick, Routing.BazaarKind, GoalWhy.MarketChosen, bazaar))
+            {
+                return Visit(in world, tick);
+            }
+        }
 
         // Holding none: a terminal of its desk for one, before anything else (the day's loop, in the remarks).
         var deskClosed = false;
@@ -1114,6 +1167,7 @@ public sealed partial class BotBrain
         _leg.FinalReach = UseReachM;
         _visitAt = (found.X, found.Z);
         _visitRegion = to.Region;
+        _marketErrand = why == GoalWhy.MarketChosen;
 
         Become(Goal.Visiting, why, tick, (uint)kind, (float)Routing.Distance(world.X, world.Z, found.X, found.Z));
         _using = false;
@@ -1167,6 +1221,42 @@ public sealed partial class BotBrain
         return (near[(int)((Next() >> 16) % (uint)spread)], region);
     }
 
+    /// <summary>
+    /// The bazaar to trade at: the nearest of its desk's city — its home's, the city it stands in, or out in the desert the nearest bazaar's — or null.
+    /// </summary>
+    private (Facility At, int Region)? Bazaar(in Perceived world, int here)
+    {
+        var region = HomeRegion != 0 ? HomeRegion
+            : here != 0 ? here
+            : Facilities.TryNearest(Routing.BazaarKind, world.X, world.Z, out _, out var nearest) ? nearest : 0;
+        Span<Facility> near = stackalloc Facility[1];
+        return region != 0 && Facilities.NearestIn(region, Routing.BazaarKind, world.X, world.Z, [], near) > 0 ? (near[0], region) : null;
+    }
+
+    /// <summary>
+    /// The load test's goal (bazaar.md § 8): to the rush city, then to one of its few nearest bazaars — a crowd spreads over them, as over a desk's
+    /// terminals — where <see cref="Visit"/> keeps it trading for good. A bazaar it cannot walk to is tried again after a pause.
+    /// </summary>
+    private Intent Rush(in Perceived world, long tick, int here)
+    {
+        if (here != RushRegion)
+        {
+            _flyNext = false;
+            return GoTo(in world, tick, RushRegion - 1, here, GoalWhy.MarketChosen);
+        }
+
+        Span<Facility> near = stackalloc Facility[DeskSpread];
+        var n = Facilities.NearestIn(RushRegion, Routing.BazaarKind, world.X, world.Z, [], near);
+        if (n > 0 && StartVisitAt(in world, tick, Routing.BazaarKind, GoalWhy.MarketChosen, (near[(int)((Next() >> 16) % (uint)n)], RushRegion)))
+        {
+            return Visit(in world, tick);
+        }
+
+        Become(Goal.Idling, GoalWhy.IdleChosen, tick);
+        _until = tick + Ticks(2);
+        return Intent.Move(0f, 0);
+    }
+
     /// <summary>A terminal of a desk tried: empty, or out of reach. A bot keeps a handful; the oldest goes first.</summary>
     private void Tried(float x, float z, int region, long tick)
     {
@@ -1187,6 +1277,23 @@ public sealed partial class BotBrain
             if (tick < _until && !(desk && world.MissionsHeld > 0 && world.HasMissionLair))
             {
                 return Intent.None;   // at the terminal: what using one looks like on the wire — until the take comes back as a mission held
+            }
+
+            if (RushRegion != 0 && _visitKind == Routing.BazaarKind)
+            {
+                // The load test stands at its bazaar for good: the next round.
+                _until = tick + Ticks(RushRoundSeconds);
+                TradesAsked++;
+                return Intent.Trade(_visitRegion);
+            }
+
+            if (_marketErrand)
+            {
+                // Traded: back to the day's loop — the desk, a quest — and not off on a flight the way an errand to look at a bazaar often is.
+                _marketErrand = false;
+                _flyNext = false;
+                Become(Goal.Choosing, GoalWhy.MarketDone, tick);
+                return Choose(in world, tick);
             }
 
             if (desk && world.MissionsHeld > 0)
@@ -1228,6 +1335,15 @@ public sealed partial class BotBrain
                     return Intent.TakeMission;
                 }
 
+                // At a bazaar, a trading bot trades — the errand that came for it or one that only came to look; the swarm sends the plan, at the
+                // commands' rate, so it stays the plan's time longer. A rush bot's first round comes at once and the next one a round later.
+                if (_visitKind == Routing.BazaarKind && (Trades || RushRegion != 0))
+                {
+                    _until = RushRegion != 0 ? tick + Ticks(RushRoundSeconds) : _until + Ticks(TradeSeconds);
+                    TradesAsked++;
+                    return Intent.Trade(_visitRegion);
+                }
+
                 return Intent.None;
             default:
                 // Not reached: a desk's terminal is tried, as an empty one is — or the next choice picked it again, for good (review 6, H1).
@@ -1236,6 +1352,7 @@ public sealed partial class BotBrain
                     Tried(_visitAt.X, _visitAt.Z, _visitRegion, tick);
                 }
 
+                _marketErrand = false;
                 Become(Goal.Idling, GoalWhy.VisitFailed, tick);
                 _until = tick + Ticks(2);
                 return Intent.Move(0f, 0);

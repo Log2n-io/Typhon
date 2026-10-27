@@ -23,6 +23,10 @@ int bots, seconds, hz, connectBatch, connectRate, tourSeconds, planets, fuzz, fu
 double regionM, wanderSeconds;
 bool brain;
 bool noMissions;
+bool noMarket;
+string marketRush;
+int marketRushListings;
+string marketLog;
 string homeCity;
 double homeShare;
 int homeMax;
@@ -72,6 +76,14 @@ try
     brain = r.Switch("--brain", "player bots decide for themselves from what they are sent, instead of wandering");
     // --brain only: a bot takes missions at the terminals it visits unless told not to — a measurement run's workload stays what it was.
     noMissions = r.Switch("--no-missions", "thinking bots take no missions at the terminals they visit");
+    // --brain only: the bazaar (bazaar.md § 8) is on by default; --no-market is the A/B arm, whose full inventories lose their drops as before.
+    noMarket = r.Switch("--no-market", "thinking bots do not trade at the bazaar");
+    // --brain only: the bazaar's load test (bazaar.md § 8, M5-1): every bot to one city's bazaars, one in ten keeping 1 cr listings, the rest racing
+    // to buy them. Two flags where the design wrote one with two values: the strict reader takes one value a flag.
+    marketRush = r.Str("--market-rush", null, "the bazaar load test in this city: sellers keep 1 cr listings, the rest race to buy them", "<city>");
+    marketRushListings = r.Int("--market-rush-listings", defaults.MarketRushListings, "the listings the rush's sellers keep on the board", min: 1);
+    marketLog = r.Str("--market-log", null, "append each bazaar buy a bot sees collected (bot index, listing) to this file; the rush's default "
+        + "is market-wins-<time>.log", "<path>");
     // --brain only: a share of the population lives in one city and never leaves it, capped so a huge run does not put thousands there.
     homeCity = r.Str("--home-city", defaults.HomeCity, "the city a share of the thinking bots live in; 'none' for none", "<name>");
     homeShare = r.Dbl("--home-share", defaults.HomeShare, "the share of the bots that live in --home-city", min: 0d);
@@ -110,6 +122,11 @@ try
     if (!Uri.TryCreate(endpoint, UriKind.Absolute, out endpointUri))
     {
         throw new ArgumentException($"'--endpoint' takes an absolute URI such as ws://127.0.0.1:9100/ws, not '{endpoint}'.");
+    }
+
+    if (marketRush != null && (BotSwarmOptions.RegionOf(marketRush) == 0 || noMarket || !brain))
+    {
+        throw new ArgumentException($"'--market-rush' takes a city of the map with --brain and without --no-market, not '{marketRush}'.");
     }
 
     if (dashboardArg != null && !Uri.TryCreate(dashboardArg.EndsWith('/') ? dashboardArg : dashboardArg + "/", UriKind.Absolute, out _))
@@ -209,6 +226,15 @@ else if (accountsFile != null)
     Console.WriteLine($"accounts are signed up a chunk at a time as the ramp reaches them, against {authBase}");
 }
 
+// The bazaar's win log (BZ-17, BZ-18): one line per buy a bot saw collected, flushed as it is written, so a run killed mid-rush keeps what it saw.
+marketLog ??= marketRush != null ? $"market-wins-{DateTime.UtcNow:yyyyMMdd-HHmmss}.log" : null;
+using var winLog = marketLog == null ? null : new System.IO.StreamWriter(marketLog, append: true) { AutoFlush = true };
+var winLock = new object();
+if (winLog != null)
+{
+    Console.WriteLine($"market: each buy collected is logged to {System.IO.Path.GetFullPath(marketLog)}");
+}
+
 var options = new BotSwarmOptions
 {
     Endpoint = endpointUri,
@@ -241,6 +267,18 @@ var options = new BotSwarmOptions
     Dashboard = dashboardArg == null ? null : new Uri(dashboardArg.EndsWith('/') ? dashboardArg : dashboardArg + "/"),
     TraceBots = traceBots,
     Missions = !noMissions,
+    Market = !noMarket,
+    MarketRush = marketRush,
+    MarketRushListings = marketRushListings,
+    OnMarketWin = winLog == null
+        ? null
+        : (index, listing) =>
+        {
+            lock (winLock)
+            {
+                winLog.WriteLine($"{DateTime.UtcNow:O} bot {index} won {listing}");
+            }
+        },
     HomeCity = homeCity,
     HomeShare = homeShare,
     HomeMax = homeMax,
@@ -335,7 +373,8 @@ while (!stopping.IsCancellationRequested)
         + $"track p99 {swarm.ServerMetric("typhon.subscriptions.track.p99"),7:F3} ms  "
         + $"tick p99 {swarm.ServerMetric("typhon.tick.p99"),7:F3} ms"
         + Home()
-        + Errands());
+        + Errands()
+        + Trade());
 }
 
 // The bots that live in the home city, and how many stand in it now: the concentration, watched as it builds.
@@ -350,6 +389,18 @@ string Errands()
 {
     var e = swarm.Errands();
     return e.Paths == 0 && e.Ports == 0 ? string.Empty : $"  walks {e.Paths} ports left {e.Ports} in a port {e.InPort}";
+}
+
+// The bazaar, while it builds: trades, lists, vendor sales, buys and races lost — a rush reads its whole story here.
+string Trade()
+{
+    if (!brain || noMarket)
+    {
+        return string.Empty;
+    }
+
+    var m = swarm.Market();
+    return m.Trades == 0 ? string.Empty : $"  market {m.Trades} trades {m.Listed} listed {m.Vendored} vendored {m.Bought} bought {m.Won} won {m.BuyLost} lost";
 }
 
 // TICK frames applied across the population: a connected session that is never produced for looks healthy in every other number.
@@ -526,6 +577,29 @@ if (brain)
         + $"{SwgTatooine.Bots.Brain.BotBrain.QuestSeconds:F0} s");
     var items = swarm.Items();
     Console.WriteLine($"items: {items.LootRows} loot row(s) read, {items.UnitsLost} unit(s) lost to a full inventory, {items.Stacks} stack(s) held");
+    if (noMarket)
+    {
+        Console.WriteLine("market: off (--no-market)");
+    }
+    else
+    {
+        var m = swarm.Market();
+        var refused = new System.Collections.Generic.List<string>();
+        for (var i = 0; i < m.Refused.Length; i++)
+        {
+            if (m.Refused[i] > 0)
+            {
+                refused.Add($"{BotSwarm.MarketReasonNames[i]} {m.Refused[i]}");
+            }
+        }
+
+        Console.WriteLine(
+            $"market: {m.Trades} trade(s) at a bazaar{(marketRush != null ? $" (rush in {marketRush}, {marketRushListings} listings)" : string.Empty)}; "
+            + $"{m.Collected} collect(s), {m.Listed} listing(s), {m.Vendored} vendor sale(s) (~{m.VendorCredits} cr), {m.Bought} buy(s) sent, "
+            + $"{m.Won} buy(s) seen collected, {m.BuyLost} race(s) lost (Sold); {m.RefusedTotal} refusal(s)"
+            + (refused.Count == 0 ? string.Empty : $": {string.Join(", ", refused)}"));
+    }
+
     var tips = swarm.Tips();
     Console.WriteLine(tipSeconds > 0
         ? $"tips: {tips.Sent} GiveCredits sent, {tips.NobodyNear} due with nobody named within reach (--tip-seconds {tipSeconds})"

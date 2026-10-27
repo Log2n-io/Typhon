@@ -1,0 +1,500 @@
+using System;
+using System.Collections.Generic;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using SwgTatooine.Bots.Brain;
+using Typhon.Client;
+using Typhon.Protocol;
+
+namespace SwgTatooine.Bots;
+
+/// <summary>
+/// The bazaar (bazaar.md § 8): a thinking bot's market — what it reads, the plan it sends at a bazaar, and what it counts — with a browser's reads and
+/// commands only. The brain decides when (<see cref="IntentKind.Trade"/>); this decides what.
+/// </summary>
+public sealed partial class BotSwarm
+{
+    /// <summary>The bazaar's commands, named as the server declares them (bazaar.md § 3.1).</summary>
+    private const string MarketListCommand = "MarketList";
+
+    private const string MarketBuyCommand = "MarketBuy";
+    private const string MarketCollectCommand = "MarketCollect";
+    private const string SellToVendorCommand = "SellToVendor";
+
+    /// <summary>
+    /// The bazaar's refusals (bazaar.md § 3.1): <c>AckReasons.FirstApplicationReason</c> + 23 … + 35, in the design's order. The bot's copy, as
+    /// <c>Perception</c> keeps the shuttle's: this project references no server code.
+    /// </summary>
+    public const byte MarketFirstReason = AckReasons.FirstApplicationReason + 23;
+
+    /// <summary><c>MarketSold</c>: the listing went to somebody else first — a buy's race lost.</summary>
+    public const byte MarketSoldReason = MarketFirstReason + 2;
+
+    /// <summary>How many reasons the bazaar has, 151 to 163.</summary>
+    public const int MarketReasons = 13;
+
+    /// <summary>The reasons' names, by offset from <see cref="MarketFirstReason"/>, for the report.</summary>
+    public static readonly string[] MarketReasonNames =
+    [
+        "notAtBazaar", "wrongCity", "sold", "notEnough", "noItems", "badListing", "listingCap", "reservedCap", "noRoom", "notYours", "ownListing",
+        "failed", "worthless",
+    ];
+
+    /// <summary>The fleet's bazaar, summed: trades begun, commands sent by kind, races lost, buys collected, refusals by reason.</summary>
+    public MarketTotals Market()
+    {
+        var t = new MarketTotals { Refused = new long[MarketReasons] };
+        foreach (var bot in Bots)
+        {
+            if (bot == null)
+            {
+                continue;
+            }
+
+            t.Trades += Volatile.Read(ref bot.MarketTrades);
+            t.Listed += Volatile.Read(ref bot.MarketListed);
+            t.Vendored += Volatile.Read(ref bot.MarketVendored);
+            t.VendorCredits += Volatile.Read(ref bot.MarketVendorCredits);
+            t.Bought += Volatile.Read(ref bot.MarketBought);
+            t.BuyLost += Volatile.Read(ref bot.MarketBuyLost);
+            t.Won += Volatile.Read(ref bot.MarketWon);
+            t.Collected += Volatile.Read(ref bot.MarketCollected);
+            for (var i = 0; i < MarketReasons; i++)
+            {
+                t.Refused[i] += Volatile.Read(ref bot.MarketRefused[i]);
+            }
+        }
+
+        return t;
+    }
+
+    private sealed partial class Bot
+    {
+        /// <summary>The bazaar (bazaar.md § 8): trade visits, commands sent by kind, the vendor's expected payout, races lost, buys collected.</summary>
+        public long MarketTrades;
+
+        public long MarketListed;
+        public long MarketVendored;
+        public long MarketVendorCredits;
+        public long MarketBought;
+        public long MarketBuyLost;
+        public long MarketWon;
+        public long MarketCollected;
+
+        /// <summary>The bazaar's refusals of this bot's commands, by reason (offset from <see cref="MarketFirstReason"/>).</summary>
+        public readonly long[] MarketRefused = new long[MarketReasons];
+
+        /// <summary>The market's prices are read again after this long (bazaar.md § 8).</summary>
+        private static readonly TimeSpan PricesFor = TimeSpan.FromSeconds(60);
+
+        /// <summary>Whether this bot trades: its run does, it can read its market, and it thinks.</summary>
+        private bool _trades;
+
+        /// <summary>The rush (bazaar.md § 8): this bot keeps listings on the board when <see cref="_rushTarget"/> is not 0, and buys otherwise.</summary>
+        private bool _rush;
+
+        private int _rushTarget;
+        private Action<int, ulong> _onWin;
+
+        private Uri _mineUri;
+        private Uri _pricesUri;
+        private Uri _browseUri;
+        private Uri _walletUri;
+
+        /// <summary>The market as last read: its listings and reservations, the prices and when, the stacks held.</summary>
+        private volatile MarketMine _mine = MarketMine.None;
+
+        private volatile MarketPrices _prices = MarketPrices.None;
+        private DateTime _pricesAt = DateTime.MinValue;
+        private volatile List<HeldStack> _held = [];
+
+        // `/mine` re-read on each `items` revision while the last answer named something — the browser's rule (bazaar.md § 5, "Told").
+        private readonly OwnerFieldPoll _minePoll = new("items", OwnerReadRetryTicks);
+
+        /// <summary>One trade read at a time; its plan lands in <see cref="_planned"/> and goes out from the driver at the commands' rate.</summary>
+        private int _tradeBusy;
+
+        private volatile List<MarketCommand> _planned;
+        private readonly Queue<MarketCommand> _sending = new();
+        private long _nextMarketSendTick;
+        private uint _marketRng;
+
+        /// <summary>The rush's buyer: listings it has tried, and the units it won and has yet to list again.</summary>
+        private readonly HashSet<ulong> _rushTried = [];
+
+        private readonly Queue<WonListing> _relist = new();
+        private readonly object _relistLock = new();
+
+        /// <summary>Wires the bazaar: whether this bot trades, its rush role, its endpoints. Called once its brain exists.</summary>
+        private void SetUpMarket(int index, BotSwarmOptions options)
+        {
+            _trades = options.Market && _missionsUri != null && !string.IsNullOrEmpty(_token);
+            if (!_trades)
+            {
+                return;
+            }
+
+            var server = new Uri(_missionsUri, "/swg/");
+            _mineUri = new Uri(server, "market/mine");
+            _pricesUri = new Uri(server, "market/prices");
+            _browseUri = new Uri(server, "market");
+            _walletUri = new Uri(server, "wallet");
+            _marketRng = (uint)((index * 2654435769u) ^ 0x5bd1e995u) | 1u;
+            _onWin = options.OnMarketWin;
+            _brain.Trades = true;
+
+            var rush = options.MarketRushRegion;
+            if (rush != 0)
+            {
+                // The load test: every bot to the rush city's bazaars, missions off. One in ten keeps listings; the rest buy.
+                _rush = true;
+                _brain.RushRegion = rush;
+                _brain.TakesMissions = false;
+                var sellers = options.MarketRushSellers;
+                _rushTarget = index % 10 == 0 ? Math.Max(1, (options.MarketRushListings + sellers - 1) / sellers) : 0;
+            }
+        }
+
+        /// <summary>Counts the bazaar's refusals of this session's commands, from each applied frame's <c>ACKS</c>: the only answer a command gets.</summary>
+        public void WatchMarket()
+        {
+            if (_trades)
+            {
+                Client.FrameApplied += CountRefusals;
+            }
+        }
+
+        private void CountRefusals(WorldStore store)
+        {
+            var acks = store.Acks;
+            for (var i = 0; i < acks.Count; i++)
+            {
+                var offset = acks[i].Reason - MarketFirstReason;
+                if (offset is >= 0 and < MarketReasons)
+                {
+                    Interlocked.Increment(ref MarketRefused[offset]);
+                    if (acks[i].Reason == MarketSoldReason)
+                    {
+                        Interlocked.Increment(ref MarketBuyLost);
+                    }
+                }
+            }
+        }
+
+        /// <summary>What the brain is told of the market: the stacks held and the goods reserved.</summary>
+        private Perceived WithMarket(Perceived world) =>
+            _trades ? world with { InventoryStacks = _inventory.Stacks, Reserved = _mine.Reserved } : world;
+
+        /// <summary>The bot stands at a bazaar: read what the plan needs, and plan. One at a time; a trade asked while one is read is the same trade.</summary>
+        private void BeginTrade(long tick, int region)
+        {
+            if (!_trades || Interlocked.CompareExchange(ref _tradeBusy, 1, 0) != 0)
+            {
+                return;
+            }
+
+            MarketTrades++;
+            var level = _brain.CombatLevel;
+            _ = TradeAsync(region, level);
+        }
+
+        private async Task TradeAsync(int region, int level)
+        {
+            try
+            {
+                var plan = _rush ? await RushRoundAsync(region).ConfigureAwait(false) : await PlanTradeAsync(region, level).ConfigureAwait(false);
+                if (plan is { Count: > 0 })
+                {
+                    _planned = plan;
+                }
+            }
+            catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException or InvalidOperationException
+                                          or FormatException or OverflowException)
+            {
+                // Nothing sent: the next visit plans again.
+            }
+            finally
+            {
+                Volatile.Write(ref _tradeBusy, 0);
+            }
+        }
+
+        /// <summary>A visit's plan (<see cref="MarketPlan.Plan"/>): its market read, a full material stack listed one visit in five, a buy one in ten.</summary>
+        private async Task<List<MarketCommand>> PlanTradeAsync(int region, int level)
+        {
+            var mine = await ReadMineAsync().ConfigureAwait(false);
+            var prices = await PricesAsync().ConfigureAwait(false);
+            var listMaterial = MarketPlan.Next(ref _marketRng) % 100u < MarketPlan.ListMaterialPercent;
+            BrowseRow? buy = null;
+            if (MarketPlan.Next(ref _marketRng) % 100u < MarketPlan.BuyPercent && region != 0)
+            {
+                // The cheapest of its band, a core or an add-on, in this city: the browser's filtered first page.
+                var band = MarketPlan.Band(level);
+                var category = MarketPlan.Next(ref _marketRng) % 2u == 0 ? "core" : "addon";
+                var page = MarketJson.Browse(await GetAsync(new Uri(_browseUri, $"?city={region}&cat={category}&mk={band}&sort=price&page=1"))
+                    .ConfigureAwait(false));
+                var wallet = MarketJson.Credits(await GetAsync(_walletUri).ConfigureAwait(false));
+                buy = MarketPlan.ChooseBuy(page, prices, band, wallet, mine.ListedIds);
+            }
+
+            return MarketPlan.Plan(_held, mine, prices, ref _marketRng, listMaterial, buy);
+        }
+
+        /// <summary>
+        /// A round of the rush (bazaar.md § 8): a seller tops its listings up to its share with one material unit each at 1 cr; a buyer lists again what
+        /// it won, then buys the three cheapest listings of the city's first page it has not tried. Four commands at most: two seconds at the rate.
+        /// </summary>
+        private async Task<List<MarketCommand>> RushRoundAsync(int region)
+        {
+            const int Budget = 4;
+            if (_rushTarget > 0)
+            {
+                var mine = await ReadMineAsync().ConfigureAwait(false);
+                return MarketPlan.RushSell(_held, mine.Listed, _rushTarget, Budget);
+            }
+
+            var plan = new List<MarketCommand>();
+            lock (_relistLock)
+            {
+                if (_relist.TryPeek(out var won) && won.Template != 0)
+                {
+                    _relist.Dequeue();
+                    plan.Add(MarketCommand.List(won.Template, won.Mk, Math.Min(won.Count, MarketPlan.StackMax), 1));
+                }
+                else if (_relist.Count > 0)
+                {
+                    _relist.Dequeue();   // an item the bot cannot name to the server: not listed
+                }
+            }
+
+            var page = MarketJson.Browse(await GetAsync(new Uri(_browseUri, $"?city={region}&sort=price&page=1")).ConfigureAwait(false));
+            plan.AddRange(MarketPlan.RushBuy(page, _rushTried, _mine.ListedIds, Budget - 1));
+            return plan;
+        }
+
+        /// <summary>Sends the next command of the plan when one is due — two a second — while the bot still stands at the bazaar; drops it otherwise.</summary>
+        private async Task SendMarketAsync(long tick, CancellationToken ct)
+        {
+            if (!_trades)
+            {
+                return;
+            }
+
+            if (Interlocked.Exchange(ref _planned, null) is { } plan)
+            {
+                _sending.Clear();
+                foreach (var step in plan)
+                {
+                    _sending.Enqueue(step);
+                }
+            }
+
+            if (_sending.Count == 0)
+            {
+                return;
+            }
+
+            if (_brain.Goal != Goal.Visiting)
+            {
+                // Walked off — the visit ended: the server would refuse every one of them NotAtBazaar.
+                _sending.Clear();
+                return;
+            }
+
+            if (tick < _nextMarketSendTick)
+            {
+                return;
+            }
+
+            _nextMarketSendTick = tick + Math.Max(1L, _ticksPerSecond / 2);
+            var c = _sending.Dequeue();
+            switch (c.Step)
+            {
+                case MarketStep.Collect when Client.Plan.CommandByName(MarketCollectCommand) != null:
+                    await Client.SendCommandAsync(MarketCollectCommand, new RecordValues { ["listing"] = FieldValue.OfUInt64(c.Listing) }, ct)
+                        .ConfigureAwait(false);
+                    MarketCollected++;
+                    break;
+                case MarketStep.List when Client.Plan.CommandByName(MarketListCommand) != null:
+                    await Client.SendCommandAsync(
+                        MarketListCommand,
+                        new RecordValues
+                        {
+                            ["template"] = FieldValue.Of((double)c.Template),
+                            ["mk"] = FieldValue.Of((double)c.Mk),
+                            ["quantity"] = FieldValue.Of((double)c.Quantity),
+                            ["unitPrice"] = FieldValue.Of((double)c.UnitPrice),
+                        },
+                        ct).ConfigureAwait(false);
+                    MarketListed++;
+                    break;
+                case MarketStep.Vendor when Client.Plan.CommandByName(SellToVendorCommand) != null:
+                    await Client.SendCommandAsync(
+                        SellToVendorCommand,
+                        new RecordValues
+                        {
+                            ["template"] = FieldValue.Of((double)c.Template),
+                            ["mk"] = FieldValue.Of((double)c.Mk),
+                            ["quantity"] = FieldValue.Of((double)c.Quantity),
+                        },
+                        ct).ConfigureAwait(false);
+                    MarketVendored++;
+                    MarketVendorCredits += VendorPayout(c);
+                    break;
+                case MarketStep.Buy when Client.Plan.CommandByName(MarketBuyCommand) != null:
+                    await Client.SendCommandAsync(
+                        MarketBuyCommand,
+                        new RecordValues { ["listing"] = FieldValue.OfUInt64(c.Listing), ["unitPrice"] = FieldValue.Of((double)c.UnitPrice) },
+                        ct).ConfigureAwait(false);
+                    MarketBought++;
+                    break;
+                default:
+                    return;   // a server without the bazaar: nothing sent, nothing counted
+            }
+
+            IntentsSent++;
+        }
+
+        /// <summary>What the vendor should pay for a sale, as the bot can know it (the design's ⌊count × value × 20 %⌋): the report's estimate.</summary>
+        private long VendorPayout(MarketCommand c)
+        {
+            foreach (var s in _held)
+            {
+                if (s.Template == c.Template && s.Mk == c.Mk)
+                {
+                    return (long)Math.Floor(c.Quantity * _prices.ValueOf(s.Item, s.Mk) * 0.2d);
+                }
+            }
+
+            return 0;
+        }
+
+        /// <summary>
+        /// The bazaar's half of an inventory read: the stacks held, for the plan, and each buy seen collected — a win, logged with its listing and, in
+        /// the rush, listed again.
+        /// </summary>
+        private void SawInventory(List<HeldStack> held, List<WonListing> won)
+        {
+            if (!_trades)
+            {
+                return;
+            }
+
+            _held = held;
+            foreach (var w in won)
+            {
+                Interlocked.Increment(ref MarketWon);
+                _onWin?.Invoke(Index, w.Listing);
+                if (_rush && _rushTarget == 0)
+                {
+                    lock (_relistLock)
+                    {
+                        _relist.Enqueue(w);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Re-reads <c>/mine</c> on an <c>items</c> revision while the last answer named something, or — a rush bot — while it stands at its bazaar: the
+        /// browser's rule, panel open or not.
+        /// </summary>
+        private void PollMine(long tick)
+        {
+            var self = Client.Store?.Self;
+            if (!_trades || self == null || (_mine.Empty && !(_rush && _brain.Goal == Goal.Visiting)))
+            {
+                return;
+            }
+
+            if (_minePoll.TryBegin(_minePoll.Revision(self), tick))
+            {
+                _ = ReadMineAsync(tick);
+            }
+        }
+
+        private async Task ReadMineAsync(long tick)
+        {
+            var ok = false;
+            try
+            {
+                await ReadMineAsync().ConfigureAwait(false);
+                ok = true;
+            }
+            catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException or InvalidOperationException
+                                          or FormatException or OverflowException)
+            {
+                // Asked again after OwnerReadRetryTicks; the next revision asks anyway.
+            }
+            finally
+            {
+                _minePoll.End(ok, tick);
+            }
+        }
+
+        private async Task<MarketMine> ReadMineAsync()
+        {
+            var mine = MarketMine.Parse(await GetAsync(_mineUri).ConfigureAwait(false));
+            _mine = mine;
+            return mine;
+        }
+
+        /// <summary>The prices, read again when a minute old.</summary>
+        private async Task<MarketPrices> PricesAsync()
+        {
+            if (DateTime.UtcNow - _pricesAt < PricesFor)
+            {
+                return _prices;
+            }
+
+            var prices = MarketPrices.Parse(await GetAsync(_pricesUri).ConfigureAwait(false));
+            _prices = prices;
+            _pricesAt = DateTime.UtcNow;
+            return prices;
+        }
+
+        /// <summary>A GET with the bot's own token, as the browser's; a refusal throws, and the trade is planned again next visit.</summary>
+        private async Task<string> GetAsync(Uri uri)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
+            using var response = await JournalHttp.SendAsync(request).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            return await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+        }
+    }
+}
+
+/// <summary>The fleet's bazaar, summed (bazaar.md § 8).</summary>
+public struct MarketTotals
+{
+    public long Trades;
+    public long Listed;
+    public long Vendored;
+    public long VendorCredits;
+    public long Bought;
+    public long BuyLost;
+    public long Won;
+    public long Collected;
+
+    /// <summary>Refusals by reason, offset from <see cref="BotSwarm.MarketFirstReason"/>.</summary>
+    public long[] Refused;
+
+    /// <summary>Every refusal.</summary>
+    public readonly long RefusedTotal
+    {
+        get
+        {
+            long sum = 0;
+            foreach (var r in Refused ?? [])
+            {
+                sum += r;
+            }
+
+            return sum;
+        }
+    }
+}
