@@ -128,7 +128,7 @@ public sealed class BotBoard
             Record("reversals/bot-min p90", f.ReversalsPerBotMin?.P90 ?? 0d);
             Record("legs stuck/min", Of(f.LegsPerMin, "Stuck") + Of(f.LegsPerMin, "TravelStuck"));
             Record("hunts given up/min", Of(f.WhyPerMin, "HuntTimeout") + Of(f.WhyPerMin, "HuntOutOfRange"));
-            Record("market trades/min", Of(f.PerMin, "listed") + Of(f.PerMin, "vendored") + Of(f.PerMin, "bought"));
+            Record("market trades/min", Of(f.PerMin, "marketTrades"));
 
             var bots = new List<TracedBotView>(_bots.Count);
             foreach (var (_, bot) in _bots)
