@@ -1019,15 +1019,17 @@ internal sealed unsafe partial class PushReplication<TEvent>
                     }
 
                     var cold = bytes + layout.ColdOffset + (slot * layout.ColdStride);
-                    if (tick - *(uint*)(cold + layout.LastEventTickOffsetInColdEntry) <= (uint)gap)
-                    {
-                        continue;
-                    }
-
                     DecodeAt(a, cold + _positionOffset[a], out var px, out var py, out var pz);
                     if (CellX(px) != cx || CellY(py) != cy || (TEvent.Deep && CellZ(pz) != cz) || (!inside && !InHull(in n, px, py, pz))
                         || (_tagOffset[a] != 0 && !Sees(local, *(uint*)(cold + _tagOffset[a]))))
                     {
+                        continue;
+                    }
+
+                    // The event step's enter, metered all the same: the fill is paced by what it will enter (15 § 4.2, DeliverCell).
+                    if (tick - *(uint*)(cold + layout.LastEventTickOffsetInColdEntry) <= (uint)gap)
+                    {
+                        scratch.FillSpent += MeterEnter(a, (nint)block, slot);
                         continue;
                     }
 

@@ -51,6 +51,9 @@ internal struct FrameCounters
     /// <summary>Frames refused for exceeding the ceiling.</summary>
     public long OversizeSkips;
 
+    /// <summary>The largest owed set (15 § 4.3) a frame of the chunk committed.</summary>
+    public int OwedLargest;
+
     /// <summary><c>SELF</c> blocks published (11 § 2).</summary>
     public long SelfBlocks;
 
@@ -1319,6 +1322,10 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
 
         _lastChunkCount = 0;
 
+        // The previous stage's largest owed set, published for an off-tick reader: every chunk of it has flushed, and nothing writes it until this tick's do.
+        Volatile.Write(ref _owedLargest, _owedLargestStage);
+        _owedLargestStage = 0;
+
         // Before the early return, because the sweep is about sessions that are NOT being served: one whose profile reaches nothing this tick still has to
         // be degraded, closed for a skip run, or closed for silence.
         var sweepFrom = prologueFrom != 0L ? Stopwatch.GetTimestamp() : 0L;
@@ -1479,6 +1486,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         Add(ref _entersEmitted, counters.EntersEmitted);
         Add(ref _leavesEmitted, counters.LeavesEmitted);
         Add(ref _oversizeSkips, counters.OversizeSkips);
+        RaiseTo(ref _owedLargestStage, counters.OwedLargest);
         Add(ref SelfBlocks, counters.SelfBlocks);
         Add(ref AcksWritten, counters.AcksWritten);
         Add(ref AcksOverflowed, counters.AcksOverflowed);
@@ -1515,6 +1523,22 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         }
     }
 
+
+    // A maximum across the workers' flushes: a compare-exchange loop, which runs once per worker per tick and almost never retries.
+    private static void RaiseTo(ref int target, int value)
+    {
+        var current = Volatile.Read(ref target);
+        while (value > current)
+        {
+            var seen = Interlocked.CompareExchange(ref target, value, current);
+            if (seen == current)
+            {
+                return;
+            }
+
+            current = seen;
+        }
+    }
 
     private static void Add(ref long target, long value)
     {

@@ -1409,20 +1409,26 @@
     the slot's state of the frame that sends it, so a newer change replaces an older one and is never queued behind it
   invariant ∀ e ∈ owed(s): s's committed geometry or keys hold e. A leave of an owed Enter is dropped and cancels it (the client never had e); an update
     of an owed Enter is dropped (e goes whole); a leave of an owed Update cancels it and goes; an enter of e cancels e's owed record
-  invariant a frame takes, in order: every leave and the controlled entity's records (its owed record first, whatever its age); owed records oldest first,
-    the first always; this frame's updates; its enters — past the first record that does not fit, every later one is owed. A deferral only ages forward,
-    so no owed record starves
+  invariant a frame takes, in order: every leave and the controlled entity's records (its owed record first, whatever its age); the owed enters oldest
+    first; this frame's enters; the owed updates oldest first; this frame's updates — the first record taken always goes, and past the first that does
+    not fit every later one is owed. Enters go ahead of updates because an entity the client lacks is worse than one it holds stale, and they are few (a
+    fill takes at most half the frame): taken in plain age order, a world whose movers outrun the frame kept every enter waiting behind their updates,
+    the owed enters passed the cap and the session RESET every few seconds, never filled (the SWG god camera). A deferral only ages forward within
+    its kind, so no owed record starves
   invariant an owed record names its entity's slot, and its identity: a slot that no longer holds it — a migration while its update was deferred (SUB-22)
     — is found again through the entity; only an entity gone, or no longer that netId, is lost
   invariant cell delivery (Sphere, World, ClientRegion) and the group fill take at most half the frame, less the bytes of the ENTERS s owes: a fill is
-    paced by bytes as by the enter count, and a fill that spilled stops until its overshoot drains. Owed updates are not counted — they merge and need not
+    paced by bytes as by the enter count, and a fill that spilled stops until its overshoot drains. A delivered cell's entity whose enter the event step
+    emits (it had an event since s's last frame) is metered all the same: a fill paced by the rest walks a world of movers thousands of cells a frame
+    and owes their enters past the cap. Owed updates are not counted — they merge and need not
     drain while their entities keep changing — so they never hold a fill, or a completion, back. A key whose completion was withheld completes in the
     first frame that owes no enter, whatever the budgets left (GroupSessionState.HeldAll); a view whose every cell is delivered is complete, budgets spent
     or not
   invariant owed(s) is pending until the frame is published, committed with it, kept by a skip, emptied by a published RESET — an events-only one too; a
-    frame that GROWS it past 4 × EnterBudgetPerFrame records, or that meets an owed entity found nowhere, is abandoned and the next is a RESET
-    (FrameAssembler.OwedResets). A RESET frame never overflows — it is the repair, and a cell heavier than the cap, delivered whole, owes more on the
-    RESET and the frames that drain it
+    frame that GROWS its ENTERS past 4 × EnterBudgetPerFrame (FrameAssembler.OwedOverflows), or that meets an owed entity found nowhere
+    (FrameAssembler.OwedLosts), is abandoned and the next is a RESET. Owed updates are not capped: one per held entity at most, merged, and a RESET
+    does not lower the rate they come at — it throws the fill away and starts it again. A RESET frame never overflows — it is the repair, and a cell
+    heavier than the cap, delivered whole, owes more on the RESET and the frames that drain it
   never publish GROUP_COMPLETE, VIEW_COMPLETE or SOURCE_APPLIED in a frame after which s owes an enter: a completion says every member is in the store —
     a SOURCE_APPLIED for a key already complete included (GroupRequests.Emit holds it). The gate is global (C3): an already complete view drops
     VIEW_COMPLETE for the frames a burst's enters are owed, and sets it again once they are not
@@ -1432,7 +1438,7 @@
   scope: FrameAssembler.FitEntities, FrameAssembler.CommitOwed, FrameAssembler.FillAllowanceOf, FrameAssembler.FrameLimitOf, FrameAssembler.AssemblePush,
     SessionFrameState.Owed, SessionFrameState.OwesEnter, FrameWorkerScratch.FillAllowance, FrameWorkerScratch.PendingOwed, ArchetypeEncodePlan.EnterBytes,
     ArchetypeEncodePlan.StateBytes, PushReplication.Room, PushReplication.MeterEnter, PushReplication.WithholdCompletions, FrameAssembler.TryHeldNetId,
-    FrameAssembler.Located, GroupSessionState.HeldAll, GroupRequests.Emit, ProjectionCompiler, SessionTable.FrameBytesOf
+    FrameAssembler.Located, FrameAssembler.CarryOwed, GroupSessionState.HeldAll, GroupRequests.Emit, ProjectionCompiler, SessionTable.FrameBytesOf
   on_violation: silent. A frame refused for its size is retried larger, then a RESET refills it under the same budget and is refused again — the session
     stalls until it is closed with 1013, reconnects and stalls again (#1408). A record owed and then dropped is an entity the client never sees, or a value
     it keeps for ever.
@@ -1445,7 +1451,10 @@
     fill, a session's own limit, SUB-26, an owed entity coming under control, the Start refusal at half the record, the meter over wide sections),
     PushGroupRequestTests.AnAnswerWaitsWhileAnEnterIsOwed, PushOracleTests.AClientsWorldIsTheServersUnderAFrameAFewRecordsWide,
     PushOracleTests.ABandedViewUnderAFrameAFewRecordsWideIsCarriedWithoutAReset (red with the slot alone: a migrated entity's deferred update),
-    PushOracleTests.ClientRegionsUnderAFrameAFewRecordsWideConverge, PushGroupTests.SessionsHoldExactlyTheTownsTheyMeetUnderAFrameAFewRecordsWide;
+    PushOracleTests.ClientRegionsUnderAFrameAFewRecordsWideConverge, PushGroupTests.SessionsHoldExactlyTheTownsTheyMeetUnderAFrameAFewRecordsWide,
+    PushWorldChurnTests.AWholeWorldOfMoversOutrunningTheFrameFillsWithoutAReset (red on main: the god camera's RESET loop; red with the cap counting
+    updates, or with the owed records carried in plain age order) and PushWorldChurnTests.AWorldFillPacesTheMoversOfTheCellsItDelivers (World and
+    ClientRegion; red with the event-owned entities of a delivered cell unmetered);
     mutant committed: PushFrameBudgetTests.Mutant_WithoutTheFrameBudgetABurstStalls. Mutants run red: a leave of an owed enter kept, the owed set not
     committed, completion not withheld, the allowance ignored, or counting owed updates, the owed set flushed newest first, an owed entity held for a
     command, the refusal removed, the meter under-counting an enter, an overflow on a frame that does not grow the set, no identity fallback, no HeldAll

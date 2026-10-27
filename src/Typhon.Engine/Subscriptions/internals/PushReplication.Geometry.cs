@@ -3795,17 +3795,20 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                     }
 
                     var cold = bytes + layout.ColdOffset + (slot * layout.ColdStride);
-                    // Owned by the push step (or, after missed frames, by the log's replay): it had an event since the session's last frame.
-                    if (tick - *(uint*)(cold + layout.LastEventTickOffsetInColdEntry) <= (uint)gap)
-                    {
-                        continue;
-                    }
-
                     decoded++;
                     DecodeAt(a, cold + _positionOffset[a], out var px, out var py, out var pz);
                     if (CellX(px) != cx || CellY(py) != cy || (TEvent.Deep && CellZ(pz) != cz) || (!everywhere && !Within(n, px, py, pz))
                         || (_tagOffset[a] != 0 && !Sees(local, *(uint*)(cold + _tagOffset[a]))))
                     {
+                        continue;
+                    }
+
+                    // Owned by the push step (or, after missed frames, by the log's replay): it had an event since the session's last frame, and the event
+                    // emits its enter. It is metered all the same (15 § 4.2): where most of a world moves, the movers of the cells delivered are most of the
+                    // fill, and a fill paced only by the rest would walk thousands of cells a frame and owe their movers past the cap.
+                    if (tick - *(uint*)(cold + layout.LastEventTickOffsetInColdEntry) <= (uint)gap)
+                    {
+                        scratch.FillSpent += MeterEnter(a, (nint)block, slot);
                         continue;
                     }
 

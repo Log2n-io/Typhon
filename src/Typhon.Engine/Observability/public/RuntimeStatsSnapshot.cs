@@ -139,6 +139,31 @@ public sealed class RuntimeStatsSnapshot
     public FrameSkipCounts FramesSkipped { get; init; }
 
     /// <summary>
+    /// Frames given up for a <c>RESET</c> because a session's frames owed more enters than their cap — four enter budgets. <b>Cumulative.</b>
+    /// </summary>
+    /// <remarks>
+    /// <b>Each one is a whole view sent again.</b> The client's store is cleared and refilled from nothing, so a session that keeps producing these never
+    /// finishes loading — the SWG god camera's symptom, once. Read with <see cref="OwedLosts"/> and <see cref="LogResets"/>: the three are the
+    /// engine's reasons for a RESET a client did not ask for.
+    /// </remarks>
+    public long OwedOverflows { get; init; }
+
+    /// <summary>Frames given up for a <c>RESET</c> because an entity a session was owed could be found nowhere. <b>Cumulative.</b></summary>
+    public long OwedLosts { get; init; }
+
+    /// <summary>
+    /// The largest set of records a session's frame left owed in the last frame stage — what a session whose updates outrun its frame carries round robin.
+    /// A gauge; 0 while every frame fits.
+    /// </summary>
+    public int OwedLargest { get; init; }
+
+    /// <summary>
+    /// Frames sent as a <c>RESET</c> because the session missed more ticks than the push log keeps — a client whose acknowledgements lag, or a link that
+    /// does not take its frames. <b>Cumulative</b>, over every served realm.
+    /// </summary>
+    public long LogResets { get; init; }
+
+    /// <summary>
     /// One row per <b>registered</b> realm, in registration order: what it is, what it is doing, and what its sessions have cost.
     /// </summary>
     /// <remarks>

@@ -772,6 +772,7 @@ class PushFrameBudgetTests : TestBase<PushFrameBudgetTests>
         Assert.Multiple(() =>
         {
             Assert.That(harness.Assembler.OwedResets, Is.EqualTo(1), "the owed set passed its cap once; the RESET's paced refill never again");
+            Assert.That(harness.Assembler.OwedOverflows, Is.EqualTo(1), "counted as an overflow, not a lost entity");
             Assert.That(harness.Replica(session).NetIds(harness.PlanIndex(nameof(GroupBuilding))), Has.Length.EqualTo(410));
             Assert.That(harness.StateOf(session).OwedCount, Is.Zero);
         });

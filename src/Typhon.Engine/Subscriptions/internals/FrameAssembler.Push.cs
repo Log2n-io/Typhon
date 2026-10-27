@@ -1453,7 +1453,7 @@ internal sealed unsafe partial class FrameAssembler
         if (fit == FitOutcome.Overflow || owedLost)
         {
             // More owed than the cap, or an owed entity found nowhere: a RESET is the repair. Nothing of this frame is committed (SUB-03).
-            Interlocked.Increment(ref _owedResets);
+            Interlocked.Increment(ref owedLost ? ref _owedLosts : ref _owedOverflows);
             state.PendingReset = true;
             send.AbandonFrame(sequence, _skipsCount);
             ReturnIfValid(recycled);
@@ -1491,6 +1491,7 @@ internal sealed unsafe partial class FrameAssembler
             if (fit == FitOutcome.Fitted)
             {
                 CommitOwed(state, scratch);
+                counters.OwedLargest = Math.Max(counters.OwedLargest, state.OwedCount);
                 if (push.Shadow)
                 {
                     push.ShadowOwe(session, state.Owed, state.OwedCount);
@@ -1606,6 +1607,7 @@ internal sealed unsafe partial class FrameAssembler
         if (fit == FitOutcome.Fitted)
         {
             CommitOwed(state, scratch);
+            counters.OwedLargest = Math.Max(counters.OwedLargest, state.OwedCount);
         }
         else if (reset)
         {

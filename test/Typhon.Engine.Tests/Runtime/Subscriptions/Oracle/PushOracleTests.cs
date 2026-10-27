@@ -79,6 +79,12 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 15150 + skipPercent, [skipPercent, 0],
             nameof(PushOracleTests), worldObserver: world, bigWorld: true, frameBytes: 512);
 
+        // A World fill paced by what it will enter owes little of its own, so the World arm's world walks: its movers' updates are what the frame binds.
+        if (world)
+        {
+            oracle.Workload.WalkStrideM = 1.5f;
+        }
+
         for (var i = 0; i < GateTicks; i++)
         {
             oracle.Step();
