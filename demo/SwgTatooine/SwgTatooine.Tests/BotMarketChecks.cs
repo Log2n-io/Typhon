@@ -4,6 +4,7 @@ using NUnit.Framework;
 using SwgTatooine.Bots;
 using SwgTatooine.Server;
 using SwgTatooine.Server.Accounts;
+using Typhon.Engine;
 using Typhon.Protocol;
 
 namespace SwgTatooine.Tests;
@@ -113,24 +114,33 @@ public sealed class BotMarketChecks
         });
     }
 
-    /// <summary>A bot does not invent a price: what the prices do not value is neither listed nor bought; the vendor still takes an unvalued material.</summary>
+    /// <summary>
+    /// What the board has not priced yet is priced at the model's value (a fresh board prices nothing held until somebody lists); what has no value at
+    /// all — an item the bot cannot name — is neither listed nor bought; the vendor takes materials either way.
+    /// </summary>
     [Test]
-    public void WhatIsNotPriced_IsNeitherListedNorBought_ButIsVendored()
+    public void WhatTheBoardDoesNotPrice_IsPricedAtTheModel_AndWhatHasNoValue_IsNeitherListedNorBought()
     {
         var rng = 7u;
-        var held = new List<HeldStack> { Core("core_propulsion", 4) };
+        var held = new List<HeldStack> { Core("core_propulsion", 4), new(0, "unknown", MarketCategory.Core, 2, 1) };
         for (var i = 0; i < 20; i++)
         {
             held.Add(Material("mat_venom", 4, 5));
         }
 
         var plan = MarketPlan.Plan(held, MarketMine.None, Prices, ref rng, listMaterial: false, null);
-        var row = new BrowseRow(1, 1, "core_propulsion", MarketCategory.Core, 4, 1, 10, 10, 2);
+        var lists = plan.Where(c => c.Step == MarketStep.List).ToList();
+        BrowseRow Row(ulong id, string item) => new(id, 1, item, MarketCategory.Core, 4, 1, 10, 10, 2);
         Assert.Multiple(() =>
         {
-            Assert.That(plan.Where(c => c.Step == MarketStep.List), Is.Empty, "an unpriced core was listed");
-            Assert.That(plan.Count(c => c.Step == MarketStep.Vendor), Is.EqualTo(held.Count - MarketPlan.KeepStacks), "an unpriced material was kept");
-            Assert.That(MarketPlan.ChooseBuy([row], Prices, 4, 1_000_000, []), Is.Null, "an unpriced core was bought");
+            Assert.That(MarketCatalog.ModelValue("core_propulsion", 4), Is.EqualTo(5_950d));
+            Assert.That(MarketCatalog.ModelValue("mat_venom", 5), Is.EqualTo(11.4d));
+            Assert.That(MarketCatalog.ModelValue("crate", 1), Is.Zero);
+            Assert.That(lists.Select(c => c.Template), Is.EqualTo(new[] { MarketCatalog.TemplateOf("core_propulsion") }), "not the core alone");
+            Assert.That(lists.Single().UnitPrice, Is.InRange((long)(5_950 * MarketPlan.ListLow), (long)(5_950 * MarketPlan.ListHigh) + 1), "not at the model's value");
+            Assert.That(plan.Count(c => c.Step == MarketStep.Vendor), Is.EqualTo(held.Count - 1 - MarketPlan.KeepStacks), "a material was kept");
+            Assert.That(MarketPlan.ChooseBuy([Row(1, "unknown")], Prices, 4, 1_000_000, []), Is.Null, "an item with no value was bought");
+            Assert.That(MarketPlan.ChooseBuy([Row(1, "unknown"), Row(2, "core_propulsion")], Prices, 4, 1_000_000, [])?.Id, Is.EqualTo(2UL));
         });
     }
 
@@ -229,7 +239,7 @@ public sealed class BotMarketChecks
             Assert.That(MarketMine.Parse("""{"listed":[],"reserved":[],"caps":{}}""").Empty, Is.True);
             Assert.That(prices.ValueOf("core_armor", 2), Is.EqualTo(1549d));
             Assert.That(prices.ValueOf("mat_hide", 1), Is.EqualTo(1.7d));
-            Assert.That(prices.ValueOf("mat_hide", 2), Is.Zero, "an (item, Mk) the answer did not name has a value");
+            Assert.That(prices.ValueOf("mat_hide", 2), Is.EqualTo(2.8d), "an (item, Mk) the answer did not name is not at the model's value");
             Assert.That(page, Is.EqualTo(new[]
             {
                 new BrowseRow(31, 1, "addon_armor", MarketCategory.Addon, 3, 2, 2700, 5400, 12),
@@ -366,6 +376,173 @@ internal sealed class BotMarketCatalogChecks : ServedChecks
                     Throws.Nothing,
                     $"{c.Step} does not encode as {name}");
             }
+        });
+    }
+}
+
+/// <summary>
+/// The bots' trade against the real desk (bazaar.md § 8, the in-process half of BZ-16): bots with full inventories at a bazaar read the server's own answers
+/// (<c>/swg/inventory</c>, <c>/mine</c>, <c>/prices</c>, a browse page) with the bots' parsers, plan with <see cref="MarketPlan"/> and send the plan as
+/// <see cref="BotSwarm.Encode"/> encodes it, at the commands' rate. Nothing is refused, the vendor takes them down to their floor, the cores are listed at
+/// value × U(0.9, 1.3), a rush buyer wins a rush seller's 1 cr listing and sees it collected, and the three audits stay OK.
+/// </summary>
+[Category("Integration")]
+[TestFixture]
+[NonParallelizable]
+internal sealed class BotMarketDeskChecks : ServedChecks
+{
+    private sealed record Trader(FakeLink Link, EntityId Character)
+    {
+        public long Key => unchecked((long)Character.RawValue);
+    }
+
+    private Trader LogIn(TatooineSim sim, ulong account, (float X, float Z) at, long bindings)
+    {
+        var link = Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(account));
+        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= bindings, "the avatar to be spawned");
+        Harness.Ticks(2);
+        Worlds.Park(sim, link.Session, at.X, at.Z);
+        Assert.That(CharacterStore.TryFind(sim.Dbe, EntityId.FromRawValue(account), out var character, out _), Is.True, "the account has no character");
+        SessionHarness.Until(() => Ledgers.TryWallet(sim, character, out _), "the wallet to be opened");
+        Harness.Ticks(2);
+        return new Trader(link, character);
+    }
+
+    /// <summary>Two cores, then materials (Mk I-IV, five units each) until the inventory's 30 slots are full: a bot back from a day's hunting.</summary>
+    private static void Fill(TatooineSim sim, Trader t)
+    {
+        sim.Bridge.StageTransfer(ItemLedger.World, t.Key, ItemCatalog.CoreArmor, 2, 1, ItemMoveKind.Kill, 1);
+        sim.Bridge.StageTransfer(ItemLedger.World, t.Key, ItemCatalog.AddonWeapon, 2, 1, ItemMoveKind.Kill, 1);
+        var n = 2;
+        for (var template = ItemCatalog.Metal; template <= ItemCatalog.Venom && n < ItemLedger.Slots; template++)
+        {
+            for (byte mk = 1; mk <= 4 && n < ItemLedger.Slots; mk++, n++)
+            {
+                sim.Bridge.StageTransfer(ItemLedger.World, t.Key, template, mk, 5, ItemMoveKind.Kill, 1);
+            }
+        }
+    }
+
+    /// <summary>What the bot reads before it plans: its stacks, its board, the prices — the server's own answers through the bots' parsers.</summary>
+    private static (List<HeldStack> Held, MarketMine Mine, MarketPrices Prices) Read(TatooineSim sim, Trader t)
+    {
+        var held = new List<HeldStack>();
+        InventoryView.Parse(ItemEndpoints.InventoryJson(sim.Dbe, t.Character), InventoryView.None, false, out _, out _, held, null);
+        var board = sim.Bridge.MarketBoard;
+        return (held, MarketMine.Parse(MarketEndpoints.MineJson(sim.Dbe, t.Character, board)), MarketPrices.Parse(MarketEndpoints.PricesJson(board)));
+    }
+
+    /// <summary>Sends a plan as a bot does: each command as <see cref="BotSwarm.Encode"/> builds it, two a second.</summary>
+    private void Send(Trader t, List<MarketCommand> plan)
+    {
+        foreach (var c in plan)
+        {
+            var (name, values) = BotSwarm.Encode(c);
+            t.Link.SendCommand(name, values);
+            Harness.Ticks((Worlds.ServedHz / 2) + 1);
+        }
+
+        Harness.Ticks(Worlds.ServedHz);
+    }
+
+    [Test]
+    [CancelAfter(240_000)]
+    public void BotsWithFullInventories_ListVendorAndBuy_AgainstTheRealDesk_AndTheAuditsStayOk()
+    {
+        var config = Worlds.Served(Dir);
+        config.WorkerCount = 1;
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+        Harness = new SessionHarness(sim);
+        Assert.That(sim.Index.Bazaars, Is.Not.Empty, "the premise: the world has a bazaar");
+        var home = sim.Index.Bazaars[0];
+        var sellers = new[]
+        {
+            LogIn(sim, 0x9100, (home.X + 2.5f, home.Z), 1),
+            LogIn(sim, 0x9101, (home.X + 2.5f, home.Z + 0.6f), 2),
+        };
+        var buyer = LogIn(sim, 0x9102, (home.X + 2.5f, home.Z - 0.6f), 3);
+        foreach (var s in sellers)
+        {
+            Fill(sim, s);
+        }
+
+        SessionHarness.Until(() => sellers.All(s => Items.Stacks(sim, s.Character).Count == ItemLedger.Slots), "the inventories to be full");
+        Harness.Ticks(2);
+
+        // Two visits each, as the brain makes them. The board has never been published with these cores on it — it prices what is held only when a
+        // listing changes — so the first visit lists them at the model's value; the second has nothing left to list or sell.
+        var rng = 7u;
+        var vendored = 0;
+        var listed = new List<MarketCommand>();
+        for (var visit = 0; visit < 2; visit++)
+        {
+            foreach (var s in sellers)
+            {
+                var (held, mine, prices) = Read(sim, s);
+                var plan = MarketPlan.Plan(held, mine, prices, ref rng, listMaterial: false, buy: null);
+                vendored += plan.Count(c => c.Step == MarketStep.Vendor);
+                // Each listing kept with its seller in the (unused) listing field, to find it on the board.
+                listed.AddRange(plan.Where(c => c.Step == MarketStep.List).Select(c => c with { Listing = (ulong)s.Key }));
+                Send(s, plan);
+            }
+        }
+
+        SessionHarness.Until(() => Market.Listings(sim).Count >= listed.Count, "the listings");
+        var (_, _, valued) = Read(sim, sellers[0]);
+
+        // The rush: a seller keeps one 1 cr listing up, a buyer reads the city's first page and races for the cheapest.
+        var rushSeller = sellers[1];
+        var (rushHeld, rushMine, _) = Read(sim, rushSeller);
+        Send(rushSeller, MarketPlan.RushSell(rushHeld, rushMine.Listed, rushMine.Listed + 1, 4));
+        var query = new MarketQuery { City = home.Region, Realm = home.Realm, Sort = "price" };
+        SessionHarness.Until(
+            () => MarketJson.Browse(MarketEndpoints.BrowseJson(sim.Bridge.MarketBoard, query)).Any(r => r.Unit == 1),
+            "the 1 cr listing on the board");
+        var page = MarketJson.Browse(MarketEndpoints.BrowseJson(sim.Bridge.MarketBoard, query));
+        var before = InventoryView.Parse(ItemEndpoints.InventoryJson(sim.Dbe, buyer.Character), InventoryView.None, false, out _, out _);
+        var buys = MarketPlan.RushBuy(page, [], [], 1);
+        Send(buyer, buys);
+        var won = new List<WonListing>();
+        SessionHarness.Until(
+            () =>
+            {
+                won.Clear();
+                InventoryView.Parse(ItemEndpoints.InventoryJson(sim.Dbe, buyer.Character), before, true, out _, out _, null, won);
+                return won.Count > 0;
+            },
+            "the buy to be collected");
+
+        var (ok, why) = Market.Audits(sim);
+        var rows = Ledgers.Rows(sim);
+        Assert.Multiple(() =>
+        {
+            foreach (var t in sellers.Append(buyer))
+            {
+                Assert.That(Ledgers.Refusals(t.Link), Is.Empty, $"character {t.Key}'s commands were refused");
+            }
+
+            foreach (var s in sellers)
+            {
+                Assert.That(Items.Stacks(sim, s.Character).Count, Is.LessThanOrEqualTo(MarketPlan.KeepStacks), "the vendor did not take a bot to its floor");
+            }
+
+            Assert.That(vendored, Is.GreaterThanOrEqualTo(2 * (ItemLedger.Slots - MarketPlan.KeepStacks - 2)), "the premise: the plans vendored");
+            Assert.That(rows.Count(r => r.Kind == TransferKind.Vendor), Is.EqualTo(vendored), "not one vendor payment a sale");
+            Assert.That(listed, Has.Count.EqualTo(4), "the cores and add-ons were not all listed");
+            foreach (var c in listed)
+            {
+                var item = MarketCatalog.TemplateOf("core_armor") == c.Template ? "core_armor" : "addon_weapon";
+                var value = valued.ValueOf(item, c.Mk);
+                Assert.That(c.UnitPrice, Is.InRange((long)(value * MarketPlan.ListLow), (long)System.Math.Ceiling(value * MarketPlan.ListHigh)), $"{item} priced off its value");
+                Assert.That(Market.Listings(sim).Values.Any(l => l.Seller == (long)c.Listing && l.Template == c.Template && l.UnitPrice == c.UnitPrice), Is.True,
+                    $"{item} at {c.UnitPrice} is not on the board");
+            }
+
+            Assert.That(buys, Has.Count.EqualTo(1));
+            Assert.That(won.Select(w => w.Listing), Is.EqualTo(buys.Select(b => b.Listing)), "the buy collected is not the listing bought");
+            Assert.That(rows.Count(r => r.Kind == TransferKind.Sale && (ulong)r.Ref == buys[0].Listing), Is.EqualTo(1), "not one sale of it");
+            Assert.That(ok, Is.True, why);
         });
     }
 }

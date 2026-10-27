@@ -43,8 +43,8 @@ public readonly record struct MarketCommand(MarketStep Step, ushort Template, in
 /// a drop from being lost. A buy, when the visit rolled one, comes last.
 /// </para>
 /// <para>
-/// <b>An item the prices do not value is neither listed nor bought</b>: a bot does not invent a price. The vendor prices its own sale, so a material
-/// with no value read is still sold — by Mk, the lowest first, which is the value's order.
+/// <b>An item with no value is neither listed nor bought</b>: a bot does not invent a price. The value is the board's, else the model's
+/// (<see cref="MarketPrices.ValueOf"/>). The vendor prices its own sale, so a material is sold either way — the cheapest unit first.
 /// </para>
 /// </remarks>
 public static class MarketPlan

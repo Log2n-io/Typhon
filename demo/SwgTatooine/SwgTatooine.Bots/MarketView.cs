@@ -47,6 +47,30 @@ public static class MarketCatalog
         return i < 0 ? (ushort)0 : (ushort)(i + 1);
     }
 
+    /// <summary>The balance model's value of a material unit by Mk (<c>MarketValues</c>, bazaar.md § 2.3), credits.</summary>
+    private static readonly double[] MaterialValue = [0d, 1.7d, 2.8d, 4.5d, 7.2d, 11.4d];
+
+    /// <summary>... of a core by Mk; an add-on's is a core's [EST].</summary>
+    private static readonly double[] CoreValue = [0d, 726d, 1_549d, 3_099d, 5_950d, 11_106d];
+
+    /// <summary>
+    /// The model's market value of one unit, credits — what <c>/swg/market/prices</c> says of any (item, Mk) it names — or 0 for an item without one.
+    /// </summary>
+    /// <remarks>
+    /// <b>The bot's copy of <c>MarketValues</c>, for what the prices do not name yet.</b> The board prices a held (item, Mk) only when it is next
+    /// published, and it is published on a listing's change or a sale: on a board nobody has listed on, nothing a bot holds is priced, and a bot that
+    /// waited for a price would never list the first core. The server's answer is believed first.
+    /// </remarks>
+    public static double ModelValue(string asset, int mk)
+    {
+        if (asset == null || mk is < 1 or > 5 || TemplateOf(asset) == 0)
+        {
+            return 0d;
+        }
+
+        return asset.StartsWith("mat_", StringComparison.Ordinal) ? MaterialValue[mk] : CoreValue[mk];
+    }
+
     /// <summary>A row's <c>template</c> when the answer carries one, else its asset's.</summary>
     public static ushort TemplateOf(JsonElement row, string asset) =>
         row.TryGetProperty("template", out var t) && t.ValueKind == JsonValueKind.Number ? t.GetUInt16() : TemplateOf(asset);
@@ -147,8 +171,11 @@ public sealed class MarketPrices
     /// <summary>Entries read.</summary>
     public int Count => _value.Count;
 
-    /// <summary>The market value of one unit, credits; 0 for an (item, Mk) the answer did not name — which a bot neither lists nor buys.</summary>
-    public double ValueOf(string item, int mk) => item != null && _value.TryGetValue((item, mk), out var v) ? v : 0d;
+    /// <summary>
+    /// The market value of one unit, credits: the answer's, or for an (item, Mk) it did not name the model's (<see cref="MarketCatalog.ModelValue"/>); 0 for
+    /// an item that has none — which a bot neither lists nor buys.
+    /// </summary>
+    public double ValueOf(string item, int mk) => item != null && _value.TryGetValue((item, mk), out var v) ? v : MarketCatalog.ModelValue(item, mk);
 
     /// <summary>Sets one value: a test's prices, or a parse's.</summary>
     public MarketPrices With(string item, int mk, double value)
