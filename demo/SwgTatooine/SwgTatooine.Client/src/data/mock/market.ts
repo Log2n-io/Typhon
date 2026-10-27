@@ -38,9 +38,9 @@ export const CONTESTED_NAME = 'Armor Core';
 /** The mock character's starting credits. */
 export const MOCK_CREDITS = 5000;
 
-/** Milli-credits a unit, by Mk I-V (`balance_model.py` `mat_value`, `core_value`; the cores' middle Mks interpolated here). */
+/** Milli-credits a unit, by Mk I-V: the server's `MarketValues` (`balance_model.py` `mat_value`, `core_value`); an add-on is a core. */
 const MATERIAL_VALUE = [1700, 2800, 4500, 7200, 11_400];
-const CORE_VALUE = [726_000, 1_435_000, 2_838_000, 5_612_000, 11_106_000];
+const CORE_VALUE = [726_000, 1_549_000, 3_099_000, 5_950_000, 11_106_000];
 
 const SELLERS = ['Kessa Dorn', 'Tobin Vax', 'Ree Valo', 'Jask', 'Mira Sunn', 'Old Pell', 'Dax Rook', 'Naro'];
 const RIVAL = 'Vex Talon';
@@ -50,6 +50,8 @@ const LISTED = 1;
 const SOLD = 2;
 const RETURNED = 3;
 const TICK_MS = 50;
+/** A listing's life, world ticks: `TatooineData.ListingLifeHours` at 20 Hz. */
+const LIFE_TICKS = 24 * 3600 * 20;
 
 interface Listing {
   readonly id: string;
@@ -142,7 +144,7 @@ export class MockMarket {
         answer = this.mine();
         break;
       case 'swg/market/prices':
-        answer = { prices: this.prices() };
+        answer = { v: this.version, prices: this.prices() };
         break;
       case 'swg/wallet':
         answer = { open: true, credits: this.credits, transfers: [...this.transfers] };
@@ -360,19 +362,9 @@ export class MockMarket {
       page,
       pages,
       listings: rows.slice((page - 1) * BROWSE_PAGE, page * BROWSE_PAGE).map((l) => ({
-        id: l.id,
-        city: l.city,
-        item: l.def.item,
-        name: l.def.name,
-        category: l.def.category,
-        template: l.def.template,
-        mk: l.mk,
-        qty: l.qty,
-        unit: l.unit,
-        total: l.unit * l.qty,
+        ...goods(l, now),
         seller: l.seller,
         sellerName: l.sellerName,
-        ageS: Math.floor((now - l.listedMs) / 1000),
       })),
     };
   }
@@ -381,27 +373,15 @@ export class MockMarket {
     const now = this.now();
     return {
       listed: this.mineIn(LISTED, SELF_ID).map((l) => ({
-        id: l.id,
-        city: l.city,
-        item: l.def.item,
-        name: l.def.name,
-        template: l.def.template,
-        mk: l.mk,
-        qty: l.qty,
-        unit: l.unit,
-        total: l.unit * l.qty,
-        ageS: Math.floor((now - l.listedMs) / 1000),
+        ...goods(l, now),
+        fee: fees(l.unit * l.qty).listFee,
+        listedTick: Math.floor(l.listedMs / TICK_MS),
+        expireTick: Math.floor(l.listedMs / TICK_MS) + LIFE_TICKS,
       })),
       reserved: [...this.listings.values()]
         .filter((l) => l.state !== LISTED && l.collector === SELF_ID)
         .map((l) => ({
-          id: l.id,
-          city: l.city,
-          item: l.def.item,
-          name: l.def.name,
-          mk: l.mk,
-          qty: l.qty,
-          unit: l.unit,
+          ...goods(l, now),
           state: l.state === SOLD ? 'sold' : 'returned',
           closedTick: l.closedTick,
         })),
@@ -415,15 +395,20 @@ export class MockMarket {
       for (let mk = 1; mk <= 5; mk++) {
         const units = [...this.listings.values()].filter((l) => l.state === LISTED && l.def === def && l.mk === mk);
         const value = Math.floor(mockValue(def, mk) / 1000);
+        const lowest = units.length === 0 ? 0 : Math.min(...units.map((l) => l.unit));
         out.push({
           item: def.item,
+          name: def.name,
+          category: def.category,
           template: def.template,
           mk,
           value,
           vendor: vendorMilli(def, mk),
           listed: units.reduce((n, l) => n + l.qty, 0),
-          lowest: units.length === 0 ? 0 : Math.min(...units.map((l) => l.unit)),
+          lowest,
           median: units.length === 0 ? 0 : Math.max(1, value),
+          min: lowest,
+          max: units.length === 0 ? 0 : Math.max(...units.map((l) => l.unit)),
           sales: 0,
         });
       }
@@ -495,6 +480,25 @@ export class MockMarket {
   private tick(): number {
     return Math.floor(this.now() / TICK_MS);
   }
+}
+
+/** A listing's goods as every answer writes them (§ 5): ids as decimal strings, the city named, the mock's one realm. */
+function goods(l: Listing, nowMs: number): Record<string, unknown> {
+  return {
+    id: l.id,
+    city: l.city,
+    cityName: CITIES[l.city - 1]?.name ?? '',
+    realm: 0,
+    item: l.def.item,
+    name: l.def.name,
+    category: l.def.category,
+    template: l.def.template,
+    mk: l.mk,
+    qty: l.qty,
+    unit: l.unit,
+    total: l.unit * l.qty,
+    ageS: Math.floor((nowMs - l.listedMs) / 1000),
+  };
 }
 
 /** What the vendor pays a unit, milli-credits: 20 % of its value (`TatooineData.VendorBuysPerMille`). */

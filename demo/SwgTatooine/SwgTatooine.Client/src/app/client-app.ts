@@ -3985,7 +3985,7 @@ export class ClientApp {
       }
     }
 
-    market.setHere(here);
+    market.setHere(here, mock !== null ? 0 : (source?.realm?.realmId ?? -1));
     const wanted = market.open || market.mine === null || market.mine.listed.length + market.mine.reserved.length > 0;
     const items =
       mock !== null ? (this.mockInventory()?.revision(nowMs) ?? 0) : (source?.selfNumber('items') ?? Number.NaN);

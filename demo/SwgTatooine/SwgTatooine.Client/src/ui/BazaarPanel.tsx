@@ -15,7 +15,7 @@ import {
 import { formatCredits } from '../data/wallet';
 import { CITIES } from '../data/world-data';
 import { useItems } from '../state/items-store';
-import { useMarket } from '../state/market-store';
+import { collectableHere, useMarket } from '../state/market-store';
 import { useWallet } from '../state/wallet-store';
 
 /**
@@ -101,7 +101,7 @@ function BrowseTab() {
   const icons = useItems((s) => s.icons);
   const stacks = useMarket((s) => s.stacks);
 
-  // The item filter: what the price list knows, named as the board or the inventory names it (the client has no item table).
+  // The item filter: what the price list knows, by the name it states (or the board's, the inventory's — no item table here).
   const names = new Map<string, string>();
   for (const l of [...stacks, ...(page?.listings ?? [])]) {
     names.set(l.item, l.name);
@@ -109,8 +109,12 @@ function BrowseTab() {
 
   const items = new Map<string, string>();
   for (const p of prices) {
-    if (query.cat === '' || p.item.startsWith(categoryPrefix(query.cat))) {
-      items.set(p.item, names.get(p.item) ?? assetLabel(p.item));
+    if (
+      query.cat === '' ||
+      p.category === query.cat ||
+      (p.category === '' && p.item.startsWith(categoryPrefix(query.cat)))
+    ) {
+      items.set(p.item, p.name !== '' ? p.name : (names.get(p.item) ?? assetLabel(p.item)));
     }
   }
 
@@ -135,7 +139,7 @@ function BrowseTab() {
         <td className="num">{l.qty}</td>
         <td className="num">{formatCredits(l.unit)}</td>
         <td className="num">{formatCredits(l.total)}</td>
-        <td>{cityName(l.city)}</td>
+        <td>{l.cityName}</td>
         <td>{l.sellerName}</td>
         <td className="num">{formatAge(l.ageS)}</td>
         <td>
@@ -444,7 +448,7 @@ function MineTab() {
               <td className="num">{l.qty}</td>
               <td className="num">{formatCredits(l.unit)}</td>
               <td className="num">{formatCredits(l.total)}</td>
-              <td>{cityName(l.city)}</td>
+              <td>{l.cityName}</td>
               <td className="num">{formatAge(l.ageS)}</td>
               <td>
                 <button
@@ -476,6 +480,7 @@ function MineTab() {
 function ReservedTab() {
   const mine = useMarket((s) => s.mine);
   const here = useMarket((s) => s.here);
+  const hereRealm = useMarket((s) => s.hereRealm);
   const pending = useMarket((s) => s.pending);
   const notices = useMarket((s) => s.rowNotices);
   const collect = useMarket((s) => s.collect);
@@ -484,7 +489,7 @@ function ReservedTab() {
     return <div className="hint">Reading what waits for you…</div>;
   }
 
-  const atHere = mine.reserved.filter((r) => r.city === here).length;
+  const atHere = mine.reserved.filter((r) => collectableHere(r, here, hereRealm)).length;
   return (
     <>
       <div className="hint">
@@ -501,9 +506,9 @@ function ReservedTab() {
               <td className={`mk mk${String(r.mk)}`}>{mkNumeral(r.mk)}</td>
               <td className="num">{r.qty}</td>
               <td>{r.state === 'sold' ? 'Bought' : 'Returned'}</td>
-              <td>{cityName(r.city)}</td>
+              <td>{r.cityName}</td>
               <td>
-                {r.city === here ? (
+                {collectableHere(r, here, hereRealm) ? (
                   <button
                     type="button"
                     disabled={pending.includes(r.id)}
@@ -514,7 +519,7 @@ function ReservedTab() {
                     {pending.includes(r.id) ? '…' : 'Collect'}
                   </button>
                 ) : (
-                  <span className="hint">collect at {cityName(r.city)}</span>
+                  <span className="hint">collect at {r.cityName}</span>
                 )}
               </td>
             </tr>,

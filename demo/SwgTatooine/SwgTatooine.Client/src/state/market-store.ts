@@ -19,6 +19,7 @@ import {
   type MarketMine,
   type MarketPrice,
   type MarketQuery,
+  type Reservation,
 } from '../data/market';
 import type { RevisionFetch } from '../data/revision-reader';
 
@@ -67,6 +68,8 @@ export interface MarketState {
   readonly tab: BazaarTab;
   /** The region of the bazaar terminal the body stands at — where list, buy, collect and vendor work — or 0 at none. */
   readonly here: number;
+  /** The realm the body is in, -1 unknown: twin realms share regions, so a reservation is here only in this realm. */
+  readonly hereRealm: number;
   readonly query: MarketQuery;
   readonly page: BrowsePage | null;
   /** Rows a refresh removed while their refusal was still being read: shown dimmed under the page. */
@@ -88,7 +91,7 @@ export interface MarketState {
   readonly close: () => void;
   readonly toggle: () => void;
   readonly setTab: (tab: BazaarTab) => void;
-  readonly setHere: (region: number) => void;
+  readonly setHere: (region: number, realm?: number) => void;
   /** Changes the query; back to page 1 unless a page is given. The page is re-read. */
   readonly setQuery: (change: Partial<MarketQuery>) => void;
   /** Re-reads the page now. */
@@ -184,6 +187,7 @@ export const useMarket = create<MarketState>((set, get) => {
     open: false,
     tab: 'browse',
     here: 0,
+    hereRealm: -1,
     query: DEFAULT_QUERY,
     page: null,
     kept: [],
@@ -223,9 +227,9 @@ export const useMarket = create<MarketState>((set, get) => {
         void get().refreshBrowse();
       }
     },
-    setHere: (here) => {
-      if (get().here !== here) {
-        set({ here });
+    setHere: (here, hereRealm = -1) => {
+      if (get().here !== here || get().hereRealm !== hereRealm) {
+        set({ here, hereRealm });
       }
     },
     setQuery: (change) => {
@@ -419,6 +423,7 @@ export const useMarket = create<MarketState>((set, get) => {
       set({
         open: false,
         here: 0,
+        hereRealm: -1,
         page: null,
         kept: [],
         mine: null,
@@ -438,6 +443,11 @@ export const useMarket = create<MarketState>((set, get) => {
 /** `record` without `key`. */
 function omit(record: Readonly<Partial<Record<string, string>>>, key: string): Partial<Record<string, string>> {
   return Object.fromEntries(Object.entries(record).filter(([k]) => k !== key));
+}
+
+/** Whether a reservation can be collected where the body stands: a terminal of its city, in its realm when both are known. */
+export function collectableHere(r: Pick<Reservation, 'city' | 'realm'>, here: number, hereRealm: number): boolean {
+  return here > 0 && r.city === here && (r.realm < 0 || hereRealm < 0 || r.realm === hereRealm);
 }
 
 function clampInt(value: number, min: number, max: number): number {

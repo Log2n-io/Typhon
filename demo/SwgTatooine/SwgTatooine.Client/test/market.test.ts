@@ -30,7 +30,7 @@ import { CONTESTED_NAME, MOCK_BAZAAR_REGION, MOCK_CREDITS, MOCK_SALE_MS, MockMar
 import { parseWallet } from '../src/data/wallet';
 import { CITIES } from '../src/data/world-data';
 import { useChat } from '../src/state/chat-store';
-import { ROW_NOTICE_MS, useMarket, type MarketActions } from '../src/state/market-store';
+import { collectableHere, ROW_NOTICE_MS, useMarket, type MarketActions } from '../src/state/market-store';
 import { useUi } from '../src/state/ui-store';
 import { useWallet } from '../src/state/wallet-store';
 
@@ -52,6 +52,8 @@ import { useWallet } from '../src/state/wallet-store';
 const listing = (id: string, over: Partial<MarketListing> = {}): MarketListing => ({
   id,
   city: 1,
+  cityName: CITIES[0].name,
+  realm: 0,
   item: 'mat_hide',
   name: 'Hide',
   category: 'material',
@@ -157,20 +159,46 @@ describe('the answers', () => {
     });
     expect(page?.listings).toHaveLength(1);
     expect(page?.listings[0]).toMatchObject({ id: '9007199254740993', seller: '17', template: 0, total: 60 });
+    // Without the server's city name and realm: the region's name from the city table, the realm unknown.
+    expect(page?.listings[0]).toMatchObject({ cityName: CITIES[0].name, realm: -1 });
     expect(parseBrowse({ listings: {} })).toBeNull();
     expect(parseBrowse(null)).toBeNull();
   });
 
-  it('read /mine: listed, reserved with their state, the caps', () => {
+  it('read /mine: listed with its fee and ticks, reserved with their state, the caps, the city as the server names it', () => {
     const mine = parseMine({
-      listed: [{ id: '5', city: 2, item: 'core_armor', name: 'Armor Core', mk: 3, qty: 1, unit: 900 }],
+      listed: [
+        {
+          id: '5',
+          city: 2,
+          cityName: 'Whitestone II',
+          realm: 3,
+          item: 'core_armor',
+          name: 'Armor Core',
+          category: 'core',
+          mk: 3,
+          qty: 1,
+          unit: 900,
+          total: 900,
+          fee: 9,
+          listedTick: 100,
+          expireTick: 1_728_100,
+          ageS: 5,
+        },
+      ],
       reserved: [
         { id: '6', city: 3, item: 'mat_bone', name: 'Bone', mk: 1, qty: 9, unit: 2, state: 'sold', closedTick: 100 },
         { id: '7', city: 3, item: 'mat_bone', name: 'Bone', mk: 1, qty: 9, unit: 2, state: 'gone', closedTick: 1 },
       ],
       caps: { listings: 20, reserved: 20 },
     });
-    expect(mine?.listed[0].total).toBe(900);
+    expect(mine?.listed[0]).toMatchObject({
+      total: 900,
+      fee: 9,
+      expireTick: 1_728_100,
+      cityName: 'Whitestone II',
+      realm: 3,
+    });
     expect(mine?.reserved.map((r) => r.state)).toEqual(['sold']);
     expect(mine?.caps).toEqual({ listings: 20, reserved: 20 });
     expect(parseMine({ listed: [] })).toBeNull();
@@ -178,9 +206,25 @@ describe('the answers', () => {
 
   it('read /prices', () => {
     const prices = parsePrices({
-      prices: [{ item: 'mat_hide', mk: 1, value: 1, vendor: 340, listed: 40, lowest: 2, median: 2, sales: 5 }],
+      v: 4,
+      prices: [
+        {
+          item: 'mat_hide',
+          name: 'Hide',
+          category: 'material',
+          mk: 1,
+          value: 1,
+          vendor: 340,
+          listed: 40,
+          lowest: 2,
+          median: 2,
+          min: 1,
+          max: 3,
+          sales: 5,
+        },
+      ],
     });
-    expect(prices?.[0]).toMatchObject({ item: 'mat_hide', vendor: 340, lowest: 2 });
+    expect(prices?.[0]).toMatchObject({ item: 'mat_hide', name: 'Hide', vendor: 340, lowest: 2, min: 1, max: 3 });
     expect(parsePrices([])).toEqual([]);
     expect(parsePrices({})).toBeNull();
   });
@@ -198,6 +242,16 @@ describe('a city', () => {
     expect(cityName(1)).toBe(CITIES[0].name);
     expect(cityName(0)).toBe('');
     expect(regionAt(CITIES[3].x + 40, CITIES[3].z - 10)).toBe(4);
+  });
+});
+
+describe('a reservation', () => {
+  it('is collected at a terminal of its city, in its realm when both are known (twins share regions)', () => {
+    expect(collectableHere({ city: 2, realm: 0 }, 2, 0)).toBe(true);
+    expect(collectableHere({ city: 2, realm: 1 }, 2, 0)).toBe(false);
+    expect(collectableHere({ city: 2, realm: -1 }, 2, 0)).toBe(true);
+    expect(collectableHere({ city: 3, realm: 0 }, 2, 0)).toBe(false);
+    expect(collectableHere({ city: 2, realm: 0 }, 0, 0)).toBe(false);
   });
 });
 
@@ -395,7 +449,21 @@ describe('the market store', () => {
     };
     useMarket.setState({
       prices: [
-        { item: 'mat_hide', template: 8, mk: 2, value: 3, vendor: 560, listed: 0, lowest: 0, median: 0, sales: 0 },
+        {
+          item: 'mat_hide',
+          name: 'Hide',
+          category: 'material',
+          template: 8,
+          mk: 2,
+          value: 3,
+          vendor: 560,
+          listed: 0,
+          lowest: 0,
+          median: 0,
+          min: 0,
+          max: 0,
+          sales: 0,
+        },
       ],
     });
     useMarket.getState().setStacks([stack]);
@@ -430,7 +498,12 @@ describe('the market store', () => {
     harness();
     useMarket.getState().setMine({
       listed: [
-        { id: '5', city: 1, item: 'mat_hide', name: 'Hide', template: 8, mk: 2, qty: 20, unit: 3, total: 60, ageS: 1 },
+        {
+          ...listing('5'),
+          fee: 1,
+          listedTick: 100,
+          expireTick: 1_728_100,
+        },
       ],
       reserved: [],
       caps: { listings: 20, reserved: 20 },

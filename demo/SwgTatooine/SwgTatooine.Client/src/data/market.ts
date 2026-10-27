@@ -31,12 +31,18 @@ export const DEFAULT_CAPS: MarketCaps = { listings: 20, reserved: 20 };
 /** How long a market command waits for a refusal, milliseconds: an accepted one is never answered (B11). */
 export const MARKET_ANSWER_MS = 5000;
 
-/** One listing on the board, as `GET /swg/market` answers it. */
-export interface MarketListing {
+/**
+ * Goods in a listing, as every market answer writes them (§ 5): the board's rows, `/mine`'s listed and reserved alike.
+ */
+export interface MarketGoods {
   /** The listing's raw entity id, as decimal text: 64 bits do not fit a JavaScript number. */
   readonly id: string;
   /** Its city: region = city index + 1, 1-based like every id (0 means none). */
   readonly city: number;
+  /** The city's name as the server states it — twin realms share regions, so the region alone does not name it. */
+  readonly cityName: string;
+  /** The realm the city is in; -1 when the server did not say. */
+  readonly realm: number;
   /** The item's asset id (`mat_hide`), which names its icon. */
   readonly item: string;
   readonly name: string;
@@ -49,11 +55,15 @@ export interface MarketListing {
   readonly unit: number;
   /** `unit × qty`: what a buyer pays. */
   readonly total: number;
+  /** Seconds since it was listed; 0 when the server did not say. */
+  readonly ageS: number;
+}
+
+/** One listing on the board, as `GET /swg/market` answers it. */
+export interface MarketListing extends MarketGoods {
   /** The seller's character id, as decimal text. */
   readonly seller: string;
   readonly sellerName: string;
-  /** Seconds since it was listed. */
-  readonly ageS: number;
 }
 
 /** One page of the board. */
@@ -71,29 +81,16 @@ export interface BrowsePage {
 }
 
 /** One of this character's listings still on the board (`/mine`'s `listed`). */
-export interface MineListing {
-  readonly id: string;
-  readonly city: number;
-  readonly item: string;
-  readonly name: string;
-  readonly template: number;
-  readonly mk: number;
-  readonly qty: number;
-  readonly unit: number;
-  readonly total: number;
-  /** Seconds since it was listed; 0 when the server did not say. */
-  readonly ageS: number;
+export interface MineListing extends MarketGoods {
+  /** The list fee it paid. */
+  readonly fee: number;
+  /** World ticks: when it was listed, and when it is returned unsold. */
+  readonly listedTick: number;
+  readonly expireTick: number;
 }
 
 /** Goods waiting for this character at a city: bought there (`sold`), or its own listing back (`returned`). */
-export interface Reservation {
-  readonly id: string;
-  readonly city: number;
-  readonly item: string;
-  readonly name: string;
-  readonly mk: number;
-  readonly qty: number;
-  readonly unit: number;
+export interface Reservation extends MarketGoods {
   readonly state: 'sold' | 'returned';
   readonly closedTick: number;
 }
@@ -113,6 +110,8 @@ export interface MarketMine {
 /** One (item, Mk) of `GET /swg/market/prices`: the Sell tab's hints. */
 export interface MarketPrice {
   readonly item: string;
+  readonly name: string;
+  readonly category: string;
   readonly template: number;
   readonly mk: number;
   /** The market value of a unit, credits. */
@@ -123,8 +122,10 @@ export interface MarketPrice {
   readonly listed: number;
   /** The cheapest unit price listed now, 0 for none. */
   readonly lowest: number;
-  /** The median unit price of the last sales, 0 for none. */
+  /** The median unit price of the last sales, 0 for none; their cheapest and dearest. */
   readonly median: number;
+  readonly min: number;
+  readonly max: number;
   readonly sales: number;
 }
 
@@ -432,44 +433,19 @@ export function parseMine(answer: unknown): MarketMine | null {
   const listed: MineListing[] = [];
   for (const raw of a.listed) {
     const r = record(raw);
-    const id = r === null ? null : idText(r.id);
-    if (r === null || id === null || typeof r.qty !== 'number' || typeof r.unit !== 'number') {
-      continue;
+    const goods = r === null ? null : goodsOf(r);
+    if (r !== null && goods !== null) {
+      listed.push({ ...goods, fee: num(r.fee), listedTick: num(r.listedTick), expireTick: num(r.expireTick) });
     }
-
-    listed.push({
-      id,
-      city: num(r.city),
-      item: str(r.item),
-      name: str(r.name),
-      template: num(r.template),
-      mk: num(r.mk),
-      qty: r.qty,
-      unit: r.unit,
-      total: typeof r.total === 'number' ? r.total : r.unit * r.qty,
-      ageS: num(r.ageS),
-    });
   }
 
   const reserved: Reservation[] = [];
   for (const raw of a.reserved) {
     const r = record(raw);
-    const id = r === null ? null : idText(r.id);
-    if (r === null || id === null || typeof r.qty !== 'number' || (r.state !== 'sold' && r.state !== 'returned')) {
-      continue;
+    const goods = r === null ? null : goodsOf(r);
+    if (r !== null && goods !== null && (r.state === 'sold' || r.state === 'returned')) {
+      reserved.push({ ...goods, state: r.state, closedTick: num(r.closedTick) });
     }
-
-    reserved.push({
-      id,
-      city: num(r.city),
-      item: str(r.item),
-      name: str(r.name),
-      mk: num(r.mk),
-      qty: r.qty,
-      unit: num(r.unit),
-      state: r.state,
-      closedTick: num(r.closedTick),
-    });
   }
 
   const caps = record(a.caps);
@@ -483,7 +459,7 @@ export function parseMine(answer: unknown): MarketMine | null {
   };
 }
 
-/** `GET /swg/market/prices` checked: its rows, `null` for anything else. Accepts `{prices:[…]}` or a bare array. */
+/** `GET /swg/market/prices` (`{v, prices: […]}`) checked: its rows, `null` for anything else. A bare array is read too. */
 export function parsePrices(answer: unknown): MarketPrice[] | null {
   const rows = Array.isArray(answer) ? answer : record(answer)?.prices;
   if (!Array.isArray(rows)) {
@@ -499,6 +475,8 @@ export function parsePrices(answer: unknown): MarketPrice[] | null {
 
     out.push({
       item: r.item,
+      name: str(r.name),
+      category: str(r.category),
       template: num(r.template),
       mk: num(r.mk),
       value: r.value,
@@ -506,6 +484,8 @@ export function parsePrices(answer: unknown): MarketPrice[] | null {
       listed: num(r.listed),
       lowest: num(r.lowest),
       median: num(r.median),
+      min: num(r.min),
+      max: num(r.max),
       sales: num(r.sales),
     });
   }
@@ -520,14 +500,25 @@ export function priceOf(prices: readonly MarketPrice[], item: string, mk: number
 
 function listingOf(raw: unknown): MarketListing | null {
   const r = record(raw);
-  const id = r === null ? null : idText(r.id);
-  if (r === null || id === null || typeof r.qty !== 'number' || typeof r.unit !== 'number') {
+  const goods = r === null ? null : goodsOf(r);
+  return r === null || goods === null
+    ? null
+    : { ...goods, seller: idText(r.seller) ?? '', sellerName: str(r.sellerName) };
+}
+
+/** The goods every market row carries; `null` for a row without an id, a quantity or a price. */
+function goodsOf(r: Record<string, unknown>): MarketGoods | null {
+  const id = idText(r.id);
+  if (id === null || typeof r.qty !== 'number' || typeof r.unit !== 'number') {
     return null;
   }
 
+  const city = num(r.city);
   return {
     id,
-    city: num(r.city),
+    city,
+    cityName: typeof r.cityName === 'string' && r.cityName !== '' ? r.cityName : cityName(city),
+    realm: typeof r.realm === 'number' ? r.realm : -1,
     item: str(r.item),
     name: str(r.name),
     category: str(r.category),
@@ -536,8 +527,6 @@ function listingOf(raw: unknown): MarketListing | null {
     qty: r.qty,
     unit: r.unit,
     total: typeof r.total === 'number' ? r.total : r.unit * r.qty,
-    seller: idText(r.seller) ?? '',
-    sellerName: str(r.sellerName),
     ageS: num(r.ageS),
   };
 }
