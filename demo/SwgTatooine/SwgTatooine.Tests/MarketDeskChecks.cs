@@ -331,6 +331,7 @@ internal sealed class MarketDeskChecks : ServedChecks
         const int buyers = 100;
         using var sim = Start();
         var home = Home(sim);
+        var elsewhere = Elsewhere(sim);
         var seller = LogIn(sim, 0x8300, At(home), 1);
         Mint(sim, seller, Hide, 2, 2);
         var links = new List<FakeLink>();
@@ -344,7 +345,8 @@ internal sealed class MarketDeskChecks : ServedChecks
         var characters = new List<EntityId>();
         for (var i = 0; i < buyers; i++)
         {
-            Worlds.Park(sim, links[i].Session, home.X + 2.5f + (i % 10 * 0.25f), home.Z + (i / 10 * 0.25f));
+            // At another city's bazaar: the winner's purchase is reserved, so the listing stays in the book, Sold, for every later buyer to find.
+            Worlds.Park(sim, links[i].Session, elsewhere.X + 2.5f + (i % 10 * 0.25f), elsewhere.Z + (i / 10 * 0.25f));
             Assert.That(CharacterStore.TryFind(sim.Dbe, EntityId.FromRawValue(0x8301UL + (ulong)i), out var c, out _), Is.True);
             characters.Add(c);
         }
@@ -374,10 +376,9 @@ internal sealed class MarketDeskChecks : ServedChecks
                 Assert.That(rows, Has.Count.EqualTo(1), "not exactly one sale");
                 Assert.That(Ledgers.Rows(sim).Count(r => r.Kind == TransferKind.Sale), Is.EqualTo(sales + 1));
                 Assert.That(links.Sum(l => Count(l, TatooineReplication.MarketSold)) - sold, Is.EqualTo(buyers - 1), "not 99 told it was sold");
-                Assert.That(Market.Listings(sim).ContainsKey(listing), Is.False, "the winner stands at its city with room: delivered at once");
-                var winner = characters.Single(c => unchecked((long)c.RawValue) == rows[0].From);
-                var won = Ledgers.Rows(sim).Count(r => r.Kind == TransferKind.Sale && r.From == rows[0].From);
-                Assert.That(Market.Units(sim, winner, Hide, 2), Is.EqualTo(won), "the winner did not get the unit");
+                var l = Market.Listings(sim)[listing];
+                Assert.That((l.State, l.Collector), Is.EqualTo((ListingState.Sold, rows[0].From)), "not reserved for the one buyer who paid");
+                Assert.That(characters.Count(c => unchecked((long)c.RawValue) == rows[0].From), Is.EqualTo(1), "the payer is not one of the buyers");
             });
         }
 
