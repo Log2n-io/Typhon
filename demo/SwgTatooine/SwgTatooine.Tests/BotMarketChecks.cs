@@ -286,7 +286,8 @@ public sealed class BotMarketChecks
     }
 
     /// <summary>
-    /// The bazaar's refusals are the server's (§ 3.1): <c>AckReasons.FirstApplicationReason</c> + 23 … + 35, 151-163, Sold the third. The bot's copy
+    /// The bazaar's refusals are the server's (§ 3.1): <c>AckReasons.FirstApplicationReason</c> + 23 … + 35, 151-163, Sold the third, and the
+    /// reused NotInWorld (142) — counted only when it answers a market command. The bot's copy
     /// must name the same numbers, or it counts the wrong races.
     /// </summary>
     [Test]
@@ -296,7 +297,14 @@ public sealed class BotMarketChecks
         {
             Assert.That(BotSwarm.MarketFirstReason, Is.EqualTo(151));
             Assert.That(BotSwarm.MarketSoldReason, Is.EqualTo(153));
-            Assert.That(BotSwarm.MarketReasonNames, Has.Length.EqualTo(BotSwarm.MarketReasons));
+            Assert.That(BotSwarm.MarketReasonNames, Has.Length.EqualTo(BotSwarm.MarketRefusals));
+            Assert.That(BotSwarm.MarketReasonNames[^1], Is.EqualTo("notInWorld"));
+            Assert.That(BotSwarm.MarketRefusalSlot(151, false), Is.Zero);
+            Assert.That(BotSwarm.MarketRefusalSlot(163, false), Is.EqualTo(12));
+            Assert.That(BotSwarm.MarketRefusalSlot(142, true), Is.EqualTo(13), "a 142 answering a market command is not counted as notInWorld");
+            Assert.That(BotSwarm.MarketRefusalSlot(142, false), Is.EqualTo(-1), "a 142 answering a mission's command is counted as the market's");
+            Assert.That(BotSwarm.MarketRefusalSlot(150, true), Is.EqualTo(-1));
+            Assert.That(BotSwarm.MarketRefusalSlot(164, true), Is.EqualTo(-1));
             Assert.That(BotSwarmOptions.RegionOf("Port Sable"), Is.EqualTo(1));
             Assert.That(BotSwarmOptions.RegionOf("Nowhere"), Is.Zero);
             Assert.That(new BotSwarmOptions { Count = 1000 }.MarketRushSellers, Is.EqualTo(100));
