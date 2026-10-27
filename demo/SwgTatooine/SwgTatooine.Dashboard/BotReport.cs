@@ -21,8 +21,13 @@ namespace SwgTatooine.Dashboard;
 //       "bots": 2000, "windowS": 64.0, "stuckS": 812.5,
 //       "goals":      { "Choosing": 0, "Travelling": 120, "Hunting": 40, ... },          bots per goal now
 //       "totals":     { "goalChanges": 0, "stuckTicks": 0, "hunts": 0, "missionsAsked": 0, "missionsTaken": 0, "missionsCompleted": 0,
-//                       "missionsCancelled": 0, "mounts": 0, "dismounts": 0, "reversals": 0 },   since the run began
+//                       "missionsCancelled": 0, "mounts": 0, "dismounts": 0, "reversals": 0,
+//                       "listed": 0, "vendored": 0, "vendorCredits": 0, "bought": 0, "buyLost": 0, "collected": 0, "marketRefused": 0 },
+//                                                                                                   since the run began; the market's keys (bazaar.md § 8)
+//                                                                                                   are optional, as from a swarm before the market
 //       "perMin":     { the same keys, fleet-wide per minute over the window },
+//       "marketRefusedBy": { "sold": 3, "notEnough": 1, ... },   the market's refusals since the start, by the server's reason name
+//                                                                (MarketStats.ReasonNames: sold = 153, the race loser's); optional
 //       "why":        { "HuntTimeout": 12, "CreatureNoticed": 80, ... },   goal reasons since the start (BotBrain.Trace.cs GoalWhy)
 //       "whyPerMin":  { the same keys },
 //       "legs":       { "Planned": 0, "Waypoint": 0, "Done": 0, "Stretch": 0, "Replanned": 0, "Stuck": 0, "Abandoned": 0,
@@ -101,6 +106,9 @@ public sealed class BotFleetReport
     public Dictionary<string, long> Legs { get; set; } = [];
 
     public Dictionary<string, double> LegsPerMin { get; set; } = [];
+
+    /// <summary>The market's refusals since the start, by reason name; empty from a swarm without the market.</summary>
+    public Dictionary<string, long> MarketRefusedBy { get; set; } = [];
 
     public BotSpread GoalChangesPerBotMin { get; set; } = new();
 
