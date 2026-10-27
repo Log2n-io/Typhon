@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-10-14 |
+| Last Updated | 2026-10-27 |
 | Domain | Engine-owned replication: per-entity replication state, its storage, and what bounds its cost |
 
 > Invariants that keep replication cost tied to what changed, keep what a session holds exactly what its geometry names, and keep per-entity
@@ -434,6 +434,32 @@
     runs the tick's guarded members and the transport path concurrently and requires the DEBUG re-entrancy guard never to fire.
     Falsifiability is proved by SessionWriterOwnershipTests.ARogueTransportThatWritesATickOwnedFieldIsDetected, which reaches an
     ordinary tick-side mutator from the transport thread and requires the verifier's own assertion to reject it.
+
+### SUB-38: The subscriptions runtime alone frees its native memory, and only after quiescing the threads that read it `[fatal]`
+  invariant ∀ native block b of the subscriptions runtime (session rows, frame-pool slabs, ingress-ring slabs, replication state):
+    the only path that frees b is SubscriptionsRuntime.Dispose — never a resource-graph ancestor's disposal cascade
+  invariant [SessionTable.Dispose latches its caller gate and drains it] → [the table's block is freed]
+  invariant [SendPump.Dispose quiesces, or records the pumps it gave up on] → [frame-pool slabs freed, or kept while a pump is still sending]
+  invariant the runtime's blocks sit under one node of its own whose DisposeWithParent is false, and the runtime removes that node from its
+    parent when it is disposed — a refused start included
+  never a block of the runtime registered directly under the scheduler, whose Dispose TyphonRuntime calls BEFORE the runtime's
+  scope: SubscriptionsRuntime.Dispose, SessionTable.Dispose, SendPump.Dispose, FramePool.KeepSlabsForOutstandingSends,
+    ResourceNode.DisposeWithParent, TyphonRuntime.Dispose
+  on_violation: an access violation on a thread-pool thread, which no handler catches: the process dies. A pump the last tick queued, run late
+    by a busy pool, passes the table's open gate and reads rows the cascade already freed (#1508, SessionTable.OwnerIdAt). Intermittent by
+    nature: a freed block below the heap's own-mapping threshold — the session table at the default 8 192 slots is just under it — usually
+    stays mapped, so the read returns stale bytes that still look like rows and faults only when the heap gives the pages back.
+  rationale: every caller gate and quiesce in this module assumes the object that owns the gate also owns the memory behind it. The resource
+    tree is a second owner of everything registered in it, and the scheduler is disposed first because it is what stops the tick; a block
+    registered there is freed in the scheduler's order rather than its owner's, which defeats the gate without touching it.
+  verified: SendPumpTeardownTests.TheSchedulersDisposal_FreesNothingAPumpStillReads — disposes the scheduler alone, the first half of
+    TyphonRuntime.Dispose, with a 65 535-slot table whose block is unmapped when freed; requires every block the runtime owns to be alive,
+    then wakes a pump through the open gate, then requires the runtime's own teardown to free every block. Without the fix the block list is
+    the session rows, both ingress slabs and the frame slab, and a woken pump faults in OwnerIdAt. Also
+    SendPumpTeardownTests.APumpStillSendingAtDispose_NeverCompletesIntoTheFreedBlock (the kept slabs really are allocated) and
+    SendPumpTeardownTests.ARefusedStart_LeavesNothingUnderTheScheduler. Falsifiability is proved by
+    SendPumpTeardownTests.Mutant_ABlockRegisteredUnderTheScheduler_IsFreedByItsCascade, which
+    registers a block where the runtime's used to live and requires the verifier's assertion to reject the scheduler's disposal.
 
 ---
 

@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using NUnit.Framework;
 using Typhon.Engine.Internals;
@@ -78,6 +80,12 @@ class SendPumpTeardownTests : TestBase<SendPumpTeardownTests>
             // The bytes that pump is sending live in a pool slab. Freeing it under the transport is a read of freed memory, so the slabs are kept.
             Assert.That(subs.Frames.Pool.SlabsKeptForOutstandingSends, Is.True,
                 "a pump outlived the quiesce, so the frame pool must leave its slabs allocated rather than free them under a send");
+
+            // And they really are still allocated. The flag alone proved nothing while the scheduler's cascade had already freed the slabs before it was set
+            // (#1508): the bytes below then read back intact only because a freed slab usually stays mapped.
+            var slabs = NativeBlocks(subs.Frames.Pool);
+            Assert.That(slabs, Is.Not.Empty, "the frame pool kept no slab, so the bytes the parked send is reading were freed under it");
+            Assert.That(slabs.Where(b => b.IsDisposed).Select(b => b.Id), Is.Empty, "a slab the parked send may be reading was freed under it");
 
             // And the view the link was handed is still the frame: the link owns those bytes until its task ends (ISubscriptionLink.SendAsync), so a kept slab
             // behind a released view is a send that faults mid-write rather than one that finishes.
@@ -176,6 +184,133 @@ class SendPumpTeardownTests : TestBase<SendPumpTeardownTests>
         });
     }
 
+    /// <summary>
+    /// #1508 — the scheduler's disposal frees none of the native memory a send pump or a transport thread still reads: the subscriptions runtime frees it,
+    /// after it has quiesced them.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="TyphonRuntime.Dispose"/> disposes the scheduler first, and the scheduler was the resource parent of the session table, the frame pool and
+    /// the ingress rings. Its cascade freed all three while the table's caller gate was still open, so a pump the last tick had queued — run late by a busy
+    /// pool — read a freed row: an access violation in <c>SessionTable.OwnerIdAt</c> that no handler catches, and the test host gone with it.
+    /// </para>
+    /// <para>
+    /// <b>Sized so a regression cannot hide.</b> At the default 8 192 slots the table's block sits just under the heap's own-mapping threshold, so a freed
+    /// one usually stays mapped and the pump reads stale bytes that still look like rows — which is why the SWG suite crashed one run in several hundred
+    /// tests. At 65 535 the block is mapped on its own and unmapped when freed, and the same read faults every time. The ownership is asserted before the
+    /// pump is woken, so a regression fails here as an assertion and never reaches the read.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-38")]
+    public void TheSchedulersDisposal_FreesNothingAPumpStillReads()
+    {
+        using var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        Populate(dbe);
+
+        var runtime = CreateRuntime(dbe,
+            new SubscriptionsOptions { ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0), MaxSessions = SessionTable.MaxSlots });
+        var link = new InProcessLink();
+        try
+        {
+            Declare(runtime.Subscriptions);
+            runtime.Start();
+            Connect(StartTransport(runtime), link);
+            Assert.That(WaitFor(() => link.PendingCount > 0, TimeSpan.FromSeconds(5)), Is.True, "the session never received a frame, so nothing was sending");
+
+            var subs = runtime.SubscriptionsContextForTest.Subscriptions;
+            var pump = subs.SendPumpForTest;
+            var session = subs.Sessions.IdAt(0);
+            Assert.That(session.IsValid, Is.True, "the one connected session must hold slot 0");
+
+            Assert.That(WaitFor(() => NativeBlocks(subs.Frames.Pool).Count > 0, TimeSpan.FromSeconds(5)), Is.True,
+                "no frame was ever encoded, so the frame pool holds no slab and this case would cover the table alone");
+            var blocks = NativeBlocks(subs.ResourcesForTest);
+            Assert.That(blocks.Select(b => b.Id), Does.Contain("Subscriptions.Sessions"), "the session table's rows must be among the blocks the runtime owns");
+
+            // The first half of TyphonRuntime.Dispose, stopped inside the window: the scheduler is gone, the subscriptions runtime is not.
+            runtime.Scheduler.Dispose();
+
+            Assert.That(subs.Sessions.IsDisposed, Is.False, "the table's own teardown has not run, so its gate is still open to every pump");
+            AssertNoneFreed(blocks);
+
+            // A pump that runs now — as one the last tick queued does when the pool is busy — reads the table through its open gate.
+            var pongs = pump.PongsSent;
+            Assert.That(pump.RequestPong(session, 1), Is.True, "the pump refused the PING, so no pump ran inside the window");
+            Assert.That(WaitFor(() => pump.ActivePumps == 0 && pump.PongsSent > pongs, TimeSpan.FromSeconds(5)), Is.True,
+                "the pump woken inside the window never finished");
+
+            runtime.Dispose();
+
+            // One owner, not none: the fix must move the free, not drop it.
+            Assert.Multiple(() =>
+            {
+                Assert.That(blocks.Where(b => !b.IsDisposed).Select(b => b.Id), Is.Empty, "the runtime's teardown must free every block it owns");
+                Assert.That(subs.ResourcesForTest.Children, Is.Empty, "a freed block must also leave the resource tree");
+            });
+        }
+        finally
+        {
+            runtime.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// A start the configuration refuses part way leaves nothing of the subscriptions runtime under the scheduler — neither a block nor the node that owned
+    /// them (#1508).
+    /// </summary>
+    /// <remarks>
+    /// The scheduler outlives a refused start, and the runtime's own node is skipped by its cascade by design, so the runtime has to take the node off the tree
+    /// itself. Refused here by the ingress rails, which are checked after the session table, the frame pool and the replication state are all allocated.
+    /// </remarks>
+    [Test]
+    public void ARefusedStart_LeavesNothingUnderTheScheduler()
+    {
+        using var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        var runtime = CreateRuntime(dbe,
+            new SubscriptionsOptions { ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0), AbuseWindow = TimeSpan.Zero });
+        try
+        {
+            Declare(runtime.Subscriptions);
+            Assert.That(runtime.Start, Throws.InvalidOperationException.With.Message.Contains("AbuseWindow"),
+                "the start must be refused by the ingress rails, after the runtime's memory is allocated, or this case does not exercise the unwind");
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(runtime.Scheduler.Children.Select(c => c.Id), Does.Not.Contain("Subscriptions"),
+                    "a refused start left the subscriptions runtime's node registered under a scheduler that will not dispose it");
+                Assert.That(NativeBlocks(runtime.Scheduler).Where(b => !b.IsDisposed).Select(b => b.Id), Has.None.StartsWith("Subscriptions"),
+                    "a refused start left a subscriptions block allocated");
+            });
+        }
+        finally
+        {
+            runtime.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// SUB-38's verifier rejects a block the scheduler's cascade frees: one registered under the scheduler directly, which is where the runtime's blocks
+    /// were before #1508.
+    /// </summary>
+    [Test]
+    [RuleMutant("SUB-38")]
+    public void Mutant_ABlockRegisteredUnderTheScheduler_IsFreedByItsCascade()
+    {
+        using var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        var runtime = CreateRuntime(dbe);
+        try
+        {
+            var block = dbe.MemoryAllocator.AllocatePinned("Subscriptions.Mutant", runtime.Scheduler, 4096, zeroed: true, alignment: 64);
+            runtime.Scheduler.Dispose();
+            RuleMutants.AssertDetects("SUB-38", FreedByCascade, () => AssertNoneFreed([block]));
+        }
+        finally
+        {
+            runtime.Dispose();
+        }
+    }
+
     // ── harness ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>A copy of what a link still holds, or <see langword="null"/> when the view behind it has been released under it.</summary>
@@ -191,6 +326,37 @@ class SendPumpTeardownTests : TestBase<SendPumpTeardownTests>
         catch (ArgumentOutOfRangeException)
         {
             return null;
+        }
+    }
+
+    private const string FreedByCascade = "the scheduler's cascade freed memory the subscriptions runtime still owns";
+
+    /// <summary>SUB-38's verifier: none of the runtime's blocks has been freed, while the runtime itself has not been disposed.</summary>
+    /// <param name="blocks">The blocks, captured before the scheduler was disposed.</param>
+    private static void AssertNoneFreed(List<PinnedMemoryBlock> blocks) =>
+        Assert.That(blocks.Where(b => b.IsDisposed).Select(b => b.Id), Is.Empty,
+            $"{FreedByCascade}, under threads its teardown has not quiesced yet");
+
+    /// <summary>Every native block registered at or below a resource node.</summary>
+    /// <param name="root">The node.</param>
+    /// <returns>The blocks, captured now: a block that is freed later leaves the tree but keeps answering <c>IsDisposed</c>.</returns>
+    private static List<PinnedMemoryBlock> NativeBlocks(IResource root)
+    {
+        var blocks = new List<PinnedMemoryBlock>();
+        Collect(root);
+        return blocks;
+
+        void Collect(IResource node)
+        {
+            foreach (var child in node.Children)
+            {
+                if (child is PinnedMemoryBlock block)
+                {
+                    blocks.Add(block);
+                }
+
+                Collect(child);
+            }
         }
     }
 
@@ -231,7 +397,7 @@ class SendPumpTeardownTests : TestBase<SendPumpTeardownTests>
         Assert.That(tx.Commit(), Is.True);
     }
 
-    private static TyphonRuntime CreateRuntime(DatabaseEngine dbe) => TyphonRuntime.Create(dbe, schedule =>
+    private static TyphonRuntime CreateRuntime(DatabaseEngine dbe, SubscriptionsOptions subscriptions = null) => TyphonRuntime.Create(dbe, schedule =>
     {
         schedule.PublicTrack.DeclareDag("Test").CallbackSystem("BindProfiles", ctx =>
         {
@@ -253,7 +419,7 @@ class SendPumpTeardownTests : TestBase<SendPumpTeardownTests>
     {
         WorkerCount = 2,
         BaseTickRate = TickRateHz,
-        Subscriptions = new SubscriptionsOptions { ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0) },
+        Subscriptions = subscriptions ?? new SubscriptionsOptions { ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0) },
     });
 
     private static void Declare(SubscriptionsRegistry subs)

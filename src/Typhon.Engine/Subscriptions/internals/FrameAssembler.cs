@@ -1576,9 +1576,8 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
 
         _workers = [];
 
-        // The counters and the slots go FIRST, and nothing here reads them. Their buffer is a child of the resource parent, which may already have been
-        // torn down by the time this runs; and a block still sitting in a slot needs no return, because the pool is about to free the slabs it was carved
-        // from. Walking the slots to hand them back would be bookkeeping paid for with a read of memory that may no longer exist.
+        // The counters and the slots go FIRST, and nothing here reads them: a block still sitting in a slot needs no return, because the pool is about to
+        // free the slabs it was carved from. Walking the slots to hand them back would be bookkeeping for memory about to go.
         // The send states are a managed array held by a field, so there is nothing to free here: the GC keeps them alive while this object is, and a send pump
         // that outlives the quiesce can complete into them without writing through a freed address (#1006).
 
