@@ -81,6 +81,8 @@ public sealed partial class SimBridge
     private long _pendingGrants;
     private long _pendingRewards;
     private long _pendingTips;
+    private readonly long[] _pendingMovedBy = new long[TransferKind.Count];
+    private readonly long[] _movedBy = new long[TransferKind.Count];
 
     private long _transfers;
     private long _grants;
@@ -106,6 +108,12 @@ public sealed partial class SimBridge
 
     /// <summary>Transactions holding economy writes that did not commit: every transfer in them was lost together, and the state was read again.</summary>
     public long EconomyCommitsFailed => Interlocked.Read(ref _economyCommitsFailed);
+
+    /// <summary>
+    /// Credits moved since start by rows of <paramref name="kind"/> (<see cref="TransferKind"/>): faucets (<c>mission</c>, <c>vendor</c>) against sinks
+    /// (<c>listfee</c>, <c>tax</c>) — bazaar.md § 9's <c>economy.byKind</c>. 0 for a kind past the last.
+    /// </summary>
+    public long EconomyMovedBy(byte kind) => kind < TransferKind.Count ? Interlocked.Read(ref _movedBy[kind]) : 0;
 
     /// <summary>The counters above as JSON, for <c>GET /swg/economy/stats</c> (economy-foundation.md E0-12).</summary>
     public string EconomyCountersJson()
@@ -250,6 +258,13 @@ public sealed partial class SimBridge
                 Interlocked.Add(ref _grants, _pendingGrants);
                 Interlocked.Add(ref _rewardsPaid, _pendingRewards);
                 Interlocked.Add(ref _tips, _pendingTips);
+                for (var k = 0; k < _pendingMovedBy.Length; k++)
+                {
+                    if (_pendingMovedBy[k] != 0)
+                    {
+                        Interlocked.Add(ref _movedBy[k], _pendingMovedBy[k]);
+                    }
+                }
             }
             else
             {
@@ -264,6 +279,7 @@ public sealed partial class SimBridge
         _pendingGrants = 0;
         _pendingRewards = 0;
         _pendingTips = 0;
+        Array.Clear(_pendingMovedBy);
         return committed;
     }
 
@@ -399,6 +415,11 @@ public sealed partial class SimBridge
         tx.Spawn<LedgerArch>(LedgerArch.Entry.Set(in row));
         _economyDirty = true;
         _pendingTransfers++;
+        if (kind < TransferKind.Count)
+        {
+            _pendingMovedBy[kind] += amount;
+        }
+
         return true;
     }
 

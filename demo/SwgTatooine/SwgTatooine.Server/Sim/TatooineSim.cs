@@ -318,6 +318,9 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.RegisterComponentFromAccessor<ItemLedgerEntry>();
         Dbe.RegisterComponentFromAccessor<ItemLedgerHead>();
 
+        // The bazaar (bazaar.md § 2.1): listings, each its own escrow stack — Versioned and non-spatial like the stacks, written by the Market system alone.
+        Dbe.RegisterComponentFromAccessor<Listing>();
+
         // SWG's coordinates are centred on the planet: -8192..+8192 on each axis at the real size. Keeping the origin in
         // the middle rather than at a corner is not cosmetic — every authentic coordinate in the map data is expressed
         // that way, and shifting them would put a transcription error between the source and the world.
