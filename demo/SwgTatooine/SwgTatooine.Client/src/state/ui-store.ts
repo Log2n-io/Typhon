@@ -32,6 +32,7 @@ import type { RealmDirectory } from '../data/server-config';
 import { askedFor, IDLE, type TransitionState } from '../app/realm-transition';
 import { NOT_TRAVELLING, type TravelState } from '../app/travel';
 import { ACTION_SLOTS, NO_STANCE, stanceAfter } from '../app/action-bar';
+import { beginWatch, type WatchState, type WatchTarget } from '../app/watch-link';
 
 /** A pending ask to look at another realm. The sequence makes a repeat of the same realm a new ask. */
 export interface RealmRequest {
@@ -217,6 +218,16 @@ export interface UiState {
   /** The demo dashboard's port on the server's host, from `/typhon/demo.json`; `null` for none. */
   readonly dashboardPort: number | null;
   readonly setDashboardPort: (port: number | null) => void;
+  /**
+   * The bot the dashboard asked this god camera to watch (`watch-link.ts`), or `null`. Stepped by the app's frame and
+   * written back only when its phase moves, so subscribers re-render a handful of times per watch.
+   */
+  readonly watch: WatchState | null;
+  /** Starts watching a bot: replaces any watch in progress. */
+  readonly watchBot: (target: WatchTarget) => void;
+  readonly setWatch: (watch: WatchState | null) => void;
+  /** Selects the watched body and follows it in the god camera, in one update. */
+  readonly followWatched: (netId: number) => void;
   /** The selected part of a structure, or `null`; never set together with {@link selectedNetId}. */
   readonly selectedPart: PartRef | null;
   readonly follow: boolean;
@@ -384,6 +395,17 @@ export const useUi = create<UiState>()((set, get) => ({
   dashboardPort: null,
   setDashboardPort: (dashboardPort) => {
     set({ dashboardPort });
+  },
+  watch: null,
+  watchBot: (target) => {
+    set({ watch: beginWatch(target, performance.now()) });
+  },
+  setWatch: (watch) => {
+    set({ watch });
+  },
+  followWatched: (netId) => {
+    // The god camera, not the eye: the dashboard asked to see the bot from above and keep it in frame.
+    set({ selectedNetId: netId, selectedPart: null, follow: true, cameraMode: 'god' });
   },
   selectedPart: null,
   follow: false,

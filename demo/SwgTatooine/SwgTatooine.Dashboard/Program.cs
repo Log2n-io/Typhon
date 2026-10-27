@@ -12,6 +12,7 @@ using SwgTatooine.Dashboard.Components;
 //   --port 5090            what the game server announces in /typhon/demo.json (its --dashboard-port)
 //   --bind 0.0.0.0         every interface by default: a person on the LAN opens it from the game client's link
 //   --server http://127.0.0.1:5080   the game server to read
+//   --client-url <url>     the 3D client the bots page's "Watch" opens; by default the page's own host at the --server's port
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.SetMinimumLevel(LogLevel.Warning);
@@ -19,10 +20,12 @@ builder.Logging.SetMinimumLevel(LogLevel.Warning);
 var port = Value("--port", "5090");
 var bind = Value("--bind", "0.0.0.0");
 var server = Value("--server", "http://127.0.0.1:5080");
+var clientUrl = Value("--client-url", null);
 
-if (!IPAddress.TryParse(bind, out var address) || !int.TryParse(port, out var portNumber) || !Uri.TryCreate(server, UriKind.Absolute, out var serverUri))
+if (!IPAddress.TryParse(bind, out var address) || !int.TryParse(port, out var portNumber) || !Uri.TryCreate(server, UriKind.Absolute, out var serverUri)
+    || (clientUrl != null && !Uri.TryCreate(clientUrl, UriKind.Absolute, out _)))
 {
-    Console.Error.WriteLine("usage: SwgTatooine.Dashboard [--port 5090] [--bind 0.0.0.0] [--server http://127.0.0.1:5080]");
+    Console.Error.WriteLine("usage: SwgTatooine.Dashboard [--port 5090] [--bind 0.0.0.0] [--server http://127.0.0.1:5080] [--client-url http://host:5080/]");
     return 2;
 }
 
@@ -37,6 +40,7 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<DashboardFeed>());
 
 // What the bot swarm reports when run with --dashboard (bot-telemetry.md): received here, never asked of the game server, which knows nothing of bots.
 builder.Services.AddSingleton<BotBoard>();
+builder.Services.AddSingleton(new WatchLink(clientUrl, serverUri.Port));
 
 var app = builder.Build();
 app.MapStaticAssets();

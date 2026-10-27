@@ -174,6 +174,7 @@ import { useUi, type NavRow, type ShuttleportPrompt, type UiState } from '../sta
 import { insideCity, NAV_KINDS, navLabel, nearestFacilities, relativeBearing, type NavTarget } from './nav-finder';
 import { nearestShuttleport } from './shuttle';
 import { nextTravel } from './travel';
+import { applyWatchAction, stepWatch } from './watch-link';
 import { TerrainDetailGovernor } from './terrain-detail';
 import { CURSORS, cursorFor, selectionTone, type CursorSubject } from './game-cursor';
 import {
@@ -1522,6 +1523,33 @@ export class ClientApp {
 
     this.lastReleaseMs = now;
     ui.spectate(0);
+  }
+
+  /**
+   * One step of a dashboard watch (`watch-link.ts`): into the bot's realm, over its last position, then onto its body once
+   * the server serves it. Before the selection check below, so a body found this frame is selected this frame.
+   */
+  private advanceWatch(now: number): void {
+    const ui = useUi.getState();
+    const watch = ui.watch;
+    if (watch === null) {
+      return;
+    }
+
+    const step = stepWatch(
+      watch,
+      {
+        realmId: this.source?.realm?.realmId ?? null,
+        canViewRealm: this.source?.canViewRealm ?? false,
+        found: this.world.locate(watch.target.netId) !== NOT_FOUND,
+      },
+      now,
+    );
+    if (step.state !== watch) {
+      ui.setWatch(step.state);
+    }
+
+    applyWatchAction(step.action, ui);
   }
 
   private adoptSourceRealm(): void {
@@ -3137,6 +3165,7 @@ export class ClientApp {
     this.adoptSubject(now);
     this.syncOverview();
     this.advanceTransition(now);
+    this.advanceWatch(now);
     this.clock.update(now);
     // Held keys may stop following: read the UI state after them.
     this.input.update(dt);

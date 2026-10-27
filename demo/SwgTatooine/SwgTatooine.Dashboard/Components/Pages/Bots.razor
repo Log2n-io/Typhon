@@ -1,6 +1,8 @@
 @page "/bots"
 @implements IDisposable
 @inject BotBoard Board
+@inject WatchLink Link
+@inject IJSRuntime JS
 
 <PageTitle>Tatooine bots</PageTitle>
 
@@ -84,7 +86,7 @@
             <table class="ledger traced">
                 <tr>
                     <th>bot</th><th>goal</th><th class="num">for</th><th class="num">changes / min</th><th class="num">reversals</th><th class="num">stuck</th>
-                    <th class="num">CL</th><th>where</th>
+                    <th class="num">CL</th><th>where</th><th></th>
                 </tr>
                 @foreach (var b in v.Bots)
                 {
@@ -98,16 +100,17 @@
                         <td class="num">@l.Stuck</td>
                         <td class="num">@l.Cl</td>
                         <td>@(l.Realm != 0 ? $"indoors ({l.Realm})" : $"{F(l.X, 0)}, {F(l.Z, 0)}")@(l.Mounted ? " · swoop" : "")</td>
+                        <td>@WatchButton(l)</td>
                     </tr>
                 }
             </table>
-            <p class="muted small">⌂ lives in the home city · click a row for its trail and timeline</p>
+            <p class="muted small">⌂ lives in the home city · click a row for its trail and timeline · Watch: the 3D client's god camera follows it</p>
         </section>
 
         @if (v.Bots.FirstOrDefault(b => b.Latest.Index == _selected) is { } sel)
         {
             <section class="card">
-                <h2>Bot #@sel.Latest.Index — trail</h2>
+                <h2>Bot #@sel.Latest.Index — trail @WatchButton(sel.Latest)</h2>
                 @Trail(sel)
                 <h3>Time per goal</h3>
                 <table class="bars">
@@ -147,7 +150,55 @@
 
     public void Dispose() => Board.Changed -= Refresh;
 
-    private void Refresh() => _ = InvokeAsync(StateHasChanged);
+    private void Refresh() => _ = InvokeAsync(async () =>
+    {
+        StateHasChanged();
+        await FollowAcrossAsync();
+    });
+
+    /// <summary>
+    /// "Watch" (bot-telemetry.md § 7). Plain HTML onclick, not Blazor's: the click opens the client's window itself, inside the click's own user
+    /// activation (wwwroot/watch.js). No button before the bot has reported a body.
+    /// </summary>
+    private RenderFragment WatchButton(TracedBotReport bot) => __builder =>
+    {
+        if (bot.NetId == 0)
+        {
+            return;
+        }
+
+        <button class="watch" title="Open the 3D client's god camera on this bot, and follow it" onclick="tatooineWatch.watch(this); event.stopPropagation()"
+                data-net-id="@bot.NetId" data-realm="@bot.Realm" data-x="@Coord(bot.X)" data-z="@Coord(bot.Z)" data-bot="@bot.Index"
+                data-client-url="@Link.ClientUrl" data-server-port="@Link.ServerPort">Watch</button>
+    };
+
+    private static string Coord(double v) => v.ToString("0.#", CultureInfo.InvariantCulture);
+
+    /// <summary>Tells the watch window when the watched bot's body changed realm or netId, so it follows the bot through a door; see watch.js.</summary>
+    private async Task FollowAcrossAsync()
+    {
+        var bots = Board.Latest.Bots;
+        if (bots.Count == 0)
+        {
+            return;
+        }
+
+        var args = new object[bots.Count];
+        for (var i = 0; i < bots.Count; i++)
+        {
+            var l = bots[i].Latest;
+            args[i] = new { bot = l.Index, netId = l.NetId, realm = l.Realm, x = Math.Round(l.X, 1), z = Math.Round(l.Z, 1) };
+        }
+
+        try
+        {
+            await JS.InvokeVoidAsync("tatooineWatch.update", (object)args);
+        }
+        catch (Exception e) when (e is JSException or JSDisconnectedException or TaskCanceledException or InvalidOperationException)
+        {
+            // A closed tab, or a render before the circuit is up: the next report tries again.
+        }
+    }
 
     private static string F(double v, int digits) => double.IsNaN(v) ? "—" : v.ToString(digits == 0 ? "N0" : "N" + digits, CultureInfo.InvariantCulture);
 

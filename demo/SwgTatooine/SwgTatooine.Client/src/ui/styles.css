@@ -1170,6 +1170,24 @@ button.active {
   opacity: 0.75;
 }
 
+/* The dashboard's "watch this bot" (watch-link.ts): top centre, under the realm curtain, clear of the side panels. */
+.watch-badge {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: var(--panel-bg);
+  color: var(--accent);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 /* ── The login screen (A8) ─────────────────────────────────────────────────────────────────────────────────────── */
 
 /*

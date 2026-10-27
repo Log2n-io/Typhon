@@ -32,8 +32,8 @@ namespace SwgTatooine.Dashboard;
 //       "reversalsPerBotMin":   { "mean": 0.1, "p50": 0.0, "p90": 0.5, "max": 4.0 }     a move > 135° off the last within 5 s
 //     },
 //     "traced": [                      the sampled bots: 1 % of the fleet, at least 10, at most 50 (--trace-bots)
-//       { "index": 0, "goal": "Hunting", "goalForS": 3.5, "tick": 12345, "cl": 3, "x": 10.5, "z": -40.0, "realm": 0, "mounted": false,
-//         "home": true, "goalChanges": 12, "reversals": 2, "stuck": 1, "legs": 9,
+//       { "index": 0, "goal": "Hunting", "goalForS": 3.5, "tick": 12345, "cl": 3, "x": 10.5, "z": -40.0, "realm": 0, "netId": 3456,
+//         "mounted": false, "home": true, "goalChanges": 12, "reversals": 2, "stuck": 1, "legs": 9,
 //         "goalS":   { "Hunting": 120.5, "Idling": 40.0 },        seconds per goal since the run began
 //         "intents": { "Move": 300, "MoveTo": 120, "Attack": 80 }, commands decided, by kind
 //         "events": [                                            only those newer than the last report the dashboard took
@@ -46,6 +46,11 @@ namespace SwgTatooine.Dashboard;
 //       }
 //     ]
 //   }
+//
+// "netId" is the body's wire netId as the bot's own session was told it (its SELF block), 0 before it has a body; netIds are global to the game's
+// database, so a god camera finds the same body under it. "x", "z", "realm" and "netId" are read on every decision and so are fresh in every
+// report — a body that crosses into another realm is replicated under another netId. They are what the bots page's "Watch" hands the 3D client
+// (bot-telemetry.md § 7). Added after version 1 shipped, and optional: a report without it reads 0, and the page offers no Watch for that bot.
 //
 // Additive changes (a new key, a new reason) keep the version; a renamed or retyped key bumps it.
 
@@ -132,6 +137,9 @@ public sealed class TracedBotReport
     public double Z { get; set; }
 
     public int Realm { get; set; }
+
+    /// <summary>The body's wire netId, 0 for none (and from a swarm that predates the field).</summary>
+    public uint NetId { get; set; }
 
     public bool Mounted { get; set; }
 

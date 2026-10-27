@@ -187,7 +187,7 @@ public sealed partial class BotSwarm
             }
 
             var reversal = Moves.See(tick, in world, intent, 5 * _ticksPerSecond, out var heading);
-            Tracer?.Observe(tick, in world, intent, HasHome, heading, reversal);
+            Tracer?.Observe(tick, in world, intent, HasHome, heading, reversal, Client.Store?.Self?.NetId ?? 0u);
         }
     }
 }

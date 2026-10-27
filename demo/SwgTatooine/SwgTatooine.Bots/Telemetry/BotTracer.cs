@@ -60,6 +60,7 @@ public sealed class BotTracer : IBrainTrace
     private int _level;
     private bool _mounted;
     private bool _home;
+    private uint _netId;
     private long _goalChanges;
     private long _stucks;
     private long _legs;
@@ -103,11 +104,14 @@ public sealed class BotTracer : IBrainTrace
     /// <param name="home">Whether it lives in the home city.</param>
     /// <param name="heading">The intent's direction of motion, NaN for none (<see cref="MoveWatch.See"/>).</param>
     /// <param name="reversal">Whether it reversed the previous move.</param>
-    public void Observe(long tick, in Perceived world, Intent intent, bool home, float heading, bool reversal)
+    /// <param name="netId">The body's wire netId as the bot's session was told it (its <c>SELF</c> block), 0 for none: what the dashboard's "watch" hands
+    /// the god camera. Read every decision, because a body that crosses into another realm is replicated under another one.</param>
+    public void Observe(long tick, in Perceived world, Intent intent, bool home, float heading, bool reversal, uint netId)
     {
         lock (_gate)
         {
             _tick = tick;
+            _netId = netId;
             _x = world.X;
             _z = world.Z;
             _realm = world.Realm;
@@ -166,6 +170,7 @@ public sealed class BotTracer : IBrainTrace
             w.WriteNumber("x", Math.Round(_x, 1));
             w.WriteNumber("z", Math.Round(_z, 1));
             w.WriteNumber("realm", _realm);
+            w.WriteNumber("netId", _netId);
             w.WriteBoolean("mounted", _mounted);
             w.WriteBoolean("home", _home);
             w.WriteNumber("goalChanges", _goalChanges);
