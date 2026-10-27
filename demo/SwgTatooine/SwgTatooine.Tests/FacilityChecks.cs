@@ -240,6 +240,26 @@ public sealed class FacilityChecks
             Assert.That(map.Count, Is.EqualTo(world.FindAll(f => f.Realm == 0 && f.Region > 0).Count), "the bot's map is not the list");
         });
 
+        // Against what the world build recorded on its own, not a second copy of Build's loop (review 6): the mission desk's terminals and each city's
+        // shuttleport from the index, and every city's bazaars within what its area plants.
+        static bool Near((float X, float Z) a, (float X, float Z) b) => MathF.Abs(a.X - b.X) < 0.01f && MathF.Abs(a.Z - b.Z) < 0.01f;
+        var index = _sim.Index;
+        var listedTerminals = listed.FindAll(f => f.Kind == StructureKind.MissionTerminal && f.Realm == 0).ConvertAll(f => (f.X, f.Z));
+        var listedPorts = listed.FindAll(f => f.Kind == StructureKind.Shuttleport && f.Realm == 0).ConvertAll(f => (f.X, f.Z));
+        var indexTerminals = index.Terminals.FindAll(t => t.Realm == 0).ConvertAll(t => (t.X, t.Z));
+        Assert.Multiple(() =>
+        {
+            Assert.That(indexTerminals, Is.Not.Empty, "the premise: the desk's terminals");
+            Assert.That(listedTerminals, Is.EquivalentTo(indexTerminals).Using<(float X, float Z)>(Near), "not the mission desk's terminals");
+            Assert.That(listedPorts, Is.EquivalentTo(index.Shuttleports).Using<(float X, float Z)>(Near), "not the cities' shuttleports");
+            for (var c = 0; c < _sim.Map.Cities.Count; c++)
+            {
+                var city = _sim.Map.Cities[c];
+                var bazaars = listed.FindAll(f => f.Kind == StructureKind.Bazaar && f.Realm == 0 && f.Region == c + 1).Count;
+                Assert.That(bazaars, Is.InRange(1, 1 + WorldBuilder.SpreadFacilities(city.Radius, _sim.Config.FacilityDensityPerKm2)), $"{city.Name}: bazaars");
+            }
+        });
+
         // From points across the planet, the bot's nearest terminal is the world's.
         for (var i = 0; i < 64; i++)
         {

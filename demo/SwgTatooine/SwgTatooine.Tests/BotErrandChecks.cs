@@ -976,11 +976,20 @@ public sealed class BotErrandChecks
             Z = Here.Z,
             MissionsHeld = 1,
             Lair = lair,
-            Planet = [new SeenStructure(Here.X, Here.Z, 0, HouseAsset, 0, 1), new SeenStructure(Here.X + 60f, Here.Z + 3f, 0, HouseAsset, 1, 1)],
+            Planet =
+            [
+                new SeenStructure(Here.X, Here.Z, 0, HouseAsset, 0, 1),
+                new SeenStructure(Here.X + 60f, Here.Z + 3f, 0, HouseAsset, 1, 1),
+
+                // Straddling the disc's edge on the way out, and another in the margin past it: buildings stand round a city, not only in it.
+                new SeenStructure(Here.X + Here.Radius, Here.Z + 2f, 0, HouseAsset, 0, 1),
+                new SeenStructure(Here.X + Here.Radius + 30f, Here.Z + 6f, 0, HouseAsset, 1, 1),
+            ],
             Forbidden = (Here.X - 3f, Here.Z - 3f, Here.X + 3f, Here.Z + 3f),
         };
 
         double? mountedAt = null;
+        var mountsAfter = 0;
         var swoopOutside = 0;
         for (var tick = 1L; tick < 800 && Routing.Distance(sim.X, sim.Z, lair.X, lair.Z) > BotBrain.NoticeM; tick++)
         {
@@ -996,6 +1005,7 @@ public sealed class BotErrandChecks
             {
                 // Out of town the ride is straight: a walk's corners ridden at the swoop's class and walked onto at the run's was the speed jerking.
                 Assert.That(intent.Kind, Is.Not.EqualTo(IntentKind.MoveTo), $"tick {tick}: out of town, it rode the walk's points ({brain.LegState})");
+                mountsAfter += mountedAt != null && intent.Kind == IntentKind.Mount ? 1 : 0;
                 mountedAt ??= intent == Intent.Mount(true) ? fromCentre : null;
                 swoopOutside += intent.Kind == IntentKind.Move && intent.SpeedClass == Routing.SwoopClass ? 1 : 0;
             }
@@ -1007,7 +1017,10 @@ public sealed class BotErrandChecks
         {
             Assert.That(brain.Goal, Is.EqualTo(Goal.Questing), "the premise: the mission is what it is doing");
             Assert.That(brain.PathsPlanned, Is.GreaterThan(0), "the premise: the town was walked on a searched path");
-            Assert.That(mountedAt, Is.Not.Null.And.LessThan(Here.Radius + 15d), "it did not get on its swoop at the city's edge");
+            Assert.That(mountedAt, Is.Not.Null.And.InRange(Here.Radius + CityPath.CityMarginM, Here.Radius + CityPath.CityLeaveM + 15d),
+                "it did not get on its swoop past the buildings round the city's edge");
+            Assert.That(mountsAfter, Is.Zero, "on its swoop, it asked to get off or on again: the edge flapped");
+            Assert.That(brain.Counters.Legs[(int)LegWhy.CityEdge], Is.LessThanOrEqualTo(1), "the walk out was dropped, searched and dropped again");
             Assert.That(swoopOutside, Is.GreaterThan(10), "the desert was not ridden");
             Assert.That(Routing.Distance(sim.X, sim.Z, lair.X, lair.Z), Is.LessThanOrEqualTo(BotBrain.NoticeM), "it never reached the lair");
         });
@@ -1050,11 +1063,21 @@ public sealed class BotErrandChecks
 
         // The tick the search ran on is the one the loop stopped after: held for that many decisions, at four a second.
         var heldSeconds = (tick - heldAt) / 4d;
+
+        // Still held: the second search waits longer — a wedged body searching every 1.25 s multiplied the searches (review 6, M3).
+        var firstAt = tick;
+        var after = brain.PathsPlanned;
+        for (; tick < firstAt + 60 && brain.PathsPlanned == after; tick++)
+        {
+            sim.Apply(brain.Decide(sim.View(), tick));
+        }
+
+        var nextSeconds = (tick - firstAt) / 4d;
         Assert.Multiple(() =>
         {
-            Assert.That(brain.Goal, Is.EqualTo(Goal.Visiting), "the premise: still on the errand");
             Assert.That(brain.PathsPlanned, Is.GreaterThan(before), "a walk held still was never searched again");
             Assert.That(heldSeconds, Is.LessThanOrEqualTo(1.5d + 0.25d), "searched again only after more than a second and a half held still");
+            Assert.That(nextSeconds, Is.GreaterThanOrEqualTo(BotBrain.StuckSeconds - 0.25d), "the second search came as quickly as the first");
         });
     }
 
@@ -1234,9 +1257,137 @@ public sealed class BotErrandChecks
         Assert.Multiple(() =>
         {
             Assert.That(usedAt, Has.Count.EqualTo(BotBrain.EmptyDesksToLeave), "it left before trying two terminals, or tried more");
-            Assert.That(usedAt.Count == 2 && usedAt[0].X > 0f && usedAt[1].X < 0f, Is.True, $"not the nearest, then the other: {string.Join(" ", usedAt)}");
+            Assert.That(usedAt.Count == 2 && usedAt[0].X * usedAt[1].X < 0f, Is.True, $"not one terminal, then the other: {string.Join(" ", usedAt)}");
             Assert.That(brain.Goal, Is.EqualTo(Goal.Travelling), "two empty terminals, and it stayed");
             Assert.That(brain.Counters.Why[(int)GoalWhy.DeskEmpty], Is.EqualTo(1), "the travel does not say the desk was empty");
+        });
+    }
+
+    /// <summary>The desk terminals a brain set out for, in order: read at each change into Visiting.</summary>
+    private static List<(float X, float Z)> DeskVisits(BotBrain brain, Sim sim, long ticks, Func<Sim, bool> held = null, Action<long> each = null)
+    {
+        var targets = new List<(float X, float Z)>();
+        var was = brain.Goal;
+        for (var tick = 1L; tick < ticks; tick++)
+        {
+            sim.Held = held?.Invoke(sim) ?? false;
+            sim.Apply(brain.Decide(sim.View(), tick));
+            if (brain.Goal == Goal.Visiting && was != Goal.Visiting)
+            {
+                targets.Add((brain.VisitTarget.X - Here.X, brain.VisitTarget.Z - Here.Z));
+                each?.Invoke(tick);
+            }
+
+            was = brain.Goal;
+        }
+
+        return targets;
+    }
+
+    /// <summary>
+    /// A terminal the bot could not reach — ringed by a crowd further out than it can be used from — is not the next one it sets out for, and two such in
+    /// one city send a roaming bot elsewhere; before, the same terminal was walked to, failed, and picked again, for good (review 6, H1).
+    /// </summary>
+    [Test]
+    public void ATerminalNotReached_IsNotTheNextOneTried()
+    {
+        var brain = new BotBrain(BotMap.Cities, 7u, 4d, Content());
+        brain.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X + 40f, Here.Z, TerminalAsset + 1, 0);
+        brain.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X - 60f, Here.Z, TerminalAsset + 1, 0);
+        var sim = new Sim
+        {
+            Planet = [new SeenStructure(Here.X + 40f, Here.Z, 10, TerminalAsset, 0, 1), new SeenStructure(Here.X - 60f, Here.Z, 10, TerminalAsset, 0, 1)],
+        };
+
+        // A crowd 5.5 m deep round every terminal: none is ever reached, nor close enough to use from.
+        var targets = DeskVisits(
+            brain,
+            sim,
+            400,
+            s => Routing.Distance(s.X, s.Z, Here.X + 40f, Here.Z) <= 5.5d || Routing.Distance(s.X, s.Z, Here.X - 60f, Here.Z) <= 5.5d);
+        Assert.Multiple(() =>
+        {
+            Assert.That(targets, Has.Count.EqualTo(BotBrain.EmptyDesksToLeave), $"terminals set out for: {string.Join(" ", targets)}");
+            Assert.That(targets.Count == 2 && targets[0] != targets[1], Is.True, "the terminal it failed to reach was the next it tried");
+            Assert.That(brain.Counters.Why[(int)GoalWhy.DeskEmpty], Is.EqualTo(1), "two terminals out of reach, and the roaming bot stayed");
+        });
+    }
+
+    /// <summary>A crowd landed at one spot spreads over the street's terminals: each bot picks one of the nearest few, from its own stream.</summary>
+    [Test]
+    public void BotsLandedTogether_SpreadOverTheNearestTerminals()
+    {
+        var picked = new HashSet<(float X, float Z)>();
+        for (var index = 0u; index < 12u; index++)
+        {
+            // The fleet's own seeds (BotSwarm.Bot).
+            var brain = new BotBrain(BotMap.Cities, (index * 2246822519u) | 1u, 4d, Content());
+            foreach (var dx in new[] { 40f, 55f, 70f })
+            {
+                brain.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X + dx, Here.Z, TerminalAsset + 1, 0);
+            }
+
+            brain.Decide(new Sim().View(), 1);
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Visiting), "the premise: the desk first");
+            picked.Add(brain.VisitTarget);
+        }
+
+        Assert.That(picked, Has.Count.GreaterThanOrEqualTo(2), "twelve bots landed together all went to one terminal");
+    }
+
+    /// <summary>
+    /// A bot's desk is its city's: a terminal of another city — even a nearer one — is never set out for, so an empty one each side cannot ping-pong it;
+    /// with its city's one terminal tried, a roaming bot leaves (review 6, H2).
+    /// </summary>
+    [Test]
+    public void AnotherCitysTerminal_IsNeverTheDesk()
+    {
+        var brain = new BotBrain(BotMap.Cities, 7u, 4d, Content());
+        brain.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X + 40f, Here.Z, TerminalAsset + 1, 0);
+        brain.Facilities.Observe(2, Routing.MissionTerminalKind, Here.X - 30f, Here.Z, TerminalAsset + 1, 0);
+        var sim = new Sim
+        {
+            Planet = [new SeenStructure(Here.X + 40f, Here.Z, 10, TerminalAsset, 0, 1), new SeenStructure(Here.X - 30f, Here.Z, 10, TerminalAsset, 0, 2)],
+        };
+
+        var targets = DeskVisits(brain, sim, 300);
+        Assert.Multiple(() =>
+        {
+            Assert.That(targets, Is.EqualTo(new[] { (40f, 0f) }), "it went to another city's terminal, or to its own twice");
+            Assert.That(brain.Counters.Why[(int)GoalWhy.DeskEmpty], Is.EqualTo(1), "its city's only terminal tried, and the roaming bot stayed");
+        });
+    }
+
+    /// <summary>A home bot's one-terminal desk, tried and empty, opens again after <see cref="BotBrain.DeskRetrySeconds"/> — and not before.</summary>
+    [Test]
+    public void AOneTerminalDesk_OpensAgainAfterItsRetry()
+    {
+        var brain = new BotBrain(BotMap.Cities, 7u, 4d, Content(), homeRegion: 1);
+        brain.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X + 40f, Here.Z, TerminalAsset + 1, 0);
+        var sim = new Sim { Planet = [new SeenStructure(Here.X + 40f, Here.Z, 10, TerminalAsset, 0, 1)] };
+        var at = new List<long>();
+        var targets = DeskVisits(brain, sim, 900, each: at.Add);
+        Assert.Multiple(() =>
+        {
+            Assert.That(targets.Count, Is.GreaterThanOrEqualTo(2), "the desk never opened again");
+            Assert.That(at.Count >= 2 ? (at[1] - at[0]) / 4d : 0d, Is.GreaterThanOrEqualTo(BotBrain.DeskRetrySeconds), "tried again before its retry");
+            Assert.That(brain.Counters.Why[(int)GoalWhy.DeskEmpty], Is.Zero, "a home bot left home");
+        });
+    }
+
+    /// <summary>A home bot out in the desert sets out for its home's terminal, not for a nearer one of another city (review 6, M1).</summary>
+    [Test]
+    public void AHomeBotInTheDesert_GoesToItsHomesDesk()
+    {
+        var brain = new BotBrain(BotMap.Cities, 7u, 4d, Content(), homeRegion: 1);
+        brain.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X + Here.Radius - 50f, Here.Z, TerminalAsset + 1, 0);
+        brain.Facilities.Observe(2, Routing.MissionTerminalKind, Here.X + Here.Radius + 130f, Here.Z, TerminalAsset + 1, 0);
+        var sim = new Sim { X = Here.X + Here.Radius + 100f, Z = Here.Z };
+        brain.Decide(sim.View(), 1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Visiting), "the premise: holding none, the desk first");
+            Assert.That(brain.VisitTarget, Is.EqualTo((Here.X + Here.Radius - 50f, Here.Z)), "it set out for another city's terminal");
         });
     }
 
@@ -1317,20 +1468,31 @@ public sealed class BotPathChecks
     private static BotAssets OneWall(PlanBox box) => new([new AssetPlan { Id = "wall", Walls = [box] }]);
 
     /// <summary>
-    /// A searched walk across a staged street — two rows of houses, an alley between each pair — never passes closer to a wall than the body's half and
-    /// 0.1 m: a leg is pulled straight only where it keeps <see cref="CityPath.AirM"/>, and the corner before it is kept otherwise.
+    /// A searched walk across a staged street — two rows of houses, an alley between each pair — keeps the body's half and <see cref="CityPath.AirM"/>
+    /// from every wall: a leg is pulled straight only where it keeps that air, and the corner before it is kept otherwise. A walk that starts or ends
+    /// inside a wall's air (a body against a house, a stand point beside it) comes no closer to that wall than its end already is — and keeps the full air
+    /// from every other wall, and from the far corners of its own (review 6).
     /// </summary>
     /// <remarks>Without the air, a leg pulled taut round a corner grazed it at the body's half and a few hundredths: a steered body touched it.</remarks>
     [Test]
     public void APulledWalk_KeepsAirAtEveryCorner()
     {
         var house = new PlanBox(-3f, -3f, 3f, 3f, 0f, 2.7f, false);
-        var assets = new BotAssets([new AssetPlan { Id = "house", Walls = [house] }]);
+        const float postR = 0.3f;
+        var post = new PlanBox(-postR, -postR, postR, postR, 0f, 3f, false, postR);
+        var assets = new BotAssets([new AssetPlan { Id = "house", Walls = [house] }, new AssetPlan { Id = "post", Walls = [post] }]);
         var structures = new List<SeenStructure>();
         for (var i = 0; i < 4; i++)
         {
             structures.Add(new SeenStructure(i * 10f, 0f, 0, 0, 0, 1));    // the south row, alleys 4 m wide between
             structures.Add(new SeenStructure((i * 10f) + 5f, 14f, 0, 0, 0, 1));   // the north row, staggered half a house; the street is 8 m wide
+        }
+
+        // Lamp posts down the street: round colliders, whose open cells the grid leaves a body's half from their rim.
+        var posts = new List<(float X, float Z)> { (4f, 7f), (16f, 7.5f), (27f, 6.5f) };
+        foreach (var (px, pz) in posts)
+        {
+            structures.Add(new SeenStructure(px, pz, 0, 1, 0, 1));
         }
 
         var ends = new List<(float X, float Z)>();
@@ -1341,14 +1503,27 @@ public sealed class BotPathChecks
             ends.Add((-2f + (k * 7.1f), 21f));   // behind the north row
         }
 
+        // And ends inside a wall's air, outside its body margin: a body standing against a house's face, at its corner, in an alley.
+        ends.AddRange([(3.35f, 1f), (-3.4f, -1.5f), (13.36f, 3.36f), (6.65f, 0.5f), (8.62f, 11.3f), (18.6f, 17.35f)]);
+
+        // Just inside the air, near a corner, so the walk's first or last leg rounds that corner of its own wall — and round a post.
+        ends.AddRange([(2.7f, -3.44f), (-2.7f, 3.44f), (13.44f, 2.7f), (6.56f, -2.7f), (7.7f, 17.44f), (21.6f, 10.56f)]);
+        foreach (var (px, pz) in posts)
+        {
+            ends.AddRange([(px + postR + 0.42f, pz + 0.1f), (px - 0.1f, pz - postR - 0.43f)]);
+        }
+        var air = CityPath.BodyHalfM + CityPath.AirM;
+
         var closest = double.MaxValue;
         var where = string.Empty;
         var routes = 0;
+        var nearEnds = 0;
         foreach (var from in ends)
         {
             foreach (var to in ends)
             {
-                if (from == to || CityPath.Route(structures, assets, from, to, BotBrain.MaxExpansions) is not { } path)
+                // A walk of a grid step or two is the grid's, not a pulled one: two ends 0.7 m apart round one corner have no other way.
+                if (Routing.Distance(from.X, from.Z, to.X, to.Z) < 2d || CityPath.Route(structures, assets, from, to, BotBrain.MaxExpansions) is not { } path)
                 {
                     continue;
                 }
@@ -1359,10 +1534,18 @@ public sealed class BotPathChecks
                 {
                     foreach (var st in structures)
                     {
-                        var d = SegmentToBox(a, b, st.X + house.MinX, st.Z + house.MinZ, st.X + house.MaxX, st.Z + house.MaxZ);
-                        if (d < closest)
+                        var (minX, minZ, maxX, maxZ) = (st.X + house.MinX, st.Z + house.MinZ, st.X + house.MaxX, st.Z + house.MaxZ);
+                        var d = st.Asset == 1 ? SegmentToPoint(a, b, (st.X, st.Z)) - postR : SegmentToBox(a, b, minX, minZ, maxX, maxZ);
+
+                        // What this leg is held to from this wall: the air, or as close as its nearer end already stands.
+                        var ends_ = st.Asset == 1
+                            ? Math.Min(SegmentToPoint(a, a, (st.X, st.Z)), SegmentToPoint(b, b, (st.X, st.Z))) - postR
+                            : Math.Min(SegmentToBox(a, a, minX, minZ, maxX, maxZ), SegmentToBox(b, b, minX, minZ, maxX, maxZ));
+                        nearEnds += ends_ < air ? 1 : 0;
+                        var margin = d - Math.Min(air, ends_);
+                        if (margin < closest)
                         {
-                            (closest, where) = (d, $"({a.X:F1}, {a.Z:F1}) to ({b.X:F1}, {b.Z:F1}), house at ({st.X}, {st.Z})");
+                            (closest, where) = (margin, $"({a.X:F2}, {a.Z:F2}) to ({b.X:F2}, {b.Z:F2}) passes {d:F3} m from the house at ({st.X}, {st.Z})");
                         }
                     }
 
@@ -1371,8 +1554,23 @@ public sealed class BotPathChecks
             }
         }
 
-        Assert.That(routes, Is.GreaterThan(300), "the premise: walks across the street were found");
-        Assert.That(closest, Is.GreaterThanOrEqualTo(CityPath.BodyHalfM + 0.1d), $"a leg passes {closest:F3} m from a wall: {where}");
+        Assert.Multiple(() =>
+        {
+            Assert.That(routes, Is.GreaterThan(500), "the premise: walks across the street were found");
+            Assert.That(nearEnds, Is.GreaterThan(0), "the premise: some walks start or end inside a wall's air");
+            // Within a tenth of a cell: a single grid step, which no pull made, keeps what its two open cells allow — beside a post, 5 cm short of the air.
+            Assert.That(closest, Is.GreaterThanOrEqualTo(-0.05d), $"a leg keeps {closest:F3} m less than its air: {where}");
+        });
+    }
+
+    /// <summary>A segment's distance to a point.</summary>
+    private static double SegmentToPoint((float X, float Z) a, (float X, float Z) b, (float X, float Z) c)
+    {
+        var (dx, dz) = (b.X - a.X, b.Z - a.Z);
+        var len2 = (dx * dx) + (dz * dz);
+        var t = len2 > 0f ? Math.Clamp((((c.X - a.X) * dx) + ((c.Z - a.Z) * dz)) / len2, 0f, 1f) : 0f;
+        var (ex, ez) = (a.X + (dx * t) - c.X, a.Z + (dz * t) - c.Z);
+        return Math.Sqrt((ex * ex) + (ez * ez));
     }
 
     /// <summary>A segment's distance to a rectangle: 0 when they meet, else the nearest of its ends to the box and of the box's corners to it.</summary>
