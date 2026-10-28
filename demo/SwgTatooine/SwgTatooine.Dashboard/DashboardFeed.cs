@@ -95,6 +95,12 @@ public sealed class DashboardFeed : BackgroundService
         while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false));
     }
 
+    /// <summary>
+    /// Whether the economy, item and market consistency audits run, from <c>SWG_DASH_CONSISTENCY=1</c>; off by default (Loïc, 2026-10-28). Each is one read
+    /// transaction over the whole database, and on a grown database it pins an epoch long enough to fill the server's page cache.
+    /// </summary>
+    private static readonly bool ConsistencyAudits = Environment.GetEnvironmentVariable("SWG_DASH_CONSISTENCY") == "1";
+
     private async Task ReadAsync(bool audit, CancellationToken ct)
     {
         var previous = Latest;
@@ -108,10 +114,13 @@ public sealed class DashboardFeed : BackgroundService
             var marketAudit = previous.MarketAudit;
             if (audit)
             {
-                auditNode = JsonNode.Parse(await _http.GetStringAsync("swg/economy/audit", ct).ConfigureAwait(false));
-                auditAt = DateTime.UtcNow;
-                itemAudit = await OptionalAuditAsync("swg/items/audit", ct).ConfigureAwait(false);
-                marketAudit = await OptionalAuditAsync("swg/market/audit", ct).ConfigureAwait(false);
+                if (ConsistencyAudits)
+                {
+                    auditNode = JsonNode.Parse(await _http.GetStringAsync("swg/economy/audit", ct).ConfigureAwait(false));
+                    auditAt = DateTime.UtcNow;
+                    itemAudit = await OptionalAuditAsync("swg/items/audit", ct).ConfigureAwait(false);
+                    marketAudit = await OptionalAuditAsync("swg/market/audit", ct).ConfigureAwait(false);
+                }
             }
 
             // The ledger's end: the audit's last sequence when there is one — the economy's counters start again at 0 with the process, the ledger does
