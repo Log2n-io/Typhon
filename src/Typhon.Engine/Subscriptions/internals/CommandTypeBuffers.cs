@@ -2,6 +2,7 @@ using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
+using Typhon.Profiler;
 
 namespace Typhon.Engine.Internals;
 
@@ -222,6 +223,8 @@ internal sealed class CommandTypeBuffer
         {
             // In place: the newest overwrites the previous one, so the batch carries exactly one record per session and TryGetLatest needs no second store.
             index = _sessionStart[slot];
+            // The overwritten command was admitted and will never be read: its trace ends here (#1517).
+            TyphonEvent.EmitIngressDropped(session.Value, _headers[_sessionSegment[slot]][index].Seq, IngressDropReason.Coalesced);
             _sessionSegment[slot] = segment;
         }
         else

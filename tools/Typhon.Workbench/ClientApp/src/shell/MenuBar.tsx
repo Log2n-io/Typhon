@@ -43,7 +43,7 @@ import {
   saveLayoutAsDefault,
   resetLayout,
 } from './commands/openSchemaBrowser';
-import { toggleViewCallTree, toggleViewCriticalPath, toggleViewProfiler, toggleViewTopSpans, toggleViewQueryAnalyzer, toggleViewEngineLiveHealth, toggleViewSpatialMaintenance, toggleViewSubscriptions, registerOpenSaveReplay } from './commands/profilerCommands';
+import { toggleViewCallTree, toggleViewCriticalPath, toggleViewProfiler, toggleViewTopSpans, toggleViewRequests, toggleViewQueryAnalyzer, toggleViewEngineLiveHealth, toggleViewSpatialMaintenance, toggleViewSubscriptions, registerOpenSaveReplay } from './commands/profilerCommands';
 import { toggleViewQueryConsole } from './commands/openQueryConsole';
 import { toggleViewRealms } from './commands/openRealms';
 import { openIntegrity } from './commands/openIntegrity';
@@ -169,6 +169,9 @@ export default function MenuBar() {
  )}
  {isViewVisible('TopSpans', sessionScope) && (
  <MenubarItem onClick={toggleViewTopSpans}>Top Spans</MenubarItem>
+ )}
+ {isViewVisible('Requests', sessionScope) && (
+ <MenubarItem onClick={toggleViewRequests}>Requests</MenubarItem>
  )}
  {isViewVisible('SystemDag', sessionScope) && (
  <MenubarItem onClick={toggleViewSystemDag}>System DAG</MenubarItem>

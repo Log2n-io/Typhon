@@ -143,6 +143,11 @@ jobs:
               - 'test/Typhon.Subscriptions.AspNetCore.Tests/**'
               # Compiled into that suite by link: its WebSocket parity test (AC-15) compares against the engine tests' in-process oracle.
               - 'test/Typhon.Engine.Tests/Runtime/Subscriptions/InProcessLink.cs'
+              # Request correlation's ASP.NET Core wiring (#1517): its suite owns its process to run the correlation-ON path, and links the
+              # engine tests' ring observer.
+              - 'src/Typhon.Profiler.AspNetCore/**'
+              - 'test/Typhon.Profiler.AspNetCore.Tests/**'
+              - 'test/Typhon.Engine.Tests/Profiler/TraceRingObserver.cs'
               - 'src/Typhon.Shell/**'
               - 'src/Typhon.Shell.Extensibility/**'
               - 'samples/Typhon.Samples.Swg/**'
@@ -862,7 +867,7 @@ jobs:
 
       # One step, all five: a per-project step would stop at the first failure and hide the rest, and the whole
       # point is to learn the state of suites nobody has run. `rc` accumulates so every project reports.
-      - name: Test — analyzers, generators, protocol, shell, samples, websocket adapter, anthill harness, swg realms
+      - name: Test — analyzers, generators, protocol, shell, samples, websocket adapter, request correlation, anthill harness, swg realms
         run: |
           set -uo pipefail
           rc=0
@@ -873,6 +878,7 @@ jobs:
             test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj \
             test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj \
             test/Typhon.Subscriptions.AspNetCore.Tests/Typhon.Subscriptions.AspNetCore.Tests.csproj \
+            test/Typhon.Profiler.AspNetCore.Tests/Typhon.Profiler.AspNetCore.Tests.csproj \
             demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj \
             demo/AsteroidField/AsteroidField.Tests/AsteroidField.Tests.csproj ; do
             name=$(basename "$proj" .csproj)

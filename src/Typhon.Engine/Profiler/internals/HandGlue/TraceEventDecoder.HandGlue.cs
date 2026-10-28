@@ -40,6 +40,14 @@ public static partial class TraceEventDecoder
         {
             return DecodeQueryArgs(source, currentTick, ticksPerUs);
         }
+        if (kind == TraceEventKind.ExternalRequest)
+        {
+            return DecodeExternalRequest(source, currentTick, ticksPerUs);
+        }
+        if (CorrelationInstantCodec.Covers(kind))
+        {
+            return DecodeCorrelationInstant(source, currentTick, ticksPerUs);
+        }
 
         // Read the common header — every record carries it regardless of kind. After that we can't decode
         // payload generically (each kind has its own layout), so we surface what we have.
@@ -72,6 +80,47 @@ public static partial class TraceEventDecoder
             OriginalKind = (int)kind,
             IsSpan = isSpan,
             DurationUs = durationUs,
+        };
+    }
+
+    private static ExternalRequestEventDto DecodeExternalRequest(ReadOnlySpan<byte> source, int currentTick, long ticksPerUs)
+    {
+        var d = ExternalRequestEventCodec.Decode(source);
+        var hasTrace = (d.TraceIdHi | d.TraceIdLo) != 0;
+        return new ExternalRequestEventDto
+        {
+            ThreadSlot = d.ThreadSlot,
+            TickNumber = currentTick,
+            TimestampUs = d.StartTimestamp / (double)ticksPerUs,
+            DurationUs = d.DurationTicks / (double)ticksPerUs,
+            SpanId = d.SpanId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ParentSpanId = "0",
+            TraceIdHi = hasTrace ? d.TraceIdHi.ToString(System.Globalization.CultureInfo.InvariantCulture) : null,
+            TraceIdLo = hasTrace ? d.TraceIdLo.ToString(System.Globalization.CultureInfo.InvariantCulture) : null,
+            Method = d.Method.ToString(),
+            Status = d.Status,
+            Route = d.Route,
+        };
+    }
+
+    private static CorrelationInstantEventDto DecodeCorrelationInstant(ReadOnlySpan<byte> source, int currentTick, long ticksPerUs)
+    {
+        var d = CorrelationInstantCodec.Decode(source);
+        return new CorrelationInstantEventDto
+        {
+            ThreadSlot = d.ThreadSlot,
+            TickNumber = currentTick,
+            TimestampUs = d.Timestamp / (double)ticksPerUs,
+            Event = d.Kind.ToString(),
+            OriginalKind = (int)d.Kind,
+            Session = d.Session,
+            Seq = d.Seq,
+            WireIdx = d.WireIdx,
+            Bytes = d.Bytes,
+            Tick = d.Tick,
+            SysIdx = d.SysIdx,
+            Reason = d.Kind == TraceEventKind.IngressDropped ? d.Reason.ToString() : null,
+            Acks = d.Acks,
         };
     }
 

@@ -1,6 +1,10 @@
 import type { ChunkSpan, OffCpuStore, ProfilerSelection, SpanData, TickData } from '@/libs/profiler/model/traceModel';
 import type { TimeRange, TrackLayout, Viewport } from '@/libs/profiler/model/uiTypes';
 import type { TimeAreaHover } from './timeAreaHitTest';
+import { flowSegments, type FlowPoint } from '@/libs/profiler/correlation/causalFlow';
+import {
+  DROPPED_MARK_HALF_WIDTH, firstRootEndingAfter, ROOT_COMMANDS_TRACK_ID, ROOT_HTTP_TRACK_ID, type RootLane, type RootLanes,
+} from '@/libs/profiler/correlation/rootLanes';
 import { relativeLuminanceHex } from '@/libs/color/contrast';
 import {
   colorForChunk,
@@ -415,7 +419,25 @@ export interface TimeAreaInputs {
    * (`useProfilerViewStore.showOffCpu`). When false the off-CPU pass is skipped entirely.
    */
   showOffCpu: boolean;
+  /**
+   * The selected request's causal id (#1517), or null. When set, spans carrying it are outlined, every other span is dimmed, and a flow line
+   * joins them — with the command's lifecycle markers — in time order.
+   */
+  causal?: CausalHighlight | null;
+  /** The packed root lanes (#1517) the `roots-*` tracks draw. Absent → those tracks draw nothing. */
+  rootLanes?: RootLanes;
 }
+
+/** What {@link TimeAreaInputs.causal} highlights. */
+export interface CausalHighlight {
+  key: string;
+  /** The key's two halves, so the per-span match compares two strings instead of building one. */
+  hi: string;
+  lo: string;
+  /** Lifecycle points with no span of their own (received, admitted, consumed, sent), by producing thread slot. */
+  markers: readonly { slot: number; us: number }[];
+}
+
 
 /**
  * Paint the full time area into the supplied canvas. No React, no store reads — every input is
@@ -432,6 +454,8 @@ export function drawTimeArea(
   if (!ctx) return;
 
   const { tracks, viewRange, vp, gutterWidth, legendsVisible, visibleTicks, ticks, selection, hover, dragSelection, crosshairX, gaugeData, helpHover, pendingRangesUs, spanColorMode, spanPalette, showOffCpu } = inputs;
+  const causal = inputs.causal ?? null;
+  const flowPoints: FlowPoint[] = [];
   const contentWidth = width - gutterWidth;
   // Height of the pinned ruler band (ruler + gap below it). Everything above this line is always
   // visible regardless of vertical scroll; tracks below are clipped to this boundary.
@@ -600,13 +624,27 @@ export function drawTimeArea(
       continue;
     }
 
+    // Root lanes (#1517) — the requests and commands that caused the work below.
+    if (track.id === ROOT_HTTP_TRACK_ID || track.id === ROOT_COMMANDS_TRACK_ID) {
+      const lane = inputs.rootLanes === undefined ? undefined : track.id === ROOT_HTTP_TRACK_ID ? inputs.rootLanes.http : inputs.rootLanes.commands;
+      if (lane !== undefined) drawRootLane(ctx, lane, visStartUs, visEndUs, gutterWidth, width, pxOfUs, ty, hover, theme, causal, flowPoints);
+      continue;
+    }
+
     // Slot lanes (expanded) — pass both `ticks` (for span rendering; needs cross-tick coverage
     // so a long span that started before the viewport still draws) and `visibleTicks` (for the
     // chunk row; chunks never span ticks so the visible-only subset is sufficient + faster).
     if (track.id.startsWith('slot-')) {
       const threadSlot = Number.parseInt(track.id.slice(5), 10);
       drawSlotLane(ctx, track, threadSlot, ticks, visibleTicks, visStartUs, visEndUs, gutterWidth, width, pxOfUs, ty, selection, hover, theme,
-        spanColorMode, spanPalette, gaugeData.offCpuBySlot.get(threadSlot), showOffCpu);
+        spanColorMode, spanPalette, gaugeData.offCpuBySlot.get(threadSlot), showOffCpu, causal, flowPoints);
+      if (causal !== null) {
+        for (const m of causal.markers) {
+          if (m.slot === threadSlot && m.us >= visStartUs && m.us <= visEndUs) {
+            flowPoints.push({ x: pxOfUs(m.us), y: ty + Math.min(track.height, 18) / 2, us: m.us, lane: threadSlot });
+          }
+        }
+      }
       continue;
     }
 
@@ -631,6 +669,11 @@ export function drawTimeArea(
       drawMiniRowsTrack(ctx, track, ticks, visibleTicks, visStartUs, visEndUs, gutterWidth, width, pxOfUs, ty, hover, theme);
       continue;
     }
+  }
+
+  // Before the ruler pin, so a flow reaching a track scrolled under the sticky band is covered by it like the track's own content.
+  if (causal !== null && flowPoints.length > 1) {
+    drawCausalFlow(ctx, flowPoints, theme);
   }
 
   // Pin the ruler content: overwrite any scrolled track content that entered the ruler band.
@@ -938,6 +981,8 @@ function drawSlotLane(
   spanPalette: SpanPalette,
   offCpuStore: OffCpuStore | undefined,
   showOffCpu: boolean,
+  causal: CausalHighlight | null = null,
+  flowPoints: FlowPoint[] = [],
 ): void {
   const chunkRowHeight = track.chunkRowHeight ?? 0;
   const spanRegionTop = ty + chunkRowHeight;
@@ -1073,7 +1118,8 @@ function drawSlotLane(
       const actualWidth = x2 - x1;
       const w = actualWidth < MIN_RECT_WIDTH ? MIN_RECT_WIDTH : actualWidth;
 
-      if (actualWidth <= 1) {
+      const causalMatch = causal !== null && span.traceIdHi === causal.hi && span.traceIdLo === causal.lo;
+      if (actualWidth <= 1 && !causalMatch) {
         // Extend existing run at this depth?
         if (coalCount[d] > 0 && x1 <= coalX2[d] + 1) {
           coalCount[d]++;
@@ -1094,16 +1140,24 @@ function drawSlotLane(
         continue;
       }
 
-      // Wide bar
+      // Wide bar — or a causal match of any width, drawn on its own so a zoomed-out view still outlines it and routes the flow through it.
       flushDepth(d);
       const c = pinChunkRow ? theme.idleBar : colorForSpan(span, spanColorMode, theme.spans, spanPalette, theme.isDark);
       if (c !== prevFill) { ctx.fillStyle = c; prevFill = c; }
+      if (causalMatch) {
+        ctx.globalAlpha = 1;
+        causalHits.push(x1, sy, w, span.startUs);
+      }
       ctx.fillRect(x1, sy + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT);
 
       if (selectedSpan !== null && isSameSpan(selectedSpan, span)) {
+        // Full strength even while a request dims the lane: the selection must stay findable.
+        const alpha = ctx.globalAlpha;
+        ctx.globalAlpha = 1;
         ctx.strokeStyle = theme.selectedOutline;
         ctx.lineWidth = 1.5;
         ctx.strokeRect(x1 + 0.5, sy + SPAN_BAR_MARGIN + 0.5, w - 1, SPAN_BAR_HEIGHT - 1);
+        ctx.globalAlpha = alpha;
       } else if (hoveredSpan !== null && isSameSpan(hoveredSpan, span)) {
         strokeHoverContour(ctx, x1, sy + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT, theme);
       }
@@ -1138,6 +1192,7 @@ function drawSlotLane(
         );
         prevFill = textColor; // keep the fillStyle cache in sync with the assignment above.
       }
+      if (causalMatch) ctx.globalAlpha = CAUSAL_DIM_ALPHA;
     }
 
     for (let d = 0; d < COAL_MAX_DEPTH; d++) flushDepth(d);
@@ -1147,6 +1202,10 @@ function drawSlotLane(
   // their tick's endUs and still overlap the viewport — they draw correctly here. Cross-tick spans
   // are excluded: they start before the tick and can produce full-width bars in a gap.
   const visSpanSet = visibleTickSet(visibleTicks);
+  // With a request selected (#1517), every span but its own draws translucent — bars, coalesced runs and labels alike, at no extra fill. Its own
+  // spans are outlined after both passes (flat x, y, w, us quads), so a coalesced run flushed later in the same pixel column cannot paint over them.
+  const causalHits: number[] = [];
+  if (causal !== null) ctx.globalAlpha = CAUSAL_DIM_ALPHA;
   for (const tick of ticks) {
     if (!visSpanSet.has(tick)) drawOneTickSpans(tick, true);
   }
@@ -1155,6 +1214,10 @@ function drawSlotLane(
   // context (low startUs) naturally draws before native spans — correct z-order within the tick.
   for (const tick of visibleTicks) {
     drawOneTickSpans(tick, false);
+  }
+  ctx.globalAlpha = 1;
+  for (let i = 0; i < causalHits.length; i += 4) {
+    outlineCausal(ctx, causalHits[i], causalHits[i + 1], causalHits[i + 2], causalHits[i + 3], theme, flowPoints, threadSlot);
   }
 
   // Off-CPU overlay — drawn last so the translucent band composites over the chunk + span rows. Opt-in via the
@@ -1588,4 +1651,135 @@ export function isSameSpan(a: SpanData, b: SpanData): boolean {
       && Math.abs(a.startUs - b.startUs) < 0.01
       && Math.abs(a.endUs - b.endUs) < 0.01
       && a.name === b.name;
+}
+
+// ─── Request correlation (#1517) ────────────────────────────────────────────────────────────────
+
+/** Opacity of everything a selected request did not cause. */
+const CAUSAL_DIM_ALPHA = 0.35;
+
+/** Outlines a span carrying the selected causal id and records its flow point, keyed by its lane so the flow fans out once per lane. */
+function outlineCausal(
+  ctx: CanvasRenderingContext2D, x1: number, sy: number, w: number, startUs: number, theme: StudioTheme, flowPoints: FlowPoint[], lane: number,
+): void {
+  ctx.strokeStyle = theme.selectedOutline;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x1 + 0.5, sy + SPAN_BAR_MARGIN + 0.5, Math.max(w - 1, 1), SPAN_BAR_HEIGHT - 1);
+  flowPoints.push({ x: x1, y: sy + SPAN_BAR_MARGIN + SPAN_BAR_HEIGHT / 2, us: startUs, lane });
+}
+
+/** Draws the selected request's flow ({@link flowSegments}): a dashed line per segment, with an arrowhead into each point. */
+function drawCausalFlow(ctx: CanvasRenderingContext2D, points: FlowPoint[], theme: StudioTheme): void {
+  const segments = flowSegments(points);
+  ctx.strokeStyle = theme.selectedOutline;
+  ctx.fillStyle = theme.selectedOutline;
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath();
+  for (const [from, to] of segments) {
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(to.x, to.y);
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+  for (const [from, to] of segments) {
+    if (Math.hypot(to.x - from.x, to.y - from.y) < 8) continue;
+    const angle = Math.atan2(to.y - from.y, to.x - from.x);
+    ctx.beginPath();
+    ctx.moveTo(to.x, to.y);
+    ctx.lineTo(to.x - 7 * Math.cos(angle - 0.4), to.y - 7 * Math.sin(angle - 0.4));
+    ctx.lineTo(to.x - 7 * Math.cos(angle + 0.4), to.y - 7 * Math.sin(angle + 0.4));
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+
+/** The flow's lane id for a root bar: no thread slot is negative. */
+const ROOT_FLOW_LANE = -1;
+
+/**
+ * One root lane: a bar per request or command on its packed row, its waits (ring, tick, send) shaded lighter so the engine part stands out, and a
+ * dropped command as a red notch. Overflowing roots share the last row, translucent. With a causal key set, its bars are outlined and record the
+ * flow's root point; the others draw translucent.
+ */
+function drawRootLane(
+  ctx: CanvasRenderingContext2D,
+  lane: RootLane,
+  visStartUs: number,
+  visEndUs: number,
+  gutterWidth: number,
+  width: number,
+  pxOfUs: (us: number) => number,
+  ty: number,
+  hover: TimeAreaHover | null,
+  theme: StudioTheme,
+  causal: CausalHighlight | null,
+  flowPoints: FlowPoint[],
+): void {
+  ctx.font = '12px monospace';
+  ctx.textAlign = 'left';
+  const hoveredId = hover !== null && hover.kind === 'root' ? hover.root.id : null;
+  const httpColor = theme.spans[2 % theme.spans.length];
+  const commandColor = theme.spans[5 % theme.spans.length];
+  for (let r = 0; r < lane.rows.length; r++) {
+    const rowIdx = lane.rows[r].idx;
+    for (let k = firstRootEndingAfter(lane, r, visStartUs); k < rowIdx.length; k++) {
+      const { row, lane: laneRow, overflow } = lane.roots[rowIdx[k]];
+      if (row.startUs > visEndUs) break;
+      if (row.endUs < visStartUs) continue;
+      const sy = ty + laneRow * SPAN_ROW_HEIGHT + SPAN_BAR_MARGIN;
+      const x1 = pxOfUs(row.startUs);
+      const selected = causal !== null && causal.key === row.key;
+      const alpha = (causal !== null && !selected ? CAUSAL_DIM_ALPHA : 1) * (overflow ? 0.45 : 1);
+      ctx.globalAlpha = alpha;
+
+      if (row.kind === 'dropped') {
+        ctx.fillStyle = theme.destructive;
+        ctx.beginPath();
+        ctx.moveTo(x1, sy + SPAN_BAR_HEIGHT);
+        ctx.lineTo(x1 - DROPPED_MARK_HALF_WIDTH, sy);
+        ctx.lineTo(x1 + DROPPED_MARK_HALF_WIDTH, sy);
+        ctx.closePath();
+        ctx.fill();
+        continue;
+      }
+
+      const x2 = pxOfUs(row.endUs);
+      const w = Math.max(x2 - x1, MIN_RECT_WIDTH);
+      const color = row.kind === 'http' ? httpColor : commandColor;
+      ctx.fillStyle = color;
+      ctx.fillRect(x1, sy, w, SPAN_BAR_HEIGHT);
+
+      // Waits, lighter: received → admitted → consumed is queueing, and the tail after the last engine span is waiting for the frame to go out.
+      ctx.fillStyle = theme.background;
+      ctx.globalAlpha = alpha * 0.5;
+      if (row.ringWaitUs !== undefined || row.tickWaitUs !== undefined) {
+        const b = pxOfUs(row.startUs + (row.ringWaitUs ?? 0) + (row.tickWaitUs ?? 0));
+        if (b - x1 >= 1) ctx.fillRect(x1, sy, b - x1, SPAN_BAR_HEIGHT);
+      }
+      if (row.sendWaitUs !== undefined) {
+        const a = pxOfUs(row.endUs - row.sendWaitUs);
+        if (x2 - a >= 1) ctx.fillRect(a, sy, x2 - a, SPAN_BAR_HEIGHT);
+      }
+      ctx.globalAlpha = alpha;
+
+      if (selected) {
+        ctx.strokeStyle = theme.selectedOutline;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x1 + 0.5, sy + 0.5, Math.max(w - 1, 1), SPAN_BAR_HEIGHT - 1);
+        flowPoints.push({ x: Math.max(x1, gutterWidth), y: sy + SPAN_BAR_HEIGHT / 2, us: row.startUs, lane: ROOT_FLOW_LANE, root: true });
+      } else if (hoveredId === row.id) {
+        strokeHoverContour(ctx, x1, sy, w, SPAN_BAR_HEIGHT, theme);
+      }
+
+      if (w > 24 && x1 + w > gutterWidth && x1 < width) {
+        ctx.fillStyle = readableOnBar(color, theme);
+        const textX = Math.max(x1 + 3, gutterWidth + 3);
+        const status = row.status !== undefined ? ` ${row.status}` : '';
+        fillTextTruncatedMono12px(ctx, `${row.label}${status} (${formatDuration(row.totalUs)})`, textX, sy + SPAN_BAR_HEIGHT - SPAN_BAR_TEXT_OFFSET,
+          x1 + w - textX);
+      }
+    }
+  }
+  ctx.globalAlpha = 1;
 }

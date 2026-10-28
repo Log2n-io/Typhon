@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using Typhon.Profiler;
 using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;
@@ -500,24 +501,27 @@ internal sealed class SendPump : IDisposable
     /// <param name="bytes">The frame's first byte.</param>
     /// <param name="length">Its length.</param>
     /// <param name="sequence">The sequence to complete once the link is done with it.</param>
+    /// <param name="tick">The tick the frame was assembled for.</param>
     /// <returns><see langword="false"/> when nothing is claimable.</returns>
     /// <remarks>
     /// The pointer leaves as an <see cref="nint"/> because an async method cannot be compiled in an unsafe context, and because a raw pointer must not be a
     /// field of a state machine the compiler may place on the heap. It is turned back into a pointer only inside <see cref="ViewOf"/>, on the stack.
     /// </remarks>
-    private unsafe bool TryClaim(int slot, out nint bytes, out int length, out long sequence)
+    private unsafe bool TryClaim(int slot, out nint bytes, out int length, out long sequence, out long tick)
     {
         if (!_frames.SendStateOf(slot).TryClaimFrame(_frames.Gate.CommittedTick, out var frame))
         {
             bytes = 0;
             length = 0;
             sequence = 0;
+            tick = 0;
             return false;
         }
 
         bytes = (nint)frame.Bytes;
         length = frame.Length;
         sequence = frame.Sequence;
+        tick = frame.Tick;
         return true;
     }
 
@@ -564,7 +568,7 @@ internal sealed class SendPump : IDisposable
             return false;
         }
 
-        if (!TryClaim(slot, out var bytes, out var length, out var sequence))
+        if (!TryClaim(slot, out var bytes, out var length, out var sequence, out var frameTick))
         {
             return false;
         }
@@ -587,6 +591,9 @@ internal sealed class SendPump : IDisposable
             var measure = FrameAssembler.PhaseTimingEnabled;
             var from = measure ? Stopwatch.GetTimestamp() : 0L;
             var pending = link.SendAsync(buffer.Memory, _stopping.Token);
+            // After SendAsync returned, so a send that throws synchronously is not recorded as sent; one that fails later still is (handed to the link).
+            // The tick is the claimed frame's own, so the Workbench answers a command with the frame of its tick.
+            TyphonEvent.EmitEgressSent(session.Value, unchecked((uint)frameTick), length, 0);
             if (measure)
             {
                 if (pending.IsCompletedSuccessfully)

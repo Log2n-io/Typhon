@@ -46,7 +46,8 @@
         "demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj",
         "demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj",
         "demo/AsteroidField/AsteroidField.Tests/AsteroidField.Tests.csproj",
-        "test/Typhon.Subscriptions.AspNetCore.Tests/Typhon.Subscriptions.AspNetCore.Tests.csproj"
+        "test/Typhon.Subscriptions.AspNetCore.Tests/Typhon.Subscriptions.AspNetCore.Tests.csproj",
+        "test/Typhon.Profiler.AspNetCore.Tests/Typhon.Profiler.AspNetCore.Tests.csproj"
       ],
       "runs_via": "merge-gate.yml (free runner)"
     },

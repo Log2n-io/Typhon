@@ -178,6 +178,19 @@ export function buildHoverTooltipLines(hover: TimeAreaHover): string[] | null {
       if (iv.readyTimeUs > 0) lines.push(`Ready-queue wait: ${formatDuration(iv.readyTimeUs)}`);
       return lines;
     }
+    case 'root': {
+      const r = hover.root;
+      const lines = [r.label];
+      if (r.kind !== 'dropped') lines.push(`Total: ${formatDuration(r.totalUs)}`);
+      if (r.status !== undefined) lines.push(`Status: ${r.status}`);
+      if (r.session !== undefined) lines.push(`Session: ${r.session}`);
+      if (r.spanCount > 0) lines.push(`Engine: ${formatDuration(r.engineUs)} in ${r.spanCount.toLocaleString()} spans`);
+      if (r.ringWaitUs !== undefined) lines.push(`Ring wait: ${formatDuration(r.ringWaitUs)}`);
+      if (r.tickWaitUs !== undefined) lines.push(`Tick wait: ${formatDuration(r.tickWaitUs)}`);
+      if (r.sendWaitUs !== undefined) lines.push(`Send wait: ${formatDuration(r.sendWaitUs)}`);
+      lines.push('Click to pin its trace');
+      return lines;
+    }
     case 'tick':
     case 'help':
     case 'gutter-chevron':

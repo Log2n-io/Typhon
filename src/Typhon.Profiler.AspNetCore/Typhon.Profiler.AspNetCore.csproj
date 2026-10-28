@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <LangVersion>default</LangVersion>
+        <RootNamespace>Typhon.Profiler.AspNetCore</RootNamespace>
+        <!-- A library, not an application: the Web SDK is used for the ASP.NET Core framework reference only. -->
+        <OutputType>Library</OutputType>
+        <!-- The Web SDK defaults to IsPackable=false. -->
+        <IsPackable>true</IsPackable>
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+        <EnableDefaultContentItems>false</EnableDefaultContentItems>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\Typhon.Engine\Typhon.Engine.csproj" />
+        <ProjectReference Include="..\Typhon.Profiler\Typhon.Profiler.csproj" />
+        <PackageReference Include="JetBrains.Annotations" Version="2026.2.0" PrivateAssets="all" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <InternalsVisibleTo Include="Typhon.Profiler.AspNetCore.Tests" />
+    </ItemGroup>
+
+    <PropertyGroup>
+        <PackageId>Typhon.Profiler.AspNetCore</PackageId>
+        <Description>Ties the HTTP requests an ASP.NET Core host serves to the Typhon engine work they cause, in the Typhon profiler and Workbench. Alpha — expect breaking changes.</Description>
+        <PackageTags>typhon;profiler;tracing;aspnetcore;game-server;realtime</PackageTags>
+        <PackageReadmeFile>PACKAGE.md</PackageReadmeFile>
+        <EnablePackageValidation>true</EnablePackageValidation>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <None Include="PACKAGE.md" Pack="true" PackagePath="" />
+    </ItemGroup>
+
+</Project>

@@ -134,6 +134,13 @@ public readonly struct CommandBatch<T> where T : unmanaged
 
         // The newest is the LAST of the session's run, which for a coalesced type is its only one.
         command = Read(_buffer, segment, start + count - 1);
+        if (TelemetryConfig.ProfilerCorrelationActive)
+        {
+            // Request correlation (#1517): what the system does next answers this command, until another one or the end of the system body.
+            var header = _buffer.HeadersIn(segment)[start + count - 1];
+            CorrelationContext.OnCommand(header.Session, header.Seq, _buffer.Tick);
+        }
+
         return true;
     }
 
@@ -177,6 +184,9 @@ public readonly struct CommandBatch<T> where T : unmanaged
         private int _index;
         private int _remaining;
         private ClientCommand<T> _current;
+        // Request correlation (#1517): the id that was in scope before the first command, restored at the batch's end.
+        private CausalId _outer;
+        private bool _scoped;
 
         internal Enumerator(CommandTypeBuffer buffer, int segment, int start, int count)
         {
@@ -188,6 +198,8 @@ public readonly struct CommandBatch<T> where T : unmanaged
             _index = segment >= 0 ? start - 1 : -1;
             _remaining = segment >= 0 ? count : -1;
             _current = default;
+            _outer = default;
+            _scoped = false;
         }
 
         /// <summary>
@@ -213,12 +225,14 @@ public readonly struct CommandBatch<T> where T : unmanaged
             {
                 if (_remaining <= 0)
                 {
+                    EndScope();
                     return false;
                 }
 
                 _remaining--;
                 _index++;
                 _current = Read(_buffer, _onlySegment, _index);
+                Scope(_onlySegment, _index);
                 return true;
             }
 
@@ -228,6 +242,7 @@ public readonly struct CommandBatch<T> where T : unmanaged
                 if (_index < _buffer.CountIn(_segment))
                 {
                     _current = Read(_buffer, _segment, _index);
+                    Scope(_segment, _index);
                     return true;
                 }
 
@@ -235,8 +250,40 @@ public readonly struct CommandBatch<T> where T : unmanaged
                 _index = -1;
                 if (_segment >= _buffer.SegmentCount)
                 {
+                    EndScope();
                     return false;
                 }
+            }
+        }
+
+        /// <summary>
+        /// Puts the command at the cursor in causal scope (#1517): every span the system opens while handling it carries the command's id, with no
+        /// change to the system's code. The first command remembers the id the loop started under; the batch's end puts it back, and the scheduler
+        /// clears the scope when the system body ends, which covers a loop left by <c>break</c>.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void Scope(int segment, int index)
+        {
+            if (TelemetryConfig.ProfilerCorrelationActive)
+            {
+                if (!_scoped)
+                {
+                    _outer = CausalScope.Current;
+                    _scoped = true;
+                }
+
+                var header = _buffer.HeadersIn(segment)[index];
+                CorrelationContext.OnCommand(header.Session, header.Seq, _buffer.Tick);
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void EndScope()
+        {
+            if (TelemetryConfig.ProfilerCorrelationActive && _scoped)
+            {
+                CorrelationContext.OnBatchEnd(_outer);
+                _scoped = false;
             }
         }
     }
