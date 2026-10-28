@@ -52,7 +52,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         return link;
     }
 
-    private static EntityId AnAccount(ulong id) => EntityId.FromRawValue(id);
+    private static EntityId AnAccount(TatooineSim sim, ulong id) => TestAccounts.For(sim.Dbe, id);
 
     private static MissionTerminalRef FirstTerminal(TatooineSim sim)
     {
@@ -244,10 +244,10 @@ internal sealed class MissionDeskChecks : ServedChecks
     {
         using var sim = Start();
         var terminal = FirstTerminal(sim);
-        var a = LogInAt(sim, AnAccount(0x6001), terminal, bindings: 1);
-        var b = LogInAt(sim, AnAccount(0x6002), terminal, bindings: 2);
-        var ca = CharacterOf(sim, AnAccount(0x6001));
-        var cb = CharacterOf(sim, AnAccount(0x6002));
+        var a = LogInAt(sim, AnAccount(sim, 0x6001), terminal, bindings: 1);
+        var b = LogInAt(sim, AnAccount(sim, 0x6002), terminal, bindings: 2);
+        var ca = CharacterOf(sim, AnAccount(sim, 0x6001));
+        var cb = CharacterOf(sim, AnAccount(sim, 0x6002));
         var offer = Offers(sim, terminal)[0];
         SessionHarness.UntilNamed(b.Session, offer.Id, "the offer to reach the second view");
 
@@ -274,8 +274,8 @@ internal sealed class MissionDeskChecks : ServedChecks
     {
         using var sim = Start();
         var terminal = FirstTerminal(sim);
-        var link = LogInAt(sim, AnAccount(0x6003), terminal);
-        var character = CharacterOf(sim, AnAccount(0x6003));
+        var link = LogInAt(sim, AnAccount(sim, 0x6003), terminal);
+        var character = CharacterOf(sim, AnAccount(sim, 0x6003));
 
         // 10 m out: inside the view, past the terminal's reach.
         Worlds.Park(sim, link.Session, terminal.X + 10f, terminal.Z);
@@ -322,8 +322,8 @@ internal sealed class MissionDeskChecks : ServedChecks
     {
         using var sim = Start();
         var terminal = FirstTerminal(sim);
-        var link = LogInAt(sim, AnAccount(0x6004), terminal);
-        var character = CharacterOf(sim, AnAccount(0x6004));
+        var link = LogInAt(sim, AnAccount(sim, 0x6004), terminal);
+        var character = CharacterOf(sim, AnAccount(sim, 0x6004));
         var revBefore = BodyOf(sim, link.Session).JournalRev;
         var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
 
@@ -367,8 +367,8 @@ internal sealed class MissionDeskChecks : ServedChecks
     {
         using var sim = Start();
         var terminal = FirstTerminal(sim);
-        var link = LogInAt(sim, AnAccount(0x6005), terminal);
-        var character = CharacterOf(sim, AnAccount(0x6005));
+        var link = LogInAt(sim, AnAccount(sim, 0x6005), terminal);
+        var character = CharacterOf(sim, AnAccount(sim, 0x6005));
         var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
         var lair = held.Mission.Lair;
 
@@ -404,8 +404,8 @@ internal sealed class MissionDeskChecks : ServedChecks
     {
         using var sim = Start();
         var terminal = FirstTerminal(sim);
-        var link = LogInAt(sim, AnAccount(0x6006), terminal);
-        var character = CharacterOf(sim, AnAccount(0x6006));
+        var link = LogInAt(sim, AnAccount(sim, 0x6006), terminal);
+        var character = CharacterOf(sim, AnAccount(sim, 0x6006));
         var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
         var credits = BodyOf(sim, link.Session).Credits;
 
@@ -435,8 +435,8 @@ internal sealed class MissionDeskChecks : ServedChecks
     {
         using var sim = Start();
         var terminal = FirstTerminal(sim);
-        var link = LogInAt(sim, AnAccount(0x6007), terminal);
-        var character = CharacterOf(sim, AnAccount(0x6007));
+        var link = LogInAt(sim, AnAccount(sim, 0x6007), terminal);
+        var character = CharacterOf(sim, AnAccount(sim, 0x6007));
         var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
 
         sim.WriteInTick(tx =>
@@ -464,11 +464,12 @@ internal sealed class MissionDeskChecks : ServedChecks
     [CancelAfter(180_000)]
     public void ALogoutTakesTheLairDown_ALoginDrawsItAgain_AcrossARestart()
     {
-        var account = AnAccount(0x6008);
+        EntityId account;
         EntityId mission;
         using (var first = Start(persist: true))
         {
             var terminal = FirstTerminal(first);
+            account = AnAccount(first, 0x6008);
             var link = LogInAt(first, account, terminal);
             var character = CharacterOf(first, account);
             var held = TakeAndHold(first, link, character, Offers(first, terminal)[0]);
@@ -511,9 +512,9 @@ internal sealed class MissionDeskChecks : ServedChecks
     {
         using var sim = Start();
         var terminal = FirstTerminal(sim);
-        var link = LogInAt(sim, AnAccount(0x6009), terminal, bindings: 1);
-        var stranger = LogInAt(sim, AnAccount(0x600A), terminal, bindings: 2);
-        var character = CharacterOf(sim, AnAccount(0x6009));
+        var link = LogInAt(sim, AnAccount(sim, 0x6009), terminal, bindings: 1);
+        var stranger = LogInAt(sim, AnAccount(sim, 0x600A), terminal, bindings: 2);
+        var character = CharacterOf(sim, AnAccount(sim, 0x6009));
         var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
 
         // The stranger names the real mission: the holder check, not the lookup, must refuse it.
@@ -543,8 +544,8 @@ internal sealed class MissionDeskChecks : ServedChecks
     {
         using var sim = Start();
         var terminal = FirstTerminal(sim);
-        var link = LogInAt(sim, AnAccount(0x600B), terminal);
-        var character = CharacterOf(sim, AnAccount(0x600B));
+        var link = LogInAt(sim, AnAccount(sim, 0x600B), terminal);
+        var character = CharacterOf(sim, AnAccount(sim, 0x600B));
         (EntityId Id, HeldMission Mission) first = default;
         for (var i = 0; i < TatooineData.MaxConcurrentMissions; i++)
         {
@@ -578,8 +579,8 @@ internal sealed class MissionDeskChecks : ServedChecks
     {
         using var sim = Start();
         var terminal = FirstTerminal(sim);
-        var link = LogInAt(sim, AnAccount(0x600C), terminal);
-        var character = CharacterOf(sim, AnAccount(0x600C));
+        var link = LogInAt(sim, AnAccount(sim, 0x600C), terminal);
+        var character = CharacterOf(sim, AnAccount(sim, 0x600C));
         var offer = Offers(sim, terminal)[0];
 
         Take(link, offer.Id, offer.Info.Serial + 1_000u);
@@ -609,7 +610,7 @@ internal sealed class MissionDeskChecks : ServedChecks
     {
         using var sim = Start();
         var terminal = FirstTerminal(sim);
-        var account = AnAccount(0x600D);
+        var account = AnAccount(sim, 0x600D);
         var link = LogInAt(sim, account, terminal);
         var character = CharacterOf(sim, account);
         var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
@@ -662,8 +663,8 @@ internal sealed class MissionDeskChecks : ServedChecks
     {
         using var sim = Start();
         var terminal = FirstTerminal(sim);
-        var link = LogInAt(sim, AnAccount(0x600E), terminal);
-        var character = CharacterOf(sim, AnAccount(0x600E));
+        var link = LogInAt(sim, AnAccount(sim, 0x600E), terminal);
+        var character = CharacterOf(sim, AnAccount(sim, 0x600E));
         var held = TakeAndHold(sim, link, character, Offers(sim, terminal)[0]);
 
         var holds = TatooineReplication.ResumesHeld;
@@ -685,7 +686,7 @@ internal sealed class MissionDeskChecks : ServedChecks
     [CancelAfter(180_000)]
     public void AReopenedWorld_ClampsTheExpiriesItStored()
     {
-        var account = AnAccount(0x600F);
+        EntityId account;
         EntityId offerId;
         EntityId mission;
         var orphan = EntityId.Null;
@@ -693,6 +694,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         using (var first = Start(persist: true))
         {
             var terminal = FirstTerminal(first);
+            account = AnAccount(first, 0x600F);
             var link = LogInAt(first, account, terminal);
             var character = CharacterOf(first, account);
             var held = TakeAndHold(first, link, character, Offers(first, terminal)[0]);
@@ -767,7 +769,7 @@ internal sealed class MissionDeskChecks : ServedChecks
     {
         using var sim = Start();
         var terminal = FirstTerminal(sim);
-        var owner = AnAccount(0x6010);
+        var owner = AnAccount(sim, 0x6010);
         var link = LogInAt(sim, owner, terminal);
         var held = TakeAndHold(sim, link, CharacterOf(sim, owner), Offers(sim, terminal)[0]);
 
@@ -790,7 +792,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         var good = Get("Bearer " + AuthToken.Mint(owner));
         var lower = Get("bearer " + AuthToken.Mint(owner));
         var expiredPlaying = Get("Bearer " + AuthToken.Mint(owner, TimeSpan.FromSeconds(-10)));
-        var idle = AnAccount(0x6011);
+        var idle = AnAccount(sim, 0x6011);
         Assert.Multiple(() =>
         {
             Assert.That(Get(null).Status, Is.EqualTo(401), "no token");

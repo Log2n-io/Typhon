@@ -407,9 +407,9 @@ internal sealed class SessionHarness
     }
 
     /// <summary>
-    /// Hands out a fresh synthetic account id, so two <c>player</c> links are two different people.
+    /// Creates a fresh account, so two <c>player</c> links are two different people.
     /// </summary>
-    /// <returns>An account id no other link in this process has used.</returns>
+    /// <returns>An account no other link in this process has used.</returns>
     /// <remarks>
     /// <para>
     /// <b>DISTINCT per link since A5, and sharing one was a real failure.</b> Every player session used to be minted a token for
@@ -418,20 +418,13 @@ internal sealed class SessionHarness
     /// account meant the second was refused, and a case asking for two players waited for ever.
     /// </para>
     /// <para>
-    /// <b>The account does not have to exist, and that is a property of A3 rather than a shortcut.</b> <c>Admit</c> validates the
-    /// token's signature and expiry and carries the account id through as <c>AppData</c>; it never resolves the entity, because the
-    /// hook runs on the transport thread with no transaction to resolve it in. A5's bind reads the account's CHARACTER through an
-    /// index and creates one when there is none, which works for an account id nothing else has heard of. So a case that only needs
-    /// a session gets one without also needing a signup — and a case that wants the real thing passes its own account.
-    /// </para>
-    /// <para>
-    /// Process-wide rather than per harness, so two fixtures in one process cannot collide on an id either.
+    /// <b>The account must exist (#1247).</b> <c>Admit</c> never resolves it — it validates the token's signature and expiry on the transport thread —
+    /// but A5's bind creates the account's character, whose account is a cascade foreign key the engine refuses to point at nothing (CASC-02); the bind
+    /// now kicks such a login. So a case that only needs a session gets a real account, without the signup's password work (<see cref="TestAccounts"/>),
+    /// and a case that wants the real thing passes its own.
     /// </para>
     /// </remarks>
-    private static EntityId NextSyntheticAccount()
-        => EntityId.FromRawValue((ulong)Interlocked.Increment(ref _syntheticAccounts));
-
-    private static long _syntheticAccounts;
+    private EntityId NextSyntheticAccount() => TestAccounts.Create(_sim.Dbe, "session");
 
     /// <summary>Connects one client and completes its handshake.</summary>
     /// <param name="kind">The session kind: <c>god</c> or <c>player</c>.</param>

@@ -3,9 +3,9 @@ using JetBrains.Annotations;
 namespace Typhon.Engine;
 
 /// <summary>
-/// Thrown at commit when a transaction points a cascade foreign key (<c>[Index(OnParentDelete = CascadeAction.Delete)]</c>) at a parent that is destroyed,
-/// or being destroyed by a committing transaction. The commit has made no change: its transaction is still open and may be rolled back, or committed again
-/// once the reference is fixed.
+/// Thrown at commit when a transaction points a cascade foreign key (<c>[Index(OnParentDelete = CascadeAction.Delete)]</c>) at a parent that does not
+/// exist, is destroyed, or is being destroyed by a committing transaction. The commit has made no change: its transaction is still open and may be rolled
+/// back, or committed again once the reference is fixed.
 /// </summary>
 [PublicAPI]
 public class ForeignKeyViolationException : TyphonException
@@ -14,7 +14,7 @@ public class ForeignKeyViolationException : TyphonException
     public ForeignKeyViolationException(EntityId child, EntityId parent, bool parentDying)
         : base(TyphonErrorCode.ForeignKeyViolation, parentDying
             ? $"Entity {child} references {parent}, which a committing transaction is destroying."
-            : $"Entity {child} references {parent}, which is destroyed.")
+            : $"Entity {child} references {parent}, which does not exist or is destroyed.")
     {
         Child = child;
         Parent = parent;

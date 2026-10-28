@@ -40,8 +40,8 @@ internal sealed class AvatarLoginChecks : ServedChecks
         return config;
     }
 
-    /// <summary>An account id nothing resolves — see <c>SessionHarness.NextSyntheticAccount</c> for why that is legitimate.</summary>
-    private static EntityId AnAccount(ulong id) => EntityId.FromRawValue(id);
+    /// <summary>The account a case knows by <paramref name="id"/>, existing in <paramref name="sim"/>'s database (see <see cref="TestAccounts"/>).</summary>
+    private static EntityId AnAccount(TatooineSim sim, ulong id) => TestAccounts.For(sim.Dbe, id);
 
     /// <summary>Starts a server and a harness against it.</summary>
     /// <param name="config">The world.</param>
@@ -181,7 +181,7 @@ internal sealed class AvatarLoginChecks : ServedChecks
         using var sim = Start(Config());
         var before = Census(sim);
 
-        var (_, avatar) = LogIn(sim, AnAccount(0x5001));
+        var (_, avatar) = LogIn(sim, AnAccount(sim, 0x5001));
 
         var at = Where(sim, avatar);
 
@@ -216,7 +216,7 @@ internal sealed class AvatarLoginChecks : ServedChecks
         var towns = new HashSet<string>();
         for (ulong i = 0; i < 12; i++)
         {
-            var (_, avatar) = LogIn(sim, AnAccount(0x6100 + i), expectedBindings: (long)i + 1);
+            var (_, avatar) = LogIn(sim, AnAccount(sim, 0x6100 + i), expectedBindings: (long)i + 1);
             var at = Where(sim, avatar);
             points.Add((at.X, at.Z));
 
@@ -286,8 +286,8 @@ internal sealed class AvatarLoginChecks : ServedChecks
         using var sim = Start(config);
         var capital = sim.Map.Cities[0];
 
-        var (_, first) = LogIn(sim, AnAccount(0x6201));
-        var (_, second) = LogIn(sim, AnAccount(0x6202), expectedBindings: 2);
+        var (_, first) = LogIn(sim, AnAccount(sim, 0x6201));
+        var (_, second) = LogIn(sim, AnAccount(sim, 0x6202), expectedBindings: 2);
 
         var a = Where(sim, first);
         var b = Where(sim, second);
@@ -312,7 +312,7 @@ internal sealed class AvatarLoginChecks : ServedChecks
     public void LogOutAndBackIn_TheAvatarIsWhereItLeft()
     {
         using var sim = Start(Config());
-        var account = AnAccount(0x5002);
+        var account = AnAccount(sim, 0x5002);
 
         var (first, avatar) = LogIn(sim, account);
         var left = WalkAway(sim, first, avatar);
@@ -347,7 +347,7 @@ internal sealed class AvatarLoginChecks : ServedChecks
     public void ACharacterWearsTheSameOutfitOnEveryBodyItSpawns()
     {
         using var sim = Start(Config());
-        var account = AnAccount(0x5003);
+        var account = AnAccount(sim, 0x5003);
 
         var (first, avatar) = LogIn(sim, account);
         var look = LookOf(sim, avatar);
@@ -408,7 +408,7 @@ internal sealed class AvatarLoginChecks : ServedChecks
         var worn = new HashSet<byte>();
         for (ulong key = 1; key <= 200; key++)
         {
-            var outfit = TatooineData.OutfitFor(AnAccount(key));
+            var outfit = TatooineData.OutfitFor(EntityId.FromRawValue(key));
             Assert.That(outfit, Is.InRange(1, TatooineData.PlayerOutfits.Length), $"account {key}");
             worn.Add(outfit);
         }
@@ -429,12 +429,13 @@ internal sealed class AvatarLoginChecks : ServedChecks
     [Category("Integration")]
     public void AcrossARestart_TheAvatarIsStillWhereItLeft()
     {
-        var account = AnAccount(0x5003);
+        EntityId account;
         (float X, float Y, float Z) left;
         ushort leftRealm;
 
         using (var first = Start(Config(persist: true)))
         {
+            account = AnAccount(first, 0x5003);
             var (link, avatar) = LogIn(first, account);
             left = WalkAway(first, link, avatar);
             leftRealm = Where(first, avatar).Realm;
@@ -474,7 +475,7 @@ internal sealed class AvatarLoginChecks : ServedChecks
     public void ASecondSessionForOneAccount_IsRefused()
     {
         using var sim = Start(Config());
-        var account = AnAccount(0x5004);
+        var account = AnAccount(sim, 0x5004);
 
         var (incumbent, avatar) = LogIn(sim, account);
 
@@ -499,6 +500,34 @@ internal sealed class AvatarLoginChecks : ServedChecks
     }
 
     /// <summary>
+    /// A token naming an account that does not exist — never created, or deleted since it was minted — is refused at the bind, and the tick goes on.
+    /// </summary>
+    /// <remarks>
+    /// A character's account is a cascade foreign key, and the engine refuses a commit pointing one at nothing (CASC-02, #1247): a bind that spawned the
+    /// character anyway aborted the tick for every session. The bind now checks the account before it spawns anything.
+    /// </remarks>
+    [Test]
+    [CancelAfter(60_000)]
+    [Category("Integration")]
+    public void ALoginForAnAccountThatDoesNotExist_IsRefused_AndTheTickGoesOn()
+    {
+        using var sim = Start(Config());
+        var (player, avatar) = LogIn(sim, AnAccount(sim, 0x5010));
+
+        var ghost = Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(0xDEAD_5011));
+        SessionHarness.Until(() => TatooineReplication.LoginsRefusedNoAccount >= 1, "the login for no account to be refused");
+        SessionHarness.Until(() => ghost.Closed != null, "the refused session's link to be closed");
+        Harness.Ticks(3);   // ticks still run: the refusal aborted nothing
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(ghost.Closed.Value.Code, Is.EqualTo(TatooineReplication.NotAuthenticatedCloseCode));
+            Assert.That(TatooineReplication.AvatarsSpawned, Is.EqualTo(1), "the refused session must not have been given a body");
+            Assert.That(TatooineReplication.ControlledBy(sim.Dbe, player.Session), Is.EqualTo(avatar), "the session already playing is untouched");
+        });
+    }
+
+    /// <summary>
     /// AC A-8: the pooled crowd is untouched by a human walking around.
     /// </summary>
     /// <remarks>
@@ -515,7 +544,7 @@ internal sealed class AvatarLoginChecks : ServedChecks
         var before = Census(sim);
         Assert.That(before.Human, Is.Zero, "no pooled player may start out possessed");
 
-        var (link, avatar) = LogIn(sim, AnAccount(0x5005));
+        var (link, avatar) = LogIn(sim, AnAccount(sim, 0x5005));
         WalkAway(sim, link, avatar);
 
         var during = Census(sim);
@@ -566,7 +595,7 @@ internal sealed class AvatarLoginChecks : ServedChecks
         // cases; this one is about leaks.
         using var sim = Start(Config(saveIntervalS: 0d));
         var before = Census(sim);
-        var account = AnAccount(0x5006);
+        var account = AnAccount(sim, 0x5006);
         var avatars = new HashSet<EntityId>();
 
         for (var i = 0; i < rounds; i++)
@@ -629,7 +658,7 @@ internal sealed class AvatarLoginChecks : ServedChecks
         const int rounds = 12;
 
         using var sim = Start(Config(saveIntervalS: 0d));
-        var account = AnAccount(0x5007);
+        var account = AnAccount(sim, 0x5007);
         var (link, _) = LogIn(sim, account);
 
         for (var round = 0; round < rounds; round++)
@@ -674,7 +703,7 @@ internal sealed class AvatarLoginChecks : ServedChecks
     public void ASecondSessionForOneAccountIsRefusedOnceAsADuplicate()
     {
         using var sim = Start(Config(saveIntervalS: 0d));
-        var account = AnAccount(0x5008);
+        var account = AnAccount(sim, 0x5008);
         var (first, _) = LogIn(sim, account);
 
         var second = Harness.Connect(TatooineReplication.PlayerKind, account);
@@ -754,10 +783,11 @@ internal sealed class AvatarLoginChecks : ServedChecks
     [Category("Integration")]
     public void AReopenedDatabaseHasNoOrphanedAvatars()
     {
-        var account = AnAccount(0x500A);
+        EntityId account;
 
         using (var first = Start(Config(persist: true, saveIntervalS: 0d)))
         {
+            account = AnAccount(first, 0x500A);
             LogIn(first, account);
             Assert.That(Census(first).Human, Is.EqualTo(1), "the first run must have an avatar to orphan");
             Harness.Ticks(8);
@@ -802,7 +832,7 @@ internal sealed class AvatarLoginChecks : ServedChecks
     {
         // Far longer than this case runs, so a cadence save is impossible and only the shutdown can account for a write.
         using var sim = Start(Config(saveIntervalS: 3_600d));
-        var account = AnAccount(0x5009);
+        var account = AnAccount(sim, 0x5009);
         var (link, avatar) = LogIn(sim, account);
 
         var spawned = Saved(sim, account);
@@ -859,7 +889,7 @@ internal sealed class AvatarLoginChecks : ServedChecks
         using var sim = Start(Config(saveIntervalS: 4d / TickRateHz));
         Assert.That(TatooineReplication.SaveIntervalSeconds, Is.GreaterThan(0d), "the cadence is disabled, so this case tests nothing");
 
-        var account = AnAccount(0x6001);
+        var account = AnAccount(sim, 0x6001);
         var (link, avatar) = LogIn(sim, account);
         var atLogin = Saved(sim, account);
 
@@ -894,7 +924,7 @@ internal sealed class AvatarLoginChecks : ServedChecks
         using var sim = Start(Config(saveIntervalS: 0d));
         Assert.That(TatooineReplication.SaveIntervalSeconds, Is.Zero, "the cadence must be disabled for this case");
 
-        var account = AnAccount(0x6002);
+        var account = AnAccount(sim, 0x6002);
         var (link, avatar) = LogIn(sim, account);
         var atLogin = Saved(sim, account);
 
@@ -937,12 +967,13 @@ internal sealed class AvatarLoginChecks : ServedChecks
     [Category("Integration")]
     public void AKillWithNoLogoutCostsAtMostTheCadence()
     {
-        var account = AnAccount(0x6003);
+        EntityId account;
         (float X, float Z) spawn;
         (float X, float Y, float Z) walked;
 
         using (var first = Start(Config(persist: true, saveIntervalS: 4d / TickRateHz)))
         {
+            account = AnAccount(first, 0x6003);
             var (link, avatar) = LogIn(first, account);
             spawn = (Where(first, avatar).X, Where(first, avatar).Z);
             walked = WalkAway(first, link, avatar);
