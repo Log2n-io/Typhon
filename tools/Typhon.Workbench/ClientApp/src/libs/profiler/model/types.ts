@@ -125,6 +125,20 @@ export const enum TraceEventKind {
 
   NamedSpan = 200,
 
+  // ── Request correlation (#1517) ──
+  /** An HTTP request the host served (span). Its trace context is the causal id its engine spans carry. Payload: u8 method, u16 status, u16 routeLen, route. */
+  ExternalRequest = 235,
+  /** A client command arrived on its transport thread. Instant: u32 session, u16 seq, u16 wireIdx, u16 bytes. */
+  IngressReceived = 236,
+  /** A client command was drained into a tick. Instant: u32 session, u16 seq, u16 wireIdx, u32 drainTick. */
+  IngressAdmitted = 237,
+  /** A client command was refused before any system saw it. Instant: u32 session, u16 seq, u8 reason. */
+  IngressDropped = 238,
+  /** A system read a client command. Instant: u32 session, u16 seq, u16 sysIdx. */
+  CommandConsumed = 239,
+  /** The send pump wrote a session's frame. Instant: u32 session, u32 tick, u32 bytes, u16 acks. */
+  EgressSent = 240,
+
   /**
    * OS thread context-switch — one record per ON-CPU slice closed for a Typhon-registered OS thread, produced by the engine's
    * EtwSchedulingPump (Windows-only). Wire shape is INSTANT (12-byte common header + 13-byte payload, no span-header extension) —
@@ -402,6 +416,7 @@ export const SkipReasonNames: Record<number, string> = {
  * `200: 'ECS.Query.MaskAnd'` line — intentional: post-#277 traces dominate.
  */
 export const SpanKindNames: Record<number, string> = {
+  [TraceEventKind.ExternalRequest]: 'Http.Request',
   // Pre-#277 kinds (mostly already in the TS enum).
   [TraceEventKind.SchedulerChunk]: 'Scheduler.Chunk',
   [TraceEventKind.TransactionCommit]: 'Transaction.Commit',
@@ -562,17 +577,11 @@ export const SpanKindNames: Record<number, string> = {
   // TraceEventKind.SchedulerSystemArchetype (= 245). Feeds the Data Flow `system-archetype/*` tracks.
   245: 'Scheduler.System.Archetype',
 
-  // Runtime subtree (161-164, 235-240).
+  // Runtime subtree (161-164). 235-240 were the v1 subscription spans, retired with Subscriptions v2 (#1004); request correlation reuses them (#1517).
   161: 'Runtime.Phase.UoWCreate',
   162: 'Runtime.Phase.UoWFlush',
   163: 'Runtime.Transaction.Lifecycle',
   164: 'Runtime.Subscription.OutputExecute',
-  235: 'Runtime.Subscription.Subscriber',
-  236: 'Runtime.Subscription.Delta.Build',
-  237: 'Runtime.Subscription.Delta.Serialize',
-  238: 'Runtime.Subscription.Transition.BeginSync',
-  239: 'Runtime.Subscription.Output.Cleanup',
-  240: 'Runtime.Subscription.Delta.DirtyBitmapSupplement',
 
   // Storage subtree (165-171).
   165: 'Storage.PageCache.DirtyWalk',
@@ -997,6 +1006,21 @@ export interface TraceEvent {
   successorIndex?: number;
   /** 0 = skipped, 1 = ran inline, 2 = parallel query published, 3 = pipeline published. */
   dispatchOutcome?: number;
+  // Request correlation (#1517). ExternalRequest (235) carries the HTTP fields; the lifecycle instants (236-240) carry the command fields.
+  httpMethod?: number;
+  httpStatus?: number;
+  httpRoute?: string;
+  session?: number;
+  seq?: number;
+  wireIdx?: number;
+  messageBytes?: number;
+  /** IngressAdmitted: the drain tick a command's causal id is derived from. EgressSent: the frame's tick. */
+  corrTick?: number;
+  /** CommandConsumed: the reading system's index (65535 when the read happened outside a system). */
+  consumerSystemIndex?: number;
+  /** IngressDropped: 1 ring full, 2 rate limited, 3 malformed, 4 realm changed. */
+  dropReason?: number;
+  acks?: number;
 
   // SchedulerMetronomeWait (kind 241) — span on the TickDriver lane covering the metronome's
   // inter-tick wait. multiplier reuses the existing tickMultiplier field. (#289 follow-up)
@@ -1147,3 +1171,6 @@ export interface TickSource {
   readonly metadata: TraceMetadata;
   getEvents(fromTick: number, toTick: number): Promise<TraceEvent[]>;
 }
+
+/** Display names of `ExternalRequestMethod` (#1517), by its wire value. */
+export const HTTP_METHOD_NAMES = ['OTHER', 'GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];

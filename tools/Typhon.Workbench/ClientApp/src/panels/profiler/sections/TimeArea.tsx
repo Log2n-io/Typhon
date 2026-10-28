@@ -1,3 +1,6 @@
+import { markersFor } from '@/libs/profiler/correlation/requests';
+import { EMPTY_ROOT_LANES, packRootLanes } from '@/libs/profiler/correlation/rootLanes';
+import { useProfilerRequestsStore } from '@/stores/useProfilerRequestsStore';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { ChunkSpan, SpanData, TickData } from '@/libs/profiler/model/traceModel';
 import { resolveOwningSystem } from '@/libs/profiler/model/owningSystem';
@@ -71,6 +74,9 @@ interface Props {
 const DRAG_THRESHOLD_PX = 3;
 const ZOOM_ANIMATION_MS = 800;
 const LERP_FACTOR = 0.15;   // fraction of remaining distance to close per rAF frame (~60 fps)
+
+/** How long a root lane's smaller height must hold before the lane shrinks to it. */
+const ROOT_LANE_SHRINK_DELAY_MS = 300;
 
 export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap, threadInfos, pendingRangesUs, isLive: _isLive = false, onGutterWidthChange }: Props): React.JSX.Element {
 
@@ -236,6 +242,42 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
   const spanPalette = useProfilerViewStore((s) => s.spanPalette);
   const dynamicTrackHeight = useProfilerViewStore((s) => s.dynamicTrackHeight);
   const showOffCpu = useProfilerViewStore((s) => s.showOffCpu);
+  // The selected request (#1517): its spans are outlined, the rest dimmed, and a flow line joins them with the command's lifecycle markers.
+  // A root hovered in a root lane previews like a selection, and wins over it while the pointer stays.
+  const selectedCausalKey = useProfilerRequestsStore((s) => s.selectedKey);
+  const hoverCausalKey = useProfilerRequestsStore((s) => s.hoverKey);
+  const causalKey = hoverCausalKey ?? selectedCausalKey;
+  // The root lanes (#1517): every loaded request and command, packed once per tick set. Read through a ref by the pointer handlers.
+  const allRequestRows = useProfilerRequestsStore((s) => s.allRows);
+  const causal = useMemo(() => {
+    if (causalKey === null) return null;
+    const [hi, lo] = causalKey.split(':');
+    return { key: causalKey, hi, lo, markers: markersFor(allRequestRows, causalKey) };
+  }, [causalKey, allRequestRows]);
+  const rootLanes = useMemo(() => (allRequestRows.length === 0 ? EMPTY_ROOT_LANES : packRootLanes(allRequestRows)), [allRequestRows]);
+  const rootLanesRef = useRef(rootLanes);
+  rootLanesRef.current = rootLanes;
+  // A lane's height follows the concurrency of the loaded roots, which churns as live ticks stream in and age out: grow at once, shrink only once
+  // it has held for a moment, the slot lanes' hysteresis, so the tracks below do not jump at ~5 Hz.
+  // The grow is computed in render (the layout of this very frame has room for the new rows); only the shrink waits, in the effect. Keyed on the
+  // counts, not the lanes object, so a live batch that leaves the counts alone does not restart the shrink timer.
+  const wantHttpRows = rootLanes.http.rowCount;
+  const wantCommandRows = rootLanes.commands.rowCount;
+  const [heldRootRows, setHeldRootRows] = useState({ http: 0, commands: 0 });
+  const rootRows = useMemo(
+    () => ({ http: Math.max(wantHttpRows, heldRootRows.http), commands: Math.max(wantCommandRows, heldRootRows.commands) }),
+    [wantHttpRows, wantCommandRows, heldRootRows],
+  );
+  useEffect(() => {
+    if (wantHttpRows === heldRootRows.http && wantCommandRows === heldRootRows.commands) return;
+    const want = { http: wantHttpRows, commands: wantCommandRows };
+    if (wantHttpRows >= heldRootRows.http && wantCommandRows >= heldRootRows.commands) {
+      setHeldRootRows(want);
+      return;
+    }
+    const timer = setTimeout(() => setHeldRootRows(want), ROOT_LANE_SHRINK_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [wantHttpRows, wantCommandRows, heldRootRows]);
   dynamicTrackHeightRef.current = dynamicTrackHeight;
 
   // Committed depth — the depth currently reflected in the layout. Grows immediately (before paint)
@@ -283,11 +325,13 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       systemVisibility,
       gaugeVisibility,
       engineOpVisibility,
+      rootRows,
     });
     layoutRef.current = r;
     return r;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slotInfo, dynamicTrackHeight, committedVersion, collapseState, threadNames, gaugeRegionVisible, gaugeCollapse, activeSystems, systemNames, perSystemLanesVisible, slotVisibility, systemVisibility, gaugeVisibility, engineOpVisibility]);
+  }, [slotInfo, dynamicTrackHeight, committedVersion, collapseState, threadNames, gaugeRegionVisible, gaugeCollapse, activeSystems, systemNames, perSystemLanesVisible, slotVisibility, systemVisibility, gaugeVisibility, engineOpVisibility,
+    rootRows]);
 
   // Grow committed depth + chunk slots immediately (useLayoutEffect = before paint) so track heights
   // never flash at the wrong size. When dynamicTrackHeight is toggled off, reset refs so the next
@@ -517,8 +561,11 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       spanColorMode,
       spanPalette,
       showOffCpu,
+      causal,
+      rootLanes,
     }, getStudioThemeTokens());
-  }, [layout, ticks, viewRange, legendsVisible, selection, applyViewRange, commitViewRange, onGutterWidthChange, gaugeData, pendingRangesUs, spanColorMode, spanPalette, showOffCpu]);
+  }, [layout, ticks, viewRange, legendsVisible, selection, applyViewRange, commitViewRange, onGutterWidthChange, gaugeData, pendingRangesUs, spanColorMode, spanPalette, showOffCpu,
+    causal, rootLanes]);
 
   const scheduleRender = useCallback((): void => {
     cancelAnimationFrame(rafRef.current);
@@ -641,6 +688,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
           legendsVisible,
           offCpuBySlot: gaugeData.offCpuBySlot,
           showOffCpu,
+          rootLanes: rootLanesRef.current,
         });
         if (hit && hit.kind === 'gutter-chevron') {
           if (GAUGE_TRACK_ID_SET.has(hit.trackId)) {
@@ -751,8 +799,11 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       legendsVisible,
       offCpuBySlot: gaugeData.offCpuBySlot,
       showOffCpu,
+      rootLanes: rootLanesRef.current,
     });
     hoverRef.current = hover;
+    // A dropped command caused nothing, so hovering its notch previews nothing (it would only dim the view).
+    useProfilerRequestsStore.getState().hover(hover !== null && hover.kind === 'root' && hover.root.kind !== 'dropped' ? hover.root.key : null);
 
     // Gauge hovers feed the DOM-overlay tooltip; non-gauge hovers clear it.
     if (hover && hover.kind === 'gauge') {
@@ -818,8 +869,15 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
           legendsVisible,
           offCpuBySlot: gaugeData.offCpuBySlot,
           showOffCpu,
+          rootLanes: rootLanesRef.current,
         });
-        if (hit) {
+        if (hit && hit.kind === 'root') {
+          // A root pins its trace (or unpins it on a second click), the same toggle as a Requests panel row.
+          const requests = useProfilerRequestsStore.getState();
+          requests.select(requests.selectedKey === hit.root.key ? null : hit.root.key);
+          // Drop the hover preview too, so an unpin shows at once rather than when the pointer leaves the bar.
+          requests.hover(null);
+        } else if (hit) {
           routeSelection(hit, ticks);
         }
       }
@@ -828,6 +886,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
   }, [ticks, animateToRange, scheduleRender, legendsVisible, gaugeData.offCpuBySlot, showOffCpu]);
 
   const onPointerLeave = useCallback((): void => {
+    useProfilerRequestsStore.getState().hover(null);
     if (dragRef.current) return; // captured drag continues
     crosshairXRef.current = -1;
     hoverRef.current = null;
@@ -858,6 +917,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       legendsVisible,
       offCpuBySlot: gaugeData.offCpuBySlot,
       showOffCpu,
+      rootLanes: rootLanesRef.current,
     });
     if (!hit) return;
 
@@ -885,6 +945,11 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       case 'span':        animateToRange({ startUs: hit.span.startUs,  endUs: hit.span.endUs  }); return;
       case 'phase':       animateToRange({ startUs: hit.phase.startUs, endUs: hit.phase.endUs }); return;
       case 'mini-row-op': animateToRange({ startUs: hit.op.startUs,    endUs: hit.op.endUs    }); return;
+      case 'root':
+        // The two clicks before this toggled the root's pin on and off again; a double-click means "this one", so pin it.
+        useProfilerRequestsStore.getState().select(hit.root.key);
+        animateToRange({ startUs: hit.root.startUs, endUs: Math.max(hit.root.endUs, hit.root.startUs + 1) });
+        return;
       default: return; // 'tick', 'gutter-chevron' — no-op
     }
   }, [ticks, animateToRange, legendsVisible, gaugeData.offCpuBySlot, showOffCpu]);
@@ -904,6 +969,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       legendsVisible,
       offCpuBySlot: gaugeData.offCpuBySlot,
       showOffCpu,
+      rootLanes: rootLanesRef.current,
     });
     if (hit && hit.kind === 'span') {
       const sourceLoc = useSourceLocationStore.getState().resolve(hit.span.rawEvent?.sourceLocationId);

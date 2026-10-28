@@ -354,6 +354,22 @@ export function toggleViewTopSpans(): void {
   else panel?.focus();
 }
 
+/** Toggle the Requests panel (#1517) inside the bottom edge group, the way Top Spans toggles. */
+export function toggleViewRequests(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const eg = api.getEdgeGroup('bottom');
+  if (!eg) return;
+  if (eg.isCollapsed()) {
+    eg.expand();
+    api.getPanel('requests')?.focus();
+    return;
+  }
+  const panel = api.getPanel('requests');
+  if (panel?.api.isActive) eg.collapse();
+  else panel?.focus();
+}
+
 function zoomToFullTrace(): void {
   const metadata = useProfilerSessionStore.getState().metadata;
   const gm = metadata?.globalMetrics;
@@ -443,6 +459,7 @@ export function buildProfilerPaletteCommands(): CommandItem[] {
     { id: 'toggle-view-subscriptions', label: 'Toggle View Subscriptions', keywords: 'subscriptions replication push sessions clients bytes bandwidth net out frames skipped degrade frame pool realm operator observe', action: toggleViewSubscriptions, viewId: 'Subscriptions' },
     { id: 'toggle-view-engine-health', label: 'Toggle View Engine Health', keywords: 'engine health live attach gauges anomaly tick rate jitter overload reconnect capture analyse observe', action: toggleViewEngineLiveHealth, viewId: 'EngineLiveHealth' },
     { id: 'toggle-view-top-spans',   label: 'Toggle View Top Spans', keywords: 'profiler top spans table slow expensive sortable', action: toggleViewTopSpans, viewId: 'TopSpans' },
+    { id: 'toggle-view-requests',    label: 'Toggle View Requests',  keywords: 'profiler requests http commands correlation latency', action: toggleViewRequests, viewId: 'Requests' },
     { id: 'profiler-save-replay',    label: 'Save Session as .typhon-replay…', keywords: 'save replay export attach session', action: openSaveReplayDialog },
     { id: 'profiler-capture-and-analyse', label: 'Capture & Analyse', keywords: 'capture analyse freeze save replay attach trace one gesture observe', action: () => { void runCaptureAndAnalyse(); } },
     // Profiler-view interaction commands — only meaningful with the Profiler view mounted, so gated with it.

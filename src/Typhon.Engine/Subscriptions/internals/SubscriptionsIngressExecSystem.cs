@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using Typhon.Profiler;
 using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;
@@ -540,12 +541,32 @@ internal sealed class SubscriptionsIngress : IDisposable
         BinaryPrimitives.WriteUInt32LittleEndian(record[4..], clientTick);
         payload.CopyTo(record[RecordHeaderBytes..]);
 
+        // Read before the write publishes the record: once it is in the ring the drain may admit it, and its Admitted must not precede this Received.
+        var receivedAt = TelemetryConfig.ProfilerCorrelationActive ? Stopwatch.GetTimestamp() : 0L;
         if (!row.Ring.TryWrite(record[..(RecordHeaderBytes + payload.Length)]))
         {
             // Never a throw and never a wait: the producer is a network thread, and the drop counter is the session's own backpressure signal (EQ-03's shape).
             row.DroppedCommands++;
+            TyphonEvent.EmitIngressDropped(row.Session.Value, seq, IngressDropReason.RingFull);
+        }
+        else if (wireIdx != AckRecordMarker)
+        {
+            // The wire index without its realm-framing bit, as the drain's Admitted records it.
+            TyphonEvent.EmitIngressReceived(receivedAt, row.Session.Value, seq, (ushort)(wireIdx & ~FramedRecordFlag), payload.Length);
+        }
+        else
+        {
+            TyphonEvent.EmitIngressDropped(row.Session.Value, seq, DropReasonOf(payload.Length > 0 ? payload[0] : AckReasons.Rejected));
         }
     }
+
+    /// <summary>The profiler's drop reason for a refusal the transport acknowledged with <paramref name="ackReason"/> (#1517).</summary>
+    private static IngressDropReason DropReasonOf(byte ackReason) => ackReason switch
+    {
+        AckReasons.RateLimited => IngressDropReason.RateLimited,
+        AckReasons.RealmChanged => IngressDropReason.RealmChanged,
+        _ => IngressDropReason.Rejected,
+    };
 
     /// <summary>Takes or creates the ingress row of a session that is sending commands. Callable from a transport thread.</summary>
     private SessionIngress RowFor(SessionId session)
@@ -767,6 +788,7 @@ internal sealed class SubscriptionsIngress : IDisposable
         var info = Commands.ByWireIdx(wireIdx);
         if (info == null)
         {
+            TyphonEvent.EmitIngressDropped(row.Session.Value, seq, IngressDropReason.Malformed);
             return;
         }
 
@@ -784,6 +806,7 @@ internal sealed class SubscriptionsIngress : IDisposable
             {
                 // Its session is owed as many answers as it may be: refused like a request past the command's rate.
                 Buffers.Acks.Add(row.Session, seq, AckReasons.RateLimited);
+                TyphonEvent.EmitIngressDropped(row.Session.Value, seq, IngressDropReason.RateLimited);
             }
 
             return;
@@ -796,6 +819,10 @@ internal sealed class SubscriptionsIngress : IDisposable
             {
                 ApplyRegion(row, seq, body);
             }
+            else
+            {
+                TyphonEvent.EmitIngressDropped(row.Session.Value, seq, IngressDropReason.RealmChanged);
+            }
 
             return;
         }
@@ -804,10 +831,19 @@ internal sealed class SubscriptionsIngress : IDisposable
         if (MultiRealm && framed && built != Frames?.StateOf(row.Session)?.CommittedRealm)
         {
             Buffers.Acks.Add(row.Session, seq, AckReasons.RealmChanged);
+            TyphonEvent.EmitIngressDropped(row.Session.Value, seq, IngressDropReason.RealmChanged);
             return;
         }
 
-        Buffers.ByWireIdx(wireIdx)?.Append(segment, row.Session, seq, clientTick, built < 0 ? RealmId.NoneValue : (ushort)built, body);
+        var buffer = Buffers.ByWireIdx(wireIdx);
+        if (buffer == null)
+        {
+            TyphonEvent.EmitIngressDropped(row.Session.Value, seq, IngressDropReason.Malformed);
+            return;
+        }
+
+        TyphonEvent.EmitIngressAdmitted(row.Session.Value, seq, wireIdx, unchecked((uint)Buffers.Tick));
+        buffer.Append(segment, row.Session, seq, clientTick, built < 0 ? RealmId.NoneValue : (ushort)built, body);
     }
 
     // Per session slot: the session's realm as its client holds it, for the transport's command decode — written by the frame stage, read by transports.
@@ -858,6 +894,7 @@ internal sealed class SubscriptionsIngress : IDisposable
         if (!ClientRegionCommand.TryRead(body, out var region))
         {
             Buffers.Acks.Add(row.Session, seq, AckReasons.RegionInvalid);
+            TyphonEvent.EmitIngressDropped(row.Session.Value, seq, IngressDropReason.Rejected);
             return;
         }
 
@@ -865,6 +902,7 @@ internal sealed class SubscriptionsIngress : IDisposable
         {
             // The ingress hull accepted it and the clamp scales it uniformly, so this is a hostile or corrupted record, refused like one.
             Buffers.Acks.Add(row.Session, seq, AckReasons.RegionInvalid);
+            TyphonEvent.EmitIngressDropped(row.Session.Value, seq, IngressDropReason.Rejected);
         }
     }
 

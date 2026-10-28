@@ -15932,6 +15932,12 @@
           },
           {
             "$ref": "#/components/schemas/TraceEventDtoWriteTickFenceTableEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoExternalRequestEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoCorrelationInstantEventDto"
           }
         ],
         "description": "Base type for the typed-DTO trace event hierarchy. Each kind gets its own derived sealed record carrying\r\nexactly its payload fields, dispatched at the wire boundary via System.Text.Json's polymorphic\r\nserialization with the camelCase `kind` property as discriminator.",
@@ -16154,7 +16160,9 @@
             "writeTickFenceClusterShadow": "#/components/schemas/TraceEventDtoWriteTickFenceClusterShadowEventDto",
             "writeTickFenceClusterSpatial": "#/components/schemas/TraceEventDtoWriteTickFenceClusterSpatialEventDto",
             "writeTickFenceShadow": "#/components/schemas/TraceEventDtoWriteTickFenceShadowEventDto",
-            "writeTickFenceTable": "#/components/schemas/TraceEventDtoWriteTickFenceTableEventDto"
+            "writeTickFenceTable": "#/components/schemas/TraceEventDtoWriteTickFenceTableEventDto",
+            "externalRequest": "#/components/schemas/TraceEventDtoExternalRequestEventDto",
+            "correlationInstant": "#/components/schemas/TraceEventDtoCorrelationInstantEventDto"
           }
         }
       },
@@ -38378,6 +38386,262 @@
           }
         },
         "description": "Generated DTO for `SchedulerSuccessorDispatch` trace events. Wire format mirrors the encoder partial."
+      },
+      "TraceEventDtoCorrelationInstantEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "correlationInstant"
+            ],
+            "type": "string"
+          },
+          "event": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "The kind's name: `IngressReceived`, `IngressAdmitted`, `IngressDropped`, `CommandConsumed` or `EgressSent`."
+          },
+          "session": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "The session's raw id.",
+            "format": "int64"
+          },
+          "seq": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "The command's sequence number.",
+            "format": "int32"
+          },
+          "wireIdx": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "The command type's wire index.",
+            "format": "int32"
+          },
+          "bytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Message or frame bytes.",
+            "format": "int64"
+          },
+          "tick": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "The drain tick (admitted) or the frame's tick (sent).",
+            "format": "int64"
+          },
+          "sysIdx": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "The consuming system's index.",
+            "format": "int32"
+          },
+          "reason": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Why a dropped command was refused."
+          },
+          "acks": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Commands acknowledged in a sent frame.",
+            "format": "int32"
+          },
+          "originalKind": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "The numeric kind.",
+            "format": "int32"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "One of the correlation lifecycle instants, kinds 236-240 (#1517): a client command received, admitted, dropped or consumed, or a session's frame\r\nsent. string CorrelationInstantEventDto.Event names which; fields that kind does not carry are zero."
+      },
+      "TraceEventDtoExternalRequestEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "externalRequest"
+            ],
+            "type": "string"
+          },
+          "method": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "The HTTP method name (`Get`, `Post`…)."
+          },
+          "status": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "The response status code.",
+            "format": "int32"
+          },
+          "route": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "The endpoint's route template."
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "durationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
+            "format": "double"
+          },
+          "spanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
+          },
+          "parentSpanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
+          },
+          "traceIdHi": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "traceIdLo": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "An TraceEventKind.ExternalRequest: one HTTP request the host served (#1517)."
       }
     },
     "securitySchemes": {

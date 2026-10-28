@@ -1183,8 +1183,35 @@ public enum TraceEventKind : byte
     /// <summary>UoW deadline check instant. Payload: <c>deadline: i64, remaining: i64, expired: u8</c>.</summary>
     DurabilityUowDeadline = 234,
 
-    // 235-240 were the per-subscriber dispatch spans. Their wire format shipped but no producer was ever wired, and the
-    // dispatch path they described was retired with the replication rewrite. The ids are not reused.
+    // ── Request correlation (#1517, claude/design/Profiler/13-request-correlation.md) ──
+
+    /// <summary>
+    /// An HTTP request served by the host (span, recorded when it ends, with explicit start and end timestamps). Its trace context is the request's
+    /// W3C trace id — the causal id every Typhon span inside the request carries. Payload: <c>method: u8, status: u16, routeByteCount: u16,
+    /// route: utf8</c> (the endpoint's route template, not the raw path). Codec: <c>ExternalRequestEventCodec</c>.
+    /// </summary>
+    ExternalRequest = 235,
+
+    /// <summary>A client command arrived on its transport thread (instant). Payload: <c>session: u32, seq: u16, wireIdx: u16, bytes: u16</c>.</summary>
+    IngressReceived = 236,
+
+    /// <summary>
+    /// A client command was drained into the tick that will hand it to systems (instant, tick thread). Payload: <c>session: u32, seq: u16,
+    /// wireIdx: u16, drainTick: u32</c>. The command's causal id is derived from (session, drainTick, seq).
+    /// </summary>
+    IngressAdmitted = 237,
+
+    /// <summary>A client command was refused before reaching a system (instant). Payload: <c>session: u32, seq: u16, reason: u8</c>.</summary>
+    IngressDropped = 238,
+
+    /// <summary>A system read a client command (instant, on that system's worker). Payload: <c>session: u32, seq: u16, sysIdx: u16</c>.</summary>
+    CommandConsumed = 239,
+
+    /// <summary>The send pump wrote a session's frame for a tick (instant). Payload: <c>session: u32, tick: u32, bytes: u32, acks: u16</c>.</summary>
+    EgressSent = 240,
+
+    // 235-240 were first the per-subscriber dispatch spans, which no producer ever wrote and which were retired with the replication
+    // rewrite (#1004); request correlation (#1517) reuses the ids above.
 
     // ── Scheduler:Metronome (span) — issue #289 follow-up: surface the timer thread's inter-tick wait ──
 
@@ -1446,6 +1473,11 @@ public static class TraceEventKindExtensions
         // Spans: 214-216 (WAL split), 219 (WalBuffer), 221 (WalBackpressure), 222-224 (Checkpoint depth),
         //        226 (Discover), 227 (Segment), 229 (FPI), 230-232 (Redo/Undo/TickFence) — fall through.
         if (v == 217 || v == 218 || v == 220 || v == 225 || v == 228 || v == 233 || v == 234)
+        {
+            return false;
+        }
+        // Request correlation (#1517): 235 (ExternalRequest) is a span; 236-240 (ingress, consumption, egress) are instants.
+        if (v is >= 236 and <= 240)
         {
             return false;
         }

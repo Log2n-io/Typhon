@@ -156,7 +156,14 @@ internal static partial class TyphonEvent
         previousSpanId = CurrentOpenSpanId;
         parentSpanId = previousSpanId;
 
-        if (slot.CaptureActivityContext && !SuppressActivityCapture)
+        // The scoped causal id first (#1517): the only cause a tick worker can see, since workers never read Activity.Current. One TLS read, and
+        // folded away entirely while correlation is off.
+        if (TelemetryConfig.ProfilerCorrelationActive && CausalScope.TryGet(out var scopedHi, out var scopedLo))
+        {
+            traceIdHi = scopedHi;
+            traceIdLo = scopedLo;
+        }
+        else if (slot.CaptureActivityContext && !SuppressActivityCapture)
         {
             var activity = Activity.Current;
             if (activity != null)

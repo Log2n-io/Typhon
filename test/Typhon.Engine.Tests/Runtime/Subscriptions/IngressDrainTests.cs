@@ -996,4 +996,236 @@ class IngressDrainTests : TestBase<IngressDrainTests>
 
         Assert.DoesNotThrow(() => Bind(registry));
     }
+
+    // ── request correlation (#1517) ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Runs <paramref name="body"/> with the profiler started and a ring observer attached, and returns the correlation instants it saw.</summary>
+    private List<Typhon.Profiler.CorrelationInstantData> CaptureCorrelation(Action body)
+    {
+        using var observer = new Typhon.Engine.Tests.Profiler.TraceRingObserver(ResourceRegistry.Profiler, captureRawBytes: true);
+        TyphonProfiler.AttachExporter(observer);
+        TyphonProfiler.Start(ResourceRegistry.Profiler, new ProfilerSessionMetadata(systems: [], archetypes: [], componentTypes: [], workerCount: 0,
+            baseTickRate: 60.0f, startTimestamp: Stopwatch.GetTimestamp(), stopwatchFrequency: Stopwatch.Frequency, startedUtc: DateTime.UtcNow));
+        // Rings outlive a profiler session, so records an earlier test emitted can drain into this one: only what the body emitted counts.
+        var from = Stopwatch.GetTimestamp();
+        try
+        {
+            body();
+        }
+        finally
+        {
+            TyphonProfiler.Stop();
+            TyphonProfiler.ResetForTests();
+        }
+
+        return observer.GetRecords()
+            .Where(r => Typhon.Profiler.CorrelationInstantCodec.Covers(r.Kind))
+            .Select(r => Typhon.Profiler.CorrelationInstantCodec.Decode(r.Bytes))
+            .Where(r => r.Timestamp >= from)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Spans a system opens while handling a command carry that command's causal id, derived from (session, drain tick, seq); a <c>break</c> leaves the
+    /// last id in scope until the system body ends, where the scheduler's leave clears it.
+    /// </summary>
+    [Test]
+    [Category("TelemetryGated")] // Correlation is off suite-wide; shard.py's T pass turns it on
+    public void ASpanOpenedWhileHandlingACommandCarriesThatCommandsId()
+    {
+        Assume.That(TelemetryConfig.ProfilerCorrelationActive, Is.True, "needs TYPHON__PROFILER__CORRELATION__ENABLED=true (shard.py T pass)");
+
+        using var harness = new Harness();
+        var session = harness.Admit();
+        harness.Tick();
+        harness.Ingress.OnCommands(session, Encode(harness.Plan, 1, ("FireAt", 10, Fire(1, 1)), ("FireAt", 11, Fire(1, 2)), ("FireAt", 12, Fire(1, 3))));
+        harness.Tick();
+        var tick = (uint)harness.Ingress.Buffers.Tick;
+
+        var seen = new List<(ulong Hi, ulong Lo)>();
+        CorrelationContext.EnterSystem(5);
+        try
+        {
+            foreach (ref readonly var command in harness.Api.Commands<FireAt>())
+            {
+                using var span = TyphonEvent.BeginBTreeInsert();
+                seen.Add((span.Header.TraceIdHi, span.Header.TraceIdLo));
+                if (command.Seq == 11)
+                {
+                    break;
+                }
+            }
+
+            using var afterBreak = TyphonEvent.BeginBTreeInsert();
+            Assert.That(afterBreak.Header.TraceIdLo, Is.EqualTo(Typhon.Profiler.CorrelationInstantCodec.CommandCausalId(session.Value, tick, 11).Lo),
+                "a loop left by break keeps its last command in scope until the body ends");
+        }
+        finally
+        {
+            // A failed assert must not leave this NUnit worker with a system and a cause in scope for the next test.
+            CorrelationContext.LeaveSystem();
+        }
+
+        using (var nextSystem = TyphonEvent.BeginBTreeInsert())
+        {
+            Assert.That((nextSystem.Header.TraceIdHi, nextSystem.Header.TraceIdLo), Is.EqualTo((0UL, 0UL)), "the next system inherits nothing");
+        }
+
+        Assert.That(seen, Is.EqualTo(new[]
+        {
+            Typhon.Profiler.CorrelationInstantCodec.CommandCausalId(session.Value, tick, 10),
+            Typhon.Profiler.CorrelationInstantCodec.CommandCausalId(session.Value, tick, 11),
+        }));
+    }
+
+    /// <summary>
+    /// A command loop run inside an enclosing scope (a staged write's restored cause, say) gives that scope back at the batch's end, instead of
+    /// leaving the spans after the loop with no cause.
+    /// </summary>
+    [Test]
+    [Category("TelemetryGated")]
+    public void ACommandLoopInsideAScopeRestoresItAtTheBatchEnd()
+    {
+        Assume.That(TelemetryConfig.ProfilerCorrelationActive, Is.True);
+
+        using var harness = new Harness();
+        var session = harness.Admit();
+        harness.Tick();
+        harness.Ingress.OnCommands(session, Encode(harness.Plan, 1, ("FireAt", 30, Fire(1, 1)), ("FireAt", 31, Fire(1, 2))));
+        harness.Tick();
+
+        var outer = new CausalId(0x1234, 0x5678);
+        CorrelationContext.EnterSystem(2);
+        try
+        {
+            using (CausalScope.Enter(outer))
+            {
+                var count = 0;
+                foreach (ref readonly var _ in harness.Api.Commands<FireAt>())
+                {
+                    Assert.That(CausalScope.Current, Is.Not.EqualTo(outer), "each command is in scope while it is handled");
+                    count++;
+                }
+
+                Assert.That(count, Is.EqualTo(2));
+                Assert.That(CausalScope.Current, Is.EqualTo(outer), "the enclosing scope is back after the loop");
+            }
+        }
+        finally
+        {
+            CorrelationContext.LeaveSystem();
+        }
+
+        Assert.That(CausalScope.Current.IsNone, Is.True);
+    }
+
+    /// <summary>A command walks Received (transport) → Admitted (drain, with its tick) → Consumed (the reading system), in order.</summary>
+    [Test]
+    [Category("TelemetryGated")]
+    public void ACommandRecordsItsReceptionAdmissionAndConsumption()
+    {
+        Assume.That(TelemetryConfig.ProfilerCorrelationActive, Is.True);
+
+        using var harness = new Harness();
+        var session = harness.Admit();
+        harness.Tick();
+        uint tick = 0;
+
+        var records = CaptureCorrelation(() =>
+        {
+            harness.Ingress.OnCommands(session, Encode(harness.Plan, 1, ("FireAt", 21, Fire(1, 1))));
+            harness.Tick();
+            tick = (uint)harness.Ingress.Buffers.Tick;
+            CorrelationContext.EnterSystem(9);
+            try
+            {
+                foreach (ref readonly var _ in harness.Api.Commands<FireAt>())
+                {
+                }
+            }
+            finally
+            {
+                CorrelationContext.LeaveSystem();
+            }
+        }).Where(r => r.Session == session.Value).ToList();
+
+        Assert.That(records.Select(r => r.Kind), Is.EqualTo(new[]
+        {
+            Typhon.Profiler.TraceEventKind.IngressReceived, Typhon.Profiler.TraceEventKind.IngressAdmitted, Typhon.Profiler.TraceEventKind.CommandConsumed,
+        }));
+        Assert.Multiple(() =>
+        {
+            Assert.That(records.Select(r => r.Seq), Is.All.EqualTo((ushort)21));
+            Assert.That(records[0].Timestamp, Is.LessThanOrEqualTo(records[1].Timestamp));
+            Assert.That(records[1].Timestamp, Is.LessThanOrEqualTo(records[2].Timestamp));
+            Assert.That(records[1].Tick, Is.EqualTo(tick), "admission carries the tick the command's id is derived from");
+            Assert.That(records[0].WireIdx, Is.EqualTo(records[1].WireIdx));
+            Assert.That(records[2].SysIdx, Is.EqualTo(9), "consumption names the system that read it");
+        });
+    }
+
+    /// <summary>
+    /// A command that ends before any system reads it is recorded as dropped with its reason, and never as received: a transport refusal, an unknown
+    /// wire index, and an older command of a coalesced type that a newer one replaced in the tick's batch.
+    /// </summary>
+    [Test]
+    [Category("TelemetryGated")]
+    public void ACommandThatEndsBeforeASystemIsRecordedAsDroppedWithItsReason()
+    {
+        Assume.That(TelemetryConfig.ProfilerCorrelationActive, Is.True);
+
+        using var harness = new Harness();
+        var session = harness.Admit();
+        harness.Tick();
+
+        var records = CaptureCorrelation(() =>
+        {
+            // The commands first: the session's ring is leased by its first message, and the two raw records below go into it.
+            harness.Ingress.OnCommands(session, Encode(harness.Plan, 1, ("MoveIntent", 42, Move(1, 1, 1)), ("MoveIntent", 43, Move(2, 2, 2))));
+            var row = harness.Ingress.RowOf(session);
+            SubscriptionsIngress.Publish(row, SubscriptionsIngress.AckRecordMarker, 40, 1, [AckReasons.Forbidden]);
+            SubscriptionsIngress.Publish(row, 0x7FF0, 41, 1, [0]);
+            harness.Tick();
+        }).Where(r => r.Session == session.Value).ToList();
+
+        var dropped = records.Where(r => r.Kind == Typhon.Profiler.TraceEventKind.IngressDropped).ToDictionary(r => r.Seq, r => r.Reason);
+        Assert.Multiple(() =>
+        {
+            Assert.That(dropped, Is.EqualTo(new Dictionary<ushort, Typhon.Profiler.IngressDropReason>
+            {
+                [40] = Typhon.Profiler.IngressDropReason.Rejected,
+                [41] = Typhon.Profiler.IngressDropReason.Malformed,
+                [42] = Typhon.Profiler.IngressDropReason.Coalesced,
+            }));
+            Assert.That(records.Any(r => r.Kind == Typhon.Profiler.TraceEventKind.IngressReceived && r.Seq == 40), Is.False,
+                "a refusal is a drop, not a reception");
+            Assert.That(records.Single(r => r.Kind == Typhon.Profiler.TraceEventKind.IngressAdmitted && r.Seq == 43), Is.Not.Null,
+                "the newer command is the one admitted for the systems");
+        });
+    }
+
+    /// <summary>A command the ring has no room for is recorded as dropped, with the ring-full reason.</summary>
+    [Test]
+    [Category("TelemetryGated")]
+    public void ACommandAFullRingRefusesIsRecordedAsDropped()
+    {
+        Assume.That(TelemetryConfig.ProfilerCorrelationActive, Is.True);
+
+        using var harness = new Harness(ringBytes: 256);
+        var session = harness.Admit();
+        harness.Tick();
+
+        var records = CaptureCorrelation(() =>
+        {
+            for (var i = 0; i < 100; i++)
+            {
+                harness.Ingress.OnCommands(session, Encode(harness.Plan, 1, ("FireAt", (ushort)i, Fire(1, (uint)i))));
+            }
+        }).Where(r => r.Session == session.Value).ToList();
+
+        var dropped = records.Where(r => r.Kind == Typhon.Profiler.TraceEventKind.IngressDropped).ToList();
+        Assert.That(dropped, Has.Count.EqualTo(harness.Ingress.RowOf(session).DroppedCommands));
+        Assert.That(dropped.Select(r => r.Reason), Is.All.EqualTo(Typhon.Profiler.IngressDropReason.RingFull));
+        Assert.That(records.Count(r => r.Kind == Typhon.Profiler.TraceEventKind.IngressReceived) + dropped.Count, Is.EqualTo(100));
+    }
 }

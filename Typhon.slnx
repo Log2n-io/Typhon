@@ -17,6 +17,7 @@
         <Project Path="src/Typhon.Schema.Definition/Typhon.Schema.Definition.csproj" />
         <Project Path="src/Typhon.Shell/Typhon.Shell.csproj" />
         <Project Path="src/Typhon.Shell.Extensibility/Typhon.Shell.Extensibility.csproj" />
+        <Project Path="src/Typhon.Profiler.AspNetCore/Typhon.Profiler.AspNetCore.csproj" />
         <Project Path="src/Typhon.Profiler/Typhon.Profiler.csproj" />
     </Folder>
     <Folder Name="/test/">
@@ -26,6 +27,7 @@
         <Project Path="test/Typhon.CompetitiveBenchmark/Typhon.CompetitiveBenchmark.csproj" />
         <Project Path="test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj" />
         <Project Path="test/Typhon.Generators.Tests/Typhon.Generators.Tests.csproj" />
+        <Project Path="test/Typhon.Profiler.AspNetCore.Tests/Typhon.Profiler.AspNetCore.Tests.csproj" />
         <Project Path="test/Typhon.Protocol.Tests/Typhon.Protocol.Tests.csproj" />
         <Project Path="test/Typhon.IOProfileRunner/Typhon.IOProfileRunner.csproj" />
         <Project Path="test/Typhon.MonitoringDemo/Typhon.MonitoringDemo.csproj" />

@@ -23,7 +23,8 @@ public class TelemetryFlagCatalogTests
         // SessionTelemetry (kind 69), split for the same volume-scaling reason as the realm record, then 222 -> 223 with SpatialRealmRates (kind 70) — and
         // the subtree grew by 17 more gates elsewhere meanwhile, to 240 — then 240 -> 243 with #1038 D-2's per-session records: FrameProduced (kind 71),
         // FrameSkipped (72) and SessionChanges (73), each gated alone because the first is a per-session-per-tick firehose the other two must not be paid for.
-        Assert.That(TelemetryFlagCatalog.All.Count, Is.EqualTo(243));
+        // 243 -> 244 with #1517's Correlation composite (request roots, command scoping, the ingress/egress lifecycle records).
+        Assert.That(TelemetryFlagCatalog.All.Count, Is.EqualTo(244));
 
         var root = TelemetryFlagCatalog.All[0];
         Assert.That(root.Kind, Is.EqualTo(TelemetryFlagKind.Master));

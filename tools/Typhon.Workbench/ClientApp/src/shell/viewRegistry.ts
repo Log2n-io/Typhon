@@ -39,6 +39,8 @@ export const ZONE_D_VIEW_ACTIVE: Readonly<Record<string, boolean>> = {
   // (the scheduling cluster) = Phase 3; the Query views = Phase 4.
   Profiler: true,
   TopSpans: true,
+  // #1517: the roots of a capture — HTTP requests and client commands — and the engine work each caused.
+  Requests: true,
   // Stage 3 Phase 2: the Call Tree (the span→cause drill — scope axes + off-CPU + sandwich, GAP-17) + Source
   // Preview (frame → file:line, degraded when attribution is absent) are reintroduced. Both are fully-built gated
   // views; flipping mounts them + lights their View-menu / palette / handoffs.
@@ -135,6 +137,7 @@ const VIEW_SESSION_SCOPE: Readonly<Record<string, ViewSessionScope>> = {
   // Profiler (trace/attach) views
   Profiler: 'profiler',
   TopSpans: 'profiler',
+  Requests: 'profiler',
   SpatialMaintenance: 'profiler',
   Subscriptions: 'profiler',
   CallTree: 'profiler',

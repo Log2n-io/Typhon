@@ -12,6 +12,7 @@ import ResourceTreePanel from '@/panels/ResourceTreePanel';
 import SchemaExplorerPanel from '@/panels/SchemaExplorer/SchemaExplorerPanel';
 import ProfilerPanel from '@/panels/profiler/ProfilerPanel';
 import TopSpansPanel from '@/panels/profiler/TopSpansPanel';
+import RequestsPanel from '@/panels/profiler/RequestsPanel';
 import EngineLiveHealthPanel from '@/panels/EngineLiveHealth/EngineLiveHealthPanel';
 import SystemsQueriesNavigatorPanel from '@/panels/SystemsQueriesNavigator/SystemsQueriesNavigatorPanel';
 import { registerDockApi, registerResetLayout, focusPanelBody } from './commands/openSchemaBrowser';
@@ -129,6 +130,7 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   SchemaExplorer: SchemaExplorerPanel,
   Profiler: ProfilerPanel,
   TopSpans: TopSpansPanel,
+  Requests: RequestsPanel,
   // Stage 4 Phase 1 — the Engine Live Health panel is the attach default surface (per its design); eager
   // (not lazy) so it mounts immediately on attach without a Suspense flash.
   EngineLiveHealth: EngineLiveHealthPanel,
@@ -225,6 +227,16 @@ function buildDefaultLayout(
         id: 'top-spans',
         component: 'TopSpans',
         title: 'Top spans',
+        tabComponent: 'locked',
+        position: { referenceGroup: EDGE_BOTTOM_ID },
+      });
+    }
+
+    if (isViewActive('Requests')) {
+      api.addPanel({
+        id: 'requests',
+        component: 'Requests',
+        title: 'Requests',
         tabComponent: 'locked',
         position: { referenceGroup: EDGE_BOTTOM_ID },
       });
