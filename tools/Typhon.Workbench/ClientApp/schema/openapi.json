@@ -15292,6 +15292,9 @@
             "$ref": "#/components/schemas/TraceEventDtoQueryArgsEventDto"
           },
           {
+            "$ref": "#/components/schemas/TraceEventDtoPerTickSnapshotEventDto"
+          },
+          {
             "$ref": "#/components/schemas/TraceEventDtoBTreeDeleteEventDto"
           },
           {
@@ -15712,6 +15715,9 @@
             "$ref": "#/components/schemas/TraceEventDtoSchedulerOverloadTickMultiplierEventDto"
           },
           {
+            "$ref": "#/components/schemas/TraceEventDtoSchedulerSuccessorDispatchEventDto"
+          },
+          {
             "$ref": "#/components/schemas/TraceEventDtoSchedulerSystemArchetypeEventDto"
           },
           {
@@ -15935,6 +15941,7 @@
             "other": "#/components/schemas/TraceEventDtoOtherTraceEventDto",
             "queryDefinitionDescribe": "#/components/schemas/TraceEventDtoQueryDefinitionDescribeEventDto",
             "queryArgs": "#/components/schemas/TraceEventDtoQueryArgsEventDto",
+            "perTickSnapshot": "#/components/schemas/TraceEventDtoPerTickSnapshotEventDto",
             "bTreeDelete": "#/components/schemas/TraceEventDtoBTreeDeleteEventDto",
             "bTreeInsert": "#/components/schemas/TraceEventDtoBTreeInsertEventDto",
             "bTreeNodeMerge": "#/components/schemas/TraceEventDtoBTreeNodeMergeEventDto",
@@ -16075,6 +16082,7 @@
             "schedulerOverloadLevelChange": "#/components/schemas/TraceEventDtoSchedulerOverloadLevelChangeEventDto",
             "schedulerOverloadSystemShed": "#/components/schemas/TraceEventDtoSchedulerOverloadSystemShedEventDto",
             "schedulerOverloadTickMultiplier": "#/components/schemas/TraceEventDtoSchedulerOverloadTickMultiplierEventDto",
+            "schedulerSuccessorDispatch": "#/components/schemas/TraceEventDtoSchedulerSuccessorDispatchEventDto",
             "schedulerSystemArchetype": "#/components/schemas/TraceEventDtoSchedulerSystemArchetypeEventDto",
             "schedulerSystemCompletion": "#/components/schemas/TraceEventDtoSchedulerSystemCompletionEventDto",
             "schedulerSystemQueueWait": "#/components/schemas/TraceEventDtoSchedulerSystemQueueWaitEventDto",
@@ -26009,6 +26017,13 @@
             ],
             "description": "Numeric TraceEventKind value of the underlying record.",
             "format": "int32"
+          },
+          "kindName": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "The TraceEventKind name of int OtherTraceEventDto.OriginalKind (`TickStart`, `TickEnd`…), or its number for a kind this build does not know."
           },
           "isSpan": {
             "type": "boolean",
@@ -38127,6 +38142,242 @@
             ]
           }
         }
+      },
+      "GaugeValueDto": {
+        "required": [
+          "gauge",
+          "valueKind",
+          "value"
+        ],
+        "type": "object",
+        "properties": {
+          "gauge": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "The GaugeId name, or its number for a gauge this build does not know."
+          },
+          "valueKind": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "The GaugeValueKind name."
+          },
+          "value": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "The value as a number: a percentage for GaugeValueKind.U32PercentHundredths (hundredths divided out), the\r\n            count, bytes or signed value otherwise. A double, because a JavaScript reader cannot hold a 64-bit integer exactly.",
+            "format": "double"
+          }
+        },
+        "description": "One gauge of a PerTickSnapshotEventDto."
+      },
+      "TraceEventDtoPerTickSnapshotEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "perTickSnapshot"
+            ],
+            "type": "string"
+          },
+          "snapshotTick": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "The tick the producer stamped into the snapshot (may differ from int TraceEventDto.TickNumber, the consumer's count).",
+            "format": "uint32"
+          },
+          "flags": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Snapshot flags as written by the producer.",
+            "format": "uint32"
+          },
+          "gauges": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/GaugeValueDto"
+            },
+            "description": "The sampled gauges, in wire order."
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "One TraceEventKind.PerTickSnapshot record: the gauges sampled at a tick's end. Surfaced typed rather than as\r\nOtherTraceEventDto, whose bare `other` hid every gauge from an API reader."
+      },
+      "TraceEventDtoSchedulerSuccessorDispatchEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "schedulerSuccessorDispatch"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "completingSysIdx": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SchedulerSuccessorDispatch` event payload — completing sys idx.",
+            "format": "uint16"
+          },
+          "succIdx": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SchedulerSuccessorDispatch` event payload — succ idx.",
+            "format": "uint16"
+          },
+          "outcome": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SchedulerSuccessorDispatch` event payload — outcome.",
+            "format": "uint8"
+          },
+          "durationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
+            "format": "double"
+          },
+          "spanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
+          },
+          "parentSpanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
+          },
+          "traceIdHi": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "traceIdLo": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "Generated DTO for `SchedulerSuccessorDispatch` trace events. Wire format mirrors the encoder partial."
       }
     },
     "securitySchemes": {

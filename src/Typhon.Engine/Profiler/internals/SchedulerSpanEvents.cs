@@ -51,6 +51,18 @@ internal ref partial struct SchedulerDependencyFanOutEvent
 
 }
 
+/// <summary>Producer-side ref struct for <see cref="TraceEventKind.SchedulerSuccessorDispatch"/>. Shares the fan-out's gate: it only explains a fan-out.</summary>
+[TraceEvent(TraceEventKind.SchedulerSuccessorDispatch, EmitEncoder = true, Gate = "SchedulerDependencyFanOutActive")]
+internal ref partial struct SchedulerSuccessorDispatchEvent
+{
+    [BeginParam]
+    public ushort CompletingSysIdx;
+    [BeginParam]
+    public ushort SuccIdx;
+    public byte Outcome;
+
+}
+
 /// <summary>Producer-side ref struct for <see cref="TraceEventKind.SchedulerGraphBuild"/>.</summary>
 [TraceEvent(TraceEventKind.SchedulerGraphBuild, EmitEncoder = true)]
 internal ref partial struct SchedulerGraphBuildEvent

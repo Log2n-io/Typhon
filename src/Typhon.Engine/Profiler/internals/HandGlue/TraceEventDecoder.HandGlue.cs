@@ -40,6 +40,10 @@ public static partial class TraceEventDecoder
         {
             return DecodeQueryArgs(source, currentTick, ticksPerUs);
         }
+        if (kind == TraceEventKind.PerTickSnapshot)
+        {
+            return DecodePerTickSnapshot(source, currentTick, ticksPerUs);
+        }
 
         // Read the common header — every record carries it regardless of kind. After that we can't decode
         // payload generically (each kind has its own layout), so we surface what we have.
@@ -70,8 +74,36 @@ public static partial class TraceEventDecoder
             TickNumber = currentTick,
             TimestampUs = startTimestamp / (double)ticksPerUs,
             OriginalKind = (int)kind,
+            KindName = kind.ToString(),
             IsSpan = isSpan,
             DurationUs = durationUs,
+        };
+    }
+
+    private static PerTickSnapshotEventDto DecodePerTickSnapshot(ReadOnlySpan<byte> source, int currentTick, long ticksPerUs)
+    {
+        var data = PerTickSnapshotEventCodec.DecodePerTickSnapshot(source);
+        var gauges = new GaugeValueDto[data.Values.Length];
+        for (var i = 0; i < gauges.Length; i++)
+        {
+            var v = data.Values[i];
+            var value = v.Kind switch
+            {
+                GaugeValueKind.U32PercentHundredths => v.RawValue / 100.0,
+                GaugeValueKind.I64Signed => unchecked((long)v.RawValue),
+                _ => (double)v.RawValue,
+            };
+            gauges[i] = new GaugeValueDto(v.Id.ToString(), v.Kind.ToString(), value);
+        }
+
+        return new PerTickSnapshotEventDto
+        {
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = currentTick,
+            TimestampUs = data.Timestamp / (double)ticksPerUs,
+            SnapshotTick = data.TickNumber,
+            Flags = data.Flags,
+            Gauges = gauges,
         };
     }
 

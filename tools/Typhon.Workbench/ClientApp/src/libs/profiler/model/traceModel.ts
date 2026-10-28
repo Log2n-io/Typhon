@@ -949,6 +949,25 @@ export function findTickIndex(trace: ProcessedTrace, tickNumber: number): number
 /**
  * Build a {@link TickData} from a tick's raw events.
  */
+const DISPATCH_OUTCOME_NAMES = ['skipped', 'inline', 'parallel', 'pipeline'];
+
+/**
+ * Span label. Fan-out and dispatch spans name their systems: a bare "Scheduler.Dependency.FanOut" said a fan-out was slow but not whose, and
+ * every completing system's fan-out looked the same on the lane.
+ */
+export function spanDisplayName(evt: TraceEvent, systems: SystemDef[]): string {
+  const base = SpanKindNames[evt.kind] ?? `Kind[${evt.kind}]`;
+  const sysName = (idx: number | undefined) => (idx === undefined ? '?' : systems[idx]?.name ?? `System[${idx}]`);
+  if (evt.kind === TraceEventKind.SchedulerDependencyFanOut && evt.completingSystemIndex !== undefined) {
+    return `FanOut after ${sysName(evt.completingSystemIndex)}`;
+  }
+  if (evt.kind === TraceEventKind.SchedulerSuccessorDispatch && evt.successorIndex !== undefined) {
+    const outcome = DISPATCH_OUTCOME_NAMES[evt.dispatchOutcome ?? -1] ?? `outcome ${evt.dispatchOutcome}`;
+    return `Dispatch ${sysName(evt.successorIndex)} (${outcome})`;
+  }
+  return base;
+}
+
 export function processTickEvents(tickNumber: number, events: TraceEvent[], systems: SystemDef[]): TickData {
   let startUs = Infinity;
   let endUs = -Infinity;
@@ -1447,7 +1466,7 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
           // put the completion record ahead of the kickoff), fold immediately so only ONE span shows up for the pair.
           const span: SpanData = {
             kind: evt.kind,
-            name: SpanKindNames[evt.kind] ?? `Kind[${evt.kind}]`,
+            name: spanDisplayName(evt, systems),
             threadSlot: evt.threadSlot,
             startUs: evt.timestampUs,
             endUs: evt.timestampUs + duration,

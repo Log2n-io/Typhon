@@ -26,6 +26,8 @@ import AnomalyLog from './AnomalyLog';
 export default function EngineLiveHealthPanel(_props: IDockviewPanelProps) {
   const sessionKind = useSessionStore((s) => s.kind);
   const sessionId = useSessionStore((s) => s.sessionId);
+  // A capture attaches its replay to this session as the active profile (#621), so a non-null id means it was already done.
+  const alreadyCaptured = useSessionStore((s) => s.activeProfileId !== null);
   const endpoint = useSessionStore((s) => s.filePath);
   const connectionStatus = useProfilerSessionStore((s) => s.connectionStatus);
   const latestTickNumber = useProfilerSessionStore((s) => s.latestTickNumber);
@@ -144,9 +146,9 @@ export default function EngineLiveHealthPanel(_props: IDockviewPanelProps) {
           size="sm"
           variant="default"
           onClick={onCaptureAndAnalyse}
-          disabled={isCapturing || !sessionId}
+          disabled={isCapturing || !sessionId || alreadyCaptured}
           data-testid="engine-live-health-capture"
-          title="Save the live session as a replay file and reopen it as a Trace for full inspection — one gesture"
+          title={alreadyCaptured ? 'Already captured — this session is showing the saved replay' : 'Save the live session as a replay file and reopen it as a Trace for full inspection — one gesture'}
         >
           {isCapturing ? 'Capturing…' : 'Capture & Analyse'}
         </Button>

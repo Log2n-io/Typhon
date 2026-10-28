@@ -875,6 +875,21 @@ function decodeSpan(
     case TraceEventKind.BackupArchiveSegment:
       return decodeBackup(reader, kind, threadSlot, tickNumber, timestampUs, header);
 
+    // Both payloads start with the completing system's index (BeginParam order); the dispatch span adds the successor and its outcome.
+    case TraceEventKind.SchedulerDependencyFanOut: {
+      const evt = baseSpanEvent(kind, threadSlot, tickNumber, timestampUs, header);
+      evt.completingSystemIndex = reader.readU16(header.payloadOffset);
+      return evt;
+    }
+
+    case TraceEventKind.SchedulerSuccessorDispatch: {
+      const evt = baseSpanEvent(kind, threadSlot, tickNumber, timestampUs, header);
+      evt.completingSystemIndex = reader.readU16(header.payloadOffset);
+      evt.successorIndex = reader.readU16(header.payloadOffset + 2);
+      evt.dispatchOutcome = reader.readU8(header.payloadOffset + 4);
+      return evt;
+    }
+
     case TraceEventKind.NamedSpan:
       // Fall back to generic span — the name payload isn't surfaced on the server's DTO either.
       return baseSpanEvent(kind, threadSlot, tickNumber, timestampUs, header);

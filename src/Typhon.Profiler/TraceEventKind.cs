@@ -528,6 +528,14 @@ public enum TraceEventKind : byte
     /// </summary>
     ThreadInfo = 77,
 
+    /// <summary>
+    /// One successor's dispatch inside a <see cref="SchedulerDependencyFanOut"/> span: its ShouldRun / Prepare gate, reactive and overload skip checks,
+    /// the parallel-query prepare, or the whole inline run of a callback successor. Child of the fan-out, so a slow fan-out names the successor that
+    /// cost it. Payload: <c>completingSysIdx: u16</c>, <c>succIdx: u16</c>, <c>outcome: u8</c> (0 = skipped, 1 = ran inline, 2 = parallel query
+    /// published, 3 = pipeline published).
+    /// </summary>
+    SchedulerSuccessorDispatch = 78,
+
     // ── WAL (span) ──
 
     /// <summary>WAL writer drain-write-signal cycle. Required: <c>batchByteCount: i32</c>, <c>frameCount: i32</c>, <c>highLsn: i64</c>.</summary>

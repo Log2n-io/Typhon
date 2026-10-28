@@ -5,7 +5,8 @@
  * jsdom env (default is node for zero-DOM startup cost).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
+import { selectGaugeRegionVisible, useProfilerViewStore } from '@/stores/useProfilerViewStore';
+import { GAUGE_GROUPS } from '@/libs/profiler/canvas/gauges/region';
 
 /**
  * Pins the v0 → v1 persist migration on `useProfilerViewStore`. Before the migration, collapse
@@ -39,7 +40,8 @@ describe('useProfilerViewStore — v0 → v1 migration', () => {
     // leak in.
     useProfilerViewStore.setState({
       gaugeCollapse: {},
-      gaugeRegionVisible: true,
+      gaugeVisibility: {},
+      gaugesBeforeHide: null,
       perSystemLanesVisible: true,
       spanPalette: 'categorical',
     });
@@ -96,7 +98,8 @@ describe('useProfilerViewStore — v0 → v1 migration', () => {
     });
     await useProfilerViewStore.persist.rehydrate();
     const state = useProfilerViewStore.getState();
-    expect(state.gaugeRegionVisible).toBe(false);
+    // v6: a hidden region is every gauge unchecked, so the filter shows why the band is gone.
+    expect(selectGaugeRegionVisible(state)).toBe(false);
     expect(state.gaugeCollapse['gauge-gc']).toBe('summary');
   });
 
@@ -113,7 +116,7 @@ describe('useProfilerViewStore — v0 → v1 migration', () => {
     await useProfilerViewStore.persist.rehydrate();
     const state = useProfilerViewStore.getState();
     expect(state.gaugeCollapse).toEqual({});
-    expect(state.gaugeRegionVisible).toBe(true);
+    expect(selectGaugeRegionVisible(state)).toBe(true);
   });
 
   it('v3 → current: drops orphan liveFollowWindowUs from persisted state (#345 Step 8)', async () => {
@@ -130,9 +133,9 @@ describe('useProfilerViewStore — v0 → v1 migration', () => {
     const raw = localStorage.getItem('workbench-profiler-view');
     expect(raw).toBeTruthy();
     const persisted = JSON.parse(raw!) as { state: Record<string, unknown>; version: number };
-    // Rehydrating an old blob re-persists at the CURRENT store version (5), running every intermediate
+    // Rehydrating an old blob re-persists at the CURRENT store version (6), running every intermediate
     // migration clause — including the < 4 `liveFollowWindowUs` drop asserted below.
-    expect(persisted.version).toBe(5);
+    expect(persisted.version).toBe(6);
     expect(persisted.state).not.toHaveProperty('liveFollowWindowUs');
     // Other v3 fields survived the migration.
     expect(persisted.state.gaugeCollapse).toEqual({ 'gauge-gc': 'double' });
@@ -148,7 +151,7 @@ describe('useProfilerViewStore — v0 → v1 migration', () => {
     await useProfilerViewStore.persist.rehydrate();
     expect(useProfilerViewStore.getState().spanPalette).toBe('categorical');
     const persisted = JSON.parse(localStorage.getItem('workbench-profiler-view')!) as { state: Record<string, unknown>; version: number };
-    expect(persisted.version).toBe(5);
+    expect(persisted.version).toBe(6);
     expect(persisted.state.spanPalette).toBe('categorical');
     expect(persisted.state.spanColorMode).toBe('thread');
   });
@@ -160,5 +163,56 @@ describe('useProfilerViewStore — v0 → v1 migration', () => {
     }));
     await useProfilerViewStore.persist.rehydrate();
     expect(useProfilerViewStore.getState().spanPalette).toBe('curated');
+  });
+});
+
+describe('useProfilerViewStore — gauge region is the gauge checkboxes (v6)', () => {
+  const ids = GAUGE_GROUPS.map((g) => g.id);
+
+  beforeEach(() => {
+    localStorage.clear();
+    useProfilerViewStore.setState({ gaugeVisibility: {}, gaugesBeforeHide: null });
+  });
+
+  it('g hides the region by unchecking every gauge, and restores the previous choice', () => {
+    const store = useProfilerViewStore.getState();
+    store.setGaugeVisibility(ids[0], false);
+    const chosen = useProfilerViewStore.getState().gaugeVisibility;
+
+    store.toggleGaugeRegion();
+    let s = useProfilerViewStore.getState();
+    expect(selectGaugeRegionVisible(s)).toBe(false);
+    expect(ids.every((id) => s.gaugeVisibility[id] === false)).toBe(true);
+
+    store.toggleGaugeRegion();
+    s = useProfilerViewStore.getState();
+    expect(selectGaugeRegionVisible(s)).toBe(true);
+    expect(s.gaugeVisibility).toEqual(chosen);
+    expect(s.gaugesBeforeHide).toBeNull();
+  });
+
+  it('unchecking every gauge in the filter is the same hidden state g reads, and g then shows them all', () => {
+    const store = useProfilerViewStore.getState();
+    store.setManyGaugeVisibility(Object.fromEntries(ids.map((id) => [id, false])));
+    expect(selectGaugeRegionVisible(useProfilerViewStore.getState())).toBe(false);
+
+    store.toggleGaugeRegion();
+    expect(useProfilerViewStore.getState().gaugeVisibility).toEqual({});
+  });
+
+  it('v5 gaugeRegionVisible:false migrates to every gauge unchecked, restorable by g', async () => {
+    localStorage.setItem(STORE_KEY, JSON.stringify({
+      state: { gaugeRegionVisible: false, gaugeVisibility: { [ids[1]]: false } },
+      version: 5,
+    }));
+    await useProfilerViewStore.persist.rehydrate();
+    const s = useProfilerViewStore.getState();
+    expect(selectGaugeRegionVisible(s)).toBe(false);
+    expect(s.gaugesBeforeHide).toEqual({ [ids[1]]: false });
+
+    s.toggleGaugeRegion();
+    expect(useProfilerViewStore.getState().gaugeVisibility).toEqual({ [ids[1]]: false });
+    const persisted = JSON.parse(localStorage.getItem(STORE_KEY)!) as { state: Record<string, unknown> };
+    expect(persisted.state).not.toHaveProperty('gaugeRegionVisible');
   });
 });

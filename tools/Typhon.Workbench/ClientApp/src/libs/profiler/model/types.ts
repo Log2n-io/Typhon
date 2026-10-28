@@ -92,6 +92,7 @@ export const enum TraceEventKind {
   // Scheduler worker-loop spans — pinned to the chunk-row band by the renderer (see timeAreaLayout.deriveSlotInfo).
   SchedulerWorkerIdle = 150,
   SchedulerWorkerBetweenTick = 152,
+  SchedulerDependencyFanOut = 155,
   /**
    * Per-tick gauge snapshot. Numerically ≥ 10 for category grouping with metric records, but wire-shape is INSTANT (no span header
    * extension) — <c>IsSpan()</c> excludes it on both server (C#) and client (this decoder). Special-cased at the top of
@@ -105,6 +106,9 @@ export const enum TraceEventKind {
    * routes it through its own case, and the chunk cache accumulates the entries into a slot→name map on <c>TraceMetadata</c>.
    */
   ThreadInfo = 77,
+
+  /** One successor's dispatch inside a Scheduler.Dependency.FanOut span (gates, parallel-query prepare, or an inline run). */
+  SchedulerSuccessorDispatch = 78,
 
   /**
    * Tick lifecycle phase span — covers one TickPhase region inside TyphonRuntime.OnTickEndInternal (SystemDispatch, WriteTickFence,
@@ -519,6 +523,7 @@ export const SpanKindNames: Record<number, string> = {
   153: 'Scheduler.Dispense',
   154: 'Scheduler.Dependency.Ready',
   155: 'Scheduler.Dependency.FanOut',
+  78: 'Scheduler.Dependency.Dispatch',
   156: 'Scheduler.Overload.LevelChange',
   157: 'Scheduler.Overload.SystemShed',
   158: 'Scheduler.Overload.TickMultiplier',
@@ -986,6 +991,12 @@ export interface TraceEvent {
   managedThreadId?: number;
   threadName?: string;
   threadKind?: number;
+
+  // SchedulerDependencyFanOut (155) / SchedulerSuccessorDispatch (78) — the system that completed, and the successor dispatched.
+  completingSystemIndex?: number;
+  successorIndex?: number;
+  /** 0 = skipped, 1 = ran inline, 2 = parallel query published, 3 = pipeline published. */
+  dispatchOutcome?: number;
 
   // SchedulerMetronomeWait (kind 241) — span on the TickDriver lane covering the metronome's
   // inter-tick wait. multiplier reuses the existing tickMultiplier field. (#289 follow-up)

@@ -31,9 +31,13 @@ namespace Typhon.Engine.Internals;
 /// suspend / restart events are filtered to GC-reason suspensions (see <see cref="IsGcSuspendReason"/>); recording the rest would flood the trace.
 /// </para>
 /// <para>
-/// <b>Timestamp source:</b> <see cref="Stopwatch.GetTimestamp()"/> in the callback rather than <see cref="EventWrittenEventArgs.TimeStamp"/>.
-/// The DateTime-to-Stopwatch-ticks conversion would require a reference-point anchor and introduce clock-skew hazards. The in-callback
-/// timestamp is within ≤ 100 ns of the actual event, which is well inside our tolerance at GC-event frequencies.
+/// <b>Timestamp source:</b> the event's own <see cref="EventWrittenEventArgs.TimeStamp"/>, taken by the runtime when the event fired, converted
+/// to Stopwatch ticks through a (UTC, Stopwatch) anchor pair (<see cref="ToStopwatchTicks(DateTime, long, long, long)"/>), re-latched every <see cref="ReanchorSeconds"/> so a
+/// wall-clock step (an NTP correction, a manual change) shifts at most that window's records rather than every later one. Never
+/// <see cref="Stopwatch.GetTimestamp()"/> in the callback: runtime events reach an in-process listener through EventPipe's dispatch thread, a
+/// managed thread that is itself suspended during the pause, so SuspendEEBegin and RestartEEEnd were both delivered — and stamped — after the
+/// restart, back to back. From #243 to 2026-10-27 every recorded GC pause measured ~0.03 ms where the runtime's own trace of the same pauses
+/// showed a 7 ms median and a 60 ms max, and each pause sat as late as the dispatch delay put it.
 /// </para>
 /// </remarks>
 internal sealed class GcEventListener : EventListener
@@ -42,6 +46,11 @@ internal sealed class GcEventListener : EventListener
     private const EventKeywords GcKeyword = (EventKeywords)0x1;
 
     private readonly GcEventQueue _queue;
+    private const int ReanchorSeconds = 60;
+
+    // Touched only by the listener's dispatch thread (and the ctor, before it is enabled): no synchronisation.
+    private long _anchorUtcTicks;
+    private long _anchorStopwatch;
     private volatile EventSource _runtimeSource;
     private bool _ready;
 
@@ -55,6 +64,7 @@ internal sealed class GcEventListener : EventListener
     {
         ArgumentNullException.ThrowIfNull(queue);
         _queue = queue;
+        Reanchor();
         _ready = true;
 
         // ── Post-base-ctor enable catch-up ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -111,6 +121,11 @@ internal sealed class GcEventListener : EventListener
             return;
         }
 
+        if (Stopwatch.GetTimestamp() - _anchorStopwatch > ReanchorSeconds * Stopwatch.Frequency)
+        {
+            Reanchor();
+        }
+
         switch (eventData.EventId)
         {
             case 1: HandleGcStart(eventData); break;
@@ -133,7 +148,7 @@ internal sealed class GcEventListener : EventListener
         var depth = (byte)Convert.ToUInt32(payload[1]);
         var reason = (byte)Convert.ToUInt32(payload[2]);
         var type = (byte)Convert.ToUInt32(payload[3]);
-        _queue.TryEnqueue(GcEventRecord.ForGcStart(Stopwatch.GetTimestamp(), depth, reason, type, count));
+        _queue.TryEnqueue(GcEventRecord.ForGcStart(ToStopwatchTicks(e.TimeStamp), depth, reason, type, count));
     }
 
     private void HandleGcEnd(EventWrittenEventArgs e)
@@ -146,7 +161,7 @@ internal sealed class GcEventListener : EventListener
         }
         var count = Convert.ToUInt32(payload[0]);
         var depth = (byte)Convert.ToUInt32(payload[1]);
-        _queue.TryEnqueue(GcEventRecord.ForGcEnd(Stopwatch.GetTimestamp(), depth, count));
+        _queue.TryEnqueue(GcEventRecord.ForGcEnd(ToStopwatchTicks(e.TimeStamp), depth, count));
     }
 
     private void HandleSuspendBegin(EventWrittenEventArgs e)
@@ -157,20 +172,37 @@ internal sealed class GcEventListener : EventListener
         _suspendRecorded = IsGcSuspendReason(reason);
         if (_suspendRecorded)
         {
-            _queue.TryEnqueue(GcEventRecord.ForSuspendBegin(Stopwatch.GetTimestamp(), reason));
+            _queue.TryEnqueue(GcEventRecord.ForSuspendBegin(ToStopwatchTicks(e.TimeStamp), reason));
         }
     }
 
     private void HandleRestartEnd(EventWrittenEventArgs e)
     {
-        _ = e;
         // GCRestartEEEnd carries no Reason payload, so pair it to the preceding suspend-begin: emit only when that
         // suspension was a GC suspension we recorded. EE suspend/restart is globally serialized and never nests, so
         // the single latched flag always reflects the matching suspend.
         if (_suspendRecorded)
         {
-            _queue.TryEnqueue(GcEventRecord.ForRestartEnd(Stopwatch.GetTimestamp()));
+            _queue.TryEnqueue(GcEventRecord.ForRestartEnd(ToStopwatchTicks(e.TimeStamp)));
         }
+    }
+
+    private void Reanchor()
+    {
+        _anchorStopwatch = Stopwatch.GetTimestamp();
+        _anchorUtcTicks = DateTime.UtcNow.Ticks;
+    }
+
+    private long ToStopwatchTicks(DateTime timeStamp) => ToStopwatchTicks(timeStamp, _anchorUtcTicks, _anchorStopwatch, Stopwatch.Frequency);
+
+    /// <summary>
+    /// When the runtime raised an event, in Stopwatch ticks — the trace's clock — from its <see cref="EventWrittenEventArgs.TimeStamp"/>, through an
+    /// (UTC ticks, Stopwatch ticks) anchor pair taken at the same instant. A <see cref="DateTimeKind.Local"/> stamp is converted to UTC first.
+    /// </summary>
+    internal static long ToStopwatchTicks(DateTime timeStamp, long anchorUtcTicks, long anchorStopwatch, long stopwatchFrequency)
+    {
+        var utcTicks = (timeStamp.Kind == DateTimeKind.Local ? timeStamp.ToUniversalTime() : timeStamp).Ticks;
+        return anchorStopwatch + (long)((utcTicks - anchorUtcTicks) * ((double)stopwatchFrequency / TimeSpan.TicksPerSecond));
     }
 
     /// <summary>

@@ -27,7 +27,7 @@ import { useNavHistoryStore } from '@/stores/useNavHistoryStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import type { ProfilerSelection } from '@/libs/profiler/model/traceModel';
 import { useSelectionStore } from '@/stores/useSelectionStore';
-import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
+import { selectGaugeRegionVisible, useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useSourceLocationStore, type ResolvedSourceLocation } from '@/stores/useSourceLocationStore';
 import { useThemeStore } from '@/stores/useThemeStore';
 import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
@@ -100,7 +100,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
   const applyViewRange = useCallback((r: TimeRange) => {
     setTransientViewRange(r);
   }, [setTransientViewRange]);
-  const gaugeRegionVisible = useProfilerViewStore((s) => s.gaugeRegionVisible);
+  const gaugeRegionVisible = useProfilerViewStore(selectGaugeRegionVisible);
   const gaugeCollapse = useProfilerViewStore((s) => s.gaugeCollapse);
   const setGaugeCollapse = useProfilerViewStore((s) => s.setGaugeCollapse);
   // Profiler selection now lives on the unified bus leaf (3E — the `useProfilerSelectionStore` silo was retired).
@@ -1046,6 +1046,19 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       >
         <div ref={scrollPhantomRef} style={{ height: layout.totalHeight - (RULER_HEIGHT + TRACK_GAP), width: 1 }} aria-hidden />
       </div>
+      {!gaugeRegionVisible && (
+        // Says where the band went: a hidden region otherwise leaves no trace, and nothing told the reader `g` exists.
+        <button
+          type="button"
+          data-testid="profiler-gauges-hidden"
+          className="absolute left-1 rounded bg-muted/80 px-1.5 text-fs-2xs leading-4 text-muted-foreground hover:text-foreground"
+          style={{ top: RULER_HEIGHT + 1 }}
+          onClick={() => useProfilerViewStore.getState().toggleGaugeRegion()}
+          title="Show the gauges again (g)"
+        >
+          Gauges hidden — g
+        </button>
+      )}
       {/*
        * Gutter icon cluster — pinned to the right edge of the ruler row's gutter band, same column as
        * the gutter labels. Distinct concerns behind distinct icons:

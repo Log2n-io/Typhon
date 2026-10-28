@@ -1330,8 +1330,10 @@ public class TraceEventGenerator : IIncrementalGenerator
         }
         sb.Append(indent).AppendLine("        };");
         sb.Append(indent).AppendLine("        var size = evt.ComputeSize();");
-        sb.Append(indent).AppendLine("        var ring = threadSlot.Buffer;");
-        sb.Append(indent).AppendLine("        if (ring == null || !ring.TryReserve(size, out var dst))");
+        // Reserve on the slot's spillover chain, never on the primary ring alone: once the chain has extended, the primary is full, so a direct
+        // reserve there drops the record (or, after a drain, lands it ahead of earlier records still queued in the spillover).
+        sb.Append(indent).Append("        if (!TryReserveOnChain(threadSlot, size, (byte)TraceEventKind.").Append(model.KindName)
+            .AppendLine(", out var dst, out var ring))");
         sb.Append(indent).AppendLine("        {");
         sb.Append(indent).AppendLine("            return;");
         sb.Append(indent).AppendLine("        }");
@@ -1450,7 +1452,7 @@ public class TraceEventGenerator : IIncrementalGenerator
         if (model.ExternalSlot)
         {
             // Caller already owns the slot — skip the registry claim. The slot must be a live claimed slot.
-            sb.Append(indent).AppendLine("        var ring = ThreadSlotRegistry.GetSlot(slot).Buffer;");
+            sb.Append(indent).AppendLine("        var threadSlot = ThreadSlotRegistry.GetSlot(slot);");
         }
         else
         {
@@ -1459,9 +1461,11 @@ public class TraceEventGenerator : IIncrementalGenerator
             sb.Append(indent).AppendLine("        {");
             sb.Append(indent).AppendLine("            return;");
             sb.Append(indent).AppendLine("        }");
-            sb.Append(indent).AppendLine("        var ring = ThreadSlotRegistry.GetSlot(slotIdx).Buffer;");
+            sb.Append(indent).AppendLine("        var threadSlot = ThreadSlotRegistry.GetSlot(slotIdx);");
         }
-        sb.Append(indent).Append("        if (ring == null || !ring.TryReserve(").Append(totalSize).AppendLine(", out var dst))");
+        // Spillover-chain reserve, same reason as the span path: tick markers dropped here made the trace merge or lose whole ticks.
+        sb.Append(indent).Append("        if (!TryReserveOnChain(threadSlot, ").Append(totalSize).Append(", (byte)TraceEventKind.").Append(model.KindName)
+            .AppendLine(", out var dst, out var ring))");
         sb.Append(indent).AppendLine("        {");
         sb.Append(indent).AppendLine("            return;");
         sb.Append(indent).AppendLine("        }");

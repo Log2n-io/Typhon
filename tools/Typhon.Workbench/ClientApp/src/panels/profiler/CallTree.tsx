@@ -360,14 +360,15 @@ export default function CallTree() {
         {!data ? (
           <div className="flex h-full w-full items-center justify-center text-muted-foreground">
             <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
-            Building call tree…
+            Loading the capture…
           </div>
         ) : data.totalSamples === 0 ? (
           <EmptyState
             text={
               scope.kind !== 'session' || activeFrameRoot != null
                 ? 'No CPU samples in the selected scope.'
-                : 'This trace carries no CPU samples. Re-run profiling with TYPHON__PROFILER__CPUSAMPLING__ENABLED=true.'
+                : 'This capture carries no CPU samples. Only a .typhon-trace written by the profiled process at a clean shutdown has them; '
+                  + 'live captures (Capture & Analyse, save replay) never do, even with CPU sampling enabled.'
             }
           />
         ) : groupByCategory ? (
