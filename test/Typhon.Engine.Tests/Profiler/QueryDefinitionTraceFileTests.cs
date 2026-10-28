@@ -131,4 +131,111 @@ public class QueryDefinitionTraceFileTests
         var ex = Assert.Throws<InvalidDataException>(() => reader.ReadHeader());
         Assert.That(ex.Message, Does.Contain("version: 8"));
     }
+
+    /// <summary>
+    /// A trace whose writer was killed mid-block (#1522) reads to its last whole block and says it was cut, instead of throwing on the torn one:
+    /// the Workbench must open the trace of a crash, which is when it is wanted most.
+    /// </summary>
+    [TestCase(1)]
+    [TestCase(9)]
+    [TestCase(60)]
+    public void A_trace_cut_inside_its_last_block_reads_to_the_block_before(int cutBytes)
+    {
+        var stream = new MemoryStream();
+        var writer = new TraceFileWriter(stream);
+        var header = new TraceFileHeader
+        {
+            Magic = TraceFileHeader.MagicValue,
+            Version = TraceFileHeader.CurrentVersion,
+            TimestampFrequency = 10_000_000,
+            BaseTickRate = 60.0f,
+            WorkerCount = 1,
+        };
+        writer.WriteHeader(in header);
+        writer.WriteSystemDefinitions(ReadOnlySpan<SystemDefinitionRecord>.Empty);
+        writer.WriteArchetypes(ReadOnlySpan<ArchetypeRecord>.Empty);
+        writer.WriteComponentTypes(ReadOnlySpan<ComponentTypeRecord>.Empty);
+        writer.WriteTracks(ReadOnlySpan<TrackRecord>.Empty);
+        writer.WriteDags(ReadOnlySpan<DagRecord>.Empty);
+        writer.WriteEmptyStaticStructures();
+        var record = new byte[64];
+        for (var block = 0; block < 2; block++)
+        {
+            var records = new byte[record.Length * 4];
+            for (var r = 0; r < 4; r++)
+            {
+                BitConverter.TryWriteBytes(records.AsSpan(r * record.Length), (ushort)record.Length);
+                records[r * record.Length + 2] = (byte)TraceEventKind.TickStart;
+                new Random(block * 10 + r).NextBytes(records.AsSpan(r * record.Length + 3, record.Length - 3));
+            }
+
+            writer.WriteRecords(records, 4);
+        }
+
+        writer.Flush();
+        stream.SetLength(stream.Length - cutBytes);
+
+        stream.Position = 0;
+        using var reader = new TraceFileReader(stream);
+        reader.ReadHeader();
+        reader.ReadSystemDefinitions();
+        reader.ReadArchetypes();
+        reader.ReadComponentTypes();
+        reader.ReadTracks();
+        reader.ReadDags();
+        reader.ReadComponentDefinitions();
+        reader.ReadArchetypeDefinitions();
+        reader.ReadIndexCatalog();
+        reader.ReadRuntimeConfig();
+        reader.ReadEventQueueCatalog();
+        reader.ReadResourceGraphSnapshot();
+
+        var blocks = 0;
+        Assert.DoesNotThrow(() =>
+        {
+            while (reader.ReadNextBlock(out _, out _))
+            {
+                blocks++;
+            }
+        });
+        Assert.That((blocks, reader.Truncated), Is.EqualTo((1, true)));
+    }
+
+    [Test]
+    public void A_whole_trace_does_not_read_as_truncated()
+    {
+        var stream = new MemoryStream();
+        var writer = new TraceFileWriter(stream);
+        var header = new TraceFileHeader { Magic = TraceFileHeader.MagicValue, Version = TraceFileHeader.CurrentVersion, TimestampFrequency = 10_000_000 };
+        writer.WriteHeader(in header);
+        writer.WriteSystemDefinitions(ReadOnlySpan<SystemDefinitionRecord>.Empty);
+        writer.WriteArchetypes(ReadOnlySpan<ArchetypeRecord>.Empty);
+        writer.WriteComponentTypes(ReadOnlySpan<ComponentTypeRecord>.Empty);
+        writer.WriteTracks(ReadOnlySpan<TrackRecord>.Empty);
+        writer.WriteDags(ReadOnlySpan<DagRecord>.Empty);
+        writer.WriteEmptyStaticStructures();
+        var records = new byte[16];
+        BitConverter.TryWriteBytes(records, (ushort)16);
+        records[2] = (byte)TraceEventKind.TickStart;
+        writer.WriteRecords(records, 1);
+        writer.Flush();
+
+        stream.Position = 0;
+        using var reader = new TraceFileReader(stream);
+        reader.ReadHeader();
+        reader.ReadSystemDefinitions();
+        reader.ReadArchetypes();
+        reader.ReadComponentTypes();
+        reader.ReadTracks();
+        reader.ReadDags();
+        reader.ReadComponentDefinitions();
+        reader.ReadArchetypeDefinitions();
+        reader.ReadIndexCatalog();
+        reader.ReadRuntimeConfig();
+        reader.ReadEventQueueCatalog();
+        reader.ReadResourceGraphSnapshot();
+        Assert.That(reader.ReadNextBlock(out _, out _), Is.True);
+        Assert.That(reader.ReadNextBlock(out _, out _), Is.False);
+        Assert.That(reader.Truncated, Is.False);
+    }
 }
