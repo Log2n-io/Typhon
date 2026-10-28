@@ -249,6 +249,58 @@ class QueryPathSelectionTests : TestBase<QueryPathSelectionTests>
         });
     }
 
+    /// <summary>
+    /// A point lookup on an <c>AllowMultiple</c> index far below the fan-out threshold — one owner's few rows among many owners — takes the selective scan
+    /// once its rows are few against the archetype's clusters, and one row per key more takes the full scan.
+    /// </summary>
+    /// <remarks>
+    /// The fan-out rule alone sent every such lookup to the full scan whatever the archetype's size: the SWG demo's per-owner inventory read all 55 000 item
+    /// stacks per request. 32 clusters put the bound at <c>32 / 8 = 4</c> rows: fan-out 4 is at it, fan-out 5 (rounded up from 4.99) is past it.
+    /// </remarks>
+    [Test]
+    public void APointLookupOnALowFanOutIndex_TakesTheSelectiveScanAtTheClusterBound_AndOneRowPerKeyMoreTakesTheFullScan()
+    {
+        var dbe = SetupEngine();
+        var rows = UniqueBoundClusters * ClusterSizeOf(dbe);
+        var atBoundKeys = rows / (UniqueBoundClusters / 8);
+        Spawn(dbe, rows, atBoundKeys);
+
+        using var tx = dbe.CreateQuickTransaction();
+        HashSet<EntityId> Run() => tx.Query<QSelUnit>().WhereField<QSelData>(d => d.Fan == 7).Execute();
+
+        var planned = Planned(Run, out var selective, out var full);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(selective, Is.GreaterThan(0), $"{rows / atBoundKeys} rows per key against {UniqueBoundClusters} clusters is at the bound: Path A");
+            Assert.That(full, Is.Zero);
+            Assert.That(planned, Has.Count.EqualTo(rows / atBoundKeys));
+            Assert.That(planned, Is.EquivalentTo(Forced(Run, ClusterScanPath.FullScan)));
+        });
+    }
+
+    /// <summary>The other side of <see cref="APointLookupOnALowFanOutIndex_TakesTheSelectiveScanAtTheClusterBound_AndOneRowPerKeyMoreTakesTheFullScan"/>.</summary>
+    [Test]
+    public void APointLookupOnALowFanOutIndex_PastTheClusterBound_TakesTheFullScan()
+    {
+        var dbe = SetupEngine();
+        var rows = UniqueBoundClusters * ClusterSizeOf(dbe);
+        var pastBoundKeys = (rows / ((UniqueBoundClusters / 8) + 1)) + 1;   // average fan-out just under 5, rounded up to 5
+        Spawn(dbe, rows, pastBoundKeys);
+
+        using var tx = dbe.CreateQuickTransaction();
+        HashSet<EntityId> Run() => tx.Query<QSelUnit>().WhereField<QSelData>(d => d.Fan == 7).Execute();
+
+        var planned = Planned(Run, out var selective, out var full);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(selective, Is.Zero, $"fan-out {(rows + pastBoundKeys - 1) / pastBoundKeys} against {UniqueBoundClusters} clusters is past the bound: Path B");
+            Assert.That(full, Is.GreaterThan(0));
+            Assert.That(planned, Is.EquivalentTo(Forced(Run, ClusterScanPath.Selective)));
+        });
+    }
+
     /// <summary>Clusters the unique-index cases spawn: the bound is one key per 8 clusters, so 32 puts it at four keys.</summary>
     private const int UniqueBoundClusters = 32;
 

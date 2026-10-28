@@ -2940,7 +2940,21 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         }
 
         // rows / distinctKeys >= MinFanOutClusters * ClusterSize, kept as a multiply so no division and no float enters a per-archetype decision.
-        return rows >= (long)distinctKeys * MinFanOutClustersForSelectiveScan * clusterState.Layout.ClusterSize;
+        if (rows >= (long)distinctKeys * MinFanOutClustersForSelectiveScan * clusterState.Layout.ClusterSize)
+        {
+            return true;
+        }
+
+        // The size guard the unique branch applies, with each key worth its fan-out in rows. The fan-out rule above weighs Path A against Path B's BEST
+        // case, zone maps pruning to the matching clusters; on keys scattered over the archetype Path B reads every cluster, so a narrow range on a
+        // low-fan-out index — one owner's few rows among thousands of owners — took the full pass however large the archetype grew: the SWG demo's
+        // per-owner inventory lookup read all 55 000 item stacks per request. The fan-out is rounded UP and the bound DOWN, so the margin stays on Path B's
+        // side; it is an average, so a key far above it (a hot duplicate) costs Path A more than the bound assumed — at worst a tree walk of that key's
+        // rows on top of the clusters it holds.
+        var maxKeys = KeyRange.MaxKeysInRange(plan.PrimaryKeyType, plan.PrimaryScanMin, plan.PrimaryScanMax);
+        var fanOut = (rows + distinctKeys - 1) / distinctKeys;
+        clusterState.ReadActiveClusterList(out var clusters);
+        return maxKeys <= clusters / MinClustersPerUniqueKeyForSelectiveScan / fanOut;
     }
 
     /// <summary>
@@ -3005,8 +3019,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     private const int MinFanOutClustersForSelectiveScan = 2;
 
     /// <summary>
-    /// For a range on a unique index: how many of the archetype's clusters each key the range can hold must stand against before the planner takes the
-    /// selective scan (<see cref="HasFanOutForSelectiveScan"/>).
+    /// How many of the archetype's clusters each row the range can match must stand against before the planner takes the selective scan
+    /// (<see cref="HasFanOutForSelectiveScan"/>): one row per key on a unique index, the fan-out per key on an <c>AllowMultiple</c> one.
     /// </summary>
     /// <remarks>
     /// The fan-out-1 cells above set it. Over 157 clusters, a range matching 1 % of the rows (100 keys, strided so zone maps prune nothing) took Path A
