@@ -2863,6 +2863,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     public ClusterIndexSlot<PersistentStore>[] IndexSlots;
 
     /// <summary>
+    /// <see cref="Transaction.EnumerateIndex{T,TKey}"/>'s source descriptors, [index slot][field], built on first use (#1514). Dropped by
+    /// <see cref="InitializeIndexes"/>, the only place the slots they describe are rebuilt.
+    /// </summary>
+    internal Transaction.IndexArchetypeSource[][] IndexEnumerationSources;
+
+    /// <summary>
     /// The component slots a unique (non-AllowMultiple) index covers, one bit per slot: the persistent home in bits 0-15, the transient home in bits
     /// 16-31. Read by a commit's pre-append check (AP-03) to pass archetypes and components with nothing to check at one bit test. Computed on first
     /// use — the index slots are built after this object — and racing computations agree.
@@ -10563,6 +10569,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         Debug.Assert(transientSlotCount == 0 || transientIndexSegment != null,
             "An archetype with an indexed Transient field needs its heap-backed index segment — eligibility detection and allocation have diverged (#655).");
 
+        IndexEnumerationSources = null;
         IndexSlots = new ClusterIndexSlot<PersistentStore>[slotCount];
         TransientIndexSlots = transientSlotCount > 0 ? new ClusterIndexSlot<TransientStore>[transientSlotCount] : null;
         var idx = 0;
