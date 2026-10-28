@@ -151,7 +151,7 @@ The `ProfilerActive` check is the JIT-fold seam. When false, the entire prologue
 
 [`Profiler/internals/TyphonEvent.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/internals/TyphonEvent.cs) owns the prologue (`BeginPrologue`) and the publishing path (`Publish<T>` with a `where T : struct, ITraceEventEncoder, allows ref struct` constraint that lets the JIT inline the full encode for each concrete event type).
 
-### `TraceEventKind` — ~217 kinds across Phases 2-8
+### `TraceEventKind` — ~223 kinds across Phases 2-8
 
 [`src/Typhon.Profiler/TraceEventKind.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Profiler/TraceEventKind.cs) — wire-stable byte enum, public so external decoders (Workbench client, offline tools) can read trace files.
 
@@ -175,13 +175,14 @@ Sparse by design — gaps left for related categories to grow contiguously. Appr
 | 173–186 | **Data plane** | Transaction Init/Prepare/Validate/Conflict/Cleanup, MVCC ChainWalk / VersionCleanup, B+Tree Search/RangeScan/Rebalance/BulkInsert/Root/NodeCow |
 | 187–213 | **Query / ECS:Query / ECS:View** | Parse, DNF, Plan, Estimate, IndexScan, Iterate, Filter, Pagination, plus ECS depth |
 | 214–234 | **Durability** | WAL split (QueueDrain/OsWrite/Signal), GroupCommit, Queue, Buffer, Frame, Backpressure; Checkpoint depth; Recovery; UoW state/deadline |
+| 235–240 | **Request/Command Correlation** | `ExternalRequest` (span), `IngressReceived`, `IngressAdmitted`, `IngressDropped`, `CommandConsumed`, `EgressSent` — gated on `Typhon:Profiler:Correlation:Enabled` (#1517) |
 | 241–245 | Scheduler follow-ups | MetronomeWait (span), OverloadDetector (instant), RuntimePhaseSpan, QueueTickEnd, SchedulerSystemArchetype |
 | 246 | Fallback | `NamedSpan` — user-defined span with inline UTF-8 name |
 | 247–248 | Query Definition Export | `QueryDefinitionDescribe`, `QueryArgs` — variable-length payloads |
 | 249–253 | Spatial/Fence detail | `SpatialClusterMigrationDetectScan`, `SpatialClusterAabbRefresh`, `WriteTickFenceTable`/`-Shadow`/`-Spatial` |
 | 254 | OS thread scheduling | `ThreadContextSwitch` (Windows ETW kernel logger, Admin-only) |
 
-Total declared kinds: **~217**.
+Total declared kinds: **~223**.
 
 ### Per-kind suppression deny-list
 
@@ -322,7 +323,7 @@ Output: off-CPU gaps visible in the Workbench timeline overlaid on the affected 
   <img src="assets/typhon-profiler-engine-pipeline.svg" width="1200" alt="Profiler engine pipeline">
 </a>
 <br>
-<sub>The engine-side capture hot path: producers (instrumented call sites, ~217 kinds, plus GC / gauge / CPU-sampling sub-pipelines) → JIT gate → per-thread 1 MB SPSC ring → <code>ProfilerConsumerThread</code> (drain · sort · LZ4) → exporter fan-out (File / TCP).</sub>
+<sub>The engine-side capture hot path: producers (instrumented call sites, ~223 kinds, plus GC / gauge / CPU-sampling sub-pipelines) → JIT gate → per-thread 1 MB SPSC ring → <code>ProfilerConsumerThread</code> (drain · sort · LZ4) → exporter fan-out (File / TCP).</sub>
 
 ### Bootstrap & start
 
@@ -366,7 +367,7 @@ When `ProfilerCpuSamplingActive` is on, the bootstrap starts an in-process `CpuS
   <img src="assets/typhon-profiler-viewer-flow.svg" width="1200" alt="Profiler viewer flow">
 </a>
 <br>
-<sub>Workbench viewer flow: file mode (chunk-based lazy load via the v16 sidecar cache, decode ~217 kinds) and live mode (SSE) feed a shared model rendered to canvas; OPFS persists chunk bytes client-side.</sub>
+<sub>Workbench viewer flow: file mode (chunk-based lazy load via the v16 sidecar cache, decode ~223 kinds) and live mode (SSE) feed a shared model rendered to canvas; OPFS persists chunk bytes client-side.</sub>
 
 [`tools/Typhon.Workbench/Controllers/ProfilerController.cs`](https://github.com/Log2n-io/Typhon/blob/main/tools/Typhon.Workbench/Controllers/ProfilerController.cs), [`Sessions/TraceSessionRuntime.cs`](https://github.com/Log2n-io/Typhon/blob/main/tools/Typhon.Workbench/Sessions/TraceSessionRuntime.cs), [`ClientApp/src/libs/profiler/`](https://github.com/Log2n-io/Typhon/tree/main/tools/Typhon.Workbench/ClientApp/src/libs/profiler)
 
@@ -428,7 +429,7 @@ The resource-graph snapshot is built in [13-resources](13-resources.md). This se
   <img src="assets/typhon-profiler-wire-protocol.svg" width="1200" alt="Profiler wire protocol">
 </a>
 <br>
-<sub>The wire format: 12 B common header, optional 25 B span extension (when the kind is a span), optional 16 B trace context (SpanFlags bit 0) and 2 B SourceLocationId (bit 1), then the per-kind typed payload (~217 kinds); framed by the LiveStreamProtocol envelope and indexed by the v16 chunker sidecar.</sub>
+<sub>The wire format: 12 B common header, optional 25 B span extension (when the kind is a span), optional 16 B trace context (SpanFlags bit 0) and 2 B SourceLocationId (bit 1), then the per-kind typed payload (~223 kinds); framed by the LiveStreamProtocol envelope and indexed by the v16 chunker sidecar.</sub>
 
 <a href="assets/typhon-telemetry-tracks.svg">
   <img src="assets/typhon-telemetry-tracks.svg" width="1200" alt="Zero-overhead telemetry gating">

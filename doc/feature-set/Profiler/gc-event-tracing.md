@@ -78,7 +78,7 @@ TyphonProfiler.Stop();   // optional; ordinary shutdown detaches the listener an
 ## 🧪 Tests
 
 - [GcTracingHostTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/GcTracingHostTests.cs) — ingestion-thread → `TyphonEvent` emit path, records injected directly into the queue to exercise processing independent of a real GC
-- [GcEventListenerTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/GcEventListenerTests.cs) — `IsGcSuspendReason` filter that keeps CPU-sampler-induced EE suspensions out of the GC track
+- [GcEventListenerTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/GcEventListenerTests.cs) — `IsGcSuspendReason` filter that keeps CPU-sampler-induced EE suspensions out of the GC track; `SuspendReasonOf` name-based payload lookup (guards against reading the GC count field as the reason, the bug fixed in #1515); end-to-end test that a forced collection produces `SuspendBegin`+`RestartEnd` records in the queue
 
 ## 🔗 Related
 
