@@ -1,4 +1,5 @@
 import type { SpanData, TickData } from '@/libs/profiler/model/traceModel';
+import { TraceEventKind } from '@/libs/profiler/model/types';
 
 /**
  * Shared test-fixture builders for profiler model tests. Centralises the boilerplate that
@@ -111,6 +112,7 @@ export function buildTick(opts: BuildTickOptions): TickData {
 
   const empty = new Float64Array(0);
   return {
+    hasExternalRequest: spans.some((s) => s.kind === TraceEventKind.ExternalRequest) || undefined,
     tickNumber,
     startUs,
     endUs,

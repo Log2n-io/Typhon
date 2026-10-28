@@ -12,6 +12,7 @@ import ComponentInspectorPanel from '@/panels/ComponentInspector/ComponentInspec
 import EntityListPanel from '@/panels/DataBrowser/EntityListPanel';
 import StorageHealthPanel from '@/panels/StorageHealth/StorageHealthPanel';
 import TopSpansPanel from '@/panels/profiler/TopSpansPanel';
+import RequestsPanel from '@/panels/profiler/RequestsPanel';
 import CallTree from '@/panels/profiler/CallTree';
 import SourcePreviewPanel from '@/panels/profiler/SourcePreviewPanel';
 import CriticalPathPanel from '@/panels/CriticalPath/CriticalPathPanel';
@@ -61,6 +62,7 @@ const VIEWS: { id: string; label: string; render: () => React.JSX.Element }[] = 
   { id: 'DataBrowserEntities', label: 'Data Browser', render: () => <EntityListPanel {...NO_PROPS} /> },
   { id: 'StorageHealth', label: 'Storage Health', render: () => <StorageHealthPanel {...NO_PROPS} /> },
   { id: 'TopSpans', label: 'Top Spans', render: () => <TopSpansPanel /> },
+  { id: 'Requests', label: 'Requests', render: () => <RequestsPanel /> },
   { id: 'CallTree', label: 'Call Tree', render: () => <CallTree /> },
   { id: 'SourcePreview', label: 'Source Preview', render: () => <SourcePreviewPanel {...NO_PROPS} /> },
   { id: 'CriticalPath', label: 'Critical Path', render: () => <CriticalPathPanel {...NO_PROPS} /> },

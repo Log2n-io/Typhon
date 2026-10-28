@@ -90,6 +90,8 @@ export function isInstantKind(v: number): boolean {
       || v === 207 || v === 208 || v === 211 || v === 212 || v === 213) return true;
   // Durability (Phase 8, #286) — instants: 217-218, 220, 225, 228, 233-234.
   if (v === 217 || v === 218 || v === 220 || v === 225 || v === 228 || v === 233 || v === 234) return true;
+  // Request correlation (#1517) — 235 (ExternalRequest) is a span; 236-240 (ingress, consumption, egress) are instants.
+  if (v >= 236 && v <= 240) return true;
   // Phase 4 follow-up (#289):
   //   241 (SchedulerMetronomeWait) — SPAN, falls through to false below.
   //   242 (SchedulerOverloadDetector) — instant.
@@ -189,6 +191,33 @@ function decodeInstant(
   switch (kind) {
     case TraceEventKind.TickStart:
       return { kind, threadSlot, tickNumber, timestampUs };
+
+    // Request correlation lifecycle (#1517) — layouts in CorrelationInstantCodec.
+    case TraceEventKind.IngressReceived:
+      return {
+        kind, threadSlot, tickNumber, timestampUs, session: reader.readU32(payloadOffset), seq: reader.readU16(payloadOffset + 4),
+        wireIdx: reader.readU16(payloadOffset + 6), messageBytes: reader.readU16(payloadOffset + 8),
+      };
+    case TraceEventKind.IngressAdmitted:
+      return {
+        kind, threadSlot, tickNumber, timestampUs, session: reader.readU32(payloadOffset), seq: reader.readU16(payloadOffset + 4),
+        wireIdx: reader.readU16(payloadOffset + 6), corrTick: reader.readU32(payloadOffset + 8),
+      };
+    case TraceEventKind.IngressDropped:
+      return {
+        kind, threadSlot, tickNumber, timestampUs, session: reader.readU32(payloadOffset), seq: reader.readU16(payloadOffset + 4),
+        dropReason: reader.readU8(payloadOffset + 6),
+      };
+    case TraceEventKind.CommandConsumed:
+      return {
+        kind, threadSlot, tickNumber, timestampUs, session: reader.readU32(payloadOffset), seq: reader.readU16(payloadOffset + 4),
+        consumerSystemIndex: reader.readU16(payloadOffset + 6),
+      };
+    case TraceEventKind.EgressSent:
+      return {
+        kind, threadSlot, tickNumber, timestampUs, session: reader.readU32(payloadOffset), corrTick: reader.readU32(payloadOffset + 4),
+        messageBytes: reader.readU32(payloadOffset + 8), acks: reader.readU16(payloadOffset + 12),
+      };
 
     case TraceEventKind.TickEnd:
       return {
@@ -764,6 +793,16 @@ function decodeSpan(
   switch (kind) {
     case TraceEventKind.SchedulerChunk:
       return decodeSchedulerChunk(reader, kind, threadSlot, tickNumber, timestampUs, header);
+
+    case TraceEventKind.ExternalRequest: {
+      // ExternalRequestEventCodec: u8 method, u16 status, u16 routeLen, utf8 route.
+      const evt = baseSpanEvent(kind, threadSlot, tickNumber, timestampUs, header);
+      const p = header.payloadOffset;
+      evt.httpMethod = reader.readU8(p);
+      evt.httpStatus = reader.readU16(p + 1);
+      evt.httpRoute = reader.readUtf8(p + 5, reader.readU16(p + 3), utf8Decoder);
+      return evt;
+    }
 
     case TraceEventKind.BTreeInsert:
     case TraceEventKind.BTreeDelete:

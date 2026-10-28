@@ -1,3 +1,5 @@
+import { useProfilerRequestsWriter } from '@/hooks/profiler/useProfilerRequestsWriter';
+import { useProfilerRequestsStore } from '@/stores/useProfilerRequestsStore';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
 import { Activity, AlertCircle, Loader2, Radio, RefreshCw, Unplug } from 'lucide-react';
@@ -149,6 +151,9 @@ function ProfilerPanelInner(props: IDockviewPanelProps) {
     [metadata?.tickSummaries],
   );
   useProfilerStatsWriter(timeAreaTicks, tickSummariesForStats, viewRangeForStats);
+  // The Requests panel's roots (#1517), from the same ticks and viewport.
+  const systemsForRequests = useMemo(() => metadata?.systems ?? [], [metadata?.systems]);
+  useProfilerRequestsWriter(timeAreaTicks, systemsForRequests, viewRangeForStats);
 
   // On metadata arrival, restore this file's last-used viewport (per-file memory, fingerprint-gated)
   // or fall back to the first tick. Fires once per session — the `{0,0}` sentinel gate keeps it from
@@ -214,6 +219,7 @@ function ProfilerPanelInner(props: IDockviewPanelProps) {
       useProfilerSessionStore.getState().reset();
       useSelectionStore.getState().clearLeaf(); // 3E: clear the profiler selection on the unified bus (silo retired)
       useProfilerStatsStore.getState().clear();
+      useProfilerRequestsStore.getState().clear();
       useNavHistoryStore.getState().clear();
       useProfilerViewStore.getState().commitViewRange({ startUs: 0, endUs: 0 });
       // Scope-link is session-scoped (stage-3 Phase 3): a prior trace's frozen window is meaningless on the

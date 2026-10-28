@@ -19,6 +19,10 @@
         // Whether opt-in in-process CPU stack sampling is requested by configuration.
         "Enabled": false,
       },
+      "Correlation": {
+        // Whether request/command correlation is requested by configuration: HTTP request roots, client-command scoping and the ingress/egress lifecycle records (#1517).
+        "Enabled": false,
+      },
       "Gauges": {
         // Whether opt-in per-tick gauge snapshots are requested by configuration.
         "Enabled": false,

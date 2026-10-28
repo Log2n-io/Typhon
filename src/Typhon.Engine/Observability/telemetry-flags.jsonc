@@ -36,6 +36,13 @@
           "desc": "Whether opt-in in-process CPU stack sampling is requested by configuration."
         },
         {
+          "name": "Correlation",
+          "kind": "compositeActive",
+          "field": "ProfilerCorrelationActive",
+          "enabledField": "ProfilerCorrelationEnabled",
+          "desc": "Whether request/command correlation is requested by configuration: HTTP request roots, client-command scoping and the ingress/egress lifecycle records (#1517)."
+        },
+        {
           "name": "Gauges",
           "kind": "compositeActive",
           "field": "ProfilerGaugesActive",

@@ -1,4 +1,5 @@
 import {
+  HTTP_METHOD_NAMES,
   TraceEventKind,
   type TraceEvent,
   type SystemDef,
@@ -391,6 +392,10 @@ export interface TickData {
    * so this is usually empty after the initial slot claims.
    */
   threadInfos: ThreadInfoEvent[];
+  /** Request-correlation lifecycle instants (#1517, kinds 236-240) that landed in this tick, in timestamp order. Absent when there are none. */
+  correlation?: TraceEvent[];
+  /** True when the tick holds an `ExternalRequest` span (#1517), so the request scan skips every other tick's spans. */
+  hasExternalRequest?: boolean;
   /**
    * ON-CPU slices observed in this tick, keyed by the owning thread slot (`targetSlotIdx`). Raw per-tick storage — the
    * off-CPU GAPS between slices are derived cross-tick by <see cref="aggregateGaugeData"/> (a gap can span a TickStart, so
@@ -963,6 +968,8 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
   const gcEvents: GcEvent[] = [];
   const gcSuspensions: GcSuspensionEvent[] = [];
   const threadInfos: ThreadInfoEvent[] = [];
+  const correlation: TraceEvent[] = [];
+  let hasExternalRequest = false;
   const contextSwitches = new Map<number, OnCpuSlice[]>();
   let gaugeSnapshot: GaugeSnapshot | undefined;
   // #911 O3 — built lazily so a tick with no spatial archetype carries no map at all rather than an empty one.
@@ -1275,6 +1282,15 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
         break;
       }
 
+      // Request correlation lifecycle (#1517): kept as-is for the Requests panel and the selection flows; nothing to draw per lane.
+      case TraceEventKind.IngressReceived:
+      case TraceEventKind.IngressAdmitted:
+      case TraceEventKind.IngressDropped:
+      case TraceEventKind.CommandConsumed:
+      case TraceEventKind.EgressSent:
+        correlation.push(evt);
+        break;
+
       case TraceEventKind.RuntimePhaseUoWCreate:
         // UoW create marker — fires once at the top of OnTickStart. Glyph rendered in the phase track.
         phaseMarkers.push({
@@ -1445,9 +1461,13 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
 
           // Kickoff / generic span path: push a new SpanData. If a pending completion already exists for this SpanId (the sort
           // put the completion record ahead of the kickoff), fold immediately so only ONE span shows up for the pair.
+          if (evt.kind === TraceEventKind.ExternalRequest) hasExternalRequest = true;
           const span: SpanData = {
             kind: evt.kind,
-            name: SpanKindNames[evt.kind] ?? `Kind[${evt.kind}]`,
+            // An HTTP request (#1517) reads as its method and route: "Http.Request" alone would make every request on a lane look alike.
+            name: evt.kind === TraceEventKind.ExternalRequest
+              ? `${HTTP_METHOD_NAMES[evt.httpMethod ?? 0] ?? 'OTHER'} ${evt.httpRoute ?? ''}`
+              : SpanKindNames[evt.kind] ?? `Kind[${evt.kind}]`,
             threadSlot: evt.threadSlot,
             startUs: evt.timestampUs,
             endUs: evt.timestampUs + duration,
@@ -1732,6 +1752,8 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
     gcEvents,
     gcSuspensions,
     threadInfos,
+    correlation: correlation.length > 0 ? correlation : undefined,
+    hasExternalRequest: hasExternalRequest || undefined,
     contextSwitches,
     rawEvents: events,
     spatialByArchetype,

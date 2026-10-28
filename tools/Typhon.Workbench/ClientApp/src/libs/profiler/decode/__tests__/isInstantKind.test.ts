@@ -15,7 +15,7 @@ import { TraceEventKind } from '@/libs/profiler/model/types';
 // Source of truth, in ladder order (C# returns false ⇒ instant):
 //   <10 · 76, 77 · 36 · 65-73 · 90-116 · 127-135, 137, 140-142, 144, 145 · 146-148, 151, 153, 154, 156-158, 161, 162 ·
 //   166-172 · 176, 178, 180, 182, 183, 185, 186 · 191, 197, 200, 202, 203, 206-208, 211-213 ·
-//   217, 218, 220, 225, 228, 233, 234 · 242, 244 · 247, 248 · 254
+//   217, 218, 220, 225, 228, 233, 234 · 236-240 · 242, 244 · 247, 248 · 254
 const INSTANT_KINDS: readonly number[] = [
   0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
   36, 76, 77,
@@ -33,6 +33,8 @@ const INSTANT_KINDS: readonly number[] = [
   176, 178, 180, 182, 183, 185, 186,
   191, 197, 200, 202, 203, 206, 207, 208, 211, 212, 213,
   217, 218, 220, 225, 228, 233, 234,
+  // Request correlation's lifecycle instants (#1517), between the 235 span below and the 241 span.
+  236, 237, 238, 239, 240,
   242, 244,
   247, 248,
   254,
@@ -54,7 +56,8 @@ const SPAN_KINDS: readonly number[] = [
   173, 174, 175, 177, 179, 181, 184,
   187, 190, 192, 196, 198, 199, 201, 204, 205, 209, 210,
   214, 216, 219, 221, 226, 227, 229, 232,
-  235, 240, 241, 243, 245,
+  // 235 (ExternalRequest, #1517) sits directly below the 236-240 instants.
+  235, 241, 243, 245,
 ];
 
 describe('isInstantKind — mirror of the C# IsSpan ladder', () => {

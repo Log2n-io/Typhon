@@ -1,6 +1,8 @@
 import type { ChunkSpan, OffCpuInterval, OffCpuStore, PhaseMarker, PhaseSpan, SpanData, TickData } from '@/libs/profiler/model/traceModel';
 import { materializeOffCpuInterval } from '@/libs/profiler/model/traceModel';
 import type { TrackLayout, Viewport } from '@/libs/profiler/model/uiTypes';
+import type { RequestRow } from '@/libs/profiler/correlation/requests';
+import { DROPPED_MARK_HALF_WIDTH, findRootAt, ROOT_COMMANDS_TRACK_ID, ROOT_HTTP_TRACK_ID, type RootLanes } from '@/libs/profiler/correlation/rootLanes';
 import {
   LABEL_ROW_HEIGHT,
   MINI_ROW_HEIGHT,
@@ -36,6 +38,7 @@ export type TimeAreaHover =
   | { kind: 'gutter-chevron'; trackId: string }  // click toggles collapse state
   | { kind: 'help'; trackId: string; label: string }  // hover on "?" glyph in a track's gutter
   | { kind: 'gauge'; trackId: string; localY: number; trackHeight: number; cursorUs: number }
+  | { kind: 'root'; root: RequestRow; trackId: string }  // an HTTP request or client command in a root lane (#1517)
   | null;
 
 export interface HitTestInputs {
@@ -60,6 +63,8 @@ export interface HitTestInputs {
   offCpuBySlot: Map<number, OffCpuStore>;
   /** Whether the off-CPU overlay is shown — when false the off-CPU probe is skipped (matches the draw gate). */
   showOffCpu: boolean;
+  /** The packed root lanes (#1517), as drawn. Absent → root tracks hit nothing but their tick. */
+  rootLanes?: RootLanes;
 }
 
 /**
@@ -68,7 +73,7 @@ export interface HitTestInputs {
  * inside a gap).
  */
 export function hitTestTimeArea(inputs: HitTestInputs): TimeAreaHover {
-  const { mx, my, tracks, ticks, vp, gutterWidth, legendsVisible, offCpuBySlot, showOffCpu } = inputs;
+  const { mx, my, tracks, ticks, vp, gutterWidth, legendsVisible, offCpuBySlot, showOffCpu, rootLanes } = inputs;
 
   // Gutter — "?" help glyph wins over the chevron when hovered; else chevron toggles collapse.
   if (mx < gutterWidth) {
@@ -110,6 +115,20 @@ export function hitTestTimeArea(inputs: HitTestInputs): TimeAreaHover {
 
   // Summary state → coarse tick hit (no sub-element granularity).
   if (track.state === 'summary') {
+    const tick = findTickAtX(ticks, mx, gutterWidth, vp);
+    if (tick !== null) return { kind: 'tick', tickNumber: tick.tickNumber };
+    return null;
+  }
+
+  // Root lanes (#1517) — one bar per request or command, packed into rows of SPAN_ROW_HEIGHT. A miss falls through to the tick.
+  if (track.id === ROOT_HTTP_TRACK_ID || track.id === ROOT_COMMANDS_TRACK_ID) {
+    const lane = rootLanes === undefined ? undefined : track.id === ROOT_HTTP_TRACK_ID ? rootLanes.http : rootLanes.commands;
+    const row = Math.floor((my - ty) / SPAN_ROW_HEIGHT);
+    if (lane !== undefined && row >= 0 && row < lane.rowCount) {
+      const us = vp.offsetX + (mx - gutterWidth) / vp.scaleX;
+      const hit = findRootAt(lane, us, row, DROPPED_MARK_HALF_WIDTH / vp.scaleX);
+      if (hit !== null) return { kind: 'root', root: hit.row, trackId: track.id };
+    }
     const tick = findTickAtX(ticks, mx, gutterWidth, vp);
     if (tick !== null) return { kind: 'tick', tickNumber: tick.tickNumber };
     return null;
