@@ -66,6 +66,9 @@ public enum TyphonErrorCode
 
     /// <summary>An insert or update would create a duplicate key in a unique index (see <see cref="UniqueConstraintViolationException"/>).</summary>
     UniqueConstraintViolation       = 4001,
+
+    /// <summary>A commit points a cascade foreign key at a destroyed or dying parent (see <see cref="ForeignKeyViolationException"/>).</summary>
+    ForeignKeyViolation             = 4002,
     // 5xxx — Query (reserved)
 
     // 6xxx — Resource

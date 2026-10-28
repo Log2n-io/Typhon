@@ -78,6 +78,19 @@ tx.Destroy(bagId);
 - Cascade delete (`OnParentDelete = CascadeAction.Delete`) only follows indexed FK fields; the cascade graph is
   validated at registration — cycles and diamonds both fail startup with a descriptive error, so cascade is
   always a bounded tree traversal. All cascaded destroys commit atomically with the parent destroy.
+- The cascade takes the children the parent has **now**, not at the destroyer's snapshot: they are looked up when
+  `Destroy()` runs and again at commit, alive at HEAD, with the transaction's own spawns and FK writes counted. A
+  child committed or re-keyed onto the parent by another transaction before the destroy commits is destroyed too;
+  one moved to another parent first survives.
+- A commit that points a cascade FK at a destroyed parent, or one a committing transaction is destroying, throws
+  `ForeignKeyViolationException` (`ErrorCode` 4002) with nothing changed; the transaction stays open, to be fixed
+  or rolled back. `ParentDying` (and `IsTransient`) says the parent was only being destroyed — that destroy may
+  still abort. A destroy waits for the commits that passed this check on its parent, so no child slips past it.
+  Every write of a component holding a cascade FK is checked, the key unchanged too: the write publishes the value
+  the transaction read, which may name a parent destroyed since. Limits: a `SingleVersion` FK written in place (the
+  default TickFence discipline) is visible at once and checked by no commit — a re-key onto a parent after its
+  destroy's commit-time lookup outlives it; use the Commit discipline for such a field when that matters. A
+  `Transient` cascade FK is followed through its index only.
 - `ComponentCollection<EntityLink<T>>` relationships are not indexed — no reverse lookup, no independent query
   on members, and concurrent writers to the same parent collection retry on conflict (microsecond cost,
   in-process). Cascade for these is a parent-side iterate-and-destroy, not an index scan.
@@ -90,6 +103,7 @@ tx.Destroy(bagId);
 ## 🧪 Tests
 
 - [CascadeDeleteTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/CascadeDeleteTests.cs) — cascade graph validation, multi-level and mixed-ownership cascade, already-dead children, same-transaction cascade
+- [CascadeHeadTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/CascadeHeadTests.cs) — children committed or re-keyed after the destroyer's snapshot and after `Destroy()`, the destroyer's own re-keys, in-place `SingleVersion` re-keys before the fence, the referential check and the destroyer/referrer handshake
 - [EcsHardeningTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsHardeningTests.cs) — `EntityLink<T>` implicit conversion round-trip, null detection, `IsAlive`/`Open` via a link, deep cascade hierarchies
 - [EcsNavigationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsNavigationTests.cs) — `NavigateField` reactive FK join, combined source/target predicates, incremental view over the join
 

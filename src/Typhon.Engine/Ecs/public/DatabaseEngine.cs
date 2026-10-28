@@ -7157,6 +7157,24 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     internal bool KeepSpawnDestroyedStorageForTest { get; set; }
 
+    /// <summary>The handshake between a commit destroying a cascade parent and one pointing a child at it (CASC-02).</summary>
+    internal CascadeReferrerGate CascadeGate { get; } = new();
+
+    /// <summary>Test hook: runs after a commit's referential check passed and before it stages anything — a child counted, not yet published (CASC-02).</summary>
+    internal Action CascadeAfterReferrerCheckProbe;
+
+    /// <summary>Test hook: runs as a commit is about to wait for the referrers of a parent it marked dying (CASC-02).</summary>
+    internal Action CascadeBeforeReferrerWaitProbe;
+
+    /// <summary>Test hook: runs once a commit's walk has marked every parent dying and looked up its children, holding the marks (CASC-02).</summary>
+    internal Action CascadeAfterDyingMarkedProbe;
+
+    /// <summary>The CASC-02 mutant, for its [RuleMutant] test: a destroyer that does not wait for the referrers counted before its mark.</summary>
+    internal bool CascadeSkipsReferrerWaitForTest { get; set; }
+
+    /// <summary>The CASC-01 mutant, for its [RuleMutant] test: a cascade child judged alive at the destroyer's snapshot, not at HEAD.</summary>
+    internal bool CascadeJudgesChildAtSnapshotForTest { get; set; }
+
     /// <summary>
     /// Test-only mutant switch (CHAIN-02): when set, a first write marks its cache entry written before its revision is appended — what CHAIN-02 forbids —
     /// so the rule's mutant can show the verifier rejects it. Per engine. Never set in production.

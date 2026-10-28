@@ -402,7 +402,7 @@ below names the invariant that proves it.
   invariant the FK reverse lookup answers "which sources' foreign key named the target at S" (FkSnapshot): built once per query or per view refresh,
             per candidate archetype, over the whole key range, the side's rows at the target's key merged with the tree's candidates; a navigation
             counts t's own spawns and destroys, a view's refresh committed state only. The cascade alone reads HEAD (no FkSnapshot): it destroys the
-            children committed now. A navigation's predicates and a view's refresh read committed values at S (Transaction.TryReadCommitted), never
+            children committed now (CASC-01). A navigation's predicates and a view's refresh read committed values at S (Transaction.TryReadCommitted), never
             t's own unpublished writes — a refresh folded the refresher's write and kept it past its rollback; a navigation view built from t's query
             is populated at t's snapshot (NavigationQueryBuilder.ToViewAt)
   invariant a spatial query, in each archetype that promises isolation, takes out of its HEAD answer every slot whose VALUE stamp is above S
