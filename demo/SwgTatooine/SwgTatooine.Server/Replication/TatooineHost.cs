@@ -14,6 +14,7 @@ using System.IO.Compression;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
+using Typhon.Profiler.AspNetCore;
 using Typhon.Subscriptions.AspNetCore;
 
 namespace SwgTatooine.Server;
@@ -435,6 +436,10 @@ public static class TatooineHost
                     + "this server from a visitor's browser. Pass --origin for each host the client is served from.");
             }
         });
+
+        // Each request becomes a root in the Workbench and the engine spans it causes carry its trace id (#1517). Off unless TYPHON__PROFILER__ENABLED and
+        // TYPHON__PROFILER__CORRELATION__ENABLED are set, and then it registers nothing: a request pays nothing.
+        builder.Services.AddTyphonRequestCorrelation();
 
         var app = builder.Build();
 
