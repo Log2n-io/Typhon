@@ -1030,13 +1030,17 @@ internal static class ArchetypeRegistry
     /// </summary>
     public static void BuildAndValidateCascadeGraph()
     {
-        // Clear any previous cascade targets (needed for test isolation)
+        // Built aside and swapped in per archetype: a commit running meanwhile reads either graph, never one cleared to nothing (CASC-02).
+        var targets = new Dictionary<ArchetypeMetadata, List<CascadeTarget>>();
+        var fks = new Dictionary<ArchetypeMetadata, List<(byte Slot, int FieldOffset)>>();
+        BuildCascadeGraph(targets, fks);
         foreach (var meta in GetAllArchetypes())
         {
-            meta._cascadeTargets = null;
+            meta._cascadeTargets = targets.GetValueOrDefault(meta);
+            meta._cascadeFks = fks.TryGetValue(meta, out var own) ? own.ToArray() : null;
         }
 
-        BuildCascadeGraph();
+        IndexCascadeFkComponents();
         ValidateCascadeGraph();
     }
 
@@ -1044,7 +1048,8 @@ internal static class ArchetypeRegistry
     /// Scan all registered archetypes' component fields for [Index(OnParentDelete = Delete)] on EntityLink fields.
     /// Build CascadeTargets on parent archetypes.
     /// </summary>
-    private static void BuildCascadeGraph()
+    private static void BuildCascadeGraph(Dictionary<ArchetypeMetadata, List<CascadeTarget>> targets,
+        Dictionary<ArchetypeMetadata, List<(byte Slot, int FieldOffset)>> fks)
     {
         foreach (var meta in GetAllArchetypes())
         {
@@ -1091,17 +1096,64 @@ internal static class ArchetypeRegistry
                     }
                     var parentMeta = Archetypes[targetCatalogId];
 
-                    parentMeta._cascadeTargets ??= [];
-                    parentMeta._cascadeTargets.Add(new CascadeTarget
+                    var fieldOffset = (int)Marshal.OffsetOf(compType, field.Name);
+                    if (!targets.TryGetValue(parentMeta, out var parentTargets))
+                    {
+                        targets[parentMeta] = parentTargets = [];
+                    }
+
+                    parentTargets.Add(new CascadeTarget
                     {
                         ChildArchetypeId = meta.ArchetypeId,
                         ChildArchetypeType = meta.ArchetypeType,
                         FkSlotIndex = slot,
-                        FkFieldOffset = (int)Marshal.OffsetOf(compType, field.Name),
+                        FkFieldOffset = fieldOffset,
                     });
+                    if (!fks.TryGetValue(meta, out var childFks))
+                    {
+                        fks[meta] = childFks = [];
+                    }
+
+                    childFks.Add((slot, fieldOffset));
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// The component types some archetype declares a cascade foreign key in, by component type id; null when no archetype declares one. A commit's
+    /// referential check (CASC-02) visits only these components' writes.
+    /// </summary>
+    internal static volatile bool[] CascadeFkComponentTypes;
+
+    private static void IndexCascadeFkComponents()
+    {
+        bool[] types = null;
+        foreach (var meta in GetAllArchetypes())
+        {
+            if (meta._cascadeFks == null)
+            {
+                continue;
+            }
+
+            foreach (var (slot, _) in meta._cascadeFks)
+            {
+                var typeId = meta._componentTypeIds[slot];
+                if (typeId < 0)
+                {
+                    continue;
+                }
+
+                if (types == null || typeId >= types.Length)
+                {
+                    Array.Resize(ref types, Math.Max(typeId + 1, (types?.Length ?? 0) * 2));
+                }
+
+                types[typeId] = true;
+            }
+        }
+
+        CascadeFkComponentTypes = types;
     }
 
     /// <summary>

@@ -137,6 +137,12 @@ internal class ArchetypeMetadata
     /// </summary>
     internal List<CascadeTarget> _cascadeTargets;
 
+    /// <summary>
+    /// This archetype's own cascade foreign keys, as a child: (component slot, field offset) of each <c>EntityLink</c> declared
+    /// <c>OnParentDelete = Delete</c>. Null when it has none. A commit pointing one at a parent passes the referential check (CASC-02).
+    /// </summary>
+    internal (byte Slot, int FieldOffset)[] _cascadeFks;
+
     /// <summary>Get the slot index for a component type ID. Throws if the component is not part of this archetype.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public byte GetSlot(int componentTypeId)

@@ -348,7 +348,16 @@ public unsafe partial class EntityAccessor
     /// hinted lookup — the same accessor cache <c>ResolveEntity</c> uses. <paramref name="needsGuard"/> enters an epoch scope around it; a caller that
     /// already holds one passes false.
     /// </summary>
-    private protected bool IsCommittedAlive(EntityId id, bool needsGuard)
+    private protected bool IsCommittedAlive(EntityId id, bool needsGuard) => IsCommittedAliveAt(id, TSN, needsGuard);
+
+    /// <summary>
+    /// Above every commit stamp and every TSN (both stay below <see cref="EntityRecordHeader.PendingBit"/>): a record read at it is the HEAD's — a committed
+    /// born or died counts whatever its stamp, a pending one only once its owner is past its commit point.
+    /// </summary>
+    private protected const long HeadTsn = EntityRecordHeader.PendingBit - 1;
+
+    /// <summary><see cref="IsCommittedAlive"/> at <paramref name="tsn"/>; <see cref="HeadTsn"/> asks whether the entity is alive at HEAD.</summary>
+    private protected bool IsCommittedAliveAt(EntityId id, long tsn, bool needsGuard)
     {
         if (id.IsNull)
         {
@@ -386,7 +395,7 @@ public unsafe partial class EntityAccessor
             guard.Dispose();
         }
 
-        return found && EntityVisibility.IsVisible(readBuf, TSN, CommitCards, es.EntityMap, id.EntityKey, ref _entityMapCacheAccessor, _epochManager);
+        return found && EntityVisibility.IsVisible(readBuf, tsn, CommitCards, es.EntityMap, id.EntityKey, ref _entityMapCacheAccessor, _epochManager);
     }
 
     /// <summary>

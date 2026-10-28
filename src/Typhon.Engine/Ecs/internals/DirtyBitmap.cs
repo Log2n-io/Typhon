@@ -150,6 +150,9 @@ internal sealed class DirtyBitmap
         return (Volatile.Read(ref blocks[blockIndex][word & WordInBlockMask]) & (1L << (chunkId & 63))) != 0;
     }
 
+    /// <summary>The words currently allocated: <see cref="ReadWord"/> answers 0 past them.</summary>
+    internal int WordCount => Volatile.Read(ref _wordCount);
+
     /// <summary>The 64 bits of word <paramref name="wordIndex"/>, read without modifying state; 0 past the allocated range.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal ulong ReadWord(int wordIndex)

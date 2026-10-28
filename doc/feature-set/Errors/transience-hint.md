@@ -46,6 +46,7 @@ while (true)
 | `TyphonTimeoutException` (lock, transaction, page-cache/WAL back-pressure) | `true` | Retry with backoff |
 | `ResourceExhaustedException` | `true` | Retry, or wait for the resource to drain |
 | `StorageException`, `DurabilityException`, schema/`UniqueConstraintViolationException` | `false` | Don't retry — surface or escalate |
+| `ForeignKeyViolationException` | `ParentDying` | Dying parent: retry (its destroy may abort — once it commits, the retry is refused for good); destroyed: fix the reference or roll back |
 
 ## ⚠️ Guarantees & limits
 
