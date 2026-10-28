@@ -750,8 +750,8 @@ internal sealed class MarketDeskChecks : ServedChecks
 
     /// <summary>
     /// The item and market audits read at a snapshot older than a vendor sale and a cancel collected on the spot — a stack and a listing destroyed after
-    /// it — stay clean. They read through <c>EnumerateIndex</c>, which does not find an entity destroyed after the snapshot (#1247): live, every audit
-    /// reported the stacks the bots had just sold as "not stored", their ledger rows not yet in its snapshot.
+    /// it — stay clean: every read, the ledgers' index walks included, answers at that snapshot (VIS-13). Before #1247, live, every audit reported the
+    /// stacks the bots had just sold as "not stored", their ledger rows not yet in its snapshot.
     /// </summary>
     [Test]
     [CancelAfter(180_000)]

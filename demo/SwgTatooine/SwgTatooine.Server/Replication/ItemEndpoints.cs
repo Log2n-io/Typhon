@@ -217,10 +217,12 @@ public static class ItemEndpoints
         }
 
         var stacks = new List<(ulong Id, ItemStack Stack)>();
-        // A query, not EnumerateIndex: the index enumerator misses a stack destroyed after this snapshot (#1247) — gone from the view for one poll.
-        foreach (var found in tx.Query<ItemStackArch>().WhereField<ItemStack>(s => s.Owner == key).Execute())
+        using (var found = tx.EnumerateIndex<ItemStack, long>(ix.StackByOwner, key, key))
         {
-            stacks.Add((found.RawValue, tx.Open(found).Read(ItemStackArch.Stack)));
+            while (found.MoveNext())
+            {
+                stacks.Add(((ulong)found.CurrentEntityPK, found.CurrentComponent));
+            }
         }
 
         stacks.Sort(static (x, y) => x.Stack.Slot.CompareTo(y.Stack.Slot));
@@ -358,8 +360,7 @@ public static class ItemEndpoints
 
     /// <summary>The audit read through <paramref name="tx"/>'s snapshot — a check passes a reader older than the commits it stages.</summary>
     /// <remarks>
-    /// Stacks and listings are destroyed, so they are read by an archetype scan, never by <c>EnumerateIndex</c>: the index enumerator does not find an
-    /// entity destroyed after the snapshot (#1247), which tore the audit live — the ledger rows of a vendor sale or a listing missing, its stack already gone.
+    /// Every stack and every listing is read, so by an archetype scan: a walk of a whole index would visit the same rows in key order, through the tree.
     /// </remarks>
     internal static ItemAuditResult Audit(DatabaseEngine dbe, Transaction tx)
     {

@@ -433,42 +433,47 @@ public static class MarketEndpoints
         using var tx = dbe.CreateQuickTransaction();
         json.Append("{\"listed\":[");
         var first = true;
-        // Queries, not EnumerateIndex: the index enumerator misses a listing destroyed after this snapshot (#1247).
-        foreach (var mine in tx.Query<ListingArch>().WhereField<Listing>(l => l.Seller == key).Execute())
+        using (var mine = tx.EnumerateIndex<Listing, long>(dbe.GetIndexRef<Listing, long>(l => l.Seller), key, key))
         {
-            var l = tx.Open(mine).Read(ListingArch.Entry);
-            if (l.State != ListingState.Listed)
+            while (mine.MoveNext())
             {
-                continue;
-            }
+                var l = mine.CurrentComponent;
+                if (l.State != ListingState.Listed)
+                {
+                    continue;
+                }
 
-            json.Append(first ? "{" : ",{");
-            first = false;
-            Common(json, board, unchecked((long)mine.RawValue), in l);
-            json.Append(",\"total\":").Append(l.UnitPrice * l.Quantity)
-                .Append(",\"fee\":").Append(l.Fee)
-                .Append(",\"listedTick\":").Append(l.ListedTick)
-                .Append(",\"expireTick\":").Append(l.ExpireTick)
-                .Append(",\"ageS\":").Append(Math.Max(0, board.WorldTick - l.ListedTick) / board.TickRateHz)
-                .Append('}');
+                json.Append(first ? "{" : ",{");
+                first = false;
+                Common(json, board, mine.CurrentEntityPK, in l);
+                json.Append(",\"total\":").Append(l.UnitPrice * l.Quantity)
+                    .Append(",\"fee\":").Append(l.Fee)
+                    .Append(",\"listedTick\":").Append(l.ListedTick)
+                    .Append(",\"expireTick\":").Append(l.ExpireTick)
+                    .Append(",\"ageS\":").Append(Math.Max(0, board.WorldTick - l.ListedTick) / board.TickRateHz)
+                    .Append('}');
+            }
         }
 
         json.Append("],\"reserved\":[");
         first = true;
-        foreach (var mine in tx.Query<ListingArch>().WhereField<Listing>(l => l.Collector == key).Execute())
+        using (var mine = tx.EnumerateIndex<Listing, long>(dbe.GetIndexRef<Listing, long>(l => l.Collector), key, key))
         {
-            var l = tx.Open(mine).Read(ListingArch.Entry);
-            if (l.State is not (ListingState.Sold or ListingState.Returned))
+            while (mine.MoveNext())
             {
-                continue;
-            }
+                var l = mine.CurrentComponent;
+                if (l.State is not (ListingState.Sold or ListingState.Returned))
+                {
+                    continue;
+                }
 
-            json.Append(first ? "{" : ",{");
-            first = false;
-            Common(json, board, unchecked((long)mine.RawValue), in l);
-            json.Append(",\"state\":\"").Append(ListingState.NameOf(l.State)).Append('"')
-                .Append(",\"closedTick\":").Append(l.ClosedTick)
-                .Append('}');
+                json.Append(first ? "{" : ",{");
+                first = false;
+                Common(json, board, mine.CurrentEntityPK, in l);
+                json.Append(",\"state\":\"").Append(ListingState.NameOf(l.State)).Append('"')
+                    .Append(",\"closedTick\":").Append(l.ClosedTick)
+                    .Append('}');
+            }
         }
 
         return json.Append("],\"caps\":{\"listings\":").Append(TatooineData.MaxListings)
@@ -557,8 +562,8 @@ public static class MarketEndpoints
     }
 
     /// <summary>
-    /// The audit read through <paramref name="tx"/>'s snapshot. Listings are read by an archetype scan: <c>EnumerateIndex</c> misses one destroyed after
-    /// the snapshot (#1247).
+    /// The audit read through <paramref name="tx"/>'s snapshot — a check passes a reader older than the commits it stages. Every listing is read, so by an
+    /// archetype scan.
     /// </summary>
     internal static MarketAuditResult Audit(DatabaseEngine dbe, MarketSnapshot board, Transaction tx)
     {
