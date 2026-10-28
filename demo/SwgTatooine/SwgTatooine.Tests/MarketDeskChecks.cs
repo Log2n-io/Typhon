@@ -44,11 +44,11 @@ internal sealed class MarketDeskChecks : ServedChecks
     /// <summary>A player logged in, parked at a point, its wallet open.</summary>
     private Trader LogIn(TatooineSim sim, ulong account, (float X, float Z) at, long bindings)
     {
-        var link = Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(account));
+        var link = Harness.Connect(TatooineReplication.PlayerKind, TestAccounts.For(sim.Dbe, account));
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= bindings, "the avatar to be spawned");
         Harness.Ticks(2);
         var body = Worlds.Park(sim, link.Session, at.X, at.Z);
-        Assert.That(CharacterStore.TryFind(sim.Dbe, EntityId.FromRawValue(account), out var character, out _), Is.True, "the account has no character");
+        Assert.That(CharacterStore.TryFind(sim.Dbe, TestAccounts.For(sim.Dbe, account), out var character, out _), Is.True, "the account has no character");
         SessionHarness.Until(() => Ledgers.TryWallet(sim, character, out _), "the wallet to be opened");
         Harness.Ticks(2);
         return new Trader(link, body, character);
@@ -325,7 +325,7 @@ internal sealed class MarketDeskChecks : ServedChecks
         for (var i = 0; i < 5 && !notInWorld; i++)
         {
             var before = State(sim, a, b);
-            var link = Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(0x8210UL + (ulong)i));
+            var link = Harness.Connect(TatooineReplication.PlayerKind, TestAccounts.For(sim.Dbe, 0x8210UL + (ulong)i));
             SessionHarness.Until(() => link.Sent.Any(m => m.Length > 0 && m[0] == MessageTypes.Welcome), "the WELCOME");
             Market.Cancel(link, 12345);
             SessionHarness.Until(
@@ -392,7 +392,7 @@ internal sealed class MarketDeskChecks : ServedChecks
         var links = new List<FakeLink>();
         for (var i = 0; i < buyers; i++)
         {
-            links.Add(Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(0x8301UL + (ulong)i)));
+            links.Add(Harness.Connect(TatooineReplication.PlayerKind, TestAccounts.For(sim.Dbe, 0x8301UL + (ulong)i)));
         }
 
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= buyers + 1, "every buyer's avatar");
@@ -402,7 +402,7 @@ internal sealed class MarketDeskChecks : ServedChecks
         {
             // At another city's bazaar: the winner's purchase is reserved, so the listing stays in the book, Sold, for every later buyer to find.
             Worlds.Park(sim, links[i].Session, elsewhere.X + 2.5f + (i % 10 * 0.25f), elsewhere.Z + (i / 10 * 0.25f));
-            Assert.That(CharacterStore.TryFind(sim.Dbe, EntityId.FromRawValue(0x8301UL + (ulong)i), out var c, out _), Is.True);
+            Assert.That(CharacterStore.TryFind(sim.Dbe, TestAccounts.For(sim.Dbe, 0x8301UL + (ulong)i), out var c, out _), Is.True);
             characters.Add(c);
         }
 

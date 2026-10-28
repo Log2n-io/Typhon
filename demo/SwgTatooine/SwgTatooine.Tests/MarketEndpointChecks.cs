@@ -260,12 +260,15 @@ internal sealed class MarketEndpointChecks : ServedChecks
     }
 
     private (FakeLink Link, EntityId Body, EntityId Character) LogIn(TatooineSim sim, ulong account, MissionTerminalRef at, long bindings)
+        => LogIn(sim, TestAccounts.For(sim.Dbe, account), at, bindings);
+
+    private (FakeLink Link, EntityId Body, EntityId Character) LogIn(TatooineSim sim, EntityId account, MissionTerminalRef at, long bindings)
     {
-        var link = Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(account));
+        var link = Harness.Connect(TatooineReplication.PlayerKind, account);
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= bindings, "the avatar to be spawned");
         Harness.Ticks(2);
         var body = Worlds.Park(sim, link.Session, at.X + 2.5f, at.Z);
-        Assert.That(CharacterStore.TryFind(sim.Dbe, EntityId.FromRawValue(account), out var character, out _), Is.True);
+        Assert.That(CharacterStore.TryFind(sim.Dbe, account, out var character, out _), Is.True);
         SessionHarness.Until(() => Ledgers.TryWallet(sim, character, out _), "the wallet to be opened");
         Harness.Ticks(2);
         return (link, body, character);
@@ -375,7 +378,7 @@ internal sealed class MarketEndpointChecks : ServedChecks
     {
         using var sim = Start();
         Assert.That(AccountStore.TrySignup(sim.Dbe, "walletpeek", "wallet-peek-pass-1", out var account), Is.EqualTo(AccountStore.SignupOutcome.Created));
-        var a = LogIn(sim, account.RawValue, sim.Index.Bazaars[0], 1);
+        var a = LogIn(sim, account, sim.Index.Bazaars[0], 1);
         var balance = Ledgers.Balance(sim, a.Character);
 
         var builder = WebApplication.CreateSlimBuilder();
@@ -447,8 +450,8 @@ internal sealed class MarketEndpointChecks : ServedChecks
             };
         }
 
-        var mine = Get("Bearer " + AuthToken.Mint(EntityId.FromRawValue(0x8D01)));
-        var theirs = Get("Bearer " + AuthToken.Mint(EntityId.FromRawValue(0x8D02)));
+        var mine = Get("Bearer " + AuthToken.Mint(TestAccounts.For(sim.Dbe, 0x8D01)));
+        var theirs = Get("Bearer " + AuthToken.Mint(TestAccounts.For(sim.Dbe, 0x8D02)));
         using var aDoc = JsonDocument.Parse(mine.Body);
         using var bDoc = JsonDocument.Parse(theirs.Body);
         Assert.Multiple(() =>

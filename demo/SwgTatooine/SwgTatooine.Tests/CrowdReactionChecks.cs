@@ -82,7 +82,7 @@ internal sealed class CrowdReactionChecks : ServedChecks
     /// <summary>Logs the attacker in and parks it; returns its link and body.</summary>
     private (FakeLink Link, EntityId Body) LogIn(TatooineSim sim, float x, float z)
     {
-        var link = Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(0x7001));
+        var link = Harness.Connect(TatooineReplication.PlayerKind, TestAccounts.For(sim.Dbe, 0x7001));
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar to be spawned");
         Harness.Ticks(2);
         return (link, Worlds.Park(sim, link.Session, x, z));

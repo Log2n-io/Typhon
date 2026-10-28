@@ -48,7 +48,7 @@ internal sealed class DemoStatsChecks : ServedChecks
         using var sim = new TatooineSim(config);
         sim.Initialize();
         Harness = new SessionHarness(sim);
-        Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(0x7301));
+        Harness.Connect(TatooineReplication.PlayerKind, TestAccounts.For(sim.Dbe, 0x7301));
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar");
         Harness.Ticks(Worlds.ServedHz * 3);
 
@@ -108,7 +108,7 @@ internal sealed class DemoStatsChecks : ServedChecks
         using var sim = new TatooineSim(config);
         sim.Initialize();
         Harness = new SessionHarness(sim);
-        Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(0x7311));
+        Harness.Connect(TatooineReplication.PlayerKind, TestAccounts.For(sim.Dbe, 0x7311));
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar");
         Harness.Ticks(Worlds.ServedHz * 3);
 
@@ -145,10 +145,10 @@ internal sealed class DemoStatsChecks : ServedChecks
         using var sim = new TatooineSim(config);
         sim.Initialize();
         Harness = new SessionHarness(sim);
-        Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(0x7302));
+        Harness.Connect(TatooineReplication.PlayerKind, TestAccounts.For(sim.Dbe, 0x7302));
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar");
         var character = EntityId.Null;
-        SessionHarness.Until(() => SwgTatooine.Server.Accounts.CharacterStore.TryFind(sim.Dbe, EntityId.FromRawValue(0x7302), out character, out _),
+        SessionHarness.Until(() => SwgTatooine.Server.Accounts.CharacterStore.TryFind(sim.Dbe, TestAccounts.For(sim.Dbe, 0x7302), out character, out _),
             "the character to be committed");
         SessionHarness.Until(() => Ledgers.TryWallet(sim, character, out _), "the wallet to be opened");
         var owner = (long)character.RawValue;
@@ -381,11 +381,11 @@ internal sealed class DemoStatsChecks : ServedChecks
     /// <summary>A player logged in, parked beside <paramref name="bazaar"/>, its wallet open.</summary>
     private (EntityId Character, FakeLink Link) Trader(TatooineSim sim, ulong account, MissionTerminalRef bazaar, long bindings)
     {
-        var link = Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(account));
+        var link = Harness.Connect(TatooineReplication.PlayerKind, TestAccounts.For(sim.Dbe, account));
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= bindings, "the avatar to be spawned");
         Harness.Ticks(2);
         Worlds.Park(sim, link.Session, bazaar.X + 2.5f, bazaar.Z);
-        Assert.That(SwgTatooine.Server.Accounts.CharacterStore.TryFind(sim.Dbe, EntityId.FromRawValue(account), out var character, out _), Is.True);
+        Assert.That(SwgTatooine.Server.Accounts.CharacterStore.TryFind(sim.Dbe, TestAccounts.For(sim.Dbe, account), out var character, out _), Is.True);
         SessionHarness.Until(() => Ledgers.TryWallet(sim, character, out _), "the wallet to be opened");
         Harness.Ticks(2);
         return (character, link);
@@ -414,7 +414,7 @@ internal sealed class DemoStatsChecks : ServedChecks
         using var sim = new TatooineSim(config);
         sim.Initialize();
         Harness = new SessionHarness(sim);
-        Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(0x7303));
+        Harness.Connect(TatooineReplication.PlayerKind, TestAccounts.For(sim.Dbe, 0x7303));
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar");
         Harness.Ticks(Worlds.ServedHz * 2);
 

@@ -579,12 +579,12 @@ internal sealed class ProgressionChecks : ServedChecks
     private Me LogIn(TatooineSim sim, ulong account)
     {
         var bound = TatooineReplication.Intents.Possessions;
-        var link = Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(account));
+        var link = Harness.Connect(TatooineReplication.PlayerKind, TestAccounts.For(sim.Dbe, account));
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions > bound, "the avatar to be spawned");
         Harness.Ticks(2);
         var body = TatooineReplication.ControlledBy(sim.Dbe, link.Session);
         Assert.That(body, Is.Not.EqualTo(EntityId.Null), "the session controls no body");
-        Assert.That(CharacterStore.TryFind(sim.Dbe, EntityId.FromRawValue(account), out var character, out _), Is.True, "the account has no character");
+        Assert.That(CharacterStore.TryFind(sim.Dbe, TestAccounts.For(sim.Dbe, account), out var character, out _), Is.True, "the account has no character");
         PlayerPlacement place = default;
         sim.WriteInTick(tx => place = tx.Open(body).Read(Player.Bounds));
         return new Me(link, body, character, place.X, place.Z, place.HalfExtent);

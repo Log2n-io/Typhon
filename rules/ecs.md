@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-10-25 |
+| Last Updated | 2026-10-28 |
 | Domain | Component schema identity, archetype registry, component-type identity, tick-fence dirty bitmaps, spawn payload staging, entity handles, view lifetime, indexed queries between a write and its fence |
 
 > Type-location: `Ecs/internals/ArchetypeRegistry.cs`, `Ecs/internals/ArchetypeMetadata.cs` (+ `ArchetypeEngineState`), `Ecs/public/DatabaseEngine.cs`
@@ -1281,6 +1281,93 @@ both fast and exact inside the window; this rule fixes what it does promise.
             re-check of the overrides has no staged test: it needs a commit landing between a cluster's word loads, with no hook there
   note: a second supply waits for a claim before its PREPARE, holding no chain lock; the wait ends at the holder's publish or exit, or at
         the chain-lock timeout, which fails the waiting commit and leaves it retryable
+
+## Module: CASC — Which children a cascade destroy takes
+
+A destroy of an entity whose archetype is a cascade parent (`[Index(OnParentDelete = CascadeAction.Delete)]` on a child's `EntityLink`) destroys its
+children with it, in the same commit. Scope: `Transaction.DestroyInternal` and the commit's PREPARE. Source: #1247; design
+`claude/design/Ecs/08-entity-relationships.md` § Cascade Delete.
+
+### CASC-01: A cascade destroys the children its parent has at HEAD, when it is called and again at commit `[fatal]` `[silent]`
+  invariant ∀ transaction t destroying a cascade parent P: the children of P are looked up in the FK trees at HEAD (`FkReverseLookup.ForEachSource`,
+            no snapshot), with t's own spawns read from their payloads and t's own unpublished FK writes overlaid on the trees' answer — a Versioned
+            update or first supply from t's `SingleCache`, a SingleVersion write from its commit staging: a child t re-keyed onto P is one, a child t
+            re-keyed away is not (`TryReadOwnFk`, `IsOwnFkWrite`); and a child is destroyed when it is alive at HEAD (`IsCommittedAliveAt(HeadTsn)`: a
+            committed born whatever its stamp, a pending one once its owner is past its commit point; a pending died is still alive), recursively
+  invariant a SingleVersion child re-keyed in place since the last tick fence is found where it was written: the trees still hold its old key
+            (QFENCE), so the lookup also reads, at HEAD, the entities the child archetype's shadow bitmap marks (a key-changing write records its old
+            keys before it lands, IX-07) — only while that component's keys may be stale (`MayHaveFenceStaleKeys`)
+            (`ReadChildrenReKeyedSinceFence`). One re-keyed away is skipped by the lookup's own slot re-check
+  invariant the lookup runs at `Destroy()` — t then sees its own destroys — and again at t's commit, before its card or anything staged
+            (`ResolveCascadesAtCommit`), for every cascade parent t destroyed, each child that is a parent in turn: a child committed or re-keyed
+            onto P since `Destroy()`, by another transaction or by t itself, is destroyed too. A transaction that destroyed no cascade parent pays
+            one flag test
+  invariant a walk — a top-level `Destroy()`, or the commit's — reads the shadow bitmap and t's own FK writes once per cascade target, by parent
+            (`WalkTargetFor`): a walk over k parents costs one scan of the tick's marked entities and of t's writes, not k
+  never judge a child by t's snapshot: the trees answer at HEAD, and a child committed after the snapshot was found, then dropped by a liveness
+        test at the snapshot — alive under its dead parent (#1247). Never answer the cascade at the snapshot either: a child re-keyed away from P
+        after it would be deleted
+  scope: Transaction.DestroyInternal, Transaction.CascadeToChildren, Transaction.ResolveCascadesAtCommit, Transaction.FindCascadeChildren,
+         Transaction.WalkTargetFor, Transaction.TryReadOwnFk, Transaction.IsOwnFkWrite, Transaction.ReadChildrenReKeyedSinceFence,
+         EntityAccessor.IsCommittedAliveAt
+  status: **RESIDUAL:**
+          - a SingleVersion child re-keyed onto P in place (TickFence discipline) after t's commit-time lookup outlives P: the write is visible when
+            made and no commit carries it, so CASC-02 cannot refuse it either. A walk also reads the tick's in-place re-keys once: one made by another
+            transaction during the walk is caught only by the commit's walk;
+          - a Transient cascade foreign key is not read beyond the trees: its in-place re-keys are not scanned and CASC-02 does not check its writes
+  on_violation: a live child references a destroyed parent (an orphan), or a child moved to another parent first is destroyed with this one
+  requires: VIS-08, VIS-09, IXS-10, QFENCE-01, CASC-02
+  verified: CascadeHeadTests [VerifiesRule] — a child committed after the destroyer's snapshot, and a SingleVersion child and grandchild; a child and
+            grandchild committed after Destroy() and before the commit; a unique cascade child likewise; one re-keyed onto the parent after Destroy();
+            one re-keyed onto it after the snapshot destroyed and one re-keyed away surviving; a child destroyed meanwhile (not taken) and one whose
+            destroy is pending (taken); a DestroyBatch; t's own re-key onto and away, Versioned and staged SingleVersion; t's own spawn, re-key and
+            first supply onto the parent after Destroy(); a SingleVersion child re-keyed in place before the fence, before and after Destroy(), with
+            the stale keys asserted, and one re-keyed away. [RuleMutant] AChildJudgedAtTheSnapshot_IsOrphaned (the child judged at the snapshot).
+            Mutants run by hand, each red: no commit-time pass, its flag never set, own writes onto the parent not added, an own re-key away kept,
+            the staged write ignored, a first supply ignored, the in-place re-keys not read
+
+### CASC-02: No commit points a cascade foreign key at a parent another commit destroys, unseen `[fatal]` `[silent]`
+  invariant ∀ commit C writing a component that carries a non-null cascade foreign key to parent P — a spawn's, a Versioned update or first supply,
+            a staged SingleVersion write; changed or not — at the start of its commit, before its card and anything staged
+            (`AnnounceCascadeReferences`): C announces itself on P's stripe (`CascadeReferrerGate.Announce`, an interlocked increment, in the stripe's
+            current phase), then requires P not being destroyed by a committing transaction (`IsDying`) and alive at HEAD, or throws
+            `ForeignKeyViolationException` (`ParentDying`, transient when P was only dying) with nothing changed: the transaction stays open. Each
+            parent once per commit, however many children name it. The announcement holds until C has published (`ReleaseCascadeMarks`, after the
+            publish, and in the commit's finally on every other exit)
+  invariant an unchanged key is checked too: a write publishes the whole component as C read it, so a key unchanged since C's snapshot is published
+            over a newer committed one — onto a parent destroyed meanwhile, whose destroyer found the child under its newer key
+  invariant ∀ commit D destroying a committed cascade parent P, in its commit-time walk (CASC-01): D marks P dying (`MarkDying`: registered, then an
+            interlocked increment), flips the stripe's phase (`BeginWait`) and waits until the referrers counted in the old phase have withdrawn
+            (`IsDrained`, `WaitForCascadeReferrers`), then looks P's children up; the mark holds until D has published. Dekker: each side's interlocked
+            store precedes its read of the other's, so either C finds P dying and refuses, or D finds C counted and waits for its children to be
+            published — then in the trees D reads. A referrer counted after the flip sees the mark, so D waits only for those counted before it:
+            referrers to the stripe's other parents cannot starve it
+  invariant no wait cycle: a referrer never waits, it refuses; a commit plays destroyer before it announces anything, so a destroyer waits holding no
+            announcement, and before its commit card, chain locks, key claims or supplies. The wait is bounded by the unit of work's deadline, one for
+            the whole walk, and refreshes the epoch every millisecond as a commit waiting for a card does (a referrer may need page loads). The dying
+            test is exact (`_dyingParents`)
+  scope: Transaction.AnnounceCascadeReferences, Transaction.CheckCascadeReference, Transaction.CheckCascadeFks, Transaction.IsOwnFkWrite,
+         Transaction.ReleaseCascadeMarks, Transaction.ResolveCascadesAtCommit, Transaction.WaitForCascadeReferrers, CascadeReferrerGate.Announce,
+         CascadeReferrerGate.Withdraw, CascadeReferrerGate.IsDying, CascadeReferrerGate.MarkDying, CascadeReferrerGate.UnmarkDying,
+         CascadeReferrerGate.BeginWait, CascadeReferrerGate.IsDrained, ArchetypeRegistry.CascadeFkComponentTypes
+  status: **RESIDUAL:**
+          - an in-place SingleVersion write (TickFence discipline) is not checked: no commit carries it (see CASC-01);
+          - two destroyers on one stripe flip its phase back and forth: one may wait for referrers counted after its own flip, bounded by the other's;
+          - two commits that each destroy a parent the other points a child at are both refused (transient), and may meet again when retried in step
+  on_violation: a child committed under a parent being destroyed, missed by the destroyer's lookup — an orphan; or a destroyer or referrer stuck
+                behind an announcement or a mark never given back, until the commit deadline
+  requires: CASC-01, VIS-08
+  verified: CascadeHeadTests [VerifiesRule] — a spawn under a destroyed parent refused, then fixed and committed in the same transaction; a re-key onto
+            a destroyed parent refused, Versioned and staged SingleVersion, the value left where it was; a write keeping the key refused while the
+            parent is dying; a write of another field carrying a key its snapshot held, refused once that parent is destroyed; a first supply onto a
+            destroyed parent refused; a child held between its check and its publish while a destroy of its parent commits — the destroy waits and
+            takes it (staged with `CascadeAfterReferrerCheckProbe` and `CascadeBeforeReferrerWaitProbe`, the wait asserted from the gate's state);
+            a spawn and a re-key while the parent's destroy holds its mark refused as dying, then the same transaction refused as destroyed; a
+            grandchild under a child being cascaded refused; a destroy failing before staging gives its marks back and commits when retried; two
+            destroys of one parent keep it dying until both end; a parent sharing a dying parent's stripe not refused; a destroy waits only for the
+            referrers counted before it. Run 8 times. [RuleMutant] ADestroyThatDoesNotWait_OrphansTheChild. Mutants run by hand, each red: no check,
+            the referrer blind to dying, the announcements or the marks never given back, Versioned writes not checked, a staged write not checked,
+            the per-parent check skipped, one phase only
 
 ## Module: EMAP — Where an entity map keeps its buckets
 

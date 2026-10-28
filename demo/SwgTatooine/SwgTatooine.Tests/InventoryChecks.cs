@@ -46,11 +46,11 @@ internal sealed class InventoryChecks : ServedChecks
     /// <summary>A player logged in, parked at a point, its wallet open; its link, body and character.</summary>
     private (FakeLink Link, EntityId Body, EntityId Character, long Parked) LogIn(TatooineSim sim, ulong account, float x, float z, long bindings = 1)
     {
-        var link = Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(account));
+        var link = Harness.Connect(TatooineReplication.PlayerKind, TestAccounts.For(sim.Dbe, account));
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= bindings, "the avatar to be spawned");
         Harness.Ticks(2);
         var body = Worlds.Park(sim, link.Session, x, z, out var parked);
-        Assert.That(CharacterStore.TryFind(sim.Dbe, EntityId.FromRawValue(account), out var character, out _), Is.True, "the account has no character");
+        Assert.That(CharacterStore.TryFind(sim.Dbe, TestAccounts.For(sim.Dbe, account), out var character, out _), Is.True, "the account has no character");
         SessionHarness.Until(() => Ledgers.TryWallet(sim, character, out _), "the wallet to be opened");
         Harness.Ticks(2);
         return (link, body, character, parked);
@@ -941,13 +941,13 @@ internal sealed class InventoryChecks : ServedChecks
             };
         }
 
-        var mine = Get("Bearer " + AuthToken.Mint(EntityId.FromRawValue(0x7409)));
-        var theirs = Get("Bearer " + AuthToken.Mint(EntityId.FromRawValue(0x740A)));
+        var mine = Get("Bearer " + AuthToken.Mint(TestAccounts.For(sim.Dbe, 0x7409)));
+        var theirs = Get("Bearer " + AuthToken.Mint(TestAccounts.For(sim.Dbe, 0x740A)));
         Assert.Multiple(() =>
         {
             Assert.That(Get(null).Status, Is.EqualTo(401), "no token");
             Assert.That(Get("Bearer not-a-token").Status, Is.EqualTo(401), "a bad token");
-            Assert.That(Get("Bearer " + AuthToken.Mint(EntityId.FromRawValue(0x740F))).Body, Is.EqualTo(ItemEndpoints.Empty), "an account with no character");
+            Assert.That(Get("Bearer " + AuthToken.Mint(TestAccounts.For(sim.Dbe, 0x740F))).Body, Is.EqualTo(ItemEndpoints.Empty), "an account with no character");
             Assert.That(mine.Status, Is.EqualTo(200));
             Assert.That(mine.Body, Does.Contain("\"item\":\"mat_venom\""), "the bearer's own stack is missing");
             Assert.That(theirs.Body, Does.StartWith("{\"open\":true,\"slots\":30,\"items\":[],\"recent\":[],\"lost\":[]}"), "another's items, or not open");

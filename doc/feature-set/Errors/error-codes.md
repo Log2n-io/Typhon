@@ -44,7 +44,7 @@ catch (TyphonException ex)
 | 1xxx | Transaction | `TransactionTimeout` (1002) |
 | 2xxx | Storage | `DataCorruption` (2003), `PageChecksumMismatch` (2005), `DatabaseLocked` (2007), `PageCacheAllocationFailed` (2009) |
 | 3xxx | Component / Schema | `SchemaValidation` (3001), `SchemaMigration` (3002) |
-| 4xxx | Index | `UniqueConstraintViolation` (4001) |
+| 4xxx | Index | `UniqueConstraintViolation` (4001), `ForeignKeyViolation` (4002) |
 | 6xxx | Resource | `ResourceExhausted` (6001), `LockTimeout` (6003) |
 | 7xxx | Durability | `WalBackPressureTimeout` (7001), `WalWriteFailure` (7003), `CommitDurabilityUncertain` (7008) |
 | 8xxx | Runtime / Scheduler | `InvalidSystemAccess` (8001) |

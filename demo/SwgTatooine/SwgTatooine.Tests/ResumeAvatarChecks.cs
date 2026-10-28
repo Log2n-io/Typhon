@@ -50,7 +50,7 @@ internal sealed class ResumeAvatarChecks : ServedChecks
         return sim;
     }
 
-    private static EntityId AnAccount(ulong id) => EntityId.FromRawValue(id);
+    private static EntityId AnAccount(TatooineSim sim, ulong id) => TestAccounts.For(sim.Dbe, id);
 
     /// <summary>Connects a player and waits for its avatar.</summary>
     /// <param name="sim">The server.</param>
@@ -128,7 +128,7 @@ internal sealed class ResumeAvatarChecks : ServedChecks
     public void ALinkThatDiesLeavesTheAvatarStandingAndTheClientThatComesBackGetsThatSameBody()
     {
         using var sim = Start();
-        var account = AnAccount(0xA13_0001);
+        var account = AnAccount(sim, 0xA13_0001);
 
         var (first, avatar) = LogIn(sim, account);
         var token = first.ResumeToken;
@@ -173,7 +173,7 @@ internal sealed class ResumeAvatarChecks : ServedChecks
     public void AClientThatSaidGoodbyeIsRetiredAtOnceAndItsTokenNamesNothing()
     {
         using var sim = Start();
-        var account = AnAccount(0xA13_0002);
+        var account = AnAccount(sim, 0xA13_0002);
 
         var (link, avatar) = LogIn(sim, account);
         var token = link.ResumeToken;
@@ -209,7 +209,7 @@ internal sealed class ResumeAvatarChecks : ServedChecks
     {
         // Short enough to elapse inside a test, and long enough that the close and the first few ticks are comfortably inside it.
         using var sim = Start(resumeGraceS: 0.25d);
-        var account = AnAccount(0xA13_0003);
+        var account = AnAccount(sim, 0xA13_0003);
 
         var (link, avatar) = LogIn(sim, account);
         var walked = WalkAway(sim, link, avatar);
@@ -287,7 +287,7 @@ internal sealed class ResumeAvatarChecks : ServedChecks
     public void AHoldIsCountedWhileItStandsAndNotAfterwards()
     {
         using var sim = Start(resumeGraceS: 0.25d);
-        var account = AnAccount(0xA13_0009);
+        var account = AnAccount(sim, 0xA13_0009);
 
         var (link, avatar) = LogIn(sim, account);
         Assert.That(TatooineReplication.ResumeHoldsStanding, Is.Zero, "premise: nothing is held while the client is connected");
@@ -324,7 +324,7 @@ internal sealed class ResumeAvatarChecks : ServedChecks
     public void AnExpiryAfterATakeoverIsNotAnOrphan()
     {
         using var sim = Start(resumeGraceS: 0.25d);
-        var account = AnAccount(0xA13_000A);
+        var account = AnAccount(sim, 0xA13_000A);
 
         var (first, _) = LogIn(sim, account);
         first.Close(LinkDied, "the link died");
@@ -348,7 +348,7 @@ internal sealed class ResumeAvatarChecks : ServedChecks
     public void AFreshLoginForAHeldAccountTakesItsOwnBodyOverRatherThanBeingRefused()
     {
         using var sim = Start();
-        var account = AnAccount(0xA13_0004);
+        var account = AnAccount(sim, 0xA13_0004);
 
         var (link, avatar) = LogIn(sim, account);
         var walked = WalkAway(sim, link, avatar);
@@ -390,7 +390,7 @@ internal sealed class ResumeAvatarChecks : ServedChecks
     public void ASecondClientForAPlayingAccountIsStillRefused()
     {
         using var sim = Start();
-        var account = AnAccount(0xA13_0005);
+        var account = AnAccount(sim, 0xA13_0005);
 
         LogIn(sim, account);
 
@@ -426,7 +426,7 @@ internal sealed class ResumeAvatarChecks : ServedChecks
     public void AGracefulShutdownSavesAHeldAvatarsPositionToo()
     {
         using var sim = Start(saveIntervalS: 3_600d);
-        var account = AnAccount(0xA13_0007);
+        var account = AnAccount(sim, 0xA13_0007);
 
         var (link, avatar) = LogIn(sim, account);
         var spawned = Saved(sim, account);
@@ -469,7 +469,7 @@ internal sealed class ResumeAvatarChecks : ServedChecks
     public void AServerWithNoGraceIssuesNoTokenAndRetiresOnADroppedLink()
     {
         using var sim = Start(resumeGraceS: 0d);
-        var account = AnAccount(0xA13_0006);
+        var account = AnAccount(sim, 0xA13_0006);
 
         var (link, avatar) = LogIn(sim, account);
 

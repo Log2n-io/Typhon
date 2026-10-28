@@ -1,7 +1,9 @@
 ﻿using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -1243,9 +1245,18 @@ public unsafe partial class Transaction
             return;
         }
 
+        if (depth == 0)
+        {
+            _cascadeWalk?.Clear();   // a new walk: what the last one read may have changed
+        }
+
         // Check if already pending spawn (destroy own spawn)
         bool isPending = SpawnedContains(id);
-        if (!isPending && !IsAlive(id))
+
+        // A cascade child is judged at HEAD, not at this transaction's snapshot (CASC-01): the lookup that found it reads the newest trees, and a child
+        // committed after the snapshot, filtered out by it, stayed alive under its dead parent (#1247).
+        if (!isPending && !(depth == 0 || _dbe.CascadeJudgesChildAtSnapshotForTest ? IsCommittedAlive(id, CascadeNeedsGuard)
+                : IsCommittedAliveAt(id, HeadTsn, CascadeNeedsGuard)))
         {
             // Idempotent destroy: entity was committed-destroyed by a prior transaction (or never existed). Common when a spatial query returns an entity that
             // another user system destroyed earlier in this tick — the spatial index can lag the EntityMap until fence cleanup runs. Silent no-op matches the
@@ -1271,7 +1282,29 @@ public unsafe partial class Transaction
             return;
         }
 
-        // Cascade: find and destroy all children via FK relationships
+        _hasCascadeParents = true;
+        if (_resolvingCascadesAtCommit)
+        {
+            return;   // the commit's walk reaches it in turn, and marks it dying before it looks up its children
+        }
+
+        CascadeToChildren(id, meta, depth, ref cascadeCount);
+
+        if (depth == 0 && cascadeCount > 1)
+        {
+            _dbe.LogCascadeSummary(id, cascadeCount);
+        }
+    }
+
+    /// <summary>An entity-map read outside the transaction's own epoch scope needs a guard of its own.</summary>
+    private bool CascadeNeedsGuard => !_ownsPersistentEpochScope && !_epochManager.IsCurrentThreadInScope;
+
+    /// <summary>A destroy of this transaction named a cascade parent: the commit resolves its children again (<see cref="ResolveCascadesAtCommit"/>).</summary>
+    private bool _hasCascadeParents;
+
+    /// <summary>Finds and destroys the children of <paramref name="id"/>, a cascade parent this transaction destroys, through every cascade target.</summary>
+    private void CascadeToChildren(EntityId id, ArchetypeMetadata meta, int depth, ref int cascadeCount)
+    {
         foreach (var target in meta._cascadeTargets)
         {
             var childMeta = ArchetypeRegistry.GetMetadata(target.ChildArchetypeId);
@@ -1293,12 +1326,312 @@ public unsafe partial class Transaction
                 DestroyInternal(childId, depth + 1, ref cascadeCount);
             }
         }
+    }
 
-        if (depth == 0 && cascadeCount > 1)
+    /// <summary>Set while <see cref="ResolveCascadesAtCommit"/> walks: a child it destroys is walked by it, not recursed into.</summary>
+    private bool _resolvingCascadesAtCommit;
+
+    /// <summary>The committed cascade parents this commit marked dying (CASC-02); unmarked when the commit ends (<see cref="ReleaseCascadeMarks"/>).</summary>
+    private List<long> _dyingMarked;
+
+    /// <summary>The counters this commit announced itself on (CASC-02); withdrawn when the commit ends (<see cref="ReleaseCascadeMarks"/>).</summary>
+    private List<int> _referrerTokens;
+
+    /// <summary>The parents this commit announced, one announcement and one check each however many children name them.</summary>
+    private HashSet<long> _announcedParents;
+
+    /// <summary>
+    /// At commit, before its card and anything prepared (CASC-01, CASC-02): every cascade parent this transaction destroys has its children resolved again,
+    /// at HEAD. A child committed or re-keyed onto it after <see cref="Destroy(EntityId)"/> ran — by another transaction, or by this one: its own spawn or
+    /// FK write — is destroyed with it; resolved at <c>Destroy()</c> only, it outlived its parent (#1247). Each committed parent is first marked dying, and
+    /// its lookup waits for the commits that passed their referential check on it before the mark to publish: their children are then in the trees it
+    /// reads. Costs one flag test for a transaction that destroyed no cascade parent.
+    /// </summary>
+    /// <remarks>
+    /// The walk covers the destroys as they grow: a child found here that is a cascade parent itself is marked and looked up in turn. It runs before this
+    /// commit announces any reference (<see cref="AnnounceCascadeReferences"/>) and before it takes its card or any lock, so its wait holds nothing a
+    /// referrer waits for; one deadline, the unit of work's, bounds the whole walk, and the waiter refreshes its epoch as a commit waiting for a card does.
+    /// A failure here leaves the commit retryable; the marks go back in the commit's finally.
+    /// </remarks>
+    private void ResolveCascadesAtCommit(ref UnitOfWorkContext ctx)
+    {
+        if (!_hasCascadeParents || _pendingDestroyOrder is not { Count: > 0 })
         {
-            _dbe.LogCascadeSummary(id, cascadeCount);
+            return;
+        }
+
+        _cascadeWalk?.Clear();
+        var gate = _dbe.CascadeGate;
+        var wc = default(WaitContext);
+        var hasDeadline = false;
+        var cascadeCount = 0;
+        _resolvingCascadesAtCommit = true;
+        try
+        {
+            for (var i = 0; i < _pendingDestroyOrder.Count; i++)
+            {
+                var id = _pendingDestroyOrder[i];
+                var meta = _dbe.GetMetaByRouting(id.ArchetypeId);
+                if (meta?._cascadeTargets is not { Count: > 0 })
+                {
+                    continue;
+                }
+
+                // An own spawn is no other commit's parent: nothing committed can name it.
+                if (!SpawnedContains(id))
+                {
+                    var pk = (long)id.RawValue;
+                    (_dyingMarked ??= []).Add(pk);
+                    gate.MarkDying(pk);
+                    var drain = gate.BeginWait(pk);
+                    _dbe.CascadeBeforeReferrerWaitProbe?.Invoke();
+                    if (!gate.IsDrained(drain) && !_dbe.CascadeSkipsReferrerWaitForTest)
+                    {
+                        if (!hasDeadline)
+                        {
+                            wc = ComposeWaitContext(ref ctx, TimeoutOptions.Current.DefaultCommitTimeout);
+                            hasDeadline = true;
+                        }
+
+                        WaitForCascadeReferrers(gate, drain, ref wc);
+                    }
+                }
+
+                CascadeToChildren(id, meta, 0, ref cascadeCount);
+            }
+
+            _dbe.CascadeAfterDyingMarkedProbe?.Invoke();
+        }
+        finally
+        {
+            _resolvingCascadesAtCommit = false;
         }
     }
+
+    /// <summary>
+    /// Waits until the referrers counted before this commit marked a parent dying have withdrawn. As a commit waiting for a card, it refreshes its epoch
+    /// every millisecond: a referrer may need page loads its pin would hold back (design 05 §3.2).
+    /// </summary>
+    private void WaitForCascadeReferrers(CascadeReferrerGate gate, int drain, ref WaitContext wc)
+    {
+        var waiter = new AdaptiveWaiter();
+        var refreshedAt = Stopwatch.GetTimestamp();
+        while (!gate.IsDrained(drain))
+        {
+            if (!waiter.Wait(ref wc))
+            {
+                ThrowHelper.ThrowLockTimeout("CascadeReferrerGate", TimeoutOptions.Current.DefaultCommitTimeout);
+            }
+
+            if (LiveIndexCursors == 0 && Stopwatch.GetElapsedTime(refreshedAt) >= CommitCardEpochRefreshInterval)
+            {
+                FlushAndRefreshEpoch();
+                refreshedAt = Stopwatch.GetTimestamp();
+            }
+        }
+    }
+
+    /// <summary>
+    /// At commit, after <see cref="ResolveCascadesAtCommit"/> and before anything is staged (CASC-02): every non-null cascade foreign key a component this
+    /// commit writes carries — a spawn's, a Versioned write's or first supply's, a staged SingleVersion write's, changed or not — names a parent that is
+    /// announced on its stripe, then required alive at HEAD and not being destroyed by a committing transaction, or the commit throws
+    /// <see cref="ForeignKeyViolationException"/> with nothing changed. Each parent once per commit. The announcement holds until the commit has published
+    /// (<see cref="ReleaseCascadeMarks"/>): a destroyer marking the parent later waits for it, and finds the child.
+    /// </summary>
+    /// <remarks>
+    /// <para>An unchanged key is checked too: a write publishes the whole component as this transaction read it, so a key unchanged since its snapshot is
+    /// published over a newer committed one — onto a parent destroyed since, the destroyer's lookup having found the child under its newer key.</para>
+    /// <para>An in-place SingleVersion write (TickFence discipline) is not checked: it is visible when made, and no commit carries it.</para>
+    /// </remarks>
+    private void AnnounceCascadeReferences()
+    {
+        var fkTypes = ArchetypeRegistry.CascadeFkComponentTypes;
+        if (fkTypes == null)
+        {
+            return;   // no archetype declares a cascade foreign key
+        }
+
+        if (_spawnedEntities is { Count: > 0 })
+        {
+            foreach (ref readonly var entry in CollectionsMarshal.AsSpan(_spawnedEntities))
+            {
+                var meta = _dbe.GetMetaByRouting(entry.Id.ArchetypeId);
+                if (meta?._cascadeFks == null || (_pendingDestroys != null && _pendingDestroys.Contains(entry.Id)))
+                {
+                    continue;
+                }
+
+                foreach (var (slot, offset) in meta._cascadeFks)
+                {
+                    if (TryReadSpawnFk(in entry, meta, slot, offset, out var fk) && !fk.IsNull)
+                    {
+                        CheckCascadeReference(entry.Id, fk);
+                    }
+                }
+            }
+        }
+
+        foreach (var kvp in _componentInfos)
+        {
+            var info = kvp.Value;
+            if ((uint)info.ComponentTypeId >= (uint)fkTypes.Length || !fkTypes[info.ComponentTypeId])
+            {
+                continue;
+            }
+
+            if (info.ComponentTable.StorageMode == StorageMode.Versioned)
+            {
+                foreach (var kv in info.SingleCache)
+                {
+                    var cri = kv.Value;
+                    var child = EntityId.FromRaw(kv.Key);
+                    if (!IsOwnFkWrite(in cri, child) || !TryCascadeFksOf(child, info, out var meta, out var slot)
+                        || (_pendingDestroys != null && _pendingDestroys.Contains(child)))
+                    {
+                        continue;
+                    }
+
+                    CheckCascadeFks(child, meta, slot, info.CompContentAccessor.GetChunkAddress(cri.CurCompContentChunkId) + info.ComponentOverhead);
+                }
+            }
+            else if (info.CommitStaged is { Count: > 0 } && _commitStagingBuffer != null)
+            {
+                foreach (var kv in info.CommitStaged)
+                {
+                    var child = EntityId.FromRaw(kv.Key);
+                    if (!TryCascadeFksOf(child, info, out var meta, out var slot) || (_pendingDestroys != null && _pendingDestroys.Contains(child)))
+                    {
+                        continue;
+                    }
+
+                    CheckCascadeFks(child, meta, slot, _commitStagingBuffer + kv.Value.Offset);
+                }
+            }
+        }
+
+        _dbe.CascadeAfterReferrerCheckProbe?.Invoke();
+    }
+
+    /// <summary>
+    /// Whether a Versioned cache entry is a write of this transaction's that carries a value of its own: an update, or a first supply — a Created entry
+    /// for a committed entity that lacked the slot. A Created entry of an own spawn is the spawn's, read from its payload.
+    /// </summary>
+    private bool IsOwnFkWrite(in ComponentInfo.CompRevInfo cri, EntityId id) =>
+        cri.CurCompContentChunkId != 0
+        && ((cri.Operations & ComponentInfo.OperationType.Created) != 0 ? !SpawnedContains(id) : (cri.Operations & ComponentInfo.OperationType.Updated) != 0);
+
+    /// <summary>Whether <paramref name="child"/>'s archetype declares cascade foreign keys in the slot holding <paramref name="info"/>'s component.</summary>
+    private bool TryCascadeFksOf(EntityId child, ComponentInfo info, out ArchetypeMetadata meta, out int slot)
+    {
+        slot = -1;
+        meta = _dbe.GetMetaByRouting(child.ArchetypeId);
+        if (meta?._cascadeFks == null || !meta.TryGetSlot(info.ComponentTypeId, out var s))
+        {
+            return false;
+        }
+
+        foreach (var (fkSlot, _) in meta._cascadeFks)
+        {
+            if (fkSlot == s)
+            {
+                slot = s;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Checks every non-null cascade foreign key of <paramref name="slot"/> in the value at <paramref name="value"/>.</summary>
+    private void CheckCascadeFks(EntityId child, ArchetypeMetadata meta, int slot, byte* value)
+    {
+        foreach (var (fkSlot, offset) in meta._cascadeFks)
+        {
+            if (fkSlot != slot)
+            {
+                continue;
+            }
+
+            var fk = *(EntityId*)(value + offset);
+            if (!fk.IsNull)
+            {
+                CheckCascadeReference(child, fk);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The referential check of one reference (CASC-02): announced, then the parent neither being destroyed by a committing transaction nor dead at HEAD.
+    /// A parent this transaction spawns or destroys is its own business: its children were resolved by its own commit-time walk.
+    /// </summary>
+    private void CheckCascadeReference(EntityId child, EntityId parent)
+    {
+        if (SpawnedContains(parent) || (_pendingDestroys != null && _pendingDestroys.Contains(parent)))
+        {
+            return;
+        }
+
+        var pk = (long)parent.RawValue;
+        if (!(_announcedParents ??= []).Add(pk))
+        {
+            return;   // announced and checked for an earlier child
+        }
+
+        var gate = _dbe.CascadeGate;
+        (_referrerTokens ??= []).Add(gate.Announce(pk));
+        if (gate.IsDying(pk))
+        {
+            throw new ForeignKeyViolationException(child, parent, parentDying: true);
+        }
+
+        if (!IsCommittedAliveAt(parent, HeadTsn, CascadeNeedsGuard))
+        {
+            throw new ForeignKeyViolationException(child, parent, parentDying: false);
+        }
+    }
+
+    /// <summary>
+    /// The handshake given back (CASC-02): the referrer announcements withdrawn and the parents unmarked — once the commit has published, or will never.
+    /// Idempotent; cannot throw.
+    /// </summary>
+    private void ReleaseCascadeMarks()
+    {
+        var gate = _dbe.CascadeGate;
+        if (_referrerTokens is { Count: > 0 })
+        {
+            foreach (var token in _referrerTokens)
+            {
+                gate.Withdraw(token);
+            }
+
+            _referrerTokens.Clear();
+        }
+
+        _announcedParents?.Clear();
+        if (_dyingMarked is { Count: > 0 })
+        {
+            foreach (var pk in _dyingMarked)
+            {
+                gate.UnmarkDying(pk);
+            }
+
+            _dyingMarked.Clear();
+        }
+    }
+
+    /// <summary>
+    /// What one walk reads once per cascade target, rather than once per parent: the children re-keyed in place since the fence, and this transaction's own
+    /// FK writes, each by the parent they name. A walk is a top-level <c>Destroy()</c> or a commit's walk; nothing it reads changes under it but other
+    /// transactions' in-place writes, which CASC-01 leaves as its residual.
+    /// </summary>
+    private sealed class CascadeWalkTarget
+    {
+        public Dictionary<EntityId, List<EntityId>> ReKeyedSinceFence;
+        public readonly Dictionary<EntityId, EntityId> OwnFk = new();
+        public readonly Dictionary<EntityId, List<EntityId>> OwnByParent = new();
+    }
+
+    private Dictionary<(ushort Archetype, byte Slot, int Offset), CascadeWalkTarget> _cascadeWalk;
 
     /// <summary>
     /// Find all entities of the child archetype that reference the given parent via FK.
@@ -1311,48 +1644,12 @@ public unsafe partial class Transaction
         // 1. Scan spawned entities for FK matches (read component data from SpawnEntry locations directly)
         if (_spawnedEntities != null)
         {
-            for (int i = 0; i < _spawnedEntities.Count; i++)
+            var routing = _dbe.RoutingIdOf(childMeta);
+            foreach (ref readonly var entry in CollectionsMarshal.AsSpan(_spawnedEntities))
             {
-                var entry = _spawnedEntities[i];
                 // entry.Id.ArchetypeId is a routing id; target.ChildArchetypeId is a catalog id — compare in routing space.
-                if (entry.Id.ArchetypeId != _dbe.RoutingIdOf(childMeta))
-                {
-                    continue;
-                }
-
-                // Resolve the slot's table first: since #839 the payload's home depends on its storage mode — a Versioned slot has a real content chunk (the
-                // first revision's), everything else stages in the transaction arena.
-                var spawnMeta = _dbe.GetMetaByRouting(entry.Id.ArchetypeId);
-                var spawnES = _dbe._archetypeStates[spawnMeta.ArchetypeId];
-                var table = spawnES.SlotToComponentTable[target.FkSlotIndex];
-                var compType = spawnMeta._slotToComponentType[target.FkSlotIndex];
-                var info = GetComponentInfo(compType);
-
-                byte* ptr;
-                if (table.StorageMode == StorageMode.Versioned)
-                {
-                    int chunkId = entry.VerLoc[target.FkSlotIndex];
-                    if (chunkId == 0)
-                    {
-                        continue;
-                    }
-
-                    // A same-tx copy-on-write supersedes the spawn's own chunk, so prefer the cache's current content chunk.
-                    int dataChunkId = info.SingleCache.TryGetValue((long)entry.Id.RawValue, out var cri) ? cri.CurCompContentChunkId : chunkId;
-                    ptr = info.CompContentAccessor.GetChunkAddress(dataChunkId);
-                }
-                else
-                {
-                    int stage = entry.Stage[target.FkSlotIndex];
-                    if (stage == 0)
-                    {
-                        continue;
-                    }
-                    ptr = SpawnArena.Resolve(stage);
-                }
-
-                var fkEntityId = *(EntityId*)(ptr + table.ComponentOverhead + target.FkFieldOffset);
-                if (fkEntityId == parentId)
+                if (entry.Id.ArchetypeId == routing && TryReadSpawnFk(in entry, childMeta, target.FkSlotIndex, target.FkFieldOffset, out var fkEntityId)
+                    && fkEntityId == parentId)
                 {
                     result.Add(entry.Id);
                 }
@@ -1365,6 +1662,7 @@ public unsafe partial class Transaction
         // nothing and orphaned its children — and a SingleVersion child component (only reachable in a non-cluster archetype, i.e. alongside a Transient
         // indexed field) hit a null CompRev segment. The helper picks the right tree per archetype and the right PK decode per home.
         var childEngineState = _dbe._archetypeStates[target.ChildArchetypeId];
+        CascadeWalkTarget walk = null;
         if (childEngineState?.SlotToComponentTable != null)
         {
             var table = childEngineState.SlotToComponentTable[target.FkSlotIndex];
@@ -1378,9 +1676,224 @@ public unsafe partial class Transaction
                 RoutingId = _dbe.RoutingIdOf(childMeta),
             };
             FkReverseLookup.ForEachSource(_dbe, table, in candidates, fkFieldOrdinal, (long)parentId.RawValue, ref collector);
+            walk = WalkTargetFor(childMeta, childEngineState, target);
+        }
+
+        walk ??= WalkTargetFor(childMeta, null, target);
+
+        // 2b. A SingleVersion child re-keyed in place since the last fence: the trees still hold its old key (QFENCE), so it is read where it was written
+        // (#1247). One re-keyed away is skipped by the lookup's own slot re-check.
+        // 3. This transaction's own FK writes, which the trees do not hold yet: a committed child it re-keyed onto the parent is one, a child it re-keyed
+        // away is not (#1247 — the first was orphaned, the second destroyed).
+        HashSet<EntityId> seen = null;
+        AddChildren(walk.ReKeyedSinceFence, parentId, result, ref seen);
+        AddChildren(walk.OwnByParent, parentId, result, ref seen);
+        if (walk.OwnFk.Count > 0)
+        {
+            for (var i = result.Count - 1; i >= 0; i--)
+            {
+                if (walk.OwnFk.TryGetValue(result[i], out var fk) && fk != parentId)
+                {
+                    result.RemoveAt(i);
+                }
+            }
         }
 
         return result;
+    }
+
+    private static void AddChildren(Dictionary<EntityId, List<EntityId>> byParent, EntityId parentId, List<EntityId> result, ref HashSet<EntityId> seen)
+    {
+        if (byParent == null || !byParent.TryGetValue(parentId, out var children))
+        {
+            return;
+        }
+
+        seen ??= [.. result];
+        foreach (var child in children)
+        {
+            if (seen.Add(child))
+            {
+                result.Add(child);
+            }
+        }
+    }
+
+    /// <summary>This walk's reads of <paramref name="target"/>, made on its first use (<see cref="CascadeWalkTarget"/>).</summary>
+    private CascadeWalkTarget WalkTargetFor(ArchetypeMetadata childMeta, ArchetypeEngineState es, CascadeTarget target)
+    {
+        var key = (target.ChildArchetypeId, target.FkSlotIndex, target.FkFieldOffset);
+        _cascadeWalk ??= [];
+        if (_cascadeWalk.TryGetValue(key, out var walk))
+        {
+            return walk;
+        }
+
+        walk = new CascadeWalkTarget();
+        if (es != null)
+        {
+            walk.ReKeyedSinceFence = ReadChildrenReKeyedSinceFence(es, target);
+        }
+
+        var info = TryGetExistingComponentInfo(childMeta._componentTypeIds[target.FkSlotIndex]);
+        if (info != null)
+        {
+            var routing = _dbe.RoutingIdOf(childMeta);
+            foreach (var kv in info.SingleCache)
+            {
+                NoteOwnFk(walk, info, kv.Key, routing, target.FkFieldOffset);
+            }
+
+            if (info.CommitStaged != null)
+            {
+                foreach (var kv in info.CommitStaged)
+                {
+                    NoteOwnFk(walk, info, kv.Key, routing, target.FkFieldOffset);
+                }
+            }
+        }
+
+        _cascadeWalk[key] = walk;
+        return walk;
+    }
+
+    private void NoteOwnFk(CascadeWalkTarget walk, ComponentInfo info, long pk, ushort routing, int fkFieldOffset)
+    {
+        var id = EntityId.FromRaw(pk);
+        if (id.ArchetypeId != routing || !TryReadOwnFk(info, pk, fkFieldOffset, out var fk) || !walk.OwnFk.TryAdd(id, fk))
+        {
+            return;
+        }
+
+        if (!walk.OwnByParent.TryGetValue(fk, out var children))
+        {
+            walk.OwnByParent[fk] = children = [];
+        }
+
+        children.Add(id);
+    }
+
+    /// <summary>The foreign key at <paramref name="fieldOffset"/> of an own spawn's <paramref name="slot"/>, from its payload; false when it has none.</summary>
+    private bool TryReadSpawnFk(in SpawnEntry entry, ArchetypeMetadata spawnMeta, int slot, int fieldOffset, out EntityId fk)
+    {
+        fk = default;
+
+        // Resolve the slot's table first: since #839 the payload's home depends on its storage mode — a Versioned slot has a real content chunk (the
+        // first revision's), everything else stages in the transaction arena.
+        var spawnES = _dbe._archetypeStates[spawnMeta.ArchetypeId];
+        var table = spawnES.SlotToComponentTable[slot];
+        byte* ptr;
+        if (table.StorageMode == StorageMode.Versioned)
+        {
+            int chunkId = entry.VerLoc[slot];
+            if (chunkId == 0)
+            {
+                return false;
+            }
+
+            // A same-tx copy-on-write supersedes the spawn's own chunk, so prefer the cache's current content chunk.
+            var info = GetComponentInfo(spawnMeta._slotToComponentType[slot]);
+            int dataChunkId = info.SingleCache.TryGetValue((long)entry.Id.RawValue, out var cri) ? cri.CurCompContentChunkId : chunkId;
+            ptr = info.CompContentAccessor.GetChunkAddress(dataChunkId);
+        }
+        else
+        {
+            int stage = entry.Stage[slot];
+            if (stage == 0)
+            {
+                return false;
+            }
+            ptr = SpawnArena.Resolve(stage);
+        }
+
+        fk = *(EntityId*)(ptr + table.ComponentOverhead + fieldOffset);
+        return true;
+    }
+
+    /// <summary>
+    /// The children whose SingleVersion FK an in-place write moved since the last tick fence, by the parent it names now: the entities the archetype's
+    /// shadow bitmap marks (a key-changing write records the old keys before it lands, IX-07), read at HEAD. Null when the FK component's keys cannot be
+    /// stale (<see cref="ArchetypeClusterState.MayHaveFenceStaleKeys"/>): a tick that wrote no indexed key of it costs one test. Read once per walk.
+    /// </summary>
+    private static Dictionary<EntityId, List<EntityId>> ReadChildrenReKeyedSinceFence(ArchetypeEngineState es, CascadeTarget target)
+    {
+        var cs = es.ClusterState;
+        var shadow = cs?.ClusterShadowBitmap;
+        if (shadow == null || es.SlotToComponentTable[target.FkSlotIndex].StorageMode != StorageMode.SingleVersion
+            || !cs.MayHaveFenceStaleKeys(target.FkSlotIndex))
+        {
+            return null;
+        }
+
+        Dictionary<EntityId, List<EntityId>> byParent = null;
+        var layout = cs.Layout;
+        var fieldBase = layout.ComponentOffset(target.FkSlotIndex) + target.FkFieldOffset;
+        var stride = layout.ComponentSize(target.FkSlotIndex);
+        var accessor = cs.ClusterSegment.CreateChunkAccessor();
+        try
+        {
+            for (int c = 0, n = shadow.WordCount; c < n; c++)
+            {
+                var marked = shadow.ReadWord(c);
+                if (marked == 0)
+                {
+                    continue;
+                }
+
+                var clusterBase = accessor.GetChunkAddress(c);
+                for (var bits = marked & Volatile.Read(ref *(ulong*)clusterBase); bits != 0; bits &= bits - 1)
+                {
+                    var slot = BitOperations.TrailingZeroCount(bits);
+                    var fk = *(EntityId*)(clusterBase + fieldBase + slot * stride);
+                    var id = EntityId.FromRaw(*(long*)(clusterBase + layout.EntityIdsOffset + slot * 8));
+                    if (fk.IsNull || id.IsNull)
+                    {
+                        continue;
+                    }
+
+                    byParent ??= [];
+                    if (!byParent.TryGetValue(fk, out var children))
+                    {
+                        byParent[fk] = children = [];
+                    }
+
+                    children.Add(id);
+                }
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+
+        return byParent;
+    }
+
+    /// <summary>
+    /// The FK value this transaction itself wrote for <paramref name="pk"/>, unpublished: a Versioned update or first supply (<see cref="IsOwnFkWrite"/>),
+    /// or a SingleVersion write staged for commit. False when it wrote none; an own spawn's is read from its payload.
+    /// </summary>
+    private bool TryReadOwnFk(ComponentInfo info, long pk, int fkFieldOffset, out EntityId fk)
+    {
+        fk = default;
+        if (info.ComponentTable.StorageMode == StorageMode.Versioned)
+        {
+            if (!info.SingleCache.TryGetValue(pk, out var cri) || !IsOwnFkWrite(in cri, EntityId.FromRaw(pk)))
+            {
+                return false;
+            }
+
+            fk = *(EntityId*)(info.CompContentAccessor.GetChunkAddress(cri.CurCompContentChunkId) + info.ComponentOverhead + fkFieldOffset);
+            return true;
+        }
+
+        if (_commitStagingBuffer == null || info.CommitStaged == null || !info.CommitStaged.TryGetValue(pk, out var staged))
+        {
+            return false;
+        }
+
+        fk = *(EntityId*)(_commitStagingBuffer + staged.Offset + fkFieldOffset);
+        return true;
     }
 
     /// <summary>Collects the cascade children found by the FK reverse lookup, keeping only those of the target child archetype.</summary>
@@ -5616,6 +6129,9 @@ public unsafe partial class Transaction
         _spawnedEntityIndexedCount = 0;
         _pendingDestroys?.Clear();
         _pendingDestroyOrder?.Clear();
+        _hasCascadeParents = false;
+        _resolvingCascadesAtCommit = false;
+        _cascadeWalk?.Clear();
         OwnDestroyCount = 0;
         _ownDestroyedUsed = 0;   // the tables are reset when reused
         _pendingDeathClusters?.Clear();

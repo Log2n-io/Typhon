@@ -180,7 +180,7 @@ internal sealed class PerceptionChecks : ServedChecks
         using var sim = new TatooineSim(config);
         sim.Initialize();
         Harness = new SessionHarness(sim);
-        var account = EntityId.FromRawValue(0x8301);
+        var account = TestAccounts.For(sim.Dbe, 0x8301);
         var first = Harness.Connect(TatooineReplication.PlayerKind, account);
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the first body to be spawned");
         Harness.Ticks(2);

@@ -4387,6 +4387,12 @@ public unsafe partial class Transaction : EntityAccessor
             // ── Holdoff: entire commit loop runs to completion ──
             using var holdoff = ctx.EnterHoldoff();
 
+            // CASC-01, CASC-02 — before the card, so a destroyer's wait holds none: the children of every cascade parent this transaction destroys
+            // resolved again at HEAD, each parent marked dying and its earlier referrers waited for; then every cascade foreign key this commit writes
+            // checked and announced until it has published. A failure here leaves the commit retryable; the finally gives the marks back.
+            ResolveCascadesAtCommit(ref ctx);
+            AnnounceCascadeReferences();
+
             // VIS-03 step 0, before any chain lock: the commit card. The finally gives it back on every exit before the commit point.
             _commitStamp = 0;
             ReserveCommitCard(ref ctx);
@@ -4576,6 +4582,9 @@ public unsafe partial class Transaction : EntityAccessor
                 published = true;
                 Volatile.Write(ref _inFlightLsnFloor, 0);
 
+                // CASC-02: its children and its destroys are published — a destroyer need not wait for this commit's durability.
+                ReleaseCascadeMarks();
+
                 // VIS-04, step 6: every effect is stamped, the card goes back: before the durability wait, and before Commit() returns (causality).
                 ReleaseCommitCard();
 
@@ -4632,6 +4641,10 @@ public unsafe partial class Transaction : EntityAccessor
             // by now, so the next commit's descent finds them with no claim to help it, and one that did not publish has nothing to find. A claim left
             // behind would refuse that key to every later commit for the engine's life.
             ReleaseUniqueKeyClaims();
+
+            // Likewise the cascade handshake (CASC-02): an announcement or a dying mark left behind would make every later destroyer of a parent on its
+            // stripe time out.
+            ReleaseCascadeMarks();
 
             // AP-01 safety net: if the commit threw between PREPARE and PUBLISH, retained handler locks would otherwise be orphaned. On the success
             // path PublishPreparedComponents already drained and cleared _publishEntries, so this is a no-op.

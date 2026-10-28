@@ -41,11 +41,11 @@ internal sealed class EconomyChecks : ServedChecks
     /// <summary>A player logged in and parked at a point; its link, body and character.</summary>
     private (FakeLink Link, EntityId Body, EntityId Character, long Parked) LogIn(TatooineSim sim, ulong account, float x, float z, long bindings)
     {
-        var link = Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(account));
+        var link = Harness.Connect(TatooineReplication.PlayerKind, TestAccounts.For(sim.Dbe, account));
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= bindings, "the avatar to be spawned");
         Harness.Ticks(2);
         var body = Worlds.Park(sim, link.Session, x, z, out var parked);
-        Assert.That(CharacterStore.TryFind(sim.Dbe, EntityId.FromRawValue(account), out var character, out _), Is.True, "the account has no character");
+        Assert.That(CharacterStore.TryFind(sim.Dbe, TestAccounts.For(sim.Dbe, account), out var character, out _), Is.True, "the account has no character");
         return (link, body, character, parked);
     }
 
@@ -99,7 +99,7 @@ internal sealed class EconomyChecks : ServedChecks
         var destroyed = TatooineReplication.AvatarsDestroyed;
         first.Link.Close(CloseCodes.Normal, "logging out");
         SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed > destroyed, "the avatar to be destroyed");
-        var again = Harness.Connect(TatooineReplication.PlayerKind, EntityId.FromRawValue(0x7210));
+        var again = Harness.Connect(TatooineReplication.PlayerKind, TestAccounts.For(sim.Dbe, 0x7210));
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 2, "the second avatar to be spawned");
         Harness.Ticks(4);
         Assert.Multiple(() =>

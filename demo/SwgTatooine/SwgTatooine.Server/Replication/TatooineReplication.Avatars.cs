@@ -198,6 +198,7 @@ public static partial class TatooineReplication
     private static long _charactersCreated;
     private static long _loginsRefusedDuplicate;
     private static long _loginsRefusedAnonymous;
+    private static long _loginsRefusedNoAccount;
     private static long _loginsRefusedUnconfigured;
     private static long _locationsSaved;
     private static long _resumesHeld;
@@ -278,6 +279,9 @@ public static partial class TatooineReplication
 
     /// <summary>Sessions refused because they reached the bind with no identity at all.</summary>
     public static long LoginsRefusedAnonymous => System.Threading.Interlocked.Read(ref _loginsRefusedAnonymous);
+
+    /// <summary>Sessions refused because the account their token names does not exist — never created, or deleted since the token was minted.</summary>
+    public static long LoginsRefusedNoAccount => System.Threading.Interlocked.Read(ref _loginsRefusedNoAccount);
 
     /// <summary>Logins refused because this process never called <see cref="ConfigureAvatars"/>.</summary>
     public static long LoginsRefusedUnconfigured => System.Threading.Interlocked.Read(ref _loginsRefusedUnconfigured);
@@ -710,6 +714,17 @@ public static partial class TatooineReplication
         // and a change that makes binding parallel, or that allows one account two sessions, breaks it.
         if (!TryFindCharacter(tx, account, out var character, out var profile))
         {
+            // A character names its account through a cascade foreign key, and the engine refuses a commit pointing one at an entity nothing holds
+            // (CASC-02, #1247): spawned for an account that does not exist — never created, or deleted since its token was minted — it would abort the tick
+            // for every session. Kicked instead, before anything is spawned.
+            if (!tx.IsAlive(account))
+            {
+                System.Threading.Interlocked.Increment(ref _loginsRefusedNoAccount);
+                subs.Session(session).Kick(NotAuthenticatedCloseCode, "that account does not exist");
+                AccountOfSession.Remove(session.Value);
+                return;
+            }
+
             // The account's own name and the outfit it chose at sign-up (Account.Outfit), else the server's pick. An account gone since
             // its token was minted reads as none of either.
             var identity = AccountOf(tx, account);
@@ -1372,6 +1387,7 @@ public static partial class TatooineReplication
         System.Threading.Interlocked.Exchange(ref _charactersCreated, 0);
         System.Threading.Interlocked.Exchange(ref _loginsRefusedDuplicate, 0);
         System.Threading.Interlocked.Exchange(ref _loginsRefusedAnonymous, 0);
+        System.Threading.Interlocked.Exchange(ref _loginsRefusedNoAccount, 0);
         System.Threading.Interlocked.Exchange(ref _loginsRefusedUnconfigured, 0);
         System.Threading.Interlocked.Exchange(ref _locationsSaved, 0);
         System.Threading.Interlocked.Exchange(ref _resumesHeld, 0);
