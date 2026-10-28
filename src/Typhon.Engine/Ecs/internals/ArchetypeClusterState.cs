@@ -2547,19 +2547,51 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal long MaxDestroyStamp => Volatile.Read(ref _maxDestroyStamp.Value);
 
     /// <summary>
-    /// A destroy's stamp, folded into <see cref="MaxDestroyStamp"/> and its cluster's died watermark (<see cref="NoteClusterDied"/>) BEFORE its B+Tree entries
-    /// are removed: a reader whose tree read misses the entry then reads both above its snapshot and looks at the cluster (#1347).
+    /// A destroy's stamp, folded into its slot's change stamp (<see cref="NoteSlotChanged"/>), then <see cref="MaxDestroyStamp"/> and its cluster's died
+    /// watermark (<see cref="NoteClusterDied"/>) BEFORE its B+Tree entries are removed: a reader whose tree read misses the entry then reads both above its
+    /// snapshot and looks at the slot (#1347, #1247).
     /// </summary>
-    internal void NoteDestroyPublished(int clusterChunkId, long stamp)
+    /// <remarks>
+    /// In an archetype with a Versioned component — the one that promises isolation, and whose readers read the stamps — the slot's stamps come first and
+    /// <see cref="KeyChangeCount"/> last: a reader that saw the tree removal sees the count moved (#1247). A SingleVersion or Transient archetype's readers
+    /// read neither, so its destroys pay for neither.
+    /// </remarks>
+    internal void NoteDestroyPublished(int clusterChunkId, int slotIndex, long stamp)
     {
-        NoteClusterDied(clusterChunkId, stamp);
-        while (true)
+        var isolated = PromisesIsolation;
+        if (isolated)
         {
-            var current = Volatile.Read(ref _maxDestroyStamp.Value);
-            if (stamp <= current || Interlocked.CompareExchange(ref _maxDestroyStamp.Value, stamp, current) == current)
+            NoteSlotChanged(clusterChunkId, slotIndex, stamp, stamp);
+        }
+
+        NoteClusterDied(clusterChunkId, stamp);
+        RaiseStamp(ref _maxDestroyStamp.Value, stamp);
+        if (isolated)
+        {
+            Interlocked.Increment(ref _keyChanges.Count);
+        }
+    }
+
+    /// <summary>Whether the archetype has a Versioned component: the one that promises snapshot isolation (its destroys hide their slots, VIS-09).</summary>
+    private bool PromisesIsolation
+    {
+        get
+        {
+            var versioned = Layout.SlotToVersionedIndex;
+            if (versioned == null)
             {
-                return;
+                return false;
             }
+
+            for (var i = 0; i < versioned.Length; i++)
+            {
+                if (versioned[i] >= 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
     }
 
@@ -2570,6 +2602,17 @@ internal sealed unsafe partial class ArchetypeClusterState
         [FieldOffset(64)] public long MaxStamp;
         [FieldOffset(72)] public long Count;
     }
+
+    // The index readers' marks on a line of their own (#1247): every Versioned update writes the update words above, while only destroys and key-moving
+    // updates write these, and a streaming index reader reads the count after every key it reads.
+    [StructLayout(LayoutKind.Explicit, Size = 192)]
+    private struct PaddedKeyChangeWords
+    {
+        [FieldOffset(64)] public long MaxKeyMoveStamp;
+        [FieldOffset(72)] public long Count;
+    }
+
+    private PaddedKeyChangeWords _keyChanges;
 
     private PaddedUpdateWords _updates;
 
@@ -2586,23 +2629,41 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal long UpdateCount => Volatile.Read(ref _updates.Count);
 
     /// <summary>
-    /// A Versioned update's publish, recorded BEFORE it moves the entity's index entries or copies its value into the HEAD (VIS-12): its cluster's update
-    /// watermark, the archetype's <see cref="MaxUpdateStamp"/>, then <see cref="UpdateCount"/>. A reader that finds either moved reads all three after it.
+    /// A Versioned update's publish, recorded BEFORE it moves the entity's index entries or copies its value into the HEAD (VIS-12): its slot's change stamp
+    /// (<see cref="NoteSlotChanged"/>), its cluster's update watermark, the archetype's <see cref="MaxUpdateStamp"/>, then <see cref="UpdateCount"/>. A
+    /// reader that finds either moved reads all four after it. <paramref name="slotIndex"/> -1: the cluster's words alone — a migration, which carried the
+    /// slot's stamp itself. <paramref name="keyMoved"/>: the update moves an index key of the entity — its slot's key stamp too, and the archetype's
+    /// <see cref="MaxKeyMoveStamp"/> and <see cref="KeyChangeCount"/> after the others, which the index readers watch (#1247).
     /// </summary>
-    internal void NoteUpdatePublished(int clusterChunkId, long stamp)
+    internal void NoteUpdatePublished(int clusterChunkId, int slotIndex, long stamp, bool keyMoved)
     {
-        NoteClusterUpdated(clusterChunkId, stamp);
-        while (true)
+        if (slotIndex >= 0)
         {
-            var current = Volatile.Read(ref _updates.MaxStamp);
-            if (stamp <= current || Interlocked.CompareExchange(ref _updates.MaxStamp, stamp, current) == current)
-            {
-                break;
-            }
+            NoteSlotChanged(clusterChunkId, slotIndex, stamp, keyMoved ? stamp : 0);
         }
 
+        NoteClusterUpdated(clusterChunkId, stamp);
+        RaiseStamp(ref _updates.MaxStamp, stamp);
         Interlocked.Increment(ref _updates.Count);
+        if (keyMoved)
+        {
+            RaiseStamp(ref _keyChanges.MaxKeyMoveStamp, stamp);
+            Interlocked.Increment(ref _keyChanges.Count);
+        }
     }
+
+    /// <summary>
+    /// The highest stamp of a Versioned update of this archetype that moved an index key (#1247), by acquire; 0 before the first. Only rises. An index reader
+    /// whose snapshot is at or above it, and at or above <see cref="MaxDestroyStamp"/>, finds every entity's tree rows at the keys its snapshot holds.
+    /// </summary>
+    internal long MaxKeyMoveStamp => Volatile.Read(ref _keyChanges.MaxKeyMoveStamp);
+
+    /// <summary>
+    /// How many destroys and key-moving updates of this archetype (one with a Versioned component) have published, by acquire, each counted after its
+    /// stamps and before it touched a tree: an index reader's mark (#1247). A count, not the stamps — a destroy with a lower stamp can publish after one with
+    /// a higher stamp and move neither maximum.
+    /// </summary>
+    internal long KeyChangeCount => Volatile.Read(ref _keyChanges.Count);
 
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // Write-time spatial bookkeeping. Populated by ClusterRef.WriteSpatial(...) at the write site. Consumed by the fence-time sparse-iteration pass — only

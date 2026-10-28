@@ -24,8 +24,8 @@ to operate on the entity's own element within the buffer, never on the key.
 
 ## ⚙️ How it works (in brief)
 
-Each `AllowMultiple` key owns one buffer: the current entity set, which is what `Transaction.EnumerateIndex`
-reads. Entities are addressed inside it by an **element id**, stored alongside the entity so a later mutation can
+Each `AllowMultiple` key owns one buffer: the current entity set. `Transaction.EnumerateIndex` reads it, and answers at
+the transaction's snapshot (see below). Entities are addressed inside it by an **element id**, stored alongside the entity so a later mutation can
 find its own entry again.
 
 Two compound operations do the work, each in a single tree traversal:
@@ -90,13 +90,15 @@ using var g9 = tx2.EnumerateIndex<GuildMember, long>(guildIndex, 9, 9); // Aria
 - Delete is first-class and element-precise: the entity's element is removed from the key's buffer in the same
   commit, so a deleted entity never reappears in an `EnumerateIndex` result, never requires a follow-up cleanup
   pass, and never takes its siblings with it.
-- `Transaction.EnumerateIndex` reflects committed current state at the same O(K) cost as a non-versioned
-  `AllowMultiple` index.
-- **Current state only.** Typhon does not reconstruct past index membership: there is no "who held this value at
-  TSN T" query, and no API exposes one. There is no append-only version-history tail behind the index either — it
-  would need pruning of its own and would charge every `AllowMultiple` mutation on a `Versioned` component for a
-  capability no caller can reach. A snapshot read of an older revision goes through the revision
-  chain, not through the index.
+- `Transaction.EnumerateIndex` answers at the transaction's snapshot, exactly as its field queries do: the entities
+  the snapshot holds, at the keys and values it holds them, in key order — an entity destroyed or re-keyed after the
+  snapshot is still found at its old key, one spawned after it is not; the transaction's own destroys are gone and
+  its own spawns are in, its own value writes unseen. The index itself holds the current entity sets; the entities a
+  commit newer than the snapshot changed are read at the snapshot beside it (#1247). With nothing newer than the
+  snapshot this costs three loads per archetype on top of the O(K) walk.
+- **No past membership beyond the snapshot.** There is no "who held this value at TSN T" query for an arbitrary T,
+  and no append-only version-history tail behind the index — it would need pruning of its own and would charge every
+  `AllowMultiple` mutation on a `Versioned` component for a capability no caller can reach.
 
 ## 🧪 Tests
 

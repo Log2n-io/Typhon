@@ -481,8 +481,13 @@
     hit — the same reasoning, and the same predicate, the scan path uses
   invariant this is a FALSE-POSITIVE rule and SQ-01 is a false-negative one; they are not the same guarantee and
     neither implies the other. A gate that dropped a visible entity would break SQ-01 while satisfying this, so
-    the gate never runs where the archetype makes no isolation promise, and an unreadable EntityMap record is
-    treated as VISIBLE — shrinking a result silently is the worse failure
+    the gate never runs where the archetype makes no isolation promise. A MISSING EntityMap record is not visible: every
+    occupied slot has its record from PREPARE (VIS-08) until the cleanup, which removes it only once the entity is dead
+    to every snapshot at or above MinTSN; reading it visible emitted a slot the cleanup was releasing (#1247). A zero
+    id is never emitted, gated or not
+  invariant a destroy newer than the snapshot, or a move of a Versioned spatial field newer than it, answers at the snapshot too (VIS-13, #1247):
+    the spatial index walks current occupancy and bounds, so the slots changed after the snapshot are decided again from their snapshot
+    state, on every shape (EcsQuery.ApplySpatialSnapshot) — before, the destroyed entity was lost and the moved one found at its new place
   never gate on MaskTestByRouting alone: the routing mask is an archetype test and knows nothing about TSNs
   never stackalloc the record buffer inside the per-archetype loop — it is sized once, to the widest gated
     record, and reused, or the frame grows with the number of spatial archetypes in the query

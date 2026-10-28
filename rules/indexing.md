@@ -512,7 +512,7 @@ keys.
             chain lock and may hold it
   invariant a copied location is re-checked where its slot can change hands meanwhile: a SingleVersion destroy releases its slot at
             once, and a spawn may take it before the read resolves it, so a SingleVersion slot's key is compared with the copied key
-            (`IndexEntityEnumerator.MoveNext`) and the FK lookup compares the slot's FK with its target and skips a freed slot
+            (`IndexEntityEnumerator.TryResolve`) and the FK lookup compares the slot's FK with its target and skips a freed slot
             (`FkReverseLookup.ScanClusterArchetype`). A Versioned slot is released only by the entity cleanup, and a spawn after the
             reader's snapshot fails its visibility. The buffer's lock used to hold the destroy's index removal, and so the release, off
   rationale: the buffer's shared lock, held across a chain walk, closed a cycle with a publish that holds the entity's chain

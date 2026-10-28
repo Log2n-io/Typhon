@@ -146,6 +146,20 @@ internal static class QueryPathProbe
     internal static Action OrderedAfterUpdateReadHook;
 
     /// <summary>
+    /// Invoked on the query thread by an ordered query right after its side stream read the entities changed after its snapshot, before its tree streams
+    /// read (#1247). Null in production; set by tests only, to publish an update of another slot of a cluster the side stream read.
+    /// </summary>
+    [ThreadStatic]
+    internal static Action OrderedAfterSideStreamHook;
+
+    /// <summary>
+    /// Invoked on the query thread by a snapshot fill after it read the cluster's change stamps, before it copies the HEAD (#1247). Null in production; set by
+    /// tests only, to publish an update the stamp read did not see and the HEAD copy will.
+    /// </summary>
+    [ThreadStatic]
+    internal static Action SnapshotFillHook;
+
+    /// <summary>
     /// Invoked on the query thread by a snapshot scan before it evaluates a cluster's HEAD, after it read the cluster's update watermark (VIS-12). Null in
     /// production; set by tests only, to publish an update the watermark read did not see and the HEAD read will.
     /// </summary>
@@ -170,6 +184,14 @@ internal static class QueryPathProbe
     /// <summary>Clusters this thread's queries read at their snapshot because an update newer than it rewrote their HEAD or tree keys (VIS-12).</summary>
     [ThreadStatic]
     internal static int SnapshotReadClusters;
+
+    /// <summary>Slots this thread's snapshot fills read through their record and chain: the ones changed after the snapshot (#1247), not the whole cluster.</summary>
+    [ThreadStatic]
+    internal static int SnapshotSlotReads;
+
+    /// <summary>Entities this thread's index reads decided at their snapshot beside the trees (IndexSnapshotSide): probed, after the key prefilter (#1247).</summary>
+    [ThreadStatic]
+    internal static int IndexSideProbes;
 
     /// <summary>
     /// Walks of every active cluster's update watermark on this thread: an index path whose snapshot is older than its archetype's newest update (VIS-12).
@@ -214,6 +236,10 @@ internal static class QueryPathProbe
         OccupancyCounts = 0;
         MapProbeCounts = 0;
         SnapshotReadClusters = 0;
+        SnapshotSlotReads = 0;
+        IndexSideProbes = 0;
+        OrderedAfterSideStreamHook = null;
+        SnapshotFillHook = null;
         UpdateWatermarkWalks = 0;
     }
 }

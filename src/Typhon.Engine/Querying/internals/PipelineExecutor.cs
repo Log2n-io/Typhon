@@ -23,7 +23,9 @@ internal static class PipelineExecutor
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static unsafe bool EvaluateFilters<T>(FieldEvaluator[] evaluators, Transaction tx, long pk) where T : unmanaged
     {
-        if (!tx.QueryRead<T>(pk, out var comp))
+        // Committed at the snapshot (#1247): a navigation's field predicates read as a field query's do, never the transaction's own unpublished write — but
+        // its own pending spawn, which no committed read finds, on its own values, as a field query reads one (QENABLE-01).
+        if (!tx.QueryReadCommitted<T>(pk, out var comp))
         {
             return false;
         }
