@@ -236,6 +236,49 @@ internal sealed class AccountStoreChecks
             "the stamping write must not have disturbed the name index");
     }
 
+    /// <summary>A login at an account's older work factor re-hashes it at the current one, and the new hash verifies.</summary>
+    /// <remarks>
+    /// This is what makes lowering the factor reach accounts that already exist: the 2 000 bot accounts were made at 600 000
+    /// iterations, and without the re-hash every one of their logins would keep paying for it.
+    /// </remarks>
+    [Test]
+    [CancelAfter(15_000)]
+    [Category("Integration")]
+    public void Login_AtAnOlderWorkFactor_RehashesAtTheCurrentOne()
+    {
+        var original = PasswordHash.Iterations;
+        try
+        {
+            var older = PasswordHash.DefaultIterations + 1_000;
+            PasswordHash.Iterations = older;
+            Assert.That(AccountStore.TrySignup(Dbe, "Mothma", GoodPassword, out var id), Is.EqualTo(AccountStore.SignupOutcome.Created));
+            Assert.That(StoredIterations(id), Is.EqualTo(older));
+
+            PasswordHash.Iterations = PasswordHash.DefaultIterations;
+            Assert.That(AccountStore.TryLogin(Dbe, "Mothma", GoodPassword, out _), Is.EqualTo(AccountStore.LoginOutcome.Ok));
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(StoredIterations(id), Is.EqualTo(PasswordHash.DefaultIterations), "the login must re-hash at the current factor");
+                Assert.That(AccountStore.TryLogin(Dbe, "Mothma", GoodPassword, out _), Is.EqualTo(AccountStore.LoginOutcome.Ok),
+                    "the re-hashed password must still log in");
+                Assert.That(AccountStore.TryLogin(Dbe, "Mothma", "not-the-password", out _), Is.EqualTo(AccountStore.LoginOutcome.WrongPassword));
+            });
+        }
+        finally
+        {
+            PasswordHash.Iterations = original;
+        }
+    }
+
+    private int StoredIterations(EntityId account)
+    {
+        using var tx = Dbe.CreateQuickTransaction();
+        using var accounts = tx.For<AccountArch>();
+        Assert.That(accounts.TryOpen(account, out var entity), Is.True);
+        return entity.Read(AccountArch.Secret).Iterations;
+    }
+
     /// <summary>
     /// EW-02 in anger: distinct accounts created and logged into from several threads while the tick loop runs.
     /// </summary>

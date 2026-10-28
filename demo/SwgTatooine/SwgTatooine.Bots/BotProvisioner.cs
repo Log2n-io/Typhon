@@ -33,9 +33,8 @@ public readonly record struct ProvisionReport(int Created, int LoggedIn, int Reu
 /// the four most likely to be what breaks at a thousand.
 /// </para>
 /// <para>
-/// <b>Bounded concurrency, and the bound is about the SERVER.</b> Each signup and each login costs one PBKDF2 at 600 000
-/// iterations, roughly 51 ms of a core, and the server runs them through a semaphore of <c>ProcessorCount / 4</c>
-/// (<c>PasswordHash.Gate</c>). Pushing a thousand at once would not go faster — it would queue inside Kestrel, time out, and make
+/// <b>Bounded concurrency, and the bound is about the SERVER.</b> Each signup and each login costs one PBKDF2 and a few engine
+/// reads, and the server admits them through a semaphore of <c>ProcessorCount / 4</c> (<c>AuthEndpoints.Gate</c>). Pushing a thousand at once would not go faster — it would queue inside Kestrel, time out, and make
 /// the fleet look like it failed to provision when it was merely early. Eight in flight keeps that gate fed without a queue.
 /// </para>
 /// <para>

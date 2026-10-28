@@ -40,26 +40,21 @@ public static class PasswordHash
     public const int SaltBytes = 16;
 
     /// <summary>
-    /// Work factor for new hashes. Stored with every hash, so raising this does not invalidate existing accounts.
+    /// Work factor for new hashes. Stored with every hash, so changing this does not invalidate existing accounts.
     /// </summary>
     /// <remarks>
-    /// OWASP's 2023 floor for PBKDF2-SHA256 is 600 000; this is that.
-    /// <para>
-    /// <b>It costs about 50 ms of one core, not "a few hundred microseconds" as this said until it was measured.</b> Three runs on a
-    /// 7950X: 51.3, 51.0 and 53.0 ms. That is a 150-fold difference from the figure that was here, and the figure was load-bearing —
-    /// it was the stated reason this may be called synchronously on a Kestrel thread. At 50 ms it still must not run on the tick, but
-    /// it is no longer free: a request that reaches the KDF spends a twentieth of a second of a core that the simulation on this same
-    /// process also wants, which is why <see cref="Gate"/> exists.
-    /// </para>
+    /// <b>Deliberately cheap: this is a demo, and its accounts hold nothing worth protecting.</b> OWASP's floor for real credentials is
+    /// 600 000, which measured 51 ms of a 7950X core per login. A 2 000-bot login wave at that cost held hundreds of thread-pool threads in
+    /// the KDF, the pool grew past 256 threads, and the engine's epoch registry ran out of slots. 10 000 is under 1 ms. A login at an
+    /// account's older work factor is re-hashed at this one (<see cref="AccountStore"/>), so existing accounts converge on it.
     /// </remarks>
-    public const int DefaultIterations = 600_000;
+    public const int DefaultIterations = 10_000;
 
     /// <summary>The smallest work factor this will accept, so "faster" cannot become "no protection at all".</summary>
     /// <remarks>
-    /// Twenty thousand. Below that a leaked table is crackable on one laptop and the hashing is theatre -- which is worse
-    /// than no hashing, because it reads as protection in a code review.
+    /// One thousand: a guard against a typo, not a security claim. The demo's default is already a cheap one.
     /// </remarks>
-    public const int MinimumIterations = 20_000;
+    public const int MinimumIterations = 1_000;
 
     /// <summary>
     /// The work factor NEW passwords are hashed with. <see cref="DefaultIterations"/> unless a run lowers it.
@@ -82,10 +77,6 @@ public static class PasswordHash
     /// <see cref="Verify"/> uses the stored one, so old hashes keep verifying at whatever they were made with. Only new
     /// passwords use this.
     /// </para>
-    /// <para>
-    /// The DEFAULT does not move. An engine-adjacent default must not be weakened because one demo found it
-    /// inconvenient; a run that wants cheaper hashing says so on its command line, where the choice stays visible.
-    /// </para>
     /// </remarks>
     public static int Iterations
     {
@@ -103,16 +94,6 @@ public static class PasswordHash
     }
 
     private static int _iterations = DefaultIterations;
-
-    /// <summary>
-    /// How many password derivations may run at once across this process.
-    /// </summary>
-    /// <remarks>
-    /// A quarter of the cores, at least one. See <see cref="Derive"/> for why there is a bound at all: the limiter's buckets are
-    /// per-key and cannot bound the number of distinct keys attempting at once, so without this the only ceiling on KDF CPU is the
-    /// thread pool's. Static and process-wide on purpose — the thing being protected is the process.
-    /// </remarks>
-    private static readonly SemaphoreSlim Gate = new(Math.Max(1, Environment.ProcessorCount / 4));
 
     /// <summary>The shortest password accepted.</summary>
     /// <remarks>
@@ -211,18 +192,14 @@ public static class PasswordHash
         Span<byte> bytes = stackalloc byte[MaximumPasswordLength * 4];
         var written = Encoding.UTF8.GetBytes(password, bytes);
 
-        // Bounded concurrency, because a login is 50 ms of a core and this process also runs a simulation. The rate limiter's caps are
-        // all PER KEY, so they bound how fast one address or one name may try and say nothing about how many distinct ones may be
-        // trying at once — which is exactly the shape of a load that turns authentication into a tick-rate problem. A quarter of the
-        // cores leaves the simulation the rest; the cost is that logins queue under that load, which is the right thing to give up.
-        Gate.Wait();
+        // Concurrency is bounded by the caller (AuthEndpoints' gate), which waits asynchronously. A blocking wait here held one
+        // thread-pool thread per queued login, and a login wave grew the pool past what the engine's epoch registry can hold.
         try
         {
             Rfc2898DeriveBytes.Pbkdf2(bytes[..written], salt, destination, iterations, HashAlgorithmName.SHA256);
         }
         finally
         {
-            Gate.Release();
             // The plaintext's bytes do not outlive the derivation. The string itself is the CLR's to manage and cannot be
             // cleared, which is why nothing here keeps one.
             CryptographicOperations.ZeroMemory(bytes[..written]);

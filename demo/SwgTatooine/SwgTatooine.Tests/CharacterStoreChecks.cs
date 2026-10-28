@@ -45,7 +45,7 @@ internal sealed class CharacterStoreChecks
     [SetUp]
     public void SetUp()
     {
-        // The floor, not the 600 000 default: nothing here is about the hash, and at the default the two hundred signups of
+        // The floor, not the default: nothing here is about the hash, and at the old 600 000 default the two hundred signups of
         // EveryAccountResolvesToItsOwnCharacter were nine seconds of PBKDF2. The factor is stored per account, so this changes no check.
         _iterations = PasswordHash.Iterations;
         PasswordHash.Iterations = PasswordHash.MinimumIterations;

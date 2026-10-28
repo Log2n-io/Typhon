@@ -21,8 +21,8 @@ namespace SwgTatooine.Tests;
 /// plaintext is bounded before the KDF runs.
 /// </para>
 /// <para>
-/// Fast by construction except where the KDF is genuinely exercised — <see cref="PasswordHash.DefaultIterations"/> is 600 000
-/// rounds and costs a few hundred microseconds, so the round-trip cases use it sparingly and the rest pass a small factor.
+/// Fast by construction except where the KDF is genuinely exercised — <see cref="PasswordHash.DefaultIterations"/> is 10 000
+/// rounds and costs under a millisecond, so the round-trip cases use it sparingly and the rest pass a small factor.
 /// </para>
 /// </remarks>
 [Category("Integration")]

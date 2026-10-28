@@ -294,9 +294,8 @@ public sealed partial class TatooineSim
         {
             PasswordHash.Iterations = _config.AuthIterations;
             Console.WriteLine(
-                $"  !! password hashing LOWERED to {_config.AuthIterations:N0} iterations from the default "
-                + $"{PasswordHash.DefaultIterations:N0}. Cheaper to attack offline if the hash table ever leaks — "
-                + "acceptable for throwaway accounts, not for real credentials. Existing accounts keep their own work factor.");
+                $"  !! password hashing set to {_config.AuthIterations:N0} iterations instead of the default "
+                + $"{PasswordHash.DefaultIterations:N0}. Existing accounts are re-hashed at it on their next login.");
         }
         else
         {
