@@ -77,6 +77,40 @@ describe('Clock', () => {
     }
   });
 
+  it('reports the lag it rendered at, which trails the target delay after late frames move it', () => {
+    // A constant 30 ms downlink, then a burst of frames 150 ms late: the p95 raises the target delay at once, render time only
+    // slews toward it. renderLagMs must be the rendered instant's lag at every frame, so a predictor reconciles where the
+    // authority it is handed actually is.
+    const clock = new Clock({ tickPeriodMs: PERIOD, initialDelayMs: 150 });
+    let next = 0;
+    let worstLagError = 0;
+    let widestGap = 0;
+    for (let now = 5000; now < 12_000; now += 1000 / 60) {
+      while (sentAt(next) + 30 <= now) {
+        const late = next >= 60 && next < 64 ? 150 : 0;
+        clock.onFrame(next, sentAt(next) + 30 + late);
+        next++;
+      }
+
+      clock.update(now);
+      if (now > 6000) {
+        // In this world server time of tick t is sentAt(t) and the least downlink is 30 ms, so the rendered instant in local
+        // time is sentAt(renderTime) + 30.
+        const renderedLocal = 5000 + clock.renderTime * PERIOD + 30;
+        worstLagError = Math.max(worstLagError, Math.abs(clock.renderLagMs - (now - renderedLocal)));
+        widestGap = Math.max(widestGap, Math.abs(clock.renderLagMs - clock.renderDelayMs));
+      }
+    }
+
+    expect(worstLagError).toBeLessThan(0.01);
+    expect(widestGap).toBeGreaterThan(50); // the late burst moved the target; render time had not caught up
+  });
+
+  it('reports the target delay as its lag before the first frame', () => {
+    const clock = new Clock({ tickPeriodMs: PERIOD, initialDelayMs: 180 });
+    expect(clock.renderLagMs).toBe(clock.renderDelayMs);
+  });
+
   it('takes the nearest-rank p95: a single outlier among twenty samples does not set the delay', () => {
     const clock = new Clock({ tickPeriodMs: PERIOD, minDelayMs: 100, maxDelayMs: 300 });
     for (let t = 0; t < 20; t++) {

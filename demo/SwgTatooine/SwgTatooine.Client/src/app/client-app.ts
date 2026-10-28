@@ -2144,7 +2144,8 @@ export class ClientApp {
       return;
     }
 
-    this.predictor.step(nowMs, dt, this.eyeX, this.eyeZ, this.clock.renderDelayMs);
+    // The lag the clock actually rendered at, not its target delay: the two differ for hundreds of ms after a late frame moves the target.
+    this.predictor.step(nowMs, dt, this.eyeX, this.eyeZ, this.clock.renderLagMs);
 
     // <b>And then out of the walls, the way the server will.</b> Prediction integrates the intent; without this it
     // walks through a building and reconciliation pulls back against a server that keeps pushing out, which settles

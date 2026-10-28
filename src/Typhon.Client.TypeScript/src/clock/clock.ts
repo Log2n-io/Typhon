@@ -109,6 +109,24 @@ export class Clock {
     return this.delayMs;
   }
 
+  /**
+   * How far behind local time the moment this clock last RENDERED actually is, in milliseconds: the time of the last
+   * {@link update} minus the local instant of its render time. Equal to {@link renderDelayMs} in steady state.
+   *
+   * <b>This, not {@link renderDelayMs}, is the instant a predictor must reconcile at.</b> The delay is a target recomputed on
+   * every frame arrival, and render time only slews toward it (a few percent of the elapsed time per frame), so for the
+   * hundreds of milliseconds after a late frame moves the target the two differ by the full jump. A predictor sampling its
+   * own path at `now − renderDelayMs` then compares the authority with where it was at a DIFFERENT instant: at a swoop's
+   * 40 m/s a 20 ms jump of the target is an 0.8 m error that is corrected, then dragged back as the clock catches up.
+   */
+  get renderLagMs(): number {
+    if (!this.started) {
+      return this.delayMs;
+    }
+
+    return this.lastUpdateMs - (this.renderMs + this.minOffsetMs);
+  }
+
   /** The current tick period in milliseconds. */
   get tickPeriodMs(): number {
     return this.pieceCount > 0 ? this.piecePeriod[this.pieceCount - 1]! : this.pendingPeriodMs;
