@@ -1467,6 +1467,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                     {
                         var chunkStartTs = Stopwatch.GetTimestamp();
                         SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
+                        CorrelationContext.EnterSystem(sysIdx);
                         try
                         {
                             ParallelQueryChunkCallback?.Invoke(sysIdx, chunk, totalChunks, 0);
@@ -1484,6 +1485,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                         }
                         finally
                         {
+                            CorrelationContext.LeaveSystem();
                             SystemAccessValidator.LeaveSystem();
 
                             // WorkUs, as the multi-worker path sums it; one thread, so a plain add.
@@ -1503,6 +1505,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 for (var chunk = 0; chunk < sys.TotalChunks; chunk++)
                 {
                     SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
+                    CorrelationContext.EnterSystem(sysIdx);
                     try
                     {
                         sys.PipelineChunkAction(chunk, sys.TotalChunks);
@@ -1519,6 +1522,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                     }
                     finally
                     {
+                        CorrelationContext.LeaveSystem();
                         SystemAccessValidator.LeaveSystem();
                     }
                 }
@@ -1530,6 +1534,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                           ?? new TickContext { TickNumber = _currentTickNumber, WorldTick = CurrentWorldTick, DeltaTime = 0f, WorkerId = 0, ChunkCount = 1 };
                 ctx.DebugValidateWorkerId(WorkerSlotCount, sys.Name);
                 SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
+                CorrelationContext.EnterSystem(sysIdx);
                 try
                 {
                     sys.CallbackAction(ctx);
@@ -1547,6 +1552,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 }
                 finally
                 {
+                    CorrelationContext.LeaveSystem();
                     SystemAccessValidator.LeaveSystem();
                 }
             }
@@ -1924,6 +1930,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         var success = true;
         ctx.DebugValidateWorkerId(WorkerSlotCount, Systems[sysIdx].Name);
         SystemAccessValidator.EnterSystem(Systems[sysIdx].Access, Systems[sysIdx].Name);
+        CorrelationContext.EnterSystem(sysIdx);
         try
         {
             Systems[sysIdx].CallbackAction(ctx);
@@ -1937,6 +1944,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         }
         finally
         {
+            CorrelationContext.LeaveSystem();
             SystemAccessValidator.LeaveSystem();
             // System lifecycle hook: commit/dispose per-system Transaction
             SystemEndCallback?.Invoke(sysIdx, success);
@@ -2005,6 +2013,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             var workStart = Stopwatch.GetTimestamp();
             InspectorChunkStart(sysIdx, chunk, workStart, totalChunks);
             SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
+            CorrelationContext.EnterSystem(sysIdx);
             try
             {
                 sys.PipelineChunkAction(chunk, totalChunks);
@@ -2017,6 +2026,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             }
             finally
             {
+                CorrelationContext.LeaveSystem();
                 SystemAccessValidator.LeaveSystem();
             }
 
@@ -2157,6 +2167,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             var workStart = Stopwatch.GetTimestamp();
             InspectorChunkStart(sysIdx, chunk, workStart, totalChunks);
             SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
+            CorrelationContext.EnterSystem(sysIdx);
             try
             {
                 ParallelQueryChunkCallback?.Invoke(sysIdx, chunk, totalChunks, workerId);
@@ -2169,6 +2180,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             }
             finally
             {
+                CorrelationContext.LeaveSystem();
                 SystemAccessValidator.LeaveSystem();
             }
 
@@ -2459,6 +2471,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         var success = true;
         ctx.DebugValidateWorkerId(WorkerSlotCount, Systems[sysIdx].Name);
         SystemAccessValidator.EnterSystem(Systems[sysIdx].Access, Systems[sysIdx].Name);
+        CorrelationContext.EnterSystem(sysIdx);
         try
         {
             Systems[sysIdx].CallbackAction(ctx);
@@ -2472,6 +2485,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         }
         finally
         {
+            CorrelationContext.LeaveSystem();
             SystemAccessValidator.LeaveSystem();
             SystemEndCallback?.Invoke(sysIdx, success);
 

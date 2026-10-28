@@ -2,6 +2,7 @@ import type { SpanData, TickData } from '@/libs/profiler/model/traceModel';
 import { TraceEventKind } from '@/libs/profiler/model/types';
 import type { TimeRange, TrackLayout, TrackState } from '@/libs/profiler/model/uiTypes';
 import { appendGaugeTracks } from './gauges/region';
+import { ROOT_COMMANDS_TRACK_ID, ROOT_HTTP_TRACK_ID } from '@/libs/profiler/correlation/rootLanes';
 
 /**
  * Pure layout composer for the main time area. Originally ported from the retired
@@ -74,6 +75,11 @@ export interface BuildLayoutInputs {
   systemVisibility?: Record<number, boolean>;
   gaugeVisibility?: Record<string, boolean>;
   engineOpVisibility?: Record<string, boolean>;
+  /**
+   * Rows of the request-correlation root lanes (#1517) — HTTP requests and client commands — from `packRootLanes`. A lane is emitted only when its
+   * count is above zero, so a capture without correlation lays out exactly as before.
+   */
+  rootRows?: { http: number; commands: number };
 }
 
 export interface LayoutResult {
@@ -122,6 +128,17 @@ export function buildLayout(inputs: BuildLayoutInputs): LayoutResult {
     }
     return expandedBody + TRACK_GAP;
   };
+
+  // Root lanes (#1517) above the slot lanes: what caused the work sits above the work. Collapsible like a fixed track.
+  const pushRootLane = (id: string, label: string, rows: number): void => {
+    if (rows <= 0) return;
+    const state = nonGaugeState(id);
+    const expandedBody = rows * SPAN_ROW_HEIGHT;
+    tracks.push({ id, label, y, height: expandedBody, state, collapsible: true });
+    y += nonGaugeHeight(state, expandedBody);
+  };
+  pushRootLane(ROOT_HTTP_TRACK_ID, 'HTTP Requests', inputs.rootRows?.http ?? 0);
+  pushRootLane(ROOT_COMMANDS_TRACK_ID, 'Commands', inputs.rootRows?.commands ?? 0);
 
   // One lane per active thread slot. Chunk row sits on top (only when the slot ever emitted a chunk);
   // span rows stack below it, sized to the slot's deepest observed depth. Span-only slots skip the

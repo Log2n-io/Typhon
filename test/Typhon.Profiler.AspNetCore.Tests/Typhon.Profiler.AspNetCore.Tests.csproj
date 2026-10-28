@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <IsPackable>false</IsPackable>
+        <LangVersion>default</LangVersion>
+        <Configurations>Debug;Release</Configurations>
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="NUnit" Version="4.6.1" />
+        <PackageReference Include="NUnit3TestAdapter" Version="6.2.0" />
+        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.7.0" />
+        <!-- TestHost, so requests go through the real hosting pipeline (and its Activity) with no port to bind. -->
+        <PackageReference Include="Microsoft.AspNetCore.TestHost" Version="10.0.0" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <FrameworkReference Include="Microsoft.AspNetCore.App" />
+        <ProjectReference Include="..\..\src\Typhon.Profiler.AspNetCore\Typhon.Profiler.AspNetCore.csproj" />
+        <ProjectReference Include="..\..\src\Typhon.Engine\Typhon.Engine.csproj" />
+        <ProjectReference Include="..\..\src\Typhon.Profiler\Typhon.Profiler.csproj" />
+        <!-- The span factories this suite drives are source-generated into the engine; nothing here needs the generator itself. -->
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- The engine tests' ring observer: reads back the records a request produced. -->
+        <Compile Include="..\Typhon.Engine.Tests\Profiler\TraceRingObserver.cs" Link="Shared\TraceRingObserver.cs" />
+    </ItemGroup>
+
+</Project>

@@ -31,6 +31,8 @@ namespace Typhon.Profiler.Events;
 [System.Text.Json.Serialization.JsonDerivedType(typeof(OtherTraceEventDto), "other")]
 [System.Text.Json.Serialization.JsonDerivedType(typeof(QueryDefinitionDescribeEventDto), "queryDefinitionDescribe")]
 [System.Text.Json.Serialization.JsonDerivedType(typeof(QueryArgsEventDto), "queryArgs")]
+[System.Text.Json.Serialization.JsonDerivedType(typeof(ExternalRequestEventDto), "externalRequest")]
+[System.Text.Json.Serialization.JsonDerivedType(typeof(CorrelationInstantEventDto), "correlationInstant")]
 public abstract partial record TraceEventDto
 {
     /// <summary>
@@ -103,6 +105,62 @@ public sealed record OtherTraceEventDto : TraceEventDto
 
     /// <summary>Span duration in microseconds, when <see cref="IsSpan"/> is true.</summary>
     public double? DurationUs { get; init; }
+
+    /// <inheritdoc/>
+    public override byte KindByte => (byte)OriginalKind;
+}
+
+/// <summary>An <see cref="TraceEventKind.ExternalRequest"/>: one HTTP request the host served (#1517).</summary>
+public sealed record ExternalRequestEventDto : TraceSpanEventDto
+{
+    /// <summary>The HTTP method name (<c>Get</c>, <c>Post</c>…).</summary>
+    public string Method { get; init; }
+
+    /// <summary>The response status code.</summary>
+    public int Status { get; init; }
+
+    /// <summary>The endpoint's route template.</summary>
+    public string Route { get; init; }
+
+    /// <inheritdoc/>
+    public override byte KindByte => (byte)TraceEventKind.ExternalRequest;
+}
+
+/// <summary>
+/// One of the correlation lifecycle instants, kinds 236-240 (#1517): a client command received, admitted, dropped or consumed, or a session's frame
+/// sent. <see cref="Event"/> names which; fields that kind does not carry are zero.
+/// </summary>
+public sealed record CorrelationInstantEventDto : TraceEventDto
+{
+    /// <summary>The kind's name: <c>IngressReceived</c>, <c>IngressAdmitted</c>, <c>IngressDropped</c>, <c>CommandConsumed</c> or <c>EgressSent</c>.</summary>
+    public string Event { get; init; }
+
+    /// <summary>The session's raw id.</summary>
+    public long Session { get; init; }
+
+    /// <summary>The command's sequence number.</summary>
+    public int Seq { get; init; }
+
+    /// <summary>The command type's wire index.</summary>
+    public int WireIdx { get; init; }
+
+    /// <summary>Message or frame bytes.</summary>
+    public long Bytes { get; init; }
+
+    /// <summary>The drain tick (admitted) or the frame's tick (sent).</summary>
+    public long Tick { get; init; }
+
+    /// <summary>The consuming system's index.</summary>
+    public int SysIdx { get; init; }
+
+    /// <summary>Why a dropped command was refused.</summary>
+    public string Reason { get; init; }
+
+    /// <summary>Commands acknowledged in a sent frame.</summary>
+    public int Acks { get; init; }
+
+    /// <summary>The numeric kind.</summary>
+    public int OriginalKind { get; init; }
 
     /// <inheritdoc/>
     public override byte KindByte => (byte)OriginalKind;
