@@ -81,6 +81,9 @@ public static partial class TatooineReplication
     /// <summary>Ground height at a point, so a scattered spawn lands ON the terrain rather than at the capital's height.</summary>
     private static Func<float, float, float> SpawnGroundAt;
 
+    /// <summary>Diagnostic switch, read once from <c>SWG_ALT_PROBE</c>; see <c>SimBridge.ProbeAltitude</c>.</summary>
+    private static readonly bool AltitudeProbe = Environment.GetEnvironmentVariable("SWG_ALT_PROBE") == "1";
+
     /// <summary>
     /// Refuses to start a server that cannot host characters.
     /// </summary>
@@ -1103,6 +1106,15 @@ public static partial class TatooineReplication
     {
         var bounds = default(PlayerPlacement);
         bounds.SetAt(profile.LastPosition.X, profile.LastPosition.Z, profile.LastPosition.Y, TatooineData.PlayerBodyHalfM);
+        if (AltitudeProbe && SpawnGroundAt != null)
+        {
+            // SWG_ALT_PROBE (SimBridge.ProbeAltitude): the saved altitude a resumed body starts at, against the terrain under it. Rooms have their
+            // own floor, so only a large gap on realm 0 means anything.
+            var ground = SpawnGroundAt(profile.LastPosition.X, profile.LastPosition.Z);
+            Console.WriteLine(
+                $"[alt-probe] resume realm {profile.LastRealm} at ({profile.LastPosition.X:F1}, {profile.LastPosition.Z:F1}) saved y {profile.LastPosition.Y:F2} "
+                + $"terrain {ground:F2} dy {profile.LastPosition.Y - ground:+0.00;-0.00}");
+        }
 
         var state = new PlayerState
         {

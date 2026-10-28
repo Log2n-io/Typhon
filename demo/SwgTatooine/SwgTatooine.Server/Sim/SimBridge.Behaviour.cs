@@ -423,6 +423,36 @@ public sealed partial class SimBridge
         return true;
     }
 
+    /// <summary>Diagnostic switch, read once from <c>SWG_ALT_PROBE</c>: logs possessed bodies whose altitude is off the terrain under them.</summary>
+    /// <remarks>
+    /// A client read a player's server altitude 35 m below and 18 m above the terrain (2026-10-27). The candidates are a resumed avatar's
+    /// saved altitude, which nothing re-derives while it stands still, and a collision disc's remembered floor. Each line carries what tells
+    /// them apart: the terrain, the disc's floor and whether the body is moving. Off by default; the JIT folds the test away.
+    /// </remarks>
+    private static readonly bool AltitudeProbe = Environment.GetEnvironmentVariable("SWG_ALT_PROBE") == "1";
+
+    /// <summary>How often <see cref="AltitudeProbe"/> samples, in ticks: every 5 s at 50 Hz.</summary>
+    private const long AltitudeProbeEveryTicks = 250;
+
+    /// <summary>Logs one possessed body when its altitude is more than a metre off the terrain.</summary>
+    private void ProbeAltitude(RealmId realm, EntityId body, in PlayerPlacement place, in PlayerMotion move, in PlayerProximity disc)
+    {
+        if (realm.Value >= _config.Planets)
+        {
+            return;
+        }
+
+        var ground = GroundAt(realm, place.X, place.Z);
+        if (MathF.Abs(place.Y - ground) < 1f)
+        {
+            return;
+        }
+
+        Console.WriteLine(
+            $"[alt-probe] {body} at ({place.X:F1}, {place.Z:F1}) y {place.Y:F2} terrain {ground:F2} dy {place.Y - ground:+0.00;-0.00} "
+            + $"disc floor {disc.SurfaceY:F2} disc realm {disc.Realm} vel ({move.VelX:F3}, {move.VelZ:F3})");
+    }
+
     /// <summary>
     /// The A/B switch for rung (c)'s cost, read once from <c>SWG_NO_SLOPE</c>.
     /// </summary>
@@ -623,6 +653,12 @@ public sealed partial class SimBridge
                         stop.VelZ = 0f;
                         stop.DestX = places[idx].X;
                         stop.DestZ = places[idx].Z;
+                    }
+
+                    if (AltitudeProbe && tick % AltitudeProbeEveryTicks == 0)
+                    {
+                        ProbeAltitude(cluster.Realm, cluster.GetEntityId(idx), in places[idx], in motions[idx],
+                            in cluster.GetReadOnlySpan(Player.Proximity)[idx]);
                     }
 
                     skipped++;
