@@ -11,14 +11,28 @@ internal static unsafe class SnapshotSlot
     /// <c>BornTSN</c>/<c>DiedTSN</c> test the chain-walking paths apply (<c>BroadScanAction.Process</c>, <c>MatchAction.Matches</c>).
     /// </summary>
     /// <remarks>
-    /// Returns true unconditionally when the archetype is not Versioned: <c>SingleVersion</c> and <c>Transient</c> are non-MVCC and
-    /// promise no isolation, so gating them would cost a hash lookup per match to enforce a guarantee they do not make. When the record
-    /// cannot be read the entity is treated as visible — the scan already proved it occupied, and dropping it would silently shrink the
-    /// result, the failure mode this whole migration exists to remove (#663).
+    /// <para>
+    /// A zero id is never visible, gated or not: a slot read occupied whose id a release cleared since — a SingleVersion destroy's publish, or the cleanup
+    /// of a hidden one — would otherwise be emitted as <c>Entity.Null</c> (#1247).
+    /// </para>
+    /// <para>
+    /// Otherwise true without a lookup when the archetype is not Versioned: <c>SingleVersion</c> and <c>Transient</c> are non-MVCC and promise no isolation,
+    /// so gating them would cost a hash lookup per match to enforce a guarantee they do not make.
+    /// </para>
+    /// <para>
+    /// A missing record is NOT visible. Every occupied slot has its record from PREPARE (VIS-08) until the cleanup removes it, which happens only once the
+    /// entity is dead to every snapshot at or above <c>MinTSN</c> — this reader's included. The fail-open this replaces emitted a slot the cleanup was
+    /// releasing between the scan's occupancy read and its probe (#1247).
+    /// </para>
     /// </remarks>
     internal static bool IsVisibleAtSnapshot(long rawId, bool visGated, ArchetypeEngineState visState, byte* visBuf, int visRecordSize, long txTsn,
         CommitCardTable cards, ref ChunkAccessor<PersistentStore> visAccessor)
     {
+        if (rawId == 0)
+        {
+            return false;
+        }
+
         if (!visGated || visState == null)
         {
             return true;
@@ -27,7 +41,7 @@ internal static unsafe class SnapshotSlot
         var key = EntityId.FromRaw(rawId).EntityKey;
         if (!visState.EntityMap.TryGet(key, visBuf, ref visAccessor))
         {
-            return true;
+            return false;
         }
 
         // Born after this snapshot — the phantom the fixed snapshot must hide — or died at or before it; a pending born through its owner's card (VIS-08).

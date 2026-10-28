@@ -1204,8 +1204,8 @@ internal abstract class EcsViewFieldReader
 }
 
 /// <summary>
-/// Typed implementation that reads component <typeparamref name="T"/> via <see cref="EntityAccessor.Open(EntityId)"/> +
-/// <see cref="EntityRef.TryRead{T}(out T)"/>.
+/// Typed implementation that reads component <typeparamref name="T"/> as committed at the refreshing transaction's snapshot
+/// (<see cref="Transaction.TryReadCommitted{T}"/>).
 /// </summary>
 internal sealed unsafe class EcsViewFieldReader<T> : EcsViewFieldReader where T : unmanaged
 {
@@ -1213,10 +1213,9 @@ internal sealed unsafe class EcsViewFieldReader<T> : EcsViewFieldReader where T 
 
     public override bool CheckOtherFields(long pk, FieldEvaluator[] evaluators, int skipFieldIndex, Transaction tx)
     {
-        var entityId = EntityId.FromRaw(pk);
-        // TryOpen: an entry can name an entity the refresh's snapshot does not see — spawned and destroyed since — which Open throws for. Not visible
-        // is not in the view.
-        if (!tx.TryOpen(entityId, out var entity) || !entity.TryRead<T>(out var comp))
+        // Committed at the refresh's snapshot (#1247): never the refresher's own unpublished write, which a rollback would leave in the view for good. An
+        // entry can name an entity the snapshot does not see — spawned and destroyed since: not visible is not in the view.
+        if (!tx.TryReadCommitted<T>(pk, true, out var comp))
         {
             return false;
         }
@@ -1245,10 +1244,9 @@ internal sealed unsafe class EcsViewFieldReader<T> : EcsViewFieldReader where T 
             return true; // Only one field in this branch, and it already passed
         }
 
-        var entityId = EntityId.FromRaw(pk);
-        // TryOpen: an entry can name an entity the refresh's snapshot does not see — spawned and destroyed since — which Open throws for. Not visible
-        // is not in the view.
-        if (!tx.TryOpen(entityId, out var entity) || !entity.TryRead<T>(out var comp))
+        // Committed at the refresh's snapshot (#1247): never the refresher's own unpublished write, which a rollback would leave in the view for good. An
+        // entry can name an entity the snapshot does not see — spawned and destroyed since: not visible is not in the view.
+        if (!tx.TryReadCommitted<T>(pk, true, out var comp))
         {
             return false;
         }
@@ -1272,10 +1270,9 @@ internal sealed unsafe class EcsViewFieldReader<T> : EcsViewFieldReader where T 
 
     public override bool EvaluateAllFields(long pk, FieldEvaluator[] evaluators, Transaction tx)
     {
-        var entityId = EntityId.FromRaw(pk);
-        // TryOpen: an entry can name an entity the refresh's snapshot does not see — spawned and destroyed since — which Open throws for. Not visible
-        // is not in the view.
-        if (!tx.TryOpen(entityId, out var entity) || !entity.TryRead<T>(out var comp))
+        // Committed at the refresh's snapshot (#1247): never the refresher's own unpublished write, which a rollback would leave in the view for good. An
+        // entry can name an entity the snapshot does not see — spawned and destroyed since: not visible is not in the view.
+        if (!tx.TryReadCommitted<T>(pk, true, out var comp))
         {
             return false;
         }

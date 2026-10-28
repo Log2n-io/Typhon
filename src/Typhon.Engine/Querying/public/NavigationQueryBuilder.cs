@@ -57,6 +57,14 @@ public class NavigationQueryBuilder<TSource, TTarget> where TSource : unmanaged 
         [CallerFilePath]   string callerFile = null,
         [CallerLineNumber] int    callerLine = 0,
         [CallerMemberName] string callerMethod = null)
+        => ToViewAt(null, bufferCapacity, callerFile, callerLine, callerMethod);
+
+    /// <summary>
+    /// <see cref="ToView"/>, populated at <paramref name="creator"/>'s snapshot when given (#1247): a view built from a transaction's query answers what that
+    /// query would, as <c>EcsQuery.ToView</c> does — a fresh transaction held a newer snapshot, so the view held sources spawned after the creator's and
+    /// dropped ones destroyed after it. Null: a fresh transaction, for a builder made from the engine.
+    /// </summary>
+    internal ViewBase ToViewAt(Transaction creator, int bufferCapacity, string callerFile, int callerLine, string callerMethod)
     {
         if (_sourcePredicates.Count == 0 && _targetPredicates.Count == 0)
         {
@@ -107,15 +115,28 @@ public class NavigationQueryBuilder<TSource, TTarget> where TSource : unmanaged 
         }
 
         // Populate initial entity set by scanning all archetype EntityMaps containing TSource
-        using var tx = _dbe.CreateQuickTransaction();
-        view.PopulateFromEntityMaps(tx);
+        if (creator != null)
+        {
+            Populate(view, creator);
+        }
+        else
+        {
+            using var tx = _dbe.CreateQuickTransaction();
+            Populate(view, tx);
+        }
 
-        // Drain any concurrent entries that arrived during population (engine-internal — no user execution site)
-        view.RefreshFromScheduler(tx);
         view.ClearDelta();
         view.OweRefreshFull();
 
         return view;
+    }
+
+    private static void Populate(NavigationView<TSource, TTarget> view, Transaction tx)
+    {
+        view.PopulateFromEntityMaps(tx);
+
+        // Drain any concurrent entries that arrived during population (engine-internal — no user execution site)
+        view.RefreshFromScheduler(tx);
     }
 
     /// <summary>Expose resolved tables, FK field, and evaluators for external execution (e.g., EntityMap-based navigation).</summary>

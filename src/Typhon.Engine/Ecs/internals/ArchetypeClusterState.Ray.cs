@@ -289,7 +289,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// infinities the division produces — the comparisons below reject correctly when the origin is outside the slab on that axis and leave the interval
     /// untouched when it is inside, which is why there is no special case for it.
     /// </remarks>
-    private static bool RayHitsBox(double ox, double oy, double oz, double dx, double dy, double dz, double maxDistance, double minX, double minY,
+    internal static bool RayHitsBox(double ox, double oy, double oz, double dx, double dy, double dz, double maxDistance, double minX, double minY,
         double minZ, double maxX, double maxY, double maxZ, out double tEntry)
     {
         double tMin = 0d;

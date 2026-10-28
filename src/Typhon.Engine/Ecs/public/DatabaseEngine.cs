@@ -1893,7 +1893,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 else
                 {
                     // A destroy of a Versioned archetype hid its slot rather than release it (VIS-09): released now, no snapshot seeing the entity alive.
-                    ReleaseHiddenDestroySlot(meta, engineState, readBuf, changeSet);
+                    ReleaseHiddenDestroySlot(meta, engineState, readBuf, entry.Id, changeSet);
 
                     // Remove from LinearHash. The ChangeSet is threaded through even though Remove does not currently read it — the accessor above carries
                     // the dirty marks — so the call does not read as though this write is exempt from ownership.
@@ -1907,10 +1907,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
     }
 
-    /// <summary>The cleanup's release of a destroyed entity's hidden slot (VIS-09), named by its record; a slot not claimed-and-unoccupied is not one.</summary>
-    private unsafe void ReleaseHiddenDestroySlot(ArchetypeMetadata meta, ArchetypeEngineState engineState, byte* record, ChangeSet changeSet)
+    /// <summary>
+    /// The cleanup's release of a destroyed entity's hidden slot (VIS-09), named by its record: only in an archetype whose destroys hide (a Versioned
+    /// component), and only while the slot is claimed, unoccupied and still holds <paramref name="destroyed"/>.
+    /// </summary>
+    /// <remarks>
+    /// A SingleVersion or Transient archetype released the slot at the destroy's publish, so a spawn may have claimed it since — claimed and unoccupied too,
+    /// until its own publish. Releasing on "claimed and unoccupied" alone wiped that spawn's id and enabled bits and freed its claim: the live entity vanished
+    /// from queries, and a second claim of the slot inside one spawn batch spun its <c>LockSlotIndexes</c> forever (#1247).
+    /// </remarks>
+    private unsafe void ReleaseHiddenDestroySlot(ArchetypeMetadata meta, ArchetypeEngineState engineState, byte* record, EntityId destroyed, ChangeSet changeSet)
     {
-        if (!meta.IsClusterEligible || engineState.ClusterState is not { ClusterSegment: not null } clusterState)
+        if (!meta.IsClusterEligible || meta.VersionedSlotMask == 0 || engineState.ClusterState is not { ClusterSegment: not null } clusterState)
         {
             return;
         }
@@ -1921,7 +1929,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         try
         {
             var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId, true);
-            if (clusterState.IsHidden(clusterBase, clusterChunkId, slotIndex))
+            if (clusterState.IsHidden(clusterBase, clusterChunkId, slotIndex)
+                && *(long*)(clusterBase + clusterState.Layout.EntityIdsOffset + slotIndex * 8) == (long)destroyed.RawValue)
             {
                 clusterState.ReleaseHiddenSlot(clusterBase, clusterChunkId, slotIndex, changeSet, clusterState.SpatialOfCluster(clusterChunkId).Grid);
             }
