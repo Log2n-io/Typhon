@@ -77,10 +77,13 @@ internal sealed unsafe partial class SessionTable : IDisposable
     private readonly SessionEvents _events;
     private readonly int _capacity;
 
-    // Nulled by Dispose, after the caller gate has drained: a late caller must find "gone" rather than a pointer into freed memory.
+    // The block and where its regions start. The bases are written once, here, and never again: Dispose zeroes the regions' length (_blockSlots) after the
+    // caller gate has drained, so a late caller indexes an empty table. Nothing indexes the bases directly — every indexed access goes through the spans
+    // below. The two header words are single fixed-offset words with no index to check, which is why they are dereferenced directly, and nulled by Dispose.
     private PinnedMemoryBlock _memory;
-    private SessionRow* _rows;
-    private uint* _freeIds;
+    private int _blockSlots;
+    private readonly SessionRow* _rows;
+    private readonly uint* _freeIds;
     private long* _freeHead;
     private int* _pushLock;
 
@@ -112,8 +115,8 @@ internal sealed unsafe partial class SessionTable : IDisposable
     // Resume (01-model § 3), all three committed only when ResumeGraceMs is above zero. The tokens are two words per slot, minted at Open and read for the
     // WELCOME; the records outlive their slots, which is what a pending resume is; the appData is the handle the application re-binds with. See
     // SessionTable.Resume.cs, which is where every one of them is written.
-    private ulong* _openTokens;
-    private ResumeRecord* _resumes;
+    private readonly ulong* _openTokens;
+    private readonly ResumeRecord* _resumes;
     private readonly object[] _resumeAppData;
     private readonly long _resumeGraceTicks;
     private readonly int _maxPendingResumes;
@@ -125,8 +128,8 @@ internal sealed unsafe partial class SessionTable : IDisposable
     private readonly List<int> _closedLastTick = [];
     private readonly List<int> _awaitingSends = [];
 
-    /// <summary>Callers inside a member that dereferences the block, plus the disposing latch in the sign bit. Padded: transport threads move it.</summary>
-    private CacheLinePaddedInt _callers;
+    /// <summary>Callers inside a member that dereferences the block, and the disposing latch. A line of its own: transport threads move it.</summary>
+    private CallerGate _callers;
 
     private ReplicationThreadAffinity _affinity;
     private int _openCount;
@@ -135,7 +138,10 @@ internal sealed unsafe partial class SessionTable : IDisposable
     /// Creates the table and commits its rows.
     /// </summary>
     /// <param name="id">Stable resource id for the backing allocation.</param>
-    /// <param name="parent">Resource-graph parent the allocation registers under.</param>
+    /// <param name="parent">
+    /// Resource-graph parent the allocation registers under. Its disposal must not reach the block before <see cref="Dispose"/> does: a cascade that frees it
+    /// bypasses the caller gate, and a send pump then reads freed rows (SUB-38, #1508).
+    /// </param>
     /// <param name="allocator">Engine allocator.</param>
     /// <param name="options">Operator configuration; <see cref="SubscriptionsOptions.MaxSessions"/> fixes the table's size for its lifetime.</param>
     /// <param name="events">The lifecycle stream this table produces into.</param>
@@ -204,6 +210,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
         _freeHead = (long*)_memory.DataAsPointer;
         _pushLock = (int*)(_memory.DataAsPointer + sizeof(long));
         _rows = (SessionRow*)(_memory.DataAsPointer + HeaderBytes);
+        _blockSlots = _capacity;
         if (_resumeGraceTicks > 0)
         {
             _openTokens = (ulong*)(_memory.DataAsPointer + HeaderBytes + rowBytes);
@@ -230,20 +237,41 @@ internal sealed unsafe partial class SessionTable : IDisposable
         // it readable. Generation starts at 1 — zero is never issued, so a default SessionId cannot name a live session.
         for (var slot = _capacity - 1; slot >= 0; slot--)
         {
-            _freeIds[_capacity - 1 - slot] = new SessionId((ushort)slot, 1).Value;
+            FreeIds[_capacity - 1 - slot] = new SessionId((ushort)slot, 1).Value;
             _openIndexBySlot[slot] = -1;
 
             // -1, not the zero the allocation came with: a record's links name slots, and slot 0 is a slot. Zeroed memory would make every record claim to be
             // linked to the first one.
-            if (_resumes != null)
+            if (ResumeEnabled)
             {
-                _resumes[slot].Prev = -1;
-                _resumes[slot].Next = -1;
+                Resumes[slot].Prev = -1;
+                Resumes[slot].Next = -1;
             }
         }
 
         *_freeHead = _capacity;
     }
+
+    // ── the block, bounds-checked ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // Spans rather than pointer arithmetic (#1508): an out-of-range slot throws IndexOutOfRangeException where it was used, rather than reading or writing
+    // past the row it meant. A span checks the INDEX and nothing else — it says nothing about whether the block is still allocated. That is the caller gate's
+    // job and the block's single owner's (SUB-38): a span over freed native memory reads freed memory exactly as the pointer did. Dispose zeroes the length
+    // and leaves the bases, so a tick-side read past the scheduler's bounded join finds an empty table — never a span of the table's length over null.
+    //
+    // Built with no check of their own (CreateSpan), and a member that has already compared the slot with the length lets the JIT drop the span's check as
+    // redundant: TryGetRow compiles to the pointer version's loads, compares and branches. Measured against the pointer form on the members the pumps and
+    // the tick call per session (#1508), in eight interleaved Release pairs: medians within ±4 %, under the 5 % that would justify keeping raw indexing.
+
+    private Span<SessionRow> Rows => MemoryMarshal.CreateSpan(ref Unsafe.AsRef<SessionRow>(_rows), _blockSlots);
+
+    private Span<uint> FreeIds => MemoryMarshal.CreateSpan(ref Unsafe.AsRef<uint>(_freeIds), _blockSlots);
+
+    /// <summary>Two words per slot, low then high; empty when resume is off, and once the table is disposed.</summary>
+    private Span<ulong> OpenTokens => new(_openTokens, ResumeEnabled ? _blockSlots * 2 : 0);
+
+    /// <summary>One record per slot; empty when resume is off, and once the table is disposed.</summary>
+    private Span<ResumeRecord> Resumes => new(_resumes, ResumeEnabled ? _blockSlots : 0);
 
     /// <summary>How many sessions may be connected at once.</summary>
     public int Capacity => _capacity;
@@ -307,7 +335,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
                     return false;
                 }
 
-                var candidate = Volatile.Read(ref _freeIds[top - 1]);
+                var candidate = Volatile.Read(ref FreeIds[top - 1]);
                 var next = Pack((ulong)packed >> 32, top - 1);
                 if (Interlocked.CompareExchange(ref *_freeHead, next, packed) != packed)
                 {
@@ -318,7 +346,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
 
                 // The row is free — nothing else holds this identity, so the exchange cannot lose. It marks the row taken so a release can be told apart from
                 // a double release, and so a lookup on the leased identity answers "not a session yet" rather than reading a half-written row.
-                var previous = Interlocked.Exchange(ref (_rows + leased.Slot)->Gate, candidate | GateLeasedBit);
+                var previous = Interlocked.Exchange(ref Rows[leased.Slot].Gate, candidate | GateLeasedBit);
                 Debug.Assert(previous == 0, "a leased slot's gate must have been free");
 
                 session = leased;
@@ -361,12 +389,12 @@ internal sealed unsafe partial class SessionTable : IDisposable
 
         try
         {
-            var row = _rows + session.Slot;
+            ref var row = ref Rows[session.Slot];
             var leased = session.Value | GateLeasedBit;
 
             // One CAS decides it: only the gate value a lease leaves behind may be released, so the second caller of a double release finds the row free and
             // answers false rather than pushing the identity twice — which would hand one slot to two connections at once.
-            if (Interlocked.CompareExchange(ref row->Gate, 0, leased) != leased)
+            if (Interlocked.CompareExchange(ref row.Gate, 0, leased) != leased)
             {
                 return false;
             }
@@ -415,9 +443,9 @@ internal sealed unsafe partial class SessionTable : IDisposable
 
         try
         {
-            var row = _rows + slot;
+            ref var row = ref Rows[slot];
             var leased = session.Value | GateLeasedBit;
-            if (Volatile.Read(ref row->Gate) != leased)
+            if (Volatile.Read(ref row.Gate) != leased)
             {
                 throw new InvalidOperationException(
                     $"{session} does not hold a lease on its slot. A session is opened exactly once, by the thread that leased it; opening a released or " +
@@ -443,19 +471,19 @@ internal sealed unsafe partial class SessionTable : IDisposable
             // writes it.
             MintResumeToken(slot);
 
-            row->State = (int)SessionSlotState.Admitted;
-            row->Role = (byte)admission.Role;
-            row->Flags = limits.AllowDebug ? SessionRowFlags.AllowDebug : (byte)0;
-            row->CloseCode = 0;
-            row->CloseReason = 0;
-            row->Resumable = 0;
-            row->BytesPerSecond = limits.BytesPerSecond;
-            row->VisibilityMask = 0;
-            row->MaxObservers = Resolve(limits.MaxObservers, _options.ObserversPerSession);
-            row->FrameBytes = Resolve(limits.FrameBytes, _options.FrameBytes);
-            row->ClientMessageBytes = Resolve(limits.ClientMessageBytes, _options.ClientMessageBytes);
-            row->Controlled = EntityId.Null;
-            row->Followed = EntityId.Null;
+            row.State = (int)SessionSlotState.Admitted;
+            row.Role = (byte)admission.Role;
+            row.Flags = limits.AllowDebug ? SessionRowFlags.AllowDebug : (byte)0;
+            row.CloseCode = 0;
+            row.CloseReason = 0;
+            row.Resumable = 0;
+            row.BytesPerSecond = limits.BytesPerSecond;
+            row.VisibilityMask = 0;
+            row.MaxObservers = Resolve(limits.MaxObservers, _options.ObserversPerSession);
+            row.FrameBytes = Resolve(limits.FrameBytes, _options.FrameBytes);
+            row.ClientMessageBytes = Resolve(limits.ClientMessageBytes, _options.ClientMessageBytes);
+            row.Controlled = EntityId.Null;
+            row.Followed = EntityId.Null;
             _viewpoints[session.Slot] = default;
             _realms[session.Slot] = -1;
             _radii[session.Slot] = 0d;
@@ -470,7 +498,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
             // Release: everything above must be visible to the tick before the gate that makes the row reachable. Dropping the lease mark in the same store is
             // what makes "leased" and "open" one state rather than two fields a reader could catch out of step. On arm64 this is the store that costs
             // something, and it is the only one on this path that does.
-            if (Interlocked.CompareExchange(ref row->Gate, session.Value, leased) != leased)
+            if (Interlocked.CompareExchange(ref row.Gate, session.Value, leased) != leased)
             {
                 throw new InvalidOperationException(
                     $"{session} lost its lease while it was being opened; a lease is released by its own thread or not at all.");
@@ -572,7 +600,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
 
         try
         {
-            return TryGetRow(session, out var row) && Volatile.Read(ref row->State) == (int)SessionSlotState.Open;
+            return TryGetRow(session, out var row) && Volatile.Read(ref row.Value.State) == (int)SessionSlotState.Open;
         }
         finally
         {
@@ -623,7 +651,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
                 throw new InvalidOperationException($"{session} is not a live session; its slot has been recycled or it never existed.");
             }
 
-            var view = new SessionRowView(row);
+            var view = new SessionRowView(ref row.Value);
 
             // Re-validated after the copy: the fields were read one at a time, so an identity that changed during the read would have handed back a mix of two
             // occupants rather than either one.
@@ -903,7 +931,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
             return false;
         }
 
-        var state = (SessionSlotState)Volatile.Read(ref row->State);
+        var state = (SessionSlotState)Volatile.Read(ref row.Value.State);
         if (state is not (SessionSlotState.Admitted or SessionSlotState.Open))
         {
             return false;
@@ -915,20 +943,20 @@ internal sealed unsafe partial class SessionTable : IDisposable
         // resumable there left the application holding a body that no event would ever release. Found by the SWG demo's own A13 cases.
         if (resumable)
         {
-            resumable = _resumes != null && ArmResume(session, _appData[session.Slot]);
+            resumable = ResumeEnabled && ArmResume(session, _appData[session.Slot]);
         }
 
-        row->CloseCode = code;
-        row->CloseReason = (byte)reason;
-        row->Resumable = resumable ? (byte)1 : (byte)0;
+        row.Value.CloseCode = code;
+        row.Value.CloseReason = (byte)reason;
+        row.Value.Resumable = resumable ? (byte)1 : (byte)0;
         _closeReasons[session.Slot] = detail;
 
-        Volatile.Write(ref row->State, (int)SessionSlotState.Closing);
+        Volatile.Write(ref row.Value.State, (int)SessionSlotState.Closing);
 
         // Tick side only, so a plain add; readers on other threads take it through Volatile.Read.
         Volatile.Write(ref _closesByReason[(int)reason & 15], _closesByReason[(int)reason & 15] + 1);
 
-        _events.Append(new SessionEvent(SessionEventKind.Closed, session, (SessionRole)row->Role, _declaredLimits[session.Slot],
+        _events.Append(new SessionEvent(SessionEventKind.Closed, session, (SessionRole)row.Value.Role, _declaredLimits[session.Slot],
             _appData[session.Slot], _sessionKinds[session.Slot], null, null, SessionId.None, reason, code, resumable));
         if (TelemetryConfig.SubscriptionsSessionChangesActive)
         {
@@ -974,10 +1002,10 @@ internal sealed unsafe partial class SessionTable : IDisposable
 
         try
         {
-            var row = _rows + session.Slot;
+            ref var row = ref Rows[session.Slot];
             while (true)
             {
-                var observed = Volatile.Read(ref row->Gate);
+                var observed = Volatile.Read(ref row.Gate);
                 if (!GateNames(observed, session) || (observed & GateCloseRequestedBit) != 0)
                 {
                     return false;
@@ -988,7 +1016,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
                     | (((byte)reason & GateCloseReasonMax) << GateCloseReasonShift)
                     | ((long)code << GateCloseCodeShift);
 
-                if (Interlocked.CompareExchange(ref row->Gate, next, observed) == observed)
+                if (Interlocked.CompareExchange(ref row.Gate, next, observed) == observed)
                 {
                     return true;
                 }
@@ -1020,8 +1048,8 @@ internal sealed unsafe partial class SessionTable : IDisposable
             for (var i = _openSlots.Count - 1; i >= 0; i--)
             {
                 var slot = _openSlots[i];
-                var row = _rows + slot;
-                var observed = Volatile.Read(ref row->Gate);
+                ref var row = ref Rows[slot];
+                var observed = Volatile.Read(ref row.Gate);
                 if ((observed & GateCloseRequestedBit) == 0)
                 {
                     continue;
@@ -1033,13 +1061,13 @@ internal sealed unsafe partial class SessionTable : IDisposable
 
                 while (true)
                 {
-                    var current = Volatile.Read(ref row->Gate);
+                    var current = Volatile.Read(ref row.Gate);
                     if ((current & GateCloseRequestedBit) == 0)
                     {
                         break;
                     }
 
-                    if (Interlocked.CompareExchange(ref row->Gate, current & ~GateCloseMask, current) == current)
+                    if (Interlocked.CompareExchange(ref row.Gate, current & ~GateCloseMask, current) == current)
                     {
                         break;
                     }
@@ -1092,7 +1120,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
         {
             // Before the batch is taken, so a grace that elapsed since the last tick is delivered in THIS one rather than waiting for the next: an
             // application that destroys an avatar on ResumeExpired should not hold it a tick longer than the operator's number says.
-            if (_resumes != null)
+            if (ResumeEnabled)
             {
                 ExpireResumes();
             }
@@ -1105,19 +1133,19 @@ internal sealed unsafe partial class SessionTable : IDisposable
             {
                 ref readonly var e = ref batch[i];
                 var slot = e.Session.Slot;
-                var row = _rows + slot;
-                if (!GateNames(Volatile.Read(ref row->Gate), e.Session))
+                ref var row = ref Rows[slot];
+                if (!GateNames(Volatile.Read(ref row.Gate), e.Session))
                 {
                     continue;
                 }
 
-                var state = Volatile.Read(ref row->State);
+                var state = Volatile.Read(ref row.State);
                 switch (e.Kind)
                 {
                     case SessionEventKind.Opened:
                         if (state == (int)SessionSlotState.Admitted)
                         {
-                            Volatile.Write(ref row->State, (int)SessionSlotState.Open);
+                            Volatile.Write(ref row.State, (int)SessionSlotState.Open);
                             AddOpen(slot);
                         }
 
@@ -1126,7 +1154,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
                     case SessionEventKind.Closed:
                         if (state == (int)SessionSlotState.Closing)
                         {
-                            Volatile.Write(ref row->State, (int)SessionSlotState.ClosedDelivered);
+                            Volatile.Write(ref row.State, (int)SessionSlotState.ClosedDelivered);
                             RemoveOpen(slot);
                             _closedLastTick.Add(slot);
                         }
@@ -1166,10 +1194,10 @@ internal sealed unsafe partial class SessionTable : IDisposable
 
         try
         {
-            var row = _rows + session.Slot;
+            ref var row = ref Rows[session.Slot];
             while (true)
             {
-                var observed = Volatile.Read(ref row->Gate);
+                var observed = Volatile.Read(ref row.Gate);
                 if (!GateNames(observed, session))
                 {
                     return false;
@@ -1182,7 +1210,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
                     return false;
                 }
 
-                if (Interlocked.CompareExchange(ref row->Gate, WithSends(observed, sends + 1), observed) == observed)
+                if (Interlocked.CompareExchange(ref row.Gate, WithSends(observed, sends + 1), observed) == observed)
                 {
                     return true;
                 }
@@ -1210,10 +1238,10 @@ internal sealed unsafe partial class SessionTable : IDisposable
 
         try
         {
-            var row = _rows + session.Slot;
+            ref var row = ref Rows[session.Slot];
             while (true)
             {
-                var observed = Volatile.Read(ref row->Gate);
+                var observed = Volatile.Read(ref row.Gate);
 
                 // The row cannot have been recycled under a matched BeginSend: a recycle refuses while the counter is non-zero, and the counter and the
                 // identity move in the same word. An unmatched EndSend is a caller bug, and answering it with nothing is better than a negative counter.
@@ -1222,7 +1250,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
                     return;
                 }
 
-                if (Interlocked.CompareExchange(ref row->Gate, WithSends(observed, GateSends(observed) - 1), observed) == observed)
+                if (Interlocked.CompareExchange(ref row.Gate, WithSends(observed, GateSends(observed) - 1), observed) == observed)
                 {
                     return;
                 }
@@ -1246,7 +1274,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
 
         try
         {
-            var observed = Volatile.Read(ref (_rows + session.Slot)->Gate);
+            var observed = Volatile.Read(ref Rows[session.Slot].Gate);
             return GateNames(observed, session) ? GateSends(observed) : 0;
         }
         finally
@@ -1310,9 +1338,9 @@ internal sealed unsafe partial class SessionTable : IDisposable
                 return false;
             }
 
-            if (row->Controlled != entity)
+            if (row.Value.Controlled != entity)
             {
-                row->Controlled = entity;
+                row.Value.Controlled = entity;
                 Interlocked.Increment(ref _controlVersion);
             }
 
@@ -1346,7 +1374,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
                 return false;
             }
 
-            row->Followed = entity;
+            row.Value.Followed = entity;
             return true;
         }
         finally
@@ -1358,7 +1386,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
     /// <summary>The entity a session follows, or <see cref="EntityId.Null"/>. Tick side, like <see cref="ControlledOf"/> and for the same reason.</summary>
     /// <param name="session">The identity.</param>
     /// <returns>The entity.</returns>
-    public EntityId FollowedOf(SessionId session) => TryGetRow(session, out var row) ? row->Followed : EntityId.Null;
+    public EntityId FollowedOf(SessionId session) => TryGetRow(session, out var row) ? row.Value.Followed : EntityId.Null;
 
     /// <summary>
     /// Both of a session's anchor entities in one row read: what it controls, and what its viewpoint follows.
@@ -1376,8 +1404,8 @@ internal sealed unsafe partial class SessionTable : IDisposable
     {
         if (TryGetRow(session, out var row))
         {
-            controlled = row->Controlled;
-            followed = row->Followed;
+            controlled = row.Value.Controlled;
+            followed = row.Value.Followed;
             return;
         }
 
@@ -1420,7 +1448,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
 
             _realms[session.Slot] = RealmId.NoneValue;
             _viewpoints[session.Slot] = default;
-            _events.Append(new SessionEvent(SessionEventKind.RealmClosed, session, (SessionRole)row->Role, _declaredLimits[session.Slot],
+            _events.Append(new SessionEvent(SessionEventKind.RealmClosed, session, (SessionRole)row.Value.Role, _declaredLimits[session.Slot],
                 _appData[session.Slot], _sessionKinds[session.Slot], null, null, SessionId.None, default, 0, false, new RealmId(realm)));
             return true;
         }
@@ -1456,7 +1484,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
                 return false;
             }
 
-            _events.Append(new SessionEvent(SessionEventKind.Degraded, session, (SessionRole)row->Role, _declaredLimits[session.Slot],
+            _events.Append(new SessionEvent(SessionEventKind.Degraded, session, (SessionRole)row.Value.Role, _declaredLimits[session.Slot],
                 _appData[session.Slot], _sessionKinds[session.Slot], null, null, SessionId.None, default, 0, false, default, level));
             return true;
         }
@@ -1475,32 +1503,32 @@ internal sealed unsafe partial class SessionTable : IDisposable
     /// here bounced its line on every session. The row's identity is checked with the acquire load <see cref="TryGetRow"/> makes, and <c>Controlled</c> is
     /// written only on the tick.
     /// </remarks>
-    public EntityId ControlledOf(SessionId session) => TryGetRow(session, out var row) ? row->Controlled : EntityId.Null;
+    public EntityId ControlledOf(SessionId session) => TryGetRow(session, out var row) ? row.Value.Controlled : EntityId.Null;
 
     /// <summary>A session's outbound byte budget, 0 for none. Tick side, without the gate, as <see cref="ControlledOf"/>: written only on the tick.</summary>
     /// <param name="session">The identity.</param>
     /// <returns>The budget in bytes per second.</returns>
-    public int BudgetOf(SessionId session) => TryGetRow(session, out var row) ? row->BytesPerSecond : 0;
+    public int BudgetOf(SessionId session) => TryGetRow(session, out var row) ? row.Value.BytesPerSecond : 0;
 
     /// <summary>
     /// The largest frame a session may be sent (<see cref="SessionLimits.FrameBytes"/>, resolved against the operator's ceiling), 0 when the identity is
     /// stale. Tick side, without the gate: written before the session is opened, never after.
     /// </summary>
-    public int FrameBytesOf(SessionId session) => TryGetRow(session, out var row) ? row->FrameBytes : 0;
+    public int FrameBytesOf(SessionId session) => TryGetRow(session, out var row) ? row.Value.FrameBytes : 0;
 
     /// <summary>Tests only: a session's frame limit, as an admission's <see cref="SessionLimits.FrameBytes"/> would set it, resolved the same way.</summary>
     internal void SetFrameBytesForTest(SessionId session, int frameBytes)
     {
         if (TryGetRow(session, out var row))
         {
-            row->FrameBytes = Resolve(frameBytes, _options.FrameBytes);
+            row.Value.FrameBytes = Resolve(frameBytes, _options.FrameBytes);
         }
     }
 
     /// <summary>A session's visibility tag mask (14 § 6), 0 for public only. Tick side, without the gate, as <see cref="ControlledOf"/>.</summary>
     /// <param name="session">The identity.</param>
     /// <returns>The mask.</returns>
-    public uint VisibilityOf(SessionId session) => TryGetRow(session, out var row) ? row->VisibilityMask : 0u;
+    public uint VisibilityOf(SessionId session) => TryGetRow(session, out var row) ? row.Value.VisibilityMask : 0u;
 
     /// <summary>Sets a session's visibility tag mask. Tick side, from the request log; the frame assembler resets the session's view when it changed.</summary>
     /// <param name="session">The identity.</param>
@@ -1520,7 +1548,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
                 return false;
             }
 
-            row->VisibilityMask = mask;
+            row.Value.VisibilityMask = mask;
             return true;
         }
         finally
@@ -1572,7 +1600,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
                 return false;
             }
 
-            row->BytesPerSecond = bytesPerSecond;
+            row.Value.BytesPerSecond = bytesPerSecond;
             return true;
         }
         finally
@@ -1597,37 +1625,51 @@ internal sealed unsafe partial class SessionTable : IDisposable
         return next == 0 ? (ushort)1 : next;
     }
 
+    /// <summary>A reference to one row, as an <c>out</c> value: what a pointer used to carry, without the arithmetic.</summary>
+    private readonly ref struct RowRef
+    {
+        public readonly ref SessionRow Value;
+
+        public RowRef(ref SessionRow value) => Value = ref value;
+    }
+
     /// <summary>Finds the row behind an identity, checking the generation.</summary>
     /// <param name="session">The identity.</param>
-    /// <param name="row">The row, or <see langword="null"/>.</param>
+    /// <param name="row">The row, or a null reference.</param>
     /// <returns><see langword="false"/> for a stale or unknown identity.</returns>
-    /// <remarks>Callers hold the caller gate, so the block is alive for the whole of the call.</remarks>
+    /// <remarks>
+    /// Callers hold the caller gate, so the block is alive for the whole of the call. A <see langword="bool"/> and an <c>out</c> rather than a ref return
+    /// that may be null: the JIT threads the caller's test on the result straight into its branch, where a null-reference check on a returned ref costs one
+    /// more compare on the found path — measured at 7-10 % on the one-field getters, which are called per session per tick.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private bool TryGetRow(SessionId session, out SessionRow* row)
+    private bool TryGetRow(SessionId session, out RowRef row)
     {
+        var rows = Rows;
         var slot = session.Slot;
-        if (slot >= _capacity || !session.IsValid)
+        if ((uint)slot >= (uint)rows.Length || !session.IsValid)
         {
-            row = null;
+            row = default;
             return false;
         }
 
-        var candidate = _rows + slot;
+        ref var candidate = ref rows[slot];
 
         // Acquire: pairs with Open's release store, so a reader that sees this identity also sees every field written before it was published. A free row's
         // gate is zero and a leased one carries the lease mark, so the identity alone answers "is this a session" — there is no second field to read.
-        if (!GateNames(Volatile.Read(ref candidate->Gate), session))
+        if (!GateNames(Volatile.Read(ref candidate.Gate), session))
         {
-            row = null;
+            row = default;
             return false;
         }
 
-        row = candidate;
+        row = new RowRef(ref candidate);
         return true;
     }
 
-    private bool TryGetOpenRow(SessionId session, out SessionRow* row)
-        => TryGetRow(session, out row) && Volatile.Read(ref row->State) == (int)SessionSlotState.Open;
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool TryGetOpenRow(SessionId session, out RowRef row)
+        => TryGetRow(session, out row) && Volatile.Read(ref row.Value.State) == (int)SessionSlotState.Open;
 
     private void RecycleDelivered()
     {
@@ -1661,17 +1703,17 @@ internal sealed unsafe partial class SessionTable : IDisposable
     /// </remarks>
     private bool TryRecycle(int slot)
     {
-        var row = _rows + slot;
+        ref var row = ref Rows[slot];
         long observed;
         while (true)
         {
-            observed = Volatile.Read(ref row->Gate);
+            observed = Volatile.Read(ref row.Gate);
             if (GateSends(observed) != 0)
             {
                 return false;
             }
 
-            if (Interlocked.CompareExchange(ref row->Gate, 0, observed) == observed)
+            if (Interlocked.CompareExchange(ref row.Gate, 0, observed) == observed)
             {
                 break;
             }
@@ -1687,14 +1729,14 @@ internal sealed unsafe partial class SessionTable : IDisposable
         _declaredLimits[slot] = null;
         ClearResumeToken(slot);
 
-        row->Followed = EntityId.Null;
-        if (!row->Controlled.IsNull)
+        row.Followed = EntityId.Null;
+        if (!row.Controlled.IsNull)
         {
-            row->Controlled = EntityId.Null;
+            row.Controlled = EntityId.Null;
             Interlocked.Increment(ref _controlVersion);
         }
 
-        Volatile.Write(ref row->State, (int)SessionSlotState.Free);
+        Volatile.Write(ref row.State, (int)SessionSlotState.Free);
 
         Push(new SessionId((ushort)slot, generation));
         return true;
@@ -1724,7 +1766,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
             {
                 var packed = Volatile.Read(ref *_freeHead);
                 var top = (int)(uint)packed;
-                Volatile.Write(ref _freeIds[top], session.Value);
+                Volatile.Write(ref FreeIds[top], session.Value);
 
                 var next = Pack((ulong)packed >> 32, top + 1);
                 if (Interlocked.CompareExchange(ref *_freeHead, next, packed) == packed)
@@ -1806,61 +1848,28 @@ internal sealed unsafe partial class SessionTable : IDisposable
 
     // ── the caller gate ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>The sign bit of <see cref="_callers"/>: set once <see cref="Dispose"/> has latched, never cleared.</summary>
-    private const int DisposingBit = unchecked((int)0x8000_0000);
-
     /// <summary>Whether this table has been disposed.</summary>
-    internal bool IsDisposed => Volatile.Read(ref _callers.Value) < 0;
+    internal bool IsDisposed => _callers.IsLatched;
 
     /// <summary>Takes a reference on the native block for the duration of one call.</summary>
     /// <returns><see langword="false"/> once disposal has latched; the caller answers as it would for a slot that is gone.</returns>
-    private bool TryEnter()
-    {
-        while (true)
-        {
-            var observed = Volatile.Read(ref _callers.Value);
-            if (observed < 0)
-            {
-                return false;
-            }
+    private bool TryEnter() => _callers.TryEnter();
 
-            if (Interlocked.CompareExchange(ref _callers.Value, observed + 1, observed) == observed)
-            {
-                return true;
-            }
-        }
-    }
-
-    /// <summary>Drops the reference taken by <see cref="TryEnter"/>. The count lives in the low bits, so this never borrows into the latch.</summary>
-    private void Exit() => Interlocked.Decrement(ref _callers.Value);
+    /// <summary>Drops the reference taken by <see cref="TryEnter"/>.</summary>
+    private void Exit() => _callers.Exit();
 
     /// <inheritdoc />
     /// <remarks>
     /// <b>Quiesce, then free.</b> <see cref="TryLease"/>, <see cref="BeginSend"/>, <see cref="EndSend"/> and <see cref="RequestClose"/> are callable from any
     /// thread, so freeing the block on a "not disposed yet" flag read would be a race with a real use-after-free on the other side of it. The latch stops new
-    /// callers, the wait lets the ones already inside finish, and the pointers are nulled so a bug that reaches past the gate faults immediately instead of
-    /// reading freed memory that still looks like rows.
+    /// callers, the wait lets the ones already inside finish, and the block's length is zeroed so a bug that reaches past the gate indexes an empty table and
+    /// throws, instead of reading freed memory that still looks like rows.
     /// </remarks>
     public void Dispose()
     {
-        while (true)
+        if (!_callers.LatchAndDrain())
         {
-            var observed = Volatile.Read(ref _callers.Value);
-            if (observed < 0)
-            {
-                return;
-            }
-
-            if (Interlocked.CompareExchange(ref _callers.Value, observed | DisposingBit, observed) == observed)
-            {
-                break;
-            }
-        }
-
-        var spin = new SpinWait();
-        while ((Volatile.Read(ref _callers.Value) & ~DisposingBit) != 0)
-        {
-            spin.SpinOnce();
+            return;
         }
 
         _openSlots.Clear();
@@ -1876,10 +1885,12 @@ internal sealed unsafe partial class SessionTable : IDisposable
         Array.Clear(_appData);
         Array.Clear(_declaredLimits);
 
+        // The length, not the bases: a span is built from a base and the length in two plain reads, and a base nulled beside a length not yet zeroed — which
+        // a reader on another core can observe on arm64 — would be a span of the table's length over address zero. With the bases fixed for the table's life,
+        // a reader sees either the whole table or an empty one.
         var memory = _memory;
         _memory = null;
-        _rows = null;
-        _freeIds = null;
+        _blockSlots = 0;
         _freeHead = null;
         _pushLock = null;
 
@@ -1915,8 +1926,8 @@ internal sealed unsafe partial class SessionTable : IDisposable
     /// <returns>The identity; <see cref="SessionId.None"/> on a disposed table, for a tick still running past the scheduler's bounded join.</returns>
     private SessionId OwnerIdAt(int slot)
     {
-        var rows = _rows;
-        return rows == null ? SessionId.None : SessionId.FromValue(GateId(Volatile.Read(ref (rows + slot)->Gate)));
+        var rows = Rows;
+        return rows.IsEmpty ? SessionId.None : SessionId.FromValue(GateId(Volatile.Read(ref rows[slot].Gate)));
     }
 
     /// <summary>Walks this tick's open sessions.</summary>
@@ -2058,27 +2069,27 @@ internal struct SessionRow
 /// </remarks>
 internal readonly struct SessionRowView
 {
-    internal unsafe SessionRowView(SessionRow* row)
+    internal SessionRowView(ref SessionRow row)
     {
         // The gate and the state are acquire loads: every plain field below was written before one of them was released, and a volatile load is program-ordered
         // against the loads that follow it, which is what keeps this copy from mixing a new occupant's identity with the previous one's limits.
-        var gate = Volatile.Read(ref row->Gate);
+        var gate = Volatile.Read(ref row.Gate);
 
         IdValue = (uint)gate;
         SendsInFlight = (int)((gate >> 32) & 0xFF);
         PendingClose = (int)((gate >> 40) & 0x1FFFFF);
-        State = Volatile.Read(ref row->State);
-        BytesPerSecond = row->BytesPerSecond;
-        MaxObservers = row->MaxObservers;
-        FrameBytes = row->FrameBytes;
-        ClientMessageBytes = row->ClientMessageBytes;
-        Controlled = row->Controlled;
-        Followed = row->Followed;
-        CloseCode = row->CloseCode;
-        Role = row->Role;
-        Flags = row->Flags;
-        CloseReason = row->CloseReason;
-        Resumable = row->Resumable;
+        State = Volatile.Read(ref row.State);
+        BytesPerSecond = row.BytesPerSecond;
+        MaxObservers = row.MaxObservers;
+        FrameBytes = row.FrameBytes;
+        ClientMessageBytes = row.ClientMessageBytes;
+        Controlled = row.Controlled;
+        Followed = row.Followed;
+        CloseCode = row.CloseCode;
+        Role = row.Role;
+        Flags = row.Flags;
+        CloseReason = row.CloseReason;
+        Resumable = row.Resumable;
     }
 
     /// <summary>The <see cref="SessionId"/> occupying the slot, packed.</summary>
