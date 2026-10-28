@@ -56,7 +56,7 @@ Refused at `Start` or at the call — never silently ignored:
   [Replication catalog](xref:concept-replication-catalog)
 - Related feature: [Overload Management](../Runtime/overload-management.md) — replication degrades sessions before the tick does
 - Related feature: [Spatial](../Spatial/README.md) — a replicated archetype is spatially indexed; views are found through the grid
-- Correctness rules: [`rules/subscriptions.md`](https://github.com/Log2n-io/Typhon/blob/main/rules/subscriptions.md) (SUB-01 … SUB-35)
+- Correctness rules: [`rules/subscriptions.md`](https://github.com/Log2n-io/Typhon/blob/main/rules/subscriptions.md) (SUB-01 … SUB-38)
 
 <!-- Deep dive: claude/design/Subscriptions/README.md -->
 <!-- Deep dive: claude/adr/067-push-replication.md -->
