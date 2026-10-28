@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -423,7 +424,7 @@ class QueryUpdateSnapshotTests : TestBase<QueryUpdateSnapshotTests>
 
         Assert.That(late, Is.GreaterThanOrEqualTo(0), "premise: a cluster the newer update did not touch");
 
-        cs.NoteUpdatePublished(late, older);   // the older commit's publish, landing after the newer one's
+        cs.NoteUpdatePublished(late, -1, older, false);   // the older commit's publish, landing after the newer one's
 
         Assert.That(cs.MaxUpdateStamp, Is.EqualTo(newest), "the newest stamp is not lowered by an older one");
         Assert.That(cs.UpdateCount, Is.EqualTo(count + 1), "the count moves, so the merge's second read answers again");
@@ -476,6 +477,106 @@ class QueryUpdateSnapshotTests : TestBase<QueryUpdateSnapshotTests>
             Assert.That(QueryPathProbe.UpdateWatermarkWalks, Is.Zero, "a reader newer than every update walks nothing in the merge");
             Assert.That(Ordered(older).ExecuteOrdered(), Is.EquivalentTo(new[] { ids[0], ids[1] }), "older, ordered");
             Assert.That(QueryPathProbe.UpdateWatermarkWalks, Is.GreaterThan(0), "premise: the older reader's merge walked the watermarks");
+        }
+        finally
+        {
+            QueryPathProbe.Reset();
+        }
+    }
+
+    // ── Per slot (#1247): only the entities changed after the snapshot are read at it ─────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A cluster one update newer than the snapshot touched is read at the snapshot in that one slot: its other entities' last changes are at or below the
+    /// snapshot, their HEAD bytes their values there. Counted, not timed: one point read, where the whole cluster cost one per slot.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-12")]
+    public void AnOlderReader_ReadsOnlyTheChangedSlotAtItsSnapshot_OnEveryPath()
+    {
+        using var dbe = OpenEngine();
+        var ids = Spawn(dbe, Enumerable.Range(1, 40).ToArray());   // one cluster
+        using var reader = dbe.CreateQuickTransaction();
+        Update(dbe, ids[7], 500, 0);
+
+        OnEachPath(at =>
+        {
+            QueryPathProbe.SnapshotSlotReads = 0;
+            QueryPathProbe.SnapshotReadClusters = 0;
+            var all = reader.Query<StatsArch>().WhereField<StatsRanked>(x => x.Tier >= 1 && x.Tier <= 40).Execute();
+            Assert.That(all, Is.EquivalentTo(ids), $"{at}: the tiers the snapshot holds");
+            Assert.That(QueryPathProbe.SnapshotReadClusters, Is.GreaterThan(0), $"{at}: premise: the cluster is read at the snapshot");
+            Assert.That(QueryPathProbe.SnapshotSlotReads, Is.EqualTo(QueryPathProbe.SnapshotReadClusters), $"{at}: one point read a cluster read");
+        });
+        AssertTier(reader, 8, [ids[7]], "the changed entity, at its snapshot value");
+        AssertTier(reader, 9, [ids[8]], "an unchanged neighbour, from the HEAD");
+    }
+
+    /// <summary>
+    /// An update of another slot publishes after the snapshot fill read the cluster's change stamps, before it copied the HEAD: the copy holds a value newer
+    /// than the snapshot for a slot the stamps said was unchanged. The fill re-reads the stamps after the copy and reads that slot at the snapshot.
+    /// </summary>
+    [TestCase(ClusterScanPath.FullScan)]
+    [TestCase(ClusterScanPath.Selective)]
+    [VerifiesRule("VIS-12")]
+    public void AnUpdateBetweenTheStampReadAndTheHeadCopy_IsReadAtTheSnapshot(ClusterScanPath path)
+    {
+        using var dbe = OpenEngine();
+        var ids = Spawn(dbe, Enumerable.Range(1, 40).ToArray());
+        using var reader = dbe.CreateQuickTransaction();
+        Update(dbe, ids[0], 1, 11);   // the cluster is above the snapshot, its other slots unchanged
+
+        QueryPathProbe.Reset();
+        try
+        {
+            QueryPathProbe.Forced = path;
+            var fired = false;
+            QueryPathProbe.SnapshotFillHook = () =>
+            {
+                QueryPathProbe.SnapshotFillHook = null;
+                fired = true;
+                var t = new Thread(() => Update(dbe, ids[1], 900, 0));   // its own thread: the reader's holds its transaction
+                t.Start();
+                t.Join();
+            };
+            var found = reader.Query<StatsArch>().WhereField<StatsRanked>(x => x.Tier == 2).Execute();
+            Assert.That(fired, Is.True, "premise: the update published inside the fill");
+            Assert.That(found, Is.EquivalentTo(new[] { ids[1] }), "tier 2, as the snapshot holds it");
+        }
+        finally
+        {
+            QueryPathProbe.Reset();
+        }
+    }
+
+    /// <summary>
+    /// The ordered merge's side stream read a cluster in the one slot changed then; an update of ANOTHER slot of that cluster publishes before the tree streams
+    /// read, moving its key past every other. The merge's check after it finds a slot changed that it did not read, and answers again — at the snapshot.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-12")]
+    public void AnUpdateOfAnotherSlotAfterTheSideStream_IsAnsweredAgain()
+    {
+        using var dbe = OpenEngine();
+        var ids = Spawn(dbe, Enumerable.Range(1, 40).ToArray());
+        using var reader = dbe.CreateQuickTransaction();
+        Update(dbe, ids[0], 1, 11);
+
+        QueryPathProbe.Reset();
+        try
+        {
+            var fired = false;
+            QueryPathProbe.OrderedAfterSideStreamHook = () =>
+            {
+                QueryPathProbe.OrderedAfterSideStreamHook = null;
+                fired = true;
+                var t = new Thread(() => Update(dbe, ids[5], 1000, 0));
+                t.Start();
+                t.Join();
+            };
+            var ordered = reader.Query<StatsArch>().WhereField<StatsRanked>(x => x.Tier >= 1).OrderByField<StatsRanked, int>(x => x.Tier).ExecuteOrdered();
+            Assert.That(fired, Is.True, "premise: the update published between the side stream and the tree streams");
+            Assert.That(ordered, Is.EqualTo(ids), "by the tiers the snapshot holds: 1 to 40");
         }
         finally
         {

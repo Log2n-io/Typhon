@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Threading;
 using System.Collections.Generic;
 using System.Diagnostics;
 using Typhon.Schema.Definition;
@@ -145,8 +146,12 @@ internal static unsafe class FkReverseLookup
     /// </param>
     /// <param name="targetPK">Primary key of the target entity whose referrers are wanted.</param>
     /// <param name="action">Receives each source entity found; returning <see langword="false"/> stops the scan.</param>
+    /// <param name="snapshot">
+    /// Null: the HEAD lookup — the sources whose foreign key names the target now (the cascade). Otherwise the sources whose foreign key named it at that
+    /// snapshot (#1247, VIS-13): a navigation, a view's refresh.
+    /// </param>
     internal static void ForEachSource<TAction>(DatabaseEngine dbe, ComponentTable sourceCT, in FkCandidates candidates, int fkFieldOrdinal, long targetPK,
-        ref TAction action) where TAction : struct, IFkSourceAction
+        ref TAction action, FkSnapshot snapshot = null) where TAction : struct, IFkSourceAction
     {
         // There used to be a phase 1 here scanning the shared ComponentTable FK tree for non-cluster candidates. That home is gone (#629) and the branch was
         // never entered — instrumented and confirmed across the full suite — so the per-archetype walk below is the whole lookup.
@@ -164,7 +169,14 @@ internal static unsafe class FkReverseLookup
         for (var i = 0; i < clusterArchetypes.Length; i++)
         {
             var (meta, componentSlot) = clusterArchetypes[i];
-            if (!ScanClusterArchetype(dbe, meta, componentSlot, fkFieldOrdinal, targetPK, ref action))
+            var entry = snapshot?[i];
+            if (!ScanClusterArchetype(dbe, meta, componentSlot, fkFieldOrdinal, targetPK, ref action, snapshot, entry))
+            {
+                return;
+            }
+
+            // The sources whose foreign key named the target at the snapshot and no longer does, or that a destroy took out of the tree.
+            if (entry?.Side != null && !entry.Side.ForEachRowAt(targetPK, meta, ref action))
             {
                 return;
             }
@@ -183,6 +195,8 @@ internal static unsafe class FkReverseLookup
     /// <param name="fkStride">Size of the FK's component, the stride of that array.</param>
     /// <param name="targetPK">The target the scan is looking for, re-checked against the slot.</param>
     /// <param name="action">The caller's action.</param>
+    /// <param name="snapshot">The snapshot the lookup answers at; null for HEAD.</param>
+    /// <param name="entry">This archetype's part of <paramref name="snapshot"/>; null for HEAD, or an archetype that promises no isolation.</param>
     /// <returns>What the action returned: <see langword="false"/> to stop the scan. A stale entry is skipped as <see langword="true"/>.</returns>
     /// <remarks>
     /// Shared by the unique and AllowMultiple branches above, which differ only in how they walk the index. Keeping the resolution in
@@ -195,19 +209,26 @@ internal static unsafe class FkReverseLookup
     /// slot at once; a Versioned slot is released only by the entity cleanup, past every snapshot the destroy could hide from.
     /// </remarks>
     private static bool ProcessClusterLocation<TAction>(int clusterLocation, ref ChunkAccessor<PersistentStore> clusterAccessor,
-        in ArchetypeClusterInfo layout, ArchetypeMetadata meta, bool fkInSlot, int fkOffset, int fkStride, long targetPK, ref TAction action)
+        in ArchetypeClusterInfo layout, ArchetypeMetadata meta, bool fkInSlot, int fkOffset, int fkStride, long targetPK, ref TAction action,
+        FkSnapshot snapshot, FkSnapshot.Entry entry)
         where TAction : struct, IFkSourceAction
     {
         var slot = clusterLocation & 0x3F;
         var clusterBase = clusterAccessor.GetChunkAddress(clusterLocation >> 6);
         var sourcePK = *(long*)(clusterBase + layout.EntityIdsOffset + slot * 8);
-        if ((*(ulong*)clusterBase & (1UL << slot)) == 0 || sourcePK == 0
-            || (fkInSlot && *(long*)(clusterBase + fkOffset + slot * fkStride) != targetPK))
+        var occupied = (Volatile.Read(ref *(ulong*)clusterBase) & (1UL << slot)) != 0;
+        if (sourcePK == 0 || (fkInSlot && *(long*)(clusterBase + fkOffset + slot * fkStride) != targetPK))
         {
             return true;   // released since the copy, or another entity's now
         }
 
-        return action.Process(sourcePK, meta);
+        if (entry != null)
+        {
+            // At the snapshot: a hidden destroy still a source, a later spawn not, an entity the side reads not twice.
+            return !snapshot.Admits(entry, clusterBase, clusterLocation >> 6, slot, sourcePK, occupied) || action.Process(sourcePK, meta);
+        }
+
+        return !occupied || action.Process(sourcePK, meta);
     }
 
     /// <summary>
@@ -215,7 +236,7 @@ internal static unsafe class FkReverseLookup
     /// the cluster's own entity-id array rather than from a chunk header.
     /// </summary>
     private static bool ScanClusterArchetype<TAction>(DatabaseEngine dbe, ArchetypeMetadata meta, int componentSlot, int fkFieldOrdinal, long targetPK,
-        ref TAction action) where TAction : struct, IFkSourceAction
+        ref TAction action, FkSnapshot snapshot, FkSnapshot.Entry entry) where TAction : struct, IFkSourceAction
     {
         var clusterState = dbe._archetypeStates[meta.ArchetypeId]?.ClusterState;
         var ixSlotIdx = FindIndexSlot(clusterState, componentSlot);
@@ -258,16 +279,26 @@ internal static unsafe class FkReverseLookup
                 // The key's values are copied and its buffer released before the action runs: an action that reads an entity walks its chain, and a chain
                 // walk under the buffer's lock waited on a publish that held the chain and waited on the buffer (IXS-10).
                 var values = Array.Empty<int>();
+                var synced = false;
                 var enumerator = fkIndex.EnumerateRangeMultiple(targetPK, targetPK);
                 try
                 {
                     while (enumerator.MoveNextKey())
                     {
                         var count = enumerator.DrainCurrentKey(ref values);
+
+                        // At a snapshot: the key's entries read, a destroy or key move counted since the last look is read before any is decided — once:
+                        // a look after rows were decided would add again an entity they returned.
+                        if (entry != null && !synced)
+                        {
+                            snapshot.Sync(entry);
+                            synced = true;
+                        }
+
                         for (var j = 0; j < count; j++)
                         {
                             if (!ProcessClusterLocation(values[j], ref clusterAccessor, in layout, meta, fkInSlot, fkOffset, fkStride, targetPK,
-                                    ref action))
+                                    ref action, snapshot, entry))
                             {
                                 return false;
                             }
@@ -282,26 +313,44 @@ internal static unsafe class FkReverseLookup
                         System.Buffers.ArrayPool<int>.Shared.Return(values);
                     }
                 }
+
+                // No entry for the target: the side may still hold one of its sources, destroyed or re-keyed since the last look.
+                if (entry != null && !synced)
+                {
+                    snapshot.Sync(entry);
+                }
             }
             else
             {
                 // A unique index holds at most ONE entry for the key, so this loop runs 0 or 1 times. It is still a range enumeration
                 // rather than a point lookup because that is the API shape, and min == max makes it the same descent.
+                // Read before it is decided, as the AllowMultiple branch drains its key first: at a snapshot, a change counted after the read is read
+                // before the entry is admitted.
+                var found = false;
+                var location = 0;
                 var enumerator = fkIndex.EnumerateRange(targetPK, targetPK);
                 try
                 {
-                    while (enumerator.MoveNext())
+                    if (enumerator.MoveNext())
                     {
-                        if (!ProcessClusterLocation(enumerator.Current.Value, ref clusterAccessor, in layout, meta, fkInSlot, fkOffset, fkStride,
-                                targetPK, ref action))
-                        {
-                            return false;
-                        }
+                        found = true;
+                        location = enumerator.Current.Value;
                     }
                 }
                 finally
                 {
                     enumerator.Dispose();
+                }
+
+                if (entry != null)
+                {
+                    snapshot.Sync(entry);
+                }
+
+                if (found && !ProcessClusterLocation(location, ref clusterAccessor, in layout, meta, fkInSlot, fkOffset, fkStride, targetPK, ref action,
+                        snapshot, entry))
+                {
+                    return false;
                 }
             }
         }
@@ -314,7 +363,7 @@ internal static unsafe class FkReverseLookup
     }
 
     /// <summary>Locates the <c>IndexSlots</c> entry owning <paramref name="componentSlot"/>, or -1 when that component has no indexed field here.</summary>
-    private static int FindIndexSlot(ArchetypeClusterState clusterState, int componentSlot)
+    internal static int FindIndexSlot(ArchetypeClusterState clusterState, int componentSlot)
     {
         var slots = clusterState.IndexSlots;
         for (var i = 0; i < slots.Length; i++)

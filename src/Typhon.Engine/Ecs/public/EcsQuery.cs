@@ -1512,6 +1512,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                         streams[streamCount++] = ReadClustersWhole(evaluators, clusterState, engineState, meta, matchSlot.Slot, field.FieldOffset, keyType,
                             descending,
                             ref gate, updated, out sidePks, out sidePkCount);
+                        QueryPathProbe.OrderedAfterSideStreamHook?.Invoke();
                         sidePkSets ??= ArrayPool<long[]>.Shared.Rent(4);
                         Grow(ref sidePkSets, sidePkSetCount);
                         sidePkSets[sidePkSetCount++] = sidePks;
@@ -1730,8 +1731,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     }
 
     /// <summary>
-    /// #1347: the rows of each cluster a death newer than this snapshot touched — or a destroy still pending — read whole, as the SoA scan reads a cluster:
-    /// every occupied slot and every slot claimed and not occupied (VIS-09), each predicate evaluated on the slot's bytes, each slot decided at the snapshot.
+    /// #1347: the rows of the entities a change newer than this snapshot touched (#1247: the slots whose change stamp is above it, in each cluster whose died
+    /// or update watermark is) — every slot of a cluster with a destroy still pending — read as the SoA scan reads a cluster: occupied slots and slots
+    /// claimed and not occupied (VIS-09), each predicate evaluated on the slot's value at the snapshot, each slot decided at the snapshot.
     /// Sorted by the ordered field into a side stream that carries each row's entity key, read with the row; <paramref name="sidePks"/> holds the same keys,
     /// sorted, for the tree stream to drop its rows of those entities — rented, the caller returns it once the merge is done.
     /// </summary>
@@ -1771,7 +1773,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 ref var words = ref ArchetypeClusterState.SlotWords(clusterState.SlotWordTable, clusterChunkId);
                 var pendingDeaths = ArchetypeClusterState.PendingDeathsOf(ref words);
                 var snapshotCluster = updated.Contains(clusterChunkId);
-                if (!snapshotCluster && pendingDeaths == 0 && ArchetypeClusterState.MaxDiedOf(ref words) <= txTsn)
+                var diedAfter = ArchetypeClusterState.MaxDiedOf(ref words) > txTsn;
+                if (!snapshotCluster && pendingDeaths == 0 && !diedAfter)
                 {
                     continue;
                 }
@@ -1783,19 +1786,32 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     words = ref ArchetypeClusterState.SlotWords(clusterState.SlotWordTable, clusterChunkId);
                 }
 
+                // The entities changed after the snapshot (#1247) — their slots' change stamps above it — are this stream's; the cluster's others stand on
+                // the tree stream, their keys there their keys at the snapshot. A cluster with a destroy pending is read whole.
                 var pend = ArchetypeClusterState.ClaimOf(ref words) & ~occupancy;
-                var admitted = occupancy & gate.ClusterMask(clusterBase, out var gateExact);
-                var visit = admitted | pend;
+                var stamped = pendingDeaths != 0 ? ~0UL : SnapshotChangedSlots(clusterState, ref words, clusterChunkId, txTsn);
+                updated.SetMask(clusterChunkId, stamped);
+                var changed = (occupancy | pend) & stamped;
+                if (changed == 0)
+                {
+                    continue;
+                }
+
+                var admitted = occupancy & changed & gate.ClusterMask(clusterBase, out var gateExact);
+                var visit = admitted | (pend & changed);
                 var compBase = clusterBase + compOffset;
+
+                // Every changed entity, matching or not: the tree holds it at a newer key, or not at all, and the tree stream drops it.
+                for (var all = changed; all != 0; all &= all - 1)
+                {
+                    Grow(ref dropped, droppedCount);
+                    dropped[droppedCount++] = *(long*)(clusterBase + layout.EntityIdsOffset + System.Numerics.BitOperations.TrailingZeroCount(all) * 8);
+                }
+
                 if (snapshotCluster)
                 {
-                    for (var all = occupancy | pend; all != 0; all &= all - 1)
-                    {
-                        Grow(ref dropped, droppedCount);
-                        dropped[droppedCount++] = *(long*)(clusterBase + layout.EntityIdsOffset + System.Numerics.BitOperations.TrailingZeroCount(all) * 8);
-                    }
 
-                    visit &= FillSnapshotColumn(meta, engineState, clusterState, clusterBase, compSlot, compSize, visit, out snapshotColumn, record,
+                    visit &= FillSnapshotColumn(meta, engineState, clusterState, clusterBase, clusterChunkId, compSlot, compSize, visit, out snapshotColumn, record,
                         ref mapAccessor);
                     compBase = snapshotColumn;
                 }
@@ -2126,7 +2142,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
         mark = clusterState.UpdateCount;
         var txTsn = _tx.TSN;
-        return clusterState.MaxUpdateStamp <= txTsn ? default : WatermarksAbove(clusterState, txTsn, default);
+        return clusterState.MaxUpdateStamp <= txTsn ? default : WatermarksAbove(clusterState, txTsn);
     }
 
     /// <summary>The selective scan's form: read once, after its tree read, with no second read to mark for.</summary>
@@ -2138,14 +2154,25 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         }
 
         var txTsn = _tx.TSN;
-        return clusterState.MaxUpdateStamp <= txTsn ? default : WatermarksAbove(clusterState, txTsn, default);
+        return clusterState.MaxUpdateStamp <= txTsn ? default : WatermarksAbove(clusterState, txTsn);
     }
 
     /// <summary>
-    /// The active clusters whose update watermark is above <paramref name="txTsn"/>, less <paramref name="except"/>, in a rented array sorted for
+    /// The slots of a cluster with a change above <paramref name="txTsn"/> whose entities an index path must evaluate at the snapshot rather than take from
+    /// the tree (#1247): the slots whose KEY stamp is above it — destroyed, or re-keyed; an entity whose update moved no key is at its snapshot key there,
+    /// its value read at the snapshot as any other's. Every slot when the cluster's died watermark is unknown — a recovery or a migration
+    /// recorded a death without a stamp — as it was read whole before. <paramref name="slotWords"/> was read by acquire first: the stamps follow it.
+    /// </summary>
+    private static ulong SnapshotChangedSlots(ArchetypeClusterState clusterState, ref long slotWords, int clusterChunkId, long txTsn) =>
+        ArchetypeClusterState.MaxDiedOf(ref slotWords) == ArchetypeClusterState.VisibilityUnknown
+            ? ~0UL
+            : clusterState.KeyChangedSlotsAfter(clusterChunkId, txTsn);
+
+    /// <summary>
+    /// The active clusters whose update watermark is above <paramref name="txTsn"/>, in a rented array sorted for
     /// <see cref="UpdatedClusterSet.Contains"/>: a HashSet per walk allocated on every query of a reader older than an update.
     /// </summary>
-    private static UpdatedClusterSet WatermarksAbove(ArchetypeClusterState clusterState, long txTsn, UpdatedClusterSet except)
+    private static UpdatedClusterSet WatermarksAbove(ArchetypeClusterState clusterState, long txTsn)
     {
         QueryPathProbe.UpdateWatermarkWalks++;
         int[] ids = null;
@@ -2155,7 +2182,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         for (var c = 0; c < activeCount; c++)
         {
             var clusterChunkId = activeIds[c];
-            if (ArchetypeClusterState.MaxUpdatedOf(ref ArchetypeClusterState.SlotWords(table, clusterChunkId)) <= txTsn || except.Contains(clusterChunkId))
+            if (ArchetypeClusterState.MaxUpdatedOf(ref ArchetypeClusterState.SlotWords(table, clusterChunkId)) <= txTsn)
             {
                 continue;
             }
@@ -2184,9 +2211,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     }
 
     /// <summary>
-    /// After the ordered merge: whether an update published since <paramref name="mark"/> touched a cluster the merge did not read whole at the snapshot —
-    /// its index entries may have moved under the streams, so the merge answers again. A cluster in <paramref name="readWhole"/> does not count: its entities
-    /// were dropped from the tree stream by key, so a later move of their entries changes nothing.
+    /// After the ordered merge: whether an update published since <paramref name="mark"/> changed an entity the merge did not read at the snapshot — its
+    /// index entries may have moved under the streams, so the merge answers again. An entity the side stream read (<paramref name="readWhole"/>'s per-cluster
+    /// masks) does not count: it was dropped from the tree stream by key, so a later move of its entries changes nothing. Per slot (#1247): a cluster the
+    /// side stream read is read only in the slots changed then, so a later update of another of its slots races the merge as one of another cluster does.
     /// </summary>
     private bool UpdatedSince(ArchetypeClusterState clusterState, long mark, UpdatedClusterSet readWhole)
     {
@@ -2200,52 +2228,141 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             return false;
         }
 
-        var since = WatermarksAbove(clusterState, _tx.TSN, readWhole);
-        var raced = !since.IsEmpty;
-        since.Return();
-        return raced;
+        QueryPathProbe.UpdateWatermarkWalks++;
+        var txTsn = _tx.TSN;
+        var table = clusterState.SlotWordTable;
+        var activeIds = clusterState.ReadActiveClusterList(out var activeCount);
+        for (var c = 0; c < activeCount; c++)
+        {
+            var clusterChunkId = activeIds[c];
+            ref var words = ref ArchetypeClusterState.SlotWords(table, clusterChunkId);
+            if (ArchetypeClusterState.MaxUpdatedOf(ref words) <= txTsn)
+            {
+                continue;
+            }
+
+            if ((SnapshotChangedSlots(clusterState, ref words, clusterChunkId, txTsn) & ~readWhole.MaskOf(clusterChunkId)) != 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
-    /// <summary>A sorted set of cluster chunk ids in a rented array, empty by default: the clusters an update newer than a snapshot touched (VIS-12).</summary>
+    /// <summary>
+    /// A sorted set of cluster chunk ids in a rented array, empty by default: the clusters an update newer than a snapshot touched (VIS-12). Beside each, the
+    /// slots the ordered merge's side stream read at the snapshot (<see cref="SetMask"/>), for <see cref="UpdatedSince"/>; none until set.
+    /// </summary>
     private readonly struct UpdatedClusterSet
     {
         private readonly int[] _ids;
+        private readonly ulong[] _masks;
         private readonly int _count;
 
         internal UpdatedClusterSet(int[] ids, int count)
         {
             _ids = ids;
             _count = count;
+            _masks = count == 0 ? null : ArrayPool<ulong>.Shared.Rent(count);
+            if (_masks != null)
+            {
+                Array.Clear(_masks, 0, count);
+            }
         }
 
         internal bool IsEmpty => _count == 0;
 
         internal bool Contains(int clusterChunkId) => _count != 0 && Array.BinarySearch(_ids, 0, _count, clusterChunkId) >= 0;
 
-        /// <summary>Gives the array back; the set is not used after.</summary>
+        /// <summary>Records the slots of <paramref name="clusterChunkId"/> the side stream read at the snapshot; a cluster not in the set records nothing.</summary>
+        internal void SetMask(int clusterChunkId, ulong slots)
+        {
+            var i = _count == 0 ? -1 : Array.BinarySearch(_ids, 0, _count, clusterChunkId);
+            if (i >= 0)
+            {
+                _masks[i] = slots;
+            }
+        }
+
+        /// <summary>The slots of <paramref name="clusterChunkId"/> the side stream read; 0 for a cluster not in the set or not read.</summary>
+        internal ulong MaskOf(int clusterChunkId)
+        {
+            var i = _count == 0 ? -1 : Array.BinarySearch(_ids, 0, _count, clusterChunkId);
+            return i >= 0 ? _masks[i] : 0;
+        }
+
+        /// <summary>Gives the arrays back; the set is not used after.</summary>
         internal void Return()
         {
             if (_ids != null)
             {
                 ArrayPool<int>.Shared.Return(_ids);
             }
+
+            if (_masks != null)
+            {
+                ArrayPool<ulong>.Shared.Return(_masks);
+            }
         }
     }
 
     /// <summary>
     /// Fills <paramref name="column"/> — a cluster's component column, laid out as the HEAD's — with the value of <paramref name="compSlot"/>'s Versioned
-    /// component each of <paramref name="slots"/> held at this snapshot (VIS-12): an update newer than it rewrote the cluster's HEAD. Returns the slots whose
-    /// entity had a value at the snapshot. Its reads are point reads through the transaction's accessors, which a back-pressure wait must not refresh the
-    /// epoch under (#1230): the walk's refreshable depth is set aside meanwhile.
+    /// component each of <paramref name="slots"/> held at this snapshot (VIS-12). Returns the slots whose entity had a value at the snapshot.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Per slot (#1247): only a slot whose change stamp is above the snapshot (<see cref="ArchetypeClusterState.ChangedSlotsAfter"/>) is read through its
+    /// record and its chain; every other slot's last change is at or below the snapshot, so its HEAD bytes are its value there, and it is taken from the HEAD
+    /// as a cluster with no change above the snapshot is — its presence left to the enabled gate, as there. One changed slot used to cost all 64 point reads
+    /// (~9 µs a cluster); an older reader under update churn paid it on every cluster any update touched.
+    /// </para>
+    /// <para>
+    /// The HEAD copy is validated after it, seqlock-style: an update folds its slot stamp before it copies its value into the HEAD, so a copy that read a value
+    /// newer than the snapshot finds that slot's stamp above it on the re-read (behind a load barrier on arm64), and the slot is read at the snapshot after all.
+    /// </para>
+    /// <para>
+    /// The point reads go through the transaction's accessors, which a back-pressure wait must not refresh the epoch under (#1230): the walk's refreshable
+    /// depth is set aside meanwhile.
+    /// </para>
+    /// </remarks>
     private ulong FillSnapshotColumn(ArchetypeMetadata meta, ArchetypeEngineState engineState, ArchetypeClusterState clusterState, byte* clusterBase,
-        int compSlot, int compSize, ulong slots, out byte* column, byte* record, ref ChunkAccessor<PersistentStore> mapAccessor)
+        int clusterChunkId, int compSlot, int compSize, ulong slots, out byte* column, byte* record, ref ChunkAccessor<PersistentStore> mapAccessor)
     {
         QueryPathProbe.SnapshotReadClusters++;
         var layout = clusterState.Layout;
         // Sized to the SIMD evaluators' reach, not the cluster's: they gather 8 or 16 lanes at a time up to the cluster size rounded up, unmasked, and
         // mask the extra lanes after — a read past the last slot that must stay inside the column.
         column = _tx.SnapshotColumn(compSize * ((layout.ClusterSize + 15) & ~15));
+        var txTsn = _tx.TSN;
+        var changed = clusterState.ChangedSlotsAfter(clusterChunkId, txTsn) & slots;
+        var fromHead = slots & ~changed;
+        if (fromHead != 0)
+        {
+            QueryPathProbe.SnapshotFillHook?.Invoke();
+            Buffer.MemoryCopy(clusterBase + layout.ComponentOffset(compSlot), column, (long)compSize * layout.ClusterSize, (long)compSize * layout.ClusterSize);
+
+            // The HEAD loads before the stamps' re-read; nothing on x64.
+            Volatile.ReadBarrier();
+            var late = clusterState.ChangedSlotsAfter(clusterChunkId, txTsn) & fromHead;
+            fromHead &= ~late;
+            changed |= late;
+        }
+
+        return fromHead | ReadSlotsAtSnapshot(meta, engineState, layout, clusterBase, compSlot, compSize, changed, column, record, ref mapAccessor);
+    }
+
+    /// <summary>The point-read half of <see cref="FillSnapshotColumn"/>: each of <paramref name="slots"/> read through its record and its chain at the snapshot.</summary>
+    private ulong ReadSlotsAtSnapshot(ArchetypeMetadata meta, ArchetypeEngineState engineState, ArchetypeClusterInfo layout, byte* clusterBase, int compSlot,
+        int compSize, ulong slots, byte* column, byte* record, ref ChunkAccessor<PersistentStore> mapAccessor)
+    {
+        if (slots == 0)
+        {
+            return 0;
+        }
+
+        QueryPathProbe.SnapshotSlotReads += System.Numerics.BitOperations.PopCount(slots);
         var versionedIndex = layout.SlotToVersionedIndex[compSlot];
         var present = 0UL;
         var refreshable = PagedMMF.RefreshableWaitDepth;
@@ -2759,7 +2876,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 var snapshotCluster = snapshotReads && ArchetypeClusterState.MaxUpdatedOf(ref slotWords) > txTsn;
                 if (snapshotCluster)
                 {
-                    var present = FillSnapshotColumn(meta, visState, clusterState, clusterBase, compSlot, compSize, admitted | reserved, out snapshotColumn,
+                    var present = FillSnapshotColumn(meta, visState, clusterState, clusterBase, clusterChunkId, compSlot, compSize, admitted | reserved, out snapshotColumn,
                         visBuf, ref visAccessor);
                     admitted &= present;
                     reserved &= present;
@@ -2780,7 +2897,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
                     if (ArchetypeClusterState.MaxUpdatedOf(ref slotWords) > txTsn)
                     {
-                        var present = FillSnapshotColumn(meta, visState, clusterState, clusterBase, compSlot, compSize, admitted | reserved, out snapshotColumn,
+                        var present = FillSnapshotColumn(meta, visState, clusterState, clusterBase, clusterChunkId, compSlot, compSize, admitted | reserved, out snapshotColumn,
                             visBuf, ref visAccessor);
                         admitted &= present;
                         reserved &= present;
@@ -3218,9 +3335,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                         : ref Unsafe.NullRef<long>();
                     var pendingDeaths = ArchetypeClusterState.PendingDeathsOf(ref slotWords);   // before the occupancy word — see ScanClusterSoa
 
-                    // A cluster a death newer than this snapshot touched, or one pending, is read whole: its tree entries may be gone (#1347).
-                    var wholeCluster = (walkDeaths && (pendingDeaths != 0 || ArchetypeClusterState.MaxDiedOf(ref slotWords) > txTsn)) || snapshotCluster;
-                    if (candidateBits == 0 && !wholeCluster)
+                    // A cluster a death newer than this snapshot touched, or an update (VIS-12): the entries of the entities changed after it may be gone
+                    // from the tree, or sit at newer keys (#1347). Those entities — their slots' change stamps above the snapshot (#1247) — are evaluated on
+                    // every predicate at the snapshot; the cluster's others stand on the tree. A cluster with a destroy pending is read whole.
+                    var diedAfter = walkDeaths && ArchetypeClusterState.MaxDiedOf(ref slotWords) > txTsn;
+                    var pendingWhole = walkDeaths && pendingDeaths != 0;
+                    if (candidateBits == 0 && !pendingWhole && !diedAfter && !snapshotCluster)
                     {
                         continue;
                     }
@@ -3235,12 +3355,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     // VIS-09: a slot claimed and not occupied, read after the occupancy word — a destroyed entity hidden until the cleanup, or a spawn not yet
                     // published. A candidate in one was hidden after the tree read; a cluster read whole visits each. Its record decides it, below.
                     var pend = visGated ? ArchetypeClusterState.ClaimOf(ref slotWords) & ~occupancy : 0;
-                    var hidden = wholeCluster ? pend : candidateBits & pend;
+                    var changed = pendingWhole ? ~0UL : diedAfter || snapshotCluster ? SnapshotChangedSlots(clusterState, ref slotWords, clusterChunkId, txTsn) : 0;
+                    var visit = candidateBits | changed;
+                    var hidden = visit & pend;
 
-                    // Live entities the enabled gate admits: the tree's candidates, or every occupied slot of a cluster read whole — whose predicates the
-                    // range has not enforced.
-                    var remaining = (wholeCluster ? occupancy : candidateBits & occupancy) & gate.ClusterMask(clusterBase, out var gateExact);
-                    var clusterEnforced = wholeCluster ? int.MinValue : enforcedByScanFieldIndex;
+                    // Live entities the enabled gate admits: the tree's candidates and the entities changed after the snapshot, whose predicates the range
+                    // has not enforced — they are re-tested, as an entity written since the fence is.
+                    var remaining = visit & occupancy & gate.ClusterMask(clusterBase, out var gateExact);
+                    var clusterEnforced = pendingWhole ? int.MinValue : enforcedByScanFieldIndex;
 
                     if (remaining == 0 && hidden == 0)
                     {
@@ -3251,13 +3373,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     // tree has already narrowed the candidate set, so the per-match probe is a LARGER share of what remains than it is on a full scan.
                     var clusterVisGated = visGated && (pendingDeaths != 0 || !clusterState.AreClusterWatermarksVisibleAt(clusterChunkId, txTsn));
 
-                    // The cluster's entities written since the last fence: one word, as the shadow bitmap indexes entities by chunkId * 64 + slot.
-                    var fenceDirty = shadowBitmap?.ReadWord(clusterChunkId) ?? 0;
+                    // The cluster's entities written since the last fence: one word, as the shadow bitmap indexes entities by chunkId * 64 + slot. The
+                    // entities changed after the snapshot join them: their tree keys say nothing at it.
+                    var fenceDirty = (shadowBitmap?.ReadWord(clusterChunkId) ?? 0) | changed;
 
                     var compBase = clusterBase + compOffset;
                     if (snapshotCluster)
                     {
-                        var present = FillSnapshotColumn(meta, visState, clusterState, clusterBase, compSlot, compSize, remaining | hidden, out snapshotColumn,
+                        var present = FillSnapshotColumn(meta, visState, clusterState, clusterBase, clusterChunkId, compSlot, compSize, remaining | hidden, out snapshotColumn,
                             visBuf, ref visAccessor);
                         remaining &= present;
                         hidden &= present;
@@ -3281,7 +3404,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
                         if (ArchetypeClusterState.MaxUpdatedOf(ref slotWords) > txTsn)
                         {
-                            var present = FillSnapshotColumn(meta, visState, clusterState, clusterBase, compSlot, compSize, remaining | hidden,
+                            var present = FillSnapshotColumn(meta, visState, clusterState, clusterBase, clusterChunkId, compSlot, compSize, remaining | hidden,
                                 out snapshotColumn, visBuf, ref visAccessor);
                             remaining &= present;
                             hidden &= present;
@@ -3612,6 +3735,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                         // because the shape would have no oracle either.
                         throw new NotSupportedException($"Cluster spatial queries for shape '{_spatialQueryType}' have no implementation.");
                     }
+
+                    if (visGated)
+                    {
+                        ApplySpatialSnapshot(cs, meta, grid, visState, visBuf, ref visAccessor, result);
+                    }
                 }
                 finally
                 {
@@ -3670,6 +3798,180 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// The spatial answer at the snapshot (#1247, VIS-13): the spatial index walks CURRENT occupancy and bounds, so for an older reader it lost an entity a
+    /// destroy newer than the snapshot hid (VIS-09), and found an entity a newer update moved at its new place. Every slot changed after the snapshot — its
+    /// value stamp above it (VIS-12), in a cluster whose died or update watermark is; every slot with a destroy pending or a died watermark recorded without
+    /// a stamp — is taken out of the HEAD answer and decided again: visible at the snapshot, in the queried realm, its bounds at the snapshot (a Versioned
+    /// field through its chain, a SingleVersion one from the slot, whose bytes a hidden destroy kept) tested against the query's shape with the narrowphase's
+    /// own bounds decoder. Two loads when nothing in the archetype is newer than the snapshot.
+    /// </summary>
+    private void ApplySpatialSnapshot(ArchetypeClusterState cs, ArchetypeMetadata meta, SpatialGrid grid, ArchetypeEngineState es, byte* record,
+        ref ChunkAccessor<PersistentStore> mapAccessor, HashSet<EntityId> result)
+    {
+        // The walk's plain loads of occupancy and bounds before the stamps, on arm64 too: an acquire does not hold earlier plain loads back, and a walk that
+        // read a newer update's bounds must read its stamps above the snapshot. JIT-folded on x64.
+        if (!X86Base.IsSupported)
+        {
+            Interlocked.MemoryBarrier();
+        }
+
+        var txTsn = _tx.TSN;
+        if (cs.MaxDestroyStamp <= txTsn && cs.MaxUpdateStamp <= txTsn)
+        {
+            return;
+        }
+
+        ref readonly var ss = ref cs.SpatialSlot;
+        var layout = cs.Layout;
+        var compOffset = layout.ComponentOffset(ss.Slot);
+        var compSize = layout.ComponentSize(ss.Slot);
+        var versionedIndex = layout.SlotToVersionedIndex != null ? layout.SlotToVersionedIndex[ss.Slot] : -1;
+        var realmKeyColumn = cs.RealmKeyColumn;
+        var realm = grid.Realm.Value;
+        var cards = _tx.DBE.CommitCards;
+        var comp = stackalloc byte[compSize];
+        Span<double> coords = stackalloc double[6];
+        var table = cs.SlotWordTable;
+        var activeIds = cs.ReadActiveClusterList(out var activeCount);
+        var clusterAccessor = cs.ClusterSegment.CreateScanAccessor();
+        var refreshable = PagedMMF.RefreshableWaitDepth;
+        PagedMMF.RefreshableWaitDepth = 0;   // point reads through the transaction's accessors (#1230)
+        try
+        {
+            for (var c = 0; c < activeCount; c++)
+            {
+                var clusterChunkId = activeIds[c];
+                ref var words = ref ArchetypeClusterState.SlotWords(table, clusterChunkId);
+                var pendingDeaths = ArchetypeClusterState.PendingDeathsOf(ref words);
+                var died = ArchetypeClusterState.MaxDiedOf(ref words);
+                var updatedAfter = ArchetypeClusterState.MaxUpdatedOf(ref words) > txTsn;
+                if (pendingDeaths == 0 && died <= txTsn && !updatedAfter)
+                {
+                    continue;
+                }
+
+                var stamped = pendingDeaths != 0 || died == ArchetypeClusterState.VisibilityUnknown ? ~0UL : cs.ChangedSlotsAfter(clusterChunkId, txTsn);
+                var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
+                var occupancy = Volatile.Read(ref *(ulong*)clusterBase);
+                var pend = ArchetypeClusterState.ClaimOf(ref words) & ~occupancy;
+                var slots = stamped & (occupancy | pend);
+                if (realmKeyColumn >= 0)
+                {
+                    slots = ArchetypeClusterState.SlotsInRealm(clusterBase, slots, realmKeyColumn, cs.RealmKeyStride, realm);
+                }
+
+                while (slots != 0)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(slots);
+                    slots &= slots - 1;
+                    var rawId = *(long*)(clusterBase + layout.EntityIdsOffset + slot * 8);
+                    if (rawId == 0)
+                    {
+                        continue;
+                    }
+
+                    var id = EntityId.FromRaw(rawId);
+                    result.Remove(id);
+                    var visible = (pend & (1UL << slot)) != 0
+                        ? IsReservedSpawnVisible(rawId, clusterChunkId, slot, es, record, txTsn, cards, ref mapAccessor)
+                        : IsVisibleAtSnapshot(rawId, true, es, record, meta._entityRecordSize, txTsn, cards, ref mapAccessor);
+                    if (!visible || !MaskTestByRouting(id.ArchetypeId))
+                    {
+                        continue;
+                    }
+
+                    byte* bounds;
+                    if (versionedIndex >= 0 && updatedAfter)
+                    {
+                        // A Versioned field a newer update may have moved: its bounds at the snapshot, through its chain.
+                        if (!_tx.TryCopyCommittedAtSnapshot(meta, ss.Slot, ClusterEntityRecordAccessor.GetCompRevFirstChunkId(record, versionedIndex), comp,
+                                compSize))
+                        {
+                            continue;
+                        }
+
+                        bounds = comp;
+                    }
+                    else
+                    {
+                        bounds = clusterBase + compOffset + slot * compSize;
+                    }
+
+                    var decoded = SpatialMaintainer.ReadAndValidateBoundsFromPtr(bounds + ss.FieldOffset, ss.FieldInfo, coords);
+
+                    // The HEAD's bounds of a Versioned field, validated after the read, seqlock-style: an update stamps its slot before it copies its HEAD, so
+                    // bounds a newer update copied in meanwhile show its stamp above the snapshot, and are read at it after all.
+                    if (versionedIndex >= 0 && bounds != comp)
+                    {
+                        Volatile.ReadBarrier();
+                        if (cs.SlotChangeStamp(clusterChunkId, slot) > txTsn)
+                        {
+                            if (!_tx.TryCopyCommittedAtSnapshot(meta, ss.Slot, ClusterEntityRecordAccessor.GetCompRevFirstChunkId(record, versionedIndex), comp,
+                                    compSize))
+                            {
+                                continue;
+                            }
+
+                            decoded = SpatialMaintainer.ReadAndValidateBoundsFromPtr(comp + ss.FieldOffset, ss.FieldInfo, coords);
+                        }
+                    }
+
+                    if (decoded && MatchesSpatialShape(coords, ss))
+                    {
+                        result.Add(id);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            PagedMMF.RefreshableWaitDepth = refreshable;
+            clusterAccessor.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Whether entity bounds (<paramref name="coords"/>, as <see cref="SpatialMaintainer.ReadAndValidateBoundsFromPtr"/> decodes them) pass this query's
+    /// shape — the narrowphase tests of each shape's cluster walk: box overlap, closest-point distance, the ray's slab test, the frustum's plane test.
+    /// </summary>
+    private bool MatchesSpatialShape(ReadOnlySpan<double> coords, in ClusterSpatialSlot ss)
+    {
+        var is3D = ss.FieldInfo.FieldType.Is3D();
+        var eMinX = coords[0];
+        var eMinY = coords[1];
+        var eMinZ = is3D ? coords[2] : double.NegativeInfinity;
+        var eMaxX = is3D ? coords[3] : coords[2];
+        var eMaxY = is3D ? coords[4] : coords[3];
+        var eMaxZ = is3D ? coords[5] : double.PositiveInfinity;
+        switch (_spatialQueryType)
+        {
+            case SpatialQueryType.AABB:
+            {
+                var qMinZ = is3D ? _spatialParams[2] : double.NegativeInfinity;
+                var qMaxZ = is3D ? _spatialParams[5] : double.PositiveInfinity;
+                return eMinX <= _spatialParams[3] && eMaxX >= _spatialParams[0] && eMinY <= _spatialParams[4] && eMaxY >= _spatialParams[1]
+                       && eMinZ <= qMaxZ && eMaxZ >= qMinZ;
+            }
+            case SpatialQueryType.Radius:
+            {
+                var cZ = is3D ? _spatialParams[2] : 0d;
+                var dx = Math.Max(Math.Max(eMinX - _spatialParams[0], 0d), _spatialParams[0] - eMaxX);
+                var dy = Math.Max(Math.Max(eMinY - _spatialParams[1], 0d), _spatialParams[1] - eMaxY);
+                var dz = is3D ? Math.Max(Math.Max(eMinZ - cZ, 0d), cZ - eMaxZ) : 0d;
+                return dx * dx + dy * dy + dz * dz <= _spatialParams[3] * _spatialParams[3];
+            }
+            case SpatialQueryType.Ray:
+                return ArchetypeClusterState.RayHitsBox(_spatialParams[0], _spatialParams[1], _spatialParams[2], _spatialParams[3], _spatialParams[4],
+                    _spatialParams[5], _spatialParams[6], eMinX, eMinY, eMinZ, eMaxX, eMaxY, eMaxZ, out _);
+            case SpatialQueryType.Frustum:
+                return SpatialGeometry.ClassifyAABBAgainstPlanes(coords[..(is3D ? 6 : 4)], _frustumPlanes.AsSpan(0, _frustumPlaneCount * ((is3D ? 3 : 2) + 1)),
+                    _frustumPlaneCount, is3D ? 3 : 2) != SpatialGeometry.FrustumOutside;
+            default:
+                return false;
+        }
     }
 
     /// <summary>

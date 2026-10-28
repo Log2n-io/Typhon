@@ -733,9 +733,15 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>
-    /// Returns an enumerator that streams entities via a secondary index in key order, filtered by MVCC visibility at this transaction's snapshot.
+    /// Returns an enumerator that streams entities via a secondary index in key order, at this transaction's snapshot: exactly the entities its field
+    /// query over the range finds, at the keys and values the snapshot holds — its own destroys gone, its own spawns in, its own value writes unseen.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <b>At the snapshot (#1247, VIS-13).</b> The trees hold the newest committed keys, and a destroy takes its entries out at its publish; the entities a
+    /// commit newer than the snapshot changed are read at the snapshot beside them (<c>IndexSnapshotSide</c>), their tree rows dropped and their rows merged
+    /// in key order. With nothing newer than the snapshot and no spawn or destroy of its own, that costs two loads per archetype.
+    /// </para>
     /// <para>
     /// <b>Fans out across every archetype holding the component (#666).</b> Indexes live per-archetype, so a component-keyed <see cref="IndexRef"/> names K
     /// trees rather than one. Fanning out is what preserves the semantics the single shared tree used to give — the alternative, making the handle name one
@@ -821,6 +827,8 @@ public unsafe partial class Transaction : EntityAccessor
             var layout = clusterState.Layout;
             sources.Add(new IndexArchetypeSource
             {
+                Meta = meta,
+                CompSlot = compSlot,
                 ClusterState = clusterState,
                 EngineState = es,
                 RecordSize = meta._entityRecordSize,
@@ -839,7 +847,18 @@ public unsafe partial class Transaction : EntityAccessor
         // EnumerateIndex(startKey, MaxValue) + break-at-100 from O(100) into O(everything at or after startKey), which is what a YCSB-style scan does.
         if (trees.Count == 1)
         {
-            return new IndexEntityEnumerator<T, TKey>(trees[0], multi[0], minKey, maxKey, sources[0], ct, this, _changeSet);
+            var streaming = new IndexEntityEnumerator<T, TKey>(trees[0], multi[0], minKey, maxKey, sources[0], ct, this, _changeSet);
+            try
+            {
+                streaming.AttachSnapshotSide(minKey, maxKey);
+            }
+            catch
+            {
+                streaming.Dispose();   // its accessors and cursor (EP-02)
+                throw;
+            }
+
+            return streaming;
         }
 
         // Genuine fan-out: K cursors cannot be held side by side (they are ref structs), so the entries are merged eagerly. Early termination degrades here
@@ -852,7 +871,19 @@ public unsafe partial class Transaction : EntityAccessor
             runs.Add(run);
         }
 
-        return new IndexEntityEnumerator<T, TKey>(MergeRuns(runs), sources.ToArray(), ct, this, _changeSet);
+        // The trees are read; the side after them (#1247): a change folds its stamps before it touches a tree, so this read sees every one the reads missed.
+        var merged = new IndexEntityEnumerator<T, TKey>(MergeRuns(runs), sources.ToArray(), ct, this, _changeSet);
+        try
+        {
+            merged.AttachSnapshotSide(minKey, maxKey);
+        }
+        catch
+        {
+            merged.Dispose();
+            throw;
+        }
+
+        return merged;
     }
 
     /// <summary>
@@ -973,6 +1004,11 @@ public unsafe partial class Transaction : EntityAccessor
     /// <summary>Everything needed to turn a <c>ClusterLocation</c> from one archetype's index back into an entity and its component bytes.</summary>
     internal sealed class IndexArchetypeSource
     {
+        public ArchetypeMetadata Meta;
+
+        /// <summary>The indexed component's slot in this archetype.</summary>
+        public int CompSlot;
+
         public ArchetypeClusterState ClusterState;
         public ArchetypeEngineState EngineState;
         public int RecordSize;
@@ -1021,12 +1057,30 @@ public unsafe partial class Transaction : EntityAccessor
 
         private ChunkAccessor<PersistentStore> _compRevAccessor;
         private ChunkAccessor<PersistentStore> _compContentAccessor;
+
+        // Snapshot (#1247): the entities the trees cannot give at the snapshot, merged in key order, and the tree row read and not yet merged.
+        private IndexSnapshotSide<TKey> _side;
+        private TKey _minKey;
+        private TKey _maxKey;
+        private ArchetypeClusterState _watch;   // streaming with no side yet: the archetype whose KeyChangeCount a change during the walk moves
+        private long _watchMark;
+        private bool _hasPending;
+        private TKey _pendingKey;
+        private int _pendingLocation;
+        private int _pendingSource;
+        private bool _treeDone;
+        private bool _hasLastTreeKey;
+        private TKey _lastTreeKey;
+
         private readonly Transaction _tx;
         private readonly long _transactionTSN;
         private readonly int _componentOverhead;
         private int _entityCount;
         private long _currentPK;
         private TKey _currentKey;
+
+        // The AllowMultiple cursor's key, whose values are being returned: its own, since a side row merged between two of them sets _currentKey (#1247).
+        private TKey _cursorKey;
         private ReadOnlySpan<byte> _currentComponentSpan;
         private bool _disposed;
 
@@ -1092,6 +1146,23 @@ public unsafe partial class Transaction : EntityAccessor
             _disposed = false;
         }
 
+        /// <summary>
+        /// Builds the part of the answer the trees cannot give at the snapshot (<see cref="IndexSnapshotSide{TKey}"/>), or — streaming, with nothing to give
+        /// yet — reads the marks a change during the walk would move.
+        /// </summary>
+        internal void AttachSnapshotSide(TKey minKey, TKey maxKey)
+        {
+            _minKey = minKey;
+            _maxKey = maxKey;
+            // The mark is read inside Create, before its stamps: a change after it is one the next look at the count finds.
+            _side = IndexSnapshotSide<TKey>.Create(_tx, _sources, minKey, maxKey, out var mark);
+            if (_side == null && _streaming && _sources[0].Meta.VersionedSlotMask != 0)
+            {
+                _watch = _sources[0].ClusterState;
+                _watchMark = mark;
+            }
+        }
+
         /// <summary>Returns this enumerator (enables the <c>foreach</c> pattern).</summary>
         public IndexEntityEnumerator<T, TKey> GetEnumerator() => this;
 
@@ -1125,87 +1196,209 @@ public unsafe partial class Transaction : EntityAccessor
             // process down instead of surfacing as an error. One buffer per call, sized for the largest archetype, costs nothing and cannot grow.
             var recordBuf = stackalloc byte[_maxRecordSize];
 
-            while (TryNextEntry(out var key, out var location, out var sourceIndex))
+            var comparer = Comparer<TKey>.Default;
+            while (true)
             {
-                var src = _sources[sourceIndex];
-
-                var clusterChunkId = location >> 6;
-                var slotIndex = location & 63;
-
-                var clusterBase = _clusterAccessors[sourceIndex].GetChunkAddress(clusterChunkId);
-                var occupancy = *(ulong*)clusterBase;
-                if ((occupancy & (1UL << slotIndex)) == 0)
+                if (!_hasPending && !_treeDone)
                 {
-                    continue;   // slot freed since the entry was written — a destroyed entity, not a visible one
-                }
-
-                var layout = src.ClusterState.Layout;
-                var entityRaw = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
-                if (entityRaw == 0)
-                {
-                    continue;
-                }
-
-
-                if (src.VersionedIndex < 0)
-                {
-                    // SingleVersion in this archetype: the cluster slot IS the component. Its key is re-checked: the key's values were copied out of
-                    // their buffer before this (IXS-10), and a SingleVersion destroy releases its slot at once — a spawn can have taken it since, another
-                    // entity under another key. The buffer's lock used to hold the destroy's index removal, and so the release, off until the read was done.
-                    _currentComponentSpan = new ReadOnlySpan<byte>(clusterBase + src.CompOffset + slotIndex * src.CompSize, src.CompSize);
-                    if (!_currentComponentSpan.Slice(src.FieldOffset, sizeof(TKey)).SequenceEqual(MemoryMarshal.AsBytes(new ReadOnlySpan<TKey>(ref key))))
+                    var read = TryNextEntry(out var key, out var location, out var sourceIndex, out var keyRead);
+                    if (read)
                     {
-                        continue;
+                        _hasPending = true;
+                        _pendingKey = key;
+                        _pendingLocation = location;
+                        _pendingSource = sourceIndex;
                     }
-                }
-                else
-                {
-                    // Hinted, not plain TryGet: entity keys are dense, so the location-hint cache resolves in one bucket visit instead of a full
-                    // hash + directory + chain walk. Identical semantics — the hint is a pure accelerator that falls back on any mismatch.
-                    if (!src.EngineState.EntityMap.TryGetWithHint(EntityId.FromRaw(entityRaw).EntityKey, recordBuf, ref _mapAccessors[sourceIndex]))
+                    else
                     {
-                        continue;
+                        _treeDone = true;
                     }
 
-                    var chainRoot = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(recordBuf, src.VersionedIndex);
-                    if (chainRoot == 0)
+                    // A key's entries were just read: a change published since the last read is read now, before any row of that key is merged.
+                    if (_streaming && (keyRead || !read) && (_side != null || _watch != null))
                     {
-                        continue;
+                        CheckChangesSinceLastRead(read);
                     }
-
-
-                    var walked = RevisionChainReader.WalkChain(ref _compRevAccessor, chainRoot, _transactionTSN, _tx);
-                    if (walked.IsFailure || walked.Value.CurCompContentChunkId == 0)
-                    {
-                        continue;   // not visible at this snapshot, or tombstoned
-                    }
-
-
-                    _currentComponentSpan = _compContentAccessor.GetChunkAsReadOnlySpan(walked.Value.CurCompContentChunkId).Slice(_componentOverhead);
                 }
 
-                _currentPK = entityRaw;
-                _currentKey = key;
-
-                // EP-03: every EpochRefreshInterval entities, or every PressuredEpochRefreshInterval while the cache is under pressure (#1230).
-                if ((++_entityCount & (PressuredEpochRefreshInterval - 1)) == 0
-                    && ((_entityCount & (EpochRefreshInterval - 1)) == 0 || _tx.DBE.MMF.UnderPressure))
+                if (_side != null && _side.TryPeek(out var sideKey) && (!_hasPending || comparer.Compare(sideKey, _pendingKey) <= 0))
                 {
-                    _tx.EnumerateRefreshEpoch();
+                    _currentComponentSpan = _side.Take(out _currentPK, out _currentKey);
+                    CountEmitted();
+                    return true;
                 }
 
-                return true;
+                if (!_hasPending)
+                {
+                    return false;
+                }
+
+                _hasPending = false;
+                if (TryResolve(_pendingKey, _pendingLocation, _pendingSource, recordBuf))
+                {
+                    CountEmitted();
+                    return true;
+                }
+            }
+        }
+
+        /// <summary>EP-03: every EpochRefreshInterval entities, or every PressuredEpochRefreshInterval while the cache is under pressure (#1230).</summary>
+        private void CountEmitted()
+        {
+            if ((++_entityCount & (PressuredEpochRefreshInterval - 1)) == 0
+                && ((_entityCount & (EpochRefreshInterval - 1)) == 0 || _tx.DBE.MMF.UnderPressure))
+            {
+                _tx.EnumerateRefreshEpoch();
+            }
+        }
+
+        /// <summary>
+        /// A streaming walk, after each key read (<paramref name="read"/>) or its end, before any row of that key is merged: a destroy or key move published
+        /// since the last look — the archetype's <see cref="ArchetypeClusterState.KeyChangeCount"/> moved — is read at the snapshot, its entity dropped from
+        /// the trees from here on and merged at its snapshot key when that key is above the PREVIOUS key read. At or below it, the entity was read there,
+        /// unchanged; between the two its entry may have left the stretch the cursor just crossed (<see cref="IndexSnapshotSide{TKey}"/>).
+        /// </summary>
+        private void CheckChangesSinceLastRead(bool read)
+        {
+            var hasFloor = _hasLastTreeKey;
+            var floor = _lastTreeKey;
+            if (read)
+            {
+                _hasLastTreeKey = true;
+                _lastTreeKey = _pendingKey;
             }
 
-            return false;
+            if (_side != null)
+            {
+                if (_side.NeedsRefresh())
+                {
+                    _side.Refresh(hasFloor, floor);
+                }
+
+                return;
+            }
+
+            if (_watch.KeyChangeCount == _watchMark)
+            {
+                return;
+            }
+
+            _side = IndexSnapshotSide<TKey>.Create(_tx, _sources, _minKey, _maxKey, out var mark, hasFloor, floor);
+            if (_side != null)
+            {
+                _watch = null;
+            }
+            else
+            {
+                _watchMark = mark;
+            }
         }
+
+        /// <summary>
+        /// One tree row at the snapshot: its entity, unless the snapshot side reads it; a slot hidden by a destroy newer than the snapshot, or not yet
+        /// published, decided by its record; a SingleVersion component of an archetype that promises isolation gated on born and died, a Versioned one
+        /// read through its chain.
+        /// </summary>
+        /// <remarks>
+        /// Two resolutions, chosen by how the component is stored in THIS archetype. A SingleVersion slot's bytes are the cluster slot itself, so the span
+        /// points straight into the SoA. A Versioned slot's cluster bytes are only the HEAD; a transaction reading at an older TSN must go through the chain,
+        /// so the entity's record supplies the chain root and <c>RevisionChainReader.WalkChain</c> picks the visible revision. Reading the SoA for a
+        /// Versioned slot would return the newest value to every snapshot — visible only as a subtly wrong read, never as an error.
+        /// </remarks>
+        private bool TryResolve(TKey key, int location, int sourceIndex, byte* recordBuf)
+        {
+            var src = _sources[sourceIndex];
+            var clusterChunkId = location >> 6;
+            var slotIndex = location & 63;
+            var clusterBase = _clusterAccessors[sourceIndex].GetChunkAddress(clusterChunkId);
+            var layout = src.ClusterState.Layout;
+            var isolated = src.Meta.VersionedSlotMask != 0;
+            var occupied = (Volatile.Read(ref *(ulong*)clusterBase) & (1UL << slotIndex)) != 0;
+            var entityRaw = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
+            if (entityRaw == 0 || (_side != null && _side.IsDropped(entityRaw)))
+            {
+                return false;
+            }
+
+            if (!occupied)
+            {
+                // Freed — a destroyed entity, not a visible one — unless the archetype promises isolation and the slot is claimed: a destroy newer than
+                // the snapshot hid it (VIS-09), or a spawn is publishing. Its record decides, and must name this slot.
+                if (!isolated || (src.ClusterState.ClaimedBits(clusterChunkId) & (1UL << slotIndex)) == 0
+                    || !SnapshotSlot.IsReservedSpawnVisible(entityRaw, clusterChunkId, slotIndex, src.EngineState, recordBuf, _transactionTSN,
+                        _tx.DBE.CommitCards, ref _mapAccessors[sourceIndex]))
+                {
+                    return false;
+                }
+            }
+
+            if (src.VersionedIndex < 0)
+            {
+                // SingleVersion in this archetype: the cluster slot IS the component. Its key is re-checked: the key's values were copied out of their
+                // buffer before this (IXS-10), and a SingleVersion destroy releases its slot at once — a spawn can have taken it since, another entity under
+                // another key. The buffer's lock used to hold the destroy's index removal, and so the release, off until the read was done.
+                _currentComponentSpan = new ReadOnlySpan<byte>(clusterBase + src.CompOffset + slotIndex * src.CompSize, src.CompSize);
+                if (!_currentComponentSpan.Slice(src.FieldOffset, sizeof(TKey)).SequenceEqual(MemoryMarshal.AsBytes(new ReadOnlySpan<TKey>(ref key))))
+                {
+                    return false;
+                }
+
+                // An archetype that promises isolation: born at or before the snapshot, and alive at it (#1247) — the cluster's summary answers for most.
+                if (isolated && occupied && !src.ClusterState.IsClusterFullyVisibleAt(clusterChunkId, _transactionTSN)
+                    && !SnapshotSlot.IsVisibleAtSnapshot(entityRaw, true, src.EngineState, recordBuf, src.RecordSize, _transactionTSN, _tx.DBE.CommitCards,
+                        ref _mapAccessors[sourceIndex]))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                // Hinted, not plain TryGet: entity keys are dense, so the location-hint cache resolves in one bucket visit instead of a full hash +
+                // directory + chain walk. Identical semantics — the hint is a pure accelerator that falls back on any mismatch. A hidden slot's record was
+                // read above.
+                if (occupied && !src.EngineState.EntityMap.TryGetWithHint(EntityId.FromRaw(entityRaw).EntityKey, recordBuf, ref _mapAccessors[sourceIndex]))
+                {
+                    return false;
+                }
+
+                var chainRoot = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(recordBuf, src.VersionedIndex);
+                if (chainRoot == 0)
+                {
+                    return false;
+                }
+
+                var walked = RevisionChainReader.WalkChain(ref _compRevAccessor, chainRoot, _transactionTSN, _tx);
+                if (walked.IsFailure || walked.Value.CurCompContentChunkId == 0)
+                {
+                    return false;   // not visible at this snapshot, or tombstoned
+                }
+
+                _currentComponentSpan = _compContentAccessor.GetChunkAsReadOnlySpan(walked.Value.CurCompContentChunkId).Slice(_componentOverhead);
+
+                // A tree row is the entity's only when its value at the snapshot carries the row's key. An update re-keys the tree before it copies its
+                // HEAD, so a side read between the two took the stale HEAD key for the tree's and did not drop the entity: its row here, at the newer key,
+                // resolves to the older value — refused rather than returned under a key it did not have (#1247).
+                if (!_currentComponentSpan.Slice(src.FieldOffset, sizeof(TKey)).SequenceEqual(MemoryMarshal.AsBytes(new ReadOnlySpan<TKey>(ref key))))
+                {
+                    return false;
+                }
+            }
+
+            _currentPK = entityRaw;
+            _currentKey = key;
+            return true;
+        }
+
 
         /// <summary>
         /// Pulls the next <c>(key, location)</c> from whichever source this enumerator has: a live B+Tree cursor when one archetype holds the component, or
         /// the pre-merged array when several do. Keeping the two shapes behind one call is what lets the resolution below stay single-bodied.
+        /// <paramref name="keyRead"/>: streaming, the entry's key was read from the tree just now — a unique entry, or an
+        /// AllowMultiple key's values copied — so a change published before it is one the walk must account for (<see cref="CheckChangesSinceLastRead"/>).
         /// </summary>
-        private bool TryNextEntry(out TKey key, out int location, out int sourceIndex)
+        private bool TryNextEntry(out TKey key, out int location, out int sourceIndex, out bool keyRead)
         {
+            keyRead = false;
             if (!_streaming)
             {
                 if (_entryIndex >= _entries.Length)
@@ -1232,6 +1425,7 @@ public unsafe partial class Transaction : EntityAccessor
                     var kv = _innerUnique.Current;
                     key = kv.Key;
                     location = kv.Value;
+                    keyRead = true;
                     return true;
                 }
 
@@ -1244,7 +1438,8 @@ public unsafe partial class Transaction : EntityAccessor
             {
                 if (_currentValueIndex < _currentValues.Length)
                 {
-                    key = _currentKey;
+                    key = _cursorKey;
+                    keyRead = _currentValueIndex == 0;
                     location = _currentValues[_currentValueIndex++];
                     return true;
                 }
@@ -1258,7 +1453,7 @@ public unsafe partial class Transaction : EntityAccessor
 
                 // The whole key, copied and its buffer released, before MoveNext resolves any entity through its chain: a chain walk under the buffer's
                 // lock waited on a publish that held the chain and waited on the buffer (IXS-10).
-                _currentKey = _innerMultiple.CurrentKey;
+                _cursorKey = _innerMultiple.CurrentKey;
                 var count = _innerMultiple.DrainCurrentKey(ref _keyValues);
                 _currentValues = new ReadOnlySpan<int>(_keyValues, 0, count);
                 _currentValueIndex = 0;
@@ -1302,6 +1497,7 @@ public unsafe partial class Transaction : EntityAccessor
 
             _compRevAccessor.Dispose();
             _compContentAccessor.Dispose();
+            _side?.Release();
         }
     }
 
@@ -1340,6 +1536,95 @@ public unsafe partial class Transaction : EntityAccessor
         }
 
         FlushAndRefreshEpoch();
+    }
+
+    /// <summary>
+    /// <typeparamref name="T"/> of <paramref name="pk"/> as COMMITTED at this transaction's snapshot — never its own unpublished writes, nor its own pending
+    /// spawns (#1247). The read a view's refresh and a navigation predicate make: a refresh folded a write it would later roll back, and kept it for good.
+    /// False when the entity is not visible at the snapshot, has no such component, a Versioned one has no revision there, or — with
+    /// <paramref name="requireEnabled"/> — it is disabled at the snapshot.
+    /// </summary>
+    /// <remarks>
+    /// A Versioned component is read through its record and its chain, as a snapshot fill reads it (EcsQuery.FillSnapshotColumn), and with the same care: no
+    /// epoch refresh under the point read (#1230). A SingleVersion or Transient one promises no isolation and has no history; its bytes are the transaction's
+    /// open of it, enabled required, as the read this replaced required it. The record is read through the accessor's warm EntityMap cache.
+    /// </remarks>
+    internal unsafe bool TryReadCommitted<T>(long pk, bool requireEnabled, out T value) where T : unmanaged
+    {
+        value = default;
+        var id = EntityId.FromRaw(pk);
+        var meta = _dbe.GetMetaByRouting(id.ArchetypeId);
+        if (meta == null || !meta.TryGetSlot(ArchetypeRegistry.GetComponentTypeId<T>(), out var slot))
+        {
+            return false;
+        }
+
+        var es = _dbe._archetypeStates[meta.ArchetypeId];
+        var versionedIndex = meta.ClusterLayout?.SlotToVersionedIndex != null ? meta.ClusterLayout.SlotToVersionedIndex[slot] : -1;
+        if (es?.EntityMap == null)
+        {
+            return false;
+        }
+
+        var record = stackalloc byte[meta._entityRecordSize];
+        var bytes = stackalloc byte[sizeof(T)];
+
+        // As the open: a refresh normally runs inside the transaction's epoch scope already, and a default guard must not be disposed.
+        var needsGuard = !_ownsPersistentEpochScope && !_epochManager.IsCurrentThreadInScope;
+        var guard = needsGuard ? EpochGuard.Enter(_epochManager) : default;
+        if (!_hasEntityMapCache || _entityMapCacheArchId != id.ArchetypeId)
+        {
+            if (_hasEntityMapCache)
+            {
+                _entityMapCacheAccessor.Dispose();
+            }
+
+            _entityMapCacheAccessor = es.EntityMap.Segment.CreateChunkAccessor();
+            _entityMapCacheArchId = id.ArchetypeId;
+            _hasEntityMapCache = true;
+        }
+
+        var refreshable = PagedMMF.RefreshableWaitDepth;
+        PagedMMF.RefreshableWaitDepth = 0;
+        try
+        {
+            if (!es.EntityMap.TryGetWithHint(id.EntityKey, record, ref _entityMapCacheAccessor)
+                || !EntityVisibility.IsVisibleInScan(record, TSN, CommitCards, es.EntityMap, id.EntityKey))
+            {
+                return false;
+            }
+
+            if (versionedIndex < 0)
+            {
+                // Committed and visible: the transaction's open reads the slot — no history, no isolation promised.
+                return TryOpen(id, out var entity) && entity.TryRead(out value);
+            }
+
+            if (requireEnabled)
+            {
+                var enabled = _dbe.EnabledBitsOverrides.ResolveEnabledBits(id.EntityKey, EntityRecordAccessor.GetHeader(record).EnabledBits, TSN, CommitCards);
+                if ((enabled & (1 << slot)) == 0)
+                {
+                    return false;
+                }
+            }
+
+            if (!TryCopyCommittedAtSnapshot(meta, slot, ClusterEntityRecordAccessor.GetCompRevFirstChunkId(record, versionedIndex), bytes, sizeof(T)))
+            {
+                return false;
+            }
+
+            value = MemoryMarshal.Read<T>(new ReadOnlySpan<byte>(bytes, sizeof(T)));
+            return true;
+        }
+        finally
+        {
+            PagedMMF.RefreshableWaitDepth = refreshable;
+            if (needsGuard)
+            {
+                guard.Dispose();
+            }
+        }
     }
 
     /// <summary>
@@ -1426,6 +1711,52 @@ public unsafe partial class Transaction : EntityAccessor
         var src = info.CompContentAccessor.GetChunkAsReadOnlySpan(compRevInfo.CurCompContentChunkId);
         src.Slice(info.ComponentTable.ComponentOverhead, size).CopyTo(MemoryMarshal.AsBytes(new Span<T>(ref t)));
 
+        return true;
+    }
+
+    /// <summary>
+    /// A navigation predicate's read (#1247): <typeparamref name="T"/> of <paramref name="pk"/> committed at the snapshot, as
+    /// <see cref="TryReadCommitted{T}"/> reads it, but at <see cref="QueryRead{T}"/>'s cost when the transaction has not written it — and its own pending
+    /// spawn on its own values, as a field query reads one (QENABLE-01).
+    /// </summary>
+    /// <remarks>
+    /// A Versioned write of this transaction lives in the component's <c>SingleCache</c> (Created, Updated, Deleted): no entry, or a read-only one, is the
+    /// committed revision at the snapshot, so <see cref="QueryRead{T}"/>'s cached walk answers. Reading every target through the committed path instead
+    /// cost a navigation twice its time: an EntityMap lookup and a chain walk per target per query, where the cache held the answer.
+    /// </remarks>
+    internal bool QueryReadCommitted<T>(long pk, out T value) where T : unmanaged
+    {
+        if (IsOwnPendingSpawn(pk))
+        {
+            return QueryRead(pk, out value);
+        }
+
+        var info = GetComponentInfo(typeof(T));
+        if (info.ComponentTable.StorageMode != StorageMode.Versioned)
+        {
+            return TryReadCommitted(pk, false, out value);
+        }
+
+        ref var cri = ref CollectionsMarshal.GetValueRefOrNullRef(info.SingleCache, pk);
+        if (Unsafe.IsNullRef(ref cri))
+        {
+            return QueryRead(pk, out value);
+        }
+
+        if ((cri.Operations & ~ComponentInfo.OperationType.Read) != 0)
+        {
+            return TryReadCommitted(pk, false, out value);   // its own write: the committed revision under it
+        }
+
+        value = default;
+        if (cri.CurCompContentChunkId == 0)
+        {
+            return false;
+        }
+
+        var size = Math.Min(info.ComponentTable.ComponentStorageSize, Unsafe.SizeOf<T>());
+        var src = info.CompContentAccessor.GetChunkAsReadOnlySpan(cri.CurCompContentChunkId);
+        src.Slice(info.ComponentTable.ComponentOverhead, size).CopyTo(MemoryMarshal.AsBytes(new Span<T>(ref value)));
         return true;
     }
 
@@ -2347,10 +2678,13 @@ public unsafe partial class Transaction : EntityAccessor
             var overTombstone = newestStamp != 0 && newestChunkId == 0;
 
             // VIS-12 (#674): an update that moves this entity's index entries or its HEAD says so first — its cluster's watermark, then its archetype's stamp
-            // and count — so a reader older than it that finds either moved reads the cluster at its snapshot instead.
-            if (becomesNewest && (e.SlotIndexed || e.ClusterCopyPending))
+            // and count — so a reader older than it that finds either moved reads the cluster at its snapshot instead. A destroy's tombstone (no content)
+            // moves neither: its slot is hidden with its bytes kept, and its entries' removal is announced by the destroy stamp (VIS-09). Folding it here sent
+            // every older reader through a whole-cluster snapshot fill per destroyed cluster, ~8.5 µs each (#1247).
+            if (becomesNewest && e.CurCompContentChunkId != 0 && (e.SlotIndexed || e.ClusterCopyPending))
             {
-                NoteVersionedUpdate(in e);
+                // A key move as Phase A below decides one — conservative: a commit that landed since the read may have moved the keys (#1263).
+                NoteVersionedUpdate(in e, e.SlotIndexed && !overTombstone && (e.IndexPending || newestChunkId != e.BaseCompChunkId));
             }
 
             // Phase A (#1262, #1263): the indexes and views, under the chain lock and before the stamp, so the index never lags a visible revision. They
@@ -2741,7 +3075,8 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>The update's cluster watermark, its archetype's update stamp and count, at this commit's stamp (VIS-12).</summary>
-    private void NoteVersionedUpdate(in PublishEntry e) => _dbe._stateByRouting[e.ArchId].ClusterState.NoteUpdatePublished(e.ClusterChunkId, _commitStamp);
+    private void NoteVersionedUpdate(in PublishEntry e, bool keyMoved) =>
+        _dbe._stateByRouting[e.ArchId].ClusterState.NoteUpdatePublished(e.ClusterChunkId, e.SlotIndex, _commitStamp, keyMoved);
 
     /// <summary>
     /// PUBLISH half of the cluster commit (AP-01): copies the committed HEAD value into the entity's cluster slot (visible to bulk iteration) and marks

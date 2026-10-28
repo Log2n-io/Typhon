@@ -1061,7 +1061,8 @@ An incremental view (`WhereField`, a navigation view) keeps its entity set curre
   invariant whether an entity WAS in the view is the view's own state — its set (`_entityIds`), or for an OR view the branch's bit, which a
             creation does not reset — never the delta's BeforeKey. Whether it is in now is decided by the delta's AfterKey against EVERY evaluator
             of the field (a range on one field is two), or, for an enable, whose entry carries no key, by reading the entity
-            (`EvaluateAllFields`, `EvaluateFullPredicate`, a target's fan-out) — an entity the refresh's snapshot does not see
+            (`EvaluateAllFields`, `EvaluateFullPredicate`, a target's fan-out), committed at its snapshot (`Transaction.TryReadCommitted`, the
+            fan-out through `NavigationView.SourcesAt`, VIS-13) — never the refresher's own unpublished write — and an entity the refresh's snapshot does not see
             (spawned and destroyed since) is not in the view, never a throw (`TryOpen`). An entry applied twice is then harmless
   invariant a full refresh never discards the ring: it clears the overflow flag and owes itself (`BeginRefreshFull`), re-scans, diffs, then FOLDS
             the entries at or below its transaction's TSN through the same processing as an incremental refresh, keeps the newer ones, and owes one

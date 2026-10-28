@@ -41,7 +41,7 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
         [CallerFilePath]   string callerFile = null,
         [CallerLineNumber] int    callerLine = 0,
         [CallerMemberName] string callerMethod = null)
-        => _inner.ToView(bufferCapacity, callerFile, callerLine, callerMethod);
+        => _inner.ToViewAt(_tx, bufferCapacity, callerFile, callerLine, callerMethod);   // at this query's snapshot (#1247)
 
     /// <summary>Execute the navigation query and return matching source entity IDs.</summary>
     public HashSet<EntityId> Execute(
@@ -108,17 +108,28 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
             Result = result,
         };
 
-        foreach (var targetPK in targetPKs)
+        // The sources whose foreign key names each target at the transaction's snapshot (#1247, VIS-13) — its own spawns and destroys counted, as its
+        // field queries count them — built once for the whole query, at its first target.
+        FkSnapshot sourcesAt = null;
+        try
         {
-            // Evaluate target predicates
-            if (targetEvals.Length > 0 && !PipelineExecutor.EvaluateFilters<TTarget>(targetEvals, _tx, targetPK))
+            foreach (var targetPK in targetPKs)
             {
-                continue;
-            }
+                // Evaluate target predicates
+                if (targetEvals.Length > 0 && !PipelineExecutor.EvaluateFilters<TTarget>(targetEvals, _tx, targetPK))
+                {
+                    continue;
+                }
 
-            // Reverse lookup across BOTH index homes: the shared ComponentTable tree AND each cluster-backed archetype's own tree. Scanning only the first
-            // returned nothing for a cluster-backed source archetype (#662).
-            FkReverseLookup.ForEachSource(_tx.DBE, sourceCT, in candidates, fkFieldOrdinal, targetPK, ref sourceCollector);
+                // Reverse lookup across BOTH index homes: the shared ComponentTable tree AND each cluster-backed archetype's own tree. Scanning only the first
+                // returned nothing for a cluster-backed source archetype (#662).
+                sourcesAt ??= new FkSnapshot(_tx, in candidates, fkFieldOrdinal, includeOwn: true);
+                FkReverseLookup.ForEachSource(_tx.DBE, sourceCT, in candidates, fkFieldOrdinal, targetPK, ref sourceCollector, sourcesAt);
+            }
+        }
+        finally
+        {
+            sourcesAt?.Dispose();
         }
 
         return result;

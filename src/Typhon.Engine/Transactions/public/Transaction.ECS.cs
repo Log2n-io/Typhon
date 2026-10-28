@@ -214,6 +214,9 @@ public unsafe partial class Transaction
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal ComponentTable[] SlotTablesFor(ArchetypeMetadata meta) => _dbe._archetypeStates[meta.ArchetypeId].SlotToComponentTable;
 
+    /// <summary>Whether <paramref name="pk"/> is one of this transaction's own pending spawns.</summary>
+    internal bool IsOwnPendingSpawn(long pk) => SpawnedContains(EntityId.FromRaw(pk));
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private bool SpawnedContains(EntityId id)
     {
@@ -4472,7 +4475,7 @@ public unsafe partial class Transaction
                         // watermark is conservative UPWARD: a value recorded before the bit is cleared, or for a destroy that then fails, costs a per-entity
                         // probe and can never make the gate say "visible" when it is not (#722 review). And before the B+Tree entries go (#1347): an index
                         // path whose tree read misses them reads the archetype's destroy stamp and this watermark above its snapshot, and looks at the cluster.
-                        destroyClusterState?.NoteDestroyPublished(clusterChunkId, PublishStamp);
+                        destroyClusterState?.NoteDestroyPublished(clusterChunkId, slotIndex, PublishStamp);
 
                         // Under the slot's index lock (VIS-08): a spawn still publishing holds it until its entries and tails are written and its slot
                         // occupied — removed before, nothing was removed, and the spawn then indexed, and occupied, a dead entity. An update of an indexed

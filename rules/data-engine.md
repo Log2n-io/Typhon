@@ -188,8 +188,7 @@ below names the invariant that proves it.
             which is safe
   note the B+Tree and the spatial enumerators (AabbClusterEnumerator, ClusterRadiusBatch) read HEAD (design 05's non-goal,
        #674): an index-path or spatial query between a commit's append and its publish does not find the spawn its
-       revisions announce, and an older snapshot's spatial query does not find a hidden destroy. The index paths do find a hidden
-       destroy (VIS-09, #1347). The cluster-free race of
+       revisions announce. Every index reader and the spatial queries find a hidden destroy (VIS-09, #1347, VIS-13, #1247). The cluster-free race of
        a drain outside the fence is #1315
   never a claim sets the occupancy bit of the slot it takes: the claim folds the claimer's TSN into the born watermark first,
         so a reader whose snapshot is above that TSN passes the cluster gate and counts, or enumerates, a slot with no data and
@@ -240,13 +239,17 @@ below names the invariant that proves it.
             shrink flag, occupancy bit) and still claimed, its bytes and entity id kept, so an older snapshot still finds the
             entity by scan. The cleanup, keyed by the died STAMP, releases it once MinTSN is past that stamp
             (DatabaseEngine.ReleaseHiddenDestroySlot, ArchetypeClusterState.ReleaseHiddenSlot), then removes the record.
-            SingleVersion and Transient archetypes release at publish, as before: they promise no isolation
+            SingleVersion and Transient archetypes release at publish, as before: they promise no isolation. The cleanup releases
+            only in an archetype whose destroys hide, and only a slot still claimed, unoccupied and holding the destroyed id: a
+            SingleVersion slot freed at publish may be claimed by a spawn since, claimed and unoccupied until its own publish (#1247)
   invariant the index paths find a hidden destroy too (#1347): the publish folds its stamp — the archetype's
             (ArchetypeClusterState.NoteDestroyPublished, MaxDestroyStamp) and the cluster's died watermark — BEFORE it removes the
-            entity's B+Tree entries. The selective scan reads the archetype stamp after its tree read; above its snapshot, each cluster
-            whose died watermark is above it, or with a destroy pending, is read whole, as the SoA scan reads it, and a tree candidate
-            whose slot is hidden by the cluster read is decided by its record. The ordered merge reads the stamp before its streams
-            open — its tree reads are lazy — reads such clusters whole into a sorted side stream whose entities the tree stream drops,
+            entity's B+Tree entries, and the slot's change stamp before both (VIS-12). The selective scan reads the archetype stamp after its tree
+            read; above its snapshot, in each cluster whose died watermark is above it, the slots whose KEY stamp is above it are read as the
+            SoA scan reads them — every slot of a cluster with a destroy pending — and a tree candidate whose slot is hidden by the cluster read
+            is decided by its record. The ordered merge reads the stamp before its streams
+            open — its tree reads are lazy — reads the changed entities of such clusters (VIS-12's stamps) into a sorted side stream whose entities
+            the tree stream drops,
             tests every row's born and died at the snapshot (ArchetypeSortedStream.TryAdmitCurrent, as the merge consumes it), and answers again when the stamp moved
             during the merge; the sort fallback keys a row absent from the tree by its slot's bytes
   scope: Transaction.MarkDestroysPending, Transaction.UnmarkDestroysPending, Transaction.FlushPendingDestroys,
@@ -263,6 +266,12 @@ below names the invariant that proves it.
   spec: tla/CommitStampFamilies.tla — DestroyRead (destroyatpublish, releaseatpublish)
   on_violation: a reader begun after the destroy's stamp still sees the entity alive while it holds the commit's other
                 effects; an older reader's scan loses an entity its snapshot holds
+  verified: SnapshotIndexVisibilityTests [VerifiesRule] — a cleanup removing the record between a scan's occupancy read and its probe; the slot gate
+            on a missing record; the slot gate on a zero id, gated and not (a SingleVersion scan reading a slot's id after a destroy's release); a
+            SingleVersion destroy's cleanup
+            run inside a later spawn's PREPARE → PUBLISH window on the slot it freed. Mutants: the gate failing open on a missing record (the gate and
+            the scan cases), without the zero-id test (the zero-id case), the old gate (both, the scan case), the cleanup without its archetype and id
+            guards (the spawn case) — each red. Each cleanup guard alone survives by design: either is enough
   requires: VIS-01, VIS-06
 
 ### VIS-10: An enable/disable change exists before the stamp, and a snapshot reads it by stamp order `[fatal]` `[silent]`
@@ -301,29 +310,50 @@ below names the invariant that proves it.
   invariant ∀ field query Q at snapshot S on a Versioned component T, ∀ entity e: Q evaluates its predicates on the value of e's T committed at
             or below S, never on one committed after S — not the cluster HEAD's bytes, not the index tree's keys, which both hold the newest
             committed value — and never on Q's transaction's own unpublished write (QENABLE-01)
+  invariant a destroy's tombstone is not an update: it moves no HEAD bytes (its slot is hidden whole, VIS-09) and its entries' removal is
+            announced by the destroy stamp, so it folds no update watermark — folding it sent every older reader through a snapshot fill of each
+            destroyed cluster, ~8.5 µs a cluster (#1247)
   invariant an update publishing a new newest value (one that moves the entity's index entries or copies its HEAD) says so first, under the
             entity's chain lock and before either move (ArchetypeClusterState.NoteUpdatePublished, from Transaction.NoteVersionedUpdate): its
             cluster's update watermark (a CAS max of the commit stamp), the archetype's MaxUpdateStamp (a CAS max), then its UpdateCount
             (an increment) — once per update, not per commit: a merge whose first read falls between two updates of one commit must see the second
-  invariant a cluster whose update watermark is above S is evaluated on a snapshot column: each slot's value at S copied into a column laid out
-            as the HEAD's (EcsQuery.FillSnapshotColumn, EntityAccessor.TryCopyCommittedAtSnapshot), a slot with no value at S dropped. The column
+  invariant every change an older snapshot must not read from the HEAD or the trees records its commit stamp in its SLOT's change stamps
+            (ArchetypeClusterState.NoteSlotChanged, CAS maxes) BEFORE it folds its cluster's died or update watermark: the VALUE stamp for a change of
+            the HEAD bytes — a destroy (VIS-09), an update that copies its HEAD — and the KEY stamp for a change of the trees — a destroy, which takes
+            the entity's entries out, an update that moves one of its index keys (as Phase A decides one, conservatively: a commit landed since the
+            read counts); a migration carries both. In an archetype with a Versioned component, a key-moving update raises the archetype's
+            MaxKeyMoveStamp, and it and every destroy then increment its KeyChangeCount — a line of their own — before either touches a tree: a
+            count, since a destroy with a lower stamp can publish after one with a higher stamp and move no maximum. A reader that read the watermark by acquire reads the stamps after it (ArchetypeClusterState.ChangedSlotsAfter,
+            KeyChangedSlotsAfter). A stamp only rises and is never cleared — a stale one, from a slot released and reused since, reads as a change and
+            costs that slot a read at S, never a wrong answer — so no clearer races a writer. In memory only (#1247)
+  invariant a cluster whose update watermark is above S is evaluated on a snapshot column: the slots whose change stamp is above S read at S
+            through their record and chain (EcsQuery.FillSnapshotColumn, EntityAccessor.TryCopyCommittedAtSnapshot), a slot with no value at S
+            dropped; every other slot from the HEAD, its last change at or below S. The HEAD copy is validated after it: the stamps re-read behind a
+            load barrier, and a slot whose stamp rose meanwhile read at S — an update stamps its slot before it copies its HEAD (#1247). The column
             is the transaction's (Transaction.SnapshotColumn): taken from the engine's allocator at the first cluster that needs one, kept across
             pooled uses, never cleared — every slot read is written first. The SoA scan and the selective scan validate their HEAD read AFTER it,
             seqlock-style — the watermark re-read (behind a full barrier on arm64) and the cluster evaluated again on the snapshot column when it
             moved above S — because an update can fold its watermark after the first read and copy its HEAD before the evaluation
   invariant the index paths find the clusters from the archetype (EcsQuery.ClustersUpdatedAfterSnapshot): its UpdateCount first (the mark), then
             its MaxUpdateStamp; at or below S, no cluster — one load for every reader newer than the archetype's last update; above it, a walk
-            of every active cluster's watermark (EcsQuery.WatermarksAbove). The selective scan reads them after its tree read and reads each
-            listed cluster whole at S. The ordered merge reads them before its lazy streams open, reads each listed cluster whole into the side
-            stream whose entities the tree stream drops — every entity of the cluster, matching or not — and after the merge compares the count
-            with its mark (EcsQuery.UpdatedSince): changed, it walks the watermarks again and answers again when a cluster it did not read whole
-            is above S. The count, not the stamp: an older commit can publish after a newer one and leave the stamp where it was
+            of every active cluster's watermark (EcsQuery.WatermarksAbove). The selective scan reads them after its tree read and, in each listed
+            cluster, re-tests at S every predicate of the entities whose slot's KEY stamp is above S, beside the tree's candidates — an entity whose
+            update moved no key is a candidate at its snapshot key, verified on the snapshot column. The ordered
+            merge reads them before its lazy streams open, reads those entities into the side stream whose entities the tree stream drops — every
+            changed entity, matching or not — and after the merge compares the count with its mark (EcsQuery.UpdatedSince): changed, it walks the
+            watermarks again and answers again when any slot above S is one its side stream did not read, in a cluster it read or not. The count,
+            not the stamp: an older commit can publish after a newer one and leave the stamp where it was. A cluster whose died watermark is
+            unknown (a recovery or migration recorded a death without a stamp), or with a destroy pending, is read in every slot, as before
   invariant every path that moves an entity's HEAD to another cluster carries the update watermark with it: a fence migration folds the source
-            cluster's watermark into the destination's, and the archetype's stamp and count, before it copies the entity's bytes
+            slot's change stamp into the destination slot's, then the source cluster's watermark into the destination's, and the archetype's stamp
+            and count, before it copies the entity's bytes
             (DatabaseEngine.ExecuteMigrations)
   invariant a cluster above S is never pruned by its zone maps: the fence re-tightens them from the HEAD, so they may exclude S's value. The SoA
             scan re-reads the watermark after a prune verdict (behind a full barrier on arm64) and keeps the cluster when it is above S
   scope: Transaction.NoteVersionedUpdate, Transaction.SnapshotColumn, ArchetypeClusterState.NoteUpdatePublished, ArchetypeClusterState.NoteClusterUpdated,
+         ArchetypeClusterState.NoteSlotChanged, ArchetypeClusterState.ChangedSlotsAfter, ArchetypeClusterState.KeyChangedSlotsAfter,
+         ArchetypeClusterState.SlotChangeStamp, ArchetypeClusterState.SlotKeyStamp, ArchetypeClusterState.MaxKeyMoveStamp,
+         ArchetypeClusterState.KeyChangeCount, EcsQuery.SnapshotChangedSlots,
          ArchetypeClusterState.MaxUpdatedOf, ArchetypeClusterState.MaxUpdateStamp, ArchetypeClusterState.UpdateCount,
          EcsQuery.ClustersUpdatedAfterSnapshot, EcsQuery.WatermarksAbove, EcsQuery.UpdatedSince,
          EcsQuery.FillSnapshotColumn, EcsQuery.MatchingSlots, EcsQuery.ScanClusterSoa, EcsQuery.ScanPerArchetypeBTreeSelective,
@@ -345,5 +375,76 @@ below names the invariant that proves it.
             fence re-tightened after the update. PipelineExecutorCombinedPathTests.Versioned_SnapshotHidesLaterUpdate; OrderedQueryByAnotherFieldTests
             ...OrdersByTheValueItSees_OnTheMerge. Mutants: no watermark fold (nine red), no stamp fold, the walk skipped (eight each), no count, the
             merge's second read removed (the merge case), either validation removed (the between-reads case), the merge dropping only matching rows,
-            a migration that does not carry the watermark, a prune that ignores it — each red. Under load: QueryStressOracleTests
+            a migration that does not carry the watermark, a prune that ignores it — each red. A destroy leaving the watermark alone: SnapshotIndexVisibilityTests.ADestroy_LeavesTheUpdateWatermarkAlone
+            (mutant: the tombstone folding it — red). Per slot (#1247): QueryUpdateSnapshotTests — one changed slot read at S on every path
+            (counted: one point read a cluster), an update between the fill's stamp read and its HEAD copy (scan and selective), an update of another
+            slot of a cluster the ordered side stream read. Mutants: the fill reading every slot, no stamp re-read after the HEAD copy, the merge's
+            check by cluster, a migration not carrying the slot stamp, the selective scan not re-testing changed entities, an update or a destroy not
+            stamping its slot (QueryIndexPathSnapshotTests), the side stream dropping only its matching rows — each red. Under load: QueryStressOracleTests
             ...UnderConcurrentChurnAndTierMoves, quarantined on #1381 (#1369/#1370, which it exposed, are VIS-08's slot index lock)
+
+### VIS-13: An index read at a snapshot answers what the snapshot holds, as the snapshot's queries do `[fatal]` `[silent]`
+  invariant ∀ index read R of transaction t at snapshot S over keys [a, b] — `Transaction.EnumerateIndex`, the FK reverse lookup of a navigation and
+            of a navigation view's refresh (FkReverseLookup.ForEachSource with an FkSnapshot), and a spatial query (SQ-07) — R yields exactly the entities t's field query over [a, b] finds — alive at S, at the key and value S holds;
+            t's own destroys gone, t's own spawns in (at their own values), t's own value writes unseen (QENABLE-01) — in key order, each once
+  invariant the trees hold the newest committed keys, and a destroy takes its entries out at its publish (VIS-09), so the entities a change newer
+            than S destroyed or re-keyed are read at S beside them (IndexSnapshotSide`1): the slots whose KEY stamp is above S (VIS-12), in each
+            cluster whose died or update watermark is — every slot with a destroy pending or a died watermark recorded without a stamp — each decided
+            at S by its record and read at S (a Versioned component through its chain, a SingleVersion one from the slot a hidden destroy kept);
+            their tree rows are dropped and their rows merged back in key order. An entity whose update moved no key stays a tree row, at its
+            snapshot key, its value read through its chain. In a cluster no update newer than S touched, a slot's bytes are its value at S: its key
+            is tested before its record is probed. An entity is dropped only when its tree rows can be in [a, b] (the slot's bytes hold their key),
+            read beside them only when its key at S is: the work follows the changes the range can see, a refresh re-reading what it passed over.
+            Three loads per archetype (KeyChangeCount, MaxDestroyStamp, MaxKeyMoveStamp) and nothing allocated when nothing newer than S
+            destroyed or re-keyed an entity and t has no spawn or destroy. A Versioned tree row is returned only when its value at S carries the
+            row's key: an update re-keys the trees before it copies its HEAD, so a side read between the two takes the stale HEAD key for the
+            tree's (defense in depth; the window sits inside the writer's chain lock and has no staged test)
+  invariant the FK reverse lookup answers "which sources' foreign key named the target at S" (FkSnapshot): built once per query or per view refresh,
+            per candidate archetype, over the whole key range, the side's rows at the target's key merged with the tree's candidates; a navigation
+            counts t's own spawns and destroys, a view's refresh committed state only. The cascade alone reads HEAD (no FkSnapshot): it destroys the
+            children committed now. A navigation's predicates and a view's refresh read committed values at S (Transaction.TryReadCommitted), never
+            t's own unpublished writes — a refresh folded the refresher's write and kept it past its rollback; a navigation view built from t's query
+            is populated at t's snapshot (NavigationQueryBuilder.ToViewAt)
+  invariant a spatial query, in each archetype that promises isolation, takes out of its HEAD answer every slot whose VALUE stamp is above S
+            (a move of a Versioned spatial field is an update: it moves no index key) — every slot with a destroy pending or a died watermark
+            recorded without a stamp — and decides it again: visible at S, in the queried realm, its bounds at S (a Versioned field through its
+            chain, a SingleVersion one from the slot a hidden destroy kept) tested with the narrowphase's own decoder against the shape — box
+            overlap, closest-point distance, the ray's slab, the frustum's planes (EcsQuery.ApplySpatialSnapshot). Two loads when nothing in the
+            archetype is newer than S
+  invariant a row's own resolution answers at S: a slot hidden by a destroy, or claimed by a spawn still publishing, is decided by its record, which
+            must name the slot; a SingleVersion key of an archetype with a Versioned component is gated on born and died (the cluster's summary
+            first); a Versioned one is read through its chain
+  invariant against the tree reads: KeyChangeCount is read first and the trees after; a materialized read (several archetypes) builds the side
+            after its tree reads. A streaming read (one archetype) reads its trees as it goes, a key's entries at once: after each read, and at
+            the end, before it merges any row of that key, it re-reads the count and, when it moved, reads the slots changed since. Such an entity
+            was unchanged at the previous read: at or below the PREVIOUS key read its row was read then, at its snapshot key, and is not added
+            again; above it — between that key and the one just read its entry may have left the stretch the cursor crossed — it is added, and its
+            tree rows from there on are dropped. The FK lookup reads each target's entries, then the count, before it decides any (FkSnapshot.Sync),
+            once per target: an exact key needs no floor. Early termination stays proportional to what is read
+  scope: Transaction.EnumerateIndex, Transaction.NoteVersionedUpdate, IndexEntityEnumerator.MoveNext, IndexEntityEnumerator.TryResolve,
+         IndexEntityEnumerator.CheckChangesSinceLastRead, FkSnapshot.Admits, FkReverseLookup.ForEachSource, NavigationView.SourcesAt,
+         NavigationQueryBuilder.ToViewAt, Transaction.TryReadCommitted, EcsViewFieldReader.EvaluateAllFields, EcsQuery.ApplySpatialSnapshot,
+         EcsQuery.MatchesSpatialShape,
+         IndexEntityEnumerator.AttachSnapshotSide, IndexSnapshotSide.Create, IndexSnapshotSide.Refresh, IndexSnapshotSide.IsDropped
+  on_violation: an older reader lost an entity a destroy newer than its snapshot took out of the tree, returned an updated entity under its newer key
+                with its older value, returned spawns newer than its snapshot (a SingleVersion key), and disagreed with its own queries on its own
+                spawns and destroys. Live: the SWG item audit, reading ItemStack through EnumerateIndex, reported 5-21 phantom violations a pass
+  verified: EnumerateIndexSnapshotTests [VerifiesRule] — a destroy newer than the snapshot on both index kinds; an update at its snapshot key and value;
+            a later spawn; the transaction's own changes against its query; a SingleVersion key in an isolated archetype; a fan-out over two
+            archetypes; during a streaming walk: a destroy ahead of the cursor (both kinds), an update moving an entity behind it, one moving a
+            returned entity ahead of it, a destroy of an entity of the key being walked; a random oracle against the query (six seeds); counted:
+            only re-keyed and destroyed entities in range read beside the trees; a destroy of the next key during the walk (both kinds); a side row
+            merged inside a multi-value key; a navigation's own spawn under a source predicate. Mutants: the floor at the key just read, the cursor
+            key shared with the current key, an own spawn's predicate read committed (each red); no side, no refresh during the walk, the refresh's floor
+            ignored, changed entities not dropped, a hidden slot skipped, no born/died gate on a SingleVersion key, own spawns not read, own destroys
+            not dropped, every update stamping the key (the counted case), none (twenty red), no key prefilter, a migration not carrying the key
+            stamp — each red. NavigationSnapshotTests [VerifiesRule] — a navigation through spawns, destroys and retargets after its snapshot,
+            with a source predicate too; its own spawns and destroys, not its own retarget; a view's fan-out against a source retargeted onto and
+            away from the target, destroyed and spawned after the refresh's snapshot; a view populated at its creator's snapshot; a navigation view's
+            and an EcsView's refresh made with the refresher's own unpublished write, then rolled back; a navigation's target predicate
+            over targets the transaction wrote, read before or not (mutant: the cached read under its own write — red). Mutants: the navigation at HEAD, the view's
+            fan-out at HEAD, the committed read seeing own writes, a fresh transaction populating, a tree candidate not gated, the side's rows not
+            added — each red. SpatialSnapshotTests [VerifiesRule] — a destroy newer than the snapshot and a later spawn, on every shape; a Versioned
+            spatial field moved after the snapshot, on every shape. Mutants: no spatial snapshot, Versioned bounds from the HEAD, the HEAD answer
+            kept, the shape test admitting all — each red
+  requires: VIS-09, VIS-12, VIS-11, QENABLE-01

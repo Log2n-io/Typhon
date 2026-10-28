@@ -31,6 +31,9 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
     // Indexes both IndexedFieldInfos[o] and, for a cluster-backed archetype, IndexSlots[s].Fields[o].
     private readonly int _fkFieldOrdinal;
 
+    // The refresh's FK lookups at its snapshot (#1247): built at the first lookup a refresh makes, released when it ends.
+    private FkSnapshot _fkSnapshot;
+
     // Which archetypes can hold the source component, split by index home. Resolved ONCE here rather than per lookup: ReverseLookupAndUpdate runs per
     // target delta entry, so anything built inside it is rebuilt on every fan-out (#662 AC: no allocation per target PK).
     private readonly FkCandidates _candidates;
@@ -143,21 +146,36 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
             throw new ObjectDisposedException(nameof(NavigationView<,>));
         }
 
-        if (NeedsRefreshFull)
+        try
         {
-            SetOverflowDetected(true);
-            RefreshFull(tx);
-            return;
-        }
+            if (NeedsRefreshFull)
+            {
+                SetOverflowDetected(true);
+                RefreshFull(tx);
+                return;
+            }
 
-        var targetTSN = tx.TSN;
-        while (DeltaBuffer.TryPeek(targetTSN, out var entry, out var flags, out var tsn, out var componentTag))
+            var targetTSN = tx.TSN;
+            while (DeltaBuffer.TryPeek(targetTSN, out var entry, out var flags, out var tsn, out var componentTag))
+            {
+                DeltaBuffer.Advance();
+                ProcessEntry(ref entry, flags & 0x3F, (flags & 0x40) != 0, (flags & 0x80) != 0, componentTag, tx);
+                SetLastRefreshTSN(tsn);
+            }
+        }
+        finally
         {
-            DeltaBuffer.Advance();
-            ProcessEntry(ref entry, flags & 0x3F, (flags & 0x40) != 0, (flags & 0x80) != 0, componentTag, tx);
-            SetLastRefreshTSN(tsn);
+            _fkSnapshot?.Dispose();
+            _fkSnapshot = null;
         }
     }
+
+    /// <summary>
+    /// The sources whose foreign key names a target AT THE REFRESH'S SNAPSHOT (#1247, VIS-13), committed state only: the HEAD tree held the newest
+    /// foreign keys, so a refresh at an older snapshot fanned a target's change out to sources re-keyed onto it since, and missed ones re-keyed away or
+    /// destroyed since. Built once per refresh.
+    /// </summary>
+    private FkSnapshot SourcesAt(Transaction tx) => _fkSnapshot ??= new FkSnapshot(tx, in _candidates, _fkFieldOrdinal, includeOwn: false);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void ProcessEntry(ref ViewDeltaEntry entry, int fieldIndex, bool isCreation, bool isDeletion, byte componentTag, Transaction tx)
@@ -279,7 +297,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
             // But if target is still qualifying, mark affected sources as Modified
             if (targetIsIn)
             {
-                MarkSourcesModified(targetPK);
+                MarkSourcesModified(targetPK, tx);
             }
             return;
         }
@@ -293,7 +311,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
     /// </summary>
     private bool EvaluateFullPredicate(long sourcePK, Transaction tx)
     {
-        if (!tx.QueryRead<TSource>(sourcePK, out var sourceComp))
+        if (!tx.TryReadCommitted<TSource>(sourcePK, false, out var sourceComp))
         {
             return false;
         }
@@ -317,7 +335,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
         }
 
         // Read and evaluate target
-        if (!tx.QueryRead<TTarget>(fkValue, out var targetComp))
+        if (!tx.TryReadCommitted<TTarget>(fkValue, false, out var targetComp))
         {
             return false;
         }
@@ -346,7 +364,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
     /// </summary>
     private bool CheckOtherSourceFieldsAndTarget(long sourcePK, int changedFieldIndex, Transaction tx)
     {
-        if (!tx.QueryRead<TSource>(sourcePK, out var sourceComp))
+        if (!tx.TryReadCommitted<TSource>(sourcePK, false, out var sourceComp))
         {
             return false;
         }
@@ -374,7 +392,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
             return false;
         }
 
-        if (!tx.QueryRead<TTarget>(fkValue, out var targetComp))
+        if (!tx.TryReadCommitted<TTarget>(fkValue, false, out var targetComp))
         {
             return false;
         }
@@ -407,7 +425,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
             return true;
         }
 
-        if (!tx.QueryRead<TTarget>(targetPK, out var targetComp))
+        if (!tx.TryReadCommitted<TTarget>(targetPK, false, out var targetComp))
         {
             return false;
         }
@@ -430,7 +448,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
     /// </summary>
     private bool EvaluateSourcePredicates(long sourcePK, Transaction tx)
     {
-        if (!tx.QueryRead<TSource>(sourcePK, out var sourceComp))
+        if (!tx.TryReadCommitted<TSource>(sourcePK, false, out var sourceComp))
         {
             return false;
         }
@@ -458,7 +476,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
         bool targetPasses = EvaluateTargetPredicates(targetPK, tx);
 
         var action = new ApplyDeltaAction { View = this, Tx = tx, TargetPasses = targetPasses };
-        FkReverseLookup.ForEachSource(_sourceTable.DBE, _sourceTable, in _candidates, _fkFieldOrdinal, targetPK, ref action);
+        FkReverseLookup.ForEachSource(_sourceTable.DBE, _sourceTable, in _candidates, _fkFieldOrdinal, targetPK, ref action, SourcesAt(tx));
     }
 
     /// <summary>Applies the source-side view transition for each entity found by the reverse lookup.</summary>
@@ -480,10 +498,10 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
     /// <summary>
     /// Marks all source entities pointing to a target as Modified (target field changed but didn't cross boundary).
     /// </summary>
-    private void MarkSourcesModified(long targetPK)
+    private void MarkSourcesModified(long targetPK, Transaction tx)
     {
         var action = new MarkModifiedAction { View = this };
-        FkReverseLookup.ForEachSource(_sourceTable.DBE, _sourceTable, in _candidates, _fkFieldOrdinal, targetPK, ref action);
+        FkReverseLookup.ForEachSource(_sourceTable.DBE, _sourceTable, in _candidates, _fkFieldOrdinal, targetPK, ref action, SourcesAt(tx));
     }
 
     /// <summary>Marks each already-present source entity Modified.</summary>
