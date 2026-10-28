@@ -453,6 +453,40 @@ public sealed partial class SimBridge
             + $"disc floor {disc.SurfaceY:F2} disc realm {disc.Realm} vel ({move.VelX:F3}, {move.VelZ:F3})");
     }
 
+    /// <summary>Diagnostic switch, read once from <c>SWG_MOVE_TRACE</c>: every client-driven body's position, each tick it moves, to a CSV.</summary>
+    /// <remarks>
+    /// Movement stuttered for every player at a regular cadence (2026-10-28). The trace says whether the server's own positions advance evenly in
+    /// tick and in time; the client records what it draws, and the two are compared. Off by default; the JIT folds the test away.
+    /// </remarks>
+    private static readonly bool MoveTrace = Environment.GetEnvironmentVariable("SWG_MOVE_TRACE") == "1";
+
+    private static readonly Lock MoveTraceGate = new();
+    private static System.IO.StreamWriter _moveTraceOut;
+
+    /// <summary>One line of <see cref="MoveTrace"/>: the position the body starts this tick's step from, i.e. where the previous tick left it.</summary>
+    private static void TraceMove(long tick, EntityId entity, byte kind, in PlayerPlacement p, in PlayerMotion move)
+    {
+        if (kind == ControllerKind.Scripted)
+        {
+            return;
+        }
+
+        lock (MoveTraceGate)
+        {
+            if (_moveTraceOut == null)
+            {
+                var path = Environment.GetEnvironmentVariable("SWG_MOVE_TRACE_FILE") ?? "move-trace.csv";
+                _moveTraceOut = new System.IO.StreamWriter(path, append: false) { AutoFlush = true };
+                _moveTraceOut.WriteLine("tick,stopwatchMs,unixMs,entity,x,z,y,velX,velZ");
+                Console.WriteLine($"  move trace: {System.IO.Path.GetFullPath(path)}");
+            }
+
+            var ms = System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            _moveTraceOut.WriteLine(string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                $"{tick},{ms:F3},{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},{entity},{p.X:F4},{p.Z:F4},{p.Y:F3},{move.VelX:F5},{move.VelZ:F5}"));
+        }
+    }
+
     /// <summary>
     /// The A/B switch for rung (c)'s cost, read once from <c>SWG_NO_SLOPE</c>.
     /// </summary>
@@ -1074,6 +1108,10 @@ public sealed partial class SimBridge
 
                 var p = places[idx];
                 var h = p.HalfExtent;
+                if (MoveTrace)
+                {
+                    TraceMove(tick, cluster.GetEntityId(idx), cluster.GetReadOnlySpan(Player.Control)[idx].Kind, in p, in move);
+                }
 
                 // The bias is one tick's remainder and is NOT scaled by `k`: a realm visited every k-th tick moves k ticks of velocity in one visit, but
                 // the split happened once.

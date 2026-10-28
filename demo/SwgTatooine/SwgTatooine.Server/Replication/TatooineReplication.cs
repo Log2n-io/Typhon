@@ -2759,6 +2759,63 @@ public static partial class TatooineReplication
     private static double SendCpuFrom;
     private static int SendGen0From;
 
+    /// <summary>Diagnostic switch, read once from <c>SWG_MOVE_TRACE</c>: each finished tick's timing and its three slowest systems, to a CSV.</summary>
+    /// <remarks>The companion of <c>SimBridge.MoveTrace</c> (2026-10-28): which system made a tick late, beside the positions that tick produced.</remarks>
+    private static readonly bool TickTrace = Environment.GetEnvironmentVariable("SWG_MOVE_TRACE") == "1";
+
+    private static System.IO.StreamWriter _tickTraceOut;
+
+    /// <summary>One line of <see cref="TickTrace"/>, for <paramref name="tickNumber"/>, read from the scheduler's telemetry ring once that tick is recorded.</summary>
+    private static void TraceTick(long tickNumber)
+    {
+        var ring = Scheduler?.Telemetry;
+        if (ring == null || !ring.TryGetTick(tickNumber, out var t) || !ring.TryGetSystemMetrics(tickNumber, out var systems))
+        {
+            return;
+        }
+
+        if (_tickTraceOut == null)
+        {
+            var path = (Environment.GetEnvironmentVariable("SWG_MOVE_TRACE_FILE") ?? "move-trace.csv") + ".ticks.csv";
+            _tickTraceOut = new System.IO.StreamWriter(path, append: false) { AutoFlush = true };
+            _tickTraceOut.WriteLine("tick,stopwatchMs,durationMs,intervalMs,uowFlushMs,lostWakesTotal,tickLostWakes,sys1,us1,work1,trans1,strag1,ent1,sys2,us2,work2,trans2,strag2,ent2,sys3,us3,work3,trans3,strag3,ent3");
+        }
+
+        int a = -1, b = -1, c = -1;
+        for (var i = 0; i < systems.Length; i++)
+        {
+            var d = systems[i].DurationUs;
+            if (a < 0 || d > systems[a].DurationUs)
+            {
+                (a, b, c) = (i, a, b);
+            }
+            else if (b < 0 || d > systems[b].DurationUs)
+            {
+                (b, c) = (i, b);
+            }
+            else if (c < 0 || d > systems[c].DurationUs)
+            {
+                c = i;
+            }
+        }
+
+        var names = Scheduler.Systems;
+        var top = new System.Text.StringBuilder();
+        foreach (var i in (ReadOnlySpan<int>)[a, b, c])
+        {
+            top.Append(',').Append(i < 0 ? "" : names[systems[i].SystemIndex].Name)
+                .Append(',').Append(i < 0 ? 0 : (int)systems[i].DurationUs)
+                .Append(',').Append(i < 0 ? 0 : (int)systems[i].WorkUs)
+                .Append(',').Append(i < 0 ? 0 : (int)systems[i].TransitionLatencyUs)
+                .Append(',').Append(i < 0 ? 0 : (int)systems[i].StragglerGapUs)
+                .Append(',').Append(i < 0 ? 0 : systems[i].EntitiesProcessed);
+        }
+
+        var ms = System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        _tickTraceOut.WriteLine(string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"{tickNumber},{ms:F3},{t.ActualDurationMs:F3},{t.TickIntervalMs:F3},{t.UowFlushMs:F3},{Scheduler.LostWakeCount},{t.LostWakes}{top}"));
+    }
+
     /// <summary>
     /// The periodic replication report: what the track did, cumulatively, every three hundred ticks.
     /// </summary>
@@ -2769,6 +2826,11 @@ public static partial class TatooineReplication
     /// </remarks>
     public static void ReportTick(TickContext tick)
     {
+        if (TickTrace)
+        {
+            TraceTick(tick.TickNumber - 1);
+        }
+
         var subs = tick.Subscriptions;
         if (subs == null)
         {
