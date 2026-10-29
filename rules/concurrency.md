@@ -584,6 +584,42 @@ lock ordering and deadlock prevention are still to come.
   verified: EntityRefMutTests.EntityRef_ExposesNoWriteMember_EntityRefMutDoes — no public member of either handle returns a reference
             [VerifiesRule]
 
+### EP-04: A thread holds an epoch pin only for a bounded scope, released on that thread `[fatal]` `[silent]`
+  invariant every epoch scope a thread enters is exited by that same thread when the work it covers ends: an EpochGuard, a Transaction, a
+            PointInTimeAccessor worker lease (PointInTimeAccessor.Enter → WorkerLease, a ref struct: it cannot be stored, captured or carried to another
+            thread). No reusable object holds a pin between its uses: a long-lived accessor carries caches, never a pin
+  invariant nor does a worker accessor hold pages once its system is over: PointInTimeAccessor.FlushWorker, at the end of every parallel system,
+            releases its cached ChunkAccessor windows (ComponentInfo.ReleaseWindows, the entity-map cache, the cluster cache), whose slot references
+            keep their pages unevictable whatever the epoch (PS-01). The worker THREAD's warm B+Tree accessors (ChunkBasedSegment.WarmAccessorCache,
+            WarmSiblingAccessorCache) are not the accessor's and stay: a bounded window per segment, the one hold PS-19 allows across calls. Kept, they were held for every (parallel system × worker) — a set that grows with
+            the systems and the cores, not the data: 210 pages for 6 systems × 4 workers over 8 000 entities, none needed. Released, the parallel
+            section measured the same (p50 2 832 µs against 2 868 µs kept, six interleaved Release runs each)
+  invariant a PointInTimeAccessor worker accessor reads only under a lease. Used with none open it throws — a resolve (EntityAccessor.NeedsEpochGuard)
+            and every entry point that hands out a walker over pages, For and GetClusterEnumerator (RequireLeaseIfPointInTime): a per-call guard
+            would cover the entity-map lookup but not the reads after it. The runtime takes one lease per parallel chunk (RT-01), so a worker
+            that is parked, between ticks or in a stalled tick holds no pin
+  note a lease exits in order (ExitScope with its depth), a Transaction unordered: a transaction opened before a lease and disposed inside it makes
+       the lease's exit throw its depth mismatch, loudly, as RT-01 accepts for a body that leaks a scope
+  invariant a refresh moves the calling thread's pin only: a flush made for another thread's accessor (PointInTimeAccessor.FlushWorker, from the thread
+            that completed the system) moves no epoch, and commits under a scope of its own
+  rationale: #1532. InitLightweight entered a scope on a worker's first parallel chunk and never left it, one per parallel system (depth 9 on all 16
+    SWG workers), and the end-of-system flush refreshed the completing thread's pin, never the workers'. Parked workers held MinActiveEpoch up to
+    14 130 epochs behind; every page tagged since stayed unevictable (PS-01). A tick that then waited for a page could not finish, so no worker ever
+    refreshed: the fence waited forever, and after a tick abort the floor stayed frozen for good (an oldest pin 204 788 epochs behind)
+  on_violation: the page cache fills with pages nothing uses and none can be evicted; every allocation waits on back-pressure, admission throttles to
+    one, and a stalled tick never recovers — a server that stays up and does nothing
+  scope: PointInTimeAccessor.cs (Enter, WorkerLease, FlushWorker, AdvanceSnapshot, Attach, Dispose), EntityAccessor.cs (InitLightweight,
+         NeedsEpochGuard, RequireLeaseIfPointInTime, BeginLease, EndLease, FlushAtSystemEnd), EntityAccessor.ECS.cs (For, GetClusterEnumerator),
+         ComponentInfo.cs (ReleaseWindows), PagedMMF.cs (CountPagesWithSlotReferences),
+         TyphonRuntime.cs (ExecuteChunkWithAccessor, OnParallelQueryCleanup)
+  verified: WorkerEpochPinTests.ParkedWorkers_HoldNoEpochPin_BetweenTicks [VerifiesRule] (4 workers, two parallel systems, measured inside the idle gap:
+            no worker pinned; before the fix every worker pinned at depth 2, the floor frozen 200 epochs behind, 16 pages held); WorkerEpochPinTests.ParkedWorkers_KeepingTheirFirstChunksPin_AreRejected [RuleMutant];
+            APointInTimeWorker_UsedOutsideItsLease_Throws and ALease_PinsItsThreadForItsLengthOnly_AndAWorkerIndexMayMoveBetweenThreads [VerifiesRule]
+            (each fails with its guard removed: no throw outside a lease, a lease that never unpins);
+            APointInTimeWorker_HandsOutNoWalkerOutsideItsLease and ALease_IsReleasedOnAThrow_NestsWithAnother_AndHostsATransaction [VerifiesRule];
+            Workers_HoldNoPageBySlotReference_OnceTheirSystemsEnd [VerifiesRule] (counted by a system after the last parallel one and in the idle gap:
+            0 pages; 210 with the release removed)
+
 ## Module: SIGNAL — Wake signals versus resource counts
 
 A counting semaphore can model two different things: how many of a resource are available, or that something has

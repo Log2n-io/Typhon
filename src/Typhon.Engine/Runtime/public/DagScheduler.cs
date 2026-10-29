@@ -1190,7 +1190,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// <remarks>
     /// <b>Two different indices share the name "worker id" — size against the right one.</b> This value sizes arrays indexed by
     /// <see cref="TickContext.WorkerId"/>, the slot a system body sees. The scheduler's own per-worker pools (<c>_partitionViews</c>, the tier-range view
-    /// pool, <c>ParallelTransactionAccessor.GetWorkerAccessor</c>) are indexed by the <i>internal</i> <c>workerId</c> that chunk dispatch hands out,
+    /// pool, <c>PointInTimeAccessor.Enter</c>) are indexed by the <i>internal</i> <c>workerId</c> that chunk dispatch hands out,
     /// which is always a real pool index and never the dispatcher slot — they are correctly sized <see cref="WorkerCount"/> and must stay that way.
     /// </remarks>
     public int WorkerSlotCount => _workerCount + 1;

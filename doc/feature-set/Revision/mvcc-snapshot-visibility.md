@@ -55,8 +55,8 @@ tx.Commit();
 ```csharp
 // PointInTimeAccessor: same visibility rule, no transaction/locking overhead — for parallel query workers
 using var snapshot = PointInTimeAccessor.Create(dbe);
-var worker = snapshot.GetWorkerAccessor(0);
-var entity = worker.Open(heroId);                          // throws if not found/visible at snapshot.TSN
+using var lease = snapshot.Enter(0);                     // pins this thread for the reads below
+var entity = lease.Accessor.Open(heroId);                          // throws if not found/visible at snapshot.TSN
 var hp = entity.Read(Hero.Stats);
 ```
 

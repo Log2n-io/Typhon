@@ -1,5 +1,8 @@
 using NUnit.Framework;
+using Microsoft.Win32.SafeHandles;
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 
@@ -38,8 +41,10 @@ public class WalWriterTests : AllocatorTestBase
     private (WalCommitBuffer buffer, WalWriter writer, WalSegmentManager segMgr) CreateWriterPipeline(
         int bufferCapacity = TestCapacity,
         int groupCommitMs = 5,
-        bool useFUA = false)
+        bool useFUA = false,
+        IWalFileIO fileIO = null)
     {
+        fileIO ??= _fileIO;
         var buffer = new WalCommitBuffer(MemoryAllocator, AllocationResource, bufferCapacity);
 
         var options = new WalWriterOptions
@@ -52,10 +57,10 @@ public class WalWriterTests : AllocatorTestBase
             UseFUA = useFUA,
         };
 
-        var segMgr = new WalSegmentManager(_fileIO, _walDir, options.SegmentSize, options.PreAllocateSegments, useFUA);
+        var segMgr = new WalSegmentManager(fileIO, _walDir, options.SegmentSize, options.PreAllocateSegments, useFUA);
         segMgr.Initialize(lastSegmentId: 0, firstLSN: 1);
 
-        var writer = new WalWriter(buffer, segMgr, _fileIO, options, MemoryAllocator, AllocationResource);
+        var writer = new WalWriter(buffer, segMgr, fileIO, options, MemoryAllocator, AllocationResource);
 
         return (buffer, writer, segMgr);
     }
@@ -382,6 +387,304 @@ public class WalWriterTests : AllocatorTestBase
             writer.Dispose();
             buffer.Dispose();
             segMgr.Dispose();
+        }
+    }
+
+    #endregion
+
+    #region WaitForDurable wake-up (#1529)
+
+    /// <summary>
+    /// Several committers wait at once, each for a different LSN, while the durable watermark advances one LSN at a time. Every waiter must return as soon
+    /// as its LSN is durable: the old <c>ManualResetEventSlim.Wait(1)</c> + <c>Reset()</c> loop let one waiter's <c>Reset</c> clear the signal another
+    /// needed, and the 1 ms timeout then slept a whole 15.6 ms Windows timer quantum.
+    /// </summary>
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("WP-17")]
+    [Category("Sensitive")] // wall-clock wake-latency bound — runs in the gate's serial quiet pass
+    public void WaitForDurable_ConcurrentWaiters_EachWakesAsSoonAsItsLsnIsDurable()
+    {
+        const int waiterCount = 8;
+        const int rounds = 100;
+        const int lsnCount = waiterCount * rounds;
+        var maxLatency = TimeSpan.FromMilliseconds(10);
+
+        var (buffer, writer, segMgr) = CreateWriterPipeline();
+        try
+        {
+            // Writer thread not started: the test is the only thing advancing the watermark (SeedDurableLsn → AdvanceDurable, the writer's own path).
+            var advancedAt = new long[lsnCount + 1];
+            var wokeAt = new long[lsnCount + 1];
+            var armed = new int[lsnCount + 1];
+            var failures = new Exception[waiterCount];
+            var threads = new Thread[waiterCount];
+            for (var w = 0; w < waiterCount; w++)
+            {
+                var waiter = w;
+                threads[w] = new Thread(() =>
+                {
+                    try
+                    {
+                        for (var r = 0; r < rounds; r++)
+                        {
+                            var lsn = r * waiterCount + waiter + 1;
+                            var ctx = WaitContext.FromTimeout(TimeSpan.FromSeconds(3));
+                            Volatile.Write(ref armed[lsn], 1);
+                            writer.WaitForDurable(lsn, ref ctx);
+                            wokeAt[lsn] = Stopwatch.GetTimestamp();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        failures[waiter] = ex;
+                    }
+                }) { IsBackground = true };
+                threads[w].Start();
+            }
+
+            for (var lsn = 1; lsn <= lsnCount; lsn++)
+            {
+                var spin = new SpinWait();
+                while (Volatile.Read(ref armed[lsn]) == 0)
+                {
+                    spin.SpinOnce(-1);
+                }
+
+                // Let the waiter reach its blocking wait, and give the previous round's wakers time to loop back: the window the Reset raced in.
+                var until = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 20_000;
+                while (Stopwatch.GetTimestamp() < until)
+                {
+                    Thread.SpinWait(20);
+                }
+
+                advancedAt[lsn] = Stopwatch.GetTimestamp();
+                writer.SeedDurableLsn(lsn);
+            }
+
+            foreach (var t in threads)
+            {
+                Assert.That(t.Join(TimeSpan.FromSeconds(3)), Is.True, "a waiter never returned");
+            }
+
+            Assert.That(failures, Is.All.Null);
+            var worst = TimeSpan.Zero;
+            var worstLsn = 0;
+            for (var lsn = 1; lsn <= lsnCount; lsn++)
+            {
+                var latency = Stopwatch.GetElapsedTime(advancedAt[lsn], wokeAt[lsn]);
+                if (latency > worst)
+                {
+                    worst = latency;
+                    worstLsn = lsn;
+                }
+            }
+
+            Assert.That(worst, Is.LessThan(maxLatency), $"LSN {worstLsn} woke {worst.TotalMilliseconds:F2} ms after it became durable");
+        }
+        finally
+        {
+            writer.Dispose();
+            buffer.Dispose();
+            segMgr.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// A waiter whose LSN never becomes durable gives up at its own deadline, not at the next backstop slice: the wait slice is clamped to the deadline.
+    /// </summary>
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("WP-17")]
+    [Category("Sensitive")] // wall-clock deadline bound
+    public void WaitForDurable_NeverDurable_TimesOutAtItsDeadline()
+    {
+        var (buffer, writer, segMgr) = CreateWriterPipeline();
+        try
+        {
+            var ctx = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(20));
+            var start = Stopwatch.GetTimestamp();
+            Assert.Throws<WalBackPressureTimeoutException>(() => writer.WaitForDurable(1, ref ctx));
+            Assert.That(Stopwatch.GetElapsedTime(start), Is.LessThan(TimeSpan.FromMilliseconds(80)));
+        }
+        finally
+        {
+            writer.Dispose();
+            buffer.Dispose();
+            segMgr.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// A waiter blocked on an LSN the writer then fails to write wakes on the failure, not on the next backstop slice, and throws the write failure.
+    /// </summary>
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("WP-17")]
+    [Category("Sensitive")] // wall-clock wake bound, below the 100 ms backstop slice
+    public void WaitForDurable_WriterFails_WakesTheBlockedWaiterAtOnce()
+    {
+        using var io = new FailingRecordWriteFileIO(_fileIO);
+        var (buffer, writer, segMgr) = CreateWriterPipeline(fileIO: io);
+        try
+        {
+            var ctx = WaitContext.FromTimeout(TimeSpan.FromSeconds(2));
+            var claim = buffer.TryClaim(64, 1, ref ctx);
+            claim.DataSpan.Fill(0xEE);
+            buffer.Publish(ref claim);
+
+            var waiter = BlockedWaiter.Start(writer, 1, WaitContext.FromTimeout(TimeSpan.FromSeconds(3)));
+            var firedAt = Stopwatch.GetTimestamp();
+            writer.Start();
+
+            var (error, wokeAt) = waiter.Join();
+            Assert.That(error, Is.InstanceOf<WalWriteException>());
+            Assert.That(Stopwatch.GetElapsedTime(firedAt, wokeAt), Is.LessThan(TimeSpan.FromMilliseconds(50)));
+        }
+        finally
+        {
+            writer.Dispose();
+            buffer.Dispose();
+            segMgr.Dispose();
+        }
+    }
+
+    /// <summary>A waiter whose token is cancelled wakes on the cancellation, not on the next backstop slice.</summary>
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("WP-17")]
+    [Category("Sensitive")] // wall-clock wake bound, below the 100 ms backstop slice
+    public void WaitForDurable_TokenCancelled_WakesTheBlockedWaiterAtOnce()
+    {
+        var (buffer, writer, segMgr) = CreateWriterPipeline();
+        using var cts = new CancellationTokenSource();
+        try
+        {
+            var waiter = BlockedWaiter.Start(writer, 1, WaitContext.FromTimeout(TimeSpan.FromSeconds(3), cts.Token));
+            var firedAt = Stopwatch.GetTimestamp();
+            cts.Cancel();
+
+            var (error, wokeAt) = waiter.Join();
+            Assert.That(error, Is.InstanceOf<WalBackPressureTimeoutException>());
+            Assert.That(Stopwatch.GetElapsedTime(firedAt, wokeAt), Is.LessThan(TimeSpan.FromMilliseconds(50)));
+        }
+        finally
+        {
+            writer.Dispose();
+            buffer.Dispose();
+            segMgr.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Disposing the writer wakes a waiter whose LSN can no longer become durable, which throws <see cref="ObjectDisposedException"/> instead of sleeping
+    /// to its deadline.
+    /// </summary>
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("WP-17")]
+    public void WaitForDurable_WriterDisposed_WakesTheBlockedWaiter()
+    {
+        var (buffer, writer, segMgr) = CreateWriterPipeline();
+        try
+        {
+            var waiter = BlockedWaiter.Start(writer, 1, WaitContext.FromTimeout(TimeSpan.FromSeconds(3)));
+            writer.Dispose();
+
+            var (error, _) = waiter.Join();
+            Assert.That(error, Is.InstanceOf<ObjectDisposedException>());
+        }
+        finally
+        {
+            writer.Dispose();
+            buffer.Dispose();
+            segMgr.Dispose();
+        }
+    }
+
+    /// <summary>A thread blocked in <see cref="WalWriter.WaitForDurable"/>: <see cref="Start"/> returns once it is inside the slow wait.</summary>
+    private sealed class BlockedWaiter
+    {
+        private readonly Thread _thread;
+        private Exception _error;
+        private long _wokeAt;
+
+        private BlockedWaiter(WalWriter writer, long lsn, WaitContext ctx)
+        {
+            _thread = new Thread(() =>
+            {
+                try
+                {
+                    var c = ctx;
+                    writer.WaitForDurable(lsn, ref c);
+                }
+                catch (Exception ex)
+                {
+                    _error = ex;
+                }
+
+                _wokeAt = Stopwatch.GetTimestamp();
+            }) { IsBackground = true };
+        }
+
+        public static BlockedWaiter Start(WalWriter writer, long lsn, WaitContext ctx)
+        {
+            var waiter = new BlockedWaiter(writer, lsn, ctx);
+            waiter._thread.Start();
+            var spin = new SpinWait();
+            while (writer.DurabilityWaitersForTest == 0)
+            {
+                spin.SpinOnce(-1);
+            }
+
+            // Registered; give it the few instructions to its Monitor.Wait, so the event under test lands on a sleeping waiter.
+            var until = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 1_000;
+            while (Stopwatch.GetTimestamp() < until)
+            {
+                Thread.SpinWait(20);
+            }
+
+            return waiter;
+        }
+
+        public (Exception Error, long WokeAt) Join()
+        {
+            Assert.That(_thread.Join(TimeSpan.FromSeconds(3)), Is.True, "the waiter never returned");
+            return (_error, _wokeAt);
+        }
+    }
+
+    /// <summary>An in-memory WAL backend whose record writes fail (segment headers pass): the writer's fatal-error path, on demand.</summary>
+    private sealed class FailingRecordWriteFileIO(InMemoryWalFileIO inner) : IWalFileIO
+    {
+        public SafeFileHandle OpenSegment(string path, bool withFUA) => inner.OpenSegment(path, withFUA);
+
+        public void WriteAligned(SafeFileHandle handle, long offset, ReadOnlySpan<byte> data)
+        {
+            if (offset >= WalSegmentHeader.SizeInBytes)
+            {
+                throw new IOException("simulated WAL write failure");
+            }
+
+            inner.WriteAligned(handle, offset, data);
+        }
+
+        public void FlushBuffers(SafeFileHandle handle) => inner.FlushBuffers(handle);
+
+        public void PreAllocate(SafeFileHandle handle, long size) => inner.PreAllocate(handle, size);
+
+        public void ReadAligned(SafeFileHandle handle, long offset, Span<byte> buffer) => inner.ReadAligned(handle, offset, buffer);
+
+        public SafeFileHandle OpenSegmentForRead(string path) => inner.OpenSegmentForRead(path);
+
+        public bool Exists(string path) => inner.Exists(path);
+
+        public void Delete(string path) => inner.Delete(path);
+
+        public IReadOnlyList<string> EnumerateSegmentPaths(string directory) => inner.EnumerateSegmentPaths(directory);
+
+        public void Dispose()
+        {
         }
     }
 

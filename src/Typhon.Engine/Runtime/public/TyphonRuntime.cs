@@ -2826,6 +2826,14 @@ public sealed partial class TyphonRuntime : IDisposable
         }
     }
 
+    /// <summary>
+    /// The EP-04 mutant, for its [RuleMutant] test: each worker takes an epoch scope at its first parallel chunk and never exits it — the standing pin
+    /// worker accessors held before #1532. Per runtime, so a parallel test is never touched.
+    /// </summary>
+    internal bool PinWorkersPastTheirChunkForTest;
+
+    [ThreadStatic] private static bool t_mutantWorkerPinned;
+
     /// <summary>Paths 1 &amp; 2: Non-Versioned chunk execution with per-worker EntityAccessor from per-system PTA.</summary>
     private void ExecuteChunkWithAccessor(int sysIdx, int chunkIndex, int totalChunks, int workerId)
     {
@@ -2837,6 +2845,17 @@ public sealed partial class TyphonRuntime : IDisposable
         int clusterStart = 0, clusterEnd = 0;
         int[] clusterIdArray = null;
         ref var plan = ref _queryPlans[sysIdx][chunkIndex];
+
+        // RT-01 / EP-04: the chunk runs under this worker's lease — its epoch scope, held for the chunk and released with it, on this thread. The worker
+        // accessor carries no pin of its own: a parked worker holds none (#1532).
+        if (PinWorkersPastTheirChunkForTest && !t_mutantWorkerPinned)
+        {
+            // The EP-04 mutant: the standing pin the worker accessor used to take on its first use, below the lease and never exited.
+            t_mutantWorkerPinned = true;
+            _ = Engine.EpochManager.EnterScope();
+        }
+
+        using var lease = pta.Enter(workerId);
 
         // Change filter MUST take precedence over tier filter for the entities source.
         //   - Change-filtered: ctx.Entities = sliced materialized list (already tier-scoped upstream).
@@ -2901,8 +2920,8 @@ public sealed partial class TyphonRuntime : IDisposable
             }
         }
 
-        // Get this worker's EntityAccessor — direct array lookup, zero dictionary overhead
-        var workerAccessor = pta.GetWorkerAccessor(workerId);
+        // This worker's EntityAccessor — direct array lookup, zero dictionary overhead
+        var workerAccessor = lease.Accessor;
 
         float amortizedDt = AmortizedDeltaTimeFor(sysIdx);
 
@@ -3116,11 +3135,13 @@ public sealed partial class TyphonRuntime : IDisposable
     /// </summary>
     private bool OnParallelQueryCleanup(int sysIdx)
     {
-        // Batch epoch flush: flush all workers that participated (once per system, not per chunk).
-        // This avoids N×chunks epoch refreshes and reduces global EpochManager contention.
+        // Flush every worker once per system, not per chunk: commits and cluster caches. No epoch moves here: a worker holds a pin only inside its lease
+        // (EP-04). This used to refresh the CALLING thread's pin once per worker, and no worker's own (#1532).
         var pta = _parallelAccessors[sysIdx];
-        if (pta != null)
+        if (pta != null && Engine?.EpochManager is { } epochManager)
         {
+            // One scope for the loop: each FlushWorker nests in it, so the cleanup advances the global epoch once, not once per worker.
+            using var guard = EpochGuard.Enter(epochManager);
             for (int w = 0; w < Scheduler.WorkerCount; w++)
             {
                 pta.FlushWorker(w);

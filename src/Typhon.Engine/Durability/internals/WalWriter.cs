@@ -26,7 +26,7 @@ namespace Typhon.Engine.Internals;
 ///   <item>Copy to 4096-aligned staging buffer, zero-pad tail</item>
 ///   <item>Write aligned data to active segment via <see cref="IWalFileIO.WriteAligned"/></item>
 ///   <item><see cref="WalCommitBuffer.CompleteDrain"/> to advance buffer position</item>
-///   <item>Advance <see cref="DurableLsn"/> and signal <see cref="_durabilityEvent"/></item>
+///   <item>Advance <see cref="DurableLsn"/> and wake waiters on <see cref="_durabilitySync"/></item>
 ///   <item>Check segment rotation threshold (75%)</item>
 /// </list>
 /// </para>
@@ -79,7 +79,32 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
     // ═══════════════════════════════════════════════════════════════
 
     private long _durableLsn;
-    private readonly ManualResetEventSlim _durabilityEvent = new(false);
+
+    /// <summary>
+    /// Monitor the waiters of <see cref="WaitForDurableSlow"/> block on. Pulsed on every durable-LSN advance, a fatal error, the writer's stop and a
+    /// waiter's cancellation. A monitor, not a shared reset event: a waiter re-checks its own LSN under the lock, so no waiter can clear a signal another
+    /// one needed (#1529).
+    /// </summary>
+    private readonly object _durabilitySync = new();
+
+    /// <summary>
+    /// Threads inside <see cref="WaitForDurableSlow"/>. Lets <see cref="AdvanceDurable"/> skip the lock when nobody waits. Dekker pairing: the waiter
+    /// increments (full fence) before reading <see cref="_durableLsn"/>, the writer CASes <see cref="_durableLsn"/> (full fence) before reading this
+    /// count, so at least one side sees the other's store.
+    /// </summary>
+    private int _durabilityWaiters;
+
+    /// <summary>
+    /// Set by <see cref="Dispose(bool)"/> once the writer thread has exited: nothing advances <see cref="_durableLsn"/> any more, so a waiter whose LSN is
+    /// still ahead of it throws instead of sleeping to its deadline.
+    /// </summary>
+    private volatile bool _stopped;
+
+    /// <summary>
+    /// Longest single <see cref="Monitor.Wait(object,int)"/> in <see cref="WaitForDurableSlow"/>. A backstop only: every event a waiter reacts to (advance,
+    /// fatal error, stop, cancellation) pulses the monitor.
+    /// </summary>
+    private const int DurabilityWaitSliceMs = 100;
 
     // ═══════════════════════════════════════════════════════════════
     // CRC chain state (single-threaded — writer thread only)
@@ -174,6 +199,9 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
 
     /// <summary>Whether the writer thread is currently running.</summary>
     public bool IsRunning => _thread != null && _thread.IsAlive;
+
+    /// <summary>Threads currently inside a slow durability wait — lets a test stage a waiter that is blocked before it fires the event under test.</summary>
+    internal int DurabilityWaitersForTest => Volatile.Read(ref _durabilityWaiters);
 
     /// <summary>Whether a fatal I/O error has occurred.</summary>
     public bool HasFatalError => _fatalError != null;
@@ -272,23 +300,86 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
 
         var waitStart = Stopwatch.GetTimestamp();
 
-        while (Interlocked.Read(ref _durableLsn) < lsn)
+        // A cancellation wakes the wait at once rather than at the next backstop slice. Registered once per slow wait, which blocks on an fsync anyway.
+        var cancelRegistration = !Unsafe.IsNullRef(ref ctx) && ctx.Token.CanBeCanceled
+            ? ctx.Token.UnsafeRegister(static s => ((WalWriter)s).PulseDurabilityWaiters(), this)
+            : default;
+        try
         {
-            if (!Unsafe.IsNullRef(ref ctx) && ctx.ShouldStop)
+            while (Interlocked.Read(ref _durableLsn) < lsn)
             {
-                // Elapsed, not Deadline.Remaining — Remaining is TimeSpan.Zero whenever ShouldStop is true, so the exception could only
-                // ever say "timeout after 0ms". See the same fix in WalCommitBuffer.TryClaim's back-pressure loop.
-                ThrowHelper.ThrowWalBackPressureTimeout(0, Stopwatch.GetElapsedTime(waitStart));
+                if (!Unsafe.IsNullRef(ref ctx) && ctx.ShouldStop)
+                {
+                    // Elapsed, not Deadline.Remaining — Remaining is TimeSpan.Zero whenever ShouldStop is true, so the exception could only
+                    // ever say "timeout after 0ms". See the same fix in WalCommitBuffer.TryClaim's back-pressure loop.
+                    ThrowHelper.ThrowWalBackPressureTimeout(0, Stopwatch.GetElapsedTime(waitStart));
+                }
+
+                if (_fatalError != null)
+                {
+                    ThrowHelper.ThrowWalWriteFailure(_fatalError);
+                }
+
+                ObjectDisposedException.ThrowIf(_stopped, this);
+                WaitForDurabilitySignal(lsn, ref ctx);
+            }
+        }
+        finally
+        {
+            cancelRegistration.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Blocks until <see cref="_durabilitySync"/> is pulsed (an advance, a fatal error, the writer's stop, a cancellation) or one backstop slice elapses;
+    /// the caller's loop re-checks every condition. Never a timed poll on the normal path: a 1 ms kernel-wait timeout rounds up to the 15.6 ms Windows
+    /// timer quantum (#1529).
+    /// </summary>
+    /// <remarks>
+    /// A deadline under 1 ms away is not slept on: <c>Monitor.Wait(1)</c> would overrun it by up to a quantum, so the thread yields and the loop re-checks
+    /// (a spin of at most that last millisecond). A longer deadline still expires at timer resolution: the wait wakes at the first tick past it.
+    /// </remarks>
+    private void WaitForDurabilitySignal(long lsn, ref WaitContext ctx)
+    {
+        var sliceMs = DurabilityWaitSliceMs;
+        if (!Unsafe.IsNullRef(ref ctx))
+        {
+            var remaining = ctx.Deadline.RemainingMilliseconds;
+            if (remaining == 0)
+            {
+                Thread.Yield();
+                return;
             }
 
-            if (_fatalError != null)
+            if (remaining > 0)
             {
-                ThrowHelper.ThrowWalWriteFailure(_fatalError);
+                sliceMs = Math.Min(sliceMs, remaining);
             }
+        }
 
-            // Wait for the durability event with a short timeout to re-check conditions
-            _durabilityEvent.Wait(1);
-            _durabilityEvent.Reset();
+        Interlocked.Increment(ref _durabilityWaiters);
+        try
+        {
+            lock (_durabilitySync)
+            {
+                if (Interlocked.Read(ref _durableLsn) < lsn && _fatalError == null && !_stopped)
+                {
+                    Monitor.Wait(_durabilitySync, sliceMs);
+                }
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _durabilityWaiters);
+        }
+    }
+
+    /// <summary>Wakes every <see cref="WaitForDurableSlow"/> waiter to re-check its LSN and the fatal-error flag.</summary>
+    private void PulseDurabilityWaiters()
+    {
+        lock (_durabilitySync)
+        {
+            Monitor.PulseAll(_durabilitySync);
         }
     }
 
@@ -561,7 +652,8 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
             // Fatal I/O error — set error flag and wake all waiters
             Logger?.LogCritical(ex, "WAL writer FATAL error — thread terminating");
             _fatalError = ex;
-            _durabilityEvent.Set();
+            // Unconditional: a volatile store followed by a load of the waiter count is not Dekker-safe, and this path runs once.
+            PulseDurabilityWaiters();
         }
     }
 
@@ -833,8 +925,8 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
 
     /// <summary>
     /// Monotonically advances the durable watermark to <paramref name="candidate"/> and wakes waiters. The single source of the advance invariant, shared by the
-    /// background drain loop, shutdown drain, and the synchronous crash-test drain. Caller is the single consumer (writer thread or a stopped-thread sync
-    /// drain), so no CAS loop is needed.
+    /// background drain loop, shutdown drain, the synchronous crash-test drain and <see cref="SeedDurableLsn"/>. A CAS loop, not a check-then-store: the
+    /// seed runs on the engine's thread, and with a running writer a store could lower the watermark the writer had just raised.
     /// </summary>
     /// <remarks>
     /// The monotonic guard is <b>defence in depth</b>, not a correctness mechanism. It previously justified itself by pointing at claim order and drain order
@@ -846,10 +938,21 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
     /// </remarks>
     private void AdvanceDurable(long candidate)
     {
-        if (candidate > Interlocked.Read(ref _durableLsn))
+        var current = Interlocked.Read(ref _durableLsn);
+        while (candidate > current)
         {
-            Interlocked.Exchange(ref _durableLsn, candidate);
-            _durabilityEvent.Set();
+            var seen = Interlocked.CompareExchange(ref _durableLsn, candidate, current);
+            if (seen == current)
+            {
+                if (Volatile.Read(ref _durabilityWaiters) > 0)
+                {
+                    PulseDurabilityWaiters();
+                }
+
+                return;
+            }
+
+            current = seen;
         }
     }
 
@@ -892,7 +995,14 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
             _commitBuffer.Signal(); // Wake the writer thread so it sees _shutdown immediately
             _thread?.Join(TimeSpan.FromSeconds(5));
 
-            _durabilityEvent.Dispose();
+            // The shutdown drain has advanced the watermark as far as it will ever go: wake whoever is still waiting past it. Not when the join timed out
+            // — the thread may still advance it.
+            if (_thread == null || !_thread.IsAlive)
+            {
+                _stopped = true;
+                PulseDurabilityWaiters();
+            }
+
             _stagingBlock.Dispose();
         }
 

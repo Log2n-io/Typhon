@@ -78,7 +78,8 @@ class LazyVersionedResolveTests : TestBase<LazyVersionedResolveTests>
         SetGold(dbe, id, 375);   // three revisions in the chain
 
         using var accessor = PointInTimeAccessor.Create(dbe);
-        var wa = accessor.GetWorkerAccessor(0);
+        using var waLease = accessor.Enter(0);
+        var wa = waLease.Accessor;
         var e = wa.Open(id);
 
         Assert.That(e.Read(LazyVMixed.Gold).Amount, Is.EqualTo(375), "deferred walk must land on the newest revision visible at this TSN");
@@ -97,7 +98,8 @@ class LazyVersionedResolveTests : TestBase<LazyVersionedResolveTests>
         using var pin = dbe.CreateReadOnlyTransaction();
 
         using var accessor = PointInTimeAccessor.Create(dbe);   // TSN anchored here
-        var wa = accessor.GetWorkerAccessor(0);
+        using var waLease = accessor.Enter(0);
+        var wa = waLease.Accessor;
         var e = wa.Open(id);                                    // chain root stashed, NOT walked
 
         SetGold(dbe, id, 999);                                  // newer revision commits while the ref is held
@@ -113,7 +115,8 @@ class LazyVersionedResolveTests : TestBase<LazyVersionedResolveTests>
         SetGold(dbe, id, 200);
 
         using var accessor = PointInTimeAccessor.Create(dbe);
-        var wa = accessor.GetWorkerAccessor(0);
+        using var waLease = accessor.Enter(0);
+        var wa = waLease.Accessor;
         var e = wa.Open(id);
 
         var first = e.Read(LazyVMixed.Gold).Amount;   // resolves + memoizes
@@ -133,7 +136,8 @@ class LazyVersionedResolveTests : TestBase<LazyVersionedResolveTests>
         SetGold(dbe, id, 512);
 
         using var accessor = PointInTimeAccessor.Create(dbe);
-        var wa = accessor.GetWorkerAccessor(0);
+        using var waLease = accessor.Enter(0);
+        var wa = waLease.Accessor;
         var e = wa.Open(id);
 
         Assert.That(e.TryRead<LazyVGold>(out var gold), Is.True);
@@ -148,7 +152,8 @@ class LazyVersionedResolveTests : TestBase<LazyVersionedResolveTests>
         SetGold(dbe, id, 4242);
 
         using var accessor = PointInTimeAccessor.Create(dbe);
-        var wa = accessor.GetWorkerAccessor(0);
+        using var waLease = accessor.Enter(0);
+        var wa = waLease.Accessor;
         var e = wa.Open(id);
 
         byte goldSlot = Archetype<LazyVMixed>.Metadata.GetSlot(ArchetypeRegistry.GetComponentTypeId<LazyVGold>());
@@ -166,7 +171,8 @@ class LazyVersionedResolveTests : TestBase<LazyVersionedResolveTests>
         SetGold(dbe, id, 77);
 
         using var accessor = PointInTimeAccessor.Create(dbe);
-        var wa = accessor.GetWorkerAccessor(0);
+        using var waLease = accessor.Enter(0);
+        var wa = waLease.Accessor;
         var e = wa.Open(id);
 
         Assert.That(e.Read<LazyVGold>().Amount, Is.EqualTo(77), "the by-type Read overload must also trigger the deferred walk");
@@ -182,7 +188,8 @@ class LazyVersionedResolveTests : TestBase<LazyVersionedResolveTests>
         SetGold(dbe, id, 300);
 
         using var accessor = PointInTimeAccessor.Create(dbe);
-        var wa = accessor.GetWorkerAccessor(0);
+        using var waLease = accessor.Enter(0);
+        var wa = waLease.Accessor;
         var e = wa.Open(id);
 
         var pos = e.Read(LazyVMixed.Pos);
@@ -203,7 +210,8 @@ class LazyVersionedResolveTests : TestBase<LazyVersionedResolveTests>
         SetGold(dbe, b, 999);
 
         using var accessor = PointInTimeAccessor.Create(dbe);
-        var wa = accessor.GetWorkerAccessor(0);
+        using var waLease = accessor.Enter(0);
+        var wa = waLease.Accessor;
 
         // Interleaved opens through one accessor — a stale pending mask or a shared chain root would cross-contaminate here.
         Assert.That(wa.Open(a).Read(LazyVMixed.Gold).Amount, Is.EqualTo(10));

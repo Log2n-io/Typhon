@@ -168,6 +168,29 @@ internal sealed class ComponentInfo
     public void AddNew(long pk, CompRevInfo entry) => SingleCache.Add(pk, entry);
 
     /// <summary>
+    /// Lets go of every page the chunk accessors' windows hold — committed, then their slot references released — and binds fresh, empty accessors on the
+    /// same segments, so the entry stays usable. A point-in-time worker's end of system (EP-04): kept across systems and ticks, the windows of every
+    /// (parallel system × worker) held their pages unevictable while the worker was parked, a set that grows with the hardware, not the data.
+    /// </summary>
+    internal void ReleaseWindows(ChangeSet changeSet)
+    {
+        DisposeAccessors();
+        switch (ComponentTable.StorageMode)
+        {
+            case StorageMode.Transient:
+                TransientCompContentAccessor = ComponentTable.TransientComponentSegment.CreateChunkAccessor();
+                break;
+            case StorageMode.SingleVersion:
+                CompContentAccessor = ComponentTable.ComponentSegment.CreateChunkAccessor(changeSet);
+                break;
+            default: // Versioned
+                CompContentAccessor = ComponentTable.ComponentSegment.CreateChunkAccessor(changeSet);
+                CompRevTableAccessor = ComponentTable.CompRevTableSegment.CreateChunkAccessor(changeSet);
+                break;
+        }
+    }
+
+    /// <summary>
     /// Disposes the <see cref="ChunkAccessor{PersistentStore}"/> fields to flush dirty pages.
     /// </summary>
     public void DisposeAccessors()

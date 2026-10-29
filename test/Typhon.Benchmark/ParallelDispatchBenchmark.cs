@@ -210,7 +210,8 @@ static class ParallelDispatchBenchmark
         double fastNs;
         {
             using var pta = PointInTimeAccessor.Create(dbe, 1);
-            var acc = pta.GetWorkerAccessor(0);
+            using var accLease = pta.Enter(0);
+            var acc = accLease.Accessor;
 
             // Warmup
             for (var w = 0; w < warmup; w++)
@@ -220,7 +221,7 @@ static class ParallelDispatchBenchmark
                     acc.Open(ids[i]);
                 }
 
-                acc.RefreshEpochScope();
+                pta.FlushWorker(0);
             }
 
             var sw = Stopwatch.StartNew();
@@ -231,7 +232,7 @@ static class ParallelDispatchBenchmark
                     acc.Open(ids[i]);
                 }
 
-                acc.RefreshEpochScope();
+                pta.FlushWorker(0);
             }
 
             sw.Stop();

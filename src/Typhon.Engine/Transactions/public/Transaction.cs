@@ -1691,7 +1691,7 @@ public unsafe partial class Transaction : EntityAccessor
         var bytes = stackalloc byte[sizeof(T)];
 
         // As the open: a refresh normally runs inside the transaction's epoch scope already, and a default guard must not be disposed.
-        var needsGuard = !_ownsPersistentEpochScope && !_epochManager.IsCurrentThreadInScope;
+        var needsGuard = NeedsEpochGuard();
         var guard = needsGuard ? EpochGuard.Enter(_epochManager) : default;
         if (!_hasEntityMapCache || _entityMapCacheArchId != id.ArchetypeId)
         {

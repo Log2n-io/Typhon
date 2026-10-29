@@ -3986,6 +3986,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal void NoteClusterPageModified(int clusterChunkId) => ClusterSegment?.MarkChunkModified(clusterChunkId);
 
     /// <summary>
+    /// The PS-10 mutant, for its [RuleMutant] test: the cluster enumerator skips the page record of a cluster whose memory it handed out (#1531). Per
+    /// archetype of one engine, so a parallel test is never touched.
+    /// </summary>
+    internal bool SkipHandedOutPageRecordForTest;
+
+    /// <summary>
     /// <see cref="NoteClusterPageModified"/> for a caller holding <paramref name="clusterBase"/>, the cluster's address on the primary segment, mapped: the
     /// page from the address, with no page lookup (#1346). A Transient-only archetype has no persistent segment and needs nothing.
     /// </summary>
