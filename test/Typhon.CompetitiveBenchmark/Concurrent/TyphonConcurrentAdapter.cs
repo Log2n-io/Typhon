@@ -71,21 +71,22 @@ public sealed class TyphonConcurrentAdapter : IConcurrentAdapter
     {
         private readonly EntityId[] _ids;
         private readonly PointInTimeAccessor _pta;
-        private readonly EntityAccessor _acc;
 
         public Worker(DatabaseEngine dbe, EntityId[] ids)
         {
             _ids = ids;
             _pta = PointInTimeAccessor.Create(dbe, workerCount: 1); // frozen MVCC snapshot, this thread only
-            _acc = _pta.GetWorkerAccessor(0);
         }
 
         public long ReadBatch(int startKey, int count)
         {
+            // One lease per batch: the thread is pinned while it reads, never between batches (EP-04).
+            using var lease = _pta.Enter(0);
+            var acc = lease.Accessor;
             long sum = 0;
             for (int i = 0; i < count; i++)
             {
-                sum += _acc.Open(_ids[startKey + i]).Read(SvValArch.Data).Value;
+                sum += acc.Open(_ids[startKey + i]).Read(SvValArch.Data).Value;
             }
             return sum;
         }
@@ -93,9 +94,11 @@ public sealed class TyphonConcurrentAdapter : IConcurrentAdapter
         public void UpdateBatch(int startKey, int count, long seed)
         {
             // SV in-place write (last-writer-wins) — no commit, no WAL fsync (durability is at tick fence). Lock-free.
+            using var lease = _pta.Enter(0);
+            var acc = lease.Accessor;
             for (int i = 0; i < count; i++)
             {
-                _acc.OpenMut(_ids[startKey + i]).Set(SvValArch.Data, new SvVal { Value = seed + i });
+                acc.OpenMut(_ids[startKey + i]).Set(SvValArch.Data, new SvVal { Value = seed + i });
             }
         }
 
@@ -103,9 +106,11 @@ public sealed class TyphonConcurrentAdapter : IConcurrentAdapter
         // thread), so the lean SV read+write is correct without a transaction or conflict detection.
         public void RmwBatch(int startKey, int count)
         {
+            using var lease = _pta.Enter(0);
+            var acc = lease.Accessor;
             for (int i = 0; i < count; i++)
             {
-                var target = _acc.OpenMut(_ids[startKey + i]);
+                var target = acc.OpenMut(_ids[startKey + i]);
                 var data = target.Read(SvValArch.Data);
                 data.Value += 1;
                 target.Set(SvValArch.Data, data);

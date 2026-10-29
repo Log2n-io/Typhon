@@ -8,7 +8,7 @@ description: 'A thread-safe, frozen current snapshot fanned across many worker t
 
 > **In one line:** a **thread-safe**, frozen **current** snapshot fanned across worker threads — a lock-free read engine **far lighter than a [Transaction](xref:concept-transaction)**.
 
-**Built for concurrent reads.** One call allocates a single TSN; each worker thread then gets its *own* [`EntityAccessor`](xref:Typhon.Engine.EntityAccessor) from a flat per-worker array (`GetWorkerAccessor(workerId)`) — no dictionary, no per-entity locking — and every worker reads the *same* consistent moment. N threads scan the snapshot in parallel with zero coordination between them; the shared snapshot is immutable, so there is nothing to lock.
+**Built for concurrent reads.** One call allocates a single TSN; each worker thread then leases its *own* [`EntityAccessor`](xref:Typhon.Engine.EntityAccessor) from a flat per-worker array (`using var lease = pta.Enter(workerId);` then `lease.Accessor`) — no dictionary, no per-entity locking — and every worker reads the *same* consistent moment. N threads scan the snapshot in parallel with zero coordination between them; the shared snapshot is immutable, so there is nothing to lock.
 
 **Lighter than a `Transaction` because it carries only the mechanics to *read*, not to *mutate*.** A [Transaction](xref:concept-transaction) must haul write-staging, a local write cache, commit-time conflict detection, an undo log for `Rollback`, and the WAL/commit path. A `PointInTimeAccessor` holds none of that — just a TSN plus one read cursor per worker, reused across ticks with zero allocation after warmup (warm page caches preserved). It reads every [storage mode](xref:concept-storage-mode) (walking the revision chain for `Versioned`) and can still store `SingleVersion`/`Transient` in place, but it **cannot** Spawn, Destroy, Commit, Rollback, or write `Versioned` (throws). For anything structural or transactional, use a [Transaction](xref:concept-transaction).
 
@@ -23,7 +23,8 @@ description: 'A thread-safe, frozen current snapshot fanned across many worker t
 
 ## In the API
 
-- [`PointInTimeAccessor`](xref:Typhon.Engine.PointInTimeAccessor) — [`Create(dbe, workerCount)`](xref:Typhon.Engine.PointInTimeAccessor.Create*), [`GetWorkerAccessor(i)`](xref:Typhon.Engine.PointInTimeAccessor.GetWorkerAccessor*), [`TSN`](xref:Typhon.Engine.PointInTimeAccessor.TSN).
+- [`PointInTimeAccessor`](xref:Typhon.Engine.PointInTimeAccessor) — [`Create(dbe, workerCount)`](xref:Typhon.Engine.PointInTimeAccessor.Create*), [`Enter(i)`](xref:Typhon.Engine.PointInTimeAccessor.Enter*) → [`WorkerLease`](xref:Typhon.Engine.PointInTimeAccessor.WorkerLease) (`Accessor`, disposed with `using`), [`TSN`](xref:Typhon.Engine.PointInTimeAccessor.TSN).
+- **The lease is the pin.** A worker's accessor reads only while its lease is open: the lease pins the thread's epoch (pages it touches cannot be evicted under it) and releases it when disposed. The accessor stays warm between leases and holds no pin; its cached page windows keep a few pages until `FlushWorker(i)` releases them (the runtime calls it at the end of every parallel system). Used without a lease it throws. Keep a lease to one stretch of reads on one thread — a `ref struct`, it cannot be stored or handed to another thread.
 - [`EntityRef`](xref:Typhon.Engine.EntityRef) / [`EntityRefMut`](xref:Typhon.Engine.EntityRefMut) — [`Read<T>`](xref:Typhon.Engine.EntityRef.Read*) / [`Set<T>`](xref:Typhon.Engine.EntityRefMut.Set*) through a worker accessor.
 
 ## Learn & use

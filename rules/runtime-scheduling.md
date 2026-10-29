@@ -652,14 +652,15 @@ descends from this one property.
 ### RT-01: Every system body runs inside an epoch scope, and must not block in it `[fatal]` `[silent]`
   invariant ∀ system S dispatched by the runtime: S's body executes with a live EpochGuard scope on the executing thread, whatever S's shape —
             a serial CallbackSystem / non-parallel QuerySystem gets it from the transaction OnSystemStartInternal creates (Transaction.Init calls
-            EnterScope unconditionally); a parallel QuerySystem from the per-worker EntityAccessor (InitLightweight, for the accessor's lifetime);
+            EnterScope unconditionally); a parallel QuerySystem from its worker's lease, once per chunk (ExecuteChunkWithAccessor →
+            PointInTimeAccessor.Enter, EP-04);
             a ChunkedCallbackSystem from the dispatcher itself, once per chunk (ExecuteChunkedCallback); and a parallel QuerySystem that WritesVersioned
             from its per-chunk Transaction (ExecuteChunkWithTransaction) rather than from an accessor — four mechanisms, not three
   invariant a parallel QuerySystem's PREPARE — the runtime's own work before its chunks: the change filter's dirty scan, the tier, sleep and
             descendant materializations — runs inside a scope the runtime opens (OnParallelQueryPrepare, #1063). It reads cluster pages
             through ChunkAccessors like a body does, and outside a scope it read pages nothing protected (Debug asserted, which hung the tick)
-  note the parallel-query accessor pins for the ACCESSOR'S lifetime and never exits inside the tick (EntityAccessor.InitLightweight, "No epoch exit
-       here"): a standing pin rather than a scope. The guarantee holds, but this rule now makes that pin load-bearing for a public contract
+  note the parallel-query accessor used to pin for the ACCESSOR'S lifetime (EntityAccessor.InitLightweight): a standing pin rather than a scope, that
+       outlived the chunk, the tick and the worker's park, and froze the cache's eviction floor (#1532). It is a lease now, scoped to the chunk (EP-04)
   note the dispatcher's own EpochGuard.Dispose THROWS on a depth mismatch (EpochThreadRegistry.UnpinCurrentThread), so a body that leaks a scope —
        an undisposed Transaction, say — fails loudly here rather than corrupting reclamation silently. That is deliberate: swallowing it would hide
        epoch-depth corruption, which is worse than a loud failure, but it does put a throw on the tick path
@@ -684,7 +685,7 @@ descends from this one property.
   scope: TyphonRuntime.cs (ExecuteChunkedCallback, ExecuteChunkWithAccessor, ExecuteChunkWithTransaction, OnParallelQueryChunk, OnParallelQueryPrepare),
          Transaction.cs (Init),
          ChunkedCallbackSystem.cs,
-         EntityAccessor.cs (InitLightweight), EpochGuard.cs (Enter, Dispose), ClusterSpatialQuery.cs
+         PointInTimeAccessor.cs (Enter, WorkerLease), EpochGuard.cs (Enter, Dispose), ClusterSpatialQuery.cs
   verified: EpochScopeAroundSystemBodiesTests — one test per mechanism, each asserting a live scope from inside the body:
             ASerialCallbackSystemBody_RunsInsideAnEpochScope, AParallelQuerySystemBody_RunsInsideAnEpochScope,
             AChunkedCallbackSystemBody_RunsInsideAnEpochScope (the last fails on the pre-fix dispatcher, which called CallbackAction with no guard), plus

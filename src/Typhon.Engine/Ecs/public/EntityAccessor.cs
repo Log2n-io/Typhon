@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using JetBrains.Annotations;
 using Typhon.Schema.Definition;
@@ -60,11 +61,18 @@ public partial class EntityAccessor : IDisposable
     private protected int _owningThreadId;
 
     /// <summary>
-    /// True when this accessor entered an epoch scope in <see cref="InitLightweight"/> that it never exits — the PointInTimeAccessor worker path. Lets
-    /// <c>ResolveEntity</c> skip <c>EpochManager.IsCurrentThreadInScope</c> (two <c>[ThreadStatic]</c> reads plus a padded-slot load) on every resolve.
-    /// False on every other path, where the original check still runs.
+    /// A <see cref="PointInTimeAccessor"/> worker (<see cref="InitLightweight"/>): its snapshot is not in the transaction chain, so a chain-walk failure
+    /// below the retention floor is an expiry (<c>ThrowIfSnapshotExpired</c>), and it may read only inside a lease (<see cref="_leaseDepth"/>).
     /// </summary>
-    private protected bool _ownsPersistentEpochScope;
+    private protected bool _isPointInTime;
+
+    /// <summary>
+    /// Leases open on this accessor (<see cref="PointInTimeAccessor.WorkerLease"/>), each holding an epoch scope on the owning thread. While one is, the
+    /// thread is provably in scope and a resolve skips <c>EpochManager.IsCurrentThreadInScope</c> (two <c>[ThreadStatic]</c> reads plus a padded-slot
+    /// load). A point-in-time worker with none open is refused (<see cref="NeedsEpochGuard"/>): a per-call guard would cover the map lookup but not the
+    /// reads after it (#1532). It used to hold a scope from its first use until its thread died, and that pin froze the cache's floor.
+    /// </summary>
+    private protected int _leaseDepth;
 
     private protected Dictionary<Type, ComponentInfo> _componentInfos;
 
@@ -163,24 +171,15 @@ public partial class EntityAccessor : IDisposable
     }
 
     /// <summary>
-    /// Initialize this accessor for lightweight point-in-time access.
-    /// Creates a per-thread ChangeSet for dirty page tracking.
-    /// Does NOT enter a persistent epoch scope — entity resolution uses per-call EpochGuard, and ChunkAccessors protect their own pages via ref counting.
-    /// Does NOT insert into TransactionChain.
+    /// Initialize this accessor for lightweight point-in-time access: a <see cref="PointInTimeAccessor"/> worker. Creates a per-thread ChangeSet for dirty
+    /// page tracking and does not insert into the TransactionChain. It enters NO epoch scope: the worker reads only inside a
+    /// <see cref="PointInTimeAccessor.WorkerLease"/>, which pins the thread for its length (EP-04, #1532).
     /// </summary>
     internal void InitLightweight(DatabaseEngine dbe, long tsn)
     {
         _dbe = dbe;
         _epochManager = _dbe.EpochManager;
-        // Enter epoch scope on calling thread — required for ChunkAccessor creation.
-        // Epoch exit is intentionally omitted from Dispose() because PointInTimeAccessor disposes per-thread accessors from a different (cleanup) thread.
-        // The epoch scope is cleaned up when the EpochManager is disposed with the DatabaseEngine.
-        // Runtime integration (#211) will add proper per-worker epoch cleanup hooks.
-        _ = _epochManager.EnterScope();
-        // The scope entered above is never exited for this accessor's lifetime (see the note on Dispose omission), and the accessor is thread-affine
-        // (_owningThreadId below). So "is this thread in an epoch scope?" is provably true from here on, and ResolveEntity can skip asking — that question
-        // costs two [ThreadStatic] reads plus a padded-slot load on EVERY entity resolve.
-        _ownsPersistentEpochScope = true;
+        _isPointInTime = true;
         _isDisposed = false;
         _owningThreadId = Environment.CurrentManagedThreadId;
         _entityOperationCount = 0;
@@ -188,6 +187,73 @@ public partial class EntityAccessor : IDisposable
         _ownsChangeSet = true;
         TSN = tsn;
     }
+
+    /// <summary>
+    /// Whether a page read at a call boundary needs an epoch guard of its own: not under a lease (its scope covers the thread), not on a thread already
+    /// in scope (a transaction's). A point-in-time worker outside every lease throws instead: it has no scope to read under (EP-04).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private protected bool NeedsEpochGuard()
+    {
+        if (_leaseDepth > 0)
+        {
+            return false;
+        }
+
+        if (_isPointInTime)
+        {
+            ThrowReadOutsideLease();
+        }
+
+        return !_epochManager.IsCurrentThreadInScope;
+    }
+
+    /// <summary>
+    /// An entry point that hands out a walker over pages (<c>For</c>, <c>GetClusterEnumerator</c>) refuses a point-in-time worker with no lease open,
+    /// as a resolve does (<see cref="NeedsEpochGuard"/>): what it hands out reads pages for as long as it lives, and only the lease protects them.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private protected void RequireLeaseIfPointInTime()
+    {
+        if (_isPointInTime && _leaseDepth == 0)
+        {
+            ThrowReadOutsideLease();
+        }
+    }
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowReadOutsideLease() =>
+        ThrowHelper.ThrowInvalidOp("A PointInTimeAccessor worker accessor was used outside its lease. Read through `using var lease = pta.Enter(workerId);` "
+            + "and `lease.Accessor`, within the lease's scope.");
+
+    /// <summary>
+    /// A lease opens on this worker accessor, on the calling thread (which already holds the lease's epoch scope). The thread becomes the owner: a worker
+    /// index may be served by a different thread from one round to the next (a <c>Parallel.For</c>), never by two at once.
+    /// </summary>
+    internal void BeginLease()
+    {
+        CheckConfig.Require(CheckConfig.Enabled, _leaseDepth == 0 || _owningThreadId == Environment.CurrentManagedThreadId,
+            $"PointInTimeAccessor worker accessor leased by two threads at once");
+        _owningThreadId = Environment.CurrentManagedThreadId;
+        _leaseDepth++;
+    }
+
+    /// <summary>The lease <see cref="BeginLease"/> opened ends; its epoch scope is exited by the lease right after.</summary>
+    internal void EndLease()
+    {
+        CheckConfig.Require(CheckConfig.Enabled, _leaseDepth > 0, $"PointInTimeAccessor lease ended twice (a copy of it disposed)");
+        if (_leaseDepth > 0)
+        {
+            _leaseDepth--;
+        }
+    }
+
+    /// <summary>Whether a lease is open on this accessor — a reset or a dispose then would race the thread reading through it.</summary>
+    internal bool IsLeased => _leaseDepth > 0;
+
+    /// <summary>Whether a lease is open on this accessor on another thread than the caller's: a flush then would race the thread reading through it.</summary>
+    internal bool IsLeasedByAnotherThread => _leaseDepth > 0 && _owningThreadId != Environment.CurrentManagedThreadId;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private protected void AssertThreadAffinity()
@@ -346,6 +412,15 @@ public partial class EntityAccessor : IDisposable
     /// </summary>
     private protected void FlushAndRefreshEpoch()
     {
+        CommitAccessorChanges();
+        _changeSet?.ReleaseDirtyMarks();
+        var newEpoch = _epochManager.RefreshScope();
+        ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(newEpoch);
+    }
+
+    /// <summary>Commits the dirty state of every cached ChunkAccessor.</summary>
+    private void CommitAccessorChanges()
+    {
         foreach (var ci in _componentInfos.Values)
         {
             if (ci.ComponentTable.StorageMode == StorageMode.Transient)
@@ -361,10 +436,6 @@ public partial class EntityAccessor : IDisposable
                 }
             }
         }
-
-        _changeSet?.ReleaseDirtyMarks();
-        var newEpoch = _epochManager.RefreshScope();
-        ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(newEpoch);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -410,9 +481,9 @@ public partial class EntityAccessor : IDisposable
     /// re-resolved once the accessor that resolved it lets go of the page — so a refresh can no longer leave a live reference over an evictable page.
     /// Without it, a transaction that opens N entities kept every page they touched, and every page any other thread touched since it began, unevictable
     /// until it ended.
-    /// <para>Not PTA workers: the runtime refreshes them once per system (<see cref="PointInTimeAccessor.FlushWorker"/>), on purpose. A refresh
-    /// increments the global epoch, and every other thread's warm B+Tree accessor, keyed on it, takes its cold path at its next operation; workers
-    /// refreshing every 128 opens each would do that to each other continuously. A worker's pinned set is bounded by its system's run instead.</para>
+    /// <para>Not PTA workers: a worker's pin lasts one lease (<see cref="PointInTimeAccessor.WorkerLease"/>) — one chunk in the runtime — and ends with it,
+    /// on purpose. A refresh increments the global epoch, and every other thread's warm B+Tree accessor, keyed on it, takes its cold path at its next
+    /// operation; workers refreshing every 128 opens each would do that to each other continuously. A worker's pinned set is bounded by its lease.</para>
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void NoteEntityOpen()
@@ -481,19 +552,31 @@ public partial class EntityAccessor : IDisposable
     }
 
     /// <summary>
-    /// Unconditionally refresh the epoch scope for this accessor. Flushes all dirty ChunkAccessor state and advances the pinned epoch, allowing pages from
-    /// older epochs to be evicted.
-    /// Called by <see cref="PointInTimeAccessor.FlushWorker"/> at the end of each parallel chunk.
+    /// Flushes a point-in-time worker at the end of its system (<see cref="PointInTimeAccessor.FlushWorker"/>): commits every dirty ChunkAccessor state and
+    /// lets go of every page its windows hold — the component accessors', the entity map's and the cluster cache — then releases the change set's dirty
+    /// marks. A parked worker holds no page (EP-04). It moves no epoch: the worker holds none outside a lease, and this runs on whichever thread completed
+    /// the system — a refresh there moved that thread's pin, never the worker's (#1532).
     /// </summary>
     /// <remarks>
-    /// Also releases the cluster cache. A worker's handles do not outlive the system it ran, and the cache lives as long as the worker accessor —
-    /// across systems and ticks. Kept, its slots stay pinned, and a slot a writable open mapped dirty holds its page's <c>ActiveChunkWriters</c>
-    /// above zero, which keeps the checkpoint from capturing that page (#1199).
+    /// The cluster cache goes because a worker's handles do not outlive the system it ran, and the cache lives as long as the worker accessor — across
+    /// systems and ticks. Kept, its slots stay pinned, and a slot a writable open mapped dirty holds its page's <c>ActiveChunkWriters</c> above zero, which
+    /// keeps the checkpoint from capturing that page (#1199).
     /// </remarks>
-    internal void RefreshEpochScope()
+    internal void FlushAtSystemEnd()
     {
         DisposeClusterCache();
-        FlushAndRefreshEpoch();
+        foreach (var ci in _componentInfos.Values)
+        {
+            ci.ReleaseWindows(_changeSet);
+        }
+
+        if (_hasEntityMapCache)
+        {
+            _entityMapCacheAccessor.Dispose();
+            _hasEntityMapCache = false;
+        }
+
+        _changeSet?.ReleaseDirtyMarks();
         _entityOperationCount = 0;
     }
 
@@ -561,7 +644,8 @@ public partial class EntityAccessor : IDisposable
         _dbe = null;
         _epochManager = null;
         _owningThreadId = 0;
-        _ownsPersistentEpochScope = false;
+        _isPointInTime = false;
+        _leaseDepth = 0;
         if (_hasEntityMapCache)
         {
             _entityMapCacheAccessor.Dispose();
@@ -620,7 +704,7 @@ public partial class EntityAccessor : IDisposable
         FlushAccessors();
         _changeSet?.ReleaseDirtyMarks();
         _isDisposed = true;
-        // No epoch exit here — InitLightweight does not enter a persistent epoch scope.
+        // No epoch exit here: a point-in-time worker holds a scope only inside a lease, which exits it on its own thread (EP-04).
         // Transaction.Dispose overrides and exits its own epoch scope.
         ResetCore();
     }

@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -47,6 +48,14 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     private readonly ClusterStep _stepSource;
     private readonly int _step;
 
+    // ── Page record for handed-out memory (#1531, PS-10) ────────────────────────────────────────────────────────────
+    //
+    // GetSpan and Get hand out writable memory over a page the enumerator maps clean, and cannot see the stores. Recording the page there would land
+    // BEFORE them: a checkpoint sampling the generation and copying the page in between would settle the debt with the old bytes, and the write would go
+    // at the next eviction (CP-04). So they only store the cluster's base into this field of the enumerator, which records that page when it leaves the
+    // cluster (MoveNext, Dispose) — after every store, and from the very address the memory was handed out over, so no re-lookup through the accessor.
+    private readonly ref nint _handedOutPage;
+
     // ── Cached cell frame (#872 step 9) ────────────────────────────────────
     //
     // The cluster's cell origin is a per-CLUSTER constant, and WriteSpatial is called per ENTITY. Resolving it inside the write meant two array loads, a
@@ -66,8 +75,10 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     private double _cachedOriginZ;
 
     internal ClusterRef(byte* basePtr, byte* transientBasePtr, ArchetypeClusterInfo layout, ArchetypeMetadata meta, int chunkId, ArchetypeClusterState state,
-        ulong occupancy, ClusterStep stepSource = null, int step = 0, EntityAccessor owner = null)
+        ulong occupancy, ref nint handedOutPage, ClusterStep stepSource = null, int step = 0, EntityAccessor owner = null)
     {
+        Debug.Assert(!Unsafe.IsNullRef(ref handedOutPage), "a ClusterRef reports its handed-out page to its enumerator (#1531)");
+        _handedOutPage = ref handedOutPage;
         _owner = owner;
         _occupancy = occupancy;
         _stepSource = stepSource;
@@ -181,6 +192,19 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     }
 
     /// <summary>
+    /// <see cref="NotePageWritten"/> for memory handed out to the caller (<see cref="GetSpan{T}"/>, <see cref="Get{T}"/>): deferred to the enumerator leaving
+    /// the cluster, after the caller's stores (#1531). One store of the base; the record itself is one per cluster visit.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private readonly void NotePageHandedOut(byte slot)
+    {
+        if ((_meta.TransientSlotMask & (1 << slot)) == 0)
+        {
+            _handedOutPage = (nint)_base;
+        }
+    }
+
+    /// <summary>
     /// Assert that <typeparamref name="T"/> strides the column exactly. Every accessor below hands out a <c>Span&lt;T&gt;</c> or a <c>ref T</c>, both of which
     /// step by <c>sizeof(T)</c>; if the column was laid out at a different stride, slot <c>i</c> is addressed at the wrong offset and a write spills into the
     /// neighbouring slot — silently, in Release (#816). The layout has matched <c>sizeof(T)</c> since <c>DBComponentDefinition.Build</c> started taking the CLR
@@ -209,6 +233,11 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     /// the key recorded at its first write, and a write through handed-out memory records nothing, so the index would keep the old key for good (#1187,
     /// IX-07). Read such a component with <see cref="GetReadOnlySpan{T}"/> and write it with <see cref="Set{T}(Comp{T}, int, in T)"/> or
     /// <c>OpenMut(...).Set</c>.
+    /// <para>
+    /// The cluster's page is owed to the disk once the enumerator leaves the cluster (#1531, PS-10), whether or not the span was written: the page stays
+    /// in memory and the next checkpoint writes it. Read through <see cref="GetReadOnlySpan{T}"/>, which owes nothing. The record is made by
+    /// <c>ClusterEnumerator.MoveNext</c> and <c>Dispose</c>: an enumerator driven by hand must be disposed (<c>foreach</c> does it).
+    /// </para>
     /// </remarks>
     /// <typeparam name="T">Component value type.</typeparam>
     /// <param name="comp">Handle identifying the component within the archetype.</param>
@@ -274,6 +303,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
             _state.NoteStructureSlots(_chunkId, ulong.MaxValue);
         }
 
+        NotePageHandedOut(slot);
         return new Span<T>(ResolveBase(slot) + _layout.ComponentOffset(slot), _layout.ClusterSize);
     }
 
@@ -281,7 +311,9 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     /// Mark every occupied slot in this cluster dirty for ONE component column — the columnar counterpart to what <c>EntityRefMut.Write</c> does per entity.
     /// <para>
     /// <b>Required after writing through <see cref="GetSpan{T}"/> for any durable (SingleVersion) component.</b> The direct cluster path sets no dirty bits,
-    /// so without this the tick fence never serialises the change and it is lost on reopen. Transient components need no call — they are never persisted.
+    /// so without this the tick fence never serialises the change (a <c>FenceWal</c> archetype loses it on reopen) and change detection never sees it.
+    /// Transient components need no call — they are never persisted. The page itself no longer depends on it: the enumerator records it on leaving a cluster
+    /// whose memory was handed out (#1531, PS-10), so the write is not lost from memory at eviction.
     /// </para>
     /// <para>
     /// Prefer this over <c>ClusterEnumerator.MarkCurrentDirty()</c>, which cannot name a component and therefore widens the archetype's written-slot union to
@@ -317,7 +349,10 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     }
 
     /// <summary>Get a mutable reference to a single component value at the given slot index.</summary>
-    /// <remarks>Refused, in every build, for a component with a fence-maintained indexed field, as <see cref="GetSpan{T}"/> is (#1187).</remarks>
+    /// <remarks>
+    /// Refused, in every build, for a component with a fence-maintained indexed field, as <see cref="GetSpan{T}"/> is (#1187). Like it, leaves the page
+    /// owed to the disk (#1531): read through <see cref="GetReadOnly{T}"/>.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly ref T Get<T>(Comp<T> comp, int slotIndex) where T : unmanaged
     {
@@ -332,6 +367,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
             ThrowHelper.ThrowInvalidOp($"Get on Versioned component bypasses revision chain. Use OpenMut+Write for writes.");
         }
         CheckStride<T>(slot);
+        NotePageHandedOut(slot);
         return ref Unsafe.Add(ref Unsafe.AsRef<T>(ResolveBase(slot) + _layout.ComponentOffset(slot)), slotIndex);
     }
 
@@ -1627,6 +1663,11 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
 /// Iterates active clusters for an archetype. Owns a <see cref="ChunkAccessor{TStore}"/> — must be disposed.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>Dispose is load-bearing for writes</b> (#1531, PS-10): a cluster whose <see cref="ClusterRef{TArch}"/> handed out writable memory
+/// (<c>GetSpan</c>, <c>Get</c>) has its page recorded when the enumerator leaves it — by <see cref="MoveNext"/>, or by <see cref="Dispose"/> for the last
+/// one. A hand-driven loop that stops early without disposing leaves that page unrecorded, and a write in it can be lost at eviction.
+/// </para>
 /// <para>Supports <c>foreach</c> via <see cref="GetEnumerator"/>.</para>
 /// <para>
 /// <b>Non-empty guarantee:</b> the enumerator always yields clusters with <c>OccupancyBits != 0</c> (i.e. <c>LiveCount &gt;= 1</c>). Empty clusters can exist
@@ -1674,6 +1715,8 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     // and the occupancy MoveNext took for the current cluster.
     private OwnDestroyFilter _ownDestroys;
     private ulong _occupancy;
+    // The current cluster's base, stored by its ClusterRef when it handed out writable page memory (GetSpan, Get); recorded on leaving it (#1531).
+    private nint _handedOutPage;
 
     [AllowCopy]
     internal static ClusterEnumerator<TArch> Create(ArchetypeClusterState state, ArchetypeMetadata meta,
@@ -1828,6 +1871,11 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
             _stepCounter.Value++;
         }
 
+        if (_handedOutPage != 0)
+        {
+            NoteLeftPageWritten();
+        }
+
         while (++_index < _endIndex)
         {
             var chunkId = _clusterIds[_index];
@@ -1844,7 +1892,24 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         return false;
     }
 
+    /// <summary>
+    /// Records the page of the cluster being left, whose ClusterRef handed out writable memory: after the caller's stores (PS-10, #1531). From the base
+    /// the memory was handed out over, so the record names the page written whatever the accessor did since.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void NoteLeftPageWritten()
+    {
+        var page = (byte*)_handedOutPage;
+        _handedOutPage = 0;
+        if (!_state.SkipHandedOutPageRecordForTest)
+        {
+            _state.NoteClusterPageModifiedAt(page);
+        }
+    }
+
     /// <summary>Get the current cluster ref.</summary>
+    /// <remarks>Scoped to this enumerator: the ref reports writes through memory it hands out back to it (#1531).</remarks>
+    [UnscopedRef]
     public ClusterRef<TArch> Current
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1855,7 +1920,8 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
             var basePtr = _hasPersistentAccessor ? _accessor.GetChunkAddress(chunkId) : _transientAccessor.GetChunkAddress(chunkId);
             // TransientStore base for mixed archetypes (null for pure-SV/V and pure-Transient)
             var transientPtr = (_hasTransientAccessor && _hasPersistentAccessor) ? _transientAccessor.GetChunkAddress(chunkId) : null;
-            return new ClusterRef<TArch>(basePtr, transientPtr, _state.Layout, _meta, chunkId, _state, _occupancy, _stepCounter, _stepCounter?.Value ?? 0,
+            return new ClusterRef<TArch>(basePtr, transientPtr, _state.Layout, _meta, chunkId, _state, _occupancy, ref _handedOutPage, _stepCounter,
+                _stepCounter?.Value ?? 0,
                 _owner);
         }
     }
@@ -1866,6 +1932,11 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         if (CheckConfig.Enabled && _stepCounter != null)
         {
             _stepCounter.Value++;
+        }
+
+        if (_handedOutPage != 0)
+        {
+            NoteLeftPageWritten();
         }
 
         if (_hasPersistentAccessor)

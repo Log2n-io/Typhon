@@ -1297,7 +1297,7 @@ public unsafe partial class Transaction
     }
 
     /// <summary>An entity-map read outside the transaction's own epoch scope needs a guard of its own.</summary>
-    private bool CascadeNeedsGuard => !_ownsPersistentEpochScope && !_epochManager.IsCurrentThreadInScope;
+    private bool CascadeNeedsGuard => NeedsEpochGuard();
 
     /// <summary>A destroy of this transaction named a cascade parent: the commit resolves its children again (<see cref="ResolveCascadesAtCommit"/>).</summary>
     private bool _hasCascadeParents;

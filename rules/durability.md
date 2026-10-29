@@ -1322,8 +1322,8 @@ either durability, recoverability, or consistency.
 
 ### WP-03: FUA before DurableLSN advance `[fatal]`
   pre IWalFileIO.WriteAligned() has returned (FUA complete)
-  post Interlocked.Exchange(ref _durableLSN, newValue)
-  post signal _durabilityEvent (wakes Immediate waiters)
+  post Interlocked.CompareExchange(ref _durableLSN, newValue, current) (AdvanceDurable's monotonic CAS loop)
+  post pulse _durabilitySync when a waiter is registered (wakes Immediate waiters, WP-17)
   scope: WalWriter.cs
   on_violation: Immediate-mode callers wake before write reaches stable media;
     crash loses data despite Immediate guarantee
@@ -1530,6 +1530,28 @@ either durability, recoverability, or consistency.
     dirtying many pages in one tick) → silent crash-recovery data loss. The writer dual of WR-02 (reader-side padding
     traversal) and a tightening of WP-05 (CRC is the writer's job — and it must cover the whole batch atomically).
   note: invisible to hand-written crash tests that never exceed 256 KB; surfaced by the T-5 differential oracle at scale (#395).
+
+### WP-17: A durability waiter wakes on the event that concerns it, not on a timeout `[perf]` `[silent]`
+  invariant WaitForDurableSlow re-checks DurableLsn, the fatal error and the writer's stop UNDER _durabilitySync before Monitor.Wait; no waiter
+            ever clears a signal (no shared reset event), so a wake meant for one waiter cannot be consumed by another
+  invariant the waiter registers (_durabilityWaiters, interlocked increment: a full fence) BEFORE it reads DurableLsn; AdvanceDurable CASes
+            DurableLsn (a full fence) BEFORE it reads the count, and pulses under the lock when it is non-zero: one side sees the other's store
+  invariant every other event a waiter reacts to pulses unconditionally: a fatal error, the writer's stop (Dispose, once the thread has exited:
+            the waiter then throws ObjectDisposedException) and the waiter's own cancellation (a token registration, once per slow wait)
+  invariant the wait slice (DurabilityWaitSliceMs, 100 ms, clamped to the caller's deadline) is a backstop, never the wake path; a deadline
+            under 1 ms away is yielded on, not slept on (Monitor.Wait(1) would overrun it by a timer quantum)
+  invariant AdvanceDurable is a monotonic CAS loop: SeedDurableLsn runs on the engine's thread, and a check-then-store racing the writer could
+            lower the watermark
+  rationale: #1529. The loop was ManualResetEventSlim.Wait(1) + Reset(): a 1 ms kernel-wait timeout rounds up to the 15.6 ms Windows timer
+    quantum, and a waiter's Reset after another advance's Set cleared the signal a second waiter needed, which then slept the quantum with its
+    LSN already durable. Seen inside game systems on the SWG server, a sixth of a 100 ms tick
+  on_violation: an Immediate commit (or a checkpoint barrier) returns up to a timer quantum after its LSN is durable, or a cancelled, failed or
+    stopped wait returns late — latency, not loss
+  scope: WalWriter.cs (WaitForDurableSlow, WaitForDurabilitySignal, PulseDurabilityWaiters, AdvanceDurable, Dispose)
+  verified: WalWriterTests.WaitForDurable_ConcurrentWaiters_EachWakesAsSoonAsItsLsnIsDurable [VerifiesRule] (8 waiters, 800 one-LSN advances,
+            every wake within 10 ms; the old Wait(1)+Reset loop measured 16.5 ms to 1.4 s worst on 2026-10-28, the fix under 1 ms typical);
+            WalWriterTests.WaitForDurable_NeverDurable_TimesOutAtItsDeadline, WaitForDurable_WriterFails_WakesTheBlockedWaiterAtOnce,
+            WaitForDurable_TokenCancelled_WakesTheBlockedWaiterAtOnce, WaitForDurable_WriterDisposed_WakesTheBlockedWaiter [VerifiesRule]
 
 ---
 
@@ -1989,7 +2011,8 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   scope: PagedMMF.MarkPageModified / MarkCaptured / HasWritebackDebt / WritePagesForCheckpoint / SavePages /
          CollectDirtyMemPageIndices / TryAcquire, IPageStore.MarkPageModified, CheckpointManager.RunCheckpointCycle,
          ChunkBasedSegment.MarkChunkModified, ArchetypeClusterState.NoteClusterPageModified, ClusterRef.MarkDirty, ClusterRef.WriteSpatial,
-         ClusterEnumerator.MarkCurrentDirty, ClusterEnumerator.MarkSlotDirty, DatabaseEngine.EmitArchetypeFenceRange,
+         ClusterRef.GetSpan, ClusterRef.Get, ClusterEnumerator.MoveNext, ClusterEnumerator.Dispose, ClusterEnumerator.MarkCurrentDirty,
+         ClusterEnumerator.MarkSlotDirty, DatabaseEngine.EmitArchetypeFenceRange,
          DatabaseEngine.DrainClusterShadowSlots, EntityRefMut.WriteRef, EntityAccessor.NoteSvInPlacePageWrite, PagedMMF.MemPageIndexOf,
          DatabaseEngine.MarkClusterSlotDirty, ArchetypeClusterState.RebuildIndexesFromData
   verified: ChangeSetDirtyMarkConservationTests; InPlaceClusterWriteSurvivalTests (a span write and a spatial write, each through a path that maps the
@@ -1998,12 +2021,23 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             PrepSliceEquivalenceTests.AnIndexMoveWrittenByASlice_SurvivesTheCacheEvictingItsPage [VerifiesRule] (a checkpoint settles the writes' own
             records, then every evictable page goes between Prep and Migrate; fails 5 of 5 with the drain's page record removed);
             InPlaceClusterWriteSurvivalTests.CommittedPointWritesSurviveEviction [VerifiesRule] (both Set overloads; 400 of 400 committed point writes
-            revert with the write's page record removed, and the by-type case fails with only its own record removed)
+            revert with the write's page record removed, and the by-type case fails with only its own record removed);
+            InPlaceClusterWriteSurvivalTests.HandedOutMemoryWritesSurviveEviction_WithoutMarkDirty [VerifiesRule] (GetSpan and Get with no MarkDirty,
+            and a loop left after its first cluster, which only Dispose records: 400 of 400 revert with no record; recording at hand-out instead of on
+            leaving the cluster loses 84 of 400 once a checkpoint runs between the hand-out and the stores, 2026-10-28);
+            InPlaceClusterWriteSurvivalTests.HandedOutMemoryWrites_WithTheRecordSkipped_AreRejected [RuleMutant] (every variant, the record skipped)
   note a SingleVersion point write (EntityRefMut.Set, through WriteRef) records its page at the call (#1172), by address with no page lookup
        (MemPageIndexOf), since it runs once per written component. Before #1172 nothing recorded it: a committed value reverted whenever the cache evicted
        the page before the next fence. Since #1199 the store happens in the same call, right after the record, through a base the handle re-resolves
        (mapped dirty again) if its accessor had let go of the page — so a checkpoint can no longer copy the page between the record and the store. That
        window was #1176: a store through a ref held across an archetype switch, or 31 other pages, landed after a checkpoint had settled the page
+  note memory a ClusterRef hands out (GetSpan, the ref Get returns) is written where nothing sees the stores, through a page the enumerator maps clean
+       (no ActiveChunkWriter, so a checkpoint may copy it mid-visit). The ref raises a flag on its enumerator, which records the page when it leaves the
+       cluster (MoveNext, Dispose): after every store, while it still holds the page (#1531). Recording at the hand-out would land BEFORE the stores, and a
+       capture in between would settle the debt with the old bytes (CP-04). The ref stores the cluster's base on its enumerator, which records from it,
+       so the record names the page written. A hand-driven enumerator must be disposed, or its last cluster goes unrecorded. The record is made whether
+       or not the caller wrote: a read through GetSpan leaves the page owed until the next checkpoint (read through GetReadOnlySpan). MarkDirty is still
+       required for a FenceWal archetype's WAL record and for change detection; it is no longer what keeps the write in memory
   note the fence's shadow drain writes an AllowMultiple field's new element id into the cluster tail through the slice's accessor, which holds no
        ChangeSet, and records the page at that write (#1171). The WAL emit's record comes later, at Finalize: in between, Migrate's own loads can evict a
        page nothing marks, and the element id went with it — Migrate read the old id, its location update was dropped, and the index kept the entity at
