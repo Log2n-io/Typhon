@@ -446,6 +446,54 @@ public struct Chat
 }
 
 /// <summary>
+/// A move of credits or items that concerns one player, told to that player's session on the tick it is written: a drop, a tip, a sale and its tax, a
+/// purchase, a reward. What the client says in its chat.
+/// </summary>
+/// <remarks>
+/// <b>Pushed, never read back.</b> The ledgers are the operators' audit trail and the game client never reads them (Loïc, 2026-10-29): it used to ask for a
+/// character's last twenty rows on every wallet and inventory read, which cost a walk of the character's whole history (#1532). A notice carries what one
+/// line of chat needs, once, and nothing the client could page through.
+/// </remarks>
+public struct PlayerNotice
+{
+    /// <summary><see cref="Ledger"/>: credits moved.</summary>
+    public const byte Credits = 1;
+
+    /// <summary><see cref="Ledger"/>: items moved.</summary>
+    public const byte Items = 2;
+
+    /// <summary><see cref="Credits"/> or <see cref="Items"/>.</summary>
+    public byte Ledger;
+
+    /// <summary>1 when this player received, 0 when it gave.</summary>
+    public byte Incoming;
+
+    /// <summary>The item's Mk; 0 for credits.</summary>
+    public byte Mk;
+
+    /// <summary>The item's template; 0 for credits.</summary>
+    public ushort Template;
+
+    /// <summary>How many items; 0 for credits.</summary>
+    public int Count;
+
+    /// <summary>How many credits, never negative: <see cref="Incoming"/> says which way; 0 for items.</summary>
+    public long Amount;
+
+    /// <summary>What the move is about — the victim, the lair, the listing, the mission — as the ledger row's <c>Ref</c>: the rows of one drop share it.</summary>
+    public long Ref;
+
+    /// <summary>The kind, by name: <c>TransferKind.NameOf</c> or <c>ItemMoveKind.NameOf</c>.</summary>
+    public Utf8Text256 Kind;
+
+    /// <summary>The other side's character name; empty for the world.</summary>
+    public Utf8Text256 Other;
+
+    /// <summary>The item's name, from the catalogue: the client has no item table. Empty for credits.</summary>
+    public Utf8Text256 Name;
+}
+
+/// <summary>
 /// Stop and start the whole simulation. <b>A demo control, and a temporary one.</b>
 /// </summary>
 /// <remarks>
@@ -1403,8 +1451,26 @@ public static partial class TatooineReplication
     // Whether the declarations were made: a measurement run has no replication, and an announcement there has nobody to reach.
     private static bool _declared;
 
+    /// <summary>Whether this process serves clients: the replication was declared.</summary>
+    public static bool Declared => _declared;
+
     // Announcements emitted, for the periodic report.
     private static long _announced;
+
+    // Notices told, for the periodic report.
+    private static long _noticesTold;
+
+    /// <summary>Notices told to a session.</summary>
+    public static long NoticesTold => System.Threading.Interlocked.Read(ref _noticesTold);
+
+    /// <summary>Tells <paramref name="notice"/> to <paramref name="session"/>, when this process serves clients. From a serial system.</summary>
+    public static void Tell(TickContext tick, uint session, in PlayerNotice notice)
+    {
+        if (_declared && tick.Subscriptions != null && tick.Subscriptions.EmitTo(SessionId.FromValue(session), in notice))
+        {
+            System.Threading.Interlocked.Increment(ref _noticesTold);
+        }
+    }
 
     /// <summary>Announces <paramref name="news"/> to its realm's subtree, when this process serves clients. From a serial system.</summary>
     /// <param name="tick">The tick context of the system this is called from.</param>
@@ -1895,6 +1961,20 @@ public static partial class TatooineReplication
 
         // Heard within 50 m of the speaker AND in the speaker's realm. The realm clause is what makes two players at the
         // same coordinates in two different cantinas unable to hear each other, and it is the engine's to enforce.
+        // Told to the one session it concerns, by EmitTo (SimBridge.Notices.cs).
+        subs.Event<PlayerNotice>(e => e
+            .RouteToSession()
+            .Field(n => n.Ledger, Codec.U8, "ledger")
+            .Field(n => n.Incoming, Codec.U8, "incoming")
+            .Field(n => n.Mk, Codec.U8, "mk")
+            .Field(n => n.Template, Codec.VarUInt, "template")
+            .Field(n => n.Count, Codec.VarInt, "count")
+            .Field(n => n.Amount, Codec.VarInt64, "amount")
+            .Field(n => n.Ref, Codec.VarInt64, "ref")
+            .Field(n => n.Kind, Codec.Str(16), "kind")
+            .Field(n => n.Other, Codec.Str(64), "other")
+            .Field(n => n.Name, Codec.Str(64), "name"));
+
         subs.Event<Chat>(e => e
             .RouteNear(c => new Vector3D(c.X, c.Z, 0d), c => new RealmId(c.Realm), TatooineData.SayRangeM)
             .Entity(c => c.Speaker, "speaker")

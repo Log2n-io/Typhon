@@ -132,7 +132,9 @@ internal static class Program
             // no deployment's.
             var clientRoot = config.ClientDirectory ?? TatooineSim.DefaultClientRoot(AppContext.BaseDirectory);
             sim.ServeAsync(config.ServePort, clientRoot, config.BindAddress, config.Origins).GetAwaiter().GetResult();
-            return 0;
+
+            // Stopped by its guard for a fault — a tick abort or a stalled tick — rather than asked to: not a success (#1532).
+            return sim.Guard?.Faulted == true ? ServerGuard.FaultExitCode : 0;
         }
         Console.WriteLine($"  {sim.Census}");
         if (sim.Reopened)

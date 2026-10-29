@@ -118,7 +118,7 @@ public static class ItemNotes
 }
 
 /// <summary>
-/// Items over HTTP (inventory-loot.md § 3.5-3.6): <c>GET /swg/inventory</c>, the caller's own stacks, recent rows and losses; <c>GET /swg/items/audit</c>, the
+/// Items over HTTP (inventory-loot.md § 3.5-3.6): <c>GET /swg/inventory</c>, the caller's own stacks and losses; <c>GET /swg/items/audit</c>, the
 /// whole item ledger replayed and checked; <c>GET /swg/items/ledger</c>, the rows themselves.
 /// </summary>
 /// <remarks>
@@ -127,18 +127,11 @@ public static class ItemNotes
 /// </remarks>
 public static class ItemEndpoints
 {
-    /// <summary>How many of its most recent rows <c>GET /swg/inventory</c> answers with.</summary>
-    public const int RecentRows = 20;
-
     /// <summary>The answer for an account with no character yet.</summary>
-    internal const string Empty = "{\"open\":false,\"slots\":30,\"items\":[],\"recent\":[],\"lost\":[]}";
+    internal const string Empty = "{\"open\":false,\"slots\":30,\"items\":[],\"lost\":[]}";
 
     private sealed record IndexSet(DatabaseEngine Dbe, IndexRef BySeq, IndexRef ByFrom, IndexRef ByTo, IndexRef StackByOwner, IndexRef HeadByKey,
-        IndexRef WalletByOwner, IndexRef CreditBySeq)
-    {
-        /// <summary>Each character's newest rows, read since only by what was appended: see <see cref="RecentRowCache{T}"/>.</summary>
-        public RecentRowCache<ItemLedgerEntry> Recent { get; } = new(static r => r.Seq, static r => r.From, static r => r.To, RecentRows);
-    }
+        IndexRef WalletByOwner, IndexRef CreditBySeq);
 
     private static IndexSet _indexes;
 
@@ -153,8 +146,6 @@ public static class ItemEndpoints
         return app;
     }
 
-    /// <summary>How many inventory reads went to the side indexes rather than the walk of the rows appended since: for the checks.</summary>
-    internal static long RecentFullReads(DatabaseEngine dbe) => Indexes(dbe).Recent.FullReads;
 
     /// <summary>The inventory handler itself, for the checks: a request in, the result out.</summary>
     internal static IResult GetInventoryForChecks(DatabaseEngine dbe, HttpContext context) => GetInventory(dbe, context);
@@ -197,11 +188,12 @@ public static class ItemEndpoints
     }
 
     /// <summary>
-    /// A character's inventory as JSON (inventory-loot.md § 3.6): <c>{"open","slots","items":[…by slot…],"recent":[…newest first…],"lost":[…]}</c>.
+    /// A character's inventory as JSON (inventory-loot.md § 3.6): <c>{"open","slots","items":[…by slot…],"lost":[…]}</c>.
     /// </summary>
     /// <remarks>
-    /// <c>id</c>, <c>seq</c> and <c>ref</c> are strings: a 64-bit value is past what a JavaScript number holds exactly. Every item, row and loss carries its
-    /// <c>name</c> and <c>category</c>; a row's <c>dir</c> is <c>"in"</c> when the character received it, <c>"out"</c> when it gave it.
+    /// <c>id</c> is a string: a 64-bit value is past what a JavaScript number holds exactly. Every item and loss carries its <c>name</c> and
+    /// <c>category</c>. <b>No ledger rows</b>: the ledger is the operators' audit trail, never read by the game client (Loïc, 2026-10-29); a drop is told
+    /// to the session as it happens (<see cref="PlayerNotice"/>).
     /// </remarks>
     public static string InventoryJson(DatabaseEngine dbe, EntityId character)
     {
@@ -239,29 +231,6 @@ public static class ItemEndpoints
             json.Append(",\"mk\":").Append(s.Mk)
                 .Append(",\"count\":").Append(s.Count)
                 .Append('}');
-        }
-
-        var lastSeq = 0L;
-        using (var heads = tx.EnumerateIndex<ItemLedgerHead, int>(ix.HeadByKey, ItemLedger.HeadKey, ItemLedger.HeadKey))
-        {
-            lastSeq = heads.MoveNext() ? heads.CurrentComponent.LastSeq : 0;
-        }
-
-        var rows = ix.Recent.Read(tx, ix.BySeq, ix.ByFrom, ix.ByTo, key, lastSeq);
-        json.Append("],\"recent\":[");
-        for (var i = 0; i < rows.Count && i < RecentRows; i++)
-        {
-            var r = rows[i];
-            ItemCatalog.TryGet(r.Template, out var t);
-            json.Append(i == 0 ? "{" : ",{")
-                .Append("\"seq\":\"").Append(r.Seq.ToString(inv)).Append('"')
-                .Append(",\"tick\":").Append(r.WorldTick)
-                .Append(",\"kind\":\"").Append(ItemMoveKind.NameOf(r.Kind)).Append('"');
-            Item(json, in t, r.Template);
-            json.Append(",\"mk\":").Append(r.Mk)
-                .Append(",\"count\":").Append(r.Count)
-                .Append(",\"ref\":\"").Append(r.Ref.ToString(inv)).Append('"')
-                .Append(",\"dir\":\"").Append(r.To == key ? "in" : "out").Append("\"}");
         }
 
         json.Append("],\"lost\":[");

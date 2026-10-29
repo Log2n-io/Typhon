@@ -1318,6 +1318,16 @@ public static partial class TatooineReplication
         return BoundPlayer.TryGetValue(session.Value, out body) && CharacterOfSession.TryGetValue(session.Value, out character);
     }
 
+    /// <summary>Every character with a session now, to the session: whom a notice is told to (<c>SimBridge.Notices.cs</c>).</summary>
+    internal static void FillCharacterSessions(Dictionary<EntityId, uint> sessions)
+    {
+        sessions.Clear();
+        foreach (var (session, character) in CharacterOfSession)
+        {
+            sessions[character] = session;
+        }
+    }
+
     /// <summary>Fills <paramref name="bodies"/> with every character that has a body in the world now, and that body.</summary>
     /// <param name="bodies">Cleared first.</param>
     /// <remarks>

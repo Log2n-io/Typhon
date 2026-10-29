@@ -2,39 +2,19 @@ import type { ContextMenuItem } from '../state/ui-store';
 import { REVISION_RETRY_MS, REVISION_TIMEOUT_MS, RevisionReader, type RevisionFetch } from './revision-reader';
 
 /**
- * The character's wallet (economy-foundation.md): its balance and recent transfers, as `GET /swg/wallet` answers them, and
- * the `/tip` command that moves credits to another player.
+ * The character's wallet (economy-foundation.md): its balance, as `GET /swg/wallet` answers it, and the `/tip` command
+ * that moves credits to another player. <b>Never a ledger row</b>: a tip, a sale or a reward reaches the client as the
+ * server's notice (`notices.ts`).
  *
  * <b>Read on a revision, the journal's pattern</b> (`data/missions.ts`): the body carries an owner field `wallet` that the
  * server moves with every transfer touching its character, and {@link WalletReader} re-reads the wallet when it moves.
  */
-
-/** One row of the wallet's history, signed from this wallet's side. */
-export interface WalletTransfer {
-  /** The ledger's sequence number, as text: a 64-bit value. */
-  readonly seq: string;
-  /** The world tick it was applied on. */
-  readonly tick: number;
-  /** `grant`, `mission`, `tip`. */
-  readonly kind: string;
-  /** Credits received (positive) or paid (negative). */
-  readonly amount: number;
-  /** The other side: a character's name, `World`, or `null` for one that is gone. */
-  readonly other: string | null;
-  /**
-   * What the row was about, as text, when the server says: a bazaar row's listing id (bazaar.md § 2.2) — a sale and its tax
-   * share it.
-   */
-  readonly ref?: string;
-}
 
 /** The wallet as last read. */
 export interface WalletSnapshot {
   /** Whether the character has a wallet yet: opened on the tick of its first login. */
   readonly open: boolean;
   readonly credits: number;
-  /** The most recent first. */
-  readonly transfers: readonly WalletTransfer[];
 }
 
 /** The context menu of another player (a long press on them): tipping them, which opens the chat on `/tip `. */
@@ -168,28 +148,9 @@ export function parseWallet(answer: unknown): WalletSnapshot | null {
   }
 
   const w = answer as Record<string, unknown>;
-  if (typeof w.credits !== 'number' || !Array.isArray(w.transfers)) {
+  if (typeof w.credits !== 'number') {
     return null;
   }
 
-  return {
-    open: w.open === true,
-    credits: w.credits,
-    transfers: w.transfers.filter(isTransfer),
-  };
-}
-
-function isTransfer(value: unknown): value is WalletTransfer {
-  if (typeof value !== 'object' || value === null) {
-    return false;
-  }
-
-  const t = value as Record<string, unknown>;
-  return (
-    typeof t.seq === 'string' &&
-    typeof t.tick === 'number' &&
-    typeof t.kind === 'string' &&
-    typeof t.amount === 'number' &&
-    (typeof t.other === 'string' || t.other === null)
-  );
+  return { open: w.open === true, credits: w.credits };
 }

@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using NUnit.Framework;
+using SwgTatooine.Bots;
 using SwgTatooine.Server;
 using SwgTatooine.Server.Accounts;
 using Typhon.Engine;
@@ -158,6 +159,15 @@ internal sealed class EconomyChecks : ServedChecks
             Assert.That(sim.Bridge.TipsRefused, Is.Zero);
             Assert.That(sim.Bridge.EconomyCommitsFailed, Is.Zero);
             Assert.That(sim.Bridge.EconomyCountersJson(), Does.StartWith("{\"transfers\":3,\"walletsOpened\":2,\"rewardsPaid\":0,\"tips\":1,\"tipsRefused\":0,"));
+        });
+
+        // Each side is told by a notice, as it happens: the client never reads the ledger (2026-10-29).
+        var toA = Notices.Heard(p.A).FindAll(n => n.Kind == "tip");
+        var toB = Notices.Heard(p.B).FindAll(n => n.Kind == "tip");
+        Assert.Multiple(() =>
+        {
+            Assert.That(toA, Is.EqualTo(new[] { new BotNotice(false, false, 0, 0, 0, 150, 0, "tip", Notices.NameOf(sim, p.CharB)) }), "the giver's notice");
+            Assert.That(toB, Is.EqualTo(new[] { new BotNotice(false, true, 0, 0, 0, 150, 0, "tip", Notices.NameOf(sim, p.CharA)) }), "the recipient's notice");
         });
     }
 
@@ -334,8 +344,7 @@ internal sealed class EconomyChecks : ServedChecks
         Assert.Multiple(() =>
         {
             Assert.That(json, Does.StartWith("{\"ok\":true,\"entries\":1,\"lastSeq\":1,\"wallets\":1,\"world\":-1000,\"walletsTotal\":1000,\"sum\":0,\"violationCount\":0,\"violations\":[]"));
-            Assert.That(wallet, Does.StartWith("{\"open\":true,\"credits\":1000,\"transfers\":[{\"seq\":\"1\""));
-            Assert.That(wallet, Does.Contain("\"kind\":\"grant\",\"amount\":1000,\"other\":\"World\""));
+            Assert.That(wallet, Is.EqualTo("{\"open\":true,\"credits\":1000}"), "the wallet carries ledger rows: the client never reads them");
             Assert.That(ledger, Does.StartWith("{\"rows\":[{\"seq\":1,"));
             Assert.That(ledger, Does.EndWith("],\"next\":1}"));
         });

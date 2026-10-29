@@ -42,6 +42,8 @@ public sealed partial class TatooineSim
         FacilityEndpoints.Json = FacilityEndpoints.Build(Dbe);
         TatooineHost.DashboardPort = _config.DashboardPort;
         Console.WriteLine($"progression: XP table from the model, CL 50 at {Progression.MaxXp:N0} XP; --xp-rate {_config.XpRatePercent} %");
+        // Before StartReplication, which wires the tick abort and the storage health to it.
+        Guard = ServerGuard.ForServer(TimeSpan.FromSeconds(_config.StopDeadlineS), TimeSpan.FromSeconds(_config.WedgeS));
         StartReplication(shapes);
         try
         {
@@ -49,7 +51,7 @@ public sealed partial class TatooineSim
                 .ServeAsync(
                     _runtime, port, clientRoot, origins, RealmDirectoryJson(), RealmInventoryJson, bindAddress, _config.AuthBurst, _config.AuthRefillMs,
                     _config.OriginSecret, _config.AuthLocalOnly, _config.TlsChainPath, _config.TlsKeyPath, _config.TlsPort, _config.RedirectPort,
-                    assets, shapes, _config.WorldEdgeM * 0.5, () => _bridge?.MarketBoard ?? MarketSnapshot.Empty)
+                    assets, shapes, _config.WorldEdgeM * 0.5, () => _bridge?.MarketBoard ?? MarketSnapshot.Empty, Guard)
                 .ConfigureAwait(false);
         }
         finally
@@ -71,6 +73,9 @@ public sealed partial class TatooineSim
             FacilityEndpoints.Json = null;
         }
     }
+
+    /// <summary>What stops and sheds this served world when the engine is in trouble (#1532); <see langword="null"/> before <see cref="ServeAsync"/>.</summary>
+    internal ServerGuard Guard { get; private set; }
 
     /// <summary>
     /// The runtime this simulation is ticking, once <see cref="StartReplication"/> or <see cref="Run"/> has started one.
@@ -270,10 +275,25 @@ public sealed partial class TatooineSim
                 CrashArtefactPath = WriteCrashArtefact(
                     $"tick aborted: {outcome.Reason} in system '{outcome.FailedSystemName}'", outcome.FailedSystemException, outcome.TickNumber);
             }
+
+            // Then STOP (#1532): a server that stops ticking but keeps serving HTTP and accepting logins is the worst of both — on 2026-10-28 it did so for
+            // 50 minutes on 20+ cores. A world whose tick aborted is in a state nobody has reasoned about; the honest answer is to end the process, with
+            // the artefact written and the sessions told, and to say so in its exit code.
+            Guard?.Stop($"tick {outcome.TickNumber} aborted: {outcome.Reason} in '{outcome.FailedSystemName}'");
         };
+
+        // The engine's storage health drives the shedding (#1532): Overloaded or Starved refuses new logins, sessions and database reads until it recovers.
+        if (Guard != null)
+        {
+            var guard = Guard;
+            Dbe.StorageHealthChanged += (_, e) => guard.OnStorageHealth(e.Current);
+        }
 
         TatooineReplication.Scheduler = _runtime.Scheduler;
         _runtime.Start();
+
+        // A tick that stands still stops the server, as an aborted one does: it is the same fault seen from outside (#1532, 2026-10-29).
+        Guard?.WatchTick(() => _runtime.CurrentTickNumber);
 
         // The catalog every client negotiates against, by its hash: two builds that print the same one serve the same wire (AC-25 compares the attribute
         // declarations against the builder ones this way).

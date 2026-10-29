@@ -950,7 +950,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
 
             asked += Volatile.Read(ref bot.ToursAsked);
             switches += Volatile.Read(ref bot.RealmSwitches);
-            news += bot.News.Count;
+            news += bot.Heard.News;
 
             // <b>LIVE sessions only, which is the whole point of the number.</b> A bot whose link died keeps its store, and its
             // store keeps the last realm it was told about, so counting every store counted the dead: a panel showing
@@ -1357,6 +1357,11 @@ public sealed partial class BotSwarm : IAsyncDisposable
         var nextDue = TimeSpan.Zero;
         var stalls = 0;
 
+        // How long a round that opened nothing, or only churned, waits before the next (#1532): StalledPoll doubled per such round in a row, to 64 s,
+        // with up to half again of jitter, and back to nothing once a round adds sessions. A server that sheds logins while it recovers is given time
+        // rather than asked again every two seconds by the whole fleet.
+        var backoff = new RampBackoff(StalledPoll, maxShift: 5, seed: Environment.ProcessId);
+
         // <b>Rounds that replaced sessions without gaining any, which is a different failure from a round that opened nothing.</b>
         // Retirement turns a permanent loss into a retry, and a retry against a condition that is not going to change turns into a
         // hot loop: measured with the server's hot spinners disabled, every handshake died on arrival and the fleet replaced 21 665
@@ -1415,7 +1420,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
                     }
 
                     nextDue = clock.Elapsed;
-                    await Task.Delay(StalledPoll, ct).ConfigureAwait(false);
+                    await Task.Delay(backoff.Next(), ct).ConfigureAwait(false);
                     continue;
                 }
 
@@ -1437,7 +1442,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
                     }
 
                     nextDue = clock.Elapsed;
-                    await Task.Delay(StalledPoll, ct).ConfigureAwait(false);
+                    await Task.Delay(backoff.Next(), ct).ConfigureAwait(false);
                     continue;
                 }
 
@@ -1469,6 +1474,10 @@ public sealed partial class BotSwarm : IAsyncDisposable
                 // A ramp that stops making progress is settled too, or StartAsync would wait forever for sessions the server is
                 // refusing — which is exactly what a full session table does.
                 stalls = added > 0 ? 0 : stalls + 1;
+                if (added > 0 && BotCount > liveBefore)
+                {
+                    backoff.Reset();
+                }
 
                 // <b>NET progress, not sessions opened.</b> A round that opens 250 and loses 250 has opened a chunk and gained
                 // nothing, and at the connect pacing it will do it again in a second and a half, forever. Three such rounds and the
@@ -1497,7 +1506,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
                         // Re-based, because the slow poll owns the cadence while the fleet is churning; the connect deadline is
                         // picked up again by the round that finally gains ground.
                         nextDue = clock.Elapsed;
-                        await Task.Delay(StalledPoll, ct).ConfigureAwait(false);
+                        await Task.Delay(backoff.Next(), ct).ConfigureAwait(false);
                         continue;
                     }
 
@@ -1531,7 +1540,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
             // otherwise retried ten times a second forever, which turns a refusal into a load test of its own. The slow poll still
             // notices when the operator lowers the target or the server recovers.
             nextDue = clock.Elapsed;
-            await Task.Delay(stalls >= 3 ? StalledPoll : IdlePoll, ct).ConfigureAwait(false);
+            await Task.Delay(stalls >= 3 ? backoff.Next() : IdlePoll, ct).ConfigureAwait(false);
         }
     }
 
@@ -2380,42 +2389,6 @@ public sealed partial class BotSwarm : IAsyncDisposable
         }
     }
 
-    /// <summary>Counts the <c>RealmNews</c> events a session hears; every other event is dropped. On the session's receive loop.</summary>
-    private sealed class NewsCounter : IEventHandler
-    {
-        private long _count;
-
-        public long Count => Volatile.Read(ref _count);
-
-        public void Event(MessagePlan type)
-        {
-            if (type.Name == "RealmNews")
-            {
-                Interlocked.Increment(ref _count);
-            }
-        }
-
-        public void Number(FieldPlan field, scoped ReadOnlySpan<double> components)
-        {
-        }
-
-        public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components)
-        {
-        }
-
-        public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
-        {
-        }
-
-        public void Bytes(FieldPlan field, scoped ReadOnlySpan<byte> bytes)
-        {
-        }
-
-        public void List(FieldPlan field, int count, scoped ReadOnlySpan<double> components)
-        {
-        }
-    }
-
     /// <summary>One scripted camera: a client, an orbit centre and a phase.</summary>
     private sealed partial class Bot
     {
@@ -2456,11 +2429,12 @@ public sealed partial class BotSwarm : IAsyncDisposable
         // Read like a browser's: GET /swg/missions with the bot's own token whenever the body's owner field `journal` moves.
         private static readonly HttpClient JournalHttp = new() { Timeout = TimeSpan.FromSeconds(10) };
 
-        /// <summary>How long a failed owner read waits before it is asked again: three seconds at the usual 4 Hz; the next revision asks anyway.</summary>
+        /// <summary>How long a first failed owner read waits before it is asked again, from when it ended: three seconds at the usual 4 Hz, doubled per
+        /// failure in a row (<see cref="OwnerFieldPoll"/>).</summary>
         private const long OwnerReadRetryTicks = 12;
         private readonly Uri _missionsUri;
         private readonly string _token;
-        private readonly OwnerFieldPoll _journalPoll = new("journal", OwnerReadRetryTicks);
+        private readonly OwnerFieldPoll _journalPoll;
         private bool _journalPrimed;
 
         /// <summary>
@@ -2474,7 +2448,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
         // Read like a browser's: GET /swg/inventory with the bot's own token whenever the body's owner field `items` moves. Looting needs no command: a
         // kill or a broken lair already drops into the killer's inventory.
         private readonly Uri _inventoryUri;
-        private readonly OwnerFieldPoll _itemsPoll = new("items", OwnerReadRetryTicks);
+        private readonly OwnerFieldPoll _itemsPoll;
         private InventoryView _inventory = InventoryView.None;
         private bool _itemsPrimed;
         private readonly bool _takesMissions;
@@ -2526,7 +2500,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
         private static readonly int TraceIndex = int.TryParse(Environment.GetEnvironmentVariable("SWG_BOT_TRACE"), out var i) ? i : -1;
 
         private static readonly bool TraceAll = Environment.GetEnvironmentVariable("SWG_BOT_TRACE") == "all";
-        public readonly NewsCounter News = new();
+        public readonly BotEvents Heard = new();
 
         public Bot(int index, BotSwarmOptions options, BotAssets assets = null, IReadOnlyList<ListedFacility> facilities = null)
         {
@@ -2542,6 +2516,9 @@ public sealed partial class BotSwarm : IAsyncDisposable
             // the first turn is staggered too: every avatar turning on one tick would be N commands in a single server tick, which is
             // the mistake the planet tour already staggers to avoid.
             _wander = (uint)((index * 2654435761u) | 1u);
+            _journalPoll = new OwnerFieldPoll("journal", OwnerReadRetryTicks, index);
+            _itemsPoll = new OwnerFieldPoll("items", OwnerReadRetryTicks, index);
+            _minePoll = new OwnerFieldPoll("items", OwnerReadRetryTicks, index);
             if (options.Brain)
             {
                 // Its own stream, from its own index, for the reason the wanderer's is: a run has to reproduce, and a thousand bots
@@ -2604,7 +2581,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
                 // STATS is opt-in per session (W23): a server emits the block only to a client that asked for it, so a load generator that does not ask
                 // reports the run with every server number reading zero — which is what the first AC-1 run did.
                 Caps = Capabilities.Stats,
-                Events = News,
+                Events = Heard,
             });
         }
 
@@ -2943,8 +2920,12 @@ public sealed partial class BotSwarm : IAsyncDisposable
             }
         }
 
+        // Bot ticks since a read started: when it ended, for its back-off.
+        private long TicksSince(long started) => (long)(Stopwatch.GetElapsedTime(started).TotalSeconds * _ticksPerSecond);
+
         private async Task ReadJournalAsync(long tick)
         {
+            var started = Stopwatch.GetTimestamp();
             var ok = false;
             try
             {
@@ -2974,11 +2955,11 @@ public sealed partial class BotSwarm : IAsyncDisposable
             catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException or InvalidOperationException
                                           or FormatException)
             {
-                // Asked again after OwnerReadRetryTicks; the next revision asks anyway.
+                // Asked again after the poll's back-off, counted from now.
             }
             finally
             {
-                _journalPoll.End(ok, tick);
+                _journalPoll.End(ok, tick + TicksSince(started));
             }
         }
 
@@ -2988,6 +2969,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
         /// </summary>
         private void PollInventory(long tick)
         {
+            TakeNotices();
             var self = Client.Store?.Self;
             if (_inventoryUri == null || string.IsNullOrEmpty(_token) || self == null)
             {
@@ -3000,8 +2982,39 @@ public sealed partial class BotSwarm : IAsyncDisposable
             }
         }
 
+        /// <summary>
+        /// The notices the session heard since the last tick (<see cref="BotEvents"/>): a drop into this bot counts as loot, and a bazaar buy collected
+        /// is a listing won. What the browser's chat says, told by the server as it happens: the ledger is never read (Loïc, 2026-10-29).
+        /// </summary>
+        private void TakeNotices()
+        {
+            List<WonListing> won = null;
+            while (Heard.Notices.TryDequeue(out var n))
+            {
+                if (!n.Items || !n.Incoming)
+                {
+                    continue;
+                }
+
+                if (n.Kind is "kill" or "lair" or "mission")
+                {
+                    Interlocked.Increment(ref LootRowsSeen);
+                }
+                else if (n.Kind == "buy")
+                {
+                    (won ??= []).Add(new WonListing((ulong)n.Ref, n.Template, MarketCatalog.AssetOf(n.Template), n.Mk, n.Count));
+                }
+            }
+
+            if (won != null)
+            {
+                SawWins(won);
+            }
+        }
+
         private async Task ReadInventoryAsync(long tick)
         {
+            var started = Stopwatch.GetTimestamp();
             var ok = false;
             try
             {
@@ -3015,19 +3028,15 @@ public sealed partial class BotSwarm : IAsyncDisposable
 
                 // The first read only learns what was already there — rows and losses of an earlier run — so this run's counts are this run's.
                 var held = new List<HeldStack>();
-                var won = new List<WonListing>();
                 var view = InventoryView.Parse(
                     await response.Content.ReadAsStringAsync().ConfigureAwait(false),
                     _inventory,
                     count: _itemsPrimed,
-                    out var rows,
                     out var lost,
-                    held,
-                    won);
-                SawInventory(held, won);
+                    held);
+                SawInventory(held);
                 _itemsPrimed = true;
                 _inventory = view;
-                Interlocked.Add(ref LootRowsSeen, rows);
                 Interlocked.Add(ref ItemsLost, lost);
                 Volatile.Write(ref Stacks, view.Stacks);
                 ok = true;
@@ -3035,11 +3044,11 @@ public sealed partial class BotSwarm : IAsyncDisposable
             catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException or InvalidOperationException
                                           or FormatException or OverflowException)
             {
-                // Asked again after OwnerReadRetryTicks; the next revision asks anyway.
+                // Asked again after the poll's back-off, counted from now.
             }
             finally
             {
-                _itemsPoll.End(ok, tick);
+                _itemsPoll.End(ok, tick + TicksSince(started));
             }
         }
 

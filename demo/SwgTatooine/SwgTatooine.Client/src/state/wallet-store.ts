@@ -1,12 +1,13 @@
 import { create } from 'zustand';
-import { marketWalletLine } from '../data/market';
-import { formatCredits, type WalletSnapshot } from '../data/wallet';
+import { noticeLines, type PlayerNotice } from '../data/notices';
+import { type WalletSnapshot } from '../data/wallet';
 import { useChat } from './chat-store';
 import { useMarket } from './market-store';
 
 /**
- * The wallet on screen (economy-foundation.md E0-10): the balance and recent transfers as last read, whether the inventory
- * window is open, and the tip the app sends.
+ * The wallet on screen (economy-foundation.md E0-10): the balance as last read, whether the inventory window is open, and
+ * the tip the app sends. The moves of credits and items are said in the chat from the server's notices
+ * ({@link announceNotices}), never from a ledger read.
  *
  * <b>Its own store</b>, for the mission store's reason: the wallet changes a few times a minute, at the world's pace, and
  * the frame loop publishes it here only when a new answer arrived. The tip is the app's to send (`ClientApp` registers it),
@@ -25,7 +26,7 @@ export interface WalletState {
   readonly inventoryOpen: boolean;
   readonly actions: WalletActions | null;
 
-  /** A new read of the wallet: a tip given or received since the last one is said in the chat. */
+  /** A new read of the wallet. */
   readonly setWallet: (wallet: WalletSnapshot) => void;
   /** Forgets the wallet without announcing anything: a new session. */
   readonly resetWallet: () => void;
@@ -40,41 +41,6 @@ export const useWallet = create<WalletState>((set, get) => ({
   actions: null,
 
   setWallet: (wallet) => {
-    // Announced only between two reads of this session: the first read's rows are history, not news.
-    const before = get().wallet;
-    if (before !== null) {
-      const known = new Set(before.transfers.map((t) => t.seq));
-      const fresh = wallet.transfers.filter((t) => !known.has(t.seq)).reverse();
-      for (const t of fresh) {
-        const who = t.other ?? 'somebody';
-        if (t.kind === 'tip') {
-          useChat
-            .getState()
-            .notice(
-              t.amount > 0
-                ? `${who} tipped you ${formatCredits(t.amount)}`
-                : `You tipped ${who} ${formatCredits(-t.amount)}`,
-            );
-          continue;
-        }
-
-        // The bazaar's (bazaar.md § 6): a sale with the tax the same tick paid, a purchase, the vendor's payment.
-        // The tax of a sale is the row naming the same listing (`ref`); a server without refs, the same tick's.
-        const tax =
-          t.kind === 'sale' && t.amount > 0
-            ? -(
-                fresh.find((x) => x.kind === 'tax' && (t.ref === undefined ? x.tick === t.tick : x.ref === t.ref))
-                  ?.amount ?? 0
-              )
-            : 0;
-        const what = t.kind === 'sale' ? useMarket.getState().saleItem(t.amount, t.ref) : null;
-        const line = marketWalletLine(t.kind, t.amount, t.other, tax, what);
-        if (line !== null) {
-          useChat.getState().notice(line);
-        }
-      }
-    }
-
     set({ wallet });
   },
   resetWallet: () => {
@@ -90,3 +56,12 @@ export const useWallet = create<WalletState>((set, get) => ({
     set({ actions });
   },
 }));
+
+/** Says one frame's notices in the chat (`noticeLines`): a drop, a tip, a sale with its tax, a purchase, a vendor's payment. */
+export function announceNotices(batch: readonly PlayerNotice[]): void {
+  const market = useMarket.getState();
+  const chat = useChat.getState();
+  for (const line of noticeLines(batch, (amount, ref) => market.saleItem(amount, ref))) {
+    chat.notice(line);
+  }
+}

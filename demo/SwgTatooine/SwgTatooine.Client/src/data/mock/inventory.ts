@@ -1,4 +1,5 @@
-import type { InventoryItem, InventoryRow, InventorySnapshot, LostNote } from '../items';
+import type { InventoryItem, InventorySnapshot, LostNote } from '../items';
+import type { PlayerNotice } from '../notices';
 import type { RevisionFetch } from '../revision-reader';
 import { Rng } from './rng';
 
@@ -54,7 +55,6 @@ export function mockItem(template: number): MockItemDef | undefined {
 }
 
 const STACK_MAX = 99;
-const RECENT = 20;
 const LOST = 10;
 const UNITS_PER_DROP = 4;
 /** One drop in four carries a core or an add-on: far above the server's rates, so the mock shows them. */
@@ -75,14 +75,13 @@ export class MockInventory {
   private readonly rng: Rng;
   private readonly slots: number;
   private readonly stacks: Stack[] = [];
-  /** Newest first, as the server lists them. */
-  private readonly rows: InventoryRow[] = [];
+  /** The notices of the moves made since the last {@link takeNotices}, as the server tells them (`PlayerNotice`). */
+  private outbox: PlayerNotice[] = [];
   private readonly lost: LostNote[] = [];
   private startMs = Number.NaN;
   private drops = 0;
   /** Moves made by the mock bazaar: each moves the revision as a drop does. */
   private moves = 0;
-  private seq = 0;
   private lostN = 0;
   private nextStack = 1;
 
@@ -117,7 +116,7 @@ export class MockInventory {
   snapshot(): InventorySnapshot {
     const items: InventoryItem[] = this.stacks.map((s) => ({ ...s }));
     items.sort((a, b) => a.slot - b.slot);
-    return { open: true, slots: this.slots, items, recent: [...this.rows], lost: [...this.lost] };
+    return { open: true, slots: this.slots, items, lost: [...this.lost] };
   }
 
   /** A `fetch` for the inventory reader: `swg/inventory` answered with {@link snapshot}, anything else 404. */
@@ -159,7 +158,7 @@ export class MockInventory {
       const out = Math.min(left, stack.count);
       stack.count -= out;
       left -= out;
-      this.row(tick, stack.item, stack.name, mk, out, ref, kind);
+      this.row(tick, stack.template, stack.name, mk, out, ref, kind, false);
       if (stack.count === 0) {
         this.stacks.splice(this.stacks.indexOf(stack), 1);
       }
@@ -227,7 +226,7 @@ export class MockInventory {
       if (put > 0) {
         stack.count += put;
         left -= put;
-        this.row(tick, item, name, mk, put, ref, kind);
+        this.row(tick, template, name, mk, put, ref, kind, true);
       }
     }
 
@@ -242,13 +241,28 @@ export class MockInventory {
       const put = Math.min(left, STACK_MAX);
       this.stacks.push({ id: String(this.nextStack++), slot, item, name, category, template, mk, count: put });
       left -= put;
-      this.row(tick, item, name, mk, put, ref, kind);
+      this.row(tick, template, name, mk, put, ref, kind, true);
     }
   }
 
-  private row(tick: number, item: string, name: string, mk: number, count: number, ref: string, kind: string): void {
-    this.rows.unshift({ seq: String(++this.seq), tick, kind, item, name, mk, count, ref });
-    this.rows.length = Math.min(this.rows.length, RECENT);
+  private row(
+    tick: number,
+    template: number,
+    name: string,
+    mk: number,
+    count: number,
+    ref: string,
+    kind: string,
+    incoming: boolean,
+  ): void {
+    this.outbox.push({ tick, items: true, incoming, template, mk, count, amount: 0, ref, kind, other: null, name });
+  }
+
+  /** The notices of the moves made since the last call, oldest first: what the server would have told the session. */
+  takeNotices(): PlayerNotice[] {
+    const taken = this.outbox;
+    this.outbox = [];
+    return taken;
   }
 
   private freeSlot(): number {

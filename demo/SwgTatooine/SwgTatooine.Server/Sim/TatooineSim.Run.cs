@@ -761,6 +761,7 @@ public sealed partial class TatooineSim
         dag.Add(new LedgerSystem(_bridge));
         dag.Add(new LootSystem(_bridge));
         dag.Add(new MarketSystem(_bridge));
+        dag.Add(new NoticesSystem(_bridge));
         dag.Add(new ProgressionSystem(_bridge));
 
         // Progression has no work but these two, so it consumes both and is skipped on a tick with neither (character-level.md § 2, § 5). In the Report phase,

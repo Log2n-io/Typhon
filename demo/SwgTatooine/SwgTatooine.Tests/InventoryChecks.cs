@@ -5,6 +5,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
 using NUnit.Framework;
+using SwgTatooine.Bots;
 using SwgTatooine.Server;
 using SwgTatooine.Server.Accounts;
 using Typhon.Engine;
@@ -438,9 +439,8 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(rows[5].ToAfter, Is.EqualTo(2));
             Assert.That(stacks.Single(s => s.Stack.Template == ItemCatalog.Hide && s.Stack.Count == 2).Stack.Slot, Is.EqualTo(1), "not the lowest free slot");
             Assert.That(stacks.Single(s => s.Id == hide.Id).Stack.Count, Is.EqualTo(ItemLedger.StackMax));
-            Assert.That(ItemEndpoints.InventoryJson(sim.Dbe, p.Character),
-                Does.Contain("\"item\":\"mat_metal\",\"name\":\"Metal\",\"category\":\"material\",\"template\":3,\"mk\":1,\"count\":5,\"ref\":\"1\",\"dir\":\"out\"}"),
-                "the metal given back is not a row out of the inventory");
+            Assert.That(Notices.Heard(p.Link).Exists(n => n.Items && !n.Incoming && n.Template == ItemCatalog.Metal && n.Count == 5), Is.True,
+                "the metal given back was not told as a move out of the inventory");
             Assert.That(ItemEndpoints.Audit(sim.Dbe).Violations.All(v => v.Contains("must go from World", StringComparison.Ordinal)), Is.True,
                 "the replay of a mint, a destroy and a fill is clean but for the destroy's kind, which no system makes yet");
         });
@@ -754,11 +754,9 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(ledger, Does.Contain($"\"kind\":\"kill\",\"from\":\"0\",\"to\":\"{p.Character.RawValue}\",\"count\":7,\"fromAfter\":0,\"toAfter\":7,"));
             Assert.That(ledger, Does.Contain($"\"item\":\"mat_hide\",\"mk\":2,\"fromStack\":\"0\",\"toStack\":\"{stack}\"}}"));
             Assert.That(ledger, Does.EndWith("],\"next\":1}"));
-            Assert.That(inventory, Does.StartWith(
+            Assert.That(inventory, Is.EqualTo(
                 $"{{\"open\":true,\"slots\":30,\"items\":[{{\"id\":\"{stack}\",\"slot\":1,\"item\":\"mat_hide\",\"name\":\"Hide\",\"category\":\"material\",\"template\":8,\"mk\":2,"
-                + "\"count\":7}],\"recent\":[{\"seq\":\"1\",\"tick\":"));
-            Assert.That(inventory, Does.EndWith(
-                ",\"kind\":\"kill\",\"item\":\"mat_hide\",\"name\":\"Hide\",\"category\":\"material\",\"template\":8,\"mk\":2,\"count\":7,\"ref\":\"1\",\"dir\":\"in\"}],\"lost\":[]}"));
+                + "\"count\":7}],\"lost\":[]}"), "the inventory carries ledger rows: the client never reads them");
         });
     }
 
@@ -799,19 +797,12 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(root.GetProperty("open").ValueKind, Is.EqualTo(JsonValueKind.True));
             Assert.That(root.GetProperty("slots").ValueKind, Is.EqualTo(JsonValueKind.Number));
             Assert.That(root.GetProperty("items").GetArrayLength(), Is.EqualTo(2));
-            Assert.That(root.GetProperty("recent").GetArrayLength(), Is.EqualTo(3));
+            Assert.That(root.TryGetProperty("recent", out _), Is.False, "ledger rows in the inventory: the client never reads them");
             Assert.That(root.GetProperty("lost").GetArrayLength(), Is.EqualTo(1));
             foreach (var item in root.GetProperty("items").EnumerateArray())
             {
                 Fields(item, "item", ("id", JsonValueKind.String), ("slot", JsonValueKind.Number), ("item", JsonValueKind.String), ("name", JsonValueKind.String),
                     ("category", JsonValueKind.String), ("mk", JsonValueKind.Number), ("count", JsonValueKind.Number));
-            }
-
-            foreach (var row in root.GetProperty("recent").EnumerateArray())
-            {
-                Fields(row, "row", ("seq", JsonValueKind.String), ("tick", JsonValueKind.Number), ("kind", JsonValueKind.String), ("item", JsonValueKind.String),
-                    ("name", JsonValueKind.String), ("category", JsonValueKind.String), ("mk", JsonValueKind.Number), ("count", JsonValueKind.Number),
-                    ("ref", JsonValueKind.String), ("dir", JsonValueKind.String));
             }
 
             foreach (var lost in root.GetProperty("lost").EnumerateArray())
@@ -820,9 +811,6 @@ internal sealed class InventoryChecks : ServedChecks
                     ("category", JsonValueKind.String), ("mk", JsonValueKind.Number), ("count", JsonValueKind.Number));
             }
 
-            var recent = root.GetProperty("recent");
-            Assert.That(recent[0].GetProperty("dir").GetString(), Is.EqualTo("out"), "the hide given back, newest first");
-            Assert.That(recent[1].GetProperty("dir").GetString(), Is.EqualTo("in"));
             Assert.That(root.GetProperty("items")[1].GetProperty("category").GetString(), Is.EqualTo("core"));
             Assert.That(root.GetProperty("lost")[0].GetProperty("name").GetString(), Is.EqualTo("Armor Enhancement"));
             Assert.That(root.GetProperty("lost")[0].GetProperty("category").GetString(), Is.EqualTo("addon"));
@@ -830,85 +818,36 @@ internal sealed class InventoryChecks : ServedChecks
     }
 
     /// <summary>
-    /// The recent rows are read incrementally (<c>RecentRowCache</c>): read after read, as a client reads on every drop, with another character's rows
-    /// between, the answer stays the newest 20 rows of the bearer's, newest first — what a read of its whole history gives. The wallet's, the same.
-    /// </summary>
-    /// <summary>
-    /// A first read of a character whose history on one side is several times the rows kept — the side trimmed as it is walked, never held whole — still
-    /// answers the newest of the whole history, in order.
+    /// A drop is told to the session of the character it lands on, as it happens (<see cref="PlayerNotice"/>): one notice per row, with what, how many and
+    /// its kind, and to no one else. The ledger itself is never read by a client (2026-10-29).
     /// </summary>
     [Test]
     [CancelAfter(120_000)]
-    public void TheFirstRead_OfALongHistory_IsItsNewestRows()
-    {
-        using var sim = Start();
-        var (x, z) = OpenGround(sim);
-        var a = LogIn(sim, 0x7411, x, z);
-        var key = (long)a.Character.RawValue;
-        const int Long = ItemEndpoints.RecentRows * 5 + 3;
-        for (var k = 0; k < Long; k++)
-        {
-            sim.Bridge.StageTransfer(ItemLedger.World, key, ItemCatalog.Bone, 1, 1, ItemMoveKind.Kill, 1);
-        }
-
-        SessionHarness.Until(() => Items.Rows(sim).Count(r => r.To == key) == Long, "the long history");
-        using var doc = JsonDocument.Parse(ItemEndpoints.InventoryJson(sim.Dbe, a.Character));
-        var answered = doc.RootElement.GetProperty("recent").EnumerateArray().Select(r => long.Parse(r.GetProperty("seq").GetString())).ToList();
-        var whole = Items.Rows(sim).Where(r => r.From == key || r.To == key).Select(r => r.Seq).OrderByDescending(q => q).Take(ItemEndpoints.RecentRows).ToList();
-        Assert.That(answered, Is.EqualTo(whole), "the first read of a long history is not its newest rows");
-    }
-
-    [Test]
-    [CancelAfter(120_000)]
-    public void TheRecentRows_ReadAfterEveryDrop_AreTheNewestOfTheWholeHistory()
+    public void ADrop_IsToldToItsCharactersSession_AndToNoOneElse()
     {
         using var sim = Start();
         var (x, z) = OpenGround(sim);
         var a = LogIn(sim, 0x740D, x, z);
-        var walletA = EconomyEndpoints.WalletJson(sim.Dbe, a.Character);
         var b = LogIn(sim, 0x740E, x + 5f, z, 2);
-        var key = (long)a.Character.RawValue;
-        for (var round = 0; round < 6; round++)
-        {
-            Mint(sim, a.Character, 2, (ItemCatalog.Hide, 1, 3), ((ushort)(ItemCatalog.Metal + round), 2, 1));
-            Mint(sim, b.Character, 1, (ItemCatalog.Bone, 1, 2));
-            Mint(sim, a.Character, 2, (ItemCatalog.Venom, 1, 1), (ItemCatalog.Gland, 1, 1));
-            ItemEndpoints.InventoryJson(sim.Dbe, a.Character);
-        }
+        Mint(sim, a.Character, 2, (ItemCatalog.Hide, 2, 3), (ItemCatalog.CoreArmor, 3, 1));
+        sim.Bridge.StageTransfer((long)a.Character.RawValue, ItemLedger.World, ItemCatalog.Hide, 2, 1, ItemMoveKind.Kill, 9);
+        SessionHarness.Until(() => Items.Rows(sim).Count == 3, "the hide given back");
+        Harness.Ticks(2);
 
-        sim.Bridge.StageTransfer(key, ItemLedger.World, ItemCatalog.Hide, 1, 4, ItemMoveKind.Kill, 1);
-        SessionHarness.Until(() => Items.Rows(sim).Count == 31, "the hide given back");
-        using var doc = JsonDocument.Parse(ItemEndpoints.InventoryJson(sim.Dbe, a.Character));
-        var answered = doc.RootElement.GetProperty("recent").EnumerateArray().Select(r => long.Parse(r.GetProperty("seq").GetString())).ToList();
-        var whole = Items.Rows(sim).Where(r => r.From == key || r.To == key).Select(r => r.Seq).OrderByDescending(q => q).Take(ItemEndpoints.RecentRows).ToList();
-
-        // A gap past the walk's bound — the world appended more since the last read than the walk would take — reads the side indexes: the same answer.
-        var gap = RecentRowCache<ItemLedgerEntry>.GapFactor * ItemEndpoints.RecentRows + 10;
-        for (var k = 0; k < gap; k++)
-        {
-            sim.Bridge.StageTransfer(ItemLedger.World, (long)b.Character.RawValue, ItemCatalog.Bone, 2, 1, ItemMoveKind.Kill, 2);
-        }
-
-        sim.Bridge.StageTransfer(ItemLedger.World, key, ItemCatalog.Crystal, 3, 1, ItemMoveKind.Kill, 3);
-        SessionHarness.Until(() => Items.Rows(sim).Count == 31 + gap + 1, "the gap's rows");
-        var fullBefore = ItemEndpoints.RecentFullReads(sim.Dbe);
-        using var afterGap = JsonDocument.Parse(ItemEndpoints.InventoryJson(sim.Dbe, a.Character));
-        var answeredAfterGap = afterGap.RootElement.GetProperty("recent").EnumerateArray().Select(r => long.Parse(r.GetProperty("seq").GetString())).ToList();
-        var wholeAfterGap = Items.Rows(sim).Where(r => r.From == key || r.To == key).Select(r => r.Seq).OrderByDescending(q => q).Take(ItemEndpoints.RecentRows)
-            .ToList();
-        var fullAfter = ItemEndpoints.RecentFullReads(sim.Dbe);
-        using var wallet = JsonDocument.Parse(EconomyEndpoints.WalletJson(sim.Dbe, a.Character));
-        var walletRows = wallet.RootElement.GetProperty("transfers").EnumerateArray().Select(r => r.GetProperty("seq").GetString()).ToList();
+        var toA = Notices.Heard(a.Link).FindAll(n => n.Items);
+        var toB = Notices.Heard(b.Link).FindAll(n => n.Items);
         Assert.Multiple(() =>
         {
-            Assert.That(answered, Is.EqualTo(whole), "the incremental read is not the newest of the whole history");
-            Assert.That(answered, Has.Count.EqualTo(ItemEndpoints.RecentRows));
-            Assert.That(answeredAfterGap, Is.EqualTo(wholeAfterGap), "the read past the walk's bound is not the newest of the whole history");
-            Assert.That(answeredAfterGap[0], Is.EqualTo(31 + gap + 1), "the row after the gap is missing");
-            Assert.That(fullBefore, Is.EqualTo(1), "a warm read went back to the side indexes: only the first read should");
-            Assert.That(fullAfter - fullBefore, Is.EqualTo(1), "the read past the walk's bound walked the world's rows instead of the side indexes");
-            Assert.That(walletA, Does.Contain("\"kind\":\"grant\""), "the premise: the first wallet read");
-            Assert.That(walletRows, Is.EqualTo(new[] { "1" }), "the other character's grant leaked into the wallet's rows, or its own went missing");
+            Assert.That(toA, Has.Count.EqualTo(3), "not one notice per row");
+            Assert.That(toA.ConvertAll(n => (n.Incoming, n.Template, n.Mk, n.Count, n.Kind)), Is.EqualTo(new[]
+            {
+                (true, ItemCatalog.Hide, 2, 3, "kill"),
+                (true, ItemCatalog.CoreArmor, 3, 1, "kill"),
+                (false, ItemCatalog.Hide, 2, 1, "kill"),
+            }), "not what moved, which way, in order");
+            Assert.That(toA[2].Ref, Is.EqualTo(9), "the row's ref");
+            Assert.That(toA.TrueForAll(n => n.Other == ""), Is.True, "the world named as a character");
+            Assert.That(toB, Is.Empty, "another character's drop was told to this session");
         });
     }
 
@@ -950,7 +889,7 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(Get("Bearer " + AuthToken.Mint(TestAccounts.For(sim.Dbe, 0x740F))).Body, Is.EqualTo(ItemEndpoints.Empty), "an account with no character");
             Assert.That(mine.Status, Is.EqualTo(200));
             Assert.That(mine.Body, Does.Contain("\"item\":\"mat_venom\""), "the bearer's own stack is missing");
-            Assert.That(theirs.Body, Does.StartWith("{\"open\":true,\"slots\":30,\"items\":[],\"recent\":[],\"lost\":[]}"), "another's items, or not open");
+            Assert.That(theirs.Body, Does.StartWith("{\"open\":true,\"slots\":30,\"items\":[],\"lost\":[]}"), "another's items, or not open");
         });
     }
 

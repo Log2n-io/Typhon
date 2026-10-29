@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { lootLines, type InventorySnapshot } from '../data/items';
+import { lostLines, type InventorySnapshot } from '../data/items';
 import { useChat } from './chat-store';
 
 /**
@@ -14,7 +14,7 @@ export interface ItemsState {
   /** Asset id → the URL of its 32 px icon; empty without a catalogue (no `--assets`). */
   readonly icons: Readonly<Record<string, string>>;
 
-  /** A new read: each drop and each loss since the last read of this session is one chat line (`lootLines`). */
+  /** A new read: each loss since the last read of this session is one chat line (`lostLines`); a drop is the server's notice. */
   readonly setSnapshot: (snapshot: InventorySnapshot) => void;
   readonly setIcons: (icons: Readonly<Record<string, string>>) => void;
   /** Forgets the inventory without announcing anything: a new session. The icons are the catalogue's and stay. */
@@ -27,7 +27,7 @@ export const useItems = create<ItemsState>((set, get) => ({
 
   setSnapshot: (snapshot) => {
     const chat = useChat.getState();
-    for (const line of lootLines(get().snapshot, snapshot)) {
+    for (const line of lostLines(get().snapshot, snapshot)) {
       chat.notice(line);
     }
 

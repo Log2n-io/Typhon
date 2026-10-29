@@ -4,12 +4,11 @@ import {
   itemIcons,
   itemInitials,
   itemTooltip,
-  lootLines,
+  lostLines,
   mkNumeral,
   parseInventory,
   slotGrid,
   type InventoryItem,
-  type InventoryRow,
   type InventorySnapshot,
   type LostNote,
 } from '../src/data/items';
@@ -18,7 +17,8 @@ import { useItems } from '../src/state/items-store';
 
 /**
  * The inventory on the client (inventory-loot.md § 6, IL-11): the answer of `GET /swg/inventory` checked, the grid, the Mk
- * badge, the tooltip, the catalogue's icons, and the chat lines a drop and a loss make — none on a session's first read.
+ * badge, the tooltip, the catalogue's icons, and the chat lines a loss makes — none on a session's first read. No ledger
+ * rows: a drop is the server's notice (`notices.test.ts`).
  */
 
 const item = (slot: number, name: string, mk: number, count: number, asset = 'mat_hide'): InventoryItem => ({
@@ -32,25 +32,6 @@ const item = (slot: number, name: string, mk: number, count: number, asset = 'ma
   count,
 });
 
-const row = (
-  seq: string,
-  kind: string,
-  name: string,
-  mk: number,
-  count: number,
-  ref = '500',
-  tick = 10,
-): InventoryRow => ({
-  seq,
-  tick,
-  kind,
-  item: name.toLowerCase().replace(/\s+/g, '_'),
-  name,
-  mk,
-  count,
-  ref,
-});
-
 const lost = (n: number, name: string, mk: number, count: number, tick = 20): LostNote => ({
   n,
   tick,
@@ -60,27 +41,21 @@ const lost = (n: number, name: string, mk: number, count: number, tick = 20): Lo
   count,
 });
 
-const snapshot = (
-  recent: InventoryRow[],
-  lostNotes: LostNote[] = [],
-  items: InventoryItem[] = [],
-): InventorySnapshot => ({
+const snapshot = (lostNotes: LostNote[] = [], items: InventoryItem[] = []): InventorySnapshot => ({
   open: true,
   slots: 30,
   items,
-  recent,
   lost: lostNotes,
 });
 
 describe('the inventory answer', () => {
-  it('is read with its stacks, rows and lost notes', () => {
+  it('is read with its stacks and lost notes', () => {
     const answer = {
       open: true,
       slots: 30,
       items: [
         { id: '17', slot: 1, item: 'mat_hide', name: 'Hide', category: 'material', template: 8, mk: 2, count: 7 },
       ],
-      recent: [{ seq: '4', tick: 123, kind: 'kill', item: 'mat_hide', name: 'Hide', mk: 2, count: 3, ref: '88' }],
       lost: [{ n: 4, tick: 130, item: 'core_armor', name: 'Armor Core', mk: 2, count: 1 }],
     };
     expect(parseInventory(answer)).toEqual(answer);
@@ -90,25 +65,23 @@ describe('the inventory answer', () => {
     expect(parseInventory({ ...answer, items: [untemplated] })?.items[0].template).toBe(0);
   });
 
-  it('is refused when a field is missing or of the wrong type, and a malformed row is dropped', () => {
+  it('is refused when a field is missing or of the wrong type, and a malformed entry is dropped', () => {
     expect(parseInventory(null)).toBeNull();
     expect(parseInventory('x')).toBeNull();
-    expect(parseInventory({ open: true, slots: 30, items: [], recent: [] })).toBeNull();
-    expect(parseInventory({ open: true, slots: '30', items: [], recent: [], lost: [] })).toBeNull();
-    expect(parseInventory({ open: true, slots: 30, items: {}, recent: [], lost: [] })).toBeNull();
+    expect(parseInventory({ open: true, slots: 30, items: [] })).toBeNull();
+    expect(parseInventory({ open: true, slots: '30', items: [], lost: [] })).toBeNull();
+    expect(parseInventory({ open: true, slots: 30, items: {}, lost: [] })).toBeNull();
 
     const parsed = parseInventory({
       open: 'yes',
       slots: 30,
       items: [item(1, 'Hide', 2, 7), { id: 17, slot: 2 }],
-      recent: [row('1', 'kill', 'Hide', 2, 3), { seq: 2, tick: 1 }],
       lost: [lost(1, 'Bone', 1, 2), { n: '2' }],
     });
     expect(parsed).toEqual({
       open: false,
       slots: 30,
       items: [item(1, 'Hide', 2, 7)],
-      recent: [row('1', 'kill', 'Hide', 2, 3)],
       lost: [lost(1, 'Bone', 1, 2)],
     });
   });
@@ -163,43 +136,16 @@ describe('the item icons', () => {
   });
 });
 
-describe('the loot lines', () => {
-  it('announce nothing on the first read of a session: its rows are history, not news', () => {
-    expect(lootLines(null, snapshot([row('3', 'kill', 'Hide', 2, 3)], [lost(1, 'Bone', 1, 1)]))).toEqual([]);
+describe('the lost lines', () => {
+  it('announce nothing on the first read of a session: its notes are history, not news', () => {
+    expect(lostLines(null, snapshot([lost(1, 'Bone', 1, 1)]))).toEqual([]);
   });
 
-  it('say the rows of one drop as one line, the core first, the same item at the same Mk summed', () => {
-    const before = snapshot([row('1', 'kill', 'Hide', 1, 4, '400', 5)]);
-    // Newest first, as the server lists them: one drop of 3 rows (Hide filled a stack, then opened one).
-    const after = snapshot([
-      row('4', 'kill', 'Hide', 2, 1),
-      row('3', 'kill', 'Hide', 2, 2),
-      row('2', 'kill', 'Armor Core', 2, 1),
-      row('1', 'kill', 'Hide', 1, 4, '400', 5),
-    ]);
-    expect(lootLines(before, after)).toEqual(['Loot: Armor Core Mk II, Hide Mk II ×3']);
-  });
-
-  it('say two drops as two lines, oldest first, a cache by its kind, and a row read twice once', () => {
-    const before = snapshot([row('1', 'kill', 'Hide', 1, 4, '400', 5)]);
-    const after = snapshot([
-      row('3', 'mission', 'Weapon Enhancement', 3, 1, '77', 12),
-      row('2', 'lair', 'Bone', 2, 6, '66', 11),
-      row('1', 'kill', 'Hide', 1, 4, '400', 5),
-    ]);
-    expect(lootLines(before, after)).toEqual(['Lair cache: Bone Mk II ×6', 'Mission cache: Weapon Enhancement Mk III']);
-    expect(lootLines(after, after)).toEqual([]);
-  });
-
-  it('say a lost note once, after what fit of the same tick, and not a kind that is not a drop', () => {
-    const before = snapshot([], [lost(1, 'Bone', 1, 2, 5)]);
-    const after = snapshot(
-      [row('9', 'give', 'Hide', 1, 1, '1', 20), row('8', 'kill', 'Hide', 2, 2, '600', 20)],
-      [lost(3, 'Hide', 2, 2), lost(2, 'Armor Core', 2, 1), lost(1, 'Bone', 1, 2, 5)],
-    );
-    const lines = lootLines(before, after);
-    expect(lines).toEqual(['Loot: Hide Mk II ×2', 'Inventory full — lost: Armor Core Mk II, Hide Mk II ×2']);
-    expect(lootLines(after, after)).toEqual([]);
+  it('say the new notes of one tick as one line, and a note read twice once', () => {
+    const before = snapshot([lost(1, 'Bone', 1, 2, 5)]);
+    const after = snapshot([lost(3, 'Hide', 2, 2), lost(2, 'Armor Core', 2, 1), lost(1, 'Bone', 1, 2, 5)]);
+    expect(lostLines(before, after)).toEqual(['Inventory full — lost: Armor Core Mk II, Hide Mk II ×2']);
+    expect(lostLines(after, after)).toEqual([]);
   });
 });
 
@@ -209,17 +155,17 @@ describe('the items store', () => {
     useChat.getState().clear();
   });
 
-  it('says each drop in the chat, but not the first read, and nothing after a reset', () => {
-    useItems.getState().setSnapshot(snapshot([row('1', 'kill', 'Hide', 1, 4)]));
+  it('says each loss in the chat, but not the first read, and nothing after a reset', () => {
+    useItems.getState().setSnapshot(snapshot([lost(1, 'Hide', 1, 4)]));
     expect(useChat.getState().lines).toHaveLength(0);
 
-    useItems.getState().setSnapshot(snapshot([row('2', 'kill', 'Bone', 1, 4, '501'), row('1', 'kill', 'Hide', 1, 4)]));
+    useItems.getState().setSnapshot(snapshot([lost(2, 'Bone', 1, 4), lost(1, 'Hide', 1, 4)]));
     const lines = useChat.getState().lines;
-    expect(lines.map((l) => l.text)).toEqual(['Loot: Bone Mk I ×4']);
+    expect(lines.map((l) => l.text)).toEqual(['Inventory full — lost: Bone Mk I ×4']);
     expect(lines.every((l) => l.system === true)).toBe(true);
 
     useItems.getState().reset();
-    useItems.getState().setSnapshot(snapshot([row('3', 'kill', 'Gland', 1, 4, '502')]));
+    useItems.getState().setSnapshot(snapshot([lost(3, 'Gland', 1, 4)]));
     expect(useChat.getState().lines).toHaveLength(1);
   });
 

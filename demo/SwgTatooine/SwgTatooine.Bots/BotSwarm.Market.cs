@@ -148,7 +148,7 @@ public sealed partial class BotSwarm
         private volatile List<HeldStack> _held = [];
 
         // `/mine` re-read on each `items` revision while the last answer named something — the browser's rule (bazaar.md § 5, "Told").
-        private readonly OwnerFieldPoll _minePoll = new("items", OwnerReadRetryTicks);
+        private readonly OwnerFieldPoll _minePoll;
 
         /// <summary>One trade read at a time; its plan goes to <see cref="_sender"/> and out from the driver at the commands' rate.</summary>
         private int _tradeBusy;
@@ -385,14 +385,22 @@ public sealed partial class BotSwarm
         /// The bazaar's half of an inventory read: the stacks held, for the plan, and each buy seen collected — a win, logged with its listing and, in
         /// the rush, listed again.
         /// </summary>
-        private void SawInventory(List<HeldStack> held, List<WonListing> won)
+        private void SawInventory(List<HeldStack> held)
+        {
+            if (_trades)
+            {
+                _held = held;
+            }
+        }
+
+        /// <summary>Bazaar buys collected, as the session was told of them: each is a listing won, and a rush bot relists it.</summary>
+        private void SawWins(List<WonListing> won)
         {
             if (!_trades)
             {
                 return;
             }
 
-            _held = held;
             foreach (var w in won)
             {
                 Interlocked.Increment(ref MarketWon);
@@ -427,6 +435,7 @@ public sealed partial class BotSwarm
 
         private async Task ReadMineAsync(long tick)
         {
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
             var ok = false;
             try
             {
@@ -436,11 +445,11 @@ public sealed partial class BotSwarm
             catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException or InvalidOperationException
                                           or FormatException or OverflowException)
             {
-                // Asked again after OwnerReadRetryTicks; the next revision asks anyway.
+                // Asked again after the poll's back-off, counted from now.
             }
             finally
             {
-                _minePoll.End(ok, tick);
+                _minePoll.End(ok, tick + TicksSince(started));
             }
         }
 

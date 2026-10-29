@@ -356,7 +356,8 @@ public static class TatooineHost
     public static async Task ServeAsync(TyphonRuntime runtime, int port, string clientRoot = null, string[] origins = null, string realmsJson = null,
         Func<string> realmInventory = null, string bindAddress = null, int authBurst = 0, int authRefillMs = 0, string originSecret = null,
         bool authInsideVpcOnly = false, string tlsChainPath = null, string tlsKeyPath = null, int tlsPort = 443, int redirectPort = 0,
-        AssetOrigin assets = null, AssetColliders assetShapes = null, double worldHalfM = 0, Func<MarketSnapshot> marketBoard = null)
+        AssetOrigin assets = null, AssetColliders assetShapes = null, double worldHalfM = 0, Func<MarketSnapshot> marketBoard = null,
+        ServerGuard guard = null)
     {
         ArgumentNullException.ThrowIfNull(runtime);
 
@@ -510,6 +511,17 @@ public static class TatooineHost
             Console.WriteLine("  /auth: answered only for callers inside the VPC; the internet gets 404");
         }
 
+        // The guard (#1532): before the WebSocket upgrade and every route, so shedding, the gate, the breaker and a stopping server's refusals see every
+        // request. See ServerGuard.
+        if (guard != null)
+        {
+            guard.Attach(app.Lifetime.StopApplication);
+            app.Use(guard.Handle);
+            Console.WriteLine($"  guard: {guard.Width} database requests at once, 503 after {guard.MaxWait.TotalSeconds:0} s; breaker {guard.TripCount} "
+                + $"engine failures in {guard.TripWindow.TotalSeconds:0} s; stop deadline {guard.StopDeadline.TotalSeconds:0} s, "
+                + (guard.WedgeTimeout > TimeSpan.Zero ? $"a tick still for {guard.WedgeTimeout.TotalSeconds:0} s stops the server" : "no tick watchdog"));
+        }
+
         app.UseWebSockets();
 
         // The asset set before the client's own files, and on its own file provider: /assets is a deployment of its own,
@@ -661,6 +673,13 @@ public static class TatooineHost
         // Tell every client the server is going, before Kestrel drops their sockets (SWG-07). ApplicationStopping runs before the listeners are closed and
         // blocks shutdown until it returns, which is exactly the window in which the runtime is still ticking and a KICK can still be staged and sent.
         app.Lifetime.ApplicationStopping.Register(KickEveryone);
+
+        // Registered after the kick so it runs BEFORE it (a token runs its callbacks in reverse order): the deadline is armed before anything that can hang.
+        // A stop the guard asked for already armed it; this is the stop asked from outside.
+        if (guard != null)
+        {
+            app.Lifetime.ApplicationStopping.Register(() => guard.Stop("asked to stop"));
+        }
 
         Console.WriteLine($"  Tatooine is serving on http://localhost:{port}  (websocket /ws, catalog /typhon/catalog.json, stats /typhon/stats.json)");
 

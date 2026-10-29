@@ -338,7 +338,7 @@ public sealed class BotMarketChecks
                 new BrowseRow(31, 1, "addon_armor", MarketCategory.Addon, 3, 2, 2700, 5400, 12),
                 new BrowseRow(32, 1, "mat_bone", MarketCategory.Material, 1, 99, 2, 198, 13),
             }));
-            Assert.That(MarketJson.Credits("""{"open":true,"credits":1234,"transfers":[]}"""), Is.EqualTo(1234L));
+            Assert.That(MarketJson.Credits("""{"open":true,"credits":1234}"""), Is.EqualTo(1234L));
             Assert.That(MarketCatalog.TemplateOf("mat_ore"), Is.EqualTo((ushort)1));
             Assert.That(MarketCatalog.TemplateOf("core_armor"), Is.EqualTo((ushort)14));
             Assert.That(MarketCatalog.TemplateOf("addon_additive"), Is.EqualTo((ushort)19));
@@ -346,46 +346,28 @@ public sealed class BotMarketChecks
         });
     }
 
-    /// <summary>
-    /// An inventory read (§ 8): every stack held, with its template; and each bazaar buy collected — a <c>buy</c> row into the bot — once, with its
-    /// listing, and never on the first read, which only learns what was there.
-    /// </summary>
+    /// <summary>An inventory read (§ 8): every stack held, with its template. A buy collected reaches the bot as a notice, never as a ledger row.</summary>
     [Test]
-    public void AnInventoryRead_GivesTheStacks_AndEachBuyCollectedOnce()
+    public void AnInventoryRead_GivesTheStacks()
     {
-        const string first = """
-            {"open":true,"slots":30,"items":[{"id":"9","slot":1,"item":"mat_hide","name":"Hide","category":"material","mk":1,"count":4}],
-            "recent":[{"seq":"5","tick":10,"kind":"buy","item":"mat_hide","name":"Hide","mk":1,"count":4,"ref":"70","dir":"in"}],"lost":[]}
-            """;
-        const string second = """
+        const string answer = """
             {"open":true,"slots":30,"items":[{"id":"9","slot":1,"item":"mat_hide","name":"Hide","category":"material","mk":1,"count":4},
-            {"id":"10","slot":2,"template":14,"item":"core_armor","name":"Armor Core","category":"core","mk":2,"count":1}],
-            "recent":[{"seq":"8","tick":20,"kind":"list","item":"mat_bone","name":"Bone","mk":1,"count":1,"ref":"80","dir":"out"},
-                      {"seq":"7","tick":12,"kind":"buy","item":"core_armor","name":"Armor Core","mk":2,"count":1,"ref":"71","dir":"in"},
-                      {"seq":"5","tick":10,"kind":"buy","item":"mat_hide","name":"Hide","mk":1,"count":4,"ref":"70","dir":"in"}],"lost":[]}
+            {"id":"10","slot":2,"template":14,"item":"core_armor","name":"Armor Core","category":"core","mk":2,"count":1}],"lost":[]}
             """;
 
         var held = new List<HeldStack>();
-        var won = new List<WonListing>();
-        var view = InventoryView.Parse(first, InventoryView.None, count: false, out _, out _, held, won);
-        Assert.That(won, Is.Empty, "the first read counted a buy that was already there");
-
-        held.Clear();
-        view = InventoryView.Parse(second, view, count: true, out _, out _, held, won);
+        var view = InventoryView.Parse(answer, InventoryView.None, count: true, out _, held);
         Assert.Multiple(() =>
         {
-            Assert.That(won, Is.EqualTo(new[] { new WonListing(71, 14, "core_armor", 2, 1) }), "not the one buy collected since, with its listing");
             Assert.That(held, Is.EqualTo(new[]
             {
                 new HeldStack(8, "mat_hide", MarketCategory.Material, 1, 4),
                 new HeldStack(14, "core_armor", MarketCategory.Core, 2, 1),
             }));
             Assert.That(view.Stacks, Is.EqualTo(2));
+            Assert.That(MarketCatalog.AssetOf(14), Is.EqualTo("core_armor"));
+            Assert.That(MarketCatalog.AssetOf(0), Is.EqualTo("unknown"));
         });
-
-        won.Clear();
-        InventoryView.Parse(second, view, count: true, out _, out _, null, won);
-        Assert.That(won, Is.Empty, "an answer read twice counted its buy twice");
     }
 
     /// <summary>
@@ -520,7 +502,7 @@ internal sealed class BotMarketDeskChecks : ServedChecks
     private static (List<HeldStack> Held, MarketMine Mine, MarketPrices Prices) Read(TatooineSim sim, Trader t)
     {
         var held = new List<HeldStack>();
-        InventoryView.Parse(ItemEndpoints.InventoryJson(sim.Dbe, t.Character), InventoryView.None, false, out _, out _, held, null);
+        InventoryView.Parse(ItemEndpoints.InventoryJson(sim.Dbe, t.Character), InventoryView.None, false, out _, held);
         var board = sim.Bridge.MarketBoard;
         return (held, MarketMine.Parse(MarketEndpoints.MineJson(sim.Dbe, t.Character, board)), MarketPrices.Parse(MarketEndpoints.PricesJson(board)));
     }
@@ -593,15 +575,17 @@ internal sealed class BotMarketDeskChecks : ServedChecks
             () => MarketJson.Browse(MarketEndpoints.BrowseJson(sim.Bridge.MarketBoard, query)).Any(r => r.Unit == 1),
             "the 1 cr listing on the board");
         var page = MarketJson.Browse(MarketEndpoints.BrowseJson(sim.Bridge.MarketBoard, query));
-        var before = InventoryView.Parse(ItemEndpoints.InventoryJson(sim.Dbe, buyer.Character), InventoryView.None, false, out _, out _);
         var buys = MarketPlan.RushBuy(page, [], [], 1);
         Send(buyer, buys);
+
+        // The buy collected, as the bot hears it: a notice to its session, never a ledger row (2026-10-29).
         var won = new List<WonListing>();
         SessionHarness.Until(
             () =>
             {
-                won.Clear();
-                InventoryView.Parse(ItemEndpoints.InventoryJson(sim.Dbe, buyer.Character), before, true, out _, out _, null, won);
+                won = Notices.Heard(buyer.Link)
+                    .FindAll(n => n.Items && n.Incoming && n.Kind == "buy")
+                    .ConvertAll(n => new WonListing((ulong)n.Ref, n.Template, MarketCatalog.AssetOf(n.Template), n.Mk, n.Count));
                 return won.Count > 0;
             },
             "the buy to be collected");

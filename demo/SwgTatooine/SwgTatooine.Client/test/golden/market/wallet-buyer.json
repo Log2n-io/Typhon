@@ -1,8 +1,4 @@
 {
   "open": true,
-  "credits": 940,
-  "transfers": [
-    { "seq": "5", "tick": 41, "kind": "sale", "amount": -60, "other": "player_8f01", "ref": "65549" },
-    { "seq": "2", "tick": 13, "kind": "grant", "amount": 1000, "other": "World", "ref": "0" }
-  ]
+  "credits": 940
 }

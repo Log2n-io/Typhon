@@ -657,6 +657,7 @@ public sealed partial class SimBridge
             Kind = kind,
         };
         tx.Spawn<ItemLedgerArch>(ItemLedgerArch.Entry.Set(in row));
+        QueueNotice(PlayerNotice.Items, from, to, ItemLedger.World, ItemMoveKind.NameOf(kind), 0, count, template, mk, reference);
         _pendingItemRows++;
         _itemsDirty = true;
     }

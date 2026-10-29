@@ -118,7 +118,7 @@ internal sealed class BotMarketLiveChecks : ServedChecks
         }
 
         bot.Held = [];
-        bot.Inventory = InventoryView.Parse(ItemEndpoints.InventoryJson(sim.Dbe, bot.Character), bot.Inventory, true, out _, out _, bot.Held, null);
+        bot.Inventory = InventoryView.Parse(ItemEndpoints.InventoryJson(sim.Dbe, bot.Character), bot.Inventory, true, out _, bot.Held);
         var world = bot.Eyes.Read(bot.Store, bot.Brain.Facilities) with
         {
             InventoryStacks = bot.Inventory.Stacks,

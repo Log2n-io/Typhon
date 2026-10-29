@@ -78,7 +78,7 @@ public sealed class EconomyAuditResult
 }
 
 /// <summary>
-/// The economy over HTTP (economy-foundation.md): <c>GET /swg/wallet</c>, the caller's own balance and recent rows; <c>GET /swg/economy/audit</c>, the
+/// The economy over HTTP (economy-foundation.md): <c>GET /swg/wallet</c>, the caller's own balance; <c>GET /swg/economy/audit</c>, the
 /// whole ledger replayed and checked; <c>GET /swg/economy/ledger</c>, the rows themselves, for whoever is checking; <c>GET /swg/economy/stats</c>, the
 /// running server's counters.
 /// </summary>
@@ -95,18 +95,11 @@ public sealed class EconomyAuditResult
 /// </remarks>
 public static class EconomyEndpoints
 {
-    /// <summary>How many of its most recent rows <c>GET /swg/wallet</c> answers with.</summary>
-    public const int RecentRows = 20;
-
     /// <summary>The most rows one <c>GET /swg/economy/ledger</c> answers with.</summary>
     public const int MaxLedgerPage = 1_000;
 
     // One engine's indexes, published whole: a reader holds the set it read, so another engine's resolution can never change them under it.
-    private sealed record IndexSet(DatabaseEngine Dbe, IndexRef BySeq, IndexRef ByFrom, IndexRef ByTo, IndexRef WalletByOwner, IndexRef HeadByKey)
-    {
-        /// <summary>Each wallet's newest rows, read since only by what was appended: see <see cref="RecentRowCache{T}"/>.</summary>
-        public RecentRowCache<LedgerEntry> Recent { get; } = new(static r => r.Seq, static r => r.From, static r => r.To, RecentRows);
-    }
+    private sealed record IndexSet(DatabaseEngine Dbe, IndexRef BySeq, IndexRef ByFrom, IndexRef ByTo, IndexRef WalletByOwner, IndexRef HeadByKey);
 
     private static IndexSet _indexes;
 
@@ -151,7 +144,7 @@ public static class EconomyEndpoints
 
         return CharacterStore.TryFind(dbe, account, out var character, out _)
             ? Results.Text(WalletJson(dbe, character), "application/json")
-            : Results.Text("{\"open\":false,\"credits\":0,\"transfers\":[]}", "application/json");
+            : Results.Text("{\"open\":false,\"credits\":0}", "application/json");
     }
 
     /// <summary>
@@ -202,68 +195,13 @@ public static class EconomyEndpoints
         return Results.Text(LedgerJson(dbe, after, limit), "application/json");
     }
 
-    /// <summary>
-    /// A character's wallet as JSON: <c>{"open","credits","transfers":[{"seq","tick","kind","amount","other","ref"}…]}</c>, the most recent row first.
-    /// </summary>
+    /// <summary>A character's wallet as JSON: <c>{"open","credits"}</c>.</summary>
     /// <remarks>
-    /// <c>amount</c> is signed from this wallet's side: what it received is positive, what it paid negative. <c>other</c> is the other side's character
-    /// name, <c>"World"</c> for a grant or a reward, or null for a character that no longer exists. <c>seq</c> and <c>ref</c> are strings: a 64-bit value
-    /// is past what a JavaScript number holds exactly.
+    /// <b>No rows.</b> The ledger is the operators' audit trail, and the game client never reads it (Loïc, 2026-10-29): the moves a player should hear of
+    /// are told to its session as they happen (<see cref="PlayerNotice"/>). This answer used to carry the wallet's last twenty rows, whose first read walked
+    /// the character's whole history (#1532).
     /// </remarks>
-    public static string WalletJson(DatabaseEngine dbe, EntityId character)
-    {
-        ArgumentNullException.ThrowIfNull(dbe);
-        var ix = Indexes(dbe);
-        var key = unchecked((long)character.RawValue);
-        using var tx = dbe.CreateQuickTransaction();
-        var open = false;
-        var credits = 0L;
-        using (var wallets = tx.EnumerateIndex<Wallet, long>(ix.WalletByOwner, key, key))
-        {
-            if (wallets.MoveNext())
-            {
-                open = true;
-                credits = wallets.CurrentComponent.Balance;
-            }
-        }
-
-        // The last RecentRows of both sides: the first read of a wallet is two range scans of their side's index, a later one only the rows appended since
-        // (RecentRowCache).
-        var lastSeq = 0L;
-        using (var heads = tx.EnumerateIndex<LedgerHead, int>(ix.HeadByKey, EconomyLedger.HeadKey, EconomyLedger.HeadKey))
-        {
-            lastSeq = heads.MoveNext() ? heads.CurrentComponent.LastSeq : 0;
-        }
-
-        var rows = ix.Recent.Read(tx, ix.BySeq, ix.ByFrom, ix.ByTo, key, lastSeq);
-        var json = new StringBuilder(512);
-        json.Append("{\"open\":").Append(open ? "true" : "false").Append(",\"credits\":").Append(credits).Append(",\"transfers\":[");
-        for (var i = 0; i < rows.Count && i < RecentRows; i++)
-        {
-            var r = rows[i];
-            var received = r.To == key;
-            var other = received ? r.From : r.To;
-            json.Append(i == 0 ? "{" : ",{")
-                .Append("\"seq\":\"").Append(r.Seq.ToString(CultureInfo.InvariantCulture)).Append('"')
-                .Append(",\"tick\":").Append(r.WorldTick)
-                .Append(",\"kind\":\"").Append(TransferKind.NameOf(r.Kind)).Append('"')
-                .Append(",\"amount\":").Append(received ? r.Amount : -r.Amount)
-                .Append(",\"other\":");
-            var name = NameOf(tx, other);
-            if (name == null)
-            {
-                json.Append("null");
-            }
-            else
-            {
-                json.Append('"').Append(Escape(name)).Append('"');
-            }
-
-            json.Append(",\"ref\":\"").Append(r.Ref.ToString(CultureInfo.InvariantCulture)).Append("\"}");
-        }
-
-        return json.Append("]}").ToString();
-    }
+    public static string WalletJson(DatabaseEngine dbe, EntityId character) => BalanceJson(dbe, character);
 
     /// <summary>Rows after <paramref name="after"/>, in sequence, at most <paramref name="limit"/>: <c>{"rows":[…],"next"}</c>.</summary>
     public static string LedgerJson(DatabaseEngine dbe, long after, int limit)

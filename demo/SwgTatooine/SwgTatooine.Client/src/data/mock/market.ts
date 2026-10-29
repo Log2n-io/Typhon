@@ -9,7 +9,7 @@ import {
   type MarketCommand,
 } from '../market';
 import type { RevisionFetch } from '../revision-reader';
-import type { WalletTransfer } from '../wallet';
+import type { PlayerNotice } from '../notices';
 import { CITIES } from '../world-data';
 import { mockItem, MOCK_MATERIALS, MOCK_PARTS, type MockInventory, type MockItemDef } from './inventory';
 import { Rng } from './rng';
@@ -80,11 +80,11 @@ export class MockMarket {
   private readonly rng: Rng;
   private readonly now: () => number;
   private readonly listings = new Map<string, Listing>();
-  private readonly transfers: WalletTransfer[] = [];
+  /** The notices of the moves of credits since the last {@link takeNotices}, as the server tells them (`PlayerNotice`). */
+  private outbox: PlayerNotice[] = [];
   private credits = 0;
   private walletRev = 1;
   private nextId = 7_000_001;
-  private nextSeq = 1;
   private version = 1;
 
   /**
@@ -147,7 +147,7 @@ export class MockMarket {
         answer = { v: this.version, prices: this.prices() };
         break;
       case 'swg/wallet':
-        answer = { open: true, credits: this.credits, transfers: [...this.transfers] };
+        answer = { open: true, credits: this.credits };
         break;
     }
 
@@ -281,7 +281,7 @@ export class MockMarket {
       return MarketReason.Worthless;
     }
 
-    this.inventory.take(template, mk, quantity, 'vendor', this.tick(), String(this.nextSeq));
+    this.inventory.take(template, mk, quantity, 'vendor', this.tick(), '0');
     this.transfer('vendor', paid, 'World');
     return 0;
   }
@@ -472,9 +472,27 @@ export class MockMarket {
 
   private transfer(kind: string, amount: number, other: string, ref = '0'): void {
     this.credits += amount;
-    this.transfers.unshift({ seq: String(this.nextSeq++), tick: this.tick(), kind, amount, other, ref });
-    this.transfers.length = Math.min(this.transfers.length, 20);
+    this.outbox.push({
+      tick: this.tick(),
+      items: false,
+      incoming: amount > 0,
+      template: 0,
+      mk: 0,
+      count: 0,
+      amount: Math.abs(amount),
+      ref,
+      kind,
+      other: other === 'World' ? null : other,
+      name: '',
+    });
     this.walletRev++;
+  }
+
+  /** The notices of the moves of credits since the last call, oldest first: what the server would have told the session. */
+  takeNotices(): PlayerNotice[] {
+    const taken = this.outbox;
+    this.outbox = [];
+    return taken;
   }
 
   private tick(): number {

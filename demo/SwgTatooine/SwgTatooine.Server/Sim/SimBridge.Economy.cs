@@ -413,6 +413,7 @@ public sealed partial class SimBridge
             Kind = kind,
         };
         tx.Spawn<LedgerArch>(LedgerArch.Entry.Set(in row));
+        QueueNotice(PlayerNotice.Credits, from, to, EconomyLedger.World, TransferKind.NameOf(kind), amount, 0, 0, 0, reference);
         _economyDirty = true;
         _pendingTransfers++;
         if (kind < TransferKind.Count)

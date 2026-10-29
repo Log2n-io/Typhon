@@ -40,7 +40,10 @@ public static class MarketCatalog
         "addon_weapon", "addon_armor", "addon_tuning", "addon_additive",
     ];
 
-    /// <summary>The template of an asset; 0 for one this table does not hold.</summary>
+    /// <summary>The asset of a tradeable template; <c>"unknown"</c> for one this table does not hold.</summary>
+    public static string AssetOf(ushort template) => template >= 1 && template <= Tradeable.Length ? Tradeable[template - 1] : "unknown";
+
+    /// <summary>The template of a tradeable asset; 0 for one this table does not hold.</summary>
     public static ushort TemplateOf(string asset)
     {
         var i = Array.IndexOf(Tradeable, asset);

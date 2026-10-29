@@ -1,3 +1,4 @@
+import type { PlayerNotice } from './notices';
 import {
   archetypeOf,
   Capabilities,
@@ -94,6 +95,11 @@ export interface EventSink {
    * in its own realm. So a quiet view is the routing working, not the feature missing.
    */
   onChat(tick: number, speakerNetId: number, text: string): void;
+  /**
+   * A move of credits or items that concerns this player, told by the server on the tick it is written (`PlayerNotice`). The
+   * client never reads the ledger: this is the only way it hears of a drop, a tip or a sale.
+   */
+  onNotice?(notice: PlayerNotice): void;
 }
 
 /** A simulated network link: the mock has one, a real connection does not. */
@@ -438,6 +444,7 @@ export class TyphonSource implements DataSource {
   private region: RegionSender | null = null;
   private attack: MessagePlan | null = null;
   private chat: MessagePlan | null = null;
+  private notice: MessagePlan | null = null;
   private pauseCommand: MessagePlan | null = null;
   private viewRealmCommand: MessagePlan | null = null;
   private spectateCommand: MessagePlan | null = null;
@@ -1073,6 +1080,7 @@ export class TyphonSource implements DataSource {
 
     this.attack = plan.eventByName('Attack');
     this.chat = plan.eventByName('Chat');
+    this.notice = plan.eventByName('PlayerNotice');
 
     // A demo control: the server stops simulating for everyone. Absent from a catalog that does not declare it, in which
     // case pausing does what it did before — nothing but hold the region.
@@ -1260,6 +1268,24 @@ export class TyphonSource implements DataSource {
   private onEvent(event: EventRecord): void {
     if (this.chat !== null && event.type === this.chat) {
       this.options.events.onChat(event.tick, event.number('speaker'), event.text('text'));
+      return;
+    }
+
+    if (this.notice !== null && event.type === this.notice) {
+      const other = event.text('other');
+      this.options.events.onNotice?.({
+        tick: event.tick,
+        items: event.number('ledger') === 2,
+        incoming: event.number('incoming') !== 0,
+        template: event.number('template'),
+        mk: event.number('mk'),
+        count: event.number('count'),
+        amount: Number(event.integer64('amount') ?? 0n),
+        ref: String(event.integer64('ref') ?? 0n),
+        kind: event.text('kind'),
+        other: other === '' ? null : other,
+        name: event.text('name'),
+      });
       return;
     }
 

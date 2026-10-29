@@ -817,13 +817,10 @@ button.active {
   text-shadow: 0 0 2px #000;
 }
 
+/* In a portal on the body, placed by ItemTip: the inventory scrolls, which clips anything positioned inside it. */
 .inventory-tip {
-  display: none;
-  position: absolute;
-  bottom: calc(100% + 4px);
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 1;
+  position: fixed;
+  z-index: 1000;
   padding: 2px 6px;
   border: 1px solid var(--border);
   border-radius: 3px;
@@ -831,40 +828,6 @@ button.active {
   font-size: 11px;
   white-space: nowrap;
   pointer-events: none;
-}
-
-.inventory-slot:hover .inventory-tip {
-  display: block;
-}
-
-.inventory-history {
-  margin-top: 6px;
-  border-top: 1px solid rgba(110, 170, 220, 0.18);
-  padding-top: 4px;
-}
-
-.inventory-transfer {
-  display: flex;
-  gap: 8px;
-  font-size: 11px;
-  padding: 1px 0;
-}
-
-.inventory-kind {
-  flex: 1;
-  color: var(--muted);
-}
-
-.inventory-amount {
-  font-variant-numeric: tabular-nums;
-}
-
-.inventory-amount.in {
-  color: #b9f5a6;
-}
-
-.inventory-amount.out {
-  color: #ffb39a;
 }
 
 .missions-head {

@@ -856,6 +856,12 @@ public sealed class SimConfig
     /// </remarks>
     public int ServePort;
 
+    /// <summary><c>--stop-deadline-s</c>: how long a stopping server has to exit before it is killed (<see cref="ServerGuard"/>, #1532).</summary>
+    public int StopDeadlineS = 30;
+
+    /// <summary><c>--wedge-s</c>: how long the tick may stand still before the server stops itself; 0 never (<see cref="ServerGuard"/>, #1532).</summary>
+    public int WedgeS = 30;
+
     /// <summary><c>--sweep</c>: run the partitioning matrix instead of one configuration.</summary>
     public bool RunSweep;
 

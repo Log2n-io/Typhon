@@ -359,6 +359,14 @@ export class MockSource implements DataSource, LatencyControl {
     const { world, grid, clock, events } = this.options;
     const started = performance.now();
     applyTick(world, grid, message, events);
+
+    // The moves the mock's inventory and bazaar made since the last frame, told as the server tells them: with the frame.
+    if (events.onNotice !== undefined) {
+      for (const notice of [...this.inventory.takeNotices(), ...this.bazaar.takeNotices()]) {
+        events.onNotice(notice);
+      }
+    }
+
     const applied = performance.now();
     clock.onFrame(message.tick, applied);
 

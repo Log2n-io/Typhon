@@ -218,6 +218,8 @@ public static class CommandLine
         c.AuthLocalOnly = r.Switch("--auth-local-only", "answer /auth only for callers on a private address; required on a public bind with no CDN");
         c.AuthIterations = r.Int(
             "--auth-iterations", c.AuthIterations, $"PBKDF2 work factor for new passwords; 0 keeps the default {PasswordHash.DefaultIterations}", min: 0);
+        c.StopDeadlineS = r.Int("--stop-deadline-s", c.StopDeadlineS, "seconds a stopping server has to exit before it is killed", min: 1, max: 3600);
+        c.WedgeS = r.Int("--wedge-s", c.WedgeS, "seconds the tick may stand still before the server stops itself; 0 never", min: 0, max: 3600);
         c.Origins = origins == null ? [] : origins.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
         // Declared so --help lists them, RejectUnknown accepts them and their values are range-checked from one place like every other flag (SWG-07) — and then

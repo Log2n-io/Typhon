@@ -1,3 +1,4 @@
+import type { PlayerNotice } from '../data/notices';
 import { FreeCamera } from '@babylonjs/core/Cameras/freeCamera';
 import { Engine } from '@babylonjs/core/Engines/engine';
 import { SceneInstrumentation } from '@babylonjs/core/Instrumentation/sceneInstrumentation';
@@ -60,7 +61,7 @@ import { useMarket } from '../state/market-store';
 import { RevisionReader } from '../data/revision-reader';
 import { useItems } from '../state/items-store';
 import { useMissions } from '../state/mission-store';
-import { useWallet } from '../state/wallet-store';
+import { announceNotices, useWallet } from '../state/wallet-store';
 import { useSessionStore } from '../state/session-store';
 import { replicationStatsOf } from '../data/replication-stats';
 import type { AssetSet } from '../data/server-config';
@@ -547,6 +548,8 @@ export class ClientApp {
   private readonly damage: DamageText;
   /** The event sink the source is handed: the debug lines and the effects, each told of every blow. */
   private readonly events: EventSink;
+  /** The notices of the frame being applied, said together (`announceNotices`). */
+  private noticeBatch: PlayerNotice[] = [];
   private readonly labels: Labels;
   /** What is said, over the speaker's head (2026-10-25, Loïc). */
   private readonly bubbles: SpeechBubbles;
@@ -854,6 +857,19 @@ export class ClientApp {
         const own = speaker !== 0 && speaker === (this.source?.selfNetId ?? 0);
         this.attacks.onChat(tick, speaker, text, own);
         this.bubbles.say(speaker, text, performance.now());
+      },
+      // One frame's notices are said together, once the frame has applied: a drop's rows are one line, and a sale is said
+      // with the tax the same listing paid.
+      onNotice: (notice) => {
+        if (this.noticeBatch.length === 0) {
+          queueMicrotask(() => {
+            const batch = this.noticeBatch;
+            this.noticeBatch = [];
+            announceNotices(batch);
+          });
+        }
+
+        this.noticeBatch.push(notice);
       },
     };
     this.labels = new Labels(overlay);

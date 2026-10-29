@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { panelKey } from '../src/app/panel-keys';
-import { transferLabel } from '../src/ui/InventoryWindow';
 import {
   formatCredits,
   parseBalance,
@@ -13,7 +12,6 @@ import {
   WALLET_RETRY_MS,
   WalletReader,
   type WalletSnapshot,
-  type WalletTransfer,
 } from '../src/data/wallet';
 import { runChatCommand } from '../src/state/chat-commands';
 import { useChat } from '../src/state/chat-store';
@@ -73,33 +71,19 @@ describe('the server refusals', () => {
   });
 });
 
-const transfer = (seq: string, kind: string, amount: number, other: string | null = 'World'): WalletTransfer => ({
-  seq,
-  tick: 10,
-  kind,
-  amount,
-  other,
-});
-
 describe('the wallet answer', () => {
-  it('is checked, and a malformed row dropped', () => {
+  it('is the balance alone, checked: no ledger rows', () => {
     expect(parseWallet(null)).toBeNull();
-    expect(parseWallet({ credits: 'x', transfers: [] })).toBeNull();
-    const wallet = parseWallet({
+    expect(parseWallet({ credits: 'x' })).toBeNull();
+    expect(parseWallet({ open: true, credits: 1000, transfers: [{ seq: '1' }] })).toEqual({
       open: true,
       credits: 1000,
-      transfers: [transfer('1', 'grant', 1000), { seq: 2 }, transfer('3', 'tip', 5, null)],
-    });
-    expect(wallet).toEqual({
-      open: true,
-      credits: 1000,
-      transfers: [transfer('1', 'grant', 1000), transfer('3', 'tip', 5, null)],
     });
   });
 });
 
 describe('the wallet reader', () => {
-  const answer = (credits: number) => ({ open: true, credits, transfers: [] });
+  const answer = (credits: number) => ({ open: true, credits });
   const harness = (answers: unknown[], token: () => string | null = () => 'tok') => {
     let clock = 0;
     const urls: { url: string; auth: string | undefined }[] = [];
@@ -198,38 +182,15 @@ describe('the wallet store', () => {
     useUi.setState({ selectedNetId: 0, contextMenu: null });
   });
 
-  const snapshot = (credits: number, transfers: WalletTransfer[]): WalletSnapshot => ({
-    open: true,
-    credits,
-    transfers,
-  });
+  const snapshot = (credits: number): WalletSnapshot => ({ open: true, credits });
 
-  it('says a tip given or received in the chat, but not the first read: history, not news', () => {
-    const grant = transfer('1', 'grant', 1000);
-    useWallet.getState().setWallet(snapshot(1000, [grant, transfer('0', 'tip', 5, 'Old')]));
+  it('keeps the balance as last read, and says nothing of it: the moves are the server notices', () => {
+    useWallet.getState().setWallet(snapshot(1000));
+    useWallet.getState().setWallet(snapshot(1250));
+    expect(useWallet.getState().wallet).toEqual(snapshot(1250));
     expect(useChat.getState().lines).toHaveLength(0);
-
-    // Newest first, as the server lists them; said oldest first.
-    useWallet
-      .getState()
-      .setWallet(
-        snapshot(1250, [
-          transfer('4', 'mission', 200),
-          transfer('3', 'tip', 100, 'Kira'),
-          transfer('2', 'tip', -50, 'Rho'),
-          grant,
-        ]),
-      );
-    const lines = useChat.getState().lines;
-    expect(lines.map((l) => l.text)).toEqual(['You tipped Rho 50 cr', 'Kira tipped you 100 cr']);
-    expect(lines.every((l) => l.system === true)).toBe(true);
-  });
-
-  it('forgets the wallet on a new session without announcing anything', () => {
-    useWallet.getState().setWallet(snapshot(1000, []));
     useWallet.getState().resetWallet();
-    useWallet.getState().setWallet(snapshot(900, [transfer('2', 'tip', -100, 'Rho')]));
-    expect(useChat.getState().lines).toHaveLength(0);
+    expect(useWallet.getState().wallet).toBeNull();
   });
 
   it('toggles the inventory', () => {
@@ -324,15 +285,6 @@ describe('the players by who drives them', () => {
     expect(countDrivers(live, 6, nameIds, bots)).toEqual({ crowd: 2, bots: 2, people: 2 });
     expect(countDrivers(live, 6, null, bots)).toEqual({ crowd: 6, bots: 0, people: 0 });
     expect(countDrivers(live, 6, nameIds, null)).toEqual({ crowd: 2, bots: 0, people: 4 });
-  });
-});
-
-describe('the inventory window labels a transfer by its side', () => {
-  it('a sale row is a purchase to the buyer and a sale to the seller; other kinds keep their one name', () => {
-    expect(transferLabel('sale', -653)).toBe('Bazaar purchase');
-    expect(transferLabel('sale', 726)).toBe('Bazaar sale');
-    expect(transferLabel('tax', -58)).toBe('Sales tax');
-    expect(transferLabel('somethingNew', 1)).toBe('somethingNew');
   });
 });
 

@@ -9,7 +9,8 @@ import {
   type TicketTerminal,
 } from '../src/app/ticket-terminal';
 import { panelKey } from '../src/app/panel-keys';
-import { lootLines, parseInventory, type InventoryItem } from '../src/data/items';
+import { parseInventory, type InventoryItem } from '../src/data/items';
+import type { PlayerNotice } from '../src/data/notices';
 import {
   browseUrl,
   cityName,
@@ -38,7 +39,7 @@ import { CITIES } from '../src/data/world-data';
 import { useChat } from '../src/state/chat-store';
 import { collectableHere, ROW_NOTICE_MS, useMarket, type MarketActions } from '../src/state/market-store';
 import { useUi } from '../src/state/ui-store';
-import { useWallet } from '../src/state/wallet-store';
+import { announceNotices, useWallet } from '../src/state/wallet-store';
 import goldenBrowse from './golden/market/browse.json';
 import goldenInventory from './golden/market/inventory-seller.json';
 import goldenMineBuyer from './golden/market/mine-buyer.json';
@@ -555,16 +556,32 @@ describe('the market store', () => {
     useMarket
       .getState()
       .buy(listing('9', { name: 'Armor Core', mk: 3, qty: 1, unit: 900, total: 900, sellerName: 'Ann' }));
-    const wallet = (transfers: unknown[]) => parseWallet({ open: true, credits: 1000, transfers })!;
-    useWallet.getState().setWallet(wallet([]));
-    useWallet.getState().setWallet(
-      wallet([
-        { seq: '4', tick: 10, kind: 'vendor', amount: 6, other: 'World' },
-        { seq: '3', tick: 9, kind: 'sale', amount: -900, other: 'Ann' },
-        { seq: '2', tick: 8, kind: 'tax', amount: -4, other: 'World' },
-        { seq: '1', tick: 8, kind: 'sale', amount: 60, other: 'Bob' },
-      ]),
-    );
+    const notice = (
+      tick: number,
+      kind: string,
+      amount: number,
+      incoming: boolean,
+      other: string | null,
+      ref: string,
+    ): PlayerNotice => ({
+      tick,
+      items: false,
+      incoming,
+      template: 0,
+      mk: 0,
+      count: 0,
+      amount,
+      ref,
+      kind,
+      other,
+      name: '',
+    });
+    announceNotices([
+      notice(8, 'sale', 60, true, 'Bob', '5'),
+      notice(8, 'tax', 4, false, null, '5'),
+      notice(9, 'sale', 900, false, 'Ann', '9'),
+      notice(10, 'vendor', 6, true, null, '0'),
+    ]);
     expect(useChat.getState().lines.map((l) => l.text)).toEqual([
       'Sold Hide Mk II ×20 to Bob for 60 cr (tax 4)',
       'Bought Armor Core Mk III from Ann for 900 cr',
@@ -764,14 +781,13 @@ describe("the server's answers", () => {
     expect(vendorPayout(10, hide.vendor)).toBe(9);
   });
 
-  it('read as the inventory: rows carry the template, a list row is not announced', () => {
-    const before = parseInventory({ ...goldenInventory, recent: goldenInventory.recent.slice(2) })!;
-    const after = parseInventory(goldenInventory)!;
-    expect(after.recent[0]).toMatchObject({ kind: 'list', item: 'mat_hide', count: 3 });
-    expect(lootLines(before, after)).toEqual([]);
+  it('read as the inventory: stacks and lost notes, no ledger rows', () => {
+    const inventory = parseInventory(goldenInventory)!;
+    expect(inventory).not.toBeNull();
+    expect('recent' in inventory).toBe(false);
   });
 
-  it("announce the seller's sale with its goods and tax, the buyer's purchase, by the rows' listing ref", () => {
+  it("announce the seller's sale with its goods and tax, the buyer's purchase, by the notices' listing ref", () => {
     harness();
     useMarket.getState().setMine({
       ...parseMine(goldenMineSeller)!,
@@ -780,9 +796,21 @@ describe("the server's answers", () => {
         { ...parseMine(goldenMineSeller)!.listed[0], id: '65549', unit: 20, total: 60 },
       ],
     });
-    const seller = parseWallet(goldenWalletSeller)!;
-    useWallet.getState().setWallet({ ...seller, transfers: seller.transfers.filter((t) => t.kind === 'grant') });
-    useWallet.getState().setWallet(seller);
+    const credits = (kind: string, amount: number, incoming: boolean, other: string | null): PlayerNotice => ({
+      tick: 41,
+      items: false,
+      incoming,
+      template: 0,
+      mk: 0,
+      count: 0,
+      amount,
+      ref: '65549',
+      kind,
+      other,
+      name: '',
+    });
+    expect(parseWallet(goldenWalletSeller)).toEqual({ open: true, credits: 1054 });
+    announceNotices([credits('tax', 4, false, null), credits('sale', 60, true, 'player_8f02')]);
     expect(useChat.getState().lines.map((l) => l.text)).toEqual([
       'Sold Hide Mk III ×3 to player_8f02 for 60 cr (tax 4)',
     ]);
@@ -790,9 +818,8 @@ describe("the server's answers", () => {
     useChat.getState().clear();
     useWallet.getState().resetWallet();
     useMarket.getState().buy({ ...parseBrowse(goldenBrowse)!.listings[0], id: '65549', unit: 20, total: 60 });
-    const buyer = parseWallet(goldenWalletBuyer)!;
-    useWallet.getState().setWallet({ ...buyer, transfers: buyer.transfers.filter((t) => t.kind === 'grant') });
-    useWallet.getState().setWallet(buyer);
+    expect(parseWallet(goldenWalletBuyer)).toEqual({ open: true, credits: 940 });
+    announceNotices([credits('sale', 60, false, 'player_8f01')]);
     expect(useChat.getState().lines.map((l) => l.text)).toEqual(['Bought Hide Mk III ×3 from player_8f01 for 60 cr']);
   });
 });

@@ -198,7 +198,21 @@ public sealed partial class TatooineSim : IDisposable
     {
         var services = new ServiceCollection();
         services
-            .AddLogging(cfg => cfg.SetMinimumLevel(LogLevel.Critical))
+            // A served world prints the engine's warnings: a move to Overloaded or Starved storage health, a back-pressure wait extended, an admission
+            // limit raised. It used to print nothing at all — no provider, and a Critical floor — so the 2026-10-29 wedge (#1532) left no line of what the
+            // engine saw. A measured run stays silent, as do the checks.
+            .AddLogging(cfg =>
+            {
+                cfg.SetMinimumLevel(_config.ServePort > 0 ? LogLevel.Warning : LogLevel.Critical);
+                if (_config.ServePort > 0)
+                {
+                    cfg.AddSimpleConsole(o =>
+                    {
+                        o.SingleLine = true;
+                        o.TimestampFormat = "HH:mm:ss ";
+                    });
+                }
+            })
             .AddResourceRegistry()
             .AddMemoryAllocator()
             .AddEpochManager()

@@ -455,7 +455,7 @@ describe('the predictor fed by a real clock', () => {
       clock.update(now);
       predictor.setIntent(0, SPEED);
       // The authority as the client evaluates it: the server's path at the clock's render time.
-      const authX = Math.max(0, clock.renderTime * PERIOD) * SPEED / 1000;
+      const authX = (Math.max(0, clock.renderTime * PERIOD) * SPEED) / 1000;
       predictor.step(now, FRAME_S, authX, 0, clock.renderLagMs);
       if (now > startLocal + 2000) {
         // Where the body really is now, by the same rule: the displayed position must be it, not it plus a correction.

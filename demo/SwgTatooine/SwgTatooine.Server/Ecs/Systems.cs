@@ -662,6 +662,25 @@ internal sealed class MarketSystem : CallbackSystem
 }
 
 /// <summary>
+/// The notices of the tick's moves of credits and items, told to the players they concern (<c>SimBridge.Notices.cs</c>, <see cref="PlayerNotice"/>).
+/// </summary>
+/// <remarks>Serial, after every system that writes a ledger row; it reads the other side's name and writes nothing.</remarks>
+internal sealed class NoticesSystem : CallbackSystem
+{
+    private readonly SimBridge _bridge;
+
+    public NoticesSystem(SimBridge bridge) => _bridge = bridge;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("Notices")
+        .Phase(SimPhases.Economy)
+        .AfterAll("Missions", "Ledger", "Loot", "Market")
+        .Reads<Character>();
+
+    protected override void Execute(TickContext ctx) => _bridge.NoticesTick(ctx);
+}
+
+/// <summary>
 /// Shuttle travel (#910's workload): boards queued players while their port's shuttle is down and transports them to the destination port.
 /// </summary>
 /// <remarks>
