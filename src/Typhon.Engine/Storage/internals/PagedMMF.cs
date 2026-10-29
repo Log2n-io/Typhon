@@ -3250,6 +3250,12 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>Live <see cref="PageInfo.ActiveChunkWriters"/> for a page. Non-zero at quiesce proves a leaked registration.</summary>
     internal int ActiveChunkWritersOf(int memPageIndex) => Volatile.Read(ref Slot(memPageIndex).ActiveChunkWriters);
 
+    /// <summary>Live <see cref="PageInfo.SlotRefCount"/> for a page: the chunk-accessor windows holding it.</summary>
+    internal int SlotRefCountOf(int memPageIndex) => Volatile.Read(ref Slot(memPageIndex).SlotRefCount);
+
+    /// <summary>Slots in the page cache. Diagnostic.</summary>
+    internal int CacheSlotCount => MemPagesCount;
+
     /// <summary>Slots an epoch scope holds now — tagged at or after the lowest pinned epoch. Diagnostic, O(cache).</summary>
     internal int CountEpochProtectedPages()
     {
@@ -3258,6 +3264,21 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         for (var i = 0; i < MemPagesCount; i++)
         {
             if (Volatile.Read(ref Slot(i).AccessEpoch) >= minActive)
+            {
+                n++;
+            }
+        }
+
+        return n;
+    }
+
+    /// <summary>Slots a chunk accessor's window holds by reference count (PS-01, PS-19) — unevictable whatever the epoch. Diagnostic, O(cache).</summary>
+    internal int CountPagesWithSlotReferences()
+    {
+        var n = 0;
+        for (var i = 0; i < MemPagesCount; i++)
+        {
+            if (Volatile.Read(ref Slot(i).SlotRefCount) > 0)
             {
                 n++;
             }

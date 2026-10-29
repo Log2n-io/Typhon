@@ -109,7 +109,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         }
 
         using var accessor = PointInTimeAccessor.Create(dbe);
-        var wa = accessor.GetWorkerAccessor(0);
+        using var waLease = accessor.Enter(0);
+        var wa = waLease.Accessor;
         var entity = wa.Open(id);
         var data = entity.Read(PtaArchVersioned.Data);
         Assert.That(data.Value, Is.EqualTo(42));
@@ -129,7 +130,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         }
 
         using var accessor = PointInTimeAccessor.Create(dbe);
-        var wa = accessor.GetWorkerAccessor(0);
+        using var waLease = accessor.Enter(0);
+        var wa = waLease.Accessor;
         var entity = wa.Open(id);
         var data = entity.Read(PtaArchSingleVersion.Data);
         Assert.That(data.Value, Is.EqualTo(99));
@@ -149,7 +151,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         }
 
         using var accessor = PointInTimeAccessor.Create(dbe);
-        var wa = accessor.GetWorkerAccessor(0);
+        using var waLease = accessor.Enter(0);
+        var wa = waLease.Accessor;
         var entity = wa.Open(id);
         var data = entity.Read(PtaArchTransient.Data);
         Assert.That(data.Value, Is.EqualTo(77));
@@ -161,7 +164,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         using var dbe = SetupEngine();
 
         using var accessor = PointInTimeAccessor.Create(dbe);
-        var wa = accessor.GetWorkerAccessor(0);
+        using var waLease = accessor.Enter(0);
+        var wa = waLease.Accessor;
         var fakeId = EntityId.FromRaw(900L << 48 | 999999L);
         var found = wa.TryOpen(fakeId, out var entity);
         Assert.That(found, Is.False);
@@ -188,7 +192,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         }
 
         using var accessor = PointInTimeAccessor.Create(dbe);
-        var wa = accessor.GetWorkerAccessor(0);
+        using var waLease = accessor.Enter(0);
+        var wa = waLease.Accessor;
         var found = wa.TryOpen(id, out _);
         Assert.That(found, Is.False);
     }
@@ -211,7 +216,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         }
 
         using var accessor = PointInTimeAccessor.Create(dbe);
-        var wa = accessor.GetWorkerAccessor(0);
+        using var waLease = accessor.Enter(0);
+        var wa = waLease.Accessor;
         var entity = wa.OpenMut(id);
         var data = entity.Read(PtaArchSingleVersion.Data);
         data.Value = 200;
@@ -236,7 +242,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         }
 
         using var accessor = PointInTimeAccessor.Create(dbe);
-        var wa = accessor.GetWorkerAccessor(0);
+        using var waLease = accessor.Enter(0);
+        var wa = waLease.Accessor;
         var entity = wa.OpenMut(id);
         var data = entity.Read(PtaArchTransient.Data);
         data.Value = 300;
@@ -260,7 +267,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         }
 
         using var accessor = PointInTimeAccessor.Create(dbe);
-        var wa = accessor.GetWorkerAccessor(0);
+        using var waLease = accessor.Enter(0);
+        var wa = waLease.Accessor;
 
         // EntityRef is a ref struct — can't capture in lambda. Call Write directly and catch.
         var entity = wa.OpenMut(id);
@@ -295,7 +303,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
 
         // Create accessor BEFORE spawning the second entity
         using var accessor = PointInTimeAccessor.Create(dbe);
-        var wa = accessor.GetWorkerAccessor(0);
+        using var waLease = accessor.Enter(0);
+        var wa = waLease.Accessor;
 
         EntityId id2;
         using (var t = dbe.CreateQuickTransaction())
@@ -348,7 +357,7 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         }
 
         var ex = Assert.Throws<SnapshotExpiredException>(
-            () => _ = accessor.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value,
+            () => _ = accessor.Leased(0, a => a.Open(id).Read(PtaArchVersioned.Data).Value),
             "reading an expired snapshot must fail, not return a zeroed component");
 
         Assert.That(ex.SnapshotTsn, Is.LessThan(ex.RetainedMinTsn), "the exception must name a snapshot genuinely below the retention floor");
@@ -424,9 +433,9 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         using var accessorB = PointInTimeAccessor.Create(dbe);
 
         Assert.Throws<SnapshotExpiredException>(
-            () => _ = accessorA.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value,
+            () => _ = accessorA.Leased(0, a => a.Open(id).Read(PtaArchVersioned.Data).Value),
             "A's snapshot was trimmed by the update that separates it from B");
-        Assert.That(accessorB.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, Is.EqualTo(20),
+        Assert.That(accessorB.Leased(0, a => a.Open(id).Read(PtaArchVersioned.Data).Value), Is.EqualTo(20),
             "B's snapshot is above the retention floor and must read normally");
     }
 
@@ -462,7 +471,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
             barrier.SignalAndWait();
             try
             {
-                var wa = accessor.GetWorkerAccessor(i);
+                using var waLease = accessor.Enter(i);
+                var wa = waLease.Accessor;
                 int start = i * (entityCount / threadCount);
                 int end = (i + 1) * (entityCount / threadCount);
                 for (int j = start; j < end; j++)
@@ -508,7 +518,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
             barrier.SignalAndWait();
             try
             {
-                var wa = accessor.GetWorkerAccessor(i);
+                using var waLease = accessor.Enter(i);
+                var wa = waLease.Accessor;
                 for (int j = 0; j < 100; j++)
                 {
                     var entity = wa.Open(id);
@@ -557,7 +568,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
             barrier.SignalAndWait();
             try
             {
-                var wa = accessor.GetWorkerAccessor(i);
+                using var waLease = accessor.Enter(i);
+                var wa = waLease.Accessor;
                 int start = i * entitiesPerThread;
                 for (int j = 0; j < entitiesPerThread; j++)
                 {
@@ -577,7 +589,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
 
         // Verify writes
         using var verifier = PointInTimeAccessor.Create(dbe);
-        var vwa = verifier.GetWorkerAccessor(0);
+        using var vwaLease = verifier.Enter(0);
+        var vwa = vwaLease.Accessor;
         for (int i = 0; i < threadCount; i++)
         {
             int start = i * entitiesPerThread;
@@ -623,7 +636,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
             barrier.SignalAndWait();
             try
             {
-                var wa = accessor.GetWorkerAccessor(threadIdx);
+                using var waLease = accessor.Enter(threadIdx);
+                var wa = waLease.Accessor;
                 // Even threads write SV, odd threads read Versioned
                 if (threadIdx % 2 == 0)
                 {
@@ -712,8 +726,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         using var acc2 = PointInTimeAccessor.Create(dbe);
 
         // Both are alive and independently resolved; only the older one's revision is gone.
-        Assert.Throws<SnapshotExpiredException>(() => _ = acc1.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value);
-        Assert.That(acc2.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, Is.EqualTo(2));
+        Assert.Throws<SnapshotExpiredException>(() => _ = acc1.Leased(0, a => a.Open(id).Read(PtaArchVersioned.Data).Value));
+        Assert.That(acc2.Leased(0, a => a.Open(id).Read(PtaArchVersioned.Data).Value), Is.EqualTo(2));
         Assert.That(acc1.TSN, Is.LessThan(acc2.TSN));
     }
 
@@ -759,7 +773,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
             barrier.SignalAndWait();
             try
             {
-                var wa = accessor.GetWorkerAccessor(threadIdx);
+                using var waLease = accessor.Enter(threadIdx);
+                var wa = waLease.Accessor;
                 int reads = 0;
                 for (int pass = 0; pass < 3; pass++)
                 {
@@ -804,7 +819,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         for (int i = 0; i < 100; i++)
         {
             using var accessor = PointInTimeAccessor.Create(dbe);
-            var entity = accessor.GetWorkerAccessor(0).Open(id);
+            using var entityLease = accessor.Enter(0);
+            var entity = entityLease.Accessor.Open(id);
             Assert.That(entity.Read(PtaArchSingleVersion.Data).Value, Is.EqualTo(42));
         }
     }
@@ -833,7 +849,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         }
 
         using var accessor = PointInTimeAccessor.Create(dbe);
-        var wa = accessor.GetWorkerAccessor(0);
+        using var waLease = accessor.Enter(0);
+        var wa = waLease.Accessor;
         var entity = wa.Open(id);
 
         Assert.That(entity.Read(PtaArchMixed.V).Value, Is.EqualTo(1));
@@ -861,7 +878,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         }
 
         using var accessor = PointInTimeAccessor.Create(dbe);
-        var wa = accessor.GetWorkerAccessor(0);
+        using var waLease = accessor.Enter(0);
+        var wa = waLease.Accessor;
         var entity = wa.OpenMut(id);
 
         // Write SV and Transient
@@ -947,7 +965,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         {
             barrier.SignalAndWait();
             int ops = 0;
-            var wa = accessor.GetWorkerAccessor(threadIdx);
+            using var waLease = accessor.Enter(threadIdx);
+            var wa = waLease.Accessor;
 
             try
             {
@@ -1051,7 +1070,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
 
         // Verify SV writes persisted correctly — each thread wrote to its own chunk
         using var verifier = PointInTimeAccessor.Create(dbe);
-        var vwa = verifier.GetWorkerAccessor(0);
+        using var vwaLease = verifier.Enter(0);
+        var vwa = vwaLease.Accessor;
         for (int threadIdx = 0; threadIdx < threadCount; threadIdx++)
         {
             int start = threadIdx * expectedChunkSize;
@@ -1096,7 +1116,7 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
 
         // Snapshot A: sees the initial value.
         using var accA = PointInTimeAccessor.Create(dbe);
-        Assert.That(accA.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, Is.EqualTo(7), "accA initial");
+        Assert.That(accA.Leased(0, a => a.Open(id).Read(PtaArchVersioned.Data).Value), Is.EqualTo(7), "accA initial");
 
         // Mutate to 100
         using (var t = dbe.CreateQuickTransaction())
@@ -1113,9 +1133,9 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
 
         // A's revision was trimmed by the mutation above — the accessor holds no retention, so this is now a loud failure rather than a zeroed read.
         Assert.Throws<SnapshotExpiredException>(
-            () => _ = accA.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, "accA after mutation");
+            () => _ = accA.Leased(0, a => a.Open(id).Read(PtaArchVersioned.Data).Value), "accA after mutation");
         // B should see 100
-        Assert.That(accB.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, Is.EqualTo(100), "accB after mutation");
+        Assert.That(accB.Leased(0, a => a.Open(id).Read(PtaArchVersioned.Data).Value), Is.EqualTo(100), "accB after mutation");
 
         // Mutate to 200
         using (var t = dbe.CreateQuickTransaction())
@@ -1138,8 +1158,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         // A is two mutations behind the retention floor by now; C is current. The note that used to sit here — "accB's second read may see stale data ...
         // a known behavioral difference" — was a description of this same defect, not of a difference worth keeping.
         Assert.Throws<SnapshotExpiredException>(
-            () => _ = accA.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, "accA final");
-        Assert.That(accC.GetWorkerAccessor(0).Open(id).Read(PtaArchVersioned.Data).Value, Is.EqualTo(200), "accC final");
+            () => _ = accA.Leased(0, a => a.Open(id).Read(PtaArchVersioned.Data).Value), "accA final");
+        Assert.That(accC.Leased(0, a => a.Open(id).Read(PtaArchVersioned.Data).Value), Is.EqualTo(200), "accC final");
     }
 
     [Test]
@@ -1184,7 +1204,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
             int accIdx = threadIdx % 3;
             int workerIdx = threadIdx / 3;
             var acc = accessors[accIdx];
-            var wa = acc.GetWorkerAccessor(workerIdx);
+            using var waLease = acc.Enter(workerIdx);
+            var wa = waLease.Accessor;
 
             try
             {

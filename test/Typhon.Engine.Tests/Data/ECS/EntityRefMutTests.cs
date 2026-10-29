@@ -212,7 +212,8 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         }
 
         using var pta = PointInTimeAccessor.Create(dbe);
-        var e = pta.GetWorkerAccessor(0).Open(id);
+        using var eLease = pta.Enter(0);
+        var e = eLease.Accessor.Open(id);
         Assert.That(e.HasPendingVersionedSlots, Is.True, "premise: this path defers the Versioned walk");
         Assert.That(ReadScore(in e), Is.EqualTo(10));
         Assert.That(e.HasPendingVersionedSlots, Is.False, "the memo landed on the handle, not on a copy");
@@ -464,7 +465,8 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         var id = SpawnSv(dbe, 1);
 
         using var pta = PointInTimeAccessor.Create(dbe);
-        var wa = pta.GetWorkerAccessor(0);
+        using var waLease = pta.Enter(0);
+        var wa = waLease.Accessor;
         Assert.That(wa.IsAlive(id), Is.True);
         Assert.That(wa.IsAlive(Missing), Is.False);
         Assert.That(wa.IsAlive(EntityId.Null), Is.False);
@@ -477,13 +479,14 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
     {
         using var dbe = SetupEngine();
         using var pta = PointInTimeAccessor.Create(dbe);
-        var wa = pta.GetWorkerAccessor(0);
+        using var waLease = pta.Enter(0);
+        var wa = waLease.Accessor;
         var later = SpawnSv(dbe, 1);
 
         Assert.That(wa.IsAlive(later), Is.False, "spawned after the snapshot's TSN");
 
         using var fresh = PointInTimeAccessor.Create(dbe);
-        Assert.That(fresh.GetWorkerAccessor(0).IsAlive(later), Is.True, "premise: a snapshot taken after the spawn sees it");
+        Assert.That(fresh.Leased(0, a => a.IsAlive(later)), Is.True, "premise: a snapshot taken after the spawn sees it");
     }
 
     /// <summary>The base <see cref="EntityAccessor"/> - a point-in-time worker - has the same writable try-open, with a no-op mutation prep.</summary>
@@ -494,7 +497,8 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         var id = SpawnSv(dbe, 1);
 
         using var pta = PointInTimeAccessor.Create(dbe);
-        var wa = pta.GetWorkerAccessor(0);
+        using var waLease = pta.Enter(0);
+        var wa = waLease.Accessor;
         Assert.That(wa.TryOpenMut(id, out var e), Is.True);
         Assert.That(e.Read(SvUnit.Position).X, Is.EqualTo(1f));
         Assert.That(wa.TryOpenMut(new EntityId(id.EntityKey + 100_000, id.ArchetypeId), out var miss), Is.False);

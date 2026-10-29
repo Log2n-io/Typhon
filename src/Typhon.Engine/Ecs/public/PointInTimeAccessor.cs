@@ -1,5 +1,6 @@
 using System;
 using JetBrains.Annotations;
+using Typhon.Engine.Internals;
 
 namespace Typhon.Engine;
 
@@ -91,33 +92,100 @@ public sealed class PointInTimeAccessor : IDisposable
         IsAttached = true;
 
         // Reset existing accessors (warm caches preserved)
-        for (var i = 0; i < _workerCount; i++)
-        {
-            _workerAccessors[i]?.ResetForNewSnapshot(newTsn);
-        }
+        ResetWorkersForSnapshot(newTsn);
     }
 
     /// <summary>
-    /// Get or create the EntityAccessor for the given worker. Called ONCE per chunk at chunk start.
-    /// The returned accessor is used directly for all Open/OpenMut calls — zero per-entity overhead.
+    /// Leases the given worker's <see cref="EntityAccessor"/> to the calling thread: pins the thread's epoch for the lease's length and hands out the
+    /// worker's accessor, created on first use and kept warm across leases (its caches, not a pin). Read only through <see cref="WorkerLease.Accessor"/>,
+    /// inside the lease: <c>using var lease = pta.Enter(workerId);</c>. The runtime takes one per chunk.
     /// </summary>
-    public EntityAccessor GetWorkerAccessor(int workerId)
+    /// <remarks>
+    /// The pin is the lease's, never the accessor's (EP-04, #1532): held from the first use of a worker accessor until its thread died, it froze the page
+    /// cache's eviction floor at the oldest worker's pin, and a tick that stalled on a page never saw one freed. A lease is a <c>ref struct</c>, so it
+    /// cannot be stored, captured or carried to another thread: its pin and its unpin run on one thread. A worker accessor used with no lease open throws.
+    /// </remarks>
+    [AllowCopy]
+    public WorkerLease Enter(int workerId)
     {
         CheckConfig.Require(CheckConfig.Enabled, !_disposed, $"PointInTimeAccessor used after disposal");
         CheckConfig.Require(CheckConfig.Enabled, IsAttached, $"PointInTimeAccessor used before Attach");
         CheckConfig.Require(CheckConfig.Enabled, workerId >= 0 && workerId < _workerAccessors.Length,
             $"workerId {workerId} out of range [0, {_workerAccessors.Length})");
 
-        var acc = _workerAccessors[workerId];
-        if (acc != null)
+        var epochManager = _dbe.EpochManager;
+        var depth = epochManager.EnterScope();
+        try
         {
-            return acc;
+            var acc = _workerAccessors[workerId];
+            if (acc == null)
+            {
+                acc = new EntityAccessor();
+                acc.InitLightweight(_dbe, TSN);
+                _workerAccessors[workerId] = acc;
+            }
+
+            acc.BeginLease();
+            return new WorkerLease(acc, epochManager, depth);
+        }
+        catch
+        {
+            epochManager.ExitScope(depth);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// A worker accessor leased to one thread for one stretch of reads (<see cref="Enter"/>): its epoch pin lasts exactly as long as the lease. Dispose it
+    /// on the thread that took it, in reverse order of nested leases — <c>using</c> does both. Never copy it: two copies would end one lease twice.
+    /// </summary>
+    [NoCopy]
+    public ref struct WorkerLease
+    {
+        private readonly EntityAccessor _accessor;
+        private readonly EpochManager _epochManager;
+        private readonly int _depth;
+
+        internal WorkerLease(EntityAccessor accessor, EpochManager epochManager, int depth)
+        {
+            _accessor = accessor;
+            _epochManager = epochManager;
+            _depth = depth;
         }
 
-        acc = new EntityAccessor();
-        acc.InitLightweight(_dbe, TSN);
-        _workerAccessors[workerId] = acc;
-        return acc;
+        /// <summary>The worker's accessor: read, and write SingleVersion / Transient components, through it while the lease is open.</summary>
+        public readonly EntityAccessor Accessor => _accessor;
+
+        /// <summary>Ends the lease and unpins the thread's epoch (the outermost lease on the thread).</summary>
+        public void Dispose()
+        {
+            if (_accessor == null)
+            {
+                return;
+            }
+
+            _accessor.EndLease();
+            _epochManager.ExitScope(_depth);
+            this = default;
+        }
+    }
+
+    /// <summary>
+    /// Resets every worker accessor to <paramref name="tsn"/>, committing what each holds. Under an epoch scope of its own: the commits touch the
+    /// accessors' pages, and a worker accessor no longer carries a pin of its own (EP-04).
+    /// </summary>
+    private void ResetWorkersForSnapshot(long tsn)
+    {
+        using var guard = EpochGuard.Enter(_dbe.EpochManager);
+        for (var i = 0; i < _workerCount; i++)
+        {
+            var acc = _workerAccessors[i];
+            if (acc != null)
+            {
+                CheckConfig.Require(CheckConfig.Enabled, !acc.IsLeased, $"PointInTimeAccessor snapshot moved while worker {i} is leased");
+                acc.ResetForNewSnapshot(tsn);
+            }
+        }
     }
 
     /// <summary>
@@ -130,22 +198,24 @@ public sealed class PointInTimeAccessor : IDisposable
         var newTsn = _dbe.TransactionChain.AllocateTSN();
         TSN = newTsn;
 
-        for (var i = 0; i < _workerCount; i++)
-        {
-            _workerAccessors[i]?.ResetForNewSnapshot(newTsn);
-        }
+        ResetWorkersForSnapshot(newTsn);
     }
 
     /// <summary>
-    /// Flush the given worker's EntityAccessor and refresh its epoch scope.
-    /// Called at the end of each parallel chunk callback on the worker thread.
+    /// Flushes the given worker's EntityAccessor: commits its dirty chunk state, releases its dirty marks, and lets go of every page its windows hold (its
+    /// component accessors', its entity-map cache's, its cluster cache's) — the accessor stays usable and refills on its next read. The runtime calls it
+    /// once per system, for every worker, from whichever thread completed the system, with no lease open. Call it with no lease open, or from the thread
+    /// holding the worker's lease. It moves no epoch: the worker holds none outside a lease.
     /// </summary>
     public void FlushWorker(int workerId)
     {
         CheckConfig.Require(CheckConfig.Enabled, !_disposed, $"PointInTimeAccessor used after disposal");
-        if (workerId >= 0 && workerId < _workerCount)
+        if (workerId >= 0 && workerId < _workerCount && _workerAccessors[workerId] is { } acc)
         {
-            _workerAccessors[workerId]?.RefreshEpochScope();
+            CheckConfig.Require(CheckConfig.Enabled, !acc.IsLeasedByAnotherThread,
+                $"PointInTimeAccessor worker {workerId} flushed while another thread leases it");
+            using var guard = EpochGuard.Enter(_dbe.EpochManager);
+            acc.FlushAtSystemEnd();
         }
     }
 
@@ -161,10 +231,24 @@ public sealed class PointInTimeAccessor : IDisposable
 
         if (_workerAccessors != null)
         {
-            for (var i = 0; i < _workerAccessors.Length; i++)
+            // Under a scope of its own, as the resets: the disposes commit what the accessors hold (EP-04).
+            var guard = _dbe != null ? EpochGuard.Enter(_dbe.EpochManager) : default;
+            try
             {
-                _workerAccessors[i]?.Dispose();
-                _workerAccessors[i] = null;
+                for (var i = 0; i < _workerAccessors.Length; i++)
+                {
+                    CheckConfig.Require(CheckConfig.Enabled, _workerAccessors[i] is not { IsLeased: true },
+                        $"PointInTimeAccessor disposed while worker {i} is leased");
+                    _workerAccessors[i]?.Dispose();
+                    _workerAccessors[i] = null;
+                }
+            }
+            finally
+            {
+                if (_dbe != null)
+                {
+                    guard.Dispose();
+                }
             }
         }
     }

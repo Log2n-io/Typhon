@@ -482,8 +482,8 @@ class EntityHandleLifetimeTests : TestBase<EntityHandleLifetimeTests>
     }
 
     /// <summary>
-    /// A PTA worker's handle: the worker accessor resolves through its own cluster cache, and its epoch moves when the runtime flushes it at the end of a
-    /// system.
+    /// A PTA worker's handle: the worker accessor resolves through its own cluster cache, which the runtime flushes at the end of a system, and its epoch
+    /// pin ends with its lease (EP-04). Read again under the next lease, after its page left the cache, the handle re-resolves.
     /// </summary>
     [Test]
     [CancelAfter(60_000)]
@@ -493,14 +493,17 @@ class EntityHandleLifetimeTests : TestBase<EntityHandleLifetimeTests>
     {
         var dbe = Build();
         using var pta = PointInTimeAccessor.Create(dbe);
-        var worker = pta.GetWorkerAccessor(0);
+        var workerLease = pta.Enter(0);
+        var worker = workerLease.Accessor;
         var a = worker.Open(_fat[X]);
         var (memPage, filePage) = PageUnder(dbe, a);
 
         PushHlFatArchOutOfTheClusterCache(worker);
         pta.FlushWorker(0);
+        workerLease.Dispose();
         EvictUnder(dbe, memPage, filePage);
 
+        using var nextLease = pta.Enter(0);
         Assert.That(a.Read(HlFatArch.Fat).Key, Is.EqualTo(X), "the handle reads another entity");
     }
 
@@ -551,7 +554,8 @@ class EntityHandleLifetimeTests : TestBase<EntityHandleLifetimeTests>
         }
 
         using var pta = PointInTimeAccessor.Create(dbe);
-        var worker = pta.GetWorkerAccessor(0);
+        using var workerLease = pta.Enter(0);
+        var worker = workerLease.Accessor;
         var pinned = dbe.EpochManager.CurrentThreadPinnedEpoch;
         for (var i = 0; i < 300; i++)
         {
@@ -572,7 +576,8 @@ class EntityHandleLifetimeTests : TestBase<EntityHandleLifetimeTests>
     {
         var dbe = Build();
         using var pta = PointInTimeAccessor.Create(dbe);
-        var worker = pta.GetWorkerAccessor(0);
+        using var workerLease = pta.Enter(0);
+        var worker = workerLease.Accessor;
         var m = worker.OpenMut(_fat[X]);
         var (memPage, _) = PageUnder(dbe, m);
         Assert.That(dbe.MMF.ActiveChunkWritersOf(memPage), Is.GreaterThan(0), "premise: the writable open mapped the page dirty");

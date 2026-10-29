@@ -23,6 +23,7 @@ public unsafe partial class EntityAccessor
     /// </summary>
     public ArchetypeAccessor<TArch> For<TArch>() where TArch : class
     {
+        RequireLeaseIfPointInTime();
         var meta = ArchetypeRegistry.GetMetadata<TArch>();
         var es = _dbe._archetypeStates[meta.ArchetypeId];
         return new ArchetypeAccessor<TArch>(meta, es, this, _dbe);
@@ -37,6 +38,7 @@ public unsafe partial class EntityAccessor
     /// <param name="endIndex">Exclusive end index. Use <see cref="TickContext.EndClusterIndex"/>.</param>
     public ClusterEnumerator<TArch> GetClusterEnumerator<TArch>(int startIndex, int endIndex) where TArch : class
     {
+        RequireLeaseIfPointInTime();
         var meta = ArchetypeRegistry.GetMetadata<TArch>();
         var es = _dbe._archetypeStates[meta.ArchetypeId];
         if (!meta.IsClusterEligible || es?.ClusterState == null)
@@ -54,6 +56,7 @@ public unsafe partial class EntityAccessor
     /// </summary>
     public ClusterEnumerator<TArch> GetClusterEnumerator<TArch>() where TArch : class
     {
+        RequireLeaseIfPointInTime();
         var meta = ArchetypeRegistry.GetMetadata<TArch>();
         var es = _dbe._archetypeStates[meta.ArchetypeId];
         if (!meta.IsClusterEligible || es?.ClusterState == null)
@@ -76,6 +79,7 @@ public unsafe partial class EntityAccessor
     /// </summary>
     public ClusterEnumerator<TArch> GetClusterEnumerator<TArch>(int[] clusterIds, int startIndex, int endIndex) where TArch : class
     {
+        RequireLeaseIfPointInTime();
         var meta = ArchetypeRegistry.GetMetadata<TArch>();
         var es = _dbe._archetypeStates[meta.ArchetypeId];
         if (!meta.IsClusterEligible || es?.ClusterState == null)
@@ -93,6 +97,7 @@ public unsafe partial class EntityAccessor
     /// <exception cref="InvalidOperationException">The archetype does not use cluster storage, or <paramref name="realm"/> is not registered.</exception>
     public ClusterEnumerator<TArch> GetClusterEnumerator<TArch>(RealmId realm) where TArch : class
     {
+        RequireLeaseIfPointInTime();
         var meta = ArchetypeRegistry.GetMetadata<TArch>();
         var es = _dbe._archetypeStates[meta.ArchetypeId];
         if (!meta.IsClusterEligible || es?.ClusterState == null)
@@ -164,7 +169,7 @@ public unsafe partial class EntityAccessor
     /// has no revision visible at this TSN) is left alone unless the snapshot is also demonstrably below the retention floor.
     /// </para>
     /// <para>
-    /// Scoped to <see cref="PointInTimeAccessor"/> worker accessors via <c>_ownsPersistentEpochScope</c>. A <c>Transaction</c> registers in the chain, so
+    /// Scoped to <see cref="PointInTimeAccessor"/> worker accessors via <c>_isPointInTime</c>. A <c>Transaction</c> registers in the chain, so
     /// <c>ComputeNextMinTSN</c> can see it and its snapshot is genuinely retained; a walk failure there means something else and must not be reported as an
     /// expiry.
     /// </para>
@@ -175,7 +180,7 @@ public unsafe partial class EntityAccessor
     /// </remarks>
     private void ThrowIfSnapshotExpired()
     {
-        if (!_ownsPersistentEpochScope || _dbe == null)
+        if (!_isPointInTime || _dbe == null)
         {
             return;
         }
@@ -283,7 +288,7 @@ public unsafe partial class EntityAccessor
     public virtual bool IsAlive(EntityId id)
     {
         AssertThreadAffinity();
-        return IsCommittedAlive(id, !_ownsPersistentEpochScope && !_epochManager.IsCurrentThreadInScope);
+        return IsCommittedAlive(id, NeedsEpochGuard());
     }
 
     /// <summary>
@@ -303,7 +308,7 @@ public unsafe partial class EntityAccessor
 
         byte* readBuf = stackalloc byte[meta._entityRecordSize];
         // As IsAlive: a walk normally runs inside the accessor's epoch scope already, and a default guard must not be disposed.
-        var needsGuard = !_ownsPersistentEpochScope && !_epochManager.IsCurrentThreadInScope;
+        var needsGuard = NeedsEpochGuard();
         var guard = needsGuard ? EpochGuard.Enter(_epochManager) : default;
         try
         {
@@ -646,10 +651,10 @@ public unsafe partial class EntityAccessor
         int recordSize = meta._entityRecordSize;
         byte* readBuf = stackalloc byte[recordSize];
 
-        // Skip EpochGuard if we're already in an epoch scope (PTA workers enter once in InitLightweight).
+        // Skip EpochGuard if we are already in an epoch scope (a PTA worker under its lease, or a transaction).
         // This eliminates per-entity PinCurrentThread/UnpinCurrentThread overhead.
-        // No NoteEntityOpen here: only PTA workers resolve through this base, and their epoch is refreshed once per system (see NoteEntityOpen).
-        var needsGuard = !_ownsPersistentEpochScope && !_epochManager.IsCurrentThreadInScope;
+        // No NoteEntityOpen here: only PTA workers resolve through this base, and their pin lasts one lease (see NoteEntityOpen).
+        var needsGuard = NeedsEpochGuard();
         var guard = needsGuard ? EpochGuard.Enter(_epochManager) : default;
 
         // Reuse cached EntityMap accessor for same archetype (avoids creating a fresh ChunkAccessor per entity).
