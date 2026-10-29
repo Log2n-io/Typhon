@@ -1322,8 +1322,8 @@ either durability, recoverability, or consistency.
 
 ### WP-03: FUA before DurableLSN advance `[fatal]`
   pre IWalFileIO.WriteAligned() has returned (FUA complete)
-  post Interlocked.Exchange(ref _durableLSN, newValue)
-  post signal _durabilityEvent (wakes Immediate waiters)
+  post Interlocked.CompareExchange(ref _durableLSN, newValue, current) (AdvanceDurable's monotonic CAS loop)
+  post pulse _durabilitySync when a waiter is registered (wakes Immediate waiters, WP-17)
   scope: WalWriter.cs
   on_violation: Immediate-mode callers wake before write reaches stable media;
     crash loses data despite Immediate guarantee
@@ -1530,6 +1530,28 @@ either durability, recoverability, or consistency.
     dirtying many pages in one tick) → silent crash-recovery data loss. The writer dual of WR-02 (reader-side padding
     traversal) and a tightening of WP-05 (CRC is the writer's job — and it must cover the whole batch atomically).
   note: invisible to hand-written crash tests that never exceed 256 KB; surfaced by the T-5 differential oracle at scale (#395).
+
+### WP-17: A durability waiter wakes on the event that concerns it, not on a timeout `[perf]` `[silent]`
+  invariant WaitForDurableSlow re-checks DurableLsn, the fatal error and the writer's stop UNDER _durabilitySync before Monitor.Wait; no waiter
+            ever clears a signal (no shared reset event), so a wake meant for one waiter cannot be consumed by another
+  invariant the waiter registers (_durabilityWaiters, interlocked increment: a full fence) BEFORE it reads DurableLsn; AdvanceDurable CASes
+            DurableLsn (a full fence) BEFORE it reads the count, and pulses under the lock when it is non-zero: one side sees the other's store
+  invariant every other event a waiter reacts to pulses unconditionally: a fatal error, the writer's stop (Dispose, once the thread has exited:
+            the waiter then throws ObjectDisposedException) and the waiter's own cancellation (a token registration, once per slow wait)
+  invariant the wait slice (DurabilityWaitSliceMs, 100 ms, clamped to the caller's deadline) is a backstop, never the wake path; a deadline
+            under 1 ms away is yielded on, not slept on (Monitor.Wait(1) would overrun it by a timer quantum)
+  invariant AdvanceDurable is a monotonic CAS loop: SeedDurableLsn runs on the engine's thread, and a check-then-store racing the writer could
+            lower the watermark
+  rationale: #1529. The loop was ManualResetEventSlim.Wait(1) + Reset(): a 1 ms kernel-wait timeout rounds up to the 15.6 ms Windows timer
+    quantum, and a waiter's Reset after another advance's Set cleared the signal a second waiter needed, which then slept the quantum with its
+    LSN already durable. Seen inside game systems on the SWG server, a sixth of a 100 ms tick
+  on_violation: an Immediate commit (or a checkpoint barrier) returns up to a timer quantum after its LSN is durable, or a cancelled, failed or
+    stopped wait returns late — latency, not loss
+  scope: WalWriter.cs (WaitForDurableSlow, WaitForDurabilitySignal, PulseDurabilityWaiters, AdvanceDurable, Dispose)
+  verified: WalWriterTests.WaitForDurable_ConcurrentWaiters_EachWakesAsSoonAsItsLsnIsDurable [VerifiesRule] (8 waiters, 800 one-LSN advances,
+            every wake within 10 ms; the old Wait(1)+Reset loop measured 16.5 ms to 1.4 s worst on 2026-10-28, the fix under 1 ms typical);
+            WalWriterTests.WaitForDurable_NeverDurable_TimesOutAtItsDeadline, WaitForDurable_WriterFails_WakesTheBlockedWaiterAtOnce,
+            WaitForDurable_TokenCancelled_WakesTheBlockedWaiterAtOnce, WaitForDurable_WriterDisposed_WakesTheBlockedWaiter [VerifiesRule]
 
 ---
 
