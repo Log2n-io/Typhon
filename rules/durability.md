@@ -2011,7 +2011,8 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   scope: PagedMMF.MarkPageModified / MarkCaptured / HasWritebackDebt / WritePagesForCheckpoint / SavePages /
          CollectDirtyMemPageIndices / TryAcquire, IPageStore.MarkPageModified, CheckpointManager.RunCheckpointCycle,
          ChunkBasedSegment.MarkChunkModified, ArchetypeClusterState.NoteClusterPageModified, ClusterRef.MarkDirty, ClusterRef.WriteSpatial,
-         ClusterEnumerator.MarkCurrentDirty, ClusterEnumerator.MarkSlotDirty, DatabaseEngine.EmitArchetypeFenceRange,
+         ClusterRef.GetSpan, ClusterRef.Get, ClusterEnumerator.MoveNext, ClusterEnumerator.Dispose, ClusterEnumerator.MarkCurrentDirty,
+         ClusterEnumerator.MarkSlotDirty, DatabaseEngine.EmitArchetypeFenceRange,
          DatabaseEngine.DrainClusterShadowSlots, EntityRefMut.WriteRef, EntityAccessor.NoteSvInPlacePageWrite, PagedMMF.MemPageIndexOf,
          DatabaseEngine.MarkClusterSlotDirty, ArchetypeClusterState.RebuildIndexesFromData
   verified: ChangeSetDirtyMarkConservationTests; InPlaceClusterWriteSurvivalTests (a span write and a spatial write, each through a path that maps the
@@ -2020,12 +2021,23 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             PrepSliceEquivalenceTests.AnIndexMoveWrittenByASlice_SurvivesTheCacheEvictingItsPage [VerifiesRule] (a checkpoint settles the writes' own
             records, then every evictable page goes between Prep and Migrate; fails 5 of 5 with the drain's page record removed);
             InPlaceClusterWriteSurvivalTests.CommittedPointWritesSurviveEviction [VerifiesRule] (both Set overloads; 400 of 400 committed point writes
-            revert with the write's page record removed, and the by-type case fails with only its own record removed)
+            revert with the write's page record removed, and the by-type case fails with only its own record removed);
+            InPlaceClusterWriteSurvivalTests.HandedOutMemoryWritesSurviveEviction_WithoutMarkDirty [VerifiesRule] (GetSpan and Get with no MarkDirty,
+            and a loop left after its first cluster, which only Dispose records: 400 of 400 revert with no record; recording at hand-out instead of on
+            leaving the cluster loses 84 of 400 once a checkpoint runs between the hand-out and the stores, 2026-10-28);
+            InPlaceClusterWriteSurvivalTests.HandedOutMemoryWrites_WithTheRecordSkipped_AreRejected [RuleMutant] (every variant, the record skipped)
   note a SingleVersion point write (EntityRefMut.Set, through WriteRef) records its page at the call (#1172), by address with no page lookup
        (MemPageIndexOf), since it runs once per written component. Before #1172 nothing recorded it: a committed value reverted whenever the cache evicted
        the page before the next fence. Since #1199 the store happens in the same call, right after the record, through a base the handle re-resolves
        (mapped dirty again) if its accessor had let go of the page — so a checkpoint can no longer copy the page between the record and the store. That
        window was #1176: a store through a ref held across an archetype switch, or 31 other pages, landed after a checkpoint had settled the page
+  note memory a ClusterRef hands out (GetSpan, the ref Get returns) is written where nothing sees the stores, through a page the enumerator maps clean
+       (no ActiveChunkWriter, so a checkpoint may copy it mid-visit). The ref raises a flag on its enumerator, which records the page when it leaves the
+       cluster (MoveNext, Dispose): after every store, while it still holds the page (#1531). Recording at the hand-out would land BEFORE the stores, and a
+       capture in between would settle the debt with the old bytes (CP-04). The ref stores the cluster's base on its enumerator, which records from it,
+       so the record names the page written. A hand-driven enumerator must be disposed, or its last cluster goes unrecorded. The record is made whether
+       or not the caller wrote: a read through GetSpan leaves the page owed until the next checkpoint (read through GetReadOnlySpan). MarkDirty is still
+       required for a FenceWal archetype's WAL record and for change detection; it is no longer what keeps the write in memory
   note the fence's shadow drain writes an AllowMultiple field's new element id into the cluster tail through the slice's accessor, which holds no
        ChangeSet, and records the page at that write (#1171). The WAL emit's record comes later, at Finalize: in between, Migrate's own loads can evict a
        page nothing marks, and the element id went with it — Migrate read the old id, its location update was dropped, and the index kept the entity at
