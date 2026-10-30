@@ -139,7 +139,8 @@ describe('mock server → SDK store (a small differential oracle)', () => {
       expect(e.attacker === 0 || e.attackerHeld).toBe(true);
       expect(e.target === 0 || e.targetHeld).toBe(true);
     }
-  });
+    // 400 simulated frames: ~2.8 s on a dev box, 6.1 s on a CI runner, past vitest's 5 s default.
+  }, 30_000);
 
   it('survives a camera jump that drops thousands of entities of one archetype in one frame', () => {
     const server = new MockServer(99, 1, { ...DEFAULT_INTEREST, enterBudget: 20_000 });

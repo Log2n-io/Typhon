@@ -411,6 +411,10 @@ public sealed partial class SimBridge
         return d2 <= rangeSq ? TargetVerdict.InRange : TargetVerdict.OutOfRange;
     }
 
+    /// <summary>A creature's level, as its lair's (<see cref="TryAcquireTarget"/>'s remarks).</summary>
+    private static int CreatureLevel(TickContext ctx, in EntityRef creature)
+        => ctx.Accessor.TryOpen(creature.Read(Creature.Home).Lair, out var lair) ? lair.Read(CreatureLair.Spawner).Level : 0;
+
     /// <summary>
     /// The nearest LIVING creature within weapon range, or failing that a standing lair — what a player in
     /// <see cref="PlayerActivity.Combat"/> shoots at when it has nobody.
@@ -433,10 +437,6 @@ public sealed partial class SimBridge
     /// <see cref="CreatureBrain"/>: <c>CreatureCombat</c> writes the brain in parallel in this phase (ED-05), and a creature always has its lair's level —
     /// it is spawned and refilled at it. A creature whose lair is gone counts as level 0: it dies with the lair's cascade in this tick's director pass.
     /// </remarks>
-    /// <summary>A creature's level, as its lair's (<see cref="TryAcquireTarget"/>'s remarks).</summary>
-    private static int CreatureLevel(TickContext ctx, in EntityRef creature)
-        => ctx.Accessor.TryOpen(creature.Read(Creature.Home).Lair, out var lair) ? lair.Read(CreatureLair.Spawner).Level : 0;
-
     private bool TryAcquireTarget(TickContext ctx, RealmId realm, float x, float z, int maxLevel, out EntityId target, out byte kind)
     {
         var sphere = new BSphere2F { CenterX = x, CenterY = z, Radius = RangedRange };

@@ -962,13 +962,6 @@ public sealed partial class BotSwarm : IAsyncDisposable
         return (asked, switches, news, inRealm);
     }
 
-    /// <summary>Movement intents this fleet has sent, so a run can prove its population was walking rather than standing.</summary>
-    /// <returns>The count.</returns>
-    /// <remarks>
-    /// <b>Worth its own counter because its absence was invisible.</b> Every run before the wander existed reported a healthy fleet
-    /// of a thousand bound avatars that sent not one intent, and the only way to notice was to look at the world in a browser. A
-    /// number here, next to the sessions, makes "they are standing still" a thing the report says rather than a thing you see.
-    /// </remarks>
     /// <summary>The bots that live in the home city, and how many of them stood in it at their last decision.</summary>
     public (int Living, int There) Homes()
     {
@@ -987,6 +980,14 @@ public sealed partial class BotSwarm : IAsyncDisposable
 
         return (living, there);
     }
+
+    /// <summary>Movement intents this fleet has sent, so a run can prove its population was walking rather than standing.</summary>
+    /// <returns>The count.</returns>
+    /// <remarks>
+    /// <b>Worth its own counter because its absence was invisible.</b> Every run before the wander existed reported a healthy fleet
+    /// of a thousand bound avatars that sent not one intent, and the only way to notice was to look at the world in a browser. A
+    /// number here, next to the sessions, makes "they are standing still" a thing the report says rather than a thing you see.
+    /// </remarks>
 
     /// <summary>The missions the thinking bots asked for, took (their journal said so), completed (paid) and cancelled.</summary>
     /// <returns>The four counts, over the fleet.</returns>

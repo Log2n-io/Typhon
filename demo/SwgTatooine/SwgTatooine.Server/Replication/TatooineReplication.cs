@@ -708,15 +708,15 @@ public static partial class TatooineReplication
     /// <summary>The session kind a small-view client names in <c>HELLO</c>.</summary>
     public const string PlayerKind = "player";
 
+    /// <summary>Enters per frame of the whole-world god and overview cameras (ObserverBuilder.Fill, #1511): the engine's default is 500.</summary>
+    public const int GodFillPerFrame = 5000;
+
     /// <summary>How far a player sees, in metres.</summary>
     /// <remarks>
     /// Chosen as a plausible awareness range for a ground game at this world scale, not measured from anything: what it is here for is that a player's view
     /// is a DISC rather than the world, and the exact figure only moves the constant. Tatooine's cells are 256 m, so a disc of this size spans a handful of
     /// them and the cluster index has something to reject.
     /// </remarks>
-    /// <summary>Enters per frame of the whole-world god and overview cameras (ObserverBuilder.Fill, #1511): the engine's default is 500.</summary>
-    public const int GodFillPerFrame = 5000;
-
     public const double PlayerRadiusM = 192d;
 
     /// <summary>How far a session with a RENDERER is served, in metres: the radius a connecting player gets before touching the slider.</summary>
