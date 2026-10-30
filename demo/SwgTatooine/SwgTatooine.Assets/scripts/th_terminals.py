@@ -9,7 +9,7 @@ exec(open(os.path.join(TH_ROOT, "scripts", "th_helpers.py")).read(), globals())
 # Emission stays around 1.2-1.5: higher, colour x strength passes 1 and tone mapping washes the screens to pastel.
 # Each asset is modelled at its local origin (base centre on the ground, front facing -Y like every asset) under its
 # own ASSET_ root, placed in a free row of the editing scene; an interaction empty stands where the player uses it
-# (local +Y faces the terminal). Collision is in th_collision.py (one or two boxes each). Re-runnable.
+# (local +Y faces the terminal); the bazaar and mission terminals are also usable from any side (interact_reach_m). Collision is in th_collision.py (one or two boxes each). Re-runnable.
 
 M_DARK = bpy.data.materials["TH_Duracrete"]
 
@@ -65,13 +65,18 @@ def part(col, root, name, bm, mat, bevel=BEVEL, rot_x=0.0, rot_z=0.0, pivot=(0, 
     return ob
 
 
-def interact(col, root, name, kind, y, radius):
+def interact(col, root, name, kind, y, radius, all_round=False):
+    """The stand point; all_round: also usable from any side (interact_reach_m about the terminal's centre). Call it
+    after the parts: the reach is measured on them."""
     it = bpy.data.objects.new(name, None)
     it.empty_display_type = 'ARROWS'; it.empty_display_size = 0.5
     it.location = (0.0, y, 0.0)
     col.objects.link(it); it.parent = root
     it["interact_kind"] = kind
     it["interact_radius"] = radius
+    if all_round:
+        bpy.context.view_layer.update()
+        set_interact_reach(it, root)
     return it
 
 
@@ -93,7 +98,7 @@ for i, (side, z) in enumerate([(-1, 0.6), (1, 0.6), (-1, 0.8), (1, 0.8)]):
     cx = side * 0.33
     part(col, root, f"BT_Holo.{i}", box_bm(cx - 0.13, cx + 0.13, -0.475, -0.46, z, z + 0.07), M_HOLO, bevel=0,
          rot_z=side * math.radians(15), pivot=(cx, -0.47, 0))
-interact(col, root, "BT_Interact", "bazaar", -1.1, 1.5)
+interact(col, root, "BT_Interact", "bazaar", -1.1, 1.5, all_round=True)
 out["bazaar_terminal"] = {"root": root.name, "parts": len(root.children)}
 
 # ---------------- crafting station: wide machine, side cabinet, front console, stacked tiers, canisters ----------------
@@ -133,7 +138,7 @@ part(col, root, "MT_Keypad", box_bm(-0.17, 0.17, -0.24, -0.1, 0.8, 0.84), M_GUN,
      pivot=(0, -0.1, 0.82))        # front edge lower, facing the user
 part(col, root, "MT_SidePanel", box_bm(-0.33, -0.26, -0.08, 0.06, 0.78, 1.3), M_GUN)
 part(col, root, "MT_SideLights", box_bm(-0.315, -0.275, -0.092, -0.08, 1.05, 1.22), M_GREEN, bevel=0)
-interact(col, root, "MT_Interact", "mission", -0.65, 1.2)
+interact(col, root, "MT_Interact", "mission", -0.65, 1.2, all_round=True)
 out["mission_terminal"] = {"root": root.name, "parts": len(root.children)}
 
 result = out

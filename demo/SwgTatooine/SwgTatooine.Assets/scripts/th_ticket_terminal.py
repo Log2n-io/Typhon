@@ -25,6 +25,8 @@ it.location = (0.0, -0.9, 0.0)                 # local +Y (forward, like every m
 SRC.objects.link(it); it.parent = root
 it["interact_kind"] = "shuttle_ticket"
 it["interact_radius"] = 1.5
+bpy.context.view_layer.update()
+set_interact_reach(it, root)                   # and usable from any side, within reach of its centre
 
 # The source collection is not rendered in place; only its instances are.
 lc = bpy.context.view_layer.layer_collection.children.get(SRC.name)

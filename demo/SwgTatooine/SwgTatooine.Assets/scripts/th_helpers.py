@@ -227,6 +227,30 @@ def look_cam(name, target, az_deg, el_deg, dist, lens=35, shift_y=0.1, col=None)
     return cam
 
 
+INTERACT_REACH_EDGE = 2.5   # an interactable is usable from any side within this distance of its farthest point
+
+
+def set_interact_reach(it, root, edge=INTERACT_REACH_EDGE):
+    """interact_reach_m on the interaction empty `it`: the radius about the asset origin, in plan, within which the asset
+    is usable from any side = its render meshes' farthest corner + edge, rounded up to 0.1 m (ASSET_FORMAT.md 5.5)."""
+    inv = root.matrix_world.inverted()
+    far = max(math.hypot(p.x, p.y) for c in root.children_recursive if c.type == 'MESH'
+              for p in (inv @ c.matrix_world @ Vector(b) for b in c.bound_box))
+    it["interact_reach_m"] = math.ceil((far + edge) * 10 - 1e-6) / 10
+    # display only: a wire sphere of that radius on the asset origin (an empty without properties, which the exporter
+    # skips), so the zone shows in the editing scene
+    name = "REACH_" + it.name
+    show = bpy.data.objects.get(name) or bpy.data.objects.new(name, None)
+    for c in list(show.users_collection):
+        c.objects.unlink(show)
+    for c in root.users_collection:
+        c.objects.link(show)
+    show.parent = root; show.matrix_parent_inverse = Matrix.Identity(4); show.location = (0, 0, 0)
+    show.empty_display_type = 'SPHERE'; show.empty_display_size = it["interact_reach_m"]
+    show.hide_render = True
+    return it
+
+
 # ---------- assets / UVs ----------
 UV0 = "UV0"
 UV0_TILE_M = 4.0   # must match th_texlib.TILE_M
