@@ -1,3 +1,4 @@
+import type { RequestRow } from '@/libs/profiler/correlation/requests';
 import {
   HTTP_METHOD_NAMES,
   TraceEventKind,
@@ -278,6 +279,7 @@ export interface SpanData {
  *  - **marker**: a discrete event instant (GC, memory alloc event)
  *  - **phase**: a tick lifecycle phase span (RuntimePhaseSpan — WriteTickFence, UoW Flush, OutputPhase, etc.)
  *  - **phase-marker**: a single-point lifecycle landmark (UoW Create / UoW Flush glyph in the phase track)
+ *  - **request**: an HTTP request or client command, from a root lane (#1517)
  *
  * Off-CPU overlay bars are deliberately NOT selectable — they're a hover-only visual (the hover tooltip surfaces
  * wait reason / duration); see routeSelection in TimeArea.tsx. Carried on the unified selection bus as the `span` /
@@ -289,7 +291,8 @@ export type ProfilerSelection =
   | { kind: 'tick'; tickNumber: number }
   | { kind: 'marker'; marker: MarkerSelection }
   | { kind: 'phase'; phase: PhaseSpan; tickNumber: number }
-  | { kind: 'phase-marker'; marker: PhaseMarker; tickNumber: number };
+  | { kind: 'phase-marker'; marker: PhaseMarker; tickNumber: number }
+  | { kind: 'request'; row: RequestRow };
 
 /** All data for a single tick */
 export interface TickData {

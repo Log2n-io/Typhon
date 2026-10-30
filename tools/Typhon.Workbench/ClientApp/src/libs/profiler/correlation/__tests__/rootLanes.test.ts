@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { buildHoverTooltipLines } from '@/libs/profiler/canvas/hoverTooltipLines';
-import { buildLayout, SPAN_ROW_HEIGHT } from '@/libs/profiler/canvas/timeAreaLayout';
+import { buildLayout, LABEL_ROW_HEIGHT, SPAN_ROW_HEIGHT, TRACK_GAP } from '@/libs/profiler/canvas/timeAreaLayout';
 import { hitTestTimeArea } from '@/libs/profiler/canvas/timeAreaHitTest';
 import type { RequestRow } from '@/libs/profiler/correlation/requests';
 import {
-  findRootAt, firstRootEndingAfter, MAX_ROOT_ROWS, packRootLanes, ROOT_COMMANDS_TRACK_ID, ROOT_HTTP_TRACK_ID,
+  findRootAt, firstRootEndingAfter, packRootLanes, ROOT_COMMANDS_TRACK_ID, ROOT_HTTP_TRACK_ID, ROOT_ROWS_DOUBLE, ROOT_ROWS_EXPANDED, rootRowCap,
 } from '@/libs/profiler/correlation/rootLanes';
 
 type Extra = Partial<Omit<RequestRow, 'id' | 'markers'>>;
@@ -41,11 +41,55 @@ describe('packRootLanes', () => {
   });
 
   it('caps the rows and puts the excess on the last one, flagged', () => {
-    const rows = Array.from({ length: MAX_ROOT_ROWS + 2 }, (_, i) => root(`r${i}`, 'command', i, 1_000));
+    const rows = Array.from({ length: ROOT_ROWS_EXPANDED + 2 }, (_, i) => root(`r${i}`, 'command', i, 1_000));
     const lane = packRootLanes(rows).commands;
-    expect(lane.rowCount).toBe(MAX_ROOT_ROWS);
+    expect(lane.rowCount).toBe(ROOT_ROWS_EXPANDED);
     expect(lane.overflowCount).toBe(2);
-    expect(lane.roots.filter((p) => p.overflow).map((p) => p.lane)).toEqual([MAX_ROOT_ROWS - 1, MAX_ROOT_ROWS - 1]);
+    expect(lane.roots.filter((p) => p.overflow).map((p) => p.lane)).toEqual([ROOT_ROWS_EXPANDED - 1, ROOT_ROWS_EXPANDED - 1]);
+  });
+
+  it('packs up to the extended cap in the double mode', () => {
+    expect([rootRowCap(undefined), rootRowCap('summary'), rootRowCap('expanded'), rootRowCap('double')])
+      .toEqual([ROOT_ROWS_EXPANDED, ROOT_ROWS_EXPANDED, ROOT_ROWS_EXPANDED, ROOT_ROWS_DOUBLE]);
+    const rows = Array.from({ length: 20 }, (_, i) => root(`r${i}`, 'command', i, 1_000));
+    const lane = packRootLanes(rows, { http: ROOT_ROWS_EXPANDED, commands: ROOT_ROWS_DOUBLE }).commands;
+    expect(lane.rowCount).toBe(20);
+    expect(lane.overflowCount).toBe(0);
+  });
+
+  it('puts each root on the lowest row free at its start, as a scan of every row would', () => {
+    // A reference packer, the scan the heaps replace, against random overlapping roots, with the cap reached.
+    let seed = 7;
+    const rand = (): number => (seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648) / 2_147_483_648;
+    const rows = Array.from({ length: 2_000 }, (_, i) => {
+      const start = Math.floor(rand() * 100_000);
+      return root(`r${i}`, 'command', start, start + 1 + Math.floor(rand() * 3_000));
+    });
+    const cap = 24;
+    const lane = packRootLanes(rows, { http: cap, commands: cap }).commands;
+
+    const sorted = rows.slice().sort((a, b) => a.startUs - b.startUs || b.endUs - a.endUs);
+    const ends: number[] = [];
+    const expected = sorted.map((r) => {
+      let lane = ends.findIndex((e) => e <= r.startUs);
+      if (lane < 0 && ends.length < cap) lane = ends.push(0) - 1;
+      if (lane < 0) {
+        ends[cap - 1] = Math.max(ends[cap - 1], r.endUs);
+        return [r.key, cap - 1, true];
+      }
+      ends[lane] = r.endUs;
+      return [r.key, lane, false];
+    });
+    expect(lane.roots.map((p) => [p.row.key, p.lane, p.overflow])).toEqual(expected);
+    expect(lane.overflowCount).toBeGreaterThan(0);
+  });
+
+  it('keeps the lane P99, dropped commands aside', () => {
+    const rows = [...Array.from({ length: 99 }, (_, i) => root(`r${i}`, 'command', i * 100, i * 100 + 10)), root('slow', 'command', 0, 5_000),
+      root('drop', 'dropped', 10, 10, { totalUs: 99_999 })];
+    expect(packRootLanes(rows).commands.p99Us).toBe(10);
+    expect(packRootLanes(rows.slice(0, 50)).commands.p99Us).toBe(10);
+    expect(packRootLanes([...rows, root('slow2', 'command', 0, 6_000)]).commands.p99Us).toBe(5_000);
   });
 
   it('marks a dropped command on row 0 without taking a row', () => {
@@ -61,9 +105,9 @@ describe('packRootLanes', () => {
 
 describe('findRootAt', () => {
   it('prefers a bar of its own row over an overflow one drawn on it', () => {
-    const rows = Array.from({ length: MAX_ROOT_ROWS + 1 }, (_, i) => root(`r${i}`, 'command', i, 1_000));
+    const rows = Array.from({ length: ROOT_ROWS_EXPANDED + 1 }, (_, i) => root(`r${i}`, 'command', i, 1_000));
     const lane = packRootLanes(rows).commands;
-    expect(findRootAt(lane, 500, MAX_ROOT_ROWS - 1, 0)?.row.key).toBe(`r${MAX_ROOT_ROWS - 1}`);
+    expect(findRootAt(lane, 500, ROOT_ROWS_EXPANDED - 1, 0)?.row.key).toBe(`r${ROOT_ROWS_EXPANDED - 1}`);
     expect(findRootAt(lane, 500, 0, 0)?.row.key).toBe('r0');
     expect(findRootAt(lane, 2_000, 0, 0)).toBeNull();
   });
@@ -105,6 +149,15 @@ describe('root lanes in the time area', () => {
     expect(ids(0, 0)).toEqual(['ruler', 'slot-0', 'phases', 'page-cache']);
     const http = buildLayout({ ...layoutBase, rootRows: { http: 3, commands: 0 } }).tracks.find((t) => t.id === ROOT_HTTP_TRACK_ID);
     expect(http?.height).toBe(3 * SPAN_ROW_HEIGHT);
+  });
+
+  it('keeps a lane in the double mode, and collapses it to its label row', () => {
+    const lay = (state: 'summary' | 'expanded' | 'double') =>
+      buildLayout({ ...layoutBase, collapseState: { [ROOT_COMMANDS_TRACK_ID]: state }, rootRows: { http: 0, commands: 20 } }).tracks;
+    expect(lay('double')[1]).toMatchObject({ id: ROOT_COMMANDS_TRACK_ID, state: 'double', height: 20 * SPAN_ROW_HEIGHT });
+    const collapsed = lay('summary');
+    expect(collapsed[1].state).toBe('summary');
+    expect(collapsed[2].y - collapsed[1].y).toBe(LABEL_ROW_HEIGHT + TRACK_GAP); // the density strip sits inside the label row
   });
 
   it('hit-tests a root bar by its row, and reads it in the tooltip', () => {

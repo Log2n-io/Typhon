@@ -39,6 +39,12 @@ public readonly struct ThreadInfoEventData
     public string GetName() => Encoding.UTF8.GetString(NameUtf8.Span);
 }
 
+/// <summary>One row of the cache's <see cref="CacheSectionId.ThreadTable"/>: a named thread slot.</summary>
+/// <param name="Slot">The thread slot.</param>
+/// <param name="Kind">What the thread is.</param>
+/// <param name="Name">Its name, at most 255 UTF-8 bytes.</param>
+public readonly record struct ThreadTableEntry(byte Slot, ThreadKind Kind, string Name);
+
 /// <summary>
 /// Wire codec for <see cref="TraceEventKind.ThreadInfo"/>. Layout after the 12-byte common header:
 /// <code>
@@ -51,7 +57,7 @@ public readonly struct ThreadInfoEventData
 /// </summary>
 public static class ThreadInfoEventCodec
 {
-    private const int PrefixSize = TraceRecordHeader.CommonHeaderSize + 4 + 2;
+    internal const int PrefixSize = TraceRecordHeader.CommonHeaderSize + 4 + 2;
 
     /// <summary>Total wire size in bytes of a ThreadInfo record whose name is <paramref name="nameByteCount"/> UTF-8 bytes.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

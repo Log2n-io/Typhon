@@ -69,7 +69,8 @@ describe('command markers', () => {
     ];
     const rows = computeRequests([tick], range, []);
     expect(markersFor(rows, commandCausalKey(2, 9, 4))).toEqual([
-      { slot: 5, us: 100 }, { slot: 0, us: 200 }, { slot: 1, us: 300 }, { slot: 7, us: 400 },
+      { slot: 5, us: 100, kind: 'received' }, { slot: 0, us: 200, kind: 'admitted' }, { slot: 1, us: 300, kind: 'consumed' },
+      { slot: 7, us: 400, kind: 'sent' },
     ]);
   });
 

@@ -710,7 +710,8 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
                     postTickSummaries: _builder?.PostTickSummaries ?? Array.Empty<Typhon.Profiler.PostTickSummary>(),
                     queueIdToName: _builder?.QueueIdToName ?? new System.Collections.Generic.Dictionary<ushort, string>(),
                     systemArchetypeTouches: _builder?.SystemArchetypeTouches ?? Array.Empty<Typhon.Profiler.SystemArchetypeTouchSummary>(),
-                    entityLifecycleRuns: _builder?.EntityLifecycleRuns ?? Array.Empty<Typhon.Profiler.EntityLifecycleRun>());
+                    entityLifecycleRuns: _builder?.EntityLifecycleRuns ?? Array.Empty<Typhon.Profiler.EntityLifecycleRun>(),
+                    threads: _builder?.Threads ?? Array.Empty<Typhon.Profiler.ThreadTableEntry>());
             }
             finally
             {
@@ -1424,7 +1425,8 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
             PostTickSummaries: postTicks,
             QueueIdToName: qNames,
             SystemArchetypeTouches: satTouches,
-            EntityLifecycleRuns: lifecycleRuns);
+            EntityLifecycleRuns: lifecycleRuns,
+            Threads: []);
         _metadataSnapshot = snap;
         return snap;
     }

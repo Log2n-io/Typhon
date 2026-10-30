@@ -363,7 +363,8 @@ public class IncrementalCacheBuilderTests
     [Test]
     public void PreTickBuffer_CapsAtConfiguredLimit()
     {
-        // Synthesize enough pre-tick records (ThreadInfo) to overflow PreTickBufferCap with no TickStart at all.
+        // Synthesize enough pre-tick records (GC starts) to overflow PreTickBufferCap with no TickStart at all. Not ThreadInfo: those are exempt
+        // from the cap (ThreadTableCacheTests).
         const int recordSize = CommonHeaderSize;
         var bigRecordCount = (IncrementalCacheBuilder.PreTickBufferCap / recordSize) + 5_000;
         var buffer = new byte[bigRecordCount * recordSize];
@@ -371,7 +372,7 @@ public class IncrementalCacheBuilderTests
         {
             var offset = i * recordSize;
             BinaryPrimitives.WriteUInt16LittleEndian(buffer.AsSpan(offset, 2), (ushort)recordSize);
-            buffer[offset + 2] = (byte)TraceEventKind.ThreadInfo;
+            buffer[offset + 2] = (byte)TraceEventKind.GcStart;
             buffer[offset + 3] = 0; // threadSlot
             BinaryPrimitives.WriteInt64LittleEndian(buffer.AsSpan(offset + 4, 8), 100 + i);
         }
@@ -407,7 +408,7 @@ public class IncrementalCacheBuilderTests
             IReadOnlyList<ChunkManifestEntry> cm, IReadOnlyDictionary<int, string> sn, ReadOnlySpan<byte> sourceMetadataBytes, in CacheHeader h,
             IReadOnlyList<SystemTickSummary> sts, IReadOnlyList<QueueTickSummary> qts, IReadOnlyList<PostTickSummary> pts,
             IReadOnlyDictionary<ushort, string> qIdToName, IReadOnlyList<SystemArchetypeTouchSummary> sat,
-            IReadOnlyList<EntityLifecycleRun> elr)
+            IReadOnlyList<EntityLifecycleRun> elr, IReadOnlyList<ThreadTableEntry> threads)
             => throw new NotSupportedException("MemorySink does not support trailer.");
         public void Dispose() { }
     }

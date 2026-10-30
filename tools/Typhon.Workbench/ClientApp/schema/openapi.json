@@ -11282,7 +11282,8 @@
           "queueIdToName",
           "systemArchetypeTouches",
           "entityLifecycleRuns",
-          "tracks"
+          "tracks",
+          "threads"
         ],
         "type": "object",
         "properties": {
@@ -11431,6 +11432,15 @@
             ],
             "items": {
               "$ref": "#/components/schemas/TrackDto"
+            }
+          },
+          "threads": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ThreadDto"
             }
           }
         }
@@ -38034,6 +38044,42 @@
             }
           }
         }
+      },
+      "ThreadDto": {
+        "required": [
+          "slot",
+          "name",
+          "kind"
+        ],
+        "type": "object",
+        "properties": {
+          "slot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "The thread slot, as the lanes number it.",
+            "format": "int32"
+          },
+          "name": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "The thread's name."
+          },
+          "kind": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Its `ThreadKind`: 0 main, 1 worker, 2 pool, 3 other.",
+            "format": "int32"
+          }
+        },
+        "description": "A named thread slot of a capture."
       },
       "TrackFieldDescriptorDto": {
         "required": [

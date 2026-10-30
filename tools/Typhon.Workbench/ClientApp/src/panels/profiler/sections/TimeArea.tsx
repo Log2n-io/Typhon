@@ -1,5 +1,11 @@
-import { markersFor } from '@/libs/profiler/correlation/requests';
-import { EMPTY_ROOT_LANES, packRootLanes } from '@/libs/profiler/correlation/rootLanes';
+import { indexSpansByCausal, markersFor } from '@/libs/profiler/correlation/requests';
+import {
+  EMPTY_ROOT_LANES, isRootLaneId, packRootLanes, ROOT_COMMANDS_TRACK_ID, ROOT_HTTP_TRACK_ID, rootRowCap,
+} from '@/libs/profiler/correlation/rootLanes';
+import { filterRequests } from '@/libs/profiler/correlation/requests';
+import {
+  describeFlowSegment, describeStepMark, hitFlowSegment, hitStepMark, type FlowSegment, type NavTarget,
+} from '@/libs/profiler/correlation/causalFlow';
 import { useProfilerRequestsStore } from '@/stores/useProfilerRequestsStore';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { ChunkSpan, SpanData, TickData } from '@/libs/profiler/model/traceModel';
@@ -7,7 +13,7 @@ import { resolveOwningSystem } from '@/libs/profiler/model/owningSystem';
 import type { TimeRange, TrackLayout, TrackState, Viewport } from '@/libs/profiler/model/uiTypes';
 import { computeGutterWidth, drawTimeArea } from '@/libs/profiler/canvas/timeArea';
 import { hitTestTimeArea, type TimeAreaHover } from '@/libs/profiler/canvas/timeAreaHitTest';
-import { buildLayout, deriveActiveSystems, deriveSlotInfo, deriveVisibleChunkSlots, deriveVisibleSpanMaxDepthBySlot, getVisibleTicks, RULER_HEIGHT, TRACK_GAP } from '@/libs/profiler/canvas/timeAreaLayout';
+import { buildLayout, deriveActiveSystems, deriveSlotInfo, deriveVisibleChunkSlots, deriveVisibleSpanMaxDepthBySlot, getVisibleTicks, RULER_HEIGHT, SPAN_ROW_HEIGHT, TRACK_GAP } from '@/libs/profiler/canvas/timeAreaLayout';
 import { GAUGE_TRACK_ID_SET, getGaugeGroupSpec } from '@/libs/profiler/canvas/gauges/region';
 import { buildGaugeTooltipLines, type GaugeData } from '@/libs/profiler/canvas/gauges/renderers';
 import { getStudioThemeTokens } from '@/libs/profiler/canvas/theme';
@@ -19,7 +25,7 @@ import { TimeAreaHelpButton } from '@/panels/profiler/sections/TimeAreaHelpButto
 import { TimeAreaContextMenu } from '@/panels/profiler/sections/TimeAreaContextMenu';
 import { getTrackHelpLines } from '@/libs/profiler/canvas/trackHelpLines';
 import { buildHoverTooltipLines } from '@/libs/profiler/canvas/hoverTooltipLines';
-import { openViewCallTree, registerAnimateViewport } from '@/shell/commands/profilerCommands';
+import { openViewCallTree, registerAnimateViewport, registerTimeAreaScroll } from '@/shell/commands/profilerCommands';
 import { openSourcePreview } from '@/shell/commands/openSchemaBrowser';
 import { resolveFrameRootForSite } from '@/libs/profiler/resolveFrameRoot';
 import { spanKindScope, systemScope, useCallTreeScopeStore } from '@/stores/useCallTreeScopeStore';
@@ -74,6 +80,9 @@ interface Props {
 const DRAG_THRESHOLD_PX = 3;
 const ZOOM_ANIMATION_MS = 800;
 const LERP_FACTOR = 0.15;   // fraction of remaining distance to close per rAF frame (~60 fps)
+
+/** Space kept between a target brought into view and the edge it was scrolled to. */
+const NAV_MARGIN_PX = 8;
 
 /** How long a root lane's smaller height must hold before the lane shrinks to it. */
 const ROOT_LANE_SHRINK_DELAY_MS = 300;
@@ -151,6 +160,10 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
   const [gutterWidth, setGutterWidth] = useState<number>(80);
   const crosshairXRef = useRef<number>(-1);
   const hoverRef = useRef<TimeAreaHover>(null);
+  // The request flow's arrows as last drawn (#1517), and the one under the pointer: hovering explains it, clicking goes to its target.
+  const flowSegmentsRef = useRef<FlowSegment[]>([]);
+  const hoveredFlowRef = useRef(-1);
+  const hoveredStepUsRef = useRef<number | null>(null);
   const dragRef = useRef<
     | { mode: 'select'; startX: number; currentX: number; moved: boolean }
     | { mode: 'pan'; startClientX: number; startClientY: number; startOffsetX: number; startScrollY: number; moved: boolean }
@@ -249,12 +262,25 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
   const causalKey = hoverCausalKey ?? selectedCausalKey;
   // The root lanes (#1517): every loaded request and command, packed once per tick set. Read through a ref by the pointer handlers.
   const allRequestRows = useProfilerRequestsStore((s) => s.allRows);
+  // Its spans and its root, wherever they are: the flow routes to the ones outside the view too, clipped at the canvas edge.
+  const causalSpanIndex = useMemo(() => indexSpansByCausal(ticks), [ticks]);
   const causal = useMemo(() => {
     if (causalKey === null) return null;
     const [hi, lo] = causalKey.split(':');
-    return { key: causalKey, hi, lo, markers: markersFor(allRequestRows, causalKey) };
-  }, [causalKey, allRequestRows]);
-  const rootLanes = useMemo(() => (allRequestRows.length === 0 ? EMPTY_ROOT_LANES : packRootLanes(allRequestRows)), [allRequestRows]);
+    return {
+      key: causalKey, hi, lo, markers: markersFor(allRequestRows, causalKey),
+      spans: causalSpanIndex.get(causalKey) ?? [], root: allRequestRows.find((r) => r.key === causalKey),
+    };
+  }, [causalKey, allRequestRows, causalSpanIndex]);
+  // The Requests panel's filter narrows what the lanes pack; each lane's row cap follows its display mode (extended packs more rows).
+  const requestFilter = useProfilerRequestsStore((s) => s.filter);
+  const laneRequestRows = useMemo(() => filterRequests(allRequestRows, requestFilter), [allRequestRows, requestFilter]);
+  const httpRowCap = rootRowCap(collapseState[ROOT_HTTP_TRACK_ID]);
+  const commandRowCap = rootRowCap(collapseState[ROOT_COMMANDS_TRACK_ID]);
+  const rootLanes = useMemo(
+    () => (laneRequestRows.length === 0 ? EMPTY_ROOT_LANES : packRootLanes(laneRequestRows, { http: httpRowCap, commands: commandRowCap })),
+    [laneRequestRows, httpRowCap, commandRowCap],
+  );
   const rootLanesRef = useRef(rootLanes);
   rootLanesRef.current = rootLanes;
   // A lane's height follows the concurrency of the loaded roots, which churns as live ticks stream in and age out: grow at once, shrink only once
@@ -563,6 +589,9 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       showOffCpu,
       causal,
       rootLanes,
+      flowSegmentsOut: flowSegmentsRef.current,
+      hoveredFlowSegment: hoveredFlowRef.current,
+      hoveredStepUs: hoveredStepUsRef.current,
     }, getStudioThemeTokens());
   }, [layout, ticks, viewRange, legendsVisible, selection, applyViewRange, commitViewRange, onGutterWidthChange, gaugeData, pendingRangesUs, spanColorMode, spanPalette, showOffCpu,
     causal, rootLanes]);
@@ -664,6 +693,103 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
     return () => registerAnimateViewport(null);
   }, [animateToRange]);
 
+  // ─── Bring into view (#1517) ─────────────────────────────────────────────────────────────────
+  // Scrolls vertically until the target's row is clear of the sticky ruler band and the bottom edge, and pans the timeline only when the target is
+  // not already entirely visible: at the same zoom when it fits, zoomed out to it when it is wider than the view.
+  const bringIntoView = useCallback((target: NavTarget): { viewRange: TimeRange; scrollY: number } => {
+    const canvas = canvasRef.current;
+    const track = layoutRef.current.tracks.find((t) => t.id === target.trackId);
+    if (canvas && track) {
+      const vp = vpRef.current;
+      const containerH = canvas.getBoundingClientRect().height;
+      const offset = track.state === 'summary' ? 0 : target.rowOffset;
+      const rowTop = track.y + offset;
+      const rowBottom = rowTop + target.rowHeight;
+      const bandBottom = RULER_HEIGHT + TRACK_GAP;
+      let scrollY = vp.scrollY;
+      if (rowTop - scrollY < bandBottom) scrollY = rowTop - bandBottom - NAV_MARGIN_PX;
+      else if (rowBottom - scrollY > containerH) scrollY = rowBottom - containerH + NAV_MARGIN_PX;
+      const clamped = Math.max(0, Math.min(Math.max(0, layoutRef.current.totalHeight - containerH), scrollY));
+      if (Math.abs(clamped - vp.scrollY) > 0.5) {
+        vp.scrollY = clamped;
+        const overlay = scrollOverlayRef.current;
+        if (overlay) overlay.scrollTop = clamped;
+      }
+    }
+
+    const width = viewRange.endUs - viewRange.startUs;
+    const span = target.endUs - target.startUs;
+    let landed: TimeRange = viewRange;
+    if (target.startUs < viewRange.startUs || target.endUs > viewRange.endUs) {
+      if (span <= width * 0.9) {
+        const center = (target.startUs + target.endUs) / 2;
+        landed = { startUs: center - width / 2, endUs: center + width / 2 };
+      } else {
+        const pad = span * 0.05;
+        landed = { startUs: target.startUs - pad, endUs: target.endUs + pad };
+      }
+      animateToRange(landed);
+    }
+    scheduleRender();
+    return { viewRange: landed, scrollY: vpRef.current.scrollY };
+  }, [viewRange, animateToRange, scheduleRender]);
+
+  // Makes the history's top entry describe the view as it is now — selection, time range and vertical scroll — before a jump leaves it.
+  const recordHere = useCallback((): void => {
+    const nav = useNavHistoryStore.getState();
+    const top = nav.pointer >= 0 ? nav.entries[nav.pointer] : null;
+    const here = { startUs: viewRange.startUs, endUs: viewRange.endUs };
+    const selectionNow = (useSelectionStore.getState().leaf?.ref as ProfilerSelection | undefined) ?? null;
+    if (top?.kind === 'profiler-selected' && top.viewRange.startUs === here.startUs && top.viewRange.endUs === here.endUs
+      && top.scrollY === vpRef.current.scrollY && top.selection === selectionNow) {
+      return;
+    }
+    nav.push({ kind: 'profiler-selected', selection: selectionNow, viewRange: here, scrollY: vpRef.current.scrollY, timestamp: Date.now() });
+  }, [viewRange]);
+
+  // History entries that carry a vertical scroll restore it through here.
+  useEffect(() => {
+    registerTimeAreaScroll((scrollY) => {
+      const canvas = canvasRef.current;
+      const containerH = canvas?.getBoundingClientRect().height ?? 0;
+      const clamped = Math.max(0, Math.min(Math.max(0, layoutRef.current.totalHeight - containerH), scrollY));
+      vpRef.current.scrollY = clamped;
+      const overlay = scrollOverlayRef.current;
+      if (overlay) overlay.scrollTop = clamped;
+      scheduleRender();
+    });
+    return () => registerTimeAreaScroll(null);
+  }, [scheduleRender]);
+
+  // A span picked in the Details pane's correlation links: resolved to its lane row from the layout, then brought into view.
+  const navRequest = useProfilerRequestsStore((s) => s.nav);
+  const lastNavSeqRef = useRef(0);
+  useEffect(() => {
+    if (navRequest === null || navRequest.seq === lastNavSeqRef.current) return;
+    lastNavSeqRef.current = navRequest.seq;
+    recordHere();
+    const push = (landed: { viewRange: TimeRange; scrollY: number }): void => {
+      const selectionNow = (useSelectionStore.getState().leaf?.ref as ProfilerSelection | undefined) ?? null;
+      useNavHistoryStore.getState().push({
+        kind: 'profiler-selected', selection: selectionNow, viewRange: landed.viewRange, scrollY: landed.scrollY, timestamp: Date.now(),
+      });
+    };
+    if (navRequest.kind === 'target') {
+      const landed = bringIntoView(navRequest.target);
+      if (navRequest.select !== undefined) useSelectionStore.getState().select('span', navRequest.select);
+      push(landed);
+      return;
+    }
+    const s = navRequest.span;
+    const trackId = `slot-${s.threadSlot}`;
+    const track = layoutRef.current.tracks.find((t) => t.id === trackId);
+    const depth = Math.max(0, s.renderDepth ?? s.depth ?? 0);
+    const rowOffset = s.renderDepth === -1 ? 0 : (track?.chunkRowHeight ?? 0) + depth * SPAN_ROW_HEIGHT;
+    const landed = bringIntoView({ startUs: s.startUs, endUs: s.endUs, trackId, rowOffset, rowHeight: SPAN_ROW_HEIGHT });
+    routeSelection({ kind: 'span', span: s, trackId }, ticks);
+    push(landed);
+  }, [navRequest, bringIntoView, recordHere, ticks]);
+
   // ─── Pointer handlers ────────────────────────────────────────────────────────────────────────
   const getLocal = (e: { clientX: number; clientY: number }): { mx: number; my: number } | null => {
     const canvas = canvasRef.current;
@@ -691,7 +817,11 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
           rootLanes: rootLanesRef.current,
         });
         if (hit && hit.kind === 'gutter-chevron') {
-          if (GAUGE_TRACK_ID_SET.has(hit.trackId)) {
+          if (isRootLaneId(hit.trackId)) {
+            // Root lanes cycle 3 states too (summary → expanded → extended); the extended one packs more rows.
+            const cur = collapseState[hit.trackId] ?? 'expanded';
+            setSingleCollapseState(hit.trackId, cur === 'summary' ? 'expanded' : cur === 'expanded' ? 'double' : 'summary');
+          } else if (GAUGE_TRACK_ID_SET.has(hit.trackId)) {
             // Gauge tracks cycle 3 states (summary → expanded → double → summary). Persisted
             // via the view store so the state survives reload.
             const cur = gaugeCollapse[hit.trackId] ?? 'expanded';
@@ -791,6 +921,32 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       return;
     }
 
+    // A request flow's arrow (#1517) wins over what lies under it: it is drawn on top, and it is what a click would follow. The request's own
+    // hover key is left alone, so the flow being explained stays drawn.
+    // A lifecycle step's diamond is drawn over the arrows ending on it, so it is tested first.
+    const step = hitStepMark(flowSegmentsRef.current, local.mx, local.my);
+    const flowHit = step !== null ? -1 : hitFlowSegment(flowSegmentsRef.current, local.mx, local.my);
+    if (flowHit >= 0 || hoveredFlowRef.current >= 0 || step !== null || hoveredStepUsRef.current !== null) {
+      hoveredFlowRef.current = flowHit;
+      hoveredStepUsRef.current = step?.us ?? null;
+      if (canvasRef.current) canvasRef.current.style.cursor = flowHit >= 0 || step !== null ? 'pointer' : '';
+    }
+    if (step !== null) {
+      hoverRef.current = null;
+      if (gaugeTooltipState !== null) setGaugeTooltipState(null);
+      const threadName = threadNames?.[Number(step.nav.trackId.replace('slot-', ''))];
+      setHoverTooltipState({ lines: describeStepMark(step, flowSegmentsRef.current, threadName), clientX: e.clientX, clientY: e.clientY });
+      scheduleRender();
+      return;
+    }
+    if (flowHit >= 0) {
+      hoverRef.current = null;
+      if (gaugeTooltipState !== null) setGaugeTooltipState(null);
+      setHoverTooltipState({ lines: describeFlowSegment(flowSegmentsRef.current[flowHit]), clientX: e.clientX, clientY: e.clientY });
+      scheduleRender();
+      return;
+    }
+
     // Hover → hit-test for tooltip + cursor shape feedback (cursor-change deferred to 2f)
     const hover = hitTestTimeArea({
       mx: local.mx, my: local.my,
@@ -839,7 +995,8 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       setHoverTooltipState(null);
     }
     scheduleRender();
-  }, [ticks, scheduleRender, applyViewRange, gaugeTooltipState, legendsVisible, helpTooltipState, hoverTooltipState, gaugeData.offCpuBySlot, showOffCpu]);
+  }, [ticks, scheduleRender, applyViewRange, gaugeTooltipState, legendsVisible, helpTooltipState, hoverTooltipState, gaugeData.offCpuBySlot, showOffCpu,
+    threadNames]);
 
   const onPointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>): void => {
     const drag = dragRef.current;
@@ -862,6 +1019,30 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
         // Click-without-drag → selection
         const local = getLocal(e);
         if (!local) return;
+        if (hitStepMark(flowSegmentsRef.current, local.mx, local.my) !== null) {
+          // A lifecycle step shows its command in the Details pane.
+          const key = useProfilerRequestsStore.getState().hoverKey ?? useProfilerRequestsStore.getState().selectedKey;
+          const row = useProfilerRequestsStore.getState().allRows.find((r) => r.key === key);
+          if (row !== undefined) useSelectionStore.getState().select('span', { kind: 'request', row } satisfies ProfilerSelection);
+          scheduleRender();
+          return;
+        }
+        const flowHit = hitFlowSegment(flowSegmentsRef.current, local.mx, local.my);
+        if (flowHit >= 0) {
+          // An arrow leads to its target: brought into view, and selected when it is a span so the Details pane follows. Both ends go in the
+          // navigation history, scroll included, so Back returns to where the arrow was clicked.
+          const to = flowSegmentsRef.current[flowHit][1];
+          recordHere();
+          const landed = bringIntoView(to.nav);
+          if (to.span !== undefined) routeSelection({ kind: 'span', span: to.span, trackId: to.nav.trackId }, ticks);
+          const nav = useNavHistoryStore.getState();
+          const selectionNow = useSelectionStore.getState().leaf?.ref as ProfilerSelection | undefined;
+          nav.push({
+            kind: 'profiler-selected', selection: selectionNow ?? null, viewRange: landed.viewRange, scrollY: landed.scrollY, timestamp: Date.now(),
+          });
+          scheduleRender();
+          return;
+        }
         const hit = hitTestTimeArea({
           mx: local.mx, my: local.my,
           tracks: layoutRef.current.tracks, ticks, vp: vpRef.current,
@@ -872,7 +1053,8 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
           rootLanes: rootLanesRef.current,
         });
         if (hit && hit.kind === 'root') {
-          // A root pins its trace (or unpins it on a second click), the same toggle as a Requests panel row.
+          // A root shows in the Details pane, and pins its trace (or unpins it on a second click), the same toggle as a Requests panel row.
+          useSelectionStore.getState().select('span', { kind: 'request', row: hit.root } satisfies ProfilerSelection);
           const requests = useProfilerRequestsStore.getState();
           requests.select(requests.selectedKey === hit.root.key ? null : hit.root.key);
           // Drop the hover preview too, so an unpin shows at once rather than when the pointer leaves the bar.
@@ -883,10 +1065,12 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       }
     }
     scheduleRender();
-  }, [ticks, animateToRange, scheduleRender, legendsVisible, gaugeData.offCpuBySlot, showOffCpu]);
+  }, [ticks, animateToRange, scheduleRender, legendsVisible, gaugeData.offCpuBySlot, showOffCpu, bringIntoView, recordHere]);
 
   const onPointerLeave = useCallback((): void => {
     useProfilerRequestsStore.getState().hover(null);
+    hoveredFlowRef.current = -1;
+    hoveredStepUsRef.current = null;
     if (dragRef.current) return; // captured drag continues
     crosshairXRef.current = -1;
     hoverRef.current = null;

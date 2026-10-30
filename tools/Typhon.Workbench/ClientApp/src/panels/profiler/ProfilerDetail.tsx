@@ -1,6 +1,6 @@
-import { causalKeyOf, isCommandCausalKey } from '@/libs/profiler/correlation/requests';
-import { useProfilerRequestsStore } from '@/stores/useProfilerRequestsStore';
-import { useMemo, useState } from 'react';
+import { causalKeyOf } from '@/libs/profiler/correlation/requests';
+import { CorrelationLinks, RequestDetail } from '@/panels/profiler/CorrelationLinks';
+import { useState } from 'react';
 import { Activity, Blocks, Clock, Crosshair, ExternalLink, FileCode, Layers, Search, Tag } from 'lucide-react';
 import type { ChunkSpan, MarkerSelection, PhaseMarker, PhaseSpan, ProfilerSelection, SpanData } from '@/libs/profiler/model/traceModel';
 import { TraceEventKind } from '@/libs/profiler/model/types';
@@ -53,6 +53,7 @@ export default function ProfilerDetail({ selection }: Props): React.JSX.Element 
     case 'marker':       return <MarkerDetail marker={selection.marker} />;
     case 'phase':        return <PhaseDetail phase={selection.phase} tickNumber={selection.tickNumber} />;
     case 'phase-marker': return <PhaseMarkerDetail marker={selection.marker} tickNumber={selection.tickNumber} />;
+    case 'request':      return <RequestDetail row={selection.row} />;
   }
 }
 
@@ -90,14 +91,8 @@ function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
   const canScopeCallTree = useTraceBackedSession();
   const isProfilerSession = useSessionCapability('profiler');
   const [openError, setOpenError] = useState<string | null>(null);
-  // The root this span served (#1517): the request or command whose causal id it carries, when that root is in the loaded ticks.
+  // The root this span served (#1517): its own card below, with the root's cost and links to every span it caused.
   const causalKey = causalKeyOf(span);
-  const allRequestRows = useProfilerRequestsStore((s) => s.allRows);
-  const causeRow = useMemo(
-    () => (causalKey === null ? undefined : allRequestRows.find((r) => r.key === causalKey)),
-    [allRequestRows, causalKey],
-  );
-  const selectCause = useProfilerRequestsStore((s) => s.select);
   const loc = resolve(span.rawEvent?.sourceLocationId);
 
   // Look up the per-tick QueryPlan execution(s) parented under this span. Returns empty for non-system
@@ -215,23 +210,6 @@ function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
             <>
               <dt className="text-muted-foreground">Trace id</dt>
               <dd className="min-w-0 truncate font-mono text-foreground">{span.traceIdHi}.{span.traceIdLo}</dd>
-            </>
-          )}
-
-          {causalKey !== null && (
-            <>
-              <dt className="text-muted-foreground">Caused by</dt>
-              <dd className="min-w-0 truncate font-mono text-foreground">
-                <button
-                  type="button"
-                  data-testid="span-caused-by"
-                  className="truncate underline decoration-dotted hover:text-primary"
-                  onClick={() => selectCause(causalKey)}
-                  title="Highlight every span this request caused"
-                >
-                  {causeRow?.label ?? (isCommandCausalKey(causalKey) ? 'a client command' : 'an external request')}
-                </button>
-              </dd>
             </>
           )}
 
@@ -581,6 +559,7 @@ function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
           </div>
         )}
       </div>
+      {causalKey !== null && <CorrelationLinks span={span} causalKey={causalKey} />}
     </div>
   );
 }

@@ -6,6 +6,7 @@ import {
   ensureRangeLoaded,
   setCacheBudget,
   type ChunkCacheState,
+  seedThreadNames,
   viewRangeToTickRange,
 } from '@/libs/profiler/cache/chunkCache';
 import {
@@ -275,6 +276,7 @@ function createEntry(sessionId: string, isLive: boolean): SessionCacheEntry {
     unsubscribeSession: () => {},
     unsubscribeView: () => {},
   };
+  seedThreadNames(entry.cache, metadataDto?.threads);
 
   // Subscribe to the session store: metadata growth (tickSummaries, chunkManifest, globalMetrics) +
   // liveThreadInfos. Recomputes derived state + triggers loads as needed.
@@ -302,6 +304,7 @@ function createEntry(sessionId: string, isLive: boolean): SessionCacheEntry {
         entry.inFlightController?.abort();
         entry.inFlightController = null;
       }
+      seedThreadNames(entry.cache, state.metadata?.threads);
       // Recompute the derived shapes (cheap; small per-tick struct conversions).
       entry.traceMetadata = state.metadata !== null ? convertProfilerMetadata(state.metadata) : null;
       entry.manifest = state.metadata !== null ? convertChunkManifest(state.metadata.chunkManifest) : [];

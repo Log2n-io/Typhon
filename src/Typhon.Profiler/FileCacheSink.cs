@@ -66,7 +66,8 @@ public sealed class FileCacheSink : ICacheChunkSink
         IReadOnlyList<PostTickSummary> postTickSummaries,
         IReadOnlyDictionary<ushort, string> queueIdToName,
         IReadOnlyList<SystemArchetypeTouchSummary> systemArchetypeTouches,
-        IReadOnlyList<EntityLifecycleRun> entityLifecycleRuns)
+        IReadOnlyList<EntityLifecycleRun> entityLifecycleRuns,
+        IReadOnlyList<ThreadTableEntry> threads)
     {
         if (_trailerWritten)
         {
@@ -123,6 +124,10 @@ public sealed class FileCacheSink : ICacheChunkSink
         // to tell "this capture recorded no spawns" from "this cache is too old to know".
         _writer.BeginSection(CacheSectionId.EntityLifecycle);
         _writer.WriteArray(ToArray(entityLifecycleRuns));
+
+        // v19 — always emit, even if empty, so a reader can tell "no named threads" from "a cache too old to carry the table".
+        _writer.BeginSection(CacheSectionId.ThreadTable);
+        _writer.WriteThreadTable(threads);
 
         _writer.Finalize(headerTemplate);
         _trailerWritten = true;

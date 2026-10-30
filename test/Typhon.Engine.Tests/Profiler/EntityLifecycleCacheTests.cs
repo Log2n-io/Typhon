@@ -150,7 +150,8 @@ internal sealed class EntityLifecycleCacheTests
                     postTickSummaries: Array.Empty<PostTickSummary>(),
                     queueIdToName: new Dictionary<ushort, string>(),
                     systemArchetypeTouches: Array.Empty<SystemArchetypeTouchSummary>(),
-                    entityLifecycleRuns: runs);
+                    entityLifecycleRuns: runs,
+                    threads: System.Array.Empty<ThreadTableEntry>());
             }
 
             using var reader = new TraceFileCacheReader(File.OpenRead(path));

@@ -49,6 +49,7 @@ export interface StudioTheme {
   // becomes a token here so the port stays theme-clean).
   summaryStripBg: string;        // collapsed non-slot track strip fill
   selectedOutline: string;       // selected chunk/span outline stroke
+  causalFlow: string;            // a request's flow arrows (#1517): softer than the selection outline it joins
   textOnLightBar: string;        // near-black — pair with light bars via per-bar luminance pick
   textOnDarkBar: string;         // near-white — pair with dark bars via per-bar luminance pick
   coalescedText: string;         // "N spans — zoom in" label on striped block
@@ -113,6 +114,7 @@ interface AdaptiveTheme {
   tooltipText: string;
   summaryStripBg: string;
   selectedOutline: string;
+  causalFlow: string;
   textOnLightBar: string;
   textOnDarkBar: string;
   coalescedText: string;
@@ -141,6 +143,7 @@ const ADAPTIVE_DARK: AdaptiveTheme = {
   // Time-area chrome — dark values preserve the old GraphArea look.
   summaryStripBg: '#222',
   selectedOutline: '#ffffff',
+  causalFlow: '#71717a',        // zinc-500
   // Text on coloured bars — literal values from the old `GraphArea.tsx` (chunks: #000, spans: #eee).
   // Going any brighter than #eee looked "too clean" in side-by-side.
   textOnLightBar: '#000',
@@ -176,6 +179,7 @@ const ADAPTIVE_LIGHT: AdaptiveTheme = {
   // neutrals (Tailwind slate scale) for foreground text; translucent greys for overlays.
   summaryStripBg: '#e5e7eb',
   selectedOutline: '#111827',
+  causalFlow: '#a1a1aa',        // zinc-400: a light grey that reads over the light card without shouting
   // Match the dark-theme tones — a slightly darker `#1a1a1a` reads the same as `#000` against
   // light mode's card while taking slightly less retinal punch; keep `#eee` so the contrast
   // table across both themes stays symmetric.
@@ -245,6 +249,7 @@ function buildTheme(isDark: boolean, cs: CSSStyleDeclaration | null): StudioThem
     // Time-area chrome (Phase 2b)
     summaryStripBg: adaptive.summaryStripBg,
     selectedOutline: adaptive.selectedOutline,
+    causalFlow: adaptive.causalFlow,
     textOnLightBar: adaptive.textOnLightBar,
     textOnDarkBar: adaptive.textOnDarkBar,
     coalescedText: adaptive.coalescedText,

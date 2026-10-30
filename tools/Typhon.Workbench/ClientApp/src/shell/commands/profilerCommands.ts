@@ -354,12 +354,32 @@ export function toggleViewTopSpans(): void {
   else panel?.focus();
 }
 
-/** Toggle the Requests panel (#1517) inside the bottom edge group, the way Top Spans toggles. */
+/**
+ * Toggle the Requests panel (#1517) inside the bottom edge group, the way Top Spans toggles. A layout without it (a database session that
+ * opened a profile, a layout saved before the panel existed) gets it docked beside Logs / Top Spans, as Critical Path is.
+ */
 export function toggleViewRequests(): void {
   const api = registeredApi;
   if (!api) return;
+  if (!api.getPanel('requests')) {
+    const bottomAnchor = api.getPanel('logs') ?? api.getPanel('top-spans');
+    api.addPanel(
+      bottomAnchor
+        ? { id: 'requests', component: 'Requests', title: 'Requests', position: { referencePanel: bottomAnchor.id, direction: 'within' } }
+        : { id: 'requests', component: 'Requests', title: 'Requests' },
+    );
+    const eg = api.getEdgeGroup('bottom');
+    if (eg?.isCollapsed()) eg.expand();
+    api.getPanel('requests')?.focus();
+    return;
+  }
   const eg = api.getEdgeGroup('bottom');
-  if (!eg) return;
+  if (!eg) {
+    const panel = api.getPanel('requests');
+    if (panel?.api.isActive) api.removePanel(panel);
+    else panel?.focus();
+    return;
+  }
   if (eg.isCollapsed()) {
     eg.expand();
     api.getPanel('requests')?.focus();
@@ -407,6 +427,17 @@ export function registerAnimateViewport(fn: ((target: TimeRange) => void) | null
 export function animateViewportToRange(target: TimeRange): void {
   if (registeredAnimate) registeredAnimate(target);
   else useProfilerViewStore.getState().commitViewRange(target);
+}
+
+/** The time area's vertical-scroll setter, for history entries that carry one (#1517). Same single-slot registration as the animator. */
+let registeredScroll: ((scrollY: number) => void) | null = null;
+
+export function registerTimeAreaScroll(fn: ((scrollY: number) => void) | null): void {
+  registeredScroll = fn;
+}
+
+export function restoreTimeAreaScroll(scrollY: number): void {
+  registeredScroll?.(scrollY);
 }
 
 /**
