@@ -43,7 +43,6 @@ internal static class ProfilerBootstrap
 {
     private static readonly Lock Gate = new();
     private static bool Started;
-    private static List<IProfilerExporter> Exporters;
 
     /// <summary>One-shot latch for the inert-profiler warning (#792). Written only under <see cref="Gate"/>, so a plain field is correct.</summary>
     private static bool WarnedInert;
@@ -93,6 +92,7 @@ internal static class ProfilerBootstrap
                 return;
             }
 
+            List<IProfilerExporter> exporters = null;
             try
             {
                 // File/env config overlaid with the process command line — resolved once by TelemetryConfig.
@@ -125,8 +125,8 @@ internal static class ProfilerBootstrap
                 }
 
                 var parent = runtime.Engine.Owner.Profiler;
-                Exporters = ProfilerLauncher.CreateExporters(config, parent);
-                foreach (var exporter in Exporters)
+                exporters = ProfilerLauncher.CreateExporters(config, parent);
+                foreach (var exporter in exporters)
                 {
                     TyphonProfiler.AttachExporter(exporter);
                 }
@@ -150,7 +150,15 @@ internal static class ProfilerBootstrap
             {
                 // Never crash the host over profiling — continue without it.
                 Console.Error.WriteLine($"[Typhon] Profiler startup FAILED — {ex.GetType().Name}: {ex.Message}. Continuing without profiling.");
-                Exporters = null;
+                // An exporter belongs to one session: left attached, the next Start would initialize it. Past Start the session owns them.
+                if (!Started)
+                {
+                    foreach (var exporter in exporters ?? [])
+                    {
+                        TyphonProfiler.DetachExporter(exporter);
+                    }
+                }
+
                 Started = false;
             }
         }
@@ -271,7 +279,7 @@ internal static class ProfilerBootstrap
     }
 
     /// <summary>
-    /// Finish profiler teardown: await the CPU-sampler parse and hand the samples to the file exporter, stop the profiler, then detach every exporter.
+    /// Finish profiler teardown: await the CPU-sampler parse and hand the samples to the file exporter, stop the profiler, which ends every exporter.
     /// This finalizes the trace file (<c>FileExporter.Dispose</c> patches the header's section-index offsets), so it MUST run: it is invoked from the engine
     /// storage's <c>DisposingEvent</c> (subscribed in <see cref="TryStart"/>), and is also wired into <see cref="TyphonProfiler"/>'s process-exit /
     /// unhandled-exception safety net (via the <c>processExitTeardown</c> argument of <c>TyphonProfiler.Start</c>) as a backup. Best-effort, idempotent.
@@ -289,14 +297,6 @@ internal static class ProfilerBootstrap
             try { ProfilerLauncher.StopCpuSampler(); } catch { /* best-effort teardown */ }
             try { TyphonProfiler.Stop(); } catch { /* best-effort teardown */ }
 
-            if (Exporters != null)
-            {
-                foreach (var exporter in Exporters)
-                {
-                    try { TyphonProfiler.DetachExporter(exporter); } catch { /* best-effort teardown */ }
-                }
-                Exporters = null;
-            }
         }
     }
 }

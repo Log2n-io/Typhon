@@ -2300,6 +2300,34 @@ public unsafe partial class Transaction
         }
     }
 
+    /// <summary>
+    /// Gives back a revision a first write built and never appended (CHAIN-02): the references of its first <paramref name="fieldsDone"/> collection fields and
+    /// its chunk, which no element ever named. On a path already failing, so a failure here is logged and left: it leaks a reference or a chunk, the safe
+    /// direction, and must not replace the exception in flight.
+    /// </summary>
+    private void AbandonPreparedRevision(ComponentInfo info, ComponentTable table, int chunkId, int fieldsDone)
+    {
+        var restartDepth = PagedMMF.RestartableOpenDepth;
+        PagedMMF.RestartableOpenDepth = 0;
+        try
+        {
+            if (fieldsDone > 0)
+            {
+                DeferredCleanupManager.ReleaseCollectionBuffers(table, info.CompContentAccessor.GetChunkAsReadOnlySpan(chunkId), fieldsDone);
+            }
+
+            info.CompContentSegment.FreeChunkUnheld(chunkId);
+        }
+        catch (Exception ex)
+        {
+            _dbe.LogPreparedRevisionLeaked(ex, table.Definition.Name, chunkId);
+        }
+        finally
+        {
+            PagedMMF.RestartableOpenDepth = restartDepth;
+        }
+    }
+
     /// <summary>Leaves a first write's restart scope once it has claimed its revision: past that point it waits as before.</summary>
     private static void EndRestartScope(ref bool restartScope)
     {
@@ -2329,6 +2357,8 @@ public unsafe partial class Transaction
         // CHAIN-02: an entry this call inserted is removed on any throw until it claims a revision — the resolve below can time out on the chain's lock,
         // the append can fail. Left behind, it was a default entry naming chain 0, which a retried write appended to.
         var claimed = false;
+        var prepared = 0;
+        var fieldsDone = 0;
         try
         {
             if (!cached)
@@ -2365,7 +2395,51 @@ public unsafe partial class Transaction
             {
                 int oldChunkId = cri.CurCompContentChunkId;
 
-                // AddCompRev: allocates NEW chunk, adds revision entry with IsolationFlag=true. The entry claims a write only once that revision exists
+                // The revision is whole before its element exists (CHAIN-02, #1257): the chunk allocated, the value copied, the collection references
+                // taken, then
+                // the append. Built after it, a throw left an element naming a chunk with no value in it: a retry read those bytes as the entity, and a
+                // rollback
+                // released buffers on the strength of them. Not restartable, as it was past the claim: a restart cannot be thrown inside an allocator, or
+                // between
+                // BufferAddRef's lock and its re-fetch. A restart of the append redoes it, the catch below giving this one back.
+                var restartDepth = PagedMMF.RestartableOpenDepth;
+                PagedMMF.RestartableOpenDepth = 0;
+                try
+                {
+                    prepared = info.CompContentSegment.AllocateChunk(false, info.CompContentAccessor.ChangeSet);
+                    _dbe.FirstWriteBuildProbe?.Invoke(0);
+
+                    // Copy old data to new chunk
+                    byte* oldPtr = info.CompContentAccessor.GetChunkAddress(oldChunkId);
+                    byte* newPtr = info.CompContentAccessor.GetChunkAddress(prepared, true);
+                    Unsafe.CopyBlock(newPtr, oldPtr, (uint)table.ComponentTotalSize);
+
+                    // If the component has collections, increment RefCounters for shared collection buffers.
+                    // The byte copy above duplicated the _bufferId fields — both old and new revisions now
+                    // reference the same collection storage, so RefCounter must reflect that.
+                    if (table.HasCollections)
+                    {
+                        foreach (var f in table.CollectionFields)
+                        {
+                            int bufferId = *(int*)(newPtr + table.ComponentOverhead + f.OffsetInComponentStorage);
+                            if (bufferId != 0)
+                            {
+                                var accessor = f.Vsbs.Segment.CreateChunkAccessor(_changeSet);
+                                f.Vsbs.BufferAddRef(bufferId, ref accessor);
+                                accessor.Dispose();
+                            }
+
+                            fieldsDone++;
+                            _dbe.FirstWriteBuildProbe?.Invoke(fieldsDone);
+                        }
+                    }
+                }
+                finally
+                {
+                    PagedMMF.RestartableOpenDepth = restartDepth;
+                }
+
+                // AddCompRev: adds revision entry with IsolationFlag=true, naming the built chunk. The entry claims a write only once that revision exists
                 // (CHAIN-02, #1252): marked Updated before, a throw here — the chain-lock timeout, an allocation failure — left it naming the committed
                 // revision as this transaction's own, and a retried write in the same transaction was handed the committed chunk to write into, in place.
                 if (_dbe.FirstWriteClaimsBeforeAppendForTest)
@@ -2375,36 +2449,20 @@ public unsafe partial class Transaction
                     EndRestartScope(ref restartScope);   // claimed: no longer restartable (#1382)
                 }
 
-                ComponentRevisionManager.AddCompRev(info, ref cri, TSN, UowId, false);
+                ComponentRevisionManager.AddCompRev(info, ref cri, TSN, UowId, false, preparedChunkId: prepared);
+                prepared = 0;   // an element names it
                 cri.Operations |= ComponentInfo.OperationType.Updated;
                 claimed = true;
                 EndRestartScope(ref restartScope);   // claimed: no longer restartable (#1382)
-
-                // Copy old data to new chunk
-                byte* oldPtr = info.CompContentAccessor.GetChunkAddress(oldChunkId);
-                byte* newPtr = info.CompContentAccessor.GetChunkAddress(cri.CurCompContentChunkId, true);
-                Unsafe.CopyBlock(newPtr, oldPtr, (uint)table.ComponentTotalSize);
-
-                // If the component has collections, increment RefCounters for shared collection buffers.
-                // The byte copy above duplicated the _bufferId fields — both old and new revisions now
-                // reference the same collection storage, so RefCounter must reflect that.
-                if (table.HasCollections)
-                {
-                    foreach (var f in table.CollectionFields)
-                    {
-                        int bufferId = *(int*)(newPtr + table.ComponentOverhead + f.OffsetInComponentStorage);
-                        if (bufferId != 0)
-                        {
-                            var accessor = f.Vsbs.Segment.CreateChunkAccessor(_changeSet);
-                            f.Vsbs.BufferAddRef(bufferId, ref accessor);
-                            accessor.Dispose();
-                        }
-                    }
-                }
             }
         }
         catch
         {
+            if (prepared != 0)
+            {
+                AbandonPreparedRevision(info, table, prepared, fieldsDone);
+            }
+
             if (!cached && !claimed)
             {
                 info.SingleCache.Remove(pk);

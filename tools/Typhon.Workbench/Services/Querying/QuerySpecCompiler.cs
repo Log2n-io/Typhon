@@ -75,7 +75,7 @@ public static class QuerySpecCompiler
             throw new WorkbenchException(400, "invalid_query_syntax",
                 "FROM <archetype> is required.");
         }
-        var archetypeType = ResolveArchetypeType(spec.Archetype);
+        var archetypeType = ResolveArchetypeType(engine, spec.Archetype);
 
         // ───── 2. Construct EcsQuery<TArchetype> via tx.Query<T>() / tx.QueryExact<T>() ──────────────────────────
         // The factories take 3 optional [CallerFilePath/LineNumber/MemberName] parameters; we pass nulls (the engine
@@ -90,7 +90,7 @@ public static class QuerySpecCompiler
         ApplyComponentList(ecsQuery, ecsQueryType, "With", spec.With, engine, allowMissingComponent: false);
         ApplyComponentList(ecsQuery, ecsQueryType, "Without", spec.Without, engine, allowMissingComponent: false);
         // Exclude takes an archetype type (different generic constraint), not a component.
-        ApplyArchetypeList(ecsQuery, ecsQueryType, "Exclude", spec.Exclude);
+        ApplyArchetypeList(ecsQuery, ecsQueryType, "Exclude", spec.Exclude, engine);
         ApplyComponentList(ecsQuery, ecsQueryType, "Enabled", spec.Enabled, engine, allowMissingComponent: false);
         ApplyComponentList(ecsQuery, ecsQueryType, "Disabled", spec.Disabled, engine, allowMissingComponent: false);
 
@@ -178,7 +178,7 @@ public static class QuerySpecCompiler
         }
 
         // ───── 6. Snapshot the polymorphic subtree for the cost-chip's archetype-count badge ────────────────────
-        var scannedArchetypes = SnapshotScannedArchetypes(archetypeType, spec);
+        var scannedArchetypes = SnapshotScannedArchetypes(engine, archetypeType, spec);
 
         return new CompiledQuery(
             ecsQuery,
@@ -194,7 +194,7 @@ public static class QuerySpecCompiler
     // Type resolution
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-    private static Type ResolveArchetypeType(string typeName)
+    private static Type ResolveArchetypeType(DatabaseEngine engine, string typeName)
     {
         // Three resolution paths:
         //   "#<digits>" — numeric ArchetypeId (the canonical form chip-mode uses; matches /schema/archetypes display).
@@ -202,7 +202,7 @@ public static class QuerySpecCompiler
         //   "<name>"    — CLR Type.Name or Type.FullName (legacy / when the user knows the C# class name).
         if (TryParseArchetypeId(typeName, out var archetypeId))
         {
-            foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+            foreach (var meta in engine.OwnArchetypes())
             {
                 if (meta.ArchetypeId == archetypeId && meta.ArchetypeType != null)
                 {
@@ -213,7 +213,7 @@ public static class QuerySpecCompiler
                 $"Archetype id #{archetypeId} is not registered. Check against /schema/archetypes.");
         }
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in engine.OwnArchetypes())
         {
             var t = meta.ArchetypeType;
             if (t == null) continue;
@@ -302,12 +302,12 @@ public static class QuerySpecCompiler
         }
     }
 
-    private static void ApplyArchetypeList(object ecsQuery, Type ecsQueryType, string methodName, string[] archetypeNames)
+    private static void ApplyArchetypeList(object ecsQuery, Type ecsQueryType, string methodName, string[] archetypeNames, DatabaseEngine engine)
     {
         if (archetypeNames == null || archetypeNames.Length == 0) return;
         for (var i = 0; i < archetypeNames.Length; i++)
         {
-            var type = ResolveArchetypeType(archetypeNames[i]);
+            var type = ResolveArchetypeType(engine, archetypeNames[i]);
             var generic = FindGenericMethod(ecsQueryType, methodName, paramCount: 0);
             var args = new object[generic.GetParameters().Length];           // all-null defaults
             generic.MakeGenericMethod(type).Invoke(ecsQuery, args);
@@ -620,7 +620,7 @@ public static class QuerySpecCompiler
     // Archetype subtree snapshot (cost-chip support)
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-    private static List<ushort> SnapshotScannedArchetypes(Type rootArchetypeType, QuerySpecDto spec)
+    private static List<ushort> SnapshotScannedArchetypes(DatabaseEngine engine, Type rootArchetypeType, QuerySpecDto spec)
     {
         // Walk ArchetypeRegistry, gather all archetypes whose type derives from rootArchetypeType (polymorphic) OR is
         // exactly rootArchetypeType (exact). Apply EXCLUDE filter. WITH/WITHOUT are too costly to evaluate here (they
@@ -628,7 +628,7 @@ public static class QuerySpecCompiler
         // integration replaces this with the real planner output.
         var exclude = new HashSet<string>(spec.Exclude ?? [], StringComparer.Ordinal);
         var ids = new List<ushort>();
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in engine.OwnArchetypes())
         {
             var t = meta.ArchetypeType;
             if (t == null) continue;

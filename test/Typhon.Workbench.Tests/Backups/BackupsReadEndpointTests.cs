@@ -14,7 +14,6 @@ namespace Typhon.Workbench.Tests.Backups;
 /// the bootstrap token.
 /// </summary>
 [TestFixture]
-[NonParallelizable] // opens real engines (the process-global ArchetypeRegistry, #554)
 public sealed class BackupsReadEndpointTests
 {
     internal static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };

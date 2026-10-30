@@ -46,7 +46,6 @@ namespace Typhon.Workbench.Tests;
 [TestFixture]
 [Explicit("Stability-initiative entry-point repro — bulk-load + reopen at scale; minutes per case")]
 [Category("Manual")]
-[NonParallelizable] // opens engines via EngineLifecycle.OpenAsync — the schema-compat State check reads the process-global ArchetypeRegistry, which must not race with other engine tests (see #554)
 public sealed class BulkLoadReopenIntegrationTest
 {
     private string _tempDir;

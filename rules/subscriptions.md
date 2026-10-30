@@ -1618,6 +1618,20 @@
     Falsifiability: PushIndexTests.AnIndexThatMisfilesSecondariesIsCaught. The cost clause is timed by the explicit
     PushIndexTests.AnEmptyWorldCostsTheSameWhateverTheCellSide, not in the gate; the never clause has no test.
 
+### SUB-39: One session-request segment, one appender, and requests apply in call order `[fatal][silent]`
+  invariant a system reaches a session-request segment only through `ctx.Subscriptions`, its worker slot's view: slot 0 is the off-worker `Commands`, slot
+            w + 1 worker w, so one segment has one appender. The log holds a segment for every slot from the runtime's start, the dispatcher's included
+  invariant requests apply in the order the calls were made, across segments: last writer wins per field by that order. Ordered systems get DAG order, and
+            unordered ones whichever ran first
+  never a caller-supplied index: nothing passed it, so every system shared segment 0, whose append is unsynchronized
+  never apply by worker index: a later system on a lower worker lost to the system it ran after
+  scope: SubscriptionsCommands.Session, SessionRequestLog.Apply, SessionRequestLog.NextSequence, SessionRequestSegment.Add, SubscriptionsRuntime.CommandsFor
+  on_violation: a lost `Profile` on an `Opened` event is a session that connects and sees nothing, for good (#1070); records duplicated, or a throw out of
+                an `Array.Resize` under a tick
+  requires: EQ-01
+  verified: SessionRequestLogTests.RequestsApplyInCallOrderAcrossSegments, SessionRequestLogTests.WorkersRecordingAtOnce_LoseNothing,
+            IngressDrainTests.AWorkersViewRecordsIntoItsOwnSegment [VerifiesRule]
+
 ### SUB-31: A reference field never names, for longer than one tick, a netId whose holder is not the entity it was resolved from `[fatal][silent]`
   invariant a reference field (an EntityId or EntityLink<T> in entityRef, 13 § 5) encodes its target's netId when the target is replicated, alive and
     identified before the tick, and 0 otherwise; a target whose identity is taken during the tick reads 0 that tick, whichever worker projects it first

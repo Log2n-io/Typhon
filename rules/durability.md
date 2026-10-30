@@ -656,8 +656,12 @@ append after it.
         visible to every reader before it commits; a retried destroy skips its tombstone; before CHAIN-01, the rollback
         freed and voided the committed revision
   never leave an inserted entry behind a throw: a default entry names chain 0, and a retried write appends there
+  invariant a first write's revision is whole before it is appended: its chunk allocated, its value copied, its collection references taken. A throw
+            before the append gives the references it took and the chunk back and leaves no element, and only the fields it reached are released
+  never build the revision after the append: a throw left an element naming a chunk holding no value. A retry read those bytes as the entity, and a
+        rollback released every collection buffer they named, freeing a buffer the committed revision still used (#1257, #1270)
   scope: Transaction.EcsVersionedCopyOnWrite, Transaction.MarkComponentDeleted, Transaction.QueryRead,
-         ComponentRevisionManager.AddCompRev
+         ComponentRevisionManager.AddCompRev, Transaction.AbandonPreparedRevision, DeferredCleanupManager.ReleaseCollectionBuffers
   on_violation: an uncommitted write is visible to every snapshot, a rolled-back one stays, a retried destroy does not commit,
                 a retried write lands in another chain (#1252)
   verified: FirstWriteFailureTests — AFailedFirstWrite_ThenARetry_WritesItsOwnRevision (a reader holds the chain shared, so
@@ -666,7 +670,10 @@ append after it.
             exclusive fails the copy-on-write's own walk), AStormOfFailingFirstWrites_LosesNoCommitAndKeepsNoRollback (a 10 µs
             chain-lock timeout and long readers, hundreds of appends retried a run, one transfer in four rolled back, every
             account where the committed transfers put it) [VerifiesRule]; mutant
-            AFirstWriteThatClaimsBeforeAppending_LeaksItsRetry (`FirstWriteClaimsBeforeAppendForTest`) [RuleMutant]. Real
+            AFirstWriteThatClaimsBeforeAppending_LeaksItsRetry (`FirstWriteClaimsBeforeAppendForTest`) [RuleMutant].
+            AFirstWriteFailingBeforeItsCopy_LeavesNoRevision_AndARetryReadsTheCommittedValue,
+            AFirstWriteFailingBetweenItsReferences_ReleasesOnlyWhatItTook and AFirstWriteRestartingOnItsChain_HoldsOneReferencePerBuffer (the first two red on
+            the old order: value 0 for 100, a committed buffer's count 0) [VerifiesRule]. Real
             mutations: the write's mark before the append fails the retry test and the storm; the destroy's mark before its
             tombstone fails the destroy test; the inserted entry kept after a throw fails the resolve test. Not covered by a
             test: QueryRead's guard and `MarkComponentDeleted`'s not-cached guards (the destroy's own pre-resolve inserts the
@@ -791,19 +798,32 @@ CK-08 (flush-only cycles) are later increments.
 
 ### CK-02: Captured ⊆ durable `[fatal]` `[silent]`
   invariant the WAL is flushed through the high-water of records a captured page copy can reflect `[flush through
-            LastPublishedLsn after capture]` strictly precedes `[data-file fsync]`; `CheckpointLSN` advances only to `barrierLsn`
-            (the post-flush `DurableLsn` taken before capture), never beyond
+            LastPublishedLsn after capture]` strictly precedes `[the copy's WRITE to the data file]`, not merely its fsync; `CheckpointLSN` advances only
+            to `barrierLsn` (the post-flush `DurableLsn` taken before capture), never beyond
+  never a page copy written before that flush. A write is as good as on disk to anything but a power cut, and the OS may write it back at any time. A process
+        killed between the two leaves a page in the file whose records died in its ring: half a committed transaction, a spawn present and the update beside it
+        gone, with nothing to undo it (#1516, #1422). The flush was at the fsync until then, which only a power cut could tell apart
+  invariant a direct save (`PagedMMF.SavePages`) flushes the same way before it writes (`PagedMMF.DirectSaveBarrier`); a flush that fails leaves its pages
+            owed for a checkpoint, and it writes nothing after a crash stop. It writes live pages, so what a commit publishes during its writes is not covered
+  invariant a page has one writer of the file at a time. A run of copies writes only with no direct save in flight, and stands aside otherwise; a direct save
+            waits for the runs writing. A copy whose page a direct save settled while it waited on the WAL, or whose slot holds another page since, is not
+            written (`PagedMMF.WriteCapturedCopies`): its bytes went to the wrong page, or over newer ones the page no longer owes
+  note a SingleVersion in-place write reaches a page before any record of it exists, since it is logged at the fence: a capture in mid-tick holds it, and this
+       rule says nothing of it: a crash loses up to a tick of those values, by design (ADR-057)
   requires: AP-01, WP-16
   scope: `CheckpointManager.RunCheckpointCycle` — step-1 barrier (`RequestFlush` + `WaitForDurable(LastPublishedLsn)` →
-         `barrierLsn`); step-3 flush2 (`RequestFlush` + `WaitForDurable(LastPublishedLsn)`) before each batch's `FlushToDisk` (`SettleBatch`)
+         `barrierLsn`); `CheckpointManager.FlushWalForCapturedPages`, the flush2 `PagedMMF.WritePagesForCheckpoint` calls between a run's copies and its writes;
+         `CheckpointManager.FlushWalForDirectSave`, `PagedMMF.SavePages`, `PagedMMF.EnterDirectSave`
   note the target was `LastAppendedLsn` until #937. The published frontier is not a weakening: AP-01 orders a commit's
        page effects strictly after its append returns, so a page captured now can only reflect records already published.
        What it drops is the unreachable part of the old target — LSNs allocated to claims that produced no frame, which
        stalled every cycle on an idle engine for the full CheckpointBarrierTimeoutMs.
   on_violation: never-durable bytes persisted in the data file → phantom data after crash
-  verified: Barrier_DrivesCheckpointAdvance_IgnoringStaleTarget (CheckpointResilienceTests); the deep crash property
-            (captured ⊆ durable across a power cut) is proven by the A1.2 crash sweep (P1.5)
-  spec: CheckpointProtocol.tla (S1) — CK02_CapturedSubsetDurable (flush2 before data fsync)
+  verified: Barrier_DrivesCheckpointAdvance_IgnoringStaleTarget (CheckpointResilienceTests); CheckpointWriteOrderTests (a commit staged after the barrier is durable
+            before the first page that can reflect it is written); the deep crash property (captured ⊆ durable across a power cut) is proven by the A1.2 crash sweep
+            (P1.5)
+  spec: CheckpointProtocol.tla (S1) — CK02_CapturedSubsetDurable (capture subset of durable). S1 models a page as on disk only at the fsync, so it cannot see the
+        write-versus-flush order: that is the test's
 
 ### CK-06: Checkpoint failure classification
   invariant a transient cycle exception (a `TyphonException` with `IsTransient` — WAL/page-cache back-pressure, lock/IO timeout)
@@ -872,7 +892,7 @@ CK-08 (flush-only cycles) are later increments.
             directory-map-extension chain, the reserved root range, the occupancy reserves, or a CK-05 directory twin
             (`DatabaseEngine.BuildOwnedPageBitmap`). "Any segment the file records" is load-bearing and was violated until
             2026-08-11 (#771): the reconstruction enumerated `MMF.RegisteredSegments`, which holds only the segments THIS
-            session loaded, and `InitializeArchetypes` loads them by iterating `ArchetypeRegistry.GetAllArchetypes()` — the
+            session loaded, and `InitializeArchetypes` loads them by iterating `DatabaseEngine.OwnArchetypes()` — the
             CLR types the CALLER registered. Opening with a subset of the schema is supported (a repair or forensic tool has
             no schema assembly), so ownership was caller-dependent: a plain open-and-close of a healthy database freed 36
             live pages. The persisted `ArchetypeR1` / `ComponentR1` segment pointers are now walked in addition, so `owned`
@@ -3238,6 +3258,19 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
             "it opens" is equally true of a rebuild that never ran and of an archetype with nothing to index, and both would
             satisfy every other assertion in the test.
 
+### RB-08: A crash open leaves no entity id in a free slot `[correctness]`
+  invariant after a crash open, every free slot of a populated cluster holds entity id 0 and no enabled bit. The open clears them after the
+            scrub and the sweep, before the index rebuild and the seal, so the seal's checkpoint writes them
+  scope: ArchetypeClusterState.ClearFreeSlotsAfterCrash, DatabaseEngine.ClearFreeSlotsAfterCrash
+  on_violation: CHK-CLU-01 on a deep scan after a recovery: an entity id in a slot occupancy calls free, which nothing ever releases
+  rationale: #1450. A destroy under snapshot isolation hides its slot: occupancy cleared, entity id and bytes kept, for snapshots older than the
+             destroy (VIS-09). The claim and the cleanup that end this are in memory. A checkpoint can write the hidden state, and the replay
+             finds nothing to do: its destroy's record is behind CheckpointLSN, or the slot is already free
+  note occupancy is authoritative, so no reader was misled; the rule keeps the file's two records of a slot in agreement, which is what lets a deep
+       scan treat a disagreement as a finding. A free slot's collection buffers are REAP-02's: it names nothing
+  verified: BackupCaptureRoundTripTests.ADestroyHiddenAtTheLastCheckpoint_LeavesNoKeyInItsFreeSlot [VerifiesRule] stages it;
+            AHardCrashUnderTheSameWorkload_IsSoundAfterRecovery reaches it from 40 seeded crashes, nightly
+
 ---
 
 ## Module: IR — Offline integrity check & repair
@@ -3275,6 +3308,28 @@ answer to different constraints — RB must always end with a usable database, I
             re-stamped through `PagedMMF.StampPageForWrite`, so the file is checksum-valid in every respect except the one
             under test) proves both halves against ONE fixture: the scan still produces a report and names the mismatch, and
             `Apply` refuses it without writing a byte. `Mutant_ApplyWithoutTheRevisionGate` shows the assertion can fail.
+
+### IR-02: Repair refuses a bundle a live process holds, before any effect `[fatal]`
+  invariant `OfflineBundlePageSource.LockHeld` ⇔ `db.lock` names a live owner, this process included ∨ another handle holds the data file. An engine verifying its
+            own open says it is the holder, and scans `Offline`: its own lock and handle say nothing about anybody else. Both are asked:
+            `db.lock` is a record no process holds open, so an engine that lost it would pass alone, and the OS cannot answer on a file
+            system without locks.
+  invariant the OS probe runs BEFORE the source opens its own handle. A `FileShare.None` probe made after it fails on that handle, and
+            every scan of every closed database would read as live.
+  invariant `DatabaseRepair.Apply` refuses a held bundle before its first effect: no pre-repair copy, no derived file deleted, no page
+            written.
+  invariant a scan of a held bundle runs `ScanMode.OnlineSampled`: its cross-structure findings are `Suspected`, never `Confirmed`, and the
+            report says so. It is a moving target, and a page read mid-checkpoint is not corruption.
+  note a lock from another machine reads as held, as it does for the engine's own open, and fails safe: a crashed bundle copied from
+       elsewhere is refused until the operator deletes that `db.lock`, which is why the refusal names the machine and the PID. A dead
+       local owner stays repairable.
+  scope: OfflineBundlePageSource.LockHeld, DatabaseLockFile.IsFileHeld, DatabaseRepair.Apply, IntegrityScanner.Scan, RepairCommand
+  on_violation: a repair run against a live database deletes its chunk summary and backup-state and then fails on the first page write,
+    or, where file locks are not enforced, writes pages under a running engine. A scan of one reports a moving target as Confirmed damage.
+  verified: DatabaseRepairTests — `ADataFileHeldOpen_ReadsAsHeld` (no `db.lock`), `ALockNamingThisProcess_ReadsAsHeld`,
+            `ALockNamingADeadPid_DoesNotReadAsHeld`, `AClosedBundle_DoesNotReadAsHeld` (the ordering trap: a source must not find its own handle),
+            `AnEngineVerifyingItsOwnOpen_ScansOffline`,
+            `Apply_OnAHeldBundle_RefusesBeforeAnyEffect`, `AScanOfAHeldBundle_IsOnlineSampled`.
 
 ## Module: BKP — Online backup capture
 

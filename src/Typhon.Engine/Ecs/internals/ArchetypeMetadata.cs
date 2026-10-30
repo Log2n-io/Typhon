@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Runtime.Loader;
 using Typhon.Engine.internals;
 using Typhon.Schema.Definition;
 
@@ -8,7 +9,7 @@ namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Metadata for a registered archetype: identity, component slots, parent-child graph, and per-archetype entity storage.
-/// Populated during static initialization, immutable after <see cref="ArchetypeRegistry.Freeze"/>.
+/// Populated during static initialization; its derived graphs are rebuilt by <see cref="ArchetypeRegistry.Freeze"/>, and otherwise it does not change.
 /// </summary>
 internal class ArchetypeMetadata
 {
@@ -44,6 +45,9 @@ internal class ArchetypeMetadata
 
     /// <summary>CLR type of the archetype class.</summary>
     public Type ArchetypeType;
+
+    /// <summary>The load context <see cref="ArchetypeType"/> lives in: an engine consumes the archetypes of its own (#554).</summary>
+    public AssemblyLoadContext LoadContext;
 
     /// <summary>
     /// Durable schema name — the stable per-DB identity persisted in <c>ArchetypeR1.Name</c> and matched on reopen to restore this archetype's routing id.

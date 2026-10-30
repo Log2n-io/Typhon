@@ -64,7 +64,7 @@ internal sealed class RepairCommand : Command<RepairCommand.Settings>
             if (source.LockHeld)
             {
                 AnsiConsole.MarkupLine(
-                    "[red]This database is open in another process.[/] Repair needs exclusive access — close it and retry.");
+                    $"[red]This database is open in {Markup.Escape(source.HeldBy)}.[/] Repair needs exclusive access — close it and retry.");
                 return CheckCommand.ScanFailedExitCode;
             }
 

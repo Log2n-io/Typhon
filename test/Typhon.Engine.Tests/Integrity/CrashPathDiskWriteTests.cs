@@ -172,7 +172,15 @@ internal sealed class CrashPathDiskWriteTests : IntegrityFixtureBase
             // Checkpoint so the cluster pages exist on disk to be torn, then commit again so recovery has a WAL delta
             // to replay. Without the delta the crash path has no work, and the open under test would not be the one
             // OQ-6a is about.
-            dbe.ForceCheckpoint();
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "premise: the cluster pages are on disk");
+            foreach (var seg in dbe.EnumerateStorageSegments())
+            {
+                if (seg.Kind == StorageSegmentKind.Cluster)
+                {
+                    clusters.AddRange(seg.Pages.ToArray());
+                }
+            }
+
             for (var i = 0; i < 64; i++)
             {
                 using var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate);
@@ -188,10 +196,6 @@ internal sealed class CrashPathDiskWriteTests : IntegrityFixtureBase
                 foreach (var page in seg.Pages.Span)
                 {
                     map[page] = seg.Kind.ToString();
-                    if (seg.Kind == StorageSegmentKind.Cluster)
-                    {
-                        clusters.Add(page);
-                    }
                 }
             }
 

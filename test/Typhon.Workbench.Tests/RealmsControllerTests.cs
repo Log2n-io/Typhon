@@ -27,7 +27,6 @@ namespace Typhon.Workbench.Tests;
 /// </para>
 /// </remarks>
 [TestFixture]
-[NonParallelizable] // opens engines, so it shares the process-global ArchetypeRegistry hazard that EngineLifecycleTests documents (#554)
 public sealed class RealmsControllerTests
 {
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };

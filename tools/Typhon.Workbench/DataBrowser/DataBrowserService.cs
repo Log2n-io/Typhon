@@ -348,11 +348,24 @@ public sealed class DataBrowserService
     private (OpenSession Open, ushort ArchetypeId) ResolveArchetype(Guid sessionId, string archetypeId)
     {
         var open = RequireOpenEngine(sessionId);
-        if (!ushort.TryParse(archetypeId, out var archId) || ArchetypeRegistry.GetMetadata(archId) == null)
+        if (!ushort.TryParse(archetypeId, out var archId) || !IsOwnArchetype(open, archId))
         {
             throw new KeyNotFoundException($"Archetype '{archetypeId}' is not registered.");
         }
         return (open, archId);
+    }
+
+    private static bool IsOwnArchetype(OpenSession open, ushort archetypeId)
+    {
+        foreach (var meta in open.Engine.Engine.OwnArchetypes())
+        {
+            if (meta.ArchetypeId == archetypeId)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private OpenSession RequireOpenEngine(Guid sessionId)

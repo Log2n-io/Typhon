@@ -150,7 +150,6 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
         {
             if (NeedsRefreshFull)
             {
-                SetOverflowDetected(true);
                 RefreshFull(tx);
                 return;
             }
@@ -287,9 +286,11 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
             return;
         }
 
-        // Check boundary crossing on the target evaluator
-        var targetWasIn = !isCreation && EvaluateKey(ref eval, ref entry.BeforeKey);
-        var targetIsIn = !isDeletion && EvaluateKey(ref eval, ref entry.AfterKey);
+        // Check boundary crossing on every target evaluator of the field (VDELTA-01): two for a range. A deletion always crosses: a destroy's or a
+        // disable's entry
+        // carries no key to say the target was in, and the reverse lookup decides from what it reads.
+        var targetWasIn = !isCreation && (isDeletion || TargetFieldPasses(fieldIndex, ref entry.BeforeKey));
+        var targetIsIn = !isDeletion && TargetFieldPasses(fieldIndex, ref entry.AfterKey);
 
         if (targetWasIn == targetIsIn)
         {
@@ -555,6 +556,20 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
         for (var i = 0; i < _sourceEvaluators.Length; i++)
         {
             if (_sourceEvaluators[i].FieldIndex == fieldIndex && !EvaluateKey(ref _sourceEvaluators[i], ref key))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Whether <paramref name="key"/> passes every target evaluator of <paramref name="fieldIndex"/>.</summary>
+    private bool TargetFieldPasses(int fieldIndex, ref KeyBytes8 key)
+    {
+        for (var i = 0; i < _targetEvaluators.Length; i++)
+        {
+            if (_targetEvaluators[i].FieldIndex == fieldIndex && !EvaluateKey(ref _targetEvaluators[i], ref key))
             {
                 return false;
             }

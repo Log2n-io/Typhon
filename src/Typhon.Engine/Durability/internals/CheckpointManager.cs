@@ -114,6 +114,9 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// which the data file holds pages whose records may not be durable yet (C1). Null in production: one null check per batch.</summary>
     internal Action BeforeSettleProbe { get; set; }
 
+    /// <summary>Test seam: called right after a cycle's barrier, so a commit can be staged in the window the barrier does not cover.</summary>
+    internal Action AfterBarrierProbe { get; set; }
+
     /// <summary>
     /// Test seam: every cycle behaves as one the coverage gate held back (CK-03) — it writes its pages, but CheckpointLSN does not advance, the flip persists
     /// nothing, no quarantined free is released and no WAL segment is recycled. False in production.
@@ -225,6 +228,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
         _stagingPool = stagingPool;
         _lastTickFenceLsnProvider = lastTickFenceLsnProvider;
         _checkpointLsn = initialCheckpointLsn;
+        _mmf.DirectSaveBarrier = FlushWalForDirectSave;
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -792,7 +796,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// whole back-pressure timeout, and every writer behind it timed out too. Writing first frees those slots.
     /// </summary>
     /// <remarks>
-    /// The pages written here keep CK-02's order (the WAL is durable through what the copies can reflect before the data fsync) and CP-03's (a page
+    /// The pages written here keep CK-02's order (the WAL is durable through what the copies can reflect before they are written) and CP-03's (a page
     /// is settled only after that fsync), as in the cycle's own write. CheckpointLSN does not move: the hook's records must still precede the advance,
     /// which only the barrier and write after the hook make. The threshold is the dirty-page trigger's, capped at half the cache so that disabling the
     /// trigger cannot disable this.
@@ -811,7 +815,8 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             return;
         }
 
-        var written = WriteDirtyPages(ref pending, ref ctx, out _);
+        _barrierDeadline = ctx;
+        var written = WriteDirtyPages(ref pending, out _);
         Interlocked.Add(ref _totalPagesWritten, written);
         Interlocked.Increment(ref _totalWritesAheadOfTheHook);
     }
@@ -850,7 +855,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// <summary>
     /// A flush-only cycle (CK-08): captures and writes the owed pages, discharging their debt, and nothing else — no CheckpointLSN advance, no meta flip,
     /// no segment recycling, no metadata hook, no held free sealed or released. The write keeps CK-02's order (the WAL is flushed through what the copies
-    /// can reflect before their fsync) and CP-03's, as the cycle's own write does. A suspect page (its checksum failed at load) is left owed: written, its
+    /// can reflect before their writes) and CP-03's, as the cycle's own write does. A suspect page (its checksum failed at load) is left owed: written, its
     /// torn bytes were checksummed again and the next open served them, whatever the suspect resolution then decided (#1304). Serialized with the cycles.
     /// Returns the pages written.
     /// </summary>
@@ -888,8 +893,8 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             return 0;
         }
 
-        var ctx = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(_resourceOptions.CheckpointBarrierTimeoutMs));
-        var written = WriteDirtyPages(ref pending, ref ctx, out _);
+        _barrierDeadline = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(_resourceOptions.CheckpointBarrierTimeoutMs));
+        var written = WriteDirtyPages(ref pending, out _);
         Interlocked.Add(ref _totalPagesWritten, written);
         Interlocked.Increment(ref _totalFlushOnlyCycles);
         return written;
@@ -1056,8 +1061,9 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// <para><b>In batches, each settled before the next is written.</b> A page's debt is discharged only after an fsync covering its write (CP-03), so a
     /// pass that settled only at its end freed nothing until it had written everything it collected — under a write storm, the whole cache: 8 GiB at
     /// ~22k pages/s while every writer waiting for a slot timed out after 5 s (MarketHardeningTests, 75M items). A batch ends at
-    /// <see cref="WriteBatchMaxPages"/> pages or <see cref="WriteBatchMaxTicks"/> of writing, whichever comes first, then flushes the WAL through what its
-    /// copies can reflect (CK-02), fsyncs and settles its pages: the cache frees pages every few hundred milliseconds, at the cost of one fsync per
+    /// <see cref="WriteBatchMaxPages"/> pages or <see cref="WriteBatchMaxTicks"/> of writing, whichever comes first, its writers having flushed the WAL
+    /// through what their copies can reflect before each run of writes (CK-02), then fsyncs and settles its pages: the cache frees pages every few hundred
+    /// milliseconds, at the cost of one fsync per
     /// batch instead of one per pass.</para>
     /// <para><b>Ordered.</b> Protected directory pages first — their persist fsyncs the file, so ahead of every plain write of the pass it can only cover
     /// what an earlier batch already flushed the WAL for — then by file position (<see cref="PagedMMF.OrderForCheckpointWrite"/>). The protected pages
@@ -1066,7 +1072,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// protected fsync ever runs after a plain write its batch has not settled.</para>
     /// </remarks>
     /// <returns>The pages written.</returns>
-    private int WriteDirtyPages(ref int[] pending, ref WaitContext ctx, out int stillSkipped)
+    private int WriteDirtyPages(ref int[] pending, out int stillSkipped)
     {
         var writtenTotal = 0;
         stillSkipped = 0;
@@ -1157,7 +1163,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                     if (batchPages > 0)
                     {
                         BeforeSettleProbe?.Invoke();
-                        SettleBatch(pending, capturedGen, batch, ref ctx);
+                        SettleBatch(pending, capturedGen, batch);
                         writtenTotal += batchPages;
                     }
                 }
@@ -1218,8 +1224,73 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     private void WriteSubBatch(int j)
     {
         var (start, count) = (_waveStarts[j], _waveCounts[j]);
-        _mmf.WritePagesForCheckpoint(_wavePending.AsSpan(start, count), _stagingPool, out var written, _waveCapturedGen.AsSpan(start, count), _waveFilter);
+        _writeBarrier ??= FlushWalForCapturedPages;
+        _mmf.WritePagesForCheckpoint(_wavePending.AsSpan(start, count), _stagingPool, out var written, _waveCapturedGen.AsSpan(start, count), _waveFilter,
+            _writeBarrier);
         _waveWritten[j] = written;
+    }
+
+    private Func<bool> _writeBarrier;
+
+    /// <summary>
+    /// The WAL made durable through what the copies a writer holds can reflect: every record PUBLISHED by now, since AP-01 orders a commit's page effects
+    /// strictly after
+    /// its append returns (CK-02). Called between a run's copies and its writes, so the file holds no committed change whose record could still be lost.
+    /// Runs on the
+    /// wave's writers, and they share the flushes the group commit makes anyway: a writer finding the published frontier durable already pays one read.
+    /// </summary>
+    /// <returns>False after a crash stop: those copies may hold writes the WAL never logged (#1271), and stay owed.</returns>
+    private bool FlushWalForCapturedPages()
+    {
+        if (_crashStop)
+        {
+            return false;
+        }
+
+        var published = _walManager.LastPublishedLsn;
+        if (_walManager.DurableLsn >= published)
+        {
+            return true;
+        }
+
+        _walManager.RequestFlush();
+        _walManager.WaitForDurable(published, ref _barrierDeadline);
+        return !_crashStop;
+    }
+
+    /// <summary>The cycle's one deadline, which every run's WAL flush shares. Set before a pass's writers start.</summary>
+    private WaitContext _barrierDeadline;
+
+    /// <summary>
+    /// <see cref="PagedMMF.DirectSaveBarrier"/>: a direct save writes the live pages, so what it writes is made durable first as a checkpoint copy is
+    /// (CK-02). The
+    /// caller may be a tick, so a flush that fails leaves the pages owed rather than throwing: the checkpoint writes them, behind its own barrier.
+    /// </summary>
+    private bool FlushWalForDirectSave()
+    {
+        if (_crashStop)
+        {
+            return false;
+        }
+
+        var published = _walManager.LastPublishedLsn;
+        if (_walManager.DurableLsn >= published)
+        {
+            return true;
+        }
+
+        try
+        {
+            var ctx = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(_resourceOptions.CheckpointBarrierTimeoutMs));
+            _walManager.RequestFlush();
+            _walManager.WaitForDurable(published, ref ctx);
+            return !_crashStop;
+        }
+        catch (Exception ex)
+        {
+            LogDirectSaveBarrierFailed(ex);
+            return false;
+        }
     }
 
     /// <summary>
@@ -1364,17 +1435,12 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     }
 
     /// <summary>
-    /// Makes one batch durable and discharges it: the WAL flushed through what the copies can reflect (CK-02 flush2), then the data fsync, then each page's
-    /// captured generation published (CP-03).
+    /// Makes one batch durable and discharges it: the data fsync, then each page's captured generation published (CP-03). The WAL is already durable
+    /// through what its
+    /// copies reflect (<see cref="FlushWalForCapturedPages"/>).
     /// </summary>
-    private void SettleBatch(int[] pending, long[] capturedGen, List<(int Start, int Count)> batch, ref WaitContext ctx)
+    private void SettleBatch(int[] pending, long[] capturedGen, List<(int Start, int Count)> batch)
     {
-        // The captured page copies just written may reflect records up to the current flush target — every record whose frame was PUBLISHED, since AP-01
-        // orders a commit's page effects strictly after its append returns. Flush the WAL through that point BEFORE the data fsync makes those bytes durable,
-        // so the data file can never hold a change whose record could still be lost (captured ⊆ durable, composing with AP-01 — 04 §3).
-        _walManager.RequestFlush();
-        _walManager.WaitForDurable(_walManager.LastPublishedLsn, ref ctx);
-
         using (TyphonEvent.BeginCheckpointFsync())
         {
             _mmf.FlushToDisk();
@@ -1423,6 +1489,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
 
             // The whole cycle shares one bounded deadline budget: the write ahead of the hook, the barrier and the write below.
             var ctx = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(_resourceOptions.CheckpointBarrierTimeoutMs));
+            _barrierDeadline = ctx;
 
             // CK-14: the hook loads pages, and under writeback pressure the cache may have no slot left that only this cycle's writes would not have to
             // free first.
@@ -1464,6 +1531,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             // CheckpointBarrierTimeoutMs until an unrelated later commit happens to drain past it.
             _walManager.WaitForDurable(_walManager.LastPublishedLsn, ref ctx);
             long barrierLsn = _walManager.DurableLsn;
+            AfterBarrierProbe?.Invoke();
 
             // CK-13: never past a commit still between its append and its publish. Read after the barrier: a barrier that covers a record has drained
             // its frame, and the commit stored its floor before publishing that frame; a commit that has since withdrawn has already dirtied its
@@ -1507,7 +1575,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                 try
                 {
                     var pending = dirtyPages;
-                    writtenTotal = WriteDirtyPages(ref pending, ref ctx, out stillSkipped);
+                    writtenTotal = WriteDirtyPages(ref pending, out stillSkipped);
 
                     // #817 diagnostic: capture WHICH pages the gate is stuck on, not just how many. The retry loop
                     // partitions written to the front, so the survivors are the last `stillSkipped` entries. The
@@ -1768,6 +1836,9 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
 
     [LoggerMessage(LogLevel.Information, "Checkpoint covered every page again after {GatedCycles} gated cycles (Health=Ok)")]
     private partial void LogCheckpointResumed(long gatedCycles);
+
+    [LoggerMessage(LogLevel.Warning, "A direct page save could not flush the WAL first: its pages stay owed, for the checkpoint to write")]
+    private partial void LogDirectSaveBarrierFailed(Exception exception);
 
     [LoggerMessage(LogLevel.Information, "Checkpoint: writing {PageCount} dirty pages")]
     private partial void LogCheckpointPass(int pageCount);

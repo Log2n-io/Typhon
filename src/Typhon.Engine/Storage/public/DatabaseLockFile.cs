@@ -219,6 +219,38 @@ public static class DatabaseLockFile
     /// <param name="bundleDirectory">The database's <c>{name}.typhon</c> directory.</param>
     public static bool IsHeldByLiveProcess(string bundleDirectory) => TryReadLock(bundleDirectory, out var info) && IsOwnerLive(info.Pid, info.MachineName);
 
+    /// <summary>
+    /// Whether another handle holds <paramref name="path"/>, asked of the OS: an exclusive open that fails because of a sharing violation or a held
+    /// <c>flock</c>. This is the question <see cref="IsHeldByLiveProcess"/> cannot answer, since <c>db.lock</c> is a record and never held open, and it is the
+    /// data file's handle that excludes. A file that does not exist is not held; "cannot tell" reads as held, because the alternative is acting on a database
+    /// somebody may be using.
+    /// </summary>
+    /// <param name="path">The file to probe.</param>
+    internal static bool IsFileHeld(string path)
+    {
+        try
+        {
+            using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.None);
+            return false;
+        }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return false;
+        }
+        catch (IOException ex) when (StoreFileSystem.IsSharingViolation(ex))
+        {
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return true;
+        }
+    }
+
     /// <summary>Whether the recorded owner of a lock or claim is still running. A different machine is always treated as live.</summary>
     /// <param name="pid">Process id recorded in the file.</param>
     /// <param name="machineName">Machine name recorded in the file.</param>

@@ -71,7 +71,9 @@ public static class TyphonProfiler
     public static int MainThreadId { get; private set; }
 
     /// <summary>
-    /// Attach an exporter. Must be called before <see cref="Start"/> — attaching while running throws.
+    /// Attach an exporter. Must be called before <see cref="Start"/> — attaching while running throws. An exporter belongs to one session: <see
+    /// cref="Stop"/> disposes
+    /// and detaches it, so a next session attaches a new instance.
     /// </summary>
     public static void AttachExporter(IProfilerExporter exporter)
     {
@@ -87,7 +89,9 @@ public static class TyphonProfiler
     }
 
     /// <summary>
-    /// Detach an exporter. Must be called while the profiler is stopped. Returns <c>true</c> if the exporter was found and removed.
+    /// Detach an exporter attached to a session that has not started. Must be called while the profiler is stopped. Returns <c>true</c> if the exporter
+    /// was found and
+    /// removed; after <see cref="Stop"/> there is nothing to detach.
     /// </summary>
     public static bool DetachExporter(IProfilerExporter exporter)
     {
@@ -115,7 +119,7 @@ public static class TyphonProfiler
     /// <param name="options">Tunable parameters. <c>null</c> uses defaults (1 ms cadence, 4-deep queues, 8 KB merge buffer).</param>
     /// <param name="processExitTeardown">
     /// Optional teardown action invoked by the process-exit / unhandled-exception safety net <i>instead of</i> a bare <see cref="Stop"/>.
-    /// <c>ProfilerBootstrap</c> passes its full teardown here (CPU-sampler stop + <see cref="Stop"/> + exporter detach) so the trace —
+    /// <c>ProfilerBootstrap</c> passes its full teardown here (CPU-sampler stop + <see cref="Stop"/>) so the trace —
     /// including events emitted during host/engine teardown — is finalised correctly without the host stopping the profiler explicitly.
     /// <c>null</c> falls back to <see cref="Stop"/>.
     /// </param>
@@ -161,11 +165,12 @@ public static class TyphonProfiler
 
             // Spawn one OS thread per exporter to drain its queue. They block on GetConsumingEnumerable until CompleteAdding is called.
             ExporterCts = new CancellationTokenSource();
+            var exporterToken = ExporterCts.Token;   // captured here: a Stop right after this Start nulls the static before these threads run
             ExporterThreads = new Thread[exporterSnapshot.Count];
             for (var i = 0; i < exporterSnapshot.Count; i++)
             {
                 var exporter = exporterSnapshot[i];
-                ExporterThreads[i] = new Thread(() => ExporterConsumeLoop(exporter, ExporterCts.Token))
+                ExporterThreads[i] = new Thread(() => ExporterConsumeLoop(exporter, exporterToken))
                 {
                     IsBackground = true,
                     Name = $"TyphonProfilerExporter[{exporter.Name}]"
@@ -315,6 +320,10 @@ public static class TyphonProfiler
             ctsToCancel = ExporterCts;
             exportersToFlush = consumerToTearDown.Exporters;
             gcTracingToDispose = GcTracing;
+
+            // An exporter belongs to one session: Stop disposes it below, and left here it would be initialized again by the next Start, truncating the
+            // trace it wrote.
+            Exporters.Clear();
             etwPumpToDispose = EtwSchedulingPumpInstance;
 
             Consumer = null;
@@ -449,14 +458,11 @@ public static class TyphonProfiler
         }
         catch (ObjectDisposedException)
         {
-            // The exporter's queue was disposed under this thread. Within one session that cannot happen — Stop joins every exporter thread before it
-            // disposes any exporter — so reaching here means this thread is draining an exporter that belongs to a FINISHED session: the exporter list is
-            // static and Stop does not clear it, so a host that attaches a new exporter and starts again gets a thread spawned over the old, disposed one.
-            //
-            // Caught rather than left to propagate because this is a background thread with no owner: an unhandled exception here does not fail an operation,
-            // it terminates the PROCESS. That turned a stale exporter into a dead test host that aborted the run mid-pass, so the remaining tests reported as
-            // "not run" rather than as failures — an observability subsystem taking down the thing it observes, for a condition it could have declined. The
-            // count is published so the condition is survivable without being silent; a non-zero reading means a host is leaking exporters across sessions.
+            // The exporter's queue was disposed under this thread: a host disposed an exporter between attaching it and starting. Caught rather than left
+            // to propagate
+            // because this is a background thread with no owner: an unhandled exception here does not fail an operation, it terminates the PROCESS. The
+            // count is
+            // published so the condition is survivable without being silent.
             Interlocked.Increment(ref SExporterThreadsAbandoned);
         }
     }

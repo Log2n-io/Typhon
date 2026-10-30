@@ -8324,7 +8324,11 @@
           "tickNumbersAbsolute",
           "tickNumberingSuspect",
           "bytesReceived",
-          "bytesRetained"
+          "bytesRetained",
+          "cacheBytes",
+          "cacheBytesLimit",
+          "capReason",
+          "capTick"
         ],
         "type": "object",
         "properties": {
@@ -8371,6 +8375,36 @@
             "format": "int64"
           },
           "bytesRetained": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "cacheBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "cacheBytesLimit": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "capReason": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "capTick": {
             "pattern": "^-?(?:0|[1-9]\\d*)$",
             "type": [
               "integer",

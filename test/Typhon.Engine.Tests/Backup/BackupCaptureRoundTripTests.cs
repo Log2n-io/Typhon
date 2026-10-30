@@ -163,13 +163,9 @@ class BackupCaptureRoundTripTests : BackupTestBase<BackupCaptureRoundTripTests>
                     {
                         using var source = new OfflineBundlePageSource(outcome.Target);
                         var report = IntegrityScanner.Scan(source, IntegrityOptions.Deep);
-                        // The one tolerated divergence is the engine's own crash-recovery defect, reproduced with no backup at all
-                        // (AHardCrashUnderTheSameWorkload_IsSoundAfterRecovery): a destroyed entity's key left in its freed cluster slot.
-                        var unexplained = report.Findings.Where(f => !IsKnownRecoveryDivergence(f)).ToList();
-                        if (report.Verdict != IntegrityVerdict.Sound && unexplained.Count > 0)
+                        if (report.Verdict != IntegrityVerdict.Sound)
                         {
-                            failures.Add($"{where}: a deep scan after a clean close reports {report.Verdict} (only {KnownRecoveryIssue}'s CHK-CLU-01 is "
-                                         + $"tolerated): {string.Join("; ", unexplained.Take(3))}");
+                            failures.Add($"{where}: a deep scan after a clean close reports {report.Verdict}: {string.Join("; ", report.Findings.Take(3))}");
                         }
                     }
                 }
@@ -188,17 +184,6 @@ class BackupCaptureRoundTripTests : BackupTestBase<BackupCaptureRoundTripTests>
 
         return new Outcome(failures, run.Points.Count, run.FrozenInsideACycle);
     }
-
-    /// <summary>The issue tracking the crash-recovery divergence the deep scan tolerates.</summary>
-    private const string KnownRecoveryIssue = "#1450";
-
-    /// <summary>
-    /// CHK-CLU-01, Lossless, on a <c>CompAArch</c> cluster slot: a free slot still holding a key after crash recovery and a clean close
-    /// (<see cref="KnownRecoveryIssue"/>). Anything else a deep scan finds is a failure.
-    /// </summary>
-    private static bool IsKnownRecoveryDivergence(IntegrityFinding f) =>
-        f.Code == "CHK-CLU-01" && f.Severity == IntegritySeverity.Divergence && f.Repair == Repairability.Lossless
-        && f.Summary.Contains("'CompAArch'", StringComparison.Ordinal) && f.Summary.Contains("free cluster slot", StringComparison.Ordinal);
 
     /// <summary>The restored bundle against what capture handed the store: the chain's newest page images, zeros elsewhere; each segment's prefix.</summary>
     private static void CheckBytes(RecordingStore recording, uint id, string bundle, string where, List<string> failures)
@@ -418,52 +403,14 @@ class BackupCaptureRoundTripTests : BackupTestBase<BackupCaptureRoundTripTests>
 
     /// <summary>
     /// Classification, crash only: the round trip's Versioned workload (spawns, updates, destroys, Immediate) under its 40 ms checkpoints, a hard
-    /// crash at a seeded instant, the crash open, a clean close, a deep scan. No backup code runs. About one seed in five leaves a destroyed
-    /// entity's key in its freed cluster slot (CHK-CLU-01): the engine's recovery defect #1450, which the round trip over packs therefore tolerates.
+    /// crash at a seeded instant, the crash open, a clean close, a deep scan. No backup code runs. About one seed in five left a destroyed entity's key
+    /// in its freed cluster slot (CHK-CLU-01) before the crash open cleared such slots (#1450).
     /// </summary>
-    [TestCase(1)]
-    [TestCase(2)]
-    [TestCase(3)]
-    [TestCase(4)]
-    [TestCase(5)]
-    [TestCase(6)]
-    [TestCase(7)]
-    [TestCase(8)]
-    [TestCase(9)]
-    [TestCase(10)]
-    [TestCase(11)]
-    [TestCase(12)]
-    [TestCase(13)]
-    [TestCase(14)]
-    [TestCase(15)]
-    [TestCase(16)]
-    [TestCase(17)]
-    [TestCase(18)]
-    [TestCase(19)]
-    [TestCase(20)]
-    [TestCase(21)]
-    [TestCase(22)]
-    [TestCase(23)]
-    [TestCase(24)]
-    [TestCase(25)]
-    [TestCase(26)]
-    [TestCase(27)]
-    [TestCase(28)]
-    [TestCase(29)]
-    [TestCase(30)]
-    [TestCase(31)]
-    [TestCase(32)]
-    [TestCase(33)]
-    [TestCase(34)]
-    [TestCase(35)]
-    [TestCase(36)]
-    [TestCase(37)]
-    [TestCase(38)]
-    [TestCase(39)]
-    [TestCase(40)]
+    [Test]
     [CancelAfter(60_000)]
-    [Category("Quarantine")]   // #1450: crash recovery leaves a destroyed entity's key in its freed cluster slot (CHK-CLU-01); no backup involved
-    public void AHardCrashUnderTheSameWorkload_IsSoundAfterRecovery(int seed)
+    [Explicit("Breadth sweep of hard crashes, 40 seeds; the gate runs the staged ADestroyHiddenAtTheLastCheckpoint_LeavesNoKeyInItsFreeSlot")]
+    [Category("Nightly")]
+    public void AHardCrashUnderTheSameWorkload_IsSoundAfterRecovery([Range(1, 40)] int seed)
     {
         var rng = new Random(seed);
         var versioned = new List<EntityId>();
@@ -520,6 +467,61 @@ class BackupCaptureRoundTripTests : BackupTestBase<BackupCaptureRoundTripTests>
         using var source = new OfflineBundlePageSource(Path.Combine(Path.GetDirectoryName(walDir), CurrentDatabaseName + ".typhon"));
         var report = IntegrityScanner.Scan(source, IntegrityOptions.Deep);
         Assert.That(report.Verdict, Is.EqualTo(IntegrityVerdict.Sound), string.Join("; ", report.Findings));
+    }
+
+    /// <summary>
+    /// The seeded test's finding, staged: a snapshot keeps a destroy hidden through a checkpoint, so the file holds the slot free with its entity id, and the
+    /// cleanup that follows reaches the cache only. The crash open clears it (#1450).
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    [VerifiesRule("RB-08")]
+    public void ADestroyHiddenAtTheLastCheckpoint_LeavesNoKeyInItsFreeSlot()
+    {
+        string walDir;
+        int cleared;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Open(scope);
+            walDir = dbe.WalDirectory;
+            var ids = new EntityId[3];
+            using (var t = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                for (var i = 0; i < ids.Length; i++)
+                {
+                    ids[i] = t.Spawn<CompAArch>(CompAArch.A.Set(new CompA(i)));
+                }
+
+                t.Commit();
+            }
+
+            using (var snapshot = dbe.CreateQuickTransaction())
+            {
+                using (var t = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+                {
+                    t.Destroy(ids[0]);
+                    t.Commit();
+                }
+
+                Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "premise: the hidden slot is on disk");
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Open(scope);
+            Assert.That(dbe.LastOpenRanCrashRecovery, Is.True);
+            cleared = dbe.LastOpenFreeSlotsCleared;
+            using var t = dbe.CreateQuickTransaction();
+            Assert.That(t.Query<CompAArch>().Execute().Count, Is.EqualTo(2));
+        }
+
+        using var source = new OfflineBundlePageSource(Path.Combine(Path.GetDirectoryName(walDir), CurrentDatabaseName + ".typhon"));
+        var report = IntegrityScanner.Scan(source, IntegrityOptions.Deep);
+        Assert.That(report.Verdict, Is.EqualTo(IntegrityVerdict.Sound), string.Join("; ", report.Findings));
+        Assert.That(cleared, Is.EqualTo(1));
     }
 
     /// <summary>A store that also keeps what capture handed it: each point's image pages, its tail and its parent.</summary>

@@ -29,6 +29,8 @@ internal ref struct ComponentRevision
 
     internal ComponentRevisionManager.ElementRevisionHandle GetRevisionElement(short revisionIndex)
         => ComponentRevisionManager.GetRevisionElement(ref _accessor, _firstChunkId, revisionIndex);
+    internal ComponentRevisionManager.ElementRevisionHandle GetRevisionElement(short revisionIndex, scoped ref WaitContext wc)
+        => ComponentRevisionManager.GetRevisionElement(ref _accessor, _firstChunkId, revisionIndex, ref wc);
     internal void AddCompRev(long tsn, bool isDelete)
         => ComponentRevisionManager.AddCompRev(_info, ref _compRevInfo, tsn, _uowId, isDelete);
     internal int AllocCompRevStorage(long tsn, long pk) => ComponentRevisionManager.AllocCompRevStorage(_info, tsn, _uowId, _firstChunkId, pk);

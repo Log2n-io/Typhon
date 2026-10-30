@@ -20,6 +20,10 @@ function state(overrides: Partial<CaptureState> = {}): CaptureState {
     tickNumberingSuspect: false,
     bytesReceived: 1_000,
     bytesRetained: 100,
+    cacheBytes: 0,
+    cacheBytesLimit: 1_000,
+    capReason: null,
+    capTick: 0,
     ...overrides,
   };
 }
@@ -44,6 +48,37 @@ describe('CaptureControl', () => {
     setCapture(state({ mode: 'Everything', state: 'Everything' }));
     const { container } = render(<CaptureControl sessionId={SESSION} />);
     expect(container.innerHTML).toBe('');
+  });
+
+  it('warns when the cache nears its limit, in both modes', () => {
+    setCapture(state({ cacheBytes: 800, cacheBytesLimit: 1_000 }));
+    render(<CaptureControl sessionId={SESSION} />);
+    expect(screen.getByTestId('capture-cache-warning')).toBeTruthy();
+    cleanup();
+
+    setCapture(state({ mode: 'Everything', state: 'Everything', cacheBytes: 800, cacheBytesLimit: 1_000 }));
+    render(<CaptureControl sessionId={SESSION} />);
+    expect(screen.getByTestId('capture-cache-warning')).toBeTruthy();
+  });
+
+  it('stays quiet below the warning ratio', () => {
+    setCapture(state({ cacheBytes: 799, cacheBytesLimit: 1_000 }));
+    render(<CaptureControl sessionId={SESSION} />);
+    expect(screen.queryByTestId('capture-cache-warning')).toBeNull();
+  });
+
+  it('replaces Record with a banner naming the reason and the tick once capped, in both modes', () => {
+    // A capped session that still offered Record would be armed into nothing, and the 409 would be the only explanation.
+    for (const mode of ['CherryPick', 'Everything'] as const) {
+      setCapture(state({ mode, state: 'Capped', capReason: 'disk_low', capTick: 4_242 }));
+      render(<CaptureControl sessionId={SESSION} />);
+      const banner = screen.getByTestId('capture-capped');
+      expect(banner.textContent).toContain('the disk is nearly full');
+      expect(banner.textContent).toContain('4242');
+      expect(screen.getByTestId('capture-capped-save')).toBeTruthy();
+      expect(screen.queryByTestId('capture-record')).toBeNull();
+      cleanup();
+    }
   });
 
   it('renders nothing before the first capture-state frame arrives', () => {

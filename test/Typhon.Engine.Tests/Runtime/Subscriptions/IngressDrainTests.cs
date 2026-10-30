@@ -281,6 +281,26 @@ class IngressDrainTests : TestBase<IngressDrainTests>
         Assert.That(slabs.Where(b => !b.IsDisposed).Select(b => b.Id), Is.Empty, "the teardown must still free the slabs once nobody holds them");
     }
 
+    /// <summary>A system steers sessions through its own slot's view, so no two workers share a segment: the view is all there is to name one
+    /// (SUB-39).</summary>
+    [Test]
+    [VerifiesRule("SUB-39")]
+    public void AWorkersViewRecordsIntoItsOwnSegment()
+    {
+        using var harness = new Harness();
+        var session = harness.Admit();
+        harness.Ingress.Requests.EnsureWorkers(5);
+
+        new SubscriptionsCommands(harness.Ingress, null, 4).Session(session).SetBudget(1);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(harness.Ingress.Requests.Segment(4).Count, Is.EqualTo(1), "the dispatcher's slot: past the worker count, and it has a segment");
+            Assert.That(harness.Ingress.Requests.Segment(0).Count, Is.Zero, "the off-worker slot");
+        });
+        harness.Ingress.Requests.Reset();
+    }
+
     private static List<PinnedMemoryBlock> PinnedBlocks(IResource root)
     {
         var blocks = new List<PinnedMemoryBlock>();

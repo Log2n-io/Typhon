@@ -22,7 +22,7 @@ internal class PendingArchetype
 
 /// <summary>
 /// Global archetype registration manager. Static class — registration at startup (serialized by CLR static constructors), lock-free reads at
-/// runtime (array indexed by ArchetypeId).
+/// runtime (array indexed by ArchetypeId). Process-wide, with one archetype per name per load context: a collectible context's entries leave with it.
 /// </summary>
 internal static class ArchetypeRegistry
 {
@@ -38,7 +38,10 @@ internal static class ArchetypeRegistry
     /// <summary>CLR Type → globally unique ComponentTypeId (deduplication across archetypes).</summary>
     private static readonly ConcurrentDictionary<Type, int> ComponentTypeIds = new();
 
-    /// <summary>Component schema name → ComponentTypeId (dedup across V1/V2 CLR types sharing the same schema name).</summary>
+    /// <summary>
+    /// Component schema name, within its load context (<see cref="ScopedName"/>) → ComponentTypeId: the dedup across V1/V2 CLR types sharing one schema name.
+    /// Two load contexts' copies of a component are two components, as they are two types.
+    /// </summary>
     private static readonly ConcurrentDictionary<string, int> ComponentTypeIdsBySchemaName = new();
 
     /// <summary>ComponentTypeId → CLR Type (reverse lookup for slot-to-type mapping).</summary>
@@ -56,20 +59,86 @@ internal static class ArchetypeRegistry
     internal static int MaxArchetypeId => MaxRegisteredArchetypeId;
 
     // #514 D1 — the per-process catalog id is engine-ASSIGNED (dense, by archetype identity), not author-set. Identity is the CLR type full name (the class name
-    // doubles as the archetype name). ArchetypeIdByName dedups so the same identity — including the same schema re-loaded into a fresh ALC — reuses its catalog id
-    // (string keys never pin an ALC). The counter starts at 1: id 0 is reserved (default(ushort) null/sentinel).
+    // doubles as the archetype name) WITHIN ITS LOAD CONTEXT (#554): two contexts' copies of one schema are two archetypes, each with its own slot and metadata,
+    // which is what lets a host open two databases whose schemas share archetype names. ArchetypeIdByName dedups a re-finalize within a context; its string keys
+    // never pin an ALC. A collectible context's ids go back to FreeCatalogIds with it, since a Workbench reopening a database gets a new context every time. The
+    // counter starts at 1: id 0 is reserved (default(ushort) null/sentinel).
     private static ushort NextArchetypeId;
     private static readonly Dictionary<string, ushort> ArchetypeIdByName = new();
+    private static readonly Queue<ushort> FreeCatalogIds = new();
 
     private static bool Frozen;
 
-    /// <summary>Get-or-assign the dense, per-process catalog id for an archetype identity (its CLR type full name). #514 D1.</summary>
+    /// <summary>A number per non-default load context, for <see cref="ScopedName"/>. Weakly keyed, so it pins no context.</summary>
+    private static readonly ConditionalWeakTable<AssemblyLoadContext, object> ContextKeys = new();
+
+    private static int NextContextKey;
+
+    /// <summary><paramref name="name"/> qualified by the load context of <paramref name="type"/>. The default context's names stand for themselves.</summary>
+    private static string ScopedName(Type type, string name)
+    {
+        var context = AssemblyLoadContext.GetLoadContext(type.Assembly);
+        if (context == null || context == AssemblyLoadContext.Default)
+        {
+            return name;
+        }
+
+        return $"{ContextKeys.GetValue(context, TrackContext)}/{name}";
+    }
+
+    /// <summary>First sight of a context: a number for its names, and, for a collectible one, the release of what it registered when it goes.</summary>
+    private static object TrackContext(AssemblyLoadContext context)
+    {
+        if (context.IsCollectible)
+        {
+            context.Unloading += ReleaseContext;
+        }
+
+        return ++NextContextKey;
+    }
+
+    /// <summary>
+    /// A collectible context is going: releases what it registered and no engine uses, which is what a schema loaded but never opened leaves behind. An
+    /// engine that still uses an entry releases it at its own dispose (<see cref="UnregisterEngineUse"/>).
+    /// </summary>
+    private static void ReleaseContext(AssemblyLoadContext context)
+    {
+        lock (RegistrationLock)
+        {
+            for (var i = 0; i < Archetypes.Length; i++)
+            {
+                var meta = Archetypes[i];
+                if (meta != null && meta.LoadContext == context && !ArchetypeRefcount.ContainsKey(meta.ArchetypeType))
+                {
+                    ReleaseArchetype(meta.ArchetypeType);
+                }
+            }
+
+            foreach (var (type, _) in ComponentTypeIds)
+            {
+                if (AssemblyLoadContext.GetLoadContext(type.Assembly) == context && !ComponentRefcount.ContainsKey(type))
+                {
+                    ReleaseComponent(type);
+                }
+            }
+        }
+    }
+
+    /// <summary>Get-or-assign the dense, per-process catalog id for an archetype identity (<see cref="ScopedName"/> of its CLR type full name). #514 D1.</summary>
     private static ushort GetOrAssignCatalogId(string identity)
     {
         if (ArchetypeIdByName.TryGetValue(identity, out var id))
         {
             return id;
         }
+
+        // First released, first reused: ids released in order come back in order, so a reopened schema keeps the ids it had, as a "#<id>" in a saved query expects.
+        if (FreeCatalogIds.TryDequeue(out id))
+        {
+            ArchetypeIdByName[identity] = id;
+            return id;
+        }
+
         var next = (ushort)(NextArchetypeId + 1);
         if (next > 4095)
         {
@@ -113,7 +182,7 @@ internal static class ArchetypeRegistry
     // are built atomically and exactly once, closing the flaky-test race (Face A sizing was removed in Phase 1; Face B — a per-engine cascade rebuild
     // double-adding CascadeTargets — is closed here by building the cascade inside the locked, idempotent Freeze). Reentrancy is required: EnsureFinalized
     // recurses up the parent chain (and RunClassConstructor may re-enter via a static field initializer). Runtime READS stay lock-free — the registry is
-    // immutable once frozen. Init/Dispose are off the hot path, so a coarse lock is correct + simple.
+    // stable once frozen for as long as an engine uses them. Init/Dispose are off the hot path, so a coarse lock is correct + simple.
     private static readonly Lock RegistrationLock = new();
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -142,7 +211,7 @@ internal static class ArchetypeRegistry
         // slot mappings work across schema evolution)
         if (!ComponentTypeIds.TryGetValue(typeof(T), out int componentTypeId))
         {
-            var schemaName = typeof(T).GetCustomAttribute<ComponentAttribute>()?.Name;
+            var schemaName = SchemaKeyOf(typeof(T));
             if (schemaName != null && ComponentTypeIdsBySchemaName.TryGetValue(schemaName, out componentTypeId))
             {
                 // Same schema name as another CLR type (schema evolution) — reuse the ID
@@ -180,12 +249,9 @@ internal static class ArchetypeRegistry
     /// </summary>
     /// <param name="archetypeType">The archetype CLR type to finalize.</param>
     /// <param name="fromBarrier">
-    /// True when called from the generated <c>[ModuleInitializer]</c> barrier (feature #514 Phase 5). In that mode a cross-ALC collision — the same archetype
-    /// <see cref="Type.FullName"/> already registered from a DIFFERENT <see cref="AssemblyLoadContext"/> — is a tolerated no-op rather than a throw: the barrier
-    /// registers a whole assembly eagerly at load, and a host that both references a schema (default ALC) and loads it collectibly would otherwise poison the
-    /// module initializer (which fails ALL registrations in that assembly). The archetype is already registered by the other ALC, so there is nothing to do; the
-    /// engine's on-demand path (EngineLifecycle / InitializeArchetypes) remains the authority. Genuine authoring errors (duplicate id, &gt;16 components) still
-    /// throw. Non-barrier callers keep the original strict diagnostic (a real cross-ALC bug is surfaced clearly).
+    /// True when called from the generated <c>[ModuleInitializer]</c> barrier (feature #514 Phase 5). In that mode two assemblies of one load context declaring
+    /// the same archetype <see cref="Type.FullName"/> is a tolerated no-op rather than a throw: the barrier registers a whole assembly eagerly at load, and a
+    /// throw there fails ALL registrations in that assembly. Genuine authoring errors (&gt;16 components) still throw. Non-barrier callers get the diagnostic.
     /// </param>
     internal static void EnsureFinalized(Type archetypeType, bool fromBarrier = false)
     {
@@ -202,13 +268,11 @@ internal static class ArchetypeRegistry
             return;
         }
 
-        // Already finalized? Identity is the CLR type full name (#514 D1 — no author-set id). If this identity already holds a slot filled by a DIFFERENT CLR
-        // type, it's a cross-ALC collision: the same schema loaded into two AssemblyLoadContexts (e.g. the Workbench referencing a schema in the default ALC
-        // while also loading it into a collectible per-session ALC). The two CLR types share their FullName but not identity; the registry can hold only one CLR
-        // type per archetype identity. The barrier tolerates it (the archetype is already registered by the other ALC — nothing to do; throwing would poison the
-        // [ModuleInitializer] and fail every registration in the assembly); strict callers get a clear, actionable diagnostic.
-        var identity = archetypeType.FullName;
-        if (ArchetypeIdByName.TryGetValue(identity!, out var existingId) && Archetypes[existingId] != null)
+        // Already finalized? Identity is the CLR type full name within its load context (#514 D1, #554). A slot held by a DIFFERENT CLR type means two assemblies
+        // of one context declare the same name: the barrier tolerates it, since a throw would poison the [ModuleInitializer] and fail every registration in the
+        // assembly, and strict callers get the diagnostic.
+        var identity = ScopedName(archetypeType, archetypeType.FullName);
+        if (ArchetypeIdByName.TryGetValue(identity, out var existingId) && Archetypes[existingId] != null)
         {
             var existing = Archetypes[existingId];
             if (existing.ArchetypeType != archetypeType)
@@ -218,10 +282,8 @@ internal static class ArchetypeRegistry
                     return;
                 }
                 throw new InvalidOperationException(
-                    $"Archetype '{identity}' is loaded in two different AssemblyLoadContexts. The engine's static archetype registry can hold only one CLR type "
-                    + "per archetype identity. This usually happens when an embedding host (e.g. the Workbench) loads a schema DLL into a collectible ALC for one "
-                    + "operation while another code path references the same archetype from the default ALC. Close any open session that loaded this schema, or "
-                    + "restart the host process, then retry.");
+                    $"Archetype '{archetypeType.FullName}' is declared by two assemblies of one load context ('{existing.ArchetypeType.Assembly.GetName().Name}' and "
+                    + $"'{archetypeType.Assembly.GetName().Name}'). A load context holds one archetype per name: rename one, or load them in separate contexts.");
             }
             return;
         }
@@ -238,14 +300,10 @@ internal static class ArchetypeRegistry
             throw new InvalidOperationException($"Archetype type {archetypeType.Name} is missing [Archetype] attribute");
         }
 
-        // Per-process catalog id is engine-assigned, dense, keyed by identity (#514 D1). Reused if this identity already has one (re-finalize within the same
-        // ALC, or a same-name reload into a fresh ALC after the prior slot was cleared by UnregisterEngineUse).
-        var identity = archetypeType.FullName;
-        var archetypeId = GetOrAssignCatalogId(identity);
-
-        // Already finalized (re-entrant via the parent chain, or a same-identity reload). A slot held by a DIFFERENT CLR type is a cross-ALC collision — surfaced
-        // clearly in EnsureFinalized; reachable here only via parent-chain recursion, where we simply keep the existing registration.
-        if (Archetypes[archetypeId] != null)
+        // Already finalized (re-entrant via the parent chain). A slot held by a DIFFERENT CLR type is two assemblies declaring one name — surfaced clearly in
+        // EnsureFinalized; reachable here only via parent-chain recursion, where we simply keep the existing registration.
+        var identity = ScopedName(archetypeType, archetypeType.FullName);
+        if (ArchetypeIdByName.TryGetValue(identity, out var knownId) && Archetypes[knownId] != null)
         {
             return;
         }
@@ -257,6 +315,7 @@ internal static class ArchetypeRegistry
         // Walk parent chain to collect inherited components (parent-first ordering)
         var allComponents = new List<(Type ComponentType, int ComponentTypeId)>();
         ushort parentArchetypeId = ArchetypeMetadata.NoParent;
+        ArchetypeMetadata parentMeta = null;
 
         var parentType = FindParentArchetypeType(archetypeType);
         if (parentType != null)
@@ -265,7 +324,7 @@ internal static class ArchetypeRegistry
             EnsureFinalized(parentType);
 
             // Parent's catalog id comes from its finalized metadata (#514 D1 — no author-set id to read).
-            if (!MetadataByType.TryGetValue(parentType, out var parentMeta))
+            if (!MetadataByType.TryGetValue(parentType, out parentMeta))
             {
                 throw new InvalidOperationException(
                     $"Parent archetype '{parentType.FullName}' failed to finalize before child '{archetypeType.FullName}' — is it missing [Archetype]?");
@@ -278,9 +337,6 @@ internal static class ArchetypeRegistry
             {
                 allComponents.Add((null, parentMeta._componentTypeIds[i])); // Type not needed, just the ID
             }
-
-            // Register as child of parent
-            parentMeta.ChildArchetypeIds.Add(archetypeId);
         }
 
         // Append own components
@@ -300,7 +356,7 @@ internal static class ArchetypeRegistry
             {
                 ComponentTypeIds[compType] = compTypeId;
                 ComponentTypeById[compTypeId] = compType;
-                var schemaName = compType.GetCustomAttribute<ComponentAttribute>()?.Name;
+                var schemaName = SchemaKeyOf(compType);
                 if (schemaName != null && !ComponentTypeIdsBySchemaName.ContainsKey(schemaName))
                 {
                     ComponentTypeIdsBySchemaName[schemaName] = compTypeId;
@@ -314,6 +370,11 @@ internal static class ArchetypeRegistry
             throw new InvalidOperationException($"Archetype {archetypeType.Name} has {totalComponentCount} components (max 16). " +
                                                 $"Inherited: {allComponents.Count - ownComponents.Count}, Own: {ownComponents.Count}");
         }
+
+        // Per-process catalog id is engine-assigned, dense, keyed by identity (#514 D1). Past the throw above, so an archetype that cannot finalize holds no id: a
+        // scoped identity never recurs, and each reload would lose one.
+        var archetypeId = GetOrAssignCatalogId(identity);
+        parentMeta?.ChildArchetypeIds.Add(archetypeId);
 
         // Build slot mapping — flat array indexed by componentTypeId (0xFF = not present)
         var componentTypeIds = new int[totalComponentCount];
@@ -358,6 +419,7 @@ internal static class ArchetypeRegistry
             ComponentCount = totalComponentCount,
             ParentArchetypeId = parentArchetypeId,
             ArchetypeType = archetypeType,
+            LoadContext = AssemblyLoadContext.GetLoadContext(archetypeType.Assembly),
             _componentTypeIds = componentTypeIds,
             _typeIdToSlot = typeIdToSlot,
             _slotToComponentType = slotToComponentType,
@@ -423,11 +485,51 @@ internal static class ArchetypeRegistry
     {
         for (int i = 0; i < Archetypes.Length; i++)
         {
-            if (Archetypes[i] != null)
+            // One read: a session closing can null the slot between two.
+            var meta = Archetypes[i];
+            if (meta != null)
             {
-                yield return Archetypes[i];
+                yield return meta;
             }
         }
+    }
+
+    /// <summary>
+    /// The archetypes of one load context, and their ancestors wherever those live: what an engine of that context consumes (#554). A schema's parent can sit in a
+    /// dependency the host resolved from the default context. The rest of the registry is another schema's.
+    /// </summary>
+    internal static ArchetypeMetadata[] GetArchetypesFor(AssemblyLoadContext context)
+    {
+        var own = new List<ArchetypeMetadata>();
+        HashSet<ArchetypeMetadata> ancestors = null;
+        for (var i = 0; i < Archetypes.Length; i++)
+        {
+            var meta = Archetypes[i];
+            if (meta == null || meta.LoadContext != context)
+            {
+                continue;
+            }
+
+            own.Add(meta);
+            for (var parentId = meta.ParentArchetypeId; parentId != ArchetypeMetadata.NoParent;)
+            {
+                var parent = Archetypes[parentId];
+                if (parent == null || parent.LoadContext == context)
+                {
+                    break;
+                }
+
+                (ancestors ??= []).Add(parent);
+                parentId = parent.ParentArchetypeId;
+            }
+        }
+
+        if (ancestors != null)
+        {
+            own.AddRange(ancestors);
+        }
+
+        return own.ToArray();
     }
 
     /// <summary>
@@ -663,26 +765,7 @@ internal static class ArchetypeRegistry
                 {
                     continue; // refcount went to 0 but we leave the registry intact for default-ALC types
                 }
-                // Remove from every static table that holds this Type — identity check on Archetypes[id] guards against a stale slot that was overwritten via
-                // a different code path (defensive).
-                if (MetadataByType.Remove(t, out var meta))
-                {
-                    if (meta.ArchetypeId < Archetypes.Length && Archetypes[meta.ArchetypeId] == meta)
-                    {
-                        Archetypes[meta.ArchetypeId] = null;
-                        RegisteredCount--;
-                    }
-                }
-                // Note: PendingRegistrations is intentionally NOT cleared here. It's a ConditionalWeakTable keyed on Type; entries self-clean when the Type
-                // is GC'd (ALC unload). Within the same ALC, keeping the entry lets a re-finalize succeed (the static ctor that populated it runs at most
-                // once per Type per process — without the cached entry, FinalizeArchetypeInternal would see an empty components list and produce a broken
-                // metadata). Clear the per-generic-instantiation `Archetype<T>._metadata` static field. This is critical: the static cache lives on the generic
-                // instantiation `Archetype<TSelf>` and is NOT released by removing entries from the registry's dictionaries — `_metadata` still holds the
-                // orphaned ArchetypeMetadata, so a subsequent `Archetype<TSelf>.Touch()` returns the stale reference without re-finalizing (the class
-                // constructor has already run; the cached value short-circuits `EnsureFinalized`). Net effect without this clear: the next engine that touches
-                // the same TSelf type sees `Metadata != null` but `Archetypes[id] == null`, and `InitializeArchetypes` never re-populates the per-engine
-                // state → `Spawn` fails its EntityMap assertion.
-                ClearArchetypeMetadataField(t);
+                ReleaseArchetype(t);
             }
 
             foreach (var t in componentTypes)
@@ -702,60 +785,102 @@ internal static class ArchetypeRegistry
                 {
                     continue;
                 }
-                if (ComponentTypeIds.Remove(t, out var id))
-                {
-                    // Reverse-mapping discipline: drop it only when this Type is still the one stored there, AND restore it to any OTHER Type that still claims
-                    // the same id afterward.
-                    //
-                    // Schema-name dedup in `DeclareComponent` makes this important: a default-ALC component can register first
-                    // (ComponentTypeById[id] = default-ALC Type), then a collectible-ALC copy of the same component overrides via the schema-name path
-                    // (ComponentTypeById[id] = ALC Type). When the ALC unloads and we remove its forward mapping, the default-ALC version is still in
-                    // ComponentTypeIds — we must point the reverse mapping back at it so the engine's slot→Type lookups keep working for the surviving
-                    // default-ALC archetypes. O(N) walk over ComponentTypeIds; bounded by the small component-type count (≤ a few hundred in any realistic
-                    // schema).
-                    if (ComponentTypeById.TryGetValue(id, out var current) && current == t)
-                    {
-                        Type fallback = null;
-                        foreach (var (otherType, otherId) in ComponentTypeIds)
-                        {
-                            if (otherId == id && otherType != t)
-                            {
-                                fallback = otherType;
-                                break;
-                            }
-                        }
-                        if (fallback != null)
-                        {
-                            ComponentTypeById[id] = fallback;
-                        }
-                        else
-                        {
-                            ComponentTypeById.TryRemove(id, out _);
-                        }
-                    }
-                    // Same fallback discipline for the schema-name → id mapping.
-                    var schemaName = t.GetCustomAttribute<ComponentAttribute>()?.Name;
-                    if (schemaName != null && ComponentTypeIdsBySchemaName.TryGetValue(schemaName, out var schemaId) && schemaId == id)
-                    {
-                        // Check whether any other Type still claims this id — if yes, leave the schema-name
-                        // mapping intact (it still resolves to a valid Type); if no, drop it.
-                        var anyOther = false;
-                        foreach (var (otherType, otherId) in ComponentTypeIds)
-                        {
-                            if (otherId == id && otherType != t)
-                            {
-                                anyOther = true;
-                                break;
-                            }
-                        }
-                        if (!anyOther)
-                        {
-                            ComponentTypeIdsBySchemaName.TryRemove(schemaName, out _);
-                        }
-                    }
-                }
+                ReleaseComponent(t);
             }
         }
+    }
+
+    /// <summary>Removes an archetype of a collectible context from every static table that holds its Type, and gives its catalog id back. Under the lock.</summary>
+    private static void ReleaseArchetype(Type t)
+    {
+        // Identity check on Archetypes[id] guards against a stale slot that was overwritten via a different code path (defensive).
+        if (MetadataByType.Remove(t, out var meta) && meta.ArchetypeId < Archetypes.Length && Archetypes[meta.ArchetypeId] == meta)
+        {
+            Archetypes[meta.ArchetypeId] = null;
+            RegisteredCount--;
+
+            // A default-context parent stays registered: it must not go on naming a child whose id the next schema gets. The derived graphs rebuild at the next
+            // Freeze.
+            if (meta.ParentArchetypeId != ArchetypeMetadata.NoParent)
+            {
+                Archetypes[meta.ParentArchetypeId]?.ChildArchetypeIds.Remove(meta.ArchetypeId);
+            }
+
+            ArchetypeIdByName.Remove(ScopedName(t, t.FullName));
+            FreeCatalogIds.Enqueue(meta.ArchetypeId);
+            Frozen = false;
+        }
+
+        // Note: PendingRegistrations is intentionally NOT cleared here. It's a ConditionalWeakTable keyed on Type; entries self-clean when the Type is GC'd (ALC
+        // unload). Within the same ALC, keeping the entry lets a re-finalize succeed (the static ctor that populated it runs at most once per Type per process —
+        // without the cached entry, FinalizeArchetypeInternal would see an empty components list and produce a broken metadata). Clear the per-generic-instantiation
+        // `Archetype<T>._metadata` static field. This is critical: the static cache lives on the generic instantiation `Archetype<TSelf>` and is NOT released by
+        // removing entries from the registry's dictionaries — `_metadata` still holds the orphaned ArchetypeMetadata, so a subsequent `Archetype<TSelf>.Touch()`
+        // returns the stale reference without re-finalizing (the class constructor has already run; the cached value short-circuits `EnsureFinalized`). Net effect
+        // without this clear: the next engine that touches the same TSelf type sees `Metadata != null` but `Archetypes[id] == null`, and `InitializeArchetypes` never
+        // re-populates the per-engine state → `Spawn` fails its EntityMap assertion.
+        ClearArchetypeMetadataField(t);
+    }
+
+    /// <summary>Removes a component of a collectible context from every static table that holds its Type. Under the lock.</summary>
+    private static void ReleaseComponent(Type t)
+    {
+        if (!ComponentTypeIds.Remove(t, out var id))
+        {
+            return;
+        }
+
+        // Reverse-mapping discipline: drop it only when this Type is still the one stored there, AND restore it to any OTHER Type that still claims the same id
+        // afterward. V1/V2 dedup in `DeclareComponent` makes this important: V1 registers first (ComponentTypeById[id] = V1), then V2 overrides via the schema-name
+        // path. Removing V2's forward mapping leaves V1 in ComponentTypeIds, and the reverse mapping must point back at it so the slot→Type lookups keep working.
+        // O(N) walk over ComponentTypeIds; bounded by the small component-type count (≤ a few hundred in any realistic schema).
+        if (ComponentTypeById.TryGetValue(id, out var current) && current == t)
+        {
+            Type fallback = null;
+            foreach (var (otherType, otherId) in ComponentTypeIds)
+            {
+                if (otherId == id && otherType != t)
+                {
+                    fallback = otherType;
+                    break;
+                }
+            }
+            if (fallback != null)
+            {
+                ComponentTypeById[id] = fallback;
+            }
+            else
+            {
+                ComponentTypeById.TryRemove(id, out _);
+            }
+        }
+
+        // Same fallback discipline for the schema-name → id mapping.
+        var schemaName = SchemaKeyOf(t);
+        if (schemaName != null && ComponentTypeIdsBySchemaName.TryGetValue(schemaName, out var schemaId) && schemaId == id)
+        {
+            // Check whether any other Type still claims this id — if yes, leave the schema-name mapping intact (it still resolves to a valid Type); if no, drop it.
+            var anyOther = false;
+            foreach (var (otherType, otherId) in ComponentTypeIds)
+            {
+                if (otherId == id && otherType != t)
+                {
+                    anyOther = true;
+                    break;
+                }
+            }
+            if (!anyOther)
+            {
+                ComponentTypeIdsBySchemaName.TryRemove(schemaName, out _);
+            }
+        }
+    }
+
+    /// <summary>The key of <see cref="ComponentTypeIdsBySchemaName"/> for a component, or <c>null</c> when it declares no schema name.</summary>
+    private static string SchemaKeyOf(Type componentType)
+    {
+        var schemaName = componentType.GetCustomAttribute<ComponentAttribute>()?.Name;
+        return schemaName == null ? null : ScopedName(componentType, schemaName);
     }
 
     /// <summary>
@@ -812,42 +937,65 @@ internal static class ArchetypeRegistry
     /// </summary>
     private static readonly ConditionalWeakTable<Type, FieldInfo> MetadataFieldCache = new();
 
+    /// <summary>The <see cref="FreezeGeneration"/> each load context last passed validation at. Weakly keyed, so it pins no context.</summary>
+    private static readonly ConditionalWeakTable<AssemblyLoadContext, StrongBox<int>> ValidatedAt = new();
+
+    /// <summary>Counts the rebuilds of the derived data, so that a context is validated once per rebuild and not once per engine.</summary>
+    private static int FreezeGeneration;
+
     /// <summary>
-    /// Freeze the registry: build SubtreeArchetypeIds for each archetype, prevent further registration. Called by DatabaseEngine before the first transaction.
+    /// Freeze the registry and validate one load context's schema: build SubtreeArchetypeIds and the cascade graph, prevent further registration. Called by
+    /// DatabaseEngine before the first transaction.
     /// </summary>
-    public static void Freeze()
+    /// <param name="context">The context whose schema the caller consumes; null means the default one.</param>
+    /// <remarks>
+    /// The derived data is process-wide and built once, but validation is per context (#554): a schema that fails it refuses the engines that consume it, and
+    /// cannot refuse the open of a database in another context.
+    /// </remarks>
+    public static void Freeze(AssemblyLoadContext context = null)
     {
+        context ??= AssemblyLoadContext.Default;
+
         // Lock first, THEN check Frozen — so the check + build + set is atomic and the global derived data (subtree + cascade graph) is built EXACTLY ONCE
         // across concurrent DatabaseEngine.InitializeArchetypes calls. A late DeclareComponent flips Frozen back to false, so a subsequent Freeze rebuilds.
         using var scopeLock = RegistrationLock.EnterScope();
-        if (Frozen)
+        if (!Frozen)
+        {
+            // Build SubtreeArchetypeIds for each registered archetype
+            for (int i = 0; i < Archetypes.Length; i++)
+            {
+                var meta = Archetypes[i];
+                if (meta == null)
+                {
+                    continue;
+                }
+
+                var subtree = new List<ushort>();
+                CollectSubtree(meta.ArchetypeId, subtree);
+                meta.SubtreeArchetypeIds = subtree.ToArray();
+            }
+
+            // Build the cascade-delete graph here (once, under the lock) rather than per-engine. The per-engine rebuild was Face B of the flaky race: two engines
+            // concurrently clearing + re-adding CascadeTargets on the shared metadata produced a spurious "cascade diamond". #514 Phase 3.
+            BuildCascadeGraphs();
+
+            FreezeGeneration++;
+            Frozen = true;
+        }
+
+        if (ValidatedAt.TryGetValue(context, out var validated) && validated.Value == FreezeGeneration)
         {
             return;
         }
 
-        // Build SubtreeArchetypeIds for each registered archetype
-        for (int i = 0; i < Archetypes.Length; i++)
-        {
-            var meta = Archetypes[i];
-            if (meta == null)
-            {
-                continue;
-            }
-
-            var subtree = new List<ushort>();
-            CollectSubtree(meta.ArchetypeId, subtree);
-            meta.SubtreeArchetypeIds = subtree.ToArray();
-        }
-
-        // Build + validate the cascade-delete graph here (once, under the lock) rather than per-engine. The per-engine rebuild was Face B of the flaky race:
-        // two engines concurrently clearing + re-adding CascadeTargets on the shared metadata produced a spurious "cascade diamond". #514 Phase 3.
-        BuildAndValidateCascadeGraph();
+        var archetypes = GetArchetypesFor(context);
+        ValidateCascadeGraph(archetypes);
 
         // #678 step 1. Validated HERE and not in FinalizeArchetypeInternal on purpose: finalization runs inside the generated [ModuleInitializer] barrier, and
         // a throw there fails EVERY registration in the assembly (see EnsureFinalized's remarks) rather than the one schema at fault.
-        ValidateComponentDeclarations(GetAllArchetypes());
+        ValidateComponentDeclarations(archetypes);
 
-        Frozen = true;
+        ValidatedAt.AddOrUpdate(context, new StrongBox<int>(FreezeGeneration));
     }
 
     /// <summary>
@@ -878,7 +1026,7 @@ internal static class ArchetypeRegistry
     /// Takes the archetype list explicitly so it can be exercised without registering a schema that would poison the module-init barrier for a whole assembly.
     /// </para>
     /// </remarks>
-    /// <param name="archetypes">Every archetype to validate together — normally the whole process-global catalog.</param>
+    /// <param name="archetypes">Every archetype to validate together — normally one load context's.</param>
     /// <exception cref="InvalidOperationException">
     /// A component is declared twice in one chain, or a unique-indexed component has more than one declarer in a single tree.
     /// </exception>
@@ -1025,10 +1173,10 @@ internal static class ArchetypeRegistry
     }
 
     /// <summary>
-    /// Build and validate the cascade delete graph. Must be called after Freeze() and after all archetypes have their SlotToComponentType populated.
+    /// Build the cascade delete graph. Called by <see cref="Freeze"/> once all archetypes have their SlotToComponentType populated.
     /// Safe to call multiple times (rebuilds each time).
     /// </summary>
-    public static void BuildAndValidateCascadeGraph()
+    private static void BuildCascadeGraphs()
     {
         // Built aside and swapped in per archetype: a commit running meanwhile reads either graph, never one cleared to nothing (CASC-02).
         var targets = new Dictionary<ArchetypeMetadata, List<CascadeTarget>>();
@@ -1041,7 +1189,6 @@ internal static class ArchetypeRegistry
         }
 
         IndexCascadeFkComponents();
-        ValidateCascadeGraph();
     }
 
     /// <summary>
@@ -1084,13 +1231,11 @@ internal static class ArchetypeRegistry
                     // Extract target archetype type from EntityLink<T>
                     var targetArchetypeType = field.FieldType.GetGenericArguments()[0];
 
-                    // Register the cascade target on the PARENT (target) archetype, resolved by IDENTITY (name) → the single authoritative catalog slot
-                    // (#514 D1). A type-keyed lookup is fragile across ALCs: when the EntityLink's type argument is a cross-ALC twin, its own finalization may
-                    // have been skipped by the cross-ALC guard, so it isn't in MetadataByType — yet the destroy path resolves the entity's archetype through the
-                    // name-assigned catalog slot. Registering here on that same Archetypes[catalogId] instance keeps the cascade edge and the destroy lookup on
-                    // one metadata object.
+                    // Register the cascade target on the PARENT (target) archetype, resolved by IDENTITY → the single authoritative catalog slot (#514 D1). The
+                    // destroy path resolves the entity's archetype through that same slot, so the cascade edge and the destroy lookup stay on one metadata object.
                     var targetName = targetArchetypeType.FullName;
-                    if (targetName == null || !ArchetypeIdByName.TryGetValue(targetName, out var targetCatalogId) || Archetypes[targetCatalogId] == null)
+                    if (targetName == null || !ArchetypeIdByName.TryGetValue(ScopedName(targetArchetypeType, targetName), out var targetCatalogId)
+                        || Archetypes[targetCatalogId] == null)
                     {
                         continue;
                     }
@@ -1159,13 +1304,13 @@ internal static class ArchetypeRegistry
     /// <summary>
     /// Validate the cascade graph: no cycles, no diamonds. DFS from each root.
     /// </summary>
-    private static void ValidateCascadeGraph()
+    private static void ValidateCascadeGraph(ArchetypeMetadata[] archetypes)
     {
         // Collect all archetypes that have cascade targets (potential roots)
         var visited = new HashSet<ushort>();
         var inStack = new HashSet<ushort>();
 
-        foreach (var meta in GetAllArchetypes())
+        foreach (var meta in archetypes)
         {
             if (meta._cascadeTargets == null || meta._cascadeTargets.Count == 0)
             {

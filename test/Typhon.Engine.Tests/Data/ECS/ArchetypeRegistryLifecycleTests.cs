@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
@@ -169,6 +170,87 @@ internal sealed class ArchetypeRegistryLifecycleTests : TestBase<ArchetypeRegist
             "Collectible ALC was not reclaimed by GC after Unload + UnregisterEngineUse. Something in the "
             + "engine's static state is still pinning a Type from the ALC's assembly. Check that every "
             + "Type-holding registry table is cleared by UnregisterEngineUse for collectible-ALC entries.");
+    }
+
+    private static string SwgSchemaPath()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "Typhon.Samples.Swg.dll");
+        Assume.That(File.Exists(path), "needs the sample schema beside the test assembly");
+        return path;
+    }
+
+    /// <summary>A schema loaded into a fresh collectible context, its barrier fired.</summary>
+    private static (AssemblyLoadContext Context, Assembly Schema) LoadSchema(string path, string name)
+    {
+        var context = new AssemblyLoadContext(name, isCollectible: true);
+        var schema = context.LoadFromAssemblyPath(path);
+        RuntimeHelpers.RunModuleConstructor(schema.ManifestModule.ModuleHandle);
+        return (context, schema);
+    }
+
+    [Test]
+    [VerifiesRule("SCHEMA-10")]
+    public void TwoContexts_OfOneSchema_HoldSeparateArchetypes()
+    {
+        var path = SwgSchemaPath();
+        var (first, _) = LoadSchema(path, "side-by-side-1");
+        var (second, _) = LoadSchema(path, "side-by-side-2");
+        try
+        {
+            var ofFirst = ArchetypeRegistry.GetArchetypesFor(first).ToArray();
+            var ofSecond = ArchetypeRegistry.GetArchetypesFor(second).ToArray();
+
+            Assert.That(ofFirst, Is.Not.Empty);
+            Assert.That(ofFirst.Select(m => m.ArchetypeType.FullName), Is.EquivalentTo(ofSecond.Select(m => m.ArchetypeType.FullName)));
+            Assert.That(ofFirst.Select(m => m.ArchetypeId).Intersect(ofSecond.Select(m => m.ArchetypeId)), Is.Empty, "one catalog slot per copy");
+            Assert.That(ofFirst.All(m => m.LoadContext == first), Is.True);
+            Assert.That(ArchetypeRegistry.GetArchetypesFor(AssemblyLoadContext.Default).Intersect(ofFirst), Is.Empty, "a default-context engine never sees them");
+
+            var a = ofFirst[0];
+            var b = ofSecond.Single(m => m.ArchetypeType.FullName == a.ArchetypeType.FullName);
+            Assert.That(a._componentTypeIds.Intersect(b._componentTypeIds), Is.Empty, "a component's copies are two components, as they are two types");
+        }
+        finally
+        {
+            first.Unload();
+            second.Unload();
+        }
+    }
+
+    [Test]
+    [VerifiesRule("SCHEMA-10")]
+    public void AnUnloadedContext_ReleasesWhatNoEngineUsed()
+    {
+        var (context, _) = LoadSchema(SwgSchemaPath(), "never-opened");
+        var ids = ArchetypeRegistry.GetArchetypesFor(context).Select(m => m.ArchetypeId).ToArray();
+        Assert.That(ids, Is.Not.Empty);
+
+        context.Unload();
+
+        Assert.That(ArchetypeRegistry.GetArchetypesFor(context), Is.Empty);
+        Assert.That(ids.All(id => ArchetypeRegistry.GetMetadata(id) == null), Is.True, "a schema that was loaded and never opened must not hold its slots");
+    }
+
+    [Test]
+    [VerifiesRule("SCHEMA-10")]
+    public void CatalogIds_ComeBackWithTheirContext()
+    {
+        // A Workbench reopening a database gets a new context every time: ids that did not come back would run the 4095-entry catalog out.
+        var path = SwgSchemaPath();
+        var (firstContext, _) = LoadSchema(path, "cycle-first");
+        var firstIds = ArchetypeRegistry.GetArchetypesFor(firstContext).ToDictionary(m => m.ArchetypeType.FullName, m => m.ArchetypeId);
+        firstContext.Unload();
+        var highWater = ArchetypeRegistry.MaxArchetypeId;
+
+        for (var cycle = 0; cycle < 5; cycle++)
+        {
+            var (context, _) = LoadSchema(path, $"cycle-{cycle}");
+            Assert.That(ArchetypeRegistry.GetArchetypesFor(context).ToDictionary(m => m.ArchetypeType.FullName, m => m.ArchetypeId), Is.EquivalentTo(firstIds),
+                "each archetype keeps its id: a \"#<id>\" in a saved query names it across a reopen");
+            context.Unload();
+        }
+
+        Assert.That(ArchetypeRegistry.MaxArchetypeId, Is.EqualTo(highWater));
     }
 
     /// <summary>

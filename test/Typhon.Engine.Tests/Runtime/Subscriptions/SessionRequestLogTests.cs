@@ -1,3 +1,5 @@
+using System.Threading;
+using System.Threading.Tasks;
 using NUnit.Framework;
 using System;
 using System.Collections.Generic;
@@ -121,14 +123,15 @@ class SessionRequestLogTests
     // ── ordering ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     [Test]
-    public void LastWriterWinsPerFieldInWorkerThenRecordOrder()
+    [VerifiesRule("SUB-39")]
+    public void RequestsApplyInCallOrderAcrossSegments()
     {
         var session = OpenSession();
         var log = new SessionRequestLog(3);
 
-        // Worker 2 records first in wall-clock terms; worker 0 records last. The apply order is the worker index, so worker 2's values must win regardless.
-        log.Request(2, session).Profile("late-worker").SetBudget(3);
-        log.Request(0, session).Profile("early-worker").SetBudget(1);
+        // The later call wins whatever segment it landed in: worker 0 records last, and the worker index says nothing.
+        log.Request(2, session).Profile("first").SetBudget(3);
+        log.Request(0, session).Profile("last").SetBudget(1);
         log.Request(1, session).SetBudget(2);
 
         Assert.That(log.Apply(_table), Is.EqualTo(5));
@@ -137,9 +140,47 @@ class SessionRequestLogTests
 
         Assert.Multiple(() =>
         {
-            Assert.That(_table.ProfileName(session), Is.EqualTo("late-worker"), "the highest worker index applies last");
-            Assert.That(budget, Is.EqualTo(3));
+            Assert.That(_table.ProfileName(session), Is.EqualTo("last"), "the later call");
+            Assert.That(budget, Is.EqualTo(2));
         });
+    }
+
+    /// <summary>Four workers on their own segments, at once: every request lands, and each worker's own come out in the order it made them.</summary>
+    [Test]
+    [CancelAfter(10_000)]
+    [VerifiesRule("SUB-39")]
+    public void WorkersRecordingAtOnce_LoseNothing()
+    {
+        const int Workers = 4;
+        const int PerWorker = 1000;
+        var sessions = new SessionId[Workers];
+        for (var i = 0; i < Workers; i++)
+        {
+            sessions[i] = OpenSession();
+        }
+
+        var log = new SessionRequestLog(Workers);
+        using var start = new Barrier(Workers);
+        var tasks = new Task[Workers];
+        for (var w = 0; w < Workers; w++)
+        {
+            var worker = w;
+            tasks[w] = Task.Run(() =>
+            {
+                start.SignalAndWait();
+                for (var i = 1; i <= PerWorker; i++)
+                {
+                    log.Request(worker, sessions[worker]).SetBudget(worker * 10_000 + i);
+                }
+            });
+        }
+
+        Task.WaitAll(tasks);
+        Assert.That(log.Apply(_table), Is.EqualTo(Workers * PerWorker));
+        for (var w = 0; w < Workers; w++)
+        {
+            Assert.That(_table.Row(sessions[w]).BytesPerSecond, Is.EqualTo(w * 10_000 + PerWorker));
+        }
     }
 
     [Test]

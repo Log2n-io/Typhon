@@ -65,6 +65,23 @@ internal ref struct ComponentRevisionManager
 
     internal static ElementRevisionHandle GetRevisionElement(ref ChunkAccessor<PersistentStore> accessor, int firstChunkId, short revisionIndex)
     {
+        if (revisionIndex < CompRevCountInRoot)
+        {
+            return new ElementRevisionHandle(ref accessor, firstChunkId, true, revisionIndex);
+        }
+
+        var wc = WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
+        return GetRevisionElement(ref accessor, firstChunkId, revisionIndex, ref wc);
+    }
+
+    /// <summary>
+    /// As the other overload, with the caller's wait: a commit's PREPARE passes the deadline it composed with its unit of work, so a cancelled unit of
+    /// work does not wait
+    /// out a full chain-lock timeout on this one lock.
+    /// </summary>
+    internal static ElementRevisionHandle GetRevisionElement(ref ChunkAccessor<PersistentStore> accessor, int firstChunkId, short revisionIndex,
+        scoped ref WaitContext wc)
+    {
         ref var firstHeader = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId);
         if (revisionIndex < CompRevCountInRoot)
         {
@@ -82,7 +99,6 @@ internal ref struct ComponentRevisionManager
         if (useLock)
         {
             ticket = ChainLockTicket(ref accessor, ref firstHeader);
-            var wc = WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
             if (!firstHeader.Control.EnterSharedAccess(ref wc))
             {
                 ThrowHelper.ThrowLockTimeout("RevisionChain/GetElement", TimeoutOptions.Current.RevisionChainLockTimeout);
@@ -122,8 +138,15 @@ internal ref struct ComponentRevisionManager
     /// <summary>Appends refused because their chain was full (<see cref="MaxChainRevisionIndex"/>), restarts included. Diagnostic.</summary>
     internal static long ChainFullRefusals => Interlocked.Read(ref s_chainFullRefusals);
 
+    /// <param name="info">The component's transaction state.</param>
+    /// <param name="compRevInfo">The entity's cached entry, moved to the new revision.</param>
+    /// <param name="tsn">The writer's TSN.</param>
+    /// <param name="uowId">The writer's unit of work.</param>
+    /// <param name="isDelete">A tombstone: its content chunk is 0.</param>
+    /// <param name="lockAlreadyHeld">The caller holds the chain's exclusive lock.</param>
+    /// <param name="preparedChunkId">The content chunk of a revision the caller built before appending it (CHAIN-02); 0 to allocate one here.</param>
     internal static unsafe void AddCompRev(ComponentInfo info, ref ComponentInfo.CompRevInfo compRevInfo, long tsn, ushort uowId, bool isDelete,
-        bool lockAlreadyHeld = false)
+        bool lockAlreadyHeld = false, int preparedChunkId = 0)
     {
         ref var compRevTableAccessor = ref info.CompRevTableAccessor;
         var compContent = info.CompContentSegment;
@@ -200,7 +223,7 @@ internal ref struct ComponentRevisionManager
             }
 
             // Allocate a new component
-            var componentChunkId = isDelete ? 0 : compContent.AllocateChunk(false, info.CompContentAccessor.ChangeSet);
+            var componentChunkId = isDelete ? 0 : preparedChunkId != 0 ? preparedChunkId : compContent.AllocateChunk(false, info.CompContentAccessor.ChangeSet);
 
             // Add our new entry
             curChunkElements[indexInChunk].TSN = tsn;

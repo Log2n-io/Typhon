@@ -24,49 +24,30 @@ namespace Typhon.Workbench.Tests.Sessions;
 /// </para>
 /// </remarks>
 [TestFixture]
-// [NonParallelizable] because SetUp redirects the captures directory through TYPHON_WORKBENCH_CAPTURES_DIR, a PROCESS-wide environment
-// variable, and restores it in TearDown. The assembly is [Parallelizable(ParallelScope.Fixtures)] with four workers, and three fixtures here
-// redirect the same variable — so a sibling's SetUp could overwrite it mid-test and this fixture then pruned the sibling's directory instead of
-// its own, leaving its own files in place. That is how ApplyRetention_EvictsOldestFirst_UntilWithinBudget failed in the gate while passing every
-// time in isolation: the file it asserts was evicted had never been looked at.
-[NonParallelizable]
 public sealed class CaptureShutdownSaveTests
 {
     private static CancellationToken Timeout15s => new CancellationTokenSource(TimeSpan.FromSeconds(15)).Token;
 
     private string _capturesDir;
-    private string _previousOverride;
 
-    /// <summary>Auto-save writes real files and prunes the directory afterwards — never point it at the real archive.</summary>
+    /// <summary>
+    /// Auto-save writes real files and prunes the directory afterwards — never point it at the real archive. Each session is pointed here through
+    /// <c>AutoSaveDirectory</c>: the process-wide override variable would let parallel fixtures write into each other's folders, and delete them (#895).
+    /// </summary>
     [SetUp]
-    public void RedirectCapturesDirectory()
+    public void CreateCapturesDirectory()
     {
-        _previousOverride = Environment.GetEnvironmentVariable(CaptureStorage.DirectoryOverrideVariable);
         _capturesDir = Path.Combine(Path.GetTempPath(), "typhon-capture-shutdown-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_capturesDir);
-        Environment.SetEnvironmentVariable(CaptureStorage.DirectoryOverrideVariable, _capturesDir);
     }
 
     [TearDown]
-    public void RestoreCapturesDirectory()
+    public void DeleteCapturesDirectory()
     {
-        Environment.SetEnvironmentVariable(CaptureStorage.DirectoryOverrideVariable, _previousOverride);
         try { Directory.Delete(_capturesDir, recursive: true); } catch (IOException) { /* best-effort */ }
     }
 
-    private static async Task<bool> WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
-    {
-        var deadline = DateTime.UtcNow + timeout;
-        while (DateTime.UtcNow < deadline)
-        {
-            if (condition())
-            {
-                return true;
-            }
-            await Task.Delay(10);
-        }
-        return condition();
-    }
+    private Task<CaptureHarness> StartCherryPickAsync() => CaptureHarness.StartAsync(CaptureMode.CherryPick, Timeout15s, _capturesDir);
 
     /// <summary>Record two windows, the way an operator does: arm, let it run, arm again.</summary>
     private static async Task RecordTwoWindowsAsync(CaptureHarness h)
@@ -94,18 +75,14 @@ public sealed class CaptureShutdownSaveTests
     [Test]
     public async Task QuitThenCaptureAndAnalyse_CompletesInsteadOfHanging()
     {
-        await using var h = await CaptureHarness.StartAsync(CaptureMode.CherryPick, Timeout15s);
+        await using var h = await StartCherryPickAsync();
         h.Server.CreatedUtcTicks = 10;
-
-        string autoSavedPath = null;
-        h.Runtime.CaptureAutoSaved += p => autoSavedPath = p;
 
         await RecordTwoWindowsAsync(h);
 
         // The user quits the app — a clean Shutdown frame, not a dropped socket.
         await h.Server.SendShutdownAsync(Timeout15s);
-        var autoSaved = await WaitUntilAsync(() => autoSavedPath != null, TimeSpan.FromSeconds(12));
-        Assert.That(autoSaved, Is.True, "quitting must auto-save the recorded window before teardown");
+        await h.AutoSave.WaitAsync(TimeSpan.FromSeconds(15));
 
         // The banner's Capture & Analyse button: POST /save-replay → SaveSessionAsync on the same runtime.
         var target = Path.Combine(_capturesDir, "capture-and-analyse.typhon-replay");
@@ -133,7 +110,7 @@ public sealed class CaptureShutdownSaveTests
     {
         string savedPath = null;
         {
-            await using var h = await CaptureHarness.StartAsync(CaptureMode.CherryPick, Timeout15s);
+            await using var h = await StartCherryPickAsync();
             h.Runtime.CaptureAutoSaved += p => savedPath = p;
             await RecordTwoWindowsAsync(h);
             // No shutdown frame, no restart — the session is simply disposed, as StopWatching and session close both do.
@@ -150,7 +127,7 @@ public sealed class CaptureShutdownSaveTests
     {
         string savedPath = null;
         {
-            await using var h = await CaptureHarness.StartAsync(CaptureMode.CherryPick, Timeout15s);
+            await using var h = await StartCherryPickAsync();
             h.Runtime.CaptureAutoSaved += p => savedPath = p;
             for (var i = 0; i < 3; i++)
             {
@@ -163,13 +140,37 @@ public sealed class CaptureShutdownSaveTests
     }
 
     /// <summary>
+    /// A save that fails says so. It is best-effort and never throws, so without this a failed save is only a wait that runs out.
+    /// </summary>
+    [Test]
+    public async Task AutoSaveFailure_IsReported()
+    {
+        var notADirectory = Path.Combine(_capturesDir, "a-file");
+        await File.WriteAllTextAsync(notADirectory, "the auto-save cannot create a directory here");
+
+        await using var h = await CaptureHarness.StartAsync(CaptureMode.CherryPick, Timeout15s, notADirectory);
+        h.Server.CreatedUtcTicks = 10;
+        await RecordTwoWindowsAsync(h);
+
+        await h.Server.SendShutdownAsync(Timeout15s);
+
+        var failure = Assert.ThrowsAsync<InvalidOperationException>(() => h.AutoSave.WaitAsync(TimeSpan.FromSeconds(15)));
+        Assert.That(failure.Message, Does.Contain("engine_shutdown"), "the reason names the teardown that asked for the save");
+        Assert.That(h.Runtime.AutoSavedPath, Is.Null);
+
+        // The session survives it: what it recorded can still be saved by hand.
+        var target = Path.Combine(_capturesDir, "after-the-failure.typhon-replay");
+        Assert.That(await h.Runtime.SaveSessionAsync(target, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(15)), Is.GreaterThan(0));
+    }
+
+    /// <summary>
     /// The same save, without the preceding quit. Isolates the auto-save from the save: if this passes and the test
     /// above hangs, the teardown path is what breaks the later one.
     /// </summary>
     [Test]
     public async Task SaveWhileStillLive_Completes()
     {
-        await using var h = await CaptureHarness.StartAsync(CaptureMode.CherryPick, Timeout15s);
+        await using var h = await StartCherryPickAsync();
         h.Server.CreatedUtcTicks = 10;
 
         await RecordTwoWindowsAsync(h);
