@@ -119,7 +119,6 @@ public static class B7Runner
             {
                 var sacc = stx.For<SvValArch>();
                 long sum = ScanRange(ref sacc, 0, sacc.ClusterCount);
-                sacc.Dispose();
                 GC.KeepAlive(sum);
             }, 1, warmupBatches: 5, minMs: 500);
         }
@@ -160,7 +159,6 @@ public static class B7Runner
                 while (!Volatile.Read(ref stop)) { sum += ScanRange(ref acc, start, end); p++; }
                 passes[wid] = p;
                 GC.KeepAlive(sum);
-                acc.Dispose();
                 tx.Dispose();
             }) { IsBackground = true };
             workers[w].Start();
@@ -174,7 +172,6 @@ public static class B7Runner
         {
             var cacc = ctx.For<SvValArch>();
             check = ScanRange(ref cacc, 0, cacc.ClusterCount);
-            cacc.Dispose();
         }
         if (check != expected)
         {

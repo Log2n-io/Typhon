@@ -662,7 +662,6 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
         {
             count += cluster.LiveCount;
         }
-        accessor.Dispose();
 
         Assert.That(count, Is.EqualTo(entityCount));
     }
@@ -710,7 +709,6 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
                 count++;
             }
         }
-        accessor.Dispose();
 
         int expectedCount = spawnCount / 2; // odd indices survive
         Assert.That(count, Is.EqualTo(expectedCount));
@@ -744,7 +742,6 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
                 sumX += positions[idx].X;
             }
         }
-        accessor.Dispose();
 
         // Sum of 0, 10, 20, ..., 90 = 450
         Assert.That(sumX, Is.EqualTo(450f));
@@ -774,7 +771,6 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
         var rm = entity.Read(ClAnt.Movement);
         Assert.That(rm.VX, Is.EqualTo(7f));
         Assert.That(rm.VY, Is.EqualTo(8f));
-        accessor.Dispose();
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -825,7 +821,6 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
         {
             count += cluster.LiveCount;
         }
-        accessor.Dispose();
         Assert.That(count, Is.EqualTo(0));
     }
 
@@ -933,7 +928,6 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
             ulong active = cluster.OccupancyBits & cluster.EnabledBits(movSlot);
             countWithMovement += BitOperations.PopCount(active);
         }
-        accessor.Dispose();
 
         Assert.That(countWithMovement, Is.EqualTo(0), "Disabled component should not appear in cluster EnabledBits");
     }
@@ -967,7 +961,6 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
         {
             count += cluster.LiveCount;
         }
-        accessor.Dispose();
         Assert.That(count, Is.EqualTo(entityCount));
     }
 
@@ -1003,7 +996,6 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
         {
             count += cluster.LiveCount;
         }
-        accessor.Dispose();
         Assert.That(count, Is.EqualTo(entityCount));
     }
 }

@@ -69,8 +69,8 @@ class ClusterRefIndexedWriteTests : TestBase<ClusterRefIndexedWriteTests>
     {
         using var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, discipline);
         var found = false;
-        using (var accessor = tx.For<QfUnit>())
         {
+            var accessor = tx.For<QfUnit>();
             foreach (var cluster in accessor.GetClusterEnumerator())
             {
                 var ids = cluster.EntityIds;
@@ -331,8 +331,8 @@ class ClusterRefIndexedWriteTests : TestBase<ClusterRefIndexedWriteTests>
         dbe.WriteTickFence(0);
         using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, discipline))
         {
-            using (var accessor = tx.For<TIdxMixedArch>())
             {
+                var accessor = tx.For<TIdxMixedArch>();
                 foreach (var cluster in accessor.GetClusterEnumerator())
                 {
                     var entityIds = cluster.EntityIds;
@@ -402,7 +402,7 @@ class ClusterRefIndexedWriteTests : TestBase<ClusterRefIndexedWriteTests>
         Exception revision = null;
         using (var tx = dbe.CreateQuickTransaction())
         {
-            using var accessor = tx.For<QfVUnit>();
+            var accessor = tx.For<QfVUnit>();
             foreach (var cluster in accessor.GetClusterEnumerator())
             {
                 revision = TrySet(cluster, QfVUnit.Data, 0, new QfVData(2));

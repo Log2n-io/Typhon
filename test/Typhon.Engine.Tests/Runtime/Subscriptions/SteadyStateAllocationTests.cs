@@ -42,24 +42,17 @@ class SteadyStateAllocationTests : TestBase<SteadyStateAllocationTests>
     {
         using var tx = harness.Engine.CreateQuickTransaction();
         var accessor = tx.For<ProjCreature>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
             {
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0)
-                {
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    var b = cluster.GetReadOnly(ProjCreature.Bounds, slot).Bounds;
-                    var angle = (tick * 0.7) + (slot * 1.3);
-                    cluster.WriteSpatial(ProjCreature.Bounds, slot, At(b.MinX + (float)Math.Cos(angle), b.MinY + (float)Math.Sin(angle)));
-                }
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                var b = cluster.GetReadOnly(ProjCreature.Bounds, slot).Bounds;
+                var angle = (tick * 0.7) + (slot * 1.3);
+                cluster.WriteSpatial(ProjCreature.Bounds, slot, At(b.MinX + (float)Math.Cos(angle), b.MinY + (float)Math.Sin(angle)));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

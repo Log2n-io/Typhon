@@ -399,7 +399,7 @@ public class ManagedPagedMMFTests
             }
 
             var loopCount = 0;
-            var ba = vsb.GetReadOnlyAccessor(id0);
+            using var ba = vsb.GetReadOnlyAccessor(id0);
             do
             {
                 var elements = ba.ReadOnlyElements;
@@ -469,7 +469,7 @@ public class ManagedPagedMMFTests
             hashset.UnionWith(ids.Select(item => item.Item2));
 
             var loopCount = 0;
-            var ba = vsb.GetReadOnlyAccessor(id1);
+            using var ba = vsb.GetReadOnlyAccessor(id1);
             do
             {
                 var elements = ba.ReadOnlyElements;

@@ -274,7 +274,7 @@ internal sealed class AccountStoreChecks
     private int StoredIterations(EntityId account)
     {
         using var tx = Dbe.CreateQuickTransaction();
-        using var accounts = tx.For<AccountArch>();
+        var accounts = tx.For<AccountArch>();
         Assert.That(accounts.TryOpen(account, out var entity), Is.True);
         return entity.Read(AccountArch.Secret).Iterations;
     }

@@ -1082,6 +1082,8 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
 /// </summary>
 /// <typeparam name="T">The unmanaged element type</typeparam>
 /// <typeparam name="TStore">The <see cref="IPageStore"/> implementation backing the buffer's chunks.</typeparam>
+[MustDispose(Reason = "owns a VariableSizedBufferAccessor ('_accessor'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
+[NoCopy(Reason = "holds a VariableSizedBufferAccessor by value ('_accessor'): a copy duplicates its slots and pins")]
 [PublicAPI]
 public ref struct BufferEnumerator<T, TStore> where T : unmanaged where TStore : struct, IPageStore
 {
@@ -1101,6 +1103,7 @@ public ref struct BufferEnumerator<T, TStore> where T : unmanaged where TStore :
     /// <summary>
     /// Returns this enumerator (required for ForEach pattern)
     /// </summary>
+    [AllowCopy]   // foreach takes this enumerator: the copy is the one it walks and disposes
     public BufferEnumerator<T, TStore> GetEnumerator() => this;
 
     /// <summary>
@@ -1147,6 +1150,8 @@ public ref struct BufferEnumerator<T, TStore> where T : unmanaged where TStore :
     public void Dispose() => _accessor.Dispose();
 }
 
+[MustDispose(Reason = "owns a ChunkAccessor ('_accessor'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
+[NoCopy(Reason = "holds a ChunkAccessor by value ('_accessor'): a copy duplicates its slots and pins")]
 [PublicAPI]
 public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T : unmanaged where TStore : struct, IPageStore
 {

@@ -89,21 +89,14 @@ class RealmRepairTests : TestBase<RealmRepairTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var accessor = tx.For<RealmUnit>();
-            try
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                foreach (var cluster in accessor.GetClusterEnumerator())
+                if (cluster.OccupancyBits != 0 && cluster.Realm.Value == 2)
                 {
-                    if (cluster.OccupancyBits != 0 && cluster.Realm.Value == 2)
-                    {
-                        var slot = System.Numerics.BitOperations.TrailingZeroCount(cluster.OccupancyBits);
-                        cluster.WriteSpatial(RealmUnit.Pos, slot, cluster.GetReadOnlySpan(RealmUnit.Pos)[slot]);
-                        break;
-                    }
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(cluster.OccupancyBits);
+                    cluster.WriteSpatial(RealmUnit.Pos, slot, cluster.GetReadOnlySpan(RealmUnit.Pos)[slot]);
+                    break;
                 }
-            }
-            finally
-            {
-                accessor.Dispose();
             }
 
             tx.Commit();

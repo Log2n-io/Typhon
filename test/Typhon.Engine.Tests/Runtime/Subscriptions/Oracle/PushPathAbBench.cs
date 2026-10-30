@@ -49,31 +49,24 @@ class PushPathAbBench : TestBase<PushPathAbBench>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ProjCreature>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
             {
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0)
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                if (random.NextDouble() >= fraction)
                 {
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    if (random.NextDouble() >= fraction)
-                    {
-                        continue;
-                    }
-
-                    var heading = random.NextDouble() * Math.PI * 2;
-                    var b = cluster.GetReadOnly(ProjCreature.Bounds, slot).Bounds;
-                    var x = Math.Clamp(((b.MinX + b.MaxX) * 0.5f) + (float)(Math.Cos(heading) * stride), -Limit, Limit);
-                    var y = Math.Clamp(((b.MinY + b.MaxY) * 0.5f) + (float)(Math.Sin(heading) * stride), -Limit, Limit);
-                    cluster.WriteSpatial(ProjCreature.Bounds, slot, At(x, y));
+                    continue;
                 }
+
+                var heading = random.NextDouble() * Math.PI * 2;
+                var b = cluster.GetReadOnly(ProjCreature.Bounds, slot).Bounds;
+                var x = Math.Clamp(((b.MinX + b.MaxX) * 0.5f) + (float)(Math.Cos(heading) * stride), -Limit, Limit);
+                var y = Math.Clamp(((b.MinY + b.MaxY) * 0.5f) + (float)(Math.Sin(heading) * stride), -Limit, Limit);
+                cluster.WriteSpatial(ProjCreature.Bounds, slot, At(x, y));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

@@ -2098,17 +2098,8 @@ public unsafe partial class Transaction
 
         // Transaction already holds an epoch scope (entered during Init) — no per-call EpochGuard needed.
         // Reuse cached EntityMap accessor (same pattern as IsEntityVisible)
-        if (!_hasEntityMapCache || _entityMapCacheArchId != id.ArchetypeId)
-        {
-            if (_hasEntityMapCache)
-            {
-                _entityMapCacheAccessor.Dispose();
-            }
-            _entityMapCacheAccessor = es.EntityMap.Segment.CreateChunkAccessor();
-            _entityMapCacheArchId = id.ArchetypeId;
-            _hasEntityMapCache = true;
-        }
-        bool found = es.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref _entityMapCacheAccessor);
+        ref var entityMap = ref EntityMapAccessor(es, id.ArchetypeId);
+        bool found = es.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref entityMap);
 
         if (!found)
         {
@@ -2122,7 +2113,7 @@ public unsafe partial class Transaction
         }
 
         // Visibility check — a pending born through its owner's card (VIS-08)
-        if (!EntityVisibility.IsVisible(readBuf, TSN, CommitCards, es.EntityMap, id.EntityKey, ref _entityMapCacheAccessor, _epochManager))
+        if (!EntityVisibility.IsVisible(readBuf, TSN, CommitCards, es.EntityMap, id.EntityKey, ref entityMap, _epochManager))
         {
             return Miss(id, throwOnMiss);
         }

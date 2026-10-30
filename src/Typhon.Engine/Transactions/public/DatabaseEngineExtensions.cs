@@ -43,7 +43,9 @@ public static class DatabaseEngineExtensions
     public static Transaction CreateQuickTransaction(this DatabaseEngine dbe, DurabilityMode durabilityMode = DurabilityMode.Deferred,
         CommitDiscipline discipline = CommitDiscipline.TickFence)
     {
+#pragma warning disable TYPHON004 // Handed to the transaction below (OwnsUnitOfWork), which disposes it; a refusal gives it back (DisposeUnused)
         var uow = dbe.CreateUnitOfWork(durabilityMode);
+#pragma warning restore TYPHON004
         dbe.LogUowLifecycle("CreateQuickTransaction: UoW created, calling CreateTransaction");
         Transaction tx;
         try

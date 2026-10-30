@@ -490,26 +490,19 @@ sealed class WideGroupTests : TestBase<WideGroupTests>
         using (var tx = harness.Engine.CreateQuickTransaction())
         {
             var accessor = tx.For<ProjLabelled>();
-            try
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                foreach (var cluster in accessor.GetClusterEnumerator())
+                var occupancy = cluster.OccupancyBits;
+                while (occupancy != 0)
                 {
-                    var occupancy = cluster.OccupancyBits;
-                    while (occupancy != 0)
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
+                    occupancy &= occupancy - 1;
+                    if (cluster.GetEntityId(slot) == ids[0])
                     {
-                        var slot = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
-                        occupancy &= occupancy - 1;
-                        if (cluster.GetEntityId(slot) == ids[0])
-                        {
-                            var far = new ProjBounds { Bounds = new AABB2F { MinX = 4000, MinY = 4000, MaxX = 4001, MaxY = 4001 }, Speed = 1f };
-                            cluster.WriteSpatial(ProjLabelled.Bounds, slot, far);
-                        }
+                        var far = new ProjBounds { Bounds = new AABB2F { MinX = 4000, MinY = 4000, MaxX = 4001, MaxY = 4001 }, Speed = 1f };
+                        cluster.WriteSpatial(ProjLabelled.Bounds, slot, far);
                     }
                 }
-            }
-            finally
-            {
-                accessor.Dispose();
             }
 
             tx.Commit();

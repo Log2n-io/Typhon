@@ -18,6 +18,8 @@ namespace Typhon.Engine.Internals;
 /// cluster slot and no revision chain is walked.
 /// </para>
 /// </remarks>
+[MustDispose(Reason = "owns a ChunkAccessor ('_map'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
+[NoCopy(Reason = "holds a ChunkAccessor by value ('_map'): a copy duplicates its slots and pins")]
 internal unsafe ref struct BoundViewpoint : IDisposable, IEventEntities
 {
     private readonly DatabaseEngine _engine;

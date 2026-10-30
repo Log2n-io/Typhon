@@ -2,7 +2,6 @@ using System;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
-using Typhon.Profiler;
 using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;

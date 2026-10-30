@@ -1695,6 +1695,8 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
 /// }
 /// </code>
 /// </remarks>
+[MustDispose(Reason = "owns a ChunkAccessor ('_accessor'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
+[NoCopy(Reason = "holds a ChunkAccessor by value ('_accessor'): a copy duplicates its slots and pins")]
 [PublicAPI]
 public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
 {
@@ -1718,7 +1720,6 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     // The current cluster's base, stored by its ClusterRef when it handed out writable page memory (GetSpan, Get); recorded on leaving it (#1531).
     private nint _handedOutPage;
 
-    [AllowCopy]
     internal static ClusterEnumerator<TArch> Create(ArchetypeClusterState state, ArchetypeMetadata meta,
         ChunkBasedSegment<PersistentStore> segment, ChunkBasedSegment<TransientStore> transientSegment = null, EntityAccessor owner = null)
     {
@@ -1750,7 +1751,6 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     /// Create a scoped enumerator that iterates a range of <see cref="ArchetypeClusterState.ActiveClusterIds"/>.
     /// Used by non-tier-filtered parallel dispatch to partition cluster work across workers.
     /// </summary>
-    [AllowCopy]
     internal static ClusterEnumerator<TArch> CreateScoped(ArchetypeClusterState state, ArchetypeMetadata meta,
         ChunkBasedSegment<PersistentStore> segment, ChunkBasedSegment<TransientStore> transientSegment,
         int startIndex, int endIndex, EntityAccessor owner = null)
@@ -1784,7 +1784,6 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     /// by <see cref="TierClusterIndex.GetClusters"/>. The range <c>[startIndex, endIndex)</c> indexes into <paramref name="clusterIds"/>, not
     /// into <see cref="ArchetypeClusterState.ActiveClusterIds"/>.
     /// </summary>
-    [AllowCopy]
     internal static ClusterEnumerator<TArch> CreateScoped(ArchetypeClusterState state, ArchetypeMetadata meta, ChunkBasedSegment<PersistentStore> segment, 
         ChunkBasedSegment<TransientStore> transientSegment, int[] clusterIds, int startIndex, int endIndex, EntityAccessor owner = null)
     {
@@ -1811,7 +1810,6 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     }
 
     /// <summary>An enumerator over a (list, count) pair its caller read once, under the list's own protocol: a realm's cluster list (Realms).</summary>
-    [AllowCopy]
     internal static ClusterEnumerator<TArch> CreateScoped(ArchetypeMetadata meta, ArchetypeClusterState state, int[] clusterIds, int count,
         EntityAccessor owner = null) =>
         CreateScoped(state, meta, state.ClusterSegment, state.TransientSegment, clusterIds, 0, count, owner);
@@ -1950,6 +1948,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     }
 
     /// <summary>Enable foreach.</summary>
+    [AllowCopy]   // foreach takes this enumerator: the copy is the one it walks and disposes
     public ClusterEnumerator<TArch> GetEnumerator() => this;
 }
 

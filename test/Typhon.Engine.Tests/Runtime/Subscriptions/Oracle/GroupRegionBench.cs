@@ -135,31 +135,24 @@ class GroupRegionBench : TestBase<GroupRegionBench>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<GroupCitizen>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
             {
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0)
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                if (random.Next(10) != 0)
                 {
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    if (random.Next(10) != 0)
-                    {
-                        continue;
-                    }
-
-                    var b = cluster.GetReadOnly(GroupCitizen.Bounds, slot).Bounds;
-                    var angle = random.NextDouble() * Math.PI * 2;
-                    var x = Math.Clamp(((b.MinX + b.MaxX) * 0.5f) + (float)Math.Cos(angle), -2040f, 2040f);
-                    var y = Math.Clamp(((b.MinY + b.MaxY) * 0.5f) + (float)Math.Sin(angle), -2040f, 2040f);
-                    cluster.WriteSpatial(GroupCitizen.Bounds, slot, GroupTestSchema.At(x, y));
+                    continue;
                 }
+
+                var b = cluster.GetReadOnly(GroupCitizen.Bounds, slot).Bounds;
+                var angle = random.NextDouble() * Math.PI * 2;
+                var x = Math.Clamp(((b.MinX + b.MaxX) * 0.5f) + (float)Math.Cos(angle), -2040f, 2040f);
+                var y = Math.Clamp(((b.MinY + b.MaxY) * 0.5f) + (float)Math.Sin(angle), -2040f, 2040f);
+                cluster.WriteSpatial(GroupCitizen.Bounds, slot, GroupTestSchema.At(x, y));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

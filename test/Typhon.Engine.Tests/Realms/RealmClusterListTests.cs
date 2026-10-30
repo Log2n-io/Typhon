@@ -75,7 +75,7 @@ class RealmClusterListTests : TestBase<RealmClusterListTests>
         var ids = new HashSet<EntityId>();
         var clusters = 0;
         using var tx = dbe.CreateQuickTransaction();
-        using var accessor = tx.For<TArch>();
+        var accessor = tx.For<TArch>();
         foreach (var cluster in accessor.GetClusterEnumerator(realm))
         {
             clusters++;
@@ -163,8 +163,8 @@ class RealmClusterListTests : TestBase<RealmClusterListTests>
     {
         using var dbe = ThreeRealms();
         using var tx = dbe.CreateQuickTransaction();
-        using (var accessor = tx.For<RealmUnit>())
         {
+            var accessor = tx.For<RealmUnit>();
             var refused = false;
             try
             {
@@ -178,7 +178,7 @@ class RealmClusterListTests : TestBase<RealmClusterListTests>
             Assert.That(refused, Is.True, "the count refuses an unregistered realm");
         }
 
-        Assert.That(() => tx.GetClusterEnumerator<RealmUnit>(new RealmId(3)), Throws.InvalidOperationException);
+        Assert.That(() => tx.GetClusterEnumerator<RealmUnit>(new RealmId(3)).Dispose(), Throws.InvalidOperationException);
     }
 
     [Test]

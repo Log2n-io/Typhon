@@ -23,6 +23,8 @@ internal abstract partial class BTree<TKey, TStore>
     /// <para>The caller must be inside an epoch scope (e.g., via a Transaction).</para>
     /// <para>Supports <c>foreach</c> via duck-typing (GetEnumerator/MoveNext/Current/Dispose).</para>
     /// </remarks>
+    [MustDispose(Reason = "owns a ChunkAccessor ('_accessor'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
+    [NoCopy(Reason = "holds a ChunkAccessor by value ('_accessor'): a copy duplicates its slots and pins")]
     public ref struct RangeEnumerator
     {
         /// <summary>How long to spin on a write-locked leaf before treating it as "go around again" rather than "wait".</summary>
@@ -267,6 +269,7 @@ internal abstract partial class BTree<TKey, TStore>
         }
 
         /// <summary>Returns this enumerator (required for foreach pattern).</summary>
+        [AllowCopy]   // foreach takes this enumerator: the copy is the one it walks and disposes
         public RangeEnumerator GetEnumerator() => this;
 
         /// <summary>Gets the current key-value item: the row <see cref="MoveNext"/> validated, not a re-read of the leaf.</summary>
@@ -470,6 +473,8 @@ internal abstract partial class BTree<TKey, TStore>
     /// <para>Supports <c>foreach</c> via duck-typing — the <c>foreach</c> loop iterates keys. Within each key, iterate values
     /// via <see cref="CurrentValues"/> + <see cref="NextChunk"/>.</para>
     /// </remarks>
+    [MustDispose(Reason = "owns a RangeEnumerator ('_inner'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
+    [NoCopy(Reason = "holds a RangeEnumerator by value ('_inner'): a copy duplicates its slots and pins")]
     public ref struct RangeMultipleEnumerator
     {
         private RangeEnumerator _inner;
@@ -488,6 +493,7 @@ internal abstract partial class BTree<TKey, TStore>
         }
 
         /// <summary>Returns this enumerator (required for foreach pattern).</summary>
+        [AllowCopy]   // foreach takes this enumerator: the copy is the one it walks and disposes
         public RangeMultipleEnumerator GetEnumerator() => this;
 
         /// <summary>The key at the current position.</summary>
@@ -579,6 +585,7 @@ internal abstract partial class BTree<TKey, TStore>
         public bool MoveNext() => MoveNextKey();
 
         /// <summary>Returns the current enumerator position (for foreach — current is this enumerator itself).</summary>
+        [AllowCopy]   // foreach duck-typing: the loop variable is a view of this enumerator, never disposed
         public RangeMultipleEnumerator Current => this;
 
         /// <summary>Releases all resources.</summary>

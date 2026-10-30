@@ -133,25 +133,18 @@ class ClusterThrottleParallelTests : TestBase<ClusterThrottleParallelTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
+            var bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
-                var bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-                    var tag = positions[slot].Tag;
-                    var (x, y) = PositionAt(tick, tag);
-                    cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, y, tag));
-                }
+                var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                var tag = positions[slot].Tag;
+                var (x, y) = PositionAt(tick, tag);
+                cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, y, tag));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

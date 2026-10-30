@@ -96,29 +96,22 @@ class ClusterDensityTargetTests : TestBase<ClusterDensityTargetTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    var slot = BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-                    var current = cluster.GetReadOnly(ClMigUnit.Pos, slot);
-                    var x = current.Bounds.MinX + ((float)rng.NextDouble() - 0.5f) * amplitude;
-                    var y = current.Bounds.MinY + ((float)rng.NextDouble() - 0.5f) * amplitude;
-                    // Clamped to the entity's own cell interior so the motion is intra-cell by construction.
-                    var cellMinX = MathF.Floor(current.Bounds.MinX / CellSize) * CellSize;
-                    x = Math.Clamp(x, cellMinX + 2f, cellMinX + CellSize - 2f);
-                    y = Math.Clamp(y, 2f, CellSize - 2f);
-                    cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, y, current.Tag));
-                }
+                var slot = BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                var current = cluster.GetReadOnly(ClMigUnit.Pos, slot);
+                var x = current.Bounds.MinX + ((float)rng.NextDouble() - 0.5f) * amplitude;
+                var y = current.Bounds.MinY + ((float)rng.NextDouble() - 0.5f) * amplitude;
+                // Clamped to the entity's own cell interior so the motion is intra-cell by construction.
+                var cellMinX = MathF.Floor(current.Bounds.MinX / CellSize) * CellSize;
+                x = Math.Clamp(x, cellMinX + 2f, cellMinX + CellSize - 2f);
+                y = Math.Clamp(y, 2f, CellSize - 2f);
+                cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, y, current.Tag));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();
@@ -315,29 +308,22 @@ class ClusterDensityTargetTests : TestBase<ClusterDensityTargetTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        var targetX = (tick % 2 == 1 ? 4 : 3) * CellSize + 50f;
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            var targetX = (tick % 2 == 1 ? 4 : 3) * CellSize + 50f;
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var bits = cluster.OccupancyBits;
-                while (bits != 0)
+                var slot = BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                var current = cluster.GetReadOnly(ClMigUnit.Pos, slot);
+                if (current.Tag < 10_000)
                 {
-                    var slot = BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-                    var current = cluster.GetReadOnly(ClMigUnit.Pos, slot);
-                    if (current.Tag < 10_000)
-                    {
-                        continue;
-                    }
-
-                    cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(targetX, current.Bounds.MinY, current.Tag));
+                    continue;
                 }
+
+                cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(targetX, current.Bounds.MinY, current.Tag));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

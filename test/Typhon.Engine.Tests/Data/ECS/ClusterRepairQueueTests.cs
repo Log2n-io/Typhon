@@ -157,25 +157,18 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var bits = cluster.OccupancyBits;
+            if (bits == 0)
             {
-                var bits = cluster.OccupancyBits;
-                if (bits == 0)
-                {
-                    continue;
-                }
-
-                var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
-                cluster.WriteSpatial(ClMigUnit.Pos, slot, positions[slot]);
-                break;
+                continue;
             }
-        }
-        finally
-        {
-            accessor.Dispose();
+
+            var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+            var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
+            cluster.WriteSpatial(ClMigUnit.Pos, slot, positions[slot]);
+            break;
         }
 
         tx.Commit();

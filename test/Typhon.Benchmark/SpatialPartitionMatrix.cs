@@ -1192,32 +1192,25 @@ public static class SpatialPartitionMatrix
                         // quarter-cell Cruise workload, i.e. it measured a world where nothing moved and called the
                         // result a 100x speedup.
                         var acc2 = tx.For<TArch>();
-                        try
+                        foreach (var cluster in acc2.GetClusterEnumerator())
                         {
-                            foreach (var cluster in acc2.GetClusterEnumerator())
+                            var bits = cluster.OccupancyBits;
+                            while (bits != 0)
                             {
-                                var bits = cluster.OccupancyBits;
-                                while (bits != 0)
+                                var slot = BitOperations.TrailingZeroCount(bits);
+                                bits &= bits - 1;
+
+                                var idx = tag(in cluster.GetReadOnly(comp, slot));
+                                if ((uint)idx >= (uint)entities || !movedFlags[idx])
                                 {
-                                    var slot = BitOperations.TrailingZeroCount(bits);
-                                    bits &= bits - 1;
-
-                                    var idx = tag(in cluster.GetReadOnly(comp, slot));
-                                    if ((uint)idx >= (uint)entities || !movedFlags[idx])
-                                    {
-                                        continue;
-                                    }
-
-                                    var next = default(TPos);
-                                    write(ref next, xs[idx], ys[idx], zs[idx], halfExtent, idx);
-                                    cluster.WriteSpatial(comp, slot, in next);
-                                    spatialWritesApplied++;
+                                    continue;
                                 }
+
+                                var next = default(TPos);
+                                write(ref next, xs[idx], ys[idx], zs[idx], halfExtent, idx);
+                                cluster.WriteSpatial(comp, slot, in next);
+                                spatialWritesApplied++;
                             }
-                        }
-                        finally
-                        {
-                            acc2.Dispose();
                         }
                     }
                     else

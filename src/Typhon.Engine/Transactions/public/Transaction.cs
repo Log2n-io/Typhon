@@ -22,6 +22,7 @@ namespace Typhon.Engine;
 /// Instances are pooled and reused; do not hold a reference past <see cref="Dispose"/>. Transactions are single-thread-affine — only the thread that created
 /// one may call its members. A write-write conflict at commit is resolved by the optional <see cref="ConcurrencyConflictHandler"/> (default: last-writer-wins).
 /// </remarks>
+[MustDispose(Reason = "leaves its changes uncommitted, its epoch pinned and its chain node holding the cleanup cutoff")]
 [PublicAPI]
 [DebuggerDisplay("TSN {TSN}, State: {State}")]
 public unsafe partial class Transaction : EntityAccessor
@@ -388,11 +389,6 @@ public unsafe partial class Transaction : EntityAccessor
 
         if (_isDisposed)
         {
-            if (_hasEntityMapCache)
-            {
-                _entityMapCacheAccessor.Dispose();
-                _hasEntityMapCache = false;
-            }
             return;
         }
 
@@ -402,17 +398,11 @@ public unsafe partial class Transaction : EntityAccessor
         // just exit the epoch scope and remove from the chain.
         if (IsReadOnly)
         {
-            if (_hasEntityMapCache)
-            {
-                _entityMapCacheAccessor.Dispose();
-                _hasEntityMapCache = false;
-            }
-
             // The component and cluster accessors hold a slot reference on every page cached in their slots, which no epoch releases. Reset recycles the
             // component entries without disposing them, and a transaction dropped by a full pool is never reset at all: left here, those pages could
             // never be evicted again. MarketHardeningTests' snapshot, read in short read-only transactions, left 94 % of its cache that way.
             FlushAccessors();
-            DisposeClusterCache();
+            DisposeArchetypeCache();
 
             // Before leaving the chain, not after: ComputeNextMinTSN reads the chain, and this transaction's own
             // membership is what has been holding the cutoff back. A reader that removes itself first and drains second
@@ -454,12 +444,7 @@ public unsafe partial class Transaction : EntityAccessor
                 {
                     dbe.LogTxDispose(tsn, "FlushAccessors");
                     FlushAccessors();
-                    DisposeClusterCache();   // here, not only in Reset: a transaction dropped by a full pool is never reset
-                    if (_hasEntityMapCache)
-                    {
-                        _entityMapCacheAccessor.Dispose();   // likewise: only Reset released it, and a dropped transaction kept up to 32 map pages pinned
-                        _hasEntityMapCache = false;
-                    }
+                    DisposeArchetypeCache();   // here, not only in Reset: a transaction dropped by a full pool is never reset
                 }
                 finally
                 {
@@ -704,6 +689,8 @@ public unsafe partial class Transaction : EntityAccessor
     
     /// <summary>Zero-copy, read-only <c>foreach</c> enumerator over the elements of a component collection buffer.</summary>
     /// <typeparam name="T">Unmanaged element type of the collection.</typeparam>
+    [MustDispose(Reason = "owns a BufferEnumerator ('_enumerator'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
+    [NoCopy(Reason = "holds a BufferEnumerator by value ('_enumerator'): a copy duplicates its slots and pins")]
     [PublicAPI]
     public ref struct ReadOnlyCollectionEnumerator<T> where T : unmanaged
     {
@@ -718,6 +705,7 @@ public unsafe partial class Transaction : EntityAccessor
         }
 
         /// <summary>Returns this enumerator (enables the <c>foreach</c> pattern).</summary>
+        [AllowCopy]   // foreach takes this enumerator: the copy is the one it walks and disposes
         public ReadOnlyCollectionEnumerator<T> GetEnumerator() => this;
 
         /// <summary>Zero-copy reference to the current element. Valid until the next <see cref="MoveNext"/> call.</summary>
@@ -1102,6 +1090,8 @@ public unsafe partial class Transaction : EntityAccessor
     /// Use <see cref="CurrentComponent"/> for zero-copy ref access into page memory, or <see cref="Current"/> for a convenience copy.
     /// Supports both unique and AllowMultiple indexes.
     /// </summary>
+    [MustDispose(Reason = "owns a ChunkAccessor ('_clusterAccessor0'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
+    [NoCopy(Reason = "holds a ChunkAccessor by value ('_clusterAccessor0'): a copy duplicates its slots and pins")]
     [PublicAPI]
     public ref struct IndexEntityEnumerator<T, TKey> where T : unmanaged where TKey : unmanaged
     {
@@ -1256,6 +1246,7 @@ public unsafe partial class Transaction : EntityAccessor
         }
 
         /// <summary>Returns this enumerator (enables the <c>foreach</c> pattern).</summary>
+        [AllowCopy]   // foreach takes this enumerator: the copy is the one it walks and disposes
         public IndexEntityEnumerator<T, TKey> GetEnumerator() => this;
 
         /// <summary>Convenience accessor — copies the component into a tuple. Prefer <see cref="CurrentComponent"/> for zero-copy.</summary>
@@ -1575,7 +1566,9 @@ public unsafe partial class Transaction : EntityAccessor
         }
 
         /// <summary>Releases the per-archetype and component accessors (unpins accessed pages). Idempotent.</summary>
+#pragma warning disable TYPHON006 // Its _tx is borrowed: the transaction that created the enumerator, its caller's to dispose
         public void Dispose()
+#pragma warning restore TYPHON006
         {
             if (_disposed)
             {
@@ -1693,23 +1686,13 @@ public unsafe partial class Transaction : EntityAccessor
         // As the open: a refresh normally runs inside the transaction's epoch scope already, and a default guard must not be disposed.
         var needsGuard = NeedsEpochGuard();
         var guard = needsGuard ? EpochGuard.Enter(_epochManager) : default;
-        if (!_hasEntityMapCache || _entityMapCacheArchId != id.ArchetypeId)
-        {
-            if (_hasEntityMapCache)
-            {
-                _entityMapCacheAccessor.Dispose();
-            }
-
-            _entityMapCacheAccessor = es.EntityMap.Segment.CreateChunkAccessor();
-            _entityMapCacheArchId = id.ArchetypeId;
-            _hasEntityMapCache = true;
-        }
+        ref var entityMap = ref EntityMapAccessor(es, id.ArchetypeId);
 
         var refreshable = PagedMMF.RefreshableWaitDepth;
         PagedMMF.RefreshableWaitDepth = 0;
         try
         {
-            if (!es.EntityMap.TryGetWithHint(id.EntityKey, record, ref _entityMapCacheAccessor)
+            if (!es.EntityMap.TryGetWithHint(id.EntityKey, record, ref entityMap)
                 || !EntityVisibility.IsVisibleInScan(record, TSN, CommitCards, es.EntityMap, id.EntityKey))
             {
                 return false;
@@ -1941,20 +1924,11 @@ public unsafe partial class Transaction : EntityAccessor
         }
 
         // Reuse cached EntityMap accessor when archetype matches
-        if (!_hasEntityMapCache || _entityMapCacheArchId != entityId.ArchetypeId)
-        {
-            if (_hasEntityMapCache)
-            {
-                _entityMapCacheAccessor.Dispose();
-            }
-            _entityMapCacheAccessor = es.EntityMap.Segment.CreateChunkAccessor();
-            _entityMapCacheArchId = entityId.ArchetypeId;
-            _hasEntityMapCache = true;
-        }
+        ref var entityMap = ref EntityMapAccessor(es, entityId.ArchetypeId);
 
         int recordSize = meta._entityRecordSize;
         byte* buf = stackalloc byte[recordSize];
-        if (!es.EntityMap.TryGet(entityId.EntityKey, buf, ref _entityMapCacheAccessor))
+        if (!es.EntityMap.TryGet(entityId.EntityKey, buf, ref entityMap))
         {
             return 0;
         }
@@ -1999,27 +1973,18 @@ public unsafe partial class Transaction : EntityAccessor
         }
 
         // Reuse cached EntityMap accessor
-        if (!_hasEntityMapCache || _entityMapCacheArchId != entityId.ArchetypeId)
-        {
-            if (_hasEntityMapCache)
-            {
-                _entityMapCacheAccessor.Dispose();
-            }
-            _entityMapCacheAccessor = es.EntityMap.Segment.CreateChunkAccessor();
-            _entityMapCacheArchId = entityId.ArchetypeId;
-            _hasEntityMapCache = true;
-        }
+        ref var entityMap = ref EntityMapAccessor(es, entityId.ArchetypeId);
 
         // TryGet copies full record, but we only need the header (first 14 bytes).
         // Use full record size to satisfy TryGet's contract, but stackalloc min header.
         int recordSize = meta._entityRecordSize;
         byte* fullBuf = stackalloc byte[recordSize];
-        if (!es.EntityMap.TryGet(entityId.EntityKey, fullBuf, ref _entityMapCacheAccessor))
+        if (!es.EntityMap.TryGet(entityId.EntityKey, fullBuf, ref entityMap))
         {
             return false;
         }
 
-        return EntityVisibility.IsVisible(fullBuf, TSN, CommitCards, es.EntityMap, entityId.EntityKey, ref _entityMapCacheAccessor, _epochManager);
+        return EntityVisibility.IsVisible(fullBuf, TSN, CommitCards, es.EntityMap, entityId.EntityKey, ref entityMap, _epochManager);
     }
 
     private Result<int, BTreeLookupStatus> GetCompRevTableFirstChunkId(long pk, ComponentInfo info)

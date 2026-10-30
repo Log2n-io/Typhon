@@ -645,38 +645,31 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
         var found = false;
         using var tx = harness.Engine.CreateQuickTransaction();
         var accessor = tx.For<ProjCreature>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
             {
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0)
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                if (cluster.GetEntityId(slot).RawValue != entity.RawValue)
                 {
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    if (cluster.GetEntityId(slot).RawValue != entity.RawValue)
-                    {
-                        continue;
-                    }
+                    continue;
+                }
 
 #pragma warning disable TYPHON009
-                    var ai = cluster.GetSpan(ProjCreature.Ai);
+                var ai = cluster.GetSpan(ProjCreature.Ai);
 #pragma warning restore TYPHON009
-                    ai[slot].Level = level;
-                    cluster.MarkDirty(ProjCreature.Ai);
-                    if (x.HasValue)
-                    {
-                        cluster.WriteSpatial(ProjCreature.Bounds, slot, BoundsAt(x.Value));
-                    }
-
-                    harness.Subscriptions.Commands.Replicate(in cluster, slot);
-                    found = true;
+                ai[slot].Level = level;
+                cluster.MarkDirty(ProjCreature.Ai);
+                if (x.HasValue)
+                {
+                    cluster.WriteSpatial(ProjCreature.Bounds, slot, BoundsAt(x.Value));
                 }
+
+                harness.Subscriptions.Commands.Replicate(in cluster, slot);
+                found = true;
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

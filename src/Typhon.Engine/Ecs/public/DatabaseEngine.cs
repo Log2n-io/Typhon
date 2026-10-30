@@ -12,7 +12,6 @@ using System.Threading;
 using System.Reflection;
 using System.Linq.Expressions;
 using Typhon.Engine.internals;
-using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine;
@@ -1609,6 +1608,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// profiler's gauges and the resource tree.
     /// </summary>
     public StorageHealthState StorageHealth => MMF?.StorageHealth ?? StorageHealthState.Healthy;
+
+    /// <summary>
+    /// How the checkpoint keeps up (CK-06): <see cref="Typhon.Engine.DurabilityHealth.Degraded"/> after a transient cycle failure,
+    /// <see cref="Typhon.Engine.DurabilityHealth.Stalled"/> while a page the checkpoint keeps refusing holds CheckpointLSN back and no WAL segment is
+    /// recycled (CP-13, #1538), <see cref="Typhon.Engine.DurabilityHealth.Fatal"/> once checkpointing has stopped. Poll it: a stall corrupts nothing
+    /// and slows nothing, and the WAL growing on disk is otherwise its only symptom.
+    /// </summary>
+    public DurabilityHealth DurabilityHealth => CheckpointManager?.Health ?? DurabilityHealth.Ok;
 
     /// <summary>
     /// Raised on every change of <see cref="StorageHealth"/>, on the engine thread that saw it — an allocation's, or the checkpoint's. A handler must

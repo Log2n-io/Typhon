@@ -285,8 +285,8 @@ class IndexWriteRecordingTests : TestBase<IndexWriteRecordingTests>
         Span<QfData> values = stackalloc QfData[64];
         using (var tx = dbe.CreateQuickTransaction())
         {
-            using (var accessor = tx.For<QfUnit>())
             {
+                var accessor = tx.For<QfUnit>();
                 foreach (var cluster in accessor.GetClusterEnumerator())
                 {
                     if (changedChunk >= 0)
@@ -364,8 +364,8 @@ class IndexWriteRecordingTests : TestBase<IndexWriteRecordingTests>
         Span<IwrWide> values = stackalloc IwrWide[64];
         using (var tx = dbe.CreateQuickTransaction())
         {
-            using (var accessor = tx.For<IwrWideUnit>())
             {
+                var accessor = tx.For<IwrWideUnit>();
                 foreach (var cluster in accessor.GetClusterEnumerator())
                 {
                     var all = cluster.OccupancyBits;
@@ -409,8 +409,8 @@ class IndexWriteRecordingTests : TestBase<IndexWriteRecordingTests>
         Exception empty = null, shortSpan = null, commit = null;
         using (var tx = dbe.CreateQuickTransaction())
         {
-            using (var accessor = tx.For<QfUnit>())
             {
+                var accessor = tx.For<QfUnit>();
                 foreach (var cluster in accessor.GetClusterEnumerator())
                 {
                     if (cluster.ChunkId == deadChunk)
@@ -427,8 +427,8 @@ class IndexWriteRecordingTests : TestBase<IndexWriteRecordingTests>
 
         using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit))
         {
-            using (var accessor = tx.For<QfUnit>())
             {
+                var accessor = tx.For<QfUnit>();
                 foreach (var cluster in accessor.GetClusterEnumerator())
                 {
                     commit ??= TryBatch(cluster, cluster.OccupancyBits, 64, keyDelta: 1_000_001);
@@ -535,8 +535,8 @@ class IndexWriteRecordingTests : TestBase<IndexWriteRecordingTests>
     private static void OnItsCluster(DatabaseEngine dbe, EntityId id, ClusterWrite write)
     {
         using var tx = dbe.CreateQuickTransaction();
-        using (var accessor = tx.For<QfUnit>())
         {
+            var accessor = tx.For<QfUnit>();
             foreach (var cluster in accessor.GetClusterEnumerator())
             {
                 var entityIds = cluster.EntityIds;
@@ -556,7 +556,7 @@ class IndexWriteRecordingTests : TestBase<IndexWriteRecordingTests>
     private static (int chunkId, int slot) LocationOf(DatabaseEngine dbe, EntityId id)
     {
         using var tx = dbe.CreateQuickTransaction();
-        using var accessor = tx.For<QfUnit>();
+        var accessor = tx.For<QfUnit>();
         foreach (var cluster in accessor.GetClusterEnumerator())
         {
             var entityIds = cluster.EntityIds;

@@ -1702,13 +1702,29 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
        deferred; NEITHER requires that it ever happens. Every ChunkAccessor that dirties a slot must
        therefore reach CommitChanges() or Dispose() — an accessor abandoned without either leaks the
        registration permanently, because the release is driven only by those two paths.
+  invariant a public accessor a caller can copy or forget owns no ChunkAccessor: `ArchetypeAccessor` resolves through
+            its EntityAccessor's archetype cache (EntityMap + cluster accessors, 4-way LRU), released at that
+            accessor's commit, dispose, reset and a point-in-time worker's end of system — so a copy, or one
+            never disposed, registers nothing it alone could release (#1538)
+  invariant a page refused on StalledAfterCycles (4) consecutive cycles sets DurabilityHealth.Stalled
+            (DatabaseEngine.DurabilityHealth) and logs one warning naming its cache slots and their writer
+            counts; the next covered cycle clears it. A leak cannot be prevented everywhere, but it cannot
+            stay silent
   scope: ChunkAccessor.MarkSlotDirty, ChunkAccessor.CommitChanges, ChunkAccessor.Dispose,
-         ChangeSet.FlushDeferredEvictions, ArchetypeClusterState.DrainPendingClusterFinalizations
+         ChangeSet.FlushDeferredEvictions, ArchetypeClusterState.DrainPendingClusterFinalizations,
+         ArchetypeAccessor, EntityAccessor.EnsureArchetypeCache, CheckpointManager.StalledAfterCycles,
+         DurabilityHealth.Stalled
+  verified: ArchetypeAccessorTests.WritesThroughCopiesOfAnAccessor_LeaveNoPageTheCheckpointCannotCover [VerifiesRule] — writable
+            opens through a by-value copy and a dropped temporary, then a forced checkpoint must cover. Mutant killed: the
+            archetype cache never released (the forced wait times out, the last cycle skips pages)
+  verified: CheckpointManagerTests.RefusedPage_StallsHealth_UntilCovered [VerifiesRule] — Ok below the threshold, Stalled at it with
+            one warning naming the page and its count, Ok again on the covering cycle
   on_violation: the leaked page is skipped by CP-11 in EVERY checkpoint cycle, so CK-03's coverage gate
     never opens, CheckpointLSN never advances and CK-04 recycles no WAL segment. The log then grows at
     the full write rate until the writer stalls and the engine raises WalBackPressureTimeout — observed
-    as 22 GB across 86 segments in four minutes against a 120 MB data file (#817). Silent: nothing is
-    corrupted and nothing is slow; a counter simply never returns to zero.
+    as 22 GB across 86 segments in four minutes against a 120 MB data file (#817), and as 15 GB in 13 hours
+    in the SWG demo, from an ArchetypeAccessor passed by value and one never disposed (#1538). Silent until
+    #1538: nothing is corrupted and nothing is slow; a counter simply never returns to zero.
 
 ---
 

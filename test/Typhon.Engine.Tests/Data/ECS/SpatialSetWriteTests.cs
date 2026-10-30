@@ -282,51 +282,44 @@ class SpatialSetWriteTests : TestBase<SpatialSetWriteTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var accessor = tx.For<SetWA3DUnit>();
-            try
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                foreach (var cluster in accessor.GetClusterEnumerator())
+                Assert.That(cluster.ClusterSize, Is.LessThan(64), "precondition: this tier's cluster should hold fewer than 64 slots");
+                var before = cluster.GetReadOnlySpan(SetWA3DUnit.Box)[0].Box;
+                var far = A3D(700, 700, 700);
+
+                // Slot 2 is beyond the two values; then a slot beyond the cluster, with values for all 64. Slot 0 is in both masks and must not have
+                // been written when the call is refused. Any exception is caught, so one thrown from inside the loop fails the assertion rather than
+                // the test harness.
+                Exception refusedShort = null;
+                try
                 {
-                    Assert.That(cluster.ClusterSize, Is.LessThan(64), "precondition: this tier's cluster should hold fewer than 64 slots");
-                    var before = cluster.GetReadOnlySpan(SetWA3DUnit.Box)[0].Box;
-                    var far = A3D(700, 700, 700);
-
-                    // Slot 2 is beyond the two values; then a slot beyond the cluster, with values for all 64. Slot 0 is in both masks and must not have
-                    // been written when the call is refused. Any exception is caught, so one thrown from inside the loop fails the assertion rather than
-                    // the test harness.
-                    Exception refusedShort = null;
-                    try
-                    {
-                        cluster.WriteSpatial(SetWA3DUnit.Box, 0b101UL, new[] { far, far });
-                    }
-                    catch (Exception e)
-                    {
-                        refusedShort = e;
-                    }
-
-                    Assert.That(refusedShort, Is.InstanceOf<ArgumentException>(),
-                        $"{Ca03Marker}: a slot beyond the values given was not refused up front (got {refusedShort?.GetType().Name ?? "no exception"})");
-                    AssertUnchanged(before, cluster.GetReadOnlySpan(SetWA3DUnit.Box)[0].Box, "a slot beyond the values");
-
-                    Exception refusedWide = null;
-                    try
-                    {
-                        cluster.WriteSpatial(SetWA3DUnit.Box, 1UL | (1UL << cluster.ClusterSize), Enumerable.Repeat(far, 64).ToArray());
-                    }
-                    catch (Exception e)
-                    {
-                        refusedWide = e;
-                    }
-
-                    Assert.That(refusedWide, Is.InstanceOf<ArgumentException>(),
-                        $"{Ca03Marker}: a slot beyond the cluster was not refused up front (got {refusedWide?.GetType().Name ?? "no exception"})");
-                    AssertUnchanged(before, cluster.GetReadOnlySpan(SetWA3DUnit.Box)[0].Box, "a slot beyond the cluster");
-
-                    checkedClusters++;
+                    cluster.WriteSpatial(SetWA3DUnit.Box, 0b101UL, new[] { far, far });
                 }
-            }
-            finally
-            {
-                accessor.Dispose();
+                catch (Exception e)
+                {
+                    refusedShort = e;
+                }
+
+                Assert.That(refusedShort, Is.InstanceOf<ArgumentException>(),
+                    $"{Ca03Marker}: a slot beyond the values given was not refused up front (got {refusedShort?.GetType().Name ?? "no exception"})");
+                AssertUnchanged(before, cluster.GetReadOnlySpan(SetWA3DUnit.Box)[0].Box, "a slot beyond the values");
+
+                Exception refusedWide = null;
+                try
+                {
+                    cluster.WriteSpatial(SetWA3DUnit.Box, 1UL | (1UL << cluster.ClusterSize), Enumerable.Repeat(far, 64).ToArray());
+                }
+                catch (Exception e)
+                {
+                    refusedWide = e;
+                }
+
+                Assert.That(refusedWide, Is.InstanceOf<ArgumentException>(),
+                    $"{Ca03Marker}: a slot beyond the cluster was not refused up front (got {refusedWide?.GetType().Name ?? "no exception"})");
+                AssertUnchanged(before, cluster.GetReadOnlySpan(SetWA3DUnit.Box)[0].Box, "a slot beyond the cluster");
+
+                checkedClusters++;
             }
 
             tx.Commit();
@@ -489,49 +482,42 @@ class SpatialSetWriteTests : TestBase<SpatialSetWriteTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var accessor = tx.For<TArch>();
-            try
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                foreach (var cluster in accessor.GetClusterEnumerator())
+                var occupied = cluster.OccupancyBits;
+                arm.Layout[cluster.ChunkId] = occupied;
+                arm.FullMask = cluster.ClusterSize == 64 ? ulong.MaxValue : (1UL << cluster.ClusterSize) - 1;
+                var current = cluster.GetReadOnlySpan(comp);
+                var mask = 0UL;
+                var nth = 0;
+                for (var bits = occupied; bits != 0; bits &= bits - 1)
                 {
-                    var occupied = cluster.OccupancyBits;
-                    arm.Layout[cluster.ChunkId] = occupied;
-                    arm.FullMask = cluster.ClusterSize == 64 ? ulong.MaxValue : (1UL << cluster.ClusterSize) - 1;
-                    var current = cluster.GetReadOnlySpan(comp);
-                    var mask = 0UL;
-                    var nth = 0;
-                    for (var bits = occupied; bits != 0; bits &= bits - 1)
+                    var slot = BitOperations.TrailingZeroCount(bits);
+                    if (motion == Motion.RewriteEveryOther && (nth++ & 1) != 0)
+                    {
+                        continue;
+                    }
+
+                    values[slot] = motion == Motion.MoveAll
+                        ? make(Moved(current[slot], boxOf, cluster.ChunkId, slot, is3D, out var y, out var z), y, z)
+                        : current[slot];
+                    mask |= 1UL << slot;
+                }
+
+                if (setWrite)
+                {
+                    cluster.WriteSpatial(comp, mask, values);
+                }
+                else
+                {
+                    for (var bits = mask; bits != 0; bits &= bits - 1)
                     {
                         var slot = BitOperations.TrailingZeroCount(bits);
-                        if (motion == Motion.RewriteEveryOther && (nth++ & 1) != 0)
-                        {
-                            continue;
-                        }
-
-                        values[slot] = motion == Motion.MoveAll
-                            ? make(Moved(current[slot], boxOf, cluster.ChunkId, slot, is3D, out var y, out var z), y, z)
-                            : current[slot];
-                        mask |= 1UL << slot;
+                        cluster.WriteSpatial(comp, slot, values[slot]);
                     }
-
-                    if (setWrite)
-                    {
-                        cluster.WriteSpatial(comp, mask, values);
-                    }
-                    else
-                    {
-                        for (var bits = mask; bits != 0; bits &= bits - 1)
-                        {
-                            var slot = BitOperations.TrailingZeroCount(bits);
-                            cluster.WriteSpatial(comp, slot, values[slot]);
-                        }
-                    }
-
-                    arm.Values[cluster.ChunkId] = OccupiedBytes(cluster.GetReadOnlySpan(comp), occupied);
                 }
-            }
-            finally
-            {
-                accessor.Dispose();
+
+                arm.Values[cluster.ChunkId] = OccupiedBytes(cluster.GetReadOnlySpan(comp), occupied);
             }
 
             tx.Commit();
@@ -545,35 +531,28 @@ class SpatialSetWriteTests : TestBase<SpatialSetWriteTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var accessor = tx.For<TArch>();
-            try
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                foreach (var cluster in accessor.GetClusterEnumerator())
+                var cellKey = state.ClusterCellMap[cluster.ChunkId];
+                var stored = state.ClusterAabbs[cluster.ChunkId];
+                grid.CellOrigin(cellKey, out double ox, out double oy, out double oz);
+                var current = cluster.GetReadOnlySpan(comp);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
                 {
-                    var cellKey = state.ClusterCellMap[cluster.ChunkId];
-                    var stored = state.ClusterAabbs[cluster.ChunkId];
-                    grid.CellOrigin(cellKey, out double ox, out double oy, out double oz);
-                    var current = cluster.GetReadOnlySpan(comp);
-                    for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                    var slot = BitOperations.TrailingZeroCount(bits);
+                    arm.CellOf[cluster.GetEntityId(slot).RawValue] = cellKey;
+                    var box = boxOf(current[slot]);
+                    var contained = stored.MinX <= ClusterSpatialAabb.ToCellRelativeMin(box.MinX, ox)
+                                    && stored.MinY <= ClusterSpatialAabb.ToCellRelativeMin(box.MinY, oy)
+                                    && stored.MaxX >= ClusterSpatialAabb.ToCellRelativeMax(box.MaxX, ox)
+                                    && stored.MaxY >= ClusterSpatialAabb.ToCellRelativeMax(box.MaxY, oy)
+                                    && (!is3D || (stored.MinZ <= ClusterSpatialAabb.ToCellRelativeMin(box.MinZ, oz)
+                                                  && stored.MaxZ >= ClusterSpatialAabb.ToCellRelativeMax(box.MaxZ, oz)));
+                    if (!contained)
                     {
-                        var slot = BitOperations.TrailingZeroCount(bits);
-                        arm.CellOf[cluster.GetEntityId(slot).RawValue] = cellKey;
-                        var box = boxOf(current[slot]);
-                        var contained = stored.MinX <= ClusterSpatialAabb.ToCellRelativeMin(box.MinX, ox)
-                                        && stored.MinY <= ClusterSpatialAabb.ToCellRelativeMin(box.MinY, oy)
-                                        && stored.MaxX >= ClusterSpatialAabb.ToCellRelativeMax(box.MaxX, ox)
-                                        && stored.MaxY >= ClusterSpatialAabb.ToCellRelativeMax(box.MaxY, oy)
-                                        && (!is3D || (stored.MinZ <= ClusterSpatialAabb.ToCellRelativeMin(box.MinZ, oz)
-                                                      && stored.MaxZ >= ClusterSpatialAabb.ToCellRelativeMax(box.MaxZ, oz)));
-                        if (!contained)
-                        {
-                            arm.Ca01Violations++;
-                        }
+                        arm.Ca01Violations++;
                     }
                 }
-            }
-            finally
-            {
-                accessor.Dispose();
             }
 
             tx.Commit();
@@ -617,37 +596,30 @@ class SpatialSetWriteTests : TestBase<SpatialSetWriteTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var accessor = tx.For<SetWA2FUnit>();
-            try
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                foreach (var cluster in accessor.GetClusterEnumerator())
+                Assert.That(cluster.OccupancyBits, Is.EqualTo(0b111UL), "precondition: the three entities should share one cluster, in slots 0 to 2");
+                arm.Layout[cluster.ChunkId] = cluster.OccupancyBits;
+                try
                 {
-                    Assert.That(cluster.OccupancyBits, Is.EqualTo(0b111UL), "precondition: the three entities should share one cluster, in slots 0 to 2");
-                    arm.Layout[cluster.ChunkId] = cluster.OccupancyBits;
-                    try
+                    if (setWrite)
                     {
-                        if (setWrite)
+                        cluster.WriteSpatial(SetWA2FUnit.Box, 0b111UL, values);
+                    }
+                    else
+                    {
+                        for (var slot = 0; slot < values.Length; slot++)
                         {
-                            cluster.WriteSpatial(SetWA2FUnit.Box, 0b111UL, values);
-                        }
-                        else
-                        {
-                            for (var slot = 0; slot < values.Length; slot++)
-                            {
-                                cluster.WriteSpatial(SetWA2FUnit.Box, slot, values[slot]);
-                            }
+                            cluster.WriteSpatial(SetWA2FUnit.Box, slot, values[slot]);
                         }
                     }
-                    catch (Exception e)
-                    {
-                        thrown = e;
-                    }
-
-                    arm.Values[cluster.ChunkId] = OccupiedBytes(cluster.GetReadOnlySpan(SetWA2FUnit.Box), cluster.OccupancyBits);
                 }
-            }
-            finally
-            {
-                accessor.Dispose();
+                catch (Exception e)
+                {
+                    thrown = e;
+                }
+
+                arm.Values[cluster.ChunkId] = OccupiedBytes(cluster.GetReadOnlySpan(SetWA2FUnit.Box), cluster.OccupancyBits);
             }
 
             tx.Commit();

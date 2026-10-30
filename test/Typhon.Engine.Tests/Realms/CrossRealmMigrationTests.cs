@@ -56,25 +56,18 @@ class CrossRealmMigrationTests : TestBase<CrossRealmMigrationTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<RealmUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
             {
-                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                var slot = BitOperations.TrailingZeroCount(bits);
+                if (cluster.GetEntityId(slot) == id)
                 {
-                    var slot = BitOperations.TrailingZeroCount(bits);
-                    if (cluster.GetEntityId(slot) == id)
-                    {
-                        cluster.WriteSpatial(RealmUnit.Pos, slot, value);
-                        tx.Commit();
-                        return;
-                    }
+                    cluster.WriteSpatial(RealmUnit.Pos, slot, value);
+                    tx.Commit();
+                    return;
                 }
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         Assert.Fail("entity not found");
@@ -85,28 +78,21 @@ class CrossRealmMigrationTests : TestBase<CrossRealmMigrationTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<RealmUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
             {
-                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                var slot = BitOperations.TrailingZeroCount(bits);
+                if (cluster.GetEntityId(slot) == id)
                 {
-                    var slot = BitOperations.TrailingZeroCount(bits);
-                    if (cluster.GetEntityId(slot) == id)
-                    {
 #pragma warning disable TYPHON009 // Deliberately around the barrier: the raw write is what the fence's revert exists for.
-                        cluster.GetSpan(RealmUnit.Pos)[slot].Realm = realm;
+                    cluster.GetSpan(RealmUnit.Pos)[slot].Realm = realm;
 #pragma warning restore TYPHON009
-                        cluster.MarkDirty(RealmUnit.Pos);
-                        tx.Commit();
-                        return;
-                    }
+                    cluster.MarkDirty(RealmUnit.Pos);
+                    tx.Commit();
+                    return;
                 }
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         Assert.Fail("entity not found");

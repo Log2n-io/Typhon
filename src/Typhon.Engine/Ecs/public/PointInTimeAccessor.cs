@@ -1,6 +1,5 @@
 using System;
 using JetBrains.Annotations;
-using Typhon.Engine.Internals;
 
 namespace Typhon.Engine;
 
@@ -105,7 +104,6 @@ public sealed class PointInTimeAccessor : IDisposable
     /// cache's eviction floor at the oldest worker's pin, and a tick that stalled on a page never saw one freed. A lease is a <c>ref struct</c>, so it
     /// cannot be stored, captured or carried to another thread: its pin and its unpin run on one thread. A worker accessor used with no lease open throws.
     /// </remarks>
-    [AllowCopy]
     public WorkerLease Enter(int workerId)
     {
         CheckConfig.Require(CheckConfig.Enabled, !_disposed, $"PointInTimeAccessor used after disposal");
@@ -139,6 +137,7 @@ public sealed class PointInTimeAccessor : IDisposable
     /// A worker accessor leased to one thread for one stretch of reads (<see cref="Enter"/>): its epoch pin lasts exactly as long as the lease. Dispose it
     /// on the thread that took it, in reverse order of nested leases — <c>using</c> does both. Never copy it: two copies would end one lease twice.
     /// </summary>
+    [MustDispose(Reason = "keeps the worker epoch-pinned past its lease")]
     [NoCopy]
     public ref struct WorkerLease
     {

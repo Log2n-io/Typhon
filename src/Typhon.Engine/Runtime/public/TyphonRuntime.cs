@@ -947,6 +947,11 @@ public sealed partial class TyphonRuntime : IDisposable
             _parallelAccessors[i]?.Dispose();
         }
 
+        // A tick's UoW is disposed at its end; one a tick never reached (a FatalStop, a shutdown between its start and its end) still holds its registry
+        // slot and change set. Nothing ticks past Quiesce, so it is released here.
+        _currentUow?.Dispose();
+        _currentUow = null;
+
         // The profiler is intentionally NOT finalized here. ProfilerBootstrap finalizes the trace from the engine
         // storage's Disposing event (ManagedPagedMMF, disposed after DatabaseEngine) — that runs deterministically on
         // every host AND after the engine's shutdown teardown, so those events still reach the trace. Stopping it here
@@ -2889,7 +2894,9 @@ public sealed partial class TyphonRuntime : IDisposable
                 // PersistentStore path: ClusterRangeEntityView for sequential cluster-order iteration.
                 // Per-worker pool (sized to WorkerCount) — must index by workerId, not chunkIndex,
                 // since oversubscription (ChunksPerWorker > 1) allows chunkIndex >= workerCount.
+#pragma warning disable TYPHON004 // Pooled per worker, not created here: the runtime disposes the pool
                 var rangeView = GetOrCreateTierRangeView(sysIdx, workerId);
+#pragma warning restore TYPHON004
                 rangeView.Reset(cs, cs.ClusterSegment, tierIds, clusterStart, clusterEnd);
                 entities = rangeView;
             }

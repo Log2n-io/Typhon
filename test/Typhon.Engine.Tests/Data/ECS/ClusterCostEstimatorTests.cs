@@ -81,23 +81,16 @@ class ClusterCostEstimatorTests : TestBase<ClusterCostEstimatorTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    var slot = BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-                    cluster.WriteSpatial(ClMigUnit.Pos, slot,
-                        PointAt(3f + (float)rng.NextDouble() * 94f, 3f + (float)rng.NextDouble() * 94f));
-                }
+                var slot = BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                cluster.WriteSpatial(ClMigUnit.Pos, slot,
+                    PointAt(3f + (float)rng.NextDouble() * 94f, 3f + (float)rng.NextDouble() * 94f));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

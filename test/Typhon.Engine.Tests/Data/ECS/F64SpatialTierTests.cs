@@ -145,19 +145,12 @@ class F64SpatialTierTests : TestBase<F64SpatialTierTests>
 
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<F64Unit3>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            if (cluster.ChunkId == chunkId)
             {
-                if (cluster.ChunkId == chunkId)
-                {
-                    cluster.WriteSpatial(F64Unit3.Pos, slot, PointAt(x, y, z));
-                }
+                cluster.WriteSpatial(F64Unit3.Pos, slot, PointAt(x, y, z));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
         tx.Commit();
     }
@@ -559,27 +552,20 @@ class F64SpatialTierTests : TestBase<F64SpatialTierTests>
         {
             using var tx = dbe.CreateQuickTransaction();
             var accessor = tx.For<F64Unit3>();
-            try
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                foreach (var cluster in accessor.GetClusterEnumerator())
+                var box = cluster.SpatialBounds;
+                if (box.IsEmpty)
                 {
-                    var box = cluster.SpatialBounds;
-                    if (box.IsEmpty)
-                    {
-                        continue;
-                    }
-                    found = true;
-                    Assert.That(box.MinX, Is.LessThanOrEqualTo(X), "the world box must contain the entity on the low side");
-                    Assert.That(box.MaxX, Is.GreaterThanOrEqualTo(X), "and on the high side");
-
-                    // The ablation, stated rather than performed: the same conversion narrowed to f32.
-                    Assert.That((float)box.MinX, Is.EqualTo((float)box.MaxX),
-                        "PRECONDITION: an f32 world box cannot distinguish this cluster's corners, which is why the conversion returns doubles.");
+                    continue;
                 }
-            }
-            finally
-            {
-                accessor.Dispose();
+                found = true;
+                Assert.That(box.MinX, Is.LessThanOrEqualTo(X), "the world box must contain the entity on the low side");
+                Assert.That(box.MaxX, Is.GreaterThanOrEqualTo(X), "and on the high side");
+
+                // The ablation, stated rather than performed: the same conversion narrowed to f32.
+                Assert.That((float)box.MinX, Is.EqualTo((float)box.MaxX),
+                    "PRECONDITION: an f32 world box cannot distinguish this cluster's corners, which is why the conversion returns doubles.");
             }
             tx.Commit();
         }

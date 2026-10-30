@@ -94,16 +94,9 @@ class ClusterRepairConvergenceTests : TestBase<ClusterRepairConvergenceTests>
         var total = 0;
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
-            {
-                total += System.Numerics.BitOperations.PopCount(cluster.OccupancyBits);
-            }
-        }
-        finally
-        {
-            accessor.Dispose();
+            total += System.Numerics.BitOperations.PopCount(cluster.OccupancyBits);
         }
 
         return total;
@@ -397,28 +390,21 @@ class ClusterRepairConvergenceTests : TestBase<ClusterRepairConvergenceTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
+            var bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
-                var bits = cluster.OccupancyBits;
-                while (bits != 0)
+                var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                if (positions[slot].Tag >= TightCellTag)
                 {
-                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-                    if (positions[slot].Tag >= TightCellTag)
-                    {
-                        cluster.WriteSpatial(ClMigUnit.Pos, slot, positions[slot]);
-                        tx.Commit();
-                        return;
-                    }
+                    cluster.WriteSpatial(ClMigUnit.Pos, slot, positions[slot]);
+                    tx.Commit();
+                    return;
                 }
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();
@@ -472,29 +458,22 @@ class ClusterRepairConvergenceTests : TestBase<ClusterRepairConvergenceTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
+            var bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
-                var bits = cluster.OccupancyBits;
-                while (bits != 0)
+                var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                if (positions[slot].Tag >= maxTag)
                 {
-                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-                    if (positions[slot].Tag >= maxTag)
-                    {
-                        continue;
-                    }
-
-                    cluster.WriteSpatial(ClMigUnit.Pos, slot,
-                        PointAt(2f + ((float)rng.NextDouble() * 96f), 2f + ((float)rng.NextDouble() * 96f), positions[slot].Tag));
+                    continue;
                 }
+
+                cluster.WriteSpatial(ClMigUnit.Pos, slot,
+                    PointAt(2f + ((float)rng.NextDouble() * 96f), 2f + ((float)rng.NextDouble() * 96f), positions[slot].Tag));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();
@@ -555,27 +534,20 @@ class ClusterRepairConvergenceTests : TestBase<ClusterRepairConvergenceTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
+            var bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
-                var bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
+                var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
 
-                    ref readonly var b = ref positions[slot].Bounds;
-                    var x = Math.Clamp((0.5f * (b.MinX + b.MaxX)) + ((float)rng.NextDouble() - 0.5f) * 4f, 2f, 98f);
-                    var y = Math.Clamp((0.5f * (b.MinY + b.MaxY)) + ((float)rng.NextDouble() - 0.5f) * 4f, 2f, 98f);
-                    cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, y, positions[slot].Tag));
-                }
+                ref readonly var b = ref positions[slot].Bounds;
+                var x = Math.Clamp((0.5f * (b.MinX + b.MaxX)) + ((float)rng.NextDouble() - 0.5f) * 4f, 2f, 98f);
+                var y = Math.Clamp((0.5f * (b.MinY + b.MaxY)) + ((float)rng.NextDouble() - 0.5f) * 4f, 2f, 98f);
+                cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, y, positions[slot].Tag));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

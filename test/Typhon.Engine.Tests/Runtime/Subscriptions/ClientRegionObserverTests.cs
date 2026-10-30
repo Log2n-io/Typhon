@@ -569,7 +569,6 @@ unsafe class ClientRegionObserverTests : TestBase<ClientRegionObserverTests>
             }
         }
 
-        accessor.Dispose();
         tx.Commit();
     }
 

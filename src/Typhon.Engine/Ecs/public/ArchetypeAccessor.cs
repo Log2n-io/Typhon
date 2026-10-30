@@ -8,7 +8,9 @@ namespace Typhon.Engine;
 /// <summary>
 /// Fast-path entity accessor pre-bound to a specific archetype.
 /// Bypasses epoch checks, archetype lookup, and null guards that are redundant for PTA workers.
-/// <para>Created via <see cref="EntityAccessor.For{TArch}"/>. Must be disposed after use.</para>
+/// <para>Created via <see cref="EntityAccessor.For{TArch}"/>. It owns no page and needs no dispose: it resolves through the archetype cache of the
+/// accessor it was taken from, whose pages that accessor lets go of at its commit, its dispose, or a point-in-time worker's end of system. A copy of
+/// it, or one simply dropped, leaks nothing (#1538).</para>
 /// </summary>
 /// <remarks>
 /// <para><b>What it skips per-entity vs <see cref="EntityAccessor.ResolveEntity"/>:</b></para>
@@ -16,7 +18,6 @@ namespace Typhon.Engine;
 ///   <item>EpochThreadRegistry.IsCurrentThreadInScope check (ThreadStatic access)</item>
 ///   <item>ArchetypeRegistry.GetMetadata lookup</item>
 ///   <item>Null guards on archetype state and entity map</item>
-///   <item>EntityMap ChunkAccessor cache check (always same archetype)</item>
 /// </list>
 /// <para>Versioned components are supported — revision chain walk is performed only for Versioned slots.
 /// SV/Transient slots skip the chain walk entirely (the common fast path for game systems).</para>
@@ -29,21 +30,19 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
     private readonly ArchetypeMetadata _archetype;
     private readonly ArchetypeEngineState _engineState;
     private readonly EntityAccessor _accessor;
+#pragma warning disable TYPHON005 // Borrowed: the accessor's own transaction, its caller's to dispose
     private readonly Transaction _transaction;   // _accessor as a Transaction (null for a PTA worker) — for its pending destroys
+#pragma warning restore TYPHON005
     private readonly EnabledBitsOverrides _enabledBitsOverrides;
     private readonly long _tsn;
     private readonly ushort _routingId;
     private readonly int _recordSize;
     private readonly bool _hasVersionedSlots;
     private bool _mutationPrepared;
-    private ChunkAccessor<PersistentStore> _entityMapAccessor;
 
     // ── Cluster storage fields ──────────────────────────────────────────
     private readonly bool _hasClusterStorage;
     private readonly ArchetypeClusterState _clusterState;
-    private ChunkAccessor<PersistentStore> _clusterAccessor;
-    private ChunkAccessor<TransientStore> _transientClusterAccessor;
-    private readonly bool _hasTransientCluster;
 
     internal ArchetypeAccessor(ArchetypeMetadata archetype, ArchetypeEngineState engineState, EntityAccessor accessor, DatabaseEngine dbe)
     {
@@ -55,7 +54,6 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
         _tsn = accessor.TSN;
         _routingId = dbe.RoutingIdOf(archetype);
         _recordSize = archetype._entityRecordSize;
-        _entityMapAccessor = engineState.EntityMap.Segment.CreateChunkAccessor();
 
         // Detect if any component uses Versioned storage (needs revision chain walk). No ComponentInfo is created here: every reader and writer reaches
         // one through GetComponentInfoByTypeId, which creates it on first touch, so warming every slot up front only cost an entry per component the
@@ -70,16 +68,8 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
             }
         }
 
-        // Cluster storage setup
         _hasClusterStorage = archetype.IsClusterEligible && engineState.ClusterState != null;
         _clusterState = engineState.ClusterState;
-        _clusterAccessor = _hasClusterStorage && _clusterState.ClusterSegment != null ? _clusterState.ClusterSegment.CreateChunkAccessor() : default;
-        _hasTransientCluster = _hasClusterStorage && _clusterState.TransientSegment != null;
-        _transientClusterAccessor = _hasTransientCluster ? _clusterState.TransientSegment.CreateChunkAccessor() : default;
-
-        // A handle resolved here caches a pointer this accessor's slot holds; what the accessor lets go of, the handle must learn (#1199). Not the
-        // Transient accessor: its pages are never evicted.
-        _clusterAccessor.TrackGeneration(accessor.ClusterGeneration);
     }
 
     /// <summary>Open an entity for reading. Throws if it is not an entity of this archetype visible at the accessor's TSN.</summary>
@@ -123,8 +113,9 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
             return false;
         }
         byte* readBuf = stackalloc byte[_recordSize];
-        return _engineState.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref _entityMapAccessor)
-            && EntityVisibility.IsVisible(readBuf, _tsn, _accessor.CommitCards, _engineState.EntityMap, id.EntityKey, ref _entityMapAccessor,
+        ref var entityMap = ref _accessor.EntityMapAccessor(_engineState, _routingId);
+        return _engineState.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref entityMap)
+            && EntityVisibility.IsVisible(readBuf, _tsn, _accessor.CommitCards, _engineState.EntityMap, id.EntityKey, ref entityMap,
                 _accessor.DBE.EpochManager);
     }
 
@@ -192,13 +183,15 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
         }
 
         byte* readBuf = stackalloc byte[_recordSize];
-        // Hinted lookup — see the note in EntityAccessor.ResolveEntity. Same map, same key shape, same reason.
-        if (!_engineState.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref _entityMapAccessor))
+        // Hinted lookup — see the note in EntityAccessor.ResolveEntity. Same map, same key shape, same reason. The accessor is the owning accessor's,
+        // taken again here rather than held: the cache may have handed its way to another archetype since the last open.
+        ref var cache = ref _accessor.EnsureArchetypeCache(_engineState, _routingId);
+        if (!_engineState.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref cache.EntityMap))
         {
             return Miss(id, throwOnMiss);
         }
 
-        if (!EntityVisibility.IsVisible(readBuf, _tsn, _accessor.CommitCards, _engineState.EntityMap, id.EntityKey, ref _entityMapAccessor,
+        if (!EntityVisibility.IsVisible(readBuf, _tsn, _accessor.CommitCards, _engineState.EntityMap, id.EntityKey, ref cache.EntityMap,
                 _accessor.DBE.EpochManager))
         {
             return Miss(id, throwOnMiss);
@@ -215,18 +208,8 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
             int clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(readBuf);
             byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(readBuf);
 
-            // Primary base: PersistentStore for mixed/SV, TransientStore for pure-Transient
-            result._clusterBase = _clusterState.ClusterSegment != null ? 
-                _clusterAccessor.GetChunkAddress(clusterChunkId, writable) : _transientClusterAccessor.GetChunkAddress(clusterChunkId, writable);
-
-            // Mixed archetype: also set TransientStore base for Transient component reads
-            if (_hasTransientCluster && _clusterState.ClusterSegment != null)
-            {
-                result._transientClusterBase = _transientClusterAccessor.GetChunkAddress(clusterChunkId, writable);
-            }
-
-            result._resolveGen = _accessor.ClusterGeneration.Value;
-            result._resolvedWritable = writable;
+            // The same cache entry the EntityMap lookup took (a hit): primary and Transient bases, stamped with their generation
+            _accessor.ResolveClusterBases(ref cache, clusterChunkId, writable, ref result);
             result._clusterSlotIndex = slotIndex;
             result._clusterChunkId = clusterChunkId;
             result._clusterLayout = _clusterState.Layout;
@@ -435,19 +418,5 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
 
         _clusterState.ReadRealmClusterList(realm.Value, out var count);
         return count;
-    }
-
-    /// <summary>Release the cached EntityMap and cluster ChunkAccessors.</summary>
-    public void Dispose()
-    {
-        _entityMapAccessor.Dispose();
-        if (_hasClusterStorage && _clusterState.ClusterSegment != null)
-        {
-            _clusterAccessor.Dispose();
-        }
-        if (_hasTransientCluster)
-        {
-            _transientClusterAccessor.Dispose();
-        }
     }
 }

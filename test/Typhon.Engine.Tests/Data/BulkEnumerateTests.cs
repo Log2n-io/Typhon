@@ -467,7 +467,7 @@ class BulkEnumerateTests : TestBase<BulkEnumerateTests>
         using var tx = dbe.CreateQuickTransaction();
 
         Assert.Throws<System.InvalidOperationException>(() =>
-            tx.EnumerateIndex<CompD, float>(staleRef, float.MinValue, float.MaxValue));
+            tx.EnumerateIndex<CompD, float>(staleRef, float.MinValue, float.MaxValue).Dispose());
     }
 
     [Test]

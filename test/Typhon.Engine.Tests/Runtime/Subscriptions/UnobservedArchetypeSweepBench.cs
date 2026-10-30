@@ -84,30 +84,23 @@ class UnobservedArchetypeSweepBench : TestBase<UnobservedArchetypeSweepBench>
 
     private static void MoveAll<T>(ArchetypeAccessor<T> accessor, Comp<ProjBounds> component, long tick, int stride) where T : Archetype<T>
     {
-        try
+        var n = 0L;
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            var n = 0L;
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
             {
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0)
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                if (n++ % stride != tick % stride)
                 {
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    if (n++ % stride != tick % stride)
-                    {
-                        continue;
-                    }
-
-                    var b = cluster.GetReadOnly(component, slot).Bounds;
-                    var angle = (tick * 0.7) + (slot * 1.3);
-                    cluster.WriteSpatial(component, slot, At(b.MinX + (float)Math.Cos(angle), b.MinY + (float)Math.Sin(angle)));
+                    continue;
                 }
+
+                var b = cluster.GetReadOnly(component, slot).Bounds;
+                var angle = (tick * 0.7) + (slot * 1.3);
+                cluster.WriteSpatial(component, slot, At(b.MinX + (float)Math.Cos(angle), b.MinY + (float)Math.Sin(angle)));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
     }
 

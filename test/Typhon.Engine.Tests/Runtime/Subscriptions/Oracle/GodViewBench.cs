@@ -84,54 +84,47 @@ class GodViewBench : TestBase<GodViewBench>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ProjCreature>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
             {
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0)
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                var id = (long)cluster.GetEntityId(slot).RawValue;
+                float stride;
+                double heading;
+                if (world.Swoops.Contains(id))
                 {
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    var id = (long)cluster.GetEntityId(slot).RawValue;
-                    float stride;
-                    double heading;
-                    if (world.Swoops.Contains(id))
+                    stride = 1.5f;
+                    if (!world.Headings.TryGetValue(id, out heading) || world.Random.Next(50) == 0)
                     {
-                        stride = 1.5f;
-                        if (!world.Headings.TryGetValue(id, out heading) || world.Random.Next(50) == 0)
-                        {
-                            heading = world.Random.NextDouble() * Math.PI * 2;
-                        }
-                    }
-                    else if (world.Random.NextDouble() < wanderers)
-                    {
-                        stride = 0.5f;
                         heading = world.Random.NextDouble() * Math.PI * 2;
                     }
-                    else
-                    {
-                        continue;
-                    }
-
-                    var b = cluster.GetReadOnly(ProjCreature.Bounds, slot).Bounds;
-                    var x = ((b.MinX + b.MaxX) * 0.5f) + (float)(Math.Cos(heading) * stride);
-                    var y = ((b.MinY + b.MaxY) * 0.5f) + (float)(Math.Sin(heading) * stride);
-                    if (Math.Abs(x) > Limit || Math.Abs(y) > Limit)
-                    {
-                        heading += Math.PI;
-                        x = Math.Clamp(x, -Limit, Limit);
-                        y = Math.Clamp(y, -Limit, Limit);
-                    }
-
-                    world.Headings[id] = heading;
-                    cluster.WriteSpatial(ProjCreature.Bounds, slot, At(x, y));
                 }
+                else if (world.Random.NextDouble() < wanderers)
+                {
+                    stride = 0.5f;
+                    heading = world.Random.NextDouble() * Math.PI * 2;
+                }
+                else
+                {
+                    continue;
+                }
+
+                var b = cluster.GetReadOnly(ProjCreature.Bounds, slot).Bounds;
+                var x = ((b.MinX + b.MaxX) * 0.5f) + (float)(Math.Cos(heading) * stride);
+                var y = ((b.MinY + b.MaxY) * 0.5f) + (float)(Math.Sin(heading) * stride);
+                if (Math.Abs(x) > Limit || Math.Abs(y) > Limit)
+                {
+                    heading += Math.PI;
+                    x = Math.Clamp(x, -Limit, Limit);
+                    y = Math.Clamp(y, -Limit, Limit);
+                }
+
+                world.Headings[id] = heading;
+                cluster.WriteSpatial(ProjCreature.Bounds, slot, At(x, y));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

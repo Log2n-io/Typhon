@@ -1559,7 +1559,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 if (ownStream.HasValue)
                 {
                     Grow(ref streams, streamCount);
+#pragma warning disable TYPHON003 // A move: the stream goes into the merge, which disposes it; the nullable is dropped
                     streams[streamCount++] = ownStream.Value;
+#pragma warning restore TYPHON003
                 }
             }
 
@@ -5247,7 +5249,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         }
 
         /// <summary>No-op; the enumerator holds no resources requiring release.</summary>
+#pragma warning disable TYPHON006 // Its _tx is borrowed: the query's transaction, its caller's to dispose
         public void Dispose() { }
+#pragma warning restore TYPHON006
     }
 }
 #pragma warning restore TYPHON005

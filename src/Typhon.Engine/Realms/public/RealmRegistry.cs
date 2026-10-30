@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using JetBrains.Annotations;
-using Typhon.Engine.Internals;
 
 namespace Typhon.Engine;
 

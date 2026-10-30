@@ -398,33 +398,19 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         using (var ro = dbe.CreateReadOnlyTransaction())
         {
             var accessor = ro.For<SvUnit>();
-            try
-            {
-                Assert.That(ArchetypeOpenThrows(ref accessor, id, tryForm: true), Is.True, "ArchetypeAccessor.TryOpenMut runs the same prep");
-                Assert.That(ArchetypeOpenThrows(ref accessor, absent, tryForm: true), Is.True, "...before the lookup");
-                Assert.That(ArchetypeOpenThrows(ref accessor, id, tryForm: false), Is.True, "ArchetypeAccessor.OpenMut too");
-            }
-            finally
-            {
-                accessor.Dispose();
-            }
+            Assert.That(ArchetypeOpenThrows(ref accessor, id, tryForm: true), Is.True, "ArchetypeAccessor.TryOpenMut runs the same prep");
+            Assert.That(ArchetypeOpenThrows(ref accessor, absent, tryForm: true), Is.True, "...before the lookup");
+            Assert.That(ArchetypeOpenThrows(ref accessor, id, tryForm: false), Is.True, "ArchetypeAccessor.OpenMut too");
         }
 
         // The prep runs on EVERY writable open of an ArchetypeAccessor, not once: one taken before commit is refused after it.
         using (var tx = dbe.CreateQuickTransaction())
         {
             var accessor = tx.For<SvUnit>();
-            try
-            {
-                Assert.That(accessor.TryOpenMut(id, out _), Is.True, "premise: the first writable open succeeds");
-                tx.Commit();
-                Assert.That(ArchetypeOpenThrows(ref accessor, id, tryForm: false), Is.True, "a writable open after commit must be refused");
-                Assert.That(ArchetypeOpenThrows(ref accessor, id, tryForm: true), Is.True);
-            }
-            finally
-            {
-                accessor.Dispose();
-            }
+            Assert.That(accessor.TryOpenMut(id, out _), Is.True, "premise: the first writable open succeeds");
+            tx.Commit();
+            Assert.That(ArchetypeOpenThrows(ref accessor, id, tryForm: false), Is.True, "a writable open after commit must be refused");
+            Assert.That(ArchetypeOpenThrows(ref accessor, id, tryForm: true), Is.True);
         }
     }
 
@@ -518,41 +504,34 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         // Right archetype, absent key — the lookup miss, not the routing check.
         var absent = new EntityId(sv.EntityKey + 100_000, sv.ArchetypeId);
         var accessor = tx.For<SvUnit>();
+        Assert.That(accessor.TryOpen(absent, out var ro), Is.False);
+        Assert.That(ro.IsValid, Is.False);
+        Assert.That(accessor.TryOpenMut(absent, out var mut), Is.False);
+        Assert.That(mut.IsValid, Is.False);
+        Assert.That(accessor.IsAlive(absent), Is.False);
+        Assert.That(accessor.TryOpen(EntityId.Null, out _), Is.False);
+        Assert.That(accessor.IsAlive(EntityId.Null), Is.False);
+
+        var openThrew = false;
         try
         {
-            Assert.That(accessor.TryOpen(absent, out var ro), Is.False);
-            Assert.That(ro.IsValid, Is.False);
-            Assert.That(accessor.TryOpenMut(absent, out var mut), Is.False);
-            Assert.That(mut.IsValid, Is.False);
-            Assert.That(accessor.IsAlive(absent), Is.False);
-            Assert.That(accessor.TryOpen(EntityId.Null, out _), Is.False);
-            Assert.That(accessor.IsAlive(EntityId.Null), Is.False);
-
-            var openThrew = false;
-            try
-            {
-                accessor.Open(absent);
-            }
-            catch (InvalidOperationException)
-            {
-                openThrew = true;
-            }
-            var openMutThrew = false;
-            try
-            {
-                accessor.OpenMut(absent);
-            }
-            catch (InvalidOperationException)
-            {
-                openMutThrew = true;
-            }
-            Assert.That(openThrew, Is.True);
-            Assert.That(openMutThrew, Is.True);
+            accessor.Open(absent);
         }
-        finally
+        catch (InvalidOperationException)
         {
-            accessor.Dispose();
+            openThrew = true;
         }
+        var openMutThrew = false;
+        try
+        {
+            accessor.OpenMut(absent);
+        }
+        catch (InvalidOperationException)
+        {
+            openMutThrew = true;
+        }
+        Assert.That(openThrew, Is.True);
+        Assert.That(openMutThrew, Is.True);
     }
 
     [Test]
@@ -564,20 +543,13 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var accessor = tx.For<SvUnit>();
-            try
-            {
-                Assert.That(accessor.IsAlive(id), Is.True);
-                Assert.That(accessor.TryOpenMut(id, out var entity), Is.True);
-                var position = entity.Read(SvUnit.Position);
-                position.X = 9;
-                entity.Set(SvUnit.Position, position);
-                Assert.That(accessor.TryOpen(id, out var ro), Is.True);
-                Assert.That(ro.Read(SvUnit.Position).X, Is.EqualTo(9f));
-            }
-            finally
-            {
-                accessor.Dispose();
-            }
+            Assert.That(accessor.IsAlive(id), Is.True);
+            Assert.That(accessor.TryOpenMut(id, out var entity), Is.True);
+            var position = entity.Read(SvUnit.Position);
+            position.X = 9;
+            entity.Set(SvUnit.Position, position);
+            Assert.That(accessor.TryOpen(id, out var ro), Is.True);
+            Assert.That(ro.Read(SvUnit.Position).X, Is.EqualTo(9f));
             tx.Commit();
         }
 
@@ -596,17 +568,10 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
 
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<SvUnit>();
-        try
-        {
-            Assert.That(accessor.IsAlive(sv), Is.True, "premise: the key resolves under its own archetype");
-            Assert.That(accessor.TryOpen(foreign, out _), Is.False);
-            Assert.That(accessor.TryOpen(v, out _), Is.False);
-            Assert.That(accessor.IsAlive(foreign), Is.False);
-        }
-        finally
-        {
-            accessor.Dispose();
-        }
+        Assert.That(accessor.IsAlive(sv), Is.True, "premise: the key resolves under its own archetype");
+        Assert.That(accessor.TryOpen(foreign, out _), Is.False);
+        Assert.That(accessor.TryOpen(v, out _), Is.False);
+        Assert.That(accessor.IsAlive(foreign), Is.False);
     }
 
     /// <summary>
@@ -624,16 +589,9 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
 
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<SvUnit>();
-        try
-        {
-            Assert.That(accessor.TryOpen(sv, out _), Is.True);
-            Assert.That(accessor.TryOpen(wrong, out _), Is.False);
-            Assert.That(accessor.IsAlive(wrong), Is.False);
-        }
-        finally
-        {
-            accessor.Dispose();
-        }
+        Assert.That(accessor.TryOpen(sv, out _), Is.True);
+        Assert.That(accessor.TryOpen(wrong, out _), Is.False);
+        Assert.That(accessor.IsAlive(wrong), Is.False);
     }
 
     /// <summary>A destroy committed after the accessor's snapshot does not hide the entity from it: it was alive at that TSN.</summary>
@@ -650,16 +608,9 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         }
 
         var accessor = old.For<SvUnit>();
-        try
-        {
-            Assert.That(accessor.IsAlive(id), Is.True);
-            Assert.That(accessor.TryOpen(id, out var e), Is.True);
-            Assert.That(e.Read(SvUnit.Position).X, Is.EqualTo(3f));
-        }
-        finally
-        {
-            accessor.Dispose();
-        }
+        Assert.That(accessor.IsAlive(id), Is.True);
+        Assert.That(accessor.TryOpen(id, out var e), Is.True);
+        Assert.That(e.Read(SvUnit.Position).X, Is.EqualTo(3f));
 
         using var fresh = dbe.CreateQuickTransaction();
         Assert.That(fresh.IsAlive(id), Is.False, "premise: the destroy is committed");
@@ -674,18 +625,11 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var accessor = tx.For<VUnit>();
-            try
-            {
-                Assert.That(accessor.TryOpenMut(id, out var entity), Is.True);
-                var statsCopy = entity.Read(VUnit.Stats);
-                statsCopy.Health = 44;
-                entity.Set(VUnit.Stats, statsCopy);
-                Assert.That(entity.Read(VUnit.Stats).Health, Is.EqualTo(44));
-            }
-            finally
-            {
-                accessor.Dispose();
-            }
+            Assert.That(accessor.TryOpenMut(id, out var entity), Is.True);
+            var statsCopy = entity.Read(VUnit.Stats);
+            statsCopy.Health = 44;
+            entity.Set(VUnit.Stats, statsCopy);
+            Assert.That(entity.Read(VUnit.Stats).Health, Is.EqualTo(44));
             tx.Commit();
         }
 
@@ -702,26 +646,12 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         var later = SpawnSv(dbe, 1);
 
         var accessor = old.For<SvUnit>();
-        try
-        {
-            Assert.That(accessor.TryOpen(later, out _), Is.False);
-            Assert.That(accessor.IsAlive(later), Is.False);
-        }
-        finally
-        {
-            accessor.Dispose();
-        }
+        Assert.That(accessor.TryOpen(later, out _), Is.False);
+        Assert.That(accessor.IsAlive(later), Is.False);
 
         using var fresh = dbe.CreateQuickTransaction();
         var freshAccessor = fresh.For<SvUnit>();
-        try
-        {
-            Assert.That(freshAccessor.TryOpen(later, out _), Is.True, "premise: visible to a snapshot taken after the commit");
-        }
-        finally
-        {
-            freshAccessor.Dispose();
-        }
+        Assert.That(freshAccessor.TryOpen(later, out _), Is.True, "premise: visible to a snapshot taken after the commit");
     }
 
     /// <summary>
@@ -740,18 +670,11 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         tx.Destroy(committed);
 
         var accessor = tx.For<SvUnit>();
-        try
-        {
-            Assert.That(accessor.TryOpen(spawned, out _), Is.False);
-            Assert.That(tx.TryOpen(spawned, out _), Is.True, "the transaction itself does see it");
+        Assert.That(accessor.TryOpen(spawned, out _), Is.False);
+        Assert.That(tx.TryOpen(spawned, out _), Is.True, "the transaction itself does see it");
 
-            Assert.That(accessor.IsAlive(committed), Is.False, "a pending destroy is a miss");
-            Assert.That(accessor.TryOpen(committed, out _), Is.False);
-            Assert.That(accessor.TryOpenMut(committed, out _), Is.False, "…so it cannot be written after its destroy");
-        }
-        finally
-        {
-            accessor.Dispose();
-        }
+        Assert.That(accessor.IsAlive(committed), Is.False, "a pending destroy is a miss");
+        Assert.That(accessor.TryOpen(committed, out _), Is.False);
+        Assert.That(accessor.TryOpenMut(committed, out _), Is.False, "…so it cannot be written after its destroy");
     }
 }

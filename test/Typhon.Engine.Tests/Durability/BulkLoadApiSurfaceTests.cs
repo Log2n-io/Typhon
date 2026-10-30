@@ -129,7 +129,7 @@ internal sealed class BulkLoadApiSurfaceTests
     {
         using var bulk1 = _engine.BeginBulkLoad();
 
-        var ex = Assert.Throws<BulkSessionAlreadyActiveException>(() => _engine.BeginBulkLoad());
+        var ex = Assert.Throws<BulkSessionAlreadyActiveException>(() => _engine.BeginBulkLoad().Dispose());
         Assert.That(ex.ActiveBulkSessionId, Is.EqualTo(bulk1.BulkSessionId));
         Assert.That(ex.ErrorCode, Is.EqualTo(TyphonErrorCode.BulkSessionAlreadyActive));
     }

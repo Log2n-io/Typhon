@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -11,8 +11,8 @@ namespace Typhon.Analyzers;
 /// Analyzer that detects IDisposable instances returned from method calls that are not properly disposed.
 /// This addresses limitations in CA2000 which lacks inter-procedural analysis and misses many patterns.
 ///
-/// Critical Typhon types (ChunkAccessor, Transaction) are reported as errors because
-/// failing to dispose them causes system-level bugs like page cache deadlock or data corruption.
+/// Critical Typhon types (<see cref="OwnershipCatalog"/>: marked <c>[MustDispose]</c>, or owning one by value) are reported as errors because failing to
+/// dispose them causes system-level bugs: pages pinned for good, a checkpoint that never covers them again and a WAL that is never recycled (CP-13).
 /// </summary>
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public class DisposableNotDisposedAnalyzer : DiagnosticAnalyzer
@@ -39,6 +39,16 @@ public class DisposableNotDisposedAnalyzer : DiagnosticAnalyzer
         DiagnosticSeverity.Error,
         isEnabledByDefault: true,
         description: DiscardedDescription);
+
+    // Diagnostic for a critical value used once as a receiver and dropped (tx.For<T>().TryOpen(...))
+    private static readonly DiagnosticDescriptor ReceiverRule = new DiagnosticDescriptor(
+        DiagnosticId,
+        "IDisposable result used as a receiver and dropped",
+        "'{0}' returns '{1}', which is used once and dropped without being disposed{2}",
+        Category,
+        DiagnosticSeverity.Error,
+        isEnabledByDefault: true,
+        description: "A critical value created only to call a member on it is never disposed. Take it into a 'using' local first.");
 
     // Diagnostic for variables that are never disposed
     private static readonly LocalizableString UndisposedTitle =
@@ -82,7 +92,7 @@ public class DisposableNotDisposedAnalyzer : DiagnosticAnalyzer
 
 
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
-        ImmutableArray.Create(DiscardedRule, UndisposedRule, ReassignmentRule);
+        ImmutableArray.Create(DiscardedRule, UndisposedRule, ReassignmentRule, ReceiverRule);
 
     public override void Initialize(AnalysisContext context)
     {
@@ -90,17 +100,21 @@ public class DisposableNotDisposedAnalyzer : DiagnosticAnalyzer
         context.EnableConcurrentExecution();
 
         // Use operation block analysis to track disposables across the entire method body
-        context.RegisterOperationBlockAction(AnalyzeOperationBlock);
+        context.RegisterCompilationStartAction(start =>
+        {
+            var catalog = new OwnershipCatalog(start.Compilation);
+            start.RegisterOperationBlockAction(block => AnalyzeOperationBlock(block, catalog));
+        });
     }
 
-    private static void AnalyzeOperationBlock(OperationBlockAnalysisContext context)
+    private static void AnalyzeOperationBlock(OperationBlockAnalysisContext context, OwnershipCatalog catalog)
     {
         // Only analyze method bodies
         if (context.OwningSymbol is not IMethodSymbol)
             return;
 
         // Track state for each local variable holding a disposable
-        var tracker = new DisposableTracker(context.Compilation);
+        var tracker = new DisposableTracker(catalog);
 
         foreach (var block in context.OperationBlocks)
         {
@@ -110,7 +124,7 @@ public class DisposableNotDisposedAnalyzer : DiagnosticAnalyzer
         // Report any variables that were never disposed
         foreach (var undisposed in tracker.GetUndisposedVariables())
         {
-            var consequence = GetConsequenceMessage(undisposed.Type);
+            var consequence = GetConsequenceMessage(undisposed.Type, catalog);
             var diagnostic = Diagnostic.Create(
                 UndisposedRule,
                 undisposed.Location,
@@ -160,6 +174,7 @@ public class DisposableNotDisposedAnalyzer : DiagnosticAnalyzer
             case IInvocationOperation invocation:
                 // Check if this is a Dispose() call
                 AnalyzeInvocation(invocation, tracker);
+                AnalyzeReceiverTemporary(invocation, tracker.Catalog, context);
                 break;
 
             case IReturnOperation returnOp:
@@ -175,6 +190,12 @@ public class DisposableNotDisposedAnalyzer : DiagnosticAnalyzer
             case IPropertyReferenceOperation propRef when IsAssignmentTarget(propRef):
                 // Assigning to a property transfers ownership
                 AnalyzePropertyAssignment(propRef, tracker);
+                break;
+
+            case IForEachLoopOperation forEach when Unwrap(forEach.Collection) is ILocalReferenceOperation collection:
+                // foreach disposes the enumerator it takes: an enumerator that is its own enumerable (GetEnumerator() => this) hands itself over, and a
+                // 'using' on the local as well would dispose it twice
+                tracker.MarkOwnershipTransferred(collection.Local);
                 break;
 
             case IArgumentOperation argument:
@@ -203,8 +224,12 @@ public class DisposableNotDisposedAnalyzer : DiagnosticAnalyzer
             var initialValue = declarator.Initializer.Value;
             var local = declarator.Symbol;
 
-            // Check if the type implements IDisposable
-            if (!IsDisposableType(local.Type, context.Compilation))
+            // Check if the type is critical
+            if (!IsDisposableType(local.Type, tracker.Catalog))
+                continue;
+
+            // A ref local aliases a value someone else owns (a rented, cached accessor): no copy, nothing to dispose here
+            if (local.RefKind != RefKind.None)
                 continue;
 
             // Check if this is inside a using declaration
@@ -214,6 +239,10 @@ public class DisposableNotDisposedAnalyzer : DiagnosticAnalyzer
             // Skip traversal patterns - these are not new allocations
             // e.g., var cur = Head; or var cur = node.Next;
             if (IsTraversalPattern(initialValue))
+                continue;
+
+            // `default` or `null` owns nothing: the value assigned later is what is tracked
+            if (IsEmptyValue(initialValue))
                 continue;
 
             // Track this variable
@@ -238,9 +267,9 @@ public class DisposableNotDisposedAnalyzer : DiagnosticAnalyzer
         if (expr is IInvocationOperation invocation)
         {
             var returnType = invocation.TargetMethod.ReturnType;
-            if (IsDisposableType(returnType, context.Compilation))
+            if (invocation.TargetMethod.RefKind == RefKind.None && IsDisposableType(returnType, tracker.Catalog))
             {
-                var consequence = GetConsequenceMessage(returnType);
+                var consequence = GetConsequenceMessage(returnType, tracker.Catalog);
                 var diagnostic = Diagnostic.Create(
                     DiscardedRule,
                     exprStmt.Syntax.GetLocation(),
@@ -264,9 +293,9 @@ public class DisposableNotDisposedAnalyzer : DiagnosticAnalyzer
             if (value is IInvocationOperation discardedInvocation)
             {
                 var returnType = discardedInvocation.TargetMethod.ReturnType;
-                if (IsDisposableType(returnType, context.Compilation))
+                if (discardedInvocation.TargetMethod.RefKind == RefKind.None && IsDisposableType(returnType, tracker.Catalog))
                 {
-                    var consequence = GetConsequenceMessage(returnType);
+                    var consequence = GetConsequenceMessage(returnType, tracker.Catalog);
                     var diagnostic = Diagnostic.Create(
                         DiscardedRule,
                         exprStmt.Syntax.GetLocation(),
@@ -290,8 +319,8 @@ public class DisposableNotDisposedAnalyzer : DiagnosticAnalyzer
 
         var local = localRef.Local;
 
-        // Check if we're assigning a disposable
-        if (!IsDisposableType(local.Type, context.Compilation))
+        // Check if we're assigning a disposable (a ref reassignment aliases, it does not own)
+        if (assignment.IsRef || !IsDisposableType(local.Type, tracker.Catalog))
             return;
 
         // Skip traversal patterns - these are not new allocations
@@ -303,10 +332,14 @@ public class DisposableNotDisposedAnalyzer : DiagnosticAnalyzer
             return;
         }
 
+        // Assigning `default` or `null` hands nothing over
+        if (IsEmptyValue(assignment.Value))
+            return;
+
         // Check if this variable already holds an undisposed value
         if (tracker.IsTrackedAndUndisposed(local))
         {
-            var consequence = GetConsequenceMessage(local.Type);
+            var consequence = GetConsequenceMessage(local.Type, tracker.Catalog);
             var diagnostic = Diagnostic.Create(
                 ReassignmentRule,
                 assignment.Syntax.GetLocation(),
@@ -347,6 +380,54 @@ public class DisposableNotDisposedAnalyzer : DiagnosticAnalyzer
                 parent = parent.Parent;
             }
         }
+    }
+
+    /// <summary>
+    /// A critical value returned by a call and used only as the receiver of another member — <c>tx.For&lt;T&gt;().TryOpen(...)</c> — is created and
+    /// dropped in one expression: nothing can dispose it. A ref-returning call hands out an existing value, not a new one.
+    /// </summary>
+    private static void AnalyzeReceiverTemporary(IInvocationOperation invocation, OwnershipCatalog catalog, OperationBlockAnalysisContext context)
+    {
+        if (invocation.TargetMethod.RefKind != RefKind.None || !catalog.IsCritical(invocation.Type, out var consequence))
+            return;
+
+        IOperation self = invocation;
+        var parent = invocation.Parent;
+        while (parent is IConversionOperation)
+        {
+            self = parent;
+            parent = parent.Parent;
+        }
+
+        var receiver = parent switch
+        {
+            IInvocationOperation call => call.Instance,
+            IPropertyReferenceOperation property => property.Instance,
+            IFieldReferenceOperation field => field.Instance,
+            IEventReferenceOperation evt => evt.Instance,
+            _ => null,
+        };
+
+        if (receiver != self)
+            return;
+
+        // The temporary's own Dispose() is the one receiver call that does dispose it
+        if (parent is IInvocationOperation { TargetMethod.Name: "Dispose" })
+            return;
+
+        context.ReportDiagnostic(Diagnostic.Create(ReceiverRule, invocation.Syntax.GetLocation(), invocation.TargetMethod.Name, invocation.Type.Name, consequence));
+    }
+
+    private static bool IsEmptyValue(IOperation operation) =>
+        Unwrap(operation) is IDefaultValueOperation || Unwrap(operation) is ILiteralOperation { ConstantValue: { HasValue: true, Value: null } };
+
+    private static IOperation Unwrap(IOperation operation)
+    {
+        while (operation is IConversionOperation conversion)
+        {
+            operation = conversion.Operand;
+        }
+        return operation;
     }
 
     private static void AnalyzeReturn(IReturnOperation returnOp, DisposableTracker tracker)
@@ -507,35 +588,25 @@ public class DisposableNotDisposedAnalyzer : DiagnosticAnalyzer
         return false;
     }
 
-    private static bool IsDisposableType(ITypeSymbol type, Compilation compilation)
-    {
-        if (type == null)
-            return false;
+    // ONLY track critical Typhon types to avoid false positives
+    private static bool IsDisposableType(ITypeSymbol type, OwnershipCatalog catalog) => type != null && catalog.IsCritical(type);
 
-        // ONLY track critical Typhon types to avoid false positives
-        var fullName = DisposableAnalyzerHelpers.GetFullTypeName(type);
-        return DisposableAnalyzerHelpers.CriticalTypes.ContainsKey(fullName);
-    }
-
-    private static string GetConsequenceMessage(ITypeSymbol type)
-    {
-        var fullName = DisposableAnalyzerHelpers.GetFullTypeName(type);
-        return DisposableAnalyzerHelpers.CriticalTypes.TryGetValue(fullName, out var consequence) ? consequence : "";
-    }
+    private static string GetConsequenceMessage(ITypeSymbol type, OwnershipCatalog catalog) => catalog.IsCritical(type, out var consequence) ? consequence : "";
 
     /// <summary>
     /// Tracks the disposal state of local variables within a method.
     /// </summary>
     private sealed class DisposableTracker
     {
-        private readonly Compilation _compilation;
         private readonly Dictionary<ILocalSymbol, TrackedVariable> _variables;
 
-        public DisposableTracker(Compilation compilation)
+        public DisposableTracker(OwnershipCatalog catalog)
         {
-            _compilation = compilation;
+            Catalog = catalog;
             _variables = new Dictionary<ILocalSymbol, TrackedVariable>(SymbolEqualityComparer.Default);
         }
+
+        public OwnershipCatalog Catalog { get; }
 
         public void TrackVariable(ILocalSymbol local, IOperation initialValue, Location location)
         {

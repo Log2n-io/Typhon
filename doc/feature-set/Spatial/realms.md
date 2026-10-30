@@ -78,7 +78,7 @@ tx.Teleport(id, Player.Bounds, new RealmId(1), in doorway);        // lands in t
 var nearby = tx.Query<Player>().WhereNearby<PlayerBounds>(x, y, 0, 30).InRealm(new RealmId(1)).Execute();
 
 // Every player in the cantina, cluster by cluster — O(clusters there), whatever the planet holds.
-using var players = tx.For<Player>();
+var players = tx.For<Player>();
 foreach (var cluster in players.GetClusterEnumerator(new RealmId(1)))
 {
     for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1) { /* cluster.GetEntityId(slot), cluster.Get<T>(slot) … */ }

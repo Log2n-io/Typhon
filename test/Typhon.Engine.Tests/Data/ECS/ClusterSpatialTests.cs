@@ -475,7 +475,6 @@ class ClusterSpatialTests : TestBase<ClusterSpatialTests>
                     // Deliberately NO MarkSlotDirty — that's the bug pattern under test.
                 }
             }
-            accessor.Dispose();
             tx.Commit();
         }
 

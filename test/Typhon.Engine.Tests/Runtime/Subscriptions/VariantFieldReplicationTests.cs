@@ -66,29 +66,22 @@ sealed class VariantFieldReplicationTests : TestBase<VariantFieldReplicationTest
         using (var tx = engine.CreateQuickTransaction())
         {
             var accessor = tx.For<ProjVariantEntity>();
-            try
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                foreach (var cluster in accessor.GetClusterEnumerator())
-                {
 #pragma warning disable TYPHON009
-                    var values = cluster.GetSpan(ProjVariantEntity.Data);
+                var values = cluster.GetSpan(ProjVariantEntity.Data);
 #pragma warning restore TYPHON009
-                    var occupancy = cluster.OccupancyBits;
-                    while (occupancy != 0)
+                var occupancy = cluster.OccupancyBits;
+                while (occupancy != 0)
+                {
+                    var slot = BitOperations.TrailingZeroCount(occupancy);
+                    occupancy &= occupancy - 1;
+                    if (cluster.GetEntityId(slot) == id)
                     {
-                        var slot = BitOperations.TrailingZeroCount(occupancy);
-                        occupancy &= occupancy - 1;
-                        if (cluster.GetEntityId(slot) == id)
-                        {
-                            values[slot].Value = new Variant("ñandú", false);
-                            harness.Subscriptions.Commands.Replicate(in cluster, slot);
-                        }
+                        values[slot].Value = new Variant("ñandú", false);
+                        harness.Subscriptions.Commands.Replicate(in cluster, slot);
                     }
                 }
-            }
-            finally
-            {
-                accessor.Dispose();
             }
 
             tx.Commit();

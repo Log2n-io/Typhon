@@ -224,7 +224,6 @@ unsafe class ProjectionPassTests : TestBase<ProjectionPassTests>
             break;
         }
 
-        accessor.Dispose();
         tx.Commit();
     }
 
@@ -651,7 +650,6 @@ unsafe class ProjectionPassTests : TestBase<ProjectionPassTests>
             break;
         }
 
-        accessor.Dispose();
         Assert.That(victim.IsNull, Is.False, "the fixture holds an entity to destroy");
         tx.Destroy(victim);
         tx.Commit();
@@ -680,7 +678,6 @@ unsafe class ProjectionPassTests : TestBase<ProjectionPassTests>
             break;
         }
 
-        accessor.Dispose();
         tx.Commit();
     }
 }

@@ -90,7 +90,7 @@ public static class CharacterStore
         byte chosen = 0;
         using (var read = dbe.CreateQuickTransaction())
         {
-            using var accounts = read.For<AccountArch>();
+            var accounts = read.For<AccountArch>();
             if (accounts.TryOpen(account, out var entity))
             {
                 chosen = entity.Read(AccountArch.Identity).Outfit;
@@ -152,7 +152,7 @@ public static class CharacterStore
         ArgumentNullException.ThrowIfNull(dbe);
 
         using var tx = dbe.CreateQuickTransaction();
-        using var characters = tx.For<CharacterArch>();
+        var characters = tx.For<CharacterArch>();
         if (!characters.TryOpenMut(character, out var entity))
         {
             return false;

@@ -1396,7 +1396,6 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
                 cluster.WriteSpatial(ClMigUnit.Pos, preSlot,
                     new ClMigPos { Bounds = new AABB2F { MinX = 250f, MinY = 250f, MaxX = 250f, MaxY = 250f } });
             }
-            accessor.Dispose();
             tx.Commit();
         }
 
@@ -1461,7 +1460,6 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
                 cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(60f, 60f));     // back home in the same tick — nothing clears the flag
             }
 
-            accessor.Dispose();
             tx.Commit();
         }
 
@@ -1529,7 +1527,6 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
                 }
             }
 
-            accessor.Dispose();
             tx.Commit();
         }
 
@@ -1567,7 +1564,6 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
                 refused = TrySetPos(cluster, System.Numerics.BitOperations.TrailingZeroCount(cluster.OccupancyBits));
             }
 
-            accessor.Dispose();
         }
 
         Assert.That(refused, Is.InstanceOf<InvalidOperationException>().With.Message.Contains("WriteSpatial"));
@@ -1604,7 +1600,6 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
                 refused = TryWriteSpatial(cluster, (1UL << first) | (1UL << second), values);
             }
 
-            accessor.Dispose();
         }
 
         Assert.That(refused, Is.InstanceOf<InvalidOperationException>().With.Message.Contains("Commit discipline"));
@@ -1670,7 +1665,6 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
                 }
             }
 
-            accessor.Dispose();
             tx.Commit();
         }
 
@@ -1711,7 +1705,6 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
                 cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(150f, 50f));
             }
 
-            accessor.Dispose();
             tx.Commit();
         }
 
@@ -1756,7 +1749,6 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
                 cluster.WriteSpatial(ClMigUnit.Pos, slotIdx,
                     new ClMigPos { Bounds = new AABB2F { MinX = 95f, MinY = 95f, MaxX = 95f, MaxY = 95f } });
             }
-            accessor.Dispose();
             tx.Commit();
         }
 
@@ -1813,7 +1805,6 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
                 cluster.WriteSpatial(ClMigUnit.Pos, slotB,
                     new ClMigPos { Bounds = new AABB2F { MinX = 50f, MinY = 50f, MaxX = 50f, MaxY = 50f } });
             }
-            accessor.Dispose();
             tx.Commit();
         }
 
@@ -1873,7 +1864,6 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
                 cluster.WriteSpatial(ClMigUnit.Pos, slotC,
                     new ClMigPos { Bounds = new AABB2F { MinX = 60f, MinY = 60f, MaxX = 60f, MaxY = 60f } });
             }
-            accessor.Dispose();
             tx.Commit();
         }
 

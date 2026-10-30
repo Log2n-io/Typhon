@@ -91,7 +91,6 @@ class ProjectionReadsClusterLayoutTests : TestBase<ProjectionReadsClusterLayoutT
                 cluster.MarkDirty(ProjCreature.Vitals);
             }
 
-            accessor.Dispose();
             tx.Commit();
         }
 
@@ -130,7 +129,6 @@ class ProjectionReadsClusterLayoutTests : TestBase<ProjectionReadsClusterLayoutT
                 visited += BitOperations.PopCount(slots);
             }
 
-            accessor.Dispose();
         }
 
         Assert.That(visited, Is.EqualTo(EntityCount), "every spawned entity was projected");

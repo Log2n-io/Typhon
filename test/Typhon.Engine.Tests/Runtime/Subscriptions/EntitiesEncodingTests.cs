@@ -387,7 +387,6 @@ class EntitiesEncodingTests : TestBase<EntitiesEncodingTests>
             break;
         }
 
-        accessor.Dispose();
         tx.Commit();
     }
 
@@ -411,7 +410,6 @@ class EntitiesEncodingTests : TestBase<EntitiesEncodingTests>
             }
         }
 
-        accessor.Dispose();
         tx.Commit();
     }
 

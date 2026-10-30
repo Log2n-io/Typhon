@@ -226,7 +226,7 @@ public static class AccountStore
     private static bool TryReadSecret(DatabaseEngine dbe, EntityId account, out AccountSecret secret)
     {
         using var tx = dbe.CreateQuickTransaction();
-        using var accounts = tx.For<AccountArch>();
+        var accounts = tx.For<AccountArch>();
         if (!accounts.TryOpen(account, out var entity))
         {
             secret = default;
@@ -244,7 +244,7 @@ public static class AccountStore
     private static void Stamp(DatabaseEngine dbe, EntityId account, string rehash)
     {
         using var tx = dbe.CreateQuickTransaction();
-        using var accounts = tx.For<AccountArch>();
+        var accounts = tx.For<AccountArch>();
         if (!accounts.TryOpenMut(account, out var entity))
         {
             return;

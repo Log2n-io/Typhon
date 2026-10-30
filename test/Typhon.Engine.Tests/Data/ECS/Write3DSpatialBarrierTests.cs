@@ -117,19 +117,12 @@ class Write3DSpatialBarrierTests : TestBase<Write3DSpatialBarrierTests>
 
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<W3DUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            if (cluster.ChunkId == chunkId)
             {
-                if (cluster.ChunkId == chunkId)
-                {
-                    cluster.WriteSpatial(W3DUnit.Pos, slot, PointAt(x, y, z));
-                }
+                cluster.WriteSpatial(W3DUnit.Pos, slot, PointAt(x, y, z));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
         tx.Commit();
     }
@@ -202,17 +195,10 @@ class Write3DSpatialBarrierTests : TestBase<Write3DSpatialBarrierTests>
         {
             using var tx = dbe.CreateQuickTransaction();
             var accessor = tx.For<W3DSphereUnit>();
-            try
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                foreach (var cluster in accessor.GetClusterEnumerator())
-                {
-                    cluster.WriteSpatial(W3DSphereUnit.Ball, 0,
-                        new W3DSphere { Ball = new BSphere3F { CenterX = 60f, CenterY = 60f, CenterZ = 60f, Radius = 2f } });
-                }
-            }
-            finally
-            {
-                accessor.Dispose();
+                cluster.WriteSpatial(W3DSphereUnit.Ball, 0,
+                    new W3DSphere { Ball = new BSphere3F { CenterX = 60f, CenterY = 60f, CenterZ = 60f, Radius = 2f } });
             }
             tx.Commit();
         });

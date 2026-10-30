@@ -64,7 +64,7 @@ class MigrateUniqueIndexTests : TestBase<MigrateUniqueIndexTests>
     private static int ClusterOf(DatabaseEngine dbe, EntityId id)
     {
         using var tx = dbe.CreateQuickTransaction();
-        using var accessor = tx.For<MigUqUnit>();
+        var accessor = tx.For<MigUqUnit>();
         foreach (var cluster in accessor.GetClusterEnumerator())
         {
             var ids = cluster.EntityIds;

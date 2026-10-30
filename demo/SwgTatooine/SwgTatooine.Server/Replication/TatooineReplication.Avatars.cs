@@ -1221,7 +1221,7 @@ public static partial class TatooineReplication
     /// <remarks>An open by entity id, not an index read: the id is what the token carried.</remarks>
     private static Account AccountOf(Transaction tx, EntityId account)
     {
-        using var accounts = tx.For<AccountArch>();
+        var accounts = tx.For<AccountArch>();
         return accounts.TryOpen(account, out var entity) ? entity.Read(AccountArch.Identity) : default;
     }
 

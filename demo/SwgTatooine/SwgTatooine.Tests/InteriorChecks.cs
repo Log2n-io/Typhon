@@ -504,7 +504,7 @@ public sealed class InteriorWorldChecks
         var doors = _sim.Portals;
         var fronts = 0;
         using var tx = _sim.Dbe.CreateQuickTransaction();
-        using var structures = tx.For<WorldObject>();
+        var structures = tx.For<WorldObject>();
         for (var row = 0; row < doors.Count; row++)
         {
             if (doors.Realm[row] != 0)

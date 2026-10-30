@@ -312,8 +312,8 @@ class ClusterPureTransientIndexTests : TestBase<ClusterPureTransientIndexTests>
 
         using (var tx = dbe.CreateQuickTransaction())
         {
-            using (var accessor = tx.For<PtIdxArch>())
             {
+                var accessor = tx.For<PtIdxArch>();
                 foreach (var cluster in accessor.GetClusterEnumerator())
                 {
                     var ids = cluster.EntityIds;

@@ -64,12 +64,10 @@ public struct UnitOfWorkContext
     }
 
     /// <summary>Create from a relative timeout (no cancellation, no UoW ID).</summary>
-    [AllowCopy]
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static UnitOfWorkContext FromTimeout(TimeSpan timeout) => new(WaitContext.FromTimeout(timeout));
 
     /// <summary>Create from a relative timeout + cancellation token.</summary>
-    [AllowCopy]
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static UnitOfWorkContext FromTimeout(TimeSpan timeout, CancellationToken token) => new(WaitContext.FromTimeout(timeout, token));
 
@@ -77,7 +75,6 @@ public struct UnitOfWorkContext
     /// Unbounded context: infinite deadline, no cancellation. For internal operations
     /// that should not be subject to timeout (e.g., cleanup, rollback).
     /// </summary>
-    [AllowCopy]
     public static UnitOfWorkContext None
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

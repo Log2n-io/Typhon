@@ -82,39 +82,32 @@ class ClusterQueryStabilityTests : TestBase<ClusterQueryStabilityTests>
             using (var tx = dbe.CreateQuickTransaction())
             {
                 var accessor = tx.For<ProjCreature>();
-                try
+                var seen = 0;
+                foreach (var cluster in accessor.GetClusterEnumerator())
                 {
-                    var seen = 0;
-                    foreach (var cluster in accessor.GetClusterEnumerator())
+                    var occupancy = cluster.OccupancyBits;
+                    while (occupancy != 0)
                     {
-                        var occupancy = cluster.OccupancyBits;
-                        while (occupancy != 0)
+                        var slot = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
+                        occupancy &= occupancy - 1;
+                        ref readonly var b = ref cluster.GetReadOnlySpan(ProjCreature.Bounds)[slot];
+
+                        // A pinned entity is identified by its coordinates being one of the fixed set; everything else drifts.
+                        var cx = (b.Bounds.MinX + b.Bounds.MaxX) * 0.5f;
+                        var cy = (b.Bounds.MinY + b.Bounds.MaxY) * 0.5f;
+                        if (IsPinned(pinnedInside, cx, cy))
                         {
-                            var slot = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
-                            occupancy &= occupancy - 1;
-                            ref readonly var b = ref cluster.GetReadOnlySpan(ProjCreature.Bounds)[slot];
-
-                            // A pinned entity is identified by its coordinates being one of the fixed set; everything else drifts.
-                            var cx = (b.Bounds.MinX + b.Bounds.MaxX) * 0.5f;
-                            var cy = (b.Bounds.MinY + b.Bounds.MaxY) * 0.5f;
-                            if (IsPinned(pinnedInside, cx, cy))
-                            {
-                                continue;
-                            }
-
-                            seen++;
-                            cluster.WriteSpatial(ProjCreature.Bounds, slot, PointAt(
-                                Clamp(cx + (float)((random.NextDouble() * 2d - 1d) * 25d)),
-                                Clamp(cy + (float)((random.NextDouble() * 2d - 1d) * 25d))));
+                            continue;
                         }
-                    }
 
-                    Assert.That(seen, Is.GreaterThan(0), "nothing moved, so repair had nothing to do and this proves nothing");
+                        seen++;
+                        cluster.WriteSpatial(ProjCreature.Bounds, slot, PointAt(
+                            Clamp(cx + (float)((random.NextDouble() * 2d - 1d) * 25d)),
+                            Clamp(cy + (float)((random.NextDouble() * 2d - 1d) * 25d))));
+                    }
                 }
-                finally
-                {
-                    accessor.Dispose();
-                }
+
+                Assert.That(seen, Is.GreaterThan(0), "nothing moved, so repair had nothing to do and this proves nothing");
 
                 tx.Commit();
             }

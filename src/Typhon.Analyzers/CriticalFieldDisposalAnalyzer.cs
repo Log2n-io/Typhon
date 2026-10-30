@@ -30,14 +30,14 @@ public class CriticalFieldDisposalAnalyzer : DiagnosticAnalyzer
 
     private static readonly DiagnosticDescriptor ContainerRule = new DiagnosticDescriptor(
         ContainerDiagnosticId,
-        "Type with disposable field does not implement IDisposable",
-        "Type '{0}' contains field '{1}' of disposable type '{2}' but does not implement IDisposable{3}",
+        "Type with disposable field has no Dispose()",
+        "Type '{0}' contains field '{1}' of disposable type '{2}' but has no Dispose(){3}",
         "Reliability",
         DiagnosticSeverity.Error,
         isEnabledByDefault: true,
         description:
-            "Types that contain fields of critical IDisposable types (ChunkAccessor, Transaction) " +
-            "must implement IDisposable to ensure proper cleanup.");
+            "Types that contain fields of critical types ([MustDispose], or owning one by value) must have a Dispose() to release them: " +
+            "IDisposable, or for a ref struct the pattern method.");
 
     // === TYPHON006: Dispose() incomplete ===
 
@@ -75,10 +75,14 @@ public class CriticalFieldDisposalAnalyzer : DiagnosticAnalyzer
         context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
         context.EnableConcurrentExecution();
 
-        context.RegisterSymbolAction(AnalyzeNamedType, SymbolKind.NamedType);
+        context.RegisterCompilationStartAction(start =>
+        {
+            var catalog = new OwnershipCatalog(start.Compilation);
+            start.RegisterSymbolAction(symbol => AnalyzeNamedType(symbol, catalog), SymbolKind.NamedType);
+        });
     }
 
-    private static void AnalyzeNamedType(SymbolAnalysisContext context)
+    private static void AnalyzeNamedType(SymbolAnalysisContext context, OwnershipCatalog catalog)
     {
         var namedType = (INamedTypeSymbol)context.Symbol;
 
@@ -86,15 +90,15 @@ public class CriticalFieldDisposalAnalyzer : DiagnosticAnalyzer
             return;
 
         // Shared first step: find critical fields once
-        var criticalFields = DisposableAnalyzerHelpers.FindCriticalFields(namedType);
+        var criticalFields = DisposableAnalyzerHelpers.FindCriticalFields(namedType, catalog);
         if (criticalFields.Count == 0)
             return;
 
-        // Branch: does the type implement IDisposable?
-        if (!ImplementsIDisposable(namedType, context.Compilation))
+        // Branch: does the type have a Dispose (IDisposable, or a ref struct's pattern method)?
+        if (!catalog.HasDispose(namedType))
         {
             // TYPHON005 path
-            CheckContainerImplementsDisposable(context, namedType, criticalFields);
+            CheckContainerImplementsDisposable(context, namedType, criticalFields, catalog);
             return;
         }
 
@@ -103,7 +107,7 @@ public class CriticalFieldDisposalAnalyzer : DiagnosticAnalyzer
         if (disposeMethod == null)
             return;
 
-        var disposeBody = GetMethodBody(disposeMethod);
+        var disposeBody = ExpandWithOwnCalls(namedType, GetMethodBody(disposeMethod), 2);
         if (string.IsNullOrEmpty(disposeBody))
             return;
 
@@ -121,18 +125,18 @@ public class CriticalFieldDisposalAnalyzer : DiagnosticAnalyzer
     private static void CheckContainerImplementsDisposable(
         SymbolAnalysisContext context,
         INamedTypeSymbol namedType,
-        List<(IFieldSymbol Field, string TypeFullName, string Consequence)> criticalFields)
+        List<(IFieldSymbol Field, string TypeFullName, string Consequence)> criticalFields,
+        OwnershipCatalog catalog)
     {
-        // Skip ref structs — can't implement interfaces, typically short-lived with explicit disposal
-        if (namedType.IsRefLikeType)
-            return;
+        // A ref struct is not exempt: it cannot implement IDisposable, but 'using' takes its pattern Dispose(), and without one nothing can release what
+        // it owns — the shape of the ArchetypeAccessor leak (#1538), had it lacked the method instead of its callers lacking the call.
 
         // Skip inline arrays — compiler-generated, disposal managed by containing struct
         if (IsInlineArray(namedType))
             return;
 
         // Skip types nested inside an IDisposable container — parent handles disposal
-        if (IsNestedInsideDisposableType(namedType, context.Compilation))
+        if (IsNestedInsideDisposableType(namedType, catalog))
             return;
 
         // Skip types that have an explicit disposal method (e.g., DisposeAccessors())
@@ -210,6 +214,10 @@ public class CriticalFieldDisposalAnalyzer : DiagnosticAnalyzer
             if (IsLastStatementInMethod(returnStatement, body))
                 continue;
 
+            // The idempotency guard — `if (_disposed) return;` — returns because the disposal already ran
+            if (IsDisposedGuard(returnStatement))
+                continue;
+
             var disposedBeforeReturn = GetFieldsDisposedBefore(returnStatement, body, criticalFields);
 
             foreach (var (field, _, consequence) in criticalFields)
@@ -227,15 +235,6 @@ public class CriticalFieldDisposalAnalyzer : DiagnosticAnalyzer
     // ──────────────────────────────────────────────
     //  Shared helpers
     // ──────────────────────────────────────────────
-
-    private static bool ImplementsIDisposable(INamedTypeSymbol type, Compilation compilation)
-    {
-        var disposableType = compilation.GetTypeByMetadataName("System.IDisposable");
-        if (disposableType == null)
-            return false;
-
-        return type.AllInterfaces.Any(i => SymbolEqualityComparer.Default.Equals(i, disposableType));
-    }
 
     private static IMethodSymbol FindDisposeMethod(INamedTypeSymbol type)
     {
@@ -278,6 +277,28 @@ public class CriticalFieldDisposalAnalyzer : DiagnosticAnalyzer
         return "";
     }
 
+    /// <summary>
+    /// <paramref name="body"/> followed by the bodies of the methods of <paramref name="type"/> it calls, <paramref name="depth"/> levels deep: a
+    /// <c>Dispose() => Close()</c> disposes what <c>Close</c> does.
+    /// </summary>
+    private static string ExpandWithOwnCalls(INamedTypeSymbol type, string body, int depth)
+    {
+        if (depth == 0 || string.IsNullOrEmpty(body))
+            return body;
+
+        var expanded = new System.Text.StringBuilder(body);
+        foreach (var member in type.GetMembers())
+        {
+            if (member is IMethodSymbol { MethodKind: MethodKind.Ordinary, Name: not "Dispose" } method &&
+                System.Text.RegularExpressions.Regex.IsMatch(body, @"(?<![\w.])" + method.Name + @"\s*\("))
+            {
+                expanded.Append('\n').Append(ExpandWithOwnCalls(type, GetMethodBody(method), depth - 1));
+            }
+        }
+
+        return expanded.ToString();
+    }
+
     // --- TYPHON005 helpers ---
 
     private static bool IsInlineArray(INamedTypeSymbol type)
@@ -292,12 +313,12 @@ public class CriticalFieldDisposalAnalyzer : DiagnosticAnalyzer
         return false;
     }
 
-    private static bool IsNestedInsideDisposableType(INamedTypeSymbol type, Compilation compilation)
+    private static bool IsNestedInsideDisposableType(INamedTypeSymbol type, OwnershipCatalog catalog)
     {
         var containingType = type.ContainingType;
         while (containingType != null)
         {
-            if (ImplementsIDisposable(containingType, compilation))
+            if (catalog.HasDispose(containingType))
                 return true;
             containingType = containingType.ContainingType;
         }
@@ -405,6 +426,13 @@ public class CriticalFieldDisposalAnalyzer : DiagnosticAnalyzer
         }
 
         return false;
+    }
+
+    private static bool IsDisposedGuard(ReturnStatementSyntax returnStatement)
+    {
+        var parent = returnStatement.Parent is BlockSyntax { Statements.Count: 1 } block ? block.Parent : returnStatement.Parent;
+        return parent is IfStatementSyntax ifStatement &&
+               ifStatement.Condition.ToString().IndexOf("dispos", System.StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
     private static HashSet<string> GetFieldsDisposedBefore(

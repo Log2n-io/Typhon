@@ -336,38 +336,31 @@ internal sealed class OracleWorkload
     {
         using var tx = _engine.CreateQuickTransaction();
         var accessor = tx.For<ProjCreature>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
             {
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0)
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                var id = (long)cluster.GetEntityId(slot).RawValue;
+                if (!_headings.TryGetValue(id, out var heading) || _random.Next(40) == 0)
                 {
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    var id = (long)cluster.GetEntityId(slot).RawValue;
-                    if (!_headings.TryGetValue(id, out var heading) || _random.Next(40) == 0)
-                    {
-                        heading = _random.NextDouble() * Math.PI * 2;
-                    }
-
-                    var bounds = cluster.GetReadOnly(ProjCreature.Bounds, slot).Bounds;
-                    var x = Centre(bounds.MinX, bounds.MaxX) + (float)(Math.Cos(heading) * WalkStrideM);
-                    var y = Centre(bounds.MinY, bounds.MaxY) + (float)(Math.Sin(heading) * WalkStrideM);
-                    if (Clamp(x) != x || Clamp(y) != y)
-                    {
-                        heading += Math.PI;
-                    }
-
-                    _headings[id] = heading;
-                    MovedLastStep.Add(id);
-                    cluster.WriteSpatial(ProjCreature.Bounds, slot, BoundsAt(Clamp(x), Clamp(y)));
+                    heading = _random.NextDouble() * Math.PI * 2;
                 }
+
+                var bounds = cluster.GetReadOnly(ProjCreature.Bounds, slot).Bounds;
+                var x = Centre(bounds.MinX, bounds.MaxX) + (float)(Math.Cos(heading) * WalkStrideM);
+                var y = Centre(bounds.MinY, bounds.MaxY) + (float)(Math.Sin(heading) * WalkStrideM);
+                if (Clamp(x) != x || Clamp(y) != y)
+                {
+                    heading += Math.PI;
+                }
+
+                _headings[id] = heading;
+                MovedLastStep.Add(id);
+                cluster.WriteSpatial(ProjCreature.Bounds, slot, BoundsAt(Clamp(x), Clamp(y)));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();
@@ -401,29 +394,22 @@ internal sealed class OracleWorkload
         var seen = 0;
         using var tx = _engine.CreateQuickTransaction();
         var accessor = tx.For<ProjCreature>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
             {
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0)
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                if (!targets.Contains(seen++))
                 {
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    if (!targets.Contains(seen++))
-                    {
-                        continue;
-                    }
-
-                    MovedLastStep.Add((long)cluster.GetEntityId(slot).RawValue);
-                    cluster.WriteSpatial(ProjCreature.Bounds, slot, BoundsAt(Clamp(RandomCoordinate()), Clamp(RandomCoordinate())));
-                    moved++;
+                    continue;
                 }
+
+                MovedLastStep.Add((long)cluster.GetEntityId(slot).RawValue);
+                cluster.WriteSpatial(ProjCreature.Bounds, slot, BoundsAt(Clamp(RandomCoordinate()), Clamp(RandomCoordinate())));
+                moved++;
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();
@@ -476,55 +462,48 @@ internal sealed class OracleWorkload
         var seen = 0;
         using var tx = _engine.CreateQuickTransaction();
         var accessor = tx.For<ProjCreature>();
-        try
-        {
-            foreach (var cluster in accessor.GetClusterEnumerator())
-        {
-            var occupancy = cluster.OccupancyBits;
+        foreach (var cluster in accessor.GetClusterEnumerator())
+    {
+        var occupancy = cluster.OccupancyBits;
 #pragma warning disable TYPHON009
-            Span<ProjBounds> bounds = spatial ? cluster.GetSpan(ProjCreature.Bounds) : _noBounds;
-            var ai = cluster.GetSpan(ProjCreature.Ai);
-            var vitals = cluster.GetSpan(ProjCreature.Vitals);
+        Span<ProjBounds> bounds = spatial ? cluster.GetSpan(ProjCreature.Bounds) : _noBounds;
+        var ai = cluster.GetSpan(ProjCreature.Ai);
+        var vitals = cluster.GetSpan(ProjCreature.Vitals);
 #pragma warning restore TYPHON009
-            var touched = false;
-            while (occupancy != 0)
+        var touched = false;
+        while (occupancy != 0)
+        {
+            var slot = BitOperations.TrailingZeroCount(occupancy);
+            occupancy &= occupancy - 1;
+            if (targets.Contains(seen++))
             {
-                var slot = BitOperations.TrailingZeroCount(occupancy);
-                occupancy &= occupancy - 1;
-                if (targets.Contains(seen++))
-                {
-                    write(ref bounds[slot], ref ai[slot], ref vitals[slot]);
-                    written++;
-                    touched = true;
-                    LastWritten[(long)cluster.GetEntityId(slot).RawValue] = ((int)ai[slot].Mode, ai[slot].Level);
-                    if (spatial)
-                    {
-                        MovedLastStep.Add((long)cluster.GetEntityId(slot).RawValue);
-                    }
-                    if (Replicate && Pushed < ForgetPushesAfter)
-                    {
-                        _harness?.Subscriptions.Commands.Replicate(in cluster, slot);
-                        Pushed++;
-                    }
-                }
-            }
-
-            // GetSpan's contract: a durable column written through a span is marked dirty by the caller, or the page holding it is free to be evicted and
-            // reloaded without the write. The pull oracle's small world never evicted; the walking one's 500 clusters do.
-            if (touched)
-            {
-                cluster.MarkDirty(ProjCreature.Ai);
-                cluster.MarkDirty(ProjCreature.Vitals);
+                write(ref bounds[slot], ref ai[slot], ref vitals[slot]);
+                written++;
+                touched = true;
+                LastWritten[(long)cluster.GetEntityId(slot).RawValue] = ((int)ai[slot].Mode, ai[slot].Level);
                 if (spatial)
                 {
-                    cluster.MarkDirty(ProjCreature.Bounds);
+                    MovedLastStep.Add((long)cluster.GetEntityId(slot).RawValue);
+                }
+                if (Replicate && Pushed < ForgetPushesAfter)
+                {
+                    _harness?.Subscriptions.Commands.Replicate(in cluster, slot);
+                    Pushed++;
                 }
             }
+        }
+
+        // GetSpan's contract: a durable column written through a span is marked dirty by the caller, or the page holding it is free to be evicted and
+        // reloaded without the write. The pull oracle's small world never evicted; the walking one's 500 clusters do.
+        if (touched)
+        {
+            cluster.MarkDirty(ProjCreature.Ai);
+            cluster.MarkDirty(ProjCreature.Vitals);
+            if (spatial)
+            {
+                cluster.MarkDirty(ProjCreature.Bounds);
             }
         }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();
@@ -536,31 +515,24 @@ internal sealed class OracleWorkload
     {
         using var tx = _engine.CreateQuickTransaction();
         var accessor = tx.For<ProjCreature>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var ai = cluster.GetSpan(ProjCreature.Ai);
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
             {
-                var ai = cluster.GetSpan(ProjCreature.Ai);
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0)
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                ai[slot].Mode = (ProjAiMode)(1 + (((int)ai[slot].Mode) % 4));
+                LastWritten[(long)cluster.GetEntityId(slot).RawValue] = ((int)ai[slot].Mode, ai[slot].Level);
+                if (Replicate && Pushed < ForgetPushesAfter)
                 {
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    ai[slot].Mode = (ProjAiMode)(1 + (((int)ai[slot].Mode) % 4));
-                    LastWritten[(long)cluster.GetEntityId(slot).RawValue] = ((int)ai[slot].Mode, ai[slot].Level);
-                    if (Replicate && Pushed < ForgetPushesAfter)
-                    {
-                        _harness?.Subscriptions.Commands.Replicate(in cluster, slot);
-                        Pushed++;
-                    }
+                    _harness?.Subscriptions.Commands.Replicate(in cluster, slot);
+                    Pushed++;
                 }
-
-                cluster.MarkDirty(ProjCreature.Ai);
             }
-        }
-        finally
-        {
-            accessor.Dispose();
+
+            cluster.MarkDirty(ProjCreature.Ai);
         }
 
         tx.Commit();

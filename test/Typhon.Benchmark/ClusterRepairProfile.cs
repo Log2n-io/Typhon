@@ -299,32 +299,25 @@ public static class ClusterRepairProfile
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<TArch>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var positions = cluster.GetReadOnlySpan(comp);
+            var bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var positions = cluster.GetReadOnlySpan(comp);
-                var bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
+                var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
 
-                    var h = (uint)((cluster.ChunkId * 0x9E3779B1) ^ (slot * 0x85EBCA6B) ^ (round * 0x27D4EB2F));
-                    h ^= h >> 15;
-                    h *= 0x2C1B3C6D;
-                    h ^= h >> 12;
-                    var g = h * 0x27D4EB2F;
-                    g ^= g >> 15;
+                var h = (uint)((cluster.ChunkId * 0x9E3779B1) ^ (slot * 0x85EBCA6B) ^ (round * 0x27D4EB2F));
+                h ^= h >> 15;
+                h *= 0x2C1B3C6D;
+                h ^= h >> 12;
+                var g = h * 0x27D4EB2F;
+                g ^= g >> 15;
 
-                    var (_, _, tag) = read(in positions[slot]);
-                    cluster.WriteSpatial(comp, slot, make(4f + (h % 10_000) * (92f / 10_000f), 4f + (g % 10_000) * (92f / 10_000f), tag));
-                }
+                var (_, _, tag) = read(in positions[slot]);
+                cluster.WriteSpatial(comp, slot, make(4f + (h % 10_000) * (92f / 10_000f), 4f + (g % 10_000) * (92f / 10_000f), tag));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

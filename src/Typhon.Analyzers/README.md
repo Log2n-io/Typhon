@@ -6,10 +6,10 @@ Custom Roslyn analyzers for the Typhon database engine project.
 
 | ID | Severity | Description |
 |----|----------|-------------|
-| TYPHON001 | Error | `[NoCopy]` type parameters must use `ref` modifier |
-| TYPHON003 | Error | `[NoCopy]` type must not be copied |
-| TYPHON004 | Error | IDisposable result must be disposed |
-| TYPHON005 | Error | Type with critical disposable field must implement IDisposable |
+| TYPHON001 | Error | No-copy type parameters must use `ref` modifier |
+| TYPHON003 | Error | No-copy type must not be copied |
+| TYPHON004 | Error | Must-dispose value must be disposed |
+| TYPHON005 | Error | Type with critical disposable field must have a `Dispose()` |
 | TYPHON006 | Error | Dispose() must dispose all critical fields |
 | TYPHON007 | Error | Early return in Dispose() must not skip critical field disposal |
 | TYPHON008 | Error | Public-namespace type exposes internal-namespace type on its public surface |
@@ -17,6 +17,22 @@ Custom Roslyn analyzers for the Typhon database engine project.
 | TYPHON010 | Warning | Component struct stores padding beyond a 4-byte multiple — every entity pays for bytes that carry no field |
 | TYPHON011 | Error | Component struct's managed and marshalled layouts differ (`bool` / `char`) — the schema cannot describe it correctly |
 | TYPHON012 | Error | Non-readonly member of `EntityRef` / `EntityRefMut` called on a read-only receiver — a hidden ~200-byte defensive copy |
+| TYPHON014 | Error | A type inferred to own a must-dispose resource, or to hold a no-copy struct, is not marked `[MustDispose]` / `[NoCopy]` |
+
+## Ownership: which types the rules track (#1538)
+
+TYPHON001/003/004/005–007/014 share one model, `OwnershipCatalog`:
+
+- **Must-dispose** — marked `[MustDispose]` (`ChunkAccessor`, `Transaction`, `EpochGuard`, `PointInTimeAccessor.WorkerLease`, `UnitOfWork`,
+  `BulkLoadSession`), or a type with a `Dispose()` — `IDisposable` or, for a ref struct, the pattern method — that holds a must-dispose type in a field
+  **by value**. A reference-typed field is not followed: a query borrows its transaction, only the owner disposes it.
+- **No-copy** — marked `[NoCopy]`, or a struct that holds a no-copy struct by value, at any depth: copying the outer copies the inner.
+- **TYPHON014** requires the marker wherever the inference finds an owner. A reference assembly drops a class's private fields, so an unmarked owning
+  class is invisible to every other project; and a type the analyzer has to work out is one a reader has to work out too.
+
+Before #1538 the must-dispose list was a set of names, and named `Typhon.Engine.ChunkAccessor` years after the type moved to `Typhon.Engine.Internals`:
+TYPHON004–007 checked nothing for it. Wrappers were not covered at all — `ArchetypeAccessor<T>` owned three accessors, the SWG demo dropped one undisposed
+and copied another by value, and the leaked chunk-writer registrations held the checkpoint back for 13 hours.
 
 ---
 
@@ -125,13 +141,18 @@ ChunkAccessor CreateAccessor()
 }
 ```
 
+A by-value call is a fresh value: a getter's copy is its own `return _field;`, reported where it is written. The call site is still reported when
+the member returns by `ref` (`var a = seg.Rent();` copies an existing instance) or is declared to return a type parameter (`var a = n.Value;` on a
+`Nullable<ChunkAccessor>`). `[AllowCopy]` is only for a member that returns a copy of itself on purpose — `GetEnumerator() => this` on an enumerator
+`foreach` consumes. It used to be required on every factory (#1538 removed that: ~90 annotations, no lost check).
+
 ---
 
 ## DisposableNotDisposedAnalyzer (TYPHON004)
 
 **Severity:** Error
 
-**Description:** Detects IDisposable instances returned from method calls that are not properly disposed.
+**Description:** Detects must-dispose values (see *Ownership* above) returned from method calls that are not properly disposed.
 
 ### Why This Rule Exists
 
@@ -162,7 +183,13 @@ t.DoWork();
 var t = CreateTransaction();
 t = CreateTransaction();  // First value leaked!
 t.Dispose();
+
+// ERROR TYPHON004 - Used once as a receiver and dropped
+var found = tx.EnumerateIndex<T, int>(index, 0, 9).MoveNext();
 ```
+
+Not reported: a `ref` local (it aliases a value someone else owns), a variable initialized with `default` or `null` and assigned later, a local a
+`foreach` consumes (`foreach` disposes the enumerator — a `using` on the same local would dispose it twice), and `Create().Dispose()`.
 
 ### Correct Usage
 
@@ -242,8 +269,10 @@ Both this analyzer and TYPHON004 share the same critical type list via `Disposab
 
 Types that hold a field of a critical disposable type must implement `IDisposable`.
 
+A ref struct is **not** exempt: it cannot implement `IDisposable`, but `using` takes its pattern `Dispose()`, and without one nothing releases what it
+holds.
+
 **Smart exclusions** (not flagged):
-- `ref struct` types (can't implement interfaces; typically short-lived with explicit disposal)
 - Inline arrays (`[InlineArray]` — compiler-generated, disposal managed by containing struct)
 - Types nested inside an `IDisposable` parent (parent handles disposal)
 - Types with an explicit disposal method (e.g., `DisposeAccessors()`) that disposes all critical fields
@@ -269,7 +298,8 @@ public class DataHolder : IDisposable
 
 **Severity:** Error
 
-If a type implements `IDisposable` and has critical fields, its `Dispose()` method must dispose every one of them.
+If a type has a `Dispose()` and critical fields, its `Dispose()` must dispose every one of them — itself, or through the methods of the type it calls
+(`Dispose() => Close()`, two levels).
 
 **Recognized disposal patterns:**
 - Direct: `_field.Dispose()`
@@ -300,7 +330,8 @@ public class MyTable : IDisposable
 
 **Severity:** Error
 
-Early `return` statements inside `Dispose()` must not bypass critical field disposal.
+Early `return` statements inside `Dispose()` must not bypass critical field disposal. The idempotency guard — a return under an `if` whose condition
+names a disposed flag — is not one.
 
 ```csharp
 // ERROR TYPHON007 - Early return skips _accessor.Dispose()

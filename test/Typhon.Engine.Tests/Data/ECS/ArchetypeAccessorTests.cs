@@ -1,4 +1,5 @@
-﻿using System.Runtime.InteropServices;
+﻿using System;
+using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -114,7 +115,6 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         var v = entity.Read(SvUnit.Velocity);
         Assert.That(v.Dx, Is.EqualTo(1f));
         Assert.That(v.Dy, Is.EqualTo(2f));
-        accessor.Dispose();
     }
 
     [Test]
@@ -140,7 +140,6 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
             var p = entity.Read(SvUnit.Position);
             Assert.That(p.X, Is.EqualTo((float)i));
         }
-        accessor.Dispose();
     }
 
     [Test]
@@ -161,7 +160,6 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         Assert.That(threw, Is.True, "Open throws on a missing entity, like EntityAccessor.Open (#997)");
         Assert.That(accessor.TryOpen(new EntityId(99999, 150), out var entity), Is.False);
         Assert.That(entity.IsValid, Is.False);
-        accessor.Dispose();
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -186,7 +184,6 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         wp.X = 99f;
         wp.Y = 88f;
         entity.Set(SvUnit.Position, wp);
-        accessor.Dispose();
         writeTx.Commit();
 
         // Verify
@@ -195,7 +192,6 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         var vp = va.Open(id).Read(SvUnit.Position);
         Assert.That(vp.X, Is.EqualTo(99f));
         Assert.That(vp.Y, Is.EqualTo(88f));
-        va.Dispose();
     }
 
     [Test]
@@ -217,7 +213,6 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         p.X += v.Dx;
         p.Y += v.Dy;
         entity.Set(SvUnit.Position, p);
-        accessor.Dispose();
         moveTx.Commit();
 
         // Verify: (100+5, 200-3) = (105, 197)
@@ -226,7 +221,6 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         var result = va.Open(id).Read(SvUnit.Position);
         Assert.That(result.X, Is.EqualTo(105f));
         Assert.That(result.Y, Is.EqualTo(197f));
-        va.Dispose();
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -249,7 +243,6 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         var s = entity.Read(VUnit.Stats);
         Assert.That(s.Health, Is.EqualTo(100));
         Assert.That(s.MaxHealth, Is.EqualTo(100));
-        accessor.Dispose();
     }
 
     /// <summary>
@@ -291,7 +284,6 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
             var dataCopy = target.Read(MixedUnit.Data);
             dataCopy.Score = 99;
             target.Set(MixedUnit.Data, dataCopy);
-            accessor.Dispose();
             writeTx.Commit();
         }
 
@@ -319,7 +311,6 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         var ws = entity.Read(VUnit.Stats);
         ws.Health = 42;
         entity.Set(VUnit.Stats, ws);
-        accessor.Dispose();
         writeTx.Commit();
 
         // Verify the Versioned write persisted
@@ -328,7 +319,6 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         var result = va.Open(id).Read(VUnit.Stats);
         Assert.That(result.Health, Is.EqualTo(42));
         Assert.That(result.MaxHealth, Is.EqualTo(100)); // untouched field
-        va.Dispose();
     }
 
     [Test]
@@ -354,7 +344,6 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
             ws.Health = i * 10;
             entity.Set(VUnit.Stats, ws);
         }
-        accessor.Dispose();
         writeTx.Commit();
 
         // Verify all writes
@@ -366,7 +355,6 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
             Assert.That(result.Health, Is.EqualTo(i * 10), $"Entity {i}");
             Assert.That(result.MaxHealth, Is.EqualTo(1000), $"Entity {i} MaxHealth");
         }
-        va.Dispose();
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -392,7 +380,6 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         Assert.That(p.X, Is.EqualTo(5f));
         var d = entity.Read(MixedUnit.Data);
         Assert.That(d.Score, Is.EqualTo(42));
-        accessor.Dispose();
     }
 
     [Test]
@@ -416,7 +403,6 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         var wd = entity.Read(MixedUnit.Data);
         wd.Score = 999;
         entity.Set(MixedUnit.Data, wd);
-        accessor.Dispose();
         writeTx.Commit();
 
         // Verify both
@@ -428,7 +414,6 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         Assert.That(vp.Y, Is.EqualTo(33f));
         var vd = ve.Read(MixedUnit.Data);
         Assert.That(vd.Score, Is.EqualTo(999));
-        va.Dispose();
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -463,7 +448,6 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         Assert.That(aaPos.Y, Is.EqualTo(stdPos.Y));
         Assert.That(aaVel.Dx, Is.EqualTo(stdVel.Dx));
         Assert.That(aaVel.Dy, Is.EqualTo(stdVel.Dy));
-        aa.Dispose();
     }
 
     [Test]
@@ -486,6 +470,55 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
 
         Assert.That(aaStats.Health, Is.EqualTo(stdStats.Health));
         Assert.That(aaStats.MaxHealth, Is.EqualTo(stdStats.MaxHealth));
-        aa.Dispose();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Ownership (#1538)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Writable opens through copies of an accessor — one passed by value, one a dropped temporary — leave no page the checkpoint cannot cover. The
+    /// accessor owned the pages its opens marked, and a copy took its marks with it: every cycle after skipped them, so CheckpointLSN never advanced and
+    /// the WAL was never recycled (CP-13). It owns none now; the transaction lets go of them at its commit.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    [VerifiesRule("CP-13")]
+    public void WritesThroughCopiesOfAnAccessor_LeaveNoPageTheCheckpointCannotCover()
+    {
+        using var dbe = SetupEngine();
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var pos = new SvPosition(1, 2);
+            var vel = new SvVelocity(0, 0);
+            id = tx.Spawn<SvUnit>(SvUnit.Position.Set(in pos), SvUnit.Velocity.Set(in vel));
+            tx.Commit();
+        }
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "premise: a clean engine checkpoints");
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var accessor = tx.For<SvUnit>();
+            for (var i = 0; i < 3; i++)
+            {
+                MoveThroughACopy(accessor, id, i);
+            }
+            Assert.That(tx.For<SvUnit>().TryOpenMut(id, out _), Is.True);
+            tx.Commit();
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True,
+                "no cycle covered every page after writes through accessor copies");
+            Assert.That(dbe.CheckpointManager.LastSkippedPages.Length, Is.Zero, "the last cycle skipped pages with a writer still registered");
+        });
+
+        static void MoveThroughACopy(ArchetypeAccessor<SvUnit> accessor, EntityId id, int x)
+        {
+            var e = accessor.OpenMut(id);
+            e.Set(SvUnit.Position, new SvPosition(x, x));
+        }
     }
 }

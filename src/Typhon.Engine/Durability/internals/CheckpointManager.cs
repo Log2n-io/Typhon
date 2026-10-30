@@ -8,7 +8,6 @@ using System.Diagnostics;
 using System.Linq;
 using System.Runtime.ExceptionServices;
 using System.Threading;
-using System.Threading.Tasks;
 using Typhon.Profiler;
 
 namespace Typhon.Engine.Internals;
@@ -168,6 +167,13 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// are accessor-scoped (~µs), so the second pass almost always clears them.</summary>
     private const int MaxCoveragePasses = 3;
 
+    /// <summary>
+    /// Consecutive cycles one page may be skipped before <see cref="Health"/> turns <see cref="DurabilityHealth.Stalled"/> and a warning names it. A live
+    /// writer holds a page for microseconds and <see cref="MaxCoveragePasses"/> passes almost always get past it; one page refused on four cycles in a
+    /// row — twelve passes, two minutes at the default interval — is held by a registration nobody will release, or by a writer that never lets go.
+    /// </summary>
+    internal const int StalledAfterCycles = 4;
+
     // ═══════════════════════════════════════════════════════════════
     // Metrics
     // ═══════════════════════════════════════════════════════════════
@@ -286,8 +292,10 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     internal Exception FatalError => _fatalError;
 
     /// <summary>Current durability health (CK-06). <see cref="DurabilityHealth.Degraded"/> means the last cycle hit a
-    /// transient stall and will retry next tick; <see cref="DurabilityHealth.Fatal"/> means periodic checkpointing
-    /// has halted (the shutdown path still attempts one last-chance flush).</summary>
+    /// transient stall and will retry next tick; <see cref="DurabilityHealth.Stalled"/> that a page has been refused for
+    /// <see cref="StalledAfterCycles"/> cycles in a row and CheckpointLSN does not advance (CP-13);
+    /// <see cref="DurabilityHealth.Fatal"/> means periodic checkpointing has halted (the shutdown path still attempts one
+    /// last-chance flush).</summary>
     public DurabilityHealth Health => _health;
 
     /// <summary>Sets the engine logger used by the CK-06 <c>[LoggerMessage]</c> paths. Null resets to a no-op logger.</summary>
@@ -343,6 +351,9 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
 
     private readonly Dictionary<int, int> _skipStreak = [];
 
+    /// <summary>The longest run of consecutive cycles a page skipped on the last cycle has been skipped for; 0 after a covered cycle.</summary>
+    private int _currentMaxSkipStreak;
+
     /// <summary>Skip causes, from the page cache (#817). A = live chunk writer, B = writer held &gt; 100 ms, C = stale odd counter.</summary>
     public (long Acw, long WriterHeld, long StaleCounter) SkipCauses =>
         (_mmf.CheckpointSkipAcw, _mmf.CheckpointSkipWriterHeld, _mmf.CheckpointSkipStaleCounter);
@@ -360,6 +371,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             Volatile.Write(ref _lastSkippedCount, 0);
             RepeatSkippedPages = 0;
             _skipStreak.Clear();
+            _currentMaxSkipStreak = 0;
             _prevSkipped = [];
             return;
         }
@@ -369,6 +381,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
         Array.Sort(skipped);
 
         var repeat = 0;
+        var currentMax = 0;
         foreach (var p in skipped)
         {
             if (Array.BinarySearch(_prevSkipped, p) >= 0)
@@ -377,6 +390,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             }
             var streak = _skipStreak.TryGetValue(p, out var s) ? s + 1 : 1;
             _skipStreak[p] = streak;
+            currentMax = Math.Max(currentMax, streak);
             if (streak > MaxConsecutiveSkipsForOnePage)
             {
                 MaxConsecutiveSkipsForOnePage = streak;
@@ -394,6 +408,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
         }
 
         RepeatSkippedPages = repeat;
+        _currentMaxSkipStreak = currentMax;
         _prevSkipped = skipped;
         _lastSkipped = skipped;
         Volatile.Write(ref _lastSkippedCount, stillSkipped);
@@ -1521,9 +1536,15 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             // written this cycle. If a page was skipped, its committed records may not have reached the data file — advancing CheckpointLSN past them and recycling
             // their WAL segment (CK-04) would lose that data permanently after a crash. A gated page stays dirty (DC > 0) and is retried next cycle.
             var gated = stillSkipped != 0 || GateCheckpointForTest;
+            var endedGatedRun = 0L;
             if (!gated)
             {
+                endedGatedRun = _consecutiveGatedCycles;
                 _consecutiveGatedCycles = 0;
+                if (dirtyPages.Length == 0)
+                {
+                    CaptureSkipDiagnostics(dirtyPages, 0);   // a cycle with nothing to write covered every page too: the streaks end here
+                }
 
                 // Step 6: Transition WalDurable → Committed
                 {
@@ -1614,11 +1635,22 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                 Interlocked.Increment(ref _totalPressureCheckpoints);
             }
 
-            // A cycle that completed without throwing clears a prior Degraded state. A gated cycle (the coverage gate
-            // working as designed) is NOT an error, so it also lands here as Ok. Fatal is terminal — never downgraded.
+            // A cycle that completed without throwing clears a prior Degraded state. A gated cycle (the coverage gate working as designed) is NOT an error
+            // and lands here as Ok too — unless one page has now been refused for StalledAfterCycles cycles in a row: the gate will not open on its own,
+            // and the WAL grows until the disk is full. Fatal is terminal — never downgraded.
             if (_health != DurabilityHealth.Fatal)
             {
-                _health = DurabilityHealth.Ok;
+                var was = _health;
+                var stalled = gated && _currentMaxSkipStreak >= StalledAfterCycles;
+                _health = stalled ? DurabilityHealth.Stalled : DurabilityHealth.Ok;
+                if (stalled && was != DurabilityHealth.Stalled)
+                {
+                    ReportStall();
+                }
+                else if (!stalled && was == DurabilityHealth.Stalled && !gated)
+                {
+                    LogCheckpointResumed(endedGatedRun);
+                }
             }
         }
         catch (Exception ex)
@@ -1705,6 +1737,37 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             LogCheckpointFatal(ex);
         }
     }
+
+    /// <summary>
+    /// Logs the stall once, on entering it, naming the pages refused for <see cref="StalledAfterCycles"/> cycles or more — the first eight, as cache slot
+    /// and live <c>ActiveChunkWriters</c>. A count that stays above 0 on a quiet engine is a registration nobody released (CP-13); the #817 trace
+    /// (<c>PagedMMF.AcwTracePage</c>) then names its call site.
+    /// </summary>
+    private void ReportStall()
+    {
+        var stuck = 0;
+        var sample = new System.Text.StringBuilder();
+        foreach (var (page, streak) in _skipStreak)
+        {
+            if (streak < StalledAfterCycles)
+            {
+                continue;
+            }
+            if (stuck++ < 8)
+            {
+                sample.Append(sample.Length == 0 ? "" : ", ").Append(page).Append(':').Append(_mmf.ActiveChunkWritersOf(page));
+            }
+        }
+        LogCheckpointStalled(stuck, StalledAfterCycles, Interlocked.Read(ref _consecutiveGatedCycles), sample.ToString());
+    }
+
+    [LoggerMessage(LogLevel.Warning, "Checkpoint stalled (Health=Stalled): {StuckPages} pages refused on {Cycles} or more consecutive cycles ({GatedCycles} "
+        + "gated in a row). CheckpointLSN does not advance and no WAL segment is recycled: the WAL grows until the disk is full. A ChunkAccessor that marked "
+        + "them dirty was neither committed nor disposed (CP-13), or a writer holds them across cycles. First pages (cache slot:ActiveChunkWriters): {Sample}")]
+    private partial void LogCheckpointStalled(int stuckPages, int cycles, long gatedCycles, string sample);
+
+    [LoggerMessage(LogLevel.Information, "Checkpoint covered every page again after {GatedCycles} gated cycles (Health=Ok)")]
+    private partial void LogCheckpointResumed(long gatedCycles);
 
     [LoggerMessage(LogLevel.Information, "Checkpoint: writing {PageCount} dirty pages")]
     private partial void LogCheckpointPass(int pageCount);

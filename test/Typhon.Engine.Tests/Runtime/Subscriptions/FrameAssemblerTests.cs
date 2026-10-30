@@ -564,7 +564,6 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
                 break;
             }
 
-            accessor.Dispose();
         }
 
         var state = harness.Subscriptions.ReplicationStates[harness.PlanIndex(nameof(ProjCreature))];
@@ -797,7 +796,6 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
             }
         }
 
-        accessor.Dispose();
         tx.Commit();
     }
 
@@ -821,7 +819,6 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
             }
         }
 
-        accessor.Dispose();
         tx.Commit();
     }
 
@@ -845,7 +842,6 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
             break;
         }
 
-        accessor.Dispose();
         tx.Commit();
     }
 
@@ -880,7 +876,6 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
             break;
         }
 
-        accessor.Dispose();
         tx.Commit();
     }
 

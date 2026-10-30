@@ -176,7 +176,6 @@ class ClusterSpanWriteDurabilityTests
                 }
             }
 
-            accessor.Dispose();
             tx.Commit();
         }
 

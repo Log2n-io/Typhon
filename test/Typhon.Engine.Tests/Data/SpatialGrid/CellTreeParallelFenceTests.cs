@@ -319,50 +319,43 @@ class CellTreeParallelFenceTests : TestBase<CellTreeParallelFenceTests>
         float sin = MathF.Sin(ThetaPerTick);
 
         var accessor = tx.For<ClCohUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            int chunkId = cluster.ChunkId;
+            if ((uint)chunkId >= (uint)cs.ClusterCellMap.Length)
             {
-                int chunkId = cluster.ChunkId;
-                if ((uint)chunkId >= (uint)cs.ClusterCellMap.Length)
-                {
-                    continue;
-                }
+                continue;
+            }
 
-                int cellKey = cs.ClusterCellMap[chunkId];
-                if (cellKey < 0)
-                {
-                    continue;
-                }
+            int cellKey = cs.ClusterCellMap[chunkId];
+            if (cellKey < 0)
+            {
+                continue;
+            }
 
-                grid.CellOrigin(cellKey, out double originX, out double originY, out _);
-                float centreX = (float)(originX + (CellSize * 0.5f));
-                float centreY = (float)(originY + (CellSize * 0.5f));
+            grid.CellOrigin(cellKey, out double originX, out double originY, out _);
+            float centreX = (float)(originX + (CellSize * 0.5f));
+            float centreY = (float)(originY + (CellSize * 0.5f));
 
-                // TYPHON009 flags un-barriered spatial mutation through a span. This span is READ only — every write below goes through WriteSpatial, which is
-                // what keeps ClusterProcessBitmap and ClusterAabbs correct.
+            // TYPHON009 flags un-barriered spatial mutation through a span. This span is READ only — every write below goes through WriteSpatial, which is
+            // what keeps ClusterProcessBitmap and ClusterAabbs correct.
 #pragma warning disable TYPHON009
-                var positions = cluster.GetSpan(ClCohUnit.Pos);
+            var positions = cluster.GetSpan(ClCohUnit.Pos);
 #pragma warning restore TYPHON009
 
-                ulong bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    int slotIndex = BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
+            ulong bits = cluster.OccupancyBits;
+            while (bits != 0)
+            {
+                int slotIndex = BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
 
-                    ref readonly var bounds = ref positions[slotIndex].Bounds;
-                    float dx = (0.5f * (bounds.MinX + bounds.MaxX)) - centreX;
-                    float dy = (0.5f * (bounds.MinY + bounds.MaxY)) - centreY;
-                    cluster.WriteSpatial(ClCohUnit.Pos, slotIndex, BoxAt(
-                        centreX + ((dx * cos) - (dy * sin)),
-                        centreY + ((dx * sin) + (dy * cos))));
-                }
+                ref readonly var bounds = ref positions[slotIndex].Bounds;
+                float dx = (0.5f * (bounds.MinX + bounds.MaxX)) - centreX;
+                float dy = (0.5f * (bounds.MinY + bounds.MaxY)) - centreY;
+                cluster.WriteSpatial(ClCohUnit.Pos, slotIndex, BoxAt(
+                    centreX + ((dx * cos) - (dy * sin)),
+                    centreY + ((dx * sin) + (dy * cos))));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
     }
 
@@ -472,26 +465,19 @@ class CellTreeParallelFenceTests : TestBase<CellTreeParallelFenceTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var accessor = tx.For<ClCohUnit>();
-            try
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                foreach (var cluster in accessor.GetClusterEnumerator())
-                {
 #pragma warning disable TYPHON009 // Read-only: this is the oracle, it must not mutate anything.
-                    var positions = cluster.GetSpan(ClCohUnit.Pos);
+                var positions = cluster.GetSpan(ClCohUnit.Pos);
 #pragma warning restore TYPHON009
-                    ulong bits = cluster.OccupancyBits;
-                    while (bits != 0)
-                    {
-                        int slotIndex = BitOperations.TrailingZeroCount(bits);
-                        bits &= bits - 1;
-                        ref readonly var b = ref positions[slotIndex].Bounds;
-                        truth.Add((SlotKey(cluster.ChunkId, slotIndex), b.MinX, b.MinY, b.MaxX, b.MaxY));
-                    }
+                ulong bits = cluster.OccupancyBits;
+                while (bits != 0)
+                {
+                    int slotIndex = BitOperations.TrailingZeroCount(bits);
+                    bits &= bits - 1;
+                    ref readonly var b = ref positions[slotIndex].Bounds;
+                    truth.Add((SlotKey(cluster.ChunkId, slotIndex), b.MinX, b.MinY, b.MaxX, b.MaxY));
                 }
-            }
-            finally
-            {
-                accessor.Dispose();
             }
         }
 

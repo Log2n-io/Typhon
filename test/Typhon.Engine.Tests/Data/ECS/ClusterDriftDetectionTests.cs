@@ -72,23 +72,16 @@ class ClusterDriftDetectionTests : TestBase<ClusterDriftDetectionTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            ulong bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                ulong bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-                    var (x, y) = position(cluster.ChunkId, slot);
-                    cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, y));
-                }
+                int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                var (x, y) = position(cluster.ChunkId, slot);
+                cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, y));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
         tx.Commit();
     }

@@ -246,7 +246,6 @@ class SphereObserverTests : TestBase<SphereObserverTests>
                     }
                 }
 
-                accessor.Dispose();
                 tx.Commit();
             }
 
@@ -305,7 +304,6 @@ class SphereObserverTests : TestBase<SphereObserverTests>
             }
         }
 
-        accessor.Dispose();
         tx.Commit();
     }
 

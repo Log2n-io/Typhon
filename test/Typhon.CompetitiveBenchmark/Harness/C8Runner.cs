@@ -95,7 +95,6 @@ public static class C8Runner
                     span[idx].Value += 1;
                 }
             }
-            acc.Dispose();
         }, opsPerBatch: count, warmupBatches: 20, minMs: 500);
 
         dbe.Dispose();

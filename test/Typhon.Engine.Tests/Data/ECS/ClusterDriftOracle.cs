@@ -70,82 +70,75 @@ static class ClusterDriftOracle
 
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            int chunkId = cluster.ChunkId;
+            if (clusterState.ClusterCellMap[chunkId] < 0)
             {
-                int chunkId = cluster.ChunkId;
-                if (clusterState.ClusterCellMap[chunkId] < 0)
-                {
-                    continue;
-                }
-
-                scanned++;
-
-                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
-
-                // The cluster's true bound, from its entities — not from ClusterAabbs.
-                float minX = float.PositiveInfinity, minY = float.PositiveInfinity;
-                float maxX = float.NegativeInfinity, maxY = float.NegativeInfinity;
-                float sumX = 0f, sumY = 0f;
-                int counted = 0;
-
-                ulong bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-                    ref readonly var b = ref positions[slot].Bounds;
-                    float cx = 0.5f * (b.MinX + b.MaxX);
-                    float cy = 0.5f * (b.MinY + b.MaxY);
-                    minX = MathF.Min(minX, cx); maxX = MathF.Max(maxX, cx);
-                    minY = MathF.Min(minY, cy); maxY = MathF.Max(maxY, cy);
-                    sumX += cx; sumY += cy;
-                    counted++;
-                }
-
-                if (counted == 0)
-                {
-                    continue;
-                }
-
-                // Level 1 — the gate. A cluster already inside the target extent cannot be improved by moving anything out of it.
-                if ((maxX - minX) <= targetExtent && (maxY - minY) <= targetExtent)
-                {
-                    continue;
-                }
-
-                float centreX = sumX / counted;
-                float centreY = sumY / counted;
-                float half = targetExtent * 0.5f;
-
-                bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-                    ref readonly var b = ref positions[slot].Bounds;
-                    float cx = 0.5f * (b.MinX + b.MaxX);
-                    float cy = 0.5f * (b.MinY + b.MaxY);
-
-                    float overshoot = MathF.Max(MathF.Abs(cx - centreX) - half, MathF.Abs(cy - centreY) - half);
-                    if (overshoot <= 0f)
-                    {
-                        continue;
-                    }
-                    if (overshoot <= driftMargin)
-                    {
-                        absorbed++;
-                        continue;
-                    }
-
-                    drifters.Add((chunkId, slot));
-                }
+                continue;
             }
-        }
-        finally
-        {
-            accessor.Dispose();
+
+            scanned++;
+
+            var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
+
+            // The cluster's true bound, from its entities — not from ClusterAabbs.
+            float minX = float.PositiveInfinity, minY = float.PositiveInfinity;
+            float maxX = float.NegativeInfinity, maxY = float.NegativeInfinity;
+            float sumX = 0f, sumY = 0f;
+            int counted = 0;
+
+            ulong bits = cluster.OccupancyBits;
+            while (bits != 0)
+            {
+                int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                ref readonly var b = ref positions[slot].Bounds;
+                float cx = 0.5f * (b.MinX + b.MaxX);
+                float cy = 0.5f * (b.MinY + b.MaxY);
+                minX = MathF.Min(minX, cx); maxX = MathF.Max(maxX, cx);
+                minY = MathF.Min(minY, cy); maxY = MathF.Max(maxY, cy);
+                sumX += cx; sumY += cy;
+                counted++;
+            }
+
+            if (counted == 0)
+            {
+                continue;
+            }
+
+            // Level 1 — the gate. A cluster already inside the target extent cannot be improved by moving anything out of it.
+            if ((maxX - minX) <= targetExtent && (maxY - minY) <= targetExtent)
+            {
+                continue;
+            }
+
+            float centreX = sumX / counted;
+            float centreY = sumY / counted;
+            float half = targetExtent * 0.5f;
+
+            bits = cluster.OccupancyBits;
+            while (bits != 0)
+            {
+                int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                ref readonly var b = ref positions[slot].Bounds;
+                float cx = 0.5f * (b.MinX + b.MaxX);
+                float cy = 0.5f * (b.MinY + b.MaxY);
+
+                float overshoot = MathF.Max(MathF.Abs(cx - centreX) - half, MathF.Abs(cy - centreY) - half);
+                if (overshoot <= 0f)
+                {
+                    continue;
+                }
+                if (overshoot <= driftMargin)
+                {
+                    absorbed++;
+                    continue;
+                }
+
+                drifters.Add((chunkId, slot));
+            }
         }
 
         drifters.Sort(static (a, b) => a.Item1 != b.Item1 ? a.Item1.CompareTo(b.Item1) : a.Item2.CompareTo(b.Item2));

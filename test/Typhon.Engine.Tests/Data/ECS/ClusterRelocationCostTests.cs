@@ -195,44 +195,37 @@ class ClusterRelocationCostTests : TestBase<ClusterRelocationCostTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
+            ulong bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
-                ulong bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
+                int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
 
-                    ref readonly var b = ref positions[slot].Bounds;
-                    float x = 0.5f * (b.MinX + b.MaxX);
-                    float y = 0.5f * (b.MinY + b.MaxY);
+                ref readonly var b = ref positions[slot].Bounds;
+                float x = 0.5f * (b.MinX + b.MaxX);
+                float y = 0.5f * (b.MinY + b.MaxY);
 
-                    uint h = (uint)((cluster.ChunkId * 0x9E3779B1) ^ (slot * 0x85EBCA6B) ^ (tick * 0x27D4EB2F));
-                    h ^= h >> 15;
-                    h *= 0x2C1B3C6D;
-                    h ^= h >> 13;
+                uint h = (uint)((cluster.ChunkId * 0x9E3779B1) ^ (slot * 0x85EBCA6B) ^ (tick * 0x27D4EB2F));
+                h ^= h >> 15;
+                h *= 0x2C1B3C6D;
+                h ^= h >> 13;
 
-                    // +/-amplitude world units per tick per axis, clamped inside the entity's own cell. The clamp is what keeps this arm free of cell
-                    // crossings; see RelocationJitter for why the amplitude is a parameter rather than the constant it used to be.
-                    // Both axes, because the population is a GRID now. The Y clamp used to be against [1, CellSize - 1] unconditionally, which was
-                    // correct only while every cell sat in row zero; on a grid it would drag every entity into the bottom row — a cell crossing, on the
-                    // arm whose whole premise is that it never crosses.
-                    float cellOriginX = MathF.Floor(x / CellSize) * CellSize;
-                    float cellOriginY = MathF.Floor(y / CellSize) * CellSize;
-                    float span = amplitude * 2f;
-                    float nx = Math.Clamp(x + (((h & 0xFF) / 255f) - 0.5f) * span, cellOriginX + 1f, cellOriginX + CellSize - 1f);
-                    float ny = Math.Clamp(y + ((((h >> 8) & 0xFF) / 255f) - 0.5f) * span, cellOriginY + 1f, cellOriginY + CellSize - 1f);
+                // +/-amplitude world units per tick per axis, clamped inside the entity's own cell. The clamp is what keeps this arm free of cell
+                // crossings; see RelocationJitter for why the amplitude is a parameter rather than the constant it used to be.
+                // Both axes, because the population is a GRID now. The Y clamp used to be against [1, CellSize - 1] unconditionally, which was
+                // correct only while every cell sat in row zero; on a grid it would drag every entity into the bottom row — a cell crossing, on the
+                // arm whose whole premise is that it never crosses.
+                float cellOriginX = MathF.Floor(x / CellSize) * CellSize;
+                float cellOriginY = MathF.Floor(y / CellSize) * CellSize;
+                float span = amplitude * 2f;
+                float nx = Math.Clamp(x + (((h & 0xFF) / 255f) - 0.5f) * span, cellOriginX + 1f, cellOriginX + CellSize - 1f);
+                float ny = Math.Clamp(y + ((((h >> 8) & 0xFF) / 255f) - 0.5f) * span, cellOriginY + 1f, cellOriginY + CellSize - 1f);
 
-                    cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(nx, ny));
-                }
+                cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(nx, ny));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();
@@ -253,50 +246,43 @@ class ClusterRelocationCostTests : TestBase<ClusterRelocationCostTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
+            ulong bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
-                ulong bits = cluster.OccupancyBits;
-                while (bits != 0)
+                int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+
+                ref readonly var b = ref positions[slot].Bounds;
+                float x = 0.5f * (b.MinX + b.MaxX);
+                float y = 0.5f * (b.MinY + b.MaxY);
+
+                uint h = (uint)((cluster.ChunkId * 0x9E3779B1) ^ (slot * 0x85EBCA6B) ^ (tick * 0x27D4EB2F));
+                h ^= h >> 15;
+                h *= 0x2C1B3C6D;
+                h ^= h >> 13;
+
+                // One cell left or right, wrapped inside the entity's own ROW of the populated grid. The offset within the cell is preserved, so the
+                // destination cell's occupancy stays as uniform as the source's and no cell drifts toward being full. Wrapping within the row rather
+                // than across the whole grid keeps every destination inside the populated region, so a crossing is always between two established
+                // cells and never a cell birth — a different path with a different cost.
+                var row = MathF.Floor(y / CellSize);
+                var rowCells = Math.Min(CellsPerRow, Math.Max(1, cellCount - (int)row * CellsPerRow));
+                var rowSpan = rowCells * CellSize;
+                float nx = x + ((h & 1) == 0 ? CellSize : -CellSize);
+                if (nx < 1f)
                 {
-                    int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-
-                    ref readonly var b = ref positions[slot].Bounds;
-                    float x = 0.5f * (b.MinX + b.MaxX);
-                    float y = 0.5f * (b.MinY + b.MaxY);
-
-                    uint h = (uint)((cluster.ChunkId * 0x9E3779B1) ^ (slot * 0x85EBCA6B) ^ (tick * 0x27D4EB2F));
-                    h ^= h >> 15;
-                    h *= 0x2C1B3C6D;
-                    h ^= h >> 13;
-
-                    // One cell left or right, wrapped inside the entity's own ROW of the populated grid. The offset within the cell is preserved, so the
-                    // destination cell's occupancy stays as uniform as the source's and no cell drifts toward being full. Wrapping within the row rather
-                    // than across the whole grid keeps every destination inside the populated region, so a crossing is always between two established
-                    // cells and never a cell birth — a different path with a different cost.
-                    var row = MathF.Floor(y / CellSize);
-                    var rowCells = Math.Min(CellsPerRow, Math.Max(1, cellCount - (int)row * CellsPerRow));
-                    var rowSpan = rowCells * CellSize;
-                    float nx = x + ((h & 1) == 0 ? CellSize : -CellSize);
-                    if (nx < 1f)
-                    {
-                        nx += rowSpan;
-                    }
-                    else if (nx > rowSpan - 1f)
-                    {
-                        nx -= rowSpan;
-                    }
-
-                    cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(nx, y));
+                    nx += rowSpan;
                 }
+                else if (nx > rowSpan - 1f)
+                {
+                    nx -= rowSpan;
+                }
+
+                cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(nx, y));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

@@ -173,26 +173,19 @@ unsafe class SubscriptionsSessionRecordsTests : TestBase<SubscriptionsSessionRec
     {
         using var tx = harness.Engine.CreateQuickTransaction();
         var accessor = tx.For<ProjCreature>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
             {
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0)
-                {
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    var b = cluster.GetReadOnly(ProjCreature.Bounds, slot).Bounds;
-                    var x = b.MinX + (float)Math.Cos((tick * 0.7) + slot);
-                    var y = b.MinY + (float)Math.Sin((tick * 0.7) + slot);
-                    cluster.WriteSpatial(ProjCreature.Bounds, slot,
-                        new ProjBounds { Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x, MaxY = y }, Speed = 1f });
-                }
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                var b = cluster.GetReadOnly(ProjCreature.Bounds, slot).Bounds;
+                var x = b.MinX + (float)Math.Cos((tick * 0.7) + slot);
+                var y = b.MinY + (float)Math.Sin((tick * 0.7) + slot);
+                cluster.WriteSpatial(ProjCreature.Bounds, slot,
+                    new ProjBounds { Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x, MaxY = y }, Speed = 1f });
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

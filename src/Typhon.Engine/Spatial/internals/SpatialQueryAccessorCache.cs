@@ -45,7 +45,9 @@ internal sealed class SpatialQueryAccessorCache
 
     internal sealed class Entry
     {
+#pragma warning disable TYPHON005 // Released by the cache (Release, an overflow's return) or by the finalizer below, never by an owner's Dispose
         internal ChunkAccessor<PersistentStore> Accessor;
+#pragma warning restore TYPHON005
         internal ChunkBasedSegment<PersistentStore> Segment;
 
         /// <summary>

@@ -29,6 +29,7 @@ namespace Typhon.Engine;
 /// Dirty data pages are drained by the checkpoint in every mode — never by a per-UoW <c>SaveChanges</c>.
 /// </para>
 /// </remarks>
+[MustDispose(Reason = "keeps its registry slot and its change set")]
 [PublicAPI]
 public sealed class UnitOfWork : IDisposable
 {

@@ -274,9 +274,9 @@ class WorkerEpochPinTests : TestBase<WorkerEpochPinTests>
         Assert.Multiple(() =>
         {
             Assert.That(() => worker.For<EcsUnit>(), Throws.InvalidOperationException.With.Message.Contains("outside its lease"), "For");
-            Assert.That(() => worker.GetClusterEnumerator<EcsUnit>(), Throws.InvalidOperationException.With.Message.Contains("outside its lease"),
+            Assert.That(() => worker.GetClusterEnumerator<EcsUnit>().Dispose(), Throws.InvalidOperationException.With.Message.Contains("outside its lease"),
                 "GetClusterEnumerator");
-            Assert.That(() => worker.GetClusterEnumerator<EcsUnit>(0, 1), Throws.InvalidOperationException.With.Message.Contains("outside its lease"),
+            Assert.That(() => worker.GetClusterEnumerator<EcsUnit>(0, 1).Dispose(), Throws.InvalidOperationException.With.Message.Contains("outside its lease"),
                 "GetClusterEnumerator(start, end)");
         });
     }

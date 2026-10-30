@@ -312,19 +312,9 @@ public unsafe partial class EntityAccessor
         var guard = needsGuard ? EpochGuard.Enter(_epochManager) : default;
         try
         {
-            if (!_hasEntityMapCache || _entityMapCacheArchId != id.ArchetypeId)
-            {
-                if (_hasEntityMapCache)
-                {
-                    _entityMapCacheAccessor.Dispose();
-                }
+            ref var entityMap = ref EntityMapAccessor(es, id.ArchetypeId);
 
-                _entityMapCacheAccessor = es.EntityMap.Segment.CreateChunkAccessor();
-                _entityMapCacheArchId = id.ArchetypeId;
-                _hasEntityMapCache = true;
-            }
-
-            if (!es.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref _entityMapCacheAccessor))
+            if (!es.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref entityMap))
             {
                 return true;
             }
@@ -336,7 +326,7 @@ public unsafe partial class EntityAccessor
             }
 
             // Published since the copy, or its commit aborted: the live record decides, and a value still pending then is not committed.
-            return !es.EntityMap.TryGet(id.EntityKey, readBuf, ref _entityMapCacheAccessor)
+            return !es.EntityMap.TryGet(id.EntityKey, readBuf, ref entityMap)
                    || EntityRecordAccessor.GetHeader(readBuf).IsDeadAt(TSN, CommitCards, out _);
         }
         finally
@@ -383,24 +373,14 @@ public unsafe partial class EntityAccessor
         byte* readBuf = stackalloc byte[meta._entityRecordSize];
         var guard = needsGuard ? EpochGuard.Enter(_epochManager) : default;
         // Same cached accessor and hinted lookup as ResolveEntity.
-        if (!_hasEntityMapCache || _entityMapCacheArchId != id.ArchetypeId)
-        {
-            if (_hasEntityMapCache)
-            {
-                _entityMapCacheAccessor.Dispose();
-            }
-
-            _entityMapCacheAccessor = es.EntityMap.Segment.CreateChunkAccessor();
-            _entityMapCacheArchId = id.ArchetypeId;
-            _hasEntityMapCache = true;
-        }
-        bool found = es.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref _entityMapCacheAccessor);
+        ref var entityMap = ref EntityMapAccessor(es, id.ArchetypeId);
+        bool found = es.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref entityMap);
         if (needsGuard)
         {
             guard.Dispose();
         }
 
-        return found && EntityVisibility.IsVisible(readBuf, tsn, CommitCards, es.EntityMap, id.EntityKey, ref _entityMapCacheAccessor, _epochManager);
+        return found && EntityVisibility.IsVisible(readBuf, tsn, CommitCards, es.EntityMap, id.EntityKey, ref entityMap, _epochManager);
     }
 
     /// <summary>
@@ -410,19 +390,9 @@ public unsafe partial class EntityAccessor
     private protected bool TryLocateCommitted(EntityId id, ArchetypeMetadata meta, ArchetypeEngineState es, out int clusterChunkId, out byte slotIndex)
     {
         byte* readBuf = stackalloc byte[meta._entityRecordSize];
-        if (!_hasEntityMapCache || _entityMapCacheArchId != id.ArchetypeId)
-        {
-            if (_hasEntityMapCache)
-            {
-                _entityMapCacheAccessor.Dispose();
-            }
+        ref var entityMap = ref EntityMapAccessor(es, id.ArchetypeId);
 
-            _entityMapCacheAccessor = es.EntityMap.Segment.CreateChunkAccessor();
-            _entityMapCacheArchId = id.ArchetypeId;
-            _hasEntityMapCache = true;
-        }
-
-        if (!es.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref _entityMapCacheAccessor))
+        if (!es.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref entityMap))
         {
             clusterChunkId = 0;
             slotIndex = 0;
@@ -461,53 +431,61 @@ public unsafe partial class EntityAccessor
     private protected void ThrowEntityNotFound(EntityId id) => throw new InvalidOperationException($"Entity {id} not found or not visible at TSN {TSN}");
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Cluster base resolution — shared by both resolvers and by a handle's re-resolve (#1199)
+    // Archetype cache — the EntityMap and cluster accessors of every resolve through this accessor: both resolvers, a handle's re-resolve (#1199) and
+    // every ArchetypeAccessor built on it, which owns none of its own
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// <summary>The cluster accessors of one archetype in <see cref="_clusterCache"/>.</summary>
-    private struct ClusterCacheEntry
+    /// <summary>The accessors of one archetype in <see cref="_archetypeCache"/>: its EntityMap's, and its clusters' when it has cluster storage.</summary>
+    [NoCopy(Reason = "holds a ChunkAccessor by value ('EntityMap'): a copy duplicates its slots and pins")]
+    internal struct ArchetypeCacheEntry
     {
-        public ChunkAccessor<PersistentStore> Persistent;
-        public ChunkAccessor<TransientStore> Transient;
-        public long LastUse;
+        // The hit test's fields first: on the line the entry starts on, not ~1.3 KB further behind three accessors.
         public ushort ArchetypeId;
         public bool Live;
         public bool HasPersistent;
         public bool HasTransient;
+        public long LastUse;
+        public ChunkAccessor<PersistentStore> EntityMap;
+        public ChunkAccessor<PersistentStore> Persistent;
+        public ChunkAccessor<TransientStore> Transient;
     }
 
-    internal const int ClusterCacheWays = 4;
+    internal const int ArchetypeCacheWays = 4;
 
-    [InlineArray(ClusterCacheWays)]
-    private struct ClusterCache
+    [InlineArray(ArchetypeCacheWays)]
+    private struct ArchetypeCache
     {
-        private ClusterCacheEntry _entry;
+        private ArchetypeCacheEntry _entry;
     }
 
     /// <summary>
-    /// The cluster cache entry of <paramref name="archetypeId"/>, created on a miss in place of the least recently used one. Only the persistent accessor
-    /// reports what it lets go of to <see cref="ClusterGeneration"/>: Transient pages live in pinned native blocks and are never evicted, so a pointer into
-    /// one outlives its accessor's slot.
+    /// The cache entry of <paramref name="archetypeId"/> (a routing id), created on a miss in place of the least recently used one. Only the persistent
+    /// cluster accessor reports what it lets go of to <see cref="ClusterGeneration"/>: Transient pages live in pinned native blocks and are never evicted,
+    /// so a pointer into one outlives its accessor's slot; and no handle keeps a pointer into an EntityMap page.
     /// </summary>
+    /// <remarks>
+    /// A returned reference is valid until the next miss, which may hand its way to another archetype: take it again rather than keep it across a resolve
+    /// of another archetype.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private ref ClusterCacheEntry EnsureClusterCache(ArchetypeEngineState es, ushort archetypeId)
+    internal ref ArchetypeCacheEntry EnsureArchetypeCache(ArchetypeEngineState es, ushort archetypeId)
     {
-        ref var mru = ref _clusterCache[_clusterCacheMru];
+        ref var mru = ref _archetypeCache[_archetypeCacheMru];
         if (mru.Live && mru.ArchetypeId == archetypeId)
         {
             return ref mru;
         }
-        return ref EnsureClusterCacheMiss(es, archetypeId);
+        return ref EnsureArchetypeCacheMiss(es, archetypeId);
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private ref ClusterCacheEntry EnsureClusterCacheMiss(ArchetypeEngineState es, ushort archetypeId)
+    private ref ArchetypeCacheEntry EnsureArchetypeCacheMiss(ArchetypeEngineState es, ushort archetypeId)
     {
         int victim = 0;
         long oldest = long.MaxValue;
-        for (int i = 0; i < ClusterCacheWays; i++)
+        for (int i = 0; i < ArchetypeCacheWays; i++)
         {
-            ref var entry = ref _clusterCache[i];
+            ref var entry = ref _archetypeCache[i];
             if (!entry.Live)
             {
                 // A free way beats any live one.
@@ -520,8 +498,8 @@ public unsafe partial class EntityAccessor
             }
             if (entry.ArchetypeId == archetypeId)
             {
-                entry.LastUse = ++_clusterCacheClock;
-                _clusterCacheMru = (byte)i;
+                entry.LastUse = ++_archetypeCacheClock;
+                _archetypeCacheMru = (byte)i;
                 return ref entry;
             }
             if (entry.LastUse < oldest)
@@ -531,33 +509,43 @@ public unsafe partial class EntityAccessor
             }
         }
 
-        ref var e = ref _clusterCache[victim];
+        ref var e = ref _archetypeCache[victim];
         if (e.Live)
         {
-            DisposeClusterCacheEntry(ref e);
+            DisposeArchetypeCacheEntry(ref e);
         }
-        var persistentSegment = es.ClusterState.ClusterSegment;
+        e.EntityMap = es.EntityMap.Segment.CreateChunkAccessor();
+        var persistentSegment = es.ClusterState?.ClusterSegment;
         e.HasPersistent = persistentSegment != null;
         if (persistentSegment != null)
         {
             e.Persistent = persistentSegment.CreateChunkAccessor();
             e.Persistent.TrackGeneration(ClusterGeneration);
         }
-        var transientSegment = es.ClusterState.TransientSegment;
+        var transientSegment = es.ClusterState?.TransientSegment;
         e.HasTransient = transientSegment != null;
         if (transientSegment != null)
         {
             e.Transient = transientSegment.CreateChunkAccessor();
         }
         e.ArchetypeId = archetypeId;
-        e.LastUse = ++_clusterCacheClock;
+        e.LastUse = ++_archetypeCacheClock;
         e.Live = true;
-        _clusterCacheMru = (byte)victim;
+        _archetypeCacheMru = (byte)victim;
         return ref e;
     }
 
-    private static void DisposeClusterCacheEntry(ref ClusterCacheEntry entry)
+    /// <summary>
+    /// The EntityMap accessor of <paramref name="archetypeId"/> (a routing id) in the archetype cache — valid until the next miss (see
+    /// <see cref="EnsureArchetypeCache"/>).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal ref ChunkAccessor<PersistentStore> EntityMapAccessor(ArchetypeEngineState es, ushort archetypeId) =>
+        ref EnsureArchetypeCache(es, archetypeId).EntityMap;
+
+    private static void DisposeArchetypeCacheEntry(ref ArchetypeCacheEntry entry)
     {
+        entry.EntityMap.Dispose();
         if (entry.HasPersistent)
         {
             entry.Persistent.Dispose();
@@ -571,27 +559,31 @@ public unsafe partial class EntityAccessor
         entry.HasTransient = false;
     }
 
-    private protected void DisposeClusterCache()
+    private protected void DisposeArchetypeCache()
     {
-        for (int i = 0; i < ClusterCacheWays; i++)
+        for (int i = 0; i < ArchetypeCacheWays; i++)
         {
-            ref var entry = ref _clusterCache[i];
+            ref var entry = ref _archetypeCache[i];
             if (entry.Live)
             {
-                DisposeClusterCacheEntry(ref entry);
+                DisposeArchetypeCacheEntry(ref entry);
             }
         }
-        _clusterCacheClock = 0;
-        _clusterCacheMru = 0;
+        _archetypeCacheClock = 0;
+        _archetypeCacheMru = 0;
     }
 
     /// <summary>
     /// Resolve <paramref name="result"/>'s cluster bases: the primary one (PersistentStore for mixed/SV, TransientStore for pure-Transient) and, for a
     /// mixed archetype, the Transient one. Stamps the handle with the generation its pointers are valid under.
     /// </summary>
-    private protected void ResolveClusterBases(ArchetypeEngineState es, ushort archetypeId, int clusterChunkId, bool writable, ref EntityRef result)
+    internal void ResolveClusterBases(ArchetypeEngineState es, ushort archetypeId, int clusterChunkId, bool writable, ref EntityRef result) =>
+        ResolveClusterBases(ref EnsureArchetypeCache(es, archetypeId), clusterChunkId, writable, ref result);
+
+    /// <summary>The same, from the cache entry the caller already holds — the one its EntityMap lookup took.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void ResolveClusterBases(ref ArchetypeCacheEntry cache, int clusterChunkId, bool writable, ref EntityRef result)
     {
-        ref var cache = ref EnsureClusterCache(es, archetypeId);
         result._clusterBase = cache.HasPersistent
             ? cache.Persistent.GetChunkAddress(clusterChunkId, writable)
             : cache.Transient.GetChunkAddress(clusterChunkId, writable);
@@ -611,7 +603,7 @@ public unsafe partial class EntityAccessor
     /// </summary>
     internal byte* ReresolveClusterBase(ArchetypeEngineState es, ushort archetypeId, int clusterChunkId, bool writable)
     {
-        ref var cache = ref EnsureClusterCache(es, archetypeId);
+        ref var cache = ref EnsureArchetypeCache(es, archetypeId);
         return cache.HasPersistent
             ? cache.Persistent.GetChunkAddress(clusterChunkId, writable)
             : cache.Transient.GetChunkAddress(clusterChunkId, writable);
@@ -659,23 +651,13 @@ public unsafe partial class EntityAccessor
 
         // Reuse cached EntityMap accessor for same archetype (avoids creating a fresh ChunkAccessor per entity).
         // Transaction uses this pattern in ResolveEntityMapSlotChunkId — extending it to the base class.
-        if (!_hasEntityMapCache || _entityMapCacheArchId != id.ArchetypeId)
-        {
-            if (_hasEntityMapCache)
-            {
-                _entityMapCacheAccessor.Dispose();
-            }
-
-            _entityMapCacheAccessor = es.EntityMap.Segment.CreateChunkAccessor();
-            _entityMapCacheArchId = id.ArchetypeId;
-            _hasEntityMapCache = true;
-        }
+        ref var entityMap = ref EntityMapAccessor(es, id.ArchetypeId);
 
         // Hinted lookup: EntityKey is dense and monotonic, so the low-bit hint slot resolves in one bucket-chunk visit — skipping the hash, the bucket
         // directory read and the chain scan that dominate the plain TryGet. Identical semantics (a stale or colliding hint falls back to the full lookup,
         // which refreshes it), and the hint array self-allocates on first miss. Transaction.ResolveEntity already took this path; the parallel/PTA path
         // did not, despite being the one that performs millions of resolves per tick.
-        bool found = es.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref _entityMapCacheAccessor);
+        bool found = es.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref entityMap);
 
         if (needsGuard)
         {
@@ -688,7 +670,7 @@ public unsafe partial class EntityAccessor
         }
 
         // MVCC visibility check — a pending born through its owner's card (VIS-08)
-        if (!EntityVisibility.IsVisible(readBuf, TSN, CommitCards, es.EntityMap, id.EntityKey, ref _entityMapCacheAccessor, _epochManager))
+        if (!EntityVisibility.IsVisible(readBuf, TSN, CommitCards, es.EntityMap, id.EntityKey, ref entityMap, _epochManager))
         {
             return Miss(id, throwOnMiss);
         }

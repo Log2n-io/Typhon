@@ -187,22 +187,15 @@ class PushGroupCapacityTests : TestBase<PushGroupCapacityTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<GroupCitizen>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
             {
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0)
-                {
-                    var slot = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    cluster.WriteSpatial(GroupCitizen.Bounds, slot, GroupTestSchema.At(x, 0f));
-                }
+                var slot = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                cluster.WriteSpatial(GroupCitizen.Bounds, slot, GroupTestSchema.At(x, 0f));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();
