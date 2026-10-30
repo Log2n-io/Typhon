@@ -56,6 +56,9 @@ public sealed class WorkbenchHostOptions
     /// </summary>
     public LogLevel MinimumLogLevel { get; init; } = LogLevel.Information;
 
+    /// <summary>What a live attach session may retain before it stops (#822).</summary>
+    public Typhon.Workbench.Sessions.LiveCacheLimits LiveCache { get; init; } = Typhon.Workbench.Sessions.LiveCacheLimits.Default;
+
     /// <summary>The defaults for the standalone <c>dotnet run</c> entry point: loopback bind, no browser launch.</summary>
     public static WorkbenchHostOptions Default => new();
 }

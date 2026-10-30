@@ -35,7 +35,7 @@ internal static class ProfilerStaticDataBuilder
         ArgumentNullException.ThrowIfNull(engine);
         var idMap = new ComponentIdMap();
         var components = BuildComponentDefinitions(engine, idMap);
-        var archetypes = BuildArchetypeDefinitions(idMap);
+        var archetypes = BuildArchetypeDefinitions(engine, idMap);
         var indexes = BuildIndexCatalog(engine, idMap);
         var queues = BuildEventQueueCatalog(runtime);
         return new StaticDataBundle(components, archetypes, indexes, queues);
@@ -111,15 +111,13 @@ internal static class ProfilerStaticDataBuilder
     }
 
     /// <summary>
-    /// One <see cref="ArchetypeDefinitionRecord"/> per archetype in the global registry. Skips half-initialised entries
+    /// One <see cref="ArchetypeDefinitionRecord"/> per archetype the engine consumes. Skips half-initialised entries
     /// (same guard as <c>SchemaService.ListArchetypes</c>) where engine startup didn't finalise <c>_slotToComponentType</c>.
     /// </summary>
-    public static ArchetypeDefinitionRecord[] BuildArchetypeDefinitions() => BuildArchetypeDefinitions(new ComponentIdMap());
-
-    private static ArchetypeDefinitionRecord[] BuildArchetypeDefinitions(ComponentIdMap idMap)
+    private static ArchetypeDefinitionRecord[] BuildArchetypeDefinitions(DatabaseEngine engine, ComponentIdMap idMap)
     {
         var records = new List<ArchetypeDefinitionRecord>();
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in engine.OwnArchetypes())
         {
             if (meta._slotToComponentType == null || meta.ComponentCount == 0)
             {
@@ -402,7 +400,7 @@ internal static class ProfilerStaticDataBuilder
     /// works. Wire format is signed int32; -2..int.MinValue gives ample room.
     ///
     /// Same instance is shared across <see cref="BuildComponentDefinitions(DatabaseEngine, ComponentIdMap)"/>,
-    /// <see cref="BuildArchetypeDefinitions(ComponentIdMap)"/>, and <see cref="BuildIndexCatalog(DatabaseEngine, ComponentIdMap)"/> within a single
+    /// <see cref="BuildArchetypeDefinitions(DatabaseEngine, ComponentIdMap)"/>, and <see cref="BuildIndexCatalog(DatabaseEngine, ComponentIdMap)"/> within a single
     /// <see cref="BuildAll"/> call — guarantees an archetype's slot map references the same synthetic ID as the matching component-definition record.
     /// </summary>
     private sealed class ComponentIdMap

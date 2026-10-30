@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
+using Typhon.Engine.Internals;
 
 namespace Typhon.Engine.Tests;
 
@@ -260,6 +261,163 @@ class ViewDeltaRingDefectTests : TestBase<ViewDeltaRingDefectTests>
         }
 
         Assert.That(view.Count, Is.EqualTo(9), $"{Marker}: the overflowed navigation view does not hold every qualifying source");
+    }
+
+    private DatabaseEngine SetupNavigationEngine()
+    {
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<SvNavGuild>();
+        dbe.RegisterComponentFromAccessor<SvNavPlayer>();
+        dbe.InitializeArchetypes();
+        return dbe;
+    }
+
+    private static EntityId SpawnGuildAndPlayer(DatabaseEngine dbe, int level)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        var guild = tx.Spawn<SvNavGuildArch>(SvNavGuildArch.Guild.Set(new SvNavGuild(level, 100)));
+        tx.Spawn<SvNavPlayerArch>(SvNavPlayerArch.Player.Set(new SvNavPlayer((long)guild.RawValue, 90)));
+        tx.Commit();
+        return guild;
+    }
+
+    private static void Refresh<TView>(DatabaseEngine dbe, TView view) where TView : ViewBase
+    {
+        using var r = dbe.CreateQuickTransaction();
+        view.Refresh(r);
+    }
+
+    /// <summary>
+    /// #1275: a disable carries no key, so "was the target in" read 0, which fails any ordinary predicate: no crossing, no fan-out, and the view kept a source
+    /// that population and a full refresh drop.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VDELTA-01")]
+    [CancelAfter(10_000)]
+    public void ADisabledTarget_TakesItsSourcesOutOfTheNavigationView()
+    {
+        using var dbe = SetupNavigationEngine();
+        var guild = SpawnGuildAndPlayer(dbe, 40);
+        dbe.WriteTickFence(1);
+
+        using var txView = dbe.CreateQuickTransaction();
+        using var view = txView.Query<SvNavPlayerArch>()
+            .NavigateField<SvNavPlayer, SvNavGuild>(p => p.GuildId)
+            .Where((p, g) => p.Score >= 50 && g.Level >= 30)
+            .ToView();
+        Assert.That(view.Count, Is.EqualTo(1), "premise");
+        Refresh(dbe, view);   // the first refresh is a full one: it would hide what the delta path does
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(guild).Disable(SvNavGuildArch.Guild);
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        Refresh(dbe, view);
+        Assert.That(view.Count, Is.Zero, "the target is disabled");
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(guild).Enable(SvNavGuildArch.Guild);
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        Refresh(dbe, view);
+        Assert.That(view.Count, Is.EqualTo(1), "the target is back");
+    }
+
+    /// <summary>#1275: one evaluator per field judged a target range by its last bound alone, whichever way the value left the range.</summary>
+    [Test]
+    [VerifiesRule("VDELTA-01")]
+    [CancelAfter(10_000)]
+    public void ATargetRange_IsDecidedByBothBounds([Values(5, 25)] int leaves)
+    {
+        using var dbe = SetupNavigationEngine();
+        var guild = SpawnGuildAndPlayer(dbe, 15);
+        dbe.WriteTickFence(1);
+
+        using var txView = dbe.CreateQuickTransaction();
+        using var view = txView.Query<SvNavPlayerArch>()
+            .NavigateField<SvNavPlayer, SvNavGuild>(p => p.GuildId)
+            .Where((p, g) => p.Score >= 50 && g.Level >= 10 && g.Level < 20)
+            .ToView();
+        Assert.That(view.Count, Is.EqualTo(1), "premise");
+        Refresh(dbe, view);   // the first refresh is a full one: it would hide what the delta path does
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(guild).Set(SvNavGuildArch.Guild, new SvNavGuild(leaves, 100));
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        dbe.WriteTickFence(2);
+        Refresh(dbe, view);
+        Assert.That(view.Count, Is.Zero, "the target left the range");
+    }
+
+    /// <summary>#1275: the first refresh of an incremental view is owed, not an overflow; the mode reported it as one, on every view.</summary>
+    [Test]
+    [VerifiesRule("VDELTA-01")]
+    [CancelAfter(10_000)]
+    public void AnOwedFirstRefresh_IsNotReportedAsAnOverflow()
+    {
+        using var dbe = SetupEngine();
+        using var txView = dbe.CreateQuickTransaction();
+        using var view = txView.Query<CompDArch>().WhereField<CompD>(d => d.B >= 50).ToView(bufferCapacity: 4);
+
+        QueryPathProbe.Reset();
+        Refresh(dbe, view);
+        Assert.That(QueryPathProbe.RefreshFullOverflows, Is.Zero, "owed, nothing dropped");
+
+        for (var i = 0; i < 8; i++)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            tx.Spawn<CompDArch>(CompDArch.D.Set(new CompD(1f, 60 + i, 1d)));
+            tx.Commit();
+        }
+
+        Refresh(dbe, view);
+        Assert.That(QueryPathProbe.RefreshFullOverflows, Is.EqualTo(1), "a real drop is reported");
+    }
+
+    /// <summary>
+    /// #797: a pull refresh skips its removal scan when the two sets count the same after the add loop. Before it, equal counts say nothing: K left and K
+    /// others came.
+    /// </summary>
+    [Test]
+    [CancelAfter(10_000)]
+    public void APullRefresh_ThatSwapsEntities_ReportsBothSides()
+    {
+        using var dbe = SetupEngine();
+        var ids = new EntityId[6];
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < ids.Length; i++)
+            {
+                ids[i] = tx.Spawn<CompDArch>(CompDArch.D.Set(new CompD(1f, i < 3 ? 60 + i : 10 + i, 1d)));
+            }
+
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+
+        using var txView = dbe.CreateQuickTransaction();
+        using var view = txView.Query<CompDArch>().Where<CompD>(d => d.B >= 50).ToView();
+        Assert.That(view.Count, Is.EqualTo(3), "premise");
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(ids[0]).Set(CompDArch.D, new CompD(1f, 20, 1d));
+            tx.OpenMut(ids[3]).Set(CompDArch.D, new CompD(1f, 70, 1d));
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        Refresh(dbe, view);
+        Assert.That(view.Count, Is.EqualTo(3));
+        Assert.That(view.Added, Is.EquivalentTo(new[] { ids[3] }), "the one that came");
+        Assert.That(view.Removed, Is.EquivalentTo(new[] { ids[0] }), "the one that left");
     }
 
     /// <summary>The view shapes whose membership a delta decides differently.</summary>

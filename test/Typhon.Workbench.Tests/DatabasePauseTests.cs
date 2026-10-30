@@ -19,14 +19,6 @@ namespace Typhon.Workbench.Tests;
 /// <see cref="DatabaseLockedException"/> carrying the same holder identity. No child process needed, and no timing flake.</para>
 /// </summary>
 [TestFixture]
-[NonParallelizable] // opens real engines — the schema-compat check reads the process-global ArchetypeRegistry (see #554)
-// #811 — quarantined AS A FIXTURE, not test by test. Quarantining the single test that wedged the c6id gate runner
-// simply moved the hang to the next test in the class, which is the evidence that settles what this is: not one bad
-// test but something these fifteen share on that one machine. They open and dispose real engines in a loop, each with
-// a FileSystemWatcher over the bundle, and they pass alone, pass as a fixture, and pass 4/4 full-suite runs on Linux
-// under WSL2 with the same Release build and gate filter. The cost is stated rather than hidden: this removes ALL
-// server-side F8 coverage from the merge gate until #811 is understood. The nightly still runs it, which is where a
-// quarantined test is supposed to be observed.
 [Category("Quarantine")]
 public sealed class DatabasePauseTests
 {

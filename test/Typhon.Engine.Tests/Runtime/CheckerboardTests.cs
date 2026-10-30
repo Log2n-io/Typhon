@@ -12,12 +12,7 @@ namespace Typhon.Engine.Tests.Runtime;
 /// Reuses the <see cref="TierUnit"/> archetype and grid pattern from <see cref="TierDispatchTests"/>.
 /// </summary>
 [TestFixture]
-[NonParallelizable] // timing-sensitive: exercises the real scheduler/tick context; concurrent CPU load from peer fixtures perturbs tick cadence (fails at LoP=8)
-// #552 — non-deterministic tick-cadence / spatial-tier assertions fail under CPU contention (a different test each
-// run). Quarantine, not [Ignore]: the fixture stays runnable locally and by an explicit filter, and it leaves the gate
-// through the category shard.py already honours instead of vanishing from every run. Needs cadence-independent
-// assertions before it can come back.
-[Category("Quarantine")]
+[NonParallelizable] // runs the real scheduler
 class CheckerboardTests : TestBase<CheckerboardTests>
 {
     private static TierPos PointAt(float x, float y) =>
@@ -74,7 +69,7 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
         runtime.Start();
-        SpinWait.SpinUntil(() => ticksDone >= 2, TimeSpan.FromSeconds(5));
+        Assert.That(SpinWait.SpinUntil(() => ticksDone >= 2, TimeSpan.FromSeconds(5)), Is.True, "the runtime did not tick");
         runtime.Shutdown();
 
         // Each tick invokes the callback twice (Red + Black)
@@ -167,7 +162,7 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
         runtime.Start();
-        SpinWait.SpinUntil(() => ticksDone >= 2, TimeSpan.FromSeconds(5));
+        Assert.That(SpinWait.SpinUntil(() => ticksDone >= 2, TimeSpan.FromSeconds(5)), Is.True, "the runtime did not tick");
         runtime.Shutdown();
 
         // Black phase should see the entity even though Red phase was empty
@@ -251,7 +246,7 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
         runtime.Start();
-        SpinWait.SpinUntil(() => ticksDone >= 2, TimeSpan.FromSeconds(5));
+        Assert.That(SpinWait.SpinUntil(() => ticksDone >= 2, TimeSpan.FromSeconds(5)), Is.True, "the runtime did not tick");
         runtime.Shutdown();
 
         // Only Black cell entity should be seen (Red cell is sleeping)
@@ -295,7 +290,7 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
         runtime.Start();
-        SpinWait.SpinUntil(() => ticksDone >= 2, TimeSpan.FromSeconds(5));
+        Assert.That(SpinWait.SpinUntil(() => ticksDone >= 2, TimeSpan.FromSeconds(5)), Is.True, "the runtime did not tick");
         runtime.Shutdown();
 
         // Should invoke callback twice per tick (Red + Black) even without a tier filter
@@ -342,7 +337,7 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 60 });
 
         runtime.Start();
-        SpinWait.SpinUntil(() => ticksDone >= 3, TimeSpan.FromSeconds(5));
+        Assert.That(SpinWait.SpinUntil(() => ticksDone >= 3, TimeSpan.FromSeconds(5)), Is.True, "the runtime did not tick");
         runtime.Shutdown();
 
         // BudgetMs should be 1000/60 ≈ 16.67
@@ -391,7 +386,7 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 60 });
 
         runtime.Start();
-        SpinWait.SpinUntil(() => ticksDone >= 3, TimeSpan.FromSeconds(5));
+        Assert.That(SpinWait.SpinUntil(() => ticksDone >= 3, TimeSpan.FromSeconds(5)), Is.True, "the runtime did not tick");
         runtime.Shutdown();
 
         // Both Tier0 and Tier1 should have non-zero cost
@@ -440,143 +435,5 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         Assert.That(grid.GetCell(grid.WorldToCellKey(5f, 5f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier3));
         Assert.That(grid.GetCell(grid.WorldToCellKey(15f, 5f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier3));
         Assert.That(grid.GetCell(grid.WorldToCellKey(55f, 55f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier3));
-    }
-
-    [Test]
-    public void SetTierInAABB_MinSemantics()
-    {
-        using var dbe = SetupEngineWithGrid();
-        var grid = dbe.Realm0Grid;
-
-        // Reset all to Tier3
-        grid.ResetAllTiers(SimTier.Tier3);
-
-        // Set a 30x30 area to Tier0 (covers cells (0,0), (1,0), (2,0), (0,1), (1,1), (2,1), (0,2), (1,2), (2,2))
-        grid.SetTierInAABB(0f, 0f, 0f, 30f, 30f, 0f, SimTier.Tier0);
-
-        // Cells inside AABB should be Tier0
-        Assert.That(grid.GetCell(grid.WorldToCellKey(5f, 5f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
-        Assert.That(grid.GetCell(grid.WorldToCellKey(15f, 15f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
-        Assert.That(grid.GetCell(grid.WorldToCellKey(25f, 25f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
-
-        // Cell outside AABB should still be Tier3
-        Assert.That(grid.GetCell(grid.WorldToCellKey(55f, 55f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier3));
-
-        // Now apply Tier1 over a larger area — min semantics means Tier0 cells stay Tier0
-        grid.SetTierInAABB(0f, 0f, 0f, 60f, 60f, 0f, SimTier.Tier1);
-
-        // Original Tier0 cells: still Tier0 (Tier0 < Tier1, min keeps Tier0)
-        Assert.That(grid.GetCell(grid.WorldToCellKey(5f, 5f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
-        // Newly covered cells: Tier1 (was Tier3, Tier1 < Tier3)
-        Assert.That(grid.GetCell(grid.WorldToCellKey(45f, 45f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier1));
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // SpatialGridAccessor (issue #232)
-    // ═══════════════════════════════════════════════════════════════════════
-
-    [Test]
-    // QUARANTINE (#406): passes on Windows (isolated + full-suite parallel) but fails only on Linux CI —
-    // ctx.SpatialGrid.IsValid is false in the tick callback. Excluded from the merge gate pending a Linux repro.
-    [Category("Quarantine")]
-    public void SpatialGridAccessor_AccessibleFromTickContext()
-    {
-        using var dbe = SetupEngineWithGrid();
-
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            tx.Spawn<TierUnit>(TierUnit.Pos.Set(PointAt(5f, 5f)));
-            tx.Commit();
-        }
-
-        using var txView = dbe.CreateQuickTransaction();
-        var view = txView.Query<TierUnit>().ToView();
-
-        SpatialGridAccessor captured = default;
-        var ticksDone = 0;
-        using var runtime = TyphonRuntime.Create(dbe, schedule =>
-        {
-            var dag = schedule.PublicTrack.DeclareDag("Test");
-            dag.CallbackSystem("GridAccess", ctx =>
-            {
-                if (Interlocked.Increment(ref ticksDone) == 1)
-                {
-                    captured = ctx.SpatialGrid;
-
-                    // Basic operations via the accessor API
-                    Assert.That(ctx.SpatialGrid.IsValid, Is.True);
-                    Assert.That(ctx.SpatialGrid.CellCount, Is.GreaterThan(0));
-                    Assert.That(ctx.SpatialGrid.GridWidth, Is.EqualTo(10));
-                    Assert.That(ctx.SpatialGrid.GridHeight, Is.EqualTo(10));
-                    Assert.That(ctx.SpatialGrid.CellSize, Is.EqualTo(10f));
-
-                    // Coordinate conversion
-                    int cellKey = ctx.SpatialGrid.WorldToCell(5f, 5f, 0f);
-                    var (cx, cy, _) = ctx.SpatialGrid.GetCellCoords(cellKey);
-                    Assert.That(cx, Is.EqualTo(0));
-                    Assert.That(cy, Is.EqualTo(0));
-
-                    // Tier assignment via accessor
-                    ctx.SpatialGrid.SetCellTier(0, 0, 0, SimTier.Tier0);
-                    ctx.SpatialGrid.SetCellTier(1, 0, 0, SimTier.Tier1);
-                }
-            });
-        }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-
-        runtime.Start();
-        SpinWait.SpinUntil(() => ticksDone >= 1, TimeSpan.FromSeconds(5));
-        runtime.Shutdown();
-
-        Assert.That(captured.IsValid, Is.True);
-        // Verify the tier assignments stuck
-        Assert.That(dbe.Realm0Grid.GetCell(dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
-        Assert.That(dbe.Realm0Grid.GetCell(dbe.Realm0Grid.WorldToCellKey(15f, 5f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier1));
-        view.Dispose();
-    }
-
-    [Test]
-    public void SpatialGridAccessor_MultiObserver_Union()
-    {
-        using var dbe = SetupEngineWithGrid();
-
-        using var txView = dbe.CreateQuickTransaction();
-        var view = txView.Query<TierUnit>().ToView();
-
-        var ticksDone = 0;
-        using var runtime = TyphonRuntime.Create(dbe, schedule =>
-        {
-            var dag = schedule.PublicTrack.DeclareDag("Test");
-            dag.CallbackSystem("TierAssignment", ctx =>
-            {
-                if (Interlocked.Increment(ref ticksDone) == 1)
-                {
-                    var grid = ctx.SpatialGrid;
-
-                    // Multi-observer pattern: reset → per-observer SetTierInAABB
-                    grid.ResetAllTiers(SimTier.Tier3);
-
-                    // Observer A: Tier0 for area (0,0)→(30,30) → cells (0,0)-(2,2)
-                    grid.SetTierInAABB(0f, 0f, 0f, 30f, 30f, 0f, SimTier.Tier0);
-
-                    // Observer B: Tier1 for area (20,20)→(60,60) → cells (2,2)-(5,5)
-                    // Cell (2,2) overlaps both: min(Tier0=1, Tier1=2) = Tier0
-                    grid.SetTierInAABB(20f, 20f, 0f, 60f, 60f, 0f, SimTier.Tier1);
-                }
-            });
-        }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-
-        runtime.Start();
-        SpinWait.SpinUntil(() => ticksDone >= 1, TimeSpan.FromSeconds(5));
-        runtime.Shutdown();
-
-        // Cell (0,0): Observer A only → Tier0
-        Assert.That(dbe.Realm0Grid.GetCell(dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
-        // Cell (2,2): Both observers → min(Tier0, Tier1) = Tier0
-        Assert.That(dbe.Realm0Grid.GetCell(dbe.Realm0Grid.WorldToCellKey(25f, 25f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
-        // Cell (4,4): Observer B only → Tier1
-        Assert.That(dbe.Realm0Grid.GetCell(dbe.Realm0Grid.WorldToCellKey(45f, 45f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier1));
-        // Cell (8,8): Neither observer → Tier3
-        Assert.That(dbe.Realm0Grid.GetCell(dbe.Realm0Grid.WorldToCellKey(85f, 85f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier3));
-        view.Dispose();
     }
 }

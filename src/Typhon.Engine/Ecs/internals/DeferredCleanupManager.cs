@@ -539,10 +539,16 @@ internal class DeferredCleanupManager
     /// and the chunk free were welded together, so removing the chunk would have silently taken the release with it —
     /// and DC-01 is <c>[fatal][silent]</c>.
     /// </param>
-    internal static void ReleaseCollectionBuffers(ComponentTable ct, ReadOnlySpan<byte> payload)
+    /// <param name="fieldLimit">How many of the table's collection fields, from the first: the ones a partly built revision took a reference for.</param>
+    internal static void ReleaseCollectionBuffers(ComponentTable ct, ReadOnlySpan<byte> payload, int fieldLimit = int.MaxValue)
     {
         foreach (var f in ct.CollectionFields)
         {
+            if (fieldLimit-- <= 0)
+            {
+                return;
+            }
+
             // The descriptor's offset is within the component struct; a content payload prefixes it with ComponentOverhead
             // (Versioned = 0, SingleVersion = 8 for the entity PK). Cluster slots have no overhead.
             var bufferId = payload.Slice(ct.ComponentOverhead + f.OffsetInComponentStorage).Cast<byte, int>()[0];

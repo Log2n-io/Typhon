@@ -31,7 +31,7 @@ public enum EcsQueryScanMode : byte
 /// </summary>
 public enum EcsViewRefreshMode : byte
 {
-    /// <summary>Full re-query (no field evaluators, pull-only view).</summary>
+    /// <summary>Full re-query: a pull-only view, or a full refresh a view owed with no entry dropped.</summary>
     Pull = 0,
 
     /// <summary>Incremental delta-drain succeeded — applied delta entries without a full re-query.</summary>

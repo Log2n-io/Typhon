@@ -80,7 +80,17 @@ public sealed class ExporterQueue : IDisposable
     /// already queued. Called by the consumer on shutdown.
     /// </summary>
     /// <remarks>Internal — only <c>TyphonProfiler.Stop</c> signals shutdown.</remarks>
-    internal void CompleteAdding() => _queue.CompleteAdding();
+    internal void CompleteAdding()
+    {
+        try
+        {
+            _queue.CompleteAdding();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Disposed by a host before Stop: one bad exporter must not cost the others their trace.
+        }
+    }
 
     /// <summary>
     /// Returns the blocking iterator that the exporter thread foreaches over. Yields each enqueued batch and exits when

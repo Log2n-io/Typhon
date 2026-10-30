@@ -124,6 +124,119 @@ internal sealed class DatabaseRepairTests
         _serviceProvider = null;
     }
 
+    /// <summary>The engine's own hold on the data file. Share modes and <c>flock</c> both act per handle, so this needs no second process.</summary>
+    private Microsoft.Win32.SafeHandles.SafeFileHandle HoldTheDataFile() =>
+        File.OpenHandle(Path.Combine(BundlePath, IntegrityConstants.DataFileName), FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
+
+    private void WriteLock(int pid) =>
+        File.WriteAllText(DatabaseLockFile.PathFor(BundlePath), DatabaseLockFile.SerializeLock(pid, DateTimeOffset.UtcNow, Environment.MachineName, false));
+
+    [Test]
+    [VerifiesRule("IR-02")]
+    public void ADataFileHeldOpen_ReadsAsHeld()
+    {
+        BuildAndClose();
+        using var engineHandle = HoldTheDataFile();
+
+        using var source = new OfflineBundlePageSource(BundlePath);
+
+        Assert.That(source.LockFilePresent, Is.False, "the case db.lock cannot answer");
+        Assert.That(source.LockHeld, Is.True);
+        Assert.That(source.LockHolder, Is.Null);
+        Assert.That(source.HeldBy, Is.EqualTo("another process"));
+    }
+
+    [Test]
+    [VerifiesRule("IR-02")]
+    public void ALockNamingThisProcess_ReadsAsHeld()
+    {
+        BuildAndClose();
+        WriteLock(Environment.ProcessId);
+
+        using var source = new OfflineBundlePageSource(BundlePath);
+
+        Assert.That(source.LockHeld, Is.True);
+        Assert.That(source.HeldBy, Is.EqualTo($"process {Environment.ProcessId} on {Environment.MachineName}"));
+    }
+
+    [Test]
+    [VerifiesRule("IR-02")]
+    public void ALockNamingADeadPid_DoesNotReadAsHeld()
+    {
+        BuildAndClose();
+        WriteLock(int.MaxValue);   // no live process: a crashed database stays repairable
+
+        using var source = new OfflineBundlePageSource(BundlePath);
+
+        Assert.That(source.LockFilePresent, Is.True);
+        Assert.That(source.LockHeld, Is.False);
+    }
+
+    [Test]
+    [VerifiesRule("IR-02")]
+    public void AClosedBundle_DoesNotReadAsHeld()
+    {
+        BuildAndClose();
+
+        using var source = new OfflineBundlePageSource(BundlePath);
+
+        Assert.That(source.LockHeld, Is.False, "a source must not find its own handle: the probe runs before it is opened");
+    }
+
+    [Test]
+    [VerifiesRule("IR-02")]
+    public void AnEngineVerifyingItsOwnOpen_ScansOffline()
+    {
+        BuildAndClose();
+        WriteLock(Environment.ProcessId);
+        using var ownHandle = HoldTheDataFile();
+
+        using var source = new OfflineBundlePageSource(BundlePath, heldByCaller: true);
+        var report = IntegrityScanner.Scan(source, new IntegrityOptions { Depth = ScanDepth.Spine });
+
+        Assert.That(source.LockHeld, Is.False, "its own lock and handle say nothing about anybody else");
+        Assert.That(report.Mode, Is.EqualTo(ScanMode.Offline));
+    }
+
+    [Test]
+    [VerifiesRule("IR-02")]
+    public void Apply_OnAHeldBundle_RefusesBeforeAnyEffect()
+    {
+        BuildAndClose();
+        var dataFile = Path.Combine(BundlePath, IntegrityConstants.DataFileName);
+        DamagePage(BundlePath, 3, page => page[8000] ^= 0xFF);
+        var plan = DatabaseRepair.Plan(Scan());
+        Assert.That(plan.Steps, Is.Not.Empty, "a plan with no steps would have no effect to refuse");
+        var besideTheBundle = Directory.GetFileSystemEntries(DbDir);
+        var inTheBundle = Directory.GetFileSystemEntries(BundlePath);
+        var before = File.ReadAllBytes(dataFile);
+
+        using (HoldTheDataFile())
+        {
+            var ex = Assert.Throws<InvalidOperationException>(() => DatabaseRepair.Apply(BundlePath, plan));
+            Assert.That(ex.Message, Does.Contain("is open in another process"));
+        }
+
+        Assert.That(Directory.GetFileSystemEntries(DbDir), Is.EquivalentTo(besideTheBundle), "no pre-repair copy");
+        Assert.That(Directory.GetFileSystemEntries(BundlePath), Is.EquivalentTo(inTheBundle), "no derived file deleted");
+        Assert.That(File.ReadAllBytes(dataFile), Is.EqualTo(before), "no page written");
+    }
+
+    [Test]
+    [VerifiesRule("IR-02")]
+    public void AScanOfAHeldBundle_IsOnlineSampled()
+    {
+        BuildAndClose();
+        DamagePage(BundlePath, 3, page => page[8000] ^= 0xFF);
+
+        using var engineHandle = HoldTheDataFile();
+        var report = Scan();
+
+        Assert.That(report.Mode, Is.EqualTo(ScanMode.OnlineSampled));
+        Assert.That(report.Limits.Caveats, Has.Some.Contains("reported as"));
+        Assert.That(report.Findings, Has.Some.Matches<IntegrityFinding>(f => f.Summary.Contains("holds this database open")));
+    }
+
     private IntegrityReport Scan(ScanDepth depth = ScanDepth.Deep)
     {
         using var source = new OfflineBundlePageSource(BundlePath);

@@ -97,6 +97,7 @@ public static class WorkbenchHost
         builder.Services.AddProblemDetails();
         builder.Services.AddExceptionHandler<WorkbenchExceptionHandler>();
         builder.Services.AddWorkbenchServices();
+        builder.Services.AddSingleton(options.LiveCache);
 
         var app = builder.Build();
 

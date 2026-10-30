@@ -102,14 +102,25 @@ internal sealed class LiveCommandCorrelationTests : TestBase<LiveCommandCorrelat
 
         Assert.That(read.Wait(TimeSpan.FromSeconds(5)), Is.True, "the command never reached the system");
         Assert.That(settled.Wait(TimeSpan.FromSeconds(5)), Is.True, "the runtime stopped ticking");
-        runtime.Shutdown();
-        TyphonProfiler.Stop();
 
-        var records = observer.GetRecords()
+        // Ticks are not frames: under load the pump can be behind them, and an idle session gets none. The record of the frame that answered the command is
+        // what the assertions below read, so it is what this waits for.
+        List<CorrelationInstantData> Records() => observer.GetRecords()
             .Where(r => CorrelationInstantCodec.Covers(r.Kind))
             .Select(r => CorrelationInstantCodec.Decode(r.Bytes))
             .Where(r => r.Timestamp >= from && r.Session == session.Value)
             .ToList();
+
+        Assert.That(SpinWait.SpinUntil(() =>
+        {
+            var seen = Records();
+            var drained = seen.FirstOrDefault(r => r.Kind == TraceEventKind.IngressAdmitted);
+            return drained.Kind == TraceEventKind.IngressAdmitted && seen.Any(r => r.Kind == TraceEventKind.EgressSent && r.Tick >= drained.Tick && r.Bytes > 0);
+        }, TimeSpan.FromSeconds(5)), Is.True, "the pump sent no frame for the tick that answered the command");
+        runtime.Shutdown();
+        TyphonProfiler.Stop();
+
+        var records = Records();
         var admitted = records.Single(r => r.Kind == TraceEventKind.IngressAdmitted);
         var expected = CorrelationInstantCodec.CommandCausalId(session.Value, admitted.Tick, 77);
 

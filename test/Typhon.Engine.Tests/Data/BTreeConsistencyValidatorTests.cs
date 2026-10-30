@@ -137,6 +137,7 @@ public class BTreeConsistencyValidatorTests
         using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
         var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 200, sizeof(Index32Chunk));
 
+        var latchesOnEntry = OlcLatchHeld.Count;
         var depth = epochManager.EnterScope();
         try
         {
@@ -160,6 +161,7 @@ public class BTreeConsistencyValidatorTests
         }
         finally
         {
+            OlcLatchHeld.Count = latchesOnEntry;   // a mutant's abandoned latch is its subject, and must not follow this thread into the next test
             epochManager.ExitScope(depth);
         }
     }

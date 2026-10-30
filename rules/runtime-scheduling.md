@@ -1034,11 +1034,13 @@ tick. The hand-written window pass does not survive that, and three shipped copi
         rule: arguments are evaluated before a gated emit is entered, so the throw fires whether or not anyone wanted the record, and it surfaced
         as 508 ticks with 2 337 trace records and not one record of the expected kind, every gate true and every null check passing. Nobody saw
         an exception
-  note: `TryGetRange` takes an absolute `fromInclusive`, not a width, deliberately. The two shipped readers disagree by one on what "the window"
-        means — `StatsEncoder` walks `[tick - window, newest]` and `ReadStats` walks `[newest - window + 1, newest]` — and a helper that took a
-        width would have to pick one and silently change the other's published percentiles. Settling that is #1066's business, not this rule's
+  note: `TryGetRange` takes an absolute `fromInclusive`, not a width: the two shipped readers run on different sides of the ring write. `StatsEncoder` runs before
+        the tick's `Record`, so its `[tick - window, ...]` ends at `tick - 1`; `ReadStats` runs after, and walks `[newest - window + 1, newest]`. Different arithmetic,
+        the same `window` ticks
+  invariant a window handed to `SubscriptionsTelemetry.Percentile` ends at a finished tick: the slot of the tick in progress is open and its track unfinished, so
+            counting it loses the one tick each STATS emission costs (#1066)
   scope: TickTelemetryRing.cs (TryGetRange, GetTick, GetSystemMetrics, OldestAvailableTick, NewestTick), StatsEncoder.cs
-         (DurabilityWaitPercentile, FillTickSamples, SystemMeans), TyphonRuntime.cs (ReadStats)
+         (DurabilityWaitPercentile, FillTickSamples, SystemMeans, TrackPercentile), SubscriptionsTelemetry.Percentile, TyphonRuntime.cs (ReadStats)
   verified: TickTelemetryRingTests.TryGetRange_RefusesAnEmptyRing_AndNeverYieldsATickGetTickWouldRefuse — asserts the property directly, over
             every `from` a caller could compute against a ring from empty through wrapped, including the negative one the trap produces;
             SubscriptionsOperatorTelemetryTests.EveryTickTelemetryWindowPassSurvivesAnEmptyRing — the consumer end, on a real encoder

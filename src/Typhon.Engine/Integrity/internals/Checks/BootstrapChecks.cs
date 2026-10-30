@@ -105,9 +105,9 @@ internal static class BootstrapChecks
         if (bundle.LockHeld)
         {
             ctx.Report(BundleShape, IntegritySeverity.Advisory, "", Locus.Database,
-                "Another process holds this database open.",
-                "db.lock is held. Cross-structure findings from this scan describe a moving target and are reported as "
-                + "Suspected. Re-run with the database closed to confirm any of them.");
+                $"{char.ToUpperInvariant(bundle.HeldBy[0])}{bundle.HeldBy[1..]} holds this database open.",
+                "Its data file is held open, or db.lock names a live process. Cross-structure findings from this scan describe a moving target and are "
+                + "reported as Suspected. Re-run with the database closed to confirm any of them.");
         }
 
         if (ctx.Source.PageCount < ManagedPagedMMF.MinimumPhysicalPageCount)

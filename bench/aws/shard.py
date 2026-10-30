@@ -324,10 +324,25 @@ def skipped_trx(results_dir, label):
     return path
 
 
+def settings_for(flt, results_dir, label):
+    """The shard's runsettings: RUNSETTINGS plus `flt` as its TestCaseFilter. The filter travels in a file because a plan grows with the suite and a
+    command line does not: Windows caps one at 32 767 characters and shard 0's negative filter passed 31 000 (#1453); Linux caps one argument at
+    128 KiB. Written beside the shard's trx and log, so a failed shard's exact filter stays on disk."""
+    root = ET.parse(RUNSETTINGS).getroot()
+    run_config = root.find("RunConfiguration")
+    if run_config is None:
+        run_config = ET.SubElement(root, "RunConfiguration")
+    ET.SubElement(run_config, "TestCaseFilter").text = flt
+    os.makedirs(results_dir, exist_ok=True)
+    path = os.path.abspath(os.path.join(results_dir, f"shard{label}.runsettings"))
+    ET.ElementTree(root).write(path, encoding="utf-8", xml_declaration=True)
+    return path
+
+
 def run_one(label, flt, results_dir, project=None, env_extra=None):
     trx = f"shard{label}.trx"
     cmd = ["dotnet", "test", project or TESTPROJ, "-c", CFG, "--no-build",
-           "--filter", flt, "--settings", RUNSETTINGS,
+           "--settings", settings_for(flt, results_dir, label),
            "--logger", f"trx;LogFileName={trx}", "--results-directory", results_dir]
     # Inherited-plus-extra rather than a replacement: a bare env loses PATH, DOTNET_ROOT and the runner's own variables.
     env = None

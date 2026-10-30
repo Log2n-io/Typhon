@@ -337,6 +337,147 @@ class DormancyTests : TestBase<DormancyTests>
         Assert.That((cs.SleepStates[chunkId], cs.SleepingClusterCount), Is.EqualTo((ClusterSleepState.Active, 0)));
     }
 
+    /// <summary>Moves <paramref name="chunkId"/>'s first entity through <c>WriteSpatial</c>, which raises no dirty bit, staying in its cell.</summary>
+    private static void WriteSpatialIn(DatabaseEngine dbe, int chunkId, float x, float y)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        foreach (var cluster in tx.For<TierUnit>().GetClusterEnumerator())
+        {
+            if (cluster.ChunkId == chunkId)
+            {
+                cluster.WriteSpatial(TierUnit.Pos, BitOperations.TrailingZeroCount(cluster.OccupancyBits), PointAt(x, y));
+            }
+        }
+
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// #896: nothing dirty in the archetype, so the fence takes the clean-spatial branch: the process bitmap says the cluster moved, and it does not sleep.
+    /// </summary>
+    [Test]
+    [VerifiesRule("DM-05")]
+    public void AClusterMovedOnlyByWriteSpatial_DoesNotSleep_OnTheCleanBranch()
+    {
+        using var dbe = SetupEngineWithGrid();
+        var (cs, chunkId, _) = SpawnInCell(dbe, 5f, 5f, SimTier.Tier0);
+        dbe.WriteTickFence(1);
+        cs.SleepThresholdTicks = 3;
+
+        for (var tick = 2; tick <= 11; tick++)
+        {
+            WriteSpatialIn(dbe, chunkId, 5f + tick * 0.1f, 5f);
+            dbe.WriteTickFence(tick);
+            Assert.That(cs.FenceBranchPath, Is.EqualTo(1), "premise: the clean-spatial branch");
+        }
+
+        Assert.That(cs.SleepStates[chunkId], Is.EqualTo(ClusterSleepState.Active));
+    }
+
+    /// <summary>
+    /// #896: another cluster's write makes the tick the dirty branch, whose sweep used to read the dirty bits alone: the moved cluster counted as clean, slept
+    /// while moving, and froze.
+    /// </summary>
+    [Test]
+    [VerifiesRule("DM-05")]
+    public void AClusterMovedOnlyByWriteSpatial_DoesNotSleep_OnTheDirtyBranch()
+    {
+        using var dbe = SetupEngineWithGrid();
+        var (cs, moved, _) = SpawnInCell(dbe, 5f, 5f, SimTier.Tier0);
+        var (_, written, other) = SpawnInCell(dbe, 55f, 55f, SimTier.Tier0);
+        Assert.That(written, Is.Not.EqualTo(moved), "premise: two clusters");
+        dbe.WriteTickFence(1);
+        cs.SleepThresholdTicks = 3;
+
+        for (var tick = 2; tick <= 11; tick++)
+        {
+            WriteSpatialIn(dbe, moved, 5f + tick * 0.1f, 5f);
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                tx.OpenMut(other).Set(TierUnit.Pos, PointAt(55f, 55f + tick * 0.1f));
+                tx.Commit();
+            }
+
+            dbe.WriteTickFence(tick);
+            Assert.That(cs.FenceBranchPath, Is.EqualTo(2), "premise: the dirty branch");
+        }
+
+        Assert.That(cs.SleepStates[moved], Is.EqualTo(ClusterSleepState.Active));
+    }
+
+    /// <summary>
+    /// #896: the process bit says the box changed, and a move between two entities at the extremes leaves it alone: the review's case. Through the single write
+    /// and the slot-set one.
+    /// </summary>
+    [Test]
+    [VerifiesRule("DM-05")]
+    public void AMoveInsideTheClusterBox_DoesNotSleep([Values] bool slotSet)
+    {
+        using var dbe = SetupEngineWithGrid();
+        var (cs, chunkId, _) = SpawnInCell(dbe, 1f, 5f, SimTier.Tier0);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<TierUnit>(TierUnit.Pos.Set(PointAt(5f, 5f)));
+            tx.Spawn<TierUnit>(TierUnit.Pos.Set(PointAt(9f, 5f)));
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+        cs.SleepThresholdTicks = 3;
+
+        for (var tick = 2; tick <= 11; tick++)
+        {
+            var x = 5f + tick * 0.1f;
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                foreach (var cluster in tx.For<TierUnit>().GetClusterEnumerator())
+                {
+                    Assert.That(BitOperations.PopCount(cluster.OccupancyBits), Is.EqualTo(3), "premise: one cluster");
+                    var middle = BitOperations.TrailingZeroCount(cluster.OccupancyBits & (cluster.OccupancyBits - 1));
+                    if (slotSet)
+                    {
+                        var values = new TierPos[cluster.ClusterSize];
+                        values[middle] = PointAt(x, 5f);
+                        cluster.WriteSpatial(TierUnit.Pos, 1UL << middle, values);
+                    }
+                    else
+                    {
+                        cluster.WriteSpatial(TierUnit.Pos, middle, PointAt(x, 5f));
+                    }
+                }
+
+                tx.Commit();
+            }
+
+            dbe.WriteTickFence(tick);
+        }
+
+        Assert.That(cs.SleepStates[chunkId], Is.EqualTo(ClusterSleepState.Active));
+    }
+
+    /// <summary>#896: a write wakes what it touches (DM-04), however it landed. The wake hung off SetDirty, which WriteSpatial does not call.</summary>
+    [Test]
+    [VerifiesRule("DM-01")]
+    public void WriteSpatial_WakesASleepingCluster()
+    {
+        using var dbe = SetupEngineWithGrid();
+        var (cs, chunkId, _) = SpawnInCell(dbe, 5f, 5f, SimTier.Tier0);
+        dbe.WriteTickFence(1);
+        cs.SleepThresholdTicks = 3;
+        for (var tick = 2; tick <= 5; tick++)
+        {
+            dbe.WriteTickFence(tick);
+        }
+
+        Assert.That(cs.SleepStates[chunkId], Is.EqualTo(ClusterSleepState.Sleeping), "premise");
+
+        WriteSpatialIn(dbe, chunkId, 6f, 5f);
+        dbe.WriteTickFence(6);
+        Assert.That(cs.SleepStates[chunkId], Is.EqualTo(ClusterSleepState.WakePending));
+        cs.TransitionWakePendingToActive(7);
+        Assert.That((cs.SleepStates[chunkId], cs.SleepingClusterCount), Is.EqualTo((ClusterSleepState.Active, 0)));
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Test 8: No overhead when no sleeping
     // ═══════════════════════════════════════════════════════════════════════

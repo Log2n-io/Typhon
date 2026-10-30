@@ -34,7 +34,7 @@ discipline (MVCC revision chains vs in-place SV vs heap-backed Transient), so re
 
 ### SCHEMA-02: ComponentTypeId is a process-global in-memory handle `[fatal]`
   invariant a component type's dense ComponentTypeId is assigned once per process (first `Register<T>()` / DeclareComponent), stable for the type's lifetime,
-            deduped by schema name (V1/V2 of a name share one id); it is NEVER persisted — durability addresses `(routingId, slot)` (see durability LOG-06)
+            deduped by schema name within its load context (V1/V2 of a name share one id); it is NEVER persisted — durability addresses `(routingId, slot)` (see durability LOG-06)
   never a per-engine or per-DB ComponentTypeId — the static `Comp<T>` handle captures the id once and every engine resolves the same slot from it
   scope: ArchetypeRegistry.DeclareComponent (ComponentTypeIds / ComponentTypeById / ComponentTypeIdsBySchemaName / NextComponentTypeId), Comp<T>
   on_violation: static handles disagree with an engine's slot map → wrong-component reads/writes
@@ -199,6 +199,24 @@ discipline (MVCC revision chains vs in-place SV vs heap-backed Transient), so re
 An unfiltered `Query<TArchetype>().ToView()` subscribes to a per-archetype channel (`ArchetypeMembershipRegistry`) and is fed spawn/destroy entries from the
 commit path, rather than re-running the whole archetype scan on every refresh. Two things make that sound: a publication order, and a promise about what the
 entry may be used for. Both are silent when broken, which is why they are rules rather than comments.
+
+### SCHEMA-10: An archetype is its name within its load context, and an engine consumes its context's archetypes `[fatal]`
+  invariant archetype identity, and a component's schema-name dedup, are per `AssemblyLoadContext`: two contexts' copies of one schema are two archetypes, with
+            separate catalog slots, metadata and component type ids. The registry stays process-wide; the copies do not meet
+  invariant an engine iterates `DatabaseEngine.OwnArchetypes()`, the archetypes of its context and their ancestors: its own assembly's context unless the host said
+            otherwise with `UseArchetypesFrom` before `InitializeArchetypes`. What it does not iterate it neither adopts by schema name nor pins
+  invariant the derived graphs are process-wide and built once; validation is per context (`Freeze`), so one schema's bad declaration refuses the engines that
+            consume it and no others
+  invariant a collectible context's catalog ids go back when its archetypes are released, by `UnregisterEngineUse` at the last engine's dispose or at the context's
+            `Unloading` for what no engine used, so reopening a database does not run the 4095-entry catalog out
+  never two copies of an archetype name sharing a slot, or an engine consuming `GetAllArchetypes()`: one definition per name per process is what made a second
+        database's open report a false MigrationRequired against the first's metadata (#554), and made a generation throw while a session held the schema (#384)
+  scope: ArchetypeRegistry.ScopedName, ArchetypeRegistry.GetArchetypesFor, ArchetypeRegistry.ReleaseContext, DatabaseEngine.UseArchetypesFrom, DatabaseEngine.OwnArchetypes
+  on_violation: a session runs on another session's metadata, silently when the shapes agree and with a false schema mismatch when they do not; closing one session
+    pulls the slot from under the other
+  verified: ArchetypeRegistryLifecycleTests [VerifiesRule] — separate slots, metadata and component ids for two contexts of one schema, a context that no engine used
+            released at unload, catalog ids reused over five reloads; EngineLifecycleSideBySideTests — live sessions open alongside each other and a default-context
+            generation, one closing under the other, and concurrent opens. Both use one schema twice: two DIFFERENT schemas sharing an archetype name have no fixture
 
 ### MEMB-01: The structural epoch is released after the entries it accounts for `[fatal][silent]`
   invariant at every instant a view can observe `StructuralEpoch == view.LastStructuralEpoch`, that view's delta buffer holds no entry it has
@@ -1081,12 +1099,13 @@ An incremental view (`WhereField`, a navigation view) keeps its entity set curre
         before its value reaches the cluster slot the re-scan reads (Phase B). Discarded, the change is in neither. (The ring's Reset did that, and
         re-anchored its base TSN under live producers; it is gone)
   scope: EcsView.ProcessEntry, EcsView.ProcessEntryOr, EcsView.RefreshFull, EcsView.RefreshFullOr, EcsView.FoldEntriesAfterRefreshFull,
+         NavigationView.ProcessTargetFieldChange,
          NavigationView.ProcessEntry, NavigationView.RefreshFull, ViewBase.BeginRefreshFull, ViewBase.EndRefreshFull, ViewBase.OweRefreshFull,
          ViewBase.ApplyMembership, ViewBase.FoldsHead, ViewDeltaRingBuffer.Advance, ViewDeltaRingBuffer.HeadPrecedesDrop
   status: **RESIDUAL:**
           - an entry drained mid-publish — after its commit's Phase A, before the commit is visible — makes a multi-field, OR or navigation
             view read the other fields' old values (#1266);
-          - a navigation view's target-side change still compares the target's BeforeKey and AfterKey before fanning out;
+          - a navigation view's target-side change decides out-to-out from BeforeKey, which is the newest published value (#1263);
           - a passes→passes change of an entity outside a multi-field or navigation view now reads the entity's other fields (unmeasured; the
             single-field drain measures at parity);
           - the owed re-scan covers a dropped commit, or one whose entry came before a drop, only once its value is published: one still between
@@ -1152,7 +1171,7 @@ both fast and exact inside the window; this rule fixes what it does promise.
              the fence. Measured over 1 000 000 rows: no measurable cost on point and range lookups, +5–9 % on an
              `AllowMultiple` lookup returning 1 000 rows, +3–5 µs on an ordered page of 1 000
   note: known exceptions, outside this rule's mechanism and tracked: an ordered query ignores a `!=` predicate, with or
-        without a write (#1185); an ordered query on a `Transient`-only archetype returns nothing (#1186). An ordered query whose snapshot is
+        without a write (#1185). An ordered query whose snapshot is
         older than a destroy reads whole the clusters newer deaths touched (VIS-09) and places their rows by their current value: a written
         entity there sits by its new value rather than its fence key. Writable cluster
         memory over a SingleVersion or Transient indexed component is refused, so every write reaches this rule's
@@ -1180,12 +1199,14 @@ both fast and exact inside the window; this rule fixes what it does promise.
             rows sorted by F, ascending or descending, and Skip / Take page that order — whether or not a predicate of P names F, a not-equal included
   invariant the ordered field's key type is the field's own, resolved when OrderByField resolves the field (OrderByField.KeyType); a field no ordered
             tree key encodes (a string, a bool) is refused there, never sorted by entity key
-  invariant the merge streams F's tree only when F's key range enforces every predicate exactly (KeyRange.AdmitsOnlyMatches); a predicate on another
-            field, a not-equal or a bound the range widens goes to the scan-then-sort fallback, which verifies every predicate and reads each row's F
-            at the reader's snapshot — its point read, the transaction's own spawns included, then the bytes a hidden slot kept (VIS-09)
+  invariant the merge streams F's tree only when F's home is persistent and F's key range enforces every predicate exactly (KeyRange.AdmitsOnlyMatches); a
+            Transient home, a predicate on another field, a not-equal or a bound the range widens goes to the scan-then-sort fallback, which verifies every
+            predicate and reads each row's F at the reader's snapshot — its point read, the transaction's own spawns included, then the bytes a hidden slot
+            kept (VIS-09). The fallback sorts a written row by its current value, not its fence key
   scope: OrderByField.KeyType, OrderByField.KeyTypeKnown, QueryResolverHelper.TryMapFieldTypeToKeyType, EcsQuery.ResolveOrderBy,
-         EcsQuery.MergeOrderedClustered, EcsQuery.ExecuteOrderedViaSortFallback, EcsQuery.TryReadOrderKeyAtSnapshot
-  on_violation: the sort fallback took F's key type from a predicate naming F; with none — filtered on one field, ordered by another — it sorted by
+         EcsQuery.MergeOrderedClustered, EcsQuery.ExecuteOrderedViaSortFallback, EcsQuery.TryReadOrderKeyAtSnapshot, EcsQuery.TryReadHiddenOrderKey
+  on_violation: a Transient F had no stream and no fallback source: the merge answered nothing, and with a predicate on another field the fallback sorted by
+                EntityKey (#1186). The sort fallback took F's key type from a predicate naming F; with none — filtered on one field, ordered by another — it sorted by
                 EntityKey: silently unordered rows (found by MarketHardeningTests' query auditor, which orders a player's items by their last trade).
                 A not-equal on another field let the merge through untyped, and it answered nothing; one on F was re-checked only on rows written since
                 the last fence, so the excluded rows came back. The fallback read F's whole tree — every entry, whatever the result — at the HEAD's keys

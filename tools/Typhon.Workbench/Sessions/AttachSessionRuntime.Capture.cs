@@ -18,9 +18,8 @@ namespace Typhon.Workbench.Sessions;
 /// user. See <c>claude/design/Profiler/12-on-demand-tick-capture.md</c> §3.
 /// </para>
 /// <para>
-/// <b>Threading.</b> Every field here except <see cref="_pendingArmTicks"/> is touched only from the read-loop task, which
-/// is single-threaded per session. <see cref="_pendingArmTicks"/> is written by HTTP request threads and consumed at a
-/// tick boundary, so it moves through <see cref="Interlocked"/>.
+/// <b>Threading.</b> The tick walk runs on the read-loop task, which is single-threaded per session. <see cref="_pendingArmTicks"/> is written by HTTP
+/// request threads and consumed at a tick boundary, so it moves through <see cref="Interlocked"/>; a field that crosses threads otherwise says so.
 /// </para>
 /// </remarks>
 public sealed partial class AttachSessionRuntime
@@ -98,6 +97,48 @@ public sealed partial class AttachSessionRuntime
     /// <summary>Bytes actually handed to the builder.</summary>
     private long _recordBytesRetained;
 
+    /// <summary>The session's retention limits. Written once, before the read loop starts.</summary>
+    private LiveCacheLimits _cacheLimits = LiveCacheLimits.Default;
+
+    /// <summary>Why the session stopped retaining, <c>null</c> until it does (#822). Set once; the size and disk bounds latch at a tick boundary.</summary>
+    private string _capReason;
+
+    /// <summary>The last tick retained, published before <see cref="_capReason"/>.</summary>
+    private long _capTick;
+
+    /// <summary>Whether the tick walk has seen the cap. Read-loop only: from here on no record reaches the builder.</summary>
+    private bool _capped;
+
+    /// <summary>Set by the tick walk when it reaches the cap, so the block's remaining records are fed before the last tick is closed. Read-loop only.</summary>
+    private bool _capCloseOutPending;
+
+    /// <summary>Temp cache size as of the last chunk flush. Read from the sink under the builder lock, and published here for the tick walk.</summary>
+    private long _cacheBytes;
+
+    /// <summary>The temp volume went below <see cref="LiveCacheLimits.MinFreeDiskBytes"/> at a chunk flush.</summary>
+    private bool _cacheDiskLow;
+
+    /// <summary>Whether the 80 % warning went out. Under the builder lock.</summary>
+    private bool _cacheWarned;
+
+    /// <summary>A write to the cache failed: the builder is never fed or flushed again, so a partly written chunk stays out of the manifest. Set under the builder lock.</summary>
+    private bool _cacheWriteFailed;
+
+    /// <summary>Nothing more will reach the cache, so the flush timers have nothing to do.</summary>
+    private bool _cacheClosed;
+
+    /// <summary>The last tick the cache's manifest covers: what a failed write leaves of the session.</summary>
+    private long _lastCachedTick;
+
+    private DriveInfo _cacheVolume;
+
+    /// <summary>Serialises computing a capture state with publishing it, so that a publish cannot bury the terminal state with an older one.</summary>
+    private readonly object _capturePublishLock = new();
+
+    internal const string CapSize = "size";
+    internal const string CapDiskLow = "disk_low";
+    internal const string CapWriteFailed = "write_failed";
+
     private static bool[] BuildExemptKinds()
     {
         var exempt = new bool[256];
@@ -124,8 +165,9 @@ public sealed partial class AttachSessionRuntime
             var remaining = Volatile.Read(ref _remainingTicks);
             // A request that has not reached a tick boundary yet still reads as Recording — the operator pressed Record
             // and the window is committed; showing Idle for up to one tick would look like the click was lost.
-            var effective = pending != NoPendingArm ? pending : remaining;
-            var state = effective switch
+            var capReason = Volatile.Read(ref _capReason);
+            var effective = capReason != null ? 0 : pending != NoPendingArm ? pending : remaining;
+            var state = capReason != null ? CaptureRunState.Capped : effective switch
             {
                 AlwaysOnTicks => CaptureRunState.Everything,
                 <= 0 => CaptureRunState.Idle,
@@ -139,7 +181,11 @@ public sealed partial class AttachSessionRuntime
                 TickNumbersAbsolute: Volatile.Read(ref _tickOffsetKnown),
                 TickNumberingSuspect: Volatile.Read(ref _tickNumberingSuspect),
                 BytesReceived: Interlocked.Read(ref _recordBytesReceived),
-                BytesRetained: Interlocked.Read(ref _recordBytesRetained));
+                BytesRetained: Interlocked.Read(ref _recordBytesRetained),
+                CacheBytes: Volatile.Read(ref _cacheBytes),
+                CacheBytesLimit: _cacheLimits.MaxBytes,
+                CapReason: capReason,
+                CapTick: capReason != null ? Volatile.Read(ref _capTick) : 0);
         }
     }
 
@@ -157,7 +203,8 @@ public sealed partial class AttachSessionRuntime
     /// <exception cref="InvalidOperationException">
     /// The session was attached in <see cref="CaptureMode.Everything"/>. Arming would leave the session reporting a
     /// bounded window while its mode still said "everything" — a state the operator never asked for and the UI cannot
-    /// describe. The mode is a choice made at attach; detach and re-attach to change it.
+    /// describe. The mode is a choice made at attach; detach and re-attach to change it. Also thrown past the session's retention cap, when there is nowhere
+    /// left to record to.
     /// </exception>
     public CaptureStateDto Arm(int tickCount)
     {
@@ -171,22 +218,36 @@ public sealed partial class AttachSessionRuntime
             throw new InvalidOperationException(
                 "This session was attached in capture-everything mode. Re-attach in cherry-pick mode to record specific tick windows.");
         }
+        var capReason = Volatile.Read(ref _capReason);
+        if (capReason != null)
+        {
+            if (tickCount == 0)
+            {
+                return CaptureState;
+            }
+
+            throw new InvalidOperationException(
+                $"This session stopped retaining ({capReason}). Save what it holds, and re-attach to record more.");
+        }
+
         Interlocked.Exchange(ref _pendingArmTicks, tickCount);
         LogCaptureArmRequested(tickCount);
-        var state = CaptureState;
-        PublishCaptureState(state);
-        return state;
+        PublishCaptureState();
+        return CaptureState;
     }
 
     /// <summary>Fires whenever the capture state changes — SSE handlers forward it as a <c>captureStateChanged</c> delta.</summary>
     public event Action<CaptureStateDto> CaptureStateChanged;
 
     /// <summary>Raise the in-process event and fan the same state out to SSE subscribers.</summary>
-    private void PublishCaptureState(CaptureStateDto state = null)
+    private void PublishCaptureState()
     {
-        state ??= CaptureState;
-        CaptureStateChanged?.Invoke(state);
-        BroadcastDelta(new LiveStreamEventDto(Kind: "captureStateChanged", CaptureState: state));
+        lock (_capturePublishLock)
+        {
+            var state = CaptureState;
+            CaptureStateChanged?.Invoke(state);
+            BroadcastDelta(new LiveStreamEventDto(Kind: "captureStateChanged", CaptureState: state));
+        }
     }
 
     /// <summary>
@@ -206,6 +267,11 @@ public sealed partial class AttachSessionRuntime
     /// </remarks>
     private int FilterRecords(ReadOnlySpan<byte> records, Span<byte> destination)
     {
+        if (_capped)
+        {
+            return 0;
+        }
+
         var pos = 0;
         var written = 0;
 
@@ -225,7 +291,7 @@ public sealed partial class AttachSessionRuntime
                 OpenTick();
             }
 
-            var keep = _armedForCurrentTick || ExemptKinds[(int)kind];
+            var keep = !_capped && (_armedForCurrentTick || ExemptKinds[(int)kind]);
             if (keep)
             {
                 records.Slice(pos, size).CopyTo(destination[written..]);
@@ -250,6 +316,32 @@ public sealed partial class AttachSessionRuntime
     /// </summary>
     private void OpenTick()
     {
+        if (_capped)
+        {
+            return;
+        }
+
+        if (Volatile.Read(ref _capReason) == null)
+        {
+            if (Volatile.Read(ref _cacheBytes) >= _cacheLimits.MaxBytes)
+            {
+                LatchCap(CapSize, ToAbsoluteTick(_derivedTickCount));
+            }
+            else if (Volatile.Read(ref _cacheDiskLow))
+            {
+                LatchCap(CapDiskLow, ToAbsoluteTick(_derivedTickCount));
+            }
+        }
+
+        // At a boundary, so a window never contains a partial tick. The derived counter stops with the builder's, which sees no further TickStart.
+        if (Volatile.Read(ref _capReason) != null)
+        {
+            _capped = true;
+            _capCloseOutPending = true;
+            _armedForCurrentTick = false;
+            return;
+        }
+
         // The window is published before the request is withdrawn, so a reader that finds no request pending finds its window (CaptureState). A request
         // replacing this one in between fails the exchange and stays pending for the next tick.
         var pending = Volatile.Read(ref _pendingArmTicks);
@@ -274,7 +366,113 @@ public sealed partial class AttachSessionRuntime
             }
         }
 
-        _derivedTickCount++;
+        Volatile.Write(ref _derivedTickCount, _derivedTickCount + 1);
+    }
+
+    /// <summary>
+    /// Stops retention, once. The session stays connected: what stops is what it keeps, because evicting a chunk would remove the capture an operator picked
+    /// earlier and ending the session would lose a live connection for no gain.
+    /// </summary>
+    private void LatchCap(string reason, long lastTick)
+    {
+        if (Volatile.Read(ref _capReason) != null)
+        {
+            return;
+        }
+
+        Volatile.Write(ref _capTick, lastTick);
+        if (Interlocked.CompareExchange(ref _capReason, reason, null) != null)
+        {
+            return;
+        }
+
+        Volatile.Write(ref _pendingArmTicks, NoPendingArm);
+        Volatile.Write(ref _remainingTicks, 0);
+        LogLiveCacheCapped(reason, Volatile.Read(ref _cacheBytes), _cacheLimits.MaxBytes);
+        PublishCaptureState();
+    }
+
+    /// <summary>
+    /// A write to the temp cache failed, which is no reason to take the process down: the session caps, and what reached the manifest stays readable. Called under
+    /// the builder lock, so that nothing passes the check on <see cref="_cacheWriteFailed"/> after this write failed.
+    /// </summary>
+    private void FailCacheWrite(IOException ex)
+    {
+        Volatile.Write(ref _cacheWriteFailed, true);
+        Volatile.Write(ref _cacheClosed, true);
+        LogLiveCacheWriteFailed(ex.Message);
+
+        // The manifest's end, whatever the tick walk had reached: this is what is left. A cap already latched keeps its reason and takes this tick.
+        var lastCached = Volatile.Read(ref _lastCachedTick);
+        Volatile.Write(ref _capTick, lastCached);
+        LatchCap(CapWriteFailed, lastCached);
+    }
+
+    /// <summary>Called under the builder lock for every chunk the cache takes: the one place the sink's position may be read, and a 200 ms cadence.</summary>
+    /// <param name="toTick">The first tick past the chunk.</param>
+    private void NoteCacheGrowth(long toTick)
+    {
+        var bytes = _tempFile.Sink.Position;
+        Volatile.Write(ref _cacheBytes, bytes);
+        Volatile.Write(ref _lastCachedTick, toTick - 1);
+        if (!Volatile.Read(ref _cacheDiskLow) && FreeCacheDiskBytes() < _cacheLimits.MinFreeDiskBytes)
+        {
+            Volatile.Write(ref _cacheDiskLow, true);
+        }
+
+        if (!_cacheWarned && bytes >= _cacheLimits.MaxBytes / 5 * 4)
+        {
+            _cacheWarned = true;
+            PublishCaptureState();
+        }
+    }
+
+    /// <summary>Free space on the temp volume. A volume that cannot be asked reads as plenty: the write failure path is what protects that case.</summary>
+    private long FreeCacheDiskBytes()
+    {
+        try
+        {
+            _cacheVolume ??= new DriveInfo(LiveCacheTempFile.TempDirectory);
+            return _cacheVolume.AvailableFreeSpace;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return long.MaxValue;
+        }
+    }
+
+    /// <summary>Closes the last retained tick once the cap took effect, so it reaches the client whole. A tick that never ends would otherwise stay open.</summary>
+    private void CloseOutCache()
+    {
+        _capCloseOutPending = false;
+        FlushCache();
+        Volatile.Write(ref _cacheClosed, true);
+    }
+
+    /// <summary>
+    /// Everything retained goes to the cache, as far as the cache can take it: a failed write caps the session and leaves its manifest as it was, so a save that
+    /// follows still has that to write.
+    /// </summary>
+    private void FlushCache()
+    {
+        lock (_builderLock)
+        {
+            if (Volatile.Read(ref _cacheWriteFailed))
+            {
+                return;
+            }
+
+            try
+            {
+                _builder.FlushCurrentChunk();
+                _builder.FlushTrailingTick();
+                _builder.FlushCurrentChunk();
+            }
+            catch (IOException ex)
+            {
+                FailCacheWrite(ex);
+            }
+        }
     }
 
     /// <summary>
@@ -370,6 +568,9 @@ public sealed partial class AttachSessionRuntime
     /// <summary>Fires when a capture is auto-saved on teardown, carrying the resolved path.</summary>
     public event Action<string> CaptureAutoSaved;
 
+    /// <summary>Fires when an auto-save fails, carrying the reason. The save is best-effort and never throws, so this is how a caller can tell.</summary>
+    public event Action<string> CaptureAutoSaveFailed;
+
     /// <summary>
     /// Persist the session before it is torn down, so a deliberately-recorded window is never lost to an engine
     /// restart or crash.
@@ -402,18 +603,13 @@ public sealed partial class AttachSessionRuntime
 
         try
         {
-            lock (_builderLock)
-            {
-                _builder.FlushCurrentChunk();
-                _builder.FlushTrailingTick();
-                _builder.FlushCurrentChunk();
-            }
+            FlushCache();
 
             var path = CaptureStorage.ResolveAutoSavePath(AutoSaveDirectory);
             var bytes = SaveSessionAsync(path, CancellationToken.None).GetAwaiter().GetResult();
             AutoSavedPath = path;
             LogCaptureAutoSaved(path, bytes, Interlocked.Read(ref _recordedTickCount));
-            CaptureAutoSaved?.Invoke(path);
+            RaiseAutoSaveEvent(CaptureAutoSaved, path, reason);
 
             // Prune only after a successful write, so a budget that is already over cannot delete an older capture in
             // exchange for one we then fail to produce. Retention follows the file: whichever directory it landed in is
@@ -423,7 +619,22 @@ public sealed partial class AttachSessionRuntime
         }
         catch (Exception ex)
         {
-            LogCaptureAutoSaveFailed($"{reason}: {ex.GetType().Name}: {ex.Message}");
+            var failure = $"{reason}: {ex.GetType().Name}: {ex.Message}";
+            LogCaptureAutoSaveFailed(failure);
+            RaiseAutoSaveEvent(CaptureAutoSaveFailed, failure, reason);
+        }
+    }
+
+    /// <summary>A throwing subscriber is a subscriber's problem: it must neither call a save that worked a failure, nor escape a method that never throws.</summary>
+    private void RaiseAutoSaveEvent(Action<string> handler, string argument, string reason)
+    {
+        try
+        {
+            handler?.Invoke(argument);
+        }
+        catch (Exception ex)
+        {
+            LogCaptureAutoSaveFailed($"{reason}: subscriber threw {ex.GetType().Name}: {ex.Message}");
         }
     }
 }
@@ -447,6 +658,9 @@ public enum CaptureRunState
     /// <summary>A bounded window is open.</summary>
     Recording = 1,
 
-    /// <summary>Capture-everything mode — unbounded.</summary>
+    /// <summary>Capture-everything mode — every tick, up to the session's retention cap.</summary>
     Everything = 2,
+
+    /// <summary>The session stopped retaining (#822): one-way for its life. It stays connected, and what it holds can be read and saved.</summary>
+    Capped = 3,
 }

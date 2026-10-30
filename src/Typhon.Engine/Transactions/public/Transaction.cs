@@ -771,16 +771,9 @@ public unsafe partial class Transaction : EntityAccessor
         List<BTree<TKey, PersistentStore>> trees = null;
         List<bool> multi = null;
 
-        // The registry's array up to the highest id rather than its GetAllArchetypes iterator, which allocates.
-        var maxArchetypeId = ArchetypeRegistry.MaxArchetypeId;
-        for (var archetypeId = 0; archetypeId <= maxArchetypeId; archetypeId++)
+        // This engine's own archetypes, an array: no iterator allocates here.
+        foreach (var meta in _dbe.OwnArchetypes())
         {
-            var meta = ArchetypeRegistry.GetMetadata((ushort)archetypeId);
-            if (meta == null)
-            {
-                continue;
-            }
-
             var es = _dbe._archetypeStates[meta.ArchetypeId];
             var clusterState = es?.ClusterState;
             if (clusterState?.IndexSlots == null)
@@ -2492,7 +2485,8 @@ public unsafe partial class Transaction : EntityAccessor
         var firstChunkId = compRevInfo.CompRevTableFirstChunkId;
 
         var compRev = new ComponentRevision(info, ref compRevInfo, firstChunkId, ref compRevTableAccessor, UowId);
-        var elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
+        var wcWalk = ComposeWaitContext(ref context.Ctx, TimeoutOptions.Current.RevisionChainLockTimeout);
+        var elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex, ref wcWalk);
 
         // Validate CurRevisionIndex — chain compaction may have shifted entry positions since our read
         if (elementHandle.Element.ComponentChunkId != compRevInfo.CurCompContentChunkId)
@@ -2501,7 +2495,7 @@ public unsafe partial class Transaction : EntityAccessor
             if (fixedIndex >= 0)
             {
                 compRevInfo.CurRevisionIndex = fixedIndex;
-                elementHandle = compRev.GetRevisionElement(fixedIndex);
+                elementHandle = compRev.GetRevisionElement(fixedIndex, ref wcWalk);
             }
         }
 

@@ -260,7 +260,8 @@ internal sealed class StatsEncoder
     /// <summary>The send pump's lifetime byte count, or 0 with no pump. The caller differences it against its own mark.</summary>
     internal long SentBytes => _sendPump?.BytesSent ?? 0;
 
-    /// <summary>p99 of the replication track's duration over <paramref name="window"/> ticks ending at <paramref name="tick"/>, in ms.</summary>
+    /// <summary>p99 of the replication track's duration over the <paramref name="window"/> ticks before <paramref name="tick"/>, the tick in progress, in
+    /// ms.</summary>
     internal double TrackP99Ms(long tick, int window) => TrackPercentile(tick, window, 0.99);
 
     /// <summary>p99 of the durability wait over the same window, in ms. Zero when no telemetry ring is attached.</summary>
@@ -459,8 +460,9 @@ internal sealed class StatsEncoder
     /// <summary>
     /// A percentile of what the replication track itself cost, in milliseconds.
     /// </summary>
-    /// <param name="tick">The newest tick to consider.</param>
-    /// <param name="window">How many ticks back to look.</param>
+    /// <param name="tick">The tick in progress: its slot is open and its track unfinished, so the window ends at the tick before it, as the ring readers'
+    /// do.</param>
+    /// <param name="window">How many finished ticks to look at.</param>
     /// <param name="q">The percentile, in [0, 1].</param>
     /// <returns>Milliseconds.</returns>
     /// <remarks>
@@ -469,7 +471,11 @@ internal sealed class StatsEncoder
     /// summing per-system durations counts a parallel stage once per worker, so the figure could exceed the tick it was measuring. The track now times
     /// itself, and reports the SPAN from its first chunk to its last — which is what "what did replication cost this tick" means.
     /// </remarks>
-    private double TrackPercentile(long tick, int window, double q) => _track.Percentile(tick, window, q, _samples) / 1000.0;
+    private double TrackPercentile(long tick, int window, double q) => TrackPercentile(_track, tick, window, q, _samples);
+
+    /// <summary>The window ends at the newest finished tick, <paramref name="tick"/> being in progress with no track yet (TR-01).</summary>
+    internal static double TrackPercentile(SubscriptionsTelemetry track, long tick, int window, double q, double[] samples)
+        => track.Percentile(tick - 1, window, q, samples) / 1000.0;
 
     /// <summary>
     /// A percentile of the per-tick durability wait, in milliseconds — the Unit-of-Work flush, which in WAL mode is

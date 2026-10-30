@@ -368,18 +368,18 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
             }
 
             // Incremental mode: drain ring buffer — unless the ring dropped entries, or the last full refresh owes another (_refreshFullPending)
-            bool overflow = NeedsRefreshFull;
-            if (overflow)
+            if (NeedsRefreshFull)
             {
                 // Phase 7: ECS:View:DeltaBuffer:Overflow instant — operationally critical, fires at the moment overflow is detected. Not for a full refresh
                 // a previous one owed (_refreshFullPending): that overflow was reported when it happened.
                 // currentTsn = transaction snapshot, tailTsn = last refresh, marginPagesLost = 0 (no per-page accounting at this layer).
-                if (DeltaBuffer.HasOverflow)
+                var dropped = DeltaBuffer.HasOverflow;
+                if (dropped)
                 {
                     TyphonEvent.EmitEcsViewDeltaBufferOverflow(tx.TSN, LastRefreshTSN, 0);
+                    QueryPathProbe.RefreshFullOverflows++;
                 }
 
-                SetOverflowDetected(true);
                 if (IsOrMode)
                 {
                     RefreshFullOr(tx);
@@ -389,7 +389,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
                     RefreshFull(tx);
                 }
                 BuildEntityIdCaches();
-                scope.Mode = EcsViewRefreshMode.Overflow;
+                scope.Mode = dropped ? EcsViewRefreshMode.Overflow : EcsViewRefreshMode.Pull;
                 scope.ResultCount = _entityIds.Count;
                 return;
             }
@@ -672,6 +672,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         try
         {
             _query.UpdateTransaction(tx);
+            _query.ResultSizeHint = _entityIds.Count;
             var newSet = _query.Execute();
 
             // Compute deltas: Added/Removed
@@ -684,14 +685,18 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
                 }
             }
 
-            // Check for removals (reuse scratch list to avoid per-refresh allocation)
+            // Check for removals (reuse scratch list to avoid per-refresh allocation). After the adds every id of newSet is in _entityIds, so equal counts mean
+            // equal sets and the scan has nothing to find; before them equal counts say nothing, K entities having left and K others come (#797).
             _pullRemoveScratch ??= [];
             _pullRemoveScratch.Clear();
-            foreach (var pk in _entityIds)
+            if (_entityIds.Count != newSet.Count)
             {
-                if (!newSet.Contains(EntityId.FromRaw(pk)))
+                foreach (var pk in _entityIds)
                 {
-                    _pullRemoveScratch.Add(pk);
+                    if (!newSet.Contains(EntityId.FromRaw(pk)))
+                    {
+                        _pullRemoveScratch.Add(pk);
+                    }
                 }
             }
 

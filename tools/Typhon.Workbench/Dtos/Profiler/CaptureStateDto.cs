@@ -6,7 +6,8 @@ namespace Typhon.Workbench.Dtos.Profiler;
 /// <param name="State">
 /// <c>Idle</c> — cherry-pick mode with no window open, only the per-tick skeleton retained.
 /// <c>Recording</c> — a bounded window is open.
-/// <c>Everything</c> — unbounded capture, the pre-#805 behaviour.
+/// <c>Everything</c> — capture of every tick, the pre-#805 behaviour.
+/// <c>Capped</c> — the session stopped retaining (#822, <paramref name="CapReason"/> says why). It stays connected, and what it holds can still be read and saved.
 /// </param>
 /// <param name="Remaining">Ticks still to record in the current window; 0 when idle or unbounded.</param>
 /// <param name="RecordedTicks">Ticks whose detail has been recorded across the whole session. Drives the auto-save guard.</param>
@@ -21,6 +22,10 @@ namespace Typhon.Workbench.Dtos.Profiler;
 /// </param>
 /// <param name="BytesReceived">Raw record bytes received from the engine, before filtering.</param>
 /// <param name="BytesRetained">Record bytes actually retained. The ratio is the feature's measured value.</param>
+/// <param name="CacheBytes">Size of the session's temp cache, as of its last chunk flush.</param>
+/// <param name="CacheBytesLimit">The size the cache stops at.</param>
+/// <param name="CapReason"><c>null</c> while retaining, else <c>size</c>, <c>disk_low</c> or <c>write_failed</c>.</param>
+/// <param name="CapTick">The last tick retained; 0 while retaining.</param>
 public record CaptureStateDto(
     string State,
     int Remaining,
@@ -29,7 +34,11 @@ public record CaptureStateDto(
     bool TickNumbersAbsolute,
     bool TickNumberingSuspect,
     long BytesReceived,
-    long BytesRetained);
+    long BytesRetained,
+    long CacheBytes,
+    long CacheBytesLimit,
+    string CapReason,
+    long CapTick);
 
 /// <summary>Request body for <c>POST /api/sessions/{id}/profiler/capture</c>.</summary>
 /// <param name="TickCount">

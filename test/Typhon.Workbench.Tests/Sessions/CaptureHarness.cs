@@ -69,23 +69,62 @@ internal sealed class CaptureHarness : IAsyncDisposable
     private readonly List<TickSummaryDto> _summaries = [];
     private readonly object _gate = new();
     private TaskCompletionSource _summaryArrived = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<string> _autoSave = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _firstChunk = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public MockTcpProfilerServer Server { get; private init; }
 
     public AttachSessionRuntime Runtime { get; private init; }
 
-    public static async Task<CaptureHarness> StartAsync(CaptureMode mode, CancellationToken ct = default)
+    public static async Task<CaptureHarness> StartAsync(CaptureMode mode, CancellationToken ct = default, string autoSaveDirectory = null,
+        LiveCacheLimits cacheLimits = null)
     {
         var server = new MockTcpProfilerServer { Scripted = true };
         server.Start();
 
         var runtime = await AttachSessionRuntime.StartAsync(
-            Guid.NewGuid(), $"127.0.0.1:{server.Port}", NullLogger.Instance, ct, mode);
+            Guid.NewGuid(), $"127.0.0.1:{server.Port}", NullLogger.Instance, ct, mode, cacheLimits: cacheLimits);
+
+        runtime.AutoSaveDirectory = autoSaveDirectory;
 
         var harness = new CaptureHarness { Server = server, Runtime = runtime };
         runtime.TickSummaryAdded += harness.OnTickSummary;
+        runtime.ChunkAdded += _ => harness._firstChunk.TrySetResult();
+        runtime.CaptureAutoSaved += path => harness._autoSave.TrySetResult(path);
+        runtime.CaptureAutoSaveFailed += reason => harness._autoSave.TrySetException(new InvalidOperationException($"the auto-save failed: {reason}"));
         await server.WaitForClientAsync(ct);
         return harness;
+    }
+
+    /// <summary>The session's auto-save: completes with the path, or faults with the reason, so a failed save reports itself instead of timing out.</summary>
+    public Task<string> AutoSave => _autoSave.Task;
+
+    /// <summary>Completes once the temp cache has taken its first chunk.</summary>
+    public Task FirstChunk => _firstChunk.Task;
+
+    /// <summary>Waits for a capture state to satisfy <paramref name="condition"/>, and returns that state. Subscribes before it looks, so no change falls between.</summary>
+    public async Task<CaptureStateDto> WaitForCaptureStateAsync(Func<CaptureStateDto, bool> condition, TimeSpan? timeout = null)
+    {
+        var reached = new TaskCompletionSource<CaptureStateDto>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void Check(CaptureStateDto state)
+        {
+            if (condition(state))
+            {
+                reached.TrySetResult(state);
+            }
+        }
+
+        Runtime.CaptureStateChanged += Check;
+        try
+        {
+            Check(Runtime.CaptureState);
+            return await reached.Task.WaitAsync(timeout ?? TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            Runtime.CaptureStateChanged -= Check;
+        }
     }
 
     private void OnTickSummary(TickSummaryDto summary)

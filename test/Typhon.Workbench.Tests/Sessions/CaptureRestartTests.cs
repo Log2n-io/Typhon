@@ -16,37 +16,27 @@ namespace Typhon.Workbench.Tests.Sessions;
 /// partial chunk survives) and AC-20 (retention over the captures directory).
 /// </summary>
 [TestFixture]
-// [NonParallelizable] because SetUp redirects the captures directory through TYPHON_WORKBENCH_CAPTURES_DIR, a PROCESS-wide environment
-// variable, and restores it in TearDown. The assembly is [Parallelizable(ParallelScope.Fixtures)] with four workers, and three fixtures here
-// redirect the same variable — so a sibling's SetUp could overwrite it mid-test and this fixture then pruned the sibling's directory instead of
-// its own, leaving its own files in place. That is how ApplyRetention_EvictsOldestFirst_UntilWithinBudget failed in the gate while passing every
-// time in isolation: the file it asserts was evicted had never been looked at.
-[NonParallelizable]
 public sealed class CaptureRestartTests
 {
     private static CancellationToken Timeout15s => new CancellationTokenSource(TimeSpan.FromSeconds(15)).Token;
 
     private string _capturesDir;
-    private string _previousOverride;
 
     /// <summary>
-    /// Redirect the captures directory into a temp folder for the whole fixture. Auto-save writes real files and then
-    /// runs a retention pass that DELETES files in that directory — pointing either at the developer's real capture
-    /// archive would make this fixture destructive.
+    /// A temp captures folder per test. Auto-save writes real files and then runs a retention pass that DELETES files in that directory — pointing
+    /// either at the developer's real capture archive would make this fixture destructive. Each session is pointed here through <c>AutoSaveDirectory</c>:
+    /// the process-wide override variable would let parallel fixtures write into each other's folders, and delete them (#895).
     /// </summary>
     [SetUp]
-    public void RedirectCapturesDirectory()
+    public void CreateCapturesDirectory()
     {
-        _previousOverride = Environment.GetEnvironmentVariable(CaptureStorage.DirectoryOverrideVariable);
         _capturesDir = Path.Combine(Path.GetTempPath(), "typhon-capture-restart-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_capturesDir);
-        Environment.SetEnvironmentVariable(CaptureStorage.DirectoryOverrideVariable, _capturesDir);
     }
 
     [TearDown]
-    public void RestoreCapturesDirectory()
+    public void DeleteCapturesDirectory()
     {
-        Environment.SetEnvironmentVariable(CaptureStorage.DirectoryOverrideVariable, _previousOverride);
         try { Directory.Delete(_capturesDir, recursive: true); } catch (IOException) { /* best-effort */ }
     }
 
@@ -125,11 +115,8 @@ public sealed class CaptureRestartTests
     [Test]
     public async Task CherryPickWithARecordedWindow_AutoSavesOnRestart_IncludingTheLastChunk()
     {
-        await using var h = await CaptureHarness.StartAsync(CaptureMode.CherryPick, Timeout15s);
+        await using var h = await CaptureHarness.StartAsync(CaptureMode.CherryPick, Timeout15s, _capturesDir);
         h.Server.CreatedUtcTicks = 10;
-
-        string savedPath = null;
-        h.Runtime.CaptureAutoSaved += p => savedPath = p;
 
         h.Runtime.Arm(3);
         for (var i = 0; i < 5; i++)
@@ -143,11 +130,9 @@ public sealed class CaptureRestartTests
         h.Server.CreatedUtcTicks = 20;
         await h.Server.DropClientAsync();
 
-        var saved = await WaitUntilAsync(() => savedPath != null, TimeSpan.FromSeconds(12));
-        Assert.That(saved, Is.True, "a recorded window must be saved before the session is torn down");
+        var savedPath = await h.AutoSave.WaitAsync(TimeSpan.FromSeconds(15));
         Assert.That(File.Exists(savedPath), Is.True, $"the replay must exist on disk at {savedPath}");
-        Assert.That(new FileInfo(savedPath!).Length, Is.GreaterThan(0), "the replay must not be empty");
-
+        Assert.That(new FileInfo(savedPath).Length, Is.GreaterThan(0), "the replay must not be empty");
     }
 
     /// <summary>
@@ -157,7 +142,7 @@ public sealed class CaptureRestartTests
     [Test]
     public async Task CherryPickWithNoRecordedWindow_SavesNothing()
     {
-        await using var h = await CaptureHarness.StartAsync(CaptureMode.CherryPick, Timeout15s);
+        await using var h = await CaptureHarness.StartAsync(CaptureMode.CherryPick, Timeout15s, _capturesDir);
         h.Server.CreatedUtcTicks = 10;
 
         string savedPath = null;
@@ -186,7 +171,7 @@ public sealed class CaptureRestartTests
     [Test]
     public async Task CaptureEverythingMode_NeverAutoSaves()
     {
-        await using var h = await CaptureHarness.StartAsync(CaptureMode.Everything, Timeout15s);
+        await using var h = await CaptureHarness.StartAsync(CaptureMode.Everything, Timeout15s, _capturesDir);
         h.Server.CreatedUtcTicks = 10;
 
         string savedPath = null;

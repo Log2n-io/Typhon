@@ -71,7 +71,7 @@ e.Set(Actor.Anim, anim);               // ~40 ns write, no dirty tracking, no WA
 - Indexes on `Transient` components are updated at `WriteTickFence`, like `SingleVersion`'s. Between a write and the fence
   an indexed query never returns a row whose current value fails its condition, but may miss one whose value started
   matching since the fence — see [indexed queries between a write and the tick fence](./storage-mode-singleversion.md#indexed-queries-between-a-write-and-the-tick-fence).
-  Known exception: an ordered query on an archetype whose only indexed component is `Transient` returns nothing (#1186).
+  An ordered query over a `Transient` field is answered by a scan and a sort, not from the tree, so `Take` does not shorten it.
 
 ## 🧪 Tests
 

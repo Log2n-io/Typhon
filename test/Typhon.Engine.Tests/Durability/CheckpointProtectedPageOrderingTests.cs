@@ -11,8 +11,8 @@ namespace Typhon.Engine.Tests;
 /// <remarks>
 /// <para>
 /// A protected segment-directory page (CK-05) is persisted as write → fsync → slot flip, and that fsync is <b>file-wide</b>, not page-scoped. Reached partway
-/// through a checkpoint batch it therefore makes every plain data page written earlier in the same pass durable — while the cycle's flush2 barrier
-/// (<c>RequestFlush</c> + <c>WaitForDurable</c>) has not run yet, because <c>CheckpointManager</c> issues it once the batch's writes return (CK-15). Any commit
+/// through a checkpoint batch it therefore makes every plain data page written earlier in the same pass durable — while the flush2 barrier of the runs
+/// after it (<c>RequestFlush</c> + <c>WaitForDurable</c>) has not run yet, because a run issues it after its copies and before its writes (CK-02). Any commit
 /// that appended and published between the step-1 barrier and that page's capture would then sit in the data file with its WAL record still in the ring buffer:
 /// "captured ⊆ durable" inverted, i.e. a phantom partial write of a never-durable transaction, which Typhon cannot undo.
 /// </para>

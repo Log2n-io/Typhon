@@ -216,6 +216,11 @@ internal static class QueryPathProbe
     [ThreadStatic]
     internal static int ViewRequeries;
 
+    /// <summary>Full refreshes on this thread since the last <see cref="Reset"/> because a view's ring dropped entries, not because one was owed
+    /// (#1275).</summary>
+    [ThreadStatic]
+    internal static int RefreshFullOverflows;
+
     /// <summary>Clear the counters and return both path choices to the planner.</summary>
     internal static void Reset()
     {
@@ -229,6 +234,7 @@ internal static class QueryPathProbe
         MembershipGateHits = 0;
         MembershipDrains = 0;
         ViewRequeries = 0;
+        RefreshFullOverflows = 0;
         Forced = ClusterScanPath.Planner;
         SelectiveScans = 0;
         FullScans = 0;

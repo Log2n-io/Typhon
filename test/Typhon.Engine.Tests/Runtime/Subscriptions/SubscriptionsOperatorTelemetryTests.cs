@@ -191,6 +191,30 @@ class SubscriptionsOperatorTelemetryTests : TestBase<SubscriptionsOperatorTeleme
         return rows;
     }
 
+    /// <summary>
+    /// The tick in progress has no track yet: a window ending at it is one finished tick short, and the tick that falls off is the previous emission's, so the
+    /// tick that wrote a STATS block into every session was never in any window (#1066).
+    /// </summary>
+    [Test]
+    [VerifiesRule("TR-01")]
+    public void TheTrackPercentile_EndsAtTheLastFinishedTick()
+    {
+        var telemetry = new SubscriptionsTelemetry();
+        const int window = 10;
+        const long first = 1000;
+        for (var tick = first; tick < first + window; tick++)
+        {
+            telemetry.BeginTick(tick);
+            telemetry.NoteStage(tick, SubscriptionsStage.Project, 0, tick == first ? 1_000_000 : 1_000);
+        }
+
+        telemetry.BeginTick(first + window);   // in progress, with nothing measured yet
+
+        var ring = new double[window];
+        Assert.That(StatsEncoder.TrackPercentile(telemetry, first + window, window, 0.99, ring),
+            Is.GreaterThan(telemetry.Percentile(first + window, window, 0.99, ring) / 1000.0), "the oldest tick of the window is the one the off-by-one lost");
+    }
+
     /// <summary>A live runtime with replication declared, no metric catalog, no transport and therefore no session.</summary>
     private sealed class World : IDisposable
     {

@@ -210,12 +210,13 @@ public class EcsAccessPathBenchmarks : IDisposable
     /// </summary>
     private void ValidateRoutesAgree()
     {
-        float point = Point_ByEntityId();
-        float sweep = ClusterSweep_WholeArchetype();
-        float cells = ClusterSweep_CellByCell();
+        double point = Point_ByEntityId();
+        double sweep = ClusterSweep_WholeArchetype();
+        double cells = ClusterSweep_CellByCell();
 
-        // Exact equality is the right test despite float: all three sum the SAME values, and the cluster routes sum them
-        // in the same storage order. A mismatch means a different entity SET, not a rounding difference.
+        // Exact equality is the right test because each sum is exact: small integers, far below 2^53 in a double. The routes do NOT add in the same order (the
+        // point route walks spawn order, the sweeps Morton storage order), and a float sum past 2^24 rounds differently in each. A mismatch means a different
+        // entity SET, not a rounding difference.
         if (point != sweep || point != cells)
         {
             throw new InvalidOperationException(
@@ -236,10 +237,10 @@ public class EcsAccessPathBenchmarks : IDisposable
     /// is the only route a key-value store has and therefore the one competitive numbers are quoted at.
     /// </summary>
     [Benchmark(Baseline = true)]
-    public float Point_ByEntityId()
+    public double Point_ByEntityId()
     {
         using var tx = _dbe.CreateQuickTransaction();
-        float sum = 0;
+        double sum = 0;
         for (int i = 0; i < EntityCount; i++)
         {
             sum += tx.Open(_ids[i]).Read(ApBenchUnit.Payload).Value;
@@ -252,11 +253,11 @@ public class EcsAccessPathBenchmarks : IDisposable
     /// the occupancy bitmask. This is the ~100x row.
     /// </summary>
     [Benchmark]
-    public float ClusterSweep_WholeArchetype()
+    public double ClusterSweep_WholeArchetype()
     {
         using var tx = _dbe.CreateQuickTransaction();
         var e = tx.GetClusterEnumerator<ApBenchUnit>();
-        float sum = 0;
+        double sum = 0;
         foreach (var cluster in e)
         {
             var payloads = cluster.GetReadOnlySpan(ApBenchUnit.Payload);
@@ -282,10 +283,10 @@ public class EcsAccessPathBenchmarks : IDisposable
     /// </para>
     /// </summary>
     [Benchmark]
-    public float ClusterSweep_CellByCell()
+    public double ClusterSweep_CellByCell()
     {
         using var tx = _dbe.CreateQuickTransaction();
-        float sum = 0;
+        double sum = 0;
         for (int c = 0; c < CellCount; c++)
         {
             var clusters = _clusterState.Realm0Spatial.CellClusterPool.GetClusters(_cellKeys[c]);
@@ -325,10 +326,10 @@ public class EcsAccessPathBenchmarks : IDisposable
     /// </para>
     /// </summary>
     [Benchmark]
-    public float ClusterSweep_OneCellNeighbourhood()
+    public double ClusterSweep_OneCellNeighbourhood()
     {
         using var tx = _dbe.CreateQuickTransaction();
-        float sum = 0;
+        double sum = 0;
         const int CenterX = CellsPerSide / 2;
         const int CenterY = CellsPerSide / 2;
         for (int dy = -1; dy <= 1; dy++)

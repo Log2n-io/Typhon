@@ -7,16 +7,15 @@ using System.Threading.Tasks;
 namespace Typhon.Engine.Tests;
 
 /// <summary>
-/// Tests verifying that exception paths in lock-acquisition code properly dispose
-/// resources before throwing, preventing page-cache pin leaks under contention.
+/// A lock timeout on an exception path leaves nothing behind: no pin on the page, and no hold on the lock.
 /// </summary>
+/// <remarks>
+/// Each test states what a leak would actually do, on the one page and the one lock involved: an exclusive acquire of the lock fails once its holder has gone,
+/// and the buffer accessor, the one path owning an accessor of its own, leaves the page's <c>SlotRefCount</c> up. A whole-cache comparison of page states can see
+/// neither, and races the 100 ms test checkpoint (#410).
+/// </remarks>
 [TestFixture]
 [NonParallelizable] // Mutates static TimeoutOptions.Current — would race with any parallel DatabaseEngine ctor.
-[Category("Quarantine")] // #410 — the leak assertion (MMF.CheckInternalState) compares the WHOLE page-state array
-                         // (PageState/ExclusiveLatchDepth/DirtyCounter) before vs after; that comparison races
-                         // background page-cache/checkpoint timing and fails only on the slower c6id gate box
-                         // (deterministically green locally — even in the serial quiet pass). Excluded from the
-                         // gate; still runs locally. Proper fix = narrow the check / quiesce. See QUARANTINE.md.
 class ExceptionPathLeakTests : TestBase<ExceptionPathLeakTests>
 {
     [OneTimeSetUp]
@@ -66,11 +65,6 @@ class ExceptionPathLeakTests : TestBase<ExceptionPathLeakTests>
 
     #region Test 1: RevisionEnumerator constructor
 
-    // FLAKY under parallel suite load: this test forces a lock-timeout and asserts the exception path leaks no
-    // chunk handle, but the timeout window is too tight when the full suite runs it under contention — it then
-    // observes the lock acquired (Expected: True / But was: False) instead of timing out. It passes reliably in
-    // isolation and the code under test is correct (verified). TODO: harden the test so it no longer depends on
-    // wall-clock timing — force the timeout deterministically (synchronization barrier) or mark [NonParallelizable].
     [Test]
     [CancelAfter(5000)]
     public void RevisionEnumerator_Constructor_WhenLockTimeout_DoesNotLeakChunkHandle()
@@ -78,9 +72,6 @@ class ExceptionPathLeakTests : TestBase<ExceptionPathLeakTests>
         var ct = _dbe.GetComponentTable<CompA>();
         var segment = ct.CompRevTableSegment;
         var firstChunkId = LookupRevisionChunkId(ct, _entityId);
-
-        // Snapshot MMF state to detect leaked page pins
-        var mmfSnapshot = _dbe.MMF.SnapshotInternalState();
 
         var acquired = new ManualResetEventSlim(false);
         var canRelease = new ManualResetEventSlim(false);
@@ -106,6 +97,8 @@ class ExceptionPathLeakTests : TestBase<ExceptionPathLeakTests>
         });
 
         acquired.Wait();
+        var slot = SlotOf(segment, firstChunkId);
+        var pins = _dbe.MMF.SlotRefCountOf(slot);
 
         // Main thread: attempt to create RevisionEnumerator — should throw LockTimeoutException
         {
@@ -132,22 +125,17 @@ class ExceptionPathLeakTests : TestBase<ExceptionPathLeakTests>
             }
         }
 
-        Assert.That(_dbe.MMF.CheckInternalState(in mmfSnapshot), Is.True,
-            "PagedMMF page state should be unchanged after RevisionEnumerator timeout — a leaked resource would leave a page pinned");
+        AssertNoPinLeaked(slot, pins, "RevisionEnumerator");
 
         canRelease.Set();
         holder.Wait();
+        AssertChainLockIsFree(segment, firstChunkId);
     }
 
     #endregion
 
     #region Test 2: GetRevisionElement chain-walk path
 
-    // FLAKY under parallel suite load: this test forces a lock-timeout and asserts the chain-walk path leaks no
-    // chunk handles, but the timeout window is too tight when the full suite runs it under contention — it then
-    // observes the lock acquired (Expected: True / But was: False) instead of timing out. It passes reliably in
-    // isolation and the code under test is correct (verified). TODO: harden the test so it no longer depends on
-    // wall-clock timing — force the timeout deterministically (synchronization barrier) or mark [NonParallelizable].
     [Test]
     [CancelAfter(5000)]
     public void GetRevisionElement_WhenLockTimeout_DoesNotLeakChunkHandles()
@@ -181,8 +169,8 @@ class ExceptionPathLeakTests : TestBase<ExceptionPathLeakTests>
 
         acquired.Wait();
 
-        // Snapshot AFTER the holder has acquired the lock
-        var mmfSnapshot = _dbe.MMF.SnapshotInternalState();
+        var slot = SlotOf(segment, firstChunkId);
+        var pins = _dbe.MMF.SlotRefCountOf(slot);
 
         // Request a revision index >= CompRevCountInRoot to trigger the chain-walk path
         var revisionIndex = (short)ComponentRevisionManager.CompRevCountInRoot;
@@ -209,22 +197,17 @@ class ExceptionPathLeakTests : TestBase<ExceptionPathLeakTests>
             }
         }
 
-        Assert.That(_dbe.MMF.CheckInternalState(in mmfSnapshot), Is.True,
-            "PagedMMF page state should be unchanged after GetRevisionElement timeout — leaked resources would leave pages pinned");
+        AssertNoPinLeaked(slot, pins, "GetRevisionElement");
 
         canRelease.Set();
         holder.Wait();
+        AssertChainLockIsFree(segment, firstChunkId);
     }
 
     #endregion
 
     #region Test 3: VariableSizedBufferAccessor constructor
 
-    // FLAKY under parallel suite load: this test forces a lock-timeout and asserts the accessor ctor leaks no
-    // resources, but the timeout window is too tight when the full suite runs it under contention — it then
-    // observes the lock acquired (Expected: True / But was: False) instead of timing out. It passes reliably in
-    // isolation and the code under test is correct (verified). TODO: harden the test so it no longer depends on
-    // wall-clock timing — force the timeout deterministically (synchronization barrier) or mark [NonParallelizable].
     [Test]
     [CancelAfter(5000)]
     public void VariableSizedBufferAccessor_Constructor_WhenLockTimeout_DoesNotLeakResources()
@@ -242,23 +225,6 @@ class ExceptionPathLeakTests : TestBase<ExceptionPathLeakTests>
                 var setupAccessor = segment.CreateChunkAccessor();
                 rootChunkId = vsbs.AllocateBuffer(ref setupAccessor);
                 setupAccessor.Dispose();
-            }
-            finally
-            {
-                _dbe.EpochManager.ExitScope(depth);
-            }
-        }
-
-        // Pre-warm: touch the root chunk page so it transitions to Idle in the page cache.
-        // Without this, the failed VSBS constructor would leave the page in a different state
-        // (Free->Idle) even if it properly cleans up, causing a false positive in the snapshot check.
-        {
-            var depth = _dbe.EpochManager.EnterScope();
-            try
-            {
-                var warmupAccessor = segment.CreateChunkAccessor();
-                _ = warmupAccessor.GetChunk<byte>(rootChunkId, false);
-                warmupAccessor.Dispose();
             }
             finally
             {
@@ -291,9 +257,9 @@ class ExceptionPathLeakTests : TestBase<ExceptionPathLeakTests>
 
         acquired.Wait();
 
-        // Snapshot AFTER the holder has acquired the lock — we only want to detect extra pins
-        // leaked by the failed GetReadOnlyAccessor call, not the holder's pins
-        var mmfSnapshot = _dbe.MMF.SnapshotInternalState();
+        // Read with the holder live: only a pin the failed GetReadOnlyAccessor leaves behind may show.
+        var slot = SlotOf(segment, rootChunkId);
+        var pins = _dbe.MMF.SlotRefCountOf(slot);
 
         // Attempt to create a read-only accessor — should throw due to lock contention.
         // Must be inside an epoch scope because GetReadOnlyAccessor creates an ChunkAccessor<PersistentStore> internally.
@@ -313,16 +279,74 @@ class ExceptionPathLeakTests : TestBase<ExceptionPathLeakTests>
             _dbe.EpochManager.ExitScope(mainDepth);
         }
 
-        Assert.That(_dbe.MMF.CheckInternalState(in mmfSnapshot), Is.True,
-            "PagedMMF page state should be unchanged after VariableSizedBufferAccessor timeout — leaked handles would leave pages pinned");
+        AssertNoPinLeaked(slot, pins, "VariableSizedBufferAccessor");
 
         canRelease.Set();
         holder.Wait();
+        AssertBufferLockIsFree(segment, rootChunkId);
     }
 
     #endregion
 
     #region Helpers
+
+    /// <summary>The cache slot of the page holding <paramref name="chunkId"/>. The holder's accessor keeps that page in the cache.</summary>
+    private int SlotOf(ChunkBasedSegment<PersistentStore> segment, int chunkId)
+    {
+        var filePage = segment.Pages[segment.GetChunkLocation(chunkId).segmentIndex];
+        var mmf = _dbe.MMF;
+        for (var i = 0; i < mmf.CacheSlotCount; i++)
+        {
+            if (mmf.GetFilePageIndex(i) == filePage)
+            {
+                return i;
+            }
+        }
+
+        Assert.Fail($"file page {filePage} is not in the cache");
+        return -1;
+    }
+
+    /// <summary>A checkpoint can pin the page for its write, so this waits: a transient pin falls away, a leaked one stays.</summary>
+    private void AssertNoPinLeaked(int slot, int pins, string path) =>
+        Assert.That(SpinWait.SpinUntil(() => _dbe.MMF.SlotRefCountOf(slot) <= pins, TimeSpan.FromSeconds(1)), Is.True,
+            $"{path} left a pin on its page after timing out: {_dbe.MMF.SlotRefCountOf(slot)} against {pins}");
+
+    private void AssertChainLockIsFree(ChunkBasedSegment<PersistentStore> segment, int chunkId)
+    {
+        var depth = _dbe.EpochManager.EnterScope();
+        try
+        {
+            var accessor = segment.CreateChunkAccessor();
+            ref var header = ref accessor.GetChunk<CompRevStorageHeader>(chunkId, false);
+            var wc = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(50));
+            Assert.That(header.Control.EnterExclusiveAccess(ref wc), Is.True, "the chain lock is still held once its holder has gone: the timeout path kept a hold");
+            header.Control.ExitExclusiveAccess();
+            accessor.Dispose();
+        }
+        finally
+        {
+            _dbe.EpochManager.ExitScope(depth);
+        }
+    }
+
+    private void AssertBufferLockIsFree(ChunkBasedSegment<PersistentStore> segment, int rootChunkId)
+    {
+        var depth = _dbe.EpochManager.EnterScope();
+        try
+        {
+            var accessor = segment.CreateChunkAccessor();
+            ref var header = ref accessor.GetChunk<VariableSizedBufferRootHeader>(rootChunkId, false);
+            var wc = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(50));
+            Assert.That(header.Lock.EnterExclusiveAccess(ref wc), Is.True, "the buffer lock is still held once its holder has gone: the timeout path kept a hold");
+            header.Lock.ExitExclusiveAccess();
+            accessor.Dispose();
+        }
+        finally
+        {
+            _dbe.EpochManager.ExitScope(depth);
+        }
+    }
 
     /// <summary>
     /// Looks up the revision chain's first chunk ID for a given entity via EntityMap.

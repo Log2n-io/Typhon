@@ -46,7 +46,7 @@ public sealed class LiveSchemaProvider : IStaticSchemaProvider
     public ArchetypeInfoDto[] ListArchetypes()
     {
         var result = new List<ArchetypeInfoDto>();
-        foreach (var archetype in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var archetype in _engine.OwnArchetypes())
         {
             if (archetype._slotToComponentType == null || archetype.ComponentCount == 0)
             {
@@ -103,7 +103,7 @@ public sealed class LiveSchemaProvider : IStaticSchemaProvider
         }
 
         var result = new List<ArchetypeInfoDto>();
-        foreach (var archetype in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var archetype in _engine.OwnArchetypes())
         {
             if (archetype._slotToComponentType == null || archetype.ComponentCount == 0)
             {

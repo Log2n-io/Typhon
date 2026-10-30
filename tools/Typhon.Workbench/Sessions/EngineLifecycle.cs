@@ -222,6 +222,7 @@ public sealed class EngineLifecycle : IDisposable
             {
                 var schemaStart = System.Diagnostics.Stopwatch.GetTimestamp();
                 alc = new WorkbenchAssemblyLoadContext($"Workbench-Session-{Guid.NewGuid():N}");
+                engine.UseArchetypesFrom(alc);
                 var loadedSchema = SchemaLoader.LoadSchemaDlls(alc, resolvedSchemaPaths);
                 var result = SchemaCompatibility.ClassifyAndRegister(engine, loadedSchema);
                 state = result.State;
@@ -232,9 +233,8 @@ public sealed class EngineLifecycle : IDisposable
                 // (`__TyphonRegistry_<Assembly>`); RunModuleConstructor fires it, and the CLR runs a module initializer exactly once, before any type in the
                 // module. So a single call per assembly registers ALL of that assembly's components + archetypes — GeneratedSchemaRegistry specs,
                 // component-collection factories, and ArchetypeRegistry finalization — replacing the old per-archetype RunClassConstructor + EnsureFinalized
-                // dance (which only ran the barrier implicitly, off the first archetype's class ctor, then re-finalized each type redundantly). Cross-ALC
-                // same-name collisions are tolerated inside the barrier (EnsureFinalized fromBarrier). Per-assembly try/catch keeps one poisoned module from
-                // aborting the others. Then InitializeArchetypes wires per-engine archetype storage (EntityMap pages) so counts are recovered from the
+                // dance (which only ran the barrier implicitly, off the first archetype's class ctor, then re-finalized each type redundantly). Per-assembly
+                // try/catch keeps one poisoned module from aborting the others. Then InitializeArchetypes wires per-engine archetype storage (EntityMap pages) so counts are recovered from the
                 // MMF-backed state.
                 if (result.RegisteredCount > 0 && loadedSchema.ArchetypeTypes.Length > 0)
                 {

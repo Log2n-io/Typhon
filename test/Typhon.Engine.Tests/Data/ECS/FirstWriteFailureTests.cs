@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -23,6 +24,21 @@ class FwWalletArch : Archetype<FwWalletArch>
     public static readonly Comp<FwWallet> Wallet = Register<FwWallet>();
 }
 
+[Component("Typhon.Test.ECS.FirstWriteFailure.Bag", 1)]
+[StructLayout(LayoutKind.Sequential)]
+struct FwBag
+{
+    [Field] public ComponentCollection<int> First;
+    [Field] public ComponentCollection<int> Second;
+    public long Credits;
+}
+
+[Archetype]
+class FwBagArch : Archetype<FwBagArch>
+{
+    public static readonly Comp<FwBag> Bag = Register<FwBag>();
+}
+
 /// <summary>
 /// #1252: a transaction's first write of a Versioned component that fails — its revision never added, here because the chain's lock is held past a short
 /// <c>RevisionChainLockTimeout</c> — leaves the transaction claiming nothing. Its cached entry used to say "written" while still naming the committed revision:
@@ -40,6 +56,7 @@ class FirstWriteFailureTests : TestBase<FirstWriteFailureTests>
     {
         var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<FwWallet>();
+        dbe.RegisterComponentFromAccessor<FwBag>();
         dbe.InitializeArchetypes();
         return dbe;
     }
@@ -238,6 +255,173 @@ class FirstWriteFailureTests : TestBase<FirstWriteFailureTests>
         }
     }
 
+    /// <summary>An entity holding two collections of one element and 100 credits, committed.</summary>
+    private static EntityId SeedBag(DatabaseEngine dbe)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        var bag = new FwBag { Credits = 100 };
+        using (var first = tx.CreateComponentCollectionAccessor(ref bag.First))
+        {
+            first.Add(1);
+        }
+
+        using (var second = tx.CreateComponentCollectionAccessor(ref bag.Second))
+        {
+            second.Add(2);
+        }
+
+        var id = tx.Spawn<FwBagArch>(FwBagArch.Bag.Set(in bag));
+        Assert.That(tx.Commit(), Is.True);
+        return id;
+    }
+
+    /// <summary>The reference counts of the committed revision's two collection buffers.</summary>
+    private static (short First, short Second) BagRefCounts(DatabaseEngine dbe, EntityId id)
+    {
+        FwBag bag;
+        using (var r = dbe.CreateReadOnlyTransaction())
+        {
+            bag = r.Open(id).Read(FwBagArch.Bag);
+        }
+
+        return (RefCount(dbe, 0, Unsafe.As<ComponentCollection<int>, int>(ref bag.First)),
+            RefCount(dbe, 1, Unsafe.As<ComponentCollection<int>, int>(ref bag.Second)));
+    }
+
+    private static short RefCount(DatabaseEngine dbe, int field, int bufferId)
+    {
+        var vsbs = (VariableSizedBufferSegment<int, PersistentStore>)dbe.GetComponentTable<FwBag>().CollectionFields[field].Vsbs;
+        var depth = dbe.EpochManager.EnterScope();
+        try
+        {
+            var accessor = vsbs.Segment.CreateChunkAccessor();
+            try
+            {
+                return vsbs.GetRefCounter(bufferId, ref accessor);
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
+        }
+        finally
+        {
+            dbe.EpochManager.ExitScope(depth);
+        }
+    }
+
+    /// <summary>
+    /// #1257: a first write that fails building its revision, before the copy here, used to leave its element claimed over a chunk holding no value: a
+    /// retry in the same transaction read those bytes as the entity.
+    /// </summary>
+    [Test]
+    [CancelAfter(10_000)]
+    [VerifiesRule("CHAIN-02")]
+    public void AFirstWriteFailingBeforeItsCopy_LeavesNoRevision_AndARetryReadsTheCommittedValue()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = OpenEngine(scope);
+        var id = Seed(dbe, out var table, out var root);
+        var committedChunk = HeadChunk(dbe, table, root);
+
+        using var writer = dbe.CreateQuickTransaction();
+        dbe.FirstWriteBuildProbe = n =>
+        {
+            if (n == 0)
+            {
+                throw new InvalidOperationException("staged");
+            }
+        };
+        Assert.Throws<InvalidOperationException>(() => Write(writer, id, 555));
+        dbe.FirstWriteBuildProbe = null;
+
+        Assert.That(writer.OpenMut(id).Read(FwWalletArch.Wallet).Credits, Is.EqualTo(100), "the transaction's own read after the failed write");
+        var target = writer.OpenMut(id);
+        var wallet = target.Read(FwWalletArch.Wallet);
+        wallet.Credits += 1;
+        target.Set(FwWalletArch.Wallet, wallet);
+        Assert.That(writer.Commit(), Is.True, "the retried write commits");
+        Assert.That(Read(dbe, id), Is.EqualTo(101), "the retry started from the committed value");
+        Assert.That(HeadChunk(dbe, table, root), Is.Not.EqualTo(committedChunk), "the commit is a new revision");
+    }
+
+    /// <summary>
+    /// #1257: a first write failing between its collection references, then rolled back. The rollback released every field of the revision, so the field
+    /// no reference was taken for lost the committed revision's only one and its buffer was freed under it.
+    /// </summary>
+    [Test]
+    [CancelAfter(10_000)]
+    [VerifiesRule("CHAIN-02")]
+    public void AFirstWriteFailingBetweenItsReferences_ReleasesOnlyWhatItTook()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = OpenEngine(scope);
+        var id = SeedBag(dbe);
+        var before = BagRefCounts(dbe, id);
+
+        using (var writer = dbe.CreateQuickTransaction())
+        {
+            dbe.FirstWriteBuildProbe = n =>
+            {
+                if (n == 1)
+                {
+                    throw new InvalidOperationException("staged");
+                }
+            };
+            Assert.Throws<InvalidOperationException>(() =>
+            {
+                var target = writer.OpenMut(id);
+                var bag = target.Read(FwBagArch.Bag);
+                bag.Credits = 555;
+                target.Set(FwBagArch.Bag, bag);
+            });
+            dbe.FirstWriteBuildProbe = null;
+            writer.Rollback();
+        }
+
+        Assert.That(BagRefCounts(dbe, id), Is.EqualTo(before), "only what the write took is given back");
+    }
+
+    /// <summary>
+    /// #1257: a first write unwinding on its chain's lock has already taken its references, on each of its restarts. They are given back, each restart's, and
+    /// the write that finally lands holds one per buffer.
+    /// </summary>
+    [Test]
+    [CancelAfter(10_000)]
+    [VerifiesRule("CHAIN-02")]
+    public void AFirstWriteRestartingOnItsChain_HoldsOneReferencePerBuffer()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = OpenEngine(scope);
+        var id = SeedBag(dbe);
+        var table = dbe.GetComponentTable<FwBag>();
+        var root = RootOf(dbe, id, table);
+        var before = BagRefCounts(dbe, id);
+
+        using (OverrideChainLockTimeout(Budget))
+        {
+            using var writer = dbe.CreateQuickTransaction();
+            var restartsBefore = Interlocked.Read(ref PagedMMF.LockRestartedOpens);
+            FailUnderASharedHold(dbe, table, root, () =>
+            {
+                var target = writer.OpenMut(id);
+                var bag = target.Read(FwBagArch.Bag);
+                bag.Credits = 555;
+                target.Set(FwBagArch.Bag, bag);
+            });
+            Assert.That(Interlocked.Read(ref PagedMMF.LockRestartedOpens), Is.GreaterThan(restartsBefore), "premise: it restarted");
+            Assert.That(BagRefCounts(dbe, id), Is.EqualTo(before), "the failed write holds nothing");
+
+            var retry = writer.OpenMut(id);
+            var again = retry.Read(FwBagArch.Bag);
+            again.Credits = 555;
+            retry.Set(FwBagArch.Bag, again);
+            Assert.That(writer.Commit(), Is.True);
+        }
+
+        Assert.That(BagRefCounts(dbe, id), Is.EqualTo(((short)(before.First + 1), (short)(before.Second + 1))), "the new revision's reference, one per buffer");
+    }
+
     /// <summary>An entity worth 100, committed; its component table and revision-chain root.</summary>
     private static EntityId Seed(DatabaseEngine dbe, out ComponentTable table, out int root)
     {
@@ -337,7 +521,7 @@ class FirstWriteFailureTests : TestBase<FirstWriteFailureTests>
         var failures = new System.Collections.Concurrent.ConcurrentQueue<string>();
         var expected = new long[accounts];
         Array.Fill(expected, each);
-        long appendTimeouts = 0, transfers = 0, rolledBack = 0, sweeps = 0;
+        long appendTimeouts = 0, commitTimeouts = 0, transfers = 0, rolledBack = 0, sweeps = 0;
         using var stop = new ManualResetEventSlim(false);
         var threads = new System.Collections.Generic.List<Thread>();
         var stuck = 0;
@@ -369,7 +553,21 @@ class FirstWriteFailureTests : TestBase<FirstWriteFailureTests>
                                     }
                                     else
                                     {
-                                        if (!tx.Commit())
+                                        bool committed;
+                                        try
+                                        {
+                                            committed = tx.Commit();
+                                        }
+                                        catch (LockTimeoutException)
+                                        {
+                                            // PREPARE shares the 10 µs budget, and missing it ends the transaction (AP-07): a clean abort, with nothing to
+                                            // account for.
+                                            Assert.That(tx.State, Is.EqualTo(Transaction.TransactionState.Rollbacked));
+                                            Interlocked.Increment(ref commitTimeouts);
+                                            continue;
+                                        }
+
+                                        if (!committed)
                                         {
                                             failures.Enqueue("writer: a transfer's commit returned false");
                                             break;
@@ -385,7 +583,7 @@ class FirstWriteFailureTests : TestBase<FirstWriteFailureTests>
                     }
                     catch (Exception ex)
                     {
-                        failures.Enqueue($"writer: {ex.GetType().Name}: {ex.Message}");
+                        failures.Enqueue($"writer: {ex}");
                     }
                 }) { IsBackground = true });
             }
@@ -417,7 +615,7 @@ class FirstWriteFailureTests : TestBase<FirstWriteFailureTests>
                     }
                     catch (Exception ex)
                     {
-                        failures.Enqueue($"reader: {ex.GetType().Name}: {ex.Message}");
+                        failures.Enqueue($"reader: {ex}");
                     }
                 }) { IsBackground = true });
             }
@@ -444,7 +642,8 @@ class FirstWriteFailureTests : TestBase<FirstWriteFailureTests>
         Assert.That(stuck, Is.Zero, "threads did not stop");
 
         TestContext.Out.WriteLine(
-            $"{transfers:N0} transfers committed, {rolledBack:N0} rolled back, {appendTimeouts:N0} appends timed out and retried, {sweeps:N0} sweeps");
+            $"{transfers:N0} transfers committed, {rolledBack:N0} rolled back, {appendTimeouts:N0} appends timed out and retried, "
+            + $"{commitTimeouts:N0} commits aborted, {sweeps:N0} sweeps");
         Assert.That(failures, Is.Empty);
         Assert.That(appendTimeouts, Is.GreaterThan(0), "premise: first writes did fail appending their revision");
         Assert.That(rolledBack, Is.GreaterThan(0), "premise: transfers rolled back");
@@ -538,12 +737,12 @@ class FirstWriteFailureTests : TestBase<FirstWriteFailureTests>
     }
 
     /// <summary>The root chunk of the entity's revision chain for <see cref="FwWallet"/>, from its entity record.</summary>
-    private static unsafe int RootOf(DatabaseEngine dbe, EntityId entityId)
+    private static unsafe int RootOf(DatabaseEngine dbe, EntityId entityId, ComponentTable table = null)
     {
         var depth = dbe.EpochManager.EnterScope();
         try
         {
-            var ct = dbe.GetComponentTable<FwWallet>();
+            var ct = table ?? dbe.GetComponentTable<FwWallet>();
             var meta = dbe.GetMetaByRouting(entityId.ArchetypeId);
             var es = dbe._archetypeStates[meta.ArchetypeId];
             var slot = -1;

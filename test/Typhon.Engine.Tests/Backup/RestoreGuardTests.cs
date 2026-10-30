@@ -134,7 +134,7 @@ internal sealed class RestoreGuardTests
     [CancelAfter(15_000)]
     public void ADataFileHeldOpen_IsRefusedEvenWhenNoLockFileSaysSo()
     {
-        // OfflineBundlePageSource.LockHeld trusts db.lock, which the engine never holds open (#1423): the OS probe is the guard that works.
+        // db.lock is a record the engine never holds open, so the OS probe is the guard that works with no lock file at all.
         var (fs, image) = StoreWithOnePoint();
         var bundle = Bundle(image);
         PlantOldBundle(fs, bundle);

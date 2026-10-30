@@ -40,8 +40,8 @@ class PublishIndexRestartTests : TestBase<PublishIndexRestartTests>
         }
 
         Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "premise: the pages are clean");
-        Assert.That((EntityAccessor.LiveIndexCursors, PagedMMF.PublishSince, PagedMMF.IndexRestartArmed), Is.EqualTo((0, 0L, false)),
-            "premise: this worker thread carries no live index cursor, publish or armed write from an earlier test");
+        Assert.That((EntityAccessor.LiveIndexCursors, PagedMMF.PublishSince, PagedMMF.IndexRestartArmed, OlcLatchHeld.Count), Is.EqualTo((0, 0L, false, 0)),
+            "premise: this worker thread carries no live index cursor, publish, armed write or held latch from an earlier test");
         var restarts = Interlocked.Read(ref PagedMMF.RestartedIndexWrites);
         var mover = Environment.CurrentManagedThreadId;
         var armedRounds = 0;

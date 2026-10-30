@@ -70,11 +70,11 @@ export type LiveStreamPayload =
 /**
  * On-demand tick capture state (#805). Mirrors the server's `CaptureStateDto`.
  *
- * `state` is `Idle` (cherry-pick with no window open), `Recording` (a bounded window is running) or `Everything`
- * (unbounded — the behaviour every attach session had before #805).
+ * `state` is `Idle` (cherry-pick with no window open), `Recording` (a bounded window is running), `Everything`
+ * (every tick — the behaviour every attach session had before #805) or `Capped` (the session stopped retaining, #822).
  */
 export interface CaptureState {
-  state: 'Idle' | 'Recording' | 'Everything';
+  state: 'Idle' | 'Recording' | 'Everything' | 'Capped';
   remaining: number;
   recordedTicks: number;
   mode: 'Everything' | 'CherryPick';
@@ -84,6 +84,13 @@ export interface CaptureState {
   tickNumberingSuspect: boolean;
   bytesReceived: number;
   bytesRetained: number;
+  /** Size of the session's temp cache, as of its last chunk flush. */
+  cacheBytes: number;
+  cacheBytesLimit: number;
+  /** Why the session stopped retaining: `size`, `disk_low` or `write_failed`. Null while retaining. */
+  capReason: string | null;
+  /** The last tick retained; 0 while retaining. */
+  capTick: number;
 }
 
 /** Live connection status — mirrors the server's `AttachSessionRuntime.ConnectionStatus`. */

@@ -17,7 +17,8 @@ namespace Typhon.Engine;
 ///   <item>The exporter thread receives batches via <see cref="Queue"/> and calls <see cref="ProcessBatch"/> for each.
 ///         After processing, the thread calls <c>batch.Release()</c> to decrement the refcount and return the batch to the pool.</item>
 ///   <item><c>TyphonProfiler.Stop()</c> calls <see cref="Queue"/>.<c>CompleteAdding</c> so the exporter thread's foreach loop exits after draining
-///         what's already queued, then calls <see cref="Flush"/> + <see cref="IDisposable.Dispose"/>.</item>
+///         what's already queued, then calls <see cref="Flush"/> + <see cref="IDisposable.Dispose"/>, and detaches the exporter: it belongs to that one
+/// session.</item>
 /// </list>
 /// </para>
 /// <para>

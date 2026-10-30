@@ -308,31 +308,7 @@ internal sealed partial class StoreFileSystem : IStoreFileSystem
     }
 
     /// <inheritdoc />
-    public bool ProbeExclusive(string path)
-    {
-        try
-        {
-            using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.None);
-            return true;
-        }
-        catch (FileNotFoundException)
-        {
-            return true;
-        }
-        catch (DirectoryNotFoundException)
-        {
-            return true;
-        }
-        catch (IOException ex) when (IsHeldFailure(ex))
-        {
-            return false;
-        }
-        catch (UnauthorizedAccessException)
-        {
-            // Cannot tell, so it must read as held: the alternative is acting on a database somebody may be using.
-            return false;
-        }
-    }
+    public bool ProbeExclusive(string path) => !DatabaseLockFile.IsFileHeld(path);
 
     /// <inheritdoc />
     public void Rename(string source, string destination, bool replace)

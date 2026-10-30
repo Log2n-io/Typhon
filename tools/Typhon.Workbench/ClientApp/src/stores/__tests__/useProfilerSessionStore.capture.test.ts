@@ -13,6 +13,10 @@ function state(overrides: Partial<CaptureState> = {}): CaptureState {
     tickNumberingSuspect: false,
     bytesReceived: 0,
     bytesRetained: 0,
+    cacheBytes: 0,
+    cacheBytesLimit: 0,
+    capReason: null,
+    capTick: 0,
     ...overrides,
   };
 }

@@ -806,6 +806,8 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
 
         CheckStride<T>(slot);
 
+        _state.NoteSpatialWrite(_chunkId);
+
         // An indexed field of the spatial component that this write changes is a key move: recorded and marked dirty like any other write (#1187).
         if ((_state.FenceIndexedSlotMask & (1 << slot)) != 0)
         {
@@ -902,6 +904,8 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
             ThrowHelper.ThrowInvalidOp(
                 $"WriteSpatial requires the archetype's spatial-indexed component (marked [SpatialIndex]). For non-spatial fields, use GetSpan or Get.");
         }
+
+        _state.NoteSpatialWrite(_chunkId);
 
         CheckStride<T>(slot);
 

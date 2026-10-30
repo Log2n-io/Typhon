@@ -1,4 +1,8 @@
+using System;
+using System.Numerics;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -20,6 +24,21 @@ class MixDiscUniqArch : Archetype<MixDiscUniqArch>
     public static readonly Comp<TIdxRuntime> Runtime = Register<TIdxRuntime>();
 }
 
+[Component("Typhon.Test.MixDisc.OtherState", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+struct MixDiscOtherState
+{
+    [Index(AllowMultiple = true)] public int Group;
+    public int Pad;
+}
+
+[Archetype]
+class MixDiscOneMarkArch : Archetype<MixDiscOneMarkArch>
+{
+    public static readonly Comp<MixDiscUniqState> State = Register<MixDiscUniqState>();
+    public static readonly Comp<MixDiscOtherState> Other = Register<MixDiscOtherState>();
+}
+
 /// <summary>
 /// #1339 (IX-06, IX-07): one entity written in one tick by a Commit-discipline transaction and by a TickFence one. A Commit transaction moves a
 /// SingleVersion key at its publish and a TickFence one at the fence, while the shadow mark that says "this entity's old keys are recorded" is per
@@ -38,6 +57,7 @@ class MixedDisciplineIndexTests : TestBase<MixedDisciplineIndexTests>
         dbe.RegisterComponentFromAccessor<TIdxState>();
         dbe.RegisterComponentFromAccessor<TIdxRuntime>();
         dbe.RegisterComponentFromAccessor<MixDiscUniqState>();
+        dbe.RegisterComponentFromAccessor<MixDiscOtherState>();
         dbe.InitializeArchetypes();
         return dbe;
     }
@@ -98,6 +118,139 @@ class MixedDisciplineIndexTests : TestBase<MixedDisciplineIndexTests>
 
         AssertHpIndexed(dbe, id, 777, 500, "after the fence");
         Assert.That(ClusterTransientIndexTests.TransientIndexed(dbe, 9), Is.EquivalentTo(new[] { id }), "the Transient tree, new bucket");
+    }
+
+    /// <summary>
+    /// #1357's sequence, staged in the capture's window, keys read and no mark set: <paramref name="publish"/> runs there. The capture holds the slot's index
+    /// lock across the two, so the publish finds the mark and leaves the move to the fence. Unlocked, it completes in the window and the fence departs a key
+    /// the tree no longer holds.
+    /// </summary>
+    private static void PublishInTheCaptureWindow(DatabaseEngine dbe, ushort archetypeId, Action capture, Action publish)
+    {
+        var state = dbe._archetypeStates[archetypeId].ClusterState;
+        Task committing = null;
+        using var publishWaits = new ManualResetEventSlim();
+        state.SlotIndexLockWaitProbe = publishWaits.Set;
+        state.BeforeCaptureMarkProbe = () =>
+        {
+            state.BeforeCaptureMarkProbe = null;
+            committing = Task.Run(publish);
+            while (!publishWaits.IsSet && !committing.IsCompleted)
+            {
+                Thread.Yield();
+            }
+        };
+
+        capture();
+        Assert.That(committing, Is.Not.Null, "premise: the capture ran");
+        committing.GetAwaiter().GetResult();
+        state.SlotIndexLockWaitProbe = null;
+    }
+
+    /// <summary>Spawns the unique subject on <paramref name="archetypeId"/>'s fixture and publishes <c>Code = 777</c> in its capture window. Unlocked, the
+    /// fence's
+    /// departure misses and the entity's arrival collides with itself.</summary>
+    private static void AssertCaptureRace<TArch>(DatabaseEngine dbe, ushort archetypeId, EntityId id, Comp<MixDiscUniqState> state, Action capture)
+        where TArch : Archetype<TArch>
+    {
+        PublishInTheCaptureWindow(dbe, archetypeId, capture, () =>
+        {
+            using var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
+            tx.OpenMut(id).Set(state, new MixDiscUniqState { Code = 777 });
+            Assert.That(tx.Commit(), Is.True);
+        });
+
+        dbe.WriteTickFence(1);
+        IndexDataOracle.AssertIndexAgreesWithData<TArch>(dbe, "after the fence");
+    }
+
+    /// <summary>Two marks: the TickFence write captures through <c>ClusterRef.Set</c>, single or batched, or through <c>EntityRefMut.Set</c>.</summary>
+    [TestCase(0, TestName = "ACaptureRacingACommitPublish_ThroughTheEntity")]
+    [TestCase(1, TestName = "ACaptureRacingACommitPublish_ThroughTheCluster")]
+    [TestCase(2, TestName = "ACaptureRacingACommitPublish_ThroughTheBatchedSet")]
+    [CancelAfter(10_000)]
+    [VerifiesRule("IX-06")]
+    public void ACaptureRacingACommitPublish_TheFenceMovesOffTheKeyTheTreeHolds(int path)
+    {
+        using var dbe = SetupEngine();
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<MixDiscUniqArch>(MixDiscUniqArch.State.Set(new MixDiscUniqState { Code = 500 }), MixDiscUniqArch.Runtime.Set(new TIdxRuntime(1, 0)));
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        dbe.WriteTickFence(0);
+
+        AssertCaptureRace<MixDiscUniqArch>(dbe, Archetype<MixDiscUniqArch>.Metadata.ArchetypeId, id, MixDiscUniqArch.State, () =>
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            if (path == 0)
+            {
+                tx.OpenMut(id).Set(MixDiscUniqArch.Runtime, new TIdxRuntime(9, 1));
+            }
+            else
+            {
+                Span<TIdxRuntime> values = stackalloc TIdxRuntime[64];
+                var accessor = tx.For<MixDiscUniqArch>();
+                foreach (var cluster in accessor.GetClusterEnumerator())
+                {
+                    var slots = cluster.OccupancyBits;
+                    if (path == 1)
+                    {
+                        cluster.Set(MixDiscUniqArch.Runtime, BitOperations.TrailingZeroCount(slots), new TIdxRuntime(9, 1));
+                    }
+                    else
+                    {
+                        values[BitOperations.TrailingZeroCount(slots)] = new TIdxRuntime(9, 1);
+                        cluster.Set(MixDiscUniqArch.Runtime, slots, values);
+                    }
+                }
+            }
+
+            Assert.That(tx.Commit(), Is.True);
+        });
+    }
+
+    /// <summary>One mark: every fence-indexed slot is SingleVersion, and the TickFence write is to the entity's other component.</summary>
+    [TestCase(false, TestName = "ACaptureRacingACommitPublish_OneMark_ThroughTheEntity")]
+    [TestCase(true, TestName = "ACaptureRacingACommitPublish_OneMark_ThroughTheBatchedSet")]
+    [CancelAfter(10_000)]
+    [VerifiesRule("IX-06")]
+    public void ACaptureRacingACommitPublish_OneMark_TheFenceMovesOffTheKeyTheTreeHolds(bool batched)
+    {
+        using var dbe = SetupEngine();
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<MixDiscOneMarkArch>(MixDiscOneMarkArch.State.Set(new MixDiscUniqState { Code = 500 }),
+                MixDiscOneMarkArch.Other.Set(new MixDiscOtherState { Group = 1 }));
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        dbe.WriteTickFence(0);
+
+        AssertCaptureRace<MixDiscOneMarkArch>(dbe, Archetype<MixDiscOneMarkArch>.Metadata.ArchetypeId, id, MixDiscOneMarkArch.State, () =>
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            if (!batched)
+            {
+                tx.OpenMut(id).Set(MixDiscOneMarkArch.Other, new MixDiscOtherState { Group = 2 });
+            }
+            else
+            {
+                Span<MixDiscOtherState> values = stackalloc MixDiscOtherState[64];
+                var accessor = tx.For<MixDiscOneMarkArch>();
+                foreach (var cluster in accessor.GetClusterEnumerator())
+                {
+                    var slots = cluster.OccupancyBits;
+                    values[BitOperations.TrailingZeroCount(slots)] = new MixDiscOtherState { Group = 2 };
+                    cluster.Set(MixDiscOneMarkArch.Other, slots, values);
+                }
+            }
+
+            Assert.That(tx.Commit(), Is.True);
+        });
     }
 
     /// <summary>The other order: the TickFence transaction records the SingleVersion key, then the Commit transaction moves the same field at its

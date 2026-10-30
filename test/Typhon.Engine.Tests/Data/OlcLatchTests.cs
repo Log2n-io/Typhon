@@ -9,6 +9,10 @@ namespace Typhon.Engine.Tests;
 [TestFixture]
 public class OlcLatchTests
 {
+    /// <summary>These tests latch a local <c>int</c> and leave it latched: the thread's count is all there is to clear.</summary>
+    [TearDown]
+    public void ForgetAbandonedLatches() => OlcLatchHeld.Count = 0;
+
     // ========================================
     // OlcLatch basic operations
     // ========================================

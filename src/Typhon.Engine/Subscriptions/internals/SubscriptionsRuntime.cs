@@ -487,6 +487,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             Events?.BindReliable(_frames.CloseBoundTicks, Options.ReliableEventBytes);
             var workerSlots = (parent as DagScheduler)?.WorkerSlotCount ?? 0;
             Events?.BindWorkerSlots(workerSlots);
+            _ingress.Requests.EnsureWorkers(workerSlots + 1);   // slot 0 is the off-worker Commands, as for events
             Commands = new SubscriptionsCommands(_ingress, Events);
             _commandsByWorker = new SubscriptionsCommands[workerSlots];
             for (var w = 0; w < workerSlots; w++)

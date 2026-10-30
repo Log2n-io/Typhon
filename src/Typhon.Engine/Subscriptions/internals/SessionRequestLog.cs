@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
@@ -41,7 +43,7 @@ internal enum SessionRequestKind : byte
 internal sealed record GroupKeysRequest(string Set, long[] Keys);
 
 /// <summary>
-/// One recorded request. Sixteen bytes and no reference, so a worker's segment is a flat array the apply pass walks forward.
+/// One recorded request. Twenty-four bytes and no reference, so a worker's segment is a flat array the apply pass walks forward.
 /// </summary>
 /// <remarks>
 /// Managed payloads — a profile name, an observer, a kick's reason — live in the segment's own object array and are named here by index. That keeps the record
@@ -51,6 +53,9 @@ internal struct SessionRequestRecord
 {
     /// <summary>Which session, as a packed <see cref="SessionId"/>.</summary>
     public uint Session;
+
+    /// <summary>The order the call was made in, across every segment of the tick (SUB-39).</summary>
+    public uint Sequence;
 
     /// <summary>The numeric payload: a packed <see cref="EntityId"/>, a budget, a source count.</summary>
     public long Payload;
@@ -69,10 +74,10 @@ internal struct SessionRequestRecord
 }
 
 /// <summary>
-/// One worker's share of the tick's session requests. A worker appends to its own segment, so recording is a bounds check and two stores with no
-/// synchronization and no line shared with another worker.
+/// One worker's share of the tick's session requests. A worker appends to its own segment: a bounds check, one locked increment for the record's place in the
+/// call order, on a line of its own, and stores no other worker sees.
 /// </summary>
-internal sealed class SessionRequestSegment
+internal sealed class SessionRequestSegment(SessionRequestLog log)
 {
     private const int InitialCapacity = 8;
 
@@ -129,6 +134,7 @@ internal sealed class SessionRequestSegment
 
         ref var record = ref _records[_count++];
         record.Session = session.Value;
+        record.Sequence = log.NextSequence();
         record.Kind = kind;
         record.Payload = payload;
         record.ObjectIndex = objectIndex;
@@ -161,8 +167,8 @@ internal sealed class SessionRequestSegment
 /// <remarks>
 /// <para>
 /// <b>Why requests and not writes.</b> Systems run in parallel and several may steer the same session in one tick. Writing the row directly would need a lock
-/// per session and would still give a result that depended on which thread was quicker. Recording per worker and applying in a fixed order — worker index,
-/// then record order — costs no synchronization at record time and makes "last writer wins per field" a property of the order rather than of the scheduler.
+/// per session. A record takes one locked increment for its place in the call order and shares nothing else, and <see cref="Apply"/> merges the segments by it,
+/// so "last writer wins per field" follows the calls (SUB-39): ordered systems get DAG order, and unordered ones whichever ran first, as they must.
 /// </para>
 /// <para>
 /// <b>Steady state allocates nothing.</b> Every segment keeps the capacity of the busiest tick so far, and <see cref="Apply"/> empties them rather than
@@ -187,7 +193,7 @@ internal sealed class SessionRequestLog
         _segments = new SessionRequestSegment[workerCount];
         for (var i = 0; i < workerCount; i++)
         {
-            _segments[i] = new SessionRequestSegment();
+            _segments[i] = new SessionRequestSegment(this);
         }
     }
 
@@ -197,10 +203,9 @@ internal sealed class SessionRequestLog
     /// <summary>
     /// Grows the log to one segment per worker, keeping the segments it already has.
     /// </summary>
-    /// <param name="workerCount">How many workers this tick dispatches.</param>
+    /// <param name="workerCount">How many slots may record: every worker slot and the off-worker one.</param>
     /// <remarks>
-    /// Called from the tick's prologue, single-threaded and before any system runs, so the array is never resized under a worker holding a segment. It only
-    /// ever grows: a tick dispatched narrower than the last one leaves the spare segments alone rather than reallocating the whole table.
+    /// Called when the runtime starts, before any system runs, so the array is never resized under a worker holding a segment.
     /// </remarks>
     public void EnsureWorkers(int workerCount)
     {
@@ -213,13 +218,25 @@ internal sealed class SessionRequestLog
         Array.Copy(_segments, grown, _segments.Length);
         for (var i = _segments.Length; i < workerCount; i++)
         {
-            grown[i] = new SessionRequestSegment { ExplicitSets = _explicitSets };
+            grown[i] = new SessionRequestSegment(this) { ExplicitSets = _explicitSets };
         }
 
         _segments = grown;
     }
 
     private IReadOnlySet<string> _explicitSets;
+    private PaddedSequence _sequence;
+
+    /// <summary>The next place in the tick's call order.</summary>
+    internal uint NextSequence() => Interlocked.Increment(ref _sequence.Value);
+
+    // On its own line: every Request reads the segment table, and every record increments this.
+    [StructLayout(LayoutKind.Explicit, Size = 128)]
+    private struct PaddedSequence
+    {
+        [FieldOffset(64)]
+        public uint Value;
+    }
 
     /// <summary>The explicit group sets' names, handed to every segment: what <see cref="SessionRequest.SetSources"/> validates against. Set at Start.</summary>
     internal IReadOnlySet<string> ExplicitSets
@@ -284,17 +301,44 @@ internal sealed class SessionRequestLog
         _affinity.Enter(nameof(SessionRequestLog), nameof(Apply));
         try
         {
+            // A merge of the segments by sequence (SUB-39): each is ascending, so the next record is the least of their heads.
             var applied = 0;
-            for (var s = 0; s < _segments.Length; s++)
+            var segments = _segments;
+            Span<int> cursors = stackalloc int[segments.Length];
+            Span<int> live = stackalloc int[segments.Length];   // the segments with records left: usually one
+            var liveCount = 0;
+            for (var s = 0; s < segments.Length; s++)
             {
-                var segment = _segments[s];
-                var records = segment.Records;
-                for (var r = 0; r < records.Length; r++)
+                if (segments[s].Count > 0)
                 {
-                    if (ApplyOne(table, segment, in records[r]))
+                    live[liveCount++] = s;
+                }
+            }
+
+            while (liveCount > 0)
+            {
+                var next = 0;
+                var least = uint.MaxValue;
+                for (var l = 0; l < liveCount; l++)
+                {
+                    var sequence = segments[live[l]].Records[cursors[live[l]]].Sequence;
+                    if (sequence <= least)
                     {
-                        applied++;
+                        next = l;
+                        least = sequence;
                     }
+                }
+
+                var s = live[next];
+                var segment = segments[s];
+                if (ApplyOne(table, segment, in segment.Records[cursors[s]]))
+                {
+                    applied++;
+                }
+
+                if (++cursors[s] == segment.Count)
+                {
+                    live[next] = live[--liveCount];
                 }
             }
 
@@ -302,11 +346,7 @@ internal sealed class SessionRequestLog
         }
         finally
         {
-            for (var s = 0; s < _segments.Length; s++)
-            {
-                _segments[s].Reset();
-            }
-
+            Reset();
             _affinity.Exit();
         }
     }
@@ -318,6 +358,8 @@ internal sealed class SessionRequestLog
         {
             _segments[s].Reset();
         }
+
+        _sequence.Value = 0;
     }
 
     private static bool ApplyOne(SessionTable table, SessionRequestSegment segment, in SessionRequestRecord record)

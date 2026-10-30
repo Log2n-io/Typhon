@@ -440,6 +440,10 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <para><b>Recorded before marked.</b> The keys are read before the bit is set, and kept only by the call that sets it. A writer finding the bit set
     /// writes at once, so had the bit gone up first, a writer of another component of the same entity could store its value before this call read it, and
     /// that value would be recorded as the old key: the index would never move off the key the tree holds.</para>
+    /// <para><b>Under the slot's index lock, when the SingleVersion keys are recorded (#1357).</b> A Commit publish reads the mark, moves the tree and copies
+    /// HEAD under that lock. Read and marked outside it, a capture could read the key the publish was about to move off and mark too late for the publish to
+    /// see, and the fence would depart a key the tree no longer holds. Inside it, the publish either finds the mark or has finished, and the capture reads
+    /// what it published.</para>
     /// <para>The caller marks the entity dirty in the same call: the fence drains the shadow buffers on its dirty branch (IX-07).</para>
     /// </remarks>
     /// <param name="clusterChunkId">The entity's cluster.</param>
@@ -469,11 +473,24 @@ internal sealed unsafe partial class ArchetypeClusterState
         // A pure-Transient archetype has no second base: the primary one IS the Transient segment's.
         transientBase = transientBase != null ? transientBase : primaryBase;
         var keys = stackalloc KeyBytes8[Math.Max(1, FenceIndexedFieldCount)];
+        var slotLocked = SvFenceIndexedSlotMask != 0;
+        if (slotLocked)
+        {
+            LockSlotIndexes(clusterChunkId, slotIndex);
+        }
+
         var n = ReadIndexedKeys(IndexSlots, primaryBase, slotIndex, skipMask, keys, 0);
         n = ReadIndexedKeys(TransientIndexSlots, transientBase, slotIndex, skipMask, keys, n);
         // The buffer is sized from the storage modes, the walk filtered by the skip mask; a mask that let a Versioned slot through would overrun it.
         Debug.Assert(n <= Math.Max(1, FenceIndexedFieldCount), "CaptureFirstWrite read more keys than FenceIndexedFieldCount sized for");
-        if (shadow.TestAndSet(entityIndex))
+        BeforeCaptureMarkProbe?.Invoke();
+        var lost = shadow.TestAndSet(entityIndex);
+        if (slotLocked)
+        {
+            UnlockSlotIndexes(clusterChunkId, slotIndex);
+        }
+
+        if (lost)
         {
             return;   // another writer recorded first, before setting the bit
         }
@@ -497,10 +514,22 @@ internal sealed unsafe partial class ArchetypeClusterState
         var skipMask = (ushort)~((needTransient ? TransientFenceIndexedSlotMask : 0) | (needSv ? SvFenceIndexedSlotMask : 0));
         transientBase = transientBase != null ? transientBase : primaryBase;
         var keys = stackalloc KeyBytes8[Math.Max(1, FenceIndexedFieldCount)];
+        if (needSv)
+        {
+            LockSlotIndexes(clusterChunkId, slotIndex);
+        }
+
         var svKeys = ReadIndexedKeys(IndexSlots, primaryBase, slotIndex, skipMask, keys, 0);
         ReadIndexedKeys(TransientIndexSlots, transientBase, slotIndex, skipMask, keys, svKeys);
+        BeforeCaptureMarkProbe?.Invoke();
         // The SingleVersion mark first: a set one implies the Transient one (FenceRecordedSlots reads the Transient one first), and both precede the store.
-        if (needSv && !SvShadowBitmap.TestAndSet(entityIndex))
+        var wonSv = needSv && !SvShadowBitmap.TestAndSet(entityIndex);
+        if (needSv)
+        {
+            UnlockSlotIndexes(clusterChunkId, slotIndex);
+        }
+
+        if (wonSv)
         {
             AppendIndexedKeys(IndexSlots, entityIndex, entityId, skipMask, keys, 0);
         }
@@ -567,6 +596,12 @@ internal sealed unsafe partial class ArchetypeClusterState
         var skipMask = (ushort)~(sv == null ? FenceIndexedSlotMask : TransientFenceIndexedSlotMask | (needSv != 0 ? SvFenceIndexedSlotMask : 0));
         transientBase = transientBase != null ? transientBase : primaryBase;
         var keys = stackalloc KeyBytes8[count * perEntity];   // entity-major: entity e's keys at [e * perEntity, ...)
+        var lockedSlots = (sv == null ? SvFenceIndexedSlotMask != 0 : needSv != 0) ? need : 0;
+        if (lockedSlots != 0)
+        {
+            LockSlotRunIndexes(clusterChunkId, lockedSlots);
+        }
+
         var e = 0;
         for (var rest = need; rest != 0; rest &= rest - 1, e++)
         {
@@ -575,9 +610,15 @@ internal sealed unsafe partial class ArchetypeClusterState
             ReadIndexedKeys(TransientIndexSlots, transientBase, i, skipMask, keys + e * perEntity, n);
         }
 
+        BeforeCaptureMarkProbe?.Invoke();
         // On two marks the SingleVersion one first, as CaptureFirstWriteTwoMarks sets it.
         var wonSv = needSv != 0 ? needSv & ~sv.TestAndSetWord(clusterChunkId, needSv) : 0;
         var won = need & ~shadow.TestAndSetWord(clusterChunkId, need);
+        if (lockedSlots != 0)
+        {
+            UnlockSlotRunIndexes(clusterChunkId, lockedSlots);
+        }
+
         if (sv == null)
         {
             wonSv = won;   // one mark covers both homes
@@ -591,6 +632,10 @@ internal sealed unsafe partial class ArchetypeClusterState
         var f = AppendIndexedKeyRuns(IndexSlots, clusterChunkId, need, wonSv, primaryBase, skipMask, keys, perEntity, 0);
         AppendIndexedKeyRuns(TransientIndexSlots, clusterChunkId, need, won, primaryBase, skipMask, keys, perEntity, f);
     }
+
+    /// <summary>Test seam: fires in a capture with the keys read and the mark not yet set, under the slot's index lock when it takes it. Null in
+    /// production.</summary>
+    internal Action BeforeCaptureMarkProbe;
 
     /// <summary>
     /// The first unique-index collision this tick's batched index moves found (#1346): raised once the drain that found it has finished and reset its
@@ -6699,9 +6744,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <param name="dirtyBits">Occupancy-masked dirty bitmap snapshot from the tick fence. Word index = chunkId.
     /// A nonzero word means at least one entity in that cluster was written this tick.</param>
     /// <param name="tickNumber">Current tick number, used for heartbeat staggering.</param>
-    /// <param name="activityBits">Optional: the spatial barrier's per-cluster process bitmap (bit per chunk id) — a cluster WriteSpatial touched this tick
-    /// is active even with no dirty bit (the clean-spatial fence branch).</param>
-    internal void DormancySweep(long[] dirtyBits, long tickNumber, long[] activityBits = null)
+    internal void DormancySweep(long[] dirtyBits, long tickNumber)
     {
         if (SleepStates == null || SleepThresholdTicks <= 0)
         {
@@ -6719,12 +6762,12 @@ internal sealed unsafe partial class ArchetypeClusterState
             }
 
             var state = SleepStates[chunkId];
+            var moved = TakeSpatialWrite(chunkId);
 
             if (state == ClusterSleepState.Active)
             {
                 // Check dirty bitmap: nonzero word means at least one entity written this tick
-                var dirty = (chunkId < dirtyBits.Length && dirtyBits[chunkId] != 0)
-                    || (activityBits != null && (chunkId >> 6) < activityBits.Length && (activityBits[chunkId >> 6] & (1L << (chunkId & 63))) != 0);
+                var dirty = moved || (chunkId < dirtyBits.Length && dirtyBits[chunkId] != 0);
                 if (dirty)
                 {
                     SleepCounters[chunkId] = 0;
@@ -7183,7 +7226,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             return;
         }
 
-        // Whole-archetype convenience wrapper: serial WriteTickFence path. The parallel path dispatches RecomputeDirtyClusterAabbsSlice across workers directly
+        // Whole-archetype convenience wrapper: serial WriteTickFence path. The parallel path dispatches RecomputeDirtyClusterAabbsSlice across workers
         // and then runs ClearAabbRefreshBookkeeping in Finalize.
         var refreshSpan = TyphonEvent.BeginSpatialClusterAabbRefresh((ushort)ArchetypeId, ActiveClusterCount);
         try

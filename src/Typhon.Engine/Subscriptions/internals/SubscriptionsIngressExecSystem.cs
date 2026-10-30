@@ -283,7 +283,7 @@ internal sealed class SubscriptionsIngress : IDisposable
         Buffers = buffers;
         NetIds = new NetIdEntityIndex();
 
-        // One segment per worker, sized at the first BeginTick. It is created here rather than by the runtime because its lifetime is the ingress's: a
+        // One segment per slot, sized when the runtime starts. It is created here rather than by the runtime because its lifetime is the ingress's: a
         // request is made by an application system during a tick and applied by the next tick's prologue, which is the same span this object is alive for.
         Requests = new SessionRequestLog(1);
     }
@@ -664,7 +664,6 @@ internal sealed class SubscriptionsIngress : IDisposable
         }
 
         Buffers.BeginTick(ctx.TickNumber, workers);
-        Requests.EnsureWorkers(workers);
         return Math.Min(workers, _tickSessionCount);
     }
 

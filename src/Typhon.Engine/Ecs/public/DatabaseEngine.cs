@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.Loader;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Reflection;
@@ -606,8 +607,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     // registry entry when the count reaches zero. That release-on-zero is what lets the owning AssemblyLoadContext be GC'd between Workbench sessions — without
     // it, the registry pinned the first ALC's Types for the lifetime of the process and any later session loading the same DLL into a fresh collectible ALC
     // saw stale state.
+    private AssemblyLoadContext _archetypeContext = AssemblyLoadContext.GetLoadContext(typeof(DatabaseEngine).Assembly);
+    private ArchetypeMetadata[] _ownArchetypes;
     private readonly HashSet<Type> _registeredArchetypeTypes = [];
     private readonly HashSet<Type> _registeredComponentTypes = [];
+    private readonly HashSet<Type> _useCountedComponentTypes = [];
     private bool _unregisteredFromRegistry;
 
     /// <summary>
@@ -1537,12 +1541,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// honours it.
     /// </para>
     /// <para>
-    /// <b>The precondition, and it is sharp.</b> Sleep is decided from the per-entity dirty bitmap, and
-    /// <see cref="ClusterRef{TArch}.WriteSpatial{T}(Comp{T}, int, in T)"/> deliberately raises no dirty bit — so an archetype whose entities only MOVE
-    /// looks clean, is put to sleep while still in motion, stops being dispatched, and freezes. An application that combines the two must mark the
-    /// column itself (<see cref="ClusterRef{TArch}.MarkDirty{T}"/>) on a cluster it moved. That is a contract of <c>WriteSpatial</c>, not of dormancy.
-    /// </para>
-    /// <para>
     /// <b>Cost when unused: nothing measurable.</b> Every consumer gates on <c>SleepingClusterCount &gt; 0</c>, which stays zero while the threshold is
     /// zero, so the check folds to one predictable-not-taken branch.
     /// </para>
@@ -2140,6 +2138,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         + "gate off online backup is refused (TYPHON_DATAFILE_TRACKING / TYPHON_DATAFILE_GATE)")]
     private partial void LogDataFileTrackingSwitchedOff(bool mapEnabled, bool gateEnabled);
 
+    [LoggerMessage(LogLevel.Error, "A first write of {component} could not give back the revision it built: chunk {chunkId} or its references are leaked")]
+    internal partial void LogPreparedRevisionLeaked(Exception exception, string component, int chunkId);
+
     [LoggerMessage(LogLevel.Warning, "Close: the backup-state could not be written ({path}); the next backup will be full")]
     private partial void LogBackupStateWriteFailed(Exception exception, string path);
 
@@ -2584,6 +2585,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             {
                 ArchetypeRegistry.UnregisterEngineUse(_registeredArchetypeTypes, _registeredComponentTypes);
                 _unregisteredFromRegistry = true;
+
+                // A disposed engine kept alive by a stray reference must not keep its schema's context reachable.
+                _ownArchetypes = [];
+                _archetypeContext = AssemblyLoadContext.Default;
 
                 // Paired one-for-one with the RegisterLiveEngine in InitializeArchetypes (#614 D-9). Conditional on having actually registered: an engine that
                 // was constructed and disposed without ever initializing its archetypes must not decrement a count it never incremented, or a *different*
@@ -3118,6 +3123,29 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     /// <param name="archetypeType">The <c>[Archetype]</c> class type to finalize.</param>
     public static void RegisterArchetype(Type archetypeType) => ArchetypeRegistry.EnsureFinalized(archetypeType, true);
+
+    /// <summary>
+    /// Makes this engine consume the archetypes of <paramref name="context"/> rather than those of its own context: a host that loads a database's schema into a
+    /// load context of its own says so before <see cref="InitializeArchetypes"/>. The registry is process-wide and holds one archetype per name per context, so
+    /// what an engine consumes is what keeps two schemas that share archetype names apart (#554).
+    /// </summary>
+    /// <param name="context">The context holding this engine's schema.</param>
+    /// <exception cref="InvalidOperationException">The engine has already initialized its archetypes.</exception>
+    internal void UseArchetypesFrom(AssemblyLoadContext context)
+    {
+        if (_ownArchetypes != null)
+        {
+            ThrowHelper.ThrowInvalidOp("An engine's archetype context is chosen before InitializeArchetypes.");
+        }
+
+        _archetypeContext = context;
+    }
+
+    /// <summary>
+    /// The archetypes this engine consumes, as of its last <see cref="InitializeArchetypes"/>. Whatever else the process-wide registry holds is another schema's,
+    /// or came after and has no state here.
+    /// </summary>
+    internal ArchetypeMetadata[] OwnArchetypes() => _ownArchetypes ?? ArchetypeRegistry.GetArchetypesFor(_archetypeContext);
 
     internal VariableSizedBufferSegment<T, PersistentStore> GetComponentCollectionVSBS<T>() where T : unmanaged => GetComponentCollectionVSBS<T>(null);
 
@@ -4052,7 +4080,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     {
         var anyUpdated = false;
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in OwnArchetypes())
         {
             if (meta.ArchetypeId >= _archetypeStates.Length)
             {
@@ -4838,7 +4866,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     private void InitializeArchetypesCore()
     {
-        ArchetypeRegistry.Freeze();
+        ArchetypeRegistry.Freeze(_archetypeContext);
+        _ownArchetypes = ArchetypeRegistry.GetArchetypesFor(_archetypeContext);
 
         // CK-08: a crash open's passes start here — the entity-map and HEAD rebuilds before the replay. The manager's creation set it for the first call;
         // a repeat InitializeArchetypes (#790) recovers again and sets it again.
@@ -4964,7 +4993,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Recorded afresh by every initialisation, so a reason never outlives the pass that found it.
         _skippedArchetypes?.Clear();
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in OwnArchetypes())
         {
             // Connect slots to ComponentTables — skip archetypes with unregistered component types
             if (meta._slotToComponentType == null || meta.ComponentCount == 0)
@@ -5640,15 +5669,30 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             cellStateTicks * toMs,
             entityMapTicks * toMs);
 
-        // ─── Register this engine's use of every archetype Type currently in the registry ──────────────
+        // ─── Register this engine's use of every archetype Type it consumes ──────────────
         // Snapshot AFTER all archetypes are registered (Touch() / DeclareComponent / EnsureFinalized cascade) so we hold a reference to every Type this engine
         // is now consuming. The matching `Dispose` decrements the same set; the registry releases the Type on refcount=0, which is what lets the owning ALC be
-        // GC'd between sessions.
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        // GC'd between sessions. Each Type once: a repeat InitializeArchetypes (#790) counting them again would leave them counted after that one decrement.
+        _ownArchetypes = ArchetypeRegistry.GetArchetypesFor(_archetypeContext);
+        var newArchetypes = new List<Type>();
+        foreach (var meta in _ownArchetypes)
         {
-            _registeredArchetypeTypes.Add(meta.ArchetypeType);
+            if (_registeredArchetypeTypes.Add(meta.ArchetypeType))
+            {
+                newArchetypes.Add(meta.ArchetypeType);
+            }
         }
-        ArchetypeRegistry.RegisterEngineUse(_registeredArchetypeTypes, _registeredComponentTypes);
+
+        var newComponents = new List<Type>();
+        foreach (var type in _registeredComponentTypes)
+        {
+            if (_useCountedComponentTypes.Add(type))
+            {
+                newComponents.Add(type);
+            }
+        }
+
+        ArchetypeRegistry.RegisterEngineUse(newArchetypes, newComponents);
 
         // Separately, count this engine as live (#614 D-9). One-shot, mirroring the `_unregisteredFromRegistry` guard on the dispose side — see the field docs
         // for why the live-engine count, unlike the Type refcounts above, cannot tolerate an unpaired call in either direction.
@@ -5806,6 +5850,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Phase 4b — the component-collection segments' orphans (#1307, REAP-02): a buffer named by nothing once the chains are their heads — one whose free a
         // checkpoint had not written, one a swept orphan named — is freed. After the scrub, which releases what dropped revisions named.
         SweepCollectionOrphans();
+
+        // Phase 4c — the slots hidden when the process died (VIS-09, RB-08): free on disk with their entity ids in place, their claims and cleanups lost.
+        // Before
+        // the seal, so the same checkpoint writes them.
+        ClearFreeSlotsAfterCrash();
 
         // Phase 5 — REBUILD (03-recovery.md §7, RB-01): repopulate every archetype's secondary indexes from the now-final chain HEADs. The indexes were emptied
         // at open on the crash path; this rebuild replaces FPI repair of torn checkpointed index pages. Before the seal so the same checkpoint consolidates the
@@ -6093,7 +6142,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         var changeSet = MMF.CreateChangeSet();
         try
         {
-            foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+            foreach (var meta in OwnArchetypes())
             {
                 if (!meta.HasClusterIndexes || meta.ArchetypeId >= _archetypeStates.Length)
                 {
@@ -6115,6 +6164,33 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             changeSet.SaveChanges();
         }
     }
+
+    /// <summary>
+    /// Phase 4c of a crash open (VIS-09, RB-08): the slots a hidden destroy left free with their entity ids in place have those ids cleared, in every
+    /// archetype's persisted clusters.
+    /// </summary>
+    private void ClearFreeSlotsAfterCrash()
+    {
+        using var guard = EpochGuard.Enter(EpochManager);
+        var changeSet = MMF.CreateChangeSet();
+        try
+        {
+            foreach (var meta in OwnArchetypes())
+            {
+                if (meta.ArchetypeId < _archetypeStates.Length && _archetypeStates[meta.ArchetypeId]?.ClusterState is { ClusterSegment: not null } clusterState)
+                {
+                    LastOpenFreeSlotsCleared += clusterState.ClearFreeSlotsAfterCrash(changeSet, () => RecoveryBatchPoint(changeSet, RecoveryPass.Scrub));
+                }
+            }
+        }
+        finally
+        {
+            changeSet.SaveChanges();
+        }
+    }
+
+    /// <summary>The slots <see cref="ClearFreeSlotsAfterCrash"/> cleared on the last crash open. Test seam.</summary>
+    internal int LastOpenFreeSlotsCleared { get; private set; }
 
     /// <summary>
     /// Phase 6 — SEAL (03-recovery.md §9). After the recovery window has been applied (its pages are dirty in the cache), run one
@@ -6210,7 +6286,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     {
         using var guard = EpochGuard.Enter(EpochManager);
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in OwnArchetypes())
         {
             var state = _archetypeStates[meta.ArchetypeId];
             if (state?.SlotToComponentTable == null)
@@ -7188,6 +7264,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     internal bool FirstWriteClaimsBeforeAppendForTest { get; set; }
 
+    /// <summary>Called while a first write builds its revision (CHAIN-02): with 0 before the copy, then with the collection fields done. Test seam.</summary>
+    internal Action<int> FirstWriteBuildProbe { get; set; }
+
     /// <summary>
     /// Test-only mutant switch (AP-03): when set, a commit's publish gives up on page-cache back-pressure after the ordinary allocation timeout, as any
     /// allocation does, instead of waiting it out — what AP-03 forbids — so the rule's mutant can show the verifier rejects it. Per engine. Never set in
@@ -7735,7 +7814,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     {
         var byTable = new Dictionary<ComponentTable, HashSet<int>>();
         var record = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in OwnArchetypes())
         {
             var state = _archetypeStates[meta.ArchetypeId];
             if (state?.SlotToComponentTable == null)
@@ -8028,7 +8107,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 }
             }
 
-            foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+            foreach (var meta in OwnArchetypes())
             {
                 var cs = _archetypeStates[meta.ArchetypeId]?.ClusterState;
                 if (cs?.CollectionSlots == null || cs.ClusterSegment == null)
@@ -8201,7 +8280,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         if (_persistedArchetypes != null)
         {
             var loadedArchetypes = new HashSet<string>();
-            foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+            foreach (var meta in OwnArchetypes())
             {
                 if (_archetypeStates[meta.ArchetypeId] != null)
                 {
@@ -8366,7 +8445,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         var cs = MMF.CreateChangeSet();
         var anyNew = false;
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in OwnArchetypes())
         {
             var engineState = _archetypeStates[meta.ArchetypeId];
             if (engineState?.SlotToComponentTable == null)

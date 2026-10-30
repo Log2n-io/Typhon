@@ -29,7 +29,13 @@ internal sealed class InMemoryExporter : IProfilerExporter
     public string Name { get; }
     public ExporterQueue Queue { get; }
 
-    public void Initialize(ProfilerSessionMetadata metadata) { }
+    /// <summary>Calls of <see cref="Initialize"/>.</summary>
+    public int Initialized { get; private set; }
+
+    /// <summary>Calls of <see cref="Flush"/>.</summary>
+    public int Flushed { get; private set; }
+
+    public void Initialize(ProfilerSessionMetadata metadata) => Initialized++;
 
     public void ProcessBatch(TraceRecordBatch batch)
     {
@@ -44,7 +50,7 @@ internal sealed class InMemoryExporter : IProfilerExporter
         }
     }
 
-    public void Flush() { }
+    public void Flush() => Flushed++;
 
     public void Dispose()
     {

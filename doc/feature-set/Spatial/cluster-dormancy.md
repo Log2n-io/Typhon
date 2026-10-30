@@ -60,13 +60,10 @@ schedule.QuerySystem("IdleDrift", ctx =>
   missed.
 - **Zero overhead when nothing sleeps** — the dormancy filter in dispatch prep is skipped entirely
   (`SleepingClusterCount == 0`), for every system, every tick, until at least one cluster actually sleeps.
-- **Activity is the dirty bitmap, not all writes** — `ClusterRef.WriteSpatial` (the typical high-frequency
-  path for a `[SpatialIndex]`-marked field, e.g. movement) deliberately does **not** mark the slot dirty, so
-  it neither resets the sleep counter nor wakes a sleeping cluster. A cluster whose entities only move via
-  `WriteSpatial` can go to sleep, and stay asleep, while still moving — resetting the counter requires a
-  normal `Transaction.OpenMut().Set(...)` on some other field, or an explicit `SetDirty` call after
-  `WriteSpatial`.
-- **Only two wake triggers exist today**: a dirty write and the heartbeat timer. Proximity-based wake
+- **Activity is every write, `WriteSpatial` included** — `ClusterRef.WriteSpatial` raises no dirty bit, and
+  still resets the sleep counter and wakes a sleeping cluster, so a cluster stays awake while its entities
+  move.
+- **Only two wake triggers exist today**: a write and the heartbeat timer. Proximity-based wake
   ("another entity approached") and tier-promotion wake ("camera moved closer") are not implemented — a
   sleeping cluster promoted to `Tier0` stays `Sleeping`, and excluded from dispatch, until a write or
   heartbeat wakes it.

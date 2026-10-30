@@ -240,7 +240,7 @@ internal sealed class FenceWorkPlan
             return;
         }
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in engine.OwnArchetypes())
         {
             if (!meta.IsClusterEligible || meta.ArchetypeId >= states.Length)
             {
@@ -354,7 +354,7 @@ internal sealed class FenceWorkPlan
             return;
         }
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in engine.OwnArchetypes())
         {
             if (!meta.IsClusterEligible || meta.ArchetypeId >= states.Length)
             {
@@ -396,7 +396,7 @@ internal sealed class FenceWorkPlan
             return;
         }
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in engine.OwnArchetypes())
         {
             if (!meta.IsClusterEligible || meta.ArchetypeId >= states.Length)
             {
@@ -486,7 +486,7 @@ internal sealed class FenceWorkPlan
             return;
         }
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in engine.OwnArchetypes())
         {
             if (!meta.IsClusterEligible || meta.ArchetypeId >= states.Length)
             {
@@ -578,7 +578,7 @@ internal sealed class FenceWorkPlan
             return;
         }
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in engine.OwnArchetypes())
         {
             if (!meta.IsClusterEligible || meta.ArchetypeId >= states.Length)
             {
@@ -686,7 +686,7 @@ internal sealed class FenceWorkPlan
             return;
         }
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in engine.OwnArchetypes())
         {
             if (!meta.IsClusterEligible || meta.ArchetypeId >= states.Length)
             {

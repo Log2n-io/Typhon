@@ -121,7 +121,8 @@ public sealed class RuntimeStatsSnapshot
     /// <remarks>Read beside <see cref="SessionsClosedSilent"/>: together they say whether a loss was the client's silence or its backlog.</remarks>
     public long SessionsClosedLagging { get; init; }
 
-    /// <summary>99th-percentile cost of the replication track itself over the window, in milliseconds.</summary>
+    /// <summary>99th-percentile cost of the replication track itself over the ticks in the window that ran it, in milliseconds.</summary>
+    /// <remarks>An idle window reports zero, not a small number: a tick that did not run the track contributes no sample.</remarks>
     public double ReplicationTrackP99Ms { get; init; }
 
     /// <summary>

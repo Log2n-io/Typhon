@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -26,6 +27,28 @@ struct PtIdxRuntime
 [Archetype]
 class PtIdxArch : Archetype<PtIdxArch>
 {
+    public static readonly Comp<PtIdxRuntime> Runtime = Register<PtIdxRuntime>();
+}
+
+// Two indexed fields: a predicate on one, the order on the other.
+[Component("Typhon.Test.ECS.PTIdx.Ranked", 1, StorageMode = StorageMode.Transient)]
+[StructLayout(LayoutKind.Sequential)]
+struct PtIdxRanked
+{
+    [Index(AllowMultiple = true)] public int Group;
+    [Index(AllowMultiple = true)] public int Rank;
+}
+
+[Archetype]
+class PtIdxRankedArch : Archetype<PtIdxRankedArch>
+{
+    public static readonly Comp<PtIdxRanked> Ranked = Register<PtIdxRanked>();
+}
+
+[Archetype]
+class PtIdxHiddenArch : Archetype<PtIdxHiddenArch>
+{
+    public static readonly Comp<CompA> A = Register<CompA>();
     public static readonly Comp<PtIdxRuntime> Runtime = Register<PtIdxRuntime>();
 }
 
@@ -69,8 +92,144 @@ class ClusterPureTransientIndexTests : TestBase<ClusterPureTransientIndexTests>
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<PtIdxRuntime>();
         dbe.RegisterComponentFromAccessor<PtIdxNote>();
+        dbe.RegisterComponentFromAccessor<PtIdxRanked>();
+        dbe.RegisterComponentFromAccessor<CompA>();
+        dbe.RegisterComponentFromAccessor<TIdxState>();
+        dbe.RegisterComponentFromAccessor<TIdxRuntime>();
         dbe.InitializeArchetypes();
         return dbe;
+    }
+
+    /// <summary>Out of order, so a sort by entity key cannot pass.</summary>
+    private static readonly int[] OutOfOrder = [40, 15, 10, 30, 5, 20, 50];
+
+    /// <summary>The issue's query: a pure-Transient archetype, its only index the ordered one (#1186).</summary>
+    [Test]
+    [VerifiesRule("QORD-01")]
+    public void AnOrderedQuery_OnATransientField_ReturnsItsRowsInThatOrder([Values] bool descending)
+    {
+        using var dbe = SetupEngine();
+        var ids = new Dictionary<int, EntityId>();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            foreach (var bucket in OutOfOrder)
+            {
+                ids[bucket] = Spawn(tx, bucket);
+            }
+
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        dbe.WriteTickFence(1);
+
+        using var read = dbe.CreateQuickTransaction();
+        var query = read.Query<PtIdxArch>().WhereField<PtIdxRuntime>(r => r.Bucket >= 10);
+        var ordered = descending ? query.OrderByFieldDescending<PtIdxRuntime, int>(r => r.Bucket) : query.OrderByField<PtIdxRuntime, int>(r => r.Bucket);
+        var expected = OutOfOrder.Where(b => b >= 10).OrderBy(b => descending ? -b : b).Select(b => ids[b]).ToArray();
+        Assert.That(ordered.ExecuteOrdered(), Is.EqualTo(expected));
+        Assert.That(ordered.Skip(1).Take(2).ExecuteOrdered(), Is.EqualTo(expected[1..3]));
+    }
+
+    /// <summary>A transaction's own spawns come back too, in their place: they were collected after the skip.</summary>
+    [Test]
+    [VerifiesRule("QORD-01")]
+    public void AnOrderedQuery_OnATransientField_ReturnsTheTransactionsOwnSpawns()
+    {
+        using var dbe = SetupEngine();
+        using var tx = dbe.CreateQuickTransaction();
+        var ids = new Dictionary<int, EntityId>();
+        foreach (var bucket in OutOfOrder)
+        {
+            ids[bucket] = Spawn(tx, bucket);
+        }
+
+        var expected = OutOfOrder.Order().Select(b => ids[b]).ToArray();
+        Assert.That(tx.Query<PtIdxArch>().WhereField<PtIdxRuntime>(r => r.Bucket >= 0).OrderByField<PtIdxRuntime, int>(r => r.Bucket).ExecuteOrdered(),
+            Is.EqualTo(expected));
+    }
+
+    /// <summary>A predicate on another field of the component went to the sort fallback, which had no source and sorted by entity key: the right rows, silently
+    /// in the wrong order.</summary>
+    [Test]
+    [VerifiesRule("QORD-01")]
+    public void AnOrderedQuery_PredicateOnAnotherTransientField_SortsByTheOrderedField()
+    {
+        using var dbe = SetupEngine();
+        var ids = new Dictionary<int, EntityId>();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            foreach (var rank in OutOfOrder)
+            {
+                ids[rank] = tx.Spawn<PtIdxRankedArch>(PtIdxRankedArch.Ranked.Set(new PtIdxRanked { Group = 1, Rank = rank }));
+            }
+
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        dbe.WriteTickFence(1);
+
+        using var read = dbe.CreateQuickTransaction();
+        Assert.That(read.Query<PtIdxRankedArch>().WhereField<PtIdxRanked>(r => r.Group == 1).OrderByField<PtIdxRanked, int>(r => r.Rank).ExecuteOrdered(),
+            Is.EqualTo(OutOfOrder.Order().Select(r => ids[r]).ToArray()));
+    }
+
+    /// <summary>
+    /// A row a destroy hid from HEAD and a snapshot still sees: no point read answers, so its key comes out of the slot's bytes on the Transient segment. The
+    /// ordered field is Transient, the archetype Versioned, or nothing would hide (VIS-09).
+    /// </summary>
+    [Test]
+    [VerifiesRule("QORD-01")]
+    public void AnOrderedQuery_OnATransientField_KeysAHiddenRowFromItsSlot()
+    {
+        using var dbe = SetupEngine();
+        var ids = new Dictionary<int, EntityId>();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            foreach (var bucket in OutOfOrder)
+            {
+                ids[bucket] = tx.Spawn<PtIdxHiddenArch>(PtIdxHiddenArch.A.Set(new CompA(bucket, 0, 0)),
+                    PtIdxHiddenArch.Runtime.Set(new PtIdxRuntime(bucket, 0)));
+            }
+
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        dbe.WriteTickFence(1);
+
+        using var snapshot = dbe.CreateQuickTransaction();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Destroy(ids[20]);
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        Assert.That(
+            snapshot.Query<PtIdxHiddenArch>().WhereField<PtIdxRuntime>(r => r.Bucket >= 0).OrderByField<PtIdxRuntime, int>(r => r.Bucket).ExecuteOrdered(),
+            Is.EqualTo(OutOfOrder.Order().Select(b => ids[b]).ToArray()));
+    }
+
+    /// <summary>A mixed archetype, ordered by its Transient component: the title's "pure" was too narrow.</summary>
+    [Test]
+    [VerifiesRule("QORD-01")]
+    public void AnOrderedQuery_OnAMixedArchetypesTransientField_ReturnsItsRowsInThatOrder()
+    {
+        using var dbe = SetupEngine();
+        var ids = new Dictionary<int, EntityId>();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            foreach (var bucket in OutOfOrder)
+            {
+                ids[bucket] = tx.Spawn<TIdxMixedArch>(TIdxMixedArch.State.Set(new TIdxState(1)), TIdxMixedArch.Runtime.Set(new TIdxRuntime(bucket, 0)));
+            }
+
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        dbe.WriteTickFence(1);
+
+        using var read = dbe.CreateQuickTransaction();
+        Assert.That(read.Query<TIdxMixedArch>().WhereField<TIdxRuntime>(r => r.Bucket >= 0).OrderByField<TIdxRuntime, int>(r => r.Bucket).ExecuteOrdered(),
+            Is.EqualTo(OutOfOrder.Order().Select(b => ids[b]).ToArray()));
     }
 
     private static ArchetypeClusterState ClusterState(DatabaseEngine dbe)
