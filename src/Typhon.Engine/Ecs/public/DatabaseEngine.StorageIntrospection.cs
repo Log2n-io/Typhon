@@ -1292,7 +1292,7 @@ public partial class DatabaseEngine
         }
 
         using var guard = EpochGuard.Enter(EpochManager);
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in OwnArchetypes())
         {
             if (meta.ArchetypeId >= states.Length)
             {

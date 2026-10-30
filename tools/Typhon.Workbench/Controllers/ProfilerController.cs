@@ -23,7 +23,13 @@ public sealed partial class ProfilerController : WorkbenchControllerBase
 {
     private readonly ILogger<ProfilerController> _logger;
 
-    public ProfilerController(ILogger<ProfilerController> logger) => _logger = logger;
+    private readonly LiveCacheLimits _cacheLimits;
+
+    public ProfilerController(ILogger<ProfilerController> logger, LiveCacheLimits cacheLimits)
+    {
+        _logger = logger;
+        _cacheLimits = cacheLimits;
+    }
 
     /// <summary>
     /// Returns the full metadata DTO once the session is ready. For Trace sessions this means the sidecar cache build
@@ -293,10 +299,10 @@ public sealed partial class ProfilerController : WorkbenchControllerBase
         }
         catch (InvalidOperationException ex)
         {
-            // Attached in capture-everything mode — arming a window would contradict the mode chosen at attach time.
+            // Attached in capture-everything mode — arming a window would contradict the mode chosen at attach time — or past the retention cap (#822).
             return Conflict(new ProblemDetails
             {
-                Title = "capture_mode_mismatch",
+                Title = runtime.CaptureState.CapReason != null ? "capture_capped" : "capture_mode_mismatch",
                 Detail = ex.Message,
                 Status = StatusCodes.Status409Conflict,
             });
@@ -347,7 +353,7 @@ public sealed partial class ProfilerController : WorkbenchControllerBase
         }
 
         var mode = request?.CherryPick == false ? CaptureMode.Everything : CaptureMode.CherryPick;
-        var runtime = await AttachSessionRuntime.StartAsync(open.Id, endpoint, _logger, ct, mode);
+        var runtime = await AttachSessionRuntime.StartAsync(open.Id, endpoint, _logger, ct, mode, cacheLimits: _cacheLimits);
         open.StartWatching(runtime);
         return Ok(runtime.CaptureState);
     }
@@ -384,9 +390,9 @@ public sealed partial class ProfilerController : WorkbenchControllerBase
         CancellationToken ct)
     {
         var session = HttpContext.Items["Session"];
-        if (session is not AttachSession attach)
+        if (session is not ILiveProfilerHost { LiveRuntime: { } runtime })
         {
-            return ConflictKindMismatch("Save Replay is only valid on Attach sessions.");
+            return ConflictKindMismatch("Save Replay is only valid on a session with a live profiler.");
         }
 
         // #377 Stage 4 P4 "Capture & Analyse" — empty path means the client wants the one-gesture flow:
@@ -415,7 +421,7 @@ public sealed partial class ProfilerController : WorkbenchControllerBase
 
         try
         {
-            var bytesWritten = await attach.Runtime.SaveSessionAsync(resolved, ct);
+            var bytesWritten = await runtime.SaveSessionAsync(resolved, ct);
 
             // #621 — attach the replay we just wrote as this session's active profile, and say so in the response.
             //
@@ -426,7 +432,8 @@ public sealed partial class ProfilerController : WorkbenchControllerBase
             Guid? profileId = null;
             try
             {
-                profileId = attach.AttachProfile(TraceSessionRuntime.Start(resolved, _logger));
+                var replay = TraceSessionRuntime.Start(resolved, _logger);
+                profileId = session is AttachSession attach ? attach.AttachProfile(replay) : ((OpenSession)session).AttachProfile(replay);
             }
             catch (Exception ex)
             {

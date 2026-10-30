@@ -246,7 +246,7 @@ public static class DatabaseRepair
             if (probe.LockHeld)
             {
                 throw new InvalidOperationException(
-                    $"'{resolved}' is open in another process. Repair requires exclusive access — close the database and retry.");
+                    $"'{resolved}' is open in {probe.HeldBy}. Repair requires exclusive access — close the database and retry.");
             }
 
             var current = IntegrityScanner.Scan(probe, new IntegrityOptions { Depth = plan.Verdict == IntegrityVerdict.Unopenable ? ScanDepth.Standard : ScanDepth.Deep });

@@ -545,7 +545,7 @@ public partial class DatabaseEngine
         // path runs this drain in FencePrep (TickDriver) so per-archetype work can be split across workers.
         DrainDormancyWakeRequests();
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in OwnArchetypes())
         {
             var contributed = ProcessArchetypeFence(meta, tickNumber, changeSet);
             if (contributed > highestLSN)
@@ -1200,7 +1200,7 @@ public partial class DatabaseEngine
             return;
         }
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in OwnArchetypes())
         {
             if (!meta.IsClusterEligible || meta.ArchetypeId >= states.Length)
             {

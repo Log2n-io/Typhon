@@ -793,7 +793,7 @@ public sealed partial class TyphonRuntime : IDisposable
     private ArchetypeStat[] ReadArchetypeStats()
     {
         var stats = new List<ArchetypeStat>();
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in Engine.OwnArchetypes())
         {
             if (meta == null)
             {
@@ -1011,7 +1011,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 if (sys.Type == SystemType.QuerySystem && Engine != null)
                 {
                     var viewArchetypeId = _systemViews[i].QueriedArchetypeId;
-                    foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+                    foreach (var meta in Engine.OwnArchetypes())
                     {
                         // Same shape as before, with one difference that is the whole fix: match the view's archetype instead of taking the first
                         // cluster-eligible one found.

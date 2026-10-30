@@ -1287,7 +1287,7 @@ internal sealed class DiagnosticCommandExecutor
         var views = new List<ArchetypeIndexView>();
         var dbe = _session.Engine;
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in dbe.OwnArchetypes())
         {
             var es = dbe._archetypeStates[meta.ArchetypeId];
             var clusterState = es?.ClusterState;

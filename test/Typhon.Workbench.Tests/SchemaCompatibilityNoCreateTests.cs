@@ -23,7 +23,6 @@ namespace Typhon.Workbench.Tests;
 /// concerns components that ARE present and behind — but a component absent from the file is reported, never invented.</para>
 /// </summary>
 [TestFixture]
-[NonParallelizable] // opens engines via EngineLifecycle.OpenAsync — the schema-compat check reads the process-global ArchetypeRegistry (see #554)
 public sealed class SchemaCompatibilityNoCreateTests
 {
     private string _tempDir;

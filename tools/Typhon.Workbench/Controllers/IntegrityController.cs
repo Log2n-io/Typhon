@@ -106,7 +106,7 @@ public sealed class IntegrityController : ControllerBase
                 {
                     return Conflict(new
                     {
-                        error = "This database is open in another process. Repair requires exclusive access — close every "
+                        error = $"This database is open in {source.HeldBy}. Repair requires exclusive access — close every "
                             + "session on it and retry."
                     });
                 }

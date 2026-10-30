@@ -21,14 +21,18 @@ public sealed partial class SessionsController : ControllerBase
     private readonly Typhon.Workbench.Backups.BackupJobRegistry _backupJobs;
     private readonly ILogger<SessionsController> _logger;
 
+    private readonly LiveCacheLimits _cacheLimits;
+
     public SessionsController(
         SessionManager sessions,
         DemoDataProvider demoData,
         OptionsStore options,
         DatabasePauseCoordinator pause,
         Typhon.Workbench.Backups.BackupJobRegistry backupJobs,
+        LiveCacheLimits cacheLimits,
         ILogger<SessionsController> logger)
     {
+        _cacheLimits = cacheLimits;
         _sessions = sessions;
         _demoData = demoData;
         _options = options;
@@ -146,7 +150,7 @@ public sealed partial class SessionsController : ControllerBase
         // Session id is generated up front so the live cache temp file path matches the public sessionId.
         var sessionId = Guid.NewGuid();
         var captureMode = request.CherryPick ? CaptureMode.CherryPick : CaptureMode.Everything;
-        var runtime = await AttachSessionRuntime.StartAsync(sessionId, request.EndpointAddress, _logger, ct, captureMode);
+        var runtime = await AttachSessionRuntime.StartAsync(sessionId, request.EndpointAddress, _logger, ct, captureMode, cacheLimits: _cacheLimits);
 
         var session = new AttachSession(sessionId, request.EndpointAddress, runtime);
         _sessions.Create(session);

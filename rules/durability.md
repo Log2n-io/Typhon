@@ -872,7 +872,7 @@ CK-08 (flush-only cycles) are later increments.
             directory-map-extension chain, the reserved root range, the occupancy reserves, or a CK-05 directory twin
             (`DatabaseEngine.BuildOwnedPageBitmap`). "Any segment the file records" is load-bearing and was violated until
             2026-08-11 (#771): the reconstruction enumerated `MMF.RegisteredSegments`, which holds only the segments THIS
-            session loaded, and `InitializeArchetypes` loads them by iterating `ArchetypeRegistry.GetAllArchetypes()` — the
+            session loaded, and `InitializeArchetypes` loads them by iterating `DatabaseEngine.OwnArchetypes()` — the
             CLR types the CALLER registered. Opening with a subset of the schema is supported (a repair or forensic tool has
             no schema assembly), so ownership was caller-dependent: a plain open-and-close of a healthy database freed 36
             live pages. The persisted `ArchetypeR1` / `ComponentR1` segment pointers are now walked in addition, so `owned`
@@ -3275,6 +3275,28 @@ answer to different constraints — RB must always end with a usable database, I
             re-stamped through `PagedMMF.StampPageForWrite`, so the file is checksum-valid in every respect except the one
             under test) proves both halves against ONE fixture: the scan still produces a report and names the mismatch, and
             `Apply` refuses it without writing a byte. `Mutant_ApplyWithoutTheRevisionGate` shows the assertion can fail.
+
+### IR-02: Repair refuses a bundle a live process holds, before any effect `[fatal]`
+  invariant `OfflineBundlePageSource.LockHeld` ⇔ `db.lock` names a live owner, this process included ∨ another handle holds the data file. An engine verifying its
+            own open says it is the holder, and scans `Offline`: its own lock and handle say nothing about anybody else. Both are asked:
+            `db.lock` is a record no process holds open, so an engine that lost it would pass alone, and the OS cannot answer on a file
+            system without locks.
+  invariant the OS probe runs BEFORE the source opens its own handle. A `FileShare.None` probe made after it fails on that handle, and
+            every scan of every closed database would read as live.
+  invariant `DatabaseRepair.Apply` refuses a held bundle before its first effect: no pre-repair copy, no derived file deleted, no page
+            written.
+  invariant a scan of a held bundle runs `ScanMode.OnlineSampled`: its cross-structure findings are `Suspected`, never `Confirmed`, and the
+            report says so. It is a moving target, and a page read mid-checkpoint is not corruption.
+  note a lock from another machine reads as held, as it does for the engine's own open, and fails safe: a crashed bundle copied from
+       elsewhere is refused until the operator deletes that `db.lock`, which is why the refusal names the machine and the PID. A dead
+       local owner stays repairable.
+  scope: OfflineBundlePageSource.LockHeld, DatabaseLockFile.IsFileHeld, DatabaseRepair.Apply, IntegrityScanner.Scan, RepairCommand
+  on_violation: a repair run against a live database deletes its chunk summary and backup-state and then fails on the first page write,
+    or, where file locks are not enforced, writes pages under a running engine. A scan of one reports a moving target as Confirmed damage.
+  verified: DatabaseRepairTests — `ADataFileHeldOpen_ReadsAsHeld` (no `db.lock`), `ALockNamingThisProcess_ReadsAsHeld`,
+            `ALockNamingADeadPid_DoesNotReadAsHeld`, `AClosedBundle_DoesNotReadAsHeld` (the ordering trap: a source must not find its own handle),
+            `AnEngineVerifyingItsOwnOpen_ScansOffline`,
+            `Apply_OnAHeldBundle_RefusesBeforeAnyEffect`, `AScanOfAHeldBundle_IsOnlineSampled`.
 
 ## Module: BKP — Online backup capture
 

@@ -803,7 +803,8 @@
     SpatialGridAccessor.SetCellTierMin, SpatialGridAccessor.ComputeCellKey, SpatialGridAccessor.WorldToCell,
     SpatialGridAccessor.GetCell, ArchetypeClusterState.MapClusterForRebuild
   verified: VdbSpatialGridTests (ReadPaths_DoNotCreateCells carries the attribute and covers
-    SpatialGrid.TryGetCellKey / TryGetCellKeyAt / SetTierInAABB). The accessor surface, the query broadphase and
+    SpatialGrid.TryGetCellKey / TryGetCellKeyAt / SetTierInAABB); SpatialGridAccessorTests
+    (TierAssignment_OverEmptyCells_CreatesNothing carries it for the accessor's tier setters and WorldToCell). The query broadphase and
     the parallel map phase are NOT directly verified — they are covered only indirectly, by the suite staying
     green with sparse memory
   on_violation:

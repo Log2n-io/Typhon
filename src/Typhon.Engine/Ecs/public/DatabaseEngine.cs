@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.Loader;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Reflection;
@@ -606,8 +607,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     // registry entry when the count reaches zero. That release-on-zero is what lets the owning AssemblyLoadContext be GC'd between Workbench sessions — without
     // it, the registry pinned the first ALC's Types for the lifetime of the process and any later session loading the same DLL into a fresh collectible ALC
     // saw stale state.
+    private AssemblyLoadContext _archetypeContext = AssemblyLoadContext.GetLoadContext(typeof(DatabaseEngine).Assembly);
+    private ArchetypeMetadata[] _ownArchetypes;
     private readonly HashSet<Type> _registeredArchetypeTypes = [];
     private readonly HashSet<Type> _registeredComponentTypes = [];
+    private readonly HashSet<Type> _useCountedComponentTypes = [];
     private bool _unregisteredFromRegistry;
 
     /// <summary>
@@ -2585,6 +2589,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 ArchetypeRegistry.UnregisterEngineUse(_registeredArchetypeTypes, _registeredComponentTypes);
                 _unregisteredFromRegistry = true;
 
+                // A disposed engine kept alive by a stray reference must not keep its schema's context reachable.
+                _ownArchetypes = [];
+                _archetypeContext = AssemblyLoadContext.Default;
+
                 // Paired one-for-one with the RegisterLiveEngine in InitializeArchetypes (#614 D-9). Conditional on having actually registered: an engine that
                 // was constructed and disposed without ever initializing its archetypes must not decrement a count it never incremented, or a *different*
                 // engine's presence would be cancelled out and its capture would write routing ids it should have withheld.
@@ -3118,6 +3126,29 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     /// <param name="archetypeType">The <c>[Archetype]</c> class type to finalize.</param>
     public static void RegisterArchetype(Type archetypeType) => ArchetypeRegistry.EnsureFinalized(archetypeType, true);
+
+    /// <summary>
+    /// Makes this engine consume the archetypes of <paramref name="context"/> rather than those of its own context: a host that loads a database's schema into a
+    /// load context of its own says so before <see cref="InitializeArchetypes"/>. The registry is process-wide and holds one archetype per name per context, so
+    /// what an engine consumes is what keeps two schemas that share archetype names apart (#554).
+    /// </summary>
+    /// <param name="context">The context holding this engine's schema.</param>
+    /// <exception cref="InvalidOperationException">The engine has already initialized its archetypes.</exception>
+    internal void UseArchetypesFrom(AssemblyLoadContext context)
+    {
+        if (_ownArchetypes != null)
+        {
+            ThrowHelper.ThrowInvalidOp("An engine's archetype context is chosen before InitializeArchetypes.");
+        }
+
+        _archetypeContext = context;
+    }
+
+    /// <summary>
+    /// The archetypes this engine consumes, as of its last <see cref="InitializeArchetypes"/>. Whatever else the process-wide registry holds is another schema's,
+    /// or came after and has no state here.
+    /// </summary>
+    internal ArchetypeMetadata[] OwnArchetypes() => _ownArchetypes ?? ArchetypeRegistry.GetArchetypesFor(_archetypeContext);
 
     internal VariableSizedBufferSegment<T, PersistentStore> GetComponentCollectionVSBS<T>() where T : unmanaged => GetComponentCollectionVSBS<T>(null);
 
@@ -4052,7 +4083,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     {
         var anyUpdated = false;
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in OwnArchetypes())
         {
             if (meta.ArchetypeId >= _archetypeStates.Length)
             {
@@ -4838,7 +4869,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     private void InitializeArchetypesCore()
     {
-        ArchetypeRegistry.Freeze();
+        ArchetypeRegistry.Freeze(_archetypeContext);
+        _ownArchetypes = ArchetypeRegistry.GetArchetypesFor(_archetypeContext);
 
         // CK-08: a crash open's passes start here — the entity-map and HEAD rebuilds before the replay. The manager's creation set it for the first call;
         // a repeat InitializeArchetypes (#790) recovers again and sets it again.
@@ -4964,7 +4996,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Recorded afresh by every initialisation, so a reason never outlives the pass that found it.
         _skippedArchetypes?.Clear();
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in OwnArchetypes())
         {
             // Connect slots to ComponentTables — skip archetypes with unregistered component types
             if (meta._slotToComponentType == null || meta.ComponentCount == 0)
@@ -5640,15 +5672,30 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             cellStateTicks * toMs,
             entityMapTicks * toMs);
 
-        // ─── Register this engine's use of every archetype Type currently in the registry ──────────────
+        // ─── Register this engine's use of every archetype Type it consumes ──────────────
         // Snapshot AFTER all archetypes are registered (Touch() / DeclareComponent / EnsureFinalized cascade) so we hold a reference to every Type this engine
         // is now consuming. The matching `Dispose` decrements the same set; the registry releases the Type on refcount=0, which is what lets the owning ALC be
-        // GC'd between sessions.
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        // GC'd between sessions. Each Type once: a repeat InitializeArchetypes (#790) counting them again would leave them counted after that one decrement.
+        _ownArchetypes = ArchetypeRegistry.GetArchetypesFor(_archetypeContext);
+        var newArchetypes = new List<Type>();
+        foreach (var meta in _ownArchetypes)
         {
-            _registeredArchetypeTypes.Add(meta.ArchetypeType);
+            if (_registeredArchetypeTypes.Add(meta.ArchetypeType))
+            {
+                newArchetypes.Add(meta.ArchetypeType);
+            }
         }
-        ArchetypeRegistry.RegisterEngineUse(_registeredArchetypeTypes, _registeredComponentTypes);
+
+        var newComponents = new List<Type>();
+        foreach (var type in _registeredComponentTypes)
+        {
+            if (_useCountedComponentTypes.Add(type))
+            {
+                newComponents.Add(type);
+            }
+        }
+
+        ArchetypeRegistry.RegisterEngineUse(newArchetypes, newComponents);
 
         // Separately, count this engine as live (#614 D-9). One-shot, mirroring the `_unregisteredFromRegistry` guard on the dispose side — see the field docs
         // for why the live-engine count, unlike the Type refcounts above, cannot tolerate an unpaired call in either direction.
@@ -6093,7 +6140,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         var changeSet = MMF.CreateChangeSet();
         try
         {
-            foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+            foreach (var meta in OwnArchetypes())
             {
                 if (!meta.HasClusterIndexes || meta.ArchetypeId >= _archetypeStates.Length)
                 {
@@ -6210,7 +6257,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     {
         using var guard = EpochGuard.Enter(EpochManager);
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in OwnArchetypes())
         {
             var state = _archetypeStates[meta.ArchetypeId];
             if (state?.SlotToComponentTable == null)
@@ -7735,7 +7782,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     {
         var byTable = new Dictionary<ComponentTable, HashSet<int>>();
         var record = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in OwnArchetypes())
         {
             var state = _archetypeStates[meta.ArchetypeId];
             if (state?.SlotToComponentTable == null)
@@ -8028,7 +8075,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 }
             }
 
-            foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+            foreach (var meta in OwnArchetypes())
             {
                 var cs = _archetypeStates[meta.ArchetypeId]?.ClusterState;
                 if (cs?.CollectionSlots == null || cs.ClusterSegment == null)
@@ -8201,7 +8248,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         if (_persistedArchetypes != null)
         {
             var loadedArchetypes = new HashSet<string>();
-            foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+            foreach (var meta in OwnArchetypes())
             {
                 if (_archetypeStates[meta.ArchetypeId] != null)
                 {
@@ -8366,7 +8413,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         var cs = MMF.CreateChangeSet();
         var anyNew = false;
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in OwnArchetypes())
         {
             var engineState = _archetypeStates[meta.ArchetypeId];
             if (engineState?.SlotToComponentTable == null)

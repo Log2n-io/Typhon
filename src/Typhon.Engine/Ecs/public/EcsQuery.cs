@@ -1233,7 +1233,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         // an empty list once the trees stopped being maintained, so the fallback is strictly the better answer, not merely the surviving one.
         var allArchetypesIndexOnArchetype = true;
         var dbe = _tx.DBE;
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in _tx.DBE.OwnArchetypes())
         {
             if (!MaskTest(meta.ArchetypeId))
             {
@@ -1400,7 +1400,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         try
         {
             // Open a sorted stream for each matching cluster archetype
-            foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+            foreach (var meta in _tx.DBE.OwnArchetypes())
             {
                 if (!MaskTest(meta.ArchetypeId) || !meta.HasClusterIndexes)
                 {
@@ -2022,7 +2022,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         List<(ArchetypeMetadata Meta, ArchetypeEngineState State, ArchetypeClusterState Cluster, int IxSlot, int FieldOffset, KeyType KeyType)>
             hiddenKeySources = null;
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        foreach (var meta in _tx.DBE.OwnArchetypes())
         {
             if (!MaskTest(meta.ArchetypeId) || !meta.HasClusterIndexes)
             {
@@ -2512,7 +2512,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         // Direct cluster scan for cluster-eligible archetypes with indexed fields
         {
             var dbe = _tx.DBE;
-            foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+            foreach (var meta in _tx.DBE.OwnArchetypes())
             {
                 if (!MaskTest(meta.ArchetypeId))
                 {

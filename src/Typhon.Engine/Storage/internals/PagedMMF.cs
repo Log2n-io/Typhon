@@ -1181,7 +1181,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         IntegrityReport report;
         try
         {
-            using var source = new OfflineBundlePageSource(Options.BundleDirectory);
+            using var source = new OfflineBundlePageSource(Options.BundleDirectory, heldByCaller: true);
             report = IntegrityScanner.Scan(source, new IntegrityOptions { Depth = depth });
         }
         catch (Exception ex) when (ex is IOException or DirectoryNotFoundException or FileNotFoundException or UnauthorizedAccessException)
@@ -5006,54 +5006,6 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void DecrementSlotRefCount(int memPageIndex) => Interlocked.Decrement(ref Slot(memPageIndex).SlotRefCount);
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // State Snapshot (test infrastructure)
-    // ═══════════════════════════════════════════════════════════════════════
-
-    internal readonly struct PageSnapshot(PageState state, short exclusiveLatchDepth, int dirtyCounter)
-    {
-        internal readonly PageState _state = state;
-        internal readonly short _exclusiveLatchDepth = exclusiveLatchDepth;
-        internal readonly int _dirtyCounter = dirtyCounter;
-    }
-
-    internal readonly struct StateSnapshot(PageSnapshot[] pages)
-    {
-        internal readonly PageSnapshot[] _pages = pages;
-    }
-
-    internal StateSnapshot SnapshotInternalState()
-    {
-        var pages = new PageSnapshot[MemPagesCount];
-        for (int i = 0; i < MemPagesCount; i++)
-        {
-            var pi = Slot(i);
-            pages[i] = new PageSnapshot(pi.PageState, pi.ExclusiveLatchDepth, pi.DirtyCounter);
-        }
-        return new StateSnapshot(pages);
-    }
-
-    internal bool CheckInternalState(in StateSnapshot snapshot)
-    {
-        if (snapshot._pages.Length != MemPagesCount)
-        {
-            return false;
-        }
-
-        for (int i = 0; i < MemPagesCount; i++)
-        {
-            var pi = Slot(i);
-            ref readonly var snap = ref snapshot._pages[i];
-            if (pi.PageState != snap._state ||
-                pi.ExclusiveLatchDepth != snap._exclusiveLatchDepth ||
-                pi.DirtyCounter != snap._dirtyCounter)
-            {
-                return false;
-            }
-        }
-        return true;
-    }
 
     /// <summary>Get the AccessEpoch for a memory page (test infrastructure).</summary>
     internal long GetPageAccessEpoch(int memPageIndex) => Slot(memPageIndex).AccessEpoch;

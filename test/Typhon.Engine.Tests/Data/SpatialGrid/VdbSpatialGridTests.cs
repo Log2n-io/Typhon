@@ -511,6 +511,31 @@ class VdbSpatialGridTests
 
     [Test]
     [CancelAfter(15_000)]
+    public void SetTierInAABB_KeepsTheHighestPriorityTier_OnTheCellsThatExist()
+    {
+        var vdb = new SpatialGrid(Flat100);
+        int inside = vdb.ComputeCellKey(0, 0, 0);
+        int corner = vdb.ComputeCellKey(2, 2, 0);
+        int widened = vdb.ComputeCellKey(4, 4, 0);
+        int outside = vdb.ComputeCellKey(8, 8, 0);
+        vdb.ResetAllTiers(SimTier.Tier3);
+
+        vdb.SetTierInAABB(0f, 0f, 0f, 300f, 300f, 0f, SimTier.Tier0);
+
+        Assert.That(vdb.GetCell(inside).Tier, Is.EqualTo((byte)SimTier.Tier0));
+        Assert.That(vdb.GetCell(corner).Tier, Is.EqualTo((byte)SimTier.Tier0));
+        Assert.That(vdb.GetCell(outside).Tier, Is.EqualTo((byte)SimTier.Tier3));
+
+        // Min semantics: a wider, lower-priority sweep promotes what it newly covers and leaves the Tier0 cells alone.
+        vdb.SetTierInAABB(0f, 0f, 0f, 600f, 600f, 0f, SimTier.Tier1);
+
+        Assert.That(vdb.GetCell(inside).Tier, Is.EqualTo((byte)SimTier.Tier0));
+        Assert.That(vdb.GetCell(widened).Tier, Is.EqualTo((byte)SimTier.Tier1));
+        Assert.That(vdb.GetCell(outside).Tier, Is.EqualTo((byte)SimTier.Tier3));
+    }
+
+    [Test]
+    [CancelAfter(15_000)]
     public void OutOfRangeCellCoordinates_ThrowRatherThanCreatingAPhantomBlock()
     {
         // The dense grid rejected an out-of-range key with an IndexOutOfRangeException from its array; a sparse one would happily CREATE a block outside the

@@ -19,7 +19,6 @@ namespace Typhon.Workbench.Tests.Backups;
 /// that started them (AC-W8). The long calls pass through a gate a test holds, never a timer.
 /// </summary>
 [TestFixture]
-[NonParallelizable] // opens real engines (the process-global ArchetypeRegistry, #554)
 public sealed class BackupsJobEndpointTests
 {
     private WorkbenchFactory _factory;

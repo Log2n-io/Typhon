@@ -771,16 +771,9 @@ public unsafe partial class Transaction : EntityAccessor
         List<BTree<TKey, PersistentStore>> trees = null;
         List<bool> multi = null;
 
-        // The registry's array up to the highest id rather than its GetAllArchetypes iterator, which allocates.
-        var maxArchetypeId = ArchetypeRegistry.MaxArchetypeId;
-        for (var archetypeId = 0; archetypeId <= maxArchetypeId; archetypeId++)
+        // This engine's own archetypes, an array: no iterator allocates here.
+        foreach (var meta in _dbe.OwnArchetypes())
         {
-            var meta = ArchetypeRegistry.GetMetadata((ushort)archetypeId);
-            if (meta == null)
-            {
-                continue;
-            }
-
             var es = _dbe._archetypeStates[meta.ArchetypeId];
             var clusterState = es?.ClusterState;
             if (clusterState?.IndexSlots == null)

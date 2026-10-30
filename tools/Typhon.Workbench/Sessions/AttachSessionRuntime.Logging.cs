@@ -79,6 +79,12 @@ public sealed partial class AttachSessionRuntime
     [LoggerMessage(Level = LogLevel.Warning, Message = "Capture: auto-save failed — {Reason}")]
     private partial void LogCaptureAutoSaveFailed(string reason);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Live cache: retention stopped ({Reason}) at {Bytes} bytes of {LimitBytes}; the session stays connected")]
+    private partial void LogLiveCacheCapped(string reason, long bytes, long limitBytes);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Live cache: a write failed — {Reason}")]
+    private partial void LogLiveCacheWriteFailed(string reason);
+
     [LoggerMessage(Level = LogLevel.Information,
         Message = "Attach: engine RESTART detected (session start {PreviousCreatedUtcTicks} → {NewCreatedUtcTicks}); ending this session rather than "
                   + "continuing its tick axis into a new run")]

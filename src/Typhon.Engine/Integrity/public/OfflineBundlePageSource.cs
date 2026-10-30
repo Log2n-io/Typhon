@@ -44,7 +44,16 @@ public sealed class OfflineBundlePageSource : IPageSource
     /// <exception cref="ArgumentNullException"><paramref name="bundlePath"/> is <c>null</c>.</exception>
     /// <exception cref="DirectoryNotFoundException">No bundle directory could be resolved from <paramref name="bundlePath"/>.</exception>
     /// <exception cref="FileNotFoundException">The bundle has no <c>data</c> file.</exception>
-    public OfflineBundlePageSource(string bundlePath)
+    public OfflineBundlePageSource(string bundlePath) : this(bundlePath, heldByCaller: false)
+    {
+    }
+
+    /// <summary>Opens a bundle for reading, on behalf of an engine verifying its own open when <paramref name="heldByCaller"/>.</summary>
+    /// <param name="bundlePath">As the public constructor.</param>
+    /// <param name="heldByCaller">
+    /// The caller is the bundle's holder: its own <c>db.lock</c> and data file handle say nothing about anybody else, and nobody else is writing.
+    /// </param>
+    internal OfflineBundlePageSource(string bundlePath, bool heldByCaller)
     {
         ArgumentNullException.ThrowIfNull(bundlePath);
 
@@ -56,15 +65,24 @@ public sealed class OfflineBundlePageSource : IPageSource
                 $"'{BundlePath}' has no '{IntegrityConstants.DataFileName}' file — it is not a Typhon database bundle.", dataPath);
         }
 
+        // Before this source's own handle exists: a FileShare.None probe made after it would fail on that handle, and every scan would read as live.
+        if (!heldByCaller)
+        {
+            if (DatabaseLockFile.TryReadLock(BundlePath, out var holder) && DatabaseLockFile.IsOwnerLive(holder.Pid, holder.MachineName))
+            {
+                LockHolder = holder;
+            }
+
+            LockHeld = LockHolder.HasValue || DatabaseLockFile.IsFileHeld(dataPath);
+        }
+
         _data = new SafeFileHandleWrapper(dataPath);
         SizeBytes = _data.Length;
         PageCount = (int)(SizeBytes / IntegrityConstants.PageSize);
         TrailingBytes = (int)(SizeBytes % IntegrityConstants.PageSize);
         _describe = BundlePath;
 
-        var lockPath = Path.Combine(BundlePath, IntegrityConstants.LockFileName);
-        LockFilePresent = File.Exists(lockPath);
-        LockHeld = LockFilePresent && IsLocked(lockPath);
+        LockFilePresent = File.Exists(Path.Combine(BundlePath, IntegrityConstants.LockFileName));
 
         WalSegments = EnumerateWal(Path.Combine(BundlePath, IntegrityConstants.WalDirectoryName));
     }
@@ -84,8 +102,18 @@ public sealed class OfflineBundlePageSource : IPageSource
     /// <summary>Whether a <c>db.lock</c> file exists in the bundle.</summary>
     public bool LockFilePresent { get; }
 
-    /// <summary>Whether <c>db.lock</c> is held by another process — i.e. a live engine has this database open.</summary>
+    /// <summary>
+    /// Whether something else has this database open: <c>db.lock</c> names a live owner, this process included, or another handle holds the data file. Both are
+    /// asked, because <c>db.lock</c> is only a record (an engine that lost it still holds the file), and the OS cannot answer on a file system without locks. A
+    /// lock from another machine reads as held, as it does for the engine's own open, and a second concurrent scan does too.
+    /// </summary>
     public bool LockHeld { get; }
+
+    /// <summary>The live owner <c>db.lock</c> names, or <c>null</c> when it names none. With <see cref="LockHeld"/> set, null means only the OS saw a holder.</summary>
+    public DatabaseLockFile.LockInfo? LockHolder { get; }
+
+    /// <summary>Who holds the database, for a refusal to name: a process and its machine when <c>db.lock</c> says so.</summary>
+    public string HeldBy => LockHolder is { } holder ? $"process {holder.Pid} on {holder.MachineName}" : "another process";
 
     /// <summary>WAL segment files found in the bundle's <c>wal/</c> directory, unparsed, ordered by name.</summary>
     public IReadOnlyList<WalSegmentRef> WalSegments { get; }
@@ -161,23 +189,6 @@ public sealed class OfflineBundlePageSource : IPageSource
         throw new DirectoryNotFoundException(
             $"No Typhon bundle at '{path}'. Expected a '{IntegrityConstants.BundleExtension}' directory containing "
             + $"'{IntegrityConstants.DataFileName}'.");
-    }
-
-    private static bool IsLocked(string lockPath)
-    {
-        try
-        {
-            using var probe = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-            return false;
-        }
-        catch (IOException)
-        {
-            return true;
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return true;
-        }
     }
 
     private static IReadOnlyList<WalSegmentRef> EnumerateWal(string walDir)

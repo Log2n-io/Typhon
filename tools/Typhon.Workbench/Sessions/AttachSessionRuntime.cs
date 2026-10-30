@@ -348,8 +348,9 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     /// <see cref="InitHandshakeTimeoutSeconds"/>; a test that wants to exercise the silent-peer path passes something short so the suite does not spend
     /// five seconds proving a timeout fires.
     /// </param>
+    /// <param name="cacheLimits">What the session may retain (#822). Null means <see cref="LiveCacheLimits.Default"/>; the host passes its own explicitly.</param>
     public static async Task<AttachSessionRuntime> StartAsync(Guid sessionId, string endpointAddress, ILogger logger, CancellationToken ct,
-        CaptureMode captureMode = CaptureMode.Everything, TimeSpan initHandshakeTimeout = default)
+        CaptureMode captureMode = CaptureMode.Everything, TimeSpan initHandshakeTimeout = default, LiveCacheLimits cacheLimits = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(endpointAddress);
         var (host, port) = ParseEndpoint(endpointAddress);
@@ -394,6 +395,7 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         }
 
         var runtime = new AttachSessionRuntime(sessionId, endpointAddress, host, port, logger, captureMode);
+        runtime._cacheLimits = cacheLimits ?? LiveCacheLimits.Default;
         runtime.LogStarting(host, port);
         runtime.SetConnectionStatus("connected");
         runtime.LogConnected(host, port);
@@ -613,7 +615,18 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         lock (_builderLock)
         {
             ct.ThrowIfCancellationRequested();
-            _builder.FinalizePendingState();
+            if (!Volatile.Read(ref _cacheWriteFailed))
+            {
+                try
+                {
+                    _builder.FinalizePendingState();
+                }
+                catch (IOException ex)
+                {
+                    // The cache cannot take the last ticks, and its manifest is intact: that is what gets saved.
+                    FailCacheWrite(ex);
+                }
+            }
 
             // Build the relocated manifest as we re-feed chunks. The new sink's offsets differ from the temp file's; we deliberately
             // do NOT mutate the builder's live manifest (live chunk-fetches must keep working). We construct a fresh array here and
@@ -672,7 +685,18 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
                 }
 
                 // Snapshot trailer inputs from the builder. Held under lock so the snapshot is internally consistent.
-                var tickSummaries = new TickSummary[_builder.TickSummaries.Count];
+                var summaryCount = _builder.TickSummaries.Count;
+                if (Volatile.Read(ref _cacheWriteFailed))
+                {
+                    // Ticks finalized in a chunk the cache never took: a summary with no chunk would send a reader to the wrong one.
+                    var end = liveManifest.Count > 0 ? liveManifest[liveManifest.Count - 1].ToTick : 0;
+                    while (summaryCount > 0 && _builder.TickSummaries[summaryCount - 1].TickNumber >= end)
+                    {
+                        summaryCount--;
+                    }
+                }
+
+                var tickSummaries = new TickSummary[summaryCount];
                 for (var i = 0; i < tickSummaries.Length; i++) tickSummaries[i] = _builder.TickSummaries[i];
 
                 var systemAggregates = _builder.GetSystemAggregatesSnapshot();
@@ -950,7 +974,8 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
             // queueNames empty at handshake — the live attach protocol doesn't ship an EventQueueCatalog frame today. If
             // it ever does, RegisterQueueName fills in the gaps without re-constructing. Until then, queue-name lookups
             // on a live session legitimately resolve to nothing (no queues registered yet on the wire).
-            _builder = new IncrementalCacheBuilder(_tempFile.Sink, ownsSink: false, profilerHeader, fingerprint, new Dictionary<int, string>(), new Dictionary<ushort, string>());
+            var sink = _cacheLimits.SinkDecorator?.Invoke(_tempFile.Sink) ?? _tempFile.Sink;
+            _builder = new IncrementalCacheBuilder(sink, ownsSink: false, profilerHeader, fingerprint, new Dictionary<int, string>(), new Dictionary<ushort, string>());
             _builder.TickFinalized += OnBuilderTickFinalized;
             _builder.ChunkFlushed += OnBuilderChunkFlushed;
 
@@ -1133,18 +1158,36 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         }
         var retainedBytes = FilterRecords(_rawBlockBuffer.AsSpan(0, uncompressedBytes), _filteredBlockBuffer);
 
+        var fedBytes = 0;
         if (retainedBytes > 0)
         {
             lock (_builderLock)
             {
-                _builder.FeedRawRecords(_filteredBlockBuffer.AsSpan(0, retainedBytes));
+                if (!Volatile.Read(ref _cacheWriteFailed))
+                {
+                    try
+                    {
+                        _builder.FeedRawRecords(_filteredBlockBuffer.AsSpan(0, retainedBytes));
+                        fedBytes = retainedBytes;
+                    }
+                    catch (IOException ex)
+                    {
+                        // A full disk says nothing about the stream: it caps the session rather than reading as a malformed frame (#822).
+                        FailCacheWrite(ex);
+                    }
+                }
             }
+        }
+
+        if (_capCloseOutPending)
+        {
+            CloseOutCache();
         }
 
         // Published LAST, and as a pair. An observer that sees the received count advance has therefore also seen this
         // block's arm-state transitions and its records reach the builder — so the two counters are never mutually
         // inconsistent, and "bytes received" never advertises work that has not happened yet.
-        Interlocked.Add(ref _recordBytesRetained, retainedBytes);
+        Interlocked.Add(ref _recordBytesRetained, fedBytes);
         Interlocked.Add(ref _recordBytesReceived, uncompressedBytes);
     }
 
@@ -1318,6 +1361,7 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
             IsContinuation: isContinuation);
         _chunkManifest.Add(dto);
         _metadataSnapshot = null;
+        NoteCacheGrowth(dto.ToTick);
         ChunkAdded?.Invoke(dto);
 
         // Deliver any buffered summaries BEFORE this chunk, because coalescing them bought batching at the cost of an ordering guarantee that used to be
@@ -1331,12 +1375,20 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
 
     private void OnFlushChunkTimer(object _)
     {
-        if (_disposed || _builder == null) return;
+        if (_disposed || _builder == null || Volatile.Read(ref _cacheClosed)) return;
         try
         {
             lock (_builderLock)
             {
-                _builder.FlushCurrentChunk();
+                if (Volatile.Read(ref _cacheWriteFailed)) return;
+                try
+                {
+                    _builder.FlushCurrentChunk();
+                }
+                catch (IOException ex)
+                {
+                    FailCacheWrite(ex);   // on a timer an unhandled throw ends the process
+                }
             }
         }
         catch (ObjectDisposedException) { /* shutting down */ }
@@ -1344,7 +1396,7 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
 
     private void OnTrailingTickTimer(object _)
     {
-        if (_disposed || _builder == null) return;
+        if (_disposed || _builder == null || Volatile.Read(ref _cacheClosed)) return;
         // Only finalize the trailing tick if no records have arrived in the last window. Otherwise we'd race the builder's
         // own tick-on-TickStart finalization and double-count.
         var last = Volatile.Read(ref _lastBlockReceivedTicks);
@@ -1355,7 +1407,15 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         {
             lock (_builderLock)
             {
-                _builder.FlushTrailingTick();
+                if (Volatile.Read(ref _cacheWriteFailed)) return;
+                try
+                {
+                    _builder.FlushTrailingTick();
+                }
+                catch (IOException ex)
+                {
+                    FailCacheWrite(ex);
+                }
             }
         }
         catch (ObjectDisposedException) { }
